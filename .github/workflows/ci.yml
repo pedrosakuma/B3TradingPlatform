@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up .NET SDK (pinned by global.json)
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v5
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', '**/*.slnx', 'Directory.Build.props', 'global.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Restore
+        run: dotnet restore B3TradingPlatform.slnx
+
+      - name: Build (Release, warnings-as-errors)
+        run: dotnet build B3TradingPlatform.slnx --no-restore -c Release
+
+      - name: Test
+        run: >
+          dotnet test B3TradingPlatform.slnx
+          --no-build -c Release
+          --logger "trx;LogFileName=test-results.trx"
+          --logger "console;verbosity=normal"
+          --collect:"XPlat Code Coverage"
+          --results-directory ./TestResults
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results
+          path: TestResults/**/*
+          if-no-files-found: ignore
+          retention-days: 14
+
+  format:
+    name: Format check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up .NET SDK (pinned by global.json)
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+
+      - name: Restore (needed by dotnet format)
+        run: dotnet restore B3TradingPlatform.slnx
+
+      - name: dotnet format --verify-no-changes
+        run: dotnet format B3TradingPlatform.slnx --verify-no-changes --no-restore --severity warn
+
+  frontend:
+    name: Frontend lint (smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # The frontend is currently vanilla HTML+JS (no build step), mirroring
+      # B3MarketDataPlatform. This job exists so the CI surface is in place
+      # for when a real build/lint is added; for now it just sanity-checks
+      # the entry point is present.
+      - name: Verify frontend entry point exists
+        run: test -f frontend/index.html

@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/backend/src/">
+    <Project Path="backend/src/B3.Trading.Domain/B3.Trading.Domain.csproj" />
+    <Project Path="backend/src/B3.Trading.Application/B3.Trading.Application.csproj" />
+    <Project Path="backend/src/B3.Trading.Infrastructure/B3.Trading.Infrastructure.csproj" />
+    <Project Path="backend/src/B3.Trading.Api/B3.Trading.Api.csproj" />
+    <Project Path="backend/src/B3.Trading.Host/B3.Trading.Host.csproj" />
+  </Folder>
+  <Folder Name="/backend/tests/">
+    <Project Path="backend/tests/B3.Trading.Domain.Tests/B3.Trading.Domain.Tests.csproj" />
+    <Project Path="backend/tests/B3.Trading.Application.Tests/B3.Trading.Application.Tests.csproj" />
+    <Project Path="backend/tests/B3.Trading.Api.Tests/B3.Trading.Api.Tests.csproj" />
+  </Folder>
+</Solution>

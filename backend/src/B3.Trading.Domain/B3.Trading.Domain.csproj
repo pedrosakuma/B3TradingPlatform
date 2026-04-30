@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>B3.Trading.Domain</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="B3.Trading.Application" />
+    <InternalsVisibleTo Include="B3.Trading.Infrastructure" />
+    <InternalsVisibleTo Include="B3.Trading.Domain.Tests" />
+  </ItemGroup>
+
+</Project>

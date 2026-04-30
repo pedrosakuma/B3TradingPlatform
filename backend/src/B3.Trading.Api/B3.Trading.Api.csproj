@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>B3.Trading.Api</RootNamespace>
+    <EnableRequestDelegateGenerator>true</EnableRequestDelegateGenerator>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\B3.Trading.Domain\B3.Trading.Domain.csproj" />
+    <ProjectReference Include="..\B3.Trading.Application\B3.Trading.Application.csproj" />
+    <ProjectReference Include="..\B3.Trading.Infrastructure\B3.Trading.Infrastructure.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="B3.Trading.Host" />
+    <InternalsVisibleTo Include="B3.Trading.Api.Tests" />
+  </ItemGroup>
+
+</Project>

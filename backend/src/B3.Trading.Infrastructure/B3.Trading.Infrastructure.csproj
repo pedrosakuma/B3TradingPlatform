@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>B3.Trading.Infrastructure</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\B3.Trading.Domain\B3.Trading.Domain.csproj" />
+    <ProjectReference Include="..\B3.Trading.Application\B3.Trading.Application.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="B3.Trading.Api" />
+    <InternalsVisibleTo Include="B3.Trading.Host" />
+  </ItemGroup>
+
+</Project>

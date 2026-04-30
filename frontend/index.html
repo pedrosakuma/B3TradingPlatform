@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>B3TradingPlatform — bootstrap</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 48rem; color: #222; }
+    code { background: #f4f4f4; padding: 0 0.25rem; border-radius: 3px; }
+    .pill { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; background: #eef; color: #225; font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+  <h1>B3TradingPlatform <span class="pill">bootstrap</span></h1>
+  <p>
+    Participant-side platform in the B3 ecosystem family. This page is a
+    placeholder; the real trader UI ships in a follow-up issue.
+  </p>
+  <p>
+    Talk to the backend (default <code>http://localhost:5000</code>):
+  </p>
+  <ul>
+    <li><code>GET /health</code> — liveness</li>
+    <li><code>GET /orders?login=alice</code> — list working orders</li>
+    <li><code>POST /orders</code> — submit an order</li>
+    <li><code>GET /positions?login=alice</code> — positions</li>
+  </ul>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
