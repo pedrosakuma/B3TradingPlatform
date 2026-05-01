@@ -1,0 +1,167 @@
+:root {
+  --bg: #0f1218;
+  --panel: #1a1f2a;
+  --panel-2: #232a39;
+  --border: #2a3242;
+  --text: #d6dce8;
+  --muted: #8a93a6;
+  --accent: #4f9eff;
+  --green: #36c46f;
+  --teal: #38b2ac;
+  --red: #ef5350;
+  --gray: #6b7280;
+  --warn: #f5a623;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+}
+.view { min-height: 100vh; }
+
+/* ---------- Login ---------- */
+.login-view { display: grid; place-items: center; }
+.login-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  padding: 2rem;
+  border-radius: 8px;
+  width: min(360px, 90vw);
+  display: flex; flex-direction: column; gap: .9rem;
+}
+.login-card h1 { margin: 0; font-size: 1.3rem; }
+.login-card .subtitle { margin: 0; color: var(--muted); font-size: .85rem; }
+.login-card label { display: grid; gap: .25rem; font-size: .8rem; color: var(--muted); }
+.login-card label.row { font-size: .7rem; }
+.login-card input, .login-card select {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 4px; padding: .5rem .6rem; font: inherit;
+}
+.login-card button {
+  background: var(--accent); color: #0b1320; border: 0; padding: .6rem; border-radius: 4px;
+  font-weight: 600; cursor: pointer; font: inherit;
+}
+.login-card button:hover { filter: brightness(1.1); }
+.error { color: var(--red); font-size: .85rem; margin: 0; }
+
+/* ---------- Trader shell ---------- */
+.trader-view { display: flex; flex-direction: column; height: 100vh; }
+.topbar {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: .6rem 1rem; background: var(--panel); border-bottom: 1px solid var(--border);
+}
+.brand { font-weight: 600; }
+.pill {
+  background: #2a3a55; color: #cfe1ff; padding: .1rem .5rem;
+  border-radius: 999px; font-size: .7rem; margin-left: .4rem;
+}
+.status { display: flex; align-items: center; gap: .8rem; }
+.status-pill {
+  padding: .15rem .55rem; border-radius: 999px; font-size: .75rem;
+  text-transform: uppercase; letter-spacing: .04em;
+}
+.status-connected    { background: rgba(54,196,111,.18); color: var(--green); }
+.status-connecting   { background: rgba(245,166,35,.18); color: var(--warn); }
+.status-disconnected { background: rgba(239,83,80,.18);  color: var(--red); }
+.user-label { color: var(--muted); }
+.link-button {
+  background: transparent; border: 0; color: var(--accent); cursor: pointer; font: inherit;
+}
+
+/* ---------- Grid layout ---------- */
+.grid {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 280px 1fr 240px;
+  grid-template-rows: auto 1fr auto;
+  grid-template-areas:
+    "ticket  blotter   positions"
+    "ticket  blotter   positions"
+    "md      execs     positions";
+  gap: 8px; padding: 8px; min-height: 0;
+}
+.panel {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+  padding: .8rem; display: flex; flex-direction: column; min-height: 0;
+}
+.panel h2 {
+  margin: 0 0 .6rem 0; font-size: .85rem; font-weight: 600; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .06em;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.panel h2 .count {
+  background: var(--panel-2); color: var(--text); border-radius: 999px;
+  padding: 0 .5rem; font-size: .7rem;
+}
+.ticket     { grid-area: ticket; }
+.blotter    { grid-area: blotter; min-height: 0; }
+.positions  { grid-area: positions; }
+.executions { grid-area: execs; min-height: 0; }
+.market-data{ grid-area: md; }
+.market-data .empty { color: var(--muted); font-size: .8rem; }
+
+/* ---------- Order ticket ---------- */
+.ticket-form { display: flex; flex-direction: column; gap: .55rem; }
+.ticket-form label { display: grid; gap: .2rem; font-size: .75rem; color: var(--muted); }
+.ticket-form input, .ticket-form select {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 4px; padding: .4rem .5rem; font: inherit;
+}
+.ticket-form .row-two { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; }
+.ticket-form button {
+  margin-top: .3rem; background: var(--accent); color: #0b1320; border: 0;
+  padding: .5rem; border-radius: 4px; font-weight: 600; cursor: pointer; font: inherit;
+}
+.ticket-form button:disabled { opacity: .5; cursor: progress; }
+.feedback { margin: .3rem 0 0; font-size: .8rem; }
+.feedback.ok    { color: var(--green); }
+.feedback.error { color: var(--red); }
+
+/* ---------- Tables ---------- */
+.table-scroll { overflow: auto; flex: 1; min-height: 0; }
+table { width: 100%; border-collapse: collapse; font-size: .8rem; }
+th {
+  position: sticky; top: 0; background: var(--panel-2); color: var(--muted);
+  text-align: left; padding: .4rem .5rem; font-weight: 500; border-bottom: 1px solid var(--border);
+}
+td { padding: .35rem .5rem; border-bottom: 1px solid #20283a; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.cancel-btn {
+  background: transparent; border: 1px solid var(--red); color: var(--red);
+  padding: .15rem .5rem; border-radius: 3px; cursor: pointer; font: inherit; font-size: .75rem;
+}
+.cancel-btn:disabled { opacity: .35; cursor: not-allowed; }
+.status-cell-Working   { color: var(--green); }
+.status-cell-PendingNew { color: var(--warn); }
+.status-cell-Cancelled { color: var(--gray); }
+.status-cell-Filled    { color: var(--accent); }
+.status-cell-Rejected  { color: var(--red); }
+
+/* ---------- Executions log ---------- */
+.executions-log {
+  list-style: none; padding: 0; margin: 0; overflow: auto; flex: 1;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .75rem;
+}
+.executions-log li { padding: .25rem .4rem; border-bottom: 1px solid #20283a; display: flex; gap: .6rem; }
+.executions-log .ts    { color: var(--muted); flex: 0 0 7em; }
+.executions-log .kind  { font-weight: 600; flex: 0 0 7em; }
+.executions-log .Fill        { color: var(--green); }
+.executions-log .PartialFill { color: var(--teal); }
+.executions-log .Rejected    { color: var(--red); }
+.executions-log .Canceled    { color: var(--gray); }
+.executions-log .New         { color: var(--accent); }
+.executions-log .meta { color: var(--muted); }
+
+/* ---------- Responsive ---------- */
+@media (max-width: 1100px) {
+  .grid {
+    grid-template-columns: 1fr 1fr;
+    grid-template-areas:
+      "ticket    positions"
+      "blotter   blotter"
+      "execs     md";
+  }
+}
