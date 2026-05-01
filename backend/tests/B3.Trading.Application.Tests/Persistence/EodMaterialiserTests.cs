@@ -24,8 +24,11 @@ public class EodMaterialiserTests : IDisposable
     {
         var opts = new PersistenceOptions
         {
-            DataDirectory = _root, FirmId = "test", FsyncOnFlush = false,
-            GroupCommitMaxRecords = 1, GroupCommitWindow = TimeSpan.FromMilliseconds(2),
+            DataDirectory = _root,
+            FirmId = "test",
+            FsyncOnFlush = false,
+            GroupCommitMaxRecords = 1,
+            GroupCommitWindow = TimeSpan.FromMilliseconds(2),
         };
         var today = DateOnly.FromDateTime(DateTime.UtcNow);
         var dayTs = new DateTimeOffset(today.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
@@ -34,25 +37,46 @@ public class EodMaterialiserTests : IDisposable
         {
             store.Append(new OrderSubmittedEvent
             {
-                ClOrdId = 1UL, EndClientId = "alice", FirmId = "TEST", Symbol = "PETR4", SecurityId = 4321UL,
-                Side = "Buy", Type = "Limit", Quantity = 100, Price = 30m,
+                ClOrdId = 1UL,
+                EndClientId = "alice",
+                FirmId = "TEST",
+                Symbol = "PETR4",
+                SecurityId = 4321UL,
+                Side = "Buy",
+                Type = "Limit",
+                Quantity = 100,
+                Price = 30m,
                 TimestampUtc = dayTs,
             });
             store.Append(new ExecutionReportReceivedEvent
             {
-                ClOrdId = 1UL, ExecKind = "Fill", LeavesQuantity = 0, CumulativeQuantity = 100,
-                LastQuantity = 100, LastPrice = 30m, Synthetic = false,
+                ClOrdId = 1UL,
+                ExecKind = "Fill",
+                LeavesQuantity = 0,
+                CumulativeQuantity = 100,
+                LastQuantity = 100,
+                LastPrice = 30m,
+                Synthetic = false,
                 TimestampUtc = dayTs,
             });
             store.Append(new ExecutionReportReceivedEvent
             {
-                ClOrdId = 2UL, ExecKind = "Rejected", LeavesQuantity = 0, CumulativeQuantity = 0,
-                LastQuantity = 0, LastPrice = 0m, Synthetic = true, RejectReason = "risk",
+                ClOrdId = 2UL,
+                ExecKind = "Rejected",
+                LeavesQuantity = 0,
+                CumulativeQuantity = 0,
+                LastQuantity = 0,
+                LastPrice = 0m,
+                Synthetic = true,
+                RejectReason = "risk",
                 TimestampUtc = dayTs,
             });
             store.Append(new KillSwitchToggledEvent
             {
-                Scope = "firm", Target = "TEST", Killed = true, TimestampUtc = dayTs,
+                Scope = "firm",
+                Target = "TEST",
+                Killed = true,
+                TimestampUtc = dayTs,
             });
             await store.FlushAsync();
         }

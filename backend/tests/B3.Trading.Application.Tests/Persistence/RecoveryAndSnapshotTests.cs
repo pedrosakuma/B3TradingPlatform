@@ -177,9 +177,15 @@ public class RecoveryAndSnapshotTests : IDisposable
         d.Dispatch(
             new OrderSubmittedEvent
             {
-                ClOrdId = clOrdId, EndClientId = ec, FirmId = "TEST",
-                Symbol = symbol, SecurityId = 4321UL, Side = side.ToString(), Type = "Limit",
-                Quantity = qty, Price = price,
+                ClOrdId = clOrdId,
+                EndClientId = ec,
+                FirmId = "TEST",
+                Symbol = symbol,
+                SecurityId = 4321UL,
+                Side = side.ToString(),
+                Type = "Limit",
+                Quantity = qty,
+                Price = price,
             },
             () =>
             {
@@ -195,9 +201,13 @@ public class RecoveryAndSnapshotTests : IDisposable
         d.Dispatch(
             new ExecutionReportReceivedEvent
             {
-                ClOrdId = clOrdId, ExecKind = kind.ToString(),
-                LeavesQuantity = leaves, CumulativeQuantity = cum,
-                LastQuantity = last, LastPrice = lastPx, Synthetic = false,
+                ClOrdId = clOrdId,
+                ExecKind = kind.ToString(),
+                LeavesQuantity = leaves,
+                CumulativeQuantity = cum,
+                LastQuantity = last,
+                LastPrice = lastPx,
+                Synthetic = false,
             },
             () => proc.Apply(clOrdId, kind, leaves, cum, last, lastPx, null));
     }

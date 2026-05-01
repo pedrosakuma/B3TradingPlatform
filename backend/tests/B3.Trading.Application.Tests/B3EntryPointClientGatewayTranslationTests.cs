@@ -22,7 +22,8 @@ public class B3EntryPointClientGatewayTranslationTests
     {
         var ev = new Up.OrderAccepted
         {
-            SeqNum = 1, SendingTime = DateTimeOffset.UtcNow,
+            SeqNum = 1,
+            SendingTime = DateTimeOffset.UtcNow,
             ClOrdID = new Up.ClOrdID(42UL),
             OrderId = 999UL,
             OrderStatus = Up.OrderStatus.New,
@@ -47,11 +48,16 @@ public class B3EntryPointClientGatewayTranslationTests
     {
         var partial = new Up.OrderTrade
         {
-            SeqNum = 1, SendingTime = DateTimeOffset.UtcNow,
-            ClOrdID = new Up.ClOrdID(5UL), OrderId = 1, TradeId = 1,
+            SeqNum = 1,
+            SendingTime = DateTimeOffset.UtcNow,
+            ClOrdID = new Up.ClOrdID(5UL),
+            OrderId = 1,
+            TradeId = 1,
             OrderStatus = Up.OrderStatus.PartiallyFilled,
-            LastPx = 30.5m, LastQty = 30UL,
-            LeavesQty = 70UL, CumQty = 30UL,
+            LastPx = 30.5m,
+            LastQty = 30UL,
+            LeavesQty = 70UL,
+            CumQty = 30UL,
         };
         var full = partial with { OrderStatus = Up.OrderStatus.Filled, LeavesQty = 0UL, CumQty = 100UL };
 
@@ -69,10 +75,12 @@ public class B3EntryPointClientGatewayTranslationTests
     {
         var ev = new Up.OrderCancelled
         {
-            SeqNum = 1, SendingTime = DateTimeOffset.UtcNow,
+            SeqNum = 1,
+            SendingTime = DateTimeOffset.UtcNow,
             ClOrdID = new Up.ClOrdID(99UL),
             OrigClOrdID = new Up.ClOrdID(42UL),
-            OrderId = 1, OrderStatus = Up.OrderStatus.Cancelled,
+            OrderId = 1,
+            OrderStatus = Up.OrderStatus.Cancelled,
         };
 
         var env = B3EntryPointClientGateway.Translate(ev);
@@ -88,11 +96,14 @@ public class B3EntryPointClientGatewayTranslationTests
     {
         var ev = new Up.OrderModified
         {
-            SeqNum = 1, SendingTime = DateTimeOffset.UtcNow,
+            SeqNum = 1,
+            SendingTime = DateTimeOffset.UtcNow,
             ClOrdID = new Up.ClOrdID(101UL),
             OrigClOrdID = new Up.ClOrdID(42UL),
-            OrderId = 1, OrderStatus = Up.OrderStatus.Replaced,
-            LeavesQty = 200UL, CumQty = 0UL,
+            OrderId = 1,
+            OrderStatus = Up.OrderStatus.Replaced,
+            LeavesQty = 200UL,
+            CumQty = 0UL,
         };
 
         var env = B3EntryPointClientGateway.Translate(ev);
@@ -109,9 +120,12 @@ public class B3EntryPointClientGatewayTranslationTests
     {
         var withReason = new Up.OrderRejected
         {
-            SeqNum = 1, SendingTime = DateTimeOffset.UtcNow,
-            ClOrdID = new Up.ClOrdID(7UL), OrderId = 0,
-            RejectCode = 99, Reason = "limit breached",
+            SeqNum = 1,
+            SendingTime = DateTimeOffset.UtcNow,
+            ClOrdID = new Up.ClOrdID(7UL),
+            OrderId = 0,
+            RejectCode = 99,
+            Reason = "limit breached",
         };
         var noReason = withReason with { Reason = null };
 
@@ -128,8 +142,11 @@ public class B3EntryPointClientGatewayTranslationTests
     {
         var ev = new Up.BusinessReject
         {
-            SeqNum = 1, SendingTime = DateTimeOffset.UtcNow,
-            RefSeqNum = 12345UL, RejectReason = 1, Text = "unknown ClOrdID",
+            SeqNum = 1,
+            SendingTime = DateTimeOffset.UtcNow,
+            RefSeqNum = 12345UL,
+            RejectReason = 1,
+            Text = "unknown ClOrdID",
         };
 
         Assert.Null(B3EntryPointClientGateway.Translate(ev));
