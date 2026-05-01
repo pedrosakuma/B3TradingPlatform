@@ -1,7 +1,9 @@
+using B3.Trading.Infrastructure;
 using B3.Trading.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 
 namespace B3.Trading.Api.Lifecycle;
@@ -30,9 +32,14 @@ public static class HealthEndpoints
                 ? Results.StatusCode(StatusCodes.Status503ServiceUnavailable)
                 : Results.Ok("ready"));
 
-        app.MapGet("/health", (DrainState drain, IOptions<PersistenceOptions> persist) =>
+        app.MapGet("/health", (HttpContext ctx, DrainState drain, IOptions<PersistenceOptions> persist) =>
         {
             var p = persist.Value;
+            // ExchangeStatus is registered by Program.cs whenever any
+            // gateway is wired; it is optional from the API project's
+            // perspective so legacy test hosts that skip the wire-side
+            // setup still serve /health.
+            var exchange = ctx.RequestServices.GetService<ExchangeStatus>();
             return Results.Json(new
             {
                 status = drain.IsDraining ? "draining" : "ready",
@@ -44,6 +51,12 @@ public static class HealthEndpoints
                     firmId = p.FirmId,
                     dataDirectory = p.DataDirectory,
                     snapshotInterval = p.SnapshotInterval,
+                },
+                exchange = exchange is null ? null : (object)new
+                {
+                    mode = exchange.Mode.ToString(),
+                    readyForOrders = exchange.ReadyForOrders,
+                    firmCount = exchange.FirmCount,
                 },
             });
         });

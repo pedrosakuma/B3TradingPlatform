@@ -14,12 +14,32 @@ namespace B3.Trading.Api.Tests;
 /// gateway disabled (mock client + ER router), known JWT signing key,
 /// and a known user "alice" / "wonderland".
 /// </summary>
-public sealed class TestAppFactory : WebApplicationFactory<Program>
+public class TestAppFactory : WebApplicationFactory<Program>
 {
     public const string TestUser = "alice";
     public const string TestPassword = "wonderland";
     public const string TestSigningKey = "test-signing-key-must-be-at-least-32-bytes-long-okay";
     public const int TestIterations = 10_000; // fast for tests
+
+    private IDictionary<string, string?>? _configOverrides;
+
+    /// <summary>
+    /// Builds a factory with extra config keys layered on top of the
+    /// deterministic test defaults. Both dictionaries are pushed through
+    /// the SAME <c>ConfigureAppConfiguration</c> call so the override is
+    /// added last and wins, regardless of provider ordering. Static factory
+    /// (not a public ctor) so xUnit's <c>IClassFixture</c> still binds.
+    /// </summary>
+    public static TestAppFactory WithOverrides(IDictionary<string, string?> configOverrides)
+        => new TestAppFactoryWithOverrides(configOverrides);
+
+    private sealed class TestAppFactoryWithOverrides : TestAppFactory
+    {
+        public TestAppFactoryWithOverrides(IDictionary<string, string?> overrides)
+        {
+            base._configOverrides = overrides;
+        }
+    }
 
     private static readonly Lazy<(string Hash, string Salt)> Pbkdf2 = new(() =>
     {
@@ -69,6 +89,9 @@ public sealed class TestAppFactory : WebApplicationFactory<Program>
                 ["Trading:Risk:ReferencePrices:PETR4"] = "30.0",
                 ["Trading:Persistence:Enabled"] = "false",
             });
+
+            if (_configOverrides is not null)
+                cb.AddInMemoryCollection(_configOverrides);
         });
         return base.CreateHost(builder);
     }

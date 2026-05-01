@@ -139,27 +139,41 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy("admin", policy => policy.RequireRole("admin"));
 });
 
-// Wire-side: pick the gateway based on config.
-//   UseStubGateway=true            → no-op StubExchangeGateway, no client wired (CI / smoke tests).
-//   UseRealEntryPointClient=false  → in-process MockEntryPointClient + EntryPointClientGateway (test seam, dev-loop).
-//   UseRealEntryPointClient=true   → one upstream EntryPointClient per FirmConfig + MultiFirmExchangeGateway,
-//                                    aggregated through FirmGatewayRegistry (which doubles as the single
-//                                    IEntryPointClient consumed by EntryPointExecutionReportRouter).
+// Wire-side: pick the gateway based on ExchangeOptions.Mode (with legacy
+// flag fallback for backward compatibility — see ExchangeOptions.ResolveMode).
+//   Stub        → no-op StubExchangeGateway, no client wired (CI / smoke).
+//   Mock        → in-process MockEntryPointClient + EntryPointClientGateway (test seam, dev-loop).
+//   Real        → one upstream EntryPointClient per FirmConfig + MultiFirmExchangeGateway,
+//                 aggregated through FirmGatewayRegistry (which doubles as the single
+//                 IEntryPointClient consumed by EntryPointExecutionReportRouter).
+//   Unavailable → fail-closed UnavailableExchangeGateway; submits surface as 502
+//                 gateway-unavailable. Production-honest no-broker mode.
+//
+// IExchangeGateway is registered as a factory so the active implementation is
+// chosen at DI resolution time — late enough that WebApplicationFactory test
+// overrides via ConfigureAppConfiguration are visible (the WebApplication
+// minimal-API builder reads pre-Build config eagerly, so we can't switch on
+// the option value at registration time).
+//
+// Real-mode hosted services (FirmGatewayConnector + ER router) MUST be
+// registered pre-Build, so we still need an early read for that branch only.
+// Tests never exercise Real mode, so the early-vs-late split is invisible
+// to them; the only Mode they switch is Stub/Mock/Unavailable.
 var exchangeSection = builder.Configuration.GetSection(ExchangeOptions.SectionName);
-var useStub = exchangeSection.GetValue("UseStubGateway", defaultValue: false);
-var useRealClient = exchangeSection.GetValue("UseRealEntryPointClient", defaultValue: false);
+var earlyMode = exchangeSection["Mode"];
+var earlyIsReal = string.Equals(earlyMode, nameof(ExchangeMode.Real), StringComparison.OrdinalIgnoreCase)
+    || (string.IsNullOrEmpty(earlyMode) && exchangeSection.GetValue("UseRealEntryPointClient", false));
 
-if (useStub)
-{
-    builder.Services.AddSingleton<IExchangeGateway, StubExchangeGateway>();
-}
-else if (useRealClient)
+builder.Services.AddSingleton<StubExchangeGateway>();
+builder.Services.AddSingleton<UnavailableExchangeGateway>();
+
+if (earlyIsReal)
 {
     builder.Services.AddSingleton<FirmGatewayRegistry>(sp =>
     {
         var opts = sp.GetRequiredService<IOptions<ExchangeOptions>>().Value;
         if (opts.Firms.Count == 0)
-            throw new InvalidOperationException("Trading:Exchange:UseRealEntryPointClient is true but no Firms[] configured.");
+            throw new InvalidOperationException("Trading:Exchange:Mode is Real but no Firms[] configured. Set Mode=Unavailable for an honest no-broker host.");
         var lf = sp.GetRequiredService<ILoggerFactory>();
         var gateways = opts.Firms.Select(firm =>
         {
@@ -184,7 +198,7 @@ else if (useRealClient)
         return new FirmGatewayRegistry(gateways);
     });
     builder.Services.AddSingleton<IEntryPointClient>(sp => sp.GetRequiredService<FirmGatewayRegistry>());
-    builder.Services.AddSingleton<IExchangeGateway>(sp =>
+    builder.Services.AddSingleton<MultiFirmExchangeGateway>(sp =>
         new MultiFirmExchangeGateway(sp.GetRequiredService<FirmGatewayRegistry>()));
     builder.Services.AddSingleton<EntryPointExecutionReportRouter>();
     builder.Services.AddHostedService<EntryPointRouterStarter>();
@@ -192,19 +206,50 @@ else if (useRealClient)
 }
 else
 {
-    builder.Services.AddSingleton<IEntryPointClient, MockEntryPointClient>();
-    builder.Services.AddSingleton<IExchangeGateway>(sp =>
+    builder.Services.AddSingleton<MockEntryPointClient>();
+    builder.Services.AddSingleton<IEntryPointClient>(sp => sp.GetRequiredService<MockEntryPointClient>());
+    builder.Services.AddSingleton<EntryPointClientGateway>(sp =>
     {
-        var client = sp.GetRequiredService<IEntryPointClient>();
-        var firms = exchangeSection.GetSection(nameof(ExchangeOptions.Firms)).Get<List<FirmConfig>>() ?? new();
-        var firmId = firms.FirstOrDefault()?.FirmId ?? "DEFAULT";
-        return new EntryPointClientGateway(client, firmId);
+        var opts = sp.GetRequiredService<IOptions<ExchangeOptions>>().Value;
+        var firmId = opts.Firms.FirstOrDefault()?.FirmId ?? "DEFAULT";
+        return new EntryPointClientGateway(sp.GetRequiredService<IEntryPointClient>(), firmId);
     });
     builder.Services.AddSingleton<EntryPointExecutionReportRouter>();
     builder.Services.AddHostedService<EntryPointRouterStarter>();
 }
 
+builder.Services.AddSingleton<IExchangeGateway>(sp =>
+{
+    var mode = sp.GetRequiredService<IOptions<ExchangeOptions>>().Value.ResolveMode();
+    return mode switch
+    {
+        ExchangeMode.Stub => sp.GetRequiredService<StubExchangeGateway>(),
+        ExchangeMode.Unavailable => sp.GetRequiredService<UnavailableExchangeGateway>(),
+        ExchangeMode.Real when earlyIsReal => sp.GetRequiredService<MultiFirmExchangeGateway>(),
+        ExchangeMode.Real => throw new InvalidOperationException(
+            "Trading:Exchange:Mode=Real requires the early-read flag too: set Trading:Exchange:UseRealEntryPointClient=true in env/appsettings (Real-mode hosted services must be wired pre-Build)."),
+        ExchangeMode.Mock => sp.GetRequiredService<EntryPointClientGateway>(),
+        _ => sp.GetRequiredService<EntryPointClientGateway>(),
+    };
+});
+
+builder.Services.AddSingleton<ExchangeStatus>(sp =>
+{
+    var opts = sp.GetRequiredService<IOptions<ExchangeOptions>>().Value;
+    return new ExchangeStatus(opts.ResolveMode(), opts.Firms.Count);
+});
+
 var app = builder.Build();
+
+// Fail-fast on weak / missing JWT signing key outside Development. The
+// default in appsettings.json is a known dev-only string; if it leaks
+// into a production-shaped deployment (Docker / Production / Staging),
+// every token signed with it would be trivially forgeable. We refuse to
+// boot rather than serve insecure tokens.
+{
+    var authOpts = app.Services.GetRequiredService<IOptions<AuthOptions>>().Value;
+    AuthSigningKeyValidator.Validate(app.Environment.EnvironmentName, authOpts.SigningKey);
+}
 
 // Synchronous recovery before any traffic is accepted: load latest
 // snapshot, then replay every WAL event past it. Idempotent — safe to

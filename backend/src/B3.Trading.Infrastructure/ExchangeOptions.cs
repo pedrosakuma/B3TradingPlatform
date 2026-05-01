@@ -39,6 +39,30 @@ public sealed class FirmConfig
 }
 
 /// <summary>
+/// Selects which <c>IExchangeGateway</c> the Host wires.
+/// </summary>
+public enum ExchangeMode
+{
+    /// <summary>No-op <see cref="StubExchangeGateway"/>. Submits succeed silently. CI / smoke.</summary>
+    Stub,
+
+    /// <summary>In-process <c>MockEntryPointClient</c> + <c>EntryPointClientGateway</c>. No TCP. Dev loop and integration tests.</summary>
+    Mock,
+
+    /// <summary>Real <c>B3.EntryPoint.Client.EntryPointClient</c> per <see cref="FirmConfig"/> behind <c>MultiFirmExchangeGateway</c>.</summary>
+    Real,
+
+    /// <summary>
+    /// Fail-closed: every submit/cancel/replace throws so <c>OrdersEndpoints</c>
+    /// synthesizes a rejection and returns 502. Use in production-like
+    /// containers when no broker is wired yet (Docker bootstrap, isolation
+    /// drills); the API stays up and honest instead of silently accepting
+    /// orders that nothing on the wire will ever match.
+    /// </summary>
+    Unavailable,
+}
+
+/// <summary>
 /// Bound from the <c>Trading:Exchange</c> section of <c>appsettings.json</c>.
 /// </summary>
 public sealed class ExchangeOptions
@@ -46,20 +70,32 @@ public sealed class ExchangeOptions
     public const string SectionName = "Trading:Exchange";
 
     /// <summary>
-    /// When true, the Host wires the no-op <see cref="StubExchangeGateway"/>
-    /// instead of any real gateway. Useful for API-only smoke tests and CI
-    /// without any FIXP plumbing.
+    /// Explicit mode selector. Wins over the legacy <see cref="UseStubGateway"/>
+    /// / <see cref="UseRealEntryPointClient"/> flags when set. When null, the
+    /// legacy flags decide (Stub if <see cref="UseStubGateway"/>; Real if
+    /// <see cref="UseRealEntryPointClient"/>; Mock otherwise) for backward
+    /// compatibility with existing deployments.
+    /// </summary>
+    public ExchangeMode? Mode { get; set; }
+
+    /// <summary>
+    /// Legacy flag. Prefer <see cref="Mode"/> = <see cref="ExchangeMode.Stub"/>.
     /// </summary>
     public bool UseStubGateway { get; set; }
 
     /// <summary>
-    /// When true (and <see cref="UseStubGateway"/> is false), the Host
-    /// instantiates a real <c>B3.EntryPoint.Client.EntryPointClient</c>
-    /// per <see cref="FirmConfig"/> and routes through
-    /// <see cref="MultiFirmExchangeGateway"/>. When false, the in-process
-    /// <see cref="MockEntryPointClient"/> is wired (no TCP, no real session).
+    /// Legacy flag. Prefer <see cref="Mode"/> = <see cref="ExchangeMode.Real"/>.
     /// </summary>
     public bool UseRealEntryPointClient { get; set; }
 
     public List<FirmConfig> Firms { get; set; } = new();
+
+    /// <summary>
+    /// Resolves the effective mode: explicit <see cref="Mode"/> if set, else
+    /// the legacy flag mapping (default = <see cref="ExchangeMode.Mock"/>).
+    /// </summary>
+    public ExchangeMode ResolveMode() =>
+        Mode ?? (UseStubGateway ? ExchangeMode.Stub
+              : UseRealEntryPointClient ? ExchangeMode.Real
+              : ExchangeMode.Mock);
 }
