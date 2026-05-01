@@ -1,5 +1,6 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Text;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Extensions.Options;
 using B3.Trading.Api;
 using B3.Trading.Api.Auth;
@@ -236,8 +237,24 @@ builder.Services.AddSingleton<IExchangeGateway>(sp =>
 builder.Services.AddSingleton<ExchangeStatus>(sp =>
 {
     var opts = sp.GetRequiredService<IOptions<ExchangeOptions>>().Value;
-    return new ExchangeStatus(opts.ResolveMode(), opts.Firms.Count);
+    return ExchangeStatus.FromOptions(opts);
 });
+
+// Persist DataProtection keys onto the data volume. JWT auth uses HMAC and
+// doesn't depend on DataProtection, but ASP.NET still spins it up for
+// cookie/antiforgery defaults. Without persistence it logs a warning every
+// boot ("No XML encryptor configured. Key ... may be persisted ... in
+// unencrypted form.") and regenerates keys on every container restart.
+{
+    var persistOpts = builder.Configuration
+        .GetSection(PersistenceOptions.SectionName)
+        .Get<PersistenceOptions>() ?? new PersistenceOptions();
+    var keysDir = Path.Combine(persistOpts.DataDirectory, "dp-keys");
+    Directory.CreateDirectory(keysDir);
+    builder.Services.AddDataProtection()
+        .PersistKeysToFileSystem(new DirectoryInfo(keysDir))
+        .SetApplicationName("b3-trading-host");
+}
 
 var app = builder.Build();
 
