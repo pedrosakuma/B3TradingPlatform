@@ -66,7 +66,7 @@ public static class OrdersEndpoints
             var owner = ResolveOwner(ctx, registry);
             var firm = ResolveFirm(ctx);
             var clOrdId = clOrdIds.Generate(owner);
-            var order = new Order(clOrdId, owner, req.Symbol, req.SecurityId, side, type, req.Quantity, req.Price);
+            var order = new Order(clOrdId, owner, req.Symbol, req.SecurityId, side, type, req.Quantity, req.Price, firm);
 
             // Persist order intent + register ownership atomically. The
             // dispatcher serialises this with snapshot capture so a crash

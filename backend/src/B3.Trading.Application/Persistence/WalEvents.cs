@@ -59,6 +59,12 @@ public sealed record ExecutionReportReceivedEvent : WalEvent
     public required decimal LastPrice { get; init; }
     public string? RejectReason { get; init; }
     public required bool Synthetic { get; init; }
+    /// <summary>
+    /// Original ClOrdID for cancel/replace acks; <c>0</c> when not applicable.
+    /// Replay uses it to mutate the original order rather than the cancel-side
+    /// ClOrdID (which has no in-memory order).
+    /// </summary>
+    public ulong OrigClOrdId { get; init; }
 }
 
 /// <summary>

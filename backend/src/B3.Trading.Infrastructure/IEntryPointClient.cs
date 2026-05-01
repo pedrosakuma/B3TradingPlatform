@@ -72,6 +72,12 @@ public sealed record OrderCancelReplaceRequest(
     decimal? NewPrice,
     string FirmId);
 
+/// <summary>
+/// ExecutionReport surfaced by the wire to the platform. <see cref="OrigClOrdId"/>
+/// is non-zero only on cancel-ack and modify-ack — the processor uses it to
+/// look up the original order whose state must mutate (the cancel/modify
+/// request itself was issued under a brand-new ClOrdID).
+/// </summary>
 public sealed record ExecutionReportEnvelope(
     ulong ClOrdId,
     EpExecType ExecType,
@@ -79,4 +85,5 @@ public sealed record ExecutionReportEnvelope(
     long CumulativeQuantity,
     long LastQuantity,
     decimal LastPrice,
-    string? RejectReason);
+    string? RejectReason,
+    ulong OrigClOrdId = 0);

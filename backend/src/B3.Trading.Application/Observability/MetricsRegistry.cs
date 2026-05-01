@@ -61,4 +61,18 @@ public static class MetricsRegistry
     // Drain
     public static readonly Counter<long> DrainRejections =
         Meter.CreateCounter<long>("trading.drain.rejections");
+
+    // EntryPoint upstream client (real adapter)
+    public static readonly UpDownCounter<int> EntryPointConnected =
+        Meter.CreateUpDownCounter<int>("trading.entrypoint.connected");
+    public static readonly Counter<long> EntryPointEventsReceived =
+        Meter.CreateCounter<long>("trading.entrypoint.events_received");
+    public static readonly Counter<long> EntryPointReconnectAttempts =
+        Meter.CreateCounter<long>("trading.entrypoint.reconnect_attempts");
+    public static readonly Counter<long> EntryPointTranslationErrors =
+        Meter.CreateCounter<long>("trading.entrypoint.translation_errors");
+    public static readonly Counter<long> EntryPointBusinessRejects =
+        Meter.CreateCounter<long>("trading.entrypoint.business_rejects");
+    public static readonly Counter<long> EntryPointTerminated =
+        Meter.CreateCounter<long>("trading.entrypoint.terminated");
 }

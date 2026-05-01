@@ -62,9 +62,10 @@ public sealed class EntryPointExecutionReportRouter : IDisposable
                     LastPrice = er.LastPrice,
                     RejectReason = er.RejectReason,
                     Synthetic = false,
+                    OrigClOrdId = er.OrigClOrdId,
                 },
                 () => _processor.Apply(er.ClOrdId, kind, er.LeavesQuantity, er.CumulativeQuantity,
-                    er.LastQuantity, er.LastPrice, er.RejectReason));
+                    er.LastQuantity, er.LastPrice, er.RejectReason, er.OrigClOrdId));
         }
         catch (WalBackpressureException)
         {
@@ -75,7 +76,7 @@ public sealed class EntryPointExecutionReportRouter : IDisposable
             // this is a "log dropped, state intact" branch and shows up in
             // metrics as a backpressure event.
             _processor.Apply(er.ClOrdId, kind, er.LeavesQuantity, er.CumulativeQuantity,
-                er.LastQuantity, er.LastPrice, er.RejectReason);
+                er.LastQuantity, er.LastPrice, er.RejectReason, er.OrigClOrdId);
         }
     }
 }

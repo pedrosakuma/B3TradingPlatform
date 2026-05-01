@@ -29,7 +29,8 @@ public sealed record OrderSnapshot(
     decimal? Price,
     long LeavesQuantity,
     long CumulativeQuantity,
-    string Status);
+    string Status,
+    string FirmId = "DEFAULT");
 
 public sealed record PositionSnapshot(
     string EndClientId,

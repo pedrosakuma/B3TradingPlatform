@@ -30,10 +30,19 @@ public enum OrderStatus
 /// </summary>
 public sealed class Order
 {
-    public Order(ulong clOrdId, EndClientId owner, string symbol, ulong securityId, OrderSide side, OrderType type, long quantity, decimal? price)
+    /// <summary>
+    /// <paramref name="firmId"/> is the FIXP session this order belongs to.
+    /// Required by the gateway to route cancel/replace requests to the right
+    /// upstream <c>EntryPointClient</c> when the host is configured for
+    /// multiple firms. Default <c>"DEFAULT"</c> exists only to keep older
+    /// unit tests terse; production call sites always pass an explicit firm.
+    /// </summary>
+    public Order(ulong clOrdId, EndClientId owner, string symbol, ulong securityId, OrderSide side, OrderType type, long quantity, decimal? price, string firmId = "DEFAULT")
     {
         if (clOrdId == 0)
             throw new ArgumentOutOfRangeException(nameof(clOrdId), "ClOrdID cannot be zero (reserved as null sentinel by EntryPoint).");
+        if (string.IsNullOrWhiteSpace(firmId))
+            throw new ArgumentException("FirmId required.", nameof(firmId));
         ClOrdId = clOrdId;
         Owner = owner;
         Symbol = symbol;
@@ -42,6 +51,7 @@ public sealed class Order
         Type = type;
         Quantity = quantity;
         Price = price;
+        FirmId = firmId;
         LeavesQuantity = quantity;
         Status = OrderStatus.PendingNew;
     }
@@ -50,6 +60,7 @@ public sealed class Order
     public EndClientId Owner { get; }
     public string Symbol { get; }
     public ulong SecurityId { get; }
+    public string FirmId { get; }
     public OrderSide Side { get; }
     public OrderType Type { get; }
     public long Quantity { get; }
@@ -81,9 +92,9 @@ public sealed class Order
     /// </summary>
     internal static Order Hydrate(
         ulong clOrdId, EndClientId owner, string symbol, ulong securityId, OrderSide side, OrderType type,
-        long quantity, decimal? price, long leaves, long cumQty, OrderStatus status)
+        long quantity, decimal? price, long leaves, long cumQty, OrderStatus status, string firmId = "DEFAULT")
     {
-        var o = new Order(clOrdId, owner, symbol, securityId, side, type, quantity, price);
+        var o = new Order(clOrdId, owner, symbol, securityId, side, type, quantity, price, firmId);
         o.LeavesQuantity = leaves;
         o.CumulativeQuantity = cumQty;
         o.Status = status;

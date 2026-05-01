@@ -33,21 +33,33 @@ public sealed class ExecutionReportProcessor
         _logger = logger;
     }
 
-    public void Apply(ulong clOrdId, ExecKind kind, long leaves, long cumQty, long lastQty, decimal lastPx, string? rejectReason)
+    /// <summary>
+    /// <paramref name="origClOrdId"/> is non-zero on cancel-ack and modify-ack.
+    /// When set, the processor mutates the order identified by that ID
+    /// (the original order) — the cancel/replace request itself uses a
+    /// fresh ClOrdID that has no in-memory order behind it.
+    /// </summary>
+    public void Apply(ulong clOrdId, ExecKind kind, long leaves, long cumQty, long lastQty, decimal lastPx, string? rejectReason, ulong origClOrdId = 0)
     {
-        if (!_ownership.TryResolve(clOrdId, out var owner) || owner is null)
+        // For cancel/replace acks, the meaningful identity is the original
+        // ClOrdID; the cancel-side ClOrdID was never registered as an order.
+        var lookupId = (kind is ExecKind.Canceled or ExecKind.Replaced) && origClOrdId != 0
+            ? origClOrdId
+            : clOrdId;
+
+        if (!_ownership.TryResolve(lookupId, out var owner) || owner is null)
         {
             // Unknown ClOrdID is not necessarily a bug — could be an ER
             // for an order owned by an end-client that has since dropped
             // out of memory (ephemeral state, see issue #1 §3). Log and
             // drop; Phase 3 will handle this via ER replay on reconnect.
-            _logger.LogWarning("ER for unknown ClOrdID {ClOrdId}; dropping.", clOrdId);
+            _logger.LogWarning("ER for unknown ClOrdID {ClOrdId} (orig={Orig}); dropping.", clOrdId, origClOrdId);
             return;
         }
 
-        if (!_orders.TryGet(clOrdId, out var order) || order is null)
+        if (!_orders.TryGet(lookupId, out var order) || order is null)
         {
-            _logger.LogWarning("ER for known owner {Owner} but missing order {ClOrdId}; dropping.", owner, clOrdId);
+            _logger.LogWarning("ER for known owner {Owner} but missing order {ClOrdId} (orig={Orig}); dropping.", owner, clOrdId, origClOrdId);
             return;
         }
 
@@ -80,7 +92,7 @@ public sealed class ExecutionReportProcessor
 
         _sink.Publish(new ExecutionEvent(
             owner,
-            clOrdId,
+            lookupId,
             order.Symbol,
             order.Side,
             order.Status,

@@ -43,7 +43,7 @@ public sealed class WorkingOrderBook
                 o.ClOrdId, o.Owner.Value, o.Symbol, o.SecurityId,
                 o.Side.ToString(), o.Type.ToString(),
                 o.Quantity, o.Price, o.LeavesQuantity, o.CumulativeQuantity,
-                o.Status.ToString());
+                o.Status.ToString(), o.FirmId);
         }
     }
 
@@ -58,7 +58,7 @@ public sealed class WorkingOrderBook
             var type = Enum.Parse<OrderType>(s.Type);
             var status = Enum.Parse<OrderStatus>(s.Status);
             _orders[s.ClOrdId] = Order.Hydrate(s.ClOrdId, owner, s.Symbol, s.SecurityId, side, type,
-                s.Quantity, s.Price, s.LeavesQuantity, s.CumulativeQuantity, status);
+                s.Quantity, s.Price, s.LeavesQuantity, s.CumulativeQuantity, status, s.FirmId);
         }
     }
 }

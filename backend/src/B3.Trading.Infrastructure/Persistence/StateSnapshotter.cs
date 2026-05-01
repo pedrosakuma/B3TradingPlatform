@@ -91,14 +91,14 @@ public sealed class EventReplayer
                 var owner = new EndClientId(o.EndClientId);
                 var side = Enum.Parse<OrderSide>(o.Side, ignoreCase: true);
                 var type = Enum.Parse<OrderType>(o.Type, ignoreCase: true);
-                _orders.TryAdd(new Order(o.ClOrdId, owner, o.Symbol, o.SecurityId, side, type, o.Quantity, o.Price));
+                _orders.TryAdd(new Order(o.ClOrdId, owner, o.Symbol, o.SecurityId, side, type, o.Quantity, o.Price, o.FirmId));
                 _ownership.Register(o.ClOrdId, owner);
                 break;
             case ExecutionReportReceivedEvent er:
                 if (Enum.TryParse<ExecKind>(er.ExecKind, ignoreCase: true, out var kind))
                 {
                     _processor.Apply(er.ClOrdId, kind, er.LeavesQuantity, er.CumulativeQuantity,
-                        er.LastQuantity, er.LastPrice, er.RejectReason);
+                        er.LastQuantity, er.LastPrice, er.RejectReason, er.OrigClOrdId);
                 }
                 break;
             case KillSwitchToggledEvent k:
