@@ -91,7 +91,7 @@ public sealed class EventReplayer
                 var owner = new EndClientId(o.EndClientId);
                 var side = Enum.Parse<OrderSide>(o.Side, ignoreCase: true);
                 var type = Enum.Parse<OrderType>(o.Type, ignoreCase: true);
-                _orders.TryAdd(new Order(o.ClOrdId, owner, o.Symbol, side, type, o.Quantity, o.Price));
+                _orders.TryAdd(new Order(o.ClOrdId, owner, o.Symbol, o.SecurityId, side, type, o.Quantity, o.Price));
                 _ownership.Register(o.ClOrdId, owner);
                 break;
             case ExecutionReportReceivedEvent er:

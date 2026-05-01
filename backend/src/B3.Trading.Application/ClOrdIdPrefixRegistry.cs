@@ -7,65 +7,62 @@ namespace B3.Trading.Application;
 /// Allocates per-end-client ClOrdID prefixes and generates fresh ClOrdIDs.
 ///
 /// <para>
-/// <b>Encoding scheme</b> (decided in #2): <c>{prefix}-{counter:D12}</c>,
-/// 17 chars total — comfortably under the 20-char EntryPoint limit.
+/// <b>Encoding scheme</b> (decided in #7): packed <c>ulong</c>:
+/// <c>(prefixIdx &lt;&lt; 40) | counter</c>. <c>prefixIdx</c> is the
+/// monotonic per-deployment prefix index (capped at 2^21, defensive
+/// bound; matches the previous base-36 4-char width); <c>counter</c>
+/// is per-end-client, monotonic, advanced atomically.
 /// </para>
 ///
+/// <para>
+/// <b>Layout</b>:
 /// <list type="bullet">
-///   <item>
-///     <c>prefix</c> — 4 chars, base36 (<c>0-9a-z</c>), zero-padded.
-///     Allocated by this registry on first use of an
-///     <see cref="EndClientId"/>; idempotent for repeat lookups. Capacity:
-///     36⁴ = 1,679,616 distinct end-clients per platform deployment, which
-///     is plenty for the participant-side scope.
-///   </item>
-///   <item>
-///     <c>counter</c> — 12-digit zero-padded decimal, per-end-client
-///     monotonic, advanced atomically with <see cref="Interlocked"/>.
-///     Capacity: 10¹² orders per end-client (≈ 30k orders per second for
-///     a year), which we will never approach in practice.
-///   </item>
+///   <item>bits 40..60 — <c>prefixIdx</c> (≤ 2^21 ≈ 2M end-clients)</item>
+///   <item>bits 0..39 — <c>counter</c> (≤ 2^40 ≈ 1.1T orders/end-client)</item>
+///   <item>bit 63 (MSB) — always 0; we stay safely under <c>long.MaxValue</c></item>
 /// </list>
+/// The first generated value is <c>(0 &lt;&lt; 40) | 1 = 1</c>; zero is
+/// never produced (matches EntryPoint <c>ClOrdID</c> non-zero invariant).
+/// </para>
 ///
-/// Prefix allocation is process-local and resets on restart. Persistence
-/// of the allocation is a Phase 6 concern; until then, restart is
-/// equivalent to "new platform" from an EntryPoint correlation
-/// standpoint, which is acceptable because Phase 1 is ephemeral by design.
+/// <para>
+/// Prefix allocation is process-local and resets on restart; the registry
+/// snapshot (Phase 6) restores the watermark on recovery.
+/// </para>
 /// </summary>
 public sealed class ClOrdIdPrefixRegistry
 {
-    private const int PrefixWidth = 4;
-    private const int CounterWidth = 12;
-    private const string Base36 = "0123456789abcdefghijklmnopqrstuvwxyz";
+    public const int CounterBits = 40;
+    public const ulong CounterMask = (1UL << CounterBits) - 1;
+    public const long MaxPrefixIndex = 1L << 21;
 
     private readonly ConcurrentDictionary<EndClientId, EndClientCounter> _counters = new();
     private long _nextPrefix;
 
-    public string AllocatePrefix(EndClientId endClient)
+    public ulong AllocatePrefix(EndClientId endClient)
     {
         ArgumentNullException.ThrowIfNull(endClient);
-        return _counters.GetOrAdd(endClient, CreateCounter).Prefix;
+        return _counters.GetOrAdd(endClient, CreateCounter).PrefixIdx;
     }
 
-    public string Generate(EndClientId endClient)
+    public ulong Generate(EndClientId endClient)
     {
         ArgumentNullException.ThrowIfNull(endClient);
         var entry = _counters.GetOrAdd(endClient, CreateCounter);
-        var seq = Interlocked.Increment(ref entry.Counter);
-        return string.Concat(entry.Prefix, "-", seq.ToString($"D{CounterWidth}"));
+        var seq = (ulong)Interlocked.Increment(ref entry.Counter);
+        if (seq > CounterMask)
+            throw new InvalidOperationException($"ClOrdID counter overflow for end-client {endClient.Value} (>2^{CounterBits}).");
+        return (entry.PrefixIdx << CounterBits) | seq;
     }
 
     private EndClientCounter CreateCounter(EndClientId _)
     {
         var idx = Interlocked.Increment(ref _nextPrefix) - 1;
-        if (idx >= 1L << 21) // 36^4 ≈ 2^20.7, defensive bound just in case
+        if (idx >= MaxPrefixIndex)
         {
-            // Beyond 36^4 — would require a wider prefix; deliberate hard
-            // failure rather than silent collision. Refactor to 5 chars
-            // when this fires.
-            throw new InvalidOperationException("ClOrdID prefix space exhausted (>1.6M end-clients).");
+            throw new InvalidOperationException("ClOrdID prefix space exhausted (>2M end-clients). Widen prefix bits.");
         }
-        return new EndClientCounter(EncodeBase36(idx, PrefixWidth));
+        return new EndClientCounter((ulong)idx);
     }
 
     public Persistence.ClOrdIdRegistrySnapshot Snapshot()
@@ -77,7 +74,7 @@ public sealed class ClOrdIdPrefixRegistry
         foreach (var kv in _counters)
         {
             snap.Counters.Add(new Persistence.ClOrdIdCounterSnapshot(
-                kv.Key.Value, kv.Value.Prefix, Interlocked.Read(ref kv.Value.Counter)));
+                kv.Key.Value, kv.Value.PrefixIdx, Interlocked.Read(ref kv.Value.Counter)));
         }
         return snap;
     }
@@ -89,27 +86,16 @@ public sealed class ClOrdIdPrefixRegistry
         Interlocked.Exchange(ref _nextPrefix, snap.NextPrefix);
         foreach (var c in snap.Counters)
         {
-            var entry = new EndClientCounter(c.Prefix) { Counter = c.Counter };
+            var entry = new EndClientCounter(c.PrefixIdx) { Counter = c.Counter };
             _counters[new EndClientId(c.EndClientId)] = entry;
         }
     }
 
-    private static string EncodeBase36(long value, int width)
-    {
-        Span<char> buffer = stackalloc char[width];
-        for (var i = width - 1; i >= 0; i--)
-        {
-            buffer[i] = Base36[(int)(value % 36)];
-            value /= 36;
-        }
-        return new string(buffer);
-    }
-
     private sealed class EndClientCounter
     {
-        public readonly string Prefix;
+        public readonly ulong PrefixIdx;
         public long Counter;
 
-        public EndClientCounter(string prefix) => Prefix = prefix;
+        public EndClientCounter(ulong prefixIdx) => PrefixIdx = prefixIdx;
     }
 }

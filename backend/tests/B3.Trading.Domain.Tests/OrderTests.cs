@@ -8,7 +8,7 @@ public class OrderTests
     public void ApplyFill_PartialThenFull_TransitionsStatus()
     {
         var owner = new EndClientId("alice");
-        var order = new Order("CLO-1", owner, "PETR4", OrderSide.Buy, OrderType.Limit, 100, 30.50m);
+        var order = new Order(1UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30.50m);
 
         order.ApplyFill(40);
         Assert.Equal(OrderStatus.PartiallyFilled, order.Status);
@@ -23,7 +23,7 @@ public class OrderTests
     [Fact]
     public void ApplyFill_OverLeaves_Throws()
     {
-        var order = new Order("CLO-2", new EndClientId("alice"), "PETR4", OrderSide.Sell, OrderType.Limit, 10, 30m);
+        var order = new Order(2UL, new EndClientId("alice"), "PETR4", 4321UL, OrderSide.Sell, OrderType.Limit, 10, 30m);
         Assert.Throws<InvalidOperationException>(() => order.ApplyFill(11));
     }
 }

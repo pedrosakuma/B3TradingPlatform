@@ -32,10 +32,11 @@ public abstract record WalEvent
 /// </summary>
 public sealed record OrderSubmittedEvent : WalEvent
 {
-    public required string ClOrdId { get; init; }
+    public required ulong ClOrdId { get; init; }
     public required string EndClientId { get; init; }
     public required string FirmId { get; init; }
     public required string Symbol { get; init; }
+    public required ulong SecurityId { get; init; }
     public required string Side { get; init; }
     public required string Type { get; init; }
     public required long Quantity { get; init; }
@@ -50,7 +51,7 @@ public sealed record OrderSubmittedEvent : WalEvent
 /// </summary>
 public sealed record ExecutionReportReceivedEvent : WalEvent
 {
-    public required string ClOrdId { get; init; }
+    public required ulong ClOrdId { get; init; }
     public required string ExecKind { get; init; }
     public required long LeavesQuantity { get; init; }
     public required long CumulativeQuantity { get; init; }

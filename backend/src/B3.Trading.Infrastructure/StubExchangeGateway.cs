@@ -10,9 +10,6 @@ namespace B3.Trading.Infrastructure;
 public sealed class StubExchangeGateway : IExchangeGateway
 {
     public Task SubmitAsync(Order order, CancellationToken cancellationToken) => Task.CompletedTask;
-
-    public Task CancelAsync(string clOrdId, CancellationToken cancellationToken) => Task.CompletedTask;
-
-    public Task CancelReplaceAsync(string originalClOrdId, string newClOrdId, long newQuantity, decimal? newPrice, CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task CancelAsync(Order order, ulong newClOrdId, CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task CancelReplaceAsync(Order original, ulong newClOrdId, long newQuantity, decimal? newPrice, CancellationToken cancellationToken) => Task.CompletedTask;
 }
-

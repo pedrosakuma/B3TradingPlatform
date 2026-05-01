@@ -12,7 +12,7 @@ public class SubscriptionManagerTests
         var book = new WorkingOrderBook();
         var positions = new PositionKeeper();
         var owner = new EndClientId("alice");
-        book.TryAdd(new Order("X1", owner, "PETR4", OrderSide.Buy, OrderType.Limit, 100, 30m));
+        book.TryAdd(new Order(1UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m));
 
         var mgr = new SubscriptionManager(book, positions);
         var client = new SubscribedClient(owner);
@@ -93,7 +93,7 @@ public class WebSocketExecutionEventSinkTests
         var book = new WorkingOrderBook();
         var positions = new PositionKeeper();
         var owner = new EndClientId("alice");
-        var order = new Order("X1", owner, "PETR4", OrderSide.Buy, OrderType.Limit, 100, 30m);
+        var order = new Order(1UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m);
         book.TryAdd(order);
         positions.ApplyFill(owner, "PETR4", OrderSide.Buy, 100, 30m);
         order.MarkWorking();
@@ -112,7 +112,7 @@ public class WebSocketExecutionEventSinkTests
 
         var sink = new WebSocketExecutionEventSink(mgr, book, positions);
         sink.Publish(new ExecutionEvent(
-            owner, "X1", "PETR4", OrderSide.Buy, order.Status, ExecKind.Fill,
+            owner, 1UL, "PETR4", OrderSide.Buy, order.Status, ExecKind.Fill,
             0, 100, 100, 30m, null, DateTimeOffset.UtcNow));
 
         var msgs = new List<OutboundMessage>();
@@ -129,7 +129,7 @@ public class WebSocketExecutionEventSinkTests
         var book = new WorkingOrderBook();
         var positions = new PositionKeeper();
         var owner = new EndClientId("alice");
-        var order = new Order("X1", owner, "PETR4", OrderSide.Buy, OrderType.Limit, 100, 30m);
+        var order = new Order(1UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m);
         book.TryAdd(order);
         order.MarkCancelled();
 
@@ -145,7 +145,7 @@ public class WebSocketExecutionEventSinkTests
 
         var sink = new WebSocketExecutionEventSink(mgr, book, positions);
         sink.Publish(new ExecutionEvent(
-            owner, "X1", "PETR4", OrderSide.Buy, order.Status, ExecKind.Canceled,
+            owner, 1UL, "PETR4", OrderSide.Buy, order.Status, ExecKind.Canceled,
             0, 0, 0, 0m, null, DateTimeOffset.UtcNow));
 
         var msgs = new List<OutboundMessage>();

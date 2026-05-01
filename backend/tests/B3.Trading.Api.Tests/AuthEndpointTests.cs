@@ -52,7 +52,7 @@ public class AuthEndpointTests : IClassFixture<TestAppFactory>
     {
         using var client = await _factory.CreateAuthedClientAsync();
         var submit = await client.PostAsJsonAsync("/orders",
-            new SubmitOrderRequest("PETR4", "Buy", "Limit", 100, 30m));
+            new SubmitOrderRequest("PETR4", 4321UL, "Buy", "Limit", 100, 30m));
         Assert.Equal(HttpStatusCode.Accepted, submit.StatusCode);
         var body = await submit.Content.ReadFromJsonAsync<SubmittedOrderResponse>();
 
@@ -66,7 +66,7 @@ public class AuthEndpointTests : IClassFixture<TestAppFactory>
         // Alice submits; Bob attempts to cancel.
         using var aliceClient = await _factory.CreateAuthedClientAsync();
         var submit = await aliceClient.PostAsJsonAsync("/orders",
-            new SubmitOrderRequest("PETR4", "Sell", "Limit", 50, 31m));
+            new SubmitOrderRequest("PETR4", 4321UL, "Sell", "Limit", 50, 31m));
         var body = await submit.Content.ReadFromJsonAsync<SubmittedOrderResponse>();
 
         using var bobClient = await _factory.CreateAuthedClientAsync("bob", TestAppFactory.TestPassword);

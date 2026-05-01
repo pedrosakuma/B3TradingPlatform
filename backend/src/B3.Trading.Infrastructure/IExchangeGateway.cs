@@ -3,8 +3,8 @@ using B3.Trading.Domain;
 namespace B3.Trading.Infrastructure;
 
 /// <summary>
-/// Boundary toward <c>B3EntryPointClient</c> (the wire-puro FIXP/SBE library
-/// in the companion repo). Real implementation will adapt EntryPoint
+/// Boundary toward <c>B3.EntryPoint.Client</c> (the wire-puro FIXP/SBE
+/// library). Real implementation will adapt EntryPoint
 /// NewOrder/CancelReplace/Cancel + ExecutionReport to/from the domain;
 /// the interface lives in Infrastructure so Application stays wire-agnostic.
 /// </summary>
@@ -18,14 +18,15 @@ public interface IExchangeGateway
     Task SubmitAsync(Order order, CancellationToken cancellationToken);
 
     /// <summary>
-    /// Cancel a working order by ClOrdID.
+    /// Cancel a working order. Takes the full <see cref="Order"/> because
+    /// the upstream <c>CancelOrderRequest</c> requires <c>SecurityId</c> +
+    /// <c>Side</c> in addition to the original ClOrdID.
     /// </summary>
-    Task CancelAsync(string clOrdId, CancellationToken cancellationToken);
+    Task CancelAsync(Order order, ulong newClOrdId, CancellationToken cancellationToken);
 
     /// <summary>
     /// Cancel-replace a working order. <paramref name="newClOrdId"/> must
     /// already be allocated; the original ClOrdID is the one being replaced.
     /// </summary>
-    Task CancelReplaceAsync(string originalClOrdId, string newClOrdId, long newQuantity, decimal? newPrice, CancellationToken cancellationToken);
+    Task CancelReplaceAsync(Order original, ulong newClOrdId, long newQuantity, decimal? newPrice, CancellationToken cancellationToken);
 }
-

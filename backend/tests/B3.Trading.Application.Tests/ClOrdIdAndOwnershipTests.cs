@@ -6,7 +6,7 @@ namespace B3.Trading.Application.Tests;
 public class ClOrdIdPrefixRegistryTests
 {
     [Fact]
-    public void Generate_ProducesFixedFormat()
+    public void Generate_PacksPrefixAndCounter_AsNonZeroUlong()
     {
         var registry = new ClOrdIdPrefixRegistry();
         var alice = new EndClientId("alice");
@@ -14,12 +14,14 @@ public class ClOrdIdPrefixRegistryTests
         var first = registry.Generate(alice);
         var second = registry.Generate(alice);
 
-        Assert.Equal(17, first.Length);
-        Assert.Matches("^[0-9a-z]{4}-[0-9]{12}$", first);
+        Assert.NotEqual(0UL, first);
         Assert.NotEqual(first, second);
 
-        // Same prefix for the same end-client.
-        Assert.Equal(first[..4], second[..4]);
+        // Counter advances by 1 for the same end-client.
+        Assert.Equal(first + 1UL, second);
+
+        // Same prefixIdx (top bits above CounterBits) for the same end-client.
+        Assert.Equal(first >> ClOrdIdPrefixRegistry.CounterBits, second >> ClOrdIdPrefixRegistry.CounterBits);
     }
 
     [Fact]
@@ -28,7 +30,9 @@ public class ClOrdIdPrefixRegistryTests
         var registry = new ClOrdIdPrefixRegistry();
         var a = registry.Generate(new EndClientId("alice"));
         var b = registry.Generate(new EndClientId("bob"));
-        Assert.NotEqual(a[..4], b[..4]);
+        Assert.NotEqual(
+            a >> ClOrdIdPrefixRegistry.CounterBits,
+            b >> ClOrdIdPrefixRegistry.CounterBits);
     }
 
     [Fact]
@@ -47,9 +51,9 @@ public class OrderOwnershipMapTests
     {
         var map = new OrderOwnershipMap();
         var owner = new EndClientId("alice");
-        map.Register("0001-000000000001", owner);
+        map.Register(42UL, owner);
 
-        Assert.True(map.TryResolve("0001-000000000001", out var got));
+        Assert.True(map.TryResolve(42UL, out var got));
         Assert.Equal(owner, got);
     }
 
@@ -58,10 +62,10 @@ public class OrderOwnershipMapTests
     {
         var map = new OrderOwnershipMap();
         var owner = new EndClientId("alice");
-        map.Register("orig", owner);
-        map.RegisterReplacement("orig", "newer");
+        map.Register(100UL, owner);
+        map.RegisterReplacement(100UL, 101UL);
 
-        Assert.True(map.TryResolve("newer", out var got));
+        Assert.True(map.TryResolve(101UL, out var got));
         Assert.Equal(owner, got);
     }
 }

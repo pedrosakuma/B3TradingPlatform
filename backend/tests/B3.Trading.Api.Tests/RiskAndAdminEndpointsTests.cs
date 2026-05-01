@@ -53,7 +53,7 @@ public class RiskAndAdminEndpointsTests : IClassFixture<TestAppFactory>
 
         // Default MaxQuantity in TestAppFactory is 1000.
         var resp = await PostAsync(http, token, "/orders",
-            new { Symbol = "PETR4", Side = "Buy", Type = "Limit", Quantity = 5000, Price = 30m });
+            new { Symbol = "PETR4", SecurityId = 4321UL, Side = "Buy", Type = "Limit", Quantity = 5000, Price = 30m });
         Assert.Equal(HttpStatusCode.Accepted, resp.StatusCode);
 
         var delta = await ReadJsonAsync(ws, cts.Token);
@@ -78,7 +78,7 @@ public class RiskAndAdminEndpointsTests : IClassFixture<TestAppFactory>
         try
         {
             var blocked = await PostAsync(http, aliceToken, "/orders",
-                new { Symbol = "PETR4", Side = "Buy", Type = "Limit", Quantity = 1, Price = 30m });
+                new { Symbol = "PETR4", SecurityId = 4321UL, Side = "Buy", Type = "Limit", Quantity = 1, Price = 30m });
             Assert.Equal(HttpStatusCode.Accepted, blocked.StatusCode);
             var delta = await ReadJsonAsync(ws, cts.Token);
             Assert.Equal("Rejected", delta.GetProperty("data").GetProperty("kind").GetString());

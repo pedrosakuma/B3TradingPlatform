@@ -5,13 +5,12 @@ namespace B3.Trading.Infrastructure;
 /// <summary>
 /// <see cref="IExchangeGateway"/> implementation that translates domain
 /// commands into <see cref="IEntryPointClient"/> calls. The reverse
-/// direction (ER → domain) is handled in
-/// <c>B3.Trading.Application.ExecutionReportProcessor</c>.
+/// direction (ER → domain) is handled by
+/// <see cref="EntryPointExecutionReportRouter"/>.
 ///
-/// This class deliberately knows nothing about ClOrdID allocation — the
-/// caller passes a fully-formed <see cref="Order"/> with a registry-issued
-/// ClOrdID — so policy lives in one place
-/// (<c>ClOrdIdPrefixRegistry</c>) and the gateway stays a thin adapter.
+/// Thin adapter — no ClOrdID allocation, no risk decisions; the caller
+/// passes a fully-formed <see cref="Order"/> with a registry-issued
+/// ClOrdID + securityId so policy stays in one place.
 /// </summary>
 public sealed class EntryPointClientGateway : IExchangeGateway
 {
@@ -30,6 +29,7 @@ public sealed class EntryPointClientGateway : IExchangeGateway
 
         var req = new NewOrderSingle(
             order.ClOrdId,
+            order.SecurityId,
             order.Symbol,
             order.Side == OrderSide.Buy ? EpSide.Buy : EpSide.Sell,
             order.Type == OrderType.Limit ? EpOrderType.Limit : EpOrderType.Market,
@@ -40,19 +40,27 @@ public sealed class EntryPointClientGateway : IExchangeGateway
         return _client.SubmitNewOrderAsync(req, cancellationToken);
     }
 
-    public Task CancelAsync(string clOrdId, CancellationToken cancellationToken)
+    public Task CancelAsync(Order order, ulong newClOrdId, CancellationToken cancellationToken)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(clOrdId);
-        return _client.SubmitCancelAsync(new OrderCancelRequest(clOrdId, _firmId), cancellationToken);
+        ArgumentNullException.ThrowIfNull(order);
+        return _client.SubmitCancelAsync(
+            new OrderCancelRequest(
+                newClOrdId,
+                order.ClOrdId,
+                order.SecurityId,
+                order.Side == OrderSide.Buy ? EpSide.Buy : EpSide.Sell,
+                _firmId),
+            cancellationToken);
     }
 
-    public Task CancelReplaceAsync(string originalClOrdId, string newClOrdId, long newQuantity, decimal? newPrice, CancellationToken cancellationToken)
+    public Task CancelReplaceAsync(Order original, ulong newClOrdId, long newQuantity, decimal? newPrice, CancellationToken cancellationToken)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(originalClOrdId);
-        ArgumentException.ThrowIfNullOrWhiteSpace(newClOrdId);
-
+        ArgumentNullException.ThrowIfNull(original);
         return _client.SubmitCancelReplaceAsync(
-            new OrderCancelReplaceRequest(originalClOrdId, newClOrdId, newQuantity, newPrice, _firmId),
+            new OrderCancelReplaceRequest(
+                original.ClOrdId, newClOrdId, original.SecurityId,
+                original.Side == OrderSide.Buy ? EpSide.Buy : EpSide.Sell,
+                newQuantity, newPrice, _firmId),
             cancellationToken);
     }
 }

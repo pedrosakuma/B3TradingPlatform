@@ -26,7 +26,7 @@ public class WorkingOrderBookTests
     public void TryAdd_DuplicateClOrdId_ReturnsFalse()
     {
         var book = new WorkingOrderBook();
-        var order = new Order("X1", new EndClientId("alice"), "PETR4", OrderSide.Buy, OrderType.Limit, 1, 1m);
+        var order = new Order(1UL, new EndClientId("alice"), "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 1, 1m);
 
         Assert.True(book.TryAdd(order));
         Assert.False(book.TryAdd(order));

@@ -80,6 +80,7 @@ public class HealthAndDrainTests : IClassFixture<TestAppFactory>
         var resp = await client.PostAsJsonAsync("/orders/", new
         {
             Symbol = "PETR4",
+            SecurityId = 4321UL,
             Side = "Buy",
             Type = "Limit",
             Quantity = 100,
@@ -107,6 +108,7 @@ public class HealthAndDrainTests : IClassFixture<TestAppFactory>
         var resp = await client.PostAsJsonAsync("/orders/", new
         {
             Symbol = "PETR4",
+            SecurityId = 4321UL,
             Side = "Buy",
             Type = "Limit",
             Quantity = 10,

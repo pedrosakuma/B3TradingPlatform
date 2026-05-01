@@ -47,12 +47,12 @@ public class RecoveryAndSnapshotTests : IDisposable
             var (book, positions, killSwitch, ownership, _, dispatcher, processor, sink) = BuildState(store);
 
             // Submit two orders.
-            DispatchSubmit(dispatcher, book, ownership, "ORD-1", "alice", "PETR4", OrderSide.Buy, 100, 30m);
-            DispatchSubmit(dispatcher, book, ownership, "ORD-2", "alice", "PETR4", OrderSide.Buy, 50, 31m);
+            DispatchSubmit(dispatcher, book, ownership, 1UL, "alice", "PETR4", OrderSide.Buy, 100, 30m);
+            DispatchSubmit(dispatcher, book, ownership, 2UL, "alice", "PETR4", OrderSide.Buy, 50, 31m);
 
             // Fill the first one, partial-fill the second.
-            DispatchEr(dispatcher, processor, "ORD-1", ExecKind.Fill, leaves: 0, cum: 100, last: 100, lastPx: 30m);
-            DispatchEr(dispatcher, processor, "ORD-2", ExecKind.PartialFill, leaves: 20, cum: 30, last: 30, lastPx: 31m);
+            DispatchEr(dispatcher, processor, 1UL, ExecKind.Fill, leaves: 0, cum: 100, last: 100, lastPx: 30m);
+            DispatchEr(dispatcher, processor, 2UL, ExecKind.PartialFill, leaves: 20, cum: 30, last: 30, lastPx: 31m);
 
             // Toggle the kill switch on a firm.
             dispatcher.Dispatch(
@@ -75,8 +75,8 @@ public class RecoveryAndSnapshotTests : IDisposable
             await recovery.RunAsync();
 
             // Working orders restored with execution state intact.
-            Assert.True(book.TryGet("ORD-1", out var o1) && o1!.Status == OrderStatus.Filled);
-            Assert.True(book.TryGet("ORD-2", out var o2) && o2!.Status == OrderStatus.PartiallyFilled);
+            Assert.True(book.TryGet(1UL, out var o1) && o1!.Status == OrderStatus.Filled);
+            Assert.True(book.TryGet(2UL, out var o2) && o2!.Status == OrderStatus.PartiallyFilled);
             Assert.Equal(100, o1!.CumulativeQuantity);
             Assert.Equal(30, o2!.CumulativeQuantity);
 
@@ -89,7 +89,7 @@ public class RecoveryAndSnapshotTests : IDisposable
             Assert.True(killSwitch.IsFirmKilled("TEST"));
 
             // Ownership restored — needed by the next ER that arrives for either order.
-            Assert.True(ownership.TryResolve("ORD-1", out _));
+            Assert.True(ownership.TryResolve(1UL, out _));
         }
     }
 
@@ -101,8 +101,8 @@ public class RecoveryAndSnapshotTests : IDisposable
         await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
         {
             var (book, _, _, ownership, snapshotter, dispatcher, _, _) = BuildState(store);
-            for (var i = 1; i <= 3; i++)
-                DispatchSubmit(dispatcher, book, ownership, $"ORD-{i}", "alice", "PETR4", OrderSide.Buy, 10, 30m);
+            for (var i = 1UL; i <= 3UL; i++)
+                DispatchSubmit(dispatcher, book, ownership, i, "alice", "PETR4", OrderSide.Buy, 10, 30m);
 
             var snapStore = new SnapshotStore(_root, "test");
             PlatformSnapshot? snap = null;
@@ -111,8 +111,8 @@ public class RecoveryAndSnapshotTests : IDisposable
             snapSeq = snap!.Seq;
             Assert.Equal(3, snapSeq);
 
-            for (var i = 4; i <= 5; i++)
-                DispatchSubmit(dispatcher, book, ownership, $"ORD-{i}", "alice", "PETR4", OrderSide.Buy, 10, 30m);
+            for (var i = 4UL; i <= 5UL; i++)
+                DispatchSubmit(dispatcher, book, ownership, i, "alice", "PETR4", OrderSide.Buy, 10, 30m);
             await store.FlushAsync();
         }
 
@@ -126,8 +126,8 @@ public class RecoveryAndSnapshotTests : IDisposable
             await recovery.RunAsync();
 
             // All 5 orders should be present (3 from snapshot, 2 from tail replay).
-            for (var i = 1; i <= 5; i++)
-                Assert.True(book.TryGet($"ORD-{i}", out _), $"ORD-{i} missing after snapshot+tail recovery.");
+            for (var i = 1UL; i <= 5UL; i++)
+                Assert.True(book.TryGet(i, out _), $"ORD-{i} missing after snapshot+tail recovery.");
         }
     }
 
@@ -136,10 +136,10 @@ public class RecoveryAndSnapshotTests : IDisposable
     {
         await using var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance);
         var (book, positions, killSwitch, ownership, snapshotter, dispatcher, processor, _) = BuildState(store);
-        DispatchSubmit(dispatcher, book, ownership, "ORD-1", "alice", "PETR4", OrderSide.Buy, 100, 30m);
-        DispatchEr(dispatcher, processor, "ORD-1", ExecKind.Fill, leaves: 0, cum: 100, last: 100, lastPx: 30m);
-        DispatchSubmit(dispatcher, book, ownership, "ORD-2", "alice", "PETR4", OrderSide.Sell, 100, 30m);
-        DispatchEr(dispatcher, processor, "ORD-2", ExecKind.Fill, leaves: 0, cum: 100, last: 100, lastPx: 30m);
+        DispatchSubmit(dispatcher, book, ownership, 1UL, "alice", "PETR4", OrderSide.Buy, 100, 30m);
+        DispatchEr(dispatcher, processor, 1UL, ExecKind.Fill, leaves: 0, cum: 100, last: 100, lastPx: 30m);
+        DispatchSubmit(dispatcher, book, ownership, 2UL, "alice", "PETR4", OrderSide.Sell, 100, 30m);
+        DispatchEr(dispatcher, processor, 2UL, ExecKind.Fill, leaves: 0, cum: 100, last: 100, lastPx: 30m);
 
         PlatformSnapshot? snap = null;
         dispatcher.WithSnapshotLock(seq => snap = snapshotter.Capture(seq));
@@ -171,26 +171,26 @@ public class RecoveryAndSnapshotTests : IDisposable
 
     private static void DispatchSubmit(
         EventDispatcher d, WorkingOrderBook book, OrderOwnershipMap ownership,
-        string clOrdId, string ec, string symbol, OrderSide side, long qty, decimal price)
+        ulong clOrdId, string ec, string symbol, OrderSide side, long qty, decimal price)
     {
         var owner = new EndClientId(ec);
         d.Dispatch(
             new OrderSubmittedEvent
             {
                 ClOrdId = clOrdId, EndClientId = ec, FirmId = "TEST",
-                Symbol = symbol, Side = side.ToString(), Type = "Limit",
+                Symbol = symbol, SecurityId = 4321UL, Side = side.ToString(), Type = "Limit",
                 Quantity = qty, Price = price,
             },
             () =>
             {
-                book.TryAdd(new Order(clOrdId, owner, symbol, side, OrderType.Limit, qty, price));
+                book.TryAdd(new Order(clOrdId, owner, symbol, 4321UL, side, OrderType.Limit, qty, price));
                 ownership.Register(clOrdId, owner);
             });
     }
 
     private static void DispatchEr(
         EventDispatcher d, ExecutionReportProcessor proc,
-        string clOrdId, ExecKind kind, long leaves, long cum, long last, decimal lastPx)
+        ulong clOrdId, ExecKind kind, long leaves, long cum, long last, decimal lastPx)
     {
         d.Dispatch(
             new ExecutionReportReceivedEvent

@@ -60,11 +60,13 @@ public static class OrdersEndpoints
                 return Results.BadRequest(new { error = $"invalid type '{req.Type}'" });
             if (req.Quantity <= 0)
                 return Results.BadRequest(new { error = "quantity must be positive" });
+            if (req.SecurityId == 0)
+                return Results.BadRequest(new { error = "securityId is required" });
 
             var owner = ResolveOwner(ctx, registry);
             var firm = ResolveFirm(ctx);
             var clOrdId = clOrdIds.Generate(owner);
-            var order = new Order(clOrdId, owner, req.Symbol, side, type, req.Quantity, req.Price);
+            var order = new Order(clOrdId, owner, req.Symbol, req.SecurityId, side, type, req.Quantity, req.Price);
 
             // Persist order intent + register ownership atomically. The
             // dispatcher serialises this with snapshot capture so a crash
@@ -80,6 +82,7 @@ public static class OrdersEndpoints
                         EndClientId = owner.Value,
                         FirmId = firm,
                         Symbol = req.Symbol,
+                        SecurityId = req.SecurityId,
                         Side = side.ToString(),
                         Type = type.ToString(),
                         Quantity = req.Quantity,
@@ -121,7 +124,7 @@ public static class OrdersEndpoints
                     new KeyValuePair<string, object?>("reason", decision.Reason ?? "risk_rejected"));
                 PublishSyntheticRejection(dispatcher, sink, order, owner, decision.Reason ?? "risk_rejected");
                 return Results.Accepted($"/orders/{clOrdId}",
-                    new { ClOrdId = clOrdId, Status = "Rejected", Reason = decision.Reason });
+                    new { ClOrdId = clOrdId.ToString(), Status = "Rejected", Reason = decision.Reason });
             }
 
             try
@@ -135,33 +138,34 @@ public static class OrdersEndpoints
                     .LogError(ex, "Gateway submit failed for {ClOrdId}; synthesizing rejection.", clOrdId);
                 PublishSyntheticRejection(dispatcher, sink, order, owner, "gateway_unavailable");
                 return Results.Json(
-                    new { error = "gateway unavailable", clOrdId },
+                    new { error = "gateway unavailable", clOrdId = clOrdId.ToString() },
                     statusCode: StatusCodes.Status502BadGateway);
             }
 
-            return Results.Accepted($"/orders/{clOrdId}", new { ClOrdId = clOrdId });
+            return Results.Accepted($"/orders/{clOrdId}", new { ClOrdId = clOrdId.ToString() });
         });
 
         group.MapDelete("/{clOrdId}", async (
             string clOrdId,
             HttpContext ctx,
             EndClientRegistry registry,
+            ClOrdIdPrefixRegistry clOrdIds,
             WorkingOrderBook book,
             IExchangeGateway gateway,
             CancellationToken ct) =>
         {
-            var owner = ResolveOwner(ctx, registry);
-            if (!book.TryGet(clOrdId, out var order) || order is null)
+            if (!ulong.TryParse(clOrdId, out var clOrdIdU))
                 return Results.NotFound();
 
-            // Cross-tenant guard: a caller with a valid token for end-client
-            // A must not be able to cancel end-client B's order even by
-            // guessing the ClOrdID. Return 404 (not 403) to avoid leaking
-            // existence of foreign orders.
+            var owner = ResolveOwner(ctx, registry);
+            if (!book.TryGet(clOrdIdU, out var order) || order is null)
+                return Results.NotFound();
+
             if (order.Owner != owner)
                 return Results.NotFound();
 
-            await gateway.CancelAsync(clOrdId, ct);
+            var cancelClOrdId = clOrdIds.Generate(owner);
+            await gateway.CancelAsync(order, cancelClOrdId, ct);
             MetricsRegistry.OrdersCancelRequested.Add(1);
             // Status transition to Cancelled happens when the exchange ER
             // arrives, not synchronously here.
@@ -231,6 +235,7 @@ public static class OrdersEndpoints
 
 public sealed record SubmitOrderRequest(
     string Symbol,
+    ulong SecurityId,
     string Side,
     string Type,
     long Quantity,

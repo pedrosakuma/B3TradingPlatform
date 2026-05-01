@@ -19,9 +19,10 @@ public sealed class PlatformSnapshot
 }
 
 public sealed record OrderSnapshot(
-    string ClOrdId,
+    ulong ClOrdId,
     string EndClientId,
     string Symbol,
+    ulong SecurityId,
     string Side,
     string Type,
     long Quantity,
@@ -42,6 +43,6 @@ public sealed class ClOrdIdRegistrySnapshot
     public List<ClOrdIdCounterSnapshot> Counters { get; init; } = new();
 }
 
-public sealed record ClOrdIdCounterSnapshot(string EndClientId, string Prefix, long Counter);
+public sealed record ClOrdIdCounterSnapshot(string EndClientId, ulong PrefixIdx, long Counter);
 
-public sealed record OwnershipMappingSnapshot(string ClOrdId, string EndClientId);
+public sealed record OwnershipMappingSnapshot(ulong ClOrdId, string EndClientId);

@@ -20,7 +20,7 @@ public interface IExecutionEventSink
 /// </summary>
 public sealed record ExecutionEvent(
     EndClientId Owner,
-    string ClOrdId,
+    ulong ClOrdId,
     string Symbol,
     OrderSide Side,
     OrderStatus Status,

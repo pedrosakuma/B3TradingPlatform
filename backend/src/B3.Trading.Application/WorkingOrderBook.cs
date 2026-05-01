@@ -10,11 +10,11 @@ namespace B3.Trading.Application;
 /// </summary>
 public sealed class WorkingOrderBook
 {
-    private readonly ConcurrentDictionary<string, Order> _orders = new();
+    private readonly ConcurrentDictionary<ulong, Order> _orders = new();
 
     public bool TryAdd(Order order) => _orders.TryAdd(order.ClOrdId, order);
 
-    public bool TryGet(string clOrdId, out Order? order) => _orders.TryGetValue(clOrdId, out order);
+    public bool TryGet(ulong clOrdId, out Order? order) => _orders.TryGetValue(clOrdId, out order);
 
     public IReadOnlyCollection<Order> ForEndClient(EndClientId owner)
     {
@@ -40,7 +40,7 @@ public sealed class WorkingOrderBook
         {
             var o = kv.Value;
             yield return new Persistence.OrderSnapshot(
-                o.ClOrdId, o.Owner.Value, o.Symbol,
+                o.ClOrdId, o.Owner.Value, o.Symbol, o.SecurityId,
                 o.Side.ToString(), o.Type.ToString(),
                 o.Quantity, o.Price, o.LeavesQuantity, o.CumulativeQuantity,
                 o.Status.ToString());
@@ -57,7 +57,7 @@ public sealed class WorkingOrderBook
             var side = Enum.Parse<OrderSide>(s.Side);
             var type = Enum.Parse<OrderType>(s.Type);
             var status = Enum.Parse<OrderStatus>(s.Status);
-            _orders[s.ClOrdId] = Order.Hydrate(s.ClOrdId, owner, s.Symbol, side, type,
+            _orders[s.ClOrdId] = Order.Hydrate(s.ClOrdId, owner, s.Symbol, s.SecurityId, side, type,
                 s.Quantity, s.Price, s.LeavesQuantity, s.CumulativeQuantity, status);
         }
     }

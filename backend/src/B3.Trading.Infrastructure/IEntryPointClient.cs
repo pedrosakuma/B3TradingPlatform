@@ -1,16 +1,14 @@
 namespace B3.Trading.Infrastructure;
 
 /// <summary>
-/// Placeholder for the surface that the upstream <c>B3EntryPointClient</c>
-/// library is expected to expose. Defined here so this repo can build the
-/// gateway, ER routing, and tests against a stable shape while the
-/// upstream lib finalizes its API design (the upstream repo is starting
-/// with API design + mocks first, on purpose, so consumers like this one
-/// can lock in their boundary early).
+/// Internal seam between the wire layer and our ER router. Production
+/// uses <see cref="B3EntryPointClientGateway"/> wrapping the upstream
+/// <c>B3.EntryPoint.Client.EntryPointClient</c>. Tests use
+/// <see cref="MockEntryPointClient"/> to drive ERs without TCP.
 ///
-/// Replace this interface with the real lib's type(s) once published —
-/// the rest of the codebase only depends on the few request/response
-/// POCOs declared here, all of which are pure data.
+/// Records here mirror the upstream package's shape (ulong ClOrdId,
+/// ulong SecurityId, FIX-style enums) so translation at the boundary
+/// is a pure field-mapping exercise.
 /// </summary>
 public interface IEntryPointClient
 {
@@ -49,7 +47,8 @@ public enum EpExecType
 }
 
 public sealed record NewOrderSingle(
-    string ClOrdId,
+    ulong ClOrdId,
+    ulong SecurityId,
     string Symbol,
     EpSide Side,
     EpOrderType Type,
@@ -57,17 +56,24 @@ public sealed record NewOrderSingle(
     decimal? Price,
     string FirmId);
 
-public sealed record OrderCancelRequest(string ClOrdId, string FirmId);
+public sealed record OrderCancelRequest(
+    ulong ClOrdId,
+    ulong OrigClOrdId,
+    ulong SecurityId,
+    EpSide Side,
+    string FirmId);
 
 public sealed record OrderCancelReplaceRequest(
-    string OriginalClOrdId,
-    string NewClOrdId,
+    ulong OriginalClOrdId,
+    ulong NewClOrdId,
+    ulong SecurityId,
+    EpSide Side,
     long NewQuantity,
     decimal? NewPrice,
     string FirmId);
 
 public sealed record ExecutionReportEnvelope(
-    string ClOrdId,
+    ulong ClOrdId,
     EpExecType ExecType,
     long LeavesQuantity,
     long CumulativeQuantity,

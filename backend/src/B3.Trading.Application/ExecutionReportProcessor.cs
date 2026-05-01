@@ -33,7 +33,7 @@ public sealed class ExecutionReportProcessor
         _logger = logger;
     }
 
-    public void Apply(string clOrdId, ExecKind kind, long leaves, long cumQty, long lastQty, decimal lastPx, string? rejectReason)
+    public void Apply(ulong clOrdId, ExecKind kind, long leaves, long cumQty, long lastQty, decimal lastPx, string? rejectReason)
     {
         if (!_ownership.TryResolve(clOrdId, out var owner) || owner is null)
         {

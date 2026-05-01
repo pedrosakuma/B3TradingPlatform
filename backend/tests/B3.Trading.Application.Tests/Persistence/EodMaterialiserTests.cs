@@ -34,19 +34,19 @@ public class EodMaterialiserTests : IDisposable
         {
             store.Append(new OrderSubmittedEvent
             {
-                ClOrdId = "ORD-1", EndClientId = "alice", FirmId = "TEST", Symbol = "PETR4",
+                ClOrdId = 1UL, EndClientId = "alice", FirmId = "TEST", Symbol = "PETR4", SecurityId = 4321UL,
                 Side = "Buy", Type = "Limit", Quantity = 100, Price = 30m,
                 TimestampUtc = dayTs,
             });
             store.Append(new ExecutionReportReceivedEvent
             {
-                ClOrdId = "ORD-1", ExecKind = "Fill", LeavesQuantity = 0, CumulativeQuantity = 100,
+                ClOrdId = 1UL, ExecKind = "Fill", LeavesQuantity = 0, CumulativeQuantity = 100,
                 LastQuantity = 100, LastPrice = 30m, Synthetic = false,
                 TimestampUtc = dayTs,
             });
             store.Append(new ExecutionReportReceivedEvent
             {
-                ClOrdId = "ORD-2", ExecKind = "Rejected", LeavesQuantity = 0, CumulativeQuantity = 0,
+                ClOrdId = 2UL, ExecKind = "Rejected", LeavesQuantity = 0, CumulativeQuantity = 0,
                 LastQuantity = 0, LastPrice = 0m, Synthetic = true, RejectReason = "risk",
                 TimestampUtc = dayTs,
             });

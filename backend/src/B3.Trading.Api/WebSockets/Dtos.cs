@@ -23,6 +23,7 @@ public sealed record OutboundMessage(string Type, string? Channel, long Seq, obj
 public sealed record OrderDto(
     string ClOrdId,
     string Symbol,
+    ulong SecurityId,
     string Side,
     string Type,
     long Quantity,
@@ -52,12 +53,12 @@ public sealed record ExecutionDto(
 public static class DtoMappings
 {
     public static OrderDto ToDto(this Order o) => new(
-        o.ClOrdId, o.Symbol, o.Side.ToString(), o.Type.ToString(),
+        o.ClOrdId.ToString(), o.Symbol, o.SecurityId, o.Side.ToString(), o.Type.ToString(),
         o.Quantity, o.LeavesQuantity, o.CumulativeQuantity, o.Price, o.Status.ToString());
 
     public static PositionDto ToDto(this Position p) => new(p.Symbol, p.NetQuantity, p.AverageEntryPrice);
 
     public static ExecutionDto ToDto(this ExecutionEvent ev) => new(
-        ev.ClOrdId, ev.Symbol, ev.Side.ToString(), ev.Status.ToString(), ev.Kind.ToString(),
+        ev.ClOrdId.ToString(), ev.Symbol, ev.Side.ToString(), ev.Status.ToString(), ev.Kind.ToString(),
         ev.LeavesQuantity, ev.CumulativeQuantity, ev.LastQuantity, ev.LastPrice, ev.RejectReason, ev.TimestampUtc);
 }

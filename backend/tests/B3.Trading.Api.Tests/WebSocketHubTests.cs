@@ -44,9 +44,10 @@ public class WebSocketHubTests : IClassFixture<TestAppFactory>
         // Push a synthetic ER end-to-end: submit an order then have the
         // mock client emit a Fill ER for that ClOrdID.
         var submit = await PostAsAuthAsync(http, token, "/orders",
-            new { Symbol = "PETR4", Side = "Buy", Type = "Limit", Quantity = 100, Price = 30m });
+            new { Symbol = "PETR4", SecurityId = 4321UL, Side = "Buy", Type = "Limit", Quantity = 100, Price = 30m });
         var body = await submit.Content.ReadFromJsonAsync<JsonElement>();
-        var clOrdId = body.GetProperty("clOrdId").GetString()!;
+        var clOrdIdStr = body.GetProperty("clOrdId").GetString()!;
+        var clOrdId = ulong.Parse(clOrdIdStr);
 
         var mock = (MockEntryPointClient)_factory.Services.GetRequiredService<IEntryPointClient>();
         mock.EmitExecutionReport(new ExecutionReportEnvelope(clOrdId, EpExecType.Fill, 0, 100, 100, 30m, null));

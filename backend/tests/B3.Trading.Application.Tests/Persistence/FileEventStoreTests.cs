@@ -63,7 +63,7 @@ public class FileEventStoreTests : IDisposable
             replayed.Add(item);
         Assert.Equal(10, replayed.Count);
         Assert.All(replayed.Select((p, i) => (p, i)), pair => Assert.Equal(pair.i + 1, pair.p.Seq));
-        Assert.Equal("ORD-0", ((OrderSubmittedEvent)replayed[0].Evt).ClOrdId);
+        Assert.Equal(1UL, ((OrderSubmittedEvent)replayed[0].Evt).ClOrdId);
     }
 
     [Fact]
@@ -186,10 +186,11 @@ public class FileEventStoreTests : IDisposable
 
     private static OrderSubmittedEvent NewOrder(int i) => new()
     {
-        ClOrdId = $"ORD-{i}",
+        ClOrdId = (ulong)(i + 1),
         EndClientId = "alice",
         FirmId = "TEST",
         Symbol = "PETR4",
+        SecurityId = 4321UL,
         Side = "Buy",
         Type = "Limit",
         Quantity = 100,

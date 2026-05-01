@@ -14,16 +14,17 @@ namespace B3.Trading.Application;
 /// </summary>
 public sealed class OrderOwnershipMap
 {
-    private readonly ConcurrentDictionary<string, EndClientId> _byClOrdId = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<ulong, EndClientId> _byClOrdId = new();
 
-    public void Register(string clOrdId, EndClientId owner)
+    public void Register(ulong clOrdId, EndClientId owner)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(clOrdId);
+        if (clOrdId == 0)
+            throw new ArgumentOutOfRangeException(nameof(clOrdId), "ClOrdID cannot be zero.");
         ArgumentNullException.ThrowIfNull(owner);
         _byClOrdId[clOrdId] = owner;
     }
 
-    public bool TryResolve(string clOrdId, out EndClientId? owner) =>
+    public bool TryResolve(ulong clOrdId, out EndClientId? owner) =>
         _byClOrdId.TryGetValue(clOrdId, out owner);
 
     /// <summary>
@@ -31,7 +32,7 @@ public sealed class OrderOwnershipMap
     /// the same owner. The original key is kept so any in-flight ER for
     /// it (e.g. Replaced ack) can still resolve.
     /// </summary>
-    public void RegisterReplacement(string originalClOrdId, string newClOrdId)
+    public void RegisterReplacement(ulong originalClOrdId, ulong newClOrdId)
     {
         if (!_byClOrdId.TryGetValue(originalClOrdId, out var owner))
             throw new InvalidOperationException($"Unknown original ClOrdID '{originalClOrdId}'.");

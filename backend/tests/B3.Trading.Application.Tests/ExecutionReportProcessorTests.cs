@@ -21,11 +21,11 @@ public class ExecutionReportProcessorTests
     {
         var (proc, ownership, book, _, sink) = Build();
         var owner = new EndClientId("alice");
-        var order = new Order("X1", owner, "PETR4", OrderSide.Buy, OrderType.Limit, 100, 30m);
+        var order = new Order(1UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m);
         book.TryAdd(order);
-        ownership.Register("X1", owner);
+        ownership.Register(1UL, owner);
 
-        proc.Apply("X1", ExecKind.New, leaves: 100, cumQty: 0, lastQty: 0, lastPx: 0m, rejectReason: null);
+        proc.Apply(1UL, ExecKind.New, leaves: 100, cumQty: 0, lastQty: 0, lastPx: 0m, rejectReason: null);
 
         Assert.Equal(OrderStatus.Working, order.Status);
         Assert.Single(sink.Events);
@@ -37,11 +37,11 @@ public class ExecutionReportProcessorTests
     {
         var (proc, ownership, book, positions, sink) = Build();
         var owner = new EndClientId("alice");
-        var order = new Order("X1", owner, "PETR4", OrderSide.Buy, OrderType.Limit, 100, 30m);
+        var order = new Order(1UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m);
         book.TryAdd(order);
-        ownership.Register("X1", owner);
+        ownership.Register(1UL, owner);
 
-        proc.Apply("X1", ExecKind.Fill, leaves: 0, cumQty: 100, lastQty: 100, lastPx: 30m, rejectReason: null);
+        proc.Apply(1UL, ExecKind.Fill, leaves: 0, cumQty: 100, lastQty: 100, lastPx: 30m, rejectReason: null);
 
         Assert.Equal(OrderStatus.Filled, order.Status);
         Assert.Equal(100, positions.GetOrCreate(owner, "PETR4").NetQuantity);
@@ -52,7 +52,7 @@ public class ExecutionReportProcessorTests
     public void UnknownClOrdId_IsDroppedSilently()
     {
         var (proc, _, _, _, sink) = Build();
-        proc.Apply("never-registered", ExecKind.New, 0, 0, 0, 0m, null);
+        proc.Apply(99999UL, ExecKind.New, 0, 0, 0, 0m, null);
         Assert.Empty(sink.Events);
     }
 

@@ -30,11 +30,14 @@ public enum OrderStatus
 /// </summary>
 public sealed class Order
 {
-    public Order(string clOrdId, EndClientId owner, string symbol, OrderSide side, OrderType type, long quantity, decimal? price)
+    public Order(ulong clOrdId, EndClientId owner, string symbol, ulong securityId, OrderSide side, OrderType type, long quantity, decimal? price)
     {
+        if (clOrdId == 0)
+            throw new ArgumentOutOfRangeException(nameof(clOrdId), "ClOrdID cannot be zero (reserved as null sentinel by EntryPoint).");
         ClOrdId = clOrdId;
         Owner = owner;
         Symbol = symbol;
+        SecurityId = securityId;
         Side = side;
         Type = type;
         Quantity = quantity;
@@ -43,9 +46,10 @@ public sealed class Order
         Status = OrderStatus.PendingNew;
     }
 
-    public string ClOrdId { get; }
+    public ulong ClOrdId { get; }
     public EndClientId Owner { get; }
     public string Symbol { get; }
+    public ulong SecurityId { get; }
     public OrderSide Side { get; }
     public OrderType Type { get; }
     public long Quantity { get; }
@@ -76,10 +80,10 @@ public sealed class Order
     /// was, by construction, produced from a sequence of valid mutations.
     /// </summary>
     internal static Order Hydrate(
-        string clOrdId, EndClientId owner, string symbol, OrderSide side, OrderType type,
+        ulong clOrdId, EndClientId owner, string symbol, ulong securityId, OrderSide side, OrderType type,
         long quantity, decimal? price, long leaves, long cumQty, OrderStatus status)
     {
-        var o = new Order(clOrdId, owner, symbol, side, type, quantity, price);
+        var o = new Order(clOrdId, owner, symbol, securityId, side, type, quantity, price);
         o.LeavesQuantity = leaves;
         o.CumulativeQuantity = cumQty;
         o.Status = status;
