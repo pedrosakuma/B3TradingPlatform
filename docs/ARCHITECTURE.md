@@ -112,6 +112,38 @@ When the real lib publishes its surface, the swap is local: replace the
 behind the same name). The rest of the codebase only depends on the
 small POCO contract declared alongside the interface.
 
+## Auth + WebSocket hub (Phase 2)
+
+The participant-side platform exposes:
+
+- **REST + JWT.** `POST /auth/login` against a local user store
+  (PBKDF2-SHA256, 600k iterations by default; per-user iteration count
+  stored alongside the hash). Issues an HS256-signed JWT with `sub` =
+  username, plus a `role` claim. The signing key must be at least 256
+  bits — `JwtIssuer` fails fast at startup otherwise.
+- **WebSocket hub at `/ws`.** Same JWT, accepted via either the standard
+  `Authorization: Bearer` header or `?access_token=` (for browsers,
+  which can't attach headers on a WS upgrade). Query-string acceptance
+  is scoped to `/ws` only.
+- **Subscription channels.** `orders.me`, `executions.me`,
+  `positions.me`. Snapshot-on-subscribe + delta stream. Per-`(connection,
+  channel)` monotonic `seq` (snapshot is `seq=0`, deltas start at 1).
+- **Real `IExecutionEventSink`.** `WebSocketExecutionEventSink` replaces
+  the no-op sink: each ER becomes an `executions.me` delta, plus an
+  `orders.me` delta with the post-mutation order state, plus (for
+  fills) a `positions.me` delta with the new net position.
+- **Backpressure.** Each connection has a bounded outbound queue. On
+  overflow the platform refuses to silently drop a delta — it emits
+  `slow_consumer_resync_required` and closes the socket so the client
+  can reconnect and re-snapshot.
+- **Cross-tenant safety.** REST endpoints derive owner from the JWT
+  `sub` claim (never from request payload). `DELETE /orders/{clOrdId}`
+  returns 404 if the order belongs to a different end-client — the
+  authenticated tenant cannot see, much less mutate, foreign orders.
+
+Wire format and error codes are documented in
+[`docs/WEBSOCKET-PROTOCOL.md`](WEBSOCKET-PROTOCOL.md).
+
 ### 3. Position-keeper persistence
 
 Same dilemma the matching side faced: ephemeral vs. WAL+snapshot. v1 is
@@ -120,9 +152,12 @@ replay on (re)connect. Revisit when the matching side does.
 
 ### 4. Two auth layers
 
-- **End-client ↔ platform.** Open question (issue #1). Likely JWT or
-  OIDC; the bootstrap exposes a `?login=` query parameter as a stand-in
-  identity so the rest of the stack can compile and be tested.
+- **End-client ↔ platform.** Phase 2: local user store + HS256 JWT
+  (`POST /auth/login`). PBKDF2-HMAC-SHA256 hashes (600k iterations),
+  per-user iteration count stored in config. No OIDC, no refresh
+  tokens — short-lived tokens (default 60 min) and re-login. Operators
+  must provide `Trading:Auth:SigningKey` ≥ 32 bytes via
+  environment / user-secrets in production.
 - **Platform ↔ exchange.** FIXP credentials per firm, in config, mirrors
   `B3EntryPointClient`'s API. Lands when that lib is wired in.
 

@@ -14,19 +14,23 @@ public interface IExecutionEventSink
 
 /// <summary>
 /// Per-end-client view of an ExecutionReport, normalized to the domain.
-/// Carries everything Phase 2 needs to render the event in <c>orders.me</c>
-/// + <c>executions.me</c> + <c>positions.me</c> channels.
+/// Carries everything Phase 2 needs to derive channel routing
+/// (<c>orders.me</c> / <c>executions.me</c> / <c>positions.me</c>) and
+/// render the event payload to subscribed clients.
 /// </summary>
 public sealed record ExecutionEvent(
     EndClientId Owner,
     string ClOrdId,
     string Symbol,
+    OrderSide Side,
     OrderStatus Status,
+    ExecKind Kind,
     long LeavesQuantity,
     long CumulativeQuantity,
     long LastQuantity,
     decimal LastPrice,
-    string? RejectReason);
+    string? RejectReason,
+    DateTimeOffset TimestampUtc);
 
 public sealed class NoOpExecutionEventSink : IExecutionEventSink
 {

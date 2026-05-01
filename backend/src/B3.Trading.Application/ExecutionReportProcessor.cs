@@ -82,12 +82,15 @@ public sealed class ExecutionReportProcessor
             owner,
             clOrdId,
             order.Symbol,
+            order.Side,
             order.Status,
+            kind,
             order.LeavesQuantity,
             order.CumulativeQuantity,
             lastQty,
             lastPx,
-            rejectReason));
+            rejectReason,
+            DateTimeOffset.UtcNow));
     }
 }
 

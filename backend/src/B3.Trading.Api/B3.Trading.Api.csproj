@@ -20,4 +20,8 @@
     <InternalsVisibleTo Include="B3.Trading.Api.Tests" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.18.0" />
+  </ItemGroup>
+
 </Project>

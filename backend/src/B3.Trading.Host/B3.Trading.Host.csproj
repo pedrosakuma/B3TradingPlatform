@@ -15,4 +15,8 @@
     <ProjectReference Include="..\B3.Trading.Api\B3.Trading.Api.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.7" />
+  </ItemGroup>
+
 </Project>

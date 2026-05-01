@@ -1,4 +1,7 @@
+using System.Security.Claims;
+using B3.Trading.Api.WebSockets;
 using B3.Trading.Application;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -9,18 +12,12 @@ public static class PositionsEndpoints
 {
     public static IEndpointRouteBuilder MapPositions(this IEndpointRouteBuilder app)
     {
-        app.MapGet("/positions", (string login, EndClientRegistry registry, PositionKeeper positions) =>
+        app.MapGet("/positions", [Authorize] (HttpContext ctx, EndClientRegistry registry, PositionKeeper positions) =>
         {
-            if (!registry.TryResolve(login, out var owner) || owner is null)
-                return Results.NotFound();
-
-            var view = positions.ForEndClient(owner).Select(p => new
-            {
-                Owner = p.Owner.Value,
-                p.Symbol,
-                p.NetQuantity,
-                p.AverageEntryPrice,
-            });
+            var sub = ctx.User.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)
+                      ?? throw new InvalidOperationException("Authenticated request missing sub claim.");
+            var owner = registry.Register(sub);
+            var view = positions.ForEndClient(owner).Select(p => p.ToDto());
             return Results.Ok(view);
         });
 
