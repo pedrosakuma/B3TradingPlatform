@@ -1,0 +1,54 @@
+# Keep the build context small and reproducible. The Dockerfile only copies
+# global.json, Directory.Build.props, the slnx and backend/src — but
+# .dockerignore filters before COPY runs and also kills cache invalidation
+# from incidental file churn.
+
+# .NET build artefacts
+**/bin/
+**/obj/
+**/[Dd]ebug/
+**/[Rr]elease/
+**/x64/
+**/x86/
+**/*.user
+**/*.suo
+**/*.userosscache
+
+# IDE / editor
+.vs/
+.vscode/
+.idea/
+*.swp
+
+# Tooling outputs
+**/TestResults/
+**/coverage/
+**/*.trx
+**/*.coverage
+**/*.coveragexml
+
+# VCS
+.git/
+.gitignore
+.gitattributes
+
+# Docs / repo meta — not needed inside the image
+docs/
+LICENSE
+README.md
+.github/
+
+# Frontend lives in its own image (frontend/Dockerfile); never ship it
+# inside the trading-host runtime.
+frontend/
+
+# Tests don't ship to runtime
+backend/tests/
+
+# NuGet packages cache
+**/*.nupkg
+**/*.snupkg
+
+# Persistent runtime data should NEVER end up in the image
+data/
+**/data/

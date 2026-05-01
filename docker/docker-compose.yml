@@ -1,0 +1,106 @@
+# Family docker-compose for B3TradingPlatform.
+#
+# Default `docker compose up` brings the trading-host up in honest no-broker
+# mode (Mode=Unavailable: /health shows readyForOrders=false, POST /orders
+# returns 502 BadGateway). The frontend is served by an nginx that
+# reverse-proxies REST + WebSocket back to the trading-host over the
+# internal `b3-net` bridge so the browser sees a single origin and CORS is
+# a non-issue.
+#
+# The `marketdata` service is gated behind the `marketdata` profile because
+# it requires a PCAP volume that's not in this repo:
+#
+#   docker compose --profile marketdata up
+#
+# The `matching-platform` service is intentionally absent until
+# pedrosakuma/B3MatchingPlatform#88 ships GHCR images + bridge-friendly
+# transport. Once it does, a follow-up PR will add it under another profile.
+
+name: b3trading
+
+services:
+  trading-host:
+    build:
+      context: ..
+      dockerfile: backend/src/B3.Trading.Host/Dockerfile
+    image: ${TRADING_IMAGE:-ghcr.io/pedrosakuma/b3-trading-host:latest}
+    container_name: b3-trading-host
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Docker
+      ASPNETCORE_URLS: http://+:5000
+      # Operator MUST provide a real signing key (>= 32 UTF-8 bytes, not the
+      # committed dev default). AuthSigningKeyValidator fails the boot
+      # otherwise. Reading from .env keeps the secret out of the YAML.
+      Trading__Auth__SigningKey: ${TRADING_AUTH_SIGNING_KEY:?Set TRADING_AUTH_SIGNING_KEY in .env (>= 32 chars, not the dev default)}
+      # Seed at least one user so the frontend can log in. Override in .env
+      # or by mounting a custom appsettings.Production.json.
+      Trading__Auth__Users__0__Username: ${TRADING_SEED_USER:-alice}
+      Trading__Auth__Users__0__PasswordHash: ${TRADING_SEED_PASSWORD_HASH:?Set TRADING_SEED_PASSWORD_HASH in .env (PBKDF2 base64)}
+      Trading__Auth__Users__0__Salt: ${TRADING_SEED_PASSWORD_SALT:?Set TRADING_SEED_PASSWORD_SALT in .env (base64)}
+      Trading__Auth__Users__0__Iterations: "600000"
+      Trading__Auth__Users__0__Role: user
+      Trading__Auth__Users__0__Firm: default
+      # CORS list from origin of nginx frontend. Same-origin via nginx proxy
+      # means this is mostly redundant, but cheap insurance for direct curls.
+      Trading__Cors__AllowedOrigins__0: http://localhost:${FRONTEND_PORT:-8080}
+    volumes:
+      - trading-data:/var/lib/b3trading
+    networks:
+      - b3-net
+    expose:
+      - "5000"
+    ports:
+      # Exposed on host for direct curls / tooling. Comment out in
+      # locked-down environments where only the frontend should be public.
+      - "${TRADING_HOST_PORT:-5000}:5000"
+
+  frontend:
+    build:
+      context: ../frontend
+    image: ${FRONTEND_IMAGE:-ghcr.io/pedrosakuma/b3-trading-frontend:latest}
+    container_name: b3-trading-frontend
+    restart: unless-stopped
+    depends_on:
+      trading-host:
+        condition: service_healthy
+    networks:
+      - b3-net
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+
+  # Opt-in. Pull the published image from GHCR. Requires the package
+  # to be public — see B3MarketDataPlatform#2 closing comment.
+  #
+  # Bring up with PCAPs mounted:
+  #   PCAP_DIR=/path/to/pcaps docker compose --profile marketdata up
+  marketdata:
+    image: ghcr.io/pedrosakuma/b3-marketdata:${MARKETDATA_TAG:-latest}
+    container_name: b3-marketdata
+    restart: unless-stopped
+    profiles: ["marketdata"]
+    environment:
+      WS_PORT: "8080"
+      PCAP_DIR: /app/pcap
+      PCAP_PREFIX: ${PCAP_PREFIX:-20250331_MBO_084_EQT}
+      REPLAY_SPEED: ${REPLAY_SPEED:-2}
+    volumes:
+      - ${PCAP_DIR:-./pcap}:/app/pcap:ro
+    networks:
+      - b3-net
+    ports:
+      - "${MARKETDATA_PORT:-8081}:8080"
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+          cpus: "2"
+
+volumes:
+  trading-data:
+    name: b3-trading-data
+
+networks:
+  b3-net:
+    name: b3-net
+    driver: bridge
