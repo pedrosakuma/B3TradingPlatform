@@ -11,9 +11,9 @@ namespace B3.Trading.Infrastructure;
 public interface IExchangeGateway
 {
     /// <summary>
-    /// Submit a freshly-built order to the exchange. Implementations are
-    /// responsible for ClOrdID allocation policy (per-end-client prefixing —
-    /// see issue #1 §1).
+    /// Submit a freshly-built order to the exchange. The caller is expected
+    /// to have already allocated <see cref="Order.ClOrdId"/> via the
+    /// <c>ClOrdIdPrefixRegistry</c>.
     /// </summary>
     Task SubmitAsync(Order order, CancellationToken cancellationToken);
 
@@ -21,4 +21,11 @@ public interface IExchangeGateway
     /// Cancel a working order by ClOrdID.
     /// </summary>
     Task CancelAsync(string clOrdId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Cancel-replace a working order. <paramref name="newClOrdId"/> must
+    /// already be allocated; the original ClOrdID is the one being replaced.
+    /// </summary>
+    Task CancelReplaceAsync(string originalClOrdId, string newClOrdId, long newQuantity, decimal? newPrice, CancellationToken cancellationToken);
 }
+

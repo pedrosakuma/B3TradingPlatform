@@ -47,17 +47,70 @@ abstraction so the wire library is a swappable detail.
 
 Likely `1 platform → N FIXP sessions (one per firm) → M end-clients per firm`.
 ClOrdID is namespaced per FIXP session; the platform allocates per-end-client
-prefixes (e.g. `e3a4-7421`) so ER routing back to the owner is a hash lookup.
-The bootstrap allocates a naive `<login>-<guid>` ClOrdID; a proper bounded
-prefix registry is a follow-up.
+prefixes so ER routing back to the owner is a hash lookup.
+
+**ClOrdID encoding (Phase 1):** `{prefix}-{counter:D12}` — 17 chars
+total, comfortably under EntryPoint's 20-char limit.
+
+- `prefix` — 4 chars, base36 (`0-9a-z`), zero-padded. Allocated by
+  `ClOrdIdPrefixRegistry` on first use of an `EndClientId`; idempotent
+  on subsequent calls. Capacity: 36⁴ ≈ 1.68M end-clients per platform
+  deployment, far beyond the participant-side scope.
+- `counter` — 12-digit zero-padded decimal, per-end-client monotonic,
+  advanced atomically with `Interlocked.Increment`. Capacity: 10¹²
+  orders per end-client.
+
+Allocation is process-local and resets on restart. Persistence of the
+allocation is a Phase 6 concern; until then, restart looks like "new
+platform" from EntryPoint's correlation standpoint, which is acceptable
+because state is ephemeral by design.
 
 ### 2. ER routing
 
 Mirror of `OrderOwnershipMap` on the matching side, but participant-side:
-`ClOrdID → endClientId`. Lives in `Application` next to
-`WorkingOrderBook`. Bootstrap currently only mutates the local order on
-synchronous submit; once a real `IExchangeGateway` lands, ER callbacks will
-look up the order via this map and dispatch fills to `PositionKeeper`.
+`ClOrdID → endClientId`. Lives in `B3.Trading.Application.OrderOwnershipMap`,
+populated by `OrdersEndpoints.POST /orders` immediately after
+`WorkingOrderBook.TryAdd` (registration is intentionally synchronous with
+the book mutation so an immediate ER cannot race the routing path).
+
+`ExecutionReportProcessor` consumes ERs (delivered by
+`EntryPointExecutionReportRouter` from the wire) and:
+
+1. Resolves owner via `OrderOwnershipMap`.
+2. Mutates the `Order` in `WorkingOrderBook` (status, leaves, cumulative).
+3. On fills, calls `PositionKeeper.ApplyFill`.
+4. Publishes an `ExecutionEvent` to `IExecutionEventSink` for Phase 2 to
+   fan out (default impl is `NoOpExecutionEventSink`; the WebSocket hub
+   in #3 will plug a real one).
+
+## Wire boundary (Phase 1)
+
+`B3.Trading.Infrastructure` defines a placeholder `IEntryPointClient`
+interface representing the surface the upstream
+[`B3EntryPointClient`](https://github.com/pedrosakuma/B3EntryPointClient)
+library is expected to expose. The upstream repo is intentionally starting
+with API design + mocks first; this lets us lock our boundary in early.
+
+- `EntryPointClientGateway` implements `IExchangeGateway` against
+  `IEntryPointClient` (one gateway instance per FIXP session).
+- `MockEntryPointClient` provides an in-memory implementation that
+  records outbound calls and lets tests / the dev host inject ERs
+  manually via `EmitExecutionReport`.
+- `EntryPointExecutionReportRouter` subscribes to the client's ER event
+  and dispatches into `ExecutionReportProcessor` (translating the wire
+  enum `EpExecType` into the Application-layer `ExecKind` so Application
+  stays unaware of the wire types).
+- `ExchangeOptions` (bound from `Trading:Exchange` in `appsettings.json`)
+  drives the wiring: `UseStubGateway=true` falls back to
+  `StubExchangeGateway` (no client, no router) for API-only smoke tests;
+  otherwise the mock client is wired and one `EntryPointClientGateway`
+  per firm is registered. The first firm in `Firms[]` is currently the
+  default; multi-session routing lands in Phase 3.
+
+When the real lib publishes its surface, the swap is local: replace the
+`IEntryPointClient` placeholder with the upstream type (or adapt it
+behind the same name). The rest of the codebase only depends on the
+small POCO contract declared alongside the interface.
 
 ### 3. Position-keeper persistence
 

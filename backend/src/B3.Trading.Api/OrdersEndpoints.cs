@@ -34,10 +34,17 @@ public static class OrdersEndpoints
             return Results.Ok(orders);
         });
 
-        group.MapPost("/", async (SubmitOrderRequest req, EndClientRegistry registry, WorkingOrderBook book, IExchangeGateway gateway, CancellationToken ct) =>
+        group.MapPost("/", async (
+            SubmitOrderRequest req,
+            EndClientRegistry registry,
+            ClOrdIdPrefixRegistry clOrdIds,
+            OrderOwnershipMap ownership,
+            WorkingOrderBook book,
+            IExchangeGateway gateway,
+            CancellationToken ct) =>
         {
             var owner = registry.Register(req.Login);
-            var clOrdId = $"{owner.Value}-{Guid.NewGuid():N}".Substring(0, 24);
+            var clOrdId = clOrdIds.Generate(owner);
             var order = new Order(
                 clOrdId,
                 owner,
@@ -47,9 +54,13 @@ public static class OrdersEndpoints
                 req.Quantity,
                 req.Price);
 
+            // Order in the book + ownership registered BEFORE the gateway
+            // call so an immediate ER from the wire (synchronous mock or
+            // very-low-latency real client) cannot race the routing path.
             book.TryAdd(order);
+            ownership.Register(clOrdId, owner);
+
             await gateway.SubmitAsync(order, ct);
-            order.MarkWorking();
 
             return Results.Accepted($"/orders/{clOrdId}", new { ClOrdId = clOrdId });
         });
@@ -60,7 +71,8 @@ public static class OrdersEndpoints
                 return Results.NotFound();
 
             await gateway.CancelAsync(clOrdId, ct);
-            order.MarkCancelled();
+            // Note: status transition to Cancelled happens when the
+            // exchange ER arrives, not synchronously here.
             return Results.NoContent();
         });
 
@@ -75,3 +87,4 @@ public sealed record SubmitOrderRequest(
     string Type,
     long Quantity,
     decimal? Price);
+

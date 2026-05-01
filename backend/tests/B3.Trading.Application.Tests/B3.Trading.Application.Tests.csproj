@@ -13,6 +13,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\B3.Trading.Application\B3.Trading.Application.csproj" />
+    <ProjectReference Include="..\..\src\B3.Trading.Infrastructure\B3.Trading.Infrastructure.csproj" />
   </ItemGroup>
 
   <ItemGroup>
