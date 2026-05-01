@@ -48,3 +48,7 @@ package-lock.json
 
 # Local docker compose env (contains real secrets — TRADING_AUTH_SIGNING_KEY)
 docker/.env
+
+# Local dotnet run data dir (WAL + snapshots + DataProtection keys)
+backend/src/B3.Trading.Host/data/
+

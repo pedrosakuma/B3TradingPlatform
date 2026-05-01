@@ -109,6 +109,16 @@ a real environment.
 
 `docker/.env.example` is your starting point — copy to `docker/.env`.
 
+## Observability (opt-in)
+
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` (and friends) and the host wires up
+OpenTelemetry: application meter (`B3.Trading`), ASP.NET Core, .NET
+runtime instrumentation, traces. Without it the SDK is not registered at
+all — zero overhead for the no-broker default. See
+[`docs/METRICS.md`](METRICS.md) for the full instrument list and a
+collector-only smoke test recipe; the bundled obs profile lands in PR
+7-2c.
+
 ## Persistence
 
 The event store WAL + snapshots live in the named volume `b3-trading-data`
