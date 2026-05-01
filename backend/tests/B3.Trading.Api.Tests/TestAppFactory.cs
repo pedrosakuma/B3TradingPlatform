@@ -55,8 +55,18 @@ public sealed class TestAppFactory : WebApplicationFactory<Program>
                 ["Trading:Auth:Users:1:Salt"] = salt,
                 ["Trading:Auth:Users:1:Iterations"] = TestIterations.ToString(),
                 ["Trading:Auth:Users:1:Role"] = "user",
+                ["Trading:Auth:Users:2:Username"] = "admin",
+                ["Trading:Auth:Users:2:PasswordHash"] = hash,
+                ["Trading:Auth:Users:2:Salt"] = salt,
+                ["Trading:Auth:Users:2:Iterations"] = TestIterations.ToString(),
+                ["Trading:Auth:Users:2:Role"] = "admin",
                 ["Trading:Exchange:UseStubGateway"] = "false",
                 ["Trading:Exchange:Firms:0:FirmId"] = "TEST",
+                ["Trading:Risk:Default:MaxQuantity"] = "1000",
+                ["Trading:Risk:Default:MaxNotional"] = "1000000",
+                ["Trading:Risk:Default:PriceCollarPercent"] = "10",
+                ["Trading:Risk:Default:PositionLimit"] = "5000",
+                ["Trading:Risk:ReferencePrices:PETR4"] = "30.0",
             });
         });
         return base.CreateHost(builder);

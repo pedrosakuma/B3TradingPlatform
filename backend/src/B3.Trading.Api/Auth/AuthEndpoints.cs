@@ -29,7 +29,7 @@ public static class AuthEndpoints
             // immediately even before the first business call.
             registry.Register(user.Username);
 
-            var (token, expires) = issuer.Issue(user.Username, user.Role);
+            var (token, expires) = issuer.Issue(user.Username, user.Role, user.Firm);
             return Results.Ok(new LoginResponse(token, expires));
         });
 

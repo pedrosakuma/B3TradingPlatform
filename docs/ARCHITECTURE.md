@@ -166,6 +166,62 @@ replay on (re)connect. Revisit when the matching side does.
 Three options on the table (see issue #1 §5). Not committed yet. The
 bootstrap is order-only; market data will arrive in a follow-up.
 
+## Pre-trade risk (Phase 4)
+
+Risk lives in `B3.Trading.Application/Risk/`. Every order goes through
+the `RiskPipeline` **before** `IExchangeGateway.SubmitAsync`. Checks are
+ordered (lower runs first) and short-circuit on the first rejection:
+
+| Order | Check               | What it enforces                                       |
+| -----:| ------------------- | ------------------------------------------------------ |
+|     0 | `KillSwitchCheck`   | per-end-client + per-firm hard halt                    |
+|   100 | `MaxQuantityCheck`  | per-symbol quantity cap                                |
+|   100 | `MaxNotionalCheck`  | qty × price cap (skipped for market orders)            |
+|   200 | `PositionLimitCheck`| projected `|net + signed|` vs. cap                     |
+|   300 | `PriceCollarCheck`  | ± `PriceCollarPercent` band around `IReferencePrice`   |
+
+`IMarginProvider` is consulted asynchronously after the synchronous
+pipeline approves. v1 ships `NoOpMarginProvider`; real providers plug
+in later.
+
+**Synthetic rejections.** When any check rejects, the endpoint
+synthesizes an `ExecutionEvent` with `Kind=Rejected` and publishes it via
+the same `IExecutionEventSink` real exchange ERs flow through, so a WS
+client subscribed to `executions.me` can't tell a risk rejection from an
+exchange rejection. The HTTP response is still `202 Accepted` with
+`{ ClOrdId, Status=Rejected, Reason }` so callers that only rely on the
+ER stream behave consistently.
+
+**Kill-switch admin API** (require `admin` role claim):
+
+```
+GET    /admin/kill                       → { endClients, firms }
+POST   /admin/kill/end-client/{id}       enable
+DELETE /admin/kill/end-client/{id}       disable
+POST   /admin/kill/firm/{id}             enable
+DELETE /admin/kill/firm/{id}             disable
+```
+
+State is in-memory; toggles take effect on the very next order
+submission with no restart. Persistence is a Phase 6 concern.
+
+**Configuration.** `Trading:Risk` schema:
+
+```jsonc
+{
+  "Default":        { "MaxQuantity": 100000, "MaxNotional": 10000000.0,
+                      "PriceCollarPercent": 10.0, "PositionLimit": 500000 },
+  "PerEndClient":   { "alice":  { "MaxQuantity": 1000 } },
+  "PerSymbol":      { "PETR4":  { "PriceCollarPercent": 5.0 } },
+  "ReferencePrices":{ "PETR4":  30.0 }
+}
+```
+
+Resolution per field is **per-end-client → per-symbol → default**, first
+non-null wins. `null`/missing fields skip the check (open-by-default; an
+operator must opt in). `IReferencePrice` reads from `ReferencePrices` in
+v1; a future implementation will subscribe to `B3MarketDataPlatform`.
+
 ## Why deviate from `B3MarketDataPlatform`'s flat `src/`
 
 `B3MarketDataPlatform` puts projects directly under `src/` because it has

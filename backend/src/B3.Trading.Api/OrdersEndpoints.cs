@@ -1,6 +1,8 @@
 using System.Security.Claims;
+using B3.Trading.Api.Auth;
 using B3.Trading.Api.WebSockets;
 using B3.Trading.Application;
+using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
 using B3.Trading.Infrastructure;
 using Microsoft.AspNetCore.Authorization;
@@ -33,6 +35,8 @@ public static class OrdersEndpoints
             WorkingOrderBook book,
             IExchangeGateway gateway,
             IExecutionEventSink sink,
+            RiskPipeline risk,
+            IMarginProvider margin,
             ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
@@ -44,6 +48,7 @@ public static class OrdersEndpoints
                 return Results.BadRequest(new { error = "quantity must be positive" });
 
             var owner = ResolveOwner(ctx, registry);
+            var firm = ResolveFirm(ctx);
             var clOrdId = clOrdIds.Generate(owner);
             var order = new Order(clOrdId, owner, req.Symbol, side, type, req.Quantity, req.Price);
 
@@ -52,6 +57,31 @@ public static class OrdersEndpoints
             // very-low-latency real client) cannot race the routing path.
             book.TryAdd(order);
             ownership.Register(clOrdId, owner);
+
+            // Pre-trade risk: synchronous pipeline + async margin provider.
+            // Rejection synthesizes an ER through the same sink real
+            // exchange rejections use, so the WS client can't tell them
+            // apart structurally.
+            var riskCtx = new RiskContext(owner, firm, req.Symbol, side, type, req.Quantity, req.Price);
+            var decision = risk.Evaluate(riskCtx);
+            if (decision.Approved)
+            {
+                var marginDecision = await margin.CheckAsync(riskCtx, ct);
+                if (!marginDecision.Approved) decision = marginDecision;
+            }
+            if (!decision.Approved)
+            {
+                order.MarkRejected();
+                sink.Publish(new ExecutionEvent(
+                    owner, clOrdId, order.Symbol, order.Side, order.Status, ExecKind.Rejected,
+                    order.LeavesQuantity, order.CumulativeQuantity, 0, 0m,
+                    decision.Reason, DateTimeOffset.UtcNow));
+                // Per acceptance criteria: 202 Accepted; the client learns
+                // about the synthetic rejection on the executions.me WS
+                // channel — same shape as exchange-originated rejections.
+                return Results.Accepted($"/orders/{clOrdId}",
+                    new { ClOrdId = clOrdId, Status = "Rejected", Reason = decision.Reason });
+            }
 
             try
             {
@@ -111,6 +141,9 @@ public static class OrdersEndpoints
                   ?? throw new InvalidOperationException("Authenticated request missing sub claim.");
         return registry.Register(sub);
     }
+
+    private static string ResolveFirm(HttpContext ctx) =>
+        ctx.User.FindFirstValue(JwtIssuer.FirmClaim) ?? "default";
 }
 
 public sealed record SubmitOrderRequest(

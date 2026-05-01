@@ -5,6 +5,8 @@ using B3.Trading.Api;
 using B3.Trading.Api.Auth;
 using B3.Trading.Api.WebSockets;
 using B3.Trading.Application;
+using B3.Trading.Application.Risk;
+using B3.Trading.Application.Risk.Checks;
 using B3.Trading.Infrastructure;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
@@ -15,6 +17,8 @@ builder.Services.Configure<ExchangeOptions>(
     builder.Configuration.GetSection(ExchangeOptions.SectionName));
 builder.Services.Configure<AuthOptions>(
     builder.Configuration.GetSection(AuthOptions.SectionName));
+builder.Services.Configure<RiskOptions>(
+    builder.Configuration.GetSection(RiskOptions.SectionName));
 
 // Application-layer singletons: registries, books, processor, sink.
 builder.Services.AddSingleton<EndClientRegistry>();
@@ -26,6 +30,19 @@ builder.Services.AddSingleton<SubscriptionManager>();
 builder.Services.AddSingleton<IExecutionEventSink, WebSocketExecutionEventSink>();
 builder.Services.AddSingleton<ExecutionReportProcessor>();
 builder.Services.AddSingleton<JwtIssuer>();
+
+// Pre-trade risk: pipeline + checks + kill-switch + reference price +
+// margin provider. Each IRiskCheck registration is auto-discovered by
+// the RiskPipeline through the IEnumerable<IRiskCheck> ctor injection.
+builder.Services.AddSingleton<KillSwitchService>();
+builder.Services.AddSingleton<IReferencePrice, ConfigReferencePrice>();
+builder.Services.AddSingleton<IMarginProvider, NoOpMarginProvider>();
+builder.Services.AddSingleton<IRiskCheck, KillSwitchCheck>();
+builder.Services.AddSingleton<IRiskCheck, MaxQuantityCheck>();
+builder.Services.AddSingleton<IRiskCheck, MaxNotionalCheck>();
+builder.Services.AddSingleton<IRiskCheck, PositionLimitCheck>();
+builder.Services.AddSingleton<IRiskCheck, PriceCollarCheck>();
+builder.Services.AddSingleton<RiskPipeline>();
 
 // Auth: JWT bearer with explicit claim mapping. We disable the legacy
 // inbound mapping so 'sub' stays 'sub' (not ClaimTypes.NameIdentifier),
@@ -69,7 +86,10 @@ builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationSc
             },
         };
     });
-builder.Services.AddAuthorization();
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy("admin", policy => policy.RequireRole("admin"));
+});
 
 // Wire-side: pick the gateway based on config. When stub mode is on, the
 // EntryPoint client + ER router are not wired at all — keeps the test
@@ -107,6 +127,7 @@ app.MapGet("/health", () => Results.Ok("ok"));
 app.MapAuth();
 app.MapOrders();
 app.MapPositions();
+app.MapAdmin();
 app.MapWebSocketHub();
 
 app.Run();

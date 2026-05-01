@@ -14,6 +14,7 @@ namespace B3.Trading.Api.Auth;
 public sealed class JwtIssuer
 {
     public const string RoleClaim = "role";
+    public const string FirmClaim = "firm";
 
     private readonly AuthOptions _options;
     private readonly SigningCredentials _credentials;
@@ -28,7 +29,7 @@ public sealed class JwtIssuer
         _credentials = new SigningCredentials(new SymmetricSecurityKey(keyBytes), SecurityAlgorithms.HmacSha256);
     }
 
-    public (string Token, DateTimeOffset ExpiresAt) Issue(string subject, string role)
+    public (string Token, DateTimeOffset ExpiresAt) Issue(string subject, string role, string firm = "default")
     {
         var now = DateTimeOffset.UtcNow;
         var expires = now.AddMinutes(_options.TokenLifetimeMinutes);
@@ -38,6 +39,7 @@ public sealed class JwtIssuer
             new(JwtRegisteredClaimNames.Sub, subject),
             new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString("N")),
             new(RoleClaim, role),
+            new(FirmClaim, firm),
         };
 
         var token = new JwtSecurityToken(

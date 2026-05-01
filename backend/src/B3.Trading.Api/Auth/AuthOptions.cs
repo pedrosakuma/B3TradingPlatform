@@ -25,4 +25,5 @@ public sealed class UserConfig
     public string Salt { get; set; } = string.Empty;
     public int Iterations { get; set; } = 600_000;
     public string Role { get; set; } = "user";
+    public string Firm { get; set; } = "default";
 }
