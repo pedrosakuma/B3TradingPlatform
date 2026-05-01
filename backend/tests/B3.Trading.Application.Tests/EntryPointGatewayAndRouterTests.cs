@@ -1,6 +1,8 @@
 using B3.Trading.Application;
+using B3.Trading.Application.Persistence;
 using B3.Trading.Domain;
 using B3.Trading.Infrastructure;
+using B3.Trading.Infrastructure.Persistence;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace B3.Trading.Application.Tests;
@@ -53,7 +55,8 @@ public class EntryPointGatewayAndRouterTests
         var sink = new TestSink();
         var proc = new ExecutionReportProcessor(ownership, book, positions, sink, NullLogger<ExecutionReportProcessor>.Instance);
         var client = new MockEntryPointClient();
-        using var router = new EntryPointExecutionReportRouter(client, proc);
+        var dispatcher = new EventDispatcher(new NullEventStore());
+        using var router = new EntryPointExecutionReportRouter(client, proc, dispatcher);
 
         client.EmitExecutionReport(new ExecutionReportEnvelope("X1", EpExecType.Fill, 0, 100, 100, 30m, null));
 

@@ -5,9 +5,11 @@ using B3.Trading.Api;
 using B3.Trading.Api.Auth;
 using B3.Trading.Api.WebSockets;
 using B3.Trading.Application;
+using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.Risk.Checks;
 using B3.Trading.Infrastructure;
+using B3.Trading.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 
@@ -19,6 +21,8 @@ builder.Services.Configure<AuthOptions>(
     builder.Configuration.GetSection(AuthOptions.SectionName));
 builder.Services.Configure<RiskOptions>(
     builder.Configuration.GetSection(RiskOptions.SectionName));
+builder.Services.Configure<PersistenceOptions>(
+    builder.Configuration.GetSection(PersistenceOptions.SectionName));
 
 // CORS: opt-in allowlist for the dev/prod frontend origins. Empty list
 // disables CORS entirely (server-only deploys, integration tests).
@@ -43,6 +47,30 @@ builder.Services.AddSingleton<SubscriptionManager>();
 builder.Services.AddSingleton<IExecutionEventSink, WebSocketExecutionEventSink>();
 builder.Services.AddSingleton<ExecutionReportProcessor>();
 builder.Services.AddSingleton<JwtIssuer>();
+
+// Persistence: event-sourced WAL + periodic snapshot. The IEventStore
+// implementation is chosen at resolution time from the bound options so
+// test-time config overrides (added via IHostBuilder.ConfigureAppConfiguration
+// after Program.cs finishes registering services) are honoured. When
+// Enabled=false, NullEventStore is wired and SnapshotService self-skips.
+builder.Services.AddSingleton<SnapshotStore>(sp =>
+{
+    var o = sp.GetRequiredService<IOptions<PersistenceOptions>>().Value;
+    return new SnapshotStore(o.DataDirectory, o.FirmId);
+});
+builder.Services.AddSingleton<IEventStore>(sp =>
+{
+    var o = sp.GetRequiredService<IOptions<PersistenceOptions>>().Value;
+    return o.Enabled
+        ? new FileEventStore(o, sp.GetRequiredService<ILogger<FileEventStore>>())
+        : new NullEventStore();
+});
+builder.Services.AddSingleton<StateSnapshotter>();
+builder.Services.AddSingleton<EventReplayer>();
+builder.Services.AddSingleton<PersistenceRecovery>();
+builder.Services.AddSingleton<EodMaterialiser>();
+builder.Services.AddHostedService<SnapshotService>();
+builder.Services.AddSingleton<EventDispatcher>();
 
 // Pre-trade risk: pipeline + checks + kill-switch + reference price +
 // margin provider. Each IRiskCheck registration is auto-discovered by
@@ -129,6 +157,20 @@ else
 }
 
 var app = builder.Build();
+
+// Synchronous recovery before any traffic is accepted: load latest
+// snapshot, then replay every WAL event past it. Idempotent — safe to
+// run on a fresh data dir, on the NullEventStore (no-op), or after a
+// graceful shutdown that already snapshotted.
+{
+    using var scope = app.Services.CreateScope();
+    var opts = scope.ServiceProvider.GetRequiredService<IOptions<PersistenceOptions>>().Value;
+    if (opts.Enabled)
+    {
+        var recovery = scope.ServiceProvider.GetRequiredService<PersistenceRecovery>();
+        await recovery.RunAsync();
+    }
+}
 
 if (corsOrigins.Length > 0)
     app.UseCors(CorsPolicy);

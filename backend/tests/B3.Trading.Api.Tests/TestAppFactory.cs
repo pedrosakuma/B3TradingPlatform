@@ -67,6 +67,7 @@ public sealed class TestAppFactory : WebApplicationFactory<Program>
                 ["Trading:Risk:Default:PriceCollarPercent"] = "10",
                 ["Trading:Risk:Default:PositionLimit"] = "5000",
                 ["Trading:Risk:ReferencePrices:PETR4"] = "30.0",
+                ["Trading:Persistence:Enabled"] = "false",
             });
         });
         return base.CreateHost(builder);

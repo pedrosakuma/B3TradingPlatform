@@ -10,8 +10,16 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="System.IO.Hashing" Version="*" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="*" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="*" />
+    <PackageReference Include="Microsoft.Extensions.Options" Version="*" />
+  </ItemGroup>
+
+  <ItemGroup>
     <InternalsVisibleTo Include="B3.Trading.Api" />
     <InternalsVisibleTo Include="B3.Trading.Host" />
+    <InternalsVisibleTo Include="B3.Trading.Application.Tests" />
   </ItemGroup>
 
 </Project>

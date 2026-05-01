@@ -3,11 +3,11 @@ using Microsoft.AspNetCore.Mvc.Testing;
 
 namespace B3.Trading.Api.Tests;
 
-public class HealthEndpointTests : IClassFixture<WebApplicationFactory<Program>>
+public class HealthEndpointTests : IClassFixture<TestAppFactory>
 {
-    private readonly WebApplicationFactory<Program> _factory;
+    private readonly TestAppFactory _factory;
 
-    public HealthEndpointTests(WebApplicationFactory<Program> factory)
+    public HealthEndpointTests(TestAppFactory factory)
     {
         _factory = factory;
     }

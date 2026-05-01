@@ -44,4 +44,17 @@ public sealed class Position
         if (NetQuantity == 0)
             AverageEntryPrice = 0m;
     }
+
+    /// <summary>
+    /// Recovery-only constructor used by snapshot replay.
+    /// </summary>
+    internal static Position Hydrate(EndClientId owner, string symbol, long netQuantity, decimal averageEntryPrice)
+    {
+        var p = new Position(owner, symbol)
+        {
+            NetQuantity = netQuantity,
+            AverageEntryPrice = averageEntryPrice,
+        };
+        return p;
+    }
 }

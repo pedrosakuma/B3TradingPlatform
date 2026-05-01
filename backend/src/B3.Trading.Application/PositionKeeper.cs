@@ -33,4 +33,29 @@ public sealed class PositionKeeper
         }
         return list;
     }
+
+    public IEnumerable<Persistence.PositionSnapshot> Snapshot()
+    {
+        foreach (var kv in _positions)
+        {
+            // Skip flat positions — they re-materialise the moment a fill
+            // arrives, and persisting zero-quantity rows would bloat the
+            // snapshot for no behavioural difference.
+            if (kv.Value.NetQuantity == 0) continue;
+            yield return new Persistence.PositionSnapshot(
+                kv.Key.Owner.Value, kv.Key.Symbol,
+                kv.Value.NetQuantity, kv.Value.AverageEntryPrice);
+        }
+    }
+
+    public void Restore(IEnumerable<Persistence.PositionSnapshot> snaps)
+    {
+        ArgumentNullException.ThrowIfNull(snaps);
+        _positions.Clear();
+        foreach (var s in snaps)
+        {
+            var owner = new EndClientId(s.EndClientId);
+            _positions[(owner, s.Symbol)] = Position.Hydrate(owner, s.Symbol, s.NetQuantity, s.AverageEntryPrice);
+        }
+    }
 }

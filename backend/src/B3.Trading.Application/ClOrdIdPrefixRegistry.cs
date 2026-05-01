@@ -68,6 +68,32 @@ public sealed class ClOrdIdPrefixRegistry
         return new EndClientCounter(EncodeBase36(idx, PrefixWidth));
     }
 
+    public Persistence.ClOrdIdRegistrySnapshot Snapshot()
+    {
+        var snap = new Persistence.ClOrdIdRegistrySnapshot
+        {
+            NextPrefix = Interlocked.Read(ref _nextPrefix),
+        };
+        foreach (var kv in _counters)
+        {
+            snap.Counters.Add(new Persistence.ClOrdIdCounterSnapshot(
+                kv.Key.Value, kv.Value.Prefix, Interlocked.Read(ref kv.Value.Counter)));
+        }
+        return snap;
+    }
+
+    public void Restore(Persistence.ClOrdIdRegistrySnapshot snap)
+    {
+        ArgumentNullException.ThrowIfNull(snap);
+        _counters.Clear();
+        Interlocked.Exchange(ref _nextPrefix, snap.NextPrefix);
+        foreach (var c in snap.Counters)
+        {
+            var entry = new EndClientCounter(c.Prefix) { Counter = c.Counter };
+            _counters[new EndClientId(c.EndClientId)] = entry;
+        }
+    }
+
     private static string EncodeBase36(long value, int width)
     {
         Span<char> buffer = stackalloc char[width];

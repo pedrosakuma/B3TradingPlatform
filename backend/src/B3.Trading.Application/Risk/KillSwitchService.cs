@@ -27,4 +27,14 @@ public sealed class KillSwitchService
         _killedEndClients.Keys.Select(k => k.Value).ToArray();
 
     public IReadOnlyCollection<string> ListKilledFirms() => _killedFirms.Keys.ToArray();
+
+    public void Restore(IEnumerable<string> killedEndClients, IEnumerable<string> killedFirms)
+    {
+        ArgumentNullException.ThrowIfNull(killedEndClients);
+        ArgumentNullException.ThrowIfNull(killedFirms);
+        _killedEndClients.Clear();
+        _killedFirms.Clear();
+        foreach (var ec in killedEndClients) _killedEndClients[new EndClientId(ec)] = 1;
+        foreach (var f in killedFirms) _killedFirms[f] = 1;
+    }
 }

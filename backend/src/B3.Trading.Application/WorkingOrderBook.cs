@@ -26,4 +26,39 @@ public sealed class WorkingOrderBook
         }
         return list;
     }
+
+    /// <summary>
+    /// Captures the current set of working orders for snapshotting.
+    /// Terminal-state orders (Filled/Cancelled/Rejected) are still
+    /// included so that replay-without-snapshot and replay-from-snapshot
+    /// produce the same in-memory state, even for very recently terminated
+    /// orders the operator might still want visibility on.
+    /// </summary>
+    public IEnumerable<Persistence.OrderSnapshot> Snapshot()
+    {
+        foreach (var kv in _orders)
+        {
+            var o = kv.Value;
+            yield return new Persistence.OrderSnapshot(
+                o.ClOrdId, o.Owner.Value, o.Symbol,
+                o.Side.ToString(), o.Type.ToString(),
+                o.Quantity, o.Price, o.LeavesQuantity, o.CumulativeQuantity,
+                o.Status.ToString());
+        }
+    }
+
+    public void Restore(IEnumerable<Persistence.OrderSnapshot> snaps)
+    {
+        ArgumentNullException.ThrowIfNull(snaps);
+        _orders.Clear();
+        foreach (var s in snaps)
+        {
+            var owner = new EndClientId(s.EndClientId);
+            var side = Enum.Parse<OrderSide>(s.Side);
+            var type = Enum.Parse<OrderType>(s.Type);
+            var status = Enum.Parse<OrderStatus>(s.Status);
+            _orders[s.ClOrdId] = Order.Hydrate(s.ClOrdId, owner, s.Symbol, side, type,
+                s.Quantity, s.Price, s.LeavesQuantity, s.CumulativeQuantity, status);
+        }
+    }
 }

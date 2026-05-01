@@ -69,4 +69,20 @@ public sealed class Order
     public void MarkWorking() => Status = OrderStatus.Working;
     public void MarkCancelled() => Status = OrderStatus.Cancelled;
     public void MarkRejected() => Status = OrderStatus.Rejected;
+
+    /// <summary>
+    /// Reconstructs an order from snapshot data. For persistence recovery
+    /// only — bypasses the state-machine invariants because the snapshot
+    /// was, by construction, produced from a sequence of valid mutations.
+    /// </summary>
+    internal static Order Hydrate(
+        string clOrdId, EndClientId owner, string symbol, OrderSide side, OrderType type,
+        long quantity, decimal? price, long leaves, long cumQty, OrderStatus status)
+    {
+        var o = new Order(clOrdId, owner, symbol, side, type, quantity, price);
+        o.LeavesQuantity = leaves;
+        o.CumulativeQuantity = cumQty;
+        o.Status = status;
+        return o;
+    }
 }

@@ -37,4 +37,18 @@ public sealed class OrderOwnershipMap
             throw new InvalidOperationException($"Unknown original ClOrdID '{originalClOrdId}'.");
         _byClOrdId[newClOrdId] = owner;
     }
+
+    public IEnumerable<Persistence.OwnershipMappingSnapshot> Snapshot()
+    {
+        foreach (var kv in _byClOrdId)
+            yield return new Persistence.OwnershipMappingSnapshot(kv.Key, kv.Value.Value);
+    }
+
+    public void Restore(IEnumerable<Persistence.OwnershipMappingSnapshot> snaps)
+    {
+        ArgumentNullException.ThrowIfNull(snaps);
+        _byClOrdId.Clear();
+        foreach (var s in snaps)
+            _byClOrdId[s.ClOrdId] = new EndClientId(s.EndClientId);
+    }
 }
