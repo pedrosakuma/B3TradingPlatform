@@ -69,6 +69,31 @@ services:
       Trading__Exchange__Mode: Mock
 ```
 
+## Logging in (dev only)
+
+The `.env.example` ships a seed user that lets you smoke-test the UI
+immediately:
+
+| Field | Value |
+|---|---|
+| Username | `alice` |
+| Password | `wonderland` |
+
+These match the `Trading:Auth:Users[0]` block in
+[`appsettings.json`](../backend/src/B3.Trading.Host/appsettings.json) and
+are PBKDF2-HMAC-SHA256, 600 000 iterations. Anyone reading this repo can
+log in with them — **rotate the hash + salt for anything beyond a
+laptop demo.**
+
+```bash
+# verify the seed user works once the stack is up
+TOKEN=$(curl -sS -X POST http://localhost:8080/auth/login \
+    -H 'Content-Type: application/json' \
+    -d '{"username":"alice","password":"wonderland"}' | jq -r .token)
+curl -sS -H "Authorization: Bearer $TOKEN" http://localhost:8080/positions
+# []  (no broker connected — see Honest no-broker mode)
+```
+
 ## Required env vars
 
 The trading-host **refuses to boot** without these. That's

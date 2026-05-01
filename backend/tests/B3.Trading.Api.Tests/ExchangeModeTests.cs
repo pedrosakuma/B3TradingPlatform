@@ -87,4 +87,56 @@ public class ExchangeStatusTests
         var status = new ExchangeStatus(mode, firmCount: 0);
         Assert.Equal(expected, status.ReadyForOrders);
     }
+
+    [Fact]
+    public void FromOptions_Unavailable_Reports_Zero_Firms_Even_With_Configured_Slot()
+    {
+        // Reproduces the IConfiguration array-merge gotcha: a base
+        // appsettings.json carries a default firm and a Docker overlay
+        // can't clear it via Firms:[]. With Mode=Unavailable, the
+        // operational firm count must still be 0.
+        var opts = new ExchangeOptions
+        {
+            Mode = ExchangeMode.Unavailable,
+            Firms = { new FirmConfig { FirmId = "DEFAULT", Endpoint = "localhost:9000" } },
+        };
+        var status = ExchangeStatus.FromOptions(opts);
+        Assert.Equal(ExchangeMode.Unavailable, status.Mode);
+        Assert.Equal(0, status.FirmCount);
+        Assert.False(status.ReadyForOrders);
+    }
+
+    [Fact]
+    public void FromOptions_Filters_Empty_FirmIds()
+    {
+        var opts = new ExchangeOptions
+        {
+            Mode = ExchangeMode.Real,
+            Firms =
+            {
+                new FirmConfig { FirmId = "REAL", Endpoint = "h:1" },
+                new FirmConfig { FirmId = "  ", Endpoint = "h:2" },
+                new FirmConfig { FirmId = "", Endpoint = "h:3" },
+            },
+        };
+        var status = ExchangeStatus.FromOptions(opts);
+        Assert.Equal(1, status.FirmCount);
+    }
+
+    [Fact]
+    public void FromOptions_Counts_Configured_Firms_When_Wired()
+    {
+        var opts = new ExchangeOptions
+        {
+            Mode = ExchangeMode.Mock,
+            Firms =
+            {
+                new FirmConfig { FirmId = "A", Endpoint = "h:1" },
+                new FirmConfig { FirmId = "B", Endpoint = "h:2" },
+            },
+        };
+        var status = ExchangeStatus.FromOptions(opts);
+        Assert.Equal(2, status.FirmCount);
+        Assert.True(status.ReadyForOrders);
+    }
 }
