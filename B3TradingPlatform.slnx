@@ -10,5 +10,6 @@
     <Project Path="backend/tests/B3.Trading.Domain.Tests/B3.Trading.Domain.Tests.csproj" />
     <Project Path="backend/tests/B3.Trading.Application.Tests/B3.Trading.Application.Tests.csproj" />
     <Project Path="backend/tests/B3.Trading.Api.Tests/B3.Trading.Api.Tests.csproj" />
+    <Project Path="backend/tests/B3.Trading.Conformance/B3.Trading.Conformance.csproj" />
   </Folder>
 </Solution>
