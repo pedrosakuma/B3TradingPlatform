@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using B3.Trading.Api.Auth;
+using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
@@ -70,10 +71,15 @@ public static class AdminEndpoints
                     ActorUserId = actor,
                 },
                 mutate);
+            MetricsRegistry.KillSwitchToggled.Add(1,
+                new KeyValuePair<string, object?>("scope", scope),
+                new KeyValuePair<string, object?>("killed", killed));
             return Results.NoContent();
         }
         catch (WalBackpressureException ex)
         {
+            MetricsRegistry.WalBackpressure.Add(1,
+                new KeyValuePair<string, object?>("call_site", "admin.kill"));
             return Results.Json(
                 new { error = "system busy (WAL backpressure)", detail = ex.Message },
                 statusCode: StatusCodes.Status503ServiceUnavailable);

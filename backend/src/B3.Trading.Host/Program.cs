@@ -3,6 +3,7 @@ using System.Text;
 using Microsoft.Extensions.Options;
 using B3.Trading.Api;
 using B3.Trading.Api.Auth;
+using B3.Trading.Api.Lifecycle;
 using B3.Trading.Api.WebSockets;
 using B3.Trading.Application;
 using B3.Trading.Application.Persistence;
@@ -47,6 +48,12 @@ builder.Services.AddSingleton<SubscriptionManager>();
 builder.Services.AddSingleton<IExecutionEventSink, WebSocketExecutionEventSink>();
 builder.Services.AddSingleton<ExecutionReportProcessor>();
 builder.Services.AddSingleton<JwtIssuer>();
+
+// Lifecycle: drain flag flipped on SIGTERM /
+// IHostApplicationLifetime.ApplicationStopping. Read by /ready (503 when
+// draining) and POST /orders (refuses new orders so in-flight can finish).
+builder.Services.AddSingleton<DrainState>();
+builder.Services.AddHostedService<DrainHostedService>();
 
 // Persistence: event-sourced WAL + periodic snapshot. The IEventStore
 // implementation is chosen at resolution time from the bound options so
@@ -180,7 +187,7 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapGet("/", () => Results.Ok(new { service = "B3TradingPlatform", status = "bootstrap" }));
-app.MapGet("/health", () => Results.Ok("ok"));
+app.MapHealth();
 
 app.MapAuth();
 app.MapOrders();

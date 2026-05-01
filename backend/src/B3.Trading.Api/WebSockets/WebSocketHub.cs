@@ -3,6 +3,7 @@ using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
 using B3.Trading.Application;
+using B3.Trading.Application.Observability;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -30,6 +31,7 @@ public static class WebSocketHub
             using var ws = await ctx.WebSockets.AcceptWebSocketAsync();
             var client = new SubscribedClient(owner);
             subs.Add(client);
+            MetricsRegistry.WsConnectionsActive.Add(1);
 
             try
             {
@@ -44,6 +46,7 @@ public static class WebSocketHub
             finally
             {
                 subs.Remove(client);
+                MetricsRegistry.WsConnectionsActive.Add(-1);
                 if (ws.State == WebSocketState.Open)
                 {
                     var reason = client.DisconnectReason ?? "closing";
@@ -71,6 +74,8 @@ public static class WebSocketHub
                     return;
                 var bytes = JsonSerializer.SerializeToUtf8Bytes(msg, JsonOptions);
                 await ws.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, ct);
+                MetricsRegistry.WsMessagesSent.Add(1,
+                    new KeyValuePair<string, object?>("channel", msg.Channel ?? "unknown"));
             }
         }
         catch (OperationCanceledException) { /* shutdown */ }

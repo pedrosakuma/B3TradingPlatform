@@ -1,4 +1,5 @@
 using B3.Trading.Application;
+using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
 
 namespace B3.Trading.Infrastructure;
@@ -34,6 +35,9 @@ public sealed class EntryPointExecutionReportRouter : IDisposable
 
     private void OnExecutionReport(ExecutionReportEnvelope er)
     {
+        MetricsRegistry.ExecutionReportsReceived.Add(1,
+            new KeyValuePair<string, object?>("exec_type", er.ExecType.ToString()));
+
         var kind = er.ExecType switch
         {
             EpExecType.New => ExecKind.New,
@@ -64,6 +68,8 @@ public sealed class EntryPointExecutionReportRouter : IDisposable
         }
         catch (WalBackpressureException)
         {
+            MetricsRegistry.WalBackpressure.Add(1,
+                new KeyValuePair<string, object?>("call_site", "er.router"));
             // ER inbound is single-direction — losing audit on backpressure
             // is preferable to dropping the state mutation. Apply directly;
             // this is a "log dropped, state intact" branch and shows up in

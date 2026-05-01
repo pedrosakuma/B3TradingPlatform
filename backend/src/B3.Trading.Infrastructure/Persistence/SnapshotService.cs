@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -56,6 +58,7 @@ public sealed class PersistenceRecovery
             replayed++;
             _ = seq;
         }
+        MetricsRegistry.RecoveryEventsReplayed.Add(replayed);
         _logger.LogInformation("Persistence recovery: replayed {Count} events past seq={Since}.", replayed, since);
     }
 }
@@ -115,16 +118,21 @@ public sealed class SnapshotService : Microsoft.Extensions.Hosting.BackgroundSer
 
     public void TryTakeSnapshot()
     {
+        var sw = Stopwatch.StartNew();
         try
         {
             PlatformSnapshot? snap = null;
             _dispatcher.WithSnapshotLock(seq => snap = _snapshotter.Capture(seq));
             if (snap is null) return;
             _store.Write(snap);
+            sw.Stop();
+            MetricsRegistry.SnapshotsTaken.Add(1);
+            MetricsRegistry.SnapshotDurationMs.Record(sw.Elapsed.TotalMilliseconds);
             _logger.LogDebug("Snapshot written at seq={Seq}.", snap.Seq);
         }
         catch (Exception ex)
         {
+            MetricsRegistry.SnapshotsFailed.Add(1);
             _logger.LogError(ex, "Snapshot attempt failed; will retry on next interval.");
         }
     }

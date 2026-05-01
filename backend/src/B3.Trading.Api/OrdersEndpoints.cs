@@ -1,7 +1,9 @@
 using System.Security.Claims;
 using B3.Trading.Api.Auth;
+using B3.Trading.Api.Lifecycle;
 using B3.Trading.Api.WebSockets;
 using B3.Trading.Application;
+using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
@@ -39,9 +41,19 @@ public static class OrdersEndpoints
             RiskPipeline risk,
             IMarginProvider margin,
             EventDispatcher dispatcher,
+            DrainState drain,
             ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
+            if (drain.IsDraining)
+            {
+                MetricsRegistry.DrainRejections.Add(1,
+                    new KeyValuePair<string, object?>("route", "POST /orders"));
+                return Results.Json(
+                    new { error = "service draining" },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
             if (!Enum.TryParse<OrderSide>(req.Side, ignoreCase: true, out var side))
                 return Results.BadRequest(new { error = $"invalid side '{req.Side}'" });
             if (!Enum.TryParse<OrderType>(req.Type, ignoreCase: true, out var type))
@@ -81,10 +93,16 @@ public static class OrdersEndpoints
             }
             catch (WalBackpressureException ex)
             {
+                MetricsRegistry.WalBackpressure.Add(1,
+                    new KeyValuePair<string, object?>("call_site", "orders.submit"));
                 return Results.Json(
                     new { error = "system busy (WAL backpressure)", detail = ex.Message },
                     statusCode: StatusCodes.Status503ServiceUnavailable);
             }
+
+            MetricsRegistry.OrdersSubmitted.Add(1,
+                new KeyValuePair<string, object?>("symbol", req.Symbol),
+                new KeyValuePair<string, object?>("side", side.ToString()));
 
             // Pre-trade risk: synchronous pipeline + async margin provider.
             // Rejection synthesizes an ER through the same sink real
@@ -99,6 +117,8 @@ public static class OrdersEndpoints
             }
             if (!decision.Approved)
             {
+                MetricsRegistry.OrdersRejectedByRisk.Add(1,
+                    new KeyValuePair<string, object?>("reason", decision.Reason ?? "risk_rejected"));
                 PublishSyntheticRejection(dispatcher, sink, order, owner, decision.Reason ?? "risk_rejected");
                 return Results.Accepted($"/orders/{clOrdId}",
                     new { ClOrdId = clOrdId, Status = "Rejected", Reason = decision.Reason });
@@ -110,6 +130,7 @@ public static class OrdersEndpoints
             }
             catch (Exception ex)
             {
+                MetricsRegistry.OrdersGatewayFailed.Add(1);
                 loggerFactory.CreateLogger("OrdersEndpoints")
                     .LogError(ex, "Gateway submit failed for {ClOrdId}; synthesizing rejection.", clOrdId);
                 PublishSyntheticRejection(dispatcher, sink, order, owner, "gateway_unavailable");
@@ -141,6 +162,7 @@ public static class OrdersEndpoints
                 return Results.NotFound();
 
             await gateway.CancelAsync(clOrdId, ct);
+            MetricsRegistry.OrdersCancelRequested.Add(1);
             // Status transition to Cancelled happens when the exchange ER
             // arrives, not synchronously here.
             return Results.NoContent();

@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Threading.Channels;
+using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -95,9 +96,12 @@ public sealed class FileEventStore : IEventStore
         {
             // Roll back the seq so we don't leave a hole in the log.
             lock (_seqLock) _seq--;
+            MetricsRegistry.WalBackpressure.Add(1,
+                new KeyValuePair<string, object?>("call_site", "store.append"));
             throw new WalBackpressureException(
                 $"WAL channel is full ({_opts.ChannelCapacity}); refusing append.");
         }
+        MetricsRegistry.WalAppended.Add(1);
         return seq;
     }
 
@@ -239,6 +243,11 @@ public sealed class FileEventStore : IEventStore
 
         if (_activeWriter is null || rotateForSize || rotateForDay)
         {
+            if (_activeWriter is not null)
+            {
+                MetricsRegistry.WalSegmentsRotated.Add(1,
+                    new KeyValuePair<string, object?>("reason", rotateForDay ? "day" : "size"));
+            }
             _activeWriter?.DisposeAsync().AsTask().GetAwaiter().GetResult();
             _activeWriter = null;
 
