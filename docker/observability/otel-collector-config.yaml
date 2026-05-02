@@ -1,0 +1,80 @@
+# otel-collector pipeline for the local observability profile.
+#
+# OTLP/gRPC in (from trading-host) -> prometheus exposition out (scraped
+# by the local Prometheus). Traces are accepted but only debug-logged in
+# this profile — Tempo / Jaeger get added later when the trace volume
+# justifies it.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      # http on 4318 too, in case operators prefer it for ad-hoc scripts
+      # against the same collector.
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    # Smooth out the periodic export bursts from the SDK so Prometheus
+    # sees a steady stream rather than spikes per export interval.
+    timeout: 5s
+    send_batch_size: 1024
+
+  resource/normalize:
+    # Promote service.name into a stable label every signal carries.
+    attributes:
+      - key: service.name
+        action: upsert
+        from_attribute: service.name
+
+exporters:
+  # Prometheus exposition for the local Prometheus to scrape.
+  # The exporter applies the standard OTel->Prometheus name translation:
+  #   - dots become underscores
+  #   - sums get a `_total` suffix appended
+  #   - histograms become `<name>_bucket` / `_sum` / `_count` triples
+  # so `trading.orders.submitted` (Counter) -> `trading_orders_submitted_total`.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    # Promote resource attrs (service.name, deployment.environment,
+    # service.version) onto every metric so dashboards can filter on them.
+    resource_to_telemetry_conversion:
+      enabled: true
+    # Counters keep their cumulative semantics — Prometheus scrapes the
+    # current value and the rate() function does the differentiation
+    # downstream. No _created lines (noisy and rarely used).
+    enable_open_metrics: false
+    add_metric_suffixes: true
+
+  # Traces just go to stdout for now. Wired so smoke tests can confirm
+  # both pipelines work end-to-end before PR 7-2c+1 introduces a tracing
+  # backend.
+  debug:
+    verbosity: basic
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [resource/normalize, batch]
+      exporters: [prometheus]
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      # Expose the collector's own internal telemetry on :8888 so the
+      # bundled Prometheus can scrape it (export drops, queue sizes,
+      # receiver/exporter rates). Useful for debugging the obs pipeline
+      # itself.
+      address: 0.0.0.0:8888
