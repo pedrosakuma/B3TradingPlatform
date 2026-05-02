@@ -178,25 +178,49 @@ if (earlyIsReal)
         if (opts.Firms.Count == 0)
             throw new InvalidOperationException("Trading:Exchange:Mode is Real but no Firms[] configured. Set Mode=Unavailable for an honest no-broker host.");
         var lf = sp.GetRequiredService<ILoggerFactory>();
+        var persistence = sp.GetRequiredService<IOptions<PersistenceOptions>>().Value;
+        var stateRoot = Path.Combine(persistence.DataDirectory, "entrypoint-state");
         var gateways = opts.Firms.Select(firm =>
         {
             FirmConfigValidation.ValidateFirm(firm);
             var ep = FirmConfigValidation.ParseEndpoint(firm.Endpoint);
+
+            // Wire the SDK's file-backed warm-restart store + resolve the
+            // next SessionVerId from the persisted snapshot. Without this,
+            // a process restart would replay the configured SessionVerId
+            // and the gateway would terminate with InvalidSessionVerId.
+            var stateDir = Path.Combine(stateRoot, firm.FirmId);
+            Directory.CreateDirectory(stateDir);
+            var stateStore = new B3.EntryPoint.Client.State.FileSessionStateStore(stateDir);
+            uint? persistedVerId = null;
+            try
+            {
+                var snap = stateStore.LoadAsync(CancellationToken.None).AsTask().GetAwaiter().GetResult();
+                if (snap is not null) persistedVerId = snap.SessionVerId;
+            }
+            catch (Exception ex)
+            {
+                lf.CreateLogger("FirmGatewayConnector").LogWarning(ex,
+                    "Failed to load persisted SessionStateStore for firm {Firm}; starting from configured SessionVerId.", firm.FirmId);
+            }
+            var resolvedVerId = SessionVerIdResolver.Resolve(firm.SessionVerId, persistedVerId);
+
             var clientOpts = new B3.EntryPoint.Client.EntryPointClientOptions
             {
                 Endpoint = ep,
                 SessionId = firm.SessionId,
-                SessionVerId = firm.SessionVerId,
+                SessionVerId = resolvedVerId,
                 EnteringFirm = firm.EnteringFirm,
                 Credentials = B3.EntryPoint.Client.EntryPointClientOptions.AccessKey(firm.AccessKey),
                 KeepAliveIntervalMs = firm.KeepAliveIntervalMs,
                 SenderLocation = firm.SenderLocation,
                 EnteringTrader = firm.EnteringTrader,
+                SessionStateStore = stateStore,
                 Logger = lf.CreateLogger($"B3.EntryPoint.Client[{firm.FirmId}]"),
             };
             var upstream = new B3.EntryPoint.Client.EntryPointClient(clientOpts);
             var gwLogger = lf.CreateLogger<B3EntryPointClientGateway>();
-            return new B3EntryPointClientGateway(upstream, firm.FirmId, gwLogger);
+            return new B3EntryPointClientGateway(upstream, firm.FirmId, resolvedVerId, gwLogger);
         });
         return new FirmGatewayRegistry(gateways);
     });
@@ -325,8 +349,9 @@ internal sealed class EntryPointRouterStarter : Microsoft.Extensions.Hosting.IHo
 /// startup and tears them down on shutdown. Connection errors are logged
 /// but do not abort host start — failed firms surface via the
 /// <c>trading.entrypoint.connected</c> gauge and via gateway-unavailable
-/// rejections at submit time. Phase-2 follow-up (issue #7): readiness gate
-/// + automated reconnect with bumped SessionVerId.
+/// rejections at submit time. Subsequent peer-initiated terminations
+/// drive the gateway's own auto-reconnect loop (Phase 3/1b); this hosted
+/// service only owns the cold-start connect.
 /// </summary>
 internal sealed class FirmGatewayConnector : Microsoft.Extensions.Hosting.IHostedService
 {

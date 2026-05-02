@@ -89,43 +89,43 @@ public sealed class ExecutionReportProcessor
                 break;
             case ExecKind.PartialFill:
             case ExecKind.Fill:
-            {
-                var wasTerminal = order.Status is OrderStatus.Cancelled or OrderStatus.Rejected;
-                var delta = order.ApplyCumulativeFill(cumQty);
-                if (delta == 0)
                 {
-                    // Stale or duplicate fill (cumQty didn't advance). Expected
-                    // after FIXP retransmit; harmless because we book nothing.
-                    MetricsRegistry.ExecutionReportsReplayDeduped.Add(1, KindTag(kind));
-                    _logger.LogDebug(
-                        "Dropping stale fill for {ClOrdId}: ER cumQty={ErCum} <= order cumQty={OrderCum}.",
-                        lookupId, cumQty, order.CumulativeQuantity);
-                    return;
+                    var wasTerminal = order.Status is OrderStatus.Cancelled or OrderStatus.Rejected;
+                    var delta = order.ApplyCumulativeFill(cumQty);
+                    if (delta == 0)
+                    {
+                        // Stale or duplicate fill (cumQty didn't advance). Expected
+                        // after FIXP retransmit; harmless because we book nothing.
+                        MetricsRegistry.ExecutionReportsReplayDeduped.Add(1, KindTag(kind));
+                        _logger.LogDebug(
+                            "Dropping stale fill for {ClOrdId}: ER cumQty={ErCum} <= order cumQty={OrderCum}.",
+                            lookupId, cumQty, order.CumulativeQuantity);
+                        return;
+                    }
+                    if (wasTerminal)
+                    {
+                        // Late fill against a terminal order — exchange's truth
+                        // wins for position keeping; order keeps its terminal
+                        // status (preserved by ApplyCumulativeFill).
+                        MetricsRegistry.ExecutionReportsLateFillAfterTerminal.Add(1, KindTag(kind));
+                        _logger.LogWarning(
+                            "Late fill after terminal status for {ClOrdId}: status={Status}, delta={Delta}, lastPx={LastPx}.",
+                            lookupId, order.Status, delta, lastPx);
+                    }
+                    if (delta != lastQty)
+                    {
+                        // Cumulative advanced by an amount that disagrees with the
+                        // ER's own LastQuantity — most often because an
+                        // intermediate fill ER was lost or arrived out of order.
+                        // Position is booked at the observed delta @ lastPx.
+                        MetricsRegistry.ExecutionReportsFillDeltaMismatch.Add(1, KindTag(kind));
+                        _logger.LogWarning(
+                            "Fill delta mismatch for {ClOrdId}: ER lastQty={LastQty}, computed delta={Delta}.",
+                            lookupId, lastQty, delta);
+                    }
+                    _positions.ApplyFill(owner, order.Symbol, order.Side, delta, lastPx);
+                    break;
                 }
-                if (wasTerminal)
-                {
-                    // Late fill against a terminal order — exchange's truth
-                    // wins for position keeping; order keeps its terminal
-                    // status (preserved by ApplyCumulativeFill).
-                    MetricsRegistry.ExecutionReportsLateFillAfterTerminal.Add(1, KindTag(kind));
-                    _logger.LogWarning(
-                        "Late fill after terminal status for {ClOrdId}: status={Status}, delta={Delta}, lastPx={LastPx}.",
-                        lookupId, order.Status, delta, lastPx);
-                }
-                if (delta != lastQty)
-                {
-                    // Cumulative advanced by an amount that disagrees with the
-                    // ER's own LastQuantity — most often because an
-                    // intermediate fill ER was lost or arrived out of order.
-                    // Position is booked at the observed delta @ lastPx.
-                    MetricsRegistry.ExecutionReportsFillDeltaMismatch.Add(1, KindTag(kind));
-                    _logger.LogWarning(
-                        "Fill delta mismatch for {ClOrdId}: ER lastQty={LastQty}, computed delta={Delta}.",
-                        lookupId, lastQty, delta);
-                }
-                _positions.ApplyFill(owner, order.Symbol, order.Side, delta, lastPx);
-                break;
-            }
             case ExecKind.Canceled:
                 if (order.Status is OrderStatus.Cancelled or OrderStatus.Filled or OrderStatus.Rejected)
                 {
