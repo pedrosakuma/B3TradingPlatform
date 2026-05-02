@@ -28,16 +28,31 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     private readonly Up.EntryPointClient _client;
     private readonly string _firmId;
     private readonly ILogger<B3EntryPointClientGateway> _logger;
-    private readonly CancellationTokenSource _eventLoopCts = new();
+    private readonly CancellationTokenSource _shutdownCts = new();
+    private readonly SemaphoreSlim _reconnectLock = new(1, 1);
+    private readonly TimeSpan _initialReconnectDelay;
+    private readonly TimeSpan _maxReconnectDelay;
     private Task? _eventLoop;
+    private uint _currentSessionVerId;
     private int _connectedState; // 0 = disconnected, 1 = connected (matches UpDownCounter increments)
+    private volatile bool _disposed;
 
-    public B3EntryPointClientGateway(Up.EntryPointClient client, string firmId, ILogger<B3EntryPointClientGateway> logger)
+    public B3EntryPointClientGateway(
+        Up.EntryPointClient client,
+        string firmId,
+        uint initialSessionVerId,
+        ILogger<B3EntryPointClientGateway> logger,
+        TimeSpan? initialReconnectDelay = null,
+        TimeSpan? maxReconnectDelay = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _firmId = firmId ?? throw new ArgumentNullException(nameof(firmId));
         _logger = logger;
+        _currentSessionVerId = initialSessionVerId;
+        _initialReconnectDelay = initialReconnectDelay ?? TimeSpan.FromSeconds(1);
+        _maxReconnectDelay = maxReconnectDelay ?? TimeSpan.FromSeconds(30);
         _client.Terminated += OnTerminated;
+        MetricsRegistry.RecordSessionVerId(_firmId, _currentSessionVerId);
     }
 
     public string FirmId => _firmId;
@@ -51,9 +66,29 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     public async Task ConnectAsync(CancellationToken cancellationToken)
     {
         await _client.ConnectAsync(cancellationToken).ConfigureAwait(false);
+        OnConnected();
+    }
+
+    private void OnConnected()
+    {
         if (Interlocked.Exchange(ref _connectedState, 1) == 0)
             MetricsRegistry.EntryPointConnected.Add(1, FirmTag());
-        _eventLoop ??= Task.Run(() => RunEventLoopAsync(_eventLoopCts.Token));
+        MetricsRegistry.RecordSessionVerId(_firmId, _currentSessionVerId);
+        StartEventLoop();
+    }
+
+    /// <summary>
+    /// Spawn the inbound event-loop task. Re-enters after a successful
+    /// reconnect — the previous task completed when the underlying
+    /// <c>Events()</c> enumeration drained on Terminate, so a fresh
+    /// <c>Task.Run</c> is required (the original <c>??=</c> was a bug:
+    /// once completed, the loop would never restart and ER replay after
+    /// reconnect would land in /dev/null).
+    /// </summary>
+    private void StartEventLoop()
+    {
+        if (_eventLoop is { IsCompleted: false }) return;
+        _eventLoop = Task.Run(() => RunEventLoopAsync(_shutdownCts.Token));
     }
 
     public Task SubmitAsync(Order order, CancellationToken cancellationToken)
@@ -243,20 +278,104 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             MetricsRegistry.EntryPointConnected.Add(-1, FirmTag());
         _logger.LogWarning("EntryPoint session terminated for firm {Firm}: code={Code} reason={Reason} byClient={ByClient}",
             _firmId, e.Code, e.Reason, e.InitiatedByClient);
+
+        // Don't fight a graceful shutdown or a client-initiated terminate
+        // (e.g. our own DisposeAsync sending Terminate). Peer-initiated
+        // terminations are the only ones that warrant a reconnect attempt.
+        if (e.InitiatedByClient || _disposed || _shutdownCts.IsCancellationRequested) return;
+
+        // Detach from the inbound thread so the event-loop can drain
+        // cleanly; the reconnect loop owns its own lifecycle.
+        _ = Task.Run(() => ReconnectLoopAsync(_shutdownCts.Token));
+    }
+
+    /// <summary>
+    /// Singleflight reconnect loop. Bumps <c>SessionVerId</c> on every
+    /// attempt (the gateway requires strict-greater) and applies
+    /// exponential backoff with jitter. Exits cleanly on shutdown CT.
+    /// On success the inbound event-loop is restarted via
+    /// <see cref="StartEventLoop"/> so ER replay (FIXP retransmit) lands
+    /// on the existing <c>ExecutionReportReceived</c> subscribers.
+    /// </summary>
+    private async Task ReconnectLoopAsync(CancellationToken ct)
+    {
+        if (!await _reconnectLock.WaitAsync(0, ct).ConfigureAwait(false))
+            return; // already reconnecting
+        try
+        {
+            var attempt = 0;
+            while (!ct.IsCancellationRequested && !_disposed)
+            {
+                attempt++;
+                uint nextVerId;
+                try { nextVerId = checked(_currentSessionVerId + 1); }
+                catch (OverflowException)
+                {
+                    _logger.LogError("SessionVerId overflow for firm {Firm}; giving up.", _firmId);
+                    return;
+                }
+                MetricsRegistry.EntryPointReconnectAttempts.Add(1,
+                    new KeyValuePair<string, object?>("firm", _firmId),
+                    new KeyValuePair<string, object?>("attempt", attempt));
+                try
+                {
+                    await _client.ReconnectAsync(nextVerId, ct).ConfigureAwait(false);
+                    _currentSessionVerId = nextVerId;
+                    MetricsRegistry.EntryPointReconnectSucceeded.Add(1, FirmTag());
+                    _logger.LogInformation("EntryPoint reconnect ok for firm {Firm} on attempt {N} (sessionVerId={Ver}).",
+                        _firmId, attempt, nextVerId);
+                    OnConnected();
+                    return;
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    MetricsRegistry.EntryPointReconnectFailed.Add(1,
+                        new KeyValuePair<string, object?>("firm", _firmId),
+                        new KeyValuePair<string, object?>("reason", ex.GetType().Name));
+                    _logger.LogWarning(ex, "EntryPoint reconnect failed for firm {Firm} (attempt {N}, sessionVerId={Ver}); will retry.",
+                        _firmId, attempt, nextVerId);
+                    // Bump the in-memory version even on failure: if the
+                    // failure was anything past Negotiate, the gateway has
+                    // already burned the value. Cheap to skip a few.
+                    _currentSessionVerId = nextVerId;
+                    var delay = ComputeBackoff(attempt);
+                    try { await Task.Delay(delay, ct).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { return; }
+                }
+            }
+        }
+        finally
+        {
+            _reconnectLock.Release();
+        }
+    }
+
+    private TimeSpan ComputeBackoff(int attempt)
+    {
+        var basisMs = Math.Min(_maxReconnectDelay.TotalMilliseconds,
+            _initialReconnectDelay.TotalMilliseconds * Math.Pow(2, Math.Min(attempt - 1, 16)));
+        var jitterMs = Random.Shared.NextDouble() * 0.25 * basisMs;
+        return TimeSpan.FromMilliseconds(basisMs + jitterMs);
     }
 
     private KeyValuePair<string, object?> FirmTag() => new("firm", _firmId);
 
     public async ValueTask DisposeAsync()
     {
-        try { _eventLoopCts.Cancel(); } catch { /* ignore */ }
+        _disposed = true;
+        try { _shutdownCts.Cancel(); } catch { /* ignore */ }
         if (_eventLoop is not null)
         {
             try { await _eventLoop.ConfigureAwait(false); } catch { /* event loop swallows, but be defensive */ }
         }
         _client.Terminated -= OnTerminated;
         await _client.DisposeAsync().ConfigureAwait(false);
-        _eventLoopCts.Dispose();
+        _shutdownCts.Dispose();
+        _reconnectLock.Dispose();
         if (Interlocked.Exchange(ref _connectedState, 0) == 1)
             MetricsRegistry.EntryPointConnected.Add(-1, FirmTag());
     }

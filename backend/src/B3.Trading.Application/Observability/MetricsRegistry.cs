@@ -87,6 +87,21 @@ public static class MetricsRegistry
         Meter.CreateCounter<long>("trading.entrypoint.events_received");
     public static readonly Counter<long> EntryPointReconnectAttempts =
         Meter.CreateCounter<long>("trading.entrypoint.reconnect_attempts");
+    public static readonly Counter<long> EntryPointReconnectSucceeded =
+        Meter.CreateCounter<long>("trading.entrypoint.reconnect_succeeded");
+    public static readonly Counter<long> EntryPointReconnectFailed =
+        Meter.CreateCounter<long>("trading.entrypoint.reconnect_failed");
+    // Last SessionVerId successfully Established for the firm. Reported as
+    // an observable gauge so a stuck reconnect (gauge frozen while attempts
+    // counter climbs) is visible at a glance.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, uint> _sessionVerIdByFirm = new();
+    public static readonly ObservableGauge<long> EntryPointSessionVerId =
+        Meter.CreateObservableGauge<long>(
+            "trading.entrypoint.session_ver_id",
+            () => _sessionVerIdByFirm.Select(kv =>
+                new Measurement<long>(kv.Value, new KeyValuePair<string, object?>("firm", kv.Key))));
+    public static void RecordSessionVerId(string firmId, uint verId) =>
+        _sessionVerIdByFirm[firmId] = verId;
     public static readonly Counter<long> EntryPointTranslationErrors =
         Meter.CreateCounter<long>("trading.entrypoint.translation_errors");
     public static readonly Counter<long> EntryPointBusinessRejects =
