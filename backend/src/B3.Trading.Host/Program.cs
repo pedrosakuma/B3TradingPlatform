@@ -19,8 +19,10 @@ using Microsoft.IdentityModel.Tokens;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.Configure<ExchangeOptions>(
-    builder.Configuration.GetSection(ExchangeOptions.SectionName));
+builder.Services.AddOptions<ExchangeOptions>()
+    .Bind(builder.Configuration.GetSection(ExchangeOptions.SectionName))
+    .ValidateOnStart();
+builder.Services.AddSingleton<IValidateOptions<ExchangeOptions>, ExchangeOptionsValidator>();
 builder.Services.Configure<AuthOptions>(
     builder.Configuration.GetSection(AuthOptions.SectionName));
 builder.Services.Configure<RiskOptions>(
@@ -182,7 +184,9 @@ if (earlyIsReal)
         var stateRoot = Path.Combine(persistence.DataDirectory, "entrypoint-state");
         var gateways = opts.Firms.Select(firm =>
         {
-            FirmConfigValidation.ValidateFirm(firm);
+            // Shape + uniqueness validation happened at startup via
+            // ExchangeOptionsValidator (ValidateOnStart). Endpoint DNS
+            // resolution is deferred to here because it requires network.
             var ep = FirmConfigValidation.ParseEndpoint(firm.Endpoint);
 
             // Wire the SDK's file-backed warm-restart store + resolve the
@@ -384,15 +388,13 @@ internal sealed class FirmGatewayConnector : Microsoft.Extensions.Hosting.IHoste
 
 internal static class FirmConfigValidation
 {
-    public static void ValidateFirm(FirmConfig f)
-    {
-        if (string.IsNullOrWhiteSpace(f.FirmId)) throw new InvalidOperationException("FirmConfig.FirmId required.");
-        if (string.IsNullOrWhiteSpace(f.Endpoint)) throw new InvalidOperationException($"FirmConfig.Endpoint required for firm '{f.FirmId}'.");
-        if (string.IsNullOrEmpty(f.AccessKey)) throw new InvalidOperationException($"FirmConfig.AccessKey required for firm '{f.FirmId}'.");
-        if (f.SenderLocation.Length is 0 or > 10) throw new InvalidOperationException($"FirmConfig.SenderLocation must be 1..10 chars for firm '{f.FirmId}'.");
-        if (f.EnteringTrader.Length is 0 or > 5) throw new InvalidOperationException($"FirmConfig.EnteringTrader must be 1..5 chars for firm '{f.FirmId}'.");
-    }
-
+    /// <summary>
+    /// DNS-resolves <paramref name="endpoint"/> in <c>host:port</c> form into
+    /// an <see cref="System.Net.IPEndPoint"/>. Shape validation lives in
+    /// <see cref="ExchangeOptionsValidator"/>; this helper is invoked at first
+    /// DI resolution by the Real-mode factory because it needs network access
+    /// and shouldn't block <c>ValidateOnStart</c>.
+    /// </summary>
     public static System.Net.IPEndPoint ParseEndpoint(string endpoint)
     {
         var parts = endpoint.Split(':', 2);

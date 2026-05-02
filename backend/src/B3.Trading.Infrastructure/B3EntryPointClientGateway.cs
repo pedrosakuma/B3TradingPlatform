@@ -67,6 +67,21 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
     public string FirmId => _firmId;
 
+    /// <summary>
+    /// Lower-snake-case tag of the live SDK <c>FixpClientState</c> (e.g.
+    /// <c>established</c>, <c>terminated</c>). Mirrors the
+    /// <c>trading.entrypoint.session_state</c> metric and is the canonical
+    /// per-firm status read by the <c>/admin/firms</c> endpoint.
+    /// </summary>
+    public string SessionStateTag =>
+        FixpStateGaugeProjector.Project(_client.State).Single(r => r.Value == 1).Key;
+
+    /// <summary>Last <c>SessionVerId</c> the gateway has tried to use (in-memory; persisted via SDK's <c>SessionStateStore</c>).</summary>
+    public uint CurrentSessionVerId => Volatile.Read(ref _currentSessionVerId);
+
+    /// <summary>True when the auto-reconnect loop is currently running for this firm.</summary>
+    public bool IsReconnecting => Volatile.Read(ref _reconnectingState) == 1;
+
     public event Action<ExecutionReportEnvelope>? ExecutionReportReceived;
 
     /// <summary>

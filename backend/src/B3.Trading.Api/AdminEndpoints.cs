@@ -4,10 +4,12 @@ using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
+using B3.Trading.Infrastructure;
 using B3.Trading.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 
 namespace B3.Trading.Api;
@@ -46,6 +48,33 @@ public static class AdminEndpoints
                 return Results.Conflict(new { error = "persistence_disabled" });
             var report = eod.Materialise(DateOnly.FromDateTime(DateTime.UtcNow));
             return Results.Ok(report);
+        });
+
+        // Per-firm operator visibility. In Real mode the response folds in
+        // live FIXP state from the FirmGatewayRegistry; in other modes it
+        // returns the configured shape only (state fields are null) — useful
+        // both as a config sanity check and as a stable schema for dashboards.
+        group.MapGet("/firms", (IOptions<ExchangeOptions> opts, IServiceProvider sp) =>
+        {
+            var mode = opts.Value.ResolveMode();
+            // Optional injection: FirmGatewayRegistry is only registered in Real mode.
+            var registry = sp.GetService<FirmGatewayRegistry>();
+            var firms = opts.Value.Firms.Select(cfg =>
+            {
+                B3EntryPointClientGateway? live = null;
+                if (registry is not null && registry.TryGet(cfg.FirmId, out var gw))
+                    live = gw;
+                return new
+                {
+                    firmId = cfg.FirmId,
+                    endpoint = cfg.Endpoint,
+                    sessionId = cfg.SessionId,
+                    sessionState = live?.SessionStateTag,
+                    sessionVerId = live?.CurrentSessionVerId,
+                    reconnecting = live?.IsReconnecting,
+                };
+            }).ToArray();
+            return Results.Ok(new { mode = mode.ToString(), firms });
         });
 
         return app;
