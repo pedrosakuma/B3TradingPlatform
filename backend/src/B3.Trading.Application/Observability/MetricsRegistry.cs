@@ -75,4 +75,8 @@ public static class MetricsRegistry
         Meter.CreateCounter<long>("trading.entrypoint.business_rejects");
     public static readonly Counter<long> EntryPointTerminated =
         Meter.CreateCounter<long>("trading.entrypoint.terminated");
+
+    // MarketData consumer (B3.MarketData.WebSocketClient)
+    public static readonly Counter<long> MarketDataSubscribeErrors =
+        Meter.CreateCounter<long>("trading.marketdata.subscribe_errors");
 }

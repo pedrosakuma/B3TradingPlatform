@@ -44,6 +44,14 @@ services:
       # CORS list from origin of nginx frontend. Same-origin via nginx proxy
       # means this is mostly redundant, but cheap insurance for direct curls.
       Trading__Cors__AllowedOrigins__0: http://localhost:${FRONTEND_PORT:-8080}
+      # Live reference price via B3MarketDataPlatform. When unset the host
+      # falls back to the static Trading:Risk:ReferencePrices map (zero
+      # background work, no SDK pull). Set when running --profile marketdata
+      # or pointing at an external MD WebSocket endpoint.
+      Trading__MarketData__WsUrl: ${TRADING_MARKETDATA_WS_URL:-}
+      # Symbols to subscribe to (array binding). Add Trading__MarketData__Symbols__1, _2, …
+      # for additional tickers. Ignored when WsUrl is empty.
+      Trading__MarketData__Symbols__0: ${TRADING_MARKETDATA_SYMBOL_0:-PETR4}
     volumes:
       - trading-data:/var/lib/b3trading
     networks:

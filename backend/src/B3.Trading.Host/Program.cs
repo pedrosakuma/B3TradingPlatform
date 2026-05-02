@@ -11,6 +11,7 @@ using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.Risk.Checks;
 using B3.Trading.Host.Observability;
+using B3.Trading.Host.MarketData;
 using B3.Trading.Infrastructure;
 using B3.Trading.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -85,7 +86,7 @@ builder.Services.AddSingleton<EventDispatcher>();
 // margin provider. Each IRiskCheck registration is auto-discovered by
 // the RiskPipeline through the IEnumerable<IRiskCheck> ctor injection.
 builder.Services.AddSingleton<KillSwitchService>();
-builder.Services.AddSingleton<IReferencePrice, ConfigReferencePrice>();
+builder.Services.AddTradingMarketData(builder.Configuration);
 builder.Services.AddSingleton<IMarginProvider, NoOpMarginProvider>();
 builder.Services.AddSingleton<IRiskCheck, KillSwitchCheck>();
 builder.Services.AddSingleton<IRiskCheck, MaxQuantityCheck>();
