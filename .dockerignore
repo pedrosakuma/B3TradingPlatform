@@ -42,8 +42,13 @@ README.md
 # inside the trading-host runtime.
 frontend/
 
-# Tests don't ship to runtime
+# Tests don't ship to runtime — except the conformance suite, which IS
+# packaged as its own runner image (docker/conformance/Dockerfile).
 backend/tests/
+!backend/tests/B3.Trading.Conformance/
+!backend/tests/B3.Trading.Conformance/**
+**/bin/
+**/obj/
 
 # NuGet packages cache
 **/*.nupkg

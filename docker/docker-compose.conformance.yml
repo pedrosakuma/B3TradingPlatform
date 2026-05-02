@@ -1,0 +1,37 @@
+# Conformance overlay for the family stack. Adds a one-shot
+# `conformance` service that runs the B3.Trading.Conformance suite
+# against the running trading-host on the same network.
+#
+# Usage:
+#   docker compose \
+#       -f docker/docker-compose.yml \
+#       -f docker/docker-compose.conformance.yml \
+#       up -d --wait trading-host
+#   docker compose \
+#       -f docker/docker-compose.yml \
+#       -f docker/docker-compose.conformance.yml \
+#       run --rm conformance
+#
+# Profile-gated so it does NOT auto-start with `docker compose up`. It's
+# always invoked explicitly via `run --rm`.
+
+services:
+  conformance:
+    build:
+      context: ..
+      dockerfile: docker/conformance/Dockerfile
+    image: ${CONFORMANCE_IMAGE:-b3-trading-conformance:dev}
+    profiles: ["conformance"]
+    depends_on:
+      trading-host:
+        condition: service_healthy
+    environment:
+      # Internal DNS via the b3-net bridge — same network as trading-host.
+      B3T_BASE_URL: http://trading-host:5000
+      B3T_AUTH_USER: ${TRADING_SEED_USER:-alice}
+      # Plaintext password that produced TRADING_SEED_PASSWORD_HASH +
+      # _SALT. Default `wonderland` matches the seeds committed in
+      # .env.example. Override in .env when rotating.
+      B3T_AUTH_PASS: ${TRADING_SEED_PASSWORD:-wonderland}
+    networks:
+      - b3-net

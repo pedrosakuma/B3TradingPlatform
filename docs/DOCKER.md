@@ -159,6 +159,60 @@ docker compose -f docker/docker-compose.yml -f docker/docker-compose.observabili
 Use `down -v` to also drop the Prometheus/Grafana volumes
 (`b3-prometheus-data`, `b3-grafana-data`).
 
+## Running conformance
+
+The conformance suite (`backend/tests/B3.Trading.Conformance/`) lives
+behind its own overlay. It builds a standalone runner image and runs it
+against the trading-host on the internal `b3-net`:
+
+```bash
+docker compose \
+    -f docker/docker-compose.yml \
+    -f docker/docker-compose.conformance.yml \
+    up -d --build --wait trading-host
+
+docker compose \
+    -f docker/docker-compose.yml \
+    -f docker/docker-compose.conformance.yml \
+    run --rm conformance
+```
+
+The runner expects three env vars (the overlay wires sane defaults from
+your `.env`):
+
+| Var | Default | Notes |
+| --- | --- | --- |
+| `B3T_BASE_URL` | `http://trading-host:5000` | Internal DNS via the bridge network. |
+| `B3T_AUTH_USER` | `${TRADING_SEED_USER:-alice}` | Must exist in the host's user store. |
+| `B3T_AUTH_PASS` | `${TRADING_SEED_PASSWORD:-wonderland}` | Plaintext that produced the host's hash/salt. |
+
+The entrypoint preflights the env, waits up to 60 s for `/ready`, and
+attempts a login before invoking `dotnet test`. Exit codes follow BSD
+sysexits so failures are easy to distinguish:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | All tests passed. |
+| `1` | A test failed (or `B3T_REQUIRE_CONFIGURED=true` and env is invalid — the runner image always sets this so a misconfig fails loudly instead of silently skipping). |
+| `64` | A required env var is missing. |
+| `69` | `B3T_BASE_URL/ready` never came up within 60 s. |
+| `78` | Preflight login was rejected (creds don't match the host's seed). |
+
+You can also point the same image at any deployed host (UAT / staging),
+no compose needed:
+
+```bash
+docker run --rm \
+    -e B3T_BASE_URL=https://trading.uat.example.com \
+    -e B3T_AUTH_USER=alice \
+    -e B3T_AUTH_PASS='...' \
+    b3-trading-conformance:dev
+```
+
+CI runs this on every PR via the `conformance` job in
+`.github/workflows/docker.yml`, with the alice/wonderland defaults that
+match the committed seed hash/salt.
+
 ## Persistence
 
 The event store WAL + snapshots live in the named volume `b3-trading-data`
