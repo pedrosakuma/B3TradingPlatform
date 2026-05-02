@@ -10,6 +10,7 @@ using B3.Trading.Application;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.Risk.Checks;
+using B3.Trading.Host.Observability;
 using B3.Trading.Infrastructure;
 using B3.Trading.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -255,6 +256,11 @@ builder.Services.AddSingleton<ExchangeStatus>(sp =>
         .PersistKeysToFileSystem(new DirectoryInfo(keysDir))
         .SetApplicationName("b3-trading-host");
 }
+
+// OpenTelemetry: opt-in via OTEL_EXPORTER_OTLP_ENDPOINT. No-op when unset,
+// so this is safe to leave registered for tests, dev loops, and the
+// no-broker compose default. PR 7-2c flips it on inside the obs profile.
+builder.Services.AddTradingObservability(builder.Configuration);
 
 var app = builder.Build();
 
