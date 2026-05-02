@@ -102,6 +102,53 @@ public static class MetricsRegistry
                 new Measurement<long>(kv.Value, new KeyValuePair<string, object?>("firm", kv.Key))));
     public static void RecordSessionVerId(string firmId, uint verId) =>
         _sessionVerIdByFirm[firmId] = verId;
+
+    // Per-firm FIXP wire-protocol state, sourced from the SDK's FixpClientState.
+    // Emitted as a one-hot gauge: for each firm, exactly one row has value 1
+    // (the current state) and the rest are 0. Source callbacks are pull-based
+    // so the metric always reflects the live SDK state on each scrape rather
+    // than a stale push from the last transition.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string,
+        Func<IEnumerable<KeyValuePair<string, int>>>> _sessionStateSources = new();
+    public static readonly ObservableGauge<int> EntryPointSessionState =
+        Meter.CreateObservableGauge<int>(
+            "trading.entrypoint.session_state",
+            () => _sessionStateSources.SelectMany(firm =>
+                firm.Value().Select(row => new Measurement<int>(
+                    row.Value,
+                    new KeyValuePair<string, object?>("firm", firm.Key),
+                    new KeyValuePair<string, object?>("state", row.Key)))));
+    public static void RegisterSessionStateSource(string firmId, Func<IEnumerable<KeyValuePair<string, int>>> source) =>
+        _sessionStateSources[firmId] = source;
+    public static void UnregisterSessionStateSource(string firmId) =>
+        _sessionStateSources.TryRemove(firmId, out _);
+
+    // Per-firm "is the gateway currently inside its reconnect loop" flag.
+    // Combined with session_state, this distinguishes "SDK terminated and
+    // we're actively trying to bring it back" (reconnecting=1) from
+    // "SDK terminated, gave up / no peer" (reconnecting=0).
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Func<int>> _reconnectingByFirm = new();
+    public static readonly ObservableGauge<int> EntryPointReconnecting =
+        Meter.CreateObservableGauge<int>(
+            "trading.entrypoint.reconnecting",
+            () => _reconnectingByFirm.Select(kv =>
+                new Measurement<int>(kv.Value(), new KeyValuePair<string, object?>("firm", kv.Key))));
+    public static void RegisterReconnectingSource(string firmId, Func<int> source) =>
+        _reconnectingByFirm[firmId] = source;
+    public static void UnregisterReconnectingSource(string firmId) =>
+        _reconnectingByFirm.TryRemove(firmId, out _);
+
+    // Inbound seqnum gap detected by our defensive check on top of the SDK's
+    // own retransmit handling. A non-zero rate indicates the SDK delivered an
+    // out-of-order or skipped batch — not necessarily fatal (SDK may still
+    // recover internally) but worth alerting on.
+    public static readonly Counter<long> EntryPointGapDetected =
+        Meter.CreateCounter<long>("trading.entrypoint.gap_detected");
+    // Companion to gap_detected — a duplicate / out-of-order replay we
+    // dropped (or the ER processor will idempotently dedup).
+    public static readonly Counter<long> EntryPointDuplicateInbound =
+        Meter.CreateCounter<long>("trading.entrypoint.duplicate_inbound");
+
     public static readonly Counter<long> EntryPointTranslationErrors =
         Meter.CreateCounter<long>("trading.entrypoint.translation_errors");
     public static readonly Counter<long> EntryPointBusinessRejects =
