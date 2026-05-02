@@ -29,6 +29,24 @@ public static class MetricsRegistry
     // Execution reports inbound
     public static readonly Counter<long> ExecutionReportsReceived =
         Meter.CreateCounter<long>("trading.er.received");
+    // Idempotency: an ER carries the same (or older) cumulative-quantity /
+    // terminal-state we already have. Expected after FIXP retransmit on
+    // reconnect; surfaced so a sustained spike is visible to operators.
+    public static readonly Counter<long> ExecutionReportsReplayDeduped =
+        Meter.CreateCounter<long>("trading.er.replay_dedup");
+    // Fill ER advanced cumulative-quantity by an amount that doesn't equal
+    // its own LastQuantity — i.e. an intermediate fill ER was lost or
+    // delivered out-of-order. Position is still booked at the reported
+    // delta and lastPx (best-effort attribution); the gauge is for
+    // operators to spot delivery issues.
+    public static readonly Counter<long> ExecutionReportsFillDeltaMismatch =
+        Meter.CreateCounter<long>("trading.er.fill_delta_mismatch");
+    // A fill ER arrived for an order already in a terminal state
+    // (Cancelled/Rejected). Position is still booked — the exchange's
+    // cumulative-quantity is the source of truth — but the order keeps
+    // its terminal status.
+    public static readonly Counter<long> ExecutionReportsLateFillAfterTerminal =
+        Meter.CreateCounter<long>("trading.er.late_fill_after_terminal");
 
     // Risk / kill-switch
     public static readonly Counter<long> KillSwitchToggled =

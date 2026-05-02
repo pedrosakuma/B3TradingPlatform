@@ -81,9 +81,66 @@ public sealed class Order
         Status = LeavesQuantity == 0 ? OrderStatus.Filled : OrderStatus.PartiallyFilled;
     }
 
-    public void MarkWorking() => Status = OrderStatus.Working;
-    public void MarkCancelled() => Status = OrderStatus.Cancelled;
-    public void MarkRejected() => Status = OrderStatus.Rejected;
+    /// <summary>
+    /// Cumulative-quantity-driven fill application. Returns the delta that
+    /// was applied (0 when the incoming <paramref name="newCumulativeQty"/>
+    /// is stale/duplicate). Designed to be safe under ER replay and
+    /// out-of-order delivery: only ever advances forward, never throws,
+    /// and preserves a terminal <see cref="OrderStatus.Cancelled"/> /
+    /// <see cref="OrderStatus.Rejected"/> when a "late" fill arrives after
+    /// the terminal ER (the exchange may legitimately deliver a fill that
+    /// happened pre-cancel after the cancel-ack).
+    ///
+    /// <para>
+    /// Overfill (newCumQty &gt; Quantity) is permitted: leaves clamps at 0
+    /// and the field still advances to whatever the exchange reports,
+    /// because the WAL replay must remain total — throwing here would
+    /// poison recovery for any persisted ER stream containing an overfill.
+    /// </para>
+    /// </summary>
+    public long ApplyCumulativeFill(long newCumulativeQty)
+    {
+        if (newCumulativeQty <= CumulativeQuantity)
+            return 0;
+
+        var delta = newCumulativeQty - CumulativeQuantity;
+        CumulativeQuantity = newCumulativeQty;
+        LeavesQuantity = Math.Max(0, Quantity - newCumulativeQty);
+
+        // Status only advances; never regresses out of a terminal state.
+        if (Status is not (OrderStatus.Cancelled or OrderStatus.Rejected))
+            Status = LeavesQuantity == 0 ? OrderStatus.Filled : OrderStatus.PartiallyFilled;
+
+        return delta;
+    }
+
+    public void MarkWorking()
+    {
+        // Idempotency: New ER may be re-delivered after reconnect. Only the
+        // PendingNew→Working transition is meaningful; later ERs (including
+        // any that re-state New) must not regress an already-fillable
+        // order back to Working.
+        if (Status == OrderStatus.PendingNew)
+            Status = OrderStatus.Working;
+    }
+
+    public void MarkCancelled()
+    {
+        // Once filled, the order can't be cancelled — a stale Cancelled ER
+        // delivered after the final fill would otherwise regress status.
+        if (Status is OrderStatus.Filled or OrderStatus.Rejected or OrderStatus.Cancelled)
+            return;
+        Status = OrderStatus.Cancelled;
+    }
+
+    public void MarkRejected()
+    {
+        // Rejection is only valid before any fill. A stale Reject after a
+        // partial/full fill must be ignored.
+        if (Status is OrderStatus.Filled or OrderStatus.PartiallyFilled or OrderStatus.Rejected or OrderStatus.Cancelled)
+            return;
+        Status = OrderStatus.Rejected;
+    }
 
     /// <summary>
     /// Reconstructs an order from snapshot data. For persistence recovery
