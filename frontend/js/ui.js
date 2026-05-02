@@ -10,11 +10,13 @@ const $ = (id) => document.getElementById(id);
 let onSubmitOrder = () => {};
 let onCancelOrder = () => {};
 let onLogout      = () => {};
+let onApplyMd     = () => {};
 
 export function setHandlers(handlers) {
   onSubmitOrder = handlers.onSubmitOrder ?? onSubmitOrder;
   onCancelOrder = handlers.onCancelOrder ?? onCancelOrder;
   onLogout      = handlers.onLogout      ?? onLogout;
+  onApplyMd     = handlers.onApplyMd     ?? onApplyMd;
 }
 
 export function showLogin() {
@@ -68,8 +70,32 @@ export function bindUi() {
     if (clOrdId) onCancelOrder(clOrdId);
   });
 
+  // Market data form: apply WS URL + watchlist atomically.
+  $("md-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const url = $("md-url").value.trim();
+    const symbols = $("md-symbols").value
+      .split(/[,\s]+/)
+      .map(s => s.trim().toUpperCase())
+      .filter(Boolean);
+    onApplyMd({ url, symbols });
+  });
+
   subscribe(renderForSlice);
   renderAll();
+}
+
+export function setMdInputs({ url, symbols }) {
+  if (typeof url === "string") $("md-url").value = url;
+  if (Array.isArray(symbols)) $("md-symbols").value = symbols.join(",");
+}
+
+export function setMdFeedback(message, kind) {
+  const el = $("md-feedback");
+  if (!message) { el.hidden = true; el.textContent = ""; return; }
+  el.hidden = false;
+  el.textContent = message;
+  el.className = `feedback ${kind === "ok" ? "ok" : "error"}`;
 }
 
 export function setTicketFeedback(message, kind) {
@@ -107,6 +133,8 @@ function renderForSlice(slice) {
   if (slice === "executions" || slice === "all") renderExecutions();
   if (slice === "status") setStatusPill(getState().status);
   if (slice === "user")   setUserLabel(getState().user);
+  if (slice === "marketData" || slice === "all") renderMarketData();
+  if (slice === "marketDataStatus") setMdStatusPill(getState().marketDataStatus);
 }
 
 function renderAll() {
@@ -115,6 +143,43 @@ function renderAll() {
   renderExecutions();
   setStatusPill(getState().status);
   setUserLabel(getState().user);
+  renderMarketData();
+  setMdStatusPill(getState().marketDataStatus);
+}
+
+function setMdStatusPill(status) {
+  const el = $("md-status");
+  if (!el) return;
+  el.textContent = status;
+  el.className = `status-pill status-${status}`;
+}
+
+function renderMarketData() {
+  const body = $("md-body");
+  if (!body) return;
+  const watch = getState().watchlist;
+  const md = getState().marketData;
+  // Show one row per watchlist symbol so the user sees pending
+  // subscriptions even before the first trade arrives.
+  const rows = watch.length > 0 ? watch : [...md.keys()];
+  if (rows.length === 0) {
+    body.innerHTML = `<tr><td colspan="5" style="color:var(--muted);text-align:center;padding:1rem">No subscriptions</td></tr>`;
+    return;
+  }
+  body.innerHTML = rows.map(symbol => {
+    const e = md.get(symbol);
+    if (!e || e.lastPrice == null) {
+      return `<tr><td>${escapeHtml(symbol)}</td><td colspan="4" style="color:var(--muted)">awaiting data…</td></tr>`;
+    }
+    const ts = e.updatedAt ? new Date(e.updatedAt).toISOString().slice(11, 19) : "—";
+    return `<tr>
+      <td>${escapeHtml(symbol)}</td>
+      <td class="num">${Number(e.lastPrice).toFixed(2)}</td>
+      <td class="num">${e.lastQty ?? "—"}</td>
+      <td class="num">${e.lastTradeId ?? "—"}</td>
+      <td>${ts}</td>
+    </tr>`;
+  }).join("");
 }
 
 function renderBlotter() {

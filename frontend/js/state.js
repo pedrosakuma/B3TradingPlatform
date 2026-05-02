@@ -11,6 +11,9 @@ const state = {
   executions: [],          // bounded ring of ExecutionDto
   status: "disconnected",  // disconnected | connecting | connected
   user: null,              // { username, expiresAt, token, backend, firm }
+  marketData: new Map(),   // Symbol -> { lastPrice, lastQty, lastTradeId, updatedAt, info }
+  marketDataStatus: "disconnected", // disconnected | connecting | connected | not_ready
+  watchlist: [],           // [string] symbols (UPPERCASE)
 };
 
 const EXECUTIONS_CAPACITY = 500;
@@ -69,6 +72,57 @@ export function clearAll() {
   state.positions.clear();
   state.executions = [];
   notify("all");
+}
+
+// ── Market data slice ──────────────────────────────────────────────
+
+export function setMarketDataStatus(status) {
+  state.marketDataStatus = status;
+  notify("marketDataStatus");
+}
+
+export function applyMdTrade({ symbol, price, qty, tradeId }) {
+  const prev = state.marketData.get(symbol) || {};
+  state.marketData.set(symbol, {
+    ...prev,
+    lastPrice: price,
+    lastQty: qty,
+    lastTradeId: tradeId,
+    updatedAt: Date.now(),
+  });
+  notify("marketData");
+}
+
+export function applyMdInfo({ symbol, fields }) {
+  const prev = state.marketData.get(symbol) || {};
+  // Seed lastPrice from snapshot if we haven't seen a live trade yet.
+  // Otherwise the live tape wins to avoid the snapshot stomping on a
+  // newer print that happened to race the periodic snapshot.
+  const seed = prev.lastPrice == null
+    ? (fields.LastTradePrice ?? fields.TradingReferencePrice ?? null)
+    : prev.lastPrice;
+  state.marketData.set(symbol, {
+    ...prev,
+    lastPrice: seed,
+    info: fields,
+    updatedAt: Date.now(),
+  });
+  notify("marketData");
+}
+
+export function removeMdSymbol(symbol) {
+  if (state.marketData.delete(symbol)) notify("marketData");
+}
+
+export function clearMarketData() {
+  if (state.marketData.size === 0) return;
+  state.marketData.clear();
+  notify("marketData");
+}
+
+export function setWatchlist(symbols) {
+  state.watchlist = symbols.slice();
+  notify("watchlist");
 }
 
 export function isTerminalOrderStatus(status) {

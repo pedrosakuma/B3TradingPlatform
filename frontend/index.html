@@ -116,14 +116,38 @@
         <ol id="executions-log" class="executions-log"></ol>
       </section>
 
-      <!-- MARKET DATA placeholder ------------------------------------ -->
+      <!-- MARKET DATA ----------------------------------------------- -->
       <section class="panel market-data">
-        <h2>Market data</h2>
-        <p class="empty">
-          Reserved for the second WebSocket directly to
-          <code>B3MarketDataPlatform</code>. Lands in the MD-integration
-          follow-up.
-        </p>
+        <h2>
+          Market data
+          <span id="md-status" class="status-pill status-disconnected" title="MarketData WebSocket connection">disconnected</span>
+        </h2>
+        <form id="md-form" class="md-form">
+          <label>
+            <span>WS URL</span>
+            <input id="md-url" type="url" placeholder="ws://localhost:8081/ws" />
+          </label>
+          <label>
+            <span>Watchlist (comma-separated)</span>
+            <input id="md-symbols" type="text" placeholder="PETR4,VALE3" />
+          </label>
+          <button type="submit" id="md-apply">Apply</button>
+          <p id="md-feedback" class="feedback" hidden></p>
+        </form>
+        <div class="table-scroll">
+          <table id="md-table">
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th class="num">Last</th>
+                <th class="num">Qty</th>
+                <th class="num">TradeID</th>
+                <th>Updated</th>
+              </tr>
+            </thead>
+            <tbody id="md-body"></tbody>
+          </table>
+        </div>
       </section>
     </main>
   </section>
