@@ -32,6 +32,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     private readonly SemaphoreSlim _reconnectLock = new(1, 1);
     private readonly TimeSpan _initialReconnectDelay;
     private readonly TimeSpan _maxReconnectDelay;
+    private readonly TimeProvider _clock;
+    private readonly OrderEntryLatencyProbe _latencyProbe;
     private Task? _eventLoop;
     private uint _currentSessionVerId;
     private int _connectedState; // 0 = disconnected, 1 = connected (matches UpDownCounter increments)
@@ -45,7 +47,9 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         uint initialSessionVerId,
         ILogger<B3EntryPointClientGateway> logger,
         TimeSpan? initialReconnectDelay = null,
-        TimeSpan? maxReconnectDelay = null)
+        TimeSpan? maxReconnectDelay = null,
+        TimeProvider? clock = null,
+        OrderEntryLatencyProbe? latencyProbe = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _firmId = firmId ?? throw new ArgumentNullException(nameof(firmId));
@@ -53,6 +57,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         _currentSessionVerId = initialSessionVerId;
         _initialReconnectDelay = initialReconnectDelay ?? TimeSpan.FromSeconds(1);
         _maxReconnectDelay = maxReconnectDelay ?? TimeSpan.FromSeconds(30);
+        _clock = clock ?? TimeProvider.System;
+        _latencyProbe = latencyProbe ?? new OrderEntryLatencyProbe(_clock);
         _client.Terminated += OnTerminated;
         MetricsRegistry.RecordSessionVerId(_firmId, _currentSessionVerId);
         // Pull-based observable gauges: read SDK state + our reconnect flag on
@@ -133,7 +139,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             TimeInForce = UpModels.TimeInForce.Day,
         };
 
-        return _client.SubmitAsync(req, cancellationToken);
+        return SendAsync(req.ClOrdID.Value, OrderEntryLatencyProbe.OpSubmit,
+            ct => _client.SubmitAsync(req, ct), cancellationToken);
     }
 
     public Task CancelAsync(Order order, ulong newClOrdId, CancellationToken cancellationToken)
@@ -150,7 +157,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             Side = order.Side == OrderSide.Buy ? UpModels.Side.Buy : UpModels.Side.Sell,
         };
 
-        return _client.CancelAsync(req, cancellationToken);
+        return SendAsync(newClOrdId, OrderEntryLatencyProbe.OpCancel,
+            ct => _client.CancelAsync(req, ct), cancellationToken);
     }
 
     public Task CancelReplaceAsync(Order original, ulong newClOrdId, long newQuantity, decimal? newPrice, CancellationToken cancellationToken)
@@ -173,7 +181,38 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             TimeInForce = UpModels.TimeInForce.Day,
         };
 
-        return _client.ReplaceAsync(req, cancellationToken);
+        return SendAsync(newClOrdId, OrderEntryLatencyProbe.OpReplace,
+            ct => _client.ReplaceAsync(req, ct), cancellationToken);
+    }
+
+    /// <summary>
+    /// Common send pipeline: register the pending latency probe BEFORE the
+    /// SDK await (the matching ER can race ahead of the await on a fast
+    /// wire, so a post-await registration would lose samples), record the
+    /// SDK call duration on success, and forget the pending entry on
+    /// synchronous failure (no ER will follow). Failed-call duration is
+    /// intentionally not histogrammed — failures are tracked by
+    /// <see cref="MetricsRegistry.OrdersGatewayFailed"/>; mixing failure
+    /// timings would corrupt the p99 of successful sends.
+    /// </summary>
+    private async Task SendAsync(ulong clOrdId, string op, Func<CancellationToken, Task> sdkCall, CancellationToken ct)
+    {
+        var start = _clock.GetTimestamp();
+        _latencyProbe.OnSubmitted(clOrdId, _firmId, op);
+        try
+        {
+            await sdkCall(ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            _latencyProbe.Forget(clOrdId);
+            throw;
+        }
+
+        MetricsRegistry.OrderEntryCallMs.Record(
+            _clock.GetElapsedTime(start).TotalMilliseconds,
+            new KeyValuePair<string, object?>("firm", _firmId),
+            new KeyValuePair<string, object?>("op", op));
     }
 
     // The IEntryPointClient submit-side surface is unused on the real adapter
@@ -231,6 +270,10 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
                 if (envelope is null)
                     continue;
+
+                // Record latency before subscriber fan-out so a misbehaving
+                // subscriber can't lose the sample.
+                _latencyProbe.OnExecutionReport(envelope.ClOrdId);
 
                 try
                 {
