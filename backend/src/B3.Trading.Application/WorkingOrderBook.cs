@@ -12,7 +12,21 @@ public sealed class WorkingOrderBook
 {
     private readonly ConcurrentDictionary<ulong, Order> _orders = new();
 
-    public bool TryAdd(Order order) => _orders.TryAdd(order.ClOrdId, order);
+    // Secondary index: firmId -> set of ClOrdIDs. Maintained on TryAdd / Restore.
+    // Built on top of ConcurrentDictionary so enumeration is lock-free; the inner
+    // dictionary's value byte is irrelevant — we only use the keys as a set.
+    private readonly ConcurrentDictionary<string, ConcurrentDictionary<ulong, byte>> _byFirm =
+        new(StringComparer.Ordinal);
+
+    public bool TryAdd(Order order)
+    {
+        if (!_orders.TryAdd(order.ClOrdId, order))
+            return false;
+
+        var firmSet = _byFirm.GetOrAdd(order.FirmId, static _ => new ConcurrentDictionary<ulong, byte>());
+        firmSet.TryAdd(order.ClOrdId, 0);
+        return true;
+    }
 
     public bool TryGet(ulong clOrdId, out Order? order) => _orders.TryGetValue(clOrdId, out order);
 
@@ -26,6 +40,41 @@ public sealed class WorkingOrderBook
         }
         return list;
     }
+
+    /// <summary>
+    /// Snapshots the orders associated with <paramref name="firmId"/>. By default
+    /// only non-terminal orders are returned (PendingNew / Working / PartiallyFilled),
+    /// which matches the FIXP "outstanding orders" semantics used to reconcile
+    /// against <c>SessionSnapshot.OutstandingOrders</c> after warm restart or
+    /// gap-recovery reconnect.
+    /// </summary>
+    /// <remarks>
+    /// Snapshot semantics: callers receive a stable list captured at call time;
+    /// concurrent <see cref="TryAdd"/> or status mutations after the call do not
+    /// affect the returned collection. Index-driven, so cost is O(orders for firm)
+    /// rather than O(total orders).
+    /// </remarks>
+    public IReadOnlyCollection<Order> EnumerateForFirm(string firmId, bool includeTerminal = false)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+
+        if (!_byFirm.TryGetValue(firmId, out var firmSet))
+            return Array.Empty<Order>();
+
+        var list = new List<Order>(firmSet.Count);
+        foreach (var clOrdId in firmSet.Keys)
+        {
+            if (!_orders.TryGetValue(clOrdId, out var order))
+                continue;
+            if (!includeTerminal && IsTerminal(order.Status))
+                continue;
+            list.Add(order);
+        }
+        return list;
+    }
+
+    private static bool IsTerminal(OrderStatus s) =>
+        s is OrderStatus.Filled or OrderStatus.Cancelled or OrderStatus.Rejected;
 
     /// <summary>
     /// Captures the current set of working orders for snapshotting.
@@ -51,6 +100,7 @@ public sealed class WorkingOrderBook
     {
         ArgumentNullException.ThrowIfNull(snaps);
         _orders.Clear();
+        _byFirm.Clear();
         foreach (var s in snaps)
         {
             var owner = new EndClientId(s.EndClientId);
@@ -59,6 +109,8 @@ public sealed class WorkingOrderBook
             var status = Enum.Parse<OrderStatus>(s.Status);
             _orders[s.ClOrdId] = Order.Hydrate(s.ClOrdId, owner, s.Symbol, s.SecurityId, side, type,
                 s.Quantity, s.Price, s.LeavesQuantity, s.CumulativeQuantity, status, s.FirmId);
+            var firmSet = _byFirm.GetOrAdd(s.FirmId, static _ => new ConcurrentDictionary<ulong, byte>());
+            firmSet.TryAdd(s.ClOrdId, 0);
         }
     }
 }
