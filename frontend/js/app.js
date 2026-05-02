@@ -5,9 +5,13 @@ import * as state from "./state.js";
 import * as ui from "./ui.js";
 
 const SESSION_KEY = "b3tp.session";
+const MD_KEY = "b3tp.md";
+const DEFAULT_WATCHLIST = ["PETR4", "VALE3"];
 
 let worker = null;
+let mdWorker = null;
 let session = null;          // { token, expiresAt, username, backend }
+let mdConfig = null;         // { url, symbols }
 let expiryTimer = null;
 
 function init() {
@@ -18,6 +22,7 @@ function init() {
     onSubmitOrder: handleSubmitOrder,
     onCancelOrder: handleCancelOrder,
     onLogout: logout,
+    onApplyMd: handleApplyMd,
   });
 
   const stored = readSession();
@@ -49,6 +54,7 @@ function startSession(next) {
   ui.showTrader();
 
   startWorker();
+  startMdWorker();
   scheduleExpiry();
 }
 
@@ -64,6 +70,103 @@ function startWorker() {
   worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
   worker.onmessage = (ev) => onWorkerMessage(ev.data);
   worker.postMessage({ type: "start", backend: session.backend, token: session.token });
+}
+
+function defaultMdUrl() {
+  // Heuristic: same host as the trading-host backend with port 8081 and
+  // ws:// scheme. Operators on a different topology can override.
+  try {
+    const u = new URL(session.backend);
+    u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
+    u.port = "8081";
+    u.pathname = "/ws";
+    return u.toString();
+  } catch { return ""; }
+}
+
+function readMdConfig() {
+  try {
+    const raw = sessionStorage.getItem(MD_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.url === "string" && Array.isArray(parsed.symbols)) {
+        return parsed;
+      }
+    }
+  } catch { /* fall through */ }
+  return { url: defaultMdUrl(), symbols: DEFAULT_WATCHLIST.slice() };
+}
+
+function writeMdConfig(cfg) { sessionStorage.setItem(MD_KEY, JSON.stringify(cfg)); }
+function clearMdConfig()    { sessionStorage.removeItem(MD_KEY); }
+
+function startMdWorker() {
+  mdConfig = readMdConfig();
+  ui.setMdInputs(mdConfig);
+  state.setWatchlist(mdConfig.symbols);
+  state.setMarketDataStatus("disconnected");
+  if (!mdConfig.url) return; // user hasn't configured an endpoint yet
+
+  mdWorker = new Worker(new URL("./mdWorker.js", import.meta.url), { type: "module" });
+  mdWorker.onmessage = (ev) => onMdWorkerMessage(ev.data);
+  mdWorker.postMessage({
+    type: "start",
+    url: mdConfig.url,
+    symbols: mdConfig.symbols,
+  });
+}
+
+function handleApplyMd({ url, symbols }) {
+  if (!url) {
+    ui.setMdFeedback("ws url required", "error");
+    return;
+  }
+  const next = { url, symbols };
+  // URL change forces a full restart (different endpoint = different
+  // session / securityIds). Symbol-only changes go via setSymbols so
+  // we don't blip the connection on every watchlist tweak.
+  const urlChanged = !mdConfig || mdConfig.url !== url;
+  mdConfig = next;
+  writeMdConfig(next);
+  state.setWatchlist(symbols);
+
+  if (urlChanged || !mdWorker) {
+    if (mdWorker) {
+      try { mdWorker.postMessage({ type: "stop" }); } catch { /* swallow */ }
+      mdWorker.terminate();
+      mdWorker = null;
+    }
+    state.clearMarketData();
+    startMdWorker();
+  } else {
+    mdWorker.postMessage({ type: "setSymbols", symbols });
+    // Clear cache entries for symbols no longer in the watchlist.
+    const wanted = new Set(symbols);
+    for (const sym of [...state.getState().marketData.keys()]) {
+      if (!wanted.has(sym)) state.removeMdSymbol(sym);
+    }
+  }
+  ui.setMdFeedback(`watching ${symbols.length} symbol(s)`, "ok");
+}
+
+function onMdWorkerMessage(msg) {
+  switch (msg.type) {
+    case "md.status":   state.setMarketDataStatus(msg.value); break;
+    case "md.clear":    state.clearMarketData(); break;
+    case "md.trade":    state.applyMdTrade(msg); break;
+    case "md.info":     state.applyMdInfo(msg); break;
+    case "md.bust":
+      // Risk consumers ignore busts (the next live trade overwrites);
+      // surface in the executions log so the trader sees it happened.
+      console.warn("[md] trade bust", msg);
+      break;
+    case "md.subError":
+      ui.setMdFeedback(`subscribe ${msg.symbol}: ${msg.errorName}`, "error");
+      state.removeMdSymbol(msg.symbol);
+      break;
+    case "md.removed":  state.removeMdSymbol(msg.symbol); break;
+    case "md.error":    console.warn("[md]", msg); break;
+  }
 }
 
 function onWorkerMessage(msg) {
@@ -123,11 +226,21 @@ function logout() {
     worker.terminate();
     worker = null;
   }
+  if (mdWorker) {
+    try { mdWorker.postMessage({ type: "stop" }); } catch { /* swallow */ }
+    mdWorker.terminate();
+    mdWorker = null;
+  }
   session = null;
+  mdConfig = null;
   clearSession();
+  clearMdConfig();
   state.setUser(null);
   state.setStatus("disconnected");
+  state.setMarketDataStatus("disconnected");
   state.clearAll();
+  state.clearMarketData();
+  state.setWatchlist([]);
   ui.showLogin();
 }
 
