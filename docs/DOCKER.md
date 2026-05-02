@@ -213,6 +213,47 @@ CI runs this on every PR via the `conformance` job in
 `.github/workflows/docker.yml`, with the alice/wonderland defaults that
 match the committed seed hash/salt.
 
+## Live reference price (B3MarketDataPlatform)
+
+The price collar in the risk pipeline can run in one of two modes:
+
+| Mode    | Toggle                              | Source of `IReferencePrice`                                |
+| ------- | ----------------------------------- | ---------------------------------------------------------- |
+| Static  | `Trading__MarketData__WsUrl` empty  | `Trading:Risk:ReferencePrices` dictionary (config-only)    |
+| Live    | `Trading__MarketData__WsUrl` set    | `MarketDataReferencePrice` over `B3.MarketData.WebSocketClient` SDK with the static dict as fallback |
+
+The static mode is the default and has zero overhead — no SDK pull, no
+background tasks. Switching to live keeps the same fail-open semantics:
+on cache miss, stale entry, or SDK fault, the collar falls back to the
+static dict and ultimately approves when neither side has a number.
+
+Wire it up against the bundled marketdata service:
+
+```bash
+# .env additions
+TRADING_MARKETDATA_WS_URL=ws://marketdata:8080/ws
+TRADING_MARKETDATA_SYMBOL_0=PETR4
+# extra symbols: TRADING_MARKETDATA_SYMBOL_1=VALE3, etc. (compose env
+# only forwards index 0; for more, add Trading__MarketData__Symbols__N
+# directly to docker-compose.yml or appsettings.Docker.json).
+
+docker compose --profile marketdata up -d
+```
+
+Tunables (defaults shown):
+
+| Setting (`Trading:MarketData:`) | Default       | Notes                                                                  |
+| ------------------------------- | ------------- | ---------------------------------------------------------------------- |
+| `WsUrl`                         | empty         | empty = feature off                                                    |
+| `Symbols`                       | `[]`          | empty + WsUrl set logs a warning                                       |
+| `MaxStaleness`                  | `00:05:00`    | older cache entries fall through to the static fallback; `0` disables  |
+
+Operationally: the SDK reconnects transparently with backoff and
+auto-resubscribes after disconnects. Watch
+`trading_marketdata_subscribe_errors_total` (tagged by `symbol` +
+`reason`) for venue-side rejections — symbol-mapping mismatches between
+this host and the matching engine surface there.
+
 ## Persistence
 
 The event store WAL + snapshots live in the named volume `b3-trading-data`
