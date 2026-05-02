@@ -1,0 +1,125 @@
+# Observability overlay. Bring up alongside the base compose:
+#
+#   docker compose \
+#     -f docker/docker-compose.yml \
+#     -f docker/docker-compose.observability.yml \
+#     up
+#
+# What this adds:
+#   1. otel-collector (OTLP/gRPC + http receivers; Prometheus exposition out)
+#   2. prometheus (scrapes the collector)
+#   3. grafana (provisioned datasource + 1 'Process Up' dashboard)
+#
+# What this changes in trading-host:
+#   - Sets OTEL_EXPORTER_OTLP_ENDPOINT so the SDK we wired in PR 7-2b
+#     actually starts exporting. Without this overlay the env stays unset
+#     and the SDK stays a no-op (see docs/METRICS.md).
+#
+# UIs after `up`:
+#   - Grafana:    http://localhost:3000 (admin / admin on first login)
+#   - Prometheus: http://localhost:9090
+#   - Collector health: http://localhost:13133 (for k8s-style probes)
+
+name: b3trading
+
+services:
+  trading-host:
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      # Faster than the 60s SDK default so the dashboard feels alive
+      # during local exploration. Production should leave this unset and
+      # accept the default.
+      OTEL_METRIC_EXPORT_INTERVAL: "5000"
+    depends_on:
+      otel-collector:
+        # otel-collector-contrib is distroless (no wget/curl/sh) so we
+        # can't probe its /health endpoint from the container. The SDK
+        # already retries with backoff on connection failures, so
+        # service_started is the right knob: trading-host doesn't crash
+        # if the collector is briefly unavailable, just buffers and
+        # retries the next periodic export.
+        condition: service_started
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.119.0
+    container_name: b3-otel-collector
+    restart: unless-stopped
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./observability/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    networks:
+      - b3-net
+    expose:
+      - "4317"
+      - "4318"
+      - "8889"
+    ports:
+      # Exposed on the host so external scripts / sub-collectors can also
+      # send OTLP into the same pipeline. Comment out to keep
+      # collector-internal.
+      - "${OTEL_OTLP_GRPC_PORT:-4317}:4317"
+      - "${OTEL_OTLP_HTTP_PORT:-4318}:4318"
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: b3-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=24h
+      - --web.enable-lifecycle
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - b3-net
+    expose:
+      - "9090"
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    depends_on:
+      - otel-collector
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "2", "--spider", "http://localhost:9090/-/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    container_name: b3-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_INSTALL_PLUGINS: ""
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/process-up.json
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    networks:
+      - b3-net
+    expose:
+      - "3000"
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -T 2 --spider http://localhost:3000/api/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 10s
+
+volumes:
+  prometheus-data:
+    name: b3-prometheus-data
+  grafana-data:
+    name: b3-grafana-data

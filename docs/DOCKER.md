@@ -116,8 +116,48 @@ OpenTelemetry: application meter (`B3.Trading`), ASP.NET Core, .NET
 runtime instrumentation, traces. Without it the SDK is not registered at
 all — zero overhead for the no-broker default. See
 [`docs/METRICS.md`](METRICS.md) for the full instrument list and a
-collector-only smoke test recipe; the bundled obs profile lands in PR
-7-2c.
+collector-only smoke test recipe.
+
+### Bundled obs stack
+
+An overlay file ships otel-collector + Prometheus + Grafana with a
+provisioned datasource and a starter dashboard ("B3 Trading — Process
+Up"). Bring it up alongside the base stack:
+
+```bash
+docker compose \
+    -f docker/docker-compose.yml \
+    -f docker/docker-compose.observability.yml \
+    up -d --build
+```
+
+This exports `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317`
+into the trading-host container automatically — no extra env required.
+
+Default ports:
+
+| Service        | URL                          | Credentials       |
+| -------------- | ---------------------------- | ----------------- |
+| trading-host   | http://localhost:5000        | `alice` / `wonderland` |
+| frontend       | http://localhost:8080        | (proxy to host)   |
+| Prometheus     | http://localhost:9090        | —                 |
+| Grafana        | http://localhost:3000        | `admin` / `admin` (change at first login) |
+| otel-collector | (internal: 4317 OTLP, 8889 prom expo) | — |
+
+The Grafana home dashboard is pre-set to "B3 Trading — Process Up". It
+shows: service-up indicator, orders submitted, active WS connections,
+working-set memory, HTTP request rate by route, and GC collections by
+generation. All panels query only verified-real instruments — no fake
+ack-latency placeholders.
+
+Tear down (keeping data volumes):
+
+```bash
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.observability.yml down
+```
+
+Use `down -v` to also drop the Prometheus/Grafana volumes
+(`b3-prometheus-data`, `b3-grafana-data`).
 
 ## Persistence
 
@@ -158,9 +198,6 @@ The build context is the **repo root** (the Dockerfile copies
   Until that's resolved, `Mode=Real` requires you to BYO an EntryPoint
   endpoint or use `B3.EntryPoint.Client.TestPeer` from a separate test
   container.
-- **No observability stack yet** — pending PR 7-2c. The host already
-  emits OTel-friendly meters via `MetricsRegistry`, but no exporter is
-  wired and nothing scrapes it.
 - **Frontend isn't AOT-compiled** — it's static HTML/JS served by nginx;
   good enough for the trader UI scope.
 - **Single-instance only** — the event store is local-disk; running two
