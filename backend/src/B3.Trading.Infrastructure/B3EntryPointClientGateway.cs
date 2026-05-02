@@ -35,6 +35,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     private Task? _eventLoop;
     private uint _currentSessionVerId;
     private int _connectedState; // 0 = disconnected, 1 = connected (matches UpDownCounter increments)
+    private int _reconnectingState; // 0 = idle, 1 = reconnect loop active (observable gauge)
+    private ulong _lastInboundSeqNum;
     private volatile bool _disposed;
 
     public B3EntryPointClientGateway(
@@ -53,6 +55,14 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         _maxReconnectDelay = maxReconnectDelay ?? TimeSpan.FromSeconds(30);
         _client.Terminated += OnTerminated;
         MetricsRegistry.RecordSessionVerId(_firmId, _currentSessionVerId);
+        // Pull-based observable gauges: read SDK state + our reconnect flag on
+        // every scrape rather than pushing on every transition. Avoids both
+        // a stale dashboard and a dropped-update race against fast Terminated
+        // → Reconnecting → Established cycles.
+        MetricsRegistry.RegisterSessionStateSource(_firmId,
+            () => FixpStateGaugeProjector.Project(_client.State));
+        MetricsRegistry.RegisterReconnectingSource(_firmId,
+            () => Volatile.Read(ref _reconnectingState));
     }
 
     public string FirmId => _firmId;
@@ -171,6 +181,26 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 MetricsRegistry.EntryPointEventsReceived.Add(1,
                     new KeyValuePair<string, object?>("firm", _firmId),
                     new KeyValuePair<string, object?>("event_type", ev.GetType().Name));
+
+                // Defensive gap detection on top of the SDK's own
+                // IRetransmitRequestHandler. The SDK normally hides gaps via
+                // automatic retransmit; if a gap nevertheless surfaces here,
+                // the metric flags it for ops and the ER processor's
+                // idempotency (#16) makes any subsequent replay safe.
+                switch (FixpGapDetector.Observe(ev.SeqNum, ref _lastInboundSeqNum))
+                {
+                    case GapObservation.Gap:
+                        MetricsRegistry.EntryPointGapDetected.Add(1, FirmTag());
+                        _logger.LogWarning("Inbound seqnum gap on firm {Firm}: got {Got} after {Last}; SDK retransmit should follow.",
+                            _firmId, ev.SeqNum, _lastInboundSeqNum);
+                        break;
+                    case GapObservation.Duplicate:
+                        MetricsRegistry.EntryPointDuplicateInbound.Add(1, FirmTag());
+                        // Don't continue — let translation + idempotent ER
+                        // processor drop it. Duplicates are expected during
+                        // FIXP retransmit.
+                        break;
+                }
 
                 ExecutionReportEnvelope? envelope;
                 try
@@ -301,6 +331,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     {
         if (!await _reconnectLock.WaitAsync(0, ct).ConfigureAwait(false))
             return; // already reconnecting
+        Interlocked.Exchange(ref _reconnectingState, 1);
         try
         {
             var attempt = 0;
@@ -350,6 +381,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         }
         finally
         {
+            Interlocked.Exchange(ref _reconnectingState, 0);
             _reconnectLock.Release();
         }
     }
@@ -368,6 +400,10 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     {
         _disposed = true;
         try { _shutdownCts.Cancel(); } catch { /* ignore */ }
+        // Stop emitting per-firm gauges before tearing down the SDK so the
+        // observable callbacks don't race with _client disposal.
+        MetricsRegistry.UnregisterSessionStateSource(_firmId);
+        MetricsRegistry.UnregisterReconnectingSource(_firmId);
         if (_eventLoop is not null)
         {
             try { await _eventLoop.ConfigureAwait(false); } catch { /* event loop swallows, but be defensive */ }
