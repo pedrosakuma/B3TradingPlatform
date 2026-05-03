@@ -163,7 +163,7 @@ public class RecoveryAndSnapshotTests : IDisposable
         var clOrdIds = new ClOrdIdPrefixRegistry();
         var sink = new TestSink();
         var processor = new ExecutionReportProcessor(ownership, book, positions, sink,
-            NullLogger<ExecutionReportProcessor>.Instance);
+            new NoOpMarginProvider(), NullLogger<ExecutionReportProcessor>.Instance);
         var snapshotter = new StateSnapshotter(book, positions, killSwitch, clOrdIds, ownership);
         var dispatcher = new EventDispatcher(store);
         return (book, positions, killSwitch, ownership, snapshotter, dispatcher, processor, sink);

@@ -1,3 +1,4 @@
+using B3.Trading.Application.Risk;
 using B3.Trading.Application;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Domain;
@@ -166,7 +167,7 @@ public class B3EntryPointClientGatewayTranslationTests
         ownership.Register(42UL, owner);
 
         var sink = new CapturingSink();
-        var proc = new ExecutionReportProcessor(ownership, book, positions, sink, NullLogger<ExecutionReportProcessor>.Instance);
+        var proc = new ExecutionReportProcessor(ownership, book, positions, sink, new NoOpMarginProvider(), NullLogger<ExecutionReportProcessor>.Instance);
 
         // ER carries the cancel-side ClOrdID 99 plus OrigClOrdId 42.
         proc.Apply(clOrdId: 99UL, ExecKind.Canceled, 0, 0, 0, 0m, null, origClOrdId: 42UL);

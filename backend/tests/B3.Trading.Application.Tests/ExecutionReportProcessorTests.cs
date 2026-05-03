@@ -1,3 +1,4 @@
+using B3.Trading.Application.Risk;
 using B3.Trading.Application;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -12,7 +13,7 @@ public class ExecutionReportProcessorTests
         var book = new WorkingOrderBook();
         var positions = new PositionKeeper();
         var sink = new RecordingSink();
-        var proc = new ExecutionReportProcessor(ownership, book, positions, sink, NullLogger<ExecutionReportProcessor>.Instance);
+        var proc = new ExecutionReportProcessor(ownership, book, positions, sink, new NoOpMarginProvider(), NullLogger<ExecutionReportProcessor>.Instance);
         return (proc, ownership, book, positions, sink);
     }
 
