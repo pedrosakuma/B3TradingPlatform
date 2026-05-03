@@ -10,10 +10,14 @@ const state = {
   positions: new Map(),    // Symbol  -> PositionDto
   executions: [],          // bounded ring of ExecutionDto
   status: "disconnected",  // disconnected | connecting | connected
-  user: null,              // { username, expiresAt, token, backend, firm }
+  user: null,              // { username, expiresAt, token, backend, firm, role }
   marketData: new Map(),   // Symbol -> { lastPrice, lastQty, lastTradeId, updatedAt, info }
   marketDataStatus: "disconnected", // disconnected | connecting | connected | not_ready
   watchlist: [],           // [string] symbols (UPPERCASE)
+  // UX-only slices added in the operability pass.
+  submitInflight: null,    // { startedAt: ms } | null — true while POST /orders is awaiting response
+  wsReconnect: null,       // { nextAt: ms } | null — when worker has scheduled the next attempt
+  firmsHealth: null,       // { mode, firms, fetchedAt } | null — admin-only poll of /admin/firms
 };
 
 const EXECUTIONS_CAPACITY = 500;
@@ -127,4 +131,21 @@ export function setWatchlist(symbols) {
 
 export function isTerminalOrderStatus(status) {
   return TERMINAL_ORDER_STATUSES.has(status);
+}
+
+// ── UX-only slices (operability pass) ──────────────────────────────
+
+export function setSubmitInflight(value) {
+  state.submitInflight = value;
+  notify("submitInflight");
+}
+
+export function setWsReconnect(value) {
+  state.wsReconnect = value;
+  notify("wsReconnect");
+}
+
+export function setFirmsHealth(value) {
+  state.firmsHealth = value;
+  notify("firmsHealth");
 }

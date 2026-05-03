@@ -1,18 +1,21 @@
 // App entry point: wires login → worker → state → UI together.
 
-import { defaultBackend, login, submitOrder, cancelOrder } from "./protocol.js";
+import { defaultBackend, login, submitOrder, cancelOrder, getAdminFirms } from "./protocol.js";
+import { claimsFromToken } from "./jwt.js";
 import * as state from "./state.js";
 import * as ui from "./ui.js";
 
 const SESSION_KEY = "b3tp.session";
 const MD_KEY = "b3tp.md";
 const DEFAULT_WATCHLIST = ["PETR4", "VALE3"];
+const FIRMS_POLL_INTERVAL_MS = 5_000;
 
 let worker = null;
 let mdWorker = null;
-let session = null;          // { token, expiresAt, username, backend }
+let session = null;          // { token, expiresAt, username, backend, role, firm }
 let mdConfig = null;         // { url, symbols }
 let expiryTimer = null;
+let firmsPollTimer = null;
 
 function init() {
   document.getElementById("login-backend").placeholder = defaultBackend();
@@ -38,7 +41,15 @@ async function onLogin(e) {
   const password = document.getElementById("login-password").value;
   try {
     const resp = await login(backend, username, password);
-    const next = { token: resp.token, expiresAt: resp.expiresAt, username, backend };
+    const claims = claimsFromToken(resp.token);
+    const next = {
+      token: resp.token,
+      expiresAt: resp.expiresAt,
+      username,
+      backend,
+      role: claims.role,
+      firm: claims.firm,
+    };
     writeSession(next);
     startSession(next);
   } catch (err) {
@@ -47,14 +58,29 @@ async function onLogin(e) {
 }
 
 function startSession(next) {
+  // Backfill claims for sessions persisted before this field existed.
+  if (next.role == null || next.firm == null) {
+    const claims = claimsFromToken(next.token);
+    next = { ...next, role: next.role ?? claims.role, firm: next.firm ?? claims.firm };
+  }
   session = next;
-  state.setUser({ username: next.username, expiresAt: next.expiresAt, backend: next.backend });
+  state.setUser({
+    username: next.username,
+    expiresAt: next.expiresAt,
+    backend: next.backend,
+    role: next.role,
+    firm: next.firm,
+  });
   state.clearAll();
   state.setStatus("connecting");
+  state.setSubmitInflight(null);
+  state.setWsReconnect(null);
+  state.setFirmsHealth(null);
   ui.showTrader();
 
   startWorker();
   startMdWorker();
+  startFirmsPoll();
   scheduleExpiry();
 }
 
@@ -172,6 +198,9 @@ function onMdWorkerMessage(msg) {
 function onWorkerMessage(msg) {
   switch (msg.type) {
     case "status":              state.setStatus(msg.value); break;
+    case "reconnect.scheduled":
+      state.setWsReconnect(msg.nextAt ? { nextAt: msg.nextAt } : null);
+      break;
     case "clear":               state.clearAll(); break;
     case "orders.snapshot":     state.applyOrdersSnapshot(msg.data); break;
     case "orders.delta":        state.applyOrdersDelta(msg.data); break;
@@ -197,6 +226,7 @@ async function handleSubmitOrder(payload) {
 
   ui.setTicketSubmitting(true);
   ui.setTicketFeedback(null);
+  state.setSubmitInflight({ startedAt: Date.now() });
   try {
     const resp = await submitOrder(session.backend, session.token, payload);
     ui.setTicketFeedback(`accepted: ${resp.clOrdId}${resp.status ? ` (${resp.status})` : ""}`, "ok");
@@ -206,6 +236,7 @@ async function handleSubmitOrder(payload) {
     ui.setTicketFeedback(err.message || "submit failed", "error");
   } finally {
     ui.setTicketSubmitting(false);
+    state.setSubmitInflight(null);
   }
 }
 
@@ -221,6 +252,7 @@ async function handleCancelOrder(clOrdId) {
 
 function logout() {
   if (expiryTimer) { clearTimeout(expiryTimer); expiryTimer = null; }
+  stopFirmsPoll();
   if (worker) {
     try { worker.postMessage({ type: "stop" }); } catch { /* swallow */ }
     worker.terminate();
@@ -238,10 +270,43 @@ function logout() {
   state.setUser(null);
   state.setStatus("disconnected");
   state.setMarketDataStatus("disconnected");
+  state.setSubmitInflight(null);
+  state.setWsReconnect(null);
+  state.setFirmsHealth(null);
   state.clearAll();
   state.clearMarketData();
   state.setWatchlist([]);
   ui.showLogin();
+}
+
+// ── Admin firms poll ───────────────────────────────────────────────
+// Only admins can hit /admin/firms (backend returns 403 otherwise).
+// We gate the call client-side too so the network panel stays clean.
+
+function startFirmsPoll() {
+  stopFirmsPoll();
+  if (!session || session.role !== "admin") return;
+  // Fire once immediately so the badge shows up without waiting a tick.
+  pollFirmsOnce();
+  firmsPollTimer = setInterval(pollFirmsOnce, FIRMS_POLL_INTERVAL_MS);
+}
+
+function stopFirmsPoll() {
+  if (firmsPollTimer) { clearInterval(firmsPollTimer); firmsPollTimer = null; }
+}
+
+async function pollFirmsOnce() {
+  if (!session) return;
+  try {
+    const resp = await getAdminFirms(session.backend, session.token);
+    state.setFirmsHealth({ ...resp, fetchedAt: Date.now() });
+  } catch (err) {
+    if (err.status === 401) { logout(); return; }
+    // 403 here means the JWT role drifted; stop polling so we don't
+    // hammer the endpoint with rejected calls.
+    if (err.status === 403) { stopFirmsPoll(); return; }
+    console.warn("[admin/firms]", err);
+  }
 }
 
 function readSession() {

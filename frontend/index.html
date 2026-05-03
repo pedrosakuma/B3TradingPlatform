@@ -34,8 +34,11 @@
     <header class="topbar">
       <div class="brand">B3TradingPlatform <span class="pill">trader</span></div>
       <div class="status">
+        <span id="firms-health" class="firms-health" hidden></span>
         <span id="ws-status" class="status-pill status-disconnected" title="WebSocket connection">disconnected</span>
+        <span id="ws-reconnect" class="reconnect-countdown" hidden></span>
         <span id="user-label" class="user-label"></span>
+        <span id="user-role" class="role-badge" hidden></span>
         <button id="logout" class="link-button" type="button">Logout</button>
       </div>
     </header>
@@ -76,6 +79,7 @@
             </label>
           </div>
           <button type="submit" id="ticket-submit">Submit</button>
+          <p id="ticket-inflight" class="inflight" hidden></p>
           <p id="ticket-feedback" class="feedback" hidden></p>
         </form>
       </section>

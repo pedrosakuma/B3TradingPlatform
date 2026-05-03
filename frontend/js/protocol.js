@@ -47,3 +47,13 @@ export async function cancelOrder(backend, token, clOrdId) {
   if (resp.status === 204 || resp.status === 404) return null;
   return jsonOrThrow(resp);
 }
+
+// Admin-only: per-firm operator visibility. Returns 403 for non-admin
+// callers — the UI must gate the call by inspecting the JWT role
+// before invoking this. Schema mirrors AdminEndpoints.MapAdmin /firms.
+export async function getAdminFirms(backend, token) {
+  const resp = await fetch(`${backend}/admin/firms`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return jsonOrThrow(resp);
+}

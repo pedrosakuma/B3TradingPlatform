@@ -179,3 +179,24 @@ td { padding: .35rem .5rem; border-bottom: 1px solid #20283a; }
   padding: .35rem .8rem; font-weight: 600; cursor: pointer; align-self: flex-start;
 }
 .market-data h2 { display: flex; align-items: center; gap: .55rem; }
+
+/* ---------- Operability badges (added in frontend hardening pass) ---------- */
+.reconnect-countdown {
+  font-size: .7rem; color: var(--warn); font-variant-numeric: tabular-nums;
+}
+.role-badge {
+  background: rgba(79,158,255,.15); color: var(--accent);
+  padding: .1rem .45rem; border-radius: 999px; font-size: .65rem;
+  text-transform: uppercase; letter-spacing: .04em;
+}
+.firms-health {
+  padding: .15rem .55rem; border-radius: 999px; font-size: .7rem;
+  border: 1px solid var(--border); cursor: help;
+}
+.firms-health-ok    { background: rgba(54,196,111,.12); color: var(--green); border-color: rgba(54,196,111,.35); }
+.firms-health-warn  { background: rgba(245,166,35,.12); color: var(--warn);  border-color: rgba(245,166,35,.35); }
+.firms-health-muted { background: var(--panel-2); color: var(--muted); }
+.inflight {
+  margin: .25rem 0 0; font-size: .75rem; color: var(--warn);
+  font-variant-numeric: tabular-nums;
+}

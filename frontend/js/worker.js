@@ -34,6 +34,8 @@ function scheduleReconnect() {
   const delay = Math.min(15_000, 500 * Math.pow(2, attempt++));
   reconnectTimer = setTimeout(connect, delay);
   post({ type: "status", value: "connecting" });
+  // Surface the next attempt timestamp so the UI can show a countdown.
+  post({ type: "reconnect.scheduled", nextAt: Date.now() + delay });
 }
 
 function wsUrl() {
@@ -66,6 +68,7 @@ function connect() {
   socket.onopen = () => {
     attempt = 0;
     post({ type: "status", value: "connected" });
+    post({ type: "reconnect.scheduled", nextAt: null });
     send({ type: "subscribe", channels: CHANNELS });
   };
 
