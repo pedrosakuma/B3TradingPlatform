@@ -125,16 +125,90 @@ export function setStatusPill(status) {
 
 export function setUserLabel(user) {
   $("user-label").textContent = user ? `${user.username}` : "";
+  const roleEl = $("user-role");
+  if (!roleEl) return;
+  if (user?.role && user.role !== "user") {
+    roleEl.textContent = user.role;
+    roleEl.hidden = false;
+  } else {
+    roleEl.textContent = "";
+    roleEl.hidden = true;
+  }
+}
+
+// Periodic UI tick for time-based elements (in-flight elapsed, reconnect
+// countdown). Started lazily on first render so SSR / non-browser hosts
+// stay quiet.
+let tickTimer = null;
+function ensureTicker() {
+  if (tickTimer) return;
+  tickTimer = setInterval(() => {
+    renderInflight();
+    renderReconnect();
+  }, 250);
+}
+
+function renderInflight() {
+  const el = $("ticket-inflight");
+  if (!el) return;
+  const inflight = getState().submitInflight;
+  if (!inflight) { el.hidden = true; el.textContent = ""; return; }
+  const elapsed = Math.max(0, Date.now() - inflight.startedAt);
+  el.hidden = false;
+  el.textContent = `awaiting ACK… ${elapsed} ms`;
+}
+
+function renderReconnect() {
+  const el = $("ws-reconnect");
+  if (!el) return;
+  const r = getState().wsReconnect;
+  if (!r || !r.nextAt) { el.hidden = true; el.textContent = ""; return; }
+  const remaining = Math.max(0, r.nextAt - Date.now());
+  el.hidden = false;
+  el.textContent = `retry in ${(remaining / 1000).toFixed(1)}s`;
+}
+
+function renderFirmsHealth() {
+  const el = $("firms-health");
+  if (!el) return;
+  const fh = getState().firmsHealth;
+  if (!fh || !Array.isArray(fh.firms) || fh.firms.length === 0) {
+    el.hidden = true;
+    el.textContent = "";
+    el.title = "";
+    return;
+  }
+  // Pick the worst-state firm to drive the badge colour, but show the
+  // full list in the tooltip so an admin sees per-firm state at a glance.
+  const ranked = fh.firms.map(f => ({
+    firmId: f.firmId,
+    state: f.sessionState ?? "unknown",
+    reconnecting: !!f.reconnecting,
+  }));
+  const anyReconnecting = ranked.some(r => r.reconnecting);
+  const allEstablished = ranked.every(r => r.state === "Established");
+  const tone = anyReconnecting ? "warn" : (allEstablished ? "ok" : "muted");
+  const summary = `${ranked.length} firm${ranked.length === 1 ? "" : "s"}`;
+  el.hidden = false;
+  el.className = `firms-health firms-health-${tone}`;
+  el.textContent = `${summary} · ${fh.mode}`;
+  el.title = ranked.map(r => `${r.firmId}: ${r.state}${r.reconnecting ? " (reconnecting)" : ""}`).join("\n");
 }
 
 function renderForSlice(slice) {
   if (slice === "orders" || slice === "all") renderBlotter();
   if (slice === "positions" || slice === "all") renderPositions();
   if (slice === "executions" || slice === "all") renderExecutions();
-  if (slice === "status") setStatusPill(getState().status);
+  if (slice === "status") {
+    setStatusPill(getState().status);
+    renderReconnect(); // pill change usually correlates with countdown reset
+  }
   if (slice === "user")   setUserLabel(getState().user);
   if (slice === "marketData" || slice === "all") renderMarketData();
   if (slice === "marketDataStatus") setMdStatusPill(getState().marketDataStatus);
+  if (slice === "submitInflight") renderInflight();
+  if (slice === "wsReconnect") renderReconnect();
+  if (slice === "firmsHealth" || slice === "all") renderFirmsHealth();
 }
 
 function renderAll() {
@@ -145,6 +219,10 @@ function renderAll() {
   setUserLabel(getState().user);
   renderMarketData();
   setMdStatusPill(getState().marketDataStatus);
+  renderInflight();
+  renderReconnect();
+  renderFirmsHealth();
+  ensureTicker();
 }
 
 function setMdStatusPill(status) {
