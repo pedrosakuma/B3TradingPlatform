@@ -12,7 +12,7 @@ public sealed class MaxQuantityCheck : IRiskCheck
 
     public RiskDecision Check(RiskContext ctx)
     {
-        var max = RiskLimitsResolver.Resolve(_options, ctx.Owner.Value, ctx.Symbol, l => l.MaxQuantity);
+        var max = RiskLimitsResolver.Resolve(_options, ctx.Owner.Value, ctx.FirmId, ctx.Symbol, l => l.MaxQuantity);
         if (max.HasValue && ctx.Quantity > max.Value)
             return RiskDecision.Reject($"quantity {ctx.Quantity} exceeds max {max.Value}");
         return RiskDecision.Approve;
@@ -29,7 +29,7 @@ public sealed class MaxNotionalCheck : IRiskCheck
 
     public RiskDecision Check(RiskContext ctx)
     {
-        var max = RiskLimitsResolver.Resolve(_options, ctx.Owner.Value, ctx.Symbol, l => l.MaxNotional);
+        var max = RiskLimitsResolver.Resolve(_options, ctx.Owner.Value, ctx.FirmId, ctx.Symbol, l => l.MaxNotional);
         if (!max.HasValue || !ctx.Price.HasValue)
             return RiskDecision.Approve; // no cap, or market order — let venue handle
         var notional = ctx.Price.Value * ctx.Quantity;

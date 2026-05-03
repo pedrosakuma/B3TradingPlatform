@@ -2,8 +2,8 @@ namespace B3.Trading.Application.Risk;
 
 /// <summary>
 /// Risk configuration. Bound from <c>Trading:Risk</c>. Resolution order
-/// when computing limits for an order: per-end-client → per-symbol →
-/// default. First non-null wins per field.
+/// when computing limits for an order: per-end-client → per-firm →
+/// per-symbol → default. First non-null wins per field.
 /// </summary>
 public sealed class RiskOptions
 {
@@ -11,6 +11,8 @@ public sealed class RiskOptions
 
     public RiskLimits Default { get; set; } = new();
     public Dictionary<string, RiskLimits> PerEndClient { get; set; } =
+        new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, RiskLimits> PerFirm { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, RiskLimits> PerSymbol { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
@@ -28,11 +30,27 @@ public sealed class RiskLimits
 
 public static class RiskLimitsResolver
 {
-    public static T? Resolve<T>(RiskOptions opts, string endClient, string symbol, Func<RiskLimits, T?> selector)
+    /// <summary>
+    /// Resolves a single risk-limit field by walking the precedence
+    /// chain <c>per-end-client → per-firm → per-symbol → default</c>
+    /// and returning the first non-null value. <paramref name="firmId"/>
+    /// may be null/blank when the caller has no firm context (legacy
+    /// callers); the per-firm slot is then skipped.
+    /// </summary>
+    public static T? Resolve<T>(
+        RiskOptions opts,
+        string endClient,
+        string? firmId,
+        string symbol,
+        Func<RiskLimits, T?> selector)
         where T : struct
     {
         if (opts.PerEndClient.TryGetValue(endClient, out var ec) && selector(ec).HasValue)
             return selector(ec);
+        if (!string.IsNullOrWhiteSpace(firmId)
+            && opts.PerFirm.TryGetValue(firmId, out var fi)
+            && selector(fi).HasValue)
+            return selector(fi);
         if (opts.PerSymbol.TryGetValue(symbol, out var sy) && selector(sy).HasValue)
             return selector(sy);
         return selector(opts.Default);

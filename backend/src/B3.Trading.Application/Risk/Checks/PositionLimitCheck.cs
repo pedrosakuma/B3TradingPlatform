@@ -19,7 +19,7 @@ public sealed class PositionLimitCheck : IRiskCheck
 
     public RiskDecision Check(RiskContext ctx)
     {
-        var limit = RiskLimitsResolver.Resolve(_options, ctx.Owner.Value, ctx.Symbol, l => l.PositionLimit);
+        var limit = RiskLimitsResolver.Resolve(_options, ctx.Owner.Value, ctx.FirmId, ctx.Symbol, l => l.PositionLimit);
         if (!limit.HasValue) return RiskDecision.Approve;
 
         var current = _positions.GetOrCreate(ctx.Owner, ctx.Symbol).NetQuantity;
