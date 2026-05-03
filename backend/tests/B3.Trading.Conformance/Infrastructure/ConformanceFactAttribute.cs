@@ -18,22 +18,35 @@ public sealed class ConformanceFactAttribute : FactAttribute
 {
     public const string EnvRequireConfigured = "B3T_REQUIRE_CONFIGURED";
 
+    /// <summary>
+    /// When true, the scenario also requires admin-role credentials
+    /// (B3T_ADMIN_USER / B3T_ADMIN_PASS). Skipped at discovery time when
+    /// only the basic user creds are configured, so deployments that
+    /// don't surface an admin role still get the rest of the suite.
+    /// </summary>
+    public bool RequiresAdmin { get; init; }
+
     public ConformanceFactAttribute()
     {
-        if (PlatformEndpoint.TryResolve() is not null)
-            return;
-
-        var require = Environment.GetEnvironmentVariable(EnvRequireConfigured);
-        if (string.Equals(require, "true", StringComparison.OrdinalIgnoreCase) ||
-            require == "1")
+        var peer = PlatformEndpoint.TryResolve();
+        if (peer is null)
         {
-            // Throwing here makes xUnit surface a discovery error instead of
-            // a skip. The CI pipeline fails loudly rather than passing with
-            // zero executed tests.
-            throw new InvalidOperationException(
-                $"{EnvRequireConfigured}=true but {PlatformEndpoint.SkipReason}");
+            var require = Environment.GetEnvironmentVariable(EnvRequireConfigured);
+            if (string.Equals(require, "true", StringComparison.OrdinalIgnoreCase) ||
+                require == "1")
+            {
+                // Throwing here makes xUnit surface a discovery error instead of
+                // a skip. The CI pipeline fails loudly rather than passing with
+                // zero executed tests.
+                throw new InvalidOperationException(
+                    $"{EnvRequireConfigured}=true but {PlatformEndpoint.SkipReason}");
+            }
+
+            Skip = PlatformEndpoint.SkipReason;
+            return;
         }
 
-        Skip = PlatformEndpoint.SkipReason;
+        if (RequiresAdmin && !peer.HasAdminCredentials)
+            Skip = PlatformEndpoint.AdminSkipReason;
     }
 }

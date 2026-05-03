@@ -21,11 +21,18 @@ namespace B3.Trading.Conformance.Infrastructure;
 /// <c>tests/B3.Trading.Api.Tests</c>.
 /// </para>
 /// </remarks>
-public sealed record PlatformEndpoint(Uri BaseUrl, string Username, string Password)
+public sealed record PlatformEndpoint(
+    Uri BaseUrl,
+    string Username,
+    string Password,
+    string? AdminUsername = null,
+    string? AdminPassword = null)
 {
     public const string EnvBaseUrl = "B3T_BASE_URL";
     public const string EnvUsername = "B3T_AUTH_USER";
     public const string EnvPassword = "B3T_AUTH_PASS";
+    public const string EnvAdminUsername = "B3T_ADMIN_USER";
+    public const string EnvAdminPassword = "B3T_ADMIN_PASS";
 
     public static PlatformEndpoint? TryResolve()
     {
@@ -43,9 +50,24 @@ public sealed record PlatformEndpoint(Uri BaseUrl, string Username, string Passw
         if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri))
             return null;
 
-        return new PlatformEndpoint(uri, user, pass);
+        // Admin creds are optional — scenarios that need them skip
+        // individually via HasAdminCredentials.
+        var adminUser = Environment.GetEnvironmentVariable(EnvAdminUsername);
+        var adminPass = Environment.GetEnvironmentVariable(EnvAdminPassword);
+        var hasAdmin = !string.IsNullOrWhiteSpace(adminUser) && !string.IsNullOrWhiteSpace(adminPass);
+
+        return new PlatformEndpoint(
+            uri, user, pass,
+            hasAdmin ? adminUser : null,
+            hasAdmin ? adminPass : null);
     }
+
+    public bool HasAdminCredentials =>
+        !string.IsNullOrWhiteSpace(AdminUsername) && !string.IsNullOrWhiteSpace(AdminPassword);
 
     public const string SkipReason =
         "Conformance platform not configured. Set B3T_BASE_URL, B3T_AUTH_USER, B3T_AUTH_PASS to run.";
+
+    public const string AdminSkipReason =
+        "Admin scenario skipped: B3T_ADMIN_USER / B3T_ADMIN_PASS not configured.";
 }
