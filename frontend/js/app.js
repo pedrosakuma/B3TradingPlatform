@@ -15,11 +15,30 @@ const BLOTTER_FILTER_KEY = "b3tp.blotter.filter";
 const DEFAULT_WATCHLIST = ["PETR4", "VALE3"];
 const FIRMS_POLL_INTERVAL_MS = 5_000;
 
+// ─────────────────────────────────────────────────────────────────
+// Session storage strategy:
+//   - sessionStorage (default): cleared when the tab/window closes,
+//     mitigates token theft if the workstation walks away.
+//   - localStorage ("Remember me" checkbox): persists across browser
+//     restarts, so a refresh after coffee keeps the operator logged
+//     in. Trade-off: a token sitting in localStorage is reachable by
+//     any later XSS bug for as long as the JWT TTL allows.
+//   We always read from both and prefer the freshest valid record so
+//   a logout from one tab doesn't leave stale state in the other.
+// ─────────────────────────────────────────────────────────────────
+
+let sessionStore = sessionStorage; // mutates if "remember me" was selected at login
+let renewInflight = false;
+let warningShown = false;
+
+const SESSION_WARNING_LEAD_MS = 60_000;
+
 let worker = null;
 let mdWorker = null;
-let session = null;          // { token, expiresAt, username, backend, role, firm }
+let session = null;          // { token, expiresAt, username, backend, role, firm, remember }
 let mdConfig = null;         // { url, symbols }
 let expiryTimer = null;
+let warningTimer = null;
 let firmsPollTimer = null;
 
 function init() {
@@ -56,6 +75,7 @@ async function onLogin(e) {
   const backend = (document.getElementById("login-backend").value || defaultBackend()).replace(/\/+$/, "");
   const username = document.getElementById("login-username").value.trim();
   const password = document.getElementById("login-password").value;
+  const remember = !!document.getElementById("login-remember")?.checked;
   try {
     const resp = await login(backend, username, password);
     const claims = claimsFromToken(resp.token);
@@ -66,7 +86,9 @@ async function onLogin(e) {
       backend,
       role: claims.role,
       firm: claims.firm,
+      remember,
     };
+    sessionStore = remember ? localStorage : sessionStorage;
     writeSession(next);
     startSession(next);
   } catch (err) {
@@ -105,17 +127,80 @@ function startSession(next) {
 }
 
 function scheduleExpiry() {
-  if (expiryTimer) clearTimeout(expiryTimer);
+  if (expiryTimer) { clearTimeout(expiryTimer); expiryTimer = null; }
+  if (warningTimer) { clearTimeout(warningTimer); warningTimer = null; }
   if (!session?.expiresAt) return;
   const remaining = new Date(session.expiresAt).getTime() - Date.now();
   if (remaining <= 0) { logout(); return; }
-  expiryTimer = setTimeout(logout, Math.max(1_000, remaining));
+
+  // Warning fires SESSION_WARNING_LEAD_MS before the hard expiry. If
+  // the lead time has already passed (short-lived tokens), fire it
+  // immediately. The hard expiry timer is kept so logout always wins
+  // even if the user walks away from the warning prompt.
+  const warnIn = Math.max(0, remaining - SESSION_WARNING_LEAD_MS);
+  warningTimer = setTimeout(showSessionWarning, warnIn);
+  expiryTimer  = setTimeout(logout, Math.max(1_000, remaining));
+}
+
+function showSessionWarning() {
+  if (!session || warningShown) return;
+  warningShown = true;
+  ui.openSessionModal({
+    onRenew: handleRenewSession,
+    onLogout: logout,
+  });
+}
+
+async function handleRenewSession(password) {
+  if (!session || renewInflight) return;
+  renewInflight = true;
+  try {
+    const resp = await login(session.backend, session.username, password);
+    const claims = claimsFromToken(resp.token);
+    session = {
+      ...session,
+      token: resp.token,
+      expiresAt: resp.expiresAt,
+      role: claims.role ?? session.role,
+      firm: claims.firm ?? session.firm,
+    };
+    writeSession(session);
+    state.setUser({
+      username: session.username,
+      expiresAt: session.expiresAt,
+      backend:   session.backend,
+      role:      session.role,
+      firm:      session.firm,
+    });
+    // Restart the WS worker so subsequent reconnects use the new token
+    // (the existing socket keeps working until the OLD JWT is rejected
+    // server-side; restart guarantees the next reconnect is clean).
+    restartWorker();
+    warningShown = false;
+    scheduleExpiry();
+    ui.closeSessionModal();
+  } catch (err) {
+    ui.setSessionModalError(err.message || "renew failed");
+  } finally {
+    renewInflight = false;
+  }
 }
 
 function startWorker() {
   worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
   worker.onmessage = (ev) => onWorkerMessage(ev.data);
   worker.postMessage({ type: "start", backend: session.backend, token: session.token });
+}
+
+function restartWorker() {
+  if (worker) {
+    try { worker.postMessage({ type: "stop" }); } catch { /* swallow */ }
+    worker.terminate();
+    worker = null;
+  }
+  state.setStatus("connecting");
+  state.setWsReconnect(null);
+  startWorker();
 }
 
 function defaultMdUrl() {
@@ -322,6 +407,9 @@ function writeBlotterFilter(f) { sessionStorage.setItem(BLOTTER_FILTER_KEY, JSON
 
 function logout() {
   if (expiryTimer) { clearTimeout(expiryTimer); expiryTimer = null; }
+  if (warningTimer) { clearTimeout(warningTimer); warningTimer = null; }
+  warningShown = false;
+  ui.closeSessionModal();
   stopFirmsPoll();
   if (worker) {
     try { worker.postMessage({ type: "stop" }); } catch { /* swallow */ }
@@ -450,16 +538,35 @@ async function handleRunEod() {
 }
 
 function readSession() {
-  try {
-    const raw = sessionStorage.getItem(SESSION_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (!parsed.token || !parsed.expiresAt) return null;
-    if (new Date(parsed.expiresAt).getTime() <= Date.now()) return null;
-    return parsed;
-  } catch { return null; }
+  // Read both stores; pick the freshest non-expired one. If "remember
+  // me" was used, it lives in localStorage. Otherwise, sessionStorage.
+  const candidates = [];
+  for (const store of [localStorage, sessionStorage]) {
+    try {
+      const raw = store.getItem(SESSION_KEY);
+      if (!raw) continue;
+      const parsed = JSON.parse(raw);
+      if (!parsed.token || !parsed.expiresAt) continue;
+      if (new Date(parsed.expiresAt).getTime() <= Date.now()) continue;
+      candidates.push({ store, parsed });
+    } catch { /* fall through */ }
+  }
+  if (!candidates.length) return null;
+  candidates.sort((a, b) =>
+    new Date(b.parsed.expiresAt).getTime() - new Date(a.parsed.expiresAt).getTime());
+  const winner = candidates[0];
+  sessionStore = winner.store;
+  return winner.parsed;
 }
-function writeSession(s) { sessionStorage.setItem(SESSION_KEY, JSON.stringify(s)); }
-function clearSession()  { sessionStorage.removeItem(SESSION_KEY); }
+function writeSession(s) {
+  sessionStore.setItem(SESSION_KEY, JSON.stringify(s));
+  // Make sure the other store doesn't shadow our write.
+  const other = sessionStore === localStorage ? sessionStorage : localStorage;
+  try { other.removeItem(SESSION_KEY); } catch { /* swallow */ }
+}
+function clearSession() {
+  try { localStorage.removeItem(SESSION_KEY); } catch { /* swallow */ }
+  try { sessionStorage.removeItem(SESSION_KEY); } catch { /* swallow */ }
+}
 
 init();
