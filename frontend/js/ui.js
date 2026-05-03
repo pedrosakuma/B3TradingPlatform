@@ -46,6 +46,7 @@ function setViewToggleVisible(visible, current) {
   wrap.hidden = !visible;
   for (const btn of wrap.querySelectorAll("button[data-view]")) {
     btn.classList.toggle("active", btn.dataset.view === current);
+    btn.setAttribute("aria-selected", btn.dataset.view === current ? "true" : "false");
   }
 }
 
@@ -251,6 +252,7 @@ export function setStatusPill(status) {
   const el = $("ws-status");
   el.textContent = status;
   el.className = `status-pill status-${status}`;
+  el.setAttribute("aria-label", `WebSocket: ${status}`);
 }
 
 export function setUserLabel(user) {
@@ -379,6 +381,7 @@ function setMdStatusPill(status) {
   if (!el) return;
   el.textContent = status;
   el.className = `status-pill status-${status}`;
+  el.setAttribute("aria-label", `Market data: ${status}`);
 }
 
 function renderMarketData() {
@@ -444,7 +447,7 @@ function orderRow(o, st) {
     <td class="num">${o.cumulativeQuantity}</td>
     <td class="num">${price}</td>
     <td class="status-cell-${escapeHtml(o.status)}">${escapeHtml(o.status)}</td>
-    <td><button class="cancel-btn" data-clordid="${escapeHtml(o.clOrdId)}" ${terminal ? "disabled" : ""}>Cancel</button></td>
+    <td><button class="cancel-btn" data-clordid="${escapeHtml(o.clOrdId)}" aria-label="Cancel order ${escapeHtml(o.clOrdId)}" ${terminal ? "disabled" : ""}>Cancel</button></td>
   </tr>`;
 }
 

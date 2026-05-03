@@ -1,0 +1,93 @@
+name: Frontend E2E (smoke)
+
+# Opt-in only: workflow_dispatch keeps it off every PR (it boots the
+# whole compose stack and pulls Playwright browsers, ~3-4 min). Run it
+# manually before merging anything that touches the frontend, the auth
+# flow, or the WS plumbing.
+#
+# Triggers:
+#   - workflow_dispatch  → operator-initiated run
+#   - schedule (Mon 03:00 UTC) → catch silent regressions on main weekly
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Trader workspace smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Bring up frontend + trading-host (Stub mode)
+        env:
+          TRADING_AUTH_SIGNING_KEY: ci-e2e-smoke-placeholder-key-min-32-bytes-long-aaaaa
+          TRADING_SEED_USER: alice
+          TRADING_SEED_PASSWORD: wonderland
+          TRADING_SEED_PASSWORD_HASH: ZDzDHANAHq8NDQK3BWk/YZjybKLCMKdRzw0z9Da5wic=
+          TRADING_SEED_PASSWORD_SALT: rXA+be7/gEYYZQrQDsUr2g==
+        run: |
+          docker compose \
+              -f docker/docker-compose.yml \
+              -f docker/docker-compose.e2e.yml \
+              up -d --build --wait trading-host frontend
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Playwright + chromium
+        working-directory: frontend/e2e
+        run: |
+          npm install --no-audit --no-fund --no-package-lock
+          npx playwright install --with-deps chromium
+
+      - name: Run smoke
+        working-directory: frontend/e2e
+        env:
+          E2E_FRONTEND_URL: http://localhost:8080
+          E2E_USERNAME: alice
+          E2E_PASSWORD: wonderland
+        run: npm test
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: frontend/e2e/playwright-report
+          retention-days: 7
+
+      - name: Trading-host logs (always)
+        if: always()
+        env:
+          TRADING_AUTH_SIGNING_KEY: ci-e2e-smoke-placeholder-key-min-32-bytes-long-aaaaa
+          TRADING_SEED_PASSWORD_HASH: ZDzDHANAHq8NDQK3BWk/YZjybKLCMKdRzw0z9Da5wic=
+          TRADING_SEED_PASSWORD_SALT: rXA+be7/gEYYZQrQDsUr2g==
+        run: |
+          docker compose \
+              -f docker/docker-compose.yml \
+              -f docker/docker-compose.e2e.yml \
+              logs trading-host || true
+
+      - name: Tear down
+        if: always()
+        env:
+          TRADING_AUTH_SIGNING_KEY: ci-e2e-smoke-placeholder-key-min-32-bytes-long-aaaaa
+          TRADING_SEED_PASSWORD_HASH: ZDzDHANAHq8NDQK3BWk/YZjybKLCMKdRzw0z9Da5wic=
+          TRADING_SEED_PASSWORD_SALT: rXA+be7/gEYYZQrQDsUr2g==
+        run: |
+          docker compose \
+              -f docker/docker-compose.yml \
+              -f docker/docker-compose.e2e.yml \
+              down -v
