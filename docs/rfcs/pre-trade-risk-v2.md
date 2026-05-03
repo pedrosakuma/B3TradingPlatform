@@ -2,7 +2,7 @@
 
 | Field    | Value                                          |
 | -------- | ---------------------------------------------- |
-| Status   | Draft                                          |
+| Status   | Implemented                                    |
 | Tracking | [#38](https://github.com/pedrosakuma/B3TradingPlatform/issues/38) |
 | Replaces | n/a (extends v1 in `B3.Trading.Application/Risk`) |
 
@@ -350,7 +350,20 @@ metrics + tests included.
    submit endpoint after both the synchronous pipeline and margin
    approve. A periodic `ThrottleLedgerSweeper` removes empty buckets
    to bound memory under tenant churn.
-8. Conformance scenarios + Grafana panel + docs touch-up.
+8. Conformance scenarios + Grafana panel + docs touch-up. **shipped** —
+   `Spec_HTTP_Risk/RiskRejectionShapeSpecTests.cs` discovers the
+   resolved `MaxQuantity` via `GET /admin/risk/limits` and asserts the
+   wire contract for risk rejections (`202 Accepted` + `{ clOrdId,
+   status: "Rejected", reason }`). Grafana dashboard
+   `dashboards/risk.json` ("B3 Trading — Risk") surfaces rejection
+   rates by reason, ref-price lookup mix and staleness, bypass
+   counters, and active throttle buckets per scope. `docs/METRICS.md`
+   gained the per-metric inventory for the `trading.risk.*` family.
+
+**RFC status: Implemented.** Future evolutions (PerFirm vs PerSymbol
+ordering — OQ-1, margin TTL — OQ-2, per-firm reload — OQ-4) will land
+as small follow-up PRs without a new RFC unless a behavioural
+contract changes.
 
 ## 8. Open questions
 
