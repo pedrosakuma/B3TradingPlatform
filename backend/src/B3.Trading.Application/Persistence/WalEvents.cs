@@ -19,6 +19,9 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(OrderSubmittedEvent), "order.submitted")]
 [JsonDerivedType(typeof(ExecutionReportReceivedEvent), "er.received")]
 [JsonDerivedType(typeof(KillSwitchToggledEvent), "killswitch.toggled")]
+[JsonDerivedType(typeof(AlgoCreatedEvent), "algo.created")]
+[JsonDerivedType(typeof(AlgoCancelRequestedEvent), "algo.cancel-requested")]
+[JsonDerivedType(typeof(AlgoTerminalStateRecordedEvent), "algo.terminal")]
 public abstract record WalEvent
 {
     public DateTimeOffset TimestampUtc { get; init; } = DateTimeOffset.UtcNow;
@@ -41,6 +44,17 @@ public sealed record OrderSubmittedEvent : WalEvent
     public required string Type { get; init; }
     public required long Quantity { get; init; }
     public decimal? Price { get; init; }
+
+    /// <summary>
+    /// When set, the order is a child slice of an <see cref="AlgoCreatedEvent"/>'s
+    /// parent. Both algo fields are set together or both <c>null</c>; manual
+    /// orders submitted via <c>POST /orders</c> emit <c>null</c>. Added in
+    /// algo orders v0 — older WAL segments without these fields deserialise
+    /// with <c>null</c> on both, which matches the manual-order semantics
+    /// they actually carried.
+    /// </summary>
+    public ulong? ParentAlgoId { get; init; }
+    public int? AlgoSliceSeq { get; init; }
 }
 
 /// <summary>
@@ -79,4 +93,63 @@ public sealed record KillSwitchToggledEvent : WalEvent
     public required string Target { get; init; }
     public required bool Killed { get; init; }    // true=kill, false=revive
     public string? ActorUserId { get; init; }
+}
+
+/// <summary>
+/// Captures the parent params at submit time. Authoritative source of
+/// truth for everything in the algo aggregate except the derived state
+/// (FilledQuantity / Status), which is reconstructed during replay from
+/// the child <see cref="OrderSubmittedEvent"/> + <see cref="ExecutionReportReceivedEvent"/>
+/// stream and the terminal events below. See RFC §4.5.
+/// </summary>
+public sealed record AlgoCreatedEvent : WalEvent
+{
+    public required ulong AlgoId { get; init; }
+    public required string EndClientId { get; init; }
+    public required string FirmId { get; init; }
+    public required string Symbol { get; init; }
+    public required ulong SecurityId { get; init; }
+    public required string Side { get; init; }
+    public required string Type { get; init; }   // "Iceberg" | "Twap"
+    public required long TotalQuantity { get; init; }
+    public required DateTimeOffset CreatedAtUtc { get; init; }
+    /// <summary>
+    /// Iceberg-only: visible slice quantity. Mutually exclusive with
+    /// the Twap fields below. Validated by the engine, not the WAL —
+    /// the event mirrors whatever the submit pipeline accepted.
+    /// </summary>
+    public long? IcebergDisplayQuantity { get; init; }
+    public decimal? IcebergLimitPrice { get; init; }
+
+    public DateTimeOffset? TwapStartUtc { get; init; }
+    public DateTimeOffset? TwapEndUtc { get; init; }
+    public int? TwapSliceCount { get; init; }
+    public string? TwapChildOrderType { get; init; }   // "Limit" | "Market"
+    public decimal? TwapChildPrice { get; init; }
+}
+
+/// <summary>
+/// Recorded when <c>DELETE /algo/{id}</c> reaches the engine, before the
+/// child cancels are dispatched. Replay uses it to set the parent to
+/// <c>Cancelling</c>; the eventual <see cref="AlgoTerminalStateRecordedEvent"/>
+/// promotes it to <c>Cancelled</c>.
+/// </summary>
+public sealed record AlgoCancelRequestedEvent : WalEvent
+{
+    public required ulong AlgoId { get; init; }
+    public string? ActorUserId { get; init; }
+}
+
+/// <summary>
+/// Recorded when the parent reaches a terminal state
+/// (<c>Completed</c>, <c>Cancelled</c>, <c>Expired</c>, <c>Suspended</c>).
+/// The <see cref="Reason"/> is the durable companion that distinguishes
+/// "user pulled it" from "venue rejected the third slice in a row".
+/// </summary>
+public sealed record AlgoTerminalStateRecordedEvent : WalEvent
+{
+    public required ulong AlgoId { get; init; }
+    public required string Status { get; init; }    // AlgoStatus enum name
+    public required string Reason { get; init; }    // AlgoTerminalReason enum name
+    public required DateTimeOffset AtUtc { get; init; }
 }

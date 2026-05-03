@@ -54,6 +54,7 @@ builder.Services.AddSingleton<EndClientRegistry>();
 builder.Services.AddSingleton<ClOrdIdPrefixRegistry>();
 builder.Services.AddSingleton<OrderOwnershipMap>();
 builder.Services.AddSingleton<WorkingOrderBook>();
+builder.Services.AddSingleton<AlgoBook>();
 builder.Services.AddSingleton<PositionKeeper>();
 builder.Services.AddSingleton<SubscriptionManager>();
 builder.Services.AddSingleton<IExecutionEventSink, WebSocketExecutionEventSink>();

@@ -19,19 +19,22 @@ public sealed class StateSnapshotter
     private readonly KillSwitchService _killSwitch;
     private readonly ClOrdIdPrefixRegistry _clOrdIds;
     private readonly OrderOwnershipMap _ownership;
+    private readonly AlgoBook _algos;
 
     public StateSnapshotter(
         WorkingOrderBook orders,
         PositionKeeper positions,
         KillSwitchService killSwitch,
         ClOrdIdPrefixRegistry clOrdIds,
-        OrderOwnershipMap ownership)
+        OrderOwnershipMap ownership,
+        AlgoBook algos)
     {
         _orders = orders;
         _positions = positions;
         _killSwitch = killSwitch;
         _clOrdIds = clOrdIds;
         _ownership = ownership;
+        _algos = algos;
     }
 
     public PlatformSnapshot Capture(long seq) => new()
@@ -44,6 +47,7 @@ public sealed class StateSnapshotter
         KilledFirms = _killSwitch.ListKilledFirms().ToList(),
         ClOrdIds = _clOrdIds.Snapshot(),
         Ownership = _ownership.Snapshot().ToList(),
+        Algos = _algos.Snapshot().ToList(),
     };
 
     public void Restore(PlatformSnapshot snap)
@@ -54,6 +58,7 @@ public sealed class StateSnapshotter
         _killSwitch.Restore(snap.KilledEndClients, snap.KilledFirms);
         _clOrdIds.Restore(snap.ClOrdIds);
         _ownership.Restore(snap.Ownership);
+        _algos.Restore(snap.Algos);
     }
 }
 
@@ -70,17 +75,20 @@ public sealed class EventReplayer
     private readonly OrderOwnershipMap _ownership;
     private readonly KillSwitchService _killSwitch;
     private readonly ExecutionReportProcessor _processor;
+    private readonly AlgoBook _algos;
 
     public EventReplayer(
         WorkingOrderBook orders,
         OrderOwnershipMap ownership,
         KillSwitchService killSwitch,
-        ExecutionReportProcessor processor)
+        ExecutionReportProcessor processor,
+        AlgoBook algos)
     {
         _orders = orders;
         _ownership = ownership;
         _killSwitch = killSwitch;
         _processor = processor;
+        _algos = algos;
     }
 
     public void Apply(WalEvent evt)
@@ -91,8 +99,13 @@ public sealed class EventReplayer
                 var owner = new EndClientId(o.EndClientId);
                 var side = Enum.Parse<OrderSide>(o.Side, ignoreCase: true);
                 var type = Enum.Parse<OrderType>(o.Type, ignoreCase: true);
-                _orders.TryAdd(new Order(o.ClOrdId, owner, o.Symbol, o.SecurityId, side, type, o.Quantity, o.Price, o.FirmId));
+                _orders.TryAdd(new Order(o.ClOrdId, owner, o.Symbol, o.SecurityId, side, type,
+                    o.Quantity, o.Price, o.FirmId, o.ParentAlgoId, o.AlgoSliceSeq));
                 _ownership.Register(o.ClOrdId, owner);
+                // Parent state-machine progression on first child accept is
+                // engine-side (slice 5/6); replay only re-creates the order
+                // — the parent's Working/Filled state is reconstructed from
+                // the child ER stream through the processor below.
                 break;
             case ExecutionReportReceivedEvent er:
                 if (Enum.TryParse<ExecKind>(er.ExecKind, ignoreCase: true, out var kind))
@@ -113,6 +126,43 @@ public sealed class EventReplayer
                     else _killSwitch.ReviveFirm(k.Target);
                 }
                 break;
+            case AlgoCreatedEvent ac:
+                ApplyAlgoCreated(ac);
+                break;
+            case AlgoCancelRequestedEvent acr:
+                if (_algos.TryGet(acr.AlgoId, out var cancelling) && cancelling is not null)
+                    cancelling.RequestCancel();
+                break;
+            case AlgoTerminalStateRecordedEvent at:
+                if (_algos.TryGet(at.AlgoId, out var algo) && algo is not null)
+                {
+                    var status = Enum.Parse<AlgoStatus>(at.Status, ignoreCase: true);
+                    var reason = Enum.Parse<AlgoTerminalReason>(at.Reason, ignoreCase: true);
+                    algo.RecordTerminal(status, reason, at.AtUtc);
+                }
+                break;
         }
+    }
+
+    private void ApplyAlgoCreated(AlgoCreatedEvent ac)
+    {
+        var owner = new EndClientId(ac.EndClientId);
+        var side = Enum.Parse<OrderSide>(ac.Side, ignoreCase: true);
+        var type = Enum.Parse<AlgoType>(ac.Type, ignoreCase: true);
+        AlgoParameters parameters = type switch
+        {
+            AlgoType.Iceberg => new IcebergParameters(
+                ac.IcebergDisplayQuantity ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing IcebergDisplayQuantity."),
+                ac.IcebergLimitPrice),
+            AlgoType.Twap => new TwapParameters(
+                ac.TwapStartUtc ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing TwapStartUtc."),
+                ac.TwapEndUtc ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing TwapEndUtc."),
+                ac.TwapSliceCount ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing TwapSliceCount."),
+                Enum.Parse<OrderType>(ac.TwapChildOrderType ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing TwapChildOrderType."), ignoreCase: true),
+                ac.TwapChildPrice),
+            _ => throw new InvalidOperationException($"Unknown algo type: {ac.Type}"),
+        };
+        _algos.TryAdd(new Algo(ac.AlgoId, owner, ac.FirmId, ac.Symbol, ac.SecurityId,
+            side, type, ac.TotalQuantity, parameters, ac.CreatedAtUtc));
     }
 }

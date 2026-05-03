@@ -16,6 +16,7 @@ public sealed class PlatformSnapshot
     public List<string> KilledFirms { get; init; } = new();
     public ClOrdIdRegistrySnapshot ClOrdIds { get; init; } = new();
     public List<OwnershipMappingSnapshot> Ownership { get; init; } = new();
+    public List<AlgoSnapshot> Algos { get; init; } = new();
 }
 
 public sealed record OrderSnapshot(
@@ -30,7 +31,37 @@ public sealed record OrderSnapshot(
     long LeavesQuantity,
     long CumulativeQuantity,
     string Status,
-    string FirmId = "DEFAULT");
+    string FirmId = "DEFAULT",
+    ulong? ParentAlgoId = null,
+    int? AlgoSliceSeq = null);
+
+/// <summary>
+/// Captures an <see cref="B3.Trading.Domain.Algo"/> aggregate. Discriminated
+/// per-type fields mirror the <see cref="AlgoCreatedEvent"/> wire shape so
+/// that recovery via WAL-only and recovery via snapshot+tail produce
+/// byte-identical aggregates.
+/// </summary>
+public sealed record AlgoSnapshot(
+    ulong AlgoId,
+    string EndClientId,
+    string FirmId,
+    string Symbol,
+    ulong SecurityId,
+    string Side,
+    string Type,
+    long TotalQuantity,
+    long FilledQuantity,
+    string Status,
+    string TerminalReason,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset? TerminalAtUtc,
+    long? IcebergDisplayQuantity = null,
+    decimal? IcebergLimitPrice = null,
+    DateTimeOffset? TwapStartUtc = null,
+    DateTimeOffset? TwapEndUtc = null,
+    int? TwapSliceCount = null,
+    string? TwapChildOrderType = null,
+    decimal? TwapChildPrice = null);
 
 public sealed record PositionSnapshot(
     string EndClientId,
