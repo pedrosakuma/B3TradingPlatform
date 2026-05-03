@@ -46,6 +46,15 @@ public sealed class RiskLimits
     public long? MaxQuantity { get; set; }
     public decimal? MaxNotional { get; set; }
     public decimal? PriceCollarPercent { get; set; }
+    /// <summary>
+    /// Optional absolute price band (in price units) around the
+    /// reference. When set together with <see cref="PriceCollarPercent"/>
+    /// the effective band is the **intersection** of the two —
+    /// whichever is narrower wins on each side. Useful for low-priced
+    /// or illiquid tickers where a percent-only collar is too coarse,
+    /// or as a conservative floor on top of an existing percent.
+    /// </summary>
+    public decimal? PriceCollarAbsolute { get; set; }
     public long? PositionLimit { get; set; }
 }
 
@@ -90,6 +99,7 @@ public static class RiskLimitsResolver
             MaxQuantity = Resolve(opts, endClient, firmId, symbol, l => l.MaxQuantity),
             MaxNotional = Resolve(opts, endClient, firmId, symbol, l => l.MaxNotional),
             PriceCollarPercent = Resolve(opts, endClient, firmId, symbol, l => l.PriceCollarPercent),
+            PriceCollarAbsolute = Resolve(opts, endClient, firmId, symbol, l => l.PriceCollarAbsolute),
             PositionLimit = Resolve(opts, endClient, firmId, symbol, l => l.PositionLimit),
         };
 }

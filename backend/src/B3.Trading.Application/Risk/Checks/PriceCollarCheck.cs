@@ -22,7 +22,8 @@ public sealed class PriceCollarCheck : IRiskCheck
         if (!ctx.Price.HasValue) return RiskDecision.Approve; // market order
         var opts = _options.CurrentValue;
         var collarPct = RiskLimitsResolver.Resolve(opts, ctx.Owner.Value, ctx.FirmId, ctx.Symbol, l => l.PriceCollarPercent);
-        if (!collarPct.HasValue) return RiskDecision.Approve;
+        var collarAbs = RiskLimitsResolver.Resolve(opts, ctx.Owner.Value, ctx.FirmId, ctx.Symbol, l => l.PriceCollarAbsolute);
+        if (!collarPct.HasValue && !collarAbs.HasValue) return RiskDecision.Approve;
 
         var lookup = _refPrice.Lookup(ctx.Symbol);
         MetricsRegistry.RefPriceLookups.Add(1,
@@ -41,8 +42,24 @@ public sealed class PriceCollarCheck : IRiskCheck
         }
 
         var refPx = lookup.Price;
-        var lower = refPx * (1m - collarPct.Value / 100m);
-        var upper = refPx * (1m + collarPct.Value / 100m);
+
+        // Effective band is the intersection of percent and absolute
+        // when both are set — narrower wins on each side. Either alone
+        // defines the full band; both unset short-circuited above.
+        decimal lower = decimal.MinValue, upper = decimal.MaxValue;
+        if (collarPct is { } pct)
+        {
+            lower = refPx * (1m - pct / 100m);
+            upper = refPx * (1m + pct / 100m);
+        }
+        if (collarAbs is { } abs && abs > 0m)
+        {
+            var absLower = refPx - abs;
+            var absUpper = refPx + abs;
+            if (absLower > lower) lower = absLower;
+            if (absUpper < upper) upper = absUpper;
+        }
+
         if (ctx.Price.Value < lower || ctx.Price.Value > upper)
             return RiskDecision.Reject(
                 $"price {ctx.Price.Value} outside collar [{lower:0.####}, {upper:0.####}] around ref {refPx}");

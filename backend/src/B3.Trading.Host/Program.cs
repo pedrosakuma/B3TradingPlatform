@@ -103,6 +103,8 @@ builder.Services.AddSingleton<IMarginProvider>(sp =>
         : new NoOpMarginProvider();
 });
 builder.Services.AddSingleton<IRiskCheck, KillSwitchCheck>();
+builder.Services.AddSingleton<IRiskCheck, MinTickSizeCheck>();
+builder.Services.AddSingleton<IRiskCheck, MinLotSizeCheck>();
 builder.Services.AddSingleton<IRiskCheck, MaxQuantityCheck>();
 builder.Services.AddSingleton<IRiskCheck, MaxNotionalCheck>();
 builder.Services.AddSingleton<IRiskCheck, PositionLimitCheck>();

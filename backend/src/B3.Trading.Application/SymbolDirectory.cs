@@ -30,6 +30,7 @@ namespace B3.Trading.Application;
 public sealed class SymbolDirectory
 {
     private readonly IReadOnlyDictionary<string, ulong> _byName;
+    private readonly IReadOnlyDictionary<string, InstrumentSpec> _specs;
 
     public SymbolDirectory(SymbolDirectoryOptions options)
     {
@@ -43,6 +44,21 @@ public sealed class SymbolDirectory
             copy[kv.Key] = kv.Value;
         }
         _byName = copy;
+
+        var specs = new Dictionary<string, InstrumentSpec>(StringComparer.OrdinalIgnoreCase);
+        foreach (var kv in options.Specs)
+        {
+            if (string.IsNullOrWhiteSpace(kv.Key) || kv.Value is null) continue;
+            // Drop entries that wouldn't constrain anything — keeps
+            // TryGetSpec callers from having to special-case zero/negative.
+            var t = kv.Value.TickSize;
+            var l = kv.Value.LotSize;
+            if ((t is null or <= 0m) && (l is null or <= 0)) continue;
+            specs[kv.Key] = new InstrumentSpec(
+                t is > 0m ? t : null,
+                l is > 0 ? l : null);
+        }
+        _specs = specs;
     }
 
     public int Count => _byName.Count;
@@ -56,7 +72,33 @@ public sealed class SymbolDirectory
         }
         return _byName.TryGetValue(symbol, out securityId);
     }
+
+    /// <summary>
+    /// Returns the per-instrument tick/lot constraints for a symbol if
+    /// configured. Missing entries return false — fail-open is the
+    /// caller's responsibility (used by the fat-finger checks so that
+    /// an unconfigured symbol is not blocked by a non-existent tick).
+    /// </summary>
+    public bool TryGetSpec(string? symbol, out InstrumentSpec spec)
+    {
+        if (string.IsNullOrWhiteSpace(symbol))
+        {
+            spec = default;
+            return false;
+        }
+        return _specs.TryGetValue(symbol, out spec!);
+    }
 }
+
+/// <summary>
+/// Per-instrument trading constraints that don't fit in
+/// <see cref="Risk.RiskOptions"/> because they describe the
+/// instrument itself, not the firm/end-client risk policy. Both
+/// fields are optional — a null/missing value means "no constraint",
+/// so partial entries are valid (e.g. a TickSize-only spec for a
+/// symbol whose lot size is 1).
+/// </summary>
+public readonly record struct InstrumentSpec(decimal? TickSize, long? LotSize);
 
 /// <summary>
 /// Bound from <c>Trading:SymbolDirectory</c>.
@@ -71,4 +113,24 @@ public sealed class SymbolDirectoryOptions
     /// </summary>
     public Dictionary<string, ulong> SecurityIds { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Symbol → tick/lot constraints. Independent from
+    /// <see cref="SecurityIds"/>: a symbol can appear in one without
+    /// the other (e.g. the SecurityId is required for routing but
+    /// tick/lot are operator-supplied for the fat-finger checks).
+    /// </summary>
+    public Dictionary<string, InstrumentSpecOptions> Specs { get; set; } =
+        new(StringComparer.OrdinalIgnoreCase);
+}
+
+/// <summary>
+/// Mutable counterpart of <see cref="InstrumentSpec"/> used only by
+/// <c>Microsoft.Extensions.Configuration</c> binding (records with
+/// non-null parameters don't bind well from JSON sections).
+/// </summary>
+public sealed class InstrumentSpecOptions
+{
+    public decimal? TickSize { get; set; }
+    public long? LotSize { get; set; }
 }

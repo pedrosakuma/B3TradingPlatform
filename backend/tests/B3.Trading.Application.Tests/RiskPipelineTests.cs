@@ -227,6 +227,84 @@ public class RiskPipelineTests
     }
 
     [Fact]
+    public void PriceCollar_AbsoluteAlone_RejectsOutsideBand()
+    {
+        var refPx = new StubRef(("PETR4", 30m));
+        var opts = Wrap(new RiskOptions { Default = new RiskLimits { PriceCollarAbsolute = 0.50m } });
+        var check = new PriceCollarCheck(opts, refPx);
+        Assert.True(check.Check(Ctx(price: 30.50m)).Approved);   // upper boundary
+        Assert.True(check.Check(Ctx(price: 29.50m)).Approved);   // lower boundary
+        Assert.False(check.Check(Ctx(price: 30.51m)).Approved);
+        Assert.False(check.Check(Ctx(price: 29.49m)).Approved);
+    }
+
+    [Fact]
+    public void PriceCollar_PercentAndAbsolute_IntersectionWins()
+    {
+        // ref=30, pct=10% → [27, 33]; abs=0.50 → [29.50, 30.50].
+        // intersection [29.50, 30.50] — absolute is the narrower band.
+        var refPx = new StubRef(("PETR4", 30m));
+        var opts = Wrap(new RiskOptions
+        {
+            Default = new RiskLimits { PriceCollarPercent = 10m, PriceCollarAbsolute = 0.50m }
+        });
+        var check = new PriceCollarCheck(opts, refPx);
+        Assert.True(check.Check(Ctx(price: 30.50m)).Approved);
+        Assert.False(check.Check(Ctx(price: 31m)).Approved);   // inside pct, outside abs
+        Assert.False(check.Check(Ctx(price: 29m)).Approved);
+    }
+
+    [Fact]
+    public void MinTickSize_RejectsNonMultiple()
+    {
+        var dir = BuildDirectory(specs: new() { ["PETR4"] = new() { TickSize = 0.01m } });
+        var check = new MinTickSizeCheck(dir);
+        Assert.True(check.Check(Ctx(price: 30.01m)).Approved);
+        Assert.True(check.Check(Ctx(price: 30.00m)).Approved);
+        Assert.False(check.Check(Ctx(price: 30.001m)).Approved);
+    }
+
+    [Fact]
+    public void MinTickSize_NoSpec_Approves()
+    {
+        var dir = BuildDirectory();
+        Assert.True(new MinTickSizeCheck(dir).Check(Ctx(price: 30.001m)).Approved);
+    }
+
+    [Fact]
+    public void MinTickSize_MarketOrder_Approves()
+    {
+        var dir = BuildDirectory(specs: new() { ["PETR4"] = new() { TickSize = 0.01m } });
+        Assert.True(new MinTickSizeCheck(dir).Check(Ctx(price: null, type: OrderType.Market)).Approved);
+    }
+
+    [Fact]
+    public void MinLotSize_RejectsNonMultiple()
+    {
+        var dir = BuildDirectory(specs: new() { ["PETR4"] = new() { LotSize = 100L } });
+        var check = new MinLotSizeCheck(dir);
+        Assert.True(check.Check(Ctx(qty: 100)).Approved);
+        Assert.True(check.Check(Ctx(qty: 300)).Approved);
+        Assert.False(check.Check(Ctx(qty: 150)).Approved);
+        Assert.False(check.Check(Ctx(qty: 1)).Approved);
+    }
+
+    [Fact]
+    public void MinLotSize_NoSpec_Approves()
+    {
+        Assert.True(new MinLotSizeCheck(BuildDirectory()).Check(Ctx(qty: 7)).Approved);
+    }
+
+    private static SymbolDirectory BuildDirectory(
+        Dictionary<string, ulong>? securityIds = null,
+        Dictionary<string, InstrumentSpecOptions>? specs = null) =>
+        new(new SymbolDirectoryOptions
+        {
+            SecurityIds = securityIds ?? new(StringComparer.OrdinalIgnoreCase),
+            Specs = specs ?? new(StringComparer.OrdinalIgnoreCase),
+        });
+
+    [Fact]
     public void PositionLimit_RejectsWhenProjectedExceeds()
     {
         var positions = new PositionKeeper();

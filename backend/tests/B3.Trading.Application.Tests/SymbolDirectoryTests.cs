@@ -98,4 +98,81 @@ public class SymbolDirectoryTests
         Assert.Equal(0, sut.Count);
         Assert.False(sut.TryResolve("PETR4", out _));
     }
+
+    [Fact]
+    public void TryGetSpec_ReturnsConfiguredSpec()
+    {
+        var sut = new SymbolDirectory(new SymbolDirectoryOptions
+        {
+            Specs =
+            {
+                ["PETR4"] = new InstrumentSpecOptions { TickSize = 0.01m, LotSize = 100L },
+            },
+        });
+
+        Assert.True(sut.TryGetSpec("PETR4", out var spec));
+        Assert.Equal(0.01m, spec.TickSize);
+        Assert.Equal(100L, spec.LotSize);
+    }
+
+    [Fact]
+    public void TryGetSpec_IsCaseInsensitive()
+    {
+        var sut = new SymbolDirectory(new SymbolDirectoryOptions
+        {
+            Specs = { ["PETR4"] = new InstrumentSpecOptions { TickSize = 0.01m } },
+        });
+
+        Assert.True(sut.TryGetSpec("petr4", out var spec));
+        Assert.Equal(0.01m, spec.TickSize);
+        Assert.Null(spec.LotSize);
+    }
+
+    [Fact]
+    public void TryGetSpec_UnknownSymbol_ReturnsFalse()
+    {
+        var sut = new SymbolDirectory(new SymbolDirectoryOptions
+        {
+            Specs = { ["PETR4"] = new InstrumentSpecOptions { TickSize = 0.01m } },
+        });
+
+        Assert.False(sut.TryGetSpec("VALE3", out var spec));
+        Assert.Equal(default, spec);
+    }
+
+    [Fact]
+    public void TryGetSpec_DropsEntriesWithNoConstraint()
+    {
+        // A spec where both tick and lot are missing (or non-positive)
+        // wouldn't constrain anything — treat it as "no spec" so the
+        // fail-open posture in MinTick/MinLot stays sharp.
+        var sut = new SymbolDirectory(new SymbolDirectoryOptions
+        {
+            Specs =
+            {
+                ["EMPTY"] = new InstrumentSpecOptions(),
+                ["BAD"]   = new InstrumentSpecOptions { TickSize = 0m, LotSize = 0L },
+            },
+        });
+
+        Assert.False(sut.TryGetSpec("EMPTY", out _));
+        Assert.False(sut.TryGetSpec("BAD", out _));
+    }
+
+    [Fact]
+    public void Specs_AreIndependentFromSecurityIds()
+    {
+        // A symbol can have a Spec without a SecurityId (or vice versa)
+        // — they're orthogonal lookups against the same directory.
+        var sut = new SymbolDirectory(new SymbolDirectoryOptions
+        {
+            SecurityIds = { ["PETR4"] = 4321UL },
+            Specs = { ["VALE3"] = new InstrumentSpecOptions { TickSize = 0.01m } },
+        });
+
+        Assert.True(sut.TryResolve("PETR4", out _));
+        Assert.False(sut.TryGetSpec("PETR4", out _));
+        Assert.False(sut.TryResolve("VALE3", out _));
+        Assert.True(sut.TryGetSpec("VALE3", out _));
+    }
 }
