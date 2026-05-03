@@ -18,6 +18,9 @@ const state = {
   submitInflight: null,    // { startedAt: ms } | null — true while POST /orders is awaiting response
   wsReconnect: null,       // { nextAt: ms } | null — when worker has scheduled the next attempt
   firmsHealth: null,       // { mode, firms, fetchedAt } | null — admin-only poll of /admin/firms
+  killStatus: null,        // { endClients: [], firms: [], fetchedAt } | null — admin-only
+  eodReport: null,         // { ranAt, report } | null — last EOD response in this session
+  currentView: "trader",   // "trader" | "admin" — which view is mounted
 };
 
 const EXECUTIONS_CAPACITY = 500;
@@ -148,4 +151,20 @@ export function setWsReconnect(value) {
 export function setFirmsHealth(value) {
   state.firmsHealth = value;
   notify("firmsHealth");
+}
+
+export function setKillStatus(value) {
+  state.killStatus = value;
+  notify("killStatus");
+}
+
+export function setEodReport(value) {
+  state.eodReport = value;
+  notify("eodReport");
+}
+
+export function setCurrentView(view) {
+  if (state.currentView === view) return;
+  state.currentView = view;
+  notify("currentView");
 }

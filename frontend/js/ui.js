@@ -11,22 +11,36 @@ let onSubmitOrder = () => {};
 let onCancelOrder = () => {};
 let onLogout      = () => {};
 let onApplyMd     = () => {};
+let onSwitchView  = () => {};
 
 export function setHandlers(handlers) {
   onSubmitOrder = handlers.onSubmitOrder ?? onSubmitOrder;
   onCancelOrder = handlers.onCancelOrder ?? onCancelOrder;
   onLogout      = handlers.onLogout      ?? onLogout;
   onApplyMd     = handlers.onApplyMd     ?? onApplyMd;
+  onSwitchView  = handlers.onSwitchView  ?? onSwitchView;
 }
 
 export function showLogin() {
   $("login-view").hidden = false;
   $("trader-view").hidden = true;
+  $("admin-view").hidden = true;
+  setViewToggleVisible(false, "trader");
 }
 
 export function showTrader() {
   $("login-view").hidden = true;
   $("trader-view").hidden = false;
+  $("admin-view").hidden = true;
+}
+
+function setViewToggleVisible(visible, current) {
+  const wrap = $("view-toggle");
+  if (!wrap) return;
+  wrap.hidden = !visible;
+  for (const btn of wrap.querySelectorAll("button[data-view]")) {
+    btn.classList.toggle("active", btn.dataset.view === current);
+  }
 }
 
 export function setLoginError(message) {
@@ -81,6 +95,17 @@ export function bindUi() {
     onApplyMd({ url, symbols });
   });
 
+  // View toggle (trader / admin) — only wired here, visibility is
+  // gated in app.js based on the JWT role claim.
+  const toggle = $("view-toggle");
+  if (toggle) {
+    toggle.addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-view]");
+      if (!btn) return;
+      onSwitchView(btn.dataset.view);
+    });
+  }
+
   subscribe(renderForSlice);
   renderAll();
 }
@@ -126,14 +151,32 @@ export function setStatusPill(status) {
 export function setUserLabel(user) {
   $("user-label").textContent = user ? `${user.username}` : "";
   const roleEl = $("user-role");
-  if (!roleEl) return;
-  if (user?.role && user.role !== "user") {
-    roleEl.textContent = user.role;
-    roleEl.hidden = false;
-  } else {
-    roleEl.textContent = "";
-    roleEl.hidden = true;
+  if (roleEl) {
+    if (user?.role && user.role !== "user") {
+      roleEl.textContent = user.role;
+      roleEl.hidden = false;
+    } else {
+      roleEl.textContent = "";
+      roleEl.hidden = true;
+    }
   }
+  // Toggle visibility of the trader/admin view switch based on role.
+  const isAdmin = user?.role === "admin";
+  setViewToggleVisible(isAdmin, getState().currentView);
+}
+
+function applyCurrentView(view) {
+  const trader = $("trader-view");
+  const admin = $("admin-view");
+  if (!trader || !admin) return;
+  if (view === "admin") {
+    trader.hidden = true;
+    admin.hidden = false;
+  } else {
+    trader.hidden = false;
+    admin.hidden = true;
+  }
+  setViewToggleVisible(getState().user?.role === "admin", view);
 }
 
 // Periodic UI tick for time-based elements (in-flight elapsed, reconnect
@@ -209,6 +252,7 @@ function renderForSlice(slice) {
   if (slice === "submitInflight") renderInflight();
   if (slice === "wsReconnect") renderReconnect();
   if (slice === "firmsHealth" || slice === "all") renderFirmsHealth();
+  if (slice === "currentView" || slice === "all") applyCurrentView(getState().currentView);
 }
 
 function renderAll() {

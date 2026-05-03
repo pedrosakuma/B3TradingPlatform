@@ -1,9 +1,12 @@
 // App entry point: wires login → worker → state → UI together.
 
-import { defaultBackend, login, submitOrder, cancelOrder, getAdminFirms } from "./protocol.js";
+import { defaultBackend, login, submitOrder, cancelOrder, getAdminFirms,
+         getKillStatus, killFirm, reviveFirm, killEndClient, reviveEndClient,
+         runEod } from "./protocol.js";
 import { claimsFromToken } from "./jwt.js";
 import * as state from "./state.js";
 import * as ui from "./ui.js";
+import * as adminUi from "./adminUi.js";
 
 const SESSION_KEY = "b3tp.session";
 const MD_KEY = "b3tp.md";
@@ -21,11 +24,20 @@ function init() {
   document.getElementById("login-backend").placeholder = defaultBackend();
   document.getElementById("login-form").addEventListener("submit", onLogin);
   ui.bindUi();
+  adminUi.bindAdminUi();
   ui.setHandlers({
     onSubmitOrder: handleSubmitOrder,
     onCancelOrder: handleCancelOrder,
     onLogout: logout,
     onApplyMd: handleApplyMd,
+    onSwitchView: handleSwitchView,
+  });
+  adminUi.setAdminHandlers({
+    onToggleFirm:      handleToggleFirm,
+    onToggleEndClient: handleToggleEndClient,
+    onAddEndClient:    handleAddEndClient,
+    onRunEod:          handleRunEod,
+    onRefresh:         refreshAdminData,
   });
 
   const stored = readSession();
@@ -76,6 +88,9 @@ function startSession(next) {
   state.setSubmitInflight(null);
   state.setWsReconnect(null);
   state.setFirmsHealth(null);
+  state.setKillStatus(null);
+  state.setEodReport(null);
+  state.setCurrentView("trader");
   ui.showTrader();
 
   startWorker();
@@ -273,6 +288,9 @@ function logout() {
   state.setSubmitInflight(null);
   state.setWsReconnect(null);
   state.setFirmsHealth(null);
+  state.setKillStatus(null);
+  state.setEodReport(null);
+  state.setCurrentView("trader");
   state.clearAll();
   state.clearMarketData();
   state.setWatchlist([]);
@@ -298,14 +316,78 @@ function stopFirmsPoll() {
 async function pollFirmsOnce() {
   if (!session) return;
   try {
-    const resp = await getAdminFirms(session.backend, session.token);
-    state.setFirmsHealth({ ...resp, fetchedAt: Date.now() });
+    const [firms, kill] = await Promise.all([
+      getAdminFirms(session.backend, session.token),
+      getKillStatus(session.backend, session.token),
+    ]);
+    state.setFirmsHealth({ ...firms, fetchedAt: Date.now() });
+    state.setKillStatus({
+      firms: kill?.Firms ?? [],
+      endClients: kill?.EndClients ?? [],
+      fetchedAt: Date.now(),
+    });
   } catch (err) {
     if (err.status === 401) { logout(); return; }
     // 403 here means the JWT role drifted; stop polling so we don't
     // hammer the endpoint with rejected calls.
     if (err.status === 403) { stopFirmsPoll(); return; }
-    console.warn("[admin/firms]", err);
+    console.warn("[admin/poll]", err);
+  }
+}
+
+// ── Admin view + actions ───────────────────────────────────────────
+
+function handleSwitchView(view) {
+  if (view === "admin" && session?.role !== "admin") return; // safety
+  state.setCurrentView(view);
+  if (view === "admin") refreshAdminData();
+}
+
+async function refreshAdminData() {
+  await pollFirmsOnce();
+}
+
+async function withAdminCall(fn, okMessage) {
+  try {
+    await fn();
+    adminUi.setAdminFeedback(okMessage, "ok");
+    await pollFirmsOnce();
+  } catch (err) {
+    if (err.status === 401) { logout(); return; }
+    if (err.status === 403) { adminUi.setAdminFeedback("forbidden — role lost?", "error"); return; }
+    if (err.status === 503) { adminUi.setAdminFeedback("WAL backpressure — retry shortly", "error"); return; }
+    if (err.status === 409) { adminUi.setAdminFeedback(err.message || "conflict", "error"); return; }
+    adminUi.setAdminFeedback(err.message || "request failed", "error");
+  }
+}
+
+function handleToggleFirm({ firmId, engage }) {
+  withAdminCall(
+    () => (engage ? killFirm : reviveFirm)(session.backend, session.token, firmId),
+    `firm ${firmId}: ${engage ? "killed" : "revived"}`,
+  );
+}
+
+function handleToggleEndClient({ id, engage }) {
+  withAdminCall(
+    () => (engage ? killEndClient : reviveEndClient)(session.backend, session.token, id),
+    `end-client ${id}: ${engage ? "killed" : "revived"}`,
+  );
+}
+
+function handleAddEndClient({ id }) {
+  handleToggleEndClient({ id, engage: true });
+}
+
+async function handleRunEod() {
+  try {
+    const report = await runEod(session.backend, session.token);
+    state.setEodReport({ ranAt: Date.now(), report });
+    adminUi.setAdminFeedback("EOD report generated", "ok");
+  } catch (err) {
+    if (err.status === 401) { logout(); return; }
+    if (err.status === 409) { adminUi.setAdminFeedback("persistence disabled — EOD unavailable", "error"); return; }
+    adminUi.setAdminFeedback(err.message || "EOD failed", "error");
   }
 }
 
