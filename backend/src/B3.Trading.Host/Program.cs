@@ -27,6 +27,10 @@ builder.Services.Configure<AuthOptions>(
     builder.Configuration.GetSection(AuthOptions.SectionName));
 builder.Services.Configure<RiskOptions>(
     builder.Configuration.GetSection(RiskOptions.SectionName));
+builder.Services.Configure<SymbolDirectoryOptions>(
+    builder.Configuration.GetSection(SymbolDirectoryOptions.SectionName));
+builder.Services.AddSingleton(sp =>
+    new SymbolDirectory(sp.GetRequiredService<IOptions<SymbolDirectoryOptions>>().Value));
 builder.Services.Configure<PersistenceOptions>(
     builder.Configuration.GetSection(PersistenceOptions.SectionName));
 
