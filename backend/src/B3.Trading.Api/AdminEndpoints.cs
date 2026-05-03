@@ -100,6 +100,7 @@ public static class AdminEndpoints
                     priceCollarPercent = resolved.PriceCollarPercent,
                     priceCollarAbsolute = resolved.PriceCollarAbsolute,
                     positionLimit = resolved.PositionLimit,
+                    maxOpenOrders = resolved.MaxOpenOrders,
                 },
             });
         });

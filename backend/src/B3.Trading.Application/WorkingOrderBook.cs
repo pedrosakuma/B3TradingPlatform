@@ -18,6 +18,13 @@ public sealed class WorkingOrderBook
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<ulong, byte>> _byFirm =
         new(StringComparer.Ordinal);
 
+    // Secondary index: end-client -> set of ClOrdIDs. Used by the
+    // slice-7 MaxOpenOrders check so the hot path doesn't scan every
+    // historical order in _orders to count what's still open for one
+    // owner. Same lock-free shape as _byFirm.
+    private readonly ConcurrentDictionary<string, ConcurrentDictionary<ulong, byte>> _byOwner =
+        new(StringComparer.Ordinal);
+
     public bool TryAdd(Order order)
     {
         if (!_orders.TryAdd(order.ClOrdId, order))
@@ -25,6 +32,8 @@ public sealed class WorkingOrderBook
 
         var firmSet = _byFirm.GetOrAdd(order.FirmId, static _ => new ConcurrentDictionary<ulong, byte>());
         firmSet.TryAdd(order.ClOrdId, 0);
+        var ownerSet = _byOwner.GetOrAdd(order.Owner.Value, static _ => new ConcurrentDictionary<ulong, byte>());
+        ownerSet.TryAdd(order.ClOrdId, 0);
         return true;
     }
 
@@ -39,6 +48,30 @@ public sealed class WorkingOrderBook
                 list.Add(kv.Value);
         }
         return list;
+    }
+
+    /// <summary>
+    /// Counts an end-client's non-terminal orders (PendingNew /
+    /// Working / PartiallyFilled). Indexed via <see cref="_byOwner"/>
+    /// so the cost is O(orders for owner) rather than O(total orders)
+    /// — the v2 risk pipeline calls this on every submit.
+    /// </summary>
+    /// <remarks>
+    /// The current order being submitted is already in the book by
+    /// the time the risk pipeline runs (the persistence dispatcher
+    /// adds it before evaluation), so callers comparing to a cap
+    /// should use strict <c>&gt;</c>, not <c>&gt;=</c>.
+    /// </remarks>
+    public int CountOpenForOwner(EndClientId owner)
+    {
+        if (!_byOwner.TryGetValue(owner.Value, out var set)) return 0;
+        var count = 0;
+        foreach (var clOrdId in set.Keys)
+        {
+            if (!_orders.TryGetValue(clOrdId, out var order)) continue;
+            if (!IsTerminal(order.Status)) count++;
+        }
+        return count;
     }
 
     /// <summary>
@@ -101,6 +134,7 @@ public sealed class WorkingOrderBook
         ArgumentNullException.ThrowIfNull(snaps);
         _orders.Clear();
         _byFirm.Clear();
+        _byOwner.Clear();
         foreach (var s in snaps)
         {
             var owner = new EndClientId(s.EndClientId);
@@ -111,6 +145,8 @@ public sealed class WorkingOrderBook
                 s.Quantity, s.Price, s.LeavesQuantity, s.CumulativeQuantity, status, s.FirmId);
             var firmSet = _byFirm.GetOrAdd(s.FirmId, static _ => new ConcurrentDictionary<ulong, byte>());
             firmSet.TryAdd(s.ClOrdId, 0);
+            var ownerSet = _byOwner.GetOrAdd(s.EndClientId, static _ => new ConcurrentDictionary<ulong, byte>());
+            ownerSet.TryAdd(s.ClOrdId, 0);
         }
     }
 }

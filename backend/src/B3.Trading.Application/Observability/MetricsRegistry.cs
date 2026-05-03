@@ -211,4 +211,61 @@ public static class MetricsRegistry
     public static void RegisterRefPriceStalenessSource(
         Func<IEnumerable<KeyValuePair<string, double>>> source) =>
         _refPriceStalenessSources.Add(source);
+
+    // Slice 7 — throttle/limit observability. All gauges are
+    // intentionally aggregate (no per-end-client tag) to keep
+    // observability cardinality bounded under tenant churn.
+    // Per-tenant detail is exposed via GET /admin/risk/throttle.
+
+    /// <summary>
+    /// Bumped when <see cref="Risk.Accounting.RollingNotionalAccountant"/>
+    /// cannot price a market order because no reference price exists
+    /// for the symbol — the order is recorded with notional 0
+    /// (fail-open). A sustained non-zero rate means the rolling cap
+    /// is being silently underestimated for those symbols.
+    /// </summary>
+    public static readonly Counter<long> RollingNotionalBypassedNoReference =
+        Meter.CreateCounter<long>("trading.risk.rolling_notional.bypassed_no_reference");
+
+    private static volatile Func<int>? _rollingNotionalActiveBucketsEc;
+    private static volatile Func<int>? _rollingNotionalActiveBucketsFirm;
+    public static readonly ObservableGauge<int> RollingNotionalActiveBuckets =
+        Meter.CreateObservableGauge<int>(
+            "trading.risk.rolling_notional.active_buckets",
+            () =>
+            {
+                var ec = _rollingNotionalActiveBucketsEc?.Invoke() ?? 0;
+                var fm = _rollingNotionalActiveBucketsFirm?.Invoke() ?? 0;
+                return new[]
+                {
+                    new Measurement<int>(ec, new KeyValuePair<string, object?>("scope", "end_client")),
+                    new Measurement<int>(fm, new KeyValuePair<string, object?>("scope", "firm")),
+                };
+            });
+    public static void RegisterRollingNotionalSources(Func<int> endClient, Func<int> firm)
+    {
+        _rollingNotionalActiveBucketsEc = endClient;
+        _rollingNotionalActiveBucketsFirm = firm;
+    }
+
+    private static volatile Func<int>? _orderRateActiveBucketsEc;
+    private static volatile Func<int>? _orderRateActiveBucketsFirm;
+    public static readonly ObservableGauge<int> OrderRateActiveBuckets =
+        Meter.CreateObservableGauge<int>(
+            "trading.risk.order_rate.active_buckets",
+            () =>
+            {
+                var ec = _orderRateActiveBucketsEc?.Invoke() ?? 0;
+                var fm = _orderRateActiveBucketsFirm?.Invoke() ?? 0;
+                return new[]
+                {
+                    new Measurement<int>(ec, new KeyValuePair<string, object?>("scope", "end_client")),
+                    new Measurement<int>(fm, new KeyValuePair<string, object?>("scope", "firm")),
+                };
+            });
+    public static void RegisterOrderRateSources(Func<int> endClient, Func<int> firm)
+    {
+        _orderRateActiveBucketsEc = endClient;
+        _orderRateActiveBucketsFirm = firm;
+    }
 }

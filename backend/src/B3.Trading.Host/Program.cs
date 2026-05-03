@@ -9,12 +9,14 @@ using B3.Trading.Api.WebSockets;
 using B3.Trading.Application;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
+using B3.Trading.Application.Risk.Accounting;
 using B3.Trading.Application.Risk.Checks;
 using B3.Trading.Host.Observability;
 using B3.Trading.Host.MarketData;
 using B3.Trading.Infrastructure;
 using B3.Trading.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.IdentityModel.Tokens;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -108,8 +110,22 @@ builder.Services.AddSingleton<IRiskCheck, MinLotSizeCheck>();
 builder.Services.AddSingleton<IRiskCheck, MaxQuantityCheck>();
 builder.Services.AddSingleton<IRiskCheck, MaxNotionalCheck>();
 builder.Services.AddSingleton<IRiskCheck, PositionLimitCheck>();
+builder.Services.AddSingleton<IRiskCheck, RollingNotionalCheck>();
+builder.Services.AddSingleton<IRiskCheck, OrderRateLimitCheck>();
+builder.Services.AddSingleton<IRiskCheck, MaxOpenOrdersCheck>();
 builder.Services.AddSingleton<IRiskCheck, PriceCollarCheck>();
 builder.Services.AddSingleton<RiskPipeline>();
+
+// Throttle accountants (slice 7). TimeProvider is fetched from DI so
+// tests can substitute a FakeTimeProvider; production resolves to
+// TimeProvider.System via the registration below.
+builder.Services.TryAddSingleton(TimeProvider.System);
+builder.Services.AddSingleton<RollingNotionalAccountant>();
+builder.Services.AddSingleton<OrderRateAccountant>();
+builder.Services.AddSingleton<IRiskAccountant>(sp => sp.GetRequiredService<RollingNotionalAccountant>());
+builder.Services.AddSingleton<IRiskAccountant>(sp => sp.GetRequiredService<OrderRateAccountant>());
+builder.Services.AddSingleton<CompositeRiskAccountant>();
+builder.Services.AddHostedService<ThrottleLedgerSweeper>();
 
 // Auth: JWT bearer with explicit claim mapping. We disable the legacy
 // inbound mapping so 'sub' stays 'sub' (not ClaimTypes.NameIdentifier),
@@ -306,6 +322,20 @@ builder.Services.AddSingleton<ExchangeStatus>(sp =>
 builder.Services.AddTradingObservability(builder.Configuration);
 
 var app = builder.Build();
+
+// Hook the slice-7 throttle ledgers into MetricsRegistry so the
+// observable gauges have a source. Done after Build so the singletons
+// are resolvable; safe to call multiple times (sources are last-write-wins).
+{
+    var rolling = app.Services.GetRequiredService<RollingNotionalAccountant>();
+    var rate = app.Services.GetRequiredService<OrderRateAccountant>();
+    B3.Trading.Application.Observability.MetricsRegistry.RegisterRollingNotionalSources(
+        () => rolling.EndClientLedger.ActiveBucketCount,
+        () => rolling.FirmLedger.ActiveBucketCount);
+    B3.Trading.Application.Observability.MetricsRegistry.RegisterOrderRateSources(
+        () => rate.EndClientLedger.ActiveBucketCount,
+        () => rate.FirmLedger.ActiveBucketCount);
+}
 
 // Fail-fast on weak / missing JWT signing key outside Development. The
 // default in appsettings.json is a known dev-only string; if it leaks
