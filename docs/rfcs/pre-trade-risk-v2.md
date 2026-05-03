@@ -242,6 +242,41 @@ The synthetic-ER invariant — risk rejections flow through the same
 channel as exchange rejections — is asserted by reading from the same
 ER stream the existing tests use.
 
+### 4.8 Throttle ledgers (rolling notional + order rate)
+
+`SlidingWindowLedger` is the shared in-memory aggregate behind
+`RollingNotionalCheck` and `OrderRateLimitCheck`. Two design points
+worth fixing:
+
+- **Scope is end-client and firm only — no per-symbol slot.** The
+  ledgers are keyed per-end-client (and per-firm) globally, but
+  `RiskLimits` resolves caps via the per-symbol slot too. Letting the
+  per-symbol cap apply to a global ledger would mean the cap that
+  applies to one order varies with the symbol while the state being
+  measured is global, which is the inconsistency we want to avoid.
+  `RollingNotionalOptions` and `OrderRateOptions` therefore live as
+  their own top-level sections with `Default` / `PerEndClient` /
+  `PerFirm` only.
+- **Check + record is intentionally not atomic.** Risk evaluation
+  reads the ledger; the accountant only writes after the synchronous
+  pipeline *and* the async margin reservation approve. Wrapping a
+  lock around that span would serialise order entry. Trade-off: under
+  N concurrent in-flight submits the cap can be overshot by up to N.
+  Acceptable for an anti-runaway guard; if a strict throttle is ever
+  needed, that's a different check with reserve+release semantics
+  (out of scope for v2).
+
+`MaxOpenOrdersCheck` reads `WorkingOrderBook.CountOpenForOwner`,
+which uses a secondary owner→ClOrdId index built on TryAdd/Restore so
+the hot path doesn't scan all historical orders. The order being
+submitted is already in the book by the time the risk pipeline runs
+(persistence dispatcher adds it before evaluation), so the check
+compares with strict `>` against the cap, not `>=`.
+
+A `ThrottleLedgerSweeper` BackgroundService prunes empty buckets
+periodically (default 60s) so distinct end-client/firm churn doesn't
+leak unbounded memory.
+
 ## 5. Alternatives considered
 
 ### A. Persist limits in a database now
@@ -306,7 +341,15 @@ metrics + tests included.
    `MaxNotionalCheck` (slice 7's rolling-window variant remains
    distinct).
 7. Notional cap by rolling window + order rate limit + max open
-   orders.
+   orders. **shipped** — sliding-window queue ledger
+   (`SlidingWindowLedger`) shared by `RollingNotionalCheck` and
+   `OrderRateLimitCheck`; both have per-end-client and per-firm scopes
+   (no per-symbol — see §4.4 below). `MaxOpenOrdersCheck` reads an
+   indexed `WorkingOrderBook.CountOpenForOwner` so the hot path is
+   O(orders for owner). `IRiskAccountant` is fanned out from the
+   submit endpoint after both the synchronous pipeline and margin
+   approve. A periodic `ThrottleLedgerSweeper` removes empty buckets
+   to bound memory under tenant churn.
 8. Conformance scenarios + Grafana panel + docs touch-up.
 
 ## 8. Open questions
@@ -319,9 +362,11 @@ metrics + tests included.
 - **OQ-2:** Margin TTL default — 5s feels right for the stub but a
   real provider may want 30s+ to amortize back-office cost. Leaving
   it configurable; default revisits when the real adapter arrives.
-- **OQ-3:** Rate limit window — fixed-window vs sliding-log. Sliding
-  is more accurate but more memory; fixed is simpler. Lean fixed for
-  v2 unless the conformance scenarios show false negatives.
+- **OQ-3:** Rate limit window — fixed-window vs sliding-log. **Resolved:**
+  shipped sliding-log via `SlidingWindowLedger` (queue + running
+  aggregate). Memory is bounded by the periodic sweeper; the running
+  aggregate keeps `Sum`/`Count` O(entries-pruned-this-call) rather
+  than O(window-size).
 - **OQ-4:** Should `/admin/risk/reload` be per-firm or global?
   Starting global; per-firm only if a multi-firm config-source
   provider needs it.

@@ -6,6 +6,7 @@ using B3.Trading.Application;
 using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
+using B3.Trading.Application.Risk.Accounting;
 using B3.Trading.Domain;
 using B3.Trading.Infrastructure;
 using Microsoft.AspNetCore.Authorization;
@@ -40,6 +41,7 @@ public static class OrdersEndpoints
             IExecutionEventSink sink,
             RiskPipeline risk,
             IMarginProvider margin,
+            CompositeRiskAccountant accountant,
             EventDispatcher dispatcher,
             DrainState drain,
             SymbolDirectory symbols,
@@ -139,6 +141,12 @@ public static class OrdersEndpoints
                 return Results.Accepted($"/orders/{clOrdId}",
                     new { ClOrdId = clOrdId.ToString(), Status = "Rejected", Reason = decision.Reason });
             }
+
+            // Slice 7: record the accepted submit on the rolling ledgers
+            // only after both the synchronous pipeline and the margin
+            // reservation approve. Recording earlier would charge the
+            // ledgers for orders the margin provider rejects.
+            accountant.RecordAccepted(riskCtx);
 
             try
             {
