@@ -1,3 +1,4 @@
+using B3.Trading.Application.Risk;
 using B3.Trading.Application;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Domain;
@@ -57,7 +58,7 @@ public class EntryPointGatewayAndRouterTests
         ownership.Register(1UL, owner);
 
         var sink = new TestSink();
-        var proc = new ExecutionReportProcessor(ownership, book, positions, sink, NullLogger<ExecutionReportProcessor>.Instance);
+        var proc = new ExecutionReportProcessor(ownership, book, positions, sink, new NoOpMarginProvider(), NullLogger<ExecutionReportProcessor>.Instance);
         var client = new MockEntryPointClient();
         var dispatcher = new EventDispatcher(new NullEventStore());
         using var router = new EntryPointExecutionReportRouter(client, proc, dispatcher);

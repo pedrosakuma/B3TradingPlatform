@@ -18,6 +18,27 @@ public sealed class RiskOptions
         new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, decimal> ReferencePrices { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
+    public MarginOptions Margin { get; set; } = new();
+}
+
+/// <summary>
+/// Reserve-on-submit margin configuration. Disabled by default —
+/// <see cref="NoOpMarginProvider"/> stays in place until an operator
+/// opts in. See <c>docs/rfcs/pre-trade-risk-v2.md</c> §3.1 for the
+/// model assumed by v2 (crypto-spot ledger; not T+N, not derivatives).
+/// </summary>
+public sealed class MarginOptions
+{
+    public bool Enabled { get; set; }
+
+    /// <summary>
+    /// Per-end-client opening balance (in the single accounting
+    /// currency v2 assumes). Missing entries are treated as zero, so
+    /// unrecognized end-clients cannot place buy orders when margin
+    /// is enabled — fail-closed by default.
+    /// </summary>
+    public Dictionary<string, decimal> Initial { get; set; } =
+        new(StringComparer.OrdinalIgnoreCase);
 }
 
 public sealed class RiskLimits

@@ -93,7 +93,15 @@ builder.Services.AddSingleton<EventDispatcher>();
 // the RiskPipeline through the IEnumerable<IRiskCheck> ctor injection.
 builder.Services.AddSingleton<KillSwitchService>();
 builder.Services.AddTradingMarketData(builder.Configuration);
-builder.Services.AddSingleton<IMarginProvider, NoOpMarginProvider>();
+builder.Services.AddSingleton<IMarginProvider>(sp =>
+{
+    var opts = sp.GetRequiredService<IOptionsMonitor<RiskOptions>>().CurrentValue;
+    return opts.Margin.Enabled
+        ? new ReserveOnSubmitMarginProvider(
+            sp.GetRequiredService<IOptionsMonitor<RiskOptions>>(),
+            sp.GetRequiredService<ILogger<ReserveOnSubmitMarginProvider>>())
+        : new NoOpMarginProvider();
+});
 builder.Services.AddSingleton<IRiskCheck, KillSwitchCheck>();
 builder.Services.AddSingleton<IRiskCheck, MaxQuantityCheck>();
 builder.Services.AddSingleton<IRiskCheck, MaxNotionalCheck>();

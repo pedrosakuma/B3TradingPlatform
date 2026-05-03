@@ -117,16 +117,19 @@ public static class OrdersEndpoints
                 new KeyValuePair<string, object?>("symbol", req.Symbol),
                 new KeyValuePair<string, object?>("side", side.ToString()));
 
-            // Pre-trade risk: synchronous pipeline + async margin provider.
+            // Pre-trade risk: synchronous pipeline + async margin reservation.
             // Rejection synthesizes an ER through the same sink real
             // exchange rejections use, so the WS client can't tell them
-            // apart structurally.
+            // apart structurally. Margin runs LAST so that a reject
+            // from any earlier check leaves the ledger untouched.
             var riskCtx = new RiskContext(owner, firm, req.Symbol, side, type, req.Quantity, req.Price);
             var decision = risk.Evaluate(riskCtx);
+            var marginReserved = false;
             if (decision.Approved)
             {
-                var marginDecision = await margin.CheckAsync(riskCtx, ct);
-                if (!marginDecision.Approved) decision = marginDecision;
+                var marginDecision = await margin.TryReserveAsync(clOrdId, riskCtx, ct);
+                if (marginDecision.Approved) marginReserved = true;
+                else decision = marginDecision;
             }
             if (!decision.Approved)
             {
@@ -146,6 +149,9 @@ public static class OrdersEndpoints
                 MetricsRegistry.OrdersGatewayFailed.Add(1);
                 loggerFactory.CreateLogger("OrdersEndpoints")
                     .LogError(ex, "Gateway submit failed for {ClOrdId}; synthesizing rejection.", clOrdId);
+                // Roll back the margin reservation: the order will never
+                // reach the exchange, so no ER will arrive to release it.
+                if (marginReserved) margin.ReleaseReservation(clOrdId);
                 PublishSyntheticRejection(dispatcher, sink, order, owner, "gateway_unavailable");
                 return Results.Json(
                     new { error = "gateway unavailable", clOrdId = clOrdId.ToString() },

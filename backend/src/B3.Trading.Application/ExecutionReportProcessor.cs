@@ -30,6 +30,7 @@ public sealed class ExecutionReportProcessor
     private readonly WorkingOrderBook _orders;
     private readonly PositionKeeper _positions;
     private readonly IExecutionEventSink _sink;
+    private readonly Risk.IMarginProvider _margin;
     private readonly ILogger<ExecutionReportProcessor> _logger;
 
     public ExecutionReportProcessor(
@@ -37,12 +38,14 @@ public sealed class ExecutionReportProcessor
         WorkingOrderBook orders,
         PositionKeeper positions,
         IExecutionEventSink sink,
+        Risk.IMarginProvider margin,
         ILogger<ExecutionReportProcessor> logger)
     {
         _ownership = ownership;
         _orders = orders;
         _positions = positions;
         _sink = sink;
+        _margin = margin;
         _logger = logger;
     }
 
@@ -124,6 +127,10 @@ public sealed class ExecutionReportProcessor
                             lookupId, lastQty, delta);
                     }
                     _positions.ApplyFill(owner, order.Symbol, order.Side, delta, lastPx);
+                    // Release reserved margin against the actual booked
+                    // delta — not the wire lastQty — so a lost
+                    // intermediate ER can't leave the ledger under-released.
+                    _margin.OnExecution(lookupId, kind, delta);
                     break;
                 }
             case ExecKind.Canceled:
@@ -134,6 +141,7 @@ public sealed class ExecutionReportProcessor
                     return;
                 }
                 order.MarkCancelled();
+                _margin.OnExecution(lookupId, kind, 0);
                 break;
             case ExecKind.Rejected:
                 if (order.Status is OrderStatus.Rejected or OrderStatus.Filled or OrderStatus.PartiallyFilled or OrderStatus.Cancelled)
@@ -143,6 +151,7 @@ public sealed class ExecutionReportProcessor
                     return;
                 }
                 order.MarkRejected();
+                _margin.OnExecution(lookupId, kind, 0);
                 break;
             case ExecKind.Replaced:
                 // Re-issuance: the gateway is responsible for calling
