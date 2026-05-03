@@ -37,6 +37,7 @@ Logical channels available to every authenticated client:
 | `orders.me`      | Order state changes (new ack, replace, cancel, fill — current state)   |
 | `executions.me`  | Each ExecutionReport (atomic event with ExecKind: Fill/Canceled/...)    |
 | `positions.me`   | Net position changes (only fired by Fill / PartialFill)                |
+| `algo.me`        | Algo parent state changes (PendingNew/Working/Cancelling/terminal)     |
 
 Unknown channel names are rejected with an `error` frame.
 
@@ -74,6 +75,11 @@ Server response: one `snapshot` frame per requested channel with
   position.
 - `executions.me`: empty array (the platform does not retain a historical
   execution log in v1; only future events are streamed).
+- `algo.me`: array of `AlgoDto` for every non-terminal algo parent owned
+  by the caller (firm-scoped: a parent created under firm A is invisible
+  to a connection authenticated as firm B even for the same end-client).
+  Each `AlgoDto` carries one of `iceberg` / `twap` per the discriminator
+  in `type`; the unused parameter block is `null`.
 
 ### Unsubscribe
 

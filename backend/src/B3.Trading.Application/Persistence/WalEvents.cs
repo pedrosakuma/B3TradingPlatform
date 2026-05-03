@@ -137,6 +137,7 @@ public sealed record AlgoCreatedEvent : WalEvent
 public sealed record AlgoCancelRequestedEvent : WalEvent
 {
     public required ulong AlgoId { get; init; }
+    public required string FirmId { get; init; }
     public string? ActorUserId { get; init; }
 }
 
@@ -149,6 +150,7 @@ public sealed record AlgoCancelRequestedEvent : WalEvent
 public sealed record AlgoTerminalStateRecordedEvent : WalEvent
 {
     public required ulong AlgoId { get; init; }
+    public required string FirmId { get; init; }
     public required string Status { get; init; }    // AlgoStatus enum name
     public required string Reason { get; init; }    // AlgoTerminalReason enum name
     public required DateTimeOffset AtUtc { get; init; }

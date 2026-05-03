@@ -14,8 +14,8 @@ public class SubscriptionManagerTests
         var owner = new EndClientId("alice");
         book.TryAdd(new Order(1UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m));
 
-        var mgr = new SubscriptionManager(book, positions);
-        var client = new SubscribedClient(owner);
+        var mgr = new SubscriptionManager(book, positions, new AlgoBook());
+        var client = new SubscribedClient(owner, "TEST");
         mgr.Add(client);
         mgr.SubscribeWithSnapshot(client, Channels.OrdersMe);
 
@@ -31,8 +31,8 @@ public class SubscriptionManagerTests
         var positions = new PositionKeeper();
         var owner = new EndClientId("alice");
 
-        var mgr = new SubscriptionManager(book, positions);
-        var client = new SubscribedClient(owner);
+        var mgr = new SubscriptionManager(book, positions, new AlgoBook());
+        var client = new SubscribedClient(owner, "TEST");
         mgr.Add(client);
         mgr.SubscribeWithSnapshot(client, Channels.ExecutionsMe);
         client.Reader.TryRead(out _); // discard snapshot
@@ -54,8 +54,8 @@ public class SubscriptionManagerTests
         var alice = new EndClientId("alice");
         var bob = new EndClientId("bob");
 
-        var mgr = new SubscriptionManager(book, positions);
-        var bobClient = new SubscribedClient(bob);
+        var mgr = new SubscriptionManager(book, positions, new AlgoBook());
+        var bobClient = new SubscribedClient(bob, "TEST");
         mgr.Add(bobClient);
         mgr.SubscribeWithSnapshot(bobClient, Channels.ExecutionsMe);
         bobClient.Reader.TryRead(out _); // snapshot
@@ -72,8 +72,8 @@ public class SubscriptionManagerTests
         var positions = new PositionKeeper();
         var owner = new EndClientId("alice");
 
-        var mgr = new SubscriptionManager(book, positions);
-        var client = new SubscribedClient(owner);
+        var mgr = new SubscriptionManager(book, positions, new AlgoBook());
+        var client = new SubscribedClient(owner, "TEST");
         mgr.Add(client);
         mgr.SubscribeWithSnapshot(client, Channels.ExecutionsMe);
 
@@ -99,8 +99,8 @@ public class WebSocketExecutionEventSinkTests
         order.MarkWorking();
         order.ApplyFill(100);
 
-        var mgr = new SubscriptionManager(book, positions);
-        var client = new SubscribedClient(owner);
+        var mgr = new SubscriptionManager(book, positions, new AlgoBook());
+        var client = new SubscribedClient(owner, "TEST");
         mgr.Add(client);
         mgr.SubscribeWithSnapshot(client, Channels.OrdersMe);
         mgr.SubscribeWithSnapshot(client, Channels.ExecutionsMe);
@@ -133,8 +133,8 @@ public class WebSocketExecutionEventSinkTests
         book.TryAdd(order);
         order.MarkCancelled();
 
-        var mgr = new SubscriptionManager(book, positions);
-        var client = new SubscribedClient(owner);
+        var mgr = new SubscriptionManager(book, positions, new AlgoBook());
+        var client = new SubscribedClient(owner, "TEST");
         mgr.Add(client);
         mgr.SubscribeWithSnapshot(client, Channels.OrdersMe);
         mgr.SubscribeWithSnapshot(client, Channels.ExecutionsMe);

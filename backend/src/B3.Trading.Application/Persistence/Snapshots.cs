@@ -17,6 +17,7 @@ public sealed class PlatformSnapshot
     public ClOrdIdRegistrySnapshot ClOrdIds { get; init; } = new();
     public List<OwnershipMappingSnapshot> Ownership { get; init; } = new();
     public List<AlgoSnapshot> Algos { get; init; } = new();
+    public AlgoIdRegistrySnapshot AlgoIds { get; init; } = new();
 }
 
 public sealed record OrderSnapshot(
@@ -78,3 +79,15 @@ public sealed class ClOrdIdRegistrySnapshot
 public sealed record ClOrdIdCounterSnapshot(string EndClientId, ulong PrefixIdx, long Counter);
 
 public sealed record OwnershipMappingSnapshot(ulong ClOrdId, string EndClientId);
+
+/// <summary>
+/// Per-firm <c>AlgoId</c> counters. Mirrors the firm-isolation pattern
+/// of every other persisted aggregate; reset to <c>0</c> for an unknown
+/// firm on restore (a never-seen-before firm starts at <c>1</c>).
+/// </summary>
+public sealed class AlgoIdRegistrySnapshot
+{
+    public List<AlgoIdCounterSnapshot> Counters { get; init; } = new();
+}
+
+public sealed record AlgoIdCounterSnapshot(string FirmId, long Counter);
