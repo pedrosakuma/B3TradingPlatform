@@ -55,9 +55,11 @@ builder.Services.AddSingleton<ClOrdIdPrefixRegistry>();
 builder.Services.AddSingleton<OrderOwnershipMap>();
 builder.Services.AddSingleton<WorkingOrderBook>();
 builder.Services.AddSingleton<AlgoBook>();
+builder.Services.AddSingleton<AlgoIdRegistry>();
 builder.Services.AddSingleton<PositionKeeper>();
 builder.Services.AddSingleton<SubscriptionManager>();
 builder.Services.AddSingleton<IExecutionEventSink, WebSocketExecutionEventSink>();
+builder.Services.AddSingleton<IAlgoEventSink, WebSocketAlgoEventSink>();
 builder.Services.AddSingleton<ExecutionReportProcessor>();
 builder.Services.AddSingleton<JwtIssuer>();
 
@@ -374,6 +376,7 @@ app.MapHealth();
 
 app.MapAuth();
 app.MapOrders();
+app.MapAlgo();
 app.MapPositions();
 app.MapAdmin();
 app.MapWebSocketHub();

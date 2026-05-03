@@ -2,6 +2,7 @@ using System.Net.WebSockets;
 using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
+using B3.Trading.Api.Auth;
 using B3.Trading.Application;
 using B3.Trading.Application.Observability;
 using Microsoft.AspNetCore.Authorization;
@@ -28,8 +29,9 @@ public static class WebSocketHub
                 return Results.Unauthorized();
 
             var owner = registry.Register(sub);
+            var firm = ctx.User.FindFirstValue(JwtIssuer.FirmClaim) ?? "default";
             using var ws = await ctx.WebSockets.AcceptWebSocketAsync();
-            var client = new SubscribedClient(owner);
+            var client = new SubscribedClient(owner, firm);
             subs.Add(client);
             MetricsRegistry.WsConnectionsActive.Add(1);
 

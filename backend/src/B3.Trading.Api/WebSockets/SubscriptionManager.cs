@@ -19,11 +19,13 @@ public sealed class SubscriptionManager
     private readonly ConcurrentDictionary<EndClientId, object> _ownerLocks = new();
     private readonly WorkingOrderBook _orders;
     private readonly PositionKeeper _positions;
+    private readonly AlgoBook _algos;
 
-    public SubscriptionManager(WorkingOrderBook orders, PositionKeeper positions)
+    public SubscriptionManager(WorkingOrderBook orders, PositionKeeper positions, AlgoBook algos)
     {
         _orders = orders;
         _positions = positions;
+        _algos = algos;
     }
 
     private object LockFor(EndClientId owner) =>
@@ -67,6 +69,7 @@ public sealed class SubscriptionManager
                 Channels.OrdersMe => _orders.ForEndClient(client.Owner).Select(o => o.ToDto()).ToArray(),
                 Channels.PositionsMe => _positions.ForEndClient(client.Owner).Select(p => p.ToDto()).ToArray(),
                 Channels.ExecutionsMe => Array.Empty<ExecutionDto>(), // no historical exec log in v1
+                Channels.AlgoMe => _algos.EnumerateForOwner(client.FirmId, client.Owner).Select(a => a.ToDto()).ToArray(),
                 _ => null,
             };
 

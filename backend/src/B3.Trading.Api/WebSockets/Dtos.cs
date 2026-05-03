@@ -9,9 +9,10 @@ public static class Channels
     public const string OrdersMe = "orders.me";
     public const string ExecutionsMe = "executions.me";
     public const string PositionsMe = "positions.me";
+    public const string AlgoMe = "algo.me";
 
     public static readonly IReadOnlySet<string> All =
-        new HashSet<string>(StringComparer.Ordinal) { OrdersMe, ExecutionsMe, PositionsMe };
+        new HashSet<string>(StringComparer.Ordinal) { OrdersMe, ExecutionsMe, PositionsMe, AlgoMe };
 }
 
 /// <summary>Inbound command from a connected client.</summary>
@@ -50,6 +51,38 @@ public sealed record ExecutionDto(
     string? RejectReason,
     DateTimeOffset TimestampUtc);
 
+/// <summary>
+/// Wire shape for an algo parent. Per-type parameters live in the
+/// nullable <see cref="Iceberg"/> / <see cref="Twap"/> properties — only
+/// the one matching <see cref="Type"/> is populated. The discriminated
+/// shape keeps the JSON debuggable (<c>jq '.iceberg.displayQuantity'</c>)
+/// without requiring polymorphic STJ converters on the client.
+/// </summary>
+public sealed record AlgoDto(
+    string AlgoId,
+    string Symbol,
+    ulong SecurityId,
+    string Side,
+    string Type,
+    long TotalQuantity,
+    long FilledQuantity,
+    long RemainingQuantity,
+    string Status,
+    string TerminalReason,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset? TerminalAtUtc,
+    IcebergParamsDto? Iceberg,
+    TwapParamsDto? Twap);
+
+public sealed record IcebergParamsDto(long DisplayQuantity, decimal? LimitPrice);
+
+public sealed record TwapParamsDto(
+    DateTimeOffset StartUtc,
+    DateTimeOffset EndUtc,
+    int SliceCount,
+    string ChildOrderType,
+    decimal? ChildPrice);
+
 public static class DtoMappings
 {
     public static OrderDto ToDto(this Order o) => new(
@@ -61,4 +94,29 @@ public static class DtoMappings
     public static ExecutionDto ToDto(this ExecutionEvent ev) => new(
         ev.ClOrdId.ToString(), ev.Symbol, ev.Side.ToString(), ev.Status.ToString(), ev.Kind.ToString(),
         ev.LeavesQuantity, ev.CumulativeQuantity, ev.LastQuantity, ev.LastPrice, ev.RejectReason, ev.TimestampUtc);
+
+    public static AlgoDto ToDto(this Algo a)
+    {
+        IcebergParamsDto? iceberg = a.Parameters is IcebergParameters ip
+            ? new IcebergParamsDto(ip.DisplayQuantity, ip.LimitPrice)
+            : null;
+        TwapParamsDto? twap = a.Parameters is TwapParameters tp
+            ? new TwapParamsDto(tp.StartUtc, tp.EndUtc, tp.SliceCount, tp.ChildOrderType.ToString(), tp.ChildPrice)
+            : null;
+        return new AlgoDto(
+            a.AlgoId.ToString(),
+            a.Symbol,
+            a.SecurityId,
+            a.Side.ToString(),
+            a.Type.ToString(),
+            a.TotalQuantity,
+            a.FilledQuantity,
+            a.RemainingQuantity,
+            a.Status.ToString(),
+            a.TerminalReason.ToString(),
+            a.CreatedAtUtc,
+            a.TerminalAtUtc,
+            iceberg,
+            twap);
+    }
 }

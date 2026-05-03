@@ -17,9 +17,11 @@ public sealed class SubscribedClient
     private readonly object _channelsSync = new();
     private readonly Dictionary<string, long> _seqByChannel = new(StringComparer.Ordinal);
 
-    public SubscribedClient(EndClientId owner)
+    public SubscribedClient(EndClientId owner, string firmId)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
         Owner = owner;
+        FirmId = firmId;
         Id = Guid.NewGuid();
         _outbound = Channel.CreateBounded<OutboundMessage>(new BoundedChannelOptions(OutboundCapacity)
         {
@@ -34,6 +36,12 @@ public sealed class SubscribedClient
 
     public Guid Id { get; }
     public EndClientId Owner { get; }
+    /// <summary>
+    /// Firm context derived from the JWT <c>firm</c> claim at connection
+    /// time. Required for fan-out of firm-scoped aggregates such as
+    /// <see cref="Algo"/> where the same end-client identifier is per-firm.
+    /// </summary>
+    public string FirmId { get; }
     public ChannelReader<OutboundMessage> Reader => _outbound.Reader;
     public bool MarkedForDisconnect { get; private set; }
     public string? DisconnectReason { get; private set; }

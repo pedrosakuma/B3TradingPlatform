@@ -95,19 +95,20 @@ public class AlgoRecoveryTests : IDisposable
 
             // Operator cancels.
             dispatcher.Dispatch(
-                new AlgoCancelRequestedEvent { AlgoId = 100UL, ActorUserId = "carol" },
-                () => algos.TryGet(100UL, out var a).Then(() => a!.RequestCancel()));
+                new AlgoCancelRequestedEvent { AlgoId = 100UL, FirmId = "TEST", ActorUserId = "carol" },
+                () => algos.TryGet("TEST", 100UL, out var a).Then(() => a!.RequestCancel()));
 
             // Engine records terminal.
             dispatcher.Dispatch(
                 new AlgoTerminalStateRecordedEvent
                 {
                     AlgoId = 100UL,
+                    FirmId = "TEST",
                     Status = "Cancelled",
                     Reason = "UserCancelled",
                     AtUtc = terminalAt,
                 },
-                () => algos.TryGet(100UL, out var a).Then(() =>
+                () => algos.TryGet("TEST", 100UL, out var a).Then(() =>
                     a!.RecordTerminal(AlgoStatus.Cancelled, AlgoTerminalReason.UserCancelled, terminalAt)));
         }
 
@@ -115,13 +116,14 @@ public class AlgoRecoveryTests : IDisposable
         await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
         {
             var (book, ownership, killSwitch, processor, algos, _) = Build(store);
-            var snapshotter = new StateSnapshotter(book, new PositionKeeper(), killSwitch, new ClOrdIdPrefixRegistry(), ownership, algos);
+            var algoIds = new AlgoIdRegistry();
+            var snapshotter = new StateSnapshotter(book, new PositionKeeper(), killSwitch, new ClOrdIdPrefixRegistry(), ownership, algos, algoIds);
             var replayer = new EventReplayer(book, ownership, killSwitch, processor, algos);
             var recovery = new PersistenceRecovery(store, snapshotter, replayer,
                 new SnapshotStore(_root, "test"), NullLogger<PersistenceRecovery>.Instance);
             await recovery.RunAsync();
 
-            Assert.True(algos.TryGet(100UL, out var algo) && algo is not null);
+            Assert.True(algos.TryGet("TEST", 100UL, out var algo) && algo is not null);
             Assert.Equal(AlgoStatus.Cancelled, algo!.Status);
             Assert.Equal(AlgoTerminalReason.UserCancelled, algo.TerminalReason);
             Assert.Equal(terminalAt, algo.TerminalAtUtc);
@@ -148,7 +150,8 @@ public class AlgoRecoveryTests : IDisposable
         await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
         {
             var (book, ownership, killSwitch, _, algos, dispatcher) = Build(store);
-            var snapshotter = new StateSnapshotter(book, new PositionKeeper(), killSwitch, new ClOrdIdPrefixRegistry(), ownership, algos);
+            var algoIds = new AlgoIdRegistry();
+            var snapshotter = new StateSnapshotter(book, new PositionKeeper(), killSwitch, new ClOrdIdPrefixRegistry(), ownership, algos, algoIds);
 
             dispatcher.Dispatch(
                 new AlgoCreatedEvent
@@ -173,7 +176,7 @@ public class AlgoRecoveryTests : IDisposable
                     new TwapParameters(twapStart, twapEnd, 5, OrderType.Market, null), createdAt)));
 
             // Two slice fills of 1000 each.
-            algos.TryGet(200UL, out var live);
+            algos.TryGet("TEST", 200UL, out var live);
             live!.MarkWorking();
             live.RecordFill(1000);
             live.RecordFill(1000);
@@ -188,7 +191,7 @@ public class AlgoRecoveryTests : IDisposable
         // Restore into a fresh book and verify shape.
         var restored = new AlgoBook();
         restored.Restore(snap.Algos);
-        Assert.True(restored.TryGet(200UL, out var rehydrated) && rehydrated is not null);
+        Assert.True(restored.TryGet("TEST", 200UL, out var rehydrated) && rehydrated is not null);
         Assert.Equal(2000, rehydrated!.FilledQuantity);
         Assert.Equal(3000, rehydrated.RemainingQuantity);
         Assert.Equal(AlgoStatus.Working, rehydrated.Status);
@@ -213,8 +216,8 @@ public class AlgoRecoveryTests : IDisposable
         algos.TryAdd(live);
         algos.TryAdd(done);
 
-        Assert.Single(algos.EnumerateForOwner(alice));
-        Assert.Equal(2, algos.EnumerateForOwner(alice, includeTerminal: true).Count);
+        Assert.Single(algos.EnumerateForOwner("TEST", alice));
+        Assert.Equal(2, algos.EnumerateForOwner("TEST", alice, includeTerminal: true).Count);
     }
 
     private static (WorkingOrderBook, OrderOwnershipMap, KillSwitchService, ExecutionReportProcessor, AlgoBook, EventDispatcher) Build(IEventStore store)

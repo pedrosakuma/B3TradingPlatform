@@ -20,6 +20,7 @@ public sealed class StateSnapshotter
     private readonly ClOrdIdPrefixRegistry _clOrdIds;
     private readonly OrderOwnershipMap _ownership;
     private readonly AlgoBook _algos;
+    private readonly AlgoIdRegistry _algoIds;
 
     public StateSnapshotter(
         WorkingOrderBook orders,
@@ -27,7 +28,8 @@ public sealed class StateSnapshotter
         KillSwitchService killSwitch,
         ClOrdIdPrefixRegistry clOrdIds,
         OrderOwnershipMap ownership,
-        AlgoBook algos)
+        AlgoBook algos,
+        AlgoIdRegistry algoIds)
     {
         _orders = orders;
         _positions = positions;
@@ -35,6 +37,7 @@ public sealed class StateSnapshotter
         _clOrdIds = clOrdIds;
         _ownership = ownership;
         _algos = algos;
+        _algoIds = algoIds;
     }
 
     public PlatformSnapshot Capture(long seq) => new()
@@ -48,6 +51,7 @@ public sealed class StateSnapshotter
         ClOrdIds = _clOrdIds.Snapshot(),
         Ownership = _ownership.Snapshot().ToList(),
         Algos = _algos.Snapshot().ToList(),
+        AlgoIds = _algoIds.Snapshot(),
     };
 
     public void Restore(PlatformSnapshot snap)
@@ -59,6 +63,7 @@ public sealed class StateSnapshotter
         _clOrdIds.Restore(snap.ClOrdIds);
         _ownership.Restore(snap.Ownership);
         _algos.Restore(snap.Algos);
+        _algoIds.Restore(snap.AlgoIds);
     }
 }
 
@@ -130,11 +135,11 @@ public sealed class EventReplayer
                 ApplyAlgoCreated(ac);
                 break;
             case AlgoCancelRequestedEvent acr:
-                if (_algos.TryGet(acr.AlgoId, out var cancelling) && cancelling is not null)
+                if (_algos.TryGet(acr.FirmId, acr.AlgoId, out var cancelling) && cancelling is not null)
                     cancelling.RequestCancel();
                 break;
             case AlgoTerminalStateRecordedEvent at:
-                if (_algos.TryGet(at.AlgoId, out var algo) && algo is not null)
+                if (_algos.TryGet(at.FirmId, at.AlgoId, out var algo) && algo is not null)
                 {
                     var status = Enum.Parse<AlgoStatus>(at.Status, ignoreCase: true);
                     var reason = Enum.Parse<AlgoTerminalReason>(at.Reason, ignoreCase: true);
