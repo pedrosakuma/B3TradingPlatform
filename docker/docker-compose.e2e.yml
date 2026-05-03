@@ -14,3 +14,7 @@ services:
       # StubExchangeGateway echoes ERs immediately for the seeded firm.
       Trading__Exchange__Firms__0__FirmId: default
       Trading__Exchange__Firms__0__Endpoint: stub://e2e
+      # Smoke E2E posts orders by symbol; SymbolDirectory turns the
+      # symbol into a SecurityId so the validator does not 400.
+      Trading__SymbolDirectory__SecurityIds__PETR4: "4321"
+      Trading__SymbolDirectory__SecurityIds__VALE3: "1234"

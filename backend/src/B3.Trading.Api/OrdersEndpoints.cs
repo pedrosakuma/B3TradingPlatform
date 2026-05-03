@@ -42,6 +42,7 @@ public static class OrdersEndpoints
             IMarginProvider margin,
             EventDispatcher dispatcher,
             DrainState drain,
+            SymbolDirectory symbols,
             ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
@@ -60,13 +61,22 @@ public static class OrdersEndpoints
                 return Results.BadRequest(new { error = $"invalid type '{req.Type}'" });
             if (req.Quantity <= 0)
                 return Results.BadRequest(new { error = "quantity must be positive" });
-            if (req.SecurityId == 0)
+
+            // SecurityId resolution: explicit non-zero in the payload
+            // wins (preserves the conformance contract). Otherwise look
+            // up the directory by symbol — that is the path the trader
+            // UI takes, since the ticket form does not expose the
+            // numeric SecurityId.
+            var securityId = req.SecurityId;
+            if (securityId == 0 && symbols.TryResolve(req.Symbol, out var resolved))
+                securityId = resolved;
+            if (securityId == 0)
                 return Results.BadRequest(new { error = "securityId is required" });
 
             var owner = ResolveOwner(ctx, registry);
             var firm = ResolveFirm(ctx);
             var clOrdId = clOrdIds.Generate(owner);
-            var order = new Order(clOrdId, owner, req.Symbol, req.SecurityId, side, type, req.Quantity, req.Price, firm);
+            var order = new Order(clOrdId, owner, req.Symbol, securityId, side, type, req.Quantity, req.Price, firm);
 
             // Persist order intent + register ownership atomically. The
             // dispatcher serialises this with snapshot capture so a crash
@@ -82,7 +92,7 @@ public static class OrdersEndpoints
                         EndClientId = owner.Value,
                         FirmId = firm,
                         Symbol = req.Symbol,
-                        SecurityId = req.SecurityId,
+                        SecurityId = securityId,
                         Side = side.ToString(),
                         Type = type.ToString(),
                         Quantity = req.Quantity,
