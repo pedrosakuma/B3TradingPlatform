@@ -149,6 +149,25 @@ public static class MetricsRegistry
     public static readonly Counter<long> EntryPointDuplicateInbound =
         Meter.CreateCounter<long>("trading.entrypoint.duplicate_inbound");
 
+    // Order-entry latency probes. Two histograms tagged by firm + op
+    // (submit/cancel/replace) so dashboards can isolate cancel-side from
+    // submit-side wire performance:
+    //
+    //   * order_entry_call_ms — duration of the local SDK await (network
+    //     write + SDK serialization). Only successful calls are recorded;
+    //     failures are already tracked by OrdersGatewayFailed.
+    //   * order_entry_to_ack_ms — submit-to-first-ER round trip. The probe
+    //     starts the timer BEFORE the SDK await to avoid losing samples
+    //     when the ER arrives before the await completes (full-duplex).
+    //
+    // BusinessReject is not surfaced to the probe because it lacks the
+    // ClOrdID needed for correlation; those rejections are still counted
+    // by EntryPointBusinessRejects.
+    public static readonly Histogram<double> OrderEntryCallMs =
+        Meter.CreateHistogram<double>("trading.entrypoint.order_entry_call_ms");
+    public static readonly Histogram<double> OrderEntryToAckMs =
+        Meter.CreateHistogram<double>("trading.entrypoint.order_entry_to_ack_ms");
+
     public static readonly Counter<long> EntryPointTranslationErrors =
         Meter.CreateCounter<long>("trading.entrypoint.translation_errors");
     public static readonly Counter<long> EntryPointBusinessRejects =
