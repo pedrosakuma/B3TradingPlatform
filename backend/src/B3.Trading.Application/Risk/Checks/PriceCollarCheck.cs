@@ -4,12 +4,12 @@ namespace B3.Trading.Application.Risk.Checks;
 
 public sealed class PriceCollarCheck : IRiskCheck
 {
-    private readonly RiskOptions _options;
+    private readonly IOptionsMonitor<RiskOptions> _options;
     private readonly IReferencePrice _refPrice;
 
-    public PriceCollarCheck(IOptions<RiskOptions> options, IReferencePrice refPrice)
+    public PriceCollarCheck(IOptionsMonitor<RiskOptions> options, IReferencePrice refPrice)
     {
-        _options = options.Value;
+        _options = options;
         _refPrice = refPrice;
     }
 
@@ -19,7 +19,8 @@ public sealed class PriceCollarCheck : IRiskCheck
     public RiskDecision Check(RiskContext ctx)
     {
         if (!ctx.Price.HasValue) return RiskDecision.Approve; // market order
-        var collarPct = RiskLimitsResolver.Resolve(_options, ctx.Owner.Value, ctx.FirmId, ctx.Symbol, l => l.PriceCollarPercent);
+        var opts = _options.CurrentValue;
+        var collarPct = RiskLimitsResolver.Resolve(opts, ctx.Owner.Value, ctx.FirmId, ctx.Symbol, l => l.PriceCollarPercent);
         if (!collarPct.HasValue) return RiskDecision.Approve;
         if (!_refPrice.TryGet(ctx.Symbol, out var refPx) || refPx <= 0m)
             return RiskDecision.Approve; // no reference; can't enforce

@@ -55,4 +55,20 @@ public static class RiskLimitsResolver
             return selector(sy);
         return selector(opts.Default);
     }
+
+    /// <summary>
+    /// Convenience: resolve every <see cref="RiskLimits"/> field in
+    /// one pass. Used by <c>GET /admin/risk/limits</c> to surface
+    /// what the system actually thinks the cap is for a given
+    /// (endClient, firm, symbol) tuple.
+    /// </summary>
+    public static RiskLimits ResolveAll(
+        RiskOptions opts, string endClient, string? firmId, string symbol) =>
+        new()
+        {
+            MaxQuantity = Resolve(opts, endClient, firmId, symbol, l => l.MaxQuantity),
+            MaxNotional = Resolve(opts, endClient, firmId, symbol, l => l.MaxNotional),
+            PriceCollarPercent = Resolve(opts, endClient, firmId, symbol, l => l.PriceCollarPercent),
+            PositionLimit = Resolve(opts, endClient, firmId, symbol, l => l.PositionLimit),
+        };
 }

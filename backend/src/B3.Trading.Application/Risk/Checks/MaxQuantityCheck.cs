@@ -4,15 +4,16 @@ namespace B3.Trading.Application.Risk.Checks;
 
 public sealed class MaxQuantityCheck : IRiskCheck
 {
-    private readonly RiskOptions _options;
-    public MaxQuantityCheck(IOptions<RiskOptions> options) => _options = options.Value;
+    private readonly IOptionsMonitor<RiskOptions> _options;
+    public MaxQuantityCheck(IOptionsMonitor<RiskOptions> options) => _options = options;
 
     public int Order => 100;
     public string Name => "max_quantity";
 
     public RiskDecision Check(RiskContext ctx)
     {
-        var max = RiskLimitsResolver.Resolve(_options, ctx.Owner.Value, ctx.FirmId, ctx.Symbol, l => l.MaxQuantity);
+        var opts = _options.CurrentValue;
+        var max = RiskLimitsResolver.Resolve(opts, ctx.Owner.Value, ctx.FirmId, ctx.Symbol, l => l.MaxQuantity);
         if (max.HasValue && ctx.Quantity > max.Value)
             return RiskDecision.Reject($"quantity {ctx.Quantity} exceeds max {max.Value}");
         return RiskDecision.Approve;
@@ -21,15 +22,16 @@ public sealed class MaxQuantityCheck : IRiskCheck
 
 public sealed class MaxNotionalCheck : IRiskCheck
 {
-    private readonly RiskOptions _options;
-    public MaxNotionalCheck(IOptions<RiskOptions> options) => _options = options.Value;
+    private readonly IOptionsMonitor<RiskOptions> _options;
+    public MaxNotionalCheck(IOptionsMonitor<RiskOptions> options) => _options = options;
 
     public int Order => 100;
     public string Name => "max_notional";
 
     public RiskDecision Check(RiskContext ctx)
     {
-        var max = RiskLimitsResolver.Resolve(_options, ctx.Owner.Value, ctx.FirmId, ctx.Symbol, l => l.MaxNotional);
+        var opts = _options.CurrentValue;
+        var max = RiskLimitsResolver.Resolve(opts, ctx.Owner.Value, ctx.FirmId, ctx.Symbol, l => l.MaxNotional);
         if (!max.HasValue || !ctx.Price.HasValue)
             return RiskDecision.Approve; // no cap, or market order — let venue handle
         var notional = ctx.Price.Value * ctx.Quantity;

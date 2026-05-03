@@ -13,10 +13,10 @@ public interface IReferencePrice
 
 public sealed class ConfigReferencePrice : IReferencePrice
 {
-    private readonly RiskOptions _options;
-    public ConfigReferencePrice(Microsoft.Extensions.Options.IOptions<RiskOptions> options) =>
-        _options = options.Value;
+    private readonly Microsoft.Extensions.Options.IOptionsMonitor<RiskOptions> _options;
+    public ConfigReferencePrice(Microsoft.Extensions.Options.IOptionsMonitor<RiskOptions> options) =>
+        _options = options;
 
     public bool TryGet(string symbol, out decimal price) =>
-        _options.ReferencePrices.TryGetValue(symbol, out price);
+        _options.CurrentValue.ReferencePrices.TryGetValue(symbol, out price);
 }

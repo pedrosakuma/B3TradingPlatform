@@ -8,7 +8,7 @@ namespace B3.Trading.Application.Tests;
 
 public class RiskPipelineTests
 {
-    private static IOptions<RiskOptions> Wrap(RiskOptions o) => Options.Create(o);
+    private static IOptionsMonitor<RiskOptions> Wrap(RiskOptions o) => new StaticOptionsMonitor<RiskOptions>(o);
 
     private static RiskContext Ctx(
         string owner = "alice", string firm = "default", string symbol = "PETR4",
@@ -152,6 +152,42 @@ public class RiskPipelineTests
         var resolved = RiskLimitsResolver.Resolve(
             opts, endClient: "x", firmId: "", symbol: "PETR4", l => l.MaxQuantity);
         Assert.Equal(999, resolved);
+    }
+
+    [Fact]
+    public void HotReload_NewLimitsTakeEffectOnNextCheck()
+    {
+        // Start permissive, then tighten. With IOptionsMonitor the
+        // change is observed on the very next Check call — no rebuild
+        // of the check or the pipeline required.
+        var monitor = new StaticOptionsMonitor<RiskOptions>(
+            new RiskOptions { Default = new RiskLimits { MaxQuantity = 1000 } });
+        var check = new MaxQuantityCheck(monitor);
+
+        Assert.True(check.Check(Ctx(qty: 500)).Approved);
+
+        monitor.Set(new RiskOptions { Default = new RiskLimits { MaxQuantity = 100 } });
+        Assert.False(check.Check(Ctx(qty: 500)).Approved);
+    }
+
+    [Fact]
+    public void ResolveAll_FoldsAllFieldsAcrossPrecedence()
+    {
+        var opts = new RiskOptions
+        {
+            Default = new RiskLimits { MaxQuantity = 1000, MaxNotional = 999_999m, PriceCollarPercent = 10m, PositionLimit = 5000 },
+            PerFirm = { ["broker-a"] = new RiskLimits { MaxQuantity = 50 } },
+            PerEndClient = { ["alice"] = new RiskLimits { PositionLimit = 100 } },
+            PerSymbol = { ["PETR4"] = new RiskLimits { PriceCollarPercent = 2m } },
+        };
+
+        var resolved = RiskLimitsResolver.ResolveAll(
+            opts, endClient: "alice", firmId: "broker-a", symbol: "PETR4");
+
+        Assert.Equal(50, resolved.MaxQuantity);                // from PerFirm
+        Assert.Equal(999_999m, resolved.MaxNotional);          // from Default
+        Assert.Equal(2m, resolved.PriceCollarPercent);         // from PerSymbol
+        Assert.Equal(100, resolved.PositionLimit);             // from PerEndClient
     }
 
     [Fact]

@@ -5,12 +5,12 @@ namespace B3.Trading.Application.Risk.Checks;
 
 public sealed class PositionLimitCheck : IRiskCheck
 {
-    private readonly RiskOptions _options;
+    private readonly IOptionsMonitor<RiskOptions> _options;
     private readonly PositionKeeper _positions;
 
-    public PositionLimitCheck(IOptions<RiskOptions> options, PositionKeeper positions)
+    public PositionLimitCheck(IOptionsMonitor<RiskOptions> options, PositionKeeper positions)
     {
-        _options = options.Value;
+        _options = options;
         _positions = positions;
     }
 
@@ -19,7 +19,8 @@ public sealed class PositionLimitCheck : IRiskCheck
 
     public RiskDecision Check(RiskContext ctx)
     {
-        var limit = RiskLimitsResolver.Resolve(_options, ctx.Owner.Value, ctx.FirmId, ctx.Symbol, l => l.PositionLimit);
+        var opts = _options.CurrentValue;
+        var limit = RiskLimitsResolver.Resolve(opts, ctx.Owner.Value, ctx.FirmId, ctx.Symbol, l => l.PositionLimit);
         if (!limit.HasValue) return RiskDecision.Approve;
 
         var current = _positions.GetOrCreate(ctx.Owner, ctx.Symbol).NetQuantity;
