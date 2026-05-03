@@ -12,13 +12,19 @@ let onCancelOrder = () => {};
 let onLogout      = () => {};
 let onApplyMd     = () => {};
 let onSwitchView  = () => {};
+let onBlotterFilter  = () => {};
+let onSelectOrder    = () => {};
+let onKeyboardCancel = () => {};
 
 export function setHandlers(handlers) {
-  onSubmitOrder = handlers.onSubmitOrder ?? onSubmitOrder;
-  onCancelOrder = handlers.onCancelOrder ?? onCancelOrder;
-  onLogout      = handlers.onLogout      ?? onLogout;
-  onApplyMd     = handlers.onApplyMd     ?? onApplyMd;
-  onSwitchView  = handlers.onSwitchView  ?? onSwitchView;
+  onSubmitOrder    = handlers.onSubmitOrder    ?? onSubmitOrder;
+  onCancelOrder    = handlers.onCancelOrder    ?? onCancelOrder;
+  onLogout         = handlers.onLogout         ?? onLogout;
+  onApplyMd        = handlers.onApplyMd        ?? onApplyMd;
+  onSwitchView     = handlers.onSwitchView     ?? onSwitchView;
+  onBlotterFilter  = handlers.onBlotterFilter  ?? onBlotterFilter;
+  onSelectOrder    = handlers.onSelectOrder    ?? onSelectOrder;
+  onKeyboardCancel = handlers.onKeyboardCancel ?? onKeyboardCancel;
 }
 
 export function showLogin() {
@@ -76,13 +82,28 @@ export function bindUi() {
 
   $("logout").addEventListener("click", () => onLogout());
 
-  // Event delegation for per-row Cancel buttons in the blotter.
+  // Event delegation for per-row Cancel buttons in the blotter,
+  // plus row selection (clicking anywhere outside the cancel button).
   $("blotter-body").addEventListener("click", (e) => {
     const btn = e.target.closest(".cancel-btn");
-    if (!btn) return;
-    const clOrdId = btn.dataset.clordid;
-    if (clOrdId) onCancelOrder(clOrdId);
+    if (btn) {
+      const clOrdId = btn.dataset.clordid;
+      if (clOrdId) onCancelOrder(clOrdId);
+      return;
+    }
+    const row = e.target.closest("tr[data-clordid]");
+    if (row) onSelectOrder(row.dataset.clordid);
   });
+
+  // Blotter filter: text + status select. Persisted via app.js.
+  const filterText = $("blotter-filter-text");
+  const filterStatus = $("blotter-filter-status");
+  const fireFilter = () => onBlotterFilter({
+    text:   filterText.value,
+    status: filterStatus.value,
+  });
+  if (filterText)   filterText.addEventListener("input",  fireFilter);
+  if (filterStatus) filterStatus.addEventListener("change", fireFilter);
 
   // Market data form: apply WS URL + watchlist atomically.
   $("md-form").addEventListener("submit", (e) => {
@@ -106,8 +127,46 @@ export function bindUi() {
     });
   }
 
+  // Global keyboard shortcuts:
+  //   F2  → focus the order-ticket symbol input
+  //   Esc → clear the ticket form (when focus is inside it)
+  //   Del → cancel the currently-selected blotter row
+  // We deliberately ignore key events when the user is typing into a
+  // text input to avoid stealing keystrokes.
+  document.addEventListener("keydown", onGlobalKeydown);
+
   subscribe(renderForSlice);
   renderAll();
+}
+
+function onGlobalKeydown(e) {
+  if (getState().currentView !== "trader") return;
+  const target = e.target;
+  const inEditable = target && (
+    target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" ||
+    target.isContentEditable
+  );
+
+  if (e.key === "F2" && !e.ctrlKey && !e.metaKey) {
+    e.preventDefault();
+    const sym = $("ticket-symbol");
+    if (sym) sym.focus();
+    return;
+  }
+  if (e.key === "Escape") {
+    // Esc inside the ticket form clears it; outside, clear blotter selection.
+    if (target?.closest && target.closest("#ticket-form")) {
+      clearTicket();
+    } else {
+      onSelectOrder(null);
+    }
+    return;
+  }
+  if ((e.key === "Delete" || e.key === "Backspace") && !inEditable) {
+    if (!getState().selectedClOrdId) return;
+    e.preventDefault();
+    onKeyboardCancel();
+  }
 }
 
 export function setMdInputs({ url, symbols }) {
@@ -128,7 +187,8 @@ export function setTicketFeedback(message, kind) {
   if (!message) { el.hidden = true; el.textContent = ""; return; }
   el.hidden = false;
   el.textContent = message;
-  el.className = `feedback ${kind === "ok" ? "ok" : "error"}`;
+  const cls = kind === "ok" ? "ok" : kind === "warn" ? "warn" : "error";
+  el.className = `feedback ${cls}`;
 }
 
 export function setTicketSubmitting(submitting) {
@@ -239,7 +299,7 @@ function renderFirmsHealth() {
 }
 
 function renderForSlice(slice) {
-  if (slice === "orders" || slice === "all") renderBlotter();
+  if (slice === "orders" || slice === "all" || slice === "blotterFilter" || slice === "selectedOrder") renderBlotter();
   if (slice === "positions" || slice === "all") renderPositions();
   if (slice === "executions" || slice === "all") renderExecutions();
   if (slice === "status") {
@@ -306,16 +366,30 @@ function renderMarketData() {
 
 function renderBlotter() {
   const body = $("blotter-body");
-  const orders = [...getState().orders.values()]
+  const st = getState();
+  const filter = st.blotterFilter ?? { text: "", status: "" };
+  syncFilterInputs(filter);
+  const search = filter.text.trim().toUpperCase();
+  const wantStatus = filter.status;
+  const all = [...st.orders.values()];
+  const orders = all
+    .filter(o => !search || o.symbol.toUpperCase().includes(search) || o.clOrdId.toUpperCase().includes(search))
+    .filter(o => !wantStatus || o.status === wantStatus)
     .sort((a, b) => a.clOrdId.localeCompare(b.clOrdId));
-  $("blotter-count").textContent = orders.length.toString();
-  body.innerHTML = orders.map(orderRow).join("");
+  $("blotter-count").textContent = `${orders.length}/${all.length}`;
+  body.innerHTML = orders.map(o => orderRow(o, st)).join("");
 }
 
-function orderRow(o) {
+const HIGHLIGHT_MS = 2000;
+
+function orderRow(o, st) {
   const terminal = isTerminalOrderStatus(o.status);
   const price = o.price == null ? "—" : Number(o.price).toFixed(2);
-  return `<tr>
+  const highlightAt = st.ordersHighlight?.get(o.clOrdId);
+  const fresh = highlightAt && (Date.now() - highlightAt) < HIGHLIGHT_MS;
+  const selected = st.selectedClOrdId === o.clOrdId;
+  const cls = [fresh ? "row-fresh" : "", selected ? "row-selected" : ""].filter(Boolean).join(" ");
+  return `<tr data-clordid="${escapeHtml(o.clOrdId)}"${cls ? ` class="${cls}"` : ""}>
     <td><code>${escapeHtml(o.clOrdId)}</code></td>
     <td>${escapeHtml(o.symbol)}</td>
     <td>${escapeHtml(o.side)}</td>
@@ -327,6 +401,13 @@ function orderRow(o) {
     <td class="status-cell-${escapeHtml(o.status)}">${escapeHtml(o.status)}</td>
     <td><button class="cancel-btn" data-clordid="${escapeHtml(o.clOrdId)}" ${terminal ? "disabled" : ""}>Cancel</button></td>
   </tr>`;
+}
+
+function syncFilterInputs(filter) {
+  const t = $("blotter-filter-text");
+  const s = $("blotter-filter-status");
+  if (t && document.activeElement !== t) t.value = filter.text;
+  if (s && s.value !== filter.status) s.value = filter.status;
 }
 
 function renderPositions() {
