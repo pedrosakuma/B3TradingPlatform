@@ -57,3 +57,40 @@ export async function getAdminFirms(backend, token) {
   });
   return jsonOrThrow(resp);
 }
+
+// Admin-only: current killswitch state (lists of killed firms /
+// end-clients). Backend: GET /admin/kill -> { EndClients, Firms }.
+export async function getKillStatus(backend, token) {
+  const resp = await fetch(`${backend}/admin/kill`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return jsonOrThrow(resp);
+}
+
+// Admin-only: toggle killswitch. POST = engage, DELETE = revive.
+// Returns 204 on success, 503 on WAL backpressure.
+async function toggleKill(backend, token, scope, id, engage) {
+  const resp = await fetch(
+    `${backend}/admin/kill/${scope}/${encodeURIComponent(id)}`,
+    {
+      method: engage ? "POST" : "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  if (resp.status === 204) return null;
+  return jsonOrThrow(resp);
+}
+
+export const killFirm        = (b, t, id) => toggleKill(b, t, "firm",       id, true);
+export const reviveFirm      = (b, t, id) => toggleKill(b, t, "firm",       id, false);
+export const killEndClient   = (b, t, id) => toggleKill(b, t, "end-client", id, true);
+export const reviveEndClient = (b, t, id) => toggleKill(b, t, "end-client", id, false);
+
+// Admin-only: trigger EOD materialisation. Returns the report or 409
+// when persistence is disabled.
+export async function runEod(backend, token) {
+  const resp = await fetch(`${backend}/admin/eod`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return jsonOrThrow(resp);
+}
