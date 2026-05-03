@@ -301,8 +301,10 @@ metrics + tests included.
 5. `IReferencePrice` indirection + `MarketDataReferencePrice` with
    fallback + staleness/source/bypass metrics. **shipped (#44)**
 6. Fat-finger server-side: `MinTickSizeCheck`, `MinLotSizeCheck`,
-   `MaxNotionalPerOrderCheck`, absolute collar in
-   `PriceCollarCheck`.
+   absolute collar in `PriceCollarCheck`. **shipped** —
+   `MaxNotionalPerOrderCheck` was deduplicated against the existing
+   `MaxNotionalCheck` (slice 7's rolling-window variant remains
+   distinct).
 7. Notional cap by rolling window + order rate limit + max open
    orders.
 8. Conformance scenarios + Grafana panel + docs touch-up.

@@ -98,6 +98,7 @@ public static class AdminEndpoints
                     maxQuantity = resolved.MaxQuantity,
                     maxNotional = resolved.MaxNotional,
                     priceCollarPercent = resolved.PriceCollarPercent,
+                    priceCollarAbsolute = resolved.PriceCollarAbsolute,
                     positionLimit = resolved.PositionLimit,
                 },
             });
