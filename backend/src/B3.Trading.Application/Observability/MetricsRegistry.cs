@@ -178,4 +178,37 @@ public static class MetricsRegistry
     // MarketData consumer (B3.MarketData.WebSocketClient)
     public static readonly Counter<long> MarketDataSubscribeErrors =
         Meter.CreateCounter<long>("trading.marketdata.subscribe_errors");
+
+    // Reference-price observability for the price-collar check (slice 5).
+    //
+    // RefPriceLookups counts every IReferencePrice.Lookup made by the
+    // collar, tagged with (symbol, source) where source is one of
+    // "live" | "fallback" | "missing". A sustained drop in source=live
+    // (or rise in source=fallback) is the signal that the live MD feed
+    // has degraded and the collar is now leaning on the static config
+    // table — which is fail-open by design and worth alerting on.
+    public static readonly Counter<long> RefPriceLookups =
+        Meter.CreateCounter<long>("trading.risk.refprice.lookups");
+
+    // Counts the cases where PriceCollarCheck approved an order purely
+    // because it could not obtain any reference price for the symbol.
+    // These are unguarded orders from the collar's perspective; tag is
+    // the symbol so a single misconfigured ticker doesn't get lost in
+    // the aggregate.
+    public static readonly Counter<long> CollarBypassedNoReference =
+        Meter.CreateCounter<long>("trading.risk.collar.bypassed_no_reference");
+
+    // Per-symbol age (seconds) of the last live MD update held in the
+    // MarketDataReferencePrice cache. Sourced from a callback registered
+    // by the provider on construction (singleton). Symbols that have
+    // never been observed simply don't appear — no synthetic samples.
+    private static readonly System.Collections.Concurrent.ConcurrentBag<Func<IEnumerable<KeyValuePair<string, double>>>> _refPriceStalenessSources = new();
+    public static readonly ObservableGauge<double> RefPriceStalenessSeconds =
+        Meter.CreateObservableGauge<double>(
+            "trading.risk.refprice.staleness_seconds",
+            () => _refPriceStalenessSources.SelectMany(src => src()).Select(kv =>
+                new Measurement<double>(kv.Value, new KeyValuePair<string, object?>("symbol", kv.Key))));
+    public static void RegisterRefPriceStalenessSource(
+        Func<IEnumerable<KeyValuePair<string, double>>> source) =>
+        _refPriceStalenessSources.Add(source);
 }
