@@ -2,7 +2,7 @@
 
 | Field    | Value                                                              |
 | -------- | ------------------------------------------------------------------ |
-| Status   | Draft                                                              |
+| Status   | Accepted                                                           |
 | Tracking | [#48](https://github.com/pedrosakuma/B3TradingPlatform/issues/48)  |
 | Replaces | n/a (new capability on top of `B3.Trading.Application`)            |
 
@@ -356,6 +356,12 @@ itself from amplifying upstream bugs:
 7. **Idempotent slice submission.** Submitting `(ParentAlgoId,
    AlgoSliceSeq)` is a no-op if a child for that pair already
    exists. Protects against double-fire from signal duplication.
+8. **No engine-side auto-correction on child rejects.** If a child
+   is rejected for a reason the engine could in principle "fix"
+   (tick-size violation, lot-size violation, stale collar config),
+   the engine still suspends. Auto-correction would mask
+   config-drift bugs that need operator attention; the same posture
+   that B2 (planning decision §7) generalizes.
 
 ### 4.8 Quantity rounding
 
@@ -393,6 +399,16 @@ DELETE /algo/{algoId}    → 202 Accepted {algoId, status: "Cancelling"}
 
 Authorization mirrors `/orders`: end-clients see only their own
 algos; admin role sees all (for `/admin/algo` follow-up if needed).
+
+The `algo` WS topic supports the same `?since=<seq>` catch-up
+semantics that the `orders` topic ships today (cf.
+`docs/WEBSOCKET-PROTOCOL.md`). Reconnecting clients replay missed
+events deterministically from the `FileEventStore` rather than
+having to reconstruct parent state from the `orders` stream. The
+custom of bundling replay with the topic from day one — instead of
+adding it later — was decided during planning (OQ-3); the cost is
+low because the `?since=` plumbing already exists per-topic, and
+the trader UI follow-up gains a reconnect-proof surface for free.
 
 WS topic `algo` carries the lifecycle as discrete messages:
 
@@ -434,6 +450,29 @@ v0 ships a small piece of test infrastructure to close that gap
   like admin scenarios already skip when admin creds are not
   configured.
 
+**Production safeguards** (planning decision B3, §7). Two layers of
+config-gating are not enough on their own — both fail the moment a
+config file is wrong. v0 ships defence-in-depth so an accidentally
+enabled simulator is loud and refuses-by-default in production:
+
+1. **Loud boot warning.** Host emits a top-of-log warning when
+   `Mode == Simulator`: `⚠ EXCHANGE MODE: SIMULATOR — synthetic ER
+   injection enabled. NEVER USE IN PRODUCTION.` Single line, hard
+   to miss in any tail.
+2. **Observable gauge.** A new metric
+   `trading.simulator.mode_active` (UpDownCounter, value `1` while
+   the mode is active) makes "is simulator on?" a Grafana alert,
+   not a log search.
+3. **/health body exposure.** The existing `/health` payload
+   continues to surface `exchange.mode`; deployers polling the
+   endpoint see `Simulator` immediately.
+4. **Refuse-to-boot in Production.** When
+   `ASPNETCORE_ENVIRONMENT == "Production"` and `Mode == Simulator`,
+   the host fails fast with a clear error. Opt-out via
+   `Trading:Exchange:AllowSimulatorInProduction = true` for the
+   rare prod-like load-test case; the opt-out is itself surfaced
+   in the boot warning.
+
 This makes the iceberg / TWAP engines testable from outside the
 host without coupling conformance to in-process internals.
 
@@ -466,25 +505,150 @@ as the trader-UI work that followed each backend phase.
 
 ## 6. Open questions
 
+> All four open questions raised at RFC merge time were closed
+> during the planning round on 2026-05-03. The original tentative
+> answers are retained below for traceability; the final decision
+> is the bold sentence after each one.
+
 - **OQ-1: Per-firm algo throttle.** Should v0 throttle the *total*
   rate at which an `AlgoEngine` consumer task submits children
   (across all parents), to protect the order hot path under heavy
   algo load? Tentative answer: not in v0 — the per-end-client and
   per-firm rate limits already cover this from the risk side. Add
   in algo risk v1 only if measured contention shows up.
+  **Decided: not in v0.** A trader's algo *is* the trader's
+  exposure; an engine-level throttle would mask that coupling and
+  inflate budget unfairly. Algo risk v1 revisits if observed
+  contention justifies it.
 - **OQ-2: Slice price selection for TWAP without explicit
   `childPrice`.** `Market` is straightforward. For `Limit` without
   a price, we either (a) reject at submit time, (b) peg to last
   trade from MD with stale-fallback. Tentative answer: (a) — keep
   v0 explicit, defer pegging to v1 with the rest of the pricing
   strategies.
+  **Decided: reject at submit time (option a).** The trader UI
+  validates client-side to avoid frustration; pegging strategies
+  (peg-to-mid, peg-to-VWAP, passive→aggressive ramp) ship together
+  in algo v1 as a coherent block.
 - **OQ-3: WS replay for the algo topic.** The orders topic supports
   catch-up via `?since=` (cf. WEBSOCKET-PROTOCOL.md). Algo events
   are persisted; a future PR can expose the same `since` semantics
   on the `algo` topic. Tentative answer: ship without `since` in
   v0 and add when the trader UI needs it.
+  **Decided: ship `?since=` in v0** (incorporated into §4.9). The
+  `?since=` plumbing already exists per-topic; reusing it now is
+  cheap, and the trader UI follow-up gets a reconnect-proof surface
+  on day one instead of waiting for a protocol bump later.
 - **OQ-4: Suspended → Resume.** Once a parent is `Suspended`, v0
   has no API to resume it; the operator must cancel and recreate.
   Resume needs to decide what the engine does with already-filled
   quantity, and that is non-trivial (especially for TWAP whose
   window has shifted). Tentative answer: punt to v1.
+  **Decided: punt to v1.** Resume is unambiguous for Iceberg but
+  semantically painful for TWAP (window already shifted; pick
+  between compress, extend, or burst — each violates a different
+  intent). Cancel + recreate has clear semantics and is sufficient
+  for the v0 surface.
+
+## 7. Planning decisions (post-RFC, 2026-05-03)
+
+Decisions taken during the planning round that followed the RFC
+merge but before slice 2 began. None of these change the v0 scope
+boundary — they sharpen behaviours the RFC left under-specified or
+explicitly out of scope. Captured here so the implementation slices
+can cite a single source of truth.
+
+### B1 — Consumer concurrency
+
+The `AlgoEngine` ships v0 with a **single consumer task** draining
+the `Channel<AlgoSignal>`, with the per-parent `SemaphoreSlim` for
+serialization across signals targeting the same parent. Multi-worker
+pool is deferred until a profile shows real contention. The
+load-bearing architectural commitment is the channel boundary
+(§4.3) plus the per-parent lock — promotion to N workers is an
+internal implementation detail behind the same boundary.
+
+### B2 — Suspend policy on child rejects
+
+The engine **suspends on the first child rejection of any kind**
+that is not covered by the bounded gateway-retry path. No
+engine-side skip-and-continue, no engine-side auto-correction
+(retry with rounded tick, retry with adjusted lot, etc.). The
+operator decides whether to cancel and recreate or wait for the
+condition to clear. Auto-correction would mask config-drift bugs
+that the operator has to know about; suspend is the honest signal.
+
+### B3 — Production safeguards for `Mode=Simulator`
+
+The simulator gateway lands with the four defences detailed in
+§4.10 (loud boot warning, observable gauge, `/health` exposure,
+refuse-to-boot in `Production` with explicit opt-out). Two layers
+of config gating are insufficient on their own; defence-in-depth
+is the cost of having a synthetic-ER injection capability at all.
+
+### C1 — `parentAlgoId` observability surface
+
+Children carry `parentAlgoId` in **structured logs** (added to the
+log scope in `OrderSubmissionService` whenever the field is set).
+Children **do not** carry `parent_algo_id` as a metric tag —
+cardinality would explode (one new series per algo). Per-source
+metrics give the same drill-down for the cases that matter without
+the cardinality blow-up:
+
+- `trading.orders.submitted_total` gains a `source` tag
+  (`manual` / `algo`).
+- New `trading.algo.children_submitted_total` with a `type` tag
+  (`iceberg` / `twap`) lives in the algo namespace, ships with the
+  Grafana panel in slice 7.
+
+Per-algo drill-down stays a logs-and-traces concern, where high
+cardinality is the natural fit.
+
+### C2 — Algo-on-algo composition
+
+`POST /algo` validates that the caller is **not** an algo engine
+itself. v0 explicitly rejects parents that try to nest algos as
+children. The v0 schema has no field that would expose such a
+chain; this is a defensive check more than an enforced restriction.
+If a real use case shows up, it earns its own RFC — recursion,
+cancel-cascade semantics, and state-machine product space are all
+non-trivial.
+
+### C3 — Modify in-flight
+
+v0 supports only `create` and `cancel`. Modify is `cancel +
+recreate`. For Iceberg this is essentially free; for TWAP this
+**loses the original time window** because the recreated parent
+needs a new `startTime` (slices recompute over `now → endTime`).
+The trader UI will show a warning when the user tries to modify a
+TWAP, framing the trade-off explicitly. A modify-preserving-window
+operation is part of the algo v1 RFC alongside Suspended → Resume
+(OQ-4) — both need the same "reschedule remaining qty into the
+remaining window" primitive that the recovery path already
+contains conceptually.
+
+### B-deferred — Scheduling and scaling posture (§4.11)
+
+Promotion thresholds for the TWAP scheduler (periodic-tick → min-heap
+→ time-wheel) and the consumer pool (single → N workers) are
+**deferred until benchmarks land**. The architectural commitments
+the implementation slices must respect regardless:
+
+1. **Scheduler thread is separate from the consumer thread.** TWAP
+   slice timing must not be affected by consumer-side work
+   (iceberg refills, terminal-state recording). Scheduler enqueues
+   signals at `plannedAtUtc`; consumer processes them as fast as it
+   can. Latency budget surfaces as `algo_twap_slice_fire_jitter_ms`,
+   not as scheduler imprecision.
+2. **`Channel<AlgoSignal>` is bounded.** Back-pressure is preferable
+   to unbounded memory growth.
+3. **Per-parent serialization** stays an invariant regardless of
+   how many consumer workers exist.
+
+Slice 6 (TWAP engine) ships the minimum metrics required to
+establish a benchmark baseline: `algo_signal_dispatch_latency_ms`,
+`algo_twap_slice_fire_jitter_ms`, `algo_signal_queue_depth`,
+`algo_per_parent_lock_wait_ms`, `algo_scheduler_tick_duration_ms`.
+A future amendment writes §4.11 once those numbers exist; until
+then the v0 picks (periodic 100ms scheduler tick, single consumer)
+are explicitly "smallest viable, instrument-then-promote."
