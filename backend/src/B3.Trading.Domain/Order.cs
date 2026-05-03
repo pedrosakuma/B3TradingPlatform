@@ -37,12 +37,29 @@ public sealed class Order
     /// multiple firms. Default <c>"DEFAULT"</c> exists only to keep older
     /// unit tests terse; production call sites always pass an explicit firm.
     /// </summary>
-    public Order(ulong clOrdId, EndClientId owner, string symbol, ulong securityId, OrderSide side, OrderType type, long quantity, decimal? price, string firmId = "DEFAULT")
+    public Order(
+        ulong clOrdId,
+        EndClientId owner,
+        string symbol,
+        ulong securityId,
+        OrderSide side,
+        OrderType type,
+        long quantity,
+        decimal? price,
+        string firmId = "DEFAULT",
+        ulong? parentAlgoId = null,
+        int? algoSliceSeq = null)
     {
         if (clOrdId == 0)
             throw new ArgumentOutOfRangeException(nameof(clOrdId), "ClOrdID cannot be zero (reserved as null sentinel by EntryPoint).");
         if (string.IsNullOrWhiteSpace(firmId))
             throw new ArgumentException("FirmId required.", nameof(firmId));
+        if (parentAlgoId is 0)
+            throw new ArgumentOutOfRangeException(nameof(parentAlgoId), "ParentAlgoId cannot be zero (reserved as null sentinel).");
+        if ((parentAlgoId is null) != (algoSliceSeq is null))
+            throw new ArgumentException("ParentAlgoId and AlgoSliceSeq must be set together (both null = manual order; both set = algo child).");
+        if (algoSliceSeq is < 0)
+            throw new ArgumentOutOfRangeException(nameof(algoSliceSeq));
         ClOrdId = clOrdId;
         Owner = owner;
         Symbol = symbol;
@@ -52,6 +69,8 @@ public sealed class Order
         Quantity = quantity;
         Price = price;
         FirmId = firmId;
+        ParentAlgoId = parentAlgoId;
+        AlgoSliceSeq = algoSliceSeq;
         LeavesQuantity = quantity;
         Status = OrderStatus.PendingNew;
     }
@@ -65,6 +84,16 @@ public sealed class Order
     public OrderType Type { get; }
     public long Quantity { get; }
     public decimal? Price { get; }
+    /// <summary>
+    /// When set, this order is a child slice produced by an
+    /// <c>AlgoEngine</c> on behalf of the parent <see cref="Algo"/> with
+    /// id <see cref="ParentAlgoId"/> and slice index <see cref="AlgoSliceSeq"/>.
+    /// Manual orders submitted via <c>POST /orders</c> leave both fields
+    /// <c>null</c>. The pair is set together or both <c>null</c> — never
+    /// one without the other (RFC §4.2).
+    /// </summary>
+    public ulong? ParentAlgoId { get; }
+    public int? AlgoSliceSeq { get; }
     public long LeavesQuantity { get; private set; }
     public long CumulativeQuantity { get; private set; }
     public OrderStatus Status { get; private set; }
@@ -149,9 +178,10 @@ public sealed class Order
     /// </summary>
     internal static Order Hydrate(
         ulong clOrdId, EndClientId owner, string symbol, ulong securityId, OrderSide side, OrderType type,
-        long quantity, decimal? price, long leaves, long cumQty, OrderStatus status, string firmId = "DEFAULT")
+        long quantity, decimal? price, long leaves, long cumQty, OrderStatus status, string firmId = "DEFAULT",
+        ulong? parentAlgoId = null, int? algoSliceSeq = null)
     {
-        var o = new Order(clOrdId, owner, symbol, securityId, side, type, quantity, price, firmId);
+        var o = new Order(clOrdId, owner, symbol, securityId, side, type, quantity, price, firmId, parentAlgoId, algoSliceSeq);
         o.LeavesQuantity = leaves;
         o.CumulativeQuantity = cumQty;
         o.Status = status;

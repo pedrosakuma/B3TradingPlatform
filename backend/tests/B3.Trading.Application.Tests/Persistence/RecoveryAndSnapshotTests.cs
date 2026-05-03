@@ -44,7 +44,7 @@ public class RecoveryAndSnapshotTests : IDisposable
         // Phase 1: live session — append events through the dispatcher, mutate state.
         await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
         {
-            var (book, positions, killSwitch, ownership, _, dispatcher, processor, sink) = BuildState(store);
+            var (book, positions, killSwitch, ownership, _, dispatcher, processor, sink, _) = BuildState(store);
 
             // Submit two orders.
             DispatchSubmit(dispatcher, book, ownership, 1UL, "alice", "PETR4", OrderSide.Buy, 100, 30m);
@@ -65,8 +65,8 @@ public class RecoveryAndSnapshotTests : IDisposable
         // Phase 2: cold boot — fresh state objects, recovery replays the WAL.
         await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
         {
-            var (book, positions, killSwitch, ownership, snapshotter, _, processor, _) = BuildState(store);
-            var replayer = new EventReplayer(book, ownership, killSwitch, processor);
+            var (book, positions, killSwitch, ownership, snapshotter, _, processor, _, algos) = BuildState(store);
+            var replayer = new EventReplayer(book, ownership, killSwitch, processor, algos);
             var recovery = new PersistenceRecovery(store,
                 snapshotter,
                 replayer,
@@ -100,7 +100,7 @@ public class RecoveryAndSnapshotTests : IDisposable
         long snapSeq;
         await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
         {
-            var (book, _, _, ownership, snapshotter, dispatcher, _, _) = BuildState(store);
+            var (book, _, _, ownership, snapshotter, dispatcher, _, _, _) = BuildState(store);
             for (var i = 1UL; i <= 3UL; i++)
                 DispatchSubmit(dispatcher, book, ownership, i, "alice", "PETR4", OrderSide.Buy, 10, 30m);
 
@@ -119,8 +119,8 @@ public class RecoveryAndSnapshotTests : IDisposable
         // Phase 2: cold boot from snapshot+tail.
         await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
         {
-            var (book, _, killSwitch, ownership, snapshotter, _, processor, _) = BuildState(store);
-            var replayer = new EventReplayer(book, ownership, killSwitch, processor);
+            var (book, _, killSwitch, ownership, snapshotter, _, processor, _, algos) = BuildState(store);
+            var replayer = new EventReplayer(book, ownership, killSwitch, processor, algos);
             var recovery = new PersistenceRecovery(store, snapshotter, replayer,
                 new SnapshotStore(_root, "test"), NullLogger<PersistenceRecovery>.Instance);
             await recovery.RunAsync();
@@ -135,7 +135,7 @@ public class RecoveryAndSnapshotTests : IDisposable
     public async Task Snapshot_DoesNotIncludeFlatPositions()
     {
         await using var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance);
-        var (book, positions, killSwitch, ownership, snapshotter, dispatcher, processor, _) = BuildState(store);
+        var (book, positions, killSwitch, ownership, snapshotter, dispatcher, processor, _, _) = BuildState(store);
         DispatchSubmit(dispatcher, book, ownership, 1UL, "alice", "PETR4", OrderSide.Buy, 100, 30m);
         DispatchEr(dispatcher, processor, 1UL, ExecKind.Fill, leaves: 0, cum: 100, last: 100, lastPx: 30m);
         DispatchSubmit(dispatcher, book, ownership, 2UL, "alice", "PETR4", OrderSide.Sell, 100, 30m);
@@ -154,19 +154,21 @@ public class RecoveryAndSnapshotTests : IDisposable
         StateSnapshotter,
         EventDispatcher,
         ExecutionReportProcessor,
-        TestSink) BuildState(IEventStore store)
+        TestSink,
+        AlgoBook) BuildState(IEventStore store)
     {
         var book = new WorkingOrderBook();
         var positions = new PositionKeeper();
         var killSwitch = new KillSwitchService();
         var ownership = new OrderOwnershipMap();
         var clOrdIds = new ClOrdIdPrefixRegistry();
+        var algos = new AlgoBook();
         var sink = new TestSink();
         var processor = new ExecutionReportProcessor(ownership, book, positions, sink,
             new NoOpMarginProvider(), NullLogger<ExecutionReportProcessor>.Instance);
-        var snapshotter = new StateSnapshotter(book, positions, killSwitch, clOrdIds, ownership);
+        var snapshotter = new StateSnapshotter(book, positions, killSwitch, clOrdIds, ownership, algos);
         var dispatcher = new EventDispatcher(store);
-        return (book, positions, killSwitch, ownership, snapshotter, dispatcher, processor, sink);
+        return (book, positions, killSwitch, ownership, snapshotter, dispatcher, processor, sink, algos);
     }
 
     private static void DispatchSubmit(
