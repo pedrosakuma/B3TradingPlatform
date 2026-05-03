@@ -400,17 +400,13 @@ DELETE /algo/{algoId}    → 202 Accepted {algoId, status: "Cancelling"}
 Authorization mirrors `/orders`: end-clients see only their own
 algos; admin role sees all (for `/admin/algo` follow-up if needed).
 
-The `algo` WS topic supports the same `?since=<seq>` catch-up
-semantics that the `orders` topic ships today (cf.
-`docs/WEBSOCKET-PROTOCOL.md`). Reconnecting clients replay missed
-events deterministically from the `FileEventStore` rather than
-having to reconstruct parent state from the `orders` stream. The
-custom of bundling replay with the topic from day one — instead of
-adding it later — was decided during planning (OQ-3); the cost is
-low because the `?since=` plumbing already exists per-topic, and
-the trader UI follow-up gains a reconnect-proof surface for free.
+The `algo` WS topic ships with **snapshot-on-subscribe** semantics
+matching the existing `orders.me` / `executions.me` / `positions.me`
+topics today: a fresh subscriber gets a snapshot frame, then deltas.
+A `?since=<seq>` parameter is **not** wired up in v0 — see the
+corrigendum on OQ-3 in §6 for the rationale and the deferred work.
 
-WS topic `algo` carries the lifecycle as discrete messages:
+WS topic `algo.me` carries the lifecycle as discrete messages:
 
 ```json
 { "topic": "algo", "type": "algoCreated",   "data": { algoId, owner, … } }
@@ -535,10 +531,19 @@ as the trader-UI work that followed each backend phase.
   are persisted; a future PR can expose the same `since` semantics
   on the `algo` topic. Tentative answer: ship without `since` in
   v0 and add when the trader UI needs it.
-  **Decided: ship `?since=` in v0** (incorporated into §4.9). The
-  `?since=` plumbing already exists per-topic; reusing it now is
-  cheap, and the trader UI follow-up gets a reconnect-proof surface
-  on day one instead of waiting for a protocol bump later.
+  **Decided 2026-05-03 (planning round): ship `?since=` in v0.**
+  *Corrigendum (slice 3 implementation, 2026-05-03): walked back.*
+  The premise was wrong: `WEBSOCKET-PROTOCOL.md` explicitly reserves
+  `since_seq` for "Phase 3 (resilience / ER-replay)" and the
+  parameter is ignored on every topic today. There is no per-topic
+  replay plumbing to reuse. Implementing replay just for the `algo`
+  topic would create protocol inconsistency and pre-empt the
+  systemic decision (WAL-replay vs ring buffer vs persisted
+  client cursor) that a dedicated WS-resilience RFC has to make
+  for *all* topics. Algo ships **snapshot-on-subscribe**, matching
+  the rest of v1; reconnect-proof replay returns when that RFC
+  lands. The corrigendum does not change v0 scope — it removes a
+  feature we couldn't honestly deliver.
 - **OQ-4: Suspended → Resume.** Once a parent is `Suspended`, v0
   has no API to resume it; the operator must cancel and recreate.
   Resume needs to decide what the engine does with already-filled
