@@ -213,18 +213,26 @@ Two new admin endpoints (gated by `role=admin`):
 
 ### 4.6 Observability
 
-New metrics (Prometheus, via the existing OTel pipeline):
+New metrics (OTel via the existing pipeline; meter name `B3.Trading`):
 
-| Metric                                | Type      | Labels                  |
-| ------------------------------------- | --------- | ----------------------- |
-| `risk_check_total`                    | counter   | check, outcome          |
-| `risk_reject_total`                   | counter   | reason, firmId          |
-| `risk_pipeline_duration_ms`           | histogram | (none)                  |
-| `risk_margin_check_duration_ms`       | histogram | (none)                  |
-| `risk_reference_price_stale_total`    | counter   | symbol                  |
-| `risk_reference_price_missing_total`  | counter   | symbol                  |
+| Metric                                      | Type             | Tags              | Status       |
+| ------------------------------------------- | ---------------- | ----------------- | ------------ |
+| `trading.risk.refprice.lookups`             | counter          | symbol, source    | shipped (slice 5) |
+| `trading.risk.refprice.staleness_seconds`   | observable gauge | symbol            | shipped (slice 5) |
+| `trading.risk.collar.bypassed_no_reference` | counter          | symbol            | shipped (slice 5) |
 
-Grafana panel mirrors the FIXP panel's layout (rate / p95 / errors).
+`source` is one of `live` (live MD cache hit fresh under
+`Trading:MarketData:MaxStaleness`), `fallback` (live missed/stale,
+satisfied by the static `Trading:Risk:ReferencePrices` table), or
+`missing` (no source had a number). The `bypassed_no_reference`
+counter only increments when a configured collar approves an order
+purely because no reference was available — i.e. the fail-open
+escape hatch was exercised. A sustained non-zero rate is the cue for
+ops to either seed the static table or fix the live feed.
+
+Per-check `risk_check_total` / `risk_reject_total` / pipeline
+duration histograms remain on the slice 8 list (conformance + Grafana
+panel).
 
 ### 4.7 Conformance
 
@@ -285,14 +293,13 @@ brittle; the metric + ops paging is the compromise.
 Each PR is sequenced, autocontido, build/format/test green, with
 metrics + tests included.
 
-1. RFC (this document) — no code.
-2. `PerFirm` limits + resolver update.
+1. RFC (this document) — no code. **shipped (#39)**
+2. `PerFirm` limits + resolver update. **shipped (#40)**
 3. `IOptionsMonitor` switch + `GET /admin/risk/limits` + reload
-   endpoint.
-4. `MarginCheck` + `StaticMarginProvider` + cache + reject reason
-   wiring.
+   endpoint. **shipped (#41)**
+4. `MarginCheck` + reserve-on-submit ledger. **shipped (#43)**
 5. `IReferencePrice` indirection + `MarketDataReferencePrice` with
-   fallback + stale/missing metrics.
+   fallback + staleness/source/bypass metrics. **shipped (#44)**
 6. Fat-finger server-side: `MinTickSizeCheck`, `MinLotSizeCheck`,
    `MaxNotionalPerOrderCheck`, absolute collar in
    `PriceCollarCheck`.

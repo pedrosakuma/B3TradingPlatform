@@ -56,6 +56,15 @@ public sealed class MarketDataReferencePrice : IReferencePrice, IHostedService
         _subscriber.InfoSnapshot += OnInfoSnapshot;
         _subscriber.ConnectionStateChanged += OnConnectionStateChanged;
         _subscriber.SubscribeError += OnSubscribeError;
+
+        // Push the per-symbol staleness source so the central observable
+        // gauge can report it on each scrape. Singleton lifetime — the
+        // provider lives as long as the host, so unregistration on
+        // shutdown is unnecessary (and would race with in-flight scrapes).
+        Observability.MetricsRegistry.RegisterRefPriceStalenessSource(
+            () => _cache.Select(kv => new KeyValuePair<string, double>(
+                kv.Key,
+                Math.Max(0d, (_clock.GetUtcNow() - kv.Value.UpdatedUtc).TotalSeconds))));
     }
 
     /// <summary>Exposed for tests / ops introspection. Snapshot, not live.</summary>
@@ -67,11 +76,15 @@ public sealed class MarketDataReferencePrice : IReferencePrice, IHostedService
 
     public bool TryGet(string symbol, out decimal price)
     {
+        var lookup = Lookup(symbol);
+        price = lookup.Price;
+        return lookup.Found;
+    }
+
+    public ReferencePriceLookup Lookup(string symbol)
+    {
         if (string.IsNullOrWhiteSpace(symbol))
-        {
-            price = 0m;
-            return false;
-        }
+            return ReferencePriceLookup.NotFound;
 
         if (_cache.TryGetValue(symbol, out var entry) && entry.Price > 0m)
         {
@@ -79,12 +92,11 @@ public sealed class MarketDataReferencePrice : IReferencePrice, IHostedService
             if (_options.MaxStaleness <= TimeSpan.Zero ||
                 _clock.GetUtcNow() - entry.UpdatedUtc <= _options.MaxStaleness)
             {
-                price = entry.Price;
-                return true;
+                return new ReferencePriceLookup(entry.Price, ReferencePriceSource.Live);
             }
         }
 
-        return _fallback.TryGet(symbol, out price);
+        return _fallback.Lookup(symbol);
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
