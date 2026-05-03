@@ -24,6 +24,10 @@
         <span>Backend</span>
         <input id="login-backend" type="url" placeholder="http://localhost:5000" />
       </label>
+      <label class="row remember">
+        <input id="login-remember" type="checkbox" />
+        <span>Remember me on this device</span>
+      </label>
       <button type="submit" id="login-submit">Sign in</button>
       <p id="login-error" class="error" hidden></p>
     </form>
@@ -216,6 +220,23 @@
       <pre id="admin-eod-output" class="admin-eod-output" hidden></pre>
     </section>
   </section>
+
+  <!-- SESSION-EXPIRY MODAL -------------------------------------------- -->
+  <div id="session-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="session-modal-title">
+    <form id="session-modal-form" class="modal-card">
+      <h2 id="session-modal-title">Session expiring</h2>
+      <p id="session-modal-msg" class="muted-line">Re-enter your password to extend the session.</p>
+      <label>
+        <span>Password</span>
+        <input id="session-modal-password" type="password" autocomplete="current-password" required />
+      </label>
+      <p id="session-modal-error" class="error" hidden></p>
+      <div class="modal-actions">
+        <button type="button" id="session-modal-logout" class="link-button">Logout</button>
+        <button type="submit" id="session-modal-submit">Renew session</button>
+      </div>
+    </form>
+  </div>
 
   <script type="module" src="js/app.js"></script>
 </body>

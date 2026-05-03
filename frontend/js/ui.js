@@ -55,6 +55,51 @@ export function setLoginError(message) {
   el.hidden = false; el.textContent = message;
 }
 
+// ── Session-expiry modal ───────────────────────────────────────────
+let sessionModalSubmit = null;
+let sessionModalLogout = null;
+
+export function openSessionModal({ onRenew, onLogout }) {
+  const modal = $("session-modal");
+  const form  = $("session-modal-form");
+  const pwd   = $("session-modal-password");
+  const logoutBtn = $("session-modal-logout");
+  if (!modal || !form || !pwd) return;
+  setSessionModalError(null);
+  pwd.value = "";
+  modal.hidden = false;
+  // Replace handlers (idempotent across multiple opens).
+  if (sessionModalSubmit) form.removeEventListener("submit", sessionModalSubmit);
+  if (sessionModalLogout) logoutBtn?.removeEventListener("click", sessionModalLogout);
+  sessionModalSubmit = (e) => {
+    e.preventDefault();
+    const value = pwd.value;
+    if (!value) { setSessionModalError("password required"); return; }
+    onRenew?.(value);
+  };
+  sessionModalLogout = () => onLogout?.();
+  form.addEventListener("submit", sessionModalSubmit);
+  logoutBtn?.addEventListener("click", sessionModalLogout);
+  // Defer focus to the next frame so backdrop transitions don't steal it.
+  requestAnimationFrame(() => pwd.focus());
+}
+
+export function closeSessionModal() {
+  const modal = $("session-modal");
+  if (!modal) return;
+  modal.hidden = true;
+  setSessionModalError(null);
+  const pwd = $("session-modal-password");
+  if (pwd) pwd.value = "";
+}
+
+export function setSessionModalError(message) {
+  const el = $("session-modal-error");
+  if (!el) return;
+  if (!message) { el.hidden = true; el.textContent = ""; return; }
+  el.hidden = false; el.textContent = message;
+}
+
 export function bindUi() {
   // Order ticket: enable/disable price field by type.
   const typeEl = $("ticket-type");
@@ -345,13 +390,13 @@ function renderMarketData() {
   // subscriptions even before the first trade arrives.
   const rows = watch.length > 0 ? watch : [...md.keys()];
   if (rows.length === 0) {
-    body.innerHTML = `<tr><td colspan="5" style="color:var(--muted);text-align:center;padding:1rem">No subscriptions</td></tr>`;
+    body.innerHTML = `<tr><td colspan="5" class="muted">No subscriptions</td></tr>`;
     return;
   }
   body.innerHTML = rows.map(symbol => {
     const e = md.get(symbol);
     if (!e || e.lastPrice == null) {
-      return `<tr><td>${escapeHtml(symbol)}</td><td colspan="4" style="color:var(--muted)">awaiting data…</td></tr>`;
+      return `<tr><td>${escapeHtml(symbol)}</td><td colspan="4" class="muted-cell">awaiting data…</td></tr>`;
     }
     const ts = e.updatedAt ? new Date(e.updatedAt).toISOString().slice(11, 19) : "—";
     return `<tr>
@@ -416,7 +461,7 @@ function renderPositions() {
     .filter(p => p.netQuantity !== 0)
     .sort((a, b) => a.symbol.localeCompare(b.symbol));
   body.innerHTML = positions.length === 0
-    ? `<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:1rem">No positions</td></tr>`
+    ? `<tr><td colspan="3" class="muted">No positions</td></tr>`
     : positions.map(p => `<tr>
         <td>${escapeHtml(p.symbol)}</td>
         <td class="num">${p.netQuantity}</td>
