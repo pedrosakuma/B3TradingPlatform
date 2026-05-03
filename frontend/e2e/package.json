@@ -1,0 +1,12 @@
+{
+  "name": "b3tp-e2e",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Opt-in headless smoke test against the docker compose stack. Pinned Playwright; not part of the day-to-day frontend build.",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.49.1"
+  }
+}

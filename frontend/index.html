@@ -38,16 +38,16 @@
     <header class="topbar">
       <div class="brand">B3TradingPlatform <span class="pill">trader</span></div>
       <div class="status">
-        <span id="view-toggle" class="view-toggle" hidden>
-          <button type="button" data-view="trader" class="active">Trader</button>
-          <button type="button" data-view="admin">Admin</button>
+        <span id="view-toggle" class="view-toggle" role="tablist" aria-label="View" hidden>
+          <button type="button" data-view="trader" class="active" role="tab" aria-selected="true">Trader</button>
+          <button type="button" data-view="admin" role="tab" aria-selected="false">Admin</button>
         </span>
-        <span id="firms-health" class="firms-health" hidden></span>
-        <span id="ws-status" class="status-pill status-disconnected" title="WebSocket connection">disconnected</span>
-        <span id="ws-reconnect" class="reconnect-countdown" hidden></span>
+        <span id="firms-health" class="firms-health" role="status" aria-live="polite" aria-label="Firms health" hidden></span>
+        <span id="ws-status" class="status-pill status-disconnected" role="status" aria-live="polite" aria-label="WebSocket: disconnected" title="WebSocket connection">disconnected</span>
+        <span id="ws-reconnect" class="reconnect-countdown" role="status" aria-live="polite" hidden></span>
         <span id="user-label" class="user-label"></span>
         <span id="user-role" class="role-badge" hidden></span>
-        <button id="logout" class="link-button" type="button">Logout</button>
+        <button id="logout" class="link-button" type="button" aria-label="Logout">Logout</button>
       </div>
     </header>
 
@@ -87,8 +87,8 @@
             </label>
           </div>
           <button type="submit" id="ticket-submit">Submit</button>
-          <p id="ticket-inflight" class="inflight" hidden></p>
-          <p id="ticket-feedback" class="feedback" hidden></p>
+          <p id="ticket-inflight" class="inflight" role="status" aria-live="polite" hidden></p>
+          <p id="ticket-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
         </form>
       </section>
 
@@ -143,7 +143,7 @@
       <section class="panel market-data">
         <h2>
           Market data
-          <span id="md-status" class="status-pill status-disconnected" title="MarketData WebSocket connection">disconnected</span>
+          <span id="md-status" class="status-pill status-disconnected" role="status" aria-live="polite" aria-label="Market data: disconnected" title="MarketData WebSocket connection">disconnected</span>
         </h2>
         <form id="md-form" class="md-form">
           <label>
@@ -155,7 +155,7 @@
             <input id="md-symbols" type="text" placeholder="PETR4,VALE3" />
           </label>
           <button type="submit" id="md-apply">Apply</button>
-          <p id="md-feedback" class="feedback" hidden></p>
+          <p id="md-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
         </form>
         <div class="table-scroll">
           <table id="md-table">
@@ -183,7 +183,7 @@
         <button id="admin-refresh" type="button" class="link-button">Refresh</button>
       </div>
     </header>
-    <p id="admin-feedback" class="feedback" hidden></p>
+    <p id="admin-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
 
     <section class="panel admin-panel">
       <h3>Firms</h3>
