@@ -19,7 +19,7 @@ public sealed class PriceCollarCheck : IRiskCheck
     public RiskDecision Check(RiskContext ctx)
     {
         if (!ctx.Price.HasValue) return RiskDecision.Approve; // market order
-        var collarPct = RiskLimitsResolver.Resolve(_options, ctx.Owner.Value, ctx.Symbol, l => l.PriceCollarPercent);
+        var collarPct = RiskLimitsResolver.Resolve(_options, ctx.Owner.Value, ctx.FirmId, ctx.Symbol, l => l.PriceCollarPercent);
         if (!collarPct.HasValue) return RiskDecision.Approve;
         if (!_refPrice.TryGet(ctx.Symbol, out var refPx) || refPx <= 0m)
             return RiskDecision.Approve; // no reference; can't enforce

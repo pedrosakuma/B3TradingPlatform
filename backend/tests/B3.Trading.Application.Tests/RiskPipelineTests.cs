@@ -92,6 +92,69 @@ public class RiskPipelineTests
     }
 
     [Fact]
+    public void MaxQuantity_PerFirm_AppliesWhenEndClientNotConfigured()
+    {
+        var opts = Wrap(new RiskOptions
+        {
+            Default = new RiskLimits { MaxQuantity = 1000 },
+            PerFirm = { ["broker-a"] = new RiskLimits { MaxQuantity = 25 } },
+        });
+        var check = new MaxQuantityCheck(opts);
+        Assert.False(check.Check(Ctx(firm: "broker-a", qty: 26)).Approved);
+        Assert.True(check.Check(Ctx(firm: "broker-a", qty: 25)).Approved);
+        // A firm without a per-firm cap falls back to default.
+        Assert.True(check.Check(Ctx(firm: "broker-b", qty: 999)).Approved);
+    }
+
+    [Fact]
+    public void MaxQuantity_PerEndClient_BeatsPerFirm()
+    {
+        var opts = Wrap(new RiskOptions
+        {
+            Default = new RiskLimits { MaxQuantity = 1000 },
+            PerFirm = { ["broker-a"] = new RiskLimits { MaxQuantity = 25 } },
+            PerEndClient = { ["alice"] = new RiskLimits { MaxQuantity = 5 } },
+        });
+        var check = new MaxQuantityCheck(opts);
+        // Alice is capped at 5, even though her firm allows 25.
+        Assert.False(check.Check(Ctx(firm: "broker-a", qty: 10)).Approved);
+        // Bob has no per-end-client cap, so the firm limit applies.
+        Assert.True(check.Check(Ctx(owner: "bob", firm: "broker-a", qty: 25)).Approved);
+        Assert.False(check.Check(Ctx(owner: "bob", firm: "broker-a", qty: 26)).Approved);
+    }
+
+    [Fact]
+    public void MaxQuantity_PerFirm_BeatsPerSymbol()
+    {
+        var opts = Wrap(new RiskOptions
+        {
+            Default = new RiskLimits { MaxQuantity = 1000 },
+            PerFirm = { ["broker-a"] = new RiskLimits { MaxQuantity = 25 } },
+            PerSymbol = { ["PETR4"] = new RiskLimits { MaxQuantity = 50 } },
+        });
+        var check = new MaxQuantityCheck(opts);
+        // Firm wins over symbol on the same field.
+        Assert.False(check.Check(Ctx(firm: "broker-a", qty: 26)).Approved);
+        // A different firm with no per-firm entry falls through to symbol.
+        Assert.True(check.Check(Ctx(firm: "broker-b", qty: 50)).Approved);
+        Assert.False(check.Check(Ctx(firm: "broker-b", qty: 51)).Approved);
+    }
+
+    [Fact]
+    public void Resolver_SkipsPerFirm_WhenFirmIdIsBlank()
+    {
+        var opts = new RiskOptions
+        {
+            Default = new RiskLimits { MaxQuantity = 999 },
+            PerFirm = { ["broker-a"] = new RiskLimits { MaxQuantity = 1 } },
+        };
+        // Blank firm id should NOT match any per-firm entry.
+        var resolved = RiskLimitsResolver.Resolve(
+            opts, endClient: "x", firmId: "", symbol: "PETR4", l => l.MaxQuantity);
+        Assert.Equal(999, resolved);
+    }
+
+    [Fact]
     public void MaxNotional_RejectsOverNotional()
     {
         var opts = Wrap(new RiskOptions { Default = new RiskLimits { MaxNotional = 1000m } });
