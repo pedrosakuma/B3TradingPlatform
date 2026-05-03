@@ -77,6 +77,47 @@ public static class AdminEndpoints
             return Results.Ok(new { mode = mode.ToString(), firms });
         });
 
+        // Debug helper for ops: surface the *effective* RiskLimits the
+        // resolver picks for a given (endClient, firm, symbol) tuple.
+        // Pure read — no side effects. The caller passes whatever
+        // dimension(s) they care about; missing values default to a
+        // sentinel that matches no entry so the resolver falls through
+        // to per-symbol/default for that slot.
+        group.MapGet("/risk/limits", (IOptionsMonitor<RiskOptions> opts, string? endClient, string? firmId, string? symbol) =>
+        {
+            var resolved = RiskLimitsResolver.ResolveAll(
+                opts.CurrentValue,
+                endClient ?? string.Empty,
+                firmId,
+                symbol ?? string.Empty);
+            return Results.Ok(new
+            {
+                query = new { endClient, firmId, symbol },
+                limits = new
+                {
+                    maxQuantity = resolved.MaxQuantity,
+                    maxNotional = resolved.MaxNotional,
+                    priceCollarPercent = resolved.PriceCollarPercent,
+                    positionLimit = resolved.PositionLimit,
+                },
+            });
+        });
+
+        // Reload hook for non-appsettings configuration providers.
+        // The default appsettings provider already watches the file
+        // and pushes IOptionsMonitor.OnChange notifications, so this
+        // endpoint is a no-op there. When a future provider (file/DB
+        // adapter from the persistence spike) ships, it can plug in
+        // an IRiskOptionsReloader and have the body trigger an
+        // out-of-band reload. Returns 204 either way; the caller can
+        // immediately re-query /admin/risk/limits to verify.
+        group.MapPost("/risk/reload", (IServiceProvider sp) =>
+        {
+            var reloader = sp.GetService<IRiskOptionsReloader>();
+            reloader?.Reload();
+            return Results.NoContent();
+        });
+
         return app;
     }
 
