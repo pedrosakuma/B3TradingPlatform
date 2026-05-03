@@ -21,6 +21,11 @@ const state = {
   killStatus: null,        // { endClients: [], firms: [], fetchedAt } | null — admin-only
   eodReport: null,         // { ranAt, report } | null — last EOD response in this session
   currentView: "trader",   // "trader" | "admin" — which view is mounted
+  // Blotter UX (section 3 of #30).
+  blotterFilter: { text: "", status: "" }, // { text: substring, status: "" | <OrderStatus> }
+  ordersHighlight: new Map(),              // ClOrdID -> Date.now() of last delta
+  selectedClOrdId: null,                   // currently selected blotter row (for keyboard cancel)
+  pendingFatFinger: null,                  // { payload, key } — set when a submit needs override
 };
 
 const EXECUTIONS_CAPACITY = 500;
@@ -45,6 +50,9 @@ export function applyOrdersSnapshot(rows) {
 }
 export function applyOrdersDelta(row) {
   state.orders.set(row.clOrdId, row);
+  // Mark this row as freshly updated so the UI can flash it; the
+  // highlight expires naturally — readers compare against now.
+  state.ordersHighlight.set(row.clOrdId, Date.now());
   notify("orders");
 }
 
@@ -78,6 +86,9 @@ export function clearAll() {
   state.orders.clear();
   state.positions.clear();
   state.executions = [];
+  state.ordersHighlight.clear();
+  state.selectedClOrdId = null;
+  state.pendingFatFinger = null;
   notify("all");
 }
 
@@ -167,4 +178,24 @@ export function setCurrentView(view) {
   if (state.currentView === view) return;
   state.currentView = view;
   notify("currentView");
+}
+
+// ── Blotter UX slices (section 3 of #30) ───────────────────────────
+
+export function setBlotterFilter(filter) {
+  state.blotterFilter = {
+    text:   typeof filter?.text   === "string" ? filter.text   : "",
+    status: typeof filter?.status === "string" ? filter.status : "",
+  };
+  notify("blotterFilter");
+}
+
+export function setSelectedOrder(clOrdId) {
+  state.selectedClOrdId = clOrdId ?? null;
+  notify("selectedOrder");
+}
+
+export function setPendingFatFinger(payload, key) {
+  state.pendingFatFinger = payload ? { payload, key } : null;
+  notify("pendingFatFinger");
 }

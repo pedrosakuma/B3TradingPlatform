@@ -4,12 +4,14 @@ import { defaultBackend, login, submitOrder, cancelOrder, getAdminFirms,
          getKillStatus, killFirm, reviveFirm, killEndClient, reviveEndClient,
          runEod } from "./protocol.js";
 import { claimsFromToken } from "./jwt.js";
+import { validateOrder, fatFingerCheck, payloadKey } from "./validation.js";
 import * as state from "./state.js";
 import * as ui from "./ui.js";
 import * as adminUi from "./adminUi.js";
 
 const SESSION_KEY = "b3tp.session";
 const MD_KEY = "b3tp.md";
+const BLOTTER_FILTER_KEY = "b3tp.blotter.filter";
 const DEFAULT_WATCHLIST = ["PETR4", "VALE3"];
 const FIRMS_POLL_INTERVAL_MS = 5_000;
 
@@ -31,6 +33,9 @@ function init() {
     onLogout: logout,
     onApplyMd: handleApplyMd,
     onSwitchView: handleSwitchView,
+    onBlotterFilter: handleBlotterFilter,
+    onSelectOrder: handleSelectOrder,
+    onKeyboardCancel: handleKeyboardCancel,
   });
   adminUi.setAdminHandlers({
     onToggleFirm:      handleToggleFirm,
@@ -233,11 +238,28 @@ function onWorkerMessage(msg) {
 
 async function handleSubmitOrder(payload) {
   if (!session) return;
-  if (!payload.symbol)               return ui.setTicketFeedback("symbol required", "error");
-  if (!Number.isFinite(payload.quantity) || payload.quantity <= 0)
-    return ui.setTicketFeedback("quantity must be positive", "error");
-  if (payload.type === "Limit" && (!Number.isFinite(payload.price) || payload.price <= 0))
-    return ui.setTicketFeedback("limit price required", "error");
+
+  const error = validateOrder(payload);
+  if (error) return ui.setTicketFeedback(error.message, "error");
+
+  // Fat-finger guard: first attempt with a >threshold deviation from
+  // the last observed trade is rejected with a warning; the same exact
+  // payload submitted again within the pending window goes through.
+  const lastPrice = state.getState().marketData.get(payload.symbol)?.lastPrice;
+  const ff = fatFingerCheck(payload, lastPrice);
+  const key = payloadKey(payload);
+  const pending = state.getState().pendingFatFinger;
+  if (ff && (!pending || pending.key !== key)) {
+    state.setPendingFatFinger(payload, key);
+    const pct = (ff.deviation * 100).toFixed(1);
+    ui.setTicketFeedback(
+      `fat-finger guard: price deviates ${pct}% from last trade ${ff.lastPrice}. Click Submit again to override.`,
+      "warn",
+    );
+    return;
+  }
+  // Clear pending guard once the user confirms or moves on.
+  state.setPendingFatFinger(null);
 
   ui.setTicketSubmitting(true);
   ui.setTicketFeedback(null);
@@ -265,6 +287,39 @@ async function handleCancelOrder(clOrdId) {
   }
 }
 
+// ── Blotter UX ─────────────────────────────────────────────────────
+
+function handleBlotterFilter(filter) {
+  state.setBlotterFilter(filter);
+  writeBlotterFilter(filter);
+}
+
+function handleSelectOrder(clOrdId) {
+  state.setSelectedOrder(clOrdId);
+}
+
+function handleKeyboardCancel() {
+  const id = state.getState().selectedClOrdId;
+  if (!id) return;
+  const order = state.getState().orders.get(id);
+  if (!order || ["Filled", "Cancelled", "Rejected"].includes(order.status)) return;
+  if (!window.confirm(`Cancel order ${id}?`)) return;
+  handleCancelOrder(id);
+}
+
+function readBlotterFilter() {
+  try {
+    const raw = sessionStorage.getItem(BLOTTER_FILTER_KEY);
+    if (!raw) return { text: "", status: "" };
+    const parsed = JSON.parse(raw);
+    return {
+      text:   typeof parsed?.text   === "string" ? parsed.text   : "",
+      status: typeof parsed?.status === "string" ? parsed.status : "",
+    };
+  } catch { return { text: "", status: "" }; }
+}
+function writeBlotterFilter(f) { sessionStorage.setItem(BLOTTER_FILTER_KEY, JSON.stringify(f)); }
+
 function logout() {
   if (expiryTimer) { clearTimeout(expiryTimer); expiryTimer = null; }
   stopFirmsPoll();
@@ -291,6 +346,9 @@ function logout() {
   state.setKillStatus(null);
   state.setEodReport(null);
   state.setCurrentView("trader");
+  state.setBlotterFilter(readBlotterFilter());
+  state.setSelectedOrder(null);
+  state.setPendingFatFinger(null);
   state.clearAll();
   state.clearMarketData();
   state.setWatchlist([]);

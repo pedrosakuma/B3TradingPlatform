@@ -91,6 +91,17 @@
       <!-- BLOTTER ---------------------------------------------------- -->
       <section class="panel blotter">
         <h2>Working orders <span id="blotter-count" class="count">0</span></h2>
+        <div class="blotter-filter">
+          <input id="blotter-filter-text" type="search" placeholder="filter by symbol or ClOrdID" maxlength="32" />
+          <select id="blotter-filter-status">
+            <option value="">all statuses</option>
+            <option value="New">New</option>
+            <option value="PartiallyFilled">PartiallyFilled</option>
+            <option value="Filled">Filled</option>
+            <option value="Cancelled">Cancelled</option>
+            <option value="Rejected">Rejected</option>
+          </select>
+        </div>
         <div class="table-scroll">
           <table id="blotter-table">
             <thead>

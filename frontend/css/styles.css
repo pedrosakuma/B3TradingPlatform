@@ -246,3 +246,24 @@ td { padding: .35rem .5rem; border-bottom: 1px solid #20283a; }
   margin-right: .35rem;
 }
 .muted { color: var(--muted); text-align: center; padding: .8rem; }
+
+/* ---------- Blotter filter + row UX (section 3 of #30) ---------- */
+.blotter-filter {
+  display: flex; gap: .4rem; margin-bottom: .4rem;
+}
+.blotter-filter input, .blotter-filter select {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 4px; padding: .25rem .45rem; font: inherit; font-size: .8rem;
+}
+.blotter-filter input { flex: 1; }
+@keyframes row-fresh-fade {
+  0%   { background: rgba(79,158,255,.32); }
+  100% { background: transparent; }
+}
+tr.row-fresh > td { animation: row-fresh-fade 2s ease-out forwards; }
+tr.row-selected > td {
+  outline: 1px solid var(--accent); outline-offset: -1px;
+}
+tr[data-clordid] { cursor: pointer; }
+tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
+.feedback.warn { color: var(--warn); }
