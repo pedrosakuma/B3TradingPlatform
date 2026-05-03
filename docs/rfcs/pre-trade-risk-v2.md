@@ -57,6 +57,51 @@ without rewriting the pipeline or the `IRiskCheck` contract.
   follows if the operational pressure justifies it.
 - Pre-trade controls specific to algo orders (parent/child notional,
   participation rate). That belongs to the algo orders RFC.
+- **Derivatives, options, futures.** The domain (`OrderType` =
+  `Limit`/`Market`, `Position.NetQuantity` as a linear inventory)
+  models cash equities only — there is no underlying / strike /
+  expiry / contract-multiplier / margin-by-greeks concept anywhere
+  in the codebase. Adding those instruments requires a polymorphic
+  `Instrument` model, a calendar, and a margin engine that knows
+  about initial vs. maintenance margin. **Out-of-scope; tracked in a
+  future RFC.**
+- **T+N cash settlement (B3 real-world model).** The current system
+  has no calendar, no D+0/D+1/D+2 projected-balance concept, no
+  integration with a clearing house (B3-CCP). v2 deliberately
+  assumes the simpler model below; T+N settlement is a future RFC.
+
+## 3.1 Margin model assumed by v2
+
+`MarginCheck` (slice 4) is designed for a **synchronous,
+reserve-on-submit ledger** — same shape as a crypto spot exchange,
+not a brokered T+2 cash market:
+
+- On `OrderSubmittedEvent`: `available -= price · qty` for the
+  end-client.
+- On ER `Filled` / `Cancelled` / `Rejected`: release the unfilled
+  portion of the reservation; partial fills release proportionally.
+- Available balance is a single scalar per (end-client, currency)
+  with no projection horizon.
+
+**Why this model first:** it is the only one that fits the existing
+domain (cash-equities-only, linear positions, no instrument
+polymorphism, no calendar). It also requires no integration with
+the clearing house, which keeps v2 fully self-contained.
+
+**What it explicitly does not cover** (and the RFC that will revisit
+it):
+
+- T+2 settlement projections — future "pre-trade risk v3 / cash
+  settlement" RFC, blocked on the persistence spike (#29) picking a
+  store.
+- Derivatives margin (initial/maintenance/variation, greeks,
+  haircut by instrument) — future "derivatives support" RFC, blocked
+  on the polymorphic `Instrument` domain change.
+
+The `IMarginProvider` interface is intentionally narrow
+(`GetAsync(EndClientKey) → MarginSnapshot`) so a future
+T+N or derivatives-aware provider can replace the stub without
+touching the pipeline or the synthetic-ER channel.
 
 ## 4. Design
 
