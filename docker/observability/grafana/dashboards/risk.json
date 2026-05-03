@@ -1,0 +1,150 @@
+{
+  "annotations": { "list": [] },
+  "description": "Pre-trade risk dashboard for the B3 trading-host. Surfaces v2 risk-pipeline behaviour: rejection rates by reason, reference-price freshness/coverage, throttle ledger occupancy. Built from instruments verified to actually export — see docs/METRICS.md for the catalog.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Rate of pre-trade risk rejections, broken down by the resolved Reason tag. Each series is one risk-check name (max_quantity, max_notional, price_collar_percent, position_limit, max_open_orders, rolling_notional, order_rate, fat_finger_*). A non-zero baseline is normal in busy markets; sustained spikes suggest either misconfiguration or a misbehaving client.",
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (reason) (rate(trading_orders_rejected_by_risk_total[1m]))",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Risk rejections rate (per reason)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Reference-price lookups by source: live (fresh MD), fallback (stale or static config), missing (no reference at all). A growing missing/fallback share means the MD subscription is degraded — checks that depend on a reference (price collar, rolling notional) silently bypass when there is no price, which is tracked separately below.",
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (source) (rate(trading_risk_refprice_lookups_total[1m]))",
+          "legendFormat": "{{source}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Reference price lookups (per source)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Cumulative count of price-collar checks that bypassed because no reference price was available. A non-zero rate here is the smoking gun for the price-collar gap — orders that would have been rejected got through because the reference was missing.",
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "blue", "value": null }, { "color": "orange", "value": 1 } ] }, "unit": "none" } },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 8 },
+      "id": 3,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "value_and_name" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(trading_risk_collar_bypassed_no_reference_total)",
+          "legendFormat": "collar bypassed",
+          "refId": "A"
+        }
+      ],
+      "title": "Collar bypassed (no reference)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Cumulative count of rolling-notional checks that bypassed because no reference price was available. Same diagnostic role as the collar-bypass counter, for the slice-7 throttle.",
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "blue", "value": null }, { "color": "orange", "value": 1 } ] }, "unit": "none" } },
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 8 },
+      "id": 4,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "value_and_name" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(trading_risk_rolling_notional_bypassed_no_reference_total)",
+          "legendFormat": "rolling notional bypassed",
+          "refId": "A"
+        }
+      ],
+      "title": "Rolling notional bypassed (no reference)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Per-symbol staleness of the reference price feed (seconds since the last accepted MD update). Anything trending above the configured MaxStaleness window means the price-collar and rolling-notional checks are about to start bypassing for that symbol.",
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "s" } },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 8 },
+      "id": 5,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "trading_risk_refprice_staleness_seconds",
+          "legendFormat": "{{symbol}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Reference price staleness (per symbol)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Active sliding-window buckets for the rolling-notional throttle, by scope (end_client / firm). Tracks how much state the SlidingWindowLedger is holding right now. A flat-line at 0 means no recent submits; sustained growth suggests a bucket-eviction bug or an end-client/firm cardinality explosion.",
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "none" } },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 14 },
+      "id": 6,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "trading_risk_rolling_notional_active_buckets",
+          "legendFormat": "{{scope}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Rolling notional — active buckets",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Active sliding-window buckets for the order-rate throttle, by scope (end_client / firm). Same ledger semantics as the rolling-notional gauge above, applied to the per-second order-count limiter.",
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "none" } },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 14 },
+      "id": 7,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "trading_risk_order_rate_active_buckets",
+          "legendFormat": "{{scope}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Order rate — active buckets",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["b3-trading", "risk"],
+  "templating": { "list": [] },
+  "time": { "from": "now-15m", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "B3 Trading — Risk",
+  "uid": "b3-trading-risk",
+  "version": 1,
+  "weekStart": ""
+}

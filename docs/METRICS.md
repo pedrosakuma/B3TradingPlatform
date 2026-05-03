@@ -63,6 +63,18 @@ One `AddMeter(MetricsRegistry.Meter.Name)` call wires the lot.
 | `trading.entrypoint.translation_errors` | Counter | `firm` |
 | `trading.entrypoint.business_rejects` | Counter | `firm`, `code` |
 | `trading.entrypoint.terminated` | Counter | `firm`, `cause` |
+| `trading.marketdata.subscribe_errors` | Counter | `symbol`, `reason` |
+| `trading.risk.refprice.lookups` | Counter | `source` (live/fallback/missing) |
+| `trading.risk.refprice.staleness_seconds` | Observable Gauge | `symbol` |
+| `trading.risk.collar.bypassed_no_reference` | Counter | `symbol` |
+| `trading.risk.rolling_notional.bypassed_no_reference` | Counter | `symbol` |
+| `trading.risk.rolling_notional.active_buckets` | Observable Gauge | `scope` (end_client/firm) |
+| `trading.risk.order_rate.active_buckets` | Observable Gauge | `scope` (end_client/firm) |
+
+The `trading.risk.*` series back the **B3 Trading — Risk** Grafana
+dashboard (`docker/observability/grafana/dashboards/risk.json`); the
+v2 risk pipeline is documented in
+[`docs/rfcs/pre-trade-risk-v2.md`](rfcs/pre-trade-risk-v2.md).
 
 ## Auto-instrumentation also exported
 
