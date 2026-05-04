@@ -160,7 +160,7 @@ jobs:
           docker compose \
               -f docker/docker-compose.yml \
               -f docker/docker-compose.conformance.yml \
-              run --rm conformance
+              run --rm --no-deps conformance
 
       - name: Trading-host logs (always)
         if: always()
@@ -224,12 +224,18 @@ jobs:
         # Per RFC integration-real-stack-v0 §4.7: auth + admin/firms +
         # risk-rejection-shape exercise the real wire; simulator + algo
         # specs auto-skip on RequiresSimulator (no Mode=Simulator).
+        # `--no-deps` is critical: without it, `docker compose run` will
+        # recreate trading-host (and its FIXP session) between the
+        # `up --wait` step and conformance execution, which leaves the
+        # SDK trying to reuse SessionVerId=1 against a matching that
+        # already saw last-seen=1, producing a permanent negotiate-reject
+        # loop and the spec timing out at `sessionState=terminating`.
         run: |
           docker compose \
               -f docker/docker-compose.yml \
               -f docker/docker-compose.real.yml \
               -f docker/docker-compose.conformance.yml \
-              run --rm conformance
+              run --rm --no-deps conformance
 
       - name: Logs (always)
         if: always()
