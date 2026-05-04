@@ -98,6 +98,47 @@ The `IExchangeGateway` is a no-op stub today; once wired to
 it will dispatch to a real `B3MatchingPlatform` instance (or B3 UAT — same
 lib, different endpoint + creds).
 
+## Quick demo (laptop)
+
+Want to see the trader UI move on its own — blotter filling up,
+executions ticking, positions evolving — without manually clicking
+through the order ticket? Use the demo overlay:
+
+```bash
+cp docker/.env.example docker/.env
+# edit docker/.env and set TRADING_AUTH_SIGNING_KEY (>= 32 bytes)
+
+docker compose \
+    -f docker/docker-compose.yml \
+    -f docker/docker-compose.demo.yml \
+    up -d --build
+# open http://localhost:8080 and log in as bot-clientA / demopass
+```
+
+This brings up the trading-host in `Mode=Simulator` and starts a
+companion **demo-driver** process
+([`backend/tools/B3.Trading.DemoDriver`](backend/tools/B3.Trading.DemoDriver))
+that:
+
+- logs in as `bot-clientA` and `bot-clientB` and submits random
+  buy/sell limit orders around the configured reference prices, and
+- logs in as `demo-admin` and injects synthetic Fill / PartialFill
+  ERs against the bots' working orders via `/admin/simulator/er`.
+
+Log in as **`bot-clientA`** (password `demopass`) or **`bot-clientB`**
+to see that bot's blotter, executions and positions panels evolve in
+real time. Logging in as `alice` — the original seed — shows the empty
+view, since alice does not submit orders.
+
+Tear down with `docker compose -f docker/docker-compose.yml -f docker/docker-compose.demo.yml down -v`.
+
+The overlay is **for laptop demos only** — `Mode=Simulator` is gated
+to non-Production environments and the demo credentials are public in
+this repo. See
+[docs/DOCKER.md § Demo overlay](docs/DOCKER.md#demo-overlay-opt-in-laptop-only)
+for tuning, safety notes, and what is intentionally out of scope (live
+MD ticks, real-stack cross-firm bots).
+
 ## Bootstrap scope (issue #1)
 
 In:
