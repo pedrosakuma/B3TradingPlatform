@@ -1,0 +1,54 @@
+{
+  // Marketdata consumer transport for the real-stack overlay.
+  //
+  // Mounted into b3-marketdata as /app/config/transport.json and selected via
+  // UMDF_MULTICAST_CONFIG. Loaded by B3.Umdf.Transport.MulticastFeedConfig.
+  //
+  // Wire-format note: with `transport: "unicast"` the consumer skips the
+  // IGMP join entirely and binds `multicastGroup`:`port` as a plain UDP
+  // socket. We use `0.0.0.0` (all interfaces) — the docker bridge takes
+  // care of routing matching's UDP datagrams to the marketdata container.
+  // See B3MarketDataPlatform/docs/CONFIGURATION.md § Example — unicast
+  // (Docker Compose bridge).
+  //
+  // Channel layout:
+  //
+  // - EQT (channelId 84) — real channel, ports match
+  //   docker/real/exchange-simulator.bridge.json verbatim. matching emits
+  //   InstrumentDefinition + SnapshotRecovery + Incremental on these ports;
+  //   the consumer transitions WaitInstrumentDefinition → Streaming and
+  //   serves Trade/Info frames over WS to the trading-host.
+  //
+  // - DRV (channelId 72) — phantom channel on unused ports (40072/40073/
+  //   41072/40172). Pure workaround for the upstream guard at
+  //   B3.Umdf.ConsoleApp/Program.cs:500 ("Single-group live multicast mode
+  //   is not supported; use multiple groups") which fires regardless of
+  //   transport mode. Tracked upstream at
+  //   https://github.com/pedrosakuma/B3MarketDataPlatform/issues/13.
+  //   The DRV sockets sit in WaitInstrumentDefinition forever; no impact
+  //   on EQT throughput.
+  //
+  // matching's bridge config only emits one of the two redundant
+  // Incremental feeds (A); B is intentionally not configured. UMDF arbitration
+  // tolerates a silent peer (the SDK only needs A to advance the sequence).
+  "channelGroups": [
+    {
+      "name": "EQT",
+      "channels": [
+        { "channelId":  84, "type": "IncrementalA",         "transport": "unicast", "multicastGroup": "0.0.0.0", "port": 30084 },
+        { "channelId":  84, "type": "IncrementalB",         "transport": "unicast", "multicastGroup": "0.0.0.0", "port": 30085 },
+        { "channelId": 184, "type": "InstrumentDefinition", "transport": "unicast", "multicastGroup": "0.0.0.0", "port": 31084 },
+        { "channelId":  84, "type": "SnapshotRecovery",     "transport": "unicast", "multicastGroup": "0.0.0.0", "port": 30184 }
+      ]
+    },
+    {
+      "name": "DRV",
+      "channels": [
+        { "channelId":  72, "type": "IncrementalA",         "transport": "unicast", "multicastGroup": "0.0.0.0", "port": 40072 },
+        { "channelId":  72, "type": "IncrementalB",         "transport": "unicast", "multicastGroup": "0.0.0.0", "port": 40073 },
+        { "channelId": 172, "type": "InstrumentDefinition", "transport": "unicast", "multicastGroup": "0.0.0.0", "port": 41072 },
+        { "channelId":  72, "type": "SnapshotRecovery",     "transport": "unicast", "multicastGroup": "0.0.0.0", "port": 40172 }
+      ]
+    }
+  ]
+}

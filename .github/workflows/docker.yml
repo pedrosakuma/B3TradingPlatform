@@ -204,11 +204,14 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Bring up real stack (matching-platform + trading-host)
-        # docker-compose.real.yml flips trading-host to Mode=Real and adds
-        # the matching-platform service. Conformance overlay still piles
-        # on the carol admin seed. --wait blocks until matching's healthcheck
-        # passes AND trading-host reports healthy (FIXP Negotiate
+      - name: Bring up real stack (matching-platform + marketdata + trading-host)
+        # docker-compose.real.yml flips trading-host to Mode=Real, adds
+        # the matching-platform service, and (since v1) the marketdata-live
+        # service consuming matching's UMDF unicast — so trading-host's
+        # IReferencePrice is wired through MarketDataReferencePrice end-to-end
+        # instead of falling back to the static map. Conformance overlay still
+        # piles on the carol admin seed. --wait blocks until matching's
+        # healthcheck passes AND trading-host reports healthy (FIXP Negotiate
         # succeeded against matching).
         run: |
           docker compose \
@@ -231,7 +234,7 @@ jobs:
       - name: Logs (always)
         if: always()
         run: |
-          for svc in trading-host matching-platform; do
+          for svc in trading-host matching-platform marketdata-live; do
             echo "::group::$svc"
             docker compose \
                 -f docker/docker-compose.yml \
