@@ -22,6 +22,16 @@ const state = {
   // render-side, not in state.
   book: new Map(),         // Symbol -> { bids: Map, asks: Map, ready: bool, updatedAt: number }
   dobSymbol: null,         // currently selected DOB symbol or null
+  // Candle slice (T3). Server may multiplex multiple resolutions for
+  // the same symbol on a single subscription, so we cache them all
+  // (Map<symbol, Map<resolutionSec, {bars, ready, updatedAt}>>) and
+  // let the UI filter at render time. `ready` flips true only when
+  // a snapshot's CANDLE_FLAGS.LAST frame arrives — partial history
+  // with no FIRST stays not-ready to avoid presenting a truncated
+  // chart as complete.
+  candles: new Map(),      // Symbol -> Map<resolutionSec, { bars: [...], ready: bool, updatedAt: number }>
+  chartSymbol: null,       // currently selected chart symbol or null
+  chartResolution: 60,     // seconds (60=1m, 300=5m, 900=15m)
   // UX-only slices added in the operability pass.
   submitInflight: null,    // { startedAt: ms } | null — true while POST /orders is awaiting response
   wsReconnect: null,       // { nextAt: ms } | null — when worker has scheduled the next attempt
@@ -250,21 +260,129 @@ export function setDobSymbol(symbol) {
   notify("dobSymbol");
 }
 
+// ── Candle slice (T3) ──────────────────────────────────────────────
+
+// Bars-per-resolution memory cap. Long histories (e.g. day-long 1m
+// chart at 8h session ≈ 480 bars) fit comfortably; beyond that we
+// drop the oldest. Snapshot replace and live update both honour this.
+const MAX_BARS = 600;
+
+// Supported resolutions in seconds. Frames carrying any other
+// resolution are accepted into state (the server may multiplex them)
+// but the chart selector exposes only these three.
+export const CHART_RESOLUTIONS = [60, 300, 900];
+
+function ensureCandleEntry(symbol, resolution) {
+  let perRes = state.candles.get(symbol);
+  if (!perRes) {
+    perRes = new Map();
+    state.candles.set(symbol, perRes);
+  }
+  let entry = perRes.get(resolution);
+  if (!entry) {
+    entry = { bars: [], ready: false, updatedAt: 0 };
+    perRes.set(resolution, entry);
+  }
+  return entry;
+}
+
+function trimBars(entry) {
+  const overflow = entry.bars.length - MAX_BARS;
+  if (overflow > 0) entry.bars.splice(0, overflow);
+}
+
+export function applyMdCandleSnapshot({ symbol, resolution, candles, isFirst, isLast }) {
+  const entry = ensureCandleEntry(symbol, resolution);
+  if (isFirst) {
+    // Fresh history sequence — restart accumulation.
+    entry.bars = candles.slice();
+    entry.ready = false;
+    entry._startedFromFirst = true;
+  } else {
+    // Mid/tail frame. If we never saw FIRST (mid-stream join, or the
+    // first frame was lost), accumulate but stay not-ready — we'd
+    // rather show "awaiting…" than present a truncated history as
+    // complete.
+    entry.bars.push(...candles);
+  }
+  trimBars(entry);
+  if (isLast && entry._startedFromFirst) {
+    entry.ready = true;
+    entry._startedFromFirst = false;
+  }
+  entry.updatedAt = Date.now();
+  notify("candles");
+}
+
+export function applyMdCandleUpdate({ symbol, resolution, candle }) {
+  const perRes = state.candles.get(symbol);
+  const entry = perRes?.get(resolution);
+  if (!entry?.ready) return; // drop until snapshot completes
+  const last = entry.bars[entry.bars.length - 1];
+  if (last && last.time === candle.time) {
+    entry.bars[entry.bars.length - 1] = candle;
+  } else {
+    entry.bars.push(candle);
+    trimBars(entry);
+  }
+  entry.updatedAt = Date.now();
+  notify("candles");
+}
+
+export function removeCandlesSymbol(symbol) {
+  if (state.candles.delete(symbol)) notify("candles");
+}
+
+export function clearAllCandles() {
+  if (state.candles.size === 0) return;
+  state.candles.clear();
+  notify("candles");
+}
+
+export function setChartSymbol(symbol) {
+  const next = symbol ?? null;
+  if (state.chartSymbol === next) return;
+  state.chartSymbol = next;
+  notify("chartSymbol");
+}
+
+export function setChartResolution(seconds) {
+  const next = Number(seconds);
+  if (!CHART_RESOLUTIONS.includes(next)) return;
+  if (state.chartResolution === next) return;
+  state.chartResolution = next;
+  notify("chartResolution");
+}
+
 export function setWatchlist(symbols) {
   const next = symbols.slice();
   state.watchlist = next;
-  // Drop book caches for symbols no longer watched.
+  // Drop book + candle caches for symbols no longer watched.
   const wanted = new Set(next);
   for (const sym of [...state.book.keys()]) {
     if (!wanted.has(sym)) state.book.delete(sym);
   }
-  // Reset DOB selection if the chosen symbol just left the watchlist.
+  for (const sym of [...state.candles.keys()]) {
+    if (!wanted.has(sym)) state.candles.delete(sym);
+  }
+  // Reset DOB / chart selection if the chosen symbol just left the
+  // watchlist. Auto-pick a sensible default for chart so the panel
+  // doesn't sit empty when the trader has symbols available.
   if (state.dobSymbol && !wanted.has(state.dobSymbol)) {
     state.dobSymbol = null;
     notify("dobSymbol");
   }
+  if (state.chartSymbol && !wanted.has(state.chartSymbol)) {
+    state.chartSymbol = null;
+    notify("chartSymbol");
+  }
+  if (state.chartSymbol === null && next.length > 0) {
+    state.chartSymbol = next[0];
+    notify("chartSymbol");
+  }
   notify("watchlist");
   notify("book");
+  notify("candles");
 }
 
 export function isTerminalOrderStatus(status) {

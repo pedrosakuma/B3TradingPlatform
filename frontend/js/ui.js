@@ -16,6 +16,8 @@ let onBlotterFilter  = () => {};
 let onSelectOrder    = () => {};
 let onKeyboardCancel = () => {};
 let onSelectDobSymbol = () => {};
+let onSelectChartSymbol = () => {};
+let onSelectChartResolution = () => {};
 
 export function setHandlers(handlers) {
   onSubmitOrder    = handlers.onSubmitOrder    ?? onSubmitOrder;
@@ -27,6 +29,8 @@ export function setHandlers(handlers) {
   onSelectOrder    = handlers.onSelectOrder    ?? onSelectOrder;
   onKeyboardCancel = handlers.onKeyboardCancel ?? onKeyboardCancel;
   onSelectDobSymbol = handlers.onSelectDobSymbol ?? onSelectDobSymbol;
+  onSelectChartSymbol     = handlers.onSelectChartSymbol     ?? onSelectChartSymbol;
+  onSelectChartResolution = handlers.onSelectChartResolution ?? onSelectChartResolution;
 }
 
 export function showLogin() {
@@ -169,6 +173,20 @@ export function bindUi() {
   if (dobSelect) {
     dobSelect.addEventListener("change", (e) => {
       onSelectDobSymbol(e.target.value || null);
+    });
+  }
+
+  // Chart selectors (T3).
+  const chartSym = $("chart-symbol");
+  if (chartSym) {
+    chartSym.addEventListener("change", (e) => {
+      onSelectChartSymbol(e.target.value || null);
+    });
+  }
+  const chartRes = $("chart-resolution");
+  if (chartRes) {
+    chartRes.addEventListener("change", (e) => {
+      onSelectChartResolution(Number(e.target.value));
     });
   }
 
@@ -371,6 +389,7 @@ function renderForSlice(slice) {
   if (slice === "firmsHealth" || slice === "all") renderFirmsHealth();
   if (slice === "currentView" || slice === "all") applyCurrentView(getState().currentView);
   if (slice === "watchlist" || slice === "dobSymbol" || slice === "book" || slice === "all") renderDob();
+  if (slice === "watchlist" || slice === "chartSymbol" || slice === "chartResolution" || slice === "candles" || slice === "all") scheduleChartRender();
 }
 
 function renderAll() {
@@ -381,6 +400,7 @@ function renderAll() {
   setUserLabel(getState().user);
   renderMarketData();
   renderDob();
+  scheduleChartRender();
   setMdStatusPill(getState().marketDataStatus);
   renderInflight();
   renderReconnect();
@@ -491,6 +511,98 @@ function renderDobSide(levels, side) {
     }
     return `<tr><td class="num">${price}</td><td class="num">${qty}</td><td class="num">${cum}</td></tr>`;
   }).join("");
+}
+
+// ── Chart panel (T3) ──────────────────────────────────────────────
+
+const CHART_VISIBLE_BARS = 150;
+const CHART_VIEW_W = 300;
+const CHART_VIEW_H = 100;
+const CHART_PADDING = 4;
+
+let chartRafHandle = null;
+
+function scheduleChartRender() {
+  if (chartRafHandle != null) return;
+  // requestAnimationFrame may be unavailable in the test runtime; fall
+  // back to a microtask to keep the contract identical (one repaint
+  // per batch of state notifies).
+  const raf = typeof requestAnimationFrame === "function"
+    ? requestAnimationFrame
+    : (cb) => setTimeout(cb, 16);
+  chartRafHandle = raf(() => {
+    chartRafHandle = null;
+    renderChart();
+  });
+}
+
+function renderChart() {
+  const svg   = $("chart-svg");
+  const empty = $("chart-empty");
+  const symSel = $("chart-symbol");
+  const resSel = $("chart-resolution");
+  if (!svg || !symSel || !resSel) return;
+
+  const st = getState();
+  const watch = st.watchlist;
+
+  // Sync symbol dropdown with the watchlist.
+  const desired = ["", ...watch];
+  const existing = [...symSel.options].map(o => o.value);
+  if (desired.length !== existing.length || desired.some((v, i) => v !== existing[i])) {
+    symSel.innerHTML = `<option value="">— select symbol —</option>` +
+      watch.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("");
+  }
+  if (symSel.value !== (st.chartSymbol ?? "")) symSel.value = st.chartSymbol ?? "";
+  const resStr = String(st.chartResolution);
+  if (resSel.value !== resStr) resSel.value = resStr;
+
+  const showEmpty = (msg) => {
+    svg.innerHTML = "";
+    if (empty) { empty.hidden = false; empty.textContent = msg; }
+  };
+
+  if (!st.chartSymbol) { showEmpty("select a symbol"); return; }
+
+  const perRes = st.candles.get(st.chartSymbol);
+  const entry = perRes?.get(st.chartResolution);
+  if (!entry || !entry.ready || entry.bars.length === 0) {
+    showEmpty("awaiting candle snapshot…");
+    return;
+  }
+
+  if (empty) empty.hidden = true;
+
+  const bars = entry.bars.slice(-CHART_VISIBLE_BARS);
+  const lows = bars.map(b => Number(b.low));
+  const highs = bars.map(b => Number(b.high));
+  const lo = Math.min(...lows);
+  const hi = Math.max(...highs);
+  const range = hi - lo || Math.abs(hi) * 1e-4 || 1; // avoid div-zero on flat books
+
+  const innerW = CHART_VIEW_W - CHART_PADDING * 2;
+  const innerH = CHART_VIEW_H - CHART_PADDING * 2;
+  const slotW = innerW / bars.length;
+  const bodyW = Math.max(0.4, slotW * 0.7);
+
+  const yFor = (price) => CHART_PADDING + (1 - (Number(price) - lo) / range) * innerH;
+
+  let parts = "";
+  for (let i = 0; i < bars.length; i++) {
+    const b = bars[i];
+    const cx = CHART_PADDING + slotW * (i + 0.5);
+    const yHigh = yFor(b.high);
+    const yLow  = yFor(b.low);
+    const yOpen  = yFor(b.open);
+    const yClose = yFor(b.close);
+    const up = Number(b.close) >= Number(b.open);
+    const cls = up ? "candle-up" : "candle-down";
+    const yTop = Math.min(yOpen, yClose);
+    const bodyH = Math.max(0.4, Math.abs(yClose - yOpen));
+    parts += `<line class="candle-wick ${cls}" x1="${cx.toFixed(2)}" x2="${cx.toFixed(2)}" y1="${yHigh.toFixed(2)}" y2="${yLow.toFixed(2)}"/>`;
+    parts += `<rect class="${cls}" x="${(cx - bodyW / 2).toFixed(2)}" y="${yTop.toFixed(2)}" width="${bodyW.toFixed(2)}" height="${bodyH.toFixed(2)}"/>`;
+  }
+  svg.innerHTML = parts;
 }
 
 function renderBlotter() {

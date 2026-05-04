@@ -205,6 +205,27 @@
           </table>
         </div>
       </section>
+
+      <!-- CHART ------------------------------------------------------ -->
+      <section class="panel chart">
+        <h2>
+          Chart
+          <span class="chart-controls">
+            <select id="chart-symbol" aria-label="Chart symbol">
+              <option value="">— select symbol —</option>
+            </select>
+            <select id="chart-resolution" aria-label="Chart resolution">
+              <option value="60">1m</option>
+              <option value="300">5m</option>
+              <option value="900">15m</option>
+            </select>
+          </span>
+        </h2>
+        <div class="chart-canvas">
+          <svg id="chart-svg" viewBox="0 0 300 100" preserveAspectRatio="none" aria-label="Candlestick chart"></svg>
+          <p id="chart-empty" class="chart-empty muted-cell">select a symbol</p>
+        </div>
+      </section>
     </main>
   </section>
 
