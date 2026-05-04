@@ -69,6 +69,72 @@ service named `marketdata-live` with a network alias `marketdata` so the
 hostnames in `docker/real/exchange-simulator.bridge.json` and the
 trading-host `Trading__MarketData__WsUrl` resolve.
 
+## Demo overlay (opt-in, laptop-only)
+
+```bash
+docker compose \
+    -f docker/docker-compose.yml \
+    -f docker/docker-compose.demo.yml \
+    up -d --build
+# open http://localhost:8080 and log in as bot-clientA / demopass
+```
+
+Flips the trading-host to `Mode=Simulator` (synthetic ER injection
+enabled) and starts the **demo-driver** console
+([`backend/tools/B3.Trading.DemoDriver`](../backend/tools/B3.Trading.DemoDriver))
+which:
+
+- logs in as `bot-clientA` and `bot-clientB` (role=user),
+- submits random buy/sell limit orders around the configured reference
+  prices at `DEMO_SUBMIT_RATE_HZ` (default 0.5 Hz per bot),
+- logs in as `demo-admin` (role=admin) and POSTs `/admin/simulator/er`
+  to inject synthetic Fill / PartialFill ERs at `DEMO_INJECT_RATE_HZ`
+  (default 0.3 Hz across the registry).
+
+Result: the trader UI's blotter, executions and positions panels move
+on their own. **Log in as one of the bots** to see that bot's view —
+`alice` does not submit orders so her view stays empty.
+
+| Service | What it does |
+|---|---|
+| `trading-host` | flipped to `Mode=Simulator`; seeds 3 extra users (`bot-clientA`, `bot-clientB`, `demo-admin`) |
+| `demo-driver` | hosts the submit + inject loops; logs to stdout |
+
+### Safety
+
+`Mode=Simulator` MUST NOT be enabled against a host reachable beyond
+your laptop — anyone with admin creds (default `demo-admin/demopass`,
+public in this repo) can mint synthetic fills. The trading-host
+**refuses to boot** in `ASPNETCORE_ENVIRONMENT=Production` with
+`Mode=Simulator` unless `Trading:Exchange:AllowSimulatorInProduction=true`
+is also set; do not flip that switch.
+
+The demo passwords are PBKDF2-hashed and committed in
+`docker/docker-compose.demo.yml` so the overlay works zero-config.
+Override via `DEMO_BOT_A_HASH` / `DEMO_BOT_A_SALT` (and `_B_`, `_ADMIN_`)
++ matching `DEMO_BOT_A_PASSWORD` etc. when rotating credentials.
+
+### Tuning
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `DEMO_SUBMIT_RATE_HZ` | 0.5 | Per-bot submission rate |
+| `DEMO_INJECT_RATE_HZ` | 0.3 | Global inject rate (admin → registry) |
+| `DEMO_MAX_OPEN_ORDERS` | 50 | Per-bot cap; submitter pauses once reached |
+| `DEMO_MODE` | auto-detect | `auto-detect` \| `simulator-inject` \| `submit-only` |
+
+### Out of scope (D1)
+
+- No MD ticks: this overlay does not include `--profile marketdata`,
+  so the MD panel stays static. Combine with the marketdata profile
+  (PCAP) to also see trades on the tape.
+- No `Mode=Real` cross-firm bots: real-stack cross requires multiple
+  firm sessions wired through the `docker-compose.real.yml` overlay;
+  tracked as a follow-up to issue #72.
+- No order cancellation cycle: bots submit + injector fills; bounded
+  via `DEMO_MAX_OPEN_ORDERS`, but stale working orders accumulate
+  during long runs.
+
 ## Honest no-broker mode
 
 The trading-host has four exchange modes, configured via
