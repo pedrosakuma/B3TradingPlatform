@@ -3,7 +3,7 @@
 | Field    | Value                                                                  |
 | -------- | ---------------------------------------------------------------------- |
 | Status   | Draft                                                                  |
-| Tracking | TBD (tracking issue link added once opened)                            |
+| Tracking | [#58](https://github.com/pedrosakuma/B3TradingPlatform/issues/58)      |
 | Replaces | n/a (additive overlay on top of the family `docker-compose.yml`)       |
 
 ## 1. Context
