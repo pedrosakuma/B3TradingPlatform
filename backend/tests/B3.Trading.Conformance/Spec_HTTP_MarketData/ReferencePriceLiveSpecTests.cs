@@ -63,6 +63,16 @@ public class ReferencePriceLiveSpecTests
         var adminAuth = await LoginHelper.LoginAsync(http, peer.AdminUsername!, peer.AdminPassword!);
         var userAuth = await LoginHelper.LoginAsync(http, peer.Username, peer.Password);
 
+        // Preflight: the trading-host's /ready turns green as soon as
+        // the HTTP listener is up — it does NOT wait for FIXP to finish
+        // negotiating with matching. On slower CI runners that delta is
+        // multi-second, long enough for the spec to fire its first
+        // POST /orders before the FirmGateway is `established`, in
+        // which case the host short-circuits to 502 gateway-unavailable.
+        // Block here until /admin/firms reports the alice-firm session
+        // is established (or fail loudly with the last-seen state).
+        await WaitForFirmEstablishedAsync(http, adminAuth);
+
         // Baseline — capture (and log) but do not assert source. The
         // live cache may already be primed by an InfoSnapshot from the
         // matching emitter's startup cycle, in which case effectiveSource
@@ -111,6 +121,41 @@ public class ReferencePriceLiveSpecTests
         Assert.Fail(
             $"Timed out after {PollTimeout.TotalSeconds:F0}s waiting for {Symbol} live ref-price=={CrossPrice} updated after {submitStartUtc:o}. " +
             $"Baseline: {Format(baseline)}. Last seen: {Format(lastSeen)}.");
+    }
+
+    private static async Task WaitForFirmEstablishedAsync(
+        HttpClient http, AuthenticationHeaderValue auth)
+    {
+        // 60s budget covers cold-CI timing (image load, EPC SDK
+        // negotiate+establish, FIXP auth handshake). On a warm local
+        // stack it returns in <1s.
+        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(60);
+        string? lastState = null;
+        int? lastFirmCount = null;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, "/admin/firms");
+            req.Headers.Authorization = auth;
+            var resp = await http.SendAsync(req);
+            if (resp.IsSuccessStatusCode)
+            {
+                var json = await resp.Content.ReadFromJsonAsync<JsonElement>();
+                var firms = json.GetProperty("firms");
+                lastFirmCount = firms.GetArrayLength();
+                if (lastFirmCount > 0)
+                {
+                    var state = firms[0].TryGetProperty("sessionState", out var s) && s.ValueKind == JsonValueKind.String
+                        ? s.GetString()
+                        : null;
+                    lastState = state;
+                    if (string.Equals(state, "established", StringComparison.OrdinalIgnoreCase))
+                        return;
+                }
+            }
+            await Task.Delay(PollInterval);
+        }
+        Assert.Fail(
+            $"Timed out waiting for FirmGateway to reach 'established' (last sessionState={lastState ?? "<none>"}, firmCount={lastFirmCount?.ToString() ?? "<none>"}).");
     }
 
     private static async Task SubmitOrderAndAssertAcceptedAsync(
