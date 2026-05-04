@@ -498,9 +498,11 @@ Concretely:
 
 1. `docker/real/marketdata-transport.json` (new) — consumer config with
    the EQT group on matching's emit ports (30084/30085/31084/30184),
-   all `transport: "unicast"` bound on `0.0.0.0`. A second `DRV` group
-   on unused ports (40072/40073/41072/40172) satisfies the `Program.cs`
-   guard described in the next section.
+   all `transport: "unicast"` bound on `0.0.0.0`. Single-channel-group
+   operation is supported as of the upstream fix for `#13` (closed
+   2026-05-04); the v1 revision of this file carried a phantom DRV
+   group on unused ports purely to satisfy the now-relaxed guard, and
+   was simplified back to a single group in v1.1.
 2. `docker/real/exchange-simulator.bridge.json` — UMDF unicast targets
    flipped from `127.0.0.1` to `marketdata` (DNS-resolved on `b3-net`).
 3. `docker/docker-compose.real.yml` — adds a `marketdata-live` service
@@ -543,29 +545,41 @@ to the static map until a real trade prints). v2 will exercise the
 crossed-order path and assert that `MarketDataReferencePrice` displaces
 the static fallback.
 
-### Findings filed upstream (non-blocking)
+### Findings filed upstream — both resolved 2026-05-04
 
 - [`B3MarketDataPlatform#13`](https://github.com/pedrosakuma/B3MarketDataPlatform/issues/13)
-  — the single-channel-group guard at `B3.Umdf.ConsoleApp/Program.cs:500`
-  fires regardless of transport. Workaround: phantom DRV group in
-  `marketdata-transport.json`. Suggested fix: make the guard
-  transport-aware (allow when every channel in the only group is
-  `transport: "unicast"`).
+  — single-channel-group guard at `B3.Umdf.ConsoleApp/Program.cs:500`
+  fired regardless of transport. **Resolved upstream**; v1.1 of this
+  overlay drops the phantom DRV group from `marketdata-transport.json`.
 - [`B3MarketDataPlatform#12`](https://github.com/pedrosakuma/B3MarketDataPlatform/issues/12)
-  — `SecurityDefinition_12.SecurityDesc` parsing throws
+  — `SecurityDefinition_12.SecurityDesc` parsing threw
   `ArgumentOutOfRangeException` on every InstrumentDefinition cycle
-  emitted by `b3-matching:latest`. Cosmetic — books are still created
-  and the consumer transitions to `Streaming` — but the warn is loud
-  and probably points at a real interop gap (matching emitter vs.
-  marketdata generated SBE reader).
+  emitted by `b3-matching:latest`. **Resolved upstream**; v1.1 local
+  verification shows clean logs (no parse warnings, books create on
+  the first cycle).
+
+### v1.1 verification (2026-05-04, single-group config)
+
+```
+docker logs b3-marketdata
+# Channel groups: 1
+#   Channel group 0: EQT
+# Listening unicast UDP on 0.0.0.0:{30084,30085,31084,30184}
+# WaitInstrumentDefinition → Streaming
+# G0:Streaming  (no SecurityDesc warnings, no exceptions)
+
+docker logs b3-trading-host | grep "MarketData connection"
+# MarketData connection state: Connected
+```
 
 ### Q1 update (R1)
 
-Resolved as **R1.a (with one footnote)** post-upstream-fix. Unicast bind
-works; the only deviation from the original R1.a sketch is the JSON key
-shape (`channelGroups` instead of the `feeds` placeholder used in the
-draft) and the workaround for the multi-group guard. D3 (reference-price
-WS) is now **enabled by default in the real overlay**.
+Resolved as **R1.a** post-upstream-fix. Unicast bind works; the only
+deviation from the original R1.a sketch is the JSON key shape
+(`channelGroups` instead of the `feeds` placeholder used in the draft).
+The transient multi-group workaround used in v1 was removed in v1.1
+once upstream `#13` shipped. D3 (reference-price WS) is **enabled by
+default in the real overlay**.
 
 ### v0 scoping items now retired
 

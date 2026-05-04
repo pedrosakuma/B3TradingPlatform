@@ -19,14 +19,10 @@
   //   the consumer transitions WaitInstrumentDefinition → Streaming and
   //   serves Trade/Info frames over WS to the trading-host.
   //
-  // - DRV (channelId 72) — phantom channel on unused ports (40072/40073/
-  //   41072/40172). Pure workaround for the upstream guard at
-  //   B3.Umdf.ConsoleApp/Program.cs:500 ("Single-group live multicast mode
-  //   is not supported; use multiple groups") which fires regardless of
-  //   transport mode. Tracked upstream at
-  //   https://github.com/pedrosakuma/B3MarketDataPlatform/issues/13.
-  //   The DRV sockets sit in WaitInstrumentDefinition forever; no impact
-  //   on EQT throughput.
+  // Single-channel-group operation is supported as of upstream
+  // B3MarketDataPlatform PR for issue #13 (closed 2026-05-04). Earlier
+  // revisions of this file carried a phantom DRV group purely to satisfy
+  // the now-relaxed `use multiple groups` guard.
   //
   // matching's bridge config only emits one of the two redundant
   // Incremental feeds (A); B is intentionally not configured. UMDF arbitration
@@ -39,15 +35,6 @@
         { "channelId":  84, "type": "IncrementalB",         "transport": "unicast", "multicastGroup": "0.0.0.0", "port": 30085 },
         { "channelId": 184, "type": "InstrumentDefinition", "transport": "unicast", "multicastGroup": "0.0.0.0", "port": 31084 },
         { "channelId":  84, "type": "SnapshotRecovery",     "transport": "unicast", "multicastGroup": "0.0.0.0", "port": 30184 }
-      ]
-    },
-    {
-      "name": "DRV",
-      "channels": [
-        { "channelId":  72, "type": "IncrementalA",         "transport": "unicast", "multicastGroup": "0.0.0.0", "port": 40072 },
-        { "channelId":  72, "type": "IncrementalB",         "transport": "unicast", "multicastGroup": "0.0.0.0", "port": 40073 },
-        { "channelId": 172, "type": "InstrumentDefinition", "transport": "unicast", "multicastGroup": "0.0.0.0", "port": 41072 },
-        { "channelId":  72, "type": "SnapshotRecovery",     "transport": "unicast", "multicastGroup": "0.0.0.0", "port": 40172 }
       ]
     }
   ]
