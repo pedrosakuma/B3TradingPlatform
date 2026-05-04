@@ -33,6 +33,16 @@ public sealed class ConformanceFactAttribute : FactAttribute
     /// </summary>
     public bool RequiresSimulator { get; init; }
 
+    /// <summary>
+    /// When true, the scenario is gated to the dedicated docker-compose
+    /// real-stack sandbox (operator opts in via
+    /// <c>B3T_REAL_STACK_CONFORMANCE=true</c>). Used for destructive
+    /// active-flow tests that submit crossed orders and expect real
+    /// trade prints — those would be unsafe to run against any
+    /// non-sandbox deployment even when the wires happen to reach.
+    /// </summary>
+    public bool RequiresSandboxMatching { get; init; }
+
     public ConformanceFactAttribute()
     {
         var peer = PlatformEndpoint.TryResolve();
@@ -74,6 +84,8 @@ public sealed class ConformanceFactAttribute : FactAttribute
                 return PlatformEndpoint.AdminSkipReason;
             if (RequiresSimulator && !PlatformEndpoint.IsSimulatorMode())
                 return PlatformEndpoint.SimulatorSkipReason;
+            if (RequiresSandboxMatching && !PlatformEndpoint.IsRealStackConformance())
+                return PlatformEndpoint.RealStackConformanceSkipReason;
             return null;
         }
         set => base.Skip = value;
