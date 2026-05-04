@@ -110,6 +110,31 @@ public sealed class WorkingOrderBook
         s is OrderStatus.Filled or OrderStatus.Cancelled or OrderStatus.Rejected;
 
     /// <summary>
+    /// Returns every order whose <see cref="Order.ParentAlgoId"/> matches
+    /// <paramref name="parentAlgoId"/> within the given firm scope. Used by
+    /// the algo engine at boot reconciliation to rebuild per-parent runtime
+    /// state (live child + cumulative-fill baseline) without rescanning the
+    /// full order book on every signal. Index-driven (firm secondary index)
+    /// so cost is O(orders for firm), not O(total orders).
+    /// </summary>
+    public IReadOnlyCollection<Order> EnumerateChildrenOf(string firmId, ulong parentAlgoId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        if (parentAlgoId == 0)
+            throw new ArgumentOutOfRangeException(nameof(parentAlgoId));
+        if (!_byFirm.TryGetValue(firmId, out var firmSet))
+            return Array.Empty<Order>();
+        var list = new List<Order>();
+        foreach (var clOrdId in firmSet.Keys)
+        {
+            if (!_orders.TryGetValue(clOrdId, out var order)) continue;
+            if (order.ParentAlgoId != parentAlgoId) continue;
+            list.Add(order);
+        }
+        return list;
+    }
+
+    /// <summary>
     /// Captures the current set of working orders for snapshotting.
     /// Terminal-state orders (Filled/Cancelled/Rejected) are still
     /// included so that replay-without-snapshot and replay-from-snapshot

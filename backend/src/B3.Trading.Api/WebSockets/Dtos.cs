@@ -31,7 +31,9 @@ public sealed record OrderDto(
     long LeavesQuantity,
     long CumulativeQuantity,
     decimal? Price,
-    string Status);
+    string Status,
+    string? ParentAlgoId = null,
+    int? AlgoSliceSeq = null);
 
 public sealed record PositionDto(
     string Symbol,
@@ -87,7 +89,8 @@ public static class DtoMappings
 {
     public static OrderDto ToDto(this Order o) => new(
         o.ClOrdId.ToString(), o.Symbol, o.SecurityId, o.Side.ToString(), o.Type.ToString(),
-        o.Quantity, o.LeavesQuantity, o.CumulativeQuantity, o.Price, o.Status.ToString());
+        o.Quantity, o.LeavesQuantity, o.CumulativeQuantity, o.Price, o.Status.ToString(),
+        o.ParentAlgoId?.ToString(), o.AlgoSliceSeq);
 
     public static PositionDto ToDto(this Position p) => new(p.Symbol, p.NetQuantity, p.AverageEntryPrice);
 

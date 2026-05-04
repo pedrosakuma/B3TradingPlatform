@@ -179,7 +179,11 @@ public class AlgoEndpointsTests
         var get = await client.GetFromJsonAsync<JsonElement>($"/algo/{algoId}");
         Assert.Equal(algoId, get.GetProperty("algoId").GetString());
         Assert.Equal("PETR4", get.GetProperty("symbol").GetString());
-        Assert.Equal("PendingNew", get.GetProperty("status").GetString());
+        // Engine may have already promoted PendingNew → Working by submitting
+        // the first slice through Mock (no ER comes back so it stays Working
+        // indefinitely). Accept either; GET should never see a terminal state.
+        var status = get.GetProperty("status").GetString();
+        Assert.Contains(status, new[] { "PendingNew", "Working" });
         // Discriminated parameter shape: iceberg block populated, twap null.
         Assert.Equal(JsonValueKind.Object, get.GetProperty("iceberg").ValueKind);
         Assert.Equal(JsonValueKind.Null, get.GetProperty("twap").ValueKind);
@@ -219,9 +223,13 @@ public class AlgoEndpointsTests
         var body = await del.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("Cancelling", body.GetProperty("status").GetString());
 
-        // Subsequent GET reflects the new status (no engine — stays Cancelling).
+        // Subsequent GET reflects the new status. Mock gateway never delivers
+        // a child cancel-ack so the engine stays in Cancelling indefinitely;
+        // the only racy variant is the engine processing the cancel before a
+        // live child existed (no child to cancel → Cancelled immediately).
         var get = await client.GetFromJsonAsync<JsonElement>($"/algo/{algoId}");
-        Assert.Equal("Cancelling", get.GetProperty("status").GetString());
+        var status = get.GetProperty("status").GetString();
+        Assert.Contains(status, new[] { "Cancelling", "Cancelled" });
     }
 
     [Fact]
@@ -252,9 +260,10 @@ public class AlgoEndpointsTests
     [Fact]
     public async Task DeleteAlgo_AlreadyCancelling_IsIdempotent()
     {
-        // Per RFC: Cancelling-on-Cancelling is a no-op via the aggregate.
-        // Engine never lands so the parent stays in Cancelling indefinitely
-        // for v0; repeated DELETE should keep returning 202 (not 409).
+        // Per RFC: Cancelling-on-Cancelling is a no-op via the aggregate
+        // and the API returns 202 again. Once the engine drives the parent
+        // to a terminal state (Cancelled), subsequent DELETEs return 409
+        // — that's the documented "you're racing the engine" signal.
         using var factory = NewFactory();
         using var client = await factory.CreateAuthedClientAsync();
 
@@ -265,6 +274,6 @@ public class AlgoEndpointsTests
         var first = await client.DeleteAsync($"/algo/{algoId}");
         var second = await client.DeleteAsync($"/algo/{algoId}");
         Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
-        Assert.Equal(HttpStatusCode.Accepted, second.StatusCode);
+        Assert.Contains(second.StatusCode, new[] { HttpStatusCode.Accepted, HttpStatusCode.Conflict });
     }
 }

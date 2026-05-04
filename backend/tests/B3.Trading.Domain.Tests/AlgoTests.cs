@@ -122,4 +122,25 @@ public class AlgoTests
         Assert.Throws<InvalidOperationException>(() =>
             algo.RecordTerminal(AlgoStatus.Cancelled, AlgoTerminalReason.UserCancelled, DateTimeOffset.UtcNow));
     }
+
+    [Fact]
+    public void RehydrateProgress_AdvancesFilledQuantity_NeverBackwards()
+    {
+        var algo = NewIceberg(total: 1000);
+        algo.RehydrateProgress(300);
+        Assert.Equal(300, algo.FilledQuantity);
+        // Never moves backwards: snapshot-restored parents already carry
+        // the higher truth, engine reconciliation must not regress.
+        algo.RehydrateProgress(200);
+        Assert.Equal(300, algo.FilledQuantity);
+        algo.RehydrateProgress(700);
+        Assert.Equal(700, algo.FilledQuantity);
+    }
+
+    [Fact]
+    public void RehydrateProgress_NegativeArgument_Throws()
+    {
+        var algo = NewIceberg();
+        Assert.Throws<ArgumentOutOfRangeException>(() => algo.RehydrateProgress(-1));
+    }
 }
