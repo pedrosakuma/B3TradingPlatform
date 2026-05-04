@@ -1,9 +1,17 @@
-# Real-stack overlay: matching-platform + trading-host(Mode=Real).
+# Real-stack overlay: matching-platform + marketdata + trading-host(Mode=Real).
 #
-# Brings up the only existing service in the family that can speak real
-# B3 EntryPoint wire to a trading-host running in Mode=Real. The overlay
+# Brings up the only services in the family that can drive the real
+# B3 EntryPoint wire (matching) and the live UMDF reference-price WS
+# (marketdata) against a trading-host running in Mode=Real. The overlay
 # is opt-in — `docker compose up` (no -f overlay) keeps the honest
 # Mode=Unavailable default.
+#
+# Topology (all on b3-net):
+#
+#   matching-platform ──FIXP TCP 9876──> trading-host ──> frontend
+#         │
+#         └──UMDF unicast UDP──> marketdata ──WS 8080──> trading-host
+#                                                       (IReferencePrice)
 #
 # Usage:
 #   docker compose \
@@ -27,14 +35,12 @@
 #       -f docker/docker-compose.conformance.yml \
 #       run --rm conformance
 #
-# The marketdata service stays profile-gated under the base compose.
-# Per RFC integration-real-stack-v0 §4.4 R1.b, the upstream b3-marketdata
-# consumer cannot bind unicast UDP via its existing JSON config (its
-# MulticastPacketSource always issues SetMulticastOption, which fails
-# EINVAL on a non-multicast group). Until that gap is closed upstream
-# the matching → marketdata UMDF leg is out of scope; matching's own
-# UMDF emissions are sunk to its loopback (see
-# docker/real/exchange-simulator.bridge.json).
+# v1 (this file) reinstates the marketdata leg after upstream
+# B3MarketDataPlatform#10 (PR #11) shipped the unicast bridge transport.
+# The marketdata service in docker-compose.yml is profile-gated under the
+# PCAP-replay configuration; here we redefine it to consume matching's
+# UMDF over the bridge and clear the profile so it boots with the overlay.
+# See RFC docs/rfcs/integration-real-stack-v0.md § v1 amendment.
 
 services:
   matching-platform:
@@ -50,6 +56,14 @@ services:
       - ./real/exchange-simulator.bridge.json:/app/config/exchange-simulator.bridge.json:ro
       - ./real/instruments-eqt.json:/app/config/instruments-eqt.json:ro
     command: ["/app/config/exchange-simulator.bridge.json"]
+    depends_on:
+      # The UnicastUdpPacketSink resolves the "marketdata" hostname at
+      # startup via DNS (B3.Exchange.Core.UnicastUdpPacketSink:36). If
+      # marketdata-live is not up, matching aborts with "Name or service
+      # not known". service_started is enough — we don't need the WS to
+      # be ready before matching opens its UDP sockets.
+      marketdata-live:
+        condition: service_started
     healthcheck:
       # Matching ships /metrics + /sessions on its HTTP port (no /health).
       # /metrics returning 200 is a sufficient readiness signal: the HTTP
@@ -61,10 +75,54 @@ services:
       retries: 12
       start_period: 5s
 
+  marketdata-live:
+    # Live UMDF unicast variant for the real-stack overlay. Defined as a
+    # separate service from the profile-gated PCAP-replay `marketdata` in
+    # the base compose so the two never conflict (volumes are
+    # additively-merged in compose, which would force a phantom PCAP bind
+    # here). Resolves to the hostname `marketdata` on b3-net via the
+    # network alias below — that name is hard-coded into
+    # docker/real/exchange-simulator.bridge.json (matching's UMDF sink)
+    # and into trading-host's Trading__MarketData__WsUrl below.
+    image: ghcr.io/pedrosakuma/b3-marketdata:${MARKETDATA_TAG:-latest}
+    container_name: b3-marketdata
+    restart: unless-stopped
+    environment:
+      UMDF_WS_PORT: "8080"
+      UMDF_MULTICAST_CONFIG: /app/config/transport.json
+    volumes:
+      - ./real/marketdata-transport.json:/app/config/transport.json:ro
+    networks:
+      b3-net:
+        aliases:
+          - marketdata
+    expose:
+      - "8080"     # WebSocket fanout consumed by trading-host
+      - "30084/udp"  # IncrementalA  (matching → marketdata)
+      - "30085/udp"  # IncrementalB  (silent in v1; matching only emits A)
+      - "30184/udp"  # SnapshotRecovery
+      - "31084/udp"  # InstrumentDefinition
+    ports:
+      # Host port for direct WS smoke (browser / debug). Not required
+      # for the in-bridge trading-host → marketdata WS hop.
+      - "${MARKETDATA_PORT:-8081}:8080"
+    healthcheck:
+      # The image is distroless-ish (no curl/wget). Use dotnet --info as
+      # a liveness probe — proves the runtime is alive and the container
+      # hasn't crashed silently. The trading-host's WS subscriber retries
+      # on its own if the WS server isn't yet accepting.
+      test: ["CMD", "/usr/bin/dotnet", "--info"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+
   trading-host:
     depends_on:
       matching-platform:
         condition: service_healthy
+      marketdata-live:
+        condition: service_started
     environment:
       Trading__Exchange__Mode: Real
       # Single firm wired to matching's pre-#42 default session, matching
@@ -89,6 +147,12 @@ services:
       # mapping is documentation more than enforcement.
       Trading__SymbolDirectory__SecurityIds__PETR4: "4321"
       Trading__SymbolDirectory__SecurityIds__VALE3: "1234"
-      # Reference-price WS deliberately left unset (D3 deferred to v1
-      # per R1.b — see overlay header). The trading-host falls back to
-      # the static Trading:Risk:ReferencePrices map.
+      # Live reference price via the marketdata WS leg (RFC §4.5 D3).
+      # MarketDataReferencePrice subscribes to PETR4/VALE3/ITUB4 on boot;
+      # cache misses fall back to Trading:Risk:ReferencePrices map. The
+      # subscription is best-effort: marketdata being slow to come up
+      # doesn't block trading-host startup.
+      Trading__MarketData__WsUrl: ws://marketdata:8080/ws
+      Trading__MarketData__Symbols__0: PETR4
+      Trading__MarketData__Symbols__1: VALE3
+      Trading__MarketData__Symbols__2: ITUB4

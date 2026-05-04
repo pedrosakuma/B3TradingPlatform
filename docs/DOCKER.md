@@ -47,15 +47,27 @@ docker compose \
     up
 ```
 
-Brings up `matching-platform` (`ghcr.io/pedrosakuma/b3-matching:latest`)
-and flips `trading-host` into `Mode=Real` against matching's FIXP
-listener over the existing `b3-net` bridge. Use this overlay when you
-need to see the real `B3.EntryPoint.Client` path drive end-to-end —
-gap detection, latency probes, multi-firm registry — instead of the
-in-process mock.
+Brings up the real-wire trio against the trading-host:
 
-The `marketdata` leg of the topology stays out of this overlay in
-v0; see RFC `docs/rfcs/integration-real-stack-v0.md` §4.4 R1.b.
+| Service | Image | What it does |
+|---|---|---|
+| `matching-platform` | `ghcr.io/pedrosakuma/b3-matching:latest` | FIXP TCP listener (`:9876`) + UMDF unicast publisher |
+| `marketdata-live` | `ghcr.io/pedrosakuma/b3-marketdata:latest` | UMDF consumer (binds `30084/30184/31084 udp`) + WebSocket fanout (`:8080`, hostname `marketdata` on `b3-net`) |
+| `trading-host` | (this repo) | `Mode=Real`, FIRM01 session against matching, `IReferencePrice` wired through `marketdata-live` WS |
+
+The overlay is opt-in — `docker compose up` (no `-f`) keeps the honest
+`Mode=Unavailable` default.
+
+Use this overlay when you need to see the real `B3.EntryPoint.Client`
+path drive end-to-end (gap detection, latency probes, multi-firm
+registry) and the live reference-price WS pipeline (versus the in-process
+mock + static-map fallback).
+
+The base compose's profile-gated `marketdata` (PCAP-replay) is unrelated
+and stays dormant under this overlay; the live variant is a separate
+service named `marketdata-live` with a network alias `marketdata` so the
+hostnames in `docker/real/exchange-simulator.bridge.json` and the
+trading-host `Trading__MarketData__WsUrl` resolve.
 
 ## Honest no-broker mode
 

@@ -2,7 +2,7 @@
 
 | Field    | Value                                                                  |
 | -------- | ---------------------------------------------------------------------- |
-| Status   | Implemented                                                            |
+| Status   | Implemented (v1)                                                       |
 | Tracking | [#58](https://github.com/pedrosakuma/B3TradingPlatform/issues/58)      |
 | Replaces | n/a (additive overlay on top of the family `docker-compose.yml`)       |
 
@@ -468,3 +468,110 @@ from the base compose header and from `docs/DOCKER.md`'s introduction.
   WS endpoint to point at. The static-map fallback in the host
   remains. v1 (gated by upstream marketdata bridge support)
   reinstates the WS wire.
+
+## 8. v1 amendment — marketdata leg reinstated (2026-05-04)
+
+### What changed upstream
+
+- [`pedrosakuma/B3MarketDataPlatform#10`](https://github.com/pedrosakuma/B3MarketDataPlatform/issues/10)
+  closed (PR #11 merged 2026-05-04). The consumer's
+  `MulticastPacketSource` now honours a `transport: "unicast"` flag per
+  channel: when set, the socket binds `multicastGroup`:`port` as a
+  plain UDP listener and skips `SetMulticastOption` entirely. New
+  schema documented under upstream `docs/CONFIGURATION.md` §
+  *Example — unicast (Docker Compose bridge)*.
+- New GHCR build `sha-2a252af` published; `:latest` updated.
+
+### What this slice does
+
+Reinstates the marketdata leg in the real overlay so the topology
+finally matches the diagram users have been promised:
+
+```
+matching-platform ──FIXP TCP 9876──> trading-host ──> frontend
+        │
+        └──UMDF unicast UDP──> marketdata-live ──WS 8080──> trading-host
+                               (alias: marketdata)         (IReferencePrice)
+```
+
+Concretely:
+
+1. `docker/real/marketdata-transport.json` (new) — consumer config with
+   the EQT group on matching's emit ports (30084/30085/31084/30184),
+   all `transport: "unicast"` bound on `0.0.0.0`. A second `DRV` group
+   on unused ports (40072/40073/41072/40172) satisfies the `Program.cs`
+   guard described in the next section.
+2. `docker/real/exchange-simulator.bridge.json` — UMDF unicast targets
+   flipped from `127.0.0.1` to `marketdata` (DNS-resolved on `b3-net`).
+3. `docker/docker-compose.real.yml` — adds a `marketdata-live` service
+   (separate name from the PCAP-replay `marketdata` profile-gated in the
+   base compose, with a `marketdata` alias on `b3-net` so DNS resolution
+   from matching and from trading-host works unchanged) and flips
+   `Trading__MarketData__WsUrl` to `ws://marketdata:8080/ws`,
+   subscribing PETR4/VALE3/ITUB4. The base PCAP variant stays dormant.
+4. `.github/workflows/docker.yml` — `real-stack-conformance` now
+   captures `marketdata-live` logs in the always-run logs step.
+5. `docs/DOCKER.md` § *Real-stack overlay* refreshed with the three-row
+   service table.
+
+### Local verification (2026-05-04)
+
+```
+docker compose -f docker-compose.yml -f docker-compose.real.yml up -d --wait trading-host
+# Container b3-marketdata Healthy
+# Container b3-matching-platform Healthy
+# Container b3-trading-host Healthy
+
+curl http://localhost:5000/health
+# {"status":"ready", … "exchange":{"mode":"Real","readyForOrders":true,"firmCount":1}}
+
+docker logs b3-trading-host | grep MarketData
+# MarketData subscribed: PETR4
+# MarketData subscribed: VALE3
+# MarketData subscribed: ITUB4
+# MarketData connection state: Connected
+
+docker compose … -f docker-compose.conformance.yml run --rm conformance
+# Test Run Successful. Total tests: 6 (5 Auth + 1 AdminFirms).
+```
+
+The marketdata consumer reaches `G0:Streaming` with 3 instruments / 3
+books / 3 symbols. Trade frames have not been observed yet because no
+order has crossed in this stack (matching has only one connected firm
+in the real overlay; `IReferencePrice` cache misses keep falling back
+to the static map until a real trade prints). v2 will exercise the
+crossed-order path and assert that `MarketDataReferencePrice` displaces
+the static fallback.
+
+### Findings filed upstream (non-blocking)
+
+- [`B3MarketDataPlatform#13`](https://github.com/pedrosakuma/B3MarketDataPlatform/issues/13)
+  — the single-channel-group guard at `B3.Umdf.ConsoleApp/Program.cs:500`
+  fires regardless of transport. Workaround: phantom DRV group in
+  `marketdata-transport.json`. Suggested fix: make the guard
+  transport-aware (allow when every channel in the only group is
+  `transport: "unicast"`).
+- [`B3MarketDataPlatform#12`](https://github.com/pedrosakuma/B3MarketDataPlatform/issues/12)
+  — `SecurityDefinition_12.SecurityDesc` parsing throws
+  `ArgumentOutOfRangeException` on every InstrumentDefinition cycle
+  emitted by `b3-matching:latest`. Cosmetic — books are still created
+  and the consumer transitions to `Streaming` — but the warn is loud
+  and probably points at a real interop gap (matching emitter vs.
+  marketdata generated SBE reader).
+
+### Q1 update (R1)
+
+Resolved as **R1.a (with one footnote)** post-upstream-fix. Unicast bind
+works; the only deviation from the original R1.a sketch is the JSON key
+shape (`channelGroups` instead of the `feeds` placeholder used in the
+draft) and the workaround for the multi-group guard. D3 (reference-price
+WS) is now **enabled by default in the real overlay**.
+
+### v0 scoping items now retired
+
+- "matching → marketdata UMDF leg is out of scope" — **closed**.
+- "Trading__MarketData__WsUrl deliberately left unset" — **closed**;
+  set to `ws://marketdata:8080/ws` in the overlay.
+- "static-map fallback is the only reference-price path in the real
+  stack" — **partially closed**; fallback still serves cache misses
+  until trades print, but the live path is wired and connecting.
