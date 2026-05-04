@@ -293,6 +293,7 @@ builder.Services.AddSingleton<IExchangeGateway>(sp =>
         ExchangeMode.Real => throw new InvalidOperationException(
             "Trading:Exchange:Mode=Real requires the early-read flag too: set Trading:Exchange:UseRealEntryPointClient=true in env/appsettings (Real-mode hosted services must be wired pre-Build)."),
         ExchangeMode.Mock => sp.GetRequiredService<EntryPointClientGateway>(),
+        ExchangeMode.Simulator => sp.GetRequiredService<EntryPointClientGateway>(),
         _ => sp.GetRequiredService<EntryPointClientGateway>(),
     };
 });
@@ -348,6 +349,25 @@ var app = builder.Build();
 {
     var authOpts = app.Services.GetRequiredService<IOptions<AuthOptions>>().Value;
     AuthSigningKeyValidator.Validate(app.Environment.EnvironmentName, authOpts.SigningKey);
+}
+
+// Simulator-mode safeguards (RFC algo-orders-v0 §4.10/§7-B3). Synthetic
+// ER injection is a powerful test feature with catastrophic blast radius
+// if it leaks into production. Four barriers: (1) loud boot-time warning,
+// (2) refuse-to-boot in Production unless an explicit opt-out is set,
+// (3) trading.simulator.mode_active gauge so dashboards/alerts can spot
+// drift, (4) /health body already exposes the mode via ExchangeStatus.
+{
+    var exchange = app.Services.GetRequiredService<ExchangeStatus>();
+    if (exchange.Mode == ExchangeMode.Simulator)
+    {
+        var exchangeOpts = app.Services.GetRequiredService<IOptions<ExchangeOptions>>().Value;
+        SimulatorBootGuard.Validate(app.Environment.EnvironmentName, exchange.Mode, exchangeOpts.AllowSimulatorInProduction);
+        var warning = SimulatorBootGuard.BuildWarning(app.Environment.EnvironmentName, exchange.Mode, exchangeOpts.AllowSimulatorInProduction);
+        if (warning is not null)
+            app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Simulator").LogWarning("{Warning}", warning);
+        B3.Trading.Application.Observability.MetricsRegistry.SimulatorModeActive.Add(1);
+    }
 }
 
 // Synchronous recovery before any traffic is accepted: load latest

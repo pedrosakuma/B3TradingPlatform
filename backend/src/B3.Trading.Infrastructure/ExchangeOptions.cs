@@ -60,6 +60,16 @@ public enum ExchangeMode
     /// orders that nothing on the wire will ever match.
     /// </summary>
     Unavailable,
+
+    /// <summary>
+    /// In-process <c>MockEntryPointClient</c> + <c>EntryPointClientGateway</c>
+    /// (same wiring as <see cref="Mock"/>) plus an admin-gated
+    /// <c>POST /admin/simulator/er</c> endpoint that lets test harnesses inject
+    /// synthetic execution reports for any working <c>ClOrdId</c>. Unblocks
+    /// algo engines (Iceberg/TWAP) without requiring a real venue.
+    /// **Never enable in production** — see <see cref="ExchangeOptions.AllowSimulatorInProduction"/>.
+    /// </summary>
+    Simulator,
 }
 
 /// <summary>
@@ -89,6 +99,14 @@ public sealed class ExchangeOptions
     public bool UseRealEntryPointClient { get; set; }
 
     public List<FirmConfig> Firms { get; set; } = new();
+
+    /// <summary>
+    /// Production opt-out for <see cref="ExchangeMode.Simulator"/>. When
+    /// <c>false</c> (default), the host refuses to boot if Simulator is
+    /// selected while <c>Environment=Production</c>. Set to <c>true</c> only
+    /// for explicit production-shaped sandboxes that have no real-money risk.
+    /// </summary>
+    public bool AllowSimulatorInProduction { get; set; }
 
     /// <summary>
     /// Resolves the effective mode: explicit <see cref="Mode"/> if set, else

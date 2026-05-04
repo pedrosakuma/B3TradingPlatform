@@ -486,9 +486,14 @@ engines from conformance.
 3. HTTP + WS surface (`POST /algo`, `GET /algo`, `DELETE /algo/{id}`,
    topic `algo`) wired to a no-op engine that just accepts and
    refuses to submit children. Locks the wire contract.
-4. **Simulator gateway mode + `POST /admin/simulator/er`.** Reuses
-   the existing `IExchangeGateway` extension point. Conformance
-   gains a test category that runs only when configured.
+4. **Simulator gateway mode + `POST /admin/simulator/er`.** ✅ Implemented.
+   Adds `ExchangeMode.Simulator` (reusing the `Mock` wiring),
+   admin-gated `POST /admin/simulator/er` mapped only when active,
+   four production safeguards (boot Warning,
+   `trading.simulator.mode_active` UpDownCounter, `/health` body,
+   refuse-to-boot in Production unless `Trading:Exchange:AllowSimulatorInProduction=true`),
+   `SimulatorEndpointTests` + `SimulatorBootGuardTests`, and a
+   `RequiresSimulator`-gated conformance smoke (`Spec_HTTP_Simulator`).
 5. **Iceberg engine** — first reactive engine. Submits the first
    child, refills on terminal-fill, suspends on terminal-cancel.
 6. **TWAP engine** — scheduler + recovery. Largest PR; the

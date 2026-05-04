@@ -26,6 +26,13 @@ public sealed class ConformanceFactAttribute : FactAttribute
     /// </summary>
     public bool RequiresAdmin { get; init; }
 
+    /// <summary>
+    /// When true, the scenario only runs against a host configured with
+    /// <c>Trading:Exchange:Mode=Simulator</c> (operator declares it via
+    /// <c>B3T_SIMULATOR_MODE=true</c>). Mock/Real/Stub deployments skip.
+    /// </summary>
+    public bool RequiresSimulator { get; init; }
+
     public ConformanceFactAttribute()
     {
         var peer = PlatformEndpoint.TryResolve();
@@ -48,5 +55,7 @@ public sealed class ConformanceFactAttribute : FactAttribute
 
         if (RequiresAdmin && !peer.HasAdminCredentials)
             Skip = PlatformEndpoint.AdminSkipReason;
+        else if (RequiresSimulator && !PlatformEndpoint.IsSimulatorMode())
+            Skip = PlatformEndpoint.SimulatorSkipReason;
     }
 }
