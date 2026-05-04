@@ -80,6 +80,19 @@ public static class MetricsRegistry
     public static readonly Counter<long> DrainRejections =
         Meter.CreateCounter<long>("trading.drain.rejections");
 
+    // Algo engine (RFC algo-orders-v0 §7 C1)
+    public static readonly Counter<long> AlgoSignalsConsumed =
+        Meter.CreateCounter<long>("trading.algo.signals_consumed");
+    // Producer-side back-pressure: the bounded signal channel rejected a
+    // write because it was full. Should be flat at zero in healthy
+    // operation; non-zero indicates a stuck consumer or a runaway loop.
+    public static readonly Counter<long> AlgoSignalsDropped =
+        Meter.CreateCounter<long>("trading.algo.signals_dropped");
+    // Child orders submitted by the engine on behalf of an algo parent.
+    // Tagged by algo type so iceberg vs twap are distinguishable.
+    public static readonly Counter<long> AlgoChildrenSubmitted =
+        Meter.CreateCounter<long>("trading.algo.children_submitted");
+
     /// <summary>
     /// 1 when the host booted with <c>ExchangeMode.Simulator</c> active, 0
     /// otherwise. Set once at startup and never decremented (mode is fixed

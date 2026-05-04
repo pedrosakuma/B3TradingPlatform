@@ -1,3 +1,4 @@
+
 using B3.Trading.Application.Observability;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Logging;
@@ -32,6 +33,7 @@ public sealed class ExecutionReportProcessor
     private readonly IExecutionEventSink _sink;
     private readonly Risk.IMarginProvider _margin;
     private readonly ILogger<ExecutionReportProcessor> _logger;
+    private readonly IAlgoSignalQueue? _algoSignals;
 
     public ExecutionReportProcessor(
         OrderOwnershipMap ownership,
@@ -39,7 +41,8 @@ public sealed class ExecutionReportProcessor
         PositionKeeper positions,
         IExecutionEventSink sink,
         Risk.IMarginProvider margin,
-        ILogger<ExecutionReportProcessor> logger)
+        ILogger<ExecutionReportProcessor> logger,
+        IAlgoSignalQueue? algoSignals = null)
     {
         _ownership = ownership;
         _orders = orders;
@@ -47,6 +50,7 @@ public sealed class ExecutionReportProcessor
         _sink = sink;
         _margin = margin;
         _logger = logger;
+        _algoSignals = algoSignals;
     }
 
     /// <summary>
@@ -174,6 +178,31 @@ public sealed class ExecutionReportProcessor
             lastPx,
             rejectReason,
             DateTimeOffset.UtcNow));
+
+        // Algo engine hook: signal AFTER fan-out so the engine reactor
+        // sees the same world the WS subscribers see, and so the dispatch
+        // path (which may be holding internal locks) is fully unwound
+        // before the engine's per-parent semaphore is acquired
+        // (RFC algo-orders-v0 §4.3).
+        if (_algoSignals is not null
+            && order.ParentAlgoId is { } parentAlgoId
+            && !string.IsNullOrEmpty(order.FirmId))
+        {
+            var enqueued = _algoSignals.TryEnqueue(new ChildExecutionObservedSignal
+            {
+                FirmId = order.FirmId,
+                AlgoId = parentAlgoId,
+                ChildClOrdId = lookupId,
+            });
+            if (!enqueued)
+            {
+                MetricsRegistry.AlgoSignalsDropped.Add(1,
+                    new KeyValuePair<string, object?>("kind", "child_er"));
+                _logger.LogWarning(
+                    "Algo signal queue full; dropped child_er signal for parent {AlgoId} child {ClOrdId}.",
+                    parentAlgoId, lookupId);
+            }
+        }
     }
 
     private static KeyValuePair<string, object?> KindTag(ExecKind kind) =>

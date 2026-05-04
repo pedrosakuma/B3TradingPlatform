@@ -61,12 +61,22 @@ builder.Services.AddSingleton<SubscriptionManager>();
 builder.Services.AddSingleton<IExecutionEventSink, WebSocketExecutionEventSink>();
 builder.Services.AddSingleton<IAlgoEventSink, WebSocketAlgoEventSink>();
 builder.Services.AddSingleton<ExecutionReportProcessor>();
+builder.Services.AddSingleton<OrderSubmissionService>();
+
+// Algo engine signal channel + hosted consumer (RFC algo-orders-v0 §4.3).
+// In slice 5a the consumer body is a no-op reactor; slice 5b plugs in the
+// Iceberg state machine.
+builder.Services.AddSingleton<AlgoSignalQueue>();
+builder.Services.AddSingleton<IAlgoSignalQueue>(sp => sp.GetRequiredService<AlgoSignalQueue>());
+builder.Services.AddHostedService<AlgoEngine>();
 builder.Services.AddSingleton<JwtIssuer>();
 
 // Lifecycle: drain flag flipped on SIGTERM /
 // IHostApplicationLifetime.ApplicationStopping. Read by /ready (503 when
 // draining) and POST /orders (refuses new orders so in-flight can finish).
 builder.Services.AddSingleton<DrainState>();
+builder.Services.AddSingleton<B3.Trading.Application.Lifecycle.IDrainGate>(
+    sp => sp.GetRequiredService<DrainState>());
 builder.Services.AddHostedService<DrainHostedService>();
 
 // Persistence: event-sourced WAL + periodic snapshot. The IEventStore

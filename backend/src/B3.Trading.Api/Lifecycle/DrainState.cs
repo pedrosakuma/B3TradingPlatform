@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using B3.Trading.Application.Lifecycle;
 using B3.Trading.Application.Observability;
 using Microsoft.Extensions.Hosting;
 
@@ -18,7 +19,7 @@ namespace B3.Trading.Api.Lifecycle;
 /// <c>/live</c> stays 200 throughout — the process is still healthy,
 /// just refusing new work.
 /// </summary>
-public sealed class DrainState
+public sealed class DrainState : IDrainGate
 {
     private readonly Stopwatch _uptime = Stopwatch.StartNew();
     private long _draining; // 0 = serving, 1 = draining

@@ -1,12 +1,13 @@
 using B3.Trading.Domain;
 
-namespace B3.Trading.Infrastructure;
+namespace B3.Trading.Application;
 
 /// <summary>
 /// Boundary toward <c>B3.EntryPoint.Client</c> (the wire-puro FIXP/SBE
-/// library). Real implementation will adapt EntryPoint
-/// NewOrder/CancelReplace/Cancel + ExecutionReport to/from the domain;
-/// the interface lives in Infrastructure so Application stays wire-agnostic.
+/// library). The interface lives in Application — implementations live in
+/// Infrastructure (ports-and-adapters), so the algo engine and the
+/// HTTP submit pipeline can share the same abstraction without
+/// dragging in wire-library types.
 /// </summary>
 public interface IExchangeGateway
 {

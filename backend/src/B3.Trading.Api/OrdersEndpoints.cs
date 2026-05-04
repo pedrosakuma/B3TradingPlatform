@@ -1,19 +1,12 @@
 using System.Security.Claims;
 using B3.Trading.Api.Auth;
-using B3.Trading.Api.Lifecycle;
 using B3.Trading.Api.WebSockets;
 using B3.Trading.Application;
 using B3.Trading.Application.Observability;
-using B3.Trading.Application.Persistence;
-using B3.Trading.Application.Risk;
-using B3.Trading.Application.Risk.Accounting;
 using B3.Trading.Domain;
-using B3.Trading.Infrastructure;
-using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
-using Microsoft.Extensions.Logging;
 
 namespace B3.Trading.Api;
 
@@ -34,35 +27,14 @@ public static class OrdersEndpoints
             SubmitOrderRequest req,
             HttpContext ctx,
             EndClientRegistry registry,
-            ClOrdIdPrefixRegistry clOrdIds,
-            OrderOwnershipMap ownership,
-            WorkingOrderBook book,
-            IExchangeGateway gateway,
-            IExecutionEventSink sink,
-            RiskPipeline risk,
-            IMarginProvider margin,
-            CompositeRiskAccountant accountant,
-            EventDispatcher dispatcher,
-            DrainState drain,
+            OrderSubmissionService submitter,
             SymbolDirectory symbols,
-            ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
-            if (drain.IsDraining)
-            {
-                MetricsRegistry.DrainRejections.Add(1,
-                    new KeyValuePair<string, object?>("route", "POST /orders"));
-                return Results.Json(
-                    new { error = "service draining" },
-                    statusCode: StatusCodes.Status503ServiceUnavailable);
-            }
-
             if (!Enum.TryParse<OrderSide>(req.Side, ignoreCase: true, out var side))
                 return Results.BadRequest(new { error = $"invalid side '{req.Side}'" });
             if (!Enum.TryParse<OrderType>(req.Type, ignoreCase: true, out var type))
                 return Results.BadRequest(new { error = $"invalid type '{req.Type}'" });
-            if (req.Quantity <= 0)
-                return Results.BadRequest(new { error = "quantity must be positive" });
 
             // SecurityId resolution: explicit non-zero in the payload
             // wins (preserves the conformance contract). Otherwise look
@@ -72,101 +44,37 @@ public static class OrdersEndpoints
             var securityId = req.SecurityId;
             if (securityId == 0 && symbols.TryResolve(req.Symbol, out var resolved))
                 securityId = resolved;
-            if (securityId == 0)
-                return Results.BadRequest(new { error = "securityId is required" });
 
             var owner = ResolveOwner(ctx, registry);
             var firm = ResolveFirm(ctx);
-            var clOrdId = clOrdIds.Generate(owner);
-            var order = new Order(clOrdId, owner, req.Symbol, securityId, side, type, req.Quantity, req.Price, firm);
 
-            // Persist order intent + register ownership atomically. The
-            // dispatcher serialises this with snapshot capture so a crash
-            // mid-window cannot leave the book and the WAL out of sync.
-            // Backpressure surfaces here as 503 — disk lag becomes a
-            // visible reject, never silent latency creep.
-            try
-            {
-                dispatcher.Dispatch(
-                    new OrderSubmittedEvent
-                    {
-                        ClOrdId = clOrdId,
-                        EndClientId = owner.Value,
-                        FirmId = firm,
-                        Symbol = req.Symbol,
-                        SecurityId = securityId,
-                        Side = side.ToString(),
-                        Type = type.ToString(),
-                        Quantity = req.Quantity,
-                        Price = req.Price,
-                    },
-                    () =>
-                    {
-                        book.TryAdd(order);
-                        ownership.Register(clOrdId, owner);
-                    });
-            }
-            catch (WalBackpressureException ex)
-            {
-                MetricsRegistry.WalBackpressure.Add(1,
-                    new KeyValuePair<string, object?>("call_site", "orders.submit"));
-                return Results.Json(
-                    new { error = "system busy (WAL backpressure)", detail = ex.Message },
-                    statusCode: StatusCodes.Status503ServiceUnavailable);
-            }
+            var result = await submitter.SubmitAsync(new OrderSubmissionRequest(
+                owner, firm, req.Symbol, securityId, side, type,
+                req.Quantity, req.Price, OrderSubmissionSource.Manual), ct);
 
-            MetricsRegistry.OrdersSubmitted.Add(1,
-                new KeyValuePair<string, object?>("symbol", req.Symbol),
-                new KeyValuePair<string, object?>("side", side.ToString()));
-
-            // Pre-trade risk: synchronous pipeline + async margin reservation.
-            // Rejection synthesizes an ER through the same sink real
-            // exchange rejections use, so the WS client can't tell them
-            // apart structurally. Margin runs LAST so that a reject
-            // from any earlier check leaves the ledger untouched.
-            var riskCtx = new RiskContext(owner, firm, req.Symbol, side, type, req.Quantity, req.Price);
-            var decision = risk.Evaluate(riskCtx);
-            var marginReserved = false;
-            if (decision.Approved)
+            return result.Kind switch
             {
-                var marginDecision = await margin.TryReserveAsync(clOrdId, riskCtx, ct);
-                if (marginDecision.Approved) marginReserved = true;
-                else decision = marginDecision;
-            }
-            if (!decision.Approved)
-            {
-                MetricsRegistry.OrdersRejectedByRisk.Add(1,
-                    new KeyValuePair<string, object?>("reason", decision.Reason ?? "risk_rejected"));
-                PublishSyntheticRejection(dispatcher, sink, order, owner, decision.Reason ?? "risk_rejected");
-                return Results.Accepted($"/orders/{clOrdId}",
-                    new { ClOrdId = clOrdId.ToString(), Status = "Rejected", Reason = decision.Reason });
-            }
-
-            // Slice 7: record the accepted submit on the rolling ledgers
-            // only after both the synchronous pipeline and the margin
-            // reservation approve. Recording earlier would charge the
-            // ledgers for orders the margin provider rejects.
-            accountant.RecordAccepted(riskCtx);
-
-            try
-            {
-                await gateway.SubmitAsync(order, ct);
-            }
-            catch (Exception ex)
-            {
-                MetricsRegistry.OrdersGatewayFailed.Add(1);
-                loggerFactory.CreateLogger("OrdersEndpoints")
-                    .LogError(ex, "Gateway submit failed for {ClOrdId}; synthesizing rejection.", clOrdId);
-                // Roll back the margin reservation: the order will never
-                // reach the exchange, so no ER will arrive to release it.
-                if (marginReserved) margin.ReleaseReservation(clOrdId);
-                PublishSyntheticRejection(dispatcher, sink, order, owner, "gateway_unavailable");
-                return Results.Json(
-                    new { error = "gateway unavailable", clOrdId = clOrdId.ToString() },
-                    statusCode: StatusCodes.Status502BadGateway);
-            }
-
-            return Results.Accepted($"/orders/{clOrdId}", new { ClOrdId = clOrdId.ToString() });
+                OrderSubmissionResultKind.Accepted =>
+                    Results.Accepted($"/orders/{result.ClOrdId}", new { ClOrdId = result.ClOrdId.ToString() }),
+                OrderSubmissionResultKind.Rejected =>
+                    Results.Accepted($"/orders/{result.ClOrdId}",
+                        new { ClOrdId = result.ClOrdId.ToString(), Status = "Rejected", Reason = result.Reason }),
+                OrderSubmissionResultKind.GatewayFailed =>
+                    Results.Json(
+                        new { error = "gateway unavailable", clOrdId = result.ClOrdId.ToString() },
+                        statusCode: StatusCodes.Status502BadGateway),
+                OrderSubmissionResultKind.WalBackpressure =>
+                    Results.Json(
+                        new { error = "system busy (WAL backpressure)", detail = result.Reason },
+                        statusCode: StatusCodes.Status503ServiceUnavailable),
+                OrderSubmissionResultKind.Drained =>
+                    Results.Json(
+                        new { error = "service draining" },
+                        statusCode: StatusCodes.Status503ServiceUnavailable),
+                OrderSubmissionResultKind.BadRequest =>
+                    Results.BadRequest(new { error = result.Reason }),
+                _ => Results.StatusCode(StatusCodes.Status500InternalServerError),
+            };
         });
 
         group.MapDelete("/{clOrdId}", async (
@@ -208,53 +116,6 @@ public static class OrdersEndpoints
 
     private static string ResolveFirm(HttpContext ctx) =>
         ctx.User.FindFirstValue(JwtIssuer.FirmClaim) ?? "default";
-
-    private static void PublishSyntheticRejection(
-        EventDispatcher dispatcher,
-        IExecutionEventSink sink,
-        Order order,
-        EndClientId owner,
-        string reason)
-    {
-        // Synthetic rejections (risk decline, gateway failure) flow through
-        // the same WAL+sink path as real exchange ERs: identical recovery
-        // and audit semantics, identical client-facing shape.
-        try
-        {
-            dispatcher.Dispatch(
-                new ExecutionReportReceivedEvent
-                {
-                    ClOrdId = order.ClOrdId,
-                    ExecKind = ExecKind.Rejected.ToString(),
-                    LeavesQuantity = order.LeavesQuantity,
-                    CumulativeQuantity = order.CumulativeQuantity,
-                    LastQuantity = 0,
-                    LastPrice = 0m,
-                    RejectReason = reason,
-                    Synthetic = true,
-                },
-                () =>
-                {
-                    order.MarkRejected();
-                    sink.Publish(new ExecutionEvent(
-                        owner, order.ClOrdId, order.Symbol, order.Side, order.Status, ExecKind.Rejected,
-                        order.LeavesQuantity, order.CumulativeQuantity, 0, 0m,
-                        reason, DateTimeOffset.UtcNow));
-                });
-        }
-        catch (WalBackpressureException)
-        {
-            // The order is already accepted in the WAL but the rejection
-            // can't be persisted. Mark + publish anyway so the client sees
-            // a terminal state; the missing audit entry is preferable to a
-            // ghost order. Surfaces in metrics as a backpressure event.
-            order.MarkRejected();
-            sink.Publish(new ExecutionEvent(
-                owner, order.ClOrdId, order.Symbol, order.Side, order.Status, ExecKind.Rejected,
-                order.LeavesQuantity, order.CumulativeQuantity, 0, 0m,
-                reason, DateTimeOffset.UtcNow));
-        }
-    }
 }
 
 public sealed record SubmitOrderRequest(
