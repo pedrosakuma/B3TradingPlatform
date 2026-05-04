@@ -64,11 +64,13 @@ builder.Services.AddSingleton<ExecutionReportProcessor>();
 builder.Services.AddSingleton<OrderSubmissionService>();
 
 // Algo engine signal channel + hosted consumer (RFC algo-orders-v0 §4.3).
-// In slice 5a the consumer body is a no-op reactor; slice 5b plugs in the
-// Iceberg state machine.
+// In slice 5a the consumer body was a no-op reactor; slice 5b plugged in the
+// Iceberg state machine; slice 6 adds the AlgoScheduler hosted service that
+// drives TWAP slice firing on a separate thread (RFC §4.11 commitment 1).
 builder.Services.AddSingleton<AlgoSignalQueue>();
 builder.Services.AddSingleton<IAlgoSignalQueue>(sp => sp.GetRequiredService<AlgoSignalQueue>());
 builder.Services.AddHostedService<AlgoEngine>();
+builder.Services.AddHostedService<AlgoScheduler>();
 builder.Services.AddSingleton<JwtIssuer>();
 
 // Lifecycle: drain flag flipped on SIGTERM /

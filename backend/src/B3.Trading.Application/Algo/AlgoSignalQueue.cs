@@ -43,13 +43,35 @@ public sealed class AlgoSignalQueue : IAlgoSignalQueue
     public bool TryEnqueue(AlgoSignal signal)
     {
         ArgumentNullException.ThrowIfNull(signal);
-        return _channel.Writer.TryWrite(signal);
+        if (_channel.Writer.TryWrite(signal))
+        {
+            Observability.MetricsRegistry.AlgoSignalQueueDepth.Add(1);
+            return true;
+        }
+        return false;
     }
 
     /// <summary>
     /// Async stream consumed by the engine's hosted-service loop. Completes
-    /// when <see cref="Complete"/> is called (host shutdown).
+    /// when <see cref="Complete"/> is called (host shutdown). Wraps the raw
+    /// channel reader so the consumer's per-signal dequeue updates the
+    /// queue-depth gauge — keeping the metric symmetric with
+    /// <see cref="TryEnqueue"/>.
     /// </summary>
+    public IAsyncEnumerable<AlgoSignal> ReadAllAsync(CancellationToken ct) =>
+        ReadAllInternalAsync(ct);
+
+    private async IAsyncEnumerable<AlgoSignal> ReadAllInternalAsync(
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    {
+        await foreach (var signal in _channel.Reader.ReadAllAsync(ct).ConfigureAwait(false))
+        {
+            Observability.MetricsRegistry.AlgoSignalQueueDepth.Add(-1);
+            yield return signal;
+        }
+    }
+
+    /// <summary>Direct channel reader access (legacy call sites; new code should use <see cref="ReadAllAsync"/>).</summary>
     public ChannelReader<AlgoSignal> Reader => _channel.Reader;
 
     public void Complete() => _channel.Writer.TryComplete();

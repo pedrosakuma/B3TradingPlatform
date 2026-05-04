@@ -93,6 +93,31 @@ public static class MetricsRegistry
     public static readonly Counter<long> AlgoChildrenSubmitted =
         Meter.CreateCounter<long>("trading.algo.children_submitted");
 
+    // TWAP scheduler observability (RFC §4.11). Jitter is the wall-clock
+    // delay between the deterministic plannedAtUtc and the moment the
+    // scheduler actually enqueued the slice signal — captures both
+    // scheduler-tick granularity (~100ms) and consumer back-pressure.
+    public static readonly Histogram<double> AlgoTwapSliceFireJitter =
+        Meter.CreateHistogram<double>(
+            "trading.algo.twap.slice_fire_jitter",
+            unit: "ms",
+            description: "now − plannedAtUtc at the moment the scheduler fires a TWAP slice.");
+    // How long a single scheduler tick takes end-to-end. Surfaces "the
+    // scheduler is starting to spend non-trivial time in its tick" before
+    // tick interval starts to slip.
+    public static readonly Histogram<double> AlgoSchedulerTickDuration =
+        Meter.CreateHistogram<double>(
+            "trading.algo.scheduler.tick_duration",
+            unit: "ms",
+            description: "Wall-clock duration of a single AlgoScheduler tick.");
+    // Live depth of the algo signal channel. Healthy operation has this
+    // close to zero; a sustained climb means the consumer is falling
+    // behind the scheduler/ER hot path.
+    public static readonly UpDownCounter<long> AlgoSignalQueueDepth =
+        Meter.CreateUpDownCounter<long>(
+            "trading.algo.signal_queue_depth",
+            description: "Estimated number of signals queued for the AlgoEngine consumer.");
+
     /// <summary>
     /// 1 when the host booted with <c>ExchangeMode.Simulator</c> active, 0
     /// otherwise. Set once at startup and never decremented (mode is fixed
