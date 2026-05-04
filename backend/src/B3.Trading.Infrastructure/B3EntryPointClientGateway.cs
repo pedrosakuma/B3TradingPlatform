@@ -4,6 +4,8 @@ using Microsoft.Extensions.Logging;
 using Up = B3.EntryPoint.Client;
 using UpModels = B3.EntryPoint.Client.Models;
 
+using B3.Trading.Application;
+
 namespace B3.Trading.Infrastructure;
 
 /// <summary>

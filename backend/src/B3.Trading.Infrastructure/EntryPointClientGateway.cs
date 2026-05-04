@@ -1,5 +1,7 @@
 using B3.Trading.Domain;
 
+using B3.Trading.Application;
+
 namespace B3.Trading.Infrastructure;
 
 /// <summary>

@@ -3,6 +3,7 @@ using B3.Trading.Api.Auth;
 using B3.Trading.Api.Lifecycle;
 using B3.Trading.Api.WebSockets;
 using B3.Trading.Application;
+
 using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Domain;
@@ -55,7 +56,8 @@ public static class AlgoEndpoints
             IAlgoEventSink sink,
             EventDispatcher dispatcher,
             DrainState drain,
-            SymbolDirectory symbols) =>
+            SymbolDirectory symbols,
+            IAlgoSignalQueue signals) =>
         {
             if (drain.IsDraining)
             {
@@ -165,6 +167,12 @@ public static class AlgoEndpoints
 
             sink.PublishAlgoSnapshot(owner, firm, algoId);
 
+            if (!signals.TryEnqueue(new AlgoCreatedSignal { FirmId = firm, AlgoId = algoId }))
+            {
+                MetricsRegistry.AlgoSignalsDropped.Add(1,
+                    new KeyValuePair<string, object?>("kind", "created"));
+            }
+
             return Results.Accepted($"/algo/{algoId}", new
             {
                 AlgoId = algoId.ToString(),
@@ -179,7 +187,8 @@ public static class AlgoEndpoints
             AlgoBook algos,
             IAlgoEventSink sink,
             EventDispatcher dispatcher,
-            DrainState drain) =>
+            DrainState drain,
+            IAlgoSignalQueue signals) =>
         {
             if (drain.IsDraining)
             {
@@ -230,6 +239,12 @@ public static class AlgoEndpoints
             }
 
             sink.PublishAlgoSnapshot(owner, firm, id);
+
+            if (!signals.TryEnqueue(new AlgoCancelRequestedSignal { FirmId = firm, AlgoId = id }))
+            {
+                MetricsRegistry.AlgoSignalsDropped.Add(1,
+                    new KeyValuePair<string, object?>("kind", "cancel_requested"));
+            }
 
             return Results.Accepted($"/algo/{id}", new
             {
