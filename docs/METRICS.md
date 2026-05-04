@@ -41,7 +41,7 @@ One `AddMeter(MetricsRegistry.Meter.Name)` call wires the lot.
 
 | OTel name | Type | Tags |
 |---|---|---|
-| `trading.orders.submitted` | Counter | (none, planned: firm/symbol) |
+| `trading.orders.submitted` | Counter | `symbol`, `side`, `source` (manual/algo) |
 | `trading.orders.rejected_by_risk` | Counter | `check` |
 | `trading.orders.gateway_failed` | Counter | (none) |
 | `trading.orders.cancel_requested` | Counter | (none) |
@@ -70,11 +70,26 @@ One `AddMeter(MetricsRegistry.Meter.Name)` call wires the lot.
 | `trading.risk.rolling_notional.bypassed_no_reference` | Counter | `symbol` |
 | `trading.risk.rolling_notional.active_buckets` | Observable Gauge | `scope` (end_client/firm) |
 | `trading.risk.order_rate.active_buckets` | Observable Gauge | `scope` (end_client/firm) |
+| `trading.algo.signals_consumed` | Counter | `kind` (created/cancel_requested/child_execution_observed) |
+| `trading.algo.signals_dropped` | Counter | `kind` |
+| `trading.algo.children_submitted` | Counter | `type` (iceberg/twap) |
+| `trading.algo.twap.slice_fire_jitter` | Histogram (ms) | (none) |
+| `trading.algo.scheduler.tick_duration` | Histogram (ms) | (none) |
+| `trading.algo.signal_queue_depth` | UpDownCounter | (none) |
 
 The `trading.risk.*` series back the **B3 Trading — Risk** Grafana
 dashboard (`docker/observability/grafana/dashboards/risk.json`); the
 v2 risk pipeline is documented in
 [`docs/rfcs/pre-trade-risk-v2.md`](rfcs/pre-trade-risk-v2.md).
+
+The `trading.algo.*` series (plus the `source` tag on
+`trading.orders.submitted`) back the **B3 Trading — Algo** Grafana
+dashboard (`docker/observability/grafana/dashboards/algo.json`); the
+v0 algo pipeline is documented in
+[`docs/rfcs/algo-orders-v0.md`](rfcs/algo-orders-v0.md). Per RFC §7
+C1, `parentAlgoId` is intentionally **not** a metric tag (cardinality
+would explode); per-algo drill-down lives in structured logs and
+traces.
 
 ## Auto-instrumentation also exported
 

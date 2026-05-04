@@ -2,7 +2,7 @@
 
 | Field    | Value                                                              |
 | -------- | ------------------------------------------------------------------ |
-| Status   | Accepted                                                           |
+| Status   | Implemented                                                        |
 | Tracking | [#48](https://github.com/pedrosakuma/B3TradingPlatform/issues/48)  |
 | Replaces | n/a (new capability on top of `B3.Trading.Application`)            |
 
@@ -494,11 +494,31 @@ engines from conformance.
    refuse-to-boot in Production unless `Trading:Exchange:AllowSimulatorInProduction=true`),
    `SimulatorEndpointTests` + `SimulatorBootGuardTests`, and a
    `RequiresSimulator`-gated conformance smoke (`Spec_HTTP_Simulator`).
-5. **Iceberg engine** — first reactive engine. Submits the first
-   child, refills on terminal-fill, suspends on terminal-cancel.
-6. **TWAP engine** — scheduler + recovery. Largest PR; the
-   scheduling model in §4.6 is the contract.
+5. **Iceberg engine** — first reactive engine. ✅ Implemented (slices
+   5a + 5b). 5a extracted `OrderSubmissionService` and shipped the
+   `AlgoSignalQueue` / no-op `AlgoEngine` skeleton; 5b lit up the
+   reactor with per-parent serialisation, refill on terminal-fill,
+   and `Suspended/VenueCancelled` on terminal-cancel.
+6. **TWAP engine** — scheduler + recovery. ✅ Implemented. Adds the
+   deterministic `TwapPlan` (ticks-based `plannedAtUtc` + last-slice
+   remainder), `AlgoScheduler` `BackgroundService` (PeriodicTimer
+   100ms, no catch-up burst), TWAP-aware engine paths
+   (defer/expire on create, no auto-refill on filled, window-expired
+   routing on cancelled/rejected), §4.8 validator on `POST /algo`,
+   and the scheduler observability metrics
+   (`trading.algo.twap.slice_fire_jitter`,
+   `trading.algo.scheduler.tick_duration`,
+   `trading.algo.signal_queue_depth`).
 7. **Conformance scenarios + Grafana panel** for algo metrics.
+   ✅ Implemented. Adds three `Spec_HTTP_Algo` scenarios (iceberg
+   lifecycle including cancel-ack, TWAP two-slice fills-to-completion,
+   `POST /algo` §4.8 validator echo) plus a **B3 Trading — Algo**
+   Grafana dashboard
+   (`docker/observability/grafana/dashboards/algo.json`) covering
+   children-submitted rate by type, signals consumed/dropped/queue
+   depth, scheduler tick duration, TWAP slice fire jitter, and
+   manual-vs-algo `POST /orders` source split. Per §7 C1 there is no
+   `parentAlgoId` metric tag.
 
 The frontend follow-up is intentionally *not* numbered here. It
 lands as its own RFC once the engine is proven, on the same posture

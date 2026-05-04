@@ -1,0 +1,174 @@
+{
+  "annotations": { "list": [] },
+  "description": "Algo orders v0 dashboard for the B3 trading-host. Surfaces engine reactor + scheduler health: child-submission throughput, signal queue depth/back-pressure, scheduler tick duration, and TWAP slice fire jitter. Built from instruments verified to actually export — see docs/METRICS.md for the catalog. Per RFC algo-orders-v0 §7 C1, parentAlgoId is intentionally NOT a metric tag (logs/traces only); per-algo drill-down lives there.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Rate of child orders the engine reactor submits on behalf of algo parents, broken down by algo type (iceberg / twap). The slice-7 source-tag panel below cross-checks this against POST /orders submissions tagged source=algo — they should agree.",
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (type) (rate(trading_algo_children_submitted_total[1m]))",
+          "legendFormat": "{{type}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Algo children submitted (per type)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Rate at which the AlgoEngine consumer pulls signals off the bounded channel, broken down by signal kind (created / cancel_requested / child_execution_observed). A flat zero with parents in PendingNew suggests the consumer is stuck.",
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (kind) (rate(trading_algo_signals_consumed_total[1m]))",
+          "legendFormat": "{{kind}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Algo signals consumed (per kind)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Signals dropped because the bounded channel rejected the write (5-minute window). Healthy operation is flat zero. Non-zero means a stuck engine consumer or a runaway producer (scheduler / ER processor / endpoint enqueue) — the bounded channel is the producer-side back-pressure boundary.",
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "blue", "value": null }, { "color": "red", "value": 1 } ] }, "unit": "none" } },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 8 },
+      "id": 3,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "value_and_name" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(increase(trading_algo_signals_dropped_total[5m]))",
+          "legendFormat": "dropped (5m)",
+          "refId": "A"
+        }
+      ],
+      "title": "Algo signals dropped (5m)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Live depth of the algo signal channel (UpDownCounter). Increments on enqueue, decrements on dequeue. Healthy: hovers near zero. A sustained climb means the consumer is falling behind producers — the dropped-signals stat above is the smoking gun once back-pressure tips into rejection.",
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "none" } },
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 8 },
+      "id": 4,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "trading_algo_signal_queue_depth",
+          "legendFormat": "queue depth",
+          "refId": "A"
+        }
+      ],
+      "title": "Algo signal queue depth",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Orders submitted via POST /orders broken down by source: manual (trader-typed) vs algo (engine-generated child). Cross-check: the algo series should track 'Algo children submitted' panel above. Divergence means the source tag is wrong somewhere in the submission path.",
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "ops" } },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 8 },
+      "id": 5,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (source) (rate(trading_orders_submitted_total[1m]))",
+          "legendFormat": "{{source}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Orders submitted (per source)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Wall-clock duration of a single AlgoScheduler tick, p50/p95/p99 over a 5-minute window. The scheduler ticks every 100ms; a tick should comfortably finish in ≪10ms. Sustained p99 climbing toward the tick interval means the scheduler is starting to slip and slice fires will bunch up on subsequent ticks.",
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "ms" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "id": 6,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(trading_algo_scheduler_tick_duration_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(trading_algo_scheduler_tick_duration_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(trading_algo_scheduler_tick_duration_bucket[5m])))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "title": "Scheduler tick duration (p50 / p95 / p99)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "TWAP slice fire jitter — wall-clock delay between the deterministic plannedAtUtc and the moment the scheduler actually enqueued the slice signal. Captures both scheduler-tick granularity (~100ms) and consumer back-pressure. p95 < 200ms is healthy for a 100ms scheduler interval.",
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "ms" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "id": 7,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(trading_algo_twap_slice_fire_jitter_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(trading_algo_twap_slice_fire_jitter_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(trading_algo_twap_slice_fire_jitter_bucket[5m])))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "title": "TWAP slice fire jitter (p50 / p95 / p99)",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["b3-trading", "algo"],
+  "templating": { "list": [] },
+  "time": { "from": "now-15m", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "B3 Trading — Algo",
+  "uid": "b3-trading-algo",
+  "version": 1,
+  "weekStart": ""
+}
