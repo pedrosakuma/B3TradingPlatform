@@ -2,7 +2,7 @@
 
 | Field    | Value                                                                  |
 | -------- | ---------------------------------------------------------------------- |
-| Status   | Draft                                                                  |
+| Status   | Implemented                                                            |
 | Tracking | [#58](https://github.com/pedrosakuma/B3TradingPlatform/issues/58)      |
 | Replaces | n/a (additive overlay on top of the family `docker-compose.yml`)       |
 
@@ -425,11 +425,17 @@ from the base compose header and from `docs/DOCKER.md`'s introduction.
 
 ## 6. Open questions
 
-- **Q1 — Marketdata unicast bind (R1).** Does the upstream consumer
-  accept `multicastGroup: "0.0.0.0"` as a degenerate "listen unicast"
-  configuration, or does it always issue an IGMP join? Resolved by
-  local probe during the implementation PR; affects whether D3 is
-  on or off in v0.
+- **Q1 — Marketdata unicast bind (R1).** Resolved as **R1.b** during
+  the implementation PR. Local probe confirmed that the upstream
+  `b3-marketdata` consumer's `MulticastPacketSource` always issues
+  `SetMulticastOption`, which fails `SocketException(22) Invalid
+  argument` for `multicastGroup: "0.0.0.0"` (or any non-multicast
+  address). The slice ships matching-platform alone in the overlay
+  and points matching's UMDF unicast sink at its own loopback
+  (`127.0.0.1`) so the simulator boots cleanly with no consumer.
+  D3 (reference-price WS) is deferred to v1; cross-issue to be
+  opened upstream in `B3MarketDataPlatform` requesting first-class
+  unicast/bridge mode.
 - **Q2 — Auth seed sharing.** Conformance overlay reuses alice's
   PBKDF2 hash/salt to add a `carol` admin user. The real overlay
   doesn't need its own seed (FIRM01 in `bridge.json` is matching's
@@ -455,7 +461,10 @@ from the base compose header and from `docs/DOCKER.md`'s introduction.
   every PR, mirroring the posture of the existing `conformance`
   job. ~3-5 min wall-clock acceptable; if it becomes painful,
   retreat to `workflow_dispatch + cron` (mirror of `e2e-smoke.yml`).
-- **D3 — Reference price wiring.** Overlay sets
-  `Trading__MarketData__WsUrl` so the real stack exercises the WS
-  path end-to-end; static-map fallback in the host is preserved for
-  any deployment that leaves the env empty.
+- **D3 — Reference price wiring.** Originally planned to set
+  `Trading__MarketData__WsUrl` so the real stack would exercise the
+  WS path end-to-end. **Reverted to "left unset"** after R1.b
+  confirmation — marketdata is not in the v0 overlay so there is no
+  WS endpoint to point at. The static-map fallback in the host
+  remains. v1 (gated by upstream marketdata bridge support)
+  reinstates the WS wire.

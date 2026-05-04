@@ -1,0 +1,75 @@
+{
+  // Bridge-network friendly variant of upstream's exchange-simulator.json,
+  // pinned to the shape B3TradingPlatform's family compose exercises.
+  // Ships under docker/real/ and is mounted into the matching-platform
+  // service by docker-compose.real.yml.
+  //
+  // Why we commit our own copy instead of mounting the upstream config:
+  // pinning at our PR boundary keeps an upstream config refactor from
+  // silently changing what our CI exercises. When upstream changes shape
+  // and ":latest" stops parsing this file, the next CI run fails — which
+  // is exactly the signal we want.
+  //
+  // Differences from upstream config/exchange-simulator.bridge.json
+  // (https://github.com/pedrosakuma/B3MatchingPlatform):
+  //
+  // 1. UMDF unicast targets point at 127.0.0.1 (matching's own loopback)
+  //    instead of "marketdata". Per RFC integration-real-stack-v0 §4.4
+  //    R1.b, the upstream b3-marketdata consumer cannot bind unicast UDP
+  //    via its existing JSON config (MulticastPacketSource always issues
+  //    SetMulticastOption, which fails EINVAL on a non-multicast group).
+  //    Until that gap is closed upstream, marketdata stays out of the
+  //    real overlay and matching's UMDF emissions are sunk to /dev/null.
+  //    The FIXP TCP listener (port 9876) is what the trading-host needs,
+  //    and it's unaffected.
+  //
+  // 2. firms[0] / sessions[0] pinned to FIRM01 / 10101 / dev-key-1 so
+  //    docker-compose.real.yml's trading-host overlay can hard-code
+  //    Trading__Exchange__Firms__0__SessionId/AccessKey to match.
+  "tcp": {
+    "listen": "0.0.0.0:9876",
+    "enteringFirm": 1,
+    "heartbeatIntervalMs": 30000,
+    "idleTimeoutMs": 30000,
+    "testRequestGraceMs": 5000
+  },
+  "auth": {
+    "devMode": true
+  },
+  "firms": [
+    { "id": "FIRM01", "name": "Alpha Corretora", "enteringFirmCode": 100 }
+  ],
+  "sessions": [
+    { "sessionId": "10101", "firmId": "FIRM01", "accessKey": "dev-key-1" }
+  ],
+  "http": {
+    "listen": "0.0.0.0:8080",
+    "livenessStaleMs": 5000
+  },
+  "channels": [
+    {
+      "channelNumber": 84,
+      // transport=unicast: each "*.group" below is a DNS name (or IP)
+      // resolved at startup. We point at 127.0.0.1 so the UDP sink writes
+      // to matching's own loopback and the kernel drops the datagrams —
+      // there is no UMDF consumer on the bridge in v0 (see header).
+      "transport": "unicast",
+      "incrementalGroup": "127.0.0.1",
+      "incrementalPort": 30084,
+      "selfTradePrevention": "none",
+      "instruments": "config/instruments-eqt.json",
+      "snapshot": {
+        "group": "127.0.0.1",
+        "port": 30184,
+        "cadenceMs": 1000,
+        "maxEntriesPerChunk": 30
+      },
+      "instrumentDefinition": {
+        "channelNumber": 184,
+        "group": "127.0.0.1",
+        "port": 31084,
+        "cadenceMs": 5000
+      }
+    }
+  ]
+}

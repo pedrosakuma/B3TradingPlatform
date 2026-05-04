@@ -12,9 +12,10 @@
 #
 #   docker compose --profile marketdata up
 #
-# The `matching-platform` service is intentionally absent until
-# pedrosakuma/B3MatchingPlatform#88 ships GHCR images + bridge-friendly
-# transport. Once it does, a follow-up PR will add it under another profile.
+# The real-stack overlay `docker-compose.real.yml` adds `matching-platform`
+# (ghcr.io/pedrosakuma/b3-matching) wired to the trading-host over the
+# `b3-net` bridge with `Mode=Real`. See docs/DOCKER.md § Real-stack overlay
+# and `docs/rfcs/integration-real-stack-v0.md`.
 
 name: b3trading
 

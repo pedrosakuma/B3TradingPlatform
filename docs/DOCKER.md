@@ -32,10 +32,30 @@ explicitly:
 PCAP_DIR=/path/to/your/pcaps docker compose -f docker/docker-compose.yml --profile marketdata up
 ```
 
-A future PR will add `matching-platform` once
-[B3MatchingPlatform#88](https://github.com/pedrosakuma/B3MatchingPlatform/issues/88)
-ships GHCR images and a bridge-friendly transport (UMDF mcast + docker
-bridge networks don't compose without help).
+A future PR will refresh this section once
+[B3MarketDataPlatform#2](https://github.com/pedrosakuma/B3MarketDataPlatform/issues/2)
+follow-ups land a unicast-bind mode (see RFC integration-real-stack-v0
+§4.4 R1.b). Today, marketdata only knows how to consume multicast
+UMDF, which is not routable across the docker bridge.
+
+## Real-stack overlay (opt-in)
+
+```bash
+docker compose \
+    -f docker/docker-compose.yml \
+    -f docker/docker-compose.real.yml \
+    up
+```
+
+Brings up `matching-platform` (`ghcr.io/pedrosakuma/b3-matching:latest`)
+and flips `trading-host` into `Mode=Real` against matching's FIXP
+listener over the existing `b3-net` bridge. Use this overlay when you
+need to see the real `B3.EntryPoint.Client` path drive end-to-end —
+gap detection, latency probes, multi-firm registry — instead of the
+in-process mock.
+
+The `marketdata` leg of the topology stays out of this overlay in
+v0; see RFC `docs/rfcs/integration-real-stack-v0.md` §4.4 R1.b.
 
 ## Honest no-broker mode
 

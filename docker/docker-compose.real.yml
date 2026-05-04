@@ -1,0 +1,94 @@
+# Real-stack overlay: matching-platform + trading-host(Mode=Real).
+#
+# Brings up the only existing service in the family that can speak real
+# B3 EntryPoint wire to a trading-host running in Mode=Real. The overlay
+# is opt-in — `docker compose up` (no -f overlay) keeps the honest
+# Mode=Unavailable default.
+#
+# Usage:
+#   docker compose \
+#       -f docker/docker-compose.yml \
+#       -f docker/docker-compose.real.yml \
+#       up
+#
+# Compose with the conformance overlay to drive the existing 11-spec
+# suite against the real FIXP wire (auth + admin/firms + risk run
+# end-to-end; simulator + algo specs auto-skip because their RequiresSimulator
+# guard does not see Mode=Simulator):
+#
+#   docker compose \
+#       -f docker/docker-compose.yml \
+#       -f docker/docker-compose.real.yml \
+#       -f docker/docker-compose.conformance.yml \
+#       up -d --wait trading-host
+#   docker compose \
+#       -f docker/docker-compose.yml \
+#       -f docker/docker-compose.real.yml \
+#       -f docker/docker-compose.conformance.yml \
+#       run --rm conformance
+#
+# The marketdata service stays profile-gated under the base compose.
+# Per RFC integration-real-stack-v0 §4.4 R1.b, the upstream b3-marketdata
+# consumer cannot bind unicast UDP via its existing JSON config (its
+# MulticastPacketSource always issues SetMulticastOption, which fails
+# EINVAL on a non-multicast group). Until that gap is closed upstream
+# the matching → marketdata UMDF leg is out of scope; matching's own
+# UMDF emissions are sunk to its loopback (see
+# docker/real/exchange-simulator.bridge.json).
+
+services:
+  matching-platform:
+    image: ${MATCHING_IMAGE:-ghcr.io/pedrosakuma/b3-matching:latest}
+    container_name: b3-matching-platform
+    restart: unless-stopped
+    networks:
+      - b3-net
+    expose:
+      - "9876"   # FIXP TCP listener consumed by trading-host
+      - "8080"   # /metrics + /sessions HTTP surface
+    volumes:
+      - ./real/exchange-simulator.bridge.json:/app/config/exchange-simulator.bridge.json:ro
+      - ./real/instruments-eqt.json:/app/config/instruments-eqt.json:ro
+    command: ["/app/config/exchange-simulator.bridge.json"]
+    healthcheck:
+      # Matching ships /metrics + /sessions on its HTTP port (no /health).
+      # /metrics returning 200 is a sufficient readiness signal: the HTTP
+      # server only binds after the channel dispatcher and the FIXP
+      # listener are up (see B3.Exchange.Host.ExchangeHost startup order).
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/metrics > /dev/null"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
+
+  trading-host:
+    depends_on:
+      matching-platform:
+        condition: service_healthy
+    environment:
+      Trading__Exchange__Mode: Real
+      # Single firm wired to matching's pre-#42 default session, matching
+      # docker/real/exchange-simulator.bridge.json verbatim so the FIXP
+      # Negotiate succeeds. Bridge auth.devMode=true ignores AccessKey,
+      # but we still set it so the field is non-empty (validator gate).
+      Trading__Exchange__Firms__0__FirmId: FIRM01
+      Trading__Exchange__Firms__0__Endpoint: matching-platform:9876
+      Trading__Exchange__Firms__0__SessionId: "10101"
+      Trading__Exchange__Firms__0__SessionVerId: "1"
+      Trading__Exchange__Firms__0__EnteringFirm: "100"
+      Trading__Exchange__Firms__0__AccessKey: dev-key-1
+      Trading__Exchange__Firms__0__SenderLocation: SP
+      Trading__Exchange__Firms__0__EnteringTrader: ALICE
+      # Map the conformance/test SecurityIds onto the symbols matching
+      # advertises in instruments-eqt.json. Conformance specs that POST
+      # to /orders or /algo with an explicit SecurityId still resolve
+      # against the host-side directory; the upstream id (900000000001
+      # for PETR4) is what matching matches on if the order ever reaches
+      # the gateway. v0's covered specs (auth/admin/risk) either skip
+      # the gateway entirely or get rejected by risk first, so the
+      # mapping is documentation more than enforcement.
+      Trading__SymbolDirectory__SecurityIds__PETR4: "4321"
+      Trading__SymbolDirectory__SecurityIds__VALE3: "1234"
+      # Reference-price WS deliberately left unset (D3 deferred to v1
+      # per R1.b — see overlay header). The trading-host falls back to
+      # the static Trading:Risk:ReferencePrices map.
