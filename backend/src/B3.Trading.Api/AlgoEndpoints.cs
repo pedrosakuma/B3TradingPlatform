@@ -116,6 +116,19 @@ public static class AlgoEndpoints
                     // unpriced child orders that contradict the user's chosen type.
                     if (childType == OrderType.Limit && req.Twap.ChildPrice is null)
                         return Results.BadRequest(new { error = "twap.childPrice is required when twap.childOrderType is Limit" });
+                    // RFC §4.8: reject when the implied per-slice quantity
+                    // rounds to zero. Echo the floor in the error body so
+                    // the caller can lower sliceCount or raise totalQuantity
+                    // without guessing.
+                    var floorQty = TwapPlan.FloorSliceQty(req.TotalQuantity, req.Twap.SliceCount);
+                    if (floorQty <= 0)
+                        return Results.BadRequest(new
+                        {
+                            error = "twap.sliceCount produces a per-slice quantity of zero",
+                            impliedSliceQuantity = floorQty,
+                            totalQuantity = req.TotalQuantity,
+                            sliceCount = req.Twap.SliceCount,
+                        });
                     parameters = new TwapParameters(
                         req.Twap.StartUtc, req.Twap.EndUtc, req.Twap.SliceCount,
                         childType, req.Twap.ChildPrice);

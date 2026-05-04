@@ -73,6 +73,7 @@ public sealed class AlgoEngine : BackgroundService
     private readonly IExchangeGateway _gateway;
     private readonly IAlgoEventSink _algoSink;
     private readonly EventDispatcher _dispatcher;
+    private readonly TimeProvider _clock;
     private readonly ILogger<AlgoEngine> _logger;
 
     // Per-parent runtime state. Owned by the consumer task; the
@@ -90,6 +91,7 @@ public sealed class AlgoEngine : BackgroundService
         IExchangeGateway gateway,
         IAlgoEventSink algoSink,
         EventDispatcher dispatcher,
+        TimeProvider clock,
         ILogger<AlgoEngine> logger)
     {
         _queue = queue;
@@ -100,6 +102,7 @@ public sealed class AlgoEngine : BackgroundService
         _gateway = gateway;
         _algoSink = algoSink;
         _dispatcher = dispatcher;
+        _clock = clock;
         _logger = logger;
     }
 
@@ -109,7 +112,7 @@ public sealed class AlgoEngine : BackgroundService
         Reconcile();
         try
         {
-            await foreach (var signal in _queue.Reader.ReadAllAsync(stoppingToken).ConfigureAwait(false))
+            await foreach (var signal in _queue.ReadAllAsync(stoppingToken).ConfigureAwait(false))
             {
                 MetricsRegistry.AlgoSignalsConsumed.Add(1,
                     new KeyValuePair<string, object?>("kind", SignalKind(signal)));
@@ -244,7 +247,8 @@ public sealed class AlgoEngine : BackgroundService
         {
             // A child is already outstanding (steady-state or post-recovery).
             // Idempotent no-op — when the child reaches terminal we'll
-            // refill via OnChildErAsync.
+            // refill (Iceberg) or wait for the next scheduled tick (TWAP)
+            // via OnChildErAsync.
             _logger.LogDebug(
                 "AlgoEngine OnCreated: algo {Firm}/{AlgoId} already has live child {Child}; no resubmit.",
                 algo.FirmId, algo.AlgoId, existing);
@@ -258,6 +262,42 @@ public sealed class AlgoEngine : BackgroundService
             // Promote to Completed now so /algo reflects truth.
             await RecordTerminalAsync(algo, rt, AlgoStatus.Completed, AlgoTerminalReason.None).ConfigureAwait(false);
             return;
+        }
+
+        // TWAP: scheduling decisions for "is the next slice due?" and
+        // "has the window expired?" live here. The scheduler thread fires
+        // an AlgoCreatedSignal at every relevant transition; the engine
+        // re-evaluates from scratch using the deterministic plan so the
+        // two threads cannot drift.
+        if (algo.Type == AlgoType.Twap && algo.Parameters is TwapParameters tp)
+        {
+            var now = _clock.GetUtcNow();
+            if (now >= tp.EndUtc)
+            {
+                // Window passed (mid-execution OR during downtime). RFC
+                // §4.6: parent transitions to Expired with the residue
+                // preserved on FilledQuantity. If RemainingQuantity is
+                // zero the earlier branch above already routed to
+                // Completed.
+                await RecordTerminalAsync(algo, rt, AlgoStatus.Expired, AlgoTerminalReason.TwapWindowExpired).ConfigureAwait(false);
+                return;
+            }
+
+            if (rt.NextSliceSeq >= tp.SliceCount)
+            {
+                // Plan exhausted but residue remains and window still
+                // open — no slices left to submit; wait for window
+                // expiry to mark Expired.
+                return;
+            }
+
+            var dueAt = TwapPlan.PlannedAtUtc(tp.StartUtc, tp.EndUtc, tp.SliceCount, rt.NextSliceSeq);
+            if (now < dueAt)
+            {
+                // Not due yet — scheduler will re-fire when plannedAtUtc
+                // arrives. No-op (idempotent under tick storms).
+                return;
+            }
         }
 
         await SubmitNextSliceAsync(algo, rt, ct).ConfigureAwait(false);
@@ -310,6 +350,23 @@ public sealed class AlgoEngine : BackgroundService
                     return;
                 }
                 rt.RetryAttempts = 0;
+                if (algo.Type == AlgoType.Twap && algo.Parameters is TwapParameters tpFilled)
+                {
+                    // TWAP child finished but residue remains. The
+                    // scheduler — not the engine — drives the next slice:
+                    // the next AlgoCreatedSignal will arrive at
+                    // plannedAtUtc(NextSliceSeq) (or sooner if catch-up
+                    // is needed). RFC §4.6 forbids the engine from
+                    // bursting slices on its own. Window-expired-during-
+                    // child-fill is also handled here: if the window
+                    // already passed there is no point waiting for the
+                    // scheduler tick.
+                    if (_clock.GetUtcNow() >= tpFilled.EndUtc)
+                    {
+                        await RecordTerminalAsync(algo, rt, AlgoStatus.Expired, AlgoTerminalReason.TwapWindowExpired).ConfigureAwait(false);
+                    }
+                    return;
+                }
                 await SubmitNextSliceAsync(algo, rt, ct).ConfigureAwait(false);
                 return;
 
@@ -321,6 +378,16 @@ public sealed class AlgoEngine : BackgroundService
                     // FilledQuantity already reflects any partial that
                     // landed before the cancel-ack.
                     await RecordTerminalAsync(algo, rt, AlgoStatus.Cancelled, AlgoTerminalReason.UserCancelled).ConfigureAwait(false);
+                }
+                else if (IsTwapWindowExpired(algo))
+                {
+                    // RFC §4.6 "window passed during downtime AND child was
+                    // live": engine reconciles the child via the ordinary
+                    // ER path, then evaluates the parent — if not Completed,
+                    // mark Expired regardless of why the child terminated.
+                    // Window-expiry is the more specific signal here than
+                    // VenueCancelled.
+                    await RecordTerminalAsync(algo, rt, AlgoStatus.Expired, AlgoTerminalReason.TwapWindowExpired).ConfigureAwait(false);
                 }
                 else
                 {
@@ -335,10 +402,20 @@ public sealed class AlgoEngine : BackgroundService
 
             case OrderStatus.Rejected:
                 if (algo.IsTerminal) return;
+                if (IsTwapWindowExpired(algo))
+                {
+                    await RecordTerminalAsync(algo, rt, AlgoStatus.Expired, AlgoTerminalReason.TwapWindowExpired).ConfigureAwait(false);
+                    return;
+                }
                 await RecordTerminalAsync(algo, rt, AlgoStatus.Suspended, AlgoTerminalReason.RiskRejected).ConfigureAwait(false);
                 return;
         }
     }
+
+    private bool IsTwapWindowExpired(Algo algo) =>
+        algo.Type == AlgoType.Twap
+        && algo.Parameters is TwapParameters tp
+        && _clock.GetUtcNow() >= tp.EndUtc;
 
     private async Task OnCancelRequestedAsync(Algo algo, AlgoParentRuntime rt, CancellationToken ct)
     {
@@ -531,7 +608,7 @@ public sealed class AlgoEngine : BackgroundService
         await Task.CompletedTask;
     }
 
-    private static (long Quantity, decimal? Price) ComputeNextSlice(Algo algo)
+    private (long Quantity, decimal? Price) ComputeNextSlice(Algo algo)
     {
         switch (algo.Parameters)
         {
@@ -542,12 +619,20 @@ public sealed class AlgoEngine : BackgroundService
                 }
             case TwapParameters tp:
                 {
-                    // TWAP slice sizing is the slice-6 problem; fall back
-                    // to even split here for now so a partial implementation
-                    // doesn't compile-break the iceberg path.
-                    var slices = Math.Max(1, tp.SliceCount);
-                    var qty = Math.Max(1, algo.TotalQuantity / slices);
-                    return (Math.Min(qty, algo.RemainingQuantity), tp.ChildPrice);
+                    // Deterministic per-slice quantity (RFC §4.8): floor on
+                    // slices 0..n-2 and the remainder on the last slice so
+                    // the parent total reconciles exactly. Recovery
+                    // re-derives the same numbers from the parameters
+                    // alone — no separate persisted plan.
+                    var rt = _runtime[(algo.FirmId, algo.AlgoId)];
+                    var seq = rt.NextSliceSeq;
+                    var planned = TwapPlan.SliceQty(algo.TotalQuantity, tp.SliceCount, seq);
+                    // Cap at remaining: fills from earlier slices may
+                    // partially-cancel a slice and shift residue forward,
+                    // so the planned quantity can exceed what's actually
+                    // outstanding.
+                    var qty = Math.Min(planned, algo.RemainingQuantity);
+                    return (qty, tp.ChildPrice);
                 }
             default:
                 return (algo.RemainingQuantity, null);
