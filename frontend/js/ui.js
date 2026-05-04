@@ -15,6 +15,7 @@ let onSwitchView  = () => {};
 let onBlotterFilter  = () => {};
 let onSelectOrder    = () => {};
 let onKeyboardCancel = () => {};
+let onSelectDobSymbol = () => {};
 
 export function setHandlers(handlers) {
   onSubmitOrder    = handlers.onSubmitOrder    ?? onSubmitOrder;
@@ -25,6 +26,7 @@ export function setHandlers(handlers) {
   onBlotterFilter  = handlers.onBlotterFilter  ?? onBlotterFilter;
   onSelectOrder    = handlers.onSelectOrder    ?? onSelectOrder;
   onKeyboardCancel = handlers.onKeyboardCancel ?? onKeyboardCancel;
+  onSelectDobSymbol = handlers.onSelectDobSymbol ?? onSelectDobSymbol;
 }
 
 export function showLogin() {
@@ -161,6 +163,14 @@ export function bindUi() {
       .filter(Boolean);
     onApplyMd({ url, symbols });
   });
+
+  // DOB symbol selector — empty value clears the selection.
+  const dobSelect = $("dob-symbol");
+  if (dobSelect) {
+    dobSelect.addEventListener("change", (e) => {
+      onSelectDobSymbol(e.target.value || null);
+    });
+  }
 
   // View toggle (trader / admin) — only wired here, visibility is
   // gated in app.js based on the JWT role claim.
@@ -360,6 +370,7 @@ function renderForSlice(slice) {
   if (slice === "wsReconnect") renderReconnect();
   if (slice === "firmsHealth" || slice === "all") renderFirmsHealth();
   if (slice === "currentView" || slice === "all") applyCurrentView(getState().currentView);
+  if (slice === "watchlist" || slice === "dobSymbol" || slice === "book" || slice === "all") renderDob();
 }
 
 function renderAll() {
@@ -369,6 +380,7 @@ function renderAll() {
   setStatusPill(getState().status);
   setUserLabel(getState().user);
   renderMarketData();
+  renderDob();
   setMdStatusPill(getState().marketDataStatus);
   renderInflight();
   renderReconnect();
@@ -409,6 +421,75 @@ function renderMarketData() {
       <td class="num">${e.lastTradeId ?? "—"}</td>
       <td>${ts}</td>
     </tr>`;
+  }).join("");
+}
+
+const DOB_TOP_N = 10;
+
+function renderDob() {
+  const select = $("dob-symbol");
+  const bidsBody = document.querySelector("#dob-bids tbody");
+  const asksBody = document.querySelector("#dob-asks tbody");
+  const feedback = $("dob-feedback");
+  if (!select || !bidsBody || !asksBody) return;
+
+  const st = getState();
+  const watch = st.watchlist;
+  const current = st.dobSymbol;
+
+  // Sync the symbol dropdown with the current watchlist.
+  const desired = ["", ...watch];
+  const existing = [...select.options].map(o => o.value);
+  if (desired.length !== existing.length || desired.some((v, i) => v !== existing[i])) {
+    select.innerHTML = `<option value="">— select symbol —</option>` +
+      watch.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("");
+  }
+  if (select.value !== (current ?? "")) {
+    select.value = current ?? "";
+  }
+
+  if (!current) {
+    bidsBody.innerHTML = `<tr><td colspan="3" class="muted-cell">select a symbol</td></tr>`;
+    asksBody.innerHTML = `<tr><td colspan="3" class="muted-cell">select a symbol</td></tr>`;
+    if (feedback) { feedback.hidden = true; feedback.textContent = ""; }
+    return;
+  }
+
+  const entry = st.book.get(current);
+  if (!entry || !entry.ready) {
+    bidsBody.innerHTML = `<tr><td colspan="3" class="muted-cell">awaiting book snapshot…</td></tr>`;
+    asksBody.innerHTML = `<tr><td colspan="3" class="muted-cell">awaiting book snapshot…</td></tr>`;
+    if (feedback) { feedback.hidden = true; feedback.textContent = ""; }
+    return;
+  }
+
+  const bids = [...entry.bids.entries()]
+    .map(([k, v]) => ({ price: Number(k), qty: v.qty, count: v.count }))
+    .sort((a, b) => b.price - a.price)
+    .slice(0, DOB_TOP_N);
+  const asks = [...entry.asks.entries()]
+    .map(([k, v]) => ({ price: Number(k), qty: v.qty, count: v.count }))
+    .sort((a, b) => a.price - b.price)
+    .slice(0, DOB_TOP_N);
+
+  bidsBody.innerHTML = renderDobSide(bids, "bid");
+  asksBody.innerHTML = renderDobSide(asks, "ask");
+  if (feedback) { feedback.hidden = true; feedback.textContent = ""; }
+}
+
+function renderDobSide(levels, side) {
+  if (levels.length === 0) {
+    return `<tr><td colspan="3" class="muted-cell">empty</td></tr>`;
+  }
+  let cum = 0;
+  return levels.map(lv => {
+    cum += Number(lv.qty) || 0;
+    const price = lv.price.toFixed(2);
+    const qty = lv.qty;
+    if (side === "bid") {
+      return `<tr><td class="num">${cum}</td><td class="num">${qty}</td><td class="num">${price}</td></tr>`;
+    }
+    return `<tr><td class="num">${price}</td><td class="num">${qty}</td><td class="num">${cum}</td></tr>`;
   }).join("");
 }
 

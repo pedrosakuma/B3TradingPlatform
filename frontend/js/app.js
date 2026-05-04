@@ -8,6 +8,7 @@ import { validateOrder, fatFingerCheck, payloadKey } from "./validation.js";
 import * as state from "./state.js";
 import * as ui from "./ui.js";
 import * as adminUi from "./adminUi.js";
+import { FLAGS } from "./mdProtocol.js";
 
 const SESSION_KEY = "b3tp.session";
 const MD_KEY = "b3tp.md";
@@ -55,6 +56,7 @@ function init() {
     onBlotterFilter: handleBlotterFilter,
     onSelectOrder: handleSelectOrder,
     onKeyboardCancel: handleKeyboardCancel,
+    onSelectDobSymbol: handleSelectDobSymbol,
   });
   adminUi.setAdminHandlers({
     onToggleFirm:      handleToggleFirm,
@@ -268,6 +270,8 @@ function handleApplyMd({ url, symbols }) {
       mdWorker = null;
     }
     state.clearMarketData();
+    state.clearAllBooks();
+    mbpEnabled = false;
     startMdWorker();
   } else {
     mdWorker.postMessage({ type: "setSymbols", symbols });
@@ -280,10 +284,27 @@ function handleApplyMd({ url, symbols }) {
   ui.setMdFeedback(`watching ${symbols.length} symbol(s)`, "ok");
 }
 
+// MBP is sticky: once enabled in a session, we leave the flag on even
+// if the trader closes the DOB panel. Toggling MBP re-subscribes every
+// symbol (server allocates fresh securityIds per flag set), which would
+// briefly blank market-data and trade-tape — not worth it.
+let mbpEnabled = false;
+
+function handleSelectDobSymbol(symbol) {
+  state.setDobSymbol(symbol || null);
+  if (!symbol || !mdWorker || mbpEnabled) return;
+  const flags = FLAGS.TRADES | FLAGS.INFO | FLAGS.MBP;
+  mdWorker.postMessage({ type: "setFlags", flags });
+  mbpEnabled = true;
+}
+
 function onMdWorkerMessage(msg) {
   switch (msg.type) {
     case "md.status":   state.setMarketDataStatus(msg.value); break;
-    case "md.clear":    state.clearMarketData(); break;
+    case "md.clear":
+      state.clearMarketData();
+      state.clearAllBooks();
+      break;
     case "md.trade":    state.applyMdTrade(msg); break;
     case "md.info":     state.applyMdInfo(msg); break;
     case "md.bust":
@@ -294,8 +315,19 @@ function onMdWorkerMessage(msg) {
     case "md.subError":
       ui.setMdFeedback(`subscribe ${msg.symbol}: ${msg.errorName}`, "error");
       state.removeMdSymbol(msg.symbol);
+      state.removeBookSymbol(msg.symbol);
       break;
-    case "md.removed":  state.removeMdSymbol(msg.symbol); break;
+    case "md.removed":
+      state.removeMdSymbol(msg.symbol);
+      state.removeBookSymbol(msg.symbol);
+      break;
+    case "md.book.snapshot":   state.applyMdBookSnapshot(msg); break;
+    case "md.book.cleared":    state.applyMdBookCleared(msg); break;
+    case "md.level.snapshot":  state.applyMdLevelSnapshot(msg); break;
+    case "md.level.update":    state.applyMdLevelUpdate(msg); break;
+    case "md.level.deleted":   state.applyMdLevelDeleted(msg); break;
+    case "md.candle.snapshot": /* T3 */ break;
+    case "md.candle.update":   /* T3 */ break;
     case "md.error":    console.warn("[md]", msg); break;
   }
 }
@@ -421,6 +453,7 @@ function logout() {
     mdWorker.terminate();
     mdWorker = null;
   }
+  mbpEnabled = false;
   session = null;
   mdConfig = null;
   clearSession();

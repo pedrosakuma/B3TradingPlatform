@@ -172,6 +172,39 @@
           </table>
         </div>
       </section>
+
+      <!-- DEPTH OF BOOK ---------------------------------------------- -->
+      <section class="panel dob">
+        <h2>
+          Depth of book
+          <select id="dob-symbol" aria-label="DOB symbol">
+            <option value="">— select symbol —</option>
+          </select>
+        </h2>
+        <p id="dob-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
+        <div class="dob-grid">
+          <table id="dob-bids" class="dob-side dob-bid">
+            <thead>
+              <tr>
+                <th class="num">Cum</th>
+                <th class="num">Qty</th>
+                <th class="num">Bid</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <table id="dob-asks" class="dob-side dob-ask">
+            <thead>
+              <tr>
+                <th class="num">Ask</th>
+                <th class="num">Qty</th>
+                <th class="num">Cum</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
     </main>
   </section>
 

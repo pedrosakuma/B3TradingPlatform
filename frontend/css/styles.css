@@ -77,11 +77,12 @@ body {
   flex: 1;
   display: grid;
   grid-template-columns: 280px 1fr 240px;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto 1fr auto auto;
   grid-template-areas:
     "ticket  blotter   positions"
     "ticket  blotter   positions"
-    "md      execs     positions";
+    "md      execs     positions"
+    "dob     dob       positions";
   gap: 8px; padding: 8px; min-height: 0;
 }
 .panel {
@@ -103,6 +104,22 @@ body {
 .executions { grid-area: execs; min-height: 0; }
 .market-data{ grid-area: md; }
 .market-data .empty { color: var(--muted); font-size: .8rem; }
+.dob { grid-area: dob; }
+.dob h2 select {
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: .15rem .3rem; font: inherit; font-size: .8rem;
+}
+.dob-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; min-height: 0;
+}
+.dob-grid table { width: 100%; border-collapse: collapse; font-size: .8rem; }
+.dob-grid th { color: var(--muted); font-weight: 500; padding: .15rem .35rem; }
+.dob-grid td { padding: .12rem .35rem; }
+.dob-grid .num { text-align: right; font-variant-numeric: tabular-nums; }
+.dob-bid td:last-child { color: #1f9d55; font-weight: 600; } /* bid price */
+.dob-ask td:first-child { color: #c53030; font-weight: 600; } /* ask price */
+.dob-grid .muted-cell { color: var(--muted); text-align: center; padding: .8rem; }
 
 /* ---------- Order ticket ---------- */
 .ticket-form { display: flex; flex-direction: column; gap: .55rem; }

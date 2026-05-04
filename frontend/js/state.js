@@ -14,6 +14,14 @@ const state = {
   marketData: new Map(),   // Symbol -> { lastPrice, lastQty, lastTradeId, updatedAt, info }
   marketDataStatus: "disconnected", // disconnected | connecting | connected | not_ready
   watchlist: [],           // [string] symbols (UPPERCASE)
+  // Depth-of-Book slice (T2). One book entry per symbol; sides are
+  // Map<priceKey, { qty, count }>. `ready` flips false on book.snapshot
+  // marker and true on the following level.snapshot — incremental
+  // updates that arrive before a snapshot are dropped to avoid
+  // displaying a partial book. Sorting (top-N for render) happens
+  // render-side, not in state.
+  book: new Map(),         // Symbol -> { bids: Map, asks: Map, ready: bool, updatedAt: number }
+  dobSymbol: null,         // currently selected DOB symbol or null
   // UX-only slices added in the operability pass.
   submitInflight: null,    // { startedAt: ms } | null — true while POST /orders is awaiting response
   wsReconnect: null,       // { nextAt: ms } | null — when worker has scheduled the next attempt
@@ -138,9 +146,125 @@ export function clearMarketData() {
   notify("marketData");
 }
 
+// ── Depth-of-Book slice (T2) ───────────────────────────────────────
+
+// Side encoding from mdWorker (mdProtocol.SIDE): 0=Bid, 1=Ask.
+const SIDE_BID = 0;
+const SIDE_ASK = 1;
+
+// Decoder produces JS numbers post-PRICE_DIVISOR division. The wire
+// price exponent is -4, so toFixed(4) is the canonical bucket key —
+// resilient to any future float-rounding drift.
+function priceKey(price) { return Number(price).toFixed(4); }
+
+function ensureBook(symbol) {
+  let entry = state.book.get(symbol);
+  if (!entry) {
+    entry = { bids: new Map(), asks: new Map(), ready: false, updatedAt: 0 };
+    state.book.set(symbol, entry);
+  }
+  return entry;
+}
+
+function sideMap(entry, side) {
+  if (side === SIDE_BID) return entry.bids;
+  if (side === SIDE_ASK) return entry.asks;
+  return null;
+}
+
+export function applyMdBookSnapshot({ symbol }) {
+  // Marker that a fresh full snapshot is incoming — the level.snapshot
+  // that follows carries the data. Mark not-ready and clear so the UI
+  // doesn't render a half-built book during the gap.
+  const entry = ensureBook(symbol);
+  entry.bids.clear();
+  entry.asks.clear();
+  entry.ready = false;
+  entry.updatedAt = Date.now();
+  notify("book");
+}
+
+export function applyMdLevelSnapshot({ symbol, bids, asks }) {
+  const entry = ensureBook(symbol);
+  entry.bids.clear();
+  entry.asks.clear();
+  for (const lv of bids ?? []) entry.bids.set(priceKey(lv.price), { qty: lv.qty, count: lv.count });
+  for (const lv of asks ?? []) entry.asks.set(priceKey(lv.price), { qty: lv.qty, count: lv.count });
+  entry.ready = true;
+  entry.updatedAt = Date.now();
+  notify("book");
+}
+
+export function applyMdLevelUpdate({ symbol, side, price, qty, count }) {
+  const entry = ensureBook(symbol);
+  // Drop incremental updates before the first level.snapshot — they
+  // would build a partial / misleading book.
+  if (!entry.ready) return;
+  const target = sideMap(entry, side);
+  if (target === null) return; // defensive: ignore malformed/future sides
+  target.set(priceKey(price), { qty, count });
+  entry.updatedAt = Date.now();
+  notify("book");
+}
+
+export function applyMdLevelDeleted({ symbol, side, price }) {
+  const entry = state.book.get(symbol);
+  if (!entry?.ready) return;
+  const target = sideMap(entry, side);
+  if (target === null) return;
+  if (target.delete(priceKey(price))) {
+    entry.updatedAt = Date.now();
+    notify("book");
+  }
+}
+
+export function applyMdBookCleared({ symbol, side }) {
+  const entry = state.book.get(symbol);
+  if (!entry) return;
+  if (side === null || side === undefined) {
+    entry.bids.clear();
+    entry.asks.clear();
+  } else {
+    const target = sideMap(entry, side);
+    if (target === null) return;
+    target.clear();
+  }
+  entry.updatedAt = Date.now();
+  notify("book");
+}
+
+export function removeBookSymbol(symbol) {
+  if (state.book.delete(symbol)) notify("book");
+}
+
+export function clearAllBooks() {
+  if (state.book.size === 0) return;
+  state.book.clear();
+  notify("book");
+}
+
+export function setDobSymbol(symbol) {
+  const next = symbol ?? null;
+  if (state.dobSymbol === next) return;
+  state.dobSymbol = next;
+  notify("dobSymbol");
+}
+
 export function setWatchlist(symbols) {
-  state.watchlist = symbols.slice();
+  const next = symbols.slice();
+  state.watchlist = next;
+  // Drop book caches for symbols no longer watched.
+  const wanted = new Set(next);
+  for (const sym of [...state.book.keys()]) {
+    if (!wanted.has(sym)) state.book.delete(sym);
+  }
+  // Reset DOB selection if the chosen symbol just left the watchlist.
+  if (state.dobSymbol && !wanted.has(state.dobSymbol)) {
+    state.dobSymbol = null;
+    notify("dobSymbol");
+  }
   notify("watchlist");
+  notify("book");
 }
 
 export function isTerminalOrderStatus(status) {
