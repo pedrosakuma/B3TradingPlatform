@@ -25,7 +25,7 @@
 //   { type: "md.candle.snapshot",   symbol, resolution, candles, isFirst, isLast }
 //   { type: "md.candle.update",     symbol, resolution, candle }
 //   { type: "md.subError", symbol, errorName }
-//   { type: "md.clear" }                        // dropped; main thread should reset cache
+//   { type: "md.clear" }                        // posted on (re)connect; reset all derived caches
 //   { type: "md.error",    message }
 
 import { buildSubscribe, buildUnsubscribe, parseFrames, FLAGS } from './mdProtocol.js';
@@ -274,14 +274,16 @@ function resetSubscriptionsForFlagsChange() {
   // new flags. The server resolves a fresh securityId per (symbol, flags)
   // session, so we drop the reverse index and let SubscribeOk repopulate.
   // Frames in flight under the previous flags are intentionally lost
-  // during the gap; post `md.clear` so panels (DOB, chart, tape) reset
-  // their per-symbol caches instead of mixing stale state with new.
+  // during the gap. We do NOT post `md.clear` here — that semantic is
+  // reserved for the full reconnect path so the trade-tape / lastPrice
+  // cache survives a flag flip (e.g. enabling MBP for a DOB panel).
+  // Per-side book/level caches reset naturally as the server resends
+  // snapshots after the new SubscribeOk.
   for (const [, id] of subscriptions) {
     if (id !== null) safeSend(buildUnsubscribe(id));
   }
   for (const sym of subscriptions.keys()) subscriptions.set(sym, null);
   securityIdToSymbol.clear();
-  post({ type: 'md.clear' });
   if (serverReady) flushSubscribes();
 }
 
