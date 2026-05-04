@@ -34,6 +34,7 @@ public sealed record PlatformEndpoint(
     public const string EnvAdminUsername = "B3T_ADMIN_USER";
     public const string EnvAdminPassword = "B3T_ADMIN_PASS";
     public const string EnvSimulatorMode = "B3T_SIMULATOR_MODE";
+    public const string EnvRealStackConformance = "B3T_REAL_STACK_CONFORMANCE";
 
     public static PlatformEndpoint? TryResolve()
     {
@@ -79,6 +80,20 @@ public sealed record PlatformEndpoint(
         return string.Equals(v, "true", StringComparison.OrdinalIgnoreCase) || v == "1";
     }
 
+    /// <summary>
+    /// True when the operator declared this is the dedicated docker-compose
+    /// real-stack sandbox (env var <c>B3T_REAL_STACK_CONFORMANCE=true</c>).
+    /// Gates destructive scenarios that submit live crossed orders and
+    /// expect them to print real trades — running those against
+    /// staging/prod-like infrastructure would be unsafe even if the
+    /// matching+marketdata wires happened to be reachable.
+    /// </summary>
+    public static bool IsRealStackConformance()
+    {
+        var v = Environment.GetEnvironmentVariable(EnvRealStackConformance);
+        return string.Equals(v, "true", StringComparison.OrdinalIgnoreCase) || v == "1";
+    }
+
     public const string SkipReason =
         "Conformance platform not configured. Set B3T_BASE_URL, B3T_AUTH_USER, B3T_AUTH_PASS to run.";
 
@@ -87,4 +102,7 @@ public sealed record PlatformEndpoint(
 
     public const string SimulatorSkipReason =
         "Simulator scenario skipped: B3T_SIMULATOR_MODE=true not set (host is not in Mode=Simulator).";
+
+    public const string RealStackConformanceSkipReason =
+        "Real-stack scenario skipped: B3T_REAL_STACK_CONFORMANCE=true not set (host is not the docker-compose real-stack sandbox).";
 }

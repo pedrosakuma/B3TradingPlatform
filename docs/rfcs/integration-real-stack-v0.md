@@ -2,7 +2,7 @@
 
 | Field    | Value                                                                  |
 | -------- | ---------------------------------------------------------------------- |
-| Status   | Implemented (v1)                                                       |
+| Status   | Implemented (v2)                                                       |
 | Tracking | [#58](https://github.com/pedrosakuma/B3TradingPlatform/issues/58)      |
 | Replaces | n/a (additive overlay on top of the family `docker-compose.yml`)       |
 
@@ -589,3 +589,98 @@ default in the real overlay**.
 - "static-map fallback is the only reference-price path in the real
   stack" — **partially closed**; fallback still serves cache misses
   until trades print, but the live path is wired and connecting.
+
+## 9. v2 amendment — destructive cross-pair conformance (2026-05-04)
+
+§8/v1 wired the live marketdata leg but left the live → trading-host
+ref-price cache unverifiable end-to-end: nothing in the real stack
+actually printed a trade, so `MarketDataReferencePrice` lived on
+`InfoSnapshot` data only and the static fallback could never be proven
+to be displaced by a real execution. v2 closes that gap with a
+destructive conformance scenario gated behind a dedicated env flag.
+
+### What ships
+
+- **New gate** `ConformanceFactAttribute.RequiresSandboxMatching` +
+  `B3T_REAL_STACK_CONFORMANCE` env (resolved by `PlatformEndpoint`).
+  Pattern matches the existing `RequiresAdmin` / `RequiresSimulator`
+  flags. Tests carrying the flag skip at discovery time unless the
+  env reads `true`/`1`.
+- **Compose plumbing** — `docker-compose.real.yml` now stacks a
+  `conformance:` service stanza that injects
+  `B3T_REAL_STACK_CONFORMANCE=true` into the conformance one-shot.
+  Compose merges environment maps additively, so:
+  - base + conformance → flag absent → spec auto-skips.
+  - base + real + conformance → flag present → spec runs.
+  This is exactly what the real-stack-conformance CI job (and only
+  that job) stacks.
+- **Real-overlay corrections required by the destructive path**:
+  - `Trading__Auth__Users__0__Firm: FIRM01` so alice's JWT firm claim
+    actually resolves to the registered FirmGateway (was `default` for
+    Mock back-compat; orders never reached the gateway).
+  - `Trading__SymbolDirectory__SecurityIds__{PETR4,VALE3,ITUB4}` set
+    to `900000000001/2/3`, the actual ids matching publishes via
+    `instruments-eqt.json`. v1's placeholders (4321/1234) would have
+    been silently mis-routed had any order arrived.
+  - `Trading__Risk__ReferencePrices__{PETR4,VALE3,ITUB4}` seeded so
+    the price-collar accepts cross prices before the live cache warms,
+    and so the v2 spec has a deterministic baseline (ITUB4=30.00) for
+    "live displaced this static value".
+  - `Trading__Exchange__Firms__0__AccessKey` reformatted as the JSON
+    envelope matching's `FixpSession` parses:
+    `{"auth_type":"basic","username":"<sessionId>","access_key":"..."}`.
+    Raw-string accessKey was rejected at Negotiate
+    (`'d' is an invalid start of a value`).
+- **New spec** `Spec_HTTP_MarketData/ReferencePriceLiveSpecTests.cs`:
+  1. admin login → GET `/admin/marketdata/reference-prices?symbols=ITUB4`
+     → capture baseline (don't assert source — `InfoSnapshot` may
+     pre-populate the cache).
+  2. user login → POST `/orders` ITUB4 BUY 100 @ 31.00 + SELL 100 @
+     31.00. Assert both 202 with no `Rejected` status (failure mode
+     `gateway unavailable` would surface as 502 with body).
+  3. Poll diagnostics endpoint every 250ms up to 30s for
+     `live.price == 31.00` AND `live.updatedUtc > submitStartUtc`.
+  4. Bonus: assert `effectiveSource == "Live"` and
+     `effectivePrice == 31.00`.
+- Cross price (31.00) is chosen distinct from the configured fallback
+  (30.00) so a coincidental fallback→live transition at the wrong
+  price would still fail. Within the default ±10% collar
+  ([27.00, 33.00]) and respects matching's lot/tick (100 / 0.01).
+
+### Verification
+
+```
+$ docker compose -f docker-compose.yml -f docker-compose.real.yml \
+                 -f docker-compose.conformance.yml run --rm conformance
+Passed B3.Trading.Conformance.Spec_HTTP_MarketData.ReferencePriceLiveSpecTests
+       .CrossedTrade_DisplacesFallback_ReachesLiveCacheWithCrossPrice [973 ms]
+Total tests: 12  Passed: 9  Skipped: 3 (simulator-only)
+```
+
+End-to-end latency `POST /orders → live cache update` < 1s on the local
+real stack.
+
+### Upstream interop bugs surfaced en route
+
+The v2 implementation was blocked three times in sequence by upstream
+interop issues that no other downstream had hit. All three closed
+within the same window:
+
+- `B3MatchingPlatform#236` — FIXP `NewOrderSingle` template=102 v6 from
+  EPC 0.8.0 rejected as `UnsupportedTemplate`.
+- `B3MatchingPlatform#239` — `varData has 2 trailing byte(s) after
+  declared fields` on the first business message.
+- `B3MatchingPlatform#241` — `business reject (unsupported feature)
+  RoutingInstruction=0 not supported`. EPC 0.8.0 doesn't expose
+  `RoutingInstruction` on its public submit API; matching now accepts
+  the SBE default.
+
+The pattern (each interop discovered downstream via this exact spec)
+suggests a CI gap on the matching repo. Recommended in #241 that
+matching add a submit-and-execute path via EPC to its own CI.
+
+### Status
+
+- "static-map fallback is the only reference-price path in the real
+  stack" — **fully closed**: live cache verifiably displaces the
+  fallback under a real cross-pair execution.
