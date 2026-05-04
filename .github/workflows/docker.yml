@@ -48,16 +48,43 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push
+      - name: Build (export to local tar)
+        # We build once here and write the image to a tar file so the
+        # downstream conformance + real-stack-conformance jobs can `docker
+        # load` it instead of rebuilding (which suffered the apt-mirror
+        # flake on the runtime stage every PR). Pushing to GHCR is split
+        # into a separate step below so we still hit GHA layer cache while
+        # also producing the tar artifact.
         uses: docker/build-push-action@v6
         with:
           context: .
           file: backend/src/B3.Trading.Host/Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: |
+            ${{ steps.meta.outputs.tags }}
+            b3-trading-host:ci
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=trading-host
           cache-to:   type=gha,scope=trading-host,mode=max
+          outputs: type=docker,dest=/tmp/trading-host-image.tar
+
+      - name: Push to GHCR
+        if: github.event_name != 'pull_request'
+        run: |
+          docker load -i /tmp/trading-host-image.tar
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            # Skip the local-only ci tag.
+            case "$tag" in b3-trading-host:ci) continue ;; esac
+            docker push "$tag"
+          done <<< "${{ steps.meta.outputs.tags }}"
+
+      - name: Upload trading-host image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trading-host-image
+          path: /tmp/trading-host-image.tar
+          retention-days: 1
+          compression-level: 6
 
   frontend:
     name: Build frontend image
@@ -133,8 +160,19 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Download trading-host image
+        uses: actions/download-artifact@v4
+        with:
+          name: trading-host-image
+          path: /tmp
+
+      - name: Load trading-host image
+        run: docker load -i /tmp/trading-host-image.tar
+
       - name: Bring up trading-host
         env:
+          # Reuse the image built by the trading-host job (loaded above).
+          TRADING_IMAGE: b3-trading-host:ci
           # alice/wonderland — the committed hash/salt match this plaintext.
           # Signing key is a CI-only placeholder; conformance only checks
           # the round-trip works, not that the key is unique.
@@ -147,10 +185,11 @@ jobs:
           docker compose \
               -f docker/docker-compose.yml \
               -f docker/docker-compose.conformance.yml \
-              up -d --build --wait trading-host
+              up -d --wait trading-host
 
       - name: Run conformance
         env:
+          TRADING_IMAGE: b3-trading-host:ci
           TRADING_AUTH_SIGNING_KEY: ci-conformance-placeholder-key-min-32-bytes-long-aaaaa
           TRADING_SEED_USER: alice
           TRADING_SEED_PASSWORD: wonderland
@@ -160,11 +199,12 @@ jobs:
           docker compose \
               -f docker/docker-compose.yml \
               -f docker/docker-compose.conformance.yml \
-              run --rm conformance
+              run --build --rm conformance
 
       - name: Trading-host logs (always)
         if: always()
         env:
+          TRADING_IMAGE: b3-trading-host:ci
           TRADING_AUTH_SIGNING_KEY: ci-conformance-placeholder-key-min-32-bytes-long-aaaaa
           TRADING_SEED_PASSWORD_HASH: ZDzDHANAHq8NDQK3BWk/YZjybKLCMKdRzw0z9Da5wic=
           TRADING_SEED_PASSWORD_SALT: rXA+be7/gEYYZQrQDsUr2g==
@@ -177,6 +217,7 @@ jobs:
       - name: Tear down
         if: always()
         env:
+          TRADING_IMAGE: b3-trading-host:ci
           TRADING_AUTH_SIGNING_KEY: ci-conformance-placeholder-key-min-32-bytes-long-aaaaa
           TRADING_SEED_PASSWORD_HASH: ZDzDHANAHq8NDQK3BWk/YZjybKLCMKdRzw0z9Da5wic=
           TRADING_SEED_PASSWORD_SALT: rXA+be7/gEYYZQrQDsUr2g==
@@ -192,6 +233,8 @@ jobs:
     timeout-minutes: 20
     needs: trading-host
     env:
+      # Reuse the image built by the trading-host job (loaded below).
+      TRADING_IMAGE: b3-trading-host:ci
       # Same CI placeholders as the conformance job above (alice/wonderland).
       TRADING_AUTH_SIGNING_KEY: ci-conformance-placeholder-key-min-32-bytes-long-aaaaa
       TRADING_SEED_USER: alice
@@ -204,6 +247,15 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Download trading-host image
+        uses: actions/download-artifact@v4
+        with:
+          name: trading-host-image
+          path: /tmp
+
+      - name: Load trading-host image
+        run: docker load -i /tmp/trading-host-image.tar
+
       - name: Bring up real stack (matching-platform + marketdata + trading-host)
         # docker-compose.real.yml flips trading-host to Mode=Real, adds
         # the matching-platform service, and (since v1) the marketdata-live
@@ -212,13 +264,14 @@ jobs:
         # instead of falling back to the static map. Conformance overlay still
         # piles on the carol admin seed. --wait blocks until matching's
         # healthcheck passes AND trading-host reports healthy (FIXP Negotiate
-        # succeeded against matching).
+        # succeeded against matching). Trading-host image is preloaded from
+        # the artifact; only upstream images are pulled.
         run: |
           docker compose \
               -f docker/docker-compose.yml \
               -f docker/docker-compose.real.yml \
               -f docker/docker-compose.conformance.yml \
-              up -d --build --wait trading-host
+              up -d --wait trading-host
 
       - name: Run conformance
         # Per RFC integration-real-stack-v0 §4.7: auth + admin/firms +
@@ -229,7 +282,7 @@ jobs:
               -f docker/docker-compose.yml \
               -f docker/docker-compose.real.yml \
               -f docker/docker-compose.conformance.yml \
-              run --rm conformance
+              run --build --rm conformance
 
       - name: Logs (always)
         if: always()
