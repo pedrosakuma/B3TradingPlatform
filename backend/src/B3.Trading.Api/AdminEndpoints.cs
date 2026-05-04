@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using B3.Trading.Api.Auth;
+using B3.Trading.Application.MarketData;
 using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
@@ -120,6 +121,82 @@ public static class AdminEndpoints
             return Results.NoContent();
         });
 
+        // GET /admin/marketdata/reference-prices?symbols=ITUB4,VALE3
+        // Operator/diagnostics view of the reference-price plumbing.
+        // Surfaces three independent readings per symbol so the caller
+        // can disambiguate "live deslocou fallback?" without inferring
+        // it from the metric tags alone:
+        //   - effective : what IReferencePrice.Lookup currently returns
+        //                 (Live | Fallback | Missing) — the single value
+        //                 the price-collar check actually consumes.
+        //   - live      : raw entry from MarketDataReferencePrice's cache
+        //                 (price + updatedUtc), independent of staleness.
+        //                 Null when MD feature is off or the symbol has
+        //                 never been observed on the WS feed.
+        //   - fallback  : raw entry from the static config table.
+        //                 Null when the symbol has no static reference.
+        // When `symbols` is omitted, returns the union of MD-subscribed
+        // symbols (Trading:MarketData:Symbols) and statically-configured
+        // ones (Trading:Risk:ReferencePrices), de-duplicated.
+        group.MapGet("/marketdata/reference-prices", (
+            string? symbols,
+            ConfigReferencePrice fallback,
+            IServiceProvider sp,
+            IOptions<MarketDataOptions> mdOpts,
+            IOptionsMonitor<RiskOptions> riskOpts,
+            IOptions<ExchangeOptions> exchangeOpts) =>
+        {
+            // MarketDataReferencePrice is registered only when the WsUrl
+            // gate is set (see MarketDataRegistration.cs). When absent,
+            // IReferencePrice resolves to ConfigReferencePrice — same as
+            // the fallback we already inject here, so the endpoint
+            // gracefully degrades to a "fallback only" view.
+            var mdRef = sp.GetService<MarketDataReferencePrice>();
+            var liveSnapshot = mdRef?.Snapshot();
+            var effective = (IReferencePrice?)mdRef ?? fallback;
+
+            var requested = ParseSymbolList(symbols);
+            if (requested.Count == 0)
+            {
+                var union = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var s in mdOpts.Value.Symbols)
+                    if (!string.IsNullOrWhiteSpace(s)) union.Add(s.Trim());
+                foreach (var s in riskOpts.CurrentValue.ReferencePrices.Keys)
+                    if (!string.IsNullOrWhiteSpace(s)) union.Add(s);
+                requested = union.OrderBy(s => s, StringComparer.OrdinalIgnoreCase).ToList();
+            }
+
+            var items = requested.Select(sym =>
+            {
+                var eff = effective.Lookup(sym);
+                var fb = fallback.Lookup(sym);
+                object? liveBlock = null;
+                if (liveSnapshot is not null && liveSnapshot.TryGetValue(sym, out var entry))
+                {
+                    liveBlock = new
+                    {
+                        price = entry.Price,
+                        updatedUtc = entry.UpdatedUtc,
+                    };
+                }
+                return new
+                {
+                    symbol = sym,
+                    effectivePrice = eff.Found ? eff.Price : (decimal?)null,
+                    effectiveSource = eff.Source.ToString(),
+                    live = liveBlock,
+                    fallbackPrice = fb.Found ? fb.Price : (decimal?)null,
+                };
+            }).ToArray();
+
+            return Results.Ok(new
+            {
+                mode = exchangeOpts.Value.ResolveMode().ToString(),
+                marketDataEnabled = mdRef is not null,
+                symbols = items,
+            });
+        });
+
         // POST /admin/simulator/er — synthetic ER injection for slice-4
         // simulator mode (RFC algo-orders-v0 §4.10/§7-B3). Only mapped
         // when Mode=Simulator at boot, so the route is invisible to other
@@ -133,6 +210,20 @@ public static class AdminEndpoints
         }
 
         return app;
+    }
+
+    private static List<string> ParseSymbolList(string? csv)
+    {
+        if (string.IsNullOrWhiteSpace(csv))
+            return new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var ordered = new List<string>();
+        foreach (var raw in csv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (seen.Add(raw))
+                ordered.Add(raw);
+        }
+        return ordered;
     }
 
     private static IResult ToggleKill(
