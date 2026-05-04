@@ -72,6 +72,17 @@ public sealed class AlgoBook
         return list;
     }
 
+    public IReadOnlyCollection<Algo> EnumerateAll(bool includeTerminal = false)
+    {
+        var list = new List<Algo>(_algos.Count);
+        foreach (var kv in _algos)
+        {
+            if (!includeTerminal && kv.Value.IsTerminal) continue;
+            list.Add(kv.Value);
+        }
+        return list;
+    }
+
     /// <summary>
     /// Captures every algo (terminal included) for a snapshot. Same
     /// rationale as <see cref="WorkingOrderBook.Snapshot"/>: replay-from-WAL

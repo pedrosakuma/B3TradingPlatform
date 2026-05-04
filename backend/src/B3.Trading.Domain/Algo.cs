@@ -185,6 +185,24 @@ public sealed class Algo
     }
 
     /// <summary>
+    /// Engine-only hook used at boot reconciliation: fills are NOT journaled
+    /// for algo parents (RFC §4.5 — derived from the child stream), so when
+    /// the platform restarts from WAL alone the parent comes back with
+    /// <see cref="FilledQuantity"/> = 0 even though the child orders carry
+    /// the real cumulative quantity. The engine sums child cums and calls
+    /// this method once during reconciliation so subsequent reactor passes
+    /// see the true remaining quantity. Refuses to move the value backwards
+    /// (snapshot-restored parents already carry the higher truth).
+    /// </summary>
+    public void RehydrateProgress(long filledQuantity)
+    {
+        if (filledQuantity < 0)
+            throw new ArgumentOutOfRangeException(nameof(filledQuantity));
+        if (filledQuantity > FilledQuantity)
+            FilledQuantity = filledQuantity;
+    }
+
+    /// <summary>
     /// Reconstructs an algo from snapshot data. Bypasses the state-machine
     /// invariants because the snapshot was, by construction, produced from
     /// a sequence of valid mutations. Mirrors <see cref="Order.Hydrate"/>.
