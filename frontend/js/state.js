@@ -32,6 +32,13 @@ const state = {
   candles: new Map(),      // Symbol -> Map<resolutionSec, { bars: [...], ready: bool, updatedAt: number }>
   chartSymbol: null,       // currently selected chart symbol or null
   chartResolution: 60,     // seconds (60=1m, 300=5m, 900=15m)
+  // Trade tape slice (T4). Per-symbol ring buffer of recent trades
+  // with side inferred from the previous trade's price (uptick=buy,
+  // downtick=sell, flat=unknown — TRADE wire frame doesn't carry an
+  // aggressor). `tapeSymbol === null` means "all" — render flattens
+  // and re-sorts by receivedAt for the cross-symbol view.
+  tape: new Map(),         // Symbol -> [{tradeId, price, qty, side, receivedAt, busted}]
+  tapeSymbol: null,        // null => "all", else specific symbol
   // UX-only slices added in the operability pass.
   submitInflight: null,    // { startedAt: ms } | null — true while POST /orders is awaiting response
   wsReconnect: null,       // { nextAt: ms } | null — when worker has scheduled the next attempt
@@ -119,6 +126,7 @@ export function setMarketDataStatus(status) {
 
 export function applyMdTrade({ symbol, price, qty, tradeId }) {
   const prev = state.marketData.get(symbol) || {};
+  const prevPrice = prev.lastPrice;
   state.marketData.set(symbol, {
     ...prev,
     lastPrice: price,
@@ -127,6 +135,19 @@ export function applyMdTrade({ symbol, price, qty, tradeId }) {
     updatedAt: Date.now(),
   });
   notify("marketData");
+  // Tape: append to the per-symbol ring; infer side from the previous
+  // trade's price (TRADE frame has no aggressor field). 'flat' = first
+  // trade or unchanged price.
+  pushTapeEntry(symbol, {
+    tradeId,
+    price,
+    qty,
+    side: prevPrice == null ? "flat"
+        : price > prevPrice ? "up"
+        : price < prevPrice ? "down" : "flat",
+    receivedAt: Date.now(),
+    busted: false,
+  });
 }
 
 export function applyMdInfo({ symbol, fields }) {
@@ -147,7 +168,9 @@ export function applyMdInfo({ symbol, fields }) {
 }
 
 export function removeMdSymbol(symbol) {
-  if (state.marketData.delete(symbol)) notify("marketData");
+  let touched = state.marketData.delete(symbol);
+  if (touched) notify("marketData");
+  if (state.tape.delete(symbol)) notify("tape");
 }
 
 export function clearMarketData() {
@@ -354,10 +377,59 @@ export function setChartResolution(seconds) {
   notify("chartResolution");
 }
 
+// ── Trade tape slice (T4) ──────────────────────────────────────────
+
+// Per-symbol cap on the tape ring buffer. 200 keeps the cross-symbol
+// "all" view bounded as well: even with N watched symbols, total
+// memory is N * 200, and the render path slices a top-200 window.
+const TAPE_MAX = 200;
+
+function pushTapeEntry(symbol, entry) {
+  let arr = state.tape.get(symbol);
+  if (!arr) { arr = []; state.tape.set(symbol, arr); }
+  arr.push(entry);
+  const overflow = arr.length - TAPE_MAX;
+  if (overflow > 0) arr.splice(0, overflow);
+  notify("tape");
+}
+
+export function applyMdTradeBust({ symbol, tradeId }) {
+  const arr = state.tape.get(symbol);
+  if (!arr) return;
+  // Search from the end — busts overwhelmingly target very recent
+  // prints, so the linear walk almost always hits in O(1) trips.
+  for (let i = arr.length - 1; i >= 0; i--) {
+    if (arr[i].tradeId === tradeId) {
+      if (arr[i].busted) return; // already marked
+      arr[i] = { ...arr[i], busted: true };
+      notify("tape");
+      return;
+    }
+  }
+}
+
+export function removeTapeSymbol(symbol) {
+  if (state.tape.delete(symbol)) notify("tape");
+}
+
+export function clearAllTape() {
+  if (state.tape.size === 0) return;
+  state.tape.clear();
+  notify("tape");
+}
+
+export function setTapeSymbol(symbol) {
+  // null === "all"; an empty string from the dropdown maps to null.
+  const next = symbol == null || symbol === "" ? null : symbol;
+  if (state.tapeSymbol === next) return;
+  state.tapeSymbol = next;
+  notify("tapeSymbol");
+}
+
 export function setWatchlist(symbols) {
   const next = symbols.slice();
   state.watchlist = next;
-  // Drop book + candle caches for symbols no longer watched.
+  // Drop book + candle + tape caches for symbols no longer watched.
   const wanted = new Set(next);
   for (const sym of [...state.book.keys()]) {
     if (!wanted.has(sym)) state.book.delete(sym);
@@ -365,9 +437,13 @@ export function setWatchlist(symbols) {
   for (const sym of [...state.candles.keys()]) {
     if (!wanted.has(sym)) state.candles.delete(sym);
   }
-  // Reset DOB / chart selection if the chosen symbol just left the
-  // watchlist. Auto-pick a sensible default for chart so the panel
-  // doesn't sit empty when the trader has symbols available.
+  for (const sym of [...state.tape.keys()]) {
+    if (!wanted.has(sym)) state.tape.delete(sym);
+  }
+  // Reset DOB / chart / tape selection if the chosen symbol just left
+  // the watchlist. Auto-pick a sensible default for chart so the
+  // panel doesn't sit empty when the trader has symbols available.
+  // tapeSymbol stays at "all" by default — no auto-pick needed.
   if (state.dobSymbol && !wanted.has(state.dobSymbol)) {
     state.dobSymbol = null;
     notify("dobSymbol");
@@ -380,9 +456,14 @@ export function setWatchlist(symbols) {
     state.chartSymbol = next[0];
     notify("chartSymbol");
   }
+  if (state.tapeSymbol && !wanted.has(state.tapeSymbol)) {
+    state.tapeSymbol = null; // back to "all"
+    notify("tapeSymbol");
+  }
   notify("watchlist");
   notify("book");
   notify("candles");
+  notify("tape");
 }
 
 export function isTerminalOrderStatus(status) {

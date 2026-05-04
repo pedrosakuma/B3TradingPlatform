@@ -18,6 +18,7 @@ let onKeyboardCancel = () => {};
 let onSelectDobSymbol = () => {};
 let onSelectChartSymbol = () => {};
 let onSelectChartResolution = () => {};
+let onSelectTapeSymbol = () => {};
 
 export function setHandlers(handlers) {
   onSubmitOrder    = handlers.onSubmitOrder    ?? onSubmitOrder;
@@ -31,6 +32,7 @@ export function setHandlers(handlers) {
   onSelectDobSymbol = handlers.onSelectDobSymbol ?? onSelectDobSymbol;
   onSelectChartSymbol     = handlers.onSelectChartSymbol     ?? onSelectChartSymbol;
   onSelectChartResolution = handlers.onSelectChartResolution ?? onSelectChartResolution;
+  onSelectTapeSymbol      = handlers.onSelectTapeSymbol      ?? onSelectTapeSymbol;
 }
 
 export function showLogin() {
@@ -187,6 +189,29 @@ export function bindUi() {
   if (chartRes) {
     chartRes.addEventListener("change", (e) => {
       onSelectChartResolution(Number(e.target.value));
+    });
+  }
+
+  // Tape (T4): symbol filter + pause-on-hover.
+  const tapeSel = $("tape-symbol");
+  if (tapeSel) {
+    tapeSel.addEventListener("change", (e) => {
+      onSelectTapeSymbol(e.target.value || null);
+    });
+  }
+  const tapeList = $("tape-list");
+  if (tapeList) {
+    tapeList.addEventListener("mouseenter", () => {
+      tapePaused = true;
+      const badge = $("tape-paused");
+      if (badge) badge.hidden = false;
+    });
+    tapeList.addEventListener("mouseleave", () => {
+      tapePaused = false;
+      const badge = $("tape-paused");
+      if (badge) badge.hidden = true;
+      // Flush any updates that arrived while hovered.
+      if (tapeDirty) scheduleTapeRender();
     });
   }
 
@@ -390,6 +415,7 @@ function renderForSlice(slice) {
   if (slice === "currentView" || slice === "all") applyCurrentView(getState().currentView);
   if (slice === "watchlist" || slice === "dobSymbol" || slice === "book" || slice === "all") renderDob();
   if (slice === "watchlist" || slice === "chartSymbol" || slice === "chartResolution" || slice === "candles" || slice === "all") scheduleChartRender();
+  if (slice === "watchlist" || slice === "tapeSymbol" || slice === "tape" || slice === "all") scheduleTapeRender();
 }
 
 function renderAll() {
@@ -401,6 +427,7 @@ function renderAll() {
   renderMarketData();
   renderDob();
   scheduleChartRender();
+  scheduleTapeRender();
   setMdStatusPill(getState().marketDataStatus);
   renderInflight();
   renderReconnect();
@@ -603,6 +630,86 @@ function renderChart() {
     parts += `<rect class="${cls}" x="${(cx - bodyW / 2).toFixed(2)}" y="${yTop.toFixed(2)}" width="${bodyW.toFixed(2)}" height="${bodyH.toFixed(2)}"/>`;
   }
   svg.innerHTML = parts;
+}
+
+// ── Trade tape (T4) ───────────────────────────────────────────────
+
+const TAPE_VISIBLE = 200;
+
+let tapeRafHandle = null;
+let tapePaused = false;
+let tapeDirty = false;
+
+function scheduleTapeRender() {
+  // Pause-on-hover: while the user is reading the tape, freeze DOM
+  // updates so rows don't shift under the cursor. Latest state still
+  // gets painted on mouseleave (we just remember a repaint is owed).
+  tapeDirty = true;
+  if (tapePaused) return;
+  if (tapeRafHandle != null) return;
+  const raf = typeof requestAnimationFrame === "function"
+    ? requestAnimationFrame
+    : (cb) => setTimeout(cb, 16);
+  tapeRafHandle = raf(() => {
+    tapeRafHandle = null;
+    tapeDirty = false;
+    renderTape();
+  });
+}
+
+function renderTape() {
+  const list = $("tape-list");
+  const sel = $("tape-symbol");
+  if (!list || !sel) return;
+
+  const st = getState();
+  const watch = st.watchlist;
+
+  // Sync filter dropdown with the watchlist; "" === all.
+  const desired = ["", ...watch];
+  const existing = [...sel.options].map(o => o.value);
+  if (desired.length !== existing.length || desired.some((v, i) => v !== existing[i])) {
+    sel.innerHTML = `<option value="">All</option>` +
+      watch.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("");
+  }
+  if (sel.value !== (st.tapeSymbol ?? "")) sel.value = st.tapeSymbol ?? "";
+
+  // Collect rows. Single-symbol view is just the per-symbol ring; the
+  // "all" view flattens every cached symbol and re-sorts by receivedAt
+  // descending. Both paths slice to TAPE_VISIBLE before rendering.
+  let rows;
+  if (st.tapeSymbol) {
+    const arr = st.tape.get(st.tapeSymbol);
+    rows = arr ? arr.slice().reverse() : [];
+    rows = rows.slice(0, TAPE_VISIBLE).map(e => ({ ...e, symbol: st.tapeSymbol }));
+  } else {
+    rows = [];
+    for (const [sym, arr] of st.tape) {
+      for (const e of arr) rows.push({ ...e, symbol: sym });
+    }
+    rows.sort((a, b) => b.receivedAt - a.receivedAt);
+    rows = rows.slice(0, TAPE_VISIBLE);
+  }
+
+  if (rows.length === 0) {
+    list.innerHTML = `<li class="tape-empty">no trades yet</li>`;
+    return;
+  }
+
+  list.innerHTML = rows.map(tapeRow).join("");
+}
+
+function tapeRow(e) {
+  const cls = `tape-${e.side}` + (e.busted ? " tape-busted" : "");
+  const ts = new Date(e.receivedAt).toISOString().slice(11, 19);
+  const arrow = e.side === "up" ? "▲" : e.side === "down" ? "▼" : "·";
+  return `<li class="${cls}">`
+    + `<span>${ts}</span>`
+    + `<span>${escapeHtml(e.symbol)}</span>`
+    + `<span class="tape-num">${arrow} ${Number(e.price).toFixed(2)}</span>`
+    + `<span class="tape-num">${e.qty}</span>`
+    + `<span class="tape-num">#${e.tradeId}</span>`
+    + `</li>`;
 }
 
 function renderBlotter() {
