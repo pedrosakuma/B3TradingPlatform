@@ -17,11 +17,15 @@
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0.201
 
-# curl is used by the entrypoint to wait for /ready before invoking
-# dotnet test. ca-certificates so https targets work too.
-RUN apt-get update \
- && apt-get install --no-install-recommends -y curl ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+# The SDK image (Ubuntu noble base) already ships /usr/bin/curl and
+# /etc/ssl/certs/ca-certificates.crt — no apt-get install needed. We
+# used to run `apt-get update && apt-get install -y curl ca-certificates`
+# here, but the GitHub-hosted runners' archive.ubuntu.com mirror
+# regularly times out (5+ min `Ign:` per package, eventual exit 100
+# "Mirror sync in progress?") and the conformance job hits the
+# 15-minute step timeout — flaky in a way that has nothing to do with
+# what we're testing. Skipping the apt step entirely removes the only
+# external network dependency from this image build.
 
 WORKDIR /src
 
