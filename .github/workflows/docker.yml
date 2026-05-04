@@ -185,3 +185,67 @@ jobs:
               -f docker/docker-compose.yml \
               -f docker/docker-compose.conformance.yml \
               down -v
+
+  real-stack-conformance:
+    name: Run conformance suite against real stack (matching-platform)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: trading-host
+    env:
+      # Same CI placeholders as the conformance job above (alice/wonderland).
+      TRADING_AUTH_SIGNING_KEY: ci-conformance-placeholder-key-min-32-bytes-long-aaaaa
+      TRADING_SEED_USER: alice
+      TRADING_SEED_PASSWORD: wonderland
+      TRADING_SEED_PASSWORD_HASH: ZDzDHANAHq8NDQK3BWk/YZjybKLCMKdRzw0z9Da5wic=
+      TRADING_SEED_PASSWORD_SALT: rXA+be7/gEYYZQrQDsUr2g==
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Bring up real stack (matching-platform + trading-host)
+        # docker-compose.real.yml flips trading-host to Mode=Real and adds
+        # the matching-platform service. Conformance overlay still piles
+        # on the carol admin seed. --wait blocks until matching's healthcheck
+        # passes AND trading-host reports healthy (FIXP Negotiate
+        # succeeded against matching).
+        run: |
+          docker compose \
+              -f docker/docker-compose.yml \
+              -f docker/docker-compose.real.yml \
+              -f docker/docker-compose.conformance.yml \
+              up -d --build --wait trading-host
+
+      - name: Run conformance
+        # Per RFC integration-real-stack-v0 §4.7: auth + admin/firms +
+        # risk-rejection-shape exercise the real wire; simulator + algo
+        # specs auto-skip on RequiresSimulator (no Mode=Simulator).
+        run: |
+          docker compose \
+              -f docker/docker-compose.yml \
+              -f docker/docker-compose.real.yml \
+              -f docker/docker-compose.conformance.yml \
+              run --rm conformance
+
+      - name: Logs (always)
+        if: always()
+        run: |
+          for svc in trading-host matching-platform; do
+            echo "::group::$svc"
+            docker compose \
+                -f docker/docker-compose.yml \
+                -f docker/docker-compose.real.yml \
+                -f docker/docker-compose.conformance.yml \
+                logs --no-color --timestamps "$svc" || true
+            echo "::endgroup::"
+          done
+
+      - name: Tear down
+        if: always()
+        run: |
+          docker compose \
+              -f docker/docker-compose.yml \
+              -f docker/docker-compose.real.yml \
+              -f docker/docker-compose.conformance.yml \
+              down -v
