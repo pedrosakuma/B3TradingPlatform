@@ -26,6 +26,13 @@ public sealed class ConformanceFactAttribute : FactAttribute
     /// </summary>
     public bool RequiresAdmin { get; init; }
 
+    /// <summary>
+    /// When true, the scenario only runs against a host configured with
+    /// <c>Trading:Exchange:Mode=Simulator</c> (operator declares it via
+    /// <c>B3T_SIMULATOR_MODE=true</c>). Mock/Real/Stub deployments skip.
+    /// </summary>
+    public bool RequiresSimulator { get; init; }
+
     public ConformanceFactAttribute()
     {
         var peer = PlatformEndpoint.TryResolve();
@@ -42,11 +49,33 @@ public sealed class ConformanceFactAttribute : FactAttribute
                     $"{EnvRequireConfigured}=true but {PlatformEndpoint.SkipReason}");
             }
 
-            Skip = PlatformEndpoint.SkipReason;
-            return;
+            // Set base.Skip directly so xUnit honors it without going
+            // through the lazy getter (Requires* are still default false
+            // here, so the getter would return null).
+            base.Skip = PlatformEndpoint.SkipReason;
         }
+    }
 
-        if (RequiresAdmin && !peer.HasAdminCredentials)
-            Skip = PlatformEndpoint.AdminSkipReason;
+    /// <summary>
+    /// Computed lazily so the <c>RequiresAdmin</c> / <c>RequiresSimulator</c>
+    /// init-only properties (set by xUnit AFTER the constructor runs via
+    /// object initializer syntax) are visible. Returning a non-null value
+    /// here causes xUnit to skip the test at run time. If the constructor
+    /// already set a static skip reason (no-peer case), that wins.
+    /// </summary>
+    public override string? Skip
+    {
+        get
+        {
+            if (!string.IsNullOrEmpty(base.Skip)) return base.Skip;
+            var peer = PlatformEndpoint.TryResolve();
+            if (peer is null) return PlatformEndpoint.SkipReason;
+            if (RequiresAdmin && !peer.HasAdminCredentials)
+                return PlatformEndpoint.AdminSkipReason;
+            if (RequiresSimulator && !PlatformEndpoint.IsSimulatorMode())
+                return PlatformEndpoint.SimulatorSkipReason;
+            return null;
+        }
+        set => base.Skip = value;
     }
 }

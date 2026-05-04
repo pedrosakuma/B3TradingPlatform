@@ -120,6 +120,18 @@ public static class AdminEndpoints
             return Results.NoContent();
         });
 
+        // POST /admin/simulator/er — synthetic ER injection for slice-4
+        // simulator mode (RFC algo-orders-v0 §4.10/§7-B3). Only mapped
+        // when Mode=Simulator at boot, so the route is invisible to other
+        // deployments. A second runtime barrier (404 if mode flips
+        // unexpectedly) is intentionally omitted because mode is fixed
+        // at startup; the not-mapped check is the single source of truth.
+        var modeAtBoot = app.ServiceProvider.GetRequiredService<IOptions<ExchangeOptions>>().Value.ResolveMode();
+        if (modeAtBoot == ExchangeMode.Simulator)
+        {
+            group.MapPost("/simulator/er", SimulatorEndpoint.Inject);
+        }
+
         return app;
     }
 

@@ -101,11 +101,30 @@ with API design + mocks first; this lets us lock our boundary in early.
   enum `EpExecType` into the Application-layer `ExecKind` so Application
   stays unaware of the wire types).
 - `ExchangeOptions` (bound from `Trading:Exchange` in `appsettings.json`)
-  drives the wiring: `UseStubGateway=true` falls back to
-  `StubExchangeGateway` (no client, no router) for API-only smoke tests;
-  otherwise the mock client is wired and one `EntryPointClientGateway`
-  per firm is registered. The first firm in `Firms[]` is currently the
-  default; multi-session routing lands in Phase 3.
+  drives the wiring via the `Mode` enum (with legacy `UseStubGateway` /
+  `UseRealEntryPointClient` flags as fallback):
+
+  | Mode          | Gateway                      | Use                                  |
+  | ------------- | ---------------------------- | ------------------------------------ |
+  | `Stub`        | `StubExchangeGateway`        | No-op; CI smoke / API-only           |
+  | `Mock`        | `EntryPointClientGateway` + `MockEntryPointClient` | Dev loop, integration tests |
+  | `Real`        | `MultiFirmExchangeGateway` over per-firm `B3EntryPointClient` | Production, UAT |
+  | `Unavailable` | `UnavailableExchangeGateway` | Fail-closed no-broker (Docker bootstrap) — submits return 502 |
+  | `Simulator`   | Same wiring as `Mock`, plus admin-gated `POST /admin/simulator/er` | **Test-only** — slice-4 algo engine harness |
+
+  The first firm in `Firms[]` is currently the default; multi-session
+  routing lands in Phase 3.
+
+  ⚠ **Simulator mode** lets any admin-role caller emit synthetic
+  `ExecutionReport`s for any working `ClOrdId`. It exists to unblock the
+  algo engines (Iceberg/TWAP) without requiring a real venue. Four
+  guardrails (RFC `algo-orders-v0` §4.10/§7-B3) prevent it from leaking
+  into production: (1) the boot path emits a loud Warning log line,
+  (2) the `trading.simulator.mode_active` UpDownCounter ticks to 1 so
+  dashboards/alerts can spot drift, (3) `/health` reports
+  `exchange.mode = Simulator`, (4) the host **refuses to boot** when
+  `Environment=Production` unless `Trading:Exchange:AllowSimulatorInProduction=true`
+  is explicitly set.
 
 When the real lib publishes its surface, the swap is local: replace the
 `IEntryPointClient` placeholder with the upstream type (or adapt it

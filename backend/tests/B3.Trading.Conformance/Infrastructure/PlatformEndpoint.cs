@@ -33,6 +33,7 @@ public sealed record PlatformEndpoint(
     public const string EnvPassword = "B3T_AUTH_PASS";
     public const string EnvAdminUsername = "B3T_ADMIN_USER";
     public const string EnvAdminPassword = "B3T_ADMIN_PASS";
+    public const string EnvSimulatorMode = "B3T_SIMULATOR_MODE";
 
     public static PlatformEndpoint? TryResolve()
     {
@@ -65,9 +66,25 @@ public sealed record PlatformEndpoint(
     public bool HasAdminCredentials =>
         !string.IsNullOrWhiteSpace(AdminUsername) && !string.IsNullOrWhiteSpace(AdminPassword);
 
+    /// <summary>
+    /// True when the operator declared the host is running with
+    /// <c>Trading:Exchange:Mode=Simulator</c> (env var
+    /// <c>B3T_SIMULATOR_MODE=true</c>). Simulator-only scenarios skip
+    /// otherwise — the same suite stays valid against Mock/Real/Stub
+    /// deployments without false failures.
+    /// </summary>
+    public static bool IsSimulatorMode()
+    {
+        var v = Environment.GetEnvironmentVariable(EnvSimulatorMode);
+        return string.Equals(v, "true", StringComparison.OrdinalIgnoreCase) || v == "1";
+    }
+
     public const string SkipReason =
         "Conformance platform not configured. Set B3T_BASE_URL, B3T_AUTH_USER, B3T_AUTH_PASS to run.";
 
     public const string AdminSkipReason =
         "Admin scenario skipped: B3T_ADMIN_USER / B3T_ADMIN_PASS not configured.";
+
+    public const string SimulatorSkipReason =
+        "Simulator scenario skipped: B3T_SIMULATOR_MODE=true not set (host is not in Mode=Simulator).";
 }

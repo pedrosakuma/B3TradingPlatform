@@ -80,6 +80,15 @@ public static class MetricsRegistry
     public static readonly Counter<long> DrainRejections =
         Meter.CreateCounter<long>("trading.drain.rejections");
 
+    /// <summary>
+    /// 1 when the host booted with <c>ExchangeMode.Simulator</c> active, 0
+    /// otherwise. Set once at startup and never decremented (mode is fixed
+    /// at runtime). Surfaces "this host is injecting synthetic ERs" to
+    /// dashboards / alerts so production drift is loud.
+    /// </summary>
+    public static readonly UpDownCounter<int> SimulatorModeActive =
+        Meter.CreateUpDownCounter<int>("trading.simulator.mode_active");
+
     // EntryPoint upstream client (real adapter)
     public static readonly UpDownCounter<int> EntryPointConnected =
         Meter.CreateUpDownCounter<int>("trading.entrypoint.connected");
