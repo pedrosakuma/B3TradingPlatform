@@ -28,9 +28,19 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 
 # curl is used by the HEALTHCHECK below. Kept tiny: install + cleanup in one
 # layer, no recommends.
-RUN apt-get update \
- && apt-get install --no-install-recommends -y curl \
- && rm -rf /var/lib/apt/lists/*
+#
+# Network resilience: CI repeatedly hits transient connection failures
+# pulling from security.ubuntu.com / archive.ubuntu.com (Connection
+# failed [IP: …]:80). Combine apt's built-in retry with an outer loop
+# and a per-request timeout so a single dropped TCP handshake doesn't
+# kill the whole build. Net cost on a healthy run: zero.
+RUN set -eux; \
+    APT_OPTS="-o Acquire::Retries=5 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"; \
+    for attempt in 1 2 3 4 5; do \
+      apt-get $APT_OPTS update && break || { echo "apt-get update failed (attempt $attempt), sleeping…" >&2; sleep $((attempt * 5)); }; \
+    done; \
+    apt-get $APT_OPTS install --no-install-recommends -y curl; \
+    rm -rf /var/lib/apt/lists/*
 
 # Persistence root (event store WAL + snapshots). Created and chowned BEFORE
 # we drop to non-root, otherwise the running user can't write to it.
