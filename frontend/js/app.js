@@ -57,6 +57,8 @@ function init() {
     onSelectOrder: handleSelectOrder,
     onKeyboardCancel: handleKeyboardCancel,
     onSelectDobSymbol: handleSelectDobSymbol,
+    onSelectChartSymbol: state.setChartSymbol,
+    onSelectChartResolution: state.setChartResolution,
   });
   adminUi.setAdminHandlers({
     onToggleFirm:      handleToggleFirm,
@@ -271,6 +273,7 @@ function handleApplyMd({ url, symbols }) {
     }
     state.clearMarketData();
     state.clearAllBooks();
+    state.clearAllCandles();
     mbpEnabled = false;
     startMdWorker();
   } else {
@@ -304,6 +307,7 @@ function onMdWorkerMessage(msg) {
     case "md.clear":
       state.clearMarketData();
       state.clearAllBooks();
+      state.clearAllCandles();
       break;
     case "md.trade":    state.applyMdTrade(msg); break;
     case "md.info":     state.applyMdInfo(msg); break;
@@ -316,18 +320,20 @@ function onMdWorkerMessage(msg) {
       ui.setMdFeedback(`subscribe ${msg.symbol}: ${msg.errorName}`, "error");
       state.removeMdSymbol(msg.symbol);
       state.removeBookSymbol(msg.symbol);
+      state.removeCandlesSymbol(msg.symbol);
       break;
     case "md.removed":
       state.removeMdSymbol(msg.symbol);
       state.removeBookSymbol(msg.symbol);
+      state.removeCandlesSymbol(msg.symbol);
       break;
     case "md.book.snapshot":   state.applyMdBookSnapshot(msg); break;
     case "md.book.cleared":    state.applyMdBookCleared(msg); break;
     case "md.level.snapshot":  state.applyMdLevelSnapshot(msg); break;
     case "md.level.update":    state.applyMdLevelUpdate(msg); break;
     case "md.level.deleted":   state.applyMdLevelDeleted(msg); break;
-    case "md.candle.snapshot": /* T3 */ break;
-    case "md.candle.update":   /* T3 */ break;
+    case "md.candle.snapshot": state.applyMdCandleSnapshot(msg); break;
+    case "md.candle.update":   state.applyMdCandleUpdate(msg); break;
     case "md.error":    console.warn("[md]", msg); break;
   }
 }
