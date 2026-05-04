@@ -78,6 +78,7 @@ public class IcebergLifecycleSpecTests
             Content = JsonContent.Create(new
             {
                 Symbol = "PETR4",
+                SecurityId = 4321UL,
                 Side = "Buy",
                 Type = "Iceberg",
                 TotalQuantity = total,

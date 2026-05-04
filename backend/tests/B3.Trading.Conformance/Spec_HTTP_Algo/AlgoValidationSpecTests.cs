@@ -39,6 +39,7 @@ public class AlgoValidationSpecTests
             Content = JsonContent.Create(new
             {
                 Symbol = "PETR4",
+                SecurityId = 4321UL,
                 Side = "Buy",
                 Type = "Twap",
                 TotalQuantity = 2,
