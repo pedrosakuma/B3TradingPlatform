@@ -7,20 +7,28 @@
 //   - different failure surface (server may NOT_READY at startup)
 //
 // Inputs (main thread → us):
-//   { type: "start", url, symbols: [string] }
+//   { type: "start", url, symbols: [string], flags?: number }
 //   { type: "stop" }
 //   { type: "setSymbols", symbols: [string] }   // diff applied
+//   { type: "setFlags", flags: number }         // re-subscribe with new bitmask
 //
 // Outputs (us → main thread):
 //   { type: "md.status", value: "connecting"|"connected"|"disconnected"|"not_ready" }
 //   { type: "md.trade",    symbol, price, qty, tradeId }
 //   { type: "md.info",     symbol, fields }     // raw InfoSnapshot fields
 //   { type: "md.bust",     symbol, tradeId }
+//   { type: "md.book.snapshot",     symbol }    // marker; levels follow
+//   { type: "md.book.cleared",      symbol, side }
+//   { type: "md.level.snapshot",    symbol, bids: [{price,qty,count}], asks: [...] }
+//   { type: "md.level.update",      symbol, side, price, qty, count }
+//   { type: "md.level.deleted",     symbol, side, price }
+//   { type: "md.candle.snapshot",   symbol, resolution, candles, isFirst, isLast }
+//   { type: "md.candle.update",     symbol, resolution, candle }
 //   { type: "md.subError", symbol, errorName }
 //   { type: "md.clear" }                        // dropped; main thread should reset cache
 //   { type: "md.error",    message }
 
-import { buildSubscribe, buildUnsubscribe, parseFrames } from './mdProtocol.js';
+import { buildSubscribe, buildUnsubscribe, parseFrames, FLAGS } from './mdProtocol.js';
 
 let ws = null;
 let url = null;
@@ -28,6 +36,7 @@ let stopped = false;
 let attempt = 0;
 let reconnectTimer = null;
 let serverReady = false;
+let subscribeFlags = FLAGS.TRADES | FLAGS.INFO;
 
 // Subscribed symbols. Keys are normalized (UPPERCASE, trimmed) so set
 // arithmetic is straightforward. Value is the resolved securityId once
@@ -115,9 +124,13 @@ function handleFrame(f) {
 
     case 'SubscribeOk': {
       const symbol = f.symbol.toUpperCase();
+      // Defensive: drop server-misdelivered subscriptions for symbols
+      // we never asked for. Keeps the local map honest and prevents
+      // forwarding frames the trader UI didn't request.
+      if (!subscriptions.has(symbol)) return;
       const id = f.securityId;
       subscriptions.set(symbol, id);
-      securityIdToSymbol.set(id.toString(), symbol);
+      securityIdToSymbol.set(id, symbol);
       return;
     }
 
@@ -131,23 +144,91 @@ function handleFrame(f) {
     }
 
     case 'Trade': {
-      const symbol = securityIdToSymbol.get(f.securityId.toString());
+      const symbol = securityIdToSymbol.get(f.securityId);
       if (!symbol) return; // arrived before SubscribeOk landed; drop
       post({ type: 'md.trade', symbol, price: f.price, qty: f.qty, tradeId: f.tradeId });
       return;
     }
 
     case 'TradeBust': {
-      const symbol = securityIdToSymbol.get(f.securityId.toString());
+      const symbol = securityIdToSymbol.get(f.securityId);
       if (!symbol) return;
       post({ type: 'md.bust', symbol, tradeId: f.tradeId });
       return;
     }
 
     case 'InfoSnapshot': {
-      const symbol = securityIdToSymbol.get(f.securityId.toString());
+      const symbol = securityIdToSymbol.get(f.securityId);
       if (!symbol) return;
       post({ type: 'md.info', symbol, fields: f.fields });
+      return;
+    }
+
+    case 'BookSnapshot': {
+      const symbol = securityIdToSymbol.get(f.securityId);
+      if (!symbol) return;
+      post({ type: 'md.book.snapshot', symbol });
+      return;
+    }
+
+    case 'BookCleared': {
+      const symbol = securityIdToSymbol.get(f.securityId);
+      if (!symbol) return;
+      post({ type: 'md.book.cleared', symbol, side: f.side });
+      return;
+    }
+
+    case 'LevelSnapshot': {
+      const symbol = securityIdToSymbol.get(f.securityId);
+      if (!symbol) return;
+      post({ type: 'md.level.snapshot', symbol, bids: f.bids, asks: f.asks });
+      return;
+    }
+
+    case 'LevelUpdate': {
+      const symbol = securityIdToSymbol.get(f.securityId);
+      if (!symbol) return;
+      post({
+        type: 'md.level.update',
+        symbol,
+        side: f.side,
+        price: f.price,
+        qty: f.qty,
+        count: f.count,
+      });
+      return;
+    }
+
+    case 'LevelDeleted': {
+      const symbol = securityIdToSymbol.get(f.securityId);
+      if (!symbol) return;
+      post({ type: 'md.level.deleted', symbol, side: f.side, price: f.price });
+      return;
+    }
+
+    case 'CandleSnapshot': {
+      const symbol = securityIdToSymbol.get(f.securityId);
+      if (!symbol) return;
+      post({
+        type: 'md.candle.snapshot',
+        symbol,
+        resolution: f.resolution,
+        candles: f.candles,
+        isFirst: f.isFirst,
+        isLast: f.isLast,
+      });
+      return;
+    }
+
+    case 'CandleUpdate': {
+      const symbol = securityIdToSymbol.get(f.securityId);
+      if (!symbol) return;
+      post({
+        type: 'md.candle.update',
+        symbol,
+        resolution: f.resolution,
+        candle: f.candle,
+      });
       return;
     }
   }
@@ -156,7 +237,7 @@ function handleFrame(f) {
 function flushSubscribes() {
   for (const [symbol, id] of subscriptions) {
     if (id !== null) continue; // already resolved
-    try { safeSend(buildSubscribe(symbol)); }
+    try { safeSend(buildSubscribe(symbol, subscribeFlags)); }
     catch (err) {
       subscriptions.delete(symbol);
       post({ type: 'md.subError', symbol, errorName: String(err.message || err) });
@@ -171,7 +252,7 @@ function applySymbolDiff(next) {
     if (wanted.has(symbol)) continue;
     if (id !== null) safeSend(buildUnsubscribe(id));
     subscriptions.delete(symbol);
-    securityIdToSymbol.delete(id?.toString() ?? '');
+    if (id !== null) securityIdToSymbol.delete(id);
     post({ type: 'md.removed', symbol });
   }
   // Add new ones.
@@ -179,13 +260,29 @@ function applySymbolDiff(next) {
     if (subscriptions.has(symbol)) continue;
     subscriptions.set(symbol, null);
     if (serverReady) {
-      try { safeSend(buildSubscribe(symbol)); }
+      try { safeSend(buildSubscribe(symbol, subscribeFlags)); }
       catch (err) {
         subscriptions.delete(symbol);
         post({ type: 'md.subError', symbol, errorName: String(err.message || err) });
       }
     }
   }
+}
+
+function resetSubscriptionsForFlagsChange() {
+  // Unsubscribe all currently-resolved symbols and re-subscribe with the
+  // new flags. The server resolves a fresh securityId per (symbol, flags)
+  // session, so we drop the reverse index and let SubscribeOk repopulate.
+  // Frames in flight under the previous flags are intentionally lost
+  // during the gap; post `md.clear` so panels (DOB, chart, tape) reset
+  // their per-symbol caches instead of mixing stale state with new.
+  for (const [, id] of subscriptions) {
+    if (id !== null) safeSend(buildUnsubscribe(id));
+  }
+  for (const sym of subscriptions.keys()) subscriptions.set(sym, null);
+  securityIdToSymbol.clear();
+  post({ type: 'md.clear' });
+  if (serverReady) flushSubscribes();
 }
 
 self.onmessage = (ev) => {
@@ -195,6 +292,9 @@ self.onmessage = (ev) => {
       url = msg.url;
       stopped = false;
       attempt = 0;
+      if (typeof msg.flags === 'number' && msg.flags > 0) {
+        subscribeFlags = msg.flags;
+      }
       subscriptions.clear();
       securityIdToSymbol.clear();
       for (const s of msg.symbols || []) {
@@ -218,6 +318,13 @@ self.onmessage = (ev) => {
 
     case 'setSymbols':
       applySymbolDiff(msg.symbols || []);
+      break;
+
+    case 'setFlags':
+      if (typeof msg.flags === 'number' && msg.flags > 0 && msg.flags !== subscribeFlags) {
+        subscribeFlags = msg.flags;
+        resetSubscriptionsForFlagsChange();
+      }
       break;
   }
 };
