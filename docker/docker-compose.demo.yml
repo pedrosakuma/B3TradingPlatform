@@ -1,0 +1,92 @@
+# Demo overlay for the family stack. Brings the trading-host up in
+# Mode=Simulator (synthetic ER injection enabled, NOT FOR PRODUCTION),
+# seeds three additional users (one admin + two user bots), and starts
+# the demo-driver process that hammers the trader UI with continuous
+# order/fill activity.
+#
+# Usage (laptop demos only):
+#   docker compose \
+#       -f docker/docker-compose.yml \
+#       -f docker/docker-compose.demo.yml \
+#       up -d
+#
+# Open http://localhost:8080 and log in as bot-clientA / demopass (or
+# bot-clientB / demopass) to see that bot's blotter, executions and
+# positions evolve in real time. Logging in as alice (the original
+# seed) shows the empty view since alice does not submit orders.
+#
+# Hashes below are PBKDF2-HMAC-SHA256 (600k iterations) of the literal
+# password "demopass". Both the password and the hashes are public —
+# DO NOT enable this overlay against a host reachable beyond your
+# laptop. The trading-host refuses to boot in Production with
+# Mode=Simulator unless AllowSimulatorInProduction=true is also set.
+
+services:
+  trading-host:
+    environment:
+      # Flip to Simulator so the InjectorWorker can POST /admin/simulator/er.
+      Trading__Exchange__Mode: Simulator
+
+      # User-bot 1 (default seed; submits orders).
+      Trading__Auth__Users__1__Username: ${DEMO_BOT_A_USER:-bot-clientA}
+      Trading__Auth__Users__1__PasswordHash: ${DEMO_BOT_A_HASH:-jCdJniZgt0YyP/cJa5ehORTMcdxEUaesnzTTZtNKYFg=}
+      Trading__Auth__Users__1__Salt: ${DEMO_BOT_A_SALT:-MKxchosZRRVTRQZe4u4Ykw==}
+      Trading__Auth__Users__1__Iterations: "600000"
+      Trading__Auth__Users__1__Role: user
+      Trading__Auth__Users__1__Firm: default
+
+      # User-bot 2 (default seed; submits orders).
+      Trading__Auth__Users__2__Username: ${DEMO_BOT_B_USER:-bot-clientB}
+      Trading__Auth__Users__2__PasswordHash: ${DEMO_BOT_B_HASH:-kPDXUUV7Bf0Qy1ryGVncXv88gi3hglccO2pcgU/VODs=}
+      Trading__Auth__Users__2__Salt: ${DEMO_BOT_B_SALT:-Bj20VGNiURA5SHsRHKWsUw==}
+      Trading__Auth__Users__2__Iterations: "600000"
+      Trading__Auth__Users__2__Role: user
+      Trading__Auth__Users__2__Firm: default
+
+      # Admin used exclusively by the demo-driver injector. Kept distinct
+      # from carol (conformance overlay) so the two overlays can coexist
+      # without slot collisions.
+      Trading__Auth__Users__3__Username: ${DEMO_ADMIN_USER:-demo-admin}
+      Trading__Auth__Users__3__PasswordHash: ${DEMO_ADMIN_HASH:-Xs/FcCBkBNEKbRKQCVR8YIQXGN/53Gxj01DBCCWl7Mk=}
+      Trading__Auth__Users__3__Salt: ${DEMO_ADMIN_SALT:-wtrNdBpmiH7nWtMwM6v9cA==}
+      Trading__Auth__Users__3__Iterations: "600000"
+      Trading__Auth__Users__3__Role: admin
+      Trading__Auth__Users__3__Firm: default
+
+      # Static reference prices the bots quote around. Mirrors the defaults
+      # the demo-driver bakes in via DEMO_SYMBOLS so the price collar (10%
+      # default) never trips on the random ±0.5% spread.
+      Trading__Risk__ReferencePrices__PETR4: "32.50"
+      Trading__Risk__ReferencePrices__VALE3: "65.00"
+      Trading__Risk__ReferencePrices__ITUB4: "30.00"
+
+      # SecurityId mapping so POST /orders can resolve symbol → SecurityId
+      # (the demo-driver leaves SecurityId=0 in the request payload — the
+      # ResolveOwner path looks the symbol up in this directory). Same IDs
+      # used by the real-stack overlay so a host that is later flipped to
+      # Mode=Real keeps consistent identifiers.
+      Trading__SymbolDirectory__SecurityIds__PETR4: "900000000001"
+      Trading__SymbolDirectory__SecurityIds__VALE3: "900000000002"
+      Trading__SymbolDirectory__SecurityIds__ITUB4: "900000000003"
+
+  demo-driver:
+    build:
+      context: ..
+      dockerfile: backend/tools/B3.Trading.DemoDriver/Dockerfile
+    image: ${DEMO_DRIVER_IMAGE:-b3-trading-demo-driver:dev}
+    container_name: b3-trading-demo-driver
+    restart: unless-stopped
+    depends_on:
+      trading-host:
+        condition: service_healthy
+    environment:
+      DEMO_BACKEND_URL: http://trading-host:5000
+      DEMO_USER_BOTS: "${DEMO_BOT_A_USER:-bot-clientA}:${DEMO_BOT_A_PASSWORD:-demopass},${DEMO_BOT_B_USER:-bot-clientB}:${DEMO_BOT_B_PASSWORD:-demopass}"
+      DEMO_ADMIN: "${DEMO_ADMIN_USER:-demo-admin}:${DEMO_ADMIN_PASSWORD:-demopass}"
+      DEMO_SYMBOLS: "PETR4:32.50,VALE3:65.00,ITUB4:30.00"
+      DEMO_SUBMIT_RATE_HZ: "${DEMO_SUBMIT_RATE_HZ:-0.5}"
+      DEMO_INJECT_RATE_HZ: "${DEMO_INJECT_RATE_HZ:-0.3}"
+      DEMO_MAX_OPEN_ORDERS: "${DEMO_MAX_OPEN_ORDERS:-50}"
+      DEMO_MODE: "${DEMO_MODE:-auto-detect}"
+    networks:
+      - b3-net

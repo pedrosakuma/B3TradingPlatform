@@ -121,6 +121,7 @@ jobs:
           docker compose -f docker/docker-compose.yml config --quiet
           docker compose -f docker/docker-compose.yml -f docker/docker-compose.observability.yml config --quiet
           docker compose -f docker/docker-compose.yml -f docker/docker-compose.conformance.yml config --quiet
+          docker compose -f docker/docker-compose.yml -f docker/docker-compose.demo.yml config --quiet
 
   conformance:
     name: Run conformance suite against compose stack
