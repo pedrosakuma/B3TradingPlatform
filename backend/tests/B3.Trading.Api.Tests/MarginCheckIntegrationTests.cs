@@ -64,7 +64,10 @@ public class MarginCheckIntegrationTests
         Assert.NotEqual("Rejected", sellBody!.Status);
 
         // Buy with 0 balance must be rejected with the margin reason.
-        var buy = await PostOrder(http, token, qty: 1, price: 30m, side: "Buy");
+        // Use a price below the resting Sell so the self-trade-prevention
+        // check (which would also fire and reject first) is not triggered;
+        // this test specifically exercises the margin path.
+        var buy = await PostOrder(http, token, qty: 1, price: 29m, side: "Buy");
         var buyBody = await buy.Content.ReadFromJsonAsync<OrderAck>();
         Assert.Equal("Rejected", buyBody!.Status);
         Assert.Contains("margin", buyBody.Reason!, StringComparison.OrdinalIgnoreCase);

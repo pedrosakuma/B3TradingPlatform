@@ -141,6 +141,18 @@ public sealed class RiskLimits
     /// market makers, or test accounts).
     /// </summary>
     public bool? AllowShortSell { get; set; }
+
+    /// <summary>
+    /// Whether the end-client may self-cross — i.e. submit an order
+    /// that would match against one of their own opposite-side working
+    /// orders on the same symbol. Default semantics when unset
+    /// everywhere in the precedence chain are conservative: self-trade
+    /// is **blocked** with newest-rejects (see
+    /// <see cref="Risk.Checks.SelfTradePreventionCheck"/>). Set to
+    /// <c>true</c> per-firm or per-end-client to opt out (e.g.
+    /// market-maker accounts or test scenarios).
+    /// </summary>
+    public bool? AllowSelfTrade { get; set; }
 }
 
 public static class RiskLimitsResolver
@@ -188,5 +200,6 @@ public static class RiskLimitsResolver
             PositionLimit = Resolve(opts, endClient, firmId, symbol, l => l.PositionLimit),
             MaxOpenOrders = Resolve(opts, endClient, firmId, symbol, l => l.MaxOpenOrders),
             AllowShortSell = Resolve(opts, endClient, firmId, symbol, l => l.AllowShortSell),
+            AllowSelfTrade = Resolve(opts, endClient, firmId, symbol, l => l.AllowSelfTrade),
         };
 }
