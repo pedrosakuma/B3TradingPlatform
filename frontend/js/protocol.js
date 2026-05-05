@@ -2,9 +2,14 @@
 // this module is HTTP-only.
 
 export function defaultBackend() {
-  return location.hostname === "localhost" || location.hostname === "127.0.0.1"
-    ? "http://localhost:5000"
-    : location.origin;
+  // Prefer the page origin so requests go through the nginx reverse-proxy
+  // (same-origin, no CORS). The legacy "localhost:5000" shortcut only kicks
+  // in for non-http schemes (e.g. file://) where there is no real origin to
+  // talk to. The login form lets the user override either way.
+  if (location.protocol === "http:" || location.protocol === "https:") {
+    return location.origin;
+  }
+  return "http://localhost:5000";
 }
 
 async function jsonOrThrow(resp) {
