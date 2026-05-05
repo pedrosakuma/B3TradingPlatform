@@ -33,3 +33,11 @@ services:
   trading-host:
     environment:
       Trading__Risk__PerEndClient__alice__AllowShortSell: "true"
+      # Same rationale for self-trade prevention (#102): the spec
+      # crosses Buy+Sell from the SAME end-client (alice) to print a
+      # trade and observe the live ref-price displace the fallback.
+      # The default-on STP gate would risk-reject the second leg
+      # ("would cross own working Buy ..."). Opt alice out, scoped
+      # to the conformance run only — the gate stays armed for
+      # every other end-client in this stack.
+      Trading__Risk__PerEndClient__alice__AllowSelfTrade: "true"
