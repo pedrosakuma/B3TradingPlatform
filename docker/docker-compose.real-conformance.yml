@@ -20,3 +20,16 @@ services:
   conformance:
     environment:
       B3T_REAL_STACK_CONFORMANCE: "true"
+
+  # The ReferencePriceLiveSpec scenario crosses Buy+Sell from a single
+  # authenticated end-client (alice) so matching can print a trade and
+  # the live ref-price cache can be observed displacing the static
+  # fallback. With the NoNakedShortCheck gate enabled by default in
+  # the real overlay (protects ad-hoc dogfooding), alice's Sell would
+  # otherwise be risk-rejected before reaching matching ("current
+  # long=0, open sell leaves=100"). Opt alice out here, scoped to the
+  # conformance run only — the gate stays armed for every other user
+  # in this stack.
+  trading-host:
+    environment:
+      Trading__Risk__PerEndClient__alice__AllowShortSell: "true"

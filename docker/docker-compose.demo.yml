@@ -63,6 +63,17 @@ services:
       Trading__Risk__ReferencePrices__VALE3: "65.00"
       Trading__Risk__ReferencePrices__ITUB4: "30.00"
 
+      # The demo bots produce Buys and Sells uniformly to populate
+      # both sides of the book. With the naked-short gate enabled
+      # (the safe default for cash equities), Sells from accounts
+      # that haven't yet accumulated long inventory would be blocked
+      # and the demo would degenerate into Buy-only flow. Opt the
+      # demo bots out via per-end-client AllowShortSell so the demo
+      # keeps showing two-sided activity. Real participant accounts
+      # would not set this in production.
+      Trading__Risk__PerEndClient__bot-clientA__AllowShortSell: "true"
+      Trading__Risk__PerEndClient__bot-clientB__AllowShortSell: "true"
+
       # SecurityId mapping so POST /orders can resolve symbol → SecurityId
       # (the demo-driver leaves SecurityId=0 in the request payload — the
       # ResolveOwner path looks the symbol up in this directory). Same IDs

@@ -75,6 +75,40 @@ public sealed class WorkingOrderBook
     }
 
     /// <summary>
+    /// Sums <see cref="Order.LeavesQuantity"/> across the end-client's
+    /// non-terminal Sell orders for a single symbol. Used by the
+    /// pre-trade naked-short gate to compute available sellable
+    /// inventory pessimistically (assume every open Sell still
+    /// executes; do not net against open Buys, which may be
+    /// cancelled). Index-driven via <see cref="_byOwner"/> so cost
+    /// is O(orders for owner), not O(total orders) — same shape as
+    /// <see cref="CountOpenForOwner"/>.
+    /// </summary>
+    /// <remarks>
+    /// As with <see cref="CountOpenForOwner"/>, the order being
+    /// submitted is **already** in the book by the time the risk
+    /// pipeline runs (the persistence dispatcher adds it before
+    /// evaluation). Callers must subtract their own incoming
+    /// quantity from the returned sum to avoid double-counting it
+    /// against itself.
+    /// </remarks>
+    public long SumOpenSellLeavesForSymbol(EndClientId owner, string symbol)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(symbol);
+        if (!_byOwner.TryGetValue(owner.Value, out var set)) return 0;
+        long total = 0;
+        foreach (var clOrdId in set.Keys)
+        {
+            if (!_orders.TryGetValue(clOrdId, out var order)) continue;
+            if (order.Side != OrderSide.Sell) continue;
+            if (!string.Equals(order.Symbol, symbol, StringComparison.Ordinal)) continue;
+            if (IsTerminal(order.Status)) continue;
+            total += order.LeavesQuantity;
+        }
+        return total;
+    }
+
+    /// <summary>
     /// Snapshots the orders associated with <paramref name="firmId"/>. By default
     /// only non-terminal orders are returned (PendingNew / Working / PartiallyFilled),
     /// which matches the FIXP "outstanding orders" semantics used to reconcile
