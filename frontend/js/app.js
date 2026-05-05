@@ -55,6 +55,7 @@ function init() {
     onApplyMd: handleApplyMd,
     onSwitchView: handleSwitchView,
     onBlotterFilter: handleBlotterFilter,
+    onBlotterPage: handleBlotterPage,
     onSelectOrder: handleSelectOrder,
     onKeyboardCancel: handleKeyboardCancel,
     onSelectChartResolution: state.setChartResolution,
@@ -450,6 +451,14 @@ async function handleCancelOrder(clOrdId) {
 function handleBlotterFilter(filter) {
   state.setBlotterFilter(filter);
   writeBlotterFilter(filter);
+}
+
+// `delta` is +1 / -1 from the prev/next buttons. The setter clamps
+// at 1; the renderer clamps at totalPages, so out-of-range requests
+// here are harmless.
+function handleBlotterPage(delta) {
+  const current = state.getState().blotterPage ?? 1;
+  state.setBlotterPage(current + Number(delta || 0));
 }
 
 function handleSelectOrder(clOrdId) {
