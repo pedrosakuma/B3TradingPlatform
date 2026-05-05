@@ -7,6 +7,23 @@ import {
 
 const $ = (id) => document.getElementById(id);
 
+// ── Number formatting (pt-BR) ──────────────────────────────────────
+// B3 traders expect Brazilian locale (`100.000,00`) for quantities,
+// prices and notionals. Centralised here so every panel stays in sync
+// and we have a single place to flip the locale if the product call
+// changes later.
+const _qtyFmt = new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 0 });
+const _pxFmt  = new Intl.NumberFormat("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+function fmtQty(n) {
+  if (n == null || n === "" || Number.isNaN(Number(n))) return "—";
+  return _qtyFmt.format(Number(n));
+}
+function fmtPx(n) {
+  if (n == null || n === "" || Number.isNaN(Number(n))) return "—";
+  return _pxFmt.format(Number(n));
+}
+export { fmtQty, fmtPx };
+
 let onSubmitOrder = () => {};
 let onCancelOrder = () => {};
 let onLogout      = () => {};
@@ -64,10 +81,18 @@ export function setLoginError(message) {
   el.hidden = false; el.textContent = message;
 }
 
+export function setLoginSubmitting(submitting) {
+  const btn = $("login-submit");
+  if (!btn) return;
+  btn.disabled = !!submitting;
+  btn.textContent = submitting ? "Signing in…" : "Sign in";
+}
+
 // ── Session-expiry modal ───────────────────────────────────────────
 let sessionModalSubmit = null;
 let sessionModalLogout = null;
 let sessionModalBackdrop = null;
+let sessionModalKey = null;
 
 export function openSessionModal({ onRenew, onLogout }) {
   const modal = $("session-modal");
@@ -82,6 +107,7 @@ export function openSessionModal({ onRenew, onLogout }) {
   if (sessionModalSubmit) form.removeEventListener("submit", sessionModalSubmit);
   if (sessionModalLogout) logoutBtn?.removeEventListener("click", sessionModalLogout);
   if (sessionModalBackdrop) modal.removeEventListener("click", sessionModalBackdrop);
+  if (sessionModalKey) document.removeEventListener("keydown", sessionModalKey);
   sessionModalSubmit = (e) => {
     e.preventDefault();
     const value = pwd.value;
@@ -96,9 +122,17 @@ export function openSessionModal({ onRenew, onLogout }) {
   sessionModalBackdrop = (e) => {
     if (e.target === modal) onLogout?.();
   };
+  // Esc on the session modal = logout (consistent with backdrop click).
+  sessionModalKey = (e) => {
+    if (e.key === "Escape" && !modal.hidden) {
+      e.preventDefault();
+      onLogout?.();
+    }
+  };
   form.addEventListener("submit", sessionModalSubmit);
   logoutBtn?.addEventListener("click", sessionModalLogout);
   modal.addEventListener("click", sessionModalBackdrop);
+  document.addEventListener("keydown", sessionModalKey);
   // Defer focus to the next frame so backdrop transitions don't steal it.
   requestAnimationFrame(() => pwd.focus());
 }
@@ -110,6 +144,10 @@ export function closeSessionModal() {
   setSessionModalError(null);
   const pwd = $("session-modal-password");
   if (pwd) pwd.value = "";
+  if (sessionModalKey) {
+    document.removeEventListener("keydown", sessionModalKey);
+    sessionModalKey = null;
+  }
 }
 
 export function setSessionModalError(message) {
@@ -143,6 +181,26 @@ export function bindUi() {
     };
     onSubmitOrder(payload);
   });
+
+  // Auto-uppercase the symbol field as the trader types so the visual
+  // matches what we actually submit (we already toUpperCase on submit).
+  const symEl = $("ticket-symbol");
+  if (symEl) {
+    symEl.addEventListener("input", (e) => {
+      // Don't fight IME composition; uppercase on compositionend instead.
+      if (e.isComposing) return;
+      const pos = e.target.selectionStart;
+      const upper = e.target.value.toUpperCase();
+      if (e.target.value !== upper) {
+        e.target.value = upper;
+        try { e.target.setSelectionRange(pos, pos); } catch {}
+      }
+    });
+    symEl.addEventListener("compositionend", (e) => {
+      const upper = e.target.value.toUpperCase();
+      if (e.target.value !== upper) e.target.value = upper;
+    });
+  }
 
   $("logout").addEventListener("click", () => onLogout());
 
@@ -206,6 +264,13 @@ export function bindUi() {
     mdModal.addEventListener("click", (e) => {
       if (e.target === mdModal) mdModal.hidden = true;
     });
+    // Esc closes the popover (non-destructive — no logout).
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !mdModal.hidden) {
+        e.preventDefault();
+        mdModal.hidden = true;
+      }
+    });
   }
 
   // Global symbol selector (drives DOB / chart / tape).
@@ -263,7 +328,8 @@ export function bindUi() {
   //   Esc → clear the ticket form (when focus is inside it)
   //   Del → cancel the currently-selected blotter row
   // We deliberately ignore key events when the user is typing into a
-  // text input to avoid stealing keystrokes.
+  // text input to avoid stealing keystrokes. Backspace is intentionally
+  // NOT a cancel shortcut — too easy to fire accidentally.
   document.addEventListener("keydown", onGlobalKeydown);
 
   subscribe(renderForSlice);
@@ -293,7 +359,7 @@ function onGlobalKeydown(e) {
     }
     return;
   }
-  if ((e.key === "Delete" || e.key === "Backspace") && !inEditable) {
+  if (e.key === "Delete" && !inEditable) {
     if (!getState().selectedClOrdId) return;
     e.preventDefault();
     onKeyboardCancel();
@@ -322,6 +388,16 @@ export function setTicketFeedback(message, kind) {
   el.className = `feedback ${cls}`;
 }
 
+// Clear the ticket feedback only if it still shows `expected`. Used by
+// the success-toast auto-dismiss so a later warning/error message that
+// landed before the timer fires isn't accidentally erased.
+export function setTicketFeedbackIfMatches(expected, replacement) {
+  const el = $("ticket-feedback");
+  if (!el || el.hidden) return;
+  if (el.textContent !== expected) return;
+  setTicketFeedback(replacement, null);
+}
+
 export function setTicketSubmitting(submitting) {
   $("ticket-submit").disabled = !!submitting;
   $("ticket-submit").textContent = submitting ? "Submitting…" : "Submit";
@@ -341,7 +417,14 @@ export function setStatusPill(status) {
 }
 
 export function setUserLabel(user) {
-  $("user-label").textContent = user ? `${user.username}` : "";
+  const el = $("user-label");
+  if (el) {
+    if (user?.username) {
+      el.textContent = user.firm ? `${user.username} @ ${user.firm}` : user.username;
+    } else {
+      el.textContent = "";
+    }
+  }
   const roleEl = $("user-role");
   if (roleEl) {
     if (user?.role && user.role !== "user") {
@@ -372,14 +455,26 @@ function applyCurrentView(view) {
 }
 
 // Periodic UI tick for time-based elements (in-flight elapsed, reconnect
-// countdown). Started lazily on first render so SSR / non-browser hosts
-// stay quiet.
+// countdown, market-data staleness, DOB "no book" promotion). Started
+// lazily on first render so SSR / non-browser hosts stay quiet.
 let tickTimer = null;
+let lastSlowTick = 0;
 function ensureTicker() {
   if (tickTimer) return;
   tickTimer = setInterval(() => {
     renderInflight();
     renderReconnect();
+    // Slow tick (1s) for time-driven re-renders that don't need 4 Hz.
+    const now = Date.now();
+    if (now - lastSlowTick >= 1000) {
+      lastSlowTick = now;
+      renderMarketData();
+      // Only re-render the DOB while we're still waiting for a snapshot
+      // — the live render path is already wired to the book slice.
+      const st = getState();
+      const entry = st.selectedSymbol ? st.book.get(st.selectedSymbol) : null;
+      if (st.selectedSymbol && (!entry || !entry.ready)) renderDob();
+    }
   }, 250);
 }
 
@@ -477,6 +572,8 @@ function setMdStatusPill(status) {
   el.setAttribute("aria-label", `Market data: ${status}`);
 }
 
+const MD_STALE_MS = 5_000;
+
 function renderMarketData() {
   const body = $("md-body");
   if (!body) return;
@@ -489,56 +586,27 @@ function renderMarketData() {
     body.innerHTML = `<tr><td colspan="5" class="muted">No subscriptions</td></tr>`;
     return;
   }
+  const now = Date.now();
   body.innerHTML = rows.map(symbol => {
     const e = md.get(symbol);
     if (!e || e.lastPrice == null) {
       return `<tr><td>${escapeHtml(symbol)}</td><td colspan="4" class="muted-cell">awaiting data…</td></tr>`;
     }
     const ts = e.updatedAt ? new Date(e.updatedAt).toISOString().slice(11, 19) : "—";
+    const stale = e.updatedAt && (now - e.updatedAt) > MD_STALE_MS;
+    const tsCls = stale ? ' class="md-cell-stale"' : "";
     return `<tr>
       <td>${escapeHtml(symbol)}</td>
-      <td class="num">${Number(e.lastPrice).toFixed(2)}</td>
-      <td class="num">${e.lastQty ?? "—"}</td>
+      <td class="num">${fmtPx(e.lastPrice)}</td>
+      <td class="num">${fmtQty(e.lastQty)}</td>
       <td class="num">${e.lastTradeId ?? "—"}</td>
-      <td>${ts}</td>
+      <td${tsCls}>${ts}</td>
     </tr>`;
   }).join("");
 }
 
 const DOB_TOP_N = 10;
-
-function renderSelectedSymbol() {
-  const sel = $("selected-symbol");
-  if (!sel) return;
-  const st = getState();
-  const watch = st.watchlist;
-  const desired = ["", ...watch];
-  const existing = [...sel.options].map(o => o.value);
-  if (desired.length !== existing.length || desired.some((v, i) => v !== existing[i])) {
-    sel.innerHTML = `<option value="">— select —</option>` +
-      watch.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("");
-  }
-  if (sel.value !== (st.selectedSymbol ?? "")) sel.value = st.selectedSymbol ?? "";
-
-  // Mirror the active symbol on each panel header tag.
-  for (const id of ["dob-symbol-tag", "chart-symbol-tag", "tape-symbol-tag"]) {
-    const tag = $(id);
-    if (!tag) continue;
-    if (id === "tape-symbol-tag" && st.tapeShowAll) {
-      tag.textContent = "all";
-      tag.classList.add("symbol-tag--muted");
-    } else {
-      tag.textContent = st.selectedSymbol ?? "—";
-      tag.classList.toggle("symbol-tag--muted", !st.selectedSymbol);
-    }
-  }
-
-  // Keep the tape "All symbols" checkbox in sync with state.
-  const tapeAll = $("tape-show-all");
-  if (tapeAll && tapeAll.checked !== !!st.tapeShowAll) {
-    tapeAll.checked = !!st.tapeShowAll;
-  }
-}
+const DOB_NO_BOOK_AFTER_MS = 10_000;
 
 function renderDob() {
   const bidsBody = document.querySelector("#dob-bids tbody");
@@ -558,8 +626,15 @@ function renderDob() {
 
   const entry = st.book.get(current);
   if (!entry || !entry.ready) {
-    bidsBody.innerHTML = `<tr><td colspan="3" class="muted-cell">awaiting book snapshot…</td></tr>`;
-    asksBody.innerHTML = `<tr><td colspan="3" class="muted-cell">awaiting book snapshot…</td></tr>`;
+    // After ~10s without a snapshot, swap the soft "awaiting…" copy for
+    // a louder hint that something is wrong with the MD subscription
+    // (most commonly: MBP not enabled or the URL is mistyped).
+    const waited = st.selectedSymbolSetAt ? Date.now() - st.selectedSymbolSetAt : 0;
+    const msg = waited > DOB_NO_BOOK_AFTER_MS
+      ? "no book — check MD settings ⚙"
+      : "awaiting book snapshot…";
+    bidsBody.innerHTML = `<tr><td colspan="3" class="muted-cell">${msg}</td></tr>`;
+    asksBody.innerHTML = `<tr><td colspan="3" class="muted-cell">${msg}</td></tr>`;
     if (feedback) { feedback.hidden = true; feedback.textContent = ""; }
     return;
   }
@@ -585,13 +660,55 @@ function renderDobSide(levels, side) {
   let cum = 0;
   return levels.map(lv => {
     cum += Number(lv.qty) || 0;
-    const price = lv.price.toFixed(2);
-    const qty = lv.qty;
+    const price = fmtPx(lv.price);
+    const qty = fmtQty(lv.qty);
+    const cumS = fmtQty(cum);
     if (side === "bid") {
-      return `<tr><td class="num">${cum}</td><td class="num">${qty}</td><td class="num">${price}</td></tr>`;
+      return `<tr><td class="num">${cumS}</td><td class="num">${qty}</td><td class="num">${price}</td></tr>`;
     }
-    return `<tr><td class="num">${price}</td><td class="num">${qty}</td><td class="num">${cum}</td></tr>`;
+    return `<tr><td class="num">${price}</td><td class="num">${qty}</td><td class="num">${cumS}</td></tr>`;
   }).join("");
+}
+
+function renderSelectedSymbol() {
+  const sel = $("selected-symbol");
+  if (!sel) return;
+  const st = getState();
+  const watch = st.watchlist;
+  const desired = ["", ...watch];
+  const existing = [...sel.options].map(o => o.value);
+  if (desired.length !== existing.length || desired.some((v, i) => v !== existing[i])) {
+    sel.innerHTML = `<option value="">— select —</option>` +
+      watch.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("");
+  }
+  if (sel.value !== (st.selectedSymbol ?? "")) sel.value = st.selectedSymbol ?? "";
+
+  // Sync the ticket-symbol <datalist> from the watchlist so the trader
+  // gets autocomplete for tickers they're already subscribed to.
+  const dl = $("watchlist-symbols");
+  if (dl) {
+    const want = watch.map(s => `<option value="${escapeHtml(s)}"></option>`).join("");
+    if (dl.innerHTML !== want) dl.innerHTML = want;
+  }
+
+  // Mirror the active symbol on each panel header tag.
+  for (const id of ["dob-symbol-tag", "chart-symbol-tag", "tape-symbol-tag"]) {
+    const tag = $(id);
+    if (!tag) continue;
+    if (id === "tape-symbol-tag" && st.tapeShowAll) {
+      tag.textContent = "all";
+      tag.classList.add("symbol-tag--muted");
+    } else {
+      tag.textContent = st.selectedSymbol ?? "—";
+      tag.classList.toggle("symbol-tag--muted", !st.selectedSymbol);
+    }
+  }
+
+  // Keep the tape "All symbols" checkbox in sync with state.
+  const tapeAll = $("tape-show-all");
+  if (tapeAll && tapeAll.checked !== !!st.tapeShowAll) {
+    tapeAll.checked = !!st.tapeShowAll;
+  }
 }
 
 // ── Chart panel (T3) ──────────────────────────────────────────────
@@ -739,13 +856,15 @@ function renderTape() {
 
 function tapeRow(e) {
   const cls = `tape-${e.side}` + (e.busted ? " tape-busted" : "");
-  const ts = new Date(e.receivedAt).toISOString().slice(11, 19);
+  // Include milliseconds (slice 11..23) so two prints in the same
+  // second can still be ordered visually.
+  const ts = new Date(e.receivedAt).toISOString().slice(11, 23);
   const arrow = e.side === "up" ? "▲" : e.side === "down" ? "▼" : "·";
   return `<li class="${cls}">`
     + `<span>${ts}</span>`
     + `<span>${escapeHtml(e.symbol)}</span>`
-    + `<span class="tape-num">${arrow} ${Number(e.price).toFixed(2)}</span>`
-    + `<span class="tape-num">${e.qty}</span>`
+    + `<span class="tape-num">${arrow} ${fmtPx(e.price)}</span>`
+    + `<span class="tape-num">${fmtQty(e.qty)}</span>`
     + `<span class="tape-num">#${e.tradeId}</span>`
     + `</li>`;
 }
@@ -800,22 +919,26 @@ const HIGHLIGHT_MS = 2000;
 
 function orderRow(o, st) {
   const terminal = isTerminalOrderStatus(o.status);
-  const price = o.price == null ? "—" : Number(o.price).toFixed(2);
+  const cancelInflight = st.inflightCancels?.has(o.clOrdId);
+  const price = o.price == null ? "—" : fmtPx(o.price);
   const highlightAt = st.ordersHighlight?.get(o.clOrdId);
   const fresh = highlightAt && (Date.now() - highlightAt) < HIGHLIGHT_MS;
   const selected = st.selectedClOrdId === o.clOrdId;
   const cls = [fresh ? "row-fresh" : "", selected ? "row-selected" : ""].filter(Boolean).join(" ");
+  const cancelDisabled = terminal || cancelInflight;
+  const cancelLabel = cancelInflight ? "Cancelling…" : "Cancel";
+  const cancelCls = "cancel-btn" + (cancelInflight ? " cancelling" : "");
   return `<tr data-clordid="${escapeHtml(o.clOrdId)}"${cls ? ` class="${cls}"` : ""}>
     <td><code>${escapeHtml(o.clOrdId)}</code></td>
     <td>${escapeHtml(o.symbol)}</td>
     <td>${escapeHtml(o.side)}</td>
     <td>${escapeHtml(o.type)}</td>
-    <td class="num">${o.quantity}</td>
-    <td class="num">${o.leavesQuantity}</td>
-    <td class="num">${o.cumulativeQuantity}</td>
+    <td class="num">${fmtQty(o.quantity)}</td>
+    <td class="num">${fmtQty(o.leavesQuantity)}</td>
+    <td class="num">${fmtQty(o.cumulativeQuantity)}</td>
     <td class="num">${price}</td>
     <td class="status-cell-${escapeHtml(o.status)}">${escapeHtml(o.status)}</td>
-    <td><button class="cancel-btn" data-clordid="${escapeHtml(o.clOrdId)}" aria-label="Cancel order ${escapeHtml(o.clOrdId)}" ${terminal ? "disabled" : ""}>Cancel</button></td>
+    <td><button class="${cancelCls}" data-clordid="${escapeHtml(o.clOrdId)}" aria-label="Cancel order ${escapeHtml(o.clOrdId)}" title="Cancel (Del)" ${cancelDisabled ? "disabled" : ""}>${cancelLabel}</button></td>
   </tr>`;
 }
 
@@ -835,8 +958,8 @@ function renderPositions() {
     ? `<tr><td colspan="3" class="muted">No positions</td></tr>`
     : positions.map(p => `<tr>
         <td>${escapeHtml(p.symbol)}</td>
-        <td class="num">${p.netQuantity}</td>
-        <td class="num">${Number(p.averageEntryPrice).toFixed(2)}</td>
+        <td class="num">${fmtQty(p.netQuantity)}</td>
+        <td class="num">${fmtPx(p.averageEntryPrice)}</td>
       </tr>`).join("");
 }
 
@@ -850,11 +973,12 @@ function renderExecutions() {
 function execRow(e) {
   const ts = new Date(e.timestampUtc).toISOString().slice(11, 23);
   const reason = e.rejectReason ? ` — ${escapeHtml(e.rejectReason)}` : "";
-  const lastPx = e.lastQuantity > 0 ? ` @ ${Number(e.lastPrice).toFixed(2)}` : "";
+  const lastPx = e.lastQuantity > 0 ? ` @ ${fmtPx(e.lastPrice)}` : "";
+  const lastQty = e.lastQuantity > 0 ? fmtQty(e.lastQuantity) : "";
   return `<li>
     <span class="ts">${ts}</span>
     <span class="kind ${escapeHtml(e.kind)}">${escapeHtml(e.kind)}</span>
-    <span class="meta">${escapeHtml(e.clOrdId)} ${escapeHtml(e.symbol)} ${e.lastQuantity || ""}${lastPx}${reason}</span>
+    <span class="meta">${escapeHtml(e.clOrdId)} ${escapeHtml(e.symbol)} ${lastQty}${lastPx}${reason}</span>
   </li>`;
 }
 

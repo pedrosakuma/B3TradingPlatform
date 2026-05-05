@@ -111,6 +111,7 @@ async function onLogin(e) {
   const username = document.getElementById("login-username").value.trim();
   const password = document.getElementById("login-password").value;
   const remember = !!document.getElementById("login-remember")?.checked;
+  ui.setLoginSubmitting(true);
   try {
     const resp = await login(backend, username, password);
     const claims = claimsFromToken(resp.token);
@@ -128,6 +129,8 @@ async function onLogin(e) {
     startSession(next);
   } catch (err) {
     ui.setLoginError(err.message || "Login failed");
+  } finally {
+    ui.setLoginSubmitting(false);
   }
 }
 
@@ -328,12 +331,28 @@ function handleApplyMd({ url, symbols }) {
 // symbol (server allocates fresh securityIds per flag set), which would
 // briefly blank market-data and trade-tape — not worth it.
 let mbpEnabled = false;
+let lastAutoFilledTicketSymbol = null;
+let _successToastTimer = null;
 
 function handleSelectSymbol(symbol) {
   // Single global selector drives DOB, chart and tape. As soon as the
   // user picks anything we promote the MD subscription to MBP so the
   // book panel can render depth (the default is TRADES|INFO only).
   state.setSelectedSymbol(symbol || null);
+  // Auto-fill the ticket-symbol input when it's empty or still tracking
+  // a previously auto-filled symbol. We never clobber a value the trader
+  // is actively editing for a different name — wrong-symbol orders are
+  // the worst class of mistake we can prevent here.
+  if (symbol) {
+    const sym = document.getElementById("ticket-symbol");
+    if (sym) {
+      const cur = (sym.value || "").trim().toUpperCase();
+      if (!cur || cur === lastAutoFilledTicketSymbol) {
+        sym.value = symbol;
+        lastAutoFilledTicketSymbol = symbol;
+      }
+    }
+  }
   if (!symbol || !mdWorker || mbpEnabled) return;
   const flags = FLAGS.TRADES | FLAGS.INFO | FLAGS.MBP;
   mdWorker.postMessage({ type: "setFlags", flags });
@@ -404,15 +423,23 @@ async function handleSubmitOrder(payload) {
   // Fat-finger guard: first attempt with a >threshold deviation from
   // the last observed trade is rejected with a warning; the same exact
   // payload submitted again within the pending window goes through.
+  // We TTL the pending guard at 15s so a trader who walks away and
+  // returns later doesn't have an old "armed" override silently apply
+  // to a fresh ticket.
+  const FAT_FINGER_TTL_MS = 15_000;
   const lastPrice = state.getState().marketData.get(payload.symbol)?.lastPrice;
   const ff = fatFingerCheck(payload, lastPrice);
   const key = payloadKey(payload);
-  const pending = state.getState().pendingFatFinger;
+  let pending = state.getState().pendingFatFinger;
+  if (pending && pending.setAt && (Date.now() - pending.setAt) > FAT_FINGER_TTL_MS) {
+    state.setPendingFatFinger(null);
+    pending = null;
+  }
   if (ff && (!pending || pending.key !== key)) {
     state.setPendingFatFinger(payload, key);
     const pct = (ff.deviation * 100).toFixed(1);
     ui.setTicketFeedback(
-      `fat-finger guard: price deviates ${pct}% from last trade ${ff.lastPrice}. Click Submit again to override.`,
+      `fat-finger guard: price deviates ${pct}% from last trade ${ui.fmtPx(ff.lastPrice)}. Click Submit again to override.`,
       "warn",
     );
     return;
@@ -425,8 +452,16 @@ async function handleSubmitOrder(payload) {
   state.setSubmitInflight({ startedAt: Date.now() });
   try {
     const resp = await submitOrder(session.backend, session.token, payload);
-    ui.setTicketFeedback(`accepted: ${resp.clOrdId}${resp.status ? ` (${resp.status})` : ""}`, "ok");
+    const msg = `accepted: ${resp.clOrdId}${resp.status ? ` (${resp.status})` : ""}`;
+    ui.setTicketFeedback(msg, "ok");
     ui.clearTicket();
+    // Auto-dismiss the success toast after 5s, but only if the message
+    // hasn't been replaced (e.g. by a later submit's warning/error).
+    if (_successToastTimer) clearTimeout(_successToastTimer);
+    _successToastTimer = setTimeout(() => {
+      _successToastTimer = null;
+      ui.setTicketFeedbackIfMatches(msg, null);
+    }, 5000);
   } catch (err) {
     if (err.status === 401) { logout(); return; }
     ui.setTicketFeedback(err.message || "submit failed", "error");
@@ -438,11 +473,24 @@ async function handleSubmitOrder(payload) {
 
 async function handleCancelOrder(clOrdId) {
   if (!session) return;
+  const st = state.getState();
+  // Don't prompt twice / send duplicate DELETEs while one is in flight,
+  // and skip orders that already finished or have a cancel acked.
+  if (st.inflightCancels && st.inflightCancels.has(clOrdId)) return;
+  const order = st.orders.get(clOrdId);
+  if (order && ["Filled", "Cancelled", "Rejected", "PendingCancel"].includes(order.status)) return;
+  // Both the mouse (blotter Cancel button) and the keyboard (Del)
+  // routes funnel through here; confirmation is centralised so the two
+  // paths can't drift in safety.
+  if (!window.confirm(`Cancel order ${clOrdId}?`)) return;
+  state.markCancelInflight(clOrdId, true);
   try {
     await cancelOrder(session.backend, session.token, clOrdId);
   } catch (err) {
     if (err.status === 401) { logout(); return; }
     ui.setTicketFeedback(`cancel failed: ${err.message}`, "error");
+  } finally {
+    state.markCancelInflight(clOrdId, false);
   }
 }
 
@@ -470,7 +518,8 @@ function handleKeyboardCancel() {
   if (!id) return;
   const order = state.getState().orders.get(id);
   if (!order || ["Filled", "Cancelled", "Rejected"].includes(order.status)) return;
-  if (!window.confirm(`Cancel order ${id}?`)) return;
+  // Confirmation lives inside handleCancelOrder so mouse and keyboard
+  // routes share the same safety prompt.
   handleCancelOrder(id);
 }
 

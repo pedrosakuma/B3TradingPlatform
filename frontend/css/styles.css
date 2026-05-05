@@ -50,6 +50,11 @@ body {
   font-weight: 600; cursor: pointer; font: inherit;
 }
 .login-card button:hover { filter: brightness(1.1); }
+.login-card button[disabled] { opacity: .6; cursor: not-allowed; filter: none; }
+.login-advanced { font-size: .75rem; color: var(--muted); }
+.login-advanced summary { cursor: pointer; padding: .15rem 0; user-select: none; }
+.login-advanced summary:hover { color: var(--text); }
+.login-advanced > .row { margin-top: .5rem; }
 .error { color: var(--red); font-size: .85rem; margin: 0; }
 
 /* ---------- Trader shell ---------- */
@@ -229,6 +234,8 @@ td { padding: .35rem .5rem; border-bottom: 1px solid #20283a; }
   padding: .15rem .5rem; border-radius: 3px; cursor: pointer; font: inherit; font-size: .75rem;
 }
 .cancel-btn:disabled { opacity: .35; cursor: not-allowed; }
+.cancel-btn.cancelling { opacity: .55; cursor: progress; }
+.md-cell-stale { color: var(--warn); }
 .status-cell-Working   { color: var(--green); }
 .status-cell-PendingNew { color: var(--warn); }
 .status-cell-Cancelled { color: var(--gray); }
