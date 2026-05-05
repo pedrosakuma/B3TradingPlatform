@@ -52,6 +52,16 @@ const state = {
   currentView: "trader",   // "trader" | "admin" — which view is mounted
   // Blotter UX (section 3 of #30).
   blotterFilter: { text: "", status: "" }, // { text: substring, status: "" | <OrderStatus> }
+  // Per-ClOrdID monotonic arrival sequence. Newly-seen orders get the
+  // next number; updates keep the original. Drives the default
+  // newest-first sort of the working orders blotter, robust to the
+  // order in which the worker delivers snapshot rows.
+  orderSeq: new Map(),                     // ClOrdID -> sequence number
+  orderSeqCounter: 0,
+  // Pagination of the blotter (1-based). Page resets to 1 whenever the
+  // filter changes; the renderer re-clamps if the visible page falls
+  // off the end (e.g. orders disappear after a snapshot replace).
+  blotterPage: 1,
   ordersHighlight: new Map(),              // ClOrdID -> Date.now() of last delta
   selectedClOrdId: null,                   // currently selected blotter row (for keyboard cancel)
   pendingFatFinger: null,                  // { payload, key } — set when a submit needs override
@@ -75,10 +85,24 @@ export function setStatus(status) { state.status = status;  notify("status"); }
 
 export function applyOrdersSnapshot(rows) {
   state.orders = new Map(rows.map(r => [r.clOrdId, r]));
+  // Assign arrival sequence to any ClOrdID we haven't seen yet.
+  // Snapshots replay the full set on reconnect — preserve previously-
+  // assigned numbers so the blotter ordering stays stable across
+  // reconnects.
+  for (const r of rows) {
+    if (!state.orderSeq.has(r.clOrdId)) {
+      state.orderSeqCounter += 1;
+      state.orderSeq.set(r.clOrdId, state.orderSeqCounter);
+    }
+  }
   notify("orders");
 }
 export function applyOrdersDelta(row) {
   state.orders.set(row.clOrdId, row);
+  if (!state.orderSeq.has(row.clOrdId)) {
+    state.orderSeqCounter += 1;
+    state.orderSeq.set(row.clOrdId, state.orderSeqCounter);
+  }
   // Mark this row as freshly updated so the UI can flash it; the
   // highlight expires naturally — readers compare against now.
   state.ordersHighlight.set(row.clOrdId, Date.now());
@@ -116,6 +140,9 @@ export function clearAll() {
   state.positions.clear();
   state.executions = [];
   state.ordersHighlight.clear();
+  state.orderSeq.clear();
+  state.orderSeqCounter = 0;
+  state.blotterPage = 1;
   state.selectedClOrdId = null;
   state.pendingFatFinger = null;
   notify("all");
@@ -518,7 +545,17 @@ export function setBlotterFilter(filter) {
     text:   typeof filter?.text   === "string" ? filter.text   : "",
     status: typeof filter?.status === "string" ? filter.status : "",
   };
+  // Filter changes shrink the visible set; reset pagination so the
+  // user lands on results instead of a now-empty page N.
+  state.blotterPage = 1;
   notify("blotterFilter");
+}
+
+export function setBlotterPage(page) {
+  const next = Math.max(1, Math.floor(Number(page) || 1));
+  if (state.blotterPage === next) return;
+  state.blotterPage = next;
+  notify("blotterPage");
 }
 
 export function setSelectedOrder(clOrdId) {

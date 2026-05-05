@@ -368,6 +368,22 @@ td { padding: .35rem .5rem; border-bottom: 1px solid #20283a; }
   border-radius: 4px; padding: .25rem .45rem; font: inherit; font-size: .8rem;
 }
 .blotter-filter input { flex: 1; }
+.blotter-pagination {
+  display: flex; align-items: center; justify-content: flex-end;
+  gap: .5rem; margin-top: .4rem; font-size: .8rem;
+}
+.blotter-pagination button {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 4px; padding: .25rem .55rem; font: inherit; font-size: .8rem;
+  cursor: pointer;
+}
+.blotter-pagination button:disabled {
+  opacity: .4; cursor: default;
+}
+.blotter-pagination button:not(:disabled):hover {
+  background: rgba(255,255,255,.05);
+}
+.blotter-page-info { color: var(--muted); font-variant-numeric: tabular-nums; }
 @keyframes row-fresh-fade {
   0%   { background: rgba(79,158,255,.32); }
   100% { background: transparent; }

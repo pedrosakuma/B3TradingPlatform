@@ -13,6 +13,7 @@ let onLogout      = () => {};
 let onApplyMd     = () => {};
 let onSwitchView  = () => {};
 let onBlotterFilter  = () => {};
+let onBlotterPage    = () => {};
 let onSelectOrder    = () => {};
 let onKeyboardCancel = () => {};
 let onSelectChartResolution = () => {};
@@ -26,6 +27,7 @@ export function setHandlers(handlers) {
   onApplyMd        = handlers.onApplyMd        ?? onApplyMd;
   onSwitchView     = handlers.onSwitchView     ?? onSwitchView;
   onBlotterFilter  = handlers.onBlotterFilter  ?? onBlotterFilter;
+  onBlotterPage    = handlers.onBlotterPage    ?? onBlotterPage;
   onSelectOrder    = handlers.onSelectOrder    ?? onSelectOrder;
   onKeyboardCancel = handlers.onKeyboardCancel ?? onKeyboardCancel;
   onSelectChartResolution = handlers.onSelectChartResolution ?? onSelectChartResolution;
@@ -166,6 +168,14 @@ export function bindUi() {
   });
   if (filterText)   filterText.addEventListener("input",  fireFilter);
   if (filterStatus) filterStatus.addEventListener("change", fireFilter);
+
+  // Blotter pagination controls. Renderer hides the bar when there's
+  // only one page; clicks here only request a page change — clamping
+  // and bounds-checking happen in the state setter / renderer.
+  const prevBtn = $("blotter-prev");
+  const nextBtn = $("blotter-next");
+  if (prevBtn) prevBtn.addEventListener("click", () => onBlotterPage(-1));
+  if (nextBtn) nextBtn.addEventListener("click", () => onBlotterPage(+1));
 
   // Market data form: apply WS URL + watchlist atomically.
   $("md-form").addEventListener("submit", (e) => {
@@ -401,7 +411,7 @@ function renderFirmsHealth() {
 }
 
 function renderForSlice(slice) {
-  if (slice === "orders" || slice === "all" || slice === "blotterFilter" || slice === "selectedOrder") renderBlotter();
+  if (slice === "orders" || slice === "all" || slice === "blotterFilter" || slice === "blotterPage" || slice === "selectedOrder") renderBlotter();
   if (slice === "positions" || slice === "all") renderPositions();
   if (slice === "executions" || slice === "all") renderExecutions();
   if (slice === "status") {
@@ -720,6 +730,8 @@ function tapeRow(e) {
     + `</li>`;
 }
 
+const BLOTTER_PAGE_SIZE = 25;
+
 function renderBlotter() {
   const body = $("blotter-body");
   const st = getState();
@@ -728,12 +740,40 @@ function renderBlotter() {
   const search = filter.text.trim().toUpperCase();
   const wantStatus = filter.status;
   const all = [...st.orders.values()];
-  const orders = all
+  // Default sort: newest-first by per-ClOrdID arrival sequence
+  // (assigned in state.applyOrders*). Falling back to clOrdId keeps
+  // ordering deterministic if seq is missing for any reason.
+  const seqOf = (o) => st.orderSeq?.get(o.clOrdId) ?? 0;
+  const filtered = all
     .filter(o => !search || o.symbol.toUpperCase().includes(search) || o.clOrdId.toUpperCase().includes(search))
     .filter(o => !wantStatus || o.status === wantStatus)
-    .sort((a, b) => a.clOrdId.localeCompare(b.clOrdId));
-  $("blotter-count").textContent = `${orders.length}/${all.length}`;
-  body.innerHTML = orders.map(o => orderRow(o, st)).join("");
+    .sort((a, b) => {
+      const diff = seqOf(b) - seqOf(a);
+      return diff !== 0 ? diff : b.clOrdId.localeCompare(a.clOrdId);
+    });
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / BLOTTER_PAGE_SIZE));
+  const page = Math.min(Math.max(1, st.blotterPage ?? 1), totalPages);
+  const start = (page - 1) * BLOTTER_PAGE_SIZE;
+  const pageRows = filtered.slice(start, start + BLOTTER_PAGE_SIZE);
+
+  $("blotter-count").textContent = `${filtered.length}/${all.length}`;
+  body.innerHTML = pageRows.map(o => orderRow(o, st)).join("");
+
+  const pager = $("blotter-pagination");
+  if (pager) {
+    if (totalPages <= 1) {
+      pager.hidden = true;
+    } else {
+      pager.hidden = false;
+      const info = $("blotter-page-info");
+      if (info) info.textContent = `page ${page} / ${totalPages}`;
+      const prev = $("blotter-prev");
+      const next = $("blotter-next");
+      if (prev) prev.disabled = page <= 1;
+      if (next) next.disabled = page >= totalPages;
+    }
+  }
 }
 
 const HIGHLIGHT_MS = 2000;
