@@ -42,6 +42,23 @@ services:
       Trading__Auth__Users__0__Iterations: "600000"
       Trading__Auth__Users__0__Role: user
       Trading__Auth__Users__0__Firm: default
+      # Second user (bob) seeded by default so dogfooding scenarios that
+      # need both sides of a trade — crosses, fill-against, position-flip
+      # exercises — work out of the box. PBKDF2 is deterministic on
+      # plaintext+salt, so reusing TRADING_SEED_PASSWORD_HASH/SALT under
+      # a different username produces a valid login for the same password.
+      # Same firm as alice on purpose; a future overlay can move bob to
+      # a separate firm when cross-firm scenarios become a thing.
+      # Slot Users__5 (not 1) so demo-overlay seed users — bot-clientA (1),
+      # bot-clientB (2), demo-admin (3), and the conformance overlay's
+      # carol (4) — don't collide with bob when overlays stack on top.
+      # Sparse indexes are fine for .NET's configuration array binder.
+      Trading__Auth__Users__5__Username: ${TRADING_SEED_USER_2:-bob}
+      Trading__Auth__Users__5__PasswordHash: ${TRADING_SEED_PASSWORD_HASH}
+      Trading__Auth__Users__5__Salt: ${TRADING_SEED_PASSWORD_SALT}
+      Trading__Auth__Users__5__Iterations: "600000"
+      Trading__Auth__Users__5__Role: user
+      Trading__Auth__Users__5__Firm: default
       # CORS list from origin of nginx frontend. Same-origin via nginx proxy
       # means this is mostly redundant, but cheap insurance for direct curls.
       Trading__Cors__AllowedOrigins__0: http://localhost:${FRONTEND_PORT:-8080}

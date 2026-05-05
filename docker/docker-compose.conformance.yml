@@ -19,15 +19,16 @@ services:
   # Add an admin-role seed user so the conformance suite can hit /admin/*.
   # Reuses alice's hash/salt (PBKDF2 is deterministic on plaintext+salt)
   # under a different username + role=admin, so no extra secret-management
-  # is required.
+  # is required. Slot Users__4 to avoid colliding with base (alice=0,
+  # bob=3) and demo (bot-clientA=1, bot-clientB=2).
   trading-host:
     environment:
-      Trading__Auth__Users__1__Username: ${TRADING_ADMIN_USER:-carol}
-      Trading__Auth__Users__1__PasswordHash: ${TRADING_SEED_PASSWORD_HASH:?Set TRADING_SEED_PASSWORD_HASH in .env (PBKDF2 base64)}
-      Trading__Auth__Users__1__Salt: ${TRADING_SEED_PASSWORD_SALT:?Set TRADING_SEED_PASSWORD_SALT in .env (base64)}
-      Trading__Auth__Users__1__Iterations: "600000"
-      Trading__Auth__Users__1__Role: admin
-      Trading__Auth__Users__1__Firm: default
+      Trading__Auth__Users__4__Username: ${TRADING_ADMIN_USER:-carol}
+      Trading__Auth__Users__4__PasswordHash: ${TRADING_SEED_PASSWORD_HASH:?Set TRADING_SEED_PASSWORD_HASH in .env (PBKDF2 base64)}
+      Trading__Auth__Users__4__Salt: ${TRADING_SEED_PASSWORD_SALT:?Set TRADING_SEED_PASSWORD_SALT in .env (base64)}
+      Trading__Auth__Users__4__Iterations: "600000"
+      Trading__Auth__Users__4__Role: admin
+      Trading__Auth__Users__4__Firm: default
 
   conformance:
     build:
