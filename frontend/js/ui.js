@@ -15,10 +15,9 @@ let onSwitchView  = () => {};
 let onBlotterFilter  = () => {};
 let onSelectOrder    = () => {};
 let onKeyboardCancel = () => {};
-let onSelectDobSymbol = () => {};
-let onSelectChartSymbol = () => {};
 let onSelectChartResolution = () => {};
-let onSelectTapeSymbol = () => {};
+let onSelectSymbol = () => {};
+let onToggleTapeShowAll = () => {};
 
 export function setHandlers(handlers) {
   onSubmitOrder    = handlers.onSubmitOrder    ?? onSubmitOrder;
@@ -29,10 +28,9 @@ export function setHandlers(handlers) {
   onBlotterFilter  = handlers.onBlotterFilter  ?? onBlotterFilter;
   onSelectOrder    = handlers.onSelectOrder    ?? onSelectOrder;
   onKeyboardCancel = handlers.onKeyboardCancel ?? onKeyboardCancel;
-  onSelectDobSymbol = handlers.onSelectDobSymbol ?? onSelectDobSymbol;
-  onSelectChartSymbol     = handlers.onSelectChartSymbol     ?? onSelectChartSymbol;
   onSelectChartResolution = handlers.onSelectChartResolution ?? onSelectChartResolution;
-  onSelectTapeSymbol      = handlers.onSelectTapeSymbol      ?? onSelectTapeSymbol;
+  onSelectSymbol      = handlers.onSelectSymbol      ?? onSelectSymbol;
+  onToggleTapeShowAll = handlers.onToggleTapeShowAll ?? onToggleTapeShowAll;
 }
 
 export function showLogin() {
@@ -170,21 +168,15 @@ export function bindUi() {
     onApplyMd({ url, symbols });
   });
 
-  // DOB symbol selector — empty value clears the selection.
-  const dobSelect = $("dob-symbol");
-  if (dobSelect) {
-    dobSelect.addEventListener("change", (e) => {
-      onSelectDobSymbol(e.target.value || null);
+  // Global symbol selector (drives DOB / chart / tape).
+  const symSelect = $("selected-symbol");
+  if (symSelect) {
+    symSelect.addEventListener("change", (e) => {
+      onSelectSymbol(e.target.value || null);
     });
   }
 
-  // Chart selectors (T3).
-  const chartSym = $("chart-symbol");
-  if (chartSym) {
-    chartSym.addEventListener("change", (e) => {
-      onSelectChartSymbol(e.target.value || null);
-    });
-  }
+  // Chart resolution selector (T3).
   const chartRes = $("chart-resolution");
   if (chartRes) {
     chartRes.addEventListener("change", (e) => {
@@ -192,11 +184,11 @@ export function bindUi() {
     });
   }
 
-  // Tape (T4): symbol filter + pause-on-hover.
-  const tapeSel = $("tape-symbol");
-  if (tapeSel) {
-    tapeSel.addEventListener("change", (e) => {
-      onSelectTapeSymbol(e.target.value || null);
+  // Tape (T4): "All symbols" toggle + pause-on-hover.
+  const tapeAll = $("tape-show-all");
+  if (tapeAll) {
+    tapeAll.addEventListener("change", (e) => {
+      onToggleTapeShowAll(e.target.checked);
     });
   }
   const tapeList = $("tape-list");
@@ -413,9 +405,10 @@ function renderForSlice(slice) {
   if (slice === "wsReconnect") renderReconnect();
   if (slice === "firmsHealth" || slice === "all") renderFirmsHealth();
   if (slice === "currentView" || slice === "all") applyCurrentView(getState().currentView);
-  if (slice === "watchlist" || slice === "dobSymbol" || slice === "book" || slice === "all") renderDob();
-  if (slice === "watchlist" || slice === "chartSymbol" || slice === "chartResolution" || slice === "candles" || slice === "all") scheduleChartRender();
-  if (slice === "watchlist" || slice === "tapeSymbol" || slice === "tape" || slice === "all") scheduleTapeRender();
+  if (slice === "watchlist" || slice === "selectedSymbol" || slice === "all") renderSelectedSymbol();
+  if (slice === "watchlist" || slice === "selectedSymbol" || slice === "book" || slice === "all") renderDob();
+  if (slice === "watchlist" || slice === "selectedSymbol" || slice === "chartResolution" || slice === "candles" || slice === "all") scheduleChartRender();
+  if (slice === "watchlist" || slice === "selectedSymbol" || slice === "tapeShowAll" || slice === "tape" || slice === "all") scheduleTapeRender();
 }
 
 function renderAll() {
@@ -425,6 +418,7 @@ function renderAll() {
   setStatusPill(getState().status);
   setUserLabel(getState().user);
   renderMarketData();
+  renderSelectedSymbol();
   renderDob();
   scheduleChartRender();
   scheduleTapeRender();
@@ -473,27 +467,47 @@ function renderMarketData() {
 
 const DOB_TOP_N = 10;
 
+function renderSelectedSymbol() {
+  const sel = $("selected-symbol");
+  if (!sel) return;
+  const st = getState();
+  const watch = st.watchlist;
+  const desired = ["", ...watch];
+  const existing = [...sel.options].map(o => o.value);
+  if (desired.length !== existing.length || desired.some((v, i) => v !== existing[i])) {
+    sel.innerHTML = `<option value="">— select —</option>` +
+      watch.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("");
+  }
+  if (sel.value !== (st.selectedSymbol ?? "")) sel.value = st.selectedSymbol ?? "";
+
+  // Mirror the active symbol on each panel header tag.
+  for (const id of ["dob-symbol-tag", "chart-symbol-tag", "tape-symbol-tag"]) {
+    const tag = $(id);
+    if (!tag) continue;
+    if (id === "tape-symbol-tag" && st.tapeShowAll) {
+      tag.textContent = "all";
+      tag.classList.add("symbol-tag--muted");
+    } else {
+      tag.textContent = st.selectedSymbol ?? "—";
+      tag.classList.toggle("symbol-tag--muted", !st.selectedSymbol);
+    }
+  }
+
+  // Keep the tape "All symbols" checkbox in sync with state.
+  const tapeAll = $("tape-show-all");
+  if (tapeAll && tapeAll.checked !== !!st.tapeShowAll) {
+    tapeAll.checked = !!st.tapeShowAll;
+  }
+}
+
 function renderDob() {
-  const select = $("dob-symbol");
   const bidsBody = document.querySelector("#dob-bids tbody");
   const asksBody = document.querySelector("#dob-asks tbody");
   const feedback = $("dob-feedback");
-  if (!select || !bidsBody || !asksBody) return;
+  if (!bidsBody || !asksBody) return;
 
   const st = getState();
-  const watch = st.watchlist;
-  const current = st.dobSymbol;
-
-  // Sync the symbol dropdown with the current watchlist.
-  const desired = ["", ...watch];
-  const existing = [...select.options].map(o => o.value);
-  if (desired.length !== existing.length || desired.some((v, i) => v !== existing[i])) {
-    select.innerHTML = `<option value="">— select symbol —</option>` +
-      watch.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("");
-  }
-  if (select.value !== (current ?? "")) {
-    select.value = current ?? "";
-  }
+  const current = st.selectedSymbol;
 
   if (!current) {
     bidsBody.innerHTML = `<tr><td colspan="3" class="muted-cell">select a symbol</td></tr>`;
@@ -566,21 +580,11 @@ function scheduleChartRender() {
 function renderChart() {
   const svg   = $("chart-svg");
   const empty = $("chart-empty");
-  const symSel = $("chart-symbol");
   const resSel = $("chart-resolution");
-  if (!svg || !symSel || !resSel) return;
+  if (!svg || !resSel) return;
 
   const st = getState();
-  const watch = st.watchlist;
 
-  // Sync symbol dropdown with the watchlist.
-  const desired = ["", ...watch];
-  const existing = [...symSel.options].map(o => o.value);
-  if (desired.length !== existing.length || desired.some((v, i) => v !== existing[i])) {
-    symSel.innerHTML = `<option value="">— select symbol —</option>` +
-      watch.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("");
-  }
-  if (symSel.value !== (st.chartSymbol ?? "")) symSel.value = st.chartSymbol ?? "";
   const resStr = String(st.chartResolution);
   if (resSel.value !== resStr) resSel.value = resStr;
 
@@ -589,9 +593,9 @@ function renderChart() {
     if (empty) { empty.hidden = false; empty.textContent = msg; }
   };
 
-  if (!st.chartSymbol) { showEmpty("select a symbol"); return; }
+  if (!st.selectedSymbol) { showEmpty("select a symbol"); return; }
 
-  const perRes = st.candles.get(st.chartSymbol);
+  const perRes = st.candles.get(st.selectedSymbol);
   const entry = perRes?.get(st.chartResolution);
   if (!entry || !entry.ready || entry.bars.length === 0) {
     showEmpty("awaiting candle snapshot…");
@@ -659,40 +663,34 @@ function scheduleTapeRender() {
 
 function renderTape() {
   const list = $("tape-list");
-  const sel = $("tape-symbol");
-  if (!list || !sel) return;
+  if (!list) return;
 
   const st = getState();
-  const watch = st.watchlist;
 
-  // Sync filter dropdown with the watchlist; "" === all.
-  const desired = ["", ...watch];
-  const existing = [...sel.options].map(o => o.value);
-  if (desired.length !== existing.length || desired.some((v, i) => v !== existing[i])) {
-    sel.innerHTML = `<option value="">All</option>` +
-      watch.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("");
-  }
-  if (sel.value !== (st.tapeSymbol ?? "")) sel.value = st.tapeSymbol ?? "";
-
-  // Collect rows. Single-symbol view is just the per-symbol ring; the
-  // "all" view flattens every cached symbol and re-sorts by receivedAt
-  // descending. Both paths slice to TAPE_VISIBLE before rendering.
+  // Source of rows: when tapeShowAll is true, flatten every cached
+  // symbol and re-sort by receivedAt desc. Otherwise scope to the
+  // shared selectedSymbol — if no symbol is picked, render empty.
   let rows;
-  if (st.tapeSymbol) {
-    const arr = st.tape.get(st.tapeSymbol);
-    rows = arr ? arr.slice().reverse() : [];
-    rows = rows.slice(0, TAPE_VISIBLE).map(e => ({ ...e, symbol: st.tapeSymbol }));
-  } else {
+  if (st.tapeShowAll) {
     rows = [];
     for (const [sym, arr] of st.tape) {
       for (const e of arr) rows.push({ ...e, symbol: sym });
     }
     rows.sort((a, b) => b.receivedAt - a.receivedAt);
     rows = rows.slice(0, TAPE_VISIBLE);
+  } else if (st.selectedSymbol) {
+    const arr = st.tape.get(st.selectedSymbol);
+    rows = arr ? arr.slice().reverse() : [];
+    rows = rows.slice(0, TAPE_VISIBLE).map(e => ({ ...e, symbol: st.selectedSymbol }));
+  } else {
+    rows = [];
   }
 
   if (rows.length === 0) {
-    list.innerHTML = `<li class="tape-empty">no trades yet</li>`;
+    const msg = st.tapeShowAll
+      ? "no trades yet"
+      : (st.selectedSymbol ? "no trades yet" : "select a symbol");
+    list.innerHTML = `<li class="tape-empty">${msg}</li>`;
     return;
   }
 
