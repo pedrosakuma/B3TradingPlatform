@@ -169,6 +169,28 @@ services:
       Trading__Risk__ReferencePrices__PETR4: "32.50"
       Trading__Risk__ReferencePrices__VALE3: "65.00"
       Trading__Risk__ReferencePrices__ITUB4: "30.00"
+      # Opening positions seeded for the default dogfood accounts so
+      # both alice and bob can sell out of the box without being blocked
+      # by the NoNakedShortCheck gate. Quantities are expressed in
+      # board-lot units (matching's lotSize=100, so 2000 = 20 lots).
+      # Seeds apply only when PersistenceRecovery leaves the slot empty,
+      # so a warm restart never overwrites real fills.
+      Trading__Positions__Seeds__0__EndClientId: ${TRADING_SEED_USER:-alice}
+      Trading__Positions__Seeds__0__Symbol: PETR4
+      Trading__Positions__Seeds__0__Quantity: "2000"
+      Trading__Positions__Seeds__0__AverageEntryPrice: "32.50"
+      Trading__Positions__Seeds__1__EndClientId: ${TRADING_SEED_USER:-alice}
+      Trading__Positions__Seeds__1__Symbol: VALE3
+      Trading__Positions__Seeds__1__Quantity: "2000"
+      Trading__Positions__Seeds__1__AverageEntryPrice: "65.00"
+      Trading__Positions__Seeds__2__EndClientId: ${TRADING_SEED_USER_2:-bob}
+      Trading__Positions__Seeds__2__Symbol: PETR4
+      Trading__Positions__Seeds__2__Quantity: "2000"
+      Trading__Positions__Seeds__2__AverageEntryPrice: "32.50"
+      Trading__Positions__Seeds__3__EndClientId: ${TRADING_SEED_USER_2:-bob}
+      Trading__Positions__Seeds__3__Symbol: VALE3
+      Trading__Positions__Seeds__3__Quantity: "2000"
+      Trading__Positions__Seeds__3__AverageEntryPrice: "65.00"
       # Live reference price via the marketdata WS leg (RFC §4.5 D3).
       # MarketDataReferencePrice subscribes to PETR4/VALE3/ITUB4 on boot;
       # cache misses fall back to Trading:Risk:ReferencePrices map. The

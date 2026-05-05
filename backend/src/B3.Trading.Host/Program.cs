@@ -11,6 +11,7 @@ using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.Risk.Accounting;
 using B3.Trading.Application.Risk.Checks;
+using B3.Trading.Domain;
 using B3.Trading.Host.Observability;
 using B3.Trading.Host.MarketData;
 using B3.Trading.Infrastructure;
@@ -35,6 +36,8 @@ builder.Services.AddSingleton(sp =>
     new SymbolDirectory(sp.GetRequiredService<IOptions<SymbolDirectoryOptions>>().Value));
 builder.Services.Configure<PersistenceOptions>(
     builder.Configuration.GetSection(PersistenceOptions.SectionName));
+builder.Services.Configure<PositionSeedOptions>(
+    builder.Configuration.GetSection(PositionSeedOptions.SectionName));
 
 // CORS: opt-in allowlist for the dev/prod frontend origins. Empty list
 // disables CORS entirely (server-only deploys, integration tests).
@@ -394,6 +397,45 @@ var app = builder.Build();
     {
         var recovery = scope.ServiceProvider.GetRequiredService<PersistenceRecovery>();
         await recovery.RunAsync();
+    }
+
+    // Apply optional opening-position seeds AFTER recovery, so warm
+    // restarts always preserve the actual fills and the seed is only
+    // ever applied to slots that recovery left empty. Intended for
+    // dogfood / dev environments where the naked-short gate would
+    // otherwise block any first Sell from a fresh account.
+    var seedOpts = scope.ServiceProvider.GetRequiredService<IOptions<PositionSeedOptions>>().Value;
+    if (seedOpts.Seeds.Count > 0)
+    {
+        var keeper = scope.ServiceProvider.GetRequiredService<PositionKeeper>();
+        var seedLogger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("PositionSeeder");
+        var applied = 0;
+        var skipped = 0;
+        foreach (var seed in seedOpts.Seeds)
+        {
+            if (string.IsNullOrWhiteSpace(seed.EndClientId) || string.IsNullOrWhiteSpace(seed.Symbol))
+            {
+                seedLogger.LogWarning("Skipping malformed PositionSeed (EndClientId='{Owner}', Symbol='{Symbol}').",
+                    seed.EndClientId, seed.Symbol);
+                continue;
+            }
+            var owner = new EndClientId(seed.EndClientId);
+            if (keeper.SeedIfAbsent(owner, seed.Symbol, seed.Quantity, seed.AverageEntryPrice))
+            {
+                applied++;
+                seedLogger.LogInformation(
+                    "Seeded opening position {Owner}/{Symbol} = {Qty} @ {AvgPx}.",
+                    seed.EndClientId, seed.Symbol, seed.Quantity, seed.AverageEntryPrice);
+            }
+            else
+            {
+                skipped++;
+                seedLogger.LogInformation(
+                    "Skipped seed for {Owner}/{Symbol}: position already present from recovery.",
+                    seed.EndClientId, seed.Symbol);
+            }
+        }
+        seedLogger.LogInformation("PositionSeeder finished: {Applied} applied, {Skipped} skipped.", applied, skipped);
     }
 }
 
