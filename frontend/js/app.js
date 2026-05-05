@@ -270,10 +270,18 @@ function startMdWorker() {
 
   mdWorker = new Worker(new URL("./mdWorker.js", import.meta.url), { type: "module" });
   mdWorker.onmessage = (ev) => onMdWorkerMessage(ev.data);
+  // Subscribe with MBP from the start. DOB is always rendered, so the
+  // book channel needs to populate without waiting for the user to
+  // explicitly pick a symbol from the topbar selector. Keeping MBP off
+  // by default would leave the DOB stuck on "awaiting book snapshot…"
+  // for users who accept the default-selected symbol.
+  const flags = FLAGS.TRADES | FLAGS.INFO | FLAGS.MBP;
+  mbpEnabled = true;
   mdWorker.postMessage({
     type: "start",
     url: mdConfig.url,
     symbols: mdConfig.symbols,
+    flags,
   });
 }
 
