@@ -10,7 +10,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="B3.EntryPoint.Client" Version="0.14.2" />
+    <PackageReference Include="B3.EntryPoint.Client" Version="0.14.3" />
     <PackageReference Include="System.IO.Hashing" Version="*" />
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="*" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="*" />
