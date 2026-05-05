@@ -68,6 +68,31 @@ body {
 .status-disconnected { background: rgba(239,83,80,.18);  color: var(--red); }
 .status-not_ready    { background: rgba(245,166,35,.18); color: var(--warn); }
 .user-label { color: var(--muted); }
+.symbol-select {
+  display: inline-flex; align-items: center; gap: .35rem;
+  font-size: .72rem; color: var(--muted); text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.symbol-select select {
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: .15rem .35rem; font-size: .85rem; text-transform: none; letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+.symbol-tag {
+  display: inline-block; margin-left: .35rem;
+  padding: 0 .35rem; border-radius: 4px;
+  background: var(--panel-2); color: var(--text);
+  font-size: .75rem; font-weight: 500; font-variant-numeric: tabular-nums;
+  border: 1px solid var(--border);
+}
+.symbol-tag--muted { color: var(--muted); }
+.tape-all-toggle {
+  display: inline-flex; align-items: center; gap: .25rem;
+  font-size: .7rem; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .04em;
+}
+.tape-all-toggle input { margin: 0; }
 .link-button {
   background: transparent; border: 0; color: var(--accent); cursor: pointer; font: inherit;
 }
@@ -107,11 +132,6 @@ body {
 .market-data{ grid-area: md; }
 .market-data .empty { color: var(--muted); font-size: .8rem; }
 .dob { grid-area: dob; }
-.dob h2 select {
-  background: var(--panel-2); color: var(--text);
-  border: 1px solid var(--border); border-radius: 4px;
-  padding: .15rem .3rem; font: inherit; font-size: .8rem;
-}
 .dob-grid {
   display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; min-height: 0;
 }
@@ -147,11 +167,6 @@ body {
 /* ---------- Trade tape (T4) ---------- */
 .tape { grid-area: tape; min-height: 200px; }
 .tape h2 { display: flex; align-items: center; gap: .55rem; }
-.tape h2 select {
-  background: var(--panel-2); color: var(--text);
-  border: 1px solid var(--border); border-radius: 4px;
-  padding: .15rem .3rem; font: inherit; font-size: .8rem;
-}
 .tape-paused {
   font-size: .65rem; color: var(--warn);
   background: rgba(250, 192, 64, .12); border: 1px solid var(--warn);

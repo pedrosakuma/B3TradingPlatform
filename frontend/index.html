@@ -42,6 +42,12 @@
           <button type="button" data-view="trader" class="active" role="tab" aria-selected="true">Trader</button>
           <button type="button" data-view="admin" role="tab" aria-selected="false">Admin</button>
         </span>
+        <label class="symbol-select" for="selected-symbol">
+          Symbol
+          <select id="selected-symbol" aria-label="Selected symbol (DOB / chart / tape)">
+            <option value="">— select —</option>
+          </select>
+        </label>
         <span id="firms-health" class="firms-health" role="status" aria-live="polite" aria-label="Firms health" hidden></span>
         <span id="ws-status" class="status-pill status-disconnected" role="status" aria-live="polite" aria-label="WebSocket: disconnected" title="WebSocket connection">disconnected</span>
         <span id="ws-reconnect" class="reconnect-countdown" role="status" aria-live="polite" hidden></span>
@@ -177,9 +183,7 @@
       <section class="panel dob">
         <h2>
           Depth of book
-          <select id="dob-symbol" aria-label="DOB symbol">
-            <option value="">— select symbol —</option>
-          </select>
+          <span id="dob-symbol-tag" class="symbol-tag" aria-live="polite"></span>
         </h2>
         <p id="dob-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
         <div class="dob-grid">
@@ -210,10 +214,8 @@
       <section class="panel chart">
         <h2>
           Chart
+          <span id="chart-symbol-tag" class="symbol-tag" aria-live="polite"></span>
           <span class="chart-controls">
-            <select id="chart-symbol" aria-label="Chart symbol">
-              <option value="">— select symbol —</option>
-            </select>
             <select id="chart-resolution" aria-label="Chart resolution">
               <option value="60">1m</option>
               <option value="300">5m</option>
@@ -231,9 +233,11 @@
       <section class="panel tape">
         <h2>
           Tape
-          <select id="tape-symbol" aria-label="Tape symbol filter">
-            <option value="">All</option>
-          </select>
+          <span id="tape-symbol-tag" class="symbol-tag" aria-live="polite"></span>
+          <label class="tape-all-toggle">
+            <input id="tape-show-all" type="checkbox" />
+            All symbols
+          </label>
           <span id="tape-paused" class="tape-paused" hidden>paused</span>
         </h2>
         <ol id="tape-list" class="tape-list" aria-live="off"></ol>

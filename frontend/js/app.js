@@ -56,10 +56,9 @@ function init() {
     onBlotterFilter: handleBlotterFilter,
     onSelectOrder: handleSelectOrder,
     onKeyboardCancel: handleKeyboardCancel,
-    onSelectDobSymbol: handleSelectDobSymbol,
-    onSelectChartSymbol: state.setChartSymbol,
     onSelectChartResolution: state.setChartResolution,
-    onSelectTapeSymbol: state.setTapeSymbol,
+    onSelectSymbol: handleSelectSymbol,
+    onToggleTapeShowAll: state.setTapeShowAll,
   });
   adminUi.setAdminHandlers({
     onToggleFirm:      handleToggleFirm,
@@ -295,8 +294,11 @@ function handleApplyMd({ url, symbols }) {
 // briefly blank market-data and trade-tape — not worth it.
 let mbpEnabled = false;
 
-function handleSelectDobSymbol(symbol) {
-  state.setDobSymbol(symbol || null);
+function handleSelectSymbol(symbol) {
+  // Single global selector drives DOB, chart and tape. As soon as the
+  // user picks anything we promote the MD subscription to MBP so the
+  // book panel can render depth (the default is TRADES|INFO only).
+  state.setSelectedSymbol(symbol || null);
   if (!symbol || !mdWorker || mbpEnabled) return;
   const flags = FLAGS.TRADES | FLAGS.INFO | FLAGS.MBP;
   mdWorker.postMessage({ type: "setFlags", flags });

@@ -98,24 +98,35 @@ test('clearAllTape empties every per-symbol ring', async () => {
   assert.equal(s.getState().tape.size, 0);
 });
 
-test('setTapeSymbol("") normalises to null (all)', async () => {
+test('setTapeShowAll toggles the tape "all" mode', async () => {
   const s = await freshState();
-  s.setTapeSymbol('PETR4');
-  assert.equal(s.getState().tapeSymbol, 'PETR4');
-  s.setTapeSymbol('');
-  assert.equal(s.getState().tapeSymbol, null);
+  assert.equal(s.getState().tapeShowAll, true); // default
+  s.setTapeShowAll(false);
+  assert.equal(s.getState().tapeShowAll, false);
+  s.setTapeShowAll(true);
+  assert.equal(s.getState().tapeShowAll, true);
 });
 
-test('setWatchlist drops tape for removed symbols and resets tapeSymbol', async () => {
+test('setTapeSymbol back-compat: empty enables show-all, non-empty disables', async () => {
+  const s = await freshState();
+  s.setTapeSymbol('PETR4');
+  assert.equal(s.getState().selectedSymbol, 'PETR4');
+  assert.equal(s.getState().tapeShowAll, false);
+  s.setTapeSymbol('');
+  assert.equal(s.getState().tapeShowAll, true);
+});
+
+test('setWatchlist drops tape for removed symbols and resets selectedSymbol', async () => {
   const s = await freshState();
   s.setWatchlist(['PETR4', 'VALE3']);
   s.applyMdTrade({ symbol: 'PETR4', price: 32.10, qty: 100, tradeId: 1 });
   s.applyMdTrade({ symbol: 'VALE3', price: 65.00, qty: 100, tradeId: 2 });
-  s.setTapeSymbol('PETR4');
+  s.setSelectedSymbol('PETR4');
   s.setWatchlist(['VALE3']); // PETR4 leaves the watchlist
   assert.equal(s.getState().tape.has('PETR4'), false);
   assert.equal(s.getState().tape.has('VALE3'), true);
-  assert.equal(s.getState().tapeSymbol, null);
+  // PETR4 left → auto-pick the only remaining symbol.
+  assert.equal(s.getState().selectedSymbol, 'VALE3');
 });
 
 test('applyMdTrade emits a tape notification', async () => {

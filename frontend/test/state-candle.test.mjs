@@ -175,20 +175,20 @@ test('setWatchlist drops candles for removed symbols', async () => {
   assert.equal(s.getState().candles.has('VALE3'), false);
 });
 
-test('setWatchlist auto-picks first symbol as chartSymbol when empty', async () => {
+test('setWatchlist auto-picks first symbol as selectedSymbol when empty', async () => {
   const s = await freshState();
-  assert.equal(s.getState().chartSymbol, null);
+  assert.equal(s.getState().selectedSymbol, null);
   s.setWatchlist(['PETR4', 'VALE3']);
-  assert.equal(s.getState().chartSymbol, 'PETR4');
+  assert.equal(s.getState().selectedSymbol, 'PETR4');
 });
 
-test('setWatchlist clears chartSymbol if it was removed', async () => {
+test('setWatchlist clears selectedSymbol if it was removed', async () => {
   const s = await freshState();
   s.setWatchlist(['PETR4', 'VALE3']);
-  s.setChartSymbol('VALE3');
+  s.setSelectedSymbol('VALE3');
   s.setWatchlist(['PETR4']);
-  // chartSymbol cleared because VALE3 left, then auto-picked first.
-  assert.equal(s.getState().chartSymbol, 'PETR4');
+  // selectedSymbol cleared because VALE3 left, then auto-picked first.
+  assert.equal(s.getState().selectedSymbol, 'PETR4');
 });
 
 test('setChartResolution rejects unsupported values', async () => {
@@ -257,10 +257,11 @@ test('candles reducers notify "candles" slice', async () => {
   assert.ok(seen.includes('candles'));
 });
 
-test('setChartSymbol notifies "chartSymbol" slice', async () => {
+test('setChartSymbol back-compat shim writes selectedSymbol', async () => {
   const s = await freshState();
   const seen = [];
   s.subscribe((slice) => seen.push(slice));
   s.setChartSymbol('PETR4');
-  assert.ok(seen.includes('chartSymbol'));
+  assert.equal(s.getState().selectedSymbol, 'PETR4');
+  assert.ok(seen.includes('selectedSymbol'));
 });

@@ -21,7 +21,6 @@ const state = {
   // displaying a partial book. Sorting (top-N for render) happens
   // render-side, not in state.
   book: new Map(),         // Symbol -> { bids: Map, asks: Map, ready: bool, updatedAt: number }
-  dobSymbol: null,         // currently selected DOB symbol or null
   // Candle slice (T3). Server may multiplex multiple resolutions for
   // the same symbol on a single subscription, so we cache them all
   // (Map<symbol, Map<resolutionSec, {bars, ready, updatedAt}>>) and
@@ -30,15 +29,20 @@ const state = {
   // with no FIRST stays not-ready to avoid presenting a truncated
   // chart as complete.
   candles: new Map(),      // Symbol -> Map<resolutionSec, { bars: [...], ready: bool, updatedAt: number }>
-  chartSymbol: null,       // currently selected chart symbol or null
   chartResolution: 60,     // seconds (60=1m, 300=5m, 900=15m)
   // Trade tape slice (T4). Per-symbol ring buffer of recent trades
   // with side inferred from the previous trade's price (uptick=buy,
   // downtick=sell, flat=unknown — TRADE wire frame doesn't carry an
-  // aggressor). `tapeSymbol === null` means "all" — render flattens
-  // and re-sorts by receivedAt for the cross-symbol view.
+  // aggressor). When `tapeShowAll` is true the render path flattens
+  // every symbol and re-sorts by receivedAt; otherwise it scopes to
+  // `selectedSymbol`.
   tape: new Map(),         // Symbol -> [{tradeId, price, qty, side, receivedAt, busted}]
-  tapeSymbol: null,        // null => "all", else specific symbol
+  tapeShowAll: true,
+  // Single symbol selection shared by DOB / chart / tape (the three
+  // panels used to carry their own *Symbol slice; that drift made
+  // it easy to look at the wrong instrument across panels). Auto-
+  // picks watchlist[0] when null and a watchlist exists.
+  selectedSymbol: null,
   // UX-only slices added in the operability pass.
   submitInflight: null,    // { startedAt: ms } | null — true while POST /orders is awaiting response
   wsReconnect: null,       // { nextAt: ms } | null — when worker has scheduled the next attempt
@@ -277,10 +281,15 @@ export function clearAllBooks() {
 }
 
 export function setDobSymbol(symbol) {
-  const next = symbol ?? null;
-  if (state.dobSymbol === next) return;
-  state.dobSymbol = next;
-  notify("dobSymbol");
+  // Back-compat shim: DOB selector is now driven by selectedSymbol.
+  setSelectedSymbol(symbol);
+}
+
+export function setSelectedSymbol(symbol) {
+  const next = symbol == null || symbol === "" ? null : symbol;
+  if (state.selectedSymbol === next) return;
+  state.selectedSymbol = next;
+  notify("selectedSymbol");
 }
 
 // ── Candle slice (T3) ──────────────────────────────────────────────
@@ -363,10 +372,8 @@ export function clearAllCandles() {
 }
 
 export function setChartSymbol(symbol) {
-  const next = symbol ?? null;
-  if (state.chartSymbol === next) return;
-  state.chartSymbol = next;
-  notify("chartSymbol");
+  // Back-compat shim: chart selector is now driven by selectedSymbol.
+  setSelectedSymbol(symbol);
 }
 
 export function setChartResolution(seconds) {
@@ -419,11 +426,21 @@ export function clearAllTape() {
 }
 
 export function setTapeSymbol(symbol) {
-  // null === "all"; an empty string from the dropdown maps to null.
-  const next = symbol == null || symbol === "" ? null : symbol;
-  if (state.tapeSymbol === next) return;
-  state.tapeSymbol = next;
-  notify("tapeSymbol");
+  // Back-compat shim — empty/null means "all", anything else
+  // becomes the global selectedSymbol with showAll cleared.
+  if (symbol == null || symbol === "") {
+    setTapeShowAll(true);
+  } else {
+    setTapeShowAll(false);
+    setSelectedSymbol(symbol);
+  }
+}
+
+export function setTapeShowAll(showAll) {
+  const next = !!showAll;
+  if (state.tapeShowAll === next) return;
+  state.tapeShowAll = next;
+  notify("tapeShowAll");
 }
 
 export function setWatchlist(symbols) {
@@ -440,25 +457,16 @@ export function setWatchlist(symbols) {
   for (const sym of [...state.tape.keys()]) {
     if (!wanted.has(sym)) state.tape.delete(sym);
   }
-  // Reset DOB / chart / tape selection if the chosen symbol just left
-  // the watchlist. Auto-pick a sensible default for chart so the
-  // panel doesn't sit empty when the trader has symbols available.
-  // tapeSymbol stays at "all" by default — no auto-pick needed.
-  if (state.dobSymbol && !wanted.has(state.dobSymbol)) {
-    state.dobSymbol = null;
-    notify("dobSymbol");
+  // Reset shared selectedSymbol if the chosen symbol just left the
+  // watchlist; auto-pick the first available so DOB/chart/tape don't
+  // sit empty when symbols exist. tapeShowAll is preserved.
+  if (state.selectedSymbol && !wanted.has(state.selectedSymbol)) {
+    state.selectedSymbol = null;
+    notify("selectedSymbol");
   }
-  if (state.chartSymbol && !wanted.has(state.chartSymbol)) {
-    state.chartSymbol = null;
-    notify("chartSymbol");
-  }
-  if (state.chartSymbol === null && next.length > 0) {
-    state.chartSymbol = next[0];
-    notify("chartSymbol");
-  }
-  if (state.tapeSymbol && !wanted.has(state.tapeSymbol)) {
-    state.tapeSymbol = null; // back to "all"
-    notify("tapeSymbol");
+  if (state.selectedSymbol === null && next.length > 0) {
+    state.selectedSymbol = next[0];
+    notify("selectedSymbol");
   }
   notify("watchlist");
   notify("book");

@@ -127,21 +127,23 @@ test('setWatchlist drops books for symbols no longer watched', async () => {
   assert.equal(s.getState().book.has('VALE3'), false);
 });
 
-test('setWatchlist clears dobSymbol if it was removed', async () => {
+test('setWatchlist clears selectedSymbol if it was removed', async () => {
   const s = await freshState();
   s.setWatchlist(['PETR4', 'VALE3']);
-  s.setDobSymbol('VALE3');
-  assert.equal(s.getState().dobSymbol, 'VALE3');
+  s.setSelectedSymbol('VALE3');
+  assert.equal(s.getState().selectedSymbol, 'VALE3');
   s.setWatchlist(['PETR4']);
-  assert.equal(s.getState().dobSymbol, null);
+  // Auto-pick promotes the only remaining symbol; the removed one
+  // never lingers as the selection.
+  assert.equal(s.getState().selectedSymbol, 'PETR4');
 });
 
-test('setWatchlist preserves dobSymbol if still in list', async () => {
+test('setWatchlist preserves selectedSymbol if still in list', async () => {
   const s = await freshState();
   s.setWatchlist(['PETR4', 'VALE3']);
-  s.setDobSymbol('PETR4');
+  s.setSelectedSymbol('PETR4');
   s.setWatchlist(['PETR4', 'ITUB4']);
-  assert.equal(s.getState().dobSymbol, 'PETR4');
+  assert.equal(s.getState().selectedSymbol, 'PETR4');
 });
 
 test('clearAllBooks empties the book Map', async () => {
@@ -152,12 +154,18 @@ test('clearAllBooks empties the book Map', async () => {
   assert.equal(s.getState().book.size, 0);
 });
 
-test('setDobSymbol notifies "dobSymbol" slice', async () => {
+test('setSelectedSymbol notifies "selectedSymbol" slice', async () => {
   const s = await freshState();
   const seen = [];
   s.subscribe((slice) => seen.push(slice));
+  s.setSelectedSymbol('PETR4');
+  assert.ok(seen.includes('selectedSymbol'));
+});
+
+test('setDobSymbol back-compat shim writes selectedSymbol', async () => {
+  const s = await freshState();
   s.setDobSymbol('PETR4');
-  assert.ok(seen.includes('dobSymbol'));
+  assert.equal(s.getState().selectedSymbol, 'PETR4');
 });
 
 test('book reducers notify "book" slice', async () => {
