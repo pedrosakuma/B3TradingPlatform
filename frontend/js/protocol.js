@@ -12,6 +12,18 @@ export function defaultBackend() {
   return "http://localhost:5000";
 }
 
+// Default WebSocket endpoint for the OPTIONAL B3MarketDataPlatform feed
+// (DOB / candles / trade prints). Distinct origin from the trader WS, so
+// it can't go through the nginx reverse-proxy. Convention: same host as
+// the page, port 8081, /ws path. Returns "" off-localhost so non-dev
+// deployments don't auto-attempt a guess that's likely wrong.
+export function defaultMarketDataUrl() {
+  if (location.protocol !== "http:" && location.protocol !== "https:") return "";
+  if (location.hostname !== "localhost" && location.hostname !== "127.0.0.1") return "";
+  const wsScheme = location.protocol === "https:" ? "wss:" : "ws:";
+  return `${wsScheme}//${location.hostname}:8081/ws`;
+}
+
 async function jsonOrThrow(resp) {
   const text = await resp.text();
   let body;

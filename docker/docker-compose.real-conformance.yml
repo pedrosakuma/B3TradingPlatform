@@ -1,0 +1,22 @@
+# Tiny merge overlay for the (real-stack + conformance) combination.
+#
+# The conformance service is defined in docker-compose.conformance.yml.
+# When stacked on top of docker-compose.real.yml, set the env flag that
+# opts the run into RequiresSandboxMatching specs (e.g. ReferencePriceLiveSpec).
+# Any non-real conformance run keeps skipping them at discovery time.
+#
+# Usage:
+#   docker compose \
+#       -f docker/docker-compose.yml \
+#       -f docker/docker-compose.real.yml \
+#       -f docker/docker-compose.conformance.yml \
+#       -f docker/docker-compose.real-conformance.yml \
+#       run --rm conformance
+#
+# Kept as a separate file so docker-compose.real.yml can be combined with
+# overlays that don't define a `conformance` service (e.g. demo) without
+# tripping compose's "service has neither image nor build" validation.
+services:
+  conformance:
+    environment:
+      B3T_REAL_STACK_CONFORMANCE: "true"

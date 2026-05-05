@@ -1,6 +1,6 @@
 // App entry point: wires login → worker → state → UI together.
 
-import { defaultBackend, login, submitOrder, cancelOrder, getAdminFirms,
+import { defaultBackend, defaultMarketDataUrl, login, submitOrder, cancelOrder, getAdminFirms,
          validateSession,
          getKillStatus, killFirm, reviveFirm, killEndClient, reviveEndClient,
          runEod } from "./protocol.js";
@@ -238,12 +238,11 @@ function restartWorker() {
 }
 
 function defaultMdUrl() {
-  // The B3MarketDataPlatform WS is an OPTIONAL external feed (separate
-  // from the trading-host WS). Don't guess a URL — leave empty so the
-  // worker stays idle until an operator enters one in the Market Data
-  // panel. Auto-defaulting to localhost:8081 caused noisy connection
-  // errors in setups (like the demo) that don't run that service.
-  return "";
+  // Optional external B3MarketDataPlatform WS. Defaults to the dev port
+  // 8081 on localhost so the docker-compose stack works out of the box;
+  // returns empty for non-localhost deployments where the operator must
+  // configure an explicit endpoint via the Market Data panel.
+  return defaultMarketDataUrl();
 }
 
 function readMdConfig() {
