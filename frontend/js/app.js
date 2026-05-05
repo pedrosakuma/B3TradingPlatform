@@ -238,15 +238,12 @@ function restartWorker() {
 }
 
 function defaultMdUrl() {
-  // Heuristic: same host as the trading-host backend with port 8081 and
-  // ws:// scheme. Operators on a different topology can override.
-  try {
-    const u = new URL(session.backend);
-    u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
-    u.port = "8081";
-    u.pathname = "/ws";
-    return u.toString();
-  } catch { return ""; }
+  // The B3MarketDataPlatform WS is an OPTIONAL external feed (separate
+  // from the trading-host WS). Don't guess a URL — leave empty so the
+  // worker stays idle until an operator enters one in the Market Data
+  // panel. Auto-defaulting to localhost:8081 caused noisy connection
+  // errors in setups (like the demo) that don't run that service.
+  return "";
 }
 
 function readMdConfig() {
