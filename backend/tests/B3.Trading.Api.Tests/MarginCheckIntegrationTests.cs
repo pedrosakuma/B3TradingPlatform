@@ -22,6 +22,11 @@ public class MarginCheckIntegrationTests
             // Push other limits high so margin is the only gate that matters.
             ["Trading:Risk:Default:MaxQuantity"] = "1000000",
             ["Trading:Risk:Default:MaxNotional"] = "999999999",
+            // These tests are about the margin provider; opt out of
+            // the naked-short gate (added later) which would otherwise
+            // pre-empt margin evaluation on the Sell-with-zero-inventory
+            // case in SellsAndUnknownOwnersBypassMargin.
+            ["Trading:Risk:Default:AllowShortSell"] = "true",
         };
 
     [Fact]

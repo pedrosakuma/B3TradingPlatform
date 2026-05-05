@@ -127,6 +127,20 @@ public sealed class RiskLimits
     /// trade-off as <see cref="PositionLimit"/>).
     /// </summary>
     public int? MaxOpenOrders { get; set; }
+
+    /// <summary>
+    /// Whether the seller is allowed to take a Sell that would
+    /// drive their projected net position negative. B3 cash equities
+    /// (mercado à vista) does not allow naked shorts — a Sell must
+    /// be covered by long inventory (or, in a future iteration, by
+    /// borrowed stock from a BTC registry). Default semantics when
+    /// unset everywhere in the precedence chain are conservative:
+    /// naked short is **blocked** (see
+    /// <see cref="Risk.Checks.NoNakedShortCheck"/>). Set to <c>true</c>
+    /// per-firm or per-end-client to opt out (e.g. authorised
+    /// market makers, or test accounts).
+    /// </summary>
+    public bool? AllowShortSell { get; set; }
 }
 
 public static class RiskLimitsResolver
@@ -173,5 +187,6 @@ public static class RiskLimitsResolver
             PriceCollarAbsolute = Resolve(opts, endClient, firmId, symbol, l => l.PriceCollarAbsolute),
             PositionLimit = Resolve(opts, endClient, firmId, symbol, l => l.PositionLimit),
             MaxOpenOrders = Resolve(opts, endClient, firmId, symbol, l => l.MaxOpenOrders),
+            AllowShortSell = Resolve(opts, endClient, firmId, symbol, l => l.AllowShortSell),
         };
 }
