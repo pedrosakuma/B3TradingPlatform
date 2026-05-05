@@ -53,7 +53,7 @@ body {
 .error { color: var(--red); font-size: .85rem; margin: 0; }
 
 /* ---------- Trader shell ---------- */
-.trader-view { display: flex; flex-direction: column; min-height: 100vh; }
+.trader-view { display: flex; flex-direction: column; height: 100vh; min-height: 0; overflow: hidden; }
 .topbar {
   display: flex; justify-content: space-between; align-items: center;
   padding: .6rem 1rem; background: var(--panel); border-bottom: 1px solid var(--border);
@@ -107,7 +107,7 @@ body {
   flex: 1;
   display: grid;
   grid-template-columns: 1fr 280px 280px;
-  grid-template-rows: minmax(260px, 1.4fr) minmax(180px, 1fr) auto minmax(140px, .8fr);
+  grid-template-rows: minmax(300px, 1.2fr) minmax(160px, .9fr) minmax(220px, 1.4fr) minmax(140px, .8fr);
   grid-template-areas:
     "chart    dob      ticket"
     "tape     dob      positions"
@@ -133,7 +133,7 @@ body {
   background: var(--panel-2); color: var(--text); border-radius: 999px;
   padding: 0 .5rem; font-size: .7rem;
 }
-.ticket     { grid-area: ticket; }
+.ticket     { grid-area: ticket; overflow-y: auto; }
 .blotter    { grid-area: blotter; min-height: 0; }
 .positions  { grid-area: positions; }
 .executions { grid-area: execs; min-height: 0; }
@@ -254,7 +254,7 @@ td { padding: .35rem .5rem; border-bottom: 1px solid #20283a; }
 @media (max-width: 1280px) {
   .grid {
     grid-template-columns: 1fr 280px;
-    grid-template-rows: minmax(240px, 1fr) minmax(180px, 1fr) auto auto minmax(140px, .8fr);
+    grid-template-rows: minmax(200px, 1fr) minmax(160px, .9fr) minmax(160px, .8fr) minmax(220px, 1.4fr) minmax(140px, .8fr);
     grid-template-areas:
       "chart     dob"
       "tape      dob"
