@@ -15,6 +15,7 @@ namespace B3.Trading.Application;
 public sealed class OrderOwnershipMap
 {
     private readonly ConcurrentDictionary<ulong, EndClientId> _byClOrdId = new();
+    private readonly ConcurrentDictionary<ulong, ulong> _cancelToOrig = new();
 
     public void Register(ulong clOrdId, EndClientId owner)
     {
@@ -38,6 +39,34 @@ public sealed class OrderOwnershipMap
             throw new InvalidOperationException($"Unknown original ClOrdID '{originalClOrdId}'.");
         _byClOrdId[newClOrdId] = owner;
     }
+
+    /// <summary>
+    /// Records the cancel/replace-side <paramref name="newClOrdId"/> as a
+    /// pointer back to <paramref name="originalClOrdId"/>. Lets
+    /// <see cref="ExecutionReportProcessor"/> resolve cancel/replace
+    /// acknowledgements when the upstream gateway omits the
+    /// <c>OrigClOrdID</c> on the ER (defensive against
+    /// <see href="https://github.com/pedrosakuma/B3EntryPointClient/issues/154">SDK</see>
+    /// not echoing it back). Also registers the new ClOrdID against the
+    /// same owner so per-end-client ER fan-out continues to work.
+    /// </summary>
+    public void RegisterCancelLink(ulong newClOrdId, ulong originalClOrdId)
+    {
+        if (newClOrdId == 0)
+            throw new ArgumentOutOfRangeException(nameof(newClOrdId));
+        if (originalClOrdId == 0)
+            throw new ArgumentOutOfRangeException(nameof(originalClOrdId));
+        _cancelToOrig[newClOrdId] = originalClOrdId;
+        if (_byClOrdId.TryGetValue(originalClOrdId, out var owner))
+            _byClOrdId[newClOrdId] = owner;
+    }
+
+    /// <summary>
+    /// Looks up the original ClOrdID a cancel/replace request was issued
+    /// against. Returns <c>false</c> when no such link was registered.
+    /// </summary>
+    public bool TryResolveOrig(ulong newClOrdId, out ulong originalClOrdId) =>
+        _cancelToOrig.TryGetValue(newClOrdId, out originalClOrdId);
 
     public IEnumerable<Persistence.OwnershipMappingSnapshot> Snapshot()
     {

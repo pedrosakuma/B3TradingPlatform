@@ -75,6 +75,7 @@ public sealed class AlgoEngine : BackgroundService
     private readonly EventDispatcher _dispatcher;
     private readonly TimeProvider _clock;
     private readonly ILogger<AlgoEngine> _logger;
+    private readonly OrderOwnershipMap _ownership;
 
     // Per-parent runtime state. Owned by the consumer task; the
     // ConcurrentDictionary is only used because TryAdd/TryGetValue are
@@ -92,7 +93,8 @@ public sealed class AlgoEngine : BackgroundService
         IAlgoEventSink algoSink,
         EventDispatcher dispatcher,
         TimeProvider clock,
-        ILogger<AlgoEngine> logger)
+        ILogger<AlgoEngine> logger,
+        OrderOwnershipMap ownership)
     {
         _queue = queue;
         _algos = algos;
@@ -104,6 +106,7 @@ public sealed class AlgoEngine : BackgroundService
         _dispatcher = dispatcher;
         _clock = clock;
         _logger = logger;
+        _ownership = ownership;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -448,6 +451,10 @@ public sealed class AlgoEngine : BackgroundService
         var newClOrdId = _clOrdIds.Generate(child.Owner);
         try
         {
+            // Pre-register the cancel-side → original mapping so the
+            // cancel-ack ER can resolve back to the child order even if
+            // upstream omits OrigClOrdID on the wire.
+            _ownership.RegisterCancelLink(newClOrdId, child.ClOrdId);
             await _gateway.CancelAsync(child, newClOrdId, ct).ConfigureAwait(false);
             // Don't mark terminal here — wait for the cancel-ack ER to land
             // via OnChildErAsync. That's what makes the engine consistent

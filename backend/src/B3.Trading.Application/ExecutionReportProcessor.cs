@@ -63,8 +63,18 @@ public sealed class ExecutionReportProcessor
     {
         // For cancel/replace acks, the meaningful identity is the original
         // ClOrdID; the cancel-side ClOrdID was never registered as an order.
-        var lookupId = (kind is ExecKind.Canceled or ExecKind.Replaced) && origClOrdId != 0
-            ? origClOrdId
+        // Some upstream gateways (and certain SDK versions) drop OrigClOrdID
+        // on cancel acks — fall back to the cancel-link map populated when
+        // we sent the request so the ER still resolves to the right order.
+        var resolvedOrig = origClOrdId;
+        if ((kind is ExecKind.Canceled or ExecKind.Replaced) && resolvedOrig == 0
+            && _ownership.TryResolveOrig(clOrdId, out var linked))
+        {
+            resolvedOrig = linked;
+        }
+
+        var lookupId = (kind is ExecKind.Canceled or ExecKind.Replaced) && resolvedOrig != 0
+            ? resolvedOrig
             : clOrdId;
 
         if (!_ownership.TryResolve(lookupId, out var owner) || owner is null)

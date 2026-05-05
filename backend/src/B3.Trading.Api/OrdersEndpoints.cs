@@ -83,6 +83,7 @@ public static class OrdersEndpoints
             EndClientRegistry registry,
             ClOrdIdPrefixRegistry clOrdIds,
             WorkingOrderBook book,
+            OrderOwnershipMap ownership,
             IExchangeGateway gateway,
             CancellationToken ct) =>
         {
@@ -97,6 +98,10 @@ public static class OrdersEndpoints
                 return Results.NotFound();
 
             var cancelClOrdId = clOrdIds.Generate(owner);
+            // Record the cancel-side → original mapping BEFORE sending so
+            // the cancel-ack ER can resolve back to the right order even
+            // when upstream omits OrigClOrdID on the wire.
+            ownership.RegisterCancelLink(cancelClOrdId, order.ClOrdId);
             await gateway.CancelAsync(order, cancelClOrdId, ct);
             MetricsRegistry.OrdersCancelRequested.Add(1);
             // Status transition to Cancelled happens when the exchange ER
