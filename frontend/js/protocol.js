@@ -2,9 +2,26 @@
 // this module is HTTP-only.
 
 export function defaultBackend() {
-  return location.hostname === "localhost" || location.hostname === "127.0.0.1"
-    ? "http://localhost:5000"
-    : location.origin;
+  // Prefer the page origin so requests go through the nginx reverse-proxy
+  // (same-origin, no CORS). The legacy "localhost:5000" shortcut only kicks
+  // in for non-http schemes (e.g. file://) where there is no real origin to
+  // talk to. The login form lets the user override either way.
+  if (location.protocol === "http:" || location.protocol === "https:") {
+    return location.origin;
+  }
+  return "http://localhost:5000";
+}
+
+// Default WebSocket endpoint for the OPTIONAL B3MarketDataPlatform feed
+// (DOB / candles / trade prints). Distinct origin from the trader WS, so
+// it can't go through the nginx reverse-proxy. Convention: same host as
+// the page, port 8081, /ws path. Returns "" off-localhost so non-dev
+// deployments don't auto-attempt a guess that's likely wrong.
+export function defaultMarketDataUrl() {
+  if (location.protocol !== "http:" && location.protocol !== "https:") return "";
+  if (location.hostname !== "localhost" && location.hostname !== "127.0.0.1") return "";
+  const wsScheme = location.protocol === "https:" ? "wss:" : "ws:";
+  return `${wsScheme}//${location.hostname}:8081/ws`;
 }
 
 async function jsonOrThrow(resp) {
@@ -28,6 +45,18 @@ export async function login(backend, username, password) {
     body: JSON.stringify({ username, password }),
   });
   return jsonOrThrow(resp);
+}
+
+// Cheap, side-effect-free probe used at boot to detect stored tokens
+// that no longer authenticate (e.g. after the host's signing key was
+// rotated). Returns true on 2xx, false on 401/403, throws on network
+// errors so the caller can fall back to the optimistic path.
+export async function validateSession(backend, token) {
+  const resp = await fetch(`${backend}/positions`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (resp.status === 401 || resp.status === 403) return false;
+  return resp.ok;
 }
 
 export async function submitOrder(backend, token, payload) {

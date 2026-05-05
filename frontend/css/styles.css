@@ -14,6 +14,11 @@
 }
 
 * { box-sizing: border-box; }
+/* The `hidden` HTML attribute must always win, even on elements that
+   declare a custom `display` (grid/flex/etc) further down. Without
+   this, .login-view / .trader-view / .modal-backdrop with hidden=true
+   would still render. */
+[hidden] { display: none !important; }
 html, body { height: 100%; margin: 0; }
 body {
   background: var(--bg);
@@ -48,7 +53,7 @@ body {
 .error { color: var(--red); font-size: .85rem; margin: 0; }
 
 /* ---------- Trader shell ---------- */
-.trader-view { display: flex; flex-direction: column; height: 100vh; }
+.trader-view { display: flex; flex-direction: column; min-height: 100vh; }
 .topbar {
   display: flex; justify-content: space-between; align-items: center;
   padding: .6rem 1rem; background: var(--panel); border-bottom: 1px solid var(--border);
@@ -102,7 +107,6 @@ body {
   flex: 1;
   display: grid;
   grid-template-columns: 280px 1fr 240px;
-  grid-template-rows: auto 1fr auto auto auto auto;
   grid-template-areas:
     "ticket  blotter   positions"
     "ticket  blotter   positions"
@@ -114,7 +118,12 @@ body {
 }
 .panel {
   background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
-  padding: .8rem; display: flex; flex-direction: column; min-height: 0;
+  padding: .8rem; display: flex; flex-direction: column;
+  min-height: 0; min-width: 0;
+}
+.panel > table,
+.panel .table-scroll {
+  display: block; overflow-x: auto; max-width: 100%;
 }
 .panel h2 {
   margin: 0 0 .6rem 0; font-size: .85rem; font-weight: 600; color: var(--muted);
@@ -243,7 +252,7 @@ td { padding: .35rem .5rem; border-bottom: 1px solid #20283a; }
 .executions-log .meta { color: var(--muted); }
 
 /* ---------- Responsive ---------- */
-@media (max-width: 1100px) {
+@media (max-width: 1280px) {
   .grid {
     grid-template-columns: 1fr 1fr;
     grid-template-areas:
@@ -253,6 +262,20 @@ td { padding: .35rem .5rem; border-bottom: 1px solid #20283a; }
       "dob       dob"
       "chart     chart"
       "tape      tape";
+  }
+}
+@media (max-width: 720px) {
+  .grid {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "ticket"
+      "positions"
+      "blotter"
+      "execs"
+      "md"
+      "dob"
+      "chart"
+      "tape";
   }
 }
 

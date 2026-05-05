@@ -1,6 +1,7 @@
 // App entry point: wires login → worker → state → UI together.
 
-import { defaultBackend, login, submitOrder, cancelOrder, getAdminFirms,
+import { defaultBackend, defaultMarketDataUrl, login, submitOrder, cancelOrder, getAdminFirms,
+         validateSession,
          getKillStatus, killFirm, reviveFirm, killEndClient, reviveEndClient,
          runEod } from "./protocol.js";
 import { claimsFromToken } from "./jwt.js";
@@ -69,8 +70,37 @@ function init() {
   });
 
   const stored = readSession();
-  if (stored) startSession(stored);
-  else ui.showLogin();
+  if (stored) {
+    // Boot guard: if the stored session is already inside the warning
+    // window (or past its expiry), don't even attempt to adopt it.
+    // Showing the "session expiring" modal as the very first thing the
+    // user sees on page load is confusing — they have no context. Treat
+    // it as expired and require a fresh login.
+    const expiresAtMs = Date.parse(stored.expiresAt || "");
+    const remaining = Number.isFinite(expiresAtMs) ? expiresAtMs - Date.now() : -1;
+    if (remaining <= SESSION_WARNING_LEAD_MS) {
+      clearSession();
+      ui.showLogin();
+      return;
+    }
+    // Probe before we commit: a token that survived a host signing-key
+    // rotation will look fresh client-side (expiresAt in the future)
+    // but be rejected by the backend on the very first WS upgrade.
+    // Showing the "session expiring" modal in that case is confusing
+    // because the user never logged in this run. Drop silently and
+    // fall back to login if the probe fails. On network error we ALSO
+    // drop — the optimistic path used to fall through here, but if the
+    // stored backend URL is stale/wrong the user lands in a half-open
+    // UI with no way out. Re-login is cheap; bias toward correctness.
+    validateSession(stored.backend, stored.token)
+      .then((ok) => {
+        if (ok) startSession(stored);
+        else { clearSession(); ui.showLogin(); }
+      })
+      .catch(() => { clearSession(); ui.showLogin(); });
+  } else {
+    ui.showLogin();
+  }
 }
 
 async function onLogin(e) {
@@ -208,15 +238,11 @@ function restartWorker() {
 }
 
 function defaultMdUrl() {
-  // Heuristic: same host as the trading-host backend with port 8081 and
-  // ws:// scheme. Operators on a different topology can override.
-  try {
-    const u = new URL(session.backend);
-    u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
-    u.port = "8081";
-    u.pathname = "/ws";
-    return u.toString();
-  } catch { return ""; }
+  // Optional external B3MarketDataPlatform WS. Defaults to the dev port
+  // 8081 on localhost so the docker-compose stack works out of the box;
+  // returns empty for non-localhost deployments where the operator must
+  // configure an explicit endpoint via the Market Data panel.
+  return defaultMarketDataUrl();
 }
 
 function readMdConfig() {
@@ -244,10 +270,18 @@ function startMdWorker() {
 
   mdWorker = new Worker(new URL("./mdWorker.js", import.meta.url), { type: "module" });
   mdWorker.onmessage = (ev) => onMdWorkerMessage(ev.data);
+  // Subscribe with MBP from the start. DOB is always rendered, so the
+  // book channel needs to populate without waiting for the user to
+  // explicitly pick a symbol from the topbar selector. Keeping MBP off
+  // by default would leave the DOB stuck on "awaiting book snapshot…"
+  // for users who accept the default-selected symbol.
+  const flags = FLAGS.TRADES | FLAGS.INFO | FLAGS.MBP;
+  mbpEnabled = true;
   mdWorker.postMessage({
     type: "start",
     url: mdConfig.url,
     symbols: mdConfig.symbols,
+    flags,
   });
 }
 

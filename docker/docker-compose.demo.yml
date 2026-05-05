@@ -33,7 +33,10 @@ services:
       Trading__Auth__Users__1__Salt: ${DEMO_BOT_A_SALT:-MKxchosZRRVTRQZe4u4Ykw==}
       Trading__Auth__Users__1__Iterations: "600000"
       Trading__Auth__Users__1__Role: user
-      Trading__Auth__Users__1__Firm: default
+      # FIRM01 so the bots route correctly when this overlay is combined
+      # with docker-compose.real.yml (real-stack registers FIRM01 only).
+      # In standalone Simulator mode the firm name is irrelevant.
+      Trading__Auth__Users__1__Firm: FIRM01
 
       # User-bot 2 (default seed; submits orders).
       Trading__Auth__Users__2__Username: ${DEMO_BOT_B_USER:-bot-clientB}
@@ -41,7 +44,7 @@ services:
       Trading__Auth__Users__2__Salt: ${DEMO_BOT_B_SALT:-Bj20VGNiURA5SHsRHKWsUw==}
       Trading__Auth__Users__2__Iterations: "600000"
       Trading__Auth__Users__2__Role: user
-      Trading__Auth__Users__2__Firm: default
+      Trading__Auth__Users__2__Firm: FIRM01
 
       # Admin used exclusively by the demo-driver injector. Kept distinct
       # from carol (conformance overlay) so the two overlays can coexist
@@ -51,7 +54,7 @@ services:
       Trading__Auth__Users__3__Salt: ${DEMO_ADMIN_SALT:-wtrNdBpmiH7nWtMwM6v9cA==}
       Trading__Auth__Users__3__Iterations: "600000"
       Trading__Auth__Users__3__Role: admin
-      Trading__Auth__Users__3__Firm: default
+      Trading__Auth__Users__3__Firm: FIRM01
 
       # Static reference prices the bots quote around. Mirrors the defaults
       # the demo-driver bakes in via DEMO_SYMBOLS so the price collar (10%

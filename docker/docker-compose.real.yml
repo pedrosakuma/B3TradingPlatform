@@ -175,13 +175,3 @@ services:
       Trading__MarketData__Symbols__0: PETR4
       Trading__MarketData__Symbols__1: VALE3
       Trading__MarketData__Symbols__2: ITUB4
-
-  # When the conformance overlay is also stacked on top, opt this run into
-  # the destructive real-stack scenarios. RequiresSandboxMatching specs
-  # (e.g. ReferencePriceLiveSpec) will only execute when this flag is set;
-  # any non-real conformance run keeps skipping them at discovery time.
-  # The conformance service is defined in docker-compose.conformance.yml;
-  # we just merge an env var into it from this overlay.
-  conformance:
-    environment:
-      B3T_REAL_STACK_CONFORMANCE: "true"

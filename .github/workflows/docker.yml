@@ -211,7 +211,10 @@ jobs:
         # service consuming matching's UMDF unicast — so trading-host's
         # IReferencePrice is wired through MarketDataReferencePrice end-to-end
         # instead of falling back to the static map. Conformance overlay still
-        # piles on the carol admin seed. --wait blocks until matching's
+        # piles on the carol admin seed. real-conformance.yml opts the run
+        # into RequiresSandboxMatching specs (separate file so non-conformance
+        # combos like real+demo don't trip a "service has no image" validation
+        # on a partial conformance fragment). --wait blocks until matching's
         # healthcheck passes AND trading-host reports healthy (FIXP Negotiate
         # succeeded against matching).
         run: |
@@ -219,6 +222,7 @@ jobs:
               -f docker/docker-compose.yml \
               -f docker/docker-compose.real.yml \
               -f docker/docker-compose.conformance.yml \
+              -f docker/docker-compose.real-conformance.yml \
               up -d --build --wait trading-host
 
       - name: Run conformance
@@ -236,6 +240,7 @@ jobs:
               -f docker/docker-compose.yml \
               -f docker/docker-compose.real.yml \
               -f docker/docker-compose.conformance.yml \
+              -f docker/docker-compose.real-conformance.yml \
               run --rm --no-deps conformance
 
       - name: Logs (always)
@@ -247,6 +252,7 @@ jobs:
                 -f docker/docker-compose.yml \
                 -f docker/docker-compose.real.yml \
                 -f docker/docker-compose.conformance.yml \
+                -f docker/docker-compose.real-conformance.yml \
                 logs --no-color --timestamps "$svc" || true
             echo "::endgroup::"
           done
@@ -258,4 +264,5 @@ jobs:
               -f docker/docker-compose.yml \
               -f docker/docker-compose.real.yml \
               -f docker/docker-compose.conformance.yml \
+              -f docker/docker-compose.real-conformance.yml \
               down -v
