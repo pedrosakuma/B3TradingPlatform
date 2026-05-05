@@ -133,6 +133,7 @@ builder.Services.AddSingleton<IRiskCheck, RollingNotionalCheck>();
 builder.Services.AddSingleton<IRiskCheck, OrderRateLimitCheck>();
 builder.Services.AddSingleton<IRiskCheck, MaxOpenOrdersCheck>();
 builder.Services.AddSingleton<IRiskCheck, NoNakedShortCheck>();
+builder.Services.AddSingleton<IRiskCheck, SelfTradePreventionCheck>();
 builder.Services.AddSingleton<IRiskCheck, PriceCollarCheck>();
 builder.Services.AddSingleton<RiskPipeline>();
 
