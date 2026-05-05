@@ -177,6 +177,49 @@ public class ExecutionReportProcessorTests
     }
 
     [Fact]
+    public void Cancel_WithMissingOrigClOrdId_ResolvesViaCancelLink()
+    {
+        // Upstream gateway sometimes drops OrigClOrdID on cancel acks
+        // (issue #99). When it does, the processor must still resolve
+        // back to the original order via the cancel-side → original
+        // link recorded at cancel-request time.
+        var (proc, ownership, book, _, _) = Build();
+        var owner = new EndClientId("alice");
+        var order = new Order(1UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m);
+        book.TryAdd(order);
+        ownership.Register(1UL, owner);
+        order.MarkWorking();
+
+        const ulong cancelClOrdId = 2UL;
+        ownership.RegisterCancelLink(cancelClOrdId, order.ClOrdId);
+
+        // Wire ER comes back addressing the cancel-side ID with no OrigClOrdID.
+        proc.Apply(cancelClOrdId, ExecKind.Canceled, leaves: 0, cumQty: 0,
+                   lastQty: 0, lastPx: 0m, rejectReason: null, origClOrdId: 0);
+
+        Assert.Equal(OrderStatus.Cancelled, order.Status);
+    }
+
+    [Fact]
+    public void Cancel_PrefersExplicitOrigClOrdIdOverFallback()
+    {
+        var (proc, ownership, book, _, _) = Build();
+        var owner = new EndClientId("alice");
+        var order = new Order(1UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m);
+        book.TryAdd(order);
+        ownership.Register(1UL, owner);
+        order.MarkWorking();
+
+        const ulong cancelClOrdId = 2UL;
+        ownership.RegisterCancelLink(cancelClOrdId, order.ClOrdId);
+
+        proc.Apply(cancelClOrdId, ExecKind.Canceled, leaves: 0, cumQty: 0,
+                   lastQty: 0, lastPx: 0m, rejectReason: null, origClOrdId: 1UL);
+
+        Assert.Equal(OrderStatus.Cancelled, order.Status);
+    }
+
+    [Fact]
     public void Overfill_DoesNotThrow_AndCapsLeavesAtZero()
     {
         // Overfill (cumQty > order.Quantity) is a wire-side bug, but Apply must
