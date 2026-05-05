@@ -20,16 +20,19 @@
         <span>Password</span>
         <input id="login-password" type="password" autocomplete="current-password" required />
       </label>
-      <label class="row">
-        <span>Backend</span>
-        <input id="login-backend" type="url" placeholder="http://localhost:5000" />
-      </label>
       <label class="row remember">
         <input id="login-remember" type="checkbox" />
         <span>Remember me on this device</span>
       </label>
+      <details class="login-advanced">
+        <summary>Advanced</summary>
+        <label class="row">
+          <span>Backend</span>
+          <input id="login-backend" type="url" placeholder="http://localhost:5000" />
+        </label>
+      </details>
       <button type="submit" id="login-submit">Sign in</button>
-      <p id="login-error" class="error" hidden></p>
+      <p id="login-error" class="error" role="alert" hidden></p>
     </form>
   </section>
 
@@ -50,7 +53,7 @@
         </label>
         <span id="firms-health" class="firms-health" role="status" aria-live="polite" aria-label="Firms health" hidden></span>
         <span id="ws-status" class="status-pill status-disconnected" role="status" aria-live="polite" aria-label="WebSocket: disconnected" title="WebSocket connection">disconnected</span>
-        <span id="ws-reconnect" class="reconnect-countdown" role="status" aria-live="polite" hidden></span>
+        <span id="ws-reconnect" class="reconnect-countdown" hidden></span>
         <span id="user-label" class="user-label"></span>
         <span id="user-role" class="role-badge" hidden></span>
         <button id="logout" class="link-button" type="button" aria-label="Logout">Logout</button>
@@ -64,7 +67,8 @@
         <form id="ticket-form" class="ticket-form">
           <label>
             <span>Symbol</span>
-            <input id="ticket-symbol" type="text" required maxlength="12" />
+            <input id="ticket-symbol" type="text" required maxlength="12" list="watchlist-symbols" title="Focus (F2)" />
+            <datalist id="watchlist-symbols"></datalist>
           </label>
           <div class="row-two">
             <label>
@@ -85,7 +89,7 @@
           <div class="row-two">
             <label>
               <span>Quantity</span>
-              <input id="ticket-qty" type="number" min="1" step="1" required />
+              <input id="ticket-qty" type="number" min="100" step="100" required />
             </label>
             <label>
               <span>Price</span>
@@ -93,7 +97,7 @@
             </label>
           </div>
           <button type="submit" id="ticket-submit">Submit</button>
-          <p id="ticket-inflight" class="inflight" role="status" aria-live="polite" hidden></p>
+          <p id="ticket-inflight" class="inflight" hidden></p>
           <p id="ticket-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
         </form>
       </section>

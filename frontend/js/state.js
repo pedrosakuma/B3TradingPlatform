@@ -64,7 +64,16 @@ const state = {
   blotterPage: 1,
   ordersHighlight: new Map(),              // ClOrdID -> Date.now() of last delta
   selectedClOrdId: null,                   // currently selected blotter row (for keyboard cancel)
-  pendingFatFinger: null,                  // { payload, key } — set when a submit needs override
+  pendingFatFinger: null,                  // { payload, key, setAt } — set when a submit needs override
+  // Per-ClOrdID set of cancels currently in flight (DELETE issued, no
+  // server ack yet). Used to disable the row's Cancel button so the
+  // trader gets immediate visual feedback and can't fire repeat DELETEs.
+  inflightCancels: new Set(),
+  // Wall-clock when the active selectedSymbol was set. The DOB renderer
+  // uses this to decide when to upgrade the "awaiting book snapshot…"
+  // placeholder to a louder "no book — check MD settings ⚙" warning
+  // (after ~10s without a snapshot).
+  selectedSymbolSetAt: 0,
 };
 
 const EXECUTIONS_CAPACITY = 500;
@@ -145,6 +154,7 @@ export function clearAll() {
   state.blotterPage = 1;
   state.selectedClOrdId = null;
   state.pendingFatFinger = null;
+  state.inflightCancels.clear();
   notify("all");
 }
 
@@ -316,6 +326,7 @@ export function setSelectedSymbol(symbol) {
   const next = symbol == null || symbol === "" ? null : symbol;
   if (state.selectedSymbol === next) return;
   state.selectedSymbol = next;
+  state.selectedSymbolSetAt = next ? Date.now() : 0;
   notify("selectedSymbol");
 }
 
@@ -489,10 +500,12 @@ export function setWatchlist(symbols) {
   // sit empty when symbols exist. tapeShowAll is preserved.
   if (state.selectedSymbol && !wanted.has(state.selectedSymbol)) {
     state.selectedSymbol = null;
+    state.selectedSymbolSetAt = 0;
     notify("selectedSymbol");
   }
   if (state.selectedSymbol === null && next.length > 0) {
     state.selectedSymbol = next[0];
+    state.selectedSymbolSetAt = Date.now();
     notify("selectedSymbol");
   }
   notify("watchlist");
@@ -564,6 +577,18 @@ export function setSelectedOrder(clOrdId) {
 }
 
 export function setPendingFatFinger(payload, key) {
-  state.pendingFatFinger = payload ? { payload, key } : null;
+  state.pendingFatFinger = payload ? { payload, key, setAt: Date.now() } : null;
   notify("pendingFatFinger");
+}
+
+// In-flight cancel tracking. The blotter Cancel button calls
+// markCancelInflight(clOrdId, true) immediately on click so the row
+// renders disabled; once the server ER lands (or the cancel errors)
+// the caller toggles it back. Re-entrant safe — Set semantics.
+export function markCancelInflight(clOrdId, inflight) {
+  if (!clOrdId) return;
+  const before = state.inflightCancels.has(clOrdId);
+  if (inflight) state.inflightCancels.add(clOrdId);
+  else state.inflightCancels.delete(clOrdId);
+  if (before !== inflight) notify("orders");
 }
