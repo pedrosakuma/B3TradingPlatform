@@ -53,6 +53,7 @@ if (corsOrigins.Length > 0)
 }
 
 // Application-layer singletons: registries, books, processor, sink.
+builder.Services.AddSingleton<IUserStore, InMemoryUserStore>();
 builder.Services.AddSingleton<EndClientRegistry>();
 builder.Services.AddSingleton<ClOrdIdPrefixRegistry>();
 builder.Services.AddSingleton<OrderOwnershipMap>();

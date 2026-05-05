@@ -1,6 +1,6 @@
 // App entry point: wires login → worker → state → UI together.
 
-import { defaultBackend, defaultMarketDataUrl, login, submitOrder, cancelOrder, getAdminFirms,
+import { defaultBackend, defaultMarketDataUrl, login, signup, submitOrder, cancelOrder, getAdminFirms,
          validateSession,
          getKillStatus, killFirm, reviveFirm, killEndClient, reviveEndClient,
          runEod } from "./protocol.js";
@@ -46,6 +46,12 @@ let firmsPollTimer = null;
 function init() {
   document.getElementById("login-backend").placeholder = defaultBackend();
   document.getElementById("login-form").addEventListener("submit", onLogin);
+  const signupBackendInput = document.getElementById("signup-backend");
+  if (signupBackendInput) signupBackendInput.placeholder = defaultBackend();
+  const signupForm = document.getElementById("signup-form");
+  if (signupForm) signupForm.addEventListener("submit", onSignup);
+  document.getElementById("login-go-signup")?.addEventListener("click", () => showSignupCard(true));
+  document.getElementById("signup-go-login")?.addEventListener("click", () => showSignupCard(false));
   ui.bindUi();
   adminUi.bindAdminUi();
   ui.setHandlers({
@@ -131,6 +137,58 @@ async function onLogin(e) {
     ui.setLoginError(err.message || "Login failed");
   } finally {
     ui.setLoginSubmitting(false);
+  }
+}
+
+function showSignupCard(show) {
+  const loginCard = document.getElementById("login-form");
+  const signupCard = document.getElementById("signup-form");
+  if (!signupCard || !loginCard) return;
+  loginCard.hidden = !!show;
+  signupCard.hidden = !show;
+  setSignupError(null);
+  if (show) document.getElementById("signup-username")?.focus();
+  else document.getElementById("login-username")?.focus();
+}
+
+function setSignupError(msg) {
+  const el = document.getElementById("signup-error");
+  if (!el) return;
+  if (!msg) { el.hidden = true; el.textContent = ""; return; }
+  el.hidden = false;
+  el.textContent = msg;
+}
+
+async function onSignup(e) {
+  e.preventDefault();
+  setSignupError(null);
+  const backend = (document.getElementById("signup-backend").value || defaultBackend()).replace(/\/+$/, "");
+  const username = document.getElementById("signup-username").value.trim();
+  const password = document.getElementById("signup-password").value;
+  const confirm = document.getElementById("signup-password-confirm").value;
+  if (!username || !password) { setSignupError("Preencha username e password."); return; }
+  if (password !== confirm) { setSignupError("As senhas não coincidem."); return; }
+  const submitBtn = document.getElementById("signup-submit");
+  if (submitBtn) submitBtn.disabled = true;
+  try {
+    const resp = await signup(backend, username, password);
+    const claims = claimsFromToken(resp.token);
+    const next = {
+      token: resp.token,
+      expiresAt: resp.expiresAt,
+      username,
+      backend,
+      role: claims.role,
+      firm: claims.firm,
+      remember: false,
+    };
+    sessionStore = sessionStorage;
+    writeSession(next);
+    startSession(next);
+  } catch (err) {
+    setSignupError(err.message || "Signup falhou");
+  } finally {
+    if (submitBtn) submitBtn.disabled = false;
   }
 }
 

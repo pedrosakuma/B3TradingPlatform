@@ -47,6 +47,19 @@ export async function login(backend, username, password) {
   return jsonOrThrow(resp);
 }
 
+// Self-service signup. Returns the same shape as /auth/login (token +
+// expiresAt) so the caller can drop the new user straight into the
+// trader view without a follow-up login round-trip. v0 is FIRM01-only,
+// role=user — see backend AuthEndpoints for the policy.
+export async function signup(backend, username, password) {
+  const resp = await fetch(`${backend}/auth/signup`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  return jsonOrThrow(resp);
+}
+
 // Cheap, side-effect-free probe used at boot to detect stored tokens
 // that no longer authenticate (e.g. after the host's signing key was
 // rotated). Returns true on 2xx, false on 401/403, throws on network

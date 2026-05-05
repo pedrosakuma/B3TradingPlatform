@@ -56,6 +56,13 @@ export function showLogin() {
   $("login-view").hidden = false;
   $("trader-view").hidden = true;
   $("admin-view").hidden = true;
+  // Default to the login card; a user that previously toggled to the
+  // signup card and was bumped back to login (e.g. logout, expiry)
+  // shouldn't land staring at the signup form.
+  const loginCard = document.getElementById("login-form");
+  const signupCard = document.getElementById("signup-form");
+  if (loginCard) loginCard.hidden = false;
+  if (signupCard) signupCard.hidden = true;
   setViewToggleVisible(false, "trader");
 }
 
