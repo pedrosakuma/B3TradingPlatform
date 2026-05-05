@@ -14,6 +14,19 @@ public sealed class PositionKeeper
     public Position GetOrCreate(EndClientId owner, string symbol) =>
         _positions.GetOrAdd((owner, symbol), key => new Position(key.Owner, key.Symbol));
 
+    /// <summary>
+    /// Insert a starting position iff one is not already tracked for
+    /// <paramref name="owner"/>/<paramref name="symbol"/>. Returns
+    /// <c>true</c> when the seed was applied; <c>false</c> when an
+    /// existing position (from snapshot/WAL replay or a prior fill)
+    /// already occupies the slot. Idempotent and thread-safe.
+    /// </summary>
+    public bool SeedIfAbsent(EndClientId owner, string symbol, long netQuantity, decimal averageEntryPrice)
+    {
+        var seeded = Position.Hydrate(owner, symbol, netQuantity, averageEntryPrice);
+        return _positions.TryAdd((owner, symbol), seeded);
+    }
+
     public void ApplyFill(EndClientId owner, string symbol, OrderSide side, long quantity, decimal price)
     {
         var position = GetOrCreate(owner, symbol);
