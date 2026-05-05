@@ -149,6 +149,9 @@ services:
       # the seeded user actually reaches matching instead of bouncing as
       # a gateway-routing miss.
       Trading__Auth__Users__0__Firm: FIRM01
+      # Same firm override for bob (seeded by base compose at slot 5) so
+      # both default users route through the FIRM01 gateway in Real mode.
+      Trading__Auth__Users__5__Firm: FIRM01
       # Map the conformance-driven symbols onto the SecurityIds matching
       # advertises in instruments-eqt.json. v1 used placeholder ids that
       # would have been silently rejected by matching had any order ever
