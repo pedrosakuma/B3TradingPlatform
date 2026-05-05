@@ -106,14 +106,13 @@ body {
 .grid {
   flex: 1;
   display: grid;
-  grid-template-columns: 280px 1fr 240px;
+  grid-template-columns: 1fr 280px 280px;
+  grid-template-rows: minmax(260px, 1.4fr) minmax(180px, 1fr) auto minmax(140px, .8fr);
   grid-template-areas:
-    "ticket  blotter   positions"
-    "ticket  blotter   positions"
-    "md      execs     positions"
-    "dob     dob       positions"
-    "chart   chart     positions"
-    "tape    tape      positions";
+    "chart    dob      ticket"
+    "tape     dob      positions"
+    "blotter  blotter  blotter"
+    "execs    execs    md";
   gap: 8px; padding: 8px; min-height: 0;
 }
 .panel {
@@ -254,43 +253,49 @@ td { padding: .35rem .5rem; border-bottom: 1px solid #20283a; }
 /* ---------- Responsive ---------- */
 @media (max-width: 1280px) {
   .grid {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr 280px;
+    grid-template-rows: minmax(240px, 1fr) minmax(180px, 1fr) auto auto minmax(140px, .8fr);
     grid-template-areas:
+      "chart     dob"
+      "tape      dob"
       "ticket    positions"
       "blotter   blotter"
-      "execs     md"
-      "dob       dob"
-      "chart     chart"
-      "tape      tape";
+      "execs     md";
   }
 }
 @media (max-width: 720px) {
   .grid {
     grid-template-columns: 1fr;
+    grid-template-rows: none;
     grid-template-areas:
       "ticket"
+      "dob"
+      "chart"
+      "tape"
       "positions"
       "blotter"
       "execs"
-      "md"
-      "dob"
-      "chart"
-      "tape";
+      "md";
   }
 }
 
 /* ---------- Market data panel ---------- */
-.md-form { display: flex; flex-direction: column; gap: .5rem; margin-bottom: .8rem; }
-.md-form label { display: grid; gap: .2rem; font-size: .75rem; color: var(--muted); }
-.md-form input {
+.market-data h2 {
+  display: flex; align-items: center; justify-content: space-between; gap: .55rem;
+}
+.market-data h2 .md-title { display: inline-flex; align-items: center; gap: .55rem; }
+.icon-button {
+  background: transparent; border: 1px solid var(--border); color: var(--muted);
+  border-radius: 4px; padding: .05rem .4rem; cursor: pointer; font: inherit;
+  font-size: .9rem; line-height: 1;
+}
+.icon-button:hover { color: var(--text); border-color: var(--accent); }
+.md-settings-card { width: min(420px, 90vw); gap: .8rem; }
+.md-settings-card label { display: grid; gap: .2rem; font-size: .75rem; color: var(--muted); }
+.md-settings-card input {
   background: var(--bg); color: var(--text); border: 1px solid var(--border);
-  border-radius: 4px; padding: .35rem .5rem; font: inherit;
+  border-radius: 4px; padding: .4rem .55rem; font: inherit;
 }
-.md-form button {
-  background: var(--accent); color: #fff; border: 0; border-radius: 4px;
-  padding: .35rem .8rem; font-weight: 600; cursor: pointer; align-self: flex-start;
-}
-.market-data h2 { display: flex; align-items: center; gap: .55rem; }
 
 /* ---------- Operability badges (added in frontend hardening pass) ---------- */
 .reconnect-countdown {

@@ -153,21 +153,12 @@
       <!-- MARKET DATA ----------------------------------------------- -->
       <section class="panel market-data">
         <h2>
-          Market data
-          <span id="md-status" class="status-pill status-disconnected" role="status" aria-live="polite" aria-label="Market data: disconnected" title="MarketData WebSocket connection">disconnected</span>
+          <span class="md-title">
+            Market data
+            <span id="md-status" class="status-pill status-disconnected" role="status" aria-live="polite" aria-label="Market data: disconnected" title="MarketData WebSocket connection">disconnected</span>
+          </span>
+          <button type="button" id="md-settings-open" class="icon-button" aria-label="Market data settings" title="Market data settings">⚙</button>
         </h2>
-        <form id="md-form" class="md-form">
-          <label>
-            <span>WS URL</span>
-            <input id="md-url" type="url" placeholder="ws://localhost:8081/ws" />
-          </label>
-          <label>
-            <span>Watchlist (comma-separated)</span>
-            <input id="md-symbols" type="text" placeholder="PETR4,VALE3" />
-          </label>
-          <button type="submit" id="md-apply">Apply</button>
-          <p id="md-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
-        </form>
         <div class="table-scroll">
           <table id="md-table">
             <thead>
@@ -295,6 +286,26 @@
       <pre id="admin-eod-output" class="admin-eod-output" hidden></pre>
     </section>
   </section>
+
+  <!-- MARKET DATA SETTINGS POPOVER ------------------------------------ -->
+  <div id="md-settings-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="md-settings-title">
+    <form id="md-form" class="modal-card md-settings-card">
+      <h2 id="md-settings-title">Market data settings</h2>
+      <label>
+        <span>WS URL</span>
+        <input id="md-url" type="url" placeholder="ws://localhost:8081/ws" />
+      </label>
+      <label>
+        <span>Watchlist (comma-separated)</span>
+        <input id="md-symbols" type="text" placeholder="PETR4,VALE3" />
+      </label>
+      <p id="md-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
+      <div class="modal-actions">
+        <button type="button" id="md-settings-close" class="link-button">Close</button>
+        <button type="submit" id="md-apply">Apply</button>
+      </div>
+    </form>
+  </div>
 
   <!-- SESSION-EXPIRY MODAL -------------------------------------------- -->
   <div id="session-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="session-modal-title">

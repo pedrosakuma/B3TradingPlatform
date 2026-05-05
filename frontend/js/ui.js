@@ -188,6 +188,26 @@ export function bindUi() {
     onApplyMd({ url, symbols });
   });
 
+  // Market data settings popover (⚙ button in MD panel header).
+  const mdModal = $("md-settings-modal");
+  const mdOpen = $("md-settings-open");
+  const mdClose = $("md-settings-close");
+  if (mdOpen && mdModal) {
+    mdOpen.addEventListener("click", () => {
+      mdModal.hidden = false;
+      const urlInput = $("md-url");
+      if (urlInput) urlInput.focus();
+    });
+  }
+  if (mdClose && mdModal) {
+    mdClose.addEventListener("click", () => { mdModal.hidden = true; });
+  }
+  if (mdModal) {
+    mdModal.addEventListener("click", (e) => {
+      if (e.target === mdModal) mdModal.hidden = true;
+    });
+  }
+
   // Global symbol selector (drives DOB / chart / tape).
   const symSelect = $("selected-symbol");
   if (symSelect) {
