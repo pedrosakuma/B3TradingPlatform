@@ -33,6 +33,40 @@
       </details>
       <button type="submit" id="login-submit">Sign in</button>
       <p id="login-error" class="error" role="alert" hidden></p>
+      <p class="login-switch">
+        Sem conta?
+        <button type="button" id="login-go-signup" class="link-button">Criar conta</button>
+      </p>
+    </form>
+
+    <form id="signup-form" class="login-card" hidden>
+      <h1>Criar conta</h1>
+      <p class="subtitle">Self-service · FIRM01</p>
+      <label>
+        <span>Username</span>
+        <input id="signup-username" type="text" autocomplete="username" required maxlength="64" />
+      </label>
+      <label>
+        <span>Password</span>
+        <input id="signup-password" type="password" autocomplete="new-password" required minlength="6" />
+      </label>
+      <label>
+        <span>Confirmar password</span>
+        <input id="signup-password-confirm" type="password" autocomplete="new-password" required minlength="6" />
+      </label>
+      <details class="login-advanced">
+        <summary>Advanced</summary>
+        <label class="row">
+          <span>Backend</span>
+          <input id="signup-backend" type="url" placeholder="http://localhost:5000" />
+        </label>
+      </details>
+      <button type="submit" id="signup-submit">Criar e entrar</button>
+      <p id="signup-error" class="error" role="alert" hidden></p>
+      <p class="login-switch">
+        Já tem conta?
+        <button type="button" id="signup-go-login" class="link-button">Voltar para login</button>
+      </p>
     </form>
   </section>
 

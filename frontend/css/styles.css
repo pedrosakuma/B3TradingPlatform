@@ -56,6 +56,14 @@ body {
 .login-advanced summary:hover { color: var(--text); }
 .login-advanced > .row { margin-top: .5rem; }
 .error { color: var(--red); font-size: .85rem; margin: 0; }
+.login-switch {
+  font-size: .8rem; color: var(--muted); margin: .2rem 0 0; text-align: center;
+}
+.login-switch .link-button {
+  background: none; color: var(--accent); border: 0; padding: 0; cursor: pointer;
+  font: inherit; text-decoration: underline;
+}
+.login-switch .link-button:hover { filter: brightness(1.2); }
 
 /* ---------- Trader shell ---------- */
 .trader-view { display: flex; flex-direction: column; height: 100vh; min-height: 0; overflow: hidden; }

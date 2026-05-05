@@ -1,0 +1,25 @@
+namespace B3.Trading.Api.Auth;
+
+/// <summary>
+/// User directory used by login + signup. Hides the split between
+/// env-seeded users (immutable, from <see cref="AuthOptions.Users"/>)
+/// and runtime users created via self-service signup.
+///
+/// <para>
+/// v1 is in-memory only; runtime entries are lost on restart by design
+/// (see plan: persistence is a tracked follow-up). Env-seeded users
+/// always survive because they're rebuilt from configuration at boot.
+/// </para>
+/// </summary>
+public interface IUserStore
+{
+    /// <summary>Lookup by username (case-insensitive).</summary>
+    bool TryGet(string username, out UserConfig? user);
+
+    /// <summary>
+    /// Insert a runtime user. Returns <c>false</c> when the username
+    /// already exists in either the env slot or the runtime slot.
+    /// Thread-safe.
+    /// </summary>
+    bool TryAdd(UserConfig user);
+}
