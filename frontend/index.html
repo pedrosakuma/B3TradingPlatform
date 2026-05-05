@@ -226,6 +226,18 @@
           <p id="chart-empty" class="chart-empty muted-cell">select a symbol</p>
         </div>
       </section>
+
+      <!-- TAPE ------------------------------------------------------- -->
+      <section class="panel tape">
+        <h2>
+          Tape
+          <select id="tape-symbol" aria-label="Tape symbol filter">
+            <option value="">All</option>
+          </select>
+          <span id="tape-paused" class="tape-paused" hidden>paused</span>
+        </h2>
+        <ol id="tape-list" class="tape-list" aria-live="off"></ol>
+      </section>
     </main>
   </section>
 

@@ -77,13 +77,14 @@ body {
   flex: 1;
   display: grid;
   grid-template-columns: 280px 1fr 240px;
-  grid-template-rows: auto 1fr auto auto auto;
+  grid-template-rows: auto 1fr auto auto auto auto;
   grid-template-areas:
     "ticket  blotter   positions"
     "ticket  blotter   positions"
     "md      execs     positions"
     "dob     dob       positions"
-    "chart   chart     positions";
+    "chart   chart     positions"
+    "tape    tape      positions";
   gap: 8px; padding: 8px; min-height: 0;
 }
 .panel {
@@ -142,6 +143,37 @@ body {
 .candle-up   { stroke: #1f9d55; fill: #1f9d55; }
 .candle-down { stroke: #c53030; fill: #c53030; }
 .candle-wick { stroke-width: 1; }
+
+/* ---------- Trade tape (T4) ---------- */
+.tape { grid-area: tape; min-height: 200px; }
+.tape h2 { display: flex; align-items: center; gap: .55rem; }
+.tape h2 select {
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: .15rem .3rem; font: inherit; font-size: .8rem;
+}
+.tape-paused {
+  font-size: .65rem; color: var(--warn);
+  background: rgba(250, 192, 64, .12); border: 1px solid var(--warn);
+  border-radius: 999px; padding: 0 .45rem;
+}
+.tape-list {
+  list-style: none; margin: 0; padding: 0;
+  flex: 1; min-height: 0; overflow-y: auto;
+  font-size: .78rem; font-variant-numeric: tabular-nums;
+}
+.tape-list li {
+  display: grid; grid-template-columns: 64px 1fr 1fr 1fr 56px;
+  gap: .35rem; padding: .12rem .35rem;
+  border-bottom: 1px solid var(--border);
+}
+.tape-list li:last-child { border-bottom: 0; }
+.tape-list .tape-num { text-align: right; }
+.tape-list .tape-up   { color: #1f9d55; }
+.tape-list .tape-down { color: #c53030; }
+.tape-list .tape-flat { color: var(--muted); }
+.tape-list .tape-busted { text-decoration: line-through; opacity: .55; }
+.tape-list .tape-empty { color: var(--muted); text-align: center; padding: .8rem; display: block; }
 
 /* ---------- Order ticket ---------- */
 .ticket-form { display: flex; flex-direction: column; gap: .55rem; }
@@ -204,7 +236,8 @@ td { padding: .35rem .5rem; border-bottom: 1px solid #20283a; }
       "blotter   blotter"
       "execs     md"
       "dob       dob"
-      "chart     chart";
+      "chart     chart"
+      "tape      tape";
   }
 }
 

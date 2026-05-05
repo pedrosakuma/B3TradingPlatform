@@ -59,6 +59,7 @@ function init() {
     onSelectDobSymbol: handleSelectDobSymbol,
     onSelectChartSymbol: state.setChartSymbol,
     onSelectChartResolution: state.setChartResolution,
+    onSelectTapeSymbol: state.setTapeSymbol,
   });
   adminUi.setAdminHandlers({
     onToggleFirm:      handleToggleFirm,
@@ -274,6 +275,7 @@ function handleApplyMd({ url, symbols }) {
     state.clearMarketData();
     state.clearAllBooks();
     state.clearAllCandles();
+    state.clearAllTape();
     mbpEnabled = false;
     startMdWorker();
   } else {
@@ -308,14 +310,11 @@ function onMdWorkerMessage(msg) {
       state.clearMarketData();
       state.clearAllBooks();
       state.clearAllCandles();
+      state.clearAllTape();
       break;
     case "md.trade":    state.applyMdTrade(msg); break;
     case "md.info":     state.applyMdInfo(msg); break;
-    case "md.bust":
-      // Risk consumers ignore busts (the next live trade overwrites);
-      // surface in the executions log so the trader sees it happened.
-      console.warn("[md] trade bust", msg);
-      break;
+    case "md.bust":     state.applyMdTradeBust(msg); break;
     case "md.subError":
       ui.setMdFeedback(`subscribe ${msg.symbol}: ${msg.errorName}`, "error");
       state.removeMdSymbol(msg.symbol);
