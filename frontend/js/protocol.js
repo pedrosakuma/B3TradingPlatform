@@ -30,6 +30,18 @@ export async function login(backend, username, password) {
   return jsonOrThrow(resp);
 }
 
+// Cheap, side-effect-free probe used at boot to detect stored tokens
+// that no longer authenticate (e.g. after the host's signing key was
+// rotated). Returns true on 2xx, false on 401/403, throws on network
+// errors so the caller can fall back to the optimistic path.
+export async function validateSession(backend, token) {
+  const resp = await fetch(`${backend}/positions`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (resp.status === 401 || resp.status === 403) return false;
+  return resp.ok;
+}
+
 export async function submitOrder(backend, token, payload) {
   const resp = await fetch(`${backend}/orders`, {
     method: "POST",

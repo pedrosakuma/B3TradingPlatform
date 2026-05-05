@@ -1,6 +1,7 @@
 // App entry point: wires login → worker → state → UI together.
 
 import { defaultBackend, login, submitOrder, cancelOrder, getAdminFirms,
+         validateSession,
          getKillStatus, killFirm, reviveFirm, killEndClient, reviveEndClient,
          runEod } from "./protocol.js";
 import { claimsFromToken } from "./jwt.js";
@@ -69,8 +70,26 @@ function init() {
   });
 
   const stored = readSession();
-  if (stored) startSession(stored);
-  else ui.showLogin();
+  if (stored) {
+    // Probe before we commit: a token that survived a host signing-key
+    // rotation will look fresh client-side (expiresAt in the future)
+    // but be rejected by the backend on the very first WS upgrade.
+    // Showing the "session expiring" modal in that case is confusing
+    // because the user never logged in this run. Drop silently and
+    // fall back to login if the probe fails.
+    validateSession(stored.backend, stored.token)
+      .then((ok) => {
+        if (ok) startSession(stored);
+        else { clearSession(); ui.showLogin(); }
+      })
+      .catch(() => {
+        // Network error — give the optimistic path a chance; if the
+        // token is genuinely bad, /orders / WS will surface it later.
+        startSession(stored);
+      });
+  } else {
+    ui.showLogin();
+  }
 }
 
 async function onLogin(e) {
