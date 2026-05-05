@@ -71,22 +71,33 @@ function init() {
 
   const stored = readSession();
   if (stored) {
+    // Boot guard: if the stored session is already inside the warning
+    // window (or past its expiry), don't even attempt to adopt it.
+    // Showing the "session expiring" modal as the very first thing the
+    // user sees on page load is confusing — they have no context. Treat
+    // it as expired and require a fresh login.
+    const expiresAtMs = Date.parse(stored.expiresAt || "");
+    const remaining = Number.isFinite(expiresAtMs) ? expiresAtMs - Date.now() : -1;
+    if (remaining <= SESSION_WARNING_LEAD_MS) {
+      clearSession();
+      ui.showLogin();
+      return;
+    }
     // Probe before we commit: a token that survived a host signing-key
     // rotation will look fresh client-side (expiresAt in the future)
     // but be rejected by the backend on the very first WS upgrade.
     // Showing the "session expiring" modal in that case is confusing
     // because the user never logged in this run. Drop silently and
-    // fall back to login if the probe fails.
+    // fall back to login if the probe fails. On network error we ALSO
+    // drop — the optimistic path used to fall through here, but if the
+    // stored backend URL is stale/wrong the user lands in a half-open
+    // UI with no way out. Re-login is cheap; bias toward correctness.
     validateSession(stored.backend, stored.token)
       .then((ok) => {
         if (ok) startSession(stored);
         else { clearSession(); ui.showLogin(); }
       })
-      .catch(() => {
-        // Network error — give the optimistic path a chance; if the
-        // token is genuinely bad, /orders / WS will surface it later.
-        startSession(stored);
-      });
+      .catch(() => { clearSession(); ui.showLogin(); });
   } else {
     ui.showLogin();
   }

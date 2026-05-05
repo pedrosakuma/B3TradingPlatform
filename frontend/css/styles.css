@@ -366,6 +366,7 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
   position: fixed; inset: 0; background: rgba(8,11,16,.65);
   display: grid; place-items: center; z-index: 1000;
 }
+.modal-backdrop[hidden] { display: none; }
 .modal-card {
   background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
   padding: 1.25rem 1.5rem; width: min(360px, 90vw);

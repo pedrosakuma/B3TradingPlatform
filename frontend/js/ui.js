@@ -65,6 +65,7 @@ export function setLoginError(message) {
 // ── Session-expiry modal ───────────────────────────────────────────
 let sessionModalSubmit = null;
 let sessionModalLogout = null;
+let sessionModalBackdrop = null;
 
 export function openSessionModal({ onRenew, onLogout }) {
   const modal = $("session-modal");
@@ -78,6 +79,7 @@ export function openSessionModal({ onRenew, onLogout }) {
   // Replace handlers (idempotent across multiple opens).
   if (sessionModalSubmit) form.removeEventListener("submit", sessionModalSubmit);
   if (sessionModalLogout) logoutBtn?.removeEventListener("click", sessionModalLogout);
+  if (sessionModalBackdrop) modal.removeEventListener("click", sessionModalBackdrop);
   sessionModalSubmit = (e) => {
     e.preventDefault();
     const value = pwd.value;
@@ -85,8 +87,16 @@ export function openSessionModal({ onRenew, onLogout }) {
     onRenew?.(value);
   };
   sessionModalLogout = () => onLogout?.();
+  // Click on the backdrop (anywhere outside the modal-card) = logout.
+  // Defensive escape hatch so a user staring at the modal after a key
+  // rotation or stale-token boot doesn't get trapped if the inner
+  // Logout button somehow fails (or they're confused by it).
+  sessionModalBackdrop = (e) => {
+    if (e.target === modal) onLogout?.();
+  };
   form.addEventListener("submit", sessionModalSubmit);
   logoutBtn?.addEventListener("click", sessionModalLogout);
+  modal.addEventListener("click", sessionModalBackdrop);
   // Defer focus to the next frame so backdrop transitions don't steal it.
   requestAnimationFrame(() => pwd.focus());
 }
