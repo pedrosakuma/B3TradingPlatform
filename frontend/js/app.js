@@ -1,6 +1,6 @@
 // App entry point: wires login → worker → state → UI together.
 
-import { defaultBackend, defaultMarketDataUrl, login, signup, submitOrder, cancelOrder, getAdminFirms,
+import { defaultBackend, defaultMarketDataUrl, login, signup, submitOrder, cancelOrder, modifyOrder, getAdminFirms,
          validateSession,
          getKillStatus, killFirm, reviveFirm, killEndClient, reviveEndClient,
          getHaltStatus, haltSymbol, resumeSymbol,
@@ -58,6 +58,7 @@ function init() {
   ui.setHandlers({
     onSubmitOrder: handleSubmitOrder,
     onCancelOrder: handleCancelOrder,
+    onModifyOrder: handleModifyOrder,
     onLogout: logout,
     onApplyMd: handleApplyMd,
     onSwitchView: handleSwitchView,
@@ -553,6 +554,41 @@ async function handleCancelOrder(clOrdId) {
     ui.setTicketFeedback(`cancel failed: ${err.message}`, "error");
   } finally {
     state.markCancelInflight(clOrdId, false);
+  }
+}
+
+// Slice 5 of #122. Routes the blotter "Modify" intent through
+// PUT /orders/{clOrdId}. The modal already validated qty/price and
+// is responsible for showing the inline error; here we only translate
+// transport failures into modal errors and toggle inflight state.
+async function handleModifyOrder(clOrdId, payload) {
+  if (!session) return;
+  const st = state.getState();
+  if (st.inflightModifies && st.inflightModifies.has(clOrdId)) return;
+  const order = st.orders.get(clOrdId);
+  if (!order || ["Filled", "Cancelled", "Rejected"].includes(order.status)) {
+    ui.setModifyModalError("Order is no longer modifiable.");
+    return;
+  }
+  state.markModifyInflight(clOrdId, true);
+  ui.setModifyModalSubmitting(true);
+  try {
+    await modifyOrder(session.backend, session.token, clOrdId, payload);
+    // Close the modal on accept; the new ClOrdID will arrive via the
+    // orders.me stream and surface in the blotter — no need for a
+    // toast since the trader can see the row appear.
+    ui.closeModifyModal();
+  } catch (err) {
+    if (err.status === 401) { logout(); return; }
+    // Backend error bodies vary across status codes (Conflict /
+    // BadRequest / UnprocessableEntity / BadGateway / etc). The
+    // shared shape is `{ error: "..." }` for the structured cases —
+    // fall back to err.message for transport errors.
+    const reason = (err.body && err.body.error) || err.message || "modify failed";
+    ui.setModifyModalError(reason);
+  } finally {
+    state.markModifyInflight(clOrdId, false);
+    ui.setModifyModalSubmitting(false);
   }
 }
 

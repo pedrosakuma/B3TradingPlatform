@@ -156,7 +156,7 @@
               <tr>
                 <th>ClOrdID</th><th>Symbol</th><th>Side</th><th>Type</th>
                 <th class="num">Qty</th><th class="num">Leaves</th><th class="num">Cum</th>
-                <th class="num">Price</th><th>Status</th><th></th>
+                <th class="num">Price</th><th>Status</th><th></th><th></th>
               </tr>
             </thead>
             <tbody id="blotter-body"></tbody>
@@ -372,6 +372,30 @@
       <div class="modal-actions">
         <button type="button" id="session-modal-logout" class="link-button">Logout</button>
         <button type="submit" id="session-modal-submit">Renew session</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- ORDER MODIFY MODAL --------------------------------------------- -->
+  <!-- Slice 5 of #122. Triggered by the Modify button in the blotter
+       row (or programmatically by app.js); pre-fills with the order's
+       current quantity/price and routes through PUT /orders/{clOrdId}. -->
+  <div id="modify-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="modify-modal-title">
+    <form id="modify-modal-form" class="modal-card">
+      <h2 id="modify-modal-title">Modify order</h2>
+      <p id="modify-modal-summary" class="muted-line"></p>
+      <label>
+        <span>New quantity</span>
+        <input id="modify-modal-qty" type="number" min="1" step="1" required inputmode="numeric" />
+      </label>
+      <label>
+        <span>New price</span>
+        <input id="modify-modal-price" type="number" min="0" step="any" inputmode="decimal" />
+      </label>
+      <p id="modify-modal-error" class="error" hidden></p>
+      <div class="modal-actions">
+        <button type="button" id="modify-modal-cancel" class="link-button">Cancel</button>
+        <button type="submit" id="modify-modal-submit">Send modify</button>
       </div>
     </form>
   </div>

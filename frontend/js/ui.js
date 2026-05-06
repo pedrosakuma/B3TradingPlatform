@@ -26,6 +26,7 @@ export { fmtQty, fmtPx };
 
 let onSubmitOrder = () => {};
 let onCancelOrder = () => {};
+let onModifyOrder = () => {};
 let onLogout      = () => {};
 let onApplyMd     = () => {};
 let onSwitchView  = () => {};
@@ -40,6 +41,7 @@ let onToggleTapeShowAll = () => {};
 export function setHandlers(handlers) {
   onSubmitOrder    = handlers.onSubmitOrder    ?? onSubmitOrder;
   onCancelOrder    = handlers.onCancelOrder    ?? onCancelOrder;
+  onModifyOrder    = handlers.onModifyOrder    ?? onModifyOrder;
   onLogout         = handlers.onLogout         ?? onLogout;
   onApplyMd        = handlers.onApplyMd        ?? onApplyMd;
   onSwitchView     = handlers.onSwitchView     ?? onSwitchView;
@@ -164,6 +166,107 @@ export function setSessionModalError(message) {
   el.hidden = false; el.textContent = message;
 }
 
+// ── Modify-order modal (slice 5 of #122) ───────────────────────────
+
+// The modal stores its "current target" on the form element via
+// dataset so the submit handler doesn't depend on UI state churn
+// while the modal is open (e.g. background ER updates the row but
+// the trader's intent is still keyed to the originally-clicked
+// ClOrdID).
+function openModifyModal(clOrdId) {
+  const st = getState();
+  const order = st.orders?.get(clOrdId);
+  if (!order) return;
+  if (isTerminalOrderStatus(order.status)) return;
+  if (st.inflightModifies?.has(clOrdId)) return;
+  if (st.inflightCancels?.has(clOrdId)) return;
+
+  const modal = $("modify-modal");
+  const form  = $("modify-modal-form");
+  const qty   = $("modify-modal-qty");
+  const price = $("modify-modal-price");
+  const summary = $("modify-modal-summary");
+  const error = $("modify-modal-error");
+  if (!modal || !form || !qty) return;
+
+  form.dataset.clordid = clOrdId;
+  qty.value = order.quantity ?? "";
+  if (price) {
+    if (order.price == null) {
+      price.value = "";
+      price.disabled = (order.type === "Market");
+    } else {
+      price.value = order.price;
+      price.disabled = false;
+    }
+  }
+  if (summary) {
+    const px = order.price == null ? "MKT" : order.price;
+    summary.textContent =
+      `Order ${order.clOrdId} — ${order.symbol} ${order.side} ${order.type} ` +
+      `(qty ${order.quantity}, leaves ${order.leavesQuantity}, cum ${order.cumulativeQuantity}, px ${px})`;
+  }
+  if (error) { error.hidden = true; error.textContent = ""; }
+  modal.hidden = false;
+  // Focus the qty field so keyboard-only operators don't need a
+  // round-trip through the mouse to change the size.
+  setTimeout(() => qty.focus(), 0);
+}
+
+export function closeModifyModal() {
+  const modal = $("modify-modal");
+  const form  = $("modify-modal-form");
+  if (!modal) return;
+  modal.hidden = true;
+  if (form) delete form.dataset.clordid;
+  setModifyModalError(null);
+  setModifyModalSubmitting(false);
+}
+
+export function setModifyModalError(message) {
+  const el = $("modify-modal-error");
+  if (!el) return;
+  if (!message) { el.hidden = true; el.textContent = ""; return; }
+  el.hidden = false; el.textContent = message;
+}
+
+export function setModifyModalSubmitting(busy) {
+  const submit = $("modify-modal-submit");
+  if (!submit) return;
+  submit.disabled = !!busy;
+  submit.textContent = busy ? "Sending…" : "Send modify";
+}
+
+function submitModifyForm() {
+  const form  = $("modify-modal-form");
+  const qtyEl = $("modify-modal-qty");
+  const pxEl  = $("modify-modal-price");
+  if (!form || !qtyEl) return;
+  const clOrdId = form.dataset.clordid;
+  if (!clOrdId) return;
+
+  const qtyRaw = qtyEl.value.trim();
+  const qty = Number(qtyRaw);
+  if (!Number.isFinite(qty) || qty <= 0 || !Number.isInteger(qty)) {
+    setModifyModalError("Quantity must be a positive integer.");
+    return;
+  }
+  let price = null;
+  if (pxEl && !pxEl.disabled) {
+    const pxRaw = pxEl.value.trim();
+    if (pxRaw !== "") {
+      const px = Number(pxRaw);
+      if (!Number.isFinite(px) || px <= 0) {
+        setModifyModalError("Price must be a positive number.");
+        return;
+      }
+      price = px;
+    }
+  }
+  setModifyModalError(null);
+  onModifyOrder(clOrdId, { quantity: qty, price });
+}
+
 export function bindUi() {
   // Order ticket: enable/disable price field by type.
   const typeEl = $("ticket-type");
@@ -211,18 +314,47 @@ export function bindUi() {
 
   $("logout").addEventListener("click", () => onLogout());
 
-  // Event delegation for per-row Cancel buttons in the blotter,
-  // plus row selection (clicking anywhere outside the cancel button).
+  // Event delegation for per-row Cancel + Modify buttons in the
+  // blotter, plus row selection (clicking anywhere outside the
+  // action buttons).
   $("blotter-body").addEventListener("click", (e) => {
-    const btn = e.target.closest(".cancel-btn");
-    if (btn) {
-      const clOrdId = btn.dataset.clordid;
+    const cancelBtn = e.target.closest(".cancel-btn");
+    if (cancelBtn) {
+      const clOrdId = cancelBtn.dataset.clordid;
       if (clOrdId) onCancelOrder(clOrdId);
+      return;
+    }
+    const modifyBtn = e.target.closest(".modify-btn");
+    if (modifyBtn) {
+      const clOrdId = modifyBtn.dataset.clordid;
+      if (clOrdId) openModifyModal(clOrdId);
       return;
     }
     const row = e.target.closest("tr[data-clordid]");
     if (row) onSelectOrder(row.dataset.clordid);
   });
+
+  // Modify modal wiring (slice 5 of #122).
+  const modifyForm = $("modify-modal-form");
+  const modifyCancelBtn = $("modify-modal-cancel");
+  if (modifyForm) {
+    modifyForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      submitModifyForm();
+    });
+  }
+  if (modifyCancelBtn) {
+    modifyCancelBtn.addEventListener("click", () => closeModifyModal());
+  }
+  const modifyModal = $("modify-modal");
+  if (modifyModal) {
+    // Backdrop click closes the modal — same UX precedent as the
+    // session-expiry modal but with closeModifyModal() (no logout
+    // side-effect). Esc handled in the global keydown below.
+    modifyModal.addEventListener("click", (e) => {
+      if (e.target === modifyModal) closeModifyModal();
+    });
+  }
 
   // Blotter filter: text + status select. Persisted via app.js.
   const filterText = $("blotter-filter-text");
@@ -358,7 +490,14 @@ function onGlobalKeydown(e) {
     return;
   }
   if (e.key === "Escape") {
-    // Esc inside the ticket form clears it; outside, clear blotter selection.
+    // Esc closes the modify modal first if open (highest-priority
+    // dismiss); inside the ticket form clears it; outside, clear
+    // blotter selection.
+    const modifyModal = $("modify-modal");
+    if (modifyModal && !modifyModal.hidden) {
+      closeModifyModal();
+      return;
+    }
     if (target?.closest && target.closest("#ticket-form")) {
       clearTicket();
     } else {
@@ -927,14 +1066,24 @@ const HIGHLIGHT_MS = 2000;
 function orderRow(o, st) {
   const terminal = isTerminalOrderStatus(o.status);
   const cancelInflight = st.inflightCancels?.has(o.clOrdId);
+  const modifyInflight = st.inflightModifies?.has(o.clOrdId);
   const price = o.price == null ? "—" : fmtPx(o.price);
   const highlightAt = st.ordersHighlight?.get(o.clOrdId);
   const fresh = highlightAt && (Date.now() - highlightAt) < HIGHLIGHT_MS;
   const selected = st.selectedClOrdId === o.clOrdId;
   const cls = [fresh ? "row-fresh" : "", selected ? "row-selected" : ""].filter(Boolean).join(" ");
-  const cancelDisabled = terminal || cancelInflight;
+  const cancelDisabled = terminal || cancelInflight || modifyInflight;
   const cancelLabel = cancelInflight ? "Cancelling…" : "Cancel";
   const cancelCls = "cancel-btn" + (cancelInflight ? " cancelling" : "");
+  // Slice 5 of #122. Modify button shares row-selection delegation
+  // (data-clordid on the button so the click handler can map it back
+  // to the order without walking the row). Disabled while terminal
+  // or while either a cancel or another modify is in flight — the
+  // backend's in-flight guard would 409 a second modify anyway, but
+  // gating client-side avoids the round-trip and keeps the UX honest.
+  const modifyDisabled = terminal || modifyInflight || cancelInflight;
+  const modifyLabel = modifyInflight ? "Modifying…" : "Modify";
+  const modifyCls = "modify-btn" + (modifyInflight ? " modifying" : "");
   return `<tr data-clordid="${escapeHtml(o.clOrdId)}"${cls ? ` class="${cls}"` : ""}>
     <td><code>${escapeHtml(o.clOrdId)}</code></td>
     <td>${escapeHtml(o.symbol)}</td>
@@ -945,6 +1094,7 @@ function orderRow(o, st) {
     <td class="num">${fmtQty(o.cumulativeQuantity)}</td>
     <td class="num">${price}</td>
     <td class="status-cell-${escapeHtml(o.status)}">${escapeHtml(o.status)}</td>
+    <td><button class="${modifyCls}" data-clordid="${escapeHtml(o.clOrdId)}" aria-label="Modify order ${escapeHtml(o.clOrdId)}" title="Modify" ${modifyDisabled ? "disabled" : ""}>${modifyLabel}</button></td>
     <td><button class="${cancelCls}" data-clordid="${escapeHtml(o.clOrdId)}" aria-label="Cancel order ${escapeHtml(o.clOrdId)}" title="Cancel (Del)" ${cancelDisabled ? "disabled" : ""}>${cancelLabel}</button></td>
   </tr>`;
 }

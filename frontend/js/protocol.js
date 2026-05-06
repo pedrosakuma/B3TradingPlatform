@@ -90,6 +90,20 @@ export async function cancelOrder(backend, token, clOrdId) {
   return jsonOrThrow(resp);
 }
 
+// Slice 5 of #122. Cancel-replace ("modify") the working order.
+// Backend returns 202 + { ClOrdId, OriginalClOrdId } on accept, with
+// the new ClOrdID being the venue-bound replacement. Other status
+// codes (404 / 409 / 400 / 422 / 502 / 503) bubble up via jsonOrThrow
+// so the caller can surface a user-readable reason.
+export async function modifyOrder(backend, token, clOrdId, payload) {
+  const resp = await fetch(`${backend}/orders/${encodeURIComponent(clOrdId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+  return jsonOrThrow(resp);
+}
+
 // Admin-only: per-firm operator visibility. Returns 403 for non-admin
 // callers — the UI must gate the call by inspecting the JWT role
 // before invoking this. Schema mirrors AdminEndpoints.MapAdmin /firms.
