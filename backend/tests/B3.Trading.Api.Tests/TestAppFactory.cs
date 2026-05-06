@@ -100,6 +100,10 @@ public class TestAppFactory : WebApplicationFactory<Program>
                 // so they don't write a users.json into the repo. Tests
                 // exercising the file-backed store opt in via WithOverrides.
                 ["Trading:Auth:UserStore:Enabled"] = "false",
+                // Slice 4 of #97: lockout disabled by default so tests
+                // hammering /auth/login with bad creds don't trip the
+                // gate. Lockout-specific tests opt in via WithOverrides.
+                ["Trading:Auth:LoginLockout:Enabled"] = "false",
             });
 
             if (_configOverrides is not null)
