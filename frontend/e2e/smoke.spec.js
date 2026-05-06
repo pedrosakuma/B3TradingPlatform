@@ -80,6 +80,11 @@ test.describe("trader workspace smoke", () => {
     await page.selectOption("#ticket-type", "Limit");
     await page.fill("#ticket-qty", "100");
     await page.fill("#ticket-price", "25.00");
+    // Issue #105: Submit must be visible in the ticket panel viewport
+    // without scrolling. Playwright's click() auto-scrolls into view,
+    // so the click itself wouldn't catch a clipped button — assert
+    // explicit in-viewport visibility before exercising it.
+    await expect(page.locator("#ticket-submit")).toBeInViewport();
     await page.click("#ticket-submit");
 
     // The accepted ClOrdId is shown in the ticket-feedback line and

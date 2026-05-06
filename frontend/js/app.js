@@ -727,32 +727,55 @@ async function handleRunEod() {
   }
 }
 
-function readSession() {
-  // Read both stores; pick the freshest non-expired one. If "remember
-  // me" was used, it lives in localStorage. Otherwise, sessionStorage.
-  const candidates = [];
-  for (const store of [localStorage, sessionStorage]) {
-    try {
-      const raw = store.getItem(SESSION_KEY);
-      if (!raw) continue;
-      const parsed = JSON.parse(raw);
-      if (!parsed.token || !parsed.expiresAt) continue;
-      if (new Date(parsed.expiresAt).getTime() <= Date.now()) continue;
-      candidates.push({ store, parsed });
-    } catch { /* fall through */ }
+function readStoredSession(store) {
+  try {
+    const raw = store.getItem(SESSION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed.token || !parsed.expiresAt) return null;
+    if (new Date(parsed.expiresAt).getTime() <= Date.now()) return null;
+    return parsed;
+  } catch {
+    return null;
   }
-  if (!candidates.length) return null;
-  candidates.sort((a, b) =>
-    new Date(b.parsed.expiresAt).getTime() - new Date(a.parsed.expiresAt).getTime());
-  const winner = candidates[0];
-  sessionStore = winner.store;
-  return winner.parsed;
+}
+
+function readSession() {
+  // sessionStorage is the per-tab anchor: once a tab has its own
+  // session pinned there, no other tab can hijack it via localStorage.
+  // localStorage is consulted only as a "boot seed" for fresh tabs
+  // that don't yet have their own pinned session — that's how
+  // "Remember me" survives a full browser close. Issue #104:
+  // previously we picked the freshest of either store, which let a
+  // remember-me login in tab B silently take over tab A on reload.
+  const fromTab = readStoredSession(sessionStorage);
+  if (fromTab) {
+    sessionStore = sessionStorage;
+    return fromTab;
+  }
+  const fromBoot = readStoredSession(localStorage);
+  if (fromBoot) {
+    // Pin the boot seed into this tab so subsequent reloads/writes
+    // stay isolated from other tabs.
+    try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(fromBoot)); } catch { /* swallow */ }
+    sessionStore = fromBoot.remember ? localStorage : sessionStorage;
+    return fromBoot;
+  }
+  return null;
 }
 function writeSession(s) {
-  sessionStore.setItem(SESSION_KEY, JSON.stringify(s));
-  // Make sure the other store doesn't shadow our write.
-  const other = sessionStore === localStorage ? sessionStorage : localStorage;
-  try { other.removeItem(SESSION_KEY); } catch { /* swallow */ }
+  // Always pin in sessionStorage so the tab owns its identity going
+  // forward. Mirror to localStorage only when remember-me is on, so
+  // a fresh browser launch can recover the session via the boot seed
+  // path in readSession(). We deliberately do NOT clear the "other"
+  // store here: another tab may legitimately have a remember-me
+  // session in localStorage that this tab's write must not erase
+  // (issue #104).
+  try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch { /* swallow */ }
+  if (s.remember) {
+    try { localStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch { /* swallow */ }
+  }
+  sessionStore = s.remember ? localStorage : sessionStorage;
 }
 function clearSession() {
   try { localStorage.removeItem(SESSION_KEY); } catch { /* swallow */ }

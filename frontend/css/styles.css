@@ -120,7 +120,13 @@ body {
   flex: 1;
   display: grid;
   grid-template-columns: 1fr 280px 280px;
-  grid-template-rows: minmax(300px, 1.2fr) minmax(160px, .9fr) minmax(220px, 1.4fr) minmax(140px, .8fr);
+  /* Row 1 min-height bumped from 300px → 360px so the Order Ticket
+     Submit button stays visible without scrolling at viewport ≥1024×600
+     (issue #105). 300px was within ~5px of the ticket form's natural
+     height, leaving the button clipped by `.ticket { overflow-y: auto }`
+     under default font-size. 360px gives ~50px of headroom for future
+     fields (TIF, Stop, etc.) without forcing the chart smaller. */
+  grid-template-rows: minmax(360px, 1.2fr) minmax(160px, .9fr) minmax(220px, 1.4fr) minmax(140px, .8fr);
   grid-template-areas:
     "chart    dob      ticket"
     "tape     dob      positions"
