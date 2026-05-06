@@ -30,7 +30,8 @@ public sealed record ExecutionEvent(
     long LastQuantity,
     decimal LastPrice,
     string? RejectReason,
-    DateTimeOffset TimestampUtc);
+    DateTimeOffset TimestampUtc,
+    bool IsNativeStp = false);
 
 public sealed class NoOpExecutionEventSink : IExecutionEventSink
 {

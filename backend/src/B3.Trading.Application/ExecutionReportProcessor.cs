@@ -183,6 +183,22 @@ public sealed class ExecutionReportProcessor
                 break;
         }
 
+        // Server-side STP detection (#117): if the matching engine
+        // emitted a cancel with a SelfTradePrevention restatement
+        // reason, mark the outbound event so the UI/logs can surface
+        // it differently from generic cancels. Native STP is the
+        // ONLY layer that can catch a self-cross within the gateway
+        // dispatch race window; this surfacing is what makes the
+        // event actionable for diagnostics.
+        var isNativeStp = kind == ExecKind.Canceled
+            && NativeStpDetector.IsNativeStpReason(rejectReason);
+        if (isNativeStp)
+        {
+            _logger.LogInformation(
+                "event=stp.native.cancel clOrdId={ClOrdId} owner={Owner} symbol={Symbol} side={Side} reason={Reason}",
+                lookupId, owner.Value, order.Symbol, order.Side, rejectReason);
+        }
+
         _sink.Publish(new ExecutionEvent(
             owner,
             lookupId,
@@ -195,7 +211,8 @@ public sealed class ExecutionReportProcessor
             lastQty,
             lastPx,
             rejectReason,
-            DateTimeOffset.UtcNow));
+            DateTimeOffset.UtcNow,
+            isNativeStp));
 
         // Algo engine hook: signal AFTER fan-out so the engine reactor
         // sees the same world the WS subscribers see, and so the dispatch

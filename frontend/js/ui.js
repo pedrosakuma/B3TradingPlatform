@@ -982,11 +982,28 @@ function execRow(e) {
   const reason = e.rejectReason ? ` — ${escapeHtml(e.rejectReason)}` : "";
   const lastPx = e.lastQuantity > 0 ? ` @ ${fmtPx(e.lastPrice)}` : "";
   const lastQty = e.lastQuantity > 0 ? fmtQty(e.lastQuantity) : "";
+  // Categorize STP cancels for the trader: server-driven STP from
+  // the matching engine (#117) is distinct from the local pre-trade
+  // reject. Both categories surface as small badges so a glance at
+  // the executions log tells the trader which layer fired.
+  const stpBadge = stpBadgeFor(e);
   return `<li>
     <span class="ts">${ts}</span>
     <span class="kind ${escapeHtml(e.kind)}">${escapeHtml(e.kind)}</span>
-    <span class="meta">${escapeHtml(e.clOrdId)} ${escapeHtml(e.symbol)} ${lastQty}${lastPx}${reason}</span>
+    <span class="meta">${escapeHtml(e.clOrdId)} ${escapeHtml(e.symbol)} ${lastQty}${lastPx}${stpBadge}${reason}</span>
   </li>`;
+}
+
+function stpBadgeFor(e) {
+  if (e.isNativeStp) {
+    return ` <span class="badge stp-native" title="Cancelado pelo motor de matching da B3 por Self-Trade Prevention">STP servidor B3</span>`;
+  }
+  if (e.kind === "Rejected"
+      && typeof e.rejectReason === "string"
+      && e.rejectReason.startsWith("self_trade_prevention")) {
+    return ` <span class="badge stp-local" title="Rejeitado pela camada local de Self-Trade Prevention antes de chegar ao gateway">STP local</span>`;
+  }
+  return "";
 }
 
 function escapeHtml(s) {
