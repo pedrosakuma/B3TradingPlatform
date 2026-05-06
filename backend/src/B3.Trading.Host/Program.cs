@@ -491,6 +491,27 @@ var app = builder.Build();
         }
         cashLogger.LogInformation("CashSeeder finished: {Applied} applied, {Skipped} skipped.", applied, skipped);
     }
+
+    // Deprecation warning (#107 slice 4): Margin.Initial is the
+    // legacy per-end-client opening-balance config. It still works as
+    // a transition fallback inside ReserveOnSubmitMarginProvider, but
+    // every populated key here means the operator is on the legacy
+    // path and should migrate to Trading:Cash:Seeds[].
+    var riskOpts = scope.ServiceProvider.GetRequiredService<IOptions<RiskOptions>>().Value;
+#pragma warning disable CS0618 // Type or member is obsolete
+    if (riskOpts.Margin.Initial.Count > 0)
+    {
+        var deprecationLogger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>()
+            .CreateLogger("MarginInitialDeprecation");
+        deprecationLogger.LogWarning(
+            "Trading:Risk:Margin:Initial is DEPRECATED (#107 slice 4) and will be removed in a follow-up. "
+            + "{Count} owner entry(ies) populated: [{Owners}]. "
+            + "Migrate to Trading:Cash:Seeds[] for static opening balances and "
+            + "Trading:Cash:SignupInitialBalance for self-service signup defaults.",
+            riskOpts.Margin.Initial.Count,
+            string.Join(", ", riskOpts.Margin.Initial.Keys));
+    }
+#pragma warning restore CS0618
 }
 
 if (corsOrigins.Length > 0)
