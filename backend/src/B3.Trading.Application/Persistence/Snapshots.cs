@@ -25,6 +25,15 @@ public sealed class PlatformSnapshot
     public List<OwnershipMappingSnapshot> Ownership { get; init; } = new();
     public List<AlgoSnapshot> Algos { get; init; } = new();
     public AlgoIdRegistrySnapshot AlgoIds { get; init; } = new();
+    /// <summary>
+    /// Per-end-client cash balances captured by <c>CashLedger</c>.
+    /// Added in the cash-balance slice (#107 slice 1); older
+    /// snapshots that pre-date the field deserialise with an empty
+    /// list, which matches the "no balance recorded" semantics they
+    /// actually carried (callers see zero until the seed re-applies
+    /// or a fill arrives).
+    /// </summary>
+    public List<CashBalanceSnapshot> CashBalances { get; init; } = new();
 }
 
 public sealed record OrderSnapshot(
@@ -76,6 +85,10 @@ public sealed record PositionSnapshot(
     string Symbol,
     long NetQuantity,
     decimal AverageEntryPrice);
+
+public sealed record CashBalanceSnapshot(
+    string EndClientId,
+    decimal Available);
 
 public sealed class ClOrdIdRegistrySnapshot
 {
