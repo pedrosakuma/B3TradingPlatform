@@ -128,6 +128,7 @@ builder.Services.AddSingleton<IRiskCheck, MinTickSizeCheck>();
 builder.Services.AddSingleton<IRiskCheck, MinLotSizeCheck>();
 builder.Services.AddSingleton<IRiskCheck, MaxQuantityCheck>();
 builder.Services.AddSingleton<IRiskCheck, MaxNotionalCheck>();
+builder.Services.AddSingleton<IRiskCheck, MinNotionalCheck>();
 builder.Services.AddSingleton<IRiskCheck, PositionLimitCheck>();
 builder.Services.AddSingleton<IRiskCheck, RollingNotionalCheck>();
 builder.Services.AddSingleton<IRiskCheck, OrderRateLimitCheck>();

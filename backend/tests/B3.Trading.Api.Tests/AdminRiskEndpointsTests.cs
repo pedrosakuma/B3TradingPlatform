@@ -30,6 +30,8 @@ public class AdminRiskEndpointsTests : IClassFixture<TestAppFactory>
         var limits = body.GetProperty("limits");
         Assert.Equal(1000, limits.GetProperty("maxQuantity").GetInt64());
         Assert.Equal(1000000m, limits.GetProperty("maxNotional").GetDecimal());
+        // MinNotional defaults to null (permissive) — surfaced as JSON null.
+        Assert.Equal(JsonValueKind.Null, limits.GetProperty("minNotional").ValueKind);
         Assert.Equal(10m, limits.GetProperty("priceCollarPercent").GetDecimal());
         Assert.Equal(5000, limits.GetProperty("positionLimit").GetInt64());
     }
