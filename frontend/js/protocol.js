@@ -127,6 +127,31 @@ export const reviveFirm      = (b, t, id) => toggleKill(b, t, "firm",       id, 
 export const killEndClient   = (b, t, id) => toggleKill(b, t, "end-client", id, true);
 export const reviveEndClient = (b, t, id) => toggleKill(b, t, "end-client", id, false);
 
+// Admin-only: current per-symbol trading halt set.
+// Backend: GET /admin/halts -> { Symbols: [...] }.
+export async function getHaltStatus(backend, token) {
+  const resp = await fetch(`${backend}/admin/halts`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return jsonOrThrow(resp);
+}
+
+// Admin-only: toggle a symbol halt. POST = halt, DELETE = resume.
+// Returns 204 on success, 503 on WAL backpressure.
+async function toggleHalt(backend, token, symbol, halt) {
+  const resp = await fetch(
+    `${backend}/admin/halts/${encodeURIComponent(symbol)}`,
+    {
+      method: halt ? "POST" : "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  if (resp.status === 204) return null;
+  return jsonOrThrow(resp);
+}
+
+export const haltSymbol   = (b, t, sym) => toggleHalt(b, t, sym, true);
+export const resumeSymbol = (b, t, sym) => toggleHalt(b, t, sym, false);
+
 // Admin-only: trigger EOD materialisation. Returns the report or 409
 // when persistence is disabled.
 export async function runEod(backend, token) {
