@@ -62,6 +62,34 @@ public sealed class OrderOwnershipMap
     }
 
     /// <summary>
+    /// Slice 1 of #122. Records a cancel-replace request: registers the
+    /// owner of <paramref name="newClOrdId"/> (same as original) AND the
+    /// reverse <paramref name="newClOrdId"/> → <paramref name="originalClOrdId"/>
+    /// fallback link used by <see cref="ExecutionReportProcessor"/> when
+    /// the venue omits <c>OrigClOrdID</c> on the Replaced ER.
+    ///
+    /// <para>
+    /// Functionally equivalent to calling <see cref="RegisterCancelLink"/>
+    /// today, but exposed under a replace-specific name so callers can
+    /// signal intent and so future divergence (e.g. in-flight tracking
+    /// keyed by original) has an obvious extension point. Throws when
+    /// the original is unknown — a replace request against an
+    /// unregistered ClOrdID is always a programmer error.
+    /// </para>
+    /// </summary>
+    public void RegisterReplaceLink(ulong originalClOrdId, ulong newClOrdId)
+    {
+        if (originalClOrdId == 0)
+            throw new ArgumentOutOfRangeException(nameof(originalClOrdId));
+        if (newClOrdId == 0)
+            throw new ArgumentOutOfRangeException(nameof(newClOrdId));
+        if (!_byClOrdId.TryGetValue(originalClOrdId, out var owner))
+            throw new InvalidOperationException($"Unknown original ClOrdID '{originalClOrdId}'.");
+        _byClOrdId[newClOrdId] = owner;
+        _cancelToOrig[newClOrdId] = originalClOrdId;
+    }
+
+    /// <summary>
     /// Looks up the original ClOrdID a cancel/replace request was issued
     /// against. Returns <c>false</c> when no such link was registered.
     /// </summary>

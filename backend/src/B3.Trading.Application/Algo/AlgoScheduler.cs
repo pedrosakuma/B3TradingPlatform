@@ -202,7 +202,7 @@ public sealed class AlgoScheduler : BackgroundService
     }
 
     private static bool IsChildTerminal(Order o) =>
-        o.Status is OrderStatus.Filled or OrderStatus.Cancelled or OrderStatus.Rejected;
+        o.Status is OrderStatus.Filled or OrderStatus.Cancelled or OrderStatus.Rejected or OrderStatus.Replaced;
 
     /// <summary>
     /// Cheap stopwatch-equivalent that avoids allocating a Stopwatch per

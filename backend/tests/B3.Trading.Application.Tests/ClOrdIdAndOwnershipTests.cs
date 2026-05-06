@@ -97,4 +97,34 @@ public class OrderOwnershipMapTests
         Assert.True(map.TryResolveOrig(201UL, out var orig));
         Assert.Equal(200UL, orig);
     }
+
+    [Fact]
+    public void RegisterReplaceLink_PopulatesOwner_AndOrigFallback()
+    {
+        // Slice 1 of #122: cancel-replace must register both the owner of
+        // the new ClOrdID AND the new→orig fallback link so the
+        // processor can resolve a Replaced ER even when the venue omits
+        // OrigClOrdID. Mirrors the cancel-link guarantees so the same
+        // dropout-recovery story applies to modify.
+        var map = new OrderOwnershipMap();
+        var owner = new EndClientId("alice");
+        map.Register(300UL, owner);
+
+        map.RegisterReplaceLink(originalClOrdId: 300UL, newClOrdId: 301UL);
+
+        Assert.True(map.TryResolve(301UL, out var got));
+        Assert.Equal(owner, got);
+        Assert.True(map.TryResolveOrig(301UL, out var orig));
+        Assert.Equal(300UL, orig);
+    }
+
+    [Fact]
+    public void RegisterReplaceLink_OnUnknownOriginal_Throws()
+    {
+        // Replace against an unregistered original is always a programmer
+        // error — there's no plausible code path that fires Modify
+        // without first having submitted the original.
+        var map = new OrderOwnershipMap();
+        Assert.Throws<InvalidOperationException>(() => map.RegisterReplaceLink(originalClOrdId: 999UL, newClOrdId: 1000UL));
+    }
 }

@@ -107,4 +107,75 @@ public class OrderTests
         order.MarkWorking(); // replayed New ER
         Assert.Equal(OrderStatus.PartiallyFilled, order.Status);
     }
+
+    // -------- MarkReplaced (Slice 1 of #122) --------
+
+    [Fact]
+    public void MarkReplaced_FromWorking_TerminalisesOriginal()
+    {
+        var order = new Order(1UL, new EndClientId("alice"), "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m);
+        order.MarkWorking();
+        order.MarkReplaced();
+        Assert.Equal(OrderStatus.Replaced, order.Status);
+    }
+
+    [Fact]
+    public void MarkReplaced_FromPartiallyFilled_TerminalisesOriginal()
+    {
+        // Cumulative fills survive on the original (the replacement order
+        // takes them as its baseline); the original's status moves to
+        // Replaced and is filtered out of restable surfaces.
+        var order = new Order(1UL, new EndClientId("alice"), "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m);
+        order.ApplyFill(40);
+        order.MarkReplaced();
+        Assert.Equal(OrderStatus.Replaced, order.Status);
+        Assert.Equal(40, order.CumulativeQuantity);
+    }
+
+    [Fact]
+    public void MarkReplaced_AfterFilled_NoOp()
+    {
+        // Late Replaced ER must NOT erase a final fill — terminal status
+        // wins, exchange truth is the position state.
+        var order = new Order(1UL, new EndClientId("alice"), "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m);
+        order.ApplyFill(100);
+        order.MarkReplaced();
+        Assert.Equal(OrderStatus.Filled, order.Status);
+    }
+
+    [Fact]
+    public void MarkReplaced_IsIdempotent()
+    {
+        var order = new Order(1UL, new EndClientId("alice"), "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m);
+        order.MarkReplaced();
+        order.MarkReplaced();
+        Assert.Equal(OrderStatus.Replaced, order.Status);
+    }
+
+    [Fact]
+    public void MarkCancelled_AfterReplaced_NoOp()
+    {
+        // A Cancelled ER drifting in for an already-replaced original
+        // must not regress the status (the new ClOrdID owns the live
+        // surface now).
+        var order = new Order(1UL, new EndClientId("alice"), "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m);
+        order.MarkReplaced();
+        order.MarkCancelled();
+        Assert.Equal(OrderStatus.Replaced, order.Status);
+    }
+
+    [Fact]
+    public void ApplyCumulativeFill_AfterReplaced_PreservesReplacedStatus()
+    {
+        // Slice 1 invariant: a late fill ER against an already-Replaced
+        // original still books position truth (cumQty advances) but
+        // status stays Replaced — the live order is the replacement.
+        var order = new Order(1UL, new EndClientId("alice"), "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m);
+        order.ApplyFill(40);
+        order.MarkReplaced();
+        var delta = order.ApplyCumulativeFill(50);
+        Assert.Equal(10, delta);
+        Assert.Equal(50, order.CumulativeQuantity);
+        Assert.Equal(OrderStatus.Replaced, order.Status);
+    }
 }
