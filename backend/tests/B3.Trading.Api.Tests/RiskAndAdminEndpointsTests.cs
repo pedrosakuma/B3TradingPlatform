@@ -43,6 +43,55 @@ public class RiskAndAdminEndpointsTests : IClassFixture<TestAppFactory>
     }
 
     [Fact]
+    public async Task AdminHaltsEndpoints_RequireAdminRole()
+    {
+        using var userClient = await _factory.CreateAuthedClientAsync(); // alice (user role)
+        var post = await userClient.PostAsync("/admin/halts/PETR4", content: null);
+        Assert.Equal(HttpStatusCode.Forbidden, post.StatusCode);
+        var get = await userClient.GetAsync("/admin/halts");
+        Assert.Equal(HttpStatusCode.Forbidden, get.StatusCode);
+    }
+
+    [Fact]
+    public async Task AdminGetHalts_ReturnsCurrentSymbols()
+    {
+        using var admin = await _factory.CreateAuthedClientAsync("admin");
+        // Clean any state from a previous test in the shared factory.
+        await admin.DeleteAsync("/admin/halts/ABEV3");
+
+        await admin.PostAsync("/admin/halts/ABEV3", content: null);
+        var state = await admin.GetFromJsonAsync<HaltStateDto>("/admin/halts");
+        Assert.Contains("ABEV3", state!.Symbols);
+        await admin.DeleteAsync("/admin/halts/ABEV3");
+    }
+
+    [Fact]
+    public async Task SymbolHaltToggle_RejectsNextOrder_ThenResumes()
+    {
+        using var http = _factory.CreateClient();
+        var token = await _factory.LoginAsync(http, "bob");
+        using var admin = await _factory.CreateAuthedClientAsync("admin");
+
+        var ws = await OpenSubscribedAsync(token, Channels.ExecutionsMe);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        await admin.PostAsync("/admin/halts/PETR4", content: null);
+        try
+        {
+            var blocked = await PostAsync(http, token, "/orders",
+                new { Symbol = "PETR4", SecurityId = 4321UL, Side = "Buy", Type = "Limit", Quantity = 1, Price = 30m });
+            Assert.Equal(HttpStatusCode.Accepted, blocked.StatusCode);
+            var delta = await ReadJsonAsync(ws, cts.Token);
+            Assert.Equal("Rejected", delta.GetProperty("data").GetProperty("kind").GetString());
+            Assert.Contains("halted", delta.GetProperty("data").GetProperty("rejectReason").GetString());
+        }
+        finally
+        {
+            await admin.DeleteAsync("/admin/halts/PETR4");
+        }
+    }
+
+    [Fact]
     public async Task SubmitOrder_OverMaxQuantity_ProducesSyntheticRejectionOnExecutionsMe()
     {
         using var http = _factory.CreateClient();
@@ -131,4 +180,5 @@ public class RiskAndAdminEndpointsTests : IClassFixture<TestAppFactory>
     }
 
     private sealed record KillStateDto(string[] EndClients, string[] Firms);
+    private sealed record HaltStateDto(string[] Symbols);
 }

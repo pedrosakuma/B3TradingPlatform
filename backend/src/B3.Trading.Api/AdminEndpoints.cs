@@ -39,6 +39,20 @@ public static class AdminEndpoints
         group.MapDelete("/kill/firm/{id}", (string id, HttpContext ctx, KillSwitchService svc, EventDispatcher dispatcher) =>
             ToggleKill(dispatcher, "firm", id, killed: false, ctx, () => svc.ReviveFirm(id)));
 
+        // ── Symbol trading halts ─────────────────────────────────
+        // Per-symbol pre-trade gate (#108 slice 2). Halts are
+        // event-sourced via SymbolHaltToggledEvent so they survive
+        // restart — losing a halt on crash would be the worst
+        // possible default for a safety control.
+        group.MapGet("/halts", (SymbolHaltService svc) =>
+            Results.Ok(new { Symbols = svc.ListHalted() }));
+
+        group.MapPost("/halts/{symbol}", (string symbol, HttpContext ctx, SymbolHaltService svc, EventDispatcher dispatcher) =>
+            ToggleHalt(dispatcher, symbol, halted: true, ctx, () => svc.Halt(symbol)));
+
+        group.MapDelete("/halts/{symbol}", (string symbol, HttpContext ctx, SymbolHaltService svc, EventDispatcher dispatcher) =>
+            ToggleHalt(dispatcher, symbol, halted: false, ctx, () => svc.Resume(symbol)));
+
         group.MapPost("/eod", (EodMaterialiser eod, IOptions<PersistenceOptions> opts) =>
         {
             // EOD materialisation runs against persisted segments, so it
@@ -256,6 +270,38 @@ public static class AdminEndpoints
         {
             MetricsRegistry.WalBackpressure.Add(1,
                 new KeyValuePair<string, object?>("call_site", "admin.kill"));
+            return Results.Json(
+                new { error = "system busy (WAL backpressure)", detail = ex.Message },
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+    }
+
+    private static IResult ToggleHalt(
+        EventDispatcher dispatcher,
+        string symbol,
+        bool halted,
+        HttpContext ctx,
+        Action mutate)
+    {
+        var actor = ctx.User.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+        try
+        {
+            dispatcher.Dispatch(
+                new SymbolHaltToggledEvent
+                {
+                    Symbol = symbol,
+                    Halted = halted,
+                    ActorUserId = actor,
+                },
+                mutate);
+            MetricsRegistry.SymbolHaltToggled.Add(1,
+                new KeyValuePair<string, object?>("halted", halted));
+            return Results.NoContent();
+        }
+        catch (WalBackpressureException ex)
+        {
+            MetricsRegistry.WalBackpressure.Add(1,
+                new KeyValuePair<string, object?>("call_site", "admin.halts"));
             return Results.Json(
                 new { error = "system busy (WAL backpressure)", detail = ex.Message },
                 statusCode: StatusCodes.Status503ServiceUnavailable);

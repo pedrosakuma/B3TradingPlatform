@@ -59,6 +59,41 @@ public class RiskPipelineTests
     }
 
     [Fact]
+    public void SymbolHalted_BlocksThenResumes()
+    {
+        var halts = new SymbolHaltService();
+        var check = new SymbolHaltedCheck(halts);
+        Assert.True(check.Check(Ctx(symbol: "PETR4")).Approved);
+        halts.Halt("PETR4");
+        var d = check.Check(Ctx(symbol: "PETR4"));
+        Assert.False(d.Approved);
+        Assert.Contains("halted", d.Reason);
+        Assert.True(check.Check(Ctx(symbol: "VALE3")).Approved); // unrelated symbol unaffected
+        halts.Resume("PETR4");
+        Assert.True(check.Check(Ctx(symbol: "PETR4")).Approved);
+    }
+
+    [Fact]
+    public void SymbolHalted_IsCaseInsensitive()
+    {
+        var halts = new SymbolHaltService();
+        halts.Halt("petr4");
+        Assert.True(halts.IsHalted("PETR4"));
+        Assert.False(new SymbolHaltedCheck(halts).Check(Ctx(symbol: "PETR4")).Approved);
+    }
+
+    [Fact]
+    public void SymbolHaltService_RestoreReplacesPreviousState()
+    {
+        var halts = new SymbolHaltService();
+        halts.Halt("PETR4");
+        halts.Restore(new[] { "VALE3", "ITUB4" });
+        Assert.False(halts.IsHalted("PETR4")); // gone
+        Assert.True(halts.IsHalted("VALE3"));
+        Assert.True(halts.IsHalted("ITUB4"));
+    }
+
+    [Fact]
     public void KillSwitch_PerFirm_Blocks()
     {
         var ks = new KillSwitchService();

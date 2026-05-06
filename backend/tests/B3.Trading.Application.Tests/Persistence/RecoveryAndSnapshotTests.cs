@@ -66,7 +66,7 @@ public class RecoveryAndSnapshotTests : IDisposable
         await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
         {
             var (book, positions, killSwitch, ownership, snapshotter, _, processor, _, algos) = BuildState(store);
-            var replayer = new EventReplayer(book, ownership, killSwitch, processor, algos);
+            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), processor, algos);
             var recovery = new PersistenceRecovery(store,
                 snapshotter,
                 replayer,
@@ -120,7 +120,7 @@ public class RecoveryAndSnapshotTests : IDisposable
         await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
         {
             var (book, _, killSwitch, ownership, snapshotter, _, processor, _, algos) = BuildState(store);
-            var replayer = new EventReplayer(book, ownership, killSwitch, processor, algos);
+            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), processor, algos);
             var recovery = new PersistenceRecovery(store, snapshotter, replayer,
                 new SnapshotStore(_root, "test"), NullLogger<PersistenceRecovery>.Instance);
             await recovery.RunAsync();
@@ -166,7 +166,7 @@ public class RecoveryAndSnapshotTests : IDisposable
         var sink = new TestSink();
         var processor = new ExecutionReportProcessor(ownership, book, positions, sink,
             new NoOpMarginProvider(), NullLogger<ExecutionReportProcessor>.Instance);
-        var snapshotter = new StateSnapshotter(book, positions, killSwitch, clOrdIds, ownership, algos, new AlgoIdRegistry());
+        var snapshotter = new StateSnapshotter(book, positions, killSwitch, new SymbolHaltService(), clOrdIds, ownership, algos, new AlgoIdRegistry());
         var dispatcher = new EventDispatcher(store);
         return (book, positions, killSwitch, ownership, snapshotter, dispatcher, processor, sink, algos);
     }

@@ -19,6 +19,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(OrderSubmittedEvent), "order.submitted")]
 [JsonDerivedType(typeof(ExecutionReportReceivedEvent), "er.received")]
 [JsonDerivedType(typeof(KillSwitchToggledEvent), "killswitch.toggled")]
+[JsonDerivedType(typeof(SymbolHaltToggledEvent), "symbol-halt.toggled")]
 [JsonDerivedType(typeof(AlgoCreatedEvent), "algo.created")]
 [JsonDerivedType(typeof(AlgoCancelRequestedEvent), "algo.cancel-requested")]
 [JsonDerivedType(typeof(AlgoTerminalStateRecordedEvent), "algo.terminal")]
@@ -92,6 +93,19 @@ public sealed record KillSwitchToggledEvent : WalEvent
     public required string Scope { get; init; }   // "end-client" | "firm"
     public required string Target { get; init; }
     public required bool Killed { get; init; }    // true=kill, false=revive
+    public string? ActorUserId { get; init; }
+}
+
+/// <summary>
+/// Per-symbol trading halt toggle. Audit trail for "who halted what,
+/// when, and why" — and the only way recovery reconstructs the halt
+/// set, since halts are an out-of-band admin decision rather than a
+/// side-effect of an exchange ER.
+/// </summary>
+public sealed record SymbolHaltToggledEvent : WalEvent
+{
+    public required string Symbol { get; init; }
+    public required bool Halted { get; init; }    // true=halt, false=resume
     public string? ActorUserId { get; init; }
 }
 

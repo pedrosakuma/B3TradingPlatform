@@ -14,6 +14,13 @@ public sealed class PlatformSnapshot
     public List<PositionSnapshot> Positions { get; init; } = new();
     public List<string> KilledEndClients { get; init; } = new();
     public List<string> KilledFirms { get; init; } = new();
+    /// <summary>
+    /// Symbols currently trading-halted via <c>SymbolHaltService</c>.
+    /// Added in the symbol-halt slice; older snapshots that pre-date
+    /// the field deserialise with an empty list, which matches the
+    /// "no halts" semantics they actually carried.
+    /// </summary>
+    public List<string> HaltedSymbols { get; init; } = new();
     public ClOrdIdRegistrySnapshot ClOrdIds { get; init; } = new();
     public List<OwnershipMappingSnapshot> Ownership { get; init; } = new();
     public List<AlgoSnapshot> Algos { get; init; } = new();
