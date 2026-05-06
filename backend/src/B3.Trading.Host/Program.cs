@@ -28,6 +28,9 @@ builder.Services.AddOptions<ExchangeOptions>()
 builder.Services.AddSingleton<IValidateOptions<ExchangeOptions>, ExchangeOptionsValidator>();
 builder.Services.Configure<AuthOptions>(
     builder.Configuration.GetSection(AuthOptions.SectionName));
+builder.Services.Configure<AuthRateLimitOptions>(
+    builder.Configuration.GetSection(AuthRateLimitOptions.SectionName));
+builder.Services.AddAuthRateLimiter();
 builder.Services.Configure<RiskOptions>(
     builder.Configuration.GetSection(RiskOptions.SectionName));
 builder.Services.Configure<SymbolDirectoryOptions>(
@@ -516,6 +519,11 @@ var app = builder.Build();
 
 if (corsOrigins.Length > 0)
     app.UseCors(CorsPolicy);
+
+// Rate limiter must run after CORS (so preflight OPTIONS still gets the
+// CORS headers before potential 429s) and before auth so abusive
+// callers cannot tie up the password hashing pipeline with floods.
+app.UseRateLimiter();
 
 app.UseWebSockets();
 app.UseAuthentication();

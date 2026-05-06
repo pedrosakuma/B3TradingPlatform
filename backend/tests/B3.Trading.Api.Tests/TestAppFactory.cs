@@ -88,6 +88,14 @@ public class TestAppFactory : WebApplicationFactory<Program>
                 ["Trading:Risk:Default:PositionLimit"] = "5000",
                 ["Trading:Risk:ReferencePrices:PETR4"] = "30.0",
                 ["Trading:Persistence:Enabled"] = "false",
+                // Slice 2 of #97 ships rate limits enabled by default.
+                // The default suite hits /auth/login and /auth/signup
+                // hundreds of times per run; disable here so individual
+                // tests opt-in via WithOverrides when they want to
+                // exercise the limiter behavior.
+                ["Trading:Auth:RateLimit:SignupPerIp:Enabled"] = "false",
+                ["Trading:Auth:RateLimit:SignupGlobal:Enabled"] = "false",
+                ["Trading:Auth:RateLimit:LoginPerIp:Enabled"] = "false",
             });
 
             if (_configOverrides is not null)
