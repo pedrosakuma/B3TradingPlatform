@@ -49,7 +49,7 @@ namespace B3.Trading.Application.Risk;
 /// dogfood configs keep working until slice 4 retires the option.
 /// </para>
 /// </summary>
-public sealed class ReserveOnSubmitMarginProvider : IMarginProvider
+public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMarginCoordinator
 {
     private readonly IOptionsMonitor<RiskOptions> _options;
     private readonly ILogger<ReserveOnSubmitMarginProvider> _logger;
@@ -219,6 +219,132 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider
     /// <summary>Test/observability helper: returns the currently available amount for an owner.</summary>
     internal decimal AvailableForTesting(string owner) =>
         ResolveBaseAvailable(owner) - ReservedForTesting(owner);
+
+    // ----- IReplaceMarginCoordinator (slice 2 of #122) -----
+
+    /// <inheritdoc />
+    public Task<RiskDecision> PrepareReplaceAsync(
+        ulong originalClOrdId,
+        ulong newClOrdId,
+        EndClientId owner,
+        decimal newRemainingNotional,
+        CancellationToken ct)
+    {
+        // Sells / markets / non-positive notionals never touched the
+        // reservation ledger on submit; they don't here either.
+        if (newRemainingNotional <= 0m)
+            return Task.FromResult(RiskDecision.Approve);
+
+        var ownerKey = owner.Value;
+        lock (_gate)
+        {
+            var oldRemaining = _reservations.TryGetValue(originalClOrdId, out var origEntry)
+                ? origEntry.RemainingNotional
+                : 0m;
+
+            // Delta semantics: we only need to reserve *additional*
+            // capacity when scaling up. Downsize / same / sell-side
+            // replace requires no extra reserve at Prepare time;
+            // Commit will rebalance to the venue-confirmed figure.
+            var delta = newRemainingNotional - oldRemaining;
+            if (delta <= 0m)
+            {
+                // Track the in-flight intent with a zero-notional entry
+                // so AbortReplace has something to remove and Commit
+                // knows the Prepare ran. No effect on _reserved.
+                _reservations[newClOrdId] = new ReservationEntry(ownerKey, 0m, 0L, 0m);
+                return Task.FromResult(RiskDecision.Approve);
+            }
+
+            var reserved = _reserved.GetValueOrDefault(ownerKey, 0m);
+            var available = ResolveBaseAvailable(ownerKey) - reserved;
+            if (delta > available)
+            {
+                return Task.FromResult(RiskDecision.Reject(
+                    $"insufficient margin for replace upsize: delta {delta} exceeds available {available} for end-client '{ownerKey}'"));
+            }
+
+            _reserved[ownerKey] = reserved + delta;
+            // The transient reservation under newClOrdId carries only
+            // the delta — Commit will top it up to confirmedRemainingNotional.
+            _reservations[newClOrdId] = new ReservationEntry(ownerKey, 0m, 0L, delta);
+            return Task.FromResult(RiskDecision.Approve);
+        }
+    }
+
+    /// <inheritdoc />
+    public void CommitReplace(
+        ulong originalClOrdId,
+        ulong newClOrdId,
+        decimal confirmedRemainingNotional)
+    {
+        lock (_gate)
+        {
+            // Remove the transient entry (set up by Prepare) — its
+            // RemainingNotional is the upsize delta we already reserved
+            // (or zero for downsize/same).
+            decimal transientDelta = 0m;
+            string? owner = null;
+            if (_reservations.TryRemove(newClOrdId, out var transient))
+            {
+                transientDelta = transient.RemainingNotional;
+                owner = transient.Owner;
+            }
+
+            // Release the original entry entirely (returns oldRemaining).
+            decimal oldRemaining = 0m;
+            if (_reservations.TryRemove(originalClOrdId, out var origEntry))
+            {
+                oldRemaining = origEntry.RemainingNotional;
+                owner ??= origEntry.Owner;
+            }
+
+            if (owner is null)
+            {
+                // No reservation existed on either side (sell or
+                // never-reserved). Nothing to track going forward.
+                if (confirmedRemainingNotional > 0m)
+                {
+                    _logger.LogWarning(
+                        "CommitReplace asked to track {Notional} for new ClOrdID {NewClOrdId} but neither original nor pending reservation has an owner; dropping.",
+                        confirmedRemainingNotional, newClOrdId);
+                }
+                return;
+            }
+
+            // Net change to _reserved[owner]:
+            //   release oldRemaining (-)
+            //   release transientDelta (- because we'll re-add via newReserved)
+            //   add confirmedRemainingNotional (+)
+            // Combined: confirmedRemainingNotional - oldRemaining - transientDelta
+            // (which equals zero for the upsize/same Prepare-then-Commit sequence
+            // when the venue confirms the qty we asked for).
+            var reserved = _reserved.GetValueOrDefault(owner, 0m);
+            var adjustment = confirmedRemainingNotional - oldRemaining - transientDelta;
+            var next = reserved + adjustment;
+            if (next < 0m)
+            {
+                _logger.LogWarning(
+                    "CommitReplace adjustment for owner {Owner} would push reserved below zero ({Reserved} + {Adjustment}); clamping to zero.",
+                    owner, reserved, adjustment);
+                next = 0m;
+            }
+            _reserved[owner] = next;
+
+            if (confirmedRemainingNotional > 0m)
+            {
+                _reservations[newClOrdId] =
+                    new ReservationEntry(owner, 0m, 0L, confirmedRemainingNotional);
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    public void AbortReplace(ulong newClOrdId)
+    {
+        // Releases the upsize delta only; original reservation untouched.
+        ReleaseRemaining(newClOrdId);
+    }
 
     private sealed record ReservationEntry(string Owner, decimal Price, long OriginalQty, decimal RemainingNotional);
 }

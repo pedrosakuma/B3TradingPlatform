@@ -35,6 +35,8 @@ public sealed class ExecutionReportProcessor
     private readonly ILogger<ExecutionReportProcessor> _logger;
     private readonly IAlgoSignalQueue? _algoSignals;
     private readonly CashLedger? _cash;
+    private readonly PendingReplacementRegistry? _replacements;
+    private readonly Risk.IReplaceMarginCoordinator? _replaceMargin;
 
     public ExecutionReportProcessor(
         OrderOwnershipMap ownership,
@@ -44,7 +46,9 @@ public sealed class ExecutionReportProcessor
         Risk.IMarginProvider margin,
         ILogger<ExecutionReportProcessor> logger,
         IAlgoSignalQueue? algoSignals = null,
-        CashLedger? cash = null)
+        CashLedger? cash = null,
+        PendingReplacementRegistry? replacements = null,
+        Risk.IReplaceMarginCoordinator? replaceMargin = null)
     {
         _ownership = ownership;
         _orders = orders;
@@ -54,6 +58,8 @@ public sealed class ExecutionReportProcessor
         _logger = logger;
         _algoSignals = algoSignals;
         _cash = cash;
+        _replacements = replacements;
+        _replaceMargin = replaceMargin;
     }
 
     /// <summary>
@@ -64,6 +70,28 @@ public sealed class ExecutionReportProcessor
     /// </summary>
     public void Apply(ulong clOrdId, ExecKind kind, long leaves, long cumQty, long lastQty, decimal lastPx, string? rejectReason, ulong origClOrdId = 0)
     {
+        // Slice 2 of #122: replace lifecycle early intercepts. Both
+        // branches are gated on the registry having an intent recorded
+        // for this ClOrdID — outside of that, the original switch
+        // semantics apply unchanged.
+        if (_replacements is not null)
+        {
+            if (kind == ExecKind.Rejected
+                && _replacements.TryConsume(clOrdId, out var rejectedIntent)
+                && rejectedIntent is not null)
+            {
+                ApplyReplaceRejected(clOrdId, rejectedIntent, rejectReason);
+                return;
+            }
+            if (kind == ExecKind.Replaced
+                && _replacements.TryConsume(clOrdId, out var replaceIntent)
+                && replaceIntent is not null)
+            {
+                ApplyReplaceAccepted(clOrdId, leaves, cumQty, lastPx, origClOrdId, replaceIntent);
+                return;
+            }
+        }
+
         // For cancel/replace acks, the meaningful identity is the original
         // ClOrdID; the cancel-side ClOrdID was never registered as an order.
         // Some upstream gateways (and certain SDK versions) drop OrigClOrdID
@@ -176,10 +204,12 @@ public sealed class ExecutionReportProcessor
                 _margin.OnExecution(lookupId, kind, 0);
                 break;
             case ExecKind.Replaced:
-                // Re-issuance: the gateway is responsible for calling
-                // OrderOwnershipMap.RegisterReplacement first; here we
-                // just leave the original order alone — the new ClOrdID
-                // already has its own Order.
+                // Slice 2 of #122 handles replace acks via the early
+                // intercept above (consumes a PendingReplacementRegistry
+                // intent). Falling through here means no intent was
+                // tracked — either we're in a test context with no
+                // registry wired, or we received an unsolicited Replaced
+                // ER. Original behavior: leave the original alone.
                 break;
         }
 
@@ -242,6 +272,139 @@ public sealed class ExecutionReportProcessor
 
     private static KeyValuePair<string, object?> KindTag(ExecKind kind) =>
         new("kind", kind.ToString());
+
+    private void ApplyReplaceRejected(ulong newClOrdId, OrderReplacementIntent intent, string? rejectReason)
+    {
+        // Replace-reject: original order is untouched (continues
+        // Working / PartiallyFilled), pending margin delta is released.
+        _replaceMargin?.AbortReplace(newClOrdId);
+        _logger.LogInformation(
+            "event=order.replace.rejected newClOrdId={NewClOrdId} origClOrdId={OrigClOrdId} owner={Owner} symbol={Symbol} reason={Reason}",
+            newClOrdId, intent.OriginalClOrdId, intent.Owner.Value, intent.Symbol, rejectReason ?? "(none)");
+    }
+
+    private void ApplyReplaceAccepted(
+        ulong newClOrdId,
+        long erLeaves,
+        long erCum,
+        decimal erLastPx,
+        ulong erOrigClOrdId,
+        OrderReplacementIntent intent)
+    {
+        var origId = erOrigClOrdId != 0 ? erOrigClOrdId : intent.OriginalClOrdId;
+
+        if (!_orders.TryGet(origId, out var origOrder) || origOrder is null)
+        {
+            _logger.LogWarning(
+                "Replaced ER for new ClOrdID {NewClOrdId} but original {OrigClOrdId} not found in book; aborting margin transfer.",
+                newClOrdId, origId);
+            _replaceMargin?.AbortReplace(newClOrdId);
+            return;
+        }
+
+        // 1) Terminalize the original. MarkReplaced is idempotent and
+        //    refuses to regress true terminal states (Filled / Rejected
+        //    / Cancelled), so a Replaced ack racing a final fill keeps
+        //    the original at its real terminal status.
+        var originalAlreadyTerminal = origOrder.Status is OrderStatus.Filled
+            or OrderStatus.Rejected
+            or OrderStatus.Cancelled
+            or OrderStatus.Replaced;
+        origOrder.MarkReplaced();
+
+        _sink.Publish(new ExecutionEvent(
+            intent.Owner,
+            origId,
+            origOrder.Symbol,
+            origOrder.Side,
+            origOrder.Status,
+            ExecKind.Replaced,
+            origOrder.LeavesQuantity,
+            origOrder.CumulativeQuantity,
+            0,
+            0m,
+            null,
+            DateTimeOffset.UtcNow,
+            false));
+
+        // 2) Hydrate the replacement with intent metadata + venue's
+        //    cum/leaves baseline. Existing fills booked under the
+        //    original are NOT re-booked — PositionKeeper already saw
+        //    them. The cum/leaves on the new Order exists so subsequent
+        //    fill ERs (now arriving under newClOrdID) advance from the
+        //    correct baseline.
+        Order newOrder;
+        try
+        {
+            newOrder = Order.HydrateReplacement(
+                origOrder, newClOrdId, intent.NewQuantity, intent.NewPrice, erLeaves, erCum);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to hydrate replacement for new ClOrdID {NewClOrdId}; aborting margin.", newClOrdId);
+            _replaceMargin?.AbortReplace(newClOrdId);
+            return;
+        }
+
+        if (!_orders.TryAdd(newOrder))
+        {
+            _logger.LogWarning(
+                "Replacement order {NewClOrdId} already in book; aborting (duplicate Replaced ER?).", newClOrdId);
+            _replaceMargin?.AbortReplace(newClOrdId);
+            return;
+        }
+
+        // 3) Margin commit: rebalance to venue-confirmed remaining.
+        //    For Buy + Limit + cash, that's intent.NewPrice * leaves;
+        //    everything else is zero (the coordinator no-ops on 0).
+        var confirmedRemaining = (intent.Side == OrderSide.Buy
+                                  && intent.Type == OrderType.Limit
+                                  && intent.NewPrice is { } px
+                                  && erLeaves > 0)
+            ? px * erLeaves
+            : 0m;
+        _replaceMargin?.CommitReplace(intent.OriginalClOrdId, newClOrdId, confirmedRemaining);
+
+        // 4) Publish event for the new order — same shape as a New ack
+        //    so WS subscribers see the order appear in the blotter.
+        _sink.Publish(new ExecutionEvent(
+            intent.Owner,
+            newClOrdId,
+            newOrder.Symbol,
+            newOrder.Side,
+            newOrder.Status,
+            ExecKind.Replaced,
+            newOrder.LeavesQuantity,
+            newOrder.CumulativeQuantity,
+            0,
+            erLastPx,
+            null,
+            DateTimeOffset.UtcNow,
+            false));
+
+        // 5) Algo-engine signal: replacement is, for the engine's
+        //    purposes, an execution observation on the parent. Mirrors
+        //    the bottom-of-method logic for normal ERs.
+        if (_algoSignals is not null
+            && intent.ParentAlgoId is { } parentAlgoId
+            && !string.IsNullOrEmpty(intent.FirmId))
+        {
+            var enqueued = _algoSignals.TryEnqueue(new ChildExecutionObservedSignal
+            {
+                FirmId = intent.FirmId,
+                AlgoId = parentAlgoId,
+                ChildClOrdId = newClOrdId,
+            });
+            if (!enqueued)
+            {
+                MetricsRegistry.AlgoSignalsDropped.Add(1,
+                    new KeyValuePair<string, object?>("kind", "child_er"));
+            }
+        }
+
+        _ = originalAlreadyTerminal; // currently observational; future metric hook.
+    }
 }
 
 /// <summary>

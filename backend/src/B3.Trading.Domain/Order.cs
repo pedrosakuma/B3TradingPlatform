@@ -217,4 +217,71 @@ public sealed class Order
         o.Status = status;
         return o;
     }
+
+    /// <summary>
+    /// Slice 2 of #122. Builds the replacement Order that the venue
+    /// just acknowledged via a Replaced ER. Symbol/side/type/owner/
+    /// firm/parent-algo are inherited from the original; quantity and
+    /// price are the values requested by the modify; cumQty and leaves
+    /// come from the ER (the venue's view of how much was already
+    /// filled under the original at the moment the replace took effect).
+    ///
+    /// <para>
+    /// Status is derived from the cum/leaves baseline:
+    /// <c>cum &gt;= quantity</c> → <see cref="OrderStatus.Filled"/> (the
+    /// modify was over-filled before it took effect — degenerate but
+    /// possible if a fill races the replace; status reflects venue truth);
+    /// <c>cum &gt; 0</c> → <see cref="OrderStatus.PartiallyFilled"/>;
+    /// otherwise → <see cref="OrderStatus.Working"/> (no
+    /// <see cref="OrderStatus.PendingNew"/> because the venue has
+    /// already accepted the replacement — slice 2 invariant).
+    /// </para>
+    ///
+    /// <para>
+    /// Existing fills booked under the original ClOrdID are NOT
+    /// re-booked here — <see cref="PositionKeeper"/> already saw them
+    /// when their fill ERs flowed under the original. The cum/leaves
+    /// values exist on the replacement only so subsequent fill ERs
+    /// (which arrive under the new ClOrdID) can advance via
+    /// <see cref="ApplyCumulativeFill"/> from the correct baseline.
+    /// </para>
+    /// </summary>
+    public static Order HydrateReplacement(
+        Order original,
+        ulong newClOrdId,
+        long newQuantity,
+        decimal? newPrice,
+        long erLeaves,
+        long erCumulative)
+    {
+        ArgumentNullException.ThrowIfNull(original);
+        if (newClOrdId == 0)
+            throw new ArgumentOutOfRangeException(nameof(newClOrdId), "ClOrdID cannot be zero.");
+        if (newQuantity <= 0)
+            throw new ArgumentOutOfRangeException(nameof(newQuantity), "Replacement quantity must be positive.");
+        if (erCumulative < 0)
+            throw new ArgumentOutOfRangeException(nameof(erCumulative));
+        if (erLeaves < 0)
+            throw new ArgumentOutOfRangeException(nameof(erLeaves));
+
+        var status = erCumulative >= newQuantity
+            ? OrderStatus.Filled
+            : (erCumulative > 0 ? OrderStatus.PartiallyFilled : OrderStatus.Working);
+
+        return Hydrate(
+            clOrdId: newClOrdId,
+            owner: original.Owner,
+            symbol: original.Symbol,
+            securityId: original.SecurityId,
+            side: original.Side,
+            type: original.Type,
+            quantity: newQuantity,
+            price: newPrice,
+            leaves: erLeaves,
+            cumQty: erCumulative,
+            status: status,
+            firmId: original.FirmId,
+            parentAlgoId: original.ParentAlgoId,
+            algoSliceSeq: original.AlgoSliceSeq);
+    }
 }
