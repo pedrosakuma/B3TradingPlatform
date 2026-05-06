@@ -17,6 +17,7 @@ public sealed class StateSnapshotter
     private readonly WorkingOrderBook _orders;
     private readonly PositionKeeper _positions;
     private readonly KillSwitchService _killSwitch;
+    private readonly SymbolHaltService _symbolHalts;
     private readonly ClOrdIdPrefixRegistry _clOrdIds;
     private readonly OrderOwnershipMap _ownership;
     private readonly AlgoBook _algos;
@@ -26,6 +27,7 @@ public sealed class StateSnapshotter
         WorkingOrderBook orders,
         PositionKeeper positions,
         KillSwitchService killSwitch,
+        SymbolHaltService symbolHalts,
         ClOrdIdPrefixRegistry clOrdIds,
         OrderOwnershipMap ownership,
         AlgoBook algos,
@@ -34,6 +36,7 @@ public sealed class StateSnapshotter
         _orders = orders;
         _positions = positions;
         _killSwitch = killSwitch;
+        _symbolHalts = symbolHalts;
         _clOrdIds = clOrdIds;
         _ownership = ownership;
         _algos = algos;
@@ -48,6 +51,7 @@ public sealed class StateSnapshotter
         Positions = _positions.Snapshot().ToList(),
         KilledEndClients = _killSwitch.ListKilledEndClients().ToList(),
         KilledFirms = _killSwitch.ListKilledFirms().ToList(),
+        HaltedSymbols = _symbolHalts.ListHalted().ToList(),
         ClOrdIds = _clOrdIds.Snapshot(),
         Ownership = _ownership.Snapshot().ToList(),
         Algos = _algos.Snapshot().ToList(),
@@ -60,6 +64,7 @@ public sealed class StateSnapshotter
         _orders.Restore(snap.WorkingOrders);
         _positions.Restore(snap.Positions);
         _killSwitch.Restore(snap.KilledEndClients, snap.KilledFirms);
+        _symbolHalts.Restore(snap.HaltedSymbols);
         _clOrdIds.Restore(snap.ClOrdIds);
         _ownership.Restore(snap.Ownership);
         _algos.Restore(snap.Algos);
@@ -79,6 +84,7 @@ public sealed class EventReplayer
     private readonly WorkingOrderBook _orders;
     private readonly OrderOwnershipMap _ownership;
     private readonly KillSwitchService _killSwitch;
+    private readonly SymbolHaltService _symbolHalts;
     private readonly ExecutionReportProcessor _processor;
     private readonly AlgoBook _algos;
 
@@ -86,12 +92,14 @@ public sealed class EventReplayer
         WorkingOrderBook orders,
         OrderOwnershipMap ownership,
         KillSwitchService killSwitch,
+        SymbolHaltService symbolHalts,
         ExecutionReportProcessor processor,
         AlgoBook algos)
     {
         _orders = orders;
         _ownership = ownership;
         _killSwitch = killSwitch;
+        _symbolHalts = symbolHalts;
         _processor = processor;
         _algos = algos;
     }
@@ -130,6 +138,10 @@ public sealed class EventReplayer
                     if (k.Killed) _killSwitch.KillFirm(k.Target);
                     else _killSwitch.ReviveFirm(k.Target);
                 }
+                break;
+            case SymbolHaltToggledEvent sh:
+                if (sh.Halted) _symbolHalts.Halt(sh.Symbol);
+                else _symbolHalts.Resume(sh.Symbol);
                 break;
             case AlgoCreatedEvent ac:
                 ApplyAlgoCreated(ac);

@@ -113,6 +113,7 @@ builder.Services.AddSingleton<EventDispatcher>();
 // margin provider. Each IRiskCheck registration is auto-discovered by
 // the RiskPipeline through the IEnumerable<IRiskCheck> ctor injection.
 builder.Services.AddSingleton<KillSwitchService>();
+builder.Services.AddSingleton<SymbolHaltService>();
 builder.Services.AddTradingMarketData(builder.Configuration);
 builder.Services.AddSingleton<IMarginProvider>(sp =>
 {
@@ -124,6 +125,7 @@ builder.Services.AddSingleton<IMarginProvider>(sp =>
         : new NoOpMarginProvider();
 });
 builder.Services.AddSingleton<IRiskCheck, KillSwitchCheck>();
+builder.Services.AddSingleton<IRiskCheck, SymbolHaltedCheck>();
 builder.Services.AddSingleton<IRiskCheck, MinTickSizeCheck>();
 builder.Services.AddSingleton<IRiskCheck, MinLotSizeCheck>();
 builder.Services.AddSingleton<IRiskCheck, MaxQuantityCheck>();

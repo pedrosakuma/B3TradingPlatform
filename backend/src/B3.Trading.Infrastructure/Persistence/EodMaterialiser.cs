@@ -70,6 +70,7 @@ public sealed class EodMaterialiser
                             report.RejectedCount++;
                         break;
                     case KillSwitchToggledEvent: report.KillSwitchToggleCount++; break;
+                    case SymbolHaltToggledEvent: report.SymbolHaltToggleCount++; break;
                 }
             }
         }
@@ -99,6 +100,7 @@ public sealed class EodReport
     public long CanceledCount { get; set; }
     public long RejectedCount { get; set; }
     public long KillSwitchToggleCount { get; set; }
+    public long SymbolHaltToggleCount { get; set; }
     public string Sha256 { get; set; } = "";
     public string Path { get; set; } = "";
 }

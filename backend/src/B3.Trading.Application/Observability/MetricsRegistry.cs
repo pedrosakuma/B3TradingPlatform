@@ -52,6 +52,9 @@ public static class MetricsRegistry
     public static readonly Counter<long> KillSwitchToggled =
         Meter.CreateCounter<long>("trading.kill_switch.toggled");
 
+    public static readonly Counter<long> SymbolHaltToggled =
+        Meter.CreateCounter<long>("trading.symbol_halt.toggled");
+
     // WAL
     public static readonly Counter<long> WalAppended =
         Meter.CreateCounter<long>("trading.wal.appended");
