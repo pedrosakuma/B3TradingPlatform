@@ -63,11 +63,40 @@ public sealed class NoNakedShortCheck : IRiskCheck
 
         var currentLong = _positions.GetOrCreate(ctx.Owner, ctx.Symbol).NetQuantity;
         var openSellLeaves = _orders.SumOpenSellLeavesForSymbol(ctx.Owner, ctx.Symbol);
+
+        // Modify (cancel-replace) projection — slice 3 of #122. The
+        // original order is still in the book until the venue's
+        // Replaced ER lands, so SumOpenSellLeavesForSymbol counts it.
+        // For the projection to reflect the post-replace world we
+        // subtract the original's leaves and add the replacement's
+        // effective leaves (newQty - origCumQty). Without this, an
+        // owner trying to downsize a working Sell that was already
+        // pinned at their inventory ceiling would be incorrectly
+        // rejected as if both legs co-existed.
+        long projectionAdjustment = 0;
+        if (ctx.ReplaceOriginalClOrdId is { } origId
+            && _orders.TryGet(origId, out var orig)
+            && orig is not null
+            && orig.Side == OrderSide.Sell
+            && string.Equals(orig.Symbol, ctx.Symbol, StringComparison.Ordinal)
+            && orig.Owner == ctx.Owner)
+        {
+            // Only subtract if the original is still counted as open
+            // (matches the predicate used in SumOpenSellLeavesForSymbol).
+            if (orig.Status is not (OrderStatus.Filled or OrderStatus.Rejected
+                or OrderStatus.Cancelled or OrderStatus.Replaced))
+            {
+                projectionAdjustment -= orig.LeavesQuantity;
+                projectionAdjustment += ctx.EffectiveLeavesQuantity ?? ctx.Quantity;
+            }
+        }
         // The incoming Sell is already counted in openSellLeaves
         // because OrderSubmissionService.TryAdd runs before risk
         // evaluation. So `sellable` is the projected net assuming
         // every open Sell fills and no open Buy does.
-        var sellable = currentLong - openSellLeaves;
+        // For modifies the new order is NOT yet in the book — the
+        // adjustment above accounts for it explicitly.
+        var sellable = currentLong - (openSellLeaves + projectionAdjustment);
         if (sellable < 0)
         {
             return RiskDecision.Reject(
