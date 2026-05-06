@@ -32,6 +32,9 @@ builder.Services.Configure<AuthRateLimitOptions>(
     builder.Configuration.GetSection(AuthRateLimitOptions.SectionName));
 builder.Services.Configure<UserStoreOptions>(
     builder.Configuration.GetSection(UserStoreOptions.SectionName));
+builder.Services.Configure<LoginLockoutOptions>(
+    builder.Configuration.GetSection(LoginLockoutOptions.SectionName));
+builder.Services.AddSingleton<ILoginAttemptTracker, InMemoryLoginAttemptTracker>();
 builder.Services.AddAuthRateLimiter();
 builder.Services.Configure<RiskOptions>(
     builder.Configuration.GetSection(RiskOptions.SectionName));

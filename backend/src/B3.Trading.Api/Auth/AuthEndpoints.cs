@@ -33,14 +33,34 @@ public static class AuthEndpoints
             LoginRequest req,
             IUserStore users,
             JwtIssuer issuer,
-            EndClientRegistry registry) =>
+            EndClientRegistry registry,
+            ILoginAttemptTracker lockout) =>
         {
             if (req is null || string.IsNullOrWhiteSpace(req.Username) || string.IsNullOrWhiteSpace(req.Password))
                 return Results.BadRequest(new { error = "username and password required" });
 
-            if (!users.TryGet(req.Username, out var user) || user is null
-                || !PasswordHasher.Verify(req.Password, user.PasswordHash, user.Salt, user.Iterations))
+            // Lockout check uses the trimmed username so "alice " and
+            // "alice" share the same bucket. Response is intentionally
+            // identical to the wrong-password 401 — exposing a distinct
+            // "locked" state would let an attacker enumerate which
+            // usernames exist.
+            var loginUsername = req.Username.Trim();
+            if (lockout.IsLocked(loginUsername))
                 return Results.Json(new { error = "invalid credentials" }, statusCode: StatusCodes.Status401Unauthorized);
+
+            if (!users.TryGet(loginUsername, out var user) || user is null
+                || !PasswordHasher.Verify(req.Password, user.PasswordHash, user.Salt, user.Iterations))
+            {
+                // Record failure under the username the client sent
+                // (normalized). Recording even for unknown usernames is
+                // intentional — otherwise an attacker can probe which
+                // usernames exist by observing whether lockouts engage.
+                lockout.RecordFailure(loginUsername);
+                return Results.Json(new { error = "invalid credentials" }, statusCode: StatusCodes.Status401Unauthorized);
+            }
+
+            // Successful auth wipes the failure counter for this user.
+            lockout.RecordSuccess(user.Username);
 
             // Pre-register so subsequent ER routing / WS subscribe work
             // immediately even before the first business call.
