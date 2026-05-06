@@ -6,6 +6,18 @@ namespace B3.Trading.Application.Risk;
 /// Inputs each <see cref="IRiskCheck"/> sees. Carries everything a check
 /// could need without forcing checks to wire-grab from the order book or
 /// position keeper themselves.
+///
+/// <para>
+/// <b>Modify (cancel-replace) projection (slice 3 of #122):</b>
+/// when <see cref="ReplaceOriginalClOrdId"/> is set the context
+/// represents the proposed replacement of an existing working order
+/// — checks that look at "open" snapshot state must therefore treat
+/// the original as if it were already gone and the replacement as if
+/// it were already there. <see cref="EffectiveLeavesQuantity"/> is
+/// the leaves the venue will assign to the replacement
+/// (<c>newQty - origCumQty</c>), used so projections stay accurate
+/// when the original has partially filled.
+/// </para>
 /// </summary>
 public sealed record RiskContext(
     EndClientId Owner,
@@ -14,7 +26,9 @@ public sealed record RiskContext(
     OrderSide Side,
     OrderType Type,
     long Quantity,
-    decimal? Price);
+    decimal? Price,
+    ulong? ReplaceOriginalClOrdId = null,
+    long? EffectiveLeavesQuantity = null);
 
 public sealed record RiskDecision(bool Approved, string? Reason)
 {
