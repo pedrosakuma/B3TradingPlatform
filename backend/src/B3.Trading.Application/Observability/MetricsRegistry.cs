@@ -25,6 +25,8 @@ public static class MetricsRegistry
         Meter.CreateCounter<long>("trading.orders.gateway_failed");
     public static readonly Counter<long> OrdersCancelRequested =
         Meter.CreateCounter<long>("trading.orders.cancel_requested");
+    public static readonly Counter<long> OrdersModifyRequested =
+        Meter.CreateCounter<long>("trading.orders.modify_requested");
 
     // Execution reports inbound
     public static readonly Counter<long> ExecutionReportsReceived =

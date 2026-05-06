@@ -102,6 +102,7 @@ builder.Services.AddSingleton<IExecutionEventSink, WebSocketExecutionEventSink>(
 builder.Services.AddSingleton<IAlgoEventSink, WebSocketAlgoEventSink>();
 builder.Services.AddSingleton<ExecutionReportProcessor>();
 builder.Services.AddSingleton<OrderSubmissionService>();
+builder.Services.AddSingleton<OrderModifyService>();
 
 // Algo engine signal channel + hosted consumer (RFC algo-orders-v0 §4.3).
 // In slice 5a the consumer body was a no-op reactor; slice 5b plugged in the

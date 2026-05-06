@@ -64,6 +64,32 @@ public class OrderModifyMarginAndProcessorTests
         Assert.True(reg.TryConsume(2UL, out _));
     }
 
+    [Fact]
+    public void Registry_IsOriginalInFlight_reflectsAddAndConsume()
+    {
+        var reg = new PendingReplacementRegistry();
+        Assert.False(reg.IsOriginalInFlight(1UL));
+        Assert.True(reg.TryAdd(BuyLimitIntent(1UL, 2UL, "alice", 100, 30m)));
+        Assert.True(reg.IsOriginalInFlight(1UL));
+        Assert.True(reg.TryConsume(2UL, out _));
+        Assert.False(reg.IsOriginalInFlight(1UL));
+    }
+
+    [Fact]
+    public void Registry_TryAdd_rejectsSecondModifyForSameOriginal()
+    {
+        // Slice-4 guard: only one in-flight modify per original ClOrdID.
+        // Second TryAdd with same OriginalClOrdId but a fresh new
+        // ClOrdID must fail (prevents stacked modifies racing the venue).
+        var reg = new PendingReplacementRegistry();
+        Assert.True(reg.TryAdd(BuyLimitIntent(1UL, 2UL, "alice", 100, 30m)));
+        Assert.False(reg.TryAdd(BuyLimitIntent(1UL, 3UL, "alice", 200, 31m)));
+        // After consuming the first, a second modify for the same orig
+        // is now allowed.
+        Assert.True(reg.TryConsume(2UL, out _));
+        Assert.True(reg.TryAdd(BuyLimitIntent(1UL, 3UL, "alice", 200, 31m)));
+    }
+
     // ---------------- HydrateReplacement ----------------
 
     [Fact]

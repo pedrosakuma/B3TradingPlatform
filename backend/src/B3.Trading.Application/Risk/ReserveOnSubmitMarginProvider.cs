@@ -230,6 +230,15 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
         decimal newRemainingNotional,
         CancellationToken ct)
     {
+        // Margin globally disabled: the DI container points
+        // IMarginProvider at the NoOp variant and never reserves on
+        // submit. The replace coordinator, however, is always wired
+        // to the concrete provider (so Commit/Abort can clean up if
+        // margin gets toggled mid-session); short-circuit Prepare here
+        // so it doesn't reject upsizes against an empty ledger.
+        if (!_options.CurrentValue.Margin.Enabled)
+            return Task.FromResult(RiskDecision.Approve);
+
         // Sells / markets / non-positive notionals never touched the
         // reservation ledger on submit; they don't here either.
         if (newRemainingNotional <= 0m)

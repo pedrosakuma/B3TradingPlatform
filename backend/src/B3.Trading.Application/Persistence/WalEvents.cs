@@ -17,6 +17,7 @@ namespace B3.Trading.Application.Persistence;
 /// </summary>
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "kind")]
 [JsonDerivedType(typeof(OrderSubmittedEvent), "order.submitted")]
+[JsonDerivedType(typeof(OrderReplaceRequestedEvent), "order.replace-requested")]
 [JsonDerivedType(typeof(ExecutionReportReceivedEvent), "er.received")]
 [JsonDerivedType(typeof(KillSwitchToggledEvent), "killswitch.toggled")]
 [JsonDerivedType(typeof(SymbolHaltToggledEvent), "symbol-halt.toggled")]
@@ -54,6 +55,38 @@ public sealed record OrderSubmittedEvent : WalEvent
     /// with <c>null</c> on both, which matches the manual-order semantics
     /// they actually carried.
     /// </summary>
+    public ulong? ParentAlgoId { get; init; }
+    public int? AlgoSliceSeq { get; init; }
+}
+
+/// <summary>
+/// Slice 4 of #122. Recorded the moment <c>PUT /orders/{clOrdId}</c>
+/// reaches the modify pipeline (post-validation, post-risk, after
+/// margin Prepare succeeded but before the gateway dispatch).
+///
+/// <para>
+/// Replay re-registers the in-flight intent in
+/// <see cref="PendingReplacementRegistry"/> and the new→orig link in
+/// <see cref="OrderOwnershipMap"/> so that, if the host restarts
+/// between the WAL append and the venue's Replaced/Rejected ER, the
+/// rebuilt state can still resolve the eventual ack. Margin
+/// reservations are NOT replayed (matches
+/// <see cref="OrderSubmittedEvent"/> semantics — reservations are
+/// not durable across restarts in slice 2 of #107).
+/// </para>
+/// </summary>
+public sealed record OrderReplaceRequestedEvent : WalEvent
+{
+    public required ulong OriginalClOrdId { get; init; }
+    public required ulong NewClOrdId { get; init; }
+    public required string EndClientId { get; init; }
+    public required string FirmId { get; init; }
+    public required string Symbol { get; init; }
+    public required ulong SecurityId { get; init; }
+    public required string Side { get; init; }
+    public required string Type { get; init; }
+    public required long NewQuantity { get; init; }
+    public decimal? NewPrice { get; init; }
     public ulong? ParentAlgoId { get; init; }
     public int? AlgoSliceSeq { get; init; }
 }

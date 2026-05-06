@@ -146,6 +146,95 @@ public class RecoveryAndSnapshotTests : IDisposable
         Assert.Empty(snap!.Positions);
     }
 
+    [Fact]
+    public async Task Recovery_OrderReplaceRequested_RestoresIntentAndOwnershipLink()
+    {
+        // Phase 1: submit an order, then dispatch a replace-requested event.
+        await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
+        {
+            var (book, _, _, ownership, _, dispatcher, _, _, _) = BuildState(store);
+            DispatchSubmit(dispatcher, book, ownership, 1UL, "alice", "PETR4", OrderSide.Buy, 100, 30m);
+            dispatcher.Dispatch(
+                new OrderReplaceRequestedEvent
+                {
+                    OriginalClOrdId = 1UL,
+                    NewClOrdId = 2UL,
+                    EndClientId = "alice",
+                    FirmId = "TEST",
+                    Symbol = "PETR4",
+                    SecurityId = 4321UL,
+                    Side = "Buy",
+                    Type = "Limit",
+                    NewQuantity = 200,
+                    NewPrice = 31m,
+                },
+                () => { /* live wiring done by OrderModifyService; replay re-applies it */ });
+            await store.FlushAsync();
+        }
+
+        // Phase 2: cold boot — replayer with PendingReplacementRegistry must
+        // re-register the intent AND the new→orig ownership link so a
+        // subsequent Replaced/Rejected ER under newClOrdId resolves.
+        await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
+        {
+            var (book, _, killSwitch, ownership, snapshotter, _, processor, _, algos) = BuildState(store);
+            var replacements = new PendingReplacementRegistry();
+            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), processor, algos, replacements);
+            var recovery = new PersistenceRecovery(store, snapshotter, replayer,
+                new SnapshotStore(_root, "test"), NullLogger<PersistenceRecovery>.Instance);
+            await recovery.RunAsync();
+
+            Assert.True(replacements.IsOriginalInFlight(1UL));
+            Assert.True(replacements.TryGet(2UL, out var intent));
+            Assert.NotNull(intent);
+            Assert.Equal(1UL, intent!.OriginalClOrdId);
+            Assert.Equal(200, intent.NewQuantity);
+            Assert.Equal(31m, intent.NewPrice);
+            // Owner of newClOrdId resolves through the replace link.
+            Assert.True(ownership.TryResolve(2UL, out var newOwner));
+            Assert.Equal(new EndClientId("alice"), newOwner);
+        }
+    }
+
+    [Fact]
+    public async Task Recovery_OrderReplaceRequested_NoReplacementsRegistry_IsNoOp()
+    {
+        // Backward-compat: existing constructors without the optional
+        // PendingReplacementRegistry must still tolerate the new event.
+        await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
+        {
+            var (book, _, _, ownership, _, dispatcher, _, _, _) = BuildState(store);
+            DispatchSubmit(dispatcher, book, ownership, 1UL, "alice", "PETR4", OrderSide.Buy, 100, 30m);
+            dispatcher.Dispatch(
+                new OrderReplaceRequestedEvent
+                {
+                    OriginalClOrdId = 1UL,
+                    NewClOrdId = 2UL,
+                    EndClientId = "alice",
+                    FirmId = "TEST",
+                    Symbol = "PETR4",
+                    SecurityId = 4321UL,
+                    Side = "Buy",
+                    Type = "Limit",
+                    NewQuantity = 200,
+                    NewPrice = 31m,
+                },
+                () => { });
+            await store.FlushAsync();
+        }
+
+        await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
+        {
+            var (book, _, killSwitch, ownership, snapshotter, _, processor, _, algos) = BuildState(store);
+            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), processor, algos);
+            var recovery = new PersistenceRecovery(store, snapshotter, replayer,
+                new SnapshotStore(_root, "test"), NullLogger<PersistenceRecovery>.Instance);
+            await recovery.RunAsync();
+
+            Assert.True(book.TryGet(1UL, out _));
+        }
+    }
+
     private static (
         WorkingOrderBook,
         PositionKeeper,

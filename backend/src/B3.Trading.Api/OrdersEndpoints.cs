@@ -77,6 +77,51 @@ public static class OrdersEndpoints
             };
         });
 
+        group.MapPut("/{clOrdId}", async (
+            string clOrdId,
+            ModifyOrderRequest req,
+            HttpContext ctx,
+            EndClientRegistry registry,
+            OrderModifyService modifier,
+            CancellationToken ct) =>
+        {
+            if (!ulong.TryParse(clOrdId, out var clOrdIdU))
+                return Results.NotFound();
+
+            var owner = ResolveOwner(ctx, registry);
+            var result = await modifier.ModifyAsync(
+                new OrderModifyRequest(owner, clOrdIdU, req.Quantity, req.Price), ct);
+
+            return result.Kind switch
+            {
+                OrderModifyResultKind.Accepted =>
+                    Results.Accepted(
+                        $"/orders/{result.NewClOrdId}",
+                        new { ClOrdId = result.NewClOrdId.ToString(), OriginalClOrdId = clOrdIdU.ToString() }),
+                OrderModifyResultKind.NotFound =>
+                    Results.NotFound(),
+                OrderModifyResultKind.Conflict =>
+                    Results.Conflict(new { error = result.Reason }),
+                OrderModifyResultKind.BadRequest =>
+                    Results.BadRequest(new { error = result.Reason }),
+                OrderModifyResultKind.RiskRejected =>
+                    Results.UnprocessableEntity(new { error = result.Reason }),
+                OrderModifyResultKind.GatewayFailed =>
+                    Results.Json(
+                        new { error = "gateway unavailable", clOrdId = result.NewClOrdId.ToString() },
+                        statusCode: StatusCodes.Status502BadGateway),
+                OrderModifyResultKind.WalBackpressure =>
+                    Results.Json(
+                        new { error = "system busy (WAL backpressure)", detail = result.Reason },
+                        statusCode: StatusCodes.Status503ServiceUnavailable),
+                OrderModifyResultKind.Drained =>
+                    Results.Json(
+                        new { error = "service draining" },
+                        statusCode: StatusCodes.Status503ServiceUnavailable),
+                _ => Results.StatusCode(StatusCodes.Status500InternalServerError),
+            };
+        });
+
         group.MapDelete("/{clOrdId}", async (
             string clOrdId,
             HttpContext ctx,
@@ -128,6 +173,10 @@ public sealed record SubmitOrderRequest(
     ulong SecurityId,
     string Side,
     string Type,
+    long Quantity,
+    decimal? Price);
+
+public sealed record ModifyOrderRequest(
     long Quantity,
     decimal? Price);
 
