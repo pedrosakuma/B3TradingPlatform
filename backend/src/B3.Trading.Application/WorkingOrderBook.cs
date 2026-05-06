@@ -141,7 +141,7 @@ public sealed class WorkingOrderBook
     }
 
     private static bool IsTerminal(OrderStatus s) =>
-        s is OrderStatus.Filled or OrderStatus.Cancelled or OrderStatus.Rejected;
+        s is OrderStatus.Filled or OrderStatus.Cancelled or OrderStatus.Rejected or OrderStatus.Replaced;
 
     /// <summary>
     /// Returns every order whose <see cref="Order.ParentAlgoId"/> matches

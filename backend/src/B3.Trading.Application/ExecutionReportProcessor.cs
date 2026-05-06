@@ -110,7 +110,7 @@ public sealed class ExecutionReportProcessor
             case ExecKind.PartialFill:
             case ExecKind.Fill:
                 {
-                    var wasTerminal = order.Status is OrderStatus.Cancelled or OrderStatus.Rejected;
+                    var wasTerminal = order.Status is OrderStatus.Cancelled or OrderStatus.Rejected or OrderStatus.Replaced;
                     var delta = order.ApplyCumulativeFill(cumQty);
                     if (delta == 0)
                     {
@@ -156,7 +156,7 @@ public sealed class ExecutionReportProcessor
                     break;
                 }
             case ExecKind.Canceled:
-                if (order.Status is OrderStatus.Cancelled or OrderStatus.Filled or OrderStatus.Rejected)
+                if (order.Status is OrderStatus.Cancelled or OrderStatus.Filled or OrderStatus.Rejected or OrderStatus.Replaced)
                 {
                     MetricsRegistry.ExecutionReportsReplayDeduped.Add(1, KindTag(kind));
                     _logger.LogDebug("Dropping Cancelled ER for {ClOrdId}; order already {Status}.", lookupId, order.Status);
@@ -166,7 +166,7 @@ public sealed class ExecutionReportProcessor
                 _margin.OnExecution(lookupId, kind, 0);
                 break;
             case ExecKind.Rejected:
-                if (order.Status is OrderStatus.Rejected or OrderStatus.Filled or OrderStatus.PartiallyFilled or OrderStatus.Cancelled)
+                if (order.Status is OrderStatus.Rejected or OrderStatus.Filled or OrderStatus.PartiallyFilled or OrderStatus.Cancelled or OrderStatus.Replaced)
                 {
                     MetricsRegistry.ExecutionReportsReplayDeduped.Add(1, KindTag(kind));
                     _logger.LogDebug("Dropping Rejected ER for {ClOrdId}; order already {Status}.", lookupId, order.Status);

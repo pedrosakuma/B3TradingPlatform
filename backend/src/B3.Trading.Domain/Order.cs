@@ -20,6 +20,16 @@ public enum OrderStatus
     Filled,
     Cancelled,
     Rejected,
+
+    /// <summary>
+    /// Terminal state assigned to the original order after a successful
+    /// cancel-replace (FIX 35=G amend). The replacement order lives under
+    /// a different ClOrdID; the original is non-restable from this point
+    /// on and is filtered out of all open-order projections (margin,
+    /// risk, blotter, snapshots). Slice 1 of #122 introduces the value;
+    /// slice 2 wires the transition.
+    /// </summary>
+    Replaced,
 }
 
 /// <summary>
@@ -137,7 +147,10 @@ public sealed class Order
         LeavesQuantity = Math.Max(0, Quantity - newCumulativeQty);
 
         // Status only advances; never regresses out of a terminal state.
-        if (Status is not (OrderStatus.Cancelled or OrderStatus.Rejected))
+        // Replaced is also terminal-for-restability — an original order in
+        // Replaced status is not a restable surface for late fills (those
+        // arrive against the replacement ClOrdID).
+        if (Status is not (OrderStatus.Cancelled or OrderStatus.Rejected or OrderStatus.Replaced))
             Status = LeavesQuantity == 0 ? OrderStatus.Filled : OrderStatus.PartiallyFilled;
 
         return delta;
@@ -155,9 +168,11 @@ public sealed class Order
 
     public void MarkCancelled()
     {
-        // Once filled, the order can't be cancelled — a stale Cancelled ER
-        // delivered after the final fill would otherwise regress status.
-        if (Status is OrderStatus.Filled or OrderStatus.Rejected or OrderStatus.Cancelled)
+        // Once filled / replaced, the order can't be cancelled — a stale
+        // Cancelled ER delivered after the final fill (or after a
+        // successful replace re-targeted under a new ClOrdID) would
+        // otherwise regress status.
+        if (Status is OrderStatus.Filled or OrderStatus.Rejected or OrderStatus.Cancelled or OrderStatus.Replaced)
             return;
         Status = OrderStatus.Cancelled;
     }
@@ -165,10 +180,25 @@ public sealed class Order
     public void MarkRejected()
     {
         // Rejection is only valid before any fill. A stale Reject after a
-        // partial/full fill must be ignored.
-        if (Status is OrderStatus.Filled or OrderStatus.PartiallyFilled or OrderStatus.Rejected or OrderStatus.Cancelled)
+        // partial/full fill (or after the order was replaced) must be
+        // ignored.
+        if (Status is OrderStatus.Filled or OrderStatus.PartiallyFilled or OrderStatus.Rejected or OrderStatus.Cancelled or OrderStatus.Replaced)
             return;
         Status = OrderStatus.Rejected;
+    }
+
+    /// <summary>
+    /// Marks the original order as terminally replaced. Slice 1 of #122
+    /// only exposes the transition; slice 2 will fire it from
+    /// <see cref="ExecutionReportProcessor"/> on a successful Replaced
+    /// ER. Idempotent and refuses to regress out of Filled/Rejected
+    /// (a late Replaced ER must not erase a final fill).
+    /// </summary>
+    public void MarkReplaced()
+    {
+        if (Status is OrderStatus.Filled or OrderStatus.Rejected or OrderStatus.Cancelled or OrderStatus.Replaced)
+            return;
+        Status = OrderStatus.Replaced;
     }
 
     /// <summary>

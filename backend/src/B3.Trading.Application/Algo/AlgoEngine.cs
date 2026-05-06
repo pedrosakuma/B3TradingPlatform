@@ -647,7 +647,7 @@ public sealed class AlgoEngine : BackgroundService
     }
 
     private static bool IsChildTerminal(Order o) =>
-        o.Status is OrderStatus.Filled or OrderStatus.Cancelled or OrderStatus.Rejected;
+        o.Status is OrderStatus.Filled or OrderStatus.Cancelled or OrderStatus.Rejected or OrderStatus.Replaced;
 
     private static string SignalKind(AlgoSignal s) => s switch
     {

@@ -343,6 +343,12 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             LastQuantity: 0,
             LastPrice: 0m,
             RejectReason: null,
+            // OrigClOrdID is a non-nullable ClOrdID struct in the SDK,
+            // but a venue that sends 0 on the wire would surface as
+            // Value == 0 here. The processor treats OrigClOrdId == 0
+            // as "missing" and falls back to OrderOwnershipMap's
+            // new→orig link populated by RegisterReplaceLink (slice 1
+            // of #122).
             OrigClOrdId: m.OrigClOrdID.Value),
 
         UpModels.OrderRejected r => new ExecutionReportEnvelope(

@@ -110,12 +110,13 @@ public sealed class SelfTradePreventionCheck : IRiskCheck
     }
 
     // "Still restable" = order is on the book and has unfilled quantity.
-    // We exclude terminal states (Filled/Cancelled/Rejected) defensively
-    // even though a fully-cancelled or filled order should also have
+    // We exclude terminal states (Filled/Cancelled/Rejected/Replaced)
+    // defensively even though terminal orders should also have
     // LeavesQuantity == 0.
     private static bool IsStillRestable(Order o) =>
         o.LeavesQuantity > 0
         && o.Status is not OrderStatus.Filled
                        and not OrderStatus.Cancelled
-                       and not OrderStatus.Rejected;
+                       and not OrderStatus.Rejected
+                       and not OrderStatus.Replaced;
 }
