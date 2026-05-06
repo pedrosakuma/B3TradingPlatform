@@ -92,6 +92,7 @@ public sealed class EventReplayer
     private readonly SymbolHaltService _symbolHalts;
     private readonly ExecutionReportProcessor _processor;
     private readonly AlgoBook _algos;
+    private readonly PendingReplacementRegistry? _replacements;
 
     public EventReplayer(
         WorkingOrderBook orders,
@@ -99,7 +100,8 @@ public sealed class EventReplayer
         KillSwitchService killSwitch,
         SymbolHaltService symbolHalts,
         ExecutionReportProcessor processor,
-        AlgoBook algos)
+        AlgoBook algos,
+        PendingReplacementRegistry? replacements = null)
     {
         _orders = orders;
         _ownership = ownership;
@@ -107,6 +109,7 @@ public sealed class EventReplayer
         _symbolHalts = symbolHalts;
         _processor = processor;
         _algos = algos;
+        _replacements = replacements;
     }
 
     public void Apply(WalEvent evt)
@@ -124,6 +127,36 @@ public sealed class EventReplayer
                 // engine-side (slice 5/6); replay only re-creates the order
                 // — the parent's Working/Filled state is reconstructed from
                 // the child ER stream through the processor below.
+                break;
+            case OrderReplaceRequestedEvent rr:
+                // Slice 4 of #122. Re-register the in-flight intent and
+                // the new→orig link so a subsequent Replaced/Rejected ER
+                // on the new ClOrdID still resolves correctly. If the
+                // orig is already gone (e.g. terminal ER replayed after
+                // this event), the intent will never be consumed and the
+                // entry stays as a benign artifact — same posture as a
+                // re-created order whose ER stream was lost.
+                if (_replacements is not null
+                    && _ownership.TryResolve(rr.OriginalClOrdId, out _))
+                {
+                    var rrSide = Enum.Parse<OrderSide>(rr.Side, ignoreCase: true);
+                    var rrType = Enum.Parse<OrderType>(rr.Type, ignoreCase: true);
+                    var intent = new OrderReplacementIntent(
+                        OriginalClOrdId: rr.OriginalClOrdId,
+                        NewClOrdId: rr.NewClOrdId,
+                        Owner: new EndClientId(rr.EndClientId),
+                        Symbol: rr.Symbol,
+                        SecurityId: rr.SecurityId,
+                        Side: rrSide,
+                        Type: rrType,
+                        NewQuantity: rr.NewQuantity,
+                        NewPrice: rr.NewPrice,
+                        FirmId: rr.FirmId,
+                        ParentAlgoId: rr.ParentAlgoId,
+                        AlgoSliceSeq: rr.AlgoSliceSeq);
+                    _replacements.TryAdd(intent);
+                    _ownership.RegisterReplaceLink(rr.OriginalClOrdId, rr.NewClOrdId);
+                }
                 break;
             case ExecutionReportReceivedEvent er:
                 if (Enum.TryParse<ExecKind>(er.ExecKind, ignoreCase: true, out var kind))
