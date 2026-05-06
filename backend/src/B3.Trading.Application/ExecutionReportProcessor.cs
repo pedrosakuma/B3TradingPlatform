@@ -34,6 +34,7 @@ public sealed class ExecutionReportProcessor
     private readonly Risk.IMarginProvider _margin;
     private readonly ILogger<ExecutionReportProcessor> _logger;
     private readonly IAlgoSignalQueue? _algoSignals;
+    private readonly CashLedger? _cash;
 
     public ExecutionReportProcessor(
         OrderOwnershipMap ownership,
@@ -42,7 +43,8 @@ public sealed class ExecutionReportProcessor
         IExecutionEventSink sink,
         Risk.IMarginProvider margin,
         ILogger<ExecutionReportProcessor> logger,
-        IAlgoSignalQueue? algoSignals = null)
+        IAlgoSignalQueue? algoSignals = null,
+        CashLedger? cash = null)
     {
         _ownership = ownership;
         _orders = orders;
@@ -51,6 +53,7 @@ public sealed class ExecutionReportProcessor
         _margin = margin;
         _logger = logger;
         _algoSignals = algoSignals;
+        _cash = cash;
     }
 
     /// <summary>
@@ -141,6 +144,11 @@ public sealed class ExecutionReportProcessor
                             lookupId, lastQty, delta);
                     }
                     _positions.ApplyFill(owner, order.Symbol, order.Side, delta, lastPx);
+                    // Book the cash leg of the fill on the same delta as
+                    // the position. Buys debit, Sells credit; T+0 settle.
+                    // Null when the host hasn't wired CashLedger yet
+                    // (test contexts only — production DI always injects).
+                    _cash?.ApplyFill(owner, order.Side, delta, lastPx);
                     // Release reserved margin against the actual booked
                     // delta — not the wire lastQty — so a lost
                     // intermediate ER can't leave the ledger under-released.

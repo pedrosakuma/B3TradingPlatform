@@ -40,6 +40,13 @@ public sealed record PositionDto(
     long NetQuantity,
     decimal AverageEntryPrice);
 
+/// <summary>
+/// Wire shape for <c>GET /balance</c>. Slice 1 of #107 exposes only
+/// <see cref="Available"/>; reserved/total are placeholders for slice 2
+/// when the margin provider plugs into the same ledger.
+/// </summary>
+public sealed record BalanceDto(decimal Available);
+
 public sealed record ExecutionDto(
     string ClOrdId,
     string Symbol,

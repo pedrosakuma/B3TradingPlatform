@@ -166,7 +166,7 @@ public class RecoveryAndSnapshotTests : IDisposable
         var sink = new TestSink();
         var processor = new ExecutionReportProcessor(ownership, book, positions, sink,
             new NoOpMarginProvider(), NullLogger<ExecutionReportProcessor>.Instance);
-        var snapshotter = new StateSnapshotter(book, positions, killSwitch, new SymbolHaltService(), clOrdIds, ownership, algos, new AlgoIdRegistry());
+        var snapshotter = new StateSnapshotter(book, positions, killSwitch, new SymbolHaltService(), clOrdIds, ownership, algos, new AlgoIdRegistry(), new CashLedger());
         var dispatcher = new EventDispatcher(store);
         return (book, positions, killSwitch, ownership, snapshotter, dispatcher, processor, sink, algos);
     }

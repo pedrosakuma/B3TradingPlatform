@@ -38,6 +38,8 @@ builder.Services.Configure<PersistenceOptions>(
     builder.Configuration.GetSection(PersistenceOptions.SectionName));
 builder.Services.Configure<PositionSeedOptions>(
     builder.Configuration.GetSection(PositionSeedOptions.SectionName));
+builder.Services.Configure<CashSeedOptions>(
+    builder.Configuration.GetSection(CashSeedOptions.SectionName));
 
 // CORS: opt-in allowlist for the dev/prod frontend origins. Empty list
 // disables CORS entirely (server-only deploys, integration tests).
@@ -61,6 +63,7 @@ builder.Services.AddSingleton<WorkingOrderBook>();
 builder.Services.AddSingleton<AlgoBook>();
 builder.Services.AddSingleton<AlgoIdRegistry>();
 builder.Services.AddSingleton<PositionKeeper>();
+builder.Services.AddSingleton<CashLedger>();
 builder.Services.AddSingleton<SubscriptionManager>();
 builder.Services.AddSingleton<IExecutionEventSink, WebSocketExecutionEventSink>();
 builder.Services.AddSingleton<IAlgoEventSink, WebSocketAlgoEventSink>();
@@ -442,6 +445,51 @@ var app = builder.Build();
         }
         seedLogger.LogInformation("PositionSeeder finished: {Applied} applied, {Skipped} skipped.", applied, skipped);
     }
+
+    // Cash balance seeds (#107 slice 1) — same lifecycle as position
+    // seeds: applied AFTER recovery so warm restarts preserve the
+    // settled-cash ledger and the seed only fills slots recovery left
+    // empty. Negative balances are accepted by the ledger but logged
+    // here as a warning so a config typo doesn't silently put a fresh
+    // dogfood account in the red.
+    var cashOpts = scope.ServiceProvider.GetRequiredService<IOptions<CashSeedOptions>>().Value;
+    if (cashOpts.Seeds.Count > 0)
+    {
+        var ledger = scope.ServiceProvider.GetRequiredService<CashLedger>();
+        var cashLogger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("CashSeeder");
+        var applied = 0;
+        var skipped = 0;
+        foreach (var seed in cashOpts.Seeds)
+        {
+            if (string.IsNullOrWhiteSpace(seed.EndClientId))
+            {
+                cashLogger.LogWarning("Skipping malformed CashSeed (empty EndClientId).");
+                continue;
+            }
+            if (seed.InitialAvailable < 0m)
+            {
+                cashLogger.LogWarning(
+                    "CashSeed for {Owner} has negative InitialAvailable={Balance} — applying anyway, but this is almost certainly a typo.",
+                    seed.EndClientId, seed.InitialAvailable);
+            }
+            var owner = new EndClientId(seed.EndClientId);
+            if (ledger.SeedIfAbsent(owner, seed.InitialAvailable))
+            {
+                applied++;
+                cashLogger.LogInformation(
+                    "Seeded opening cash {Owner} = {Balance}.",
+                    seed.EndClientId, seed.InitialAvailable);
+            }
+            else
+            {
+                skipped++;
+                cashLogger.LogInformation(
+                    "Skipped cash seed for {Owner}: balance already present from recovery.",
+                    seed.EndClientId);
+            }
+        }
+        cashLogger.LogInformation("CashSeeder finished: {Applied} applied, {Skipped} skipped.", applied, skipped);
+    }
 }
 
 if (corsOrigins.Length > 0)
@@ -458,6 +506,7 @@ app.MapAuth();
 app.MapOrders();
 app.MapAlgo();
 app.MapPositions();
+app.MapBalance();
 app.MapAdmin();
 app.MapWebSocketHub();
 

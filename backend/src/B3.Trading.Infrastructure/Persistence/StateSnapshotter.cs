@@ -22,6 +22,7 @@ public sealed class StateSnapshotter
     private readonly OrderOwnershipMap _ownership;
     private readonly AlgoBook _algos;
     private readonly AlgoIdRegistry _algoIds;
+    private readonly CashLedger _cash;
 
     public StateSnapshotter(
         WorkingOrderBook orders,
@@ -31,7 +32,8 @@ public sealed class StateSnapshotter
         ClOrdIdPrefixRegistry clOrdIds,
         OrderOwnershipMap ownership,
         AlgoBook algos,
-        AlgoIdRegistry algoIds)
+        AlgoIdRegistry algoIds,
+        CashLedger cash)
     {
         _orders = orders;
         _positions = positions;
@@ -41,6 +43,7 @@ public sealed class StateSnapshotter
         _ownership = ownership;
         _algos = algos;
         _algoIds = algoIds;
+        _cash = cash;
     }
 
     public PlatformSnapshot Capture(long seq) => new()
@@ -56,6 +59,7 @@ public sealed class StateSnapshotter
         Ownership = _ownership.Snapshot().ToList(),
         Algos = _algos.Snapshot().ToList(),
         AlgoIds = _algoIds.Snapshot(),
+        CashBalances = _cash.Snapshot().ToList(),
     };
 
     public void Restore(PlatformSnapshot snap)
@@ -69,6 +73,7 @@ public sealed class StateSnapshotter
         _ownership.Restore(snap.Ownership);
         _algos.Restore(snap.Algos);
         _algoIds.Restore(snap.AlgoIds);
+        _cash.Restore(snap.CashBalances);
     }
 }
 
