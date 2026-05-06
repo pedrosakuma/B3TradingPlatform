@@ -239,6 +239,60 @@ public class ExecutionReportProcessorTests
         Assert.Equal(150, positions.GetOrCreate(owner, "PETR4").NetQuantity);
     }
 
+    [Fact]
+    public void Cancel_WithNativeStpReason_MarksEventAsNativeStp()
+    {
+        var (proc, ownership, book, _, sink) = Build();
+        var owner = new EndClientId("alice");
+        var order = new Order(1UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m);
+        book.TryAdd(order);
+        ownership.Register(1UL, owner);
+        order.MarkWorking();
+
+        proc.Apply(1UL, ExecKind.Canceled, leaves: 0, cumQty: 0, lastQty: 0, lastPx: 0m,
+                   rejectReason: "CancelRestingOrderOnSelfTrade");
+
+        Assert.Equal(OrderStatus.Cancelled, order.Status);
+        var ev = Assert.Single(sink.Events);
+        Assert.True(ev.IsNativeStp);
+        Assert.Equal("CancelRestingOrderOnSelfTrade", ev.RejectReason);
+    }
+
+    [Fact]
+    public void Cancel_WithGenericReason_DoesNotMarkAsNativeStp()
+    {
+        var (proc, ownership, book, _, sink) = Build();
+        var owner = new EndClientId("alice");
+        var order = new Order(2UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m);
+        book.TryAdd(order);
+        ownership.Register(2UL, owner);
+        order.MarkWorking();
+
+        proc.Apply(2UL, ExecKind.Canceled, leaves: 0, cumQty: 0, lastQty: 0, lastPx: 0m,
+                   rejectReason: "RiskManagementCancellation");
+
+        var ev = Assert.Single(sink.Events);
+        Assert.False(ev.IsNativeStp);
+    }
+
+    [Fact]
+    public void Fill_WithStpLikeReason_DoesNotMarkAsNativeStp()
+    {
+        // Defensive: native-STP marker is gated on Kind == Canceled.
+        // A Fill ER with a freaky reason text must not be miscategorised.
+        var (proc, ownership, book, _, sink) = Build();
+        var owner = new EndClientId("alice");
+        var order = new Order(3UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m);
+        book.TryAdd(order);
+        ownership.Register(3UL, owner);
+
+        proc.Apply(3UL, ExecKind.Fill, leaves: 0, cumQty: 100, lastQty: 100, lastPx: 30m,
+                   rejectReason: "SelfTradingPrevention");
+
+        var ev = Assert.Single(sink.Events);
+        Assert.False(ev.IsNativeStp);
+    }
+
     private sealed class RecordingSink : IExecutionEventSink
     {
         public readonly List<ExecutionEvent> Events = new();

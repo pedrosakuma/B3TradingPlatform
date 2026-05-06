@@ -270,6 +270,17 @@ td { padding: .35rem .5rem; border-bottom: 1px solid #20283a; }
 .executions-log .Canceled    { color: var(--gray); }
 .executions-log .New         { color: var(--accent); }
 .executions-log .meta { color: var(--muted); }
+.executions-log .badge {
+  display: inline-block;
+  padding: 0 .35em;
+  margin-left: .25em;
+  border-radius: .25em;
+  font-size: .7rem;
+  font-weight: 600;
+  vertical-align: baseline;
+}
+.executions-log .badge.stp-native { background: #5a3a14; color: #ffd28a; }
+.executions-log .badge.stp-local  { background: #2a3a5a; color: #b8d2ff; }
 
 /* ---------- Responsive ---------- */
 @media (max-width: 1280px) {

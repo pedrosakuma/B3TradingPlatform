@@ -58,7 +58,8 @@ public sealed record ExecutionDto(
     long LastQuantity,
     decimal LastPrice,
     string? RejectReason,
-    DateTimeOffset TimestampUtc);
+    DateTimeOffset TimestampUtc,
+    bool IsNativeStp = false);
 
 /// <summary>
 /// Wire shape for an algo parent. Per-type parameters live in the
@@ -103,7 +104,8 @@ public static class DtoMappings
 
     public static ExecutionDto ToDto(this ExecutionEvent ev) => new(
         ev.ClOrdId.ToString(), ev.Symbol, ev.Side.ToString(), ev.Status.ToString(), ev.Kind.ToString(),
-        ev.LeavesQuantity, ev.CumulativeQuantity, ev.LastQuantity, ev.LastPrice, ev.RejectReason, ev.TimestampUtc);
+        ev.LeavesQuantity, ev.CumulativeQuantity, ev.LastQuantity, ev.LastPrice, ev.RejectReason, ev.TimestampUtc,
+        ev.IsNativeStp);
 
     public static AlgoDto ToDto(this Algo a)
     {
