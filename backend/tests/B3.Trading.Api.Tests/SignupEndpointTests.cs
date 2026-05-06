@@ -49,11 +49,11 @@ public class SignupEndpointTests : IClassFixture<TestAppFactory>
         using var client = _factory.CreateClient();
         var username = FreshUsername();
         var first = await client.PostAsJsonAsync("/auth/signup",
-            new SignupRequest(username, "pw1"));
+            new SignupRequest(username, "wonderland-1"));
         first.EnsureSuccessStatusCode();
 
         var second = await client.PostAsJsonAsync("/auth/signup",
-            new SignupRequest(username, "pw2"));
+            new SignupRequest(username, "wonderland-2"));
         Assert.Equal(HttpStatusCode.Conflict, second.StatusCode);
     }
 
@@ -62,7 +62,7 @@ public class SignupEndpointTests : IClassFixture<TestAppFactory>
     {
         using var client = _factory.CreateClient();
         var resp = await client.PostAsJsonAsync("/auth/signup",
-            new SignupRequest("alice", "anything"));
+            new SignupRequest("alice", "wonderland-1"));
         Assert.Equal(HttpStatusCode.Conflict, resp.StatusCode);
     }
 
@@ -80,7 +80,7 @@ public class SignupEndpointTests : IClassFixture<TestAppFactory>
     {
         using var client = _factory.CreateClient();
         var resp = await client.PostAsJsonAsync("/auth/signup",
-            new SignupRequest("bad name", "pw"));
+            new SignupRequest("bad name", "wonderland-1"));
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
     }
 
@@ -90,7 +90,7 @@ public class SignupEndpointTests : IClassFixture<TestAppFactory>
         using var client = _factory.CreateClient();
         var username = FreshUsername();
         var signup = await client.PostAsJsonAsync("/auth/signup",
-            new SignupRequest(username, "pw"));
+            new SignupRequest(username, "wonderland-1"));
         signup.EnsureSuccessStatusCode();
 
         var keeper = _factory.Services.GetRequiredService<PositionKeeper>();
@@ -101,5 +101,103 @@ public class SignupEndpointTests : IClassFixture<TestAppFactory>
         Assert.True(bySymbol.ContainsKey("VALE3"), "VALE3 not seeded");
         Assert.Equal(2000, bySymbol["PETR4"].NetQuantity);
         Assert.Equal(2000, bySymbol["VALE3"].NetQuantity);
+    }
+
+    private static async Task<string?> ReadErrorAsync(HttpResponseMessage resp)
+    {
+        var doc = await resp.Content.ReadFromJsonAsync<System.Text.Json.JsonElement>();
+        return doc.TryGetProperty("error", out var err) ? err.GetString() : null;
+    }
+
+    [Fact]
+    public async Task Signup_ShortPassword_Returns400_WithPolicyError()
+    {
+        using var client = _factory.CreateClient();
+        var resp = await client.PostAsJsonAsync("/auth/signup",
+            new SignupRequest(FreshUsername(), "abc1"));
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        var err = await ReadErrorAsync(resp);
+        Assert.NotNull(err);
+        Assert.Contains("policy", err!);
+        Assert.Contains("length", err);
+    }
+
+    [Fact]
+    public async Task Signup_NoDigit_Returns400()
+    {
+        using var client = _factory.CreateClient();
+        var resp = await client.PostAsJsonAsync("/auth/signup",
+            new SignupRequest(FreshUsername(), "wonderland"));
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        var err = await ReadErrorAsync(resp);
+        Assert.Contains("digit", err!);
+    }
+
+    [Fact]
+    public async Task Signup_NoLetter_Returns400()
+    {
+        using var client = _factory.CreateClient();
+        var resp = await client.PostAsJsonAsync("/auth/signup",
+            new SignupRequest(FreshUsername(), "12345678"));
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        var err = await ReadErrorAsync(resp);
+        Assert.Contains("letter", err!);
+    }
+
+    [Fact]
+    public async Task Signup_ReservedExactName_Root_Returns409()
+    {
+        using var client = _factory.CreateClient();
+        var resp = await client.PostAsJsonAsync("/auth/signup",
+            new SignupRequest("root", "wonderland-1"));
+        Assert.Equal(HttpStatusCode.Conflict, resp.StatusCode);
+        var err = await ReadErrorAsync(resp);
+        Assert.Equal("username is reserved", err);
+    }
+
+    [Fact]
+    public async Task Signup_ReservedExactName_CaseInsensitive_Returns409()
+    {
+        using var client = _factory.CreateClient();
+        var resp = await client.PostAsJsonAsync("/auth/signup",
+            new SignupRequest("SyStEm", "wonderland-1"));
+        Assert.Equal(HttpStatusCode.Conflict, resp.StatusCode);
+        var err = await ReadErrorAsync(resp);
+        Assert.Equal("username is reserved", err);
+    }
+
+    [Fact]
+    public async Task Signup_ReservedPrefix_BotDash_Returns409()
+    {
+        using var client = _factory.CreateClient();
+        var resp = await client.PostAsJsonAsync("/auth/signup",
+            new SignupRequest("bot-rogueX", "wonderland-1"));
+        Assert.Equal(HttpStatusCode.Conflict, resp.StatusCode);
+        var err = await ReadErrorAsync(resp);
+        Assert.Equal("username is reserved", err);
+    }
+
+    [Fact]
+    public async Task Signup_NonPrefixSubstring_IsAllowed()
+    {
+        using var client = _factory.CreateClient();
+        // "fooadmin" contains "admin" but is not an exact match nor a prefix
+        // hit; should pass policy/reserved and create a fresh account.
+        var resp = await client.PostAsJsonAsync("/auth/signup",
+            new SignupRequest("fooadmin" + Guid.NewGuid().ToString("N")[..6], "wonderland-1"));
+        Assert.Equal(HttpStatusCode.Created, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Login_AfterPolicyTightened_StillWorks_ForEnvSeededUser()
+    {
+        // Slice 1 design: policy is signup-only. Env-seeded "alice/wonderland"
+        // would fail RequireDigit if policy were re-checked at login. This
+        // test pins the decision so a future refactor sharing validation
+        // between login/signup trips immediately.
+        using var client = _factory.CreateClient();
+        var login = await client.PostAsJsonAsync("/auth/login",
+            new LoginRequest("alice", "wonderland"));
+        Assert.Equal(HttpStatusCode.OK, login.StatusCode);
     }
 }

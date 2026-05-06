@@ -67,13 +67,9 @@ public static class AuthEndpoints
                 || string.IsNullOrWhiteSpace(req.Password))
                 return Results.BadRequest(new { error = "username and password required" });
 
-            // Minimal hygiene only — full policy (length/complexity/captcha
-            // /rate-limit) is a tracked hardening follow-up. Reject strings
-            // we know will break downstream consumers (claim parsing,
-            // ClOrdID emission, WS topic routing).
-            var username = req.Username.Trim();
-            if (username.Length > 64 || username.Any(c => char.IsWhiteSpace(c) || c == ':' || c == '"' || c == '\\'))
-                return Results.BadRequest(new { error = "username contains invalid characters" });
+            var validation = ValidateSignupRequest(req, opts.Value, out var username);
+            if (validation is not null)
+                return validation;
 
             var iterations = opts.Value.Pbkdf2Iterations > 0 ? opts.Value.Pbkdf2Iterations : 600_000;
             var (hash, salt) = PasswordHasher.Hash(req.Password, iterations);
@@ -129,6 +125,66 @@ public static class AuthEndpoints
         });
 
         return app;
+    }
+
+    /// <summary>
+    /// Slice 1 of #97 hardening: shape + reserved-name + password-policy
+    /// validation for signup. Returns <c>null</c> on success and emits the
+    /// normalized (trimmed) <paramref name="username"/> so the caller does
+    /// not re-trim and risk drift between validate/store.
+    /// </summary>
+    private static IResult? ValidateSignupRequest(SignupRequest req, AuthOptions opts, out string username)
+    {
+        username = req.Username.Trim();
+
+        // Existing minimal hygiene — reject strings we know will break
+        // downstream consumers (claim parsing, ClOrdID emission, WS topic
+        // routing).
+        if (username.Length > 64 || username.Any(c => char.IsWhiteSpace(c) || c == ':' || c == '"' || c == '\\'))
+            return Results.BadRequest(new { error = "username contains invalid characters" });
+
+        // Reserved usernames + prefixes (case-insensitive). 409 mirrors
+        // the duplicate-username UX; the body string distinguishes the
+        // two cases for client-side messaging.
+        if (IsReserved(username, opts))
+            return Results.Conflict(new { error = "username is reserved" });
+
+        var policyError = ValidatePassword(req.Password, opts.PasswordPolicy);
+        if (policyError is not null)
+            return Results.BadRequest(new { error = policyError });
+
+        return null;
+    }
+
+    private static bool IsReserved(string username, AuthOptions opts)
+    {
+        foreach (var name in opts.ReservedUsernames ?? new())
+        {
+            if (string.IsNullOrWhiteSpace(name)) continue;
+            if (string.Equals(username, name.Trim(), StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        foreach (var prefix in opts.ReservedUsernamePrefixes ?? new())
+        {
+            if (string.IsNullOrWhiteSpace(prefix)) continue;
+            if (username.StartsWith(prefix.Trim(), StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
+    }
+
+    private static string? ValidatePassword(string password, PasswordPolicyOptions policy)
+    {
+        var minLength = policy.EffectiveMinLength;
+        if (password.Length < minLength)
+            return $"password does not meet policy: minimum length is {minLength}";
+        if (policy.RequireDigit && !password.Any(char.IsDigit))
+            return "password does not meet policy: must contain a digit";
+        if (policy.RequireLetter && !password.Any(char.IsLetter))
+            return "password does not meet policy: must contain a letter";
+        return null;
     }
 }
 
