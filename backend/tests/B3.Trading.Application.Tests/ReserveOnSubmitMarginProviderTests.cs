@@ -2,6 +2,12 @@ using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Logging.Abstractions;
 
+// These tests cover the legacy Margin.Initial fallback path on
+// purpose (#107 slice 4 deprecated but did not remove it). Suppress
+// the obsolete warning at file scope; when the property is removed
+// in a follow-up, this file will be migrated or deleted.
+#pragma warning disable CS0618 // Type or member is obsolete
+
 namespace B3.Trading.Application.Tests;
 
 public class ReserveOnSubmitMarginProviderTests

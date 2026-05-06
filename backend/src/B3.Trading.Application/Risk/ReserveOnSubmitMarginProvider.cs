@@ -204,7 +204,13 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider
         {
             return balance.Available;
         }
+        // Transition fallback: Margin.Initial is deprecated under #107
+        // slice 4 but kept here so legacy dogfood configs keep working
+        // until a follow-up removes the property. The startup warning
+        // in Program.cs nudges operators to migrate.
+#pragma warning disable CS0618 // Type or member is obsolete
         return _options.CurrentValue.Margin.Initial.GetValueOrDefault(owner, 0m);
+#pragma warning restore CS0618
     }
 
     /// <summary>Test/observability helper: returns the currently reserved amount for an owner.</summary>

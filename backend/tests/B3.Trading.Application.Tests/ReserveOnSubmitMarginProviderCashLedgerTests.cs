@@ -2,6 +2,13 @@ using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Logging.Abstractions;
 
+// Slice 4 of #107 deprecates Margin.Initial; the configInitial branch
+// here exercises the legacy fallback on purpose to prove ledger
+// presence wins over config and that fallback still works when no
+// ledger entry exists. Suppress at file scope; will be migrated when
+// Margin.Initial is removed.
+#pragma warning disable CS0618 // Type or member is obsolete
+
 namespace B3.Trading.Application.Tests;
 
 /// <summary>

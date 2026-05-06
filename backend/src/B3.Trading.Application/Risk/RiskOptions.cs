@@ -86,6 +86,17 @@ public sealed class OrderRateLimit
 /// <see cref="NoOpMarginProvider"/> stays in place until an operator
 /// opts in. See <c>docs/rfcs/pre-trade-risk-v2.md</c> §3.1 for the
 /// model assumed by v2 (crypto-spot ledger; not T+N, not derivatives).
+///
+/// <para>
+/// <b>Migration note (#107 slice 4):</b> the per-end-client opening
+/// balance has moved from <see cref="Initial"/> to the
+/// <see cref="B3.Trading.Application.CashSeedOptions"/> ledger seeds
+/// (<c>Trading:Cash:Seeds[]</c>) and to
+/// <c>Trading:Cash:SignupInitialBalance</c> for self-service signup.
+/// Operators populating <see cref="Initial"/> will get a one-time
+/// startup warning with migration guidance; the fallback path stays
+/// in place until a follow-up retires the property entirely.
+/// </para>
 /// </summary>
 public sealed class MarginOptions
 {
@@ -96,7 +107,19 @@ public sealed class MarginOptions
     /// currency v2 assumes). Missing entries are treated as zero, so
     /// unrecognized end-clients cannot place buy orders when margin
     /// is enabled — fail-closed by default.
+    ///
+    /// <para>
+    /// <b>Deprecated (#107 slice 4):</b> use
+    /// <c>Trading:Cash:Seeds[]</c> for static opening balances and
+    /// <c>Trading:Cash:SignupInitialBalance</c> for the self-service
+    /// signup default. The <see cref="B3.Trading.Application.CashLedger"/>
+    /// overlay introduced in slice 1 is the source of truth; this
+    /// property is consulted only as a transition fallback for owners
+    /// that have no ledger entry, and a follow-up will remove it
+    /// entirely once dogfood configs migrate.
+    /// </para>
     /// </summary>
+    [Obsolete("Use Trading:Cash:Seeds[] for static opening balances or Trading:Cash:SignupInitialBalance for self-service signup defaults. Margin.Initial is the transition fallback only and will be removed in a follow-up to #107.")]
     public Dictionary<string, decimal> Initial { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
 }
