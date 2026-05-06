@@ -207,6 +207,48 @@ public class RiskPipelineTests
     }
 
     [Fact]
+    public void MinNotional_RejectsBelowFloor_ApprovesAtAndAbove()
+    {
+        var opts = Wrap(new RiskOptions { Default = new RiskLimits { MinNotional = 1000m } });
+        var check = new MinNotionalCheck(opts);
+        Assert.True(check.Check(Ctx(qty: 100, price: 30m)).Approved);    // 3000 ≥ 1000
+        Assert.True(check.Check(Ctx(qty: 100, price: 10m)).Approved);    // 1000 == floor
+        var d = check.Check(Ctx(qty: 10, price: 10m));                   // 100 < 1000
+        Assert.False(d.Approved);
+        Assert.Contains("min", d.Reason);
+    }
+
+    [Fact]
+    public void MinNotional_NullPriceIsApproved()
+    {
+        // Market orders don't carry a price; min-notional cannot fire.
+        var opts = Wrap(new RiskOptions { Default = new RiskLimits { MinNotional = 999_999m } });
+        Assert.True(new MinNotionalCheck(opts).Check(Ctx(price: null, type: OrderType.Market)).Approved);
+    }
+
+    [Fact]
+    public void MinNotional_NoFloorConfigured_IsApproved()
+    {
+        // Default semantics: permissive when unset everywhere.
+        var opts = Wrap(new RiskOptions());
+        Assert.True(new MinNotionalCheck(opts).Check(Ctx(qty: 1, price: 0.01m)).Approved);
+    }
+
+    [Fact]
+    public void MinNotional_PerEndClient_OverridesDefault()
+    {
+        var opts = Wrap(new RiskOptions
+        {
+            Default = new RiskLimits { MinNotional = 100m },
+            PerEndClient = { ["alice"] = new RiskLimits { MinNotional = 5000m } },
+        });
+        var check = new MinNotionalCheck(opts);
+        // Notional 1000 passes default but trips alice's tighter floor.
+        Assert.False(check.Check(Ctx(owner: "alice", qty: 100, price: 10m)).Approved);
+        Assert.True(check.Check(Ctx(owner: "bob", qty: 100, price: 10m)).Approved);
+    }
+
+    [Fact]
     public void PriceCollar_RejectsOutsideBand()
     {
         var refPx = new StubRef(("PETR4", 30m));

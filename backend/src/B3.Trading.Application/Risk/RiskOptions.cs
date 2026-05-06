@@ -105,6 +105,18 @@ public sealed class RiskLimits
 {
     public long? MaxQuantity { get; set; }
     public decimal? MaxNotional { get; set; }
+
+    /// <summary>
+    /// Optional notional floor (price × quantity) for Limit orders.
+    /// Rejects sub-floor submissions as anti-dust / typo-guard
+    /// (e.g. fat-finger 0.01 on PETR4 still passes max-quantity but
+    /// trips min-notional). Market orders skip the check — there's
+    /// no price to evaluate and the venue + max-quantity gates
+    /// already bound the worst case. Default semantics when unset
+    /// everywhere in the precedence chain are permissive: no floor
+    /// (see <see cref="Risk.Checks.MinNotionalCheck"/>).
+    /// </summary>
+    public decimal? MinNotional { get; set; }
     public decimal? PriceCollarPercent { get; set; }
     /// <summary>
     /// Optional absolute price band (in price units) around the
@@ -195,6 +207,7 @@ public static class RiskLimitsResolver
         {
             MaxQuantity = Resolve(opts, endClient, firmId, symbol, l => l.MaxQuantity),
             MaxNotional = Resolve(opts, endClient, firmId, symbol, l => l.MaxNotional),
+            MinNotional = Resolve(opts, endClient, firmId, symbol, l => l.MinNotional),
             PriceCollarPercent = Resolve(opts, endClient, firmId, symbol, l => l.PriceCollarPercent),
             PriceCollarAbsolute = Resolve(opts, endClient, firmId, symbol, l => l.PriceCollarAbsolute),
             PositionLimit = Resolve(opts, endClient, firmId, symbol, l => l.PositionLimit),
