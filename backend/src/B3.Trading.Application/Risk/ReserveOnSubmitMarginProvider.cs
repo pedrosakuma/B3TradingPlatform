@@ -38,11 +38,22 @@ namespace B3.Trading.Application.Risk;
 /// (no orphaned holds because the reservation lives only as long as
 /// the working order).
 /// </para>
+///
+/// <para>
+/// <b>Cash source (slice 2 of #107):</b> when a <see cref="CashLedger"/>
+/// is wired in, the per-owner base capacity is read from the ledger's
+/// settled-cash balance — this is the post-fill number, so a Buy that
+/// just executed correctly reduces the available figure for the next
+/// reservation. When the ledger has no entry for the owner, the
+/// provider falls back to <c>RiskOptions.Margin.Initial</c> so legacy
+/// dogfood configs keep working until slice 4 retires the option.
+/// </para>
 /// </summary>
 public sealed class ReserveOnSubmitMarginProvider : IMarginProvider
 {
     private readonly IOptionsMonitor<RiskOptions> _options;
     private readonly ILogger<ReserveOnSubmitMarginProvider> _logger;
+    private readonly CashLedger? _cash;
 
     private readonly ConcurrentDictionary<ulong, ReservationEntry> _reservations = new();
     private readonly ConcurrentDictionary<string, decimal> _reserved =
@@ -51,10 +62,12 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider
 
     public ReserveOnSubmitMarginProvider(
         IOptionsMonitor<RiskOptions> options,
-        ILogger<ReserveOnSubmitMarginProvider> logger)
+        ILogger<ReserveOnSubmitMarginProvider> logger,
+        CashLedger? cash = null)
     {
         _options = options;
         _logger = logger;
+        _cash = cash;
     }
 
     public Task<RiskDecision> TryReserveAsync(ulong clOrdId, RiskContext ctx, CancellationToken ct)
@@ -76,7 +89,7 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider
             return Task.FromResult(RiskDecision.Approve);
 
         var owner = ctx.Owner.Value;
-        var initial = ResolveInitial(owner);
+        var baseAvailable = ResolveBaseAvailable(owner);
 
         // Atomic check+reserve: take the gate, snapshot reserved,
         // verify capacity, mutate. The provider is a singleton so the
@@ -84,7 +97,7 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider
         lock (_gate)
         {
             var reserved = _reserved.GetValueOrDefault(owner, 0m);
-            var available = initial - reserved;
+            var available = baseAvailable - reserved;
             if (notional > available)
             {
                 return Task.FromResult(RiskDecision.Reject(
@@ -170,15 +183,36 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider
         _reserved[owner] = next;
     }
 
-    private decimal ResolveInitial(string owner) =>
-        _options.CurrentValue.Margin.Initial.GetValueOrDefault(owner, 0m);
+    /// <summary>
+    /// Resolves the per-owner base capacity that the reservation ledger
+    /// debits against. Slice 2 of #107 introduces a CashLedger fallback:
+    /// when the ledger has an entry for the owner (seeded or built up
+    /// from fills) it is the authoritative settled-cash figure; the
+    /// owner-pinned <c>RiskOptions.Margin.Initial</c> is consulted as a
+    /// fallback so existing dogfood configs keep working until slice 4
+    /// retires the option.
+    ///
+    /// <para>
+    /// The ledger answer is preferred even when it's lower than the
+    /// config — a trader who's already debited cash via Buy fills must
+    /// see the post-settlement number, not the original allowance.
+    /// </para>
+    /// </summary>
+    private decimal ResolveBaseAvailable(string owner)
+    {
+        if (_cash is not null && _cash.TryGet(new EndClientId(owner), out var balance) && balance is not null)
+        {
+            return balance.Available;
+        }
+        return _options.CurrentValue.Margin.Initial.GetValueOrDefault(owner, 0m);
+    }
 
     /// <summary>Test/observability helper: returns the currently reserved amount for an owner.</summary>
     internal decimal ReservedForTesting(string owner) => _reserved.GetValueOrDefault(owner, 0m);
 
     /// <summary>Test/observability helper: returns the currently available amount for an owner.</summary>
     internal decimal AvailableForTesting(string owner) =>
-        ResolveInitial(owner) - ReservedForTesting(owner);
+        ResolveBaseAvailable(owner) - ReservedForTesting(owner);
 
     private sealed record ReservationEntry(string Owner, decimal Price, long OriginalQty, decimal RemainingNotional);
 }

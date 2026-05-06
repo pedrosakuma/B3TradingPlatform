@@ -124,7 +124,8 @@ builder.Services.AddSingleton<IMarginProvider>(sp =>
     return opts.Margin.Enabled
         ? new ReserveOnSubmitMarginProvider(
             sp.GetRequiredService<IOptionsMonitor<RiskOptions>>(),
-            sp.GetRequiredService<ILogger<ReserveOnSubmitMarginProvider>>())
+            sp.GetRequiredService<ILogger<ReserveOnSubmitMarginProvider>>(),
+            sp.GetRequiredService<CashLedger>())
         : new NoOpMarginProvider();
 });
 builder.Services.AddSingleton<IRiskCheck, KillSwitchCheck>();
