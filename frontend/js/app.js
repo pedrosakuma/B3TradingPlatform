@@ -3,6 +3,7 @@
 import { defaultBackend, defaultMarketDataUrl, login, signup, submitOrder, cancelOrder, getAdminFirms,
          validateSession,
          getKillStatus, killFirm, reviveFirm, killEndClient, reviveEndClient,
+         getHaltStatus, haltSymbol, resumeSymbol,
          runEod } from "./protocol.js";
 import { claimsFromToken } from "./jwt.js";
 import { validateOrder, fatFingerCheck, payloadKey } from "./validation.js";
@@ -72,6 +73,8 @@ function init() {
     onToggleFirm:      handleToggleFirm,
     onToggleEndClient: handleToggleEndClient,
     onAddEndClient:    handleAddEndClient,
+    onToggleHalt:      handleToggleHalt,
+    onAddHalt:         handleAddHalt,
     onRunEod:          handleRunEod,
     onRefresh:         refreshAdminData,
   });
@@ -212,6 +215,7 @@ function startSession(next) {
   state.setWsReconnect(null);
   state.setFirmsHealth(null);
   state.setKillStatus(null);
+  state.setHaltStatus(null);
   state.setEodReport(null);
   state.setCurrentView("trader");
   ui.showTrader();
@@ -622,6 +626,7 @@ function logout() {
   state.setWsReconnect(null);
   state.setFirmsHealth(null);
   state.setKillStatus(null);
+  state.setHaltStatus(null);
   state.setEodReport(null);
   state.setCurrentView("trader");
   state.setBlotterFilter(readBlotterFilter());
@@ -652,14 +657,19 @@ function stopFirmsPoll() {
 async function pollFirmsOnce() {
   if (!session) return;
   try {
-    const [firms, kill] = await Promise.all([
+    const [firms, kill, halts] = await Promise.all([
       getAdminFirms(session.backend, session.token),
       getKillStatus(session.backend, session.token),
+      getHaltStatus(session.backend, session.token),
     ]);
     state.setFirmsHealth({ ...firms, fetchedAt: Date.now() });
     state.setKillStatus({
       firms: kill?.Firms ?? [],
       endClients: kill?.EndClients ?? [],
+      fetchedAt: Date.now(),
+    });
+    state.setHaltStatus({
+      symbols: halts?.Symbols ?? [],
       fetchedAt: Date.now(),
     });
   } catch (err) {
@@ -713,6 +723,17 @@ function handleToggleEndClient({ id, engage }) {
 
 function handleAddEndClient({ id }) {
   handleToggleEndClient({ id, engage: true });
+}
+
+function handleToggleHalt({ symbol, halt }) {
+  withAdminCall(
+    () => (halt ? haltSymbol : resumeSymbol)(session.backend, session.token, symbol),
+    `symbol ${symbol}: ${halt ? "halted" : "resumed"}`,
+  );
+}
+
+function handleAddHalt({ symbol }) {
+  handleToggleHalt({ symbol, halt: true });
 }
 
 async function handleRunEod() {

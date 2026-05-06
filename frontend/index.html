@@ -319,6 +319,20 @@
     </section>
 
     <section class="panel admin-panel">
+      <h3>Symbols (halted)</h3>
+      <form id="admin-add-halt-form" class="admin-inline-form">
+        <input id="admin-add-halt-symbol" type="text" placeholder="symbol (e.g. PETR4)" maxlength="16" />
+        <button type="submit" class="danger-btn engage">Halt symbol</button>
+      </form>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Symbol</th><th></th></tr></thead>
+          <tbody id="admin-halts-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel admin-panel">
       <h3>EOD materialisation</h3>
       <button id="admin-eod-btn" type="button">Run EOD now</button>
       <pre id="admin-eod-output" class="admin-eod-output" hidden></pre>

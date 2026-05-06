@@ -48,6 +48,7 @@ const state = {
   wsReconnect: null,       // { nextAt: ms } | null — when worker has scheduled the next attempt
   firmsHealth: null,       // { mode, firms, fetchedAt } | null — admin-only poll of /admin/firms
   killStatus: null,        // { endClients: [], firms: [], fetchedAt } | null — admin-only
+  haltStatus: null,        // { symbols: [], fetchedAt } | null — admin-only
   eodReport: null,         // { ranAt, report } | null — last EOD response in this session
   currentView: "trader",   // "trader" | "admin" — which view is mounted
   // Blotter UX (section 3 of #30).
@@ -538,6 +539,11 @@ export function setFirmsHealth(value) {
 export function setKillStatus(value) {
   state.killStatus = value;
   notify("killStatus");
+}
+
+export function setHaltStatus(value) {
+  state.haltStatus = value;
+  notify("haltStatus");
 }
 
 export function setEodReport(value) {

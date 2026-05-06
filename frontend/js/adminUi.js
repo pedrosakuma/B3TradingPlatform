@@ -10,6 +10,8 @@ const $ = (id) => document.getElementById(id);
 let onToggleFirm = () => {};
 let onToggleEndClient = () => {};
 let onAddEndClient = () => {};
+let onToggleHalt = () => {};
+let onAddHalt = () => {};
 let onRunEod = () => {};
 let onRefresh = () => {};
 
@@ -17,6 +19,8 @@ export function setAdminHandlers(handlers) {
   onToggleFirm      = handlers.onToggleFirm      ?? onToggleFirm;
   onToggleEndClient = handlers.onToggleEndClient ?? onToggleEndClient;
   onAddEndClient    = handlers.onAddEndClient    ?? onAddEndClient;
+  onToggleHalt      = handlers.onToggleHalt      ?? onToggleHalt;
+  onAddHalt         = handlers.onAddHalt         ?? onAddHalt;
   onRunEod          = handlers.onRunEod          ?? onRunEod;
   onRefresh         = handlers.onRefresh         ?? onRefresh;
 }
@@ -59,6 +63,29 @@ export function bindAdminUi() {
     $("admin-add-ec-id").value = "";
   });
 
+  $("admin-halts-body").addEventListener("click", (e) => {
+    const btn = e.target.closest(".halt-resume");
+    if (!btn) return;
+    const symbol = btn.dataset.symbol;
+    if (!confirmTwice(
+      `Resume trading for ${symbol}?`,
+      `Confirm: resume ${symbol}. Orders for this symbol will be accepted again.`,
+    )) return;
+    onToggleHalt({ symbol, halt: false });
+  });
+
+  $("admin-add-halt-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const symbol = $("admin-add-halt-symbol").value.trim().toUpperCase();
+    if (!symbol) return;
+    if (!confirmTwice(
+      `HALT trading for symbol ${symbol}?`,
+      `Confirm: halt ${symbol}. ALL participants will be blocked from sending orders for this symbol until resumed.`,
+    )) return;
+    onAddHalt({ symbol });
+    $("admin-add-halt-symbol").value = "";
+  });
+
   $("admin-eod-btn").addEventListener("click", () => {
     if (!confirmTwice(
       "Run EOD materialisation now?",
@@ -77,6 +104,7 @@ function confirmTwice(first, second) {
 function renderForSlice(slice) {
   if (slice === "firmsHealth" || slice === "killStatus" || slice === "all") renderFirms();
   if (slice === "killStatus"  || slice === "all") renderEndClients();
+  if (slice === "haltStatus"  || slice === "all") renderHalts();
   if (slice === "eodReport"   || slice === "all") renderEod();
   if (slice === "currentView") onViewChanged();
 }
@@ -88,6 +116,7 @@ function onViewChanged() {
   if (getState().currentView === "admin") {
     renderFirms();
     renderEndClients();
+    renderHalts();
     renderEod();
   }
 }
@@ -95,6 +124,7 @@ function onViewChanged() {
 export function renderAdminAll() {
   renderFirms();
   renderEndClients();
+  renderHalts();
   renderEod();
 }
 
@@ -150,6 +180,25 @@ function renderEndClients() {
   body.innerHTML = list.map(id => `<tr>
     <td><code>${escapeHtml(id)}</code></td>
     <td><button type="button" class="ec-revive danger-btn revive" data-ec="${escapeHtml(id)}">Revive</button></td>
+  </tr>`).join("");
+}
+
+function renderHalts() {
+  const body = $("admin-halts-body");
+  if (!body) return;
+  const hs = getState().haltStatus;
+  if (!hs) {
+    body.innerHTML = `<tr><td colspan="2" class="muted">awaiting /admin/halts…</td></tr>`;
+    return;
+  }
+  const list = hs.symbols ?? [];
+  if (list.length === 0) {
+    body.innerHTML = `<tr><td colspan="2" class="muted">no halted symbols</td></tr>`;
+    return;
+  }
+  body.innerHTML = list.map(sym => `<tr>
+    <td><code>${escapeHtml(sym)}</code></td>
+    <td><button type="button" class="halt-resume danger-btn revive" data-symbol="${escapeHtml(sym)}">Resume</button></td>
   </tr>`).join("");
 }
 
