@@ -1,0 +1,202 @@
+using System.Collections.Concurrent;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+
+namespace B3.Trading.Api.Auth;
+
+/// <summary>
+/// Slice 3 of #97 hardening: file-backed <see cref="IUserStore"/>.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Env-seeded users (from <see cref="AuthOptions.Users"/>) live in an
+/// immutable in-memory dictionary and are NEVER written to disk —
+/// configuration is authoritative and the file is only the runtime
+/// signup tail. Runtime users are loaded on construction (boot) and
+/// written through on every successful <see cref="TryAdd"/>.
+/// </para>
+/// <para>
+/// On-disk format is JSON with a top-level envelope so future schema
+/// evolutions can migrate without breaking startup:
+/// <code>
+/// { "version": 1, "users": [ { "Username": "...", "PasswordHash": "...",
+///                              "Salt": "...", "Iterations": 600000,
+///                              "Role": "user", "Firm": "FIRM01" }, ... ] }
+/// </code>
+/// </para>
+/// <para>
+/// Writes are atomic (write to <c>users.json.tmp</c> + fsync + rename)
+/// and serialized via a single <c>lock</c> so concurrent signups can't
+/// corrupt the file. A corrupt file is logged at WARN level and treated
+/// as empty so a poisoned file does not brick boot — operators inspect
+/// the warning and either restore from backup or delete the file.
+/// </para>
+/// </remarks>
+public sealed class FileBackedUserStore : IUserStore
+{
+    private readonly Dictionary<string, UserConfig> _seeded;
+    private readonly ConcurrentDictionary<string, UserConfig> _runtime =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly string _filePath;
+    private readonly object _writeGate = new();
+    private readonly ILogger<FileBackedUserStore> _logger;
+
+    private static readonly JsonSerializerOptions JsonOpts = new()
+    {
+        WriteIndented = true,
+        DefaultIgnoreCondition = JsonIgnoreCondition.Never,
+    };
+
+    public FileBackedUserStore(
+        IOptions<AuthOptions> authOptions,
+        IOptions<UserStoreOptions> storeOptions,
+        ILogger<FileBackedUserStore> logger)
+    {
+        ArgumentNullException.ThrowIfNull(authOptions);
+        ArgumentNullException.ThrowIfNull(storeOptions);
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+
+        var path = storeOptions.Value.FilePath;
+        if (string.IsNullOrWhiteSpace(path))
+            throw new InvalidOperationException(
+                "FileBackedUserStore requires Trading:Auth:UserStore:FilePath. " +
+                "Either set it explicitly or rely on the host's default derivation " +
+                "from Trading:Persistence:DataDirectory.");
+        _filePath = path;
+
+        _seeded = new Dictionary<string, UserConfig>(StringComparer.OrdinalIgnoreCase);
+        foreach (var u in authOptions.Value.Users)
+        {
+            if (string.IsNullOrWhiteSpace(u.Username)) continue;
+            _seeded[u.Username] = u;
+        }
+
+        LoadRuntimeUsers();
+    }
+
+    public bool TryGet(string username, out UserConfig? user)
+    {
+        if (string.IsNullOrWhiteSpace(username)) { user = null; return false; }
+        if (_seeded.TryGetValue(username, out var s)) { user = s; return true; }
+        if (_runtime.TryGetValue(username, out var r)) { user = r; return true; }
+        user = null;
+        return false;
+    }
+
+    public bool TryAdd(UserConfig user)
+    {
+        ArgumentNullException.ThrowIfNull(user);
+        if (string.IsNullOrWhiteSpace(user.Username)) return false;
+
+        // Block runtime collisions with env-seeded users — same invariant
+        // as InMemoryUserStore.
+        if (_seeded.ContainsKey(user.Username)) return false;
+
+        // Serialize TryAdd through the write gate so the in-memory state
+        // and the on-disk snapshot can never disagree under concurrent
+        // signups. The signup endpoint is rate-limited and rare; this is
+        // not a hot path.
+        lock (_writeGate)
+        {
+            if (!_runtime.TryAdd(user.Username, user))
+                return false;
+
+            try
+            {
+                PersistRuntimeUsersLocked();
+            }
+            catch (Exception ex)
+            {
+                // Roll back the in-memory insert so the next signup with
+                // the same username sees a 409 (or succeeds and retries
+                // the write) rather than a silent disk-vs-memory drift.
+                _runtime.TryRemove(user.Username, out _);
+                _logger.LogError(ex,
+                    "FileBackedUserStore: failed to persist runtime user {Username} to {Path}; " +
+                    "in-memory insert rolled back.",
+                    user.Username, _filePath);
+                throw;
+            }
+
+            return true;
+        }
+    }
+
+    private void LoadRuntimeUsers()
+    {
+        if (!File.Exists(_filePath))
+        {
+            _logger.LogInformation(
+                "FileBackedUserStore: no runtime user file at {Path}; starting with empty runtime set.",
+                _filePath);
+            return;
+        }
+
+        try
+        {
+            using var stream = File.OpenRead(_filePath);
+            var envelope = JsonSerializer.Deserialize<UserStoreFileEnvelope>(stream, JsonOpts);
+            if (envelope?.Users is null)
+            {
+                _logger.LogWarning(
+                    "FileBackedUserStore: {Path} parsed but contained no users; starting empty.",
+                    _filePath);
+                return;
+            }
+
+            foreach (var u in envelope.Users)
+            {
+                if (string.IsNullOrWhiteSpace(u.Username)) continue;
+                if (_seeded.ContainsKey(u.Username)) continue; // env wins
+                _runtime[u.Username] = u;
+            }
+            _logger.LogInformation(
+                "FileBackedUserStore: loaded {Count} runtime users from {Path}.",
+                _runtime.Count, _filePath);
+        }
+        catch (Exception ex)
+        {
+            // Don't brick boot — log loud and start empty. Operators
+            // inspect the warning to decide between restore from backup
+            // or accepting that runtime users are gone.
+            _logger.LogWarning(ex,
+                "FileBackedUserStore: failed to read {Path}; starting with empty runtime set. " +
+                "Existing runtime signups (if any) are NOT loaded — operator action required.",
+                _filePath);
+        }
+    }
+
+    private void PersistRuntimeUsersLocked()
+    {
+        var dir = Path.GetDirectoryName(_filePath);
+        if (!string.IsNullOrEmpty(dir))
+            Directory.CreateDirectory(dir);
+
+        var envelope = new UserStoreFileEnvelope
+        {
+            Version = 1,
+            Users = _runtime.Values
+                .OrderBy(u => u.Username, StringComparer.OrdinalIgnoreCase)
+                .ToList(),
+        };
+
+        // Atomic write: tmp + fsync + rename. Crash between fsync and
+        // rename leaves the previous good file intact; crash after
+        // rename is fine because the new file is on disk.
+        var tmp = _filePath + ".tmp";
+        using (var stream = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            JsonSerializer.Serialize(stream, envelope, JsonOpts);
+            stream.Flush(true);
+        }
+        File.Move(tmp, _filePath, overwrite: true);
+    }
+
+    private sealed class UserStoreFileEnvelope
+    {
+        public int Version { get; set; }
+        public List<UserConfig> Users { get; set; } = new();
+    }
+}

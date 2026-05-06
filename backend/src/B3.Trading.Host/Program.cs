@@ -30,6 +30,8 @@ builder.Services.Configure<AuthOptions>(
     builder.Configuration.GetSection(AuthOptions.SectionName));
 builder.Services.Configure<AuthRateLimitOptions>(
     builder.Configuration.GetSection(AuthRateLimitOptions.SectionName));
+builder.Services.Configure<UserStoreOptions>(
+    builder.Configuration.GetSection(UserStoreOptions.SectionName));
 builder.Services.AddAuthRateLimiter();
 builder.Services.Configure<RiskOptions>(
     builder.Configuration.GetSection(RiskOptions.SectionName));
@@ -58,7 +60,32 @@ if (corsOrigins.Length > 0)
 }
 
 // Application-layer singletons: registries, books, processor, sink.
-builder.Services.AddSingleton<IUserStore, InMemoryUserStore>();
+//
+// Slice 3 of #97: when Trading:Auth:UserStore:Enabled is true (the
+// production default), runtime self-service signups persist to disk so
+// they survive restarts. Tests and ephemeral demos can opt out via
+// Enabled=false to keep the legacy in-memory behavior.
+//
+// FilePath is resolved via PostConfigure so tests can override it
+// before construction; the IUserStore registration is a factory
+// function so Enabled is read AFTER all configuration sources
+// (including WebApplicationFactory overrides) have been merged.
+builder.Services.PostConfigure<UserStoreOptions>(opts =>
+{
+    if (!opts.Enabled) return;
+    if (!string.IsNullOrWhiteSpace(opts.FilePath)) return;
+    var persistDir = builder.Configuration
+        .GetSection(PersistenceOptions.SectionName).Get<PersistenceOptions>()?.DataDirectory
+        ?? "data";
+    opts.FilePath = Path.Combine(persistDir, "users.json");
+});
+builder.Services.AddSingleton<IUserStore>(sp =>
+{
+    var opts = sp.GetRequiredService<IOptions<UserStoreOptions>>().Value;
+    return opts.Enabled
+        ? ActivatorUtilities.CreateInstance<FileBackedUserStore>(sp)
+        : ActivatorUtilities.CreateInstance<InMemoryUserStore>(sp);
+});
 builder.Services.AddSingleton<EndClientRegistry>();
 builder.Services.AddSingleton<ClOrdIdPrefixRegistry>();
 builder.Services.AddSingleton<OrderOwnershipMap>();
