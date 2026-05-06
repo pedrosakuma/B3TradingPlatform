@@ -152,7 +152,7 @@ body {
   background: var(--panel-2); color: var(--text); border-radius: 999px;
   padding: 0 .5rem; font-size: .7rem;
 }
-.ticket     { grid-area: ticket; overflow-y: auto; }
+.ticket     { grid-area: ticket; overflow-y: auto; overflow-x: hidden; min-width: 0; }
 .blotter    { grid-area: blotter; min-height: 0; }
 .positions  { grid-area: positions; }
 .executions { grid-area: execs; min-height: 0; }
