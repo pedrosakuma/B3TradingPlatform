@@ -58,20 +58,30 @@ public class SelfTradePreventionCheckTests
         Assert.Contains("clOrdId=7", decision.Reason);
     }
 
+    // Presence-based STP (no price-cross filter): a non-crossing pair
+    // is also rejected, because Modify/partial-fill/market-move can
+    // turn it crossing later and we have no atomic check↔dispatch
+    // step to re-validate. Opt out via AllowSelfTrade=true.
     [Fact]
-    public void Buy_BelowOwnSellPrice_Approves()
+    public void Buy_BelowOwnSellPrice_Rejected_PresenceBased()
     {
         var (check, book) = Build();
         Assert.True(book.TryAdd(Make(1, OrderSide.Sell, 32.50m)));
-        Assert.True(check.Check(Ctx(OrderSide.Buy, 32.40m)).Approved);
+        var decision = check.Check(Ctx(OrderSide.Buy, 32.40m));
+        Assert.False(decision.Approved);
+        Assert.Contains("self_trade_prevention", decision.Reason);
+        Assert.Contains("clOrdId=1", decision.Reason);
     }
 
     [Fact]
-    public void Sell_AboveOwnBuyPrice_Approves()
+    public void Sell_AboveOwnBuyPrice_Rejected_PresenceBased()
     {
         var (check, book) = Build();
         Assert.True(book.TryAdd(Make(1, OrderSide.Buy, 32.40m)));
-        Assert.True(check.Check(Ctx(OrderSide.Sell, 32.50m)).Approved);
+        var decision = check.Check(Ctx(OrderSide.Sell, 32.50m));
+        Assert.False(decision.Approved);
+        Assert.Contains("self_trade_prevention", decision.Reason);
+        Assert.Contains("clOrdId=1", decision.Reason);
     }
 
     [Fact]
@@ -139,6 +149,22 @@ public class SelfTradePreventionCheckTests
         var (check, book) = Build(opts);
         Assert.True(book.TryAdd(Make(1, OrderSide.Sell, 32.40m)));
         Assert.True(check.Check(Ctx(OrderSide.Buy, 32.50m)).Approved);
+    }
+
+    // Opt-in covers BOTH crossing and non-crossing pairs.
+    [Fact]
+    public void AllowSelfTrade_OptIn_NonCrossing_Approves()
+    {
+        var opts = new RiskOptions
+        {
+            PerEndClient =
+            {
+                [Owner] = new RiskLimits { AllowSelfTrade = true },
+            },
+        };
+        var (check, book) = Build(opts);
+        Assert.True(book.TryAdd(Make(1, OrderSide.Sell, 32.50m)));
+        Assert.True(check.Check(Ctx(OrderSide.Buy, 32.40m)).Approved);
     }
 
     [Fact]

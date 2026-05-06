@@ -27,6 +27,12 @@ public class MarginCheckIntegrationTests
             // pre-empt margin evaluation on the Sell-with-zero-inventory
             // case in SellsAndUnknownOwnersBypassMargin.
             ["Trading:Risk:Default:AllowShortSell"] = "true",
+            // Same rationale for self-trade prevention: the
+            // presence-based STP would reject SellsAndUnknownOwnersBypassMargin's
+            // Buy because a Sell from the same owner is already
+            // resting (regardless of price). Opt out so the assertion
+            // exercises the margin path.
+            ["Trading:Risk:Default:AllowSelfTrade"] = "true",
         };
 
     [Fact]
@@ -64,9 +70,9 @@ public class MarginCheckIntegrationTests
         Assert.NotEqual("Rejected", sellBody!.Status);
 
         // Buy with 0 balance must be rejected with the margin reason.
-        // Use a price below the resting Sell so the self-trade-prevention
-        // check (which would also fire and reject first) is not triggered;
-        // this test specifically exercises the margin path.
+        // STP is opted out at the EnabledFor() level so this Buy is
+        // not pre-empted by the presence-based STP gate even though
+        // an opposite-side Sell from the same owner is resting.
         var buy = await PostOrder(http, token, qty: 1, price: 29m, side: "Buy");
         var buyBody = await buy.Content.ReadFromJsonAsync<OrderAck>();
         Assert.Equal("Rejected", buyBody!.Status);

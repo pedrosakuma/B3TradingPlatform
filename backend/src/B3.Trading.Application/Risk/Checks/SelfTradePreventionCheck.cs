@@ -18,16 +18,35 @@ namespace B3.Trading.Application.Risk.Checks;
 /// </para>
 ///
 /// <para>
-/// Policy: when an incoming order would cross any of the end-client's
-/// own opposite-side working orders for the same symbol, reject the
-/// incoming (newest-rejects). This is the most conservative STP mode
-/// and matches what most exchanges call "STP-N" / "Cancel newest".
-/// Toggleable per firm / per end-client via
-/// <see cref="RiskLimits.AllowSelfTrade"/> (default: blocked).
+/// <b>Policy (presence-based STP):</b> reject any incoming order if
+/// the end-client already has at least one opposite-side working
+/// order for the same symbol — <em>regardless of price</em>. This is
+/// stricter than the price-crossing check it replaces, and is the
+/// only correct policy given that the submit pipeline does not have
+/// strict execution guarantees: a non-crossing pair today (e.g. Buy
+/// 32.40 + Sell 32.50) can become crossing after a Modify, a partial
+/// fill, or a market move, with no atomic check↔dispatch step we
+/// could synchronise against. The price-crossing variant left the
+/// burden of "is this pair safe right now AND going forward?" on
+/// every state transition, which is impossible to guarantee from
+/// pre-trade. By collapsing the rule to "no opposite-side
+/// coexistence", we make the gate decidable from the snapshot the
+/// check sees and fail closed by construction. Mode is
+/// "newest-rejects" (a.k.a. STP-N / Cancel newest). Toggleable per
+/// firm / per end-client via
+/// <see cref="RiskLimits.AllowSelfTrade"/> (default: blocked) — set
+/// to <c>true</c> for accounts that legitimately need both sides
+/// resting (market makers, hedgers).
 /// </para>
 ///
 /// <para>
-/// Limitations (intentional, tracked in #103):
+/// Native server STP (the second viable layer, see #103) is
+/// stateful too and lives at the matching engine; #117 tracks
+/// surfacing its restatement reasons in the UI when active.
+/// </para>
+///
+/// <para>
+/// Limitations (intentional):
 /// <list type="bullet">
 ///   <item>TOCTOU: there is a small window between this check and
 ///   the gateway dispatch in which a contra order could be added by
@@ -76,13 +95,15 @@ public sealed class SelfTradePreventionCheck : IRiskCheck
             if (existing.Side != oppositeSide) continue;
             if (!string.Equals(existing.Symbol, ctx.Symbol, StringComparison.Ordinal)) continue;
             if (!IsStillRestable(existing)) continue;
-            if (!WouldCross(ctx, existing)) continue;
 
+            // Presence-based: do NOT consult prices. Any opposite-side
+            // working order in the same symbol is enough to reject.
             return RiskDecision.Reject(
-                $"self_trade_prevention: would cross own working " +
-                $"{existing.Side} {existing.LeavesQuantity}@" +
+                $"self_trade_prevention: own opposite-side {existing.Side} order " +
+                $"{existing.LeavesQuantity}@" +
                 $"{(existing.Price.HasValue ? existing.Price.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "MKT")} " +
-                $"(clOrdId={existing.ClOrdId}); set AllowSelfTrade=true to opt out");
+                $"is working on {ctx.Symbol} (clOrdId={existing.ClOrdId}); " +
+                $"set AllowSelfTrade=true to opt out");
         }
 
         return RiskDecision.Approve;
@@ -97,22 +118,4 @@ public sealed class SelfTradePreventionCheck : IRiskCheck
         && o.Status is not OrderStatus.Filled
                        and not OrderStatus.Cancelled
                        and not OrderStatus.Rejected;
-
-    // Crossing rules:
-    //   * If either side is Market, the new order will sweep — always cross.
-    //   * Buy@P crosses Sell@Q when P >= Q.
-    //   * Sell@P crosses Buy@Q when P <= Q.
-    private static bool WouldCross(RiskContext incoming, Order existing)
-    {
-        if (incoming.Type == OrderType.Market || existing.Type == OrderType.Market)
-            return true;
-
-        // Limit-vs-Limit requires both prices set; defensive nulls treat as no-cross.
-        if (!incoming.Price.HasValue || !existing.Price.HasValue)
-            return false;
-
-        return incoming.Side == OrderSide.Buy
-            ? incoming.Price.Value >= existing.Price.Value
-            : incoming.Price.Value <= existing.Price.Value;
-    }
 }
