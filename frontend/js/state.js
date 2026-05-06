@@ -70,6 +70,11 @@ const state = {
   // server ack yet). Used to disable the row's Cancel button so the
   // trader gets immediate visual feedback and can't fire repeat DELETEs.
   inflightCancels: new Set(),
+  // Slice 5 of #122. Per-ClOrdID set of modifies currently in flight
+  // (PUT /orders issued, no server ack yet). Drives the "Modifying…"
+  // state on the row's Modify button so a slow server can't yield two
+  // PUTs racing the venue.
+  inflightModifies: new Set(),
   // Wall-clock when the active selectedSymbol was set. The DOB renderer
   // uses this to decide when to upgrade the "awaiting book snapshot…"
   // placeholder to a louder "no book — check MD settings ⚙" warning
@@ -156,6 +161,7 @@ export function clearAll() {
   state.selectedClOrdId = null;
   state.pendingFatFinger = null;
   state.inflightCancels.clear();
+  state.inflightModifies.clear();
   notify("all");
 }
 
@@ -596,5 +602,16 @@ export function markCancelInflight(clOrdId, inflight) {
   const before = state.inflightCancels.has(clOrdId);
   if (inflight) state.inflightCancels.add(clOrdId);
   else state.inflightCancels.delete(clOrdId);
+  if (before !== inflight) notify("orders");
+}
+
+// Slice 5 of #122. Modify counterpart of markCancelInflight — flips
+// the per-ClOrdID flag the renderer reads to decide whether the row's
+// Modify button shows "Modifying…" + disabled.
+export function markModifyInflight(clOrdId, inflight) {
+  if (!clOrdId) return;
+  const before = state.inflightModifies.has(clOrdId);
+  if (inflight) state.inflightModifies.add(clOrdId);
+  else state.inflightModifies.delete(clOrdId);
   if (before !== inflight) notify("orders");
 }

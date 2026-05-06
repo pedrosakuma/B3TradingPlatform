@@ -103,3 +103,6 @@ jobs:
 
       - name: Run mdProtocol decoder tests (no deps, node:test)
         run: node --test frontend/test/decoder.test.mjs
+
+      - name: Run state reducer tests (no deps, node:test)
+        run: node --test frontend/test/state-modify.test.mjs
