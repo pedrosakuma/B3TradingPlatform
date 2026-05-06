@@ -151,16 +151,26 @@ builder.Services.AddSingleton<EventDispatcher>();
 builder.Services.AddSingleton<KillSwitchService>();
 builder.Services.AddSingleton<SymbolHaltService>();
 builder.Services.AddTradingMarketData(builder.Configuration);
+builder.Services.AddSingleton<ReserveOnSubmitMarginProvider>(sp =>
+    new ReserveOnSubmitMarginProvider(
+        sp.GetRequiredService<IOptionsMonitor<RiskOptions>>(),
+        sp.GetRequiredService<ILogger<ReserveOnSubmitMarginProvider>>(),
+        sp.GetRequiredService<CashLedger>()));
 builder.Services.AddSingleton<IMarginProvider>(sp =>
 {
     var opts = sp.GetRequiredService<IOptionsMonitor<RiskOptions>>().CurrentValue;
     return opts.Margin.Enabled
-        ? new ReserveOnSubmitMarginProvider(
-            sp.GetRequiredService<IOptionsMonitor<RiskOptions>>(),
-            sp.GetRequiredService<ILogger<ReserveOnSubmitMarginProvider>>(),
-            sp.GetRequiredService<CashLedger>())
+        ? sp.GetRequiredService<ReserveOnSubmitMarginProvider>()
         : new NoOpMarginProvider();
 });
+// Slice 2 of #122: the replace coordinator shares the reservation
+// ledger with IMarginProvider, so it always points at the concrete
+// ReserveOnSubmitMarginProvider singleton — even when margin is
+// disabled the coordinator's Commit/Abort are harmless no-ops on an
+// empty ledger.
+builder.Services.AddSingleton<PendingReplacementRegistry>();
+builder.Services.AddSingleton<IReplaceMarginCoordinator>(sp =>
+    sp.GetRequiredService<ReserveOnSubmitMarginProvider>());
 builder.Services.AddSingleton<IRiskCheck, KillSwitchCheck>();
 builder.Services.AddSingleton<IRiskCheck, SymbolHaltedCheck>();
 builder.Services.AddSingleton<IRiskCheck, MinTickSizeCheck>();
