@@ -54,9 +54,11 @@ public static class AuthEndpoints
             SignupRequest req,
             IUserStore users,
             IOptions<AuthOptions> opts,
+            IOptions<CashSeedOptions> cashOpts,
             JwtIssuer issuer,
             EndClientRegistry registry,
             PositionKeeper positions,
+            CashLedger cash,
             IReferencePrice refPrice,
             ILoggerFactory loggerFactory) =>
         {
@@ -100,10 +102,27 @@ public static class AuthEndpoints
                 positions.SeedIfAbsent(endClientId, symbol, qty, avgPx);
             }
 
+            // Slice 3 of #107: pre-fund the new account from the
+            // configured opening cash. We seed only when a positive
+            // balance is configured; a zero seed would be skipped by
+            // CashLedger.Snapshot (zero rows are pruned), which would
+            // cause the margin provider to fall back to the legacy
+            // RiskOptions.Margin.Initial after the next snapshot —
+            // surprising and unsafe. Operators wanting a true-zero
+            // signup balance can wait for slice 4 (deprecation of
+            // Margin.Initial), at which point a missing ledger entry
+            // unambiguously means zero.
+            var initialCash = cashOpts.Value.SignupInitialBalance;
+            var cashSeeded = false;
+            if (initialCash > 0m)
+            {
+                cashSeeded = cash.SeedIfAbsent(endClientId, initialCash);
+            }
+
             var log = loggerFactory.CreateLogger("AuthEndpoints");
             log.LogInformation(
-                "Self-service signup: user={Username} firm={Firm} role={Role} (positions seeded).",
-                newUser.Username, newUser.Firm, newUser.Role);
+                "Self-service signup: user={Username} firm={Firm} role={Role} positionsSeeded=true cashSeeded={CashSeeded} initialCash={InitialCash}.",
+                newUser.Username, newUser.Firm, newUser.Role, cashSeeded, cashSeeded ? initialCash : 0m);
 
             var (token, expires) = issuer.Issue(newUser.Username, newUser.Role, newUser.Firm);
             return Results.Created($"/auth/users/{newUser.Username}", new LoginResponse(token, expires));
