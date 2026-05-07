@@ -256,6 +256,12 @@ td { padding: .35rem .5rem; border-bottom: 1px solid #20283a; }
 }
 .cancel-btn:disabled { opacity: .35; cursor: not-allowed; }
 .cancel-btn.cancelling { opacity: .55; cursor: progress; }
+.modify-btn {
+  background: transparent; border: 1px solid var(--accent); color: var(--accent);
+  padding: .15rem .5rem; border-radius: 3px; cursor: pointer; font: inherit; font-size: .75rem;
+}
+.modify-btn:disabled { opacity: .35; cursor: not-allowed; }
+.modify-btn.modifying { opacity: .55; cursor: progress; }
 .md-cell-stale { color: var(--warn); }
 .status-cell-Working   { color: var(--green); }
 .status-cell-PendingNew { color: var(--warn); }

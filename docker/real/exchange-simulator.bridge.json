@@ -68,6 +68,19 @@
         "group": "marketdata",
         "port": 31084,
         "cadenceMs": 5000
+      },
+      // Persistence (upstream PRs #261/#269/#262/#274 etc, closes part of
+      // pedrosakuma/B3MatchingPlatform#260). dataDir is mounted from the
+      // named volume `b3-matching-data` in docker-compose.real.yml so
+      // restarts preserve order book + FIXP session counters / SessionVerId.
+      // WAL closes the RPO gap between snapshots; fsyncPerWrite trades
+      // throughput for at-most-one-cmd loss on unclean shutdown.
+      "persistence": {
+        "dataDir": "/var/lib/b3matching",
+        "wal": {
+          "enabled": true,
+          "fsyncPerWrite": true
+        }
       }
     }
   ]
