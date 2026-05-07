@@ -43,6 +43,20 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     private ulong _lastInboundSeqNum;
     private volatile bool _disposed;
 
+    // Slice 2 of #132. Captured by the SDK's InboundGapAtReconnect handler
+    // (fires synchronously inside ReconnectAsync, just before the call returns)
+    // and consumed once on the very next post-reconnect call to the reactor.
+    // Single-writer (SDK inbound thread inside ReconnectAsync) / single-reader
+    // (reconnect loop, immediately after ReconnectAsync returns), separated by
+    // the await — no lock needed for the bool/struct fields, but we Volatile.Read
+    // / Write to defend against compiler reordering across the await barrier.
+    private int _lastReconnectHadGap;
+    private ulong _lastGapFromSeq;
+    private uint _lastGapCount;
+    private ulong _lastGapPriorSessionVerId;
+    private string? _lastTerminationCode;
+    private readonly IVenueDisconnectReactor? _reactor;
+
     public B3EntryPointClientGateway(
         Up.EntryPointClient client,
         string firmId,
@@ -51,7 +65,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         TimeSpan? initialReconnectDelay = null,
         TimeSpan? maxReconnectDelay = null,
         TimeProvider? clock = null,
-        OrderEntryLatencyProbe? latencyProbe = null)
+        OrderEntryLatencyProbe? latencyProbe = null,
+        IVenueDisconnectReactor? venueDisconnectReactor = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _firmId = firmId ?? throw new ArgumentNullException(nameof(firmId));
@@ -61,7 +76,9 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         _maxReconnectDelay = maxReconnectDelay ?? TimeSpan.FromSeconds(30);
         _clock = clock ?? TimeProvider.System;
         _latencyProbe = latencyProbe ?? new OrderEntryLatencyProbe(_clock);
+        _reactor = venueDisconnectReactor;
         _client.Terminated += OnTerminated;
+        _client.InboundGapAtReconnect += OnInboundGapAtReconnect;
         MetricsRegistry.RecordSessionVerId(_firmId, _currentSessionVerId);
         // Pull-based observable gauges: read SDK state + our reconnect flag on
         // every scrape rather than pushing on every transition. Avoids both
@@ -71,6 +88,21 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             () => FixpStateGaugeProjector.Project(_client.State));
         MetricsRegistry.RegisterReconnectingSource(_firmId,
             () => Volatile.Read(ref _reconnectingState));
+    }
+
+    private void OnInboundGapAtReconnect(object? sender, Up.InboundGapAtReconnectEventArgs e)
+    {
+        // Capture for the post-reconnect reactor invocation; the SDK fires
+        // this exactly once per ReconnectAsync, synchronously inside that call,
+        // BEFORE it returns to ReconnectLoopAsync. No lock needed — see field
+        // declarations.
+        _lastGapFromSeq = e.FromSeqNo;
+        _lastGapCount = e.Count;
+        _lastGapPriorSessionVerId = e.PriorSessionVerId;
+        Volatile.Write(ref _lastReconnectHadGap, 1);
+        _logger.LogWarning(
+            "EntryPoint inbound gap at reconnect for firm {Firm}: priorVer={PriorVer} from={From} count={Count}",
+            _firmId, e.PriorSessionVerId, e.FromSeqNo, e.Count);
     }
 
     public string FirmId => _firmId;
@@ -380,6 +412,11 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         // terminations are the only ones that warrant a reconnect attempt.
         if (e.InitiatedByClient || _disposed || _shutdownCts.IsCancellationRequested) return;
 
+        // Capture the peer terminate code for the post-reconnect reactor
+        // (slice 2 of #132). Stored before kicking the reconnect loop so
+        // the loop sees the latest value when it consults it on success.
+        Volatile.Write(ref _lastTerminationCode, e.Code.ToString());
+
         // Detach from the inbound thread so the event-loop can drain
         // cleanly; the reconnect loop owns its own lifecycle.
         _ = Task.Run(() => ReconnectLoopAsync(_shutdownCts.Token));
@@ -422,6 +459,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                     _logger.LogInformation("EntryPoint reconnect ok for firm {Firm} on attempt {N} (sessionVerId={Ver}).",
                         _firmId, attempt, nextVerId);
                     OnConnected();
+                    NotifyVenueDisconnectReactor();
                     return;
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -452,6 +490,37 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         }
     }
 
+    /// <summary>
+    /// Slice 2 of #132. After a successful reconnect, drains the
+    /// captured gap / termination signals into a single
+    /// <see cref="ReconnectOutcome"/> and hands it to the configured
+    /// <see cref="IVenueDisconnectReactor"/>. Reactor errors are
+    /// swallowed and logged: a reactor crash MUST NOT bring down the
+    /// gateway. Resets the captured state regardless of reactor
+    /// presence so a subsequent reconnect cycle starts clean.
+    /// </summary>
+    private void NotifyVenueDisconnectReactor()
+    {
+        var hadGap = Interlocked.Exchange(ref _lastReconnectHadGap, 0) == 1;
+        var fromSeq = hadGap ? (ulong?)_lastGapFromSeq : null;
+        var count = hadGap ? (uint?)_lastGapCount : null;
+        var priorVer = hadGap ? (ulong?)_lastGapPriorSessionVerId : null;
+        var priorCode = Interlocked.Exchange(ref _lastTerminationCode, null);
+
+        if (_reactor is null) return;
+
+        try
+        {
+            _reactor.OnPeerReconnected(_firmId,
+                new ReconnectOutcome(hadGap, fromSeq, count, priorVer, priorCode));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "VenueDisconnectReactor threw for firm {Firm}; suppressed to keep gateway alive.", _firmId);
+        }
+    }
+
     private TimeSpan ComputeBackoff(int attempt)
     {
         var basisMs = Math.Min(_maxReconnectDelay.TotalMilliseconds,
@@ -475,6 +544,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             try { await _eventLoop.ConfigureAwait(false); } catch { /* event loop swallows, but be defensive */ }
         }
         _client.Terminated -= OnTerminated;
+        _client.InboundGapAtReconnect -= OnInboundGapAtReconnect;
         await _client.DisposeAsync().ConfigureAwait(false);
         _shutdownCts.Dispose();
         _reconnectLock.Dispose();
