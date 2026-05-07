@@ -302,11 +302,20 @@ public class NoNakedShortCheckTests
     }
 
     [Fact]
-    public void Replace_doesNotSubtract_whenOriginalAlreadyTerminal()
+    public void Replace_doesNotSubtract_whenOriginalAlreadyTerminal_butStillProjectsReplacement()
     {
         // Original was just cancelled (status terminal) but caller
-        // still set ReplaceOriginalClOrdId — adjustment must be a
-        // no-op so the check doesn't double-credit inventory.
+        // still set ReplaceOriginalClOrdId. Slice 4 of #132 split the
+        // projection: when the original would not have been counted
+        // by SumOpenSellLeavesForSymbol (terminal or stale), we no
+        // longer subtract it — but the replacement leg is still
+        // projected because the new ClOrdID is not yet in the book
+        // (OrderModifyService calls risk before TryAdd). So the
+        // arithmetic now correctly treats this race as "incoming new
+        // Sell of 100" against current_long=50 → naked short of 50.
+        // OrderModifyService 404s terminal originals before risk in
+        // the happy path; this defends the deeper invariant in case
+        // that gate ever drifts.
         var (check, positions, orders) = Build();
         positions.GetOrCreate(new EndClientId(DefaultOwner), DefaultSymbol).ApplyFill(OrderSide.Buy, 50, 30m);
         var orig = MakeSell(1UL, 100);
@@ -315,10 +324,62 @@ public class NoNakedShortCheckTests
 
         var ctx = SellReplaceCtx(newQty: 100, origClOrdId: 1UL, effectiveLeaves: 100);
 
-        // currentLong=50, openSellLeaves=0 (orig terminal), no
-        // adjustment → projected sell leaves = 0; sellable = 50.
-        // The new 100 isn't in the book → projection logic doesn't
-        // add it back here either (no-op when terminal). Approved.
+        // currentLong=50, openSellLeaves=0 (orig terminal, skipped),
+        // adjustment = 0 (no subtract) + 100 (replacement projected)
+        // = 100 → sellable = 50 - 100 = -50 → reject.
+        Assert.False(check.Check(ctx).Approved);
+    }
+
+    [Fact]
+    public void Replace_doesNotSubtract_whenOriginalIsStale_butStillProjectsReplacement()
+    {
+        // Slice 4 of #132. The auto-detect bulk-marks every working
+        // order stale on FIXP venue desync; if a trader then submits
+        // a Replace for one of those originals, the original's leaves
+        // must NOT be credited back (they were already excluded from
+        // the openSellLeaves sum). The replacement must still be
+        // projected because it would be a fresh order at the venue.
+        var (check, positions, orders) = Build();
+        positions.GetOrCreate(new EndClientId(DefaultOwner), DefaultSymbol).ApplyFill(OrderSide.Buy, 100, 30m);
+        var orig = MakeSell(1UL, 100);
+        orig.MarkWorking();
+        SubmitInto(orders, orig);
+        Assert.True(orig.MarkStale("inbound_gap:50-52", DateTimeOffset.UtcNow));
+
+        // Trader replaces with newQty=200 against current_long=100.
+        // openSellLeaves=0 (stale, skipped), adjustment=0+200=200,
+        // sellable=100-200=-100 → reject.
+        var rejectCtx = SellReplaceCtx(newQty: 200, origClOrdId: 1UL, effectiveLeaves: 200);
+        Assert.False(check.Check(rejectCtx).Approved);
+
+        // Replace with newQty=60 against current_long=100 → adjustment
+        // = 0 + 60 = 60, sellable = 100 - 60 = 40 → approve. Confirms
+        // the stale original is not double-credited (i.e. we are not
+        // erroneously subtracting its 100 leaves to get sellable=140).
+        var approveCtx = SellReplaceCtx(newQty: 60, origClOrdId: 1UL, effectiveLeaves: 60);
+        Assert.True(check.Check(approveCtx).Approved);
+    }
+
+    [Fact]
+    public void Sell_StaleOpenSells_NotCountedAgainstInventory()
+    {
+        // Slice 4 of #132. A ghost stale Sell must not block a new,
+        // legitimate Sell against held inventory.
+        var (check, positions, orders) = Build();
+        positions.GetOrCreate(new EndClientId(DefaultOwner), DefaultSymbol).ApplyFill(OrderSide.Buy, 100, 30m);
+        var ghost = MakeSell(1UL, 100);
+        ghost.MarkWorking();
+        SubmitInto(orders, ghost);
+        Assert.True(ghost.MarkStale("inbound_gap:50-52", DateTimeOffset.UtcNow));
+
+        // Incoming Sell of 80 is already in the book (mirrors
+        // OrderSubmissionService.TryAdd ordering).
+        var incoming = MakeSell(2UL, 80);
+        SubmitInto(orders, incoming);
+
+        // openSellLeaves should reflect only the incoming 80 because
+        // the ghost is excluded. sellable = 100 - 80 = 20 ≥ 0 → approve.
+        var ctx = SellCtx(80);
         Assert.True(check.Check(ctx).Approved);
     }
 }
