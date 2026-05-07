@@ -139,7 +139,13 @@
 
       <!-- BLOTTER ---------------------------------------------------- -->
       <section class="panel blotter">
-        <h2>Working orders <span id="blotter-count" class="count">0</span></h2>
+        <h2>
+          <span class="blotter-title">
+            Working orders <span id="blotter-count" class="count">0</span>
+          </span>
+          <button type="button" id="cancel-all-btn" class="cancel-all-btn" hidden
+                  aria-label="Cancel all working orders">Cancel all</button>
+        </h2>
         <div class="blotter-filter">
           <input id="blotter-filter-text" type="search" placeholder="filter by symbol or ClOrdID" maxlength="32" />
           <select id="blotter-filter-status">
@@ -397,6 +403,27 @@
       <div class="modal-actions">
         <button type="button" id="modify-modal-cancel" class="link-button">Cancel</button>
         <button type="submit" id="modify-modal-submit">Send modify</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Cancel-all modal (T3). Two-stage: trader must type CANCEL to
+       arm submit, then the burst kicks off with progress. Only the
+       Close button is enabled once the burst is running. -->
+  <div id="cancel-all-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="cancel-all-title">
+    <form id="cancel-all-form" class="modal-card">
+      <h2 id="cancel-all-title">Cancel all working orders</h2>
+      <p id="cancel-all-summary" class="muted-line"></p>
+      <label>
+        <span>Type <strong>CANCEL</strong> to confirm</span>
+        <input id="cancel-all-confirm" type="text" autocomplete="off" autocapitalize="characters"
+               spellcheck="false" maxlength="16" required />
+      </label>
+      <p id="cancel-all-progress" class="muted-line" hidden></p>
+      <p id="cancel-all-error" class="error" hidden></p>
+      <div class="modal-actions">
+        <button type="button" id="cancel-all-close" class="link-button">Close</button>
+        <button type="submit" id="cancel-all-submit" disabled>Cancel orders</button>
       </div>
     </form>
   </div>

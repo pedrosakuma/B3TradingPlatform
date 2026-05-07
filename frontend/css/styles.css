@@ -159,6 +159,20 @@ body {
   background: var(--panel-2); color: var(--text); border-radius: 999px;
   padding: 0 .5rem; font-size: .7rem;
 }
+/* Cancel-all panic button (T3). Lives in the blotter h2. Subdued
+   until clicked — bright enough to find quickly under stress, not so
+   bright the trader hits it by accident. Hidden via [hidden] when
+   there's nothing to cancel. */
+.cancel-all-btn {
+  background: transparent; color: #ff6a6a;
+  border: 1px solid #c53030; border-radius: 4px;
+  padding: .15rem .55rem; font-size: .7rem; font-weight: 600;
+  letter-spacing: .04em; text-transform: uppercase; cursor: pointer;
+  line-height: 1.4;
+}
+.cancel-all-btn:hover { background: rgba(197, 48, 48, .15); }
+.cancel-all-btn:disabled { opacity: .5; cursor: not-allowed; }
+.blotter h2 .blotter-title { display: inline-flex; align-items: center; gap: .5rem; }
 /* Stale-data overlay (T2). Dim the data area but keep the header
    readable so the trader can still see the panel title + the bright
    "stale" tag explaining why interaction is risky. The data zone is

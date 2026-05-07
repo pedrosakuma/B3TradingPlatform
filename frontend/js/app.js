@@ -63,6 +63,7 @@ function init() {
   ui.setHandlers({
     onSubmitOrder: handleSubmitOrder,
     onCancelOrder: handleCancelOrder,
+    onCancelAll: handleCancelAll,
     onModifyOrder: handleModifyOrder,
     onLogout: logout,
     onApplyMd: handleApplyMd,
@@ -562,6 +563,70 @@ async function handleCancelOrder(clOrdId) {
   } finally {
     state.markCancelInflight(clOrdId, false);
   }
+}
+
+// T3 — bulk cancel-all panic action. Bursts cancellations with a
+// concurrency cap so we don't flood the host with N parallel HTTP
+// calls (a fat-finger may have left dozens of working orders). The
+// modal already gated on the trader typing CANCEL, so this routine
+// trusts the caller and just executes. Each per-order cancel still
+// flips inflightCancels so the blotter rows visibly transition;
+// terminal/PendingCancel orders that slipped into the snapshot are
+// silently filtered out. 401 logs out (same surface as single
+// cancel). Other failures are counted and reported in the modal.
+const CANCEL_ALL_CONCURRENCY = 8;
+
+async function handleCancelAll(clOrdIds) {
+  if (!session || !Array.isArray(clOrdIds) || clOrdIds.length === 0) return;
+  // Re-validate against current state — the snapshot was taken when
+  // the modal opened; an order may have filled since.
+  const st = state.getState();
+  const queue = clOrdIds.filter(id => {
+    if (st.inflightCancels && st.inflightCancels.has(id)) return false;
+    const o = st.orders.get(id);
+    if (!o) return false;
+    return !["Filled", "Cancelled", "Rejected", "PendingCancel"].includes(o.status);
+  });
+  const total = queue.length;
+  if (total === 0) {
+    ui.setCancelAllProgress({ done: 0, failed: 0, total: 0, finished: true });
+    return;
+  }
+  let done = 0;
+  let failed = 0;
+  let unauthorized = false;
+  let cursor = 0;
+
+  ui.setCancelAllProgress({ done, failed, total, finished: false });
+
+  async function worker() {
+    while (true) {
+      if (unauthorized) return;
+      const idx = cursor++;
+      if (idx >= queue.length) return;
+      const clOrdId = queue[idx];
+      state.markCancelInflight(clOrdId, true);
+      try {
+        await cancelOrder(session.backend, session.token, clOrdId);
+        done += 1;
+      } catch (err) {
+        if (err.status === 401) { unauthorized = true; return; }
+        failed += 1;
+      } finally {
+        state.markCancelInflight(clOrdId, false);
+        ui.setCancelAllProgress({ done, failed, total, finished: false });
+      }
+    }
+  }
+
+  const pool = Array.from(
+    { length: Math.min(CANCEL_ALL_CONCURRENCY, queue.length) },
+    () => worker(),
+  );
+  await Promise.all(pool);
+
+  if (unauthorized) { logout(); return; }
+  ui.setCancelAllProgress({ done, failed, total, finished: true });
 }
 
 // Slice 5 of #122. Routes the blotter "Modify" intent through
