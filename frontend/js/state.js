@@ -13,6 +13,13 @@ const state = {
   user: null,              // { username, expiresAt, token, backend, firm, role }
   marketData: new Map(),   // Symbol -> { lastPrice, lastQty, lastTradeId, updatedAt, info }
   marketDataStatus: "disconnected", // disconnected | connecting | connected | not_ready
+  // Stale-data tracking (T2 of the trader-ui ergonomics review). Stamps
+  // the last time we received any data over the trader WS / MD WS.
+  // Drives the "stale" overlay that flips on whenever the corresponding
+  // WS isn't `connected`, so a trader can't act on rows that look
+  // authoritative but are actually frozen during a flap.
+  lastWsActivity: null,    // ms epoch | null
+  lastMdActivity: null,    // ms epoch | null
   watchlist: [],           // [string] symbols (UPPERCASE)
   // Depth-of-Book slice (T2). One book entry per symbol; sides are
   // Map<priceKey, { qty, count }>. `ready` flips false on book.snapshot
@@ -96,7 +103,17 @@ export function subscribe(fn) {
   return () => listeners.delete(fn);
 }
 
+// Stale-data tracking (T2). Tapped into notify() so any slice update
+// covered by WS_NOTIFY_SLICES / MD_NOTIFY_SLICES implicitly stamps
+// the last-activity timestamp — keeps the freshness signal tightly
+// coupled to the actual data flow without a separate instrumentation
+// surface every applyX has to remember to call.
+const WS_NOTIFY_SLICES = new Set(["orders", "positions", "executions"]);
+const MD_NOTIFY_SLICES = new Set(["marketData", "book", "candles", "tape"]);
+
 function notify(slice) {
+  if (WS_NOTIFY_SLICES.has(slice)) state.lastWsActivity = Date.now();
+  if (MD_NOTIFY_SLICES.has(slice)) state.lastMdActivity = Date.now();
   for (const fn of listeners) fn(slice);
 }
 
@@ -147,6 +164,10 @@ export function applyExecutionsSnapshot(rows) {
   if (Array.isArray(rows) && rows.length > 0) {
     state.executions = rows.slice(-EXECUTIONS_CAPACITY);
     notify("executions");
+  } else {
+    // Even an empty snapshot proves the WS is alive — stamp activity
+    // explicitly so the staleness overlay clears on subscribe.
+    state.lastWsActivity = Date.now();
   }
 }
 export function applyExecutionsDelta(row) {
@@ -169,6 +190,8 @@ export function clearAll() {
   state.pendingFatFinger = null;
   state.inflightCancels.clear();
   state.inflightModifies.clear();
+  state.lastWsActivity = null;
+  state.lastMdActivity = null;
   notify("all");
 }
 
