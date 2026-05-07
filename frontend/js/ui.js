@@ -4,6 +4,7 @@
 import {
   getState, subscribe, isTerminalOrderStatus,
 } from "./state.js";
+import { rulesFor } from "./validation.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -436,11 +437,16 @@ export function bindUi() {
         e.target.value = upper;
         try { e.target.setSelectionRange(pos, pos); } catch {}
       }
+      syncTicketRules();
     });
     symEl.addEventListener("compositionend", (e) => {
       const upper = e.target.value.toUpperCase();
       if (e.target.value !== upper) e.target.value = upper;
+      syncTicketRules();
     });
+    symEl.addEventListener("change", syncTicketRules);
+    // Initial paint so the hint reflects defaults before any input.
+    syncTicketRules();
   }
 
   $("logout").addEventListener("click", () => onLogout());
@@ -711,6 +717,32 @@ export function clearTicket() {
   $("ticket-symbol").value = "";
   $("ticket-qty").value = "";
   $("ticket-price").value = "";
+  syncTicketRules();
+}
+
+// T4 — reflect the per-symbol lot/tick on the qty/price inputs and
+// in the hint line. The qty input's step+min match the lot size so
+// browser arrow-up/down increments by the right amount and the
+// HTML5 validation message matches what validateOrder() will say
+// at submit-time. Hint format is intentionally short ("lot 100 ·
+// tick 0.01") so it doesn't crowd the small ticket panel.
+function syncTicketRules() {
+  const symEl = $("ticket-symbol");
+  const qtyEl = $("ticket-qty");
+  const pxEl  = $("ticket-price");
+  const hint  = $("ticket-rules-hint");
+  const sym = (symEl?.value ?? "").trim().toUpperCase();
+  const r = rulesFor(sym);
+  if (qtyEl) {
+    qtyEl.step = String(r.lotSize);
+    qtyEl.min  = String(r.lotSize);
+  }
+  if (pxEl) {
+    pxEl.step = String(r.tickSize);
+  }
+  if (hint) {
+    hint.textContent = `lot ${r.lotSize} · tick ${r.tickSize}`;
+  }
 }
 
 export function setStatusPill(status) {
