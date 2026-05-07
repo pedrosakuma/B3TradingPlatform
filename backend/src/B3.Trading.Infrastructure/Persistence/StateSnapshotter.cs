@@ -196,6 +196,14 @@ public sealed class EventReplayer
                     algo.RecordTerminal(status, reason, at.AtUtc);
                 }
                 break;
+            case OrderStaledEvent os:
+                if (_orders.TryGet(os.ClOrdId, out var staleOrd) && staleOrd is not null)
+                    staleOrd.MarkStale(os.Reason, os.StaledAtUtc);
+                break;
+            case OrderStaleClearedEvent osc:
+                if (_orders.TryGet(osc.ClOrdId, out var clearOrd) && clearOrd is not null)
+                    clearOrd.ClearStale();
+                break;
         }
     }
 

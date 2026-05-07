@@ -142,6 +142,16 @@ public static class OrdersEndpoints
             if (order.Owner != owner)
                 return Results.NotFound();
 
+            // Slice 1 of #132. Reject Cancel against an order the operator
+            // has flagged as suspected-stale-by-venue: the venue most
+            // likely doesn't know the original ClOrdID either, and we'd
+            // burn a fresh ClOrdID for nothing. Operator must explicitly
+            // clear the stale overlay first (admin endpoint) when the
+            // venue catches up, or rely on the eventual real terminal ER
+            // to auto-clear.
+            if (order.IsStale)
+                return Results.Conflict(new { error = "order is marked stale", reason = order.StaleReason });
+
             var cancelClOrdId = clOrdIds.Generate(owner);
             // Record the cancel-side → original mapping BEFORE sending so
             // the cancel-ack ER can resolve back to the right order even

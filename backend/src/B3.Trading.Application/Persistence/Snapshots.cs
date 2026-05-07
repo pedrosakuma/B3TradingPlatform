@@ -50,7 +50,19 @@ public sealed record OrderSnapshot(
     string Status,
     string FirmId = "DEFAULT",
     ulong? ParentAlgoId = null,
-    int? AlgoSliceSeq = null);
+    int? AlgoSliceSeq = null)
+{
+    /// <summary>
+    /// Slice 1 of #132. Advisory venue-staleness overlay. Older snapshots
+    /// pre-date the field; default of <c>false</c> is correct on restore
+    /// (no stale marks before this slice existed).
+    /// </summary>
+    public bool IsStale { get; init; }
+
+    public string? StaleReason { get; init; }
+
+    public DateTimeOffset? StaledAtUtc { get; init; }
+}
 
 /// <summary>
 /// Captures an <see cref="B3.Trading.Domain.Algo"/> aggregate. Discriminated

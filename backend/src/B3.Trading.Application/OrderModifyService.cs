@@ -116,6 +116,14 @@ public sealed class OrderModifyService
             return OrderModifyResult.Conflict("order is terminal");
         }
 
+        // Slice 1 of #132: refuse Modify against a stale-flagged order.
+        // Same rationale as the cancel gate: the venue most likely
+        // doesn't know the original ClOrdID, so a CancelReplace would
+        // just burn a new ID. Operator clears stale (admin endpoint or
+        // real terminal ER auto-clear) before reissuing.
+        if (orig.IsStale)
+            return OrderModifyResult.Conflict("order is marked stale");
+
         if (req.NewQuantity <= orig.CumulativeQuantity)
         {
             // Modifying the total qty to or below already-filled cum

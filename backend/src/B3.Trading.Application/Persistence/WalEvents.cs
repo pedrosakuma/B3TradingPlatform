@@ -24,6 +24,8 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(AlgoCreatedEvent), "algo.created")]
 [JsonDerivedType(typeof(AlgoCancelRequestedEvent), "algo.cancel-requested")]
 [JsonDerivedType(typeof(AlgoTerminalStateRecordedEvent), "algo.terminal")]
+[JsonDerivedType(typeof(OrderStaledEvent), "order.staled")]
+[JsonDerivedType(typeof(OrderStaleClearedEvent), "order.stale-cleared")]
 public abstract record WalEvent
 {
     public DateTimeOffset TimestampUtc { get; init; } = DateTimeOffset.UtcNow;
@@ -201,4 +203,35 @@ public sealed record AlgoTerminalStateRecordedEvent : WalEvent
     public required string Status { get; init; }    // AlgoStatus enum name
     public required string Reason { get; init; }    // AlgoTerminalReason enum name
     public required DateTimeOffset AtUtc { get; init; }
+}
+
+/// <summary>
+/// Slice 1 of #132. Persists an admin / operator decision to flag a
+/// working order as suspected-stale-by-venue (typically after a venue
+/// restart that reset its book without our trading-host noticing). The
+/// underlying business state is unchanged — replay re-applies the
+/// advisory overlay so post-recovery state matches what the operator
+/// saw before the restart.
+/// </summary>
+public sealed record OrderStaledEvent : WalEvent
+{
+    public required ulong ClOrdId { get; init; }
+    public required string FirmId { get; init; }
+    public required string Reason { get; init; }
+    public required DateTimeOffset StaledAtUtc { get; init; }
+    public string? ActorUserId { get; init; }
+}
+
+/// <summary>
+/// Slice 1 of #132. Records that the staleness overlay was lifted —
+/// either because an admin explicitly cleared it or because a real
+/// terminal ER arrived (the venue actually still knew the order, so the
+/// stale mark was a false positive). Idempotent on replay.
+/// </summary>
+public sealed record OrderStaleClearedEvent : WalEvent
+{
+    public required ulong ClOrdId { get; init; }
+    public required string FirmId { get; init; }
+    public required string ResolvedBy { get; init; }    // "admin" or "er-terminal"
+    public string? ActorUserId { get; init; }
 }

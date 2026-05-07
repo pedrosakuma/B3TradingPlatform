@@ -108,6 +108,72 @@ public sealed class Order
     public long CumulativeQuantity { get; private set; }
     public OrderStatus Status { get; private set; }
 
+    /// <summary>
+    /// Slice 1 of #132. Advisory flag set when the platform suspects the
+    /// venue no longer knows about this order — typically because the
+    /// matching engine restarted with a fresh book while trading-host
+    /// retained its WAL/snapshot state. Stale orders remain in their
+    /// previous status (Working/PartiallyFilled) so positions/cash/risk
+    /// accounting is unchanged, but Cancel/Modify is blocked at the API
+    /// (409) since sending those against a phantom is wasted bandwidth
+    /// and creates extra ClOrdIDs that the venue will reject. Cleared
+    /// automatically when a real terminal ER arrives (the venue actually
+    /// knew the order — false positive). NOT a status because the
+    /// underlying business state hasn't changed; it's an overlay.
+    /// </summary>
+    public bool IsStale { get; private set; }
+
+    /// <summary>Free-text reason recorded when staleness was set.</summary>
+    public string? StaleReason { get; private set; }
+
+    /// <summary>Wall-clock timestamp of the first stale mark (preserved on idempotent re-marks).</summary>
+    public DateTimeOffset? StaledAtUtc { get; private set; }
+
+    /// <summary>
+    /// Slice 1 of #132. Mark this order as suspected-stale-by-venue.
+    /// Returns <c>true</c> when the call mutated state (i.e. the order
+    /// was restable and not already stale), <c>false</c> otherwise.
+    ///
+    /// <para>
+    /// Only Working / PartiallyFilled orders may be marked stale. We
+    /// deliberately exclude PendingNew (the venue may simply not have
+    /// acked yet — that's a different bug class) and every terminal
+    /// status (Filled/Cancelled/Rejected/Replaced — nothing left to
+    /// be ghosted). Idempotent: re-marking an already-stale order is
+    /// a no-op and preserves the original <see cref="StaledAtUtc"/>.
+    /// </para>
+    /// </summary>
+    public bool MarkStale(string reason, DateTimeOffset atUtc)
+    {
+        if (string.IsNullOrWhiteSpace(reason))
+            throw new ArgumentException("Stale reason required.", nameof(reason));
+        if (IsStale)
+            return false;
+        if (Status is not (OrderStatus.Working or OrderStatus.PartiallyFilled))
+            return false;
+        IsStale = true;
+        StaleReason = reason;
+        StaledAtUtc = atUtc;
+        return true;
+    }
+
+    /// <summary>
+    /// Clears advisory staleness. Called by
+    /// <see cref="ExecutionReportProcessor"/> on terminal ERs (the venue
+    /// actually still knew the order — the stale mark was a false
+    /// positive) and by the admin "clear stale" path. Returns
+    /// <c>true</c> when state changed.
+    /// </summary>
+    public bool ClearStale()
+    {
+        if (!IsStale)
+            return false;
+        IsStale = false;
+        StaleReason = null;
+        StaledAtUtc = null;
+        return true;
+    }
+
     public void ApplyFill(long fillQty)
     {
         if (fillQty <= 0)
@@ -209,12 +275,19 @@ public sealed class Order
     internal static Order Hydrate(
         ulong clOrdId, EndClientId owner, string symbol, ulong securityId, OrderSide side, OrderType type,
         long quantity, decimal? price, long leaves, long cumQty, OrderStatus status, string firmId = "DEFAULT",
-        ulong? parentAlgoId = null, int? algoSliceSeq = null)
+        ulong? parentAlgoId = null, int? algoSliceSeq = null,
+        bool isStale = false, string? staleReason = null, DateTimeOffset? staledAtUtc = null)
     {
         var o = new Order(clOrdId, owner, symbol, securityId, side, type, quantity, price, firmId, parentAlgoId, algoSliceSeq);
         o.LeavesQuantity = leaves;
         o.CumulativeQuantity = cumQty;
         o.Status = status;
+        if (isStale)
+        {
+            o.IsStale = true;
+            o.StaleReason = staleReason;
+            o.StaledAtUtc = staledAtUtc;
+        }
         return o;
     }
 

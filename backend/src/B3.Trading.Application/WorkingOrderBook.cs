@@ -184,7 +184,12 @@ public sealed class WorkingOrderBook
                 o.ClOrdId, o.Owner.Value, o.Symbol, o.SecurityId,
                 o.Side.ToString(), o.Type.ToString(),
                 o.Quantity, o.Price, o.LeavesQuantity, o.CumulativeQuantity,
-                o.Status.ToString(), o.FirmId, o.ParentAlgoId, o.AlgoSliceSeq);
+                o.Status.ToString(), o.FirmId, o.ParentAlgoId, o.AlgoSliceSeq)
+            {
+                IsStale = o.IsStale,
+                StaleReason = o.StaleReason,
+                StaledAtUtc = o.StaledAtUtc,
+            };
         }
     }
 
@@ -202,7 +207,8 @@ public sealed class WorkingOrderBook
             var status = Enum.Parse<OrderStatus>(s.Status);
             _orders[s.ClOrdId] = Order.Hydrate(s.ClOrdId, owner, s.Symbol, s.SecurityId, side, type,
                 s.Quantity, s.Price, s.LeavesQuantity, s.CumulativeQuantity, status, s.FirmId,
-                s.ParentAlgoId, s.AlgoSliceSeq);
+                s.ParentAlgoId, s.AlgoSliceSeq,
+                isStale: s.IsStale, staleReason: s.StaleReason, staledAtUtc: s.StaledAtUtc);
             var firmSet = _byFirm.GetOrAdd(s.FirmId, static _ => new ConcurrentDictionary<ulong, byte>());
             firmSet.TryAdd(s.ClOrdId, 0);
             var ownerSet = _byOwner.GetOrAdd(s.EndClientId, static _ => new ConcurrentDictionary<ulong, byte>());
