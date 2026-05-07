@@ -735,10 +735,15 @@ function renderForSlice(slice) {
   if (slice === "status") {
     setStatusPill(getState().status);
     renderReconnect(); // pill change usually correlates with countdown reset
+    renderStaleness("ws");
   }
   if (slice === "user")   setUserLabel(getState().user);
   if (slice === "marketData" || slice === "all") renderMarketData();
-  if (slice === "marketDataStatus") setMdStatusPill(getState().marketDataStatus);
+  if (slice === "marketDataStatus") {
+    setMdStatusPill(getState().marketDataStatus);
+    renderStaleness("md");
+  }
+  if (slice === "all") { renderStaleness("ws"); renderStaleness("md"); }
   if (slice === "submitInflight") renderInflight();
   if (slice === "wsReconnect") renderReconnect();
   if (slice === "firmsHealth" || slice === "all") renderFirmsHealth();
@@ -748,6 +753,53 @@ function renderForSlice(slice) {
   if (slice === "watchlist" || slice === "selectedSymbol" || slice === "book" || slice === "all") renderDob();
   if (slice === "watchlist" || slice === "selectedSymbol" || slice === "chartResolution" || slice === "candles" || slice === "all") scheduleChartRender();
   if (slice === "watchlist" || slice === "selectedSymbol" || slice === "tapeShowAll" || slice === "tape" || slice === "all") scheduleTapeRender();
+}
+
+// ── Stale-data overlay (T2) ────────────────────────────────────────
+// Panels fed by the trader WS go stale whenever `state.status !==
+// "connected"`; panels fed by the MD WS go stale on
+// `state.marketDataStatus !== "connected"`. The visual cue is two-
+// part: a `panel--stale` class (dims the data area in CSS) + an
+// injected `<span class="stale-tag">stale · HH:MM:SS</span>` next to
+// the panel's `<h2>` showing the last successful update timestamp.
+// The timestamp is captured at the moment of staleness, not animated,
+// so a frozen-but-still-mounted UI is unambiguous.
+const WS_PANEL_SELECTORS = [".panel.blotter", ".panel.positions", ".panel.executions"];
+const MD_PANEL_SELECTORS = [".panel.market-data", ".panel.dob", ".panel.chart", ".panel.tape"];
+
+function fmtStaleTimestamp(ms) {
+  if (!ms) return "no data";
+  return new Date(ms).toLocaleTimeString("pt-BR", { hour12: false });
+}
+
+function renderStaleness(kind) {
+  const s = getState();
+  const isStale = kind === "ws"
+    ? s.status !== "connected"
+    : s.marketDataStatus !== "connected";
+  const lastAt = kind === "ws" ? s.lastWsActivity : s.lastMdActivity;
+  const selectors = kind === "ws" ? WS_PANEL_SELECTORS : MD_PANEL_SELECTORS;
+  const label = isStale ? `stale · ${fmtStaleTimestamp(lastAt)}` : null;
+  for (const sel of selectors) {
+    const panel = document.querySelector(sel);
+    if (!panel) continue;
+    panel.classList.toggle("panel--stale", isStale);
+    let tag = panel.querySelector(":scope > h2 > .stale-tag");
+    if (label) {
+      const h2 = panel.querySelector(":scope > h2");
+      if (!h2) continue;
+      if (!tag) {
+        tag = document.createElement("span");
+        tag.className = "stale-tag";
+        tag.setAttribute("role", "status");
+        tag.setAttribute("aria-live", "polite");
+        h2.appendChild(tag);
+      }
+      tag.textContent = label;
+    } else if (tag) {
+      tag.remove();
+    }
+  }
 }
 
 function renderAll() {

@@ -159,6 +159,25 @@ body {
   background: var(--panel-2); color: var(--text); border-radius: 999px;
   padding: 0 .5rem; font-size: .7rem;
 }
+/* Stale-data overlay (T2). Dim the data area but keep the header
+   readable so the trader can still see the panel title + the bright
+   "stale" tag explaining why interaction is risky. The data zone is
+   pointer-events:none so accidental clicks on frozen rows can't
+   issue actions during a flap. */
+.panel--stale > table,
+.panel--stale .table-scroll,
+.panel--stale .executions-log,
+.panel--stale .dob-grid,
+.panel--stale .chart-canvas,
+.panel--stale .tape-list {
+  opacity: .5; pointer-events: none; transition: opacity .15s ease-in;
+}
+.stale-tag {
+  margin-left: .5rem; padding: 0 .5rem;
+  background: var(--warn, #c97a1a); color: #fff;
+  border-radius: 999px; font-size: .7rem; font-weight: 600;
+  letter-spacing: .04em; text-transform: none; line-height: 1.4;
+}
 .ticket     { grid-area: ticket; overflow-y: auto; overflow-x: hidden; min-width: 0; }
 .blotter    { grid-area: blotter; min-height: 0; }
 .positions  { grid-area: positions; }
