@@ -55,6 +55,7 @@ services:
     volumes:
       - ./real/exchange-simulator.bridge.json:/app/config/exchange-simulator.bridge.json:ro
       - ./real/instruments-eqt.json:/app/config/instruments-eqt.json:ro
+      - matching-data:/var/lib/b3matching
     command: ["/app/config/exchange-simulator.bridge.json"]
     depends_on:
       # The UnicastUdpPacketSink resolves the "marketdata" hostname at
@@ -200,3 +201,11 @@ services:
       Trading__MarketData__Symbols__0: PETR4
       Trading__MarketData__Symbols__1: VALE3
       Trading__MarketData__Symbols__2: ITUB4
+
+volumes:
+  # Persists matching-platform's per-channel snapshots + WAL across
+  # restarts. Closes the desync loop documented in #132 (working orders
+  # going phantom on venue restart) by making upstream
+  # pedrosakuma/B3MatchingPlatform#260 phase work observable here.
+  matching-data:
+    name: b3-matching-data
