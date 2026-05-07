@@ -1,25 +1,134 @@
 # Family docker-compose for B3TradingPlatform.
 #
-# Default `docker compose up` brings the trading-host up in honest no-broker
-# mode (Mode=Unavailable: /health shows readyForOrders=false, POST /orders
-# returns 502 BadGateway). The frontend is served by an nginx that
-# reverse-proxies REST + WebSocket back to the trading-host over the
-# internal `b3-net` bridge so the browser sees a single origin and CORS is
-# a non-issue.
+# Default `docker compose -f docker/docker-compose.yml up` brings the FULL
+# real stack online: matching-platform (FIXP TCP 9876) + marketdata (UMDF
+# unicast → WS 8080) + trading-host (Mode=Real, FIRM01 wired) + frontend
+# (nginx reverse-proxy on host port 8080). The trading-host actually
+# routes /orders submissions through matching, prints trades on the book
+# in marketdata, and surfaces live ref-prices back to the risk layer —
+# no synthetic ER injection, no stub gateway, no "honest no-broker"
+# fallback.
 #
-# The `marketdata` service is gated behind the `marketdata` profile because
-# it requires a PCAP volume that's not in this repo:
+# Persistence:
+#   - trading-data volume → trading-host's WAL + snapshots.
+#   - matching-data volume → matching-platform's per-channel snapshots +
+#     WAL (upstream pedrosakuma/B3MatchingPlatform#260 phase work). A
+#     `docker compose restart matching-platform` no longer drops the
+#     working order book on the floor.
 #
-#   docker compose --profile marketdata up
+# Topology (all on b3-net):
 #
-# The real-stack overlay `docker-compose.real.yml` adds `matching-platform`
-# (ghcr.io/pedrosakuma/b3-matching) wired to the trading-host over the
-# `b3-net` bridge with `Mode=Real`. See docs/DOCKER.md § Real-stack overlay
-# and `docs/rfcs/integration-real-stack-v0.md`.
+#   matching-platform ──FIXP TCP 9876──► trading-host ──REST/WS──► frontend
+#         │
+#         └──UMDF unicast UDP──► marketdata ──WS 8080──► trading-host
+#                                                       (IReferencePrice)
+#
+# Opt-in overlays:
+#
+#   - docker-compose.unavailable.yml  → flip trading-host to
+#       Mode=Unavailable + suppress matching/marketdata via profiles.
+#       Useful for testing the no-broker fail-closed path
+#       (POST /orders → 502 BadGateway, /health readyForOrders=false).
+#   - docker-compose.observability.yml → Prometheus + Grafana sidecars.
+#   - docker-compose.conformance.yml  → one-shot conformance suite runner
+#       (carol admin seed). Combine with real-conformance.yml when running
+#       on top of the real stack to opt into RequiresSandboxMatching specs.
+#   - docker-compose.real-conformance.yml → see above; sets
+#       B3T_REAL_STACK_CONFORMANCE=true and exempts alice from short/STP.
+#   - docker-compose.demo.yml         → flip to Mode=Simulator + demo bots
+#       (synthetic ER injection inside trading-host; not for production).
+#       Implicitly disables matching/marketdata (still come up by default
+#       but Simulator path doesn't talk to them).
+#   - docker-compose.e2e.yml          → flip to Mode=Stub for the frontend
+#       smoke E2E (StubExchangeGateway echoes ERs in-process; matching/
+#       marketdata suppressed via profiles).
+#
+# The PCAP-replay marketdata variant is gated under the `marketdata-pcap`
+# profile (separate service from the live unicast `marketdata` because
+# the two consume from different transports and configs):
+#
+#   PCAP_DIR=/path/to/pcaps docker compose --profile marketdata-pcap up
+#
+# Historical: the previous default was Mode=Unavailable (an "honest
+# no-broker" posture), and the real stack was an opt-in overlay
+# `docker-compose.real.yml`. That overlay is kept as a no-op shim so
+# pre-existing tutorials and CI command-lines that still pass
+# `-f docker-compose.real.yml` keep working.
 
 name: b3trading
 
 services:
+  matching-platform:
+    image: ${MATCHING_IMAGE:-ghcr.io/pedrosakuma/b3-matching:latest}
+    container_name: b3-matching-platform
+    restart: unless-stopped
+    networks:
+      - b3-net
+    expose:
+      - "9876"   # FIXP TCP listener consumed by trading-host
+      - "8080"   # /metrics + /sessions HTTP surface + /admin/channels/*
+    volumes:
+      - ./real/exchange-simulator.bridge.json:/app/config/exchange-simulator.bridge.json:ro
+      - ./real/instruments-eqt.json:/app/config/instruments-eqt.json:ro
+      - matching-data:/var/lib/b3matching
+    command: ["/app/config/exchange-simulator.bridge.json"]
+    depends_on:
+      # The UnicastUdpPacketSink resolves the "marketdata" hostname at
+      # startup via DNS (B3.Exchange.Core.UnicastUdpPacketSink:36). If
+      # marketdata is not up, matching aborts with "Name or service
+      # not known". service_started is enough — we don't need the WS to
+      # be ready before matching opens its UDP sockets.
+      marketdata:
+        condition: service_started
+    healthcheck:
+      # Matching ships /metrics + /sessions on its HTTP port (no /health).
+      # /metrics returning 200 is a sufficient readiness signal: the HTTP
+      # server only binds after the channel dispatcher and the FIXP
+      # listener are up (see B3.Exchange.Host.ExchangeHost startup order).
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/metrics > /dev/null"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
+
+  marketdata:
+    # Live UMDF unicast variant — reads UDP from matching-platform and
+    # fans out over WebSocket to trading-host (and any other consumer).
+    # Resolves to the hostname `marketdata` on b3-net (no alias needed)
+    # — that name is hard-coded into docker/real/exchange-simulator.bridge.json
+    # (matching's UMDF sink) and into trading-host's
+    # Trading__MarketData__WsUrl below.
+    image: ghcr.io/pedrosakuma/b3-marketdata:${MARKETDATA_TAG:-latest}
+    container_name: b3-marketdata
+    restart: unless-stopped
+    environment:
+      UMDF_WS_PORT: "8080"
+      UMDF_MULTICAST_CONFIG: /app/config/transport.json
+    volumes:
+      - ./real/marketdata-transport.json:/app/config/transport.json:ro
+    networks:
+      - b3-net
+    expose:
+      - "8080"     # WebSocket fanout consumed by trading-host
+      - "30084/udp"  # IncrementalA  (matching → marketdata)
+      - "30085/udp"  # IncrementalB  (silent in v1; matching only emits A)
+      - "30184/udp"  # SnapshotRecovery
+      - "31084/udp"  # InstrumentDefinition
+    ports:
+      # Host port for direct WS smoke (browser / debug). Not required
+      # for the in-bridge trading-host → marketdata WS hop.
+      - "${MARKETDATA_PORT:-8081}:8080"
+    healthcheck:
+      # The image is distroless-ish (no curl/wget). Use dotnet --info as
+      # a liveness probe — proves the runtime is alive and the container
+      # hasn't crashed silently. The trading-host's WS subscriber retries
+      # on its own if the WS server isn't yet accepting.
+      test: ["CMD", "/usr/bin/dotnet", "--info"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+
   trading-host:
     build:
       context: ..
@@ -27,6 +136,11 @@ services:
     image: ${TRADING_IMAGE:-ghcr.io/pedrosakuma/b3-trading-host:latest}
     container_name: b3-trading-host
     restart: unless-stopped
+    depends_on:
+      matching-platform:
+        condition: service_healthy
+      marketdata:
+        condition: service_started
     environment:
       ASPNETCORE_ENVIRONMENT: Docker
       ASPNETCORE_URLS: http://+:5000
@@ -41,35 +155,94 @@ services:
       Trading__Auth__Users__0__Salt: ${TRADING_SEED_PASSWORD_SALT:?Set TRADING_SEED_PASSWORD_SALT in .env (base64)}
       Trading__Auth__Users__0__Iterations: "600000"
       Trading__Auth__Users__0__Role: user
-      Trading__Auth__Users__0__Firm: default
+      # alice routes through FIRM01 in Real mode (every order needs a
+      # registered FirmGateway by JWT firm claim). The Mode=Unavailable
+      # overlay flips this back to "default".
+      Trading__Auth__Users__0__Firm: FIRM01
       # Second user (bob) seeded by default so dogfooding scenarios that
       # need both sides of a trade — crosses, fill-against, position-flip
       # exercises — work out of the box. PBKDF2 is deterministic on
       # plaintext+salt, so reusing TRADING_SEED_PASSWORD_HASH/SALT under
       # a different username produces a valid login for the same password.
-      # Same firm as alice on purpose; a future overlay can move bob to
-      # a separate firm when cross-firm scenarios become a thing.
       # Slot Users__5 (not 1) so demo-overlay seed users — bot-clientA (1),
       # bot-clientB (2), demo-admin (3), and the conformance overlay's
       # carol (4) — don't collide with bob when overlays stack on top.
-      # Sparse indexes are fine for .NET's configuration array binder.
       Trading__Auth__Users__5__Username: ${TRADING_SEED_USER_2:-bob}
       Trading__Auth__Users__5__PasswordHash: ${TRADING_SEED_PASSWORD_HASH}
       Trading__Auth__Users__5__Salt: ${TRADING_SEED_PASSWORD_SALT}
       Trading__Auth__Users__5__Iterations: "600000"
       Trading__Auth__Users__5__Role: user
-      Trading__Auth__Users__5__Firm: default
+      Trading__Auth__Users__5__Firm: FIRM01
       # CORS list from origin of nginx frontend. Same-origin via nginx proxy
       # means this is mostly redundant, but cheap insurance for direct curls.
       Trading__Cors__AllowedOrigins__0: http://localhost:${FRONTEND_PORT:-8080}
-      # Live reference price via B3MarketDataPlatform. When unset the host
-      # falls back to the static Trading:Risk:ReferencePrices map (zero
-      # background work, no SDK pull). Set when running --profile marketdata
-      # or pointing at an external MD WebSocket endpoint.
-      Trading__MarketData__WsUrl: ${TRADING_MARKETDATA_WS_URL:-}
-      # Symbols to subscribe to (array binding). Add Trading__MarketData__Symbols__1, _2, …
-      # for additional tickers. Ignored when WsUrl is empty.
-      Trading__MarketData__Symbols__0: ${TRADING_MARKETDATA_SYMBOL_0:-PETR4}
+
+      # ── Real-mode wire (matching-platform / FIXP) ──────────────────────
+      # The Mode=Unavailable overlay clears Mode + Firms__0__* + reverts
+      # Auth__Users__{0,5}__Firm to "default".
+      Trading__Exchange__Mode: Real
+      # Single firm wired to matching's pre-#42 default session, matching
+      # docker/real/exchange-simulator.bridge.json verbatim so the FIXP
+      # Negotiate succeeds. Bridge auth.devMode=true ignores AccessKey,
+      # but we still set it so the field is non-empty (validator gate).
+      Trading__Exchange__Firms__0__FirmId: FIRM01
+      Trading__Exchange__Firms__0__Endpoint: matching-platform:9876
+      Trading__Exchange__Firms__0__SessionId: "10101"
+      Trading__Exchange__Firms__0__SessionVerId: "1"
+      Trading__Exchange__Firms__0__EnteringFirm: "100"
+      # Matching's FixpSession parses Credentials as JSON expecting
+      # { auth_type, username, access_key }. devMode disables enforcement
+      # but the parse still requires the schema. Pre-this-fix, the raw
+      # "dev-key-1" string was rejected with "'d' is an invalid start of
+      # a value", and a too-thin {"accessKey":...} was rejected with
+      # "missing required field (auth_type/username/access_key)".
+      Trading__Exchange__Firms__0__AccessKey: '{"auth_type":"basic","username":"10101","access_key":"dev-key-1"}'
+      Trading__Exchange__Firms__0__SenderLocation: SP
+      Trading__Exchange__Firms__0__EnteringTrader: ALICE
+      # Map the conformance-driven symbols onto the SecurityIds matching
+      # advertises in instruments-eqt.json so /orders submissions for
+      # PETR4/VALE3/ITUB4 hit a real instrument and can print trades.
+      Trading__SymbolDirectory__SecurityIds__PETR4: "900000000001"
+      Trading__SymbolDirectory__SecurityIds__VALE3: "900000000002"
+      Trading__SymbolDirectory__SecurityIds__ITUB4: "900000000003"
+      # Static fallback prices for the price-collar check. Required so the
+      # collar accepts cross prices below the live cache warms up. Live
+      # ref-prices via the marketdata WS leg below displace these.
+      Trading__Risk__ReferencePrices__PETR4: "32.50"
+      Trading__Risk__ReferencePrices__VALE3: "65.00"
+      Trading__Risk__ReferencePrices__ITUB4: "30.00"
+      # Opening positions seeded for the default dogfood accounts so
+      # both alice and bob can sell out of the box without being blocked
+      # by the NoNakedShortCheck gate. Quantities are expressed in
+      # board-lot units (matching's lotSize=100, so 2000 = 20 lots).
+      # Seeds apply only when PersistenceRecovery leaves the slot empty,
+      # so a warm restart never overwrites real fills.
+      Trading__Positions__Seeds__0__EndClientId: ${TRADING_SEED_USER:-alice}
+      Trading__Positions__Seeds__0__Symbol: PETR4
+      Trading__Positions__Seeds__0__Quantity: "2000"
+      Trading__Positions__Seeds__0__AverageEntryPrice: "32.50"
+      Trading__Positions__Seeds__1__EndClientId: ${TRADING_SEED_USER:-alice}
+      Trading__Positions__Seeds__1__Symbol: VALE3
+      Trading__Positions__Seeds__1__Quantity: "2000"
+      Trading__Positions__Seeds__1__AverageEntryPrice: "65.00"
+      Trading__Positions__Seeds__2__EndClientId: ${TRADING_SEED_USER_2:-bob}
+      Trading__Positions__Seeds__2__Symbol: PETR4
+      Trading__Positions__Seeds__2__Quantity: "2000"
+      Trading__Positions__Seeds__2__AverageEntryPrice: "32.50"
+      Trading__Positions__Seeds__3__EndClientId: ${TRADING_SEED_USER_2:-bob}
+      Trading__Positions__Seeds__3__Symbol: VALE3
+      Trading__Positions__Seeds__3__Quantity: "2000"
+      Trading__Positions__Seeds__3__AverageEntryPrice: "65.00"
+      # Live reference price via the marketdata WS leg (RFC §4.5 D3).
+      # MarketDataReferencePrice subscribes to PETR4/VALE3/ITUB4 on boot;
+      # cache misses fall back to Trading:Risk:ReferencePrices map. The
+      # subscription is best-effort: marketdata being slow to come up
+      # doesn't block trading-host startup. The Mode=Unavailable overlay
+      # clears WsUrl so the subscriber stays idle.
+      Trading__MarketData__WsUrl: ws://marketdata:8080/ws
+      Trading__MarketData__Symbols__0: PETR4
+      Trading__MarketData__Symbols__1: VALE3
+      Trading__MarketData__Symbols__2: ITUB4
     volumes:
       - trading-data:/var/lib/b3trading
     networks:
@@ -95,16 +268,17 @@ services:
     ports:
       - "${FRONTEND_PORT:-8080}:80"
 
-  # Opt-in. Pull the published image from GHCR. Requires the package
-  # to be public — see B3MarketDataPlatform#2 closing comment.
+  # PCAP-replay marketdata variant. Opt-in via `--profile marketdata-pcap`.
+  # Replays a captured B3 UMDF session for offline regression. Conflicts
+  # with the live `marketdata` service above on the same hostname/ports —
+  # do not enable both at once.
   #
-  # Bring up with PCAPs mounted:
-  #   PCAP_DIR=/path/to/pcaps docker compose --profile marketdata up
-  marketdata:
+  #   PCAP_DIR=/path/to/pcaps docker compose --profile marketdata-pcap up
+  marketdata-pcap:
     image: ghcr.io/pedrosakuma/b3-marketdata:${MARKETDATA_TAG:-latest}
-    container_name: b3-marketdata
+    container_name: b3-marketdata-pcap
     restart: unless-stopped
-    profiles: ["marketdata"]
+    profiles: ["marketdata-pcap"]
     environment:
       WS_PORT: "8080"
       PCAP_DIR: /app/pcap
@@ -115,7 +289,7 @@ services:
     networks:
       - b3-net
     ports:
-      - "${MARKETDATA_PORT:-8081}:8080"
+      - "${MARKETDATA_PCAP_PORT:-8082}:8080"
     deploy:
       resources:
         limits:
@@ -125,6 +299,11 @@ services:
 volumes:
   trading-data:
     name: b3-trading-data
+  # Persists matching-platform's per-channel snapshots + WAL across
+  # restarts (upstream pedrosakuma/B3MatchingPlatform#260). Closes the
+  # venue half of the desync described in #132 — see #133.
+  matching-data:
+    name: b3-matching-data
 
 networks:
   b3-net:

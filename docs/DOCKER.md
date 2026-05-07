@@ -13,61 +13,84 @@ docker compose -f docker/docker-compose.yml up --build
 # open http://localhost:8080
 ```
 
-You'll see the trader UI; logging in works; submitting an order returns
-**502 BadGateway with `reason: gateway unavailable`**. That's the honest
-default — see [Honest no-broker mode](#honest-no-broker-mode) below.
+You'll see the trader UI, log in as `alice / wonderland` (the seeded
+default), and submit a PETR4 order — it routes through the real
+matching engine, prints on the book, and the live tape lights up.
+That's the **default Real stack** — see
+[What runs by default](#what-runs-by-default) below.
+
+To validate the no-broker fail-closed surface instead (POST /orders →
+502, /health `readyForOrders=false`), stack the unavailable overlay:
+
+```bash
+docker compose \
+    -f docker/docker-compose.yml \
+    -f docker/docker-compose.unavailable.yml \
+    up
+```
 
 ## What runs by default
 
 | Service | Image | Port (host) | Purpose |
 |---|---|---|---|
-| `trading-host` | `ghcr.io/pedrosakuma/b3-trading-host:latest` | `5000` | REST + WebSocket; `Mode=Unavailable` |
+| `matching-platform` | `ghcr.io/pedrosakuma/b3-matching:latest` | (internal `:9876`, `:8080`) | FIXP TCP listener + UMDF unicast publisher + `/admin/channels/*` snapshot ops |
+| `marketdata` | `ghcr.io/pedrosakuma/b3-marketdata:latest` | `8081` | UMDF unicast consumer (`30084/30184/31084 udp`) + WebSocket fanout (`:8080`) |
+| `trading-host` | `ghcr.io/pedrosakuma/b3-trading-host:latest` | `5000` | REST + WebSocket; `Mode=Real`, FIRM01 session against matching, live `IReferencePrice` wired through marketdata WS |
 | `frontend` | `ghcr.io/pedrosakuma/b3-trading-frontend:latest` | `8080` | nginx serving the static UI + reverse-proxy to trading-host |
 
-The `marketdata` service is defined but **gated behind the `marketdata`
-profile** because it needs PCAP files this repo doesn't ship. Bring it up
-explicitly:
+Persistence:
+
+- **`b3-trading-data`** named volume → trading-host WAL + snapshots.
+- **`b3-matching-data`** named volume → matching-platform per-channel
+  snapshots + WAL (upstream
+  [B3MatchingPlatform#260](https://github.com/pedrosakuma/B3MatchingPlatform/issues/260)
+  phase work). `docker compose restart matching-platform` no longer
+  drops the working order book on the floor.
+
+The PCAP-replay marketdata variant is now a separate service
+(`marketdata-pcap`) gated behind the `marketdata-pcap` profile so it
+doesn't conflict with the live `marketdata`:
 
 ```bash
-PCAP_DIR=/path/to/your/pcaps docker compose -f docker/docker-compose.yml --profile marketdata up
+PCAP_DIR=/path/to/pcaps docker compose -f docker/docker-compose.yml --profile marketdata-pcap up
 ```
 
-A future PR will refresh this section once
-[B3MarketDataPlatform#2](https://github.com/pedrosakuma/B3MarketDataPlatform/issues/2)
-follow-ups land a unicast-bind mode (see RFC integration-real-stack-v0
-§4.4 R1.b). Today, marketdata only knows how to consume multicast
-UMDF, which is not routable across the docker bridge.
+> **Heads up — venue-restart caveat.** Working orders submitted before
+> a `docker compose restart matching-platform` survive on the venue
+> (snapshot + WAL), but the FIXP owner session is dropped on restore
+> (matching's cross-channel consistency check). Trading-host still sees
+> them as Working in the blotter — see
+> [#132](https://github.com/pedrosakuma/B3TradingPlatform/issues/132)
+> for the consumer-side reconciliation work.
 
-## Real-stack overlay (opt-in)
+## Honest no-broker overlay (opt-in)
 
 ```bash
 docker compose \
     -f docker/docker-compose.yml \
-    -f docker/docker-compose.real.yml \
+    -f docker/docker-compose.unavailable.yml \
     up
 ```
 
-Brings up the real-wire trio against the trading-host:
+Flips trading-host back to `Mode=Unavailable` and suppresses
+`matching-platform` + `marketdata` so only `trading-host + frontend`
+come up. Useful for:
 
-| Service | Image | What it does |
-|---|---|---|
-| `matching-platform` | `ghcr.io/pedrosakuma/b3-matching:latest` | FIXP TCP listener (`:9876`) + UMDF unicast publisher |
-| `marketdata-live` | `ghcr.io/pedrosakuma/b3-marketdata:latest` | UMDF consumer (binds `30084/30184/31084 udp`) + WebSocket fanout (`:8080`, hostname `marketdata` on `b3-net`) |
-| `trading-host` | (this repo) | `Mode=Real`, FIRM01 session against matching, `IReferencePrice` wired through `marketdata-live` WS |
+- Validating the fail-closed surface (POST /orders → 502 BadGateway,
+  /health `readyForOrders=false`, ticket disabled).
+- Auth/admin-only flows (login, /admin/firms CRUD) without paying the
+  matching+marketdata startup cost.
+- CI conformance jobs that exercise the Unavailable contract
+  (admin/firms tests, risk-rejection-shape).
 
-The overlay is opt-in — `docker compose up` (no `-f`) keeps the honest
-`Mode=Unavailable` default.
+## Historical: `docker-compose.real.yml`
 
-Use this overlay when you need to see the real `B3.EntryPoint.Client`
-path drive end-to-end (gap detection, latency probes, multi-firm
-registry) and the live reference-price WS pipeline (versus the in-process
-mock + static-map fallback).
-
-The base compose's profile-gated `marketdata` (PCAP-replay) is unrelated
-and stays dormant under this overlay; the live variant is a separate
-service named `marketdata-live` with a network alias `marketdata` so the
-hostnames in `docker/real/exchange-simulator.bridge.json` and the
-trading-host `Trading__MarketData__WsUrl` resolve.
+Until the family compose was restructured to make Real the default
+(2026-05-07), the real stack was an opt-in overlay
+`docker-compose.real.yml`. That file is preserved as an empty no-op
+shim so pre-existing CI command-lines and external tutorials still
+parse. New tooling should use `docker-compose.yml` directly (or
+combine with `docker-compose.unavailable.yml` for the inverse).
 
 ## Demo overlay (opt-in, laptop-only)
 
