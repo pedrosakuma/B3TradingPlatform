@@ -810,6 +810,14 @@ function ensureTicker() {
       const st = getState();
       const entry = st.selectedSymbol ? st.book.get(st.selectedSymbol) : null;
       if (st.selectedSymbol && (!entry || !entry.ready)) renderDob();
+      // Same idea for the chart: tick re-render while waiting so the
+      // copy can flip from "awaiting…" to "no candles — server may not
+      // publish them" once the timeout passes (issue #91).
+      const cperRes = st.selectedSymbol ? st.candles.get(st.selectedSymbol) : null;
+      const centry  = cperRes?.get(st.chartResolution);
+      if (st.selectedSymbol && (!centry || !centry.ready || centry.bars.length === 0)) {
+        scheduleChartRender();
+      }
     }
   }, 250);
 }
@@ -1164,6 +1172,11 @@ const CHART_VISIBLE_BARS = 150;
 const CHART_VIEW_W = 300;
 const CHART_VIEW_H = 100;
 const CHART_PADDING = 4;
+// Mirror DOB_NO_BOOK_AFTER_MS: after this long without a candle frame
+// for the selected symbol, swap the soft "awaiting…" copy for a louder
+// hint that the server probably doesn't publish candles (the current
+// b3-marketdata image has zero candle support — issue #91).
+const CHART_NO_DATA_AFTER_MS = 8_000;
 
 let chartRafHandle = null;
 
@@ -1202,7 +1215,10 @@ function renderChart() {
   const perRes = st.candles.get(st.selectedSymbol);
   const entry = perRes?.get(st.chartResolution);
   if (!entry || !entry.ready || entry.bars.length === 0) {
-    showEmpty("awaiting candle snapshot…");
+    const waited = st.selectedSymbolSetAt ? Date.now() - st.selectedSymbolSetAt : 0;
+    showEmpty(waited > CHART_NO_DATA_AFTER_MS
+      ? "no candles — server may not publish them"
+      : "awaiting candle snapshot…");
     return;
   }
 
