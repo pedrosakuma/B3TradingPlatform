@@ -6,7 +6,7 @@ import { defaultBackend, defaultMarketDataUrl, login, signup, submitOrder, cance
          getHaltStatus, haltSymbol, resumeSymbol,
          runEod } from "./protocol.js";
 import { claimsFromToken } from "./jwt.js";
-import { validateOrder, fatFingerCheck, payloadKey } from "./validation.js";
+import { validateOrder, pretradeWarnings, payloadKey } from "./validation.js";
 import * as state from "./state.js";
 import * as ui from "./ui.js";
 import * as adminUi from "./adminUi.js";
@@ -485,34 +485,46 @@ function onWorkerMessage(msg) {
   }
 }
 
+function formatPretradeWarning(w) {
+  switch (w.kind) {
+    case "fat_finger": {
+      const pct = (w.deviation * 100).toFixed(1);
+      return `fat-finger: price deviates ${pct}% from last trade ${ui.fmtPx(w.lastPrice)}`;
+    }
+    case "qty":
+      return `large quantity: ${w.qty.toLocaleString("pt-BR")} > ${w.multiple}× lot (${w.threshold.toLocaleString("pt-BR")})`;
+    case "market_notional": {
+      const fmt = (n) => `R$ ${n.toLocaleString("pt-BR", { maximumFractionDigits: 0 })}`;
+      return `market notional ≈ ${fmt(w.notional)} ≥ ${fmt(w.threshold)}`;
+    }
+    default:
+      return "advisory warning";
+  }
+}
+
 async function handleSubmitOrder(payload) {
   if (!session) return;
 
   const error = validateOrder(payload);
-  if (error) return ui.setTicketFeedback(error.message, "error");
-
-  // Fat-finger guard: first attempt with a >threshold deviation from
-  // the last observed trade is rejected with a warning; the same exact
-  // payload submitted again within the pending window goes through.
-  // We TTL the pending guard at 15s so a trader who walks away and
-  // returns later doesn't have an old "armed" override silently apply
-  // to a fresh ticket.
+  if (error) return ui.setTicketFeedback(error.message, "error");  // Pre-trade advisory guards (fat-finger, soft quantity cap, market
+  // notional). The first attempt with one or more warnings is rejected
+  // with a combined message; the same exact payload re-submitted within
+  // the pending window goes through. We TTL the pending guard at 15s so
+  // a trader who walks away and returns later doesn't have an old
+  // "armed" override silently apply to a fresh ticket.
   const FAT_FINGER_TTL_MS = 15_000;
   const lastPrice = state.getState().marketData.get(payload.symbol)?.lastPrice;
-  const ff = fatFingerCheck(payload, lastPrice);
+  const warnings = pretradeWarnings(payload, lastPrice);
   const key = payloadKey(payload);
   let pending = state.getState().pendingFatFinger;
   if (pending && pending.setAt && (Date.now() - pending.setAt) > FAT_FINGER_TTL_MS) {
     state.setPendingFatFinger(null);
     pending = null;
   }
-  if (ff && (!pending || pending.key !== key)) {
+  if (warnings.length > 0 && (!pending || pending.key !== key)) {
     state.setPendingFatFinger(payload, key);
-    const pct = (ff.deviation * 100).toFixed(1);
-    ui.setTicketFeedback(
-      `fat-finger guard: price deviates ${pct}% from last trade ${ui.fmtPx(ff.lastPrice)}. Click Submit again to override.`,
-      "warn",
-    );
+    const msg = warnings.map(w => formatPretradeWarning(w)).join(" · ");
+    ui.setTicketFeedback(`${msg}. Click Submit again to override.`, "warn");
     return;
   }
   // Clear pending guard once the user confirms or moves on.

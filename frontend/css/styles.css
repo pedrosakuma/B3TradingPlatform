@@ -91,7 +91,15 @@ body {
 .status-connected    { background: rgba(54,196,111,.18); color: var(--green); }
 .status-connecting   { background: rgba(245,166,35,.18); color: var(--warn); }
 .status-disconnected { background: rgba(239,83,80,.18);  color: var(--red); }
-.status-not_ready    { background: rgba(245,166,35,.18); color: var(--warn); }
+/* `not_ready` means the WebSocket handshake completed but the server
+   hasn't yet declared itself ready for orders/snapshots. It's a
+   distinct condition from `connecting` (handshake in flight) and
+   needs its own colour so the trader can tell at a glance whether
+   the link is still being negotiated or whether the upstream feed
+   is stalled. Cyan/blue family keeps it visually different from the
+   warm tones used by `connecting` while still reading as "advisory,
+   not an error". */
+.status-not_ready    { background: rgba(74,144,226,.18); color: #4a90e2; }
 .user-label { color: var(--muted); }
 .symbol-select {
   display: inline-flex; align-items: center; gap: .35rem;
