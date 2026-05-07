@@ -84,7 +84,7 @@ public class HealthSessionStatusTests
         // SDK guard ("Client is not in Established state").
         var fake = new FakeProvider(
             new FirmSessionStatus("FIRM01", "established", IsReconnecting: false, SessionVerId: 1),
-            new FirmSessionStatus("FIRM02", "suspended",   IsReconnecting: true,  SessionVerId: 4));
+            new FirmSessionStatus("FIRM02", "suspended", IsReconnecting: true, SessionVerId: 4));
         using var factory = WithProvider(fake);
         using var client = factory.CreateClient();
 
