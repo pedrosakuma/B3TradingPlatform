@@ -26,6 +26,7 @@ export { fmtQty, fmtPx };
 
 let onSubmitOrder = () => {};
 let onCancelOrder = () => {};
+let onCancelAll   = () => {};
 let onModifyOrder = () => {};
 let onLogout      = () => {};
 let onApplyMd     = () => {};
@@ -41,6 +42,7 @@ let onToggleTapeShowAll = () => {};
 export function setHandlers(handlers) {
   onSubmitOrder    = handlers.onSubmitOrder    ?? onSubmitOrder;
   onCancelOrder    = handlers.onCancelOrder    ?? onCancelOrder;
+  onCancelAll      = handlers.onCancelAll      ?? onCancelAll;
   onModifyOrder    = handlers.onModifyOrder    ?? onModifyOrder;
   onLogout         = handlers.onLogout         ?? onLogout;
   onApplyMd        = handlers.onApplyMd        ?? onApplyMd;
@@ -267,6 +269,135 @@ function submitModifyForm() {
   onModifyOrder(clOrdId, { quantity: qty, price });
 }
 
+// ── Cancel-all modal (T3) ──────────────────────────────────────────
+// Snapshot the working ClOrdID set when the modal opens so concurrent
+// fills/cancels don't change the list mid-burst. The trader has to
+// type CANCEL to arm the submit; submission is one-shot per modal
+// open. While the burst is in flight, the form input is disabled and
+// only the Close button is interactive — closing won't abort already-
+// dispatched HTTP calls but suppresses further progress UI.
+const CANCEL_ALL_MAGIC_WORD = "CANCEL";
+let cancelAllInflight = false;
+
+function workingOrderIds() {
+  const orders = getState().orders;
+  const ids = [];
+  for (const o of orders.values()) {
+    if (!o || !o.clOrdId) continue;
+    if (isTerminalOrderStatus(o.status)) continue;
+    if (o.status === "PendingCancel") continue;
+    ids.push(o.clOrdId);
+  }
+  return ids;
+}
+
+function openCancelAllModal() {
+  const ids = workingOrderIds();
+  if (ids.length === 0) return;
+  const modal   = $("cancel-all-modal");
+  const form    = $("cancel-all-form");
+  const summary = $("cancel-all-summary");
+  const input   = $("cancel-all-confirm");
+  const submit  = $("cancel-all-submit");
+  const close   = $("cancel-all-close");
+  const progress = $("cancel-all-progress");
+  if (!modal || !form || !input || !submit) return;
+  cancelAllInflight = false;
+  form.dataset.ids = JSON.stringify(ids);
+  if (summary) summary.textContent = `${ids.length} working ${ids.length === 1 ? "order" : "orders"} will be cancelled. This cannot be undone.`;
+  input.value = ""; input.disabled = false;
+  submit.disabled = true; submit.textContent = "Cancel orders";
+  if (close) { close.disabled = false; close.textContent = "Close"; }
+  if (progress) { progress.hidden = true; progress.textContent = ""; }
+  setCancelAllError(null);
+  modal.hidden = false;
+  // Defer focus so the autofocus doesn't fight the show transition.
+  queueMicrotask(() => input.focus());
+}
+
+export function closeCancelAllModal() {
+  const modal = $("cancel-all-modal");
+  const form  = $("cancel-all-form");
+  if (!modal) return;
+  // Don't let Close yank the modal mid-burst — the burst keeps running
+  // but the trader needs to see the final tally to know what to retry.
+  if (cancelAllInflight) return;
+  modal.hidden = true;
+  if (form) delete form.dataset.ids;
+  setCancelAllError(null);
+}
+
+export function setCancelAllError(message) {
+  const el = $("cancel-all-error");
+  if (!el) return;
+  if (!message) { el.hidden = true; el.textContent = ""; return; }
+  el.hidden = false; el.textContent = message;
+}
+
+export function setCancelAllProgress({ done, failed, total, finished }) {
+  const progress = $("cancel-all-progress");
+  const submit   = $("cancel-all-submit");
+  const close    = $("cancel-all-close");
+  if (progress) {
+    progress.hidden = false;
+    const failTxt = failed > 0 ? ` (${failed} failed)` : "";
+    progress.textContent = finished
+      ? `Done: ${done}/${total} cancelled${failTxt}.`
+      : `${done}/${total} cancelled${failTxt}…`;
+  }
+  if (finished) {
+    cancelAllInflight = false;
+    if (submit) { submit.disabled = true; submit.textContent = "Cancel orders"; }
+    if (close)  { close.disabled = false; close.textContent = "Done"; }
+  }
+}
+
+function syncCancelAllSubmitArmed() {
+  const input  = $("cancel-all-confirm");
+  const submit = $("cancel-all-submit");
+  if (!input || !submit) return;
+  if (cancelAllInflight) { submit.disabled = true; return; }
+  submit.disabled = input.value.trim().toUpperCase() !== CANCEL_ALL_MAGIC_WORD;
+}
+
+function submitCancelAllForm() {
+  const form   = $("cancel-all-form");
+  const input  = $("cancel-all-confirm");
+  const submit = $("cancel-all-submit");
+  const close  = $("cancel-all-close");
+  if (!form || !input) return;
+  if (input.value.trim().toUpperCase() !== CANCEL_ALL_MAGIC_WORD) return;
+  let ids;
+  try { ids = JSON.parse(form.dataset.ids ?? "[]"); }
+  catch { ids = []; }
+  if (!Array.isArray(ids) || ids.length === 0) {
+    setCancelAllError("No working orders to cancel.");
+    return;
+  }
+  cancelAllInflight = true;
+  setCancelAllError(null);
+  input.disabled = true;
+  if (submit) { submit.disabled = true; submit.textContent = "Cancelling…"; }
+  if (close)  { close.disabled = true; }
+  onCancelAll(ids);
+}
+
+function renderCancelAllButton() {
+  const btn = $("cancel-all-btn");
+  if (!btn) return;
+  const ids = workingOrderIds();
+  const n = ids.length;
+  if (n === 0) {
+    btn.hidden = true;
+    btn.textContent = "Cancel all";
+    btn.disabled = true;
+    return;
+  }
+  btn.hidden = false;
+  btn.disabled = false;
+  btn.textContent = `Cancel all (${n})`;
+}
+
 export function bindUi() {
   // Order ticket: enable/disable price field by type.
   const typeEl = $("ticket-type");
@@ -353,6 +484,28 @@ export function bindUi() {
     // side-effect). Esc handled in the global keydown below.
     modifyModal.addEventListener("click", (e) => {
       if (e.target === modifyModal) closeModifyModal();
+    });
+  }
+
+  // Cancel-all wiring (T3). Button lives in the blotter header and
+  // appears whenever there are working orders to cancel.
+  const cancelAllBtn   = $("cancel-all-btn");
+  const cancelAllForm  = $("cancel-all-form");
+  const cancelAllInput = $("cancel-all-confirm");
+  const cancelAllClose = $("cancel-all-close");
+  const cancelAllModal = $("cancel-all-modal");
+  if (cancelAllBtn) cancelAllBtn.addEventListener("click", () => openCancelAllModal());
+  if (cancelAllForm) {
+    cancelAllForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      submitCancelAllForm();
+    });
+  }
+  if (cancelAllInput) cancelAllInput.addEventListener("input", syncCancelAllSubmitArmed);
+  if (cancelAllClose) cancelAllClose.addEventListener("click", () => closeCancelAllModal());
+  if (cancelAllModal) {
+    cancelAllModal.addEventListener("click", (e) => {
+      if (e.target === cancelAllModal) closeCancelAllModal();
     });
   }
 
@@ -490,9 +643,14 @@ function onGlobalKeydown(e) {
     return;
   }
   if (e.key === "Escape") {
-    // Esc closes the modify modal first if open (highest-priority
-    // dismiss); inside the ticket form clears it; outside, clear
-    // blotter selection.
+    // Esc closes the cancel-all modal first (most disruptive, highest
+    // priority dismiss), then the modify modal; inside the ticket
+    // form clears it; outside, clear blotter selection.
+    const cancelAllModal = $("cancel-all-modal");
+    if (cancelAllModal && !cancelAllModal.hidden) {
+      closeCancelAllModal();
+      return;
+    }
     const modifyModal = $("modify-modal");
     if (modifyModal && !modifyModal.hidden) {
       closeModifyModal();
@@ -730,6 +888,7 @@ function renderGatewayPill() {
 
 function renderForSlice(slice) {
   if (slice === "orders" || slice === "all" || slice === "blotterFilter" || slice === "blotterPage" || slice === "selectedOrder") renderBlotter();
+  if (slice === "orders" || slice === "all") renderCancelAllButton();
   if (slice === "positions" || slice === "all") renderPositions();
   if (slice === "executions" || slice === "all") renderExecutions();
   if (slice === "status") {
