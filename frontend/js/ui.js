@@ -811,11 +811,13 @@ function ensureTicker() {
       const entry = st.selectedSymbol ? st.book.get(st.selectedSymbol) : null;
       if (st.selectedSymbol && (!entry || !entry.ready)) renderDob();
       // Same idea for the chart: tick re-render while waiting so the
-      // copy can flip from "awaiting…" to "no candles — server may not
-      // publish them" once the timeout passes (issue #91).
+      // copy can flip from "awaiting…" to "no candle snapshot received"
+      // once the timeout passes (issue #91). Once a snapshot has arrived
+      // (ready=true), the live render path covers updates — only keep
+      // ticking if we're still waiting for the snapshot itself.
       const cperRes = st.selectedSymbol ? st.candles.get(st.selectedSymbol) : null;
       const centry  = cperRes?.get(st.chartResolution);
-      if (st.selectedSymbol && (!centry || !centry.ready || centry.bars.length === 0)) {
+      if (st.selectedSymbol && (!centry || !centry.ready)) {
         scheduleChartRender();
       }
     }
@@ -1214,11 +1216,18 @@ function renderChart() {
 
   const perRes = st.candles.get(st.selectedSymbol);
   const entry = perRes?.get(st.chartResolution);
-  if (!entry || !entry.ready || entry.bars.length === 0) {
+  if (!entry || !entry.ready) {
     const waited = st.selectedSymbolSetAt ? Date.now() - st.selectedSymbolSetAt : 0;
     showEmpty(waited > CHART_NO_DATA_AFTER_MS
-      ? "no candles — server may not publish them"
+      ? "no candle snapshot received"
       : "awaiting candle snapshot…");
+    return;
+  }
+  if (entry.bars.length === 0) {
+    // Snapshot arrived empty — aggregator has no history yet for this
+    // resolution. The first CandleUpdate will fix this when a trade
+    // closes a window.
+    showEmpty("no candles yet — waiting for first trade");
     return;
   }
 
