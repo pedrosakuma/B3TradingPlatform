@@ -143,6 +143,17 @@ public static class MetricsRegistry
         Meter.CreateCounter<long>("trading.entrypoint.reconnect_succeeded");
     public static readonly Counter<long> EntryPointReconnectFailed =
         Meter.CreateCounter<long>("trading.entrypoint.reconnect_failed");
+
+    /// <summary>
+    /// Slice 2 of #132. Counts orders auto-marked stale by the
+    /// <c>OrderStaleningVenueReactor</c> after a venue desync signal
+    /// (FIXP <c>InboundGapAtReconnect</c> or peer-terminate when the
+    /// <c>Trading:AutoStale:OnPeerTerminate</c> flag is on). Tagged
+    /// <c>{firm, reason}</c>; one Add per bulk-mark with the count of
+    /// orders flipped, so a sum gives total ghost candidates.
+    /// </summary>
+    public static readonly Counter<long> OrdersAutoStaledByVenueDesync =
+        Meter.CreateCounter<long>("trading.entrypoint.orders_auto_staled");
     // Last SessionVerId successfully Established for the firm. Reported as
     // an observable gauge so a stuck reconnect (gauge frozen while attempts
     // counter climbs) is visible at a glance.

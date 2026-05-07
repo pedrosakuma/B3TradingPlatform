@@ -152,6 +152,13 @@ builder.Services.AddSingleton<EventDispatcher>();
 builder.Services.AddSingleton<KillSwitchService>();
 builder.Services.AddSingleton<SymbolHaltService>();
 builder.Services.AddSingleton<OrderStalenessService>();
+// Slice 2 of #132. Reactor reads the flag set off the Trading:AutoStale section.
+builder.Services.Configure<AutoStaleOptions>(builder.Configuration.GetSection(AutoStaleOptions.SectionName));
+builder.Services.AddSingleton<IVenueDisconnectReactor>(sp =>
+    new OrderStaleningVenueReactor(
+        sp.GetRequiredService<OrderStalenessService>(),
+        sp.GetRequiredService<IOptions<AutoStaleOptions>>().Value,
+        sp.GetService<TimeProvider>()));
 builder.Services.AddTradingMarketData(builder.Configuration);
 builder.Services.AddSingleton<ReserveOnSubmitMarginProvider>(sp =>
     new ReserveOnSubmitMarginProvider(
@@ -329,7 +336,9 @@ if (earlyIsReal)
             };
             var upstream = new B3.EntryPoint.Client.EntryPointClient(clientOpts);
             var gwLogger = lf.CreateLogger<B3EntryPointClientGateway>();
-            return new B3EntryPointClientGateway(upstream, firm.FirmId, resolvedVerId, gwLogger);
+            var reactor = sp.GetService<IVenueDisconnectReactor>();
+            return new B3EntryPointClientGateway(upstream, firm.FirmId, resolvedVerId, gwLogger,
+                venueDisconnectReactor: reactor);
         });
         return new FirmGatewayRegistry(gateways);
     });
