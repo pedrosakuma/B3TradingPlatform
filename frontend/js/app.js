@@ -17,6 +17,10 @@ const MD_KEY = "b3tp.md";
 const BLOTTER_FILTER_KEY = "b3tp.blotter.filter";
 const DEFAULT_WATCHLIST = ["PETR4", "VALE3"];
 const FIRMS_POLL_INTERVAL_MS = 5_000;
+// /health is unauthenticated and cheap, so a tighter cadence than the
+// admin-only /admin/firms poll is fine. Drives the gateway badge that
+// every logged-in user sees in the header.
+const GATEWAY_POLL_INTERVAL_MS = 5_000;
 
 // ─────────────────────────────────────────────────────────────────
 // Session storage strategy:
@@ -43,6 +47,7 @@ let mdConfig = null;         // { url, symbols }
 let expiryTimer = null;
 let warningTimer = null;
 let firmsPollTimer = null;
+let gatewayPollTimer = null;
 
 function init() {
   document.getElementById("login-backend").placeholder = defaultBackend();
@@ -215,6 +220,7 @@ function startSession(next) {
   state.setSubmitInflight(null);
   state.setWsReconnect(null);
   state.setFirmsHealth(null);
+  state.setGatewayHealth(null);
   state.setKillStatus(null);
   state.setHaltStatus(null);
   state.setEodReport(null);
@@ -224,6 +230,7 @@ function startSession(next) {
   startWorker();
   startMdWorker();
   startFirmsPoll();
+  startGatewayPoll();
   scheduleExpiry();
 }
 
@@ -640,6 +647,7 @@ function logout() {
   warningShown = false;
   ui.closeSessionModal();
   stopFirmsPoll();
+  stopGatewayPoll();
   if (worker) {
     try { worker.postMessage({ type: "stop" }); } catch { /* swallow */ }
     worker.terminate();
@@ -661,6 +669,7 @@ function logout() {
   state.setSubmitInflight(null);
   state.setWsReconnect(null);
   state.setFirmsHealth(null);
+  state.setGatewayHealth(null);
   state.setKillStatus(null);
   state.setHaltStatus(null);
   state.setEodReport(null);
@@ -714,6 +723,60 @@ async function pollFirmsOnce() {
     // hammer the endpoint with rejected calls.
     if (err.status === 403) { stopFirmsPoll(); return; }
     console.warn("[admin/poll]", err);
+  }
+}
+
+// ── Gateway health poll ────────────────────────────────────────────
+// Polls /health (unauthenticated, cheap) so every logged-in user sees
+// an honest exchange-gateway badge in the header. /health.exchange.firms
+// is populated only when the host wires IFirmSessionStatusProvider
+// (Real mode); in Mock/Stub/Unavailable hosts the badge stays hidden
+// rather than guessing at a state we don't have. Failure to fetch is
+// treated as "unknown" — we deliberately don't logout on 401 here
+// (the endpoint requires no auth, so anything other than network/5xx
+// is unexpected and shouldn't kick the user out of the session).
+
+function startGatewayPoll() {
+  stopGatewayPoll();
+  if (!session) return;
+  pollGatewayOnce();
+  gatewayPollTimer = setInterval(pollGatewayOnce, GATEWAY_POLL_INTERVAL_MS);
+}
+
+function stopGatewayPoll() {
+  if (gatewayPollTimer) { clearInterval(gatewayPollTimer); gatewayPollTimer = null; }
+}
+
+async function pollGatewayOnce() {
+  if (!session) return;
+  try {
+    const resp = await fetch(`${session.backend}/health`, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    if (!resp.ok) {
+      // Only flag as fetch-error on a non-2xx — leaves the existing badge
+      // alone for transient blips (304 isn't possible with no-store) so
+      // a single bad response doesn't paint the badge red while the
+      // session is otherwise fine.
+      state.setGatewayHealth({ error: `http_${resp.status}`, fetchedAt: Date.now() });
+      return;
+    }
+    const body = await resp.json();
+    const ex = body?.exchange ?? null;
+    if (!ex) {
+      state.setGatewayHealth(null);
+      return;
+    }
+    state.setGatewayHealth({
+      mode: ex.mode,
+      readyForOrders: !!ex.readyForOrders,
+      firmCount: ex.firmCount ?? 0,
+      firms: Array.isArray(ex.firms) ? ex.firms : null,
+      fetchedAt: Date.now(),
+    });
+  } catch (err) {
+    state.setGatewayHealth({ error: err?.message || "fetch_failed", fetchedAt: Date.now() });
   }
 }
 

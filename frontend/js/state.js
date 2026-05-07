@@ -47,6 +47,13 @@ const state = {
   submitInflight: null,    // { startedAt: ms } | null — true while POST /orders is awaiting response
   wsReconnect: null,       // { nextAt: ms } | null — when worker has scheduled the next attempt
   firmsHealth: null,       // { mode, firms, fetchedAt } | null — admin-only poll of /admin/firms
+  // Public, unauthenticated mirror of /health.exchange. Polled for every
+  // logged-in user (not just admin) so the gateway badge can stop lying
+  // when the FIXP session goes Suspended/Disconnected mid-trading.
+  // Shape: { mode, readyForOrders, firmCount, firms?: [{firmId,state,reconnecting,sessionVerId}], fetchedAt } | null
+  // firms[] is absent in Mock/Stub/Unavailable hosts; the badge then
+  // hides itself rather than guessing.
+  gatewayHealth: null,
   killStatus: null,        // { endClients: [], firms: [], fetchedAt } | null — admin-only
   haltStatus: null,        // { symbols: [], fetchedAt } | null — admin-only
   eodReport: null,         // { ranAt, report } | null — last EOD response in this session
@@ -540,6 +547,11 @@ export function setWsReconnect(value) {
 export function setFirmsHealth(value) {
   state.firmsHealth = value;
   notify("firmsHealth");
+}
+
+export function setGatewayHealth(value) {
+  state.gatewayHealth = value;
+  notify("gatewayHealth");
 }
 
 export function setKillStatus(value) {
