@@ -490,6 +490,13 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
 /* ---------- Session-expiry modal + helpers (section 4 of #30) ---------- */
 .muted-cell { color: var(--muted); }
 .muted-line { color: var(--muted); margin: 0 0 .4rem; font-size: .8rem; }
+/* Order ticket lot/tick hint (T4). Driven by rulesFor(symbol) so the
+   trader sees the lot size before submit-time validation rejects the
+   order. Subdued so it doesn't compete with the form labels. */
+.field-hint {
+  margin: -.2rem 0 .2rem; font-size: .7rem; color: var(--muted);
+  letter-spacing: .03em;
+}
 .login-card label.remember { flex-direction: row; align-items: center; gap: .5rem; font-size: .8rem; color: var(--muted); }
 .login-card label.remember input { width: auto; }
 .modal-backdrop {
