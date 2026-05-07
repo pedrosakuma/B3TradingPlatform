@@ -154,6 +154,32 @@ public static class MetricsRegistry
     /// </summary>
     public static readonly Counter<long> OrdersAutoStaledByVenueDesync =
         Meter.CreateCounter<long>("trading.entrypoint.orders_auto_staled");
+
+    /// <summary>
+    /// #153. Counts cash-margin reservation Restore calls (admin
+    /// clear-stale path) that pushed the per-owner reserved figure
+    /// above the resolved base capacity. Restore intentionally never
+    /// fails (an admin clear must succeed once the WAL event is
+    /// committed) so overcommit is the safety valve — operators
+    /// should monitor this counter and reconcile by cancelling stale
+    /// orders. Tagged <c>{owner}</c>.
+    /// </summary>
+    public static readonly Counter<long> MarginOvercommitOnRestore =
+        Meter.CreateCounter<long>("trading.risk.margin_overcommit_on_restore");
+
+    /// <summary>
+    /// #153. Counts margin-side stale-transition failures (the
+    /// <see cref="OrderStalenessService"/> committed the WAL event and
+    /// then could not apply <see cref="ExecKind.Suspended"/> /
+    /// <see cref="ExecKind.Restored"/> to the in-process reservation
+    /// ledger). The WAL state stays authoritative and the next
+    /// process restart reconstructs reservations from scratch via ER
+    /// replay, so this is a recoverable inconsistency — but a
+    /// non-zero rate signals a code bug or a misbehaving sink.
+    /// Tagged <c>{kind}</c>.
+    /// </summary>
+    public static readonly Counter<long> MarginStaleTransitionFailed =
+        Meter.CreateCounter<long>("trading.risk.margin_stale_transition_failed");
     // Last SessionVerId successfully Established for the firm. Reported as
     // an observable gauge so a stuck reconnect (gauge frozen while attempts
     // counter climbs) is visible at a glance.

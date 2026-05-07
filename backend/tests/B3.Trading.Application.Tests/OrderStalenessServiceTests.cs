@@ -261,4 +261,117 @@ public class OrderStalenessServiceTests
     {
         public void Publish(ExecutionEvent ev) => throw new InvalidOperationException("subscriber down");
     }
+
+    private sealed class CapturingMargin : Risk.IMarginProvider
+    {
+        public List<(ulong ClOrdId, ExecKind Kind, long LastQty)> Calls { get; } = new();
+        public Task<Risk.RiskDecision> TryReserveAsync(ulong clOrdId, Risk.RiskContext ctx, CancellationToken ct)
+            => Task.FromResult(Risk.RiskDecision.Approve);
+        public void OnExecution(ulong clOrdId, ExecKind kind, long lastQty)
+            => Calls.Add((clOrdId, kind, lastQty));
+        public void ReleaseReservation(ulong clOrdId) { }
+    }
+
+    private sealed class ThrowingMargin : Risk.IMarginProvider
+    {
+        public Task<Risk.RiskDecision> TryReserveAsync(ulong clOrdId, Risk.RiskContext ctx, CancellationToken ct)
+            => Task.FromResult(Risk.RiskDecision.Approve);
+        public void OnExecution(ulong clOrdId, ExecKind kind, long lastQty)
+            => throw new InvalidOperationException("ledger down");
+        public void ReleaseReservation(ulong clOrdId) { }
+    }
+
+    private static (OrderStalenessService svc, WorkingOrderBook book, CapturingSink sink, CapturingMargin margin) BuildWithSinkAndMargin()
+    {
+        var book = new WorkingOrderBook();
+        var dispatcher = new EventDispatcher(new NullEventStore());
+        var sink = new CapturingSink();
+        var margin = new CapturingMargin();
+        var svc = new OrderStalenessService(dispatcher, book, sink, margin);
+        return (svc, book, sink, margin);
+    }
+
+    [Fact]
+    public void MarkStale_NotifiesMarginWithSuspended()
+    {
+        // #153. The cash hold for a stale order must be released so
+        // ghosts stop blocking new trading. The margin call mirrors
+        // the synthetic event publish: one Suspended notification per
+        // mark, lastQty=0 (the staleness flip carries no fill data).
+        var (svc, book, _, margin) = BuildWithSinkAndMargin();
+        AddWorking(book, 1UL);
+
+        var r = svc.MarkStale("FIRM01", 1UL, "venue_desync", DateTimeOffset.UtcNow, "auto");
+
+        Assert.Equal(MarkStaleResult.Marked, r);
+        var call = Assert.Single(margin.Calls);
+        Assert.Equal((1UL, ExecKind.Suspended, 0L), call);
+    }
+
+    [Fact]
+    public void MarkStale_DoesNotNotifyMargin_WhenAlreadyStale()
+    {
+        // Idempotency: a duplicate mark must not double-release cash
+        // (the margin provider is itself idempotent on Suspended, but
+        // we do not want to spend the call either).
+        var (svc, book, _, margin) = BuildWithSinkAndMargin();
+        AddWorking(book, 1UL);
+        svc.MarkStale("FIRM01", 1UL, "x", DateTimeOffset.UtcNow, null);
+        margin.Calls.Clear();
+
+        var r = svc.MarkStale("FIRM01", 1UL, "y", DateTimeOffset.UtcNow, null);
+
+        Assert.Equal(MarkStaleResult.AlreadyStale, r);
+        Assert.Empty(margin.Calls);
+    }
+
+    [Fact]
+    public void ClearStale_NotifiesMarginWithRestored()
+    {
+        var (svc, book, _, margin) = BuildWithSinkAndMargin();
+        AddWorking(book, 1UL);
+        svc.MarkStale("FIRM01", 1UL, "x", DateTimeOffset.UtcNow, null);
+        margin.Calls.Clear();
+
+        var r = svc.ClearStale("FIRM01", 1UL, "admin");
+
+        Assert.Equal(ClearStaleResult.Cleared, r);
+        var call = Assert.Single(margin.Calls);
+        Assert.Equal((1UL, ExecKind.Restored, 0L), call);
+    }
+
+    [Fact]
+    public void MarkAllWorkingByFirm_NotifiesMarginPerNewlyMarkedOrder()
+    {
+        var (svc, book, _, margin) = BuildWithSinkAndMargin();
+        AddWorking(book, 1UL);
+        AddWorking(book, 2UL);
+        var pre = AddWorking(book, 3UL);
+        Assert.True(pre.MarkStale("preexisting", DateTimeOffset.UtcNow));
+        margin.Calls.Clear();
+
+        var marked = svc.MarkAllWorkingByFirm("FIRM01", "venue_desync", DateTimeOffset.UtcNow, "auto");
+
+        Assert.Equal(2, marked);
+        Assert.Equal(2, margin.Calls.Count);
+        Assert.All(margin.Calls, c => Assert.Equal(ExecKind.Suspended, c.Kind));
+        Assert.DoesNotContain(margin.Calls, c => c.ClOrdId == 3UL);
+    }
+
+    [Fact]
+    public void MarkStale_SwallowsMarginException_StillReturnsMarked()
+    {
+        // #153. Margin failures must NOT bubble: the WAL event for
+        // MarkStale is already committed; if the admin call faulted
+        // here, the operator would think the stale state never changed
+        // when in fact it did. We log + emit a metric instead.
+        var book = new WorkingOrderBook();
+        var dispatcher = new EventDispatcher(new NullEventStore());
+        var svc = new OrderStalenessService(dispatcher, book, sink: null, margin: new ThrowingMargin());
+        AddWorking(book, 1UL);
+
+        var r = svc.MarkStale("FIRM01", 1UL, "x", DateTimeOffset.UtcNow, null);
+
+        Assert.Equal(MarkStaleResult.Marked, r);
+    }
 }

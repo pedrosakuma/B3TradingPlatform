@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using B3.Trading.Application.Observability;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -112,64 +113,126 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
 
     public void OnExecution(ulong clOrdId, ExecKind kind, long lastQty)
     {
-        if (!_reservations.TryGetValue(clOrdId, out var entry))
-            return; // unknown order (Sell, Market, or never reserved here)
-
-        switch (kind)
+        // #153. Every state lookup happens INSIDE _gate so a
+        // Suspended/Restored race with a genuine ER for the same
+        // ClOrdID cannot read a stale snapshot and double-decrement
+        // (the rubber-duck flagged that scenario where DecrementReserved's
+        // clamp-to-zero would silently consume another order's hold).
+        lock (_gate)
         {
-            case ExecKind.PartialFill:
-                if (lastQty > 0) ReleasePartial(clOrdId, entry, lastQty);
-                break;
+            if (!_reservations.TryGetValue(clOrdId, out var entry))
+                return; // unknown order (Sell, Market, never reserved here, or already terminalized)
 
-            case ExecKind.Fill:
-                if (lastQty > 0) ReleasePartial(clOrdId, entry, lastQty);
-                ReleaseRemaining(clOrdId);
-                break;
+            switch (kind)
+            {
+                case ExecKind.PartialFill:
+                    if (lastQty > 0) ReleasePartial_Locked(clOrdId, entry, lastQty);
+                    break;
 
-            case ExecKind.Canceled:
-            case ExecKind.Rejected:
-                ReleaseRemaining(clOrdId);
-                break;
+                case ExecKind.Fill:
+                    if (lastQty > 0)
+                    {
+                        ReleasePartial_Locked(clOrdId, entry, lastQty);
+                        // Re-fetch — ReleasePartial_Locked rewrote the entry.
+                        if (!_reservations.TryGetValue(clOrdId, out entry)) break;
+                    }
+                    ReleaseRemaining_Locked(clOrdId, entry);
+                    break;
 
-                // New / Replaced: nothing to release. Replaced is handled
-                // by the gateway re-issuing under a fresh ClOrdID; the
-                // original reservation stays with the original ID.
+                case ExecKind.Canceled:
+                case ExecKind.Rejected:
+                    ReleaseRemaining_Locked(clOrdId, entry);
+                    break;
+
+                case ExecKind.Suspended:
+                    // #153. Stale flip: release the cash hold so the
+                    // ghost stops blocking new trading. Idempotent: a
+                    // second Suspended on an already-suspended entry
+                    // is a no-op (the flag prevents double-decrement).
+                    if (!entry.IsSuspended && entry.RemainingNotional > 0m)
+                    {
+                        DecrementReserved(entry.Owner, entry.RemainingNotional);
+                    }
+                    _reservations[clOrdId] = entry with { IsSuspended = true };
+                    break;
+
+                case ExecKind.Restored:
+                    // #153. Admin clear-stale: re-acquire the hold.
+                    // Restore never fails — the WAL event is already
+                    // committed and refusing to track the cash would
+                    // leave the ledger inconsistent with the WAL. If
+                    // the increment exceeds the owner's base
+                    // capacity, log + emit the overcommit metric so
+                    // operators can reconcile by cancelling other
+                    // stale orders.
+                    if (entry.IsSuspended && entry.RemainingNotional > 0m)
+                    {
+                        var current = _reserved.GetValueOrDefault(entry.Owner, 0m);
+                        var next = current + entry.RemainingNotional;
+                        var baseCap = ResolveBaseAvailable(entry.Owner);
+                        if (next > baseCap)
+                        {
+                            _logger.LogWarning(
+                                "Margin restore for {ClOrdId} overcommits owner {Owner}: reserved {Current} + restored {Restored} > base {Base}.",
+                                clOrdId, entry.Owner, current, entry.RemainingNotional, baseCap);
+                            MetricsRegistry.MarginOvercommitOnRestore.Add(
+                                1, new KeyValuePair<string, object?>("owner", entry.Owner));
+                        }
+                        _reserved[entry.Owner] = next;
+                    }
+                    _reservations[clOrdId] = entry with { IsSuspended = false };
+                    break;
+
+                    // New / Replaced: nothing to release. Replaced is handled
+                    // by the gateway re-issuing under a fresh ClOrdID; the
+                    // original reservation stays with the original ID.
+            }
         }
     }
 
-    public void ReleaseReservation(ulong clOrdId) => ReleaseRemaining(clOrdId);
+    public void ReleaseReservation(ulong clOrdId)
+    {
+        lock (_gate)
+        {
+            if (_reservations.TryGetValue(clOrdId, out var entry))
+                ReleaseRemaining_Locked(clOrdId, entry);
+        }
+    }
 
-    private void ReleasePartial(ulong clOrdId, ReservationEntry entry, long lastQty)
+    private void ReleasePartial_Locked(ulong clOrdId, ReservationEntry entry, long lastQty)
     {
         var amount = entry.Price * lastQty;
         if (amount <= 0m) return;
-        lock (_gate)
+        var newRemaining = entry.RemainingNotional - amount;
+        if (newRemaining < 0m)
         {
-            // Update the per-clordid entry so a subsequent partial
-            // releases against the still-reserved remainder, never the
-            // original.
-            var newRemaining = entry.RemainingNotional - amount;
-            if (newRemaining < 0m)
-            {
-                // Should not happen if the exchange respects our qty,
-                // but defend against a misbehaving venue rather than
-                // letting reserved go negative.
-                _logger.LogWarning(
-                    "Margin partial-release for {ClOrdId} would exceed remaining ({Amount} > {Remaining}); clamping.",
-                    clOrdId, amount, entry.RemainingNotional);
-                amount = entry.RemainingNotional;
-                newRemaining = 0m;
-            }
-            DecrementReserved(entry.Owner, amount);
-            _reservations[clOrdId] = entry with { RemainingNotional = newRemaining };
+            // Should not happen if the exchange respects our qty,
+            // but defend against a misbehaving venue rather than
+            // letting reserved go negative.
+            _logger.LogWarning(
+                "Margin partial-release for {ClOrdId} would exceed remaining ({Amount} > {Remaining}); clamping.",
+                clOrdId, amount, entry.RemainingNotional);
+            amount = entry.RemainingNotional;
+            newRemaining = 0m;
         }
+        // #153. Suspended entries already had their cash released by
+        // ExecKind.Suspended; partial fills must reduce the tracked
+        // remaining notional (so a later Restored re-acquires only the
+        // post-fill leaves) WITHOUT decrementing _reserved again.
+        if (!entry.IsSuspended)
+        {
+            DecrementReserved(entry.Owner, amount);
+        }
+        _reservations[clOrdId] = entry with { RemainingNotional = newRemaining };
     }
 
-    private void ReleaseRemaining(ulong clOrdId)
+    private void ReleaseRemaining_Locked(ulong clOrdId, ReservationEntry entry)
     {
-        if (!_reservations.TryRemove(clOrdId, out var entry)) return;
+        if (!_reservations.TryRemove(clOrdId, out _)) return;
         if (entry.RemainingNotional <= 0m) return;
-        lock (_gate)
+        // #153. Suspended entries' cash was already released; only
+        // remove the tracking entry, do not double-decrement.
+        if (!entry.IsSuspended)
         {
             DecrementReserved(entry.Owner, entry.RemainingNotional);
         }
@@ -247,15 +310,23 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
         var ownerKey = owner.Value;
         lock (_gate)
         {
-            var oldRemaining = _reservations.TryGetValue(originalClOrdId, out var origEntry)
-                ? origEntry.RemainingNotional
-                : 0m;
+            // #153. A suspended original held no cash in _reserved, so
+            // the upsize-delta math must treat its tracked remaining as
+            // zero. Otherwise we'd approve a replace that, at commit
+            // time, restores the missing notional and pushes the owner
+            // over their cap. Same predicate applied in CommitReplace
+            // below — keep them in sync.
+            decimal oldHeldRemaining = 0m;
+            if (_reservations.TryGetValue(originalClOrdId, out var origEntry) && !origEntry.IsSuspended)
+            {
+                oldHeldRemaining = origEntry.RemainingNotional;
+            }
 
             // Delta semantics: we only need to reserve *additional*
             // capacity when scaling up. Downsize / same / sell-side
             // replace requires no extra reserve at Prepare time;
             // Commit will rebalance to the venue-confirmed figure.
-            var delta = newRemainingNotional - oldRemaining;
+            var delta = newRemainingNotional - oldHeldRemaining;
             if (delta <= 0m)
             {
                 // Track the in-flight intent with a zero-notional entry
@@ -301,10 +372,15 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
             }
 
             // Release the original entry entirely (returns oldRemaining).
+            // #153. As in PrepareReplaceAsync, a suspended original
+            // held no cash in _reserved — the adjustment math must
+            // not subtract its remaining notional, otherwise the
+            // owner's reserved figure would be over-released.
             decimal oldRemaining = 0m;
             if (_reservations.TryRemove(originalClOrdId, out var origEntry))
             {
-                oldRemaining = origEntry.RemainingNotional;
+                if (!origEntry.IsSuspended)
+                    oldRemaining = origEntry.RemainingNotional;
                 owner ??= origEntry.Owner;
             }
 
@@ -352,8 +428,12 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
     public void AbortReplace(ulong newClOrdId)
     {
         // Releases the upsize delta only; original reservation untouched.
-        ReleaseRemaining(newClOrdId);
+        lock (_gate)
+        {
+            if (_reservations.TryGetValue(newClOrdId, out var entry))
+                ReleaseRemaining_Locked(newClOrdId, entry);
+        }
     }
 
-    private sealed record ReservationEntry(string Owner, decimal Price, long OriginalQty, decimal RemainingNotional);
+    private sealed record ReservationEntry(string Owner, decimal Price, long OriginalQty, decimal RemainingNotional, bool IsSuspended = false);
 }
