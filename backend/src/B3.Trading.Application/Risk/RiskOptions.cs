@@ -188,6 +188,35 @@ public sealed class RiskLimits
     /// market-maker accounts or test scenarios).
     /// </summary>
     public bool? AllowSelfTrade { get; set; }
+
+    /// <summary>
+    /// Slice of #108. When <c>true</c>, Market orders are rejected
+    /// unless the reference-price lookup returns
+    /// <see cref="ReferencePriceSource.Live"/> — i.e. the live MD feed
+    /// has a fresh sample under the configured <c>MaxStaleness</c>.
+    /// Static config (<see cref="ReferencePriceSource.Fallback"/>) and
+    /// missing readings both reject. Limit orders bypass — they carry
+    /// their own price, and PriceCollar already handles the staleness
+    /// consequence on the band side. Default semantics when unset
+    /// everywhere in the precedence chain are conservative: Market
+    /// **requires** live MD (see
+    /// <see cref="Risk.Checks.StaleReferencePriceCheck"/>). Set to
+    /// <c>false</c> per-firm or per-end-client to opt out (e.g. test
+    /// accounts that legitimately route Market into the fallback path).
+    /// </summary>
+    public bool? MarketRequiresLiveRef { get; set; }
+
+    /// <summary>
+    /// Slice of #108. Optional whitelist of <see cref="OrderType"/>
+    /// values the resolved scope may submit. Case-insensitive enum
+    /// names (e.g. <c>"Limit"</c>, <c>"Market"</c>). <c>null</c> or
+    /// empty means "no whitelist — every type permitted by the venue
+    /// passes". When non-empty, a submission whose type is missing
+    /// from the list is rejected with <c>order_type_blocked</c>.
+    /// Useful for compliance scopes that should only ever use Limit,
+    /// or for staged rollouts of a new order type.
+    /// </summary>
+    public List<string>? AllowedOrderTypes { get; set; }
 }
 
 public static class RiskLimitsResolver
@@ -219,6 +248,46 @@ public static class RiskLimitsResolver
     }
 
     /// <summary>
+    /// Reference-type variant of <see cref="Resolve{T}"/> for limits whose
+    /// "unset" sentinel is <c>null</c> at the class-typed level (e.g.
+    /// <see cref="RiskLimits.AllowedOrderTypes"/>). Same precedence
+    /// chain; first non-null value wins. <paramref name="isSet"/> lets
+    /// callers treat empty collections as "not configured" (the typical
+    /// shape coming out of a JSON binder that materialises every key
+    /// even when the operator left the array blank).
+    /// </summary>
+    public static T? ResolveRef<T>(
+        RiskOptions opts,
+        string endClient,
+        string? firmId,
+        string symbol,
+        Func<RiskLimits, T?> selector,
+        Func<T, bool>? isSet = null)
+        where T : class
+    {
+        bool Set(T? v) => v is not null && (isSet is null || isSet(v));
+
+        if (opts.PerEndClient.TryGetValue(endClient, out var ec))
+        {
+            var v = selector(ec);
+            if (Set(v)) return v;
+        }
+        if (!string.IsNullOrWhiteSpace(firmId)
+            && opts.PerFirm.TryGetValue(firmId, out var fi))
+        {
+            var v = selector(fi);
+            if (Set(v)) return v;
+        }
+        if (opts.PerSymbol.TryGetValue(symbol, out var sy))
+        {
+            var v = selector(sy);
+            if (Set(v)) return v;
+        }
+        var def = selector(opts.Default);
+        return Set(def) ? def : null;
+    }
+
+    /// <summary>
     /// Convenience: resolve every <see cref="RiskLimits"/> field in
     /// one pass. Used by <c>GET /admin/risk/limits</c> to surface
     /// what the system actually thinks the cap is for a given
@@ -237,5 +306,9 @@ public static class RiskLimitsResolver
             MaxOpenOrders = Resolve(opts, endClient, firmId, symbol, l => l.MaxOpenOrders),
             AllowShortSell = Resolve(opts, endClient, firmId, symbol, l => l.AllowShortSell),
             AllowSelfTrade = Resolve(opts, endClient, firmId, symbol, l => l.AllowSelfTrade),
+            MarketRequiresLiveRef = Resolve(opts, endClient, firmId, symbol, l => l.MarketRequiresLiveRef),
+            AllowedOrderTypes = ResolveRef(opts, endClient, firmId, symbol,
+                l => l.AllowedOrderTypes,
+                v => v.Count > 0),
         };
 }

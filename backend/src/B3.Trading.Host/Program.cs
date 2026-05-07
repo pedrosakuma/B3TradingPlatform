@@ -175,6 +175,7 @@ builder.Services.AddSingleton<IReplaceMarginCoordinator>(sp =>
     sp.GetRequiredService<ReserveOnSubmitMarginProvider>());
 builder.Services.AddSingleton<IRiskCheck, KillSwitchCheck>();
 builder.Services.AddSingleton<IRiskCheck, SymbolHaltedCheck>();
+builder.Services.AddSingleton<IRiskCheck, OrderTypeAllowedCheck>();
 builder.Services.AddSingleton<IRiskCheck, MinTickSizeCheck>();
 builder.Services.AddSingleton<IRiskCheck, MinLotSizeCheck>();
 builder.Services.AddSingleton<IRiskCheck, MaxQuantityCheck>();
@@ -187,6 +188,7 @@ builder.Services.AddSingleton<IRiskCheck, MaxOpenOrdersCheck>();
 builder.Services.AddSingleton<IRiskCheck, NoNakedShortCheck>();
 builder.Services.AddSingleton<IRiskCheck, SelfTradePreventionCheck>();
 builder.Services.AddSingleton<IRiskCheck, PriceCollarCheck>();
+builder.Services.AddSingleton<IRiskCheck, StaleReferencePriceCheck>();
 builder.Services.AddSingleton<RiskPipeline>();
 
 // Throttle accountants (slice 7). TimeProvider is fetched from DI so
