@@ -1,5 +1,9 @@
+using System.Diagnostics;
+using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
+using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
+using Microsoft.Extensions.Logging;
 
 namespace B3.Trading.Application;
 
@@ -35,12 +39,21 @@ public sealed class OrderStalenessService
     private readonly EventDispatcher _dispatcher;
     private readonly WorkingOrderBook _orders;
     private readonly IExecutionEventSink _sink;
+    private readonly IMarginProvider _margin;
+    private readonly ILogger<OrderStalenessService>? _logger;
 
-    public OrderStalenessService(EventDispatcher dispatcher, WorkingOrderBook orders, IExecutionEventSink? sink = null)
+    public OrderStalenessService(
+        EventDispatcher dispatcher,
+        WorkingOrderBook orders,
+        IExecutionEventSink? sink = null,
+        IMarginProvider? margin = null,
+        ILogger<OrderStalenessService>? logger = null)
     {
         _dispatcher = dispatcher;
         _orders = orders;
         _sink = sink ?? new NoOpExecutionEventSink();
+        _margin = margin ?? new NoOpMarginProvider();
+        _logger = logger;
     }
 
     public MarkStaleResult MarkStale(string firmId, ulong clOrdId, string reason, DateTimeOffset atUtc, string? actorUserId)
@@ -78,6 +91,7 @@ public sealed class OrderStalenessService
             marked = order.MarkStale(reason, atUtc);
         });
         if (marked) PublishSyntheticEvent(order, ExecKind.Suspended, reason, atUtc);
+        if (marked) NotifyMargin(clOrdId, ExecKind.Suspended);
         return marked ? MarkStaleResult.Marked : MarkStaleResult.NotEligible;
     }
 
@@ -133,6 +147,7 @@ public sealed class OrderStalenessService
             });
             if (didMark) marked++;
             if (didMark) PublishSyntheticEvent(order, ExecKind.Suspended, reason, atUtc);
+            if (didMark) NotifyMargin(clOrdId, ExecKind.Suspended);
         }
         return marked;
     }
@@ -159,6 +174,7 @@ public sealed class OrderStalenessService
         var cleared = false;
         _dispatcher.Dispatch(evt, () => cleared = order.ClearStale());
         if (cleared) PublishSyntheticEvent(order, ExecKind.Restored, reason: "admin_clear", atUtc: DateTimeOffset.UtcNow);
+        if (cleared) NotifyMargin(clOrdId, ExecKind.Restored);
         return cleared ? ClearStaleResult.Cleared : ClearStaleResult.NotStale;
     }
 
@@ -199,6 +215,33 @@ public sealed class OrderStalenessService
             // committed and re-attempting the broadcast here would
             // risk a duplicate. Operators see staleness via the
             // metrics counter and the next reload of orders.me.
+        }
+    }
+
+    /// <summary>
+    /// #153. Mirrors the synthetic event publish but for the cash
+    /// reservation ledger: a stale flip releases the cash hold so
+    /// ghosts stop blocking new trading; an admin clear-stale
+    /// re-acquires the hold (with overcommit metric if cash is no
+    /// longer available). Margin failures are logged + counted but
+    /// MUST NOT bubble — the WAL event is already committed and
+    /// failing the admin call would leave the operator thinking the
+    /// stale state never changed when in fact it did.
+    /// </summary>
+    private void NotifyMargin(ulong clOrdId, ExecKind kind)
+    {
+        Debug.Assert(kind is ExecKind.Suspended or ExecKind.Restored);
+        try
+        {
+            _margin.OnExecution(clOrdId, kind, 0);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex,
+                "Margin {Kind} failed for {ClOrdId}; WAL state is authoritative, ledger will reconcile on next process restart via ER replay.",
+                kind, clOrdId);
+            MetricsRegistry.MarginStaleTransitionFailed.Add(
+                1, new KeyValuePair<string, object?>("kind", kind.ToString()));
         }
     }
 }
