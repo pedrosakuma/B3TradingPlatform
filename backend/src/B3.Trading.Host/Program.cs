@@ -151,6 +151,7 @@ builder.Services.AddSingleton<EventDispatcher>();
 // the RiskPipeline through the IEnumerable<IRiskCheck> ctor injection.
 builder.Services.AddSingleton<KillSwitchService>();
 builder.Services.AddSingleton<SymbolHaltService>();
+builder.Services.AddSingleton<OrderStalenessService>();
 builder.Services.AddTradingMarketData(builder.Configuration);
 builder.Services.AddSingleton<ReserveOnSubmitMarginProvider>(sp =>
     new ReserveOnSubmitMarginProvider(

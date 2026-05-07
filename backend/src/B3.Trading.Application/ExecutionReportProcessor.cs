@@ -213,6 +213,19 @@ public sealed class ExecutionReportProcessor
                 break;
         }
 
+        // Slice 1 of #132. A real terminal ER means the venue actually
+        // still knew this order — any prior advisory stale flag was a
+        // false positive. Lift it as a side-effect; replay reconstructs
+        // the same end state because the OrderStaledEvent is applied
+        // first and this terminal ER arrives later in the same WAL
+        // stream. Partial fills do NOT clear (the venue may know the
+        // original child but the trader's worry that the rest is
+        // ghosted is still valid).
+        if (order.IsStale && order.Status is OrderStatus.Filled or OrderStatus.Cancelled or OrderStatus.Rejected or OrderStatus.Replaced)
+        {
+            order.ClearStale();
+        }
+
         // Server-side STP detection (#117): if the matching engine
         // emitted a cancel with a SelfTradePrevention restatement
         // reason, mark the outbound event so the UI/logs can surface
@@ -311,6 +324,9 @@ public sealed class ExecutionReportProcessor
             or OrderStatus.Cancelled
             or OrderStatus.Replaced;
         origOrder.MarkReplaced();
+        // Slice 1 of #132: terminalising clears any advisory stale.
+        if (origOrder.IsStale)
+            origOrder.ClearStale();
 
         _sink.Publish(new ExecutionEvent(
             intent.Owner,

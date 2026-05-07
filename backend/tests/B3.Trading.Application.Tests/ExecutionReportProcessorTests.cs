@@ -293,6 +293,63 @@ public class ExecutionReportProcessorTests
         Assert.False(ev.IsNativeStp);
     }
 
+    [Fact]
+    public void TerminalFill_OnStaleOrder_AutoClearsStale()
+    {
+        var (proc, ownership, book, _, _) = Build();
+        var owner = new EndClientId("alice");
+        var order = new Order(1UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m);
+        book.TryAdd(order);
+        ownership.Register(1UL, owner);
+        order.MarkWorking();
+        order.MarkStale("matching restart", DateTimeOffset.UtcNow);
+        Assert.True(order.IsStale);
+
+        proc.Apply(1UL, ExecKind.Fill, leaves: 0, cumQty: 100, lastQty: 100, lastPx: 30m, rejectReason: null);
+
+        // Real fill arrived → venue still knew the order → false-positive
+        // stale flag is auto-lifted (slice 1 of #132).
+        Assert.Equal(OrderStatus.Filled, order.Status);
+        Assert.False(order.IsStale);
+        Assert.Null(order.StaleReason);
+    }
+
+    [Fact]
+    public void TerminalCancel_OnStaleOrder_AutoClearsStale()
+    {
+        var (proc, ownership, book, _, _) = Build();
+        var owner = new EndClientId("alice");
+        var order = new Order(1UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m);
+        book.TryAdd(order);
+        ownership.Register(1UL, owner);
+        order.MarkWorking();
+        order.MarkStale("matching restart", DateTimeOffset.UtcNow);
+
+        proc.Apply(1UL, ExecKind.Canceled, leaves: 100, cumQty: 0, lastQty: 0, lastPx: 0m, rejectReason: null);
+
+        Assert.Equal(OrderStatus.Cancelled, order.Status);
+        Assert.False(order.IsStale);
+    }
+
+    [Fact]
+    public void PartialFill_OnStaleOrder_DoesNotClearStale()
+    {
+        var (proc, ownership, book, _, _) = Build();
+        var owner = new EndClientId("alice");
+        var order = new Order(1UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m);
+        book.TryAdd(order);
+        ownership.Register(1UL, owner);
+        order.MarkWorking();
+        order.MarkStale("gap", DateTimeOffset.UtcNow);
+
+        proc.Apply(1UL, ExecKind.PartialFill, leaves: 60, cumQty: 40, lastQty: 40, lastPx: 30m, rejectReason: null);
+
+        // Partial fill: venue knew about the original child but the
+        // remainder may still be ghosted; trader's stale concern stands.
+        Assert.Equal(OrderStatus.PartiallyFilled, order.Status);
+        Assert.True(order.IsStale);
+    }
+
     private sealed class RecordingSink : IExecutionEventSink
     {
         public readonly List<ExecutionEvent> Events = new();

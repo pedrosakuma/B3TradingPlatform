@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using B3.Trading.Api.Auth;
+using B3.Trading.Application;
 using B3.Trading.Application.MarketData;
 using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
@@ -52,6 +53,71 @@ public static class AdminEndpoints
 
         group.MapDelete("/halts/{symbol}", (string symbol, HttpContext ctx, SymbolHaltService svc, EventDispatcher dispatcher) =>
             ToggleHalt(dispatcher, symbol, halted: false, ctx, () => svc.Resume(symbol)));
+
+        // ── Order staleness overlay (#132 slice 1) ────────────────
+        // Lets an admin flag a specific working order as
+        // suspected-stale-by-venue (matching restart, FIXP gap, etc.)
+        // so Cancel/Modify return 409 until it's cleared. Cleared
+        // automatically when a real terminal ER arrives. Both routes
+        // are firm-scoped so the same ClOrdID across firms (rare —
+        // ClOrdIDs are per-firm) cannot be addressed from another firm.
+        group.MapPost("/firms/{firmId}/orders/{clOrdId}/mark-stale",
+            (string firmId, string clOrdId, MarkStaleRequest req, HttpContext ctx, OrderStalenessService svc) =>
+            {
+                if (!ulong.TryParse(clOrdId, out var clOrdIdU))
+                    return Results.NotFound();
+                var reason = string.IsNullOrWhiteSpace(req?.Reason) ? "operator-marked-stale" : req!.Reason!;
+                var actor = ctx.User.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+                try
+                {
+                    var result = svc.MarkStale(firmId, clOrdIdU, reason, DateTimeOffset.UtcNow, actor);
+                    return result switch
+                    {
+                        MarkStaleResult.Marked => Results.NoContent(),
+                        MarkStaleResult.AlreadyStale => Results.NoContent(),
+                        MarkStaleResult.NotFound => Results.NotFound(),
+                        MarkStaleResult.WrongFirm => Results.NotFound(),
+                        MarkStaleResult.NotEligible => Results.Conflict(new { error = "order not eligible for stale mark (must be Working or PartiallyFilled)" }),
+                        _ => Results.StatusCode(StatusCodes.Status500InternalServerError),
+                    };
+                }
+                catch (WalBackpressureException ex)
+                {
+                    MetricsRegistry.WalBackpressure.Add(1,
+                        new KeyValuePair<string, object?>("call_site", "admin.stale.mark"));
+                    return Results.Json(
+                        new { error = "system busy (WAL backpressure)", detail = ex.Message },
+                        statusCode: StatusCodes.Status503ServiceUnavailable);
+                }
+            });
+
+        group.MapPost("/firms/{firmId}/orders/{clOrdId}/clear-stale",
+            (string firmId, string clOrdId, HttpContext ctx, OrderStalenessService svc) =>
+            {
+                if (!ulong.TryParse(clOrdId, out var clOrdIdU))
+                    return Results.NotFound();
+                var actor = ctx.User.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+                try
+                {
+                    var result = svc.ClearStale(firmId, clOrdIdU, actor);
+                    return result switch
+                    {
+                        ClearStaleResult.Cleared => Results.NoContent(),
+                        ClearStaleResult.NotStale => Results.NoContent(),
+                        ClearStaleResult.NotFound => Results.NotFound(),
+                        ClearStaleResult.WrongFirm => Results.NotFound(),
+                        _ => Results.StatusCode(StatusCodes.Status500InternalServerError),
+                    };
+                }
+                catch (WalBackpressureException ex)
+                {
+                    MetricsRegistry.WalBackpressure.Add(1,
+                        new KeyValuePair<string, object?>("call_site", "admin.stale.clear"));
+                    return Results.Json(
+                        new { error = "system busy (WAL backpressure)", detail = ex.Message },
+                        statusCode: StatusCodes.Status503ServiceUnavailable);
+                }
+            });
 
         group.MapPost("/eod", (EodMaterialiser eod, IOptions<PersistenceOptions> opts) =>
         {
@@ -308,3 +374,8 @@ public static class AdminEndpoints
         }
     }
 }
+
+/// <summary>
+/// Slice 1 of #132. Body for <c>POST /admin/firms/{firmId}/orders/{clOrdId}/mark-stale</c>.
+/// </summary>
+public sealed record MarkStaleRequest(string? Reason);
