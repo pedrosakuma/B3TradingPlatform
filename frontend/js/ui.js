@@ -671,6 +671,63 @@ function renderFirmsHealth() {
   el.title = ranked.map(r => `${r.firmId}: ${r.state}${r.reconnecting ? " (reconnecting)" : ""}`).join("\n");
 }
 
+// Header gateway pill, fed by the public /health poll. Visible to every
+// logged-in user (admins also see the richer #firms-health badge from
+// /admin/firms). Hidden when the host is in a no-session mode (Mock/
+// Stub/Unavailable — /health.exchange.firms is absent), so it never
+// guesses at a state we can't observe.
+function renderGatewayPill() {
+  const el = $("gateway-status");
+  if (!el) return;
+  const gh = getState().gatewayHealth;
+  // No data yet, or host doesn't expose firm-level state → keep hidden.
+  if (!gh || !Array.isArray(gh.firms)) {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  let toneClass, label, ariaLabel, tooltip;
+  if (gh.error) {
+    toneClass = "status-disconnected";
+    label = "gateway: unreachable";
+    ariaLabel = `Exchange gateway: unreachable (${gh.error})`;
+    tooltip = `/health fetch failed: ${gh.error}`;
+  } else if (gh.firms.length === 0) {
+    // Real mode wired but no firms registered — defensive; mirrors the
+    // /health "no firms" branch where readyForOrders is vacuously true.
+    toneClass = "status-not_ready";
+    label = "gateway: no firms";
+    ariaLabel = "Exchange gateway: no firms configured";
+    tooltip = `${gh.mode}: no firms`;
+  } else {
+    const allEstablished = gh.firms.every(f => f.state === "established");
+    const anyReconnecting = gh.firms.some(f => !!f.reconnecting);
+    if (allEstablished && gh.readyForOrders) {
+      toneClass = "status-connected";
+      label = "gateway";
+      ariaLabel = "Exchange gateway: established";
+    } else if (anyReconnecting) {
+      toneClass = "status-connecting";
+      label = "gateway: reconnecting";
+      ariaLabel = "Exchange gateway: reconnecting";
+    } else {
+      toneClass = "status-disconnected";
+      // Pick the most useful single-word state to surface in the pill
+      // when the firms differ; tooltip carries the per-firm breakdown.
+      const worst = gh.firms.find(f => f.state !== "established") ?? gh.firms[0];
+      label = `gateway: ${worst.state}`;
+      ariaLabel = `Exchange gateway: ${worst.state}`;
+    }
+    tooltip = gh.firms.map(f =>
+      `${f.firmId}: ${f.state}${f.reconnecting ? " (reconnecting)" : ""} v${f.sessionVerId}`
+    ).join("\n");
+  }
+  el.className = `status-pill ${toneClass}`;
+  el.textContent = label;
+  el.setAttribute("aria-label", ariaLabel);
+  el.title = tooltip;
+}
+
 function renderForSlice(slice) {
   if (slice === "orders" || slice === "all" || slice === "blotterFilter" || slice === "blotterPage" || slice === "selectedOrder") renderBlotter();
   if (slice === "positions" || slice === "all") renderPositions();
@@ -685,6 +742,7 @@ function renderForSlice(slice) {
   if (slice === "submitInflight") renderInflight();
   if (slice === "wsReconnect") renderReconnect();
   if (slice === "firmsHealth" || slice === "all") renderFirmsHealth();
+  if (slice === "gatewayHealth" || slice === "all") renderGatewayPill();
   if (slice === "currentView" || slice === "all") applyCurrentView(getState().currentView);
   if (slice === "watchlist" || slice === "selectedSymbol" || slice === "all") renderSelectedSymbol();
   if (slice === "watchlist" || slice === "selectedSymbol" || slice === "book" || slice === "all") renderDob();
