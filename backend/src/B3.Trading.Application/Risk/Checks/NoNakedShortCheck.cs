@@ -82,13 +82,20 @@ public sealed class NoNakedShortCheck : IRiskCheck
             && orig.Owner == ctx.Owner)
         {
             // Only subtract if the original is still counted as open
-            // (matches the predicate used in SumOpenSellLeavesForSymbol).
-            if (orig.Status is not (OrderStatus.Filled or OrderStatus.Rejected
-                or OrderStatus.Cancelled or OrderStatus.Replaced))
-            {
+            // by SumOpenSellLeavesForSymbol — terminal originals are
+            // already absent, and slice 4 of #132 also excludes stale
+            // originals (the ghost Sell does not lock inventory).
+            // The replacement leg is added unconditionally because the
+            // new ClOrdID is NOT in the book yet (OrderModifyService
+            // calls risk before TryAdd of the replacement).
+            var originalCounted =
+                !orig.IsStale &&
+                orig.Status is not (OrderStatus.Filled or OrderStatus.Rejected
+                    or OrderStatus.Cancelled or OrderStatus.Replaced);
+
+            if (originalCounted)
                 projectionAdjustment -= orig.LeavesQuantity;
-                projectionAdjustment += ctx.EffectiveLeavesQuantity ?? ctx.Quantity;
-            }
+            projectionAdjustment += ctx.EffectiveLeavesQuantity ?? ctx.Quantity;
         }
         // The incoming Sell is already counted in openSellLeaves
         // because OrderSubmissionService.TryAdd runs before risk

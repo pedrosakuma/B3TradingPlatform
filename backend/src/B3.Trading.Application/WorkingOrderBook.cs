@@ -61,6 +61,13 @@ public sealed class WorkingOrderBook
     /// the time the risk pipeline runs (the persistence dispatcher
     /// adds it before evaluation), so callers comparing to a cap
     /// should use strict <c>&gt;</c>, not <c>&gt;=</c>.
+    /// <para>
+    /// Slice 4 of #132. Stale orders (admin mark-stale or auto-detect
+    /// on FIXP venue desync) are skipped: a ghost that the venue does
+    /// not know about must not block the trader's max-open-orders
+    /// budget, otherwise a venue restart would silently freeze new
+    /// trading until every stale order is cancelled.
+    /// </para>
     /// </remarks>
     public int CountOpenForOwner(EndClientId owner)
     {
@@ -69,7 +76,9 @@ public sealed class WorkingOrderBook
         foreach (var clOrdId in set.Keys)
         {
             if (!_orders.TryGetValue(clOrdId, out var order)) continue;
-            if (!IsTerminal(order.Status)) count++;
+            if (IsTerminal(order.Status)) continue;
+            if (order.IsStale) continue;
+            count++;
         }
         return count;
     }
@@ -91,6 +100,14 @@ public sealed class WorkingOrderBook
     /// evaluation). Callers must subtract their own incoming
     /// quantity from the returned sum to avoid double-counting it
     /// against itself.
+    /// <para>
+    /// Slice 4 of #132. Stale orders are excluded from the sum: the
+    /// venue is unlikely to ever execute them, so locking inventory
+    /// against ghost Sell leaves would prevent a trader from selling
+    /// the shares they actually hold after a venue desync. The
+    /// pre-trade naked-short gate (<see cref="Risk.Checks.NoNakedShortCheck"/>)
+    /// applies the matching skip in its replace projection branch.
+    /// </para>
     /// </remarks>
     public long SumOpenSellLeavesForSymbol(EndClientId owner, string symbol)
     {
@@ -103,6 +120,7 @@ public sealed class WorkingOrderBook
             if (order.Side != OrderSide.Sell) continue;
             if (!string.Equals(order.Symbol, symbol, StringComparison.Ordinal)) continue;
             if (IsTerminal(order.Status)) continue;
+            if (order.IsStale) continue;
             total += order.LeavesQuantity;
         }
         return total;
