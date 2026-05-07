@@ -1,0 +1,67 @@
+# Honest "no-broker" overlay. Flips trading-host back to Mode=Unavailable
+# (the pre-default-Real posture) and suppresses matching-platform +
+# marketdata so a `docker compose up` with this overlay brings up only
+# trading-host + frontend.
+#
+# Use cases:
+#   - Validating the fail-closed surface (POST /orders → 502 BadGateway,
+#     /health readyForOrders=false, blotter empty, ticket disabled).
+#   - Auth/admin-only flows (login, /admin/firms CRUD) without spinning
+#     up the matching engine.
+#   - CI conformance jobs that exercise the Unavailable contract
+#     (admin/firms tests, risk-rejection-shape).
+#
+# Usage:
+#   docker compose \
+#       -f docker/docker-compose.yml \
+#       -f docker/docker-compose.unavailable.yml \
+#       up
+#
+# Why a profile-based suppression: setting `profiles: ["never-on"]` on
+# matching-platform/marketdata in this overlay hides them from the
+# default `up` (no `--profile never-on` ever passed). depends_on on
+# trading-host is also cleared so compose doesn't wait on services it
+# was just told to ignore.
+
+services:
+  trading-host:
+    # Override depends_on entirely. `!reset` is the compose v2 directive
+    # for clearing a parent value (compose merges by default; an empty
+    # mapping `{}` would no-op-merge instead of replacing). Without this
+    # the validator complains "trading-host depends on undefined service
+    # marketdata" because the suppressed services below are still
+    # referenced by the inherited depends_on.
+    depends_on: !reset null
+    environment:
+      # Honest no-broker posture. EntryPointModeValidator accepts
+      # Unavailable without any Firms[] config — no FIXP wire is opened.
+      Trading__Exchange__Mode: Unavailable
+      # Clear the FIRM01 wiring so the Firms[] array is empty and no
+      # gateway is registered. Empty strings make .NET's array binder
+      # treat the slot as missing on bind (config sources prefer to
+      # signal absence via empty string for env-var transports).
+      Trading__Exchange__Firms__0__FirmId: ""
+      Trading__Exchange__Firms__0__Endpoint: ""
+      Trading__Exchange__Firms__0__SessionId: ""
+      Trading__Exchange__Firms__0__SessionVerId: ""
+      Trading__Exchange__Firms__0__EnteringFirm: ""
+      Trading__Exchange__Firms__0__AccessKey: ""
+      Trading__Exchange__Firms__0__SenderLocation: ""
+      Trading__Exchange__Firms__0__EnteringTrader: ""
+      # Revert alice + bob to "default" firm. With no FirmGateway
+      # registered (Mode=Unavailable), the JWT firm claim is informational
+      # and order submissions short-circuit at the EntryPointMode gate
+      # before any gateway routing.
+      Trading__Auth__Users__0__Firm: default
+      Trading__Auth__Users__5__Firm: default
+      # Live ref-prices are unreachable without marketdata; kill the
+      # subscriber so it doesn't churn reconnect attempts in logs.
+      # Static fallback Trading:Risk:ReferencePrices map (still set by
+      # base) keeps the price-collar happy if any code path consults it.
+      Trading__MarketData__WsUrl: ""
+
+  matching-platform:
+    profiles: ["never-on"]
+
+  marketdata:
+    profiles: ["never-on"]

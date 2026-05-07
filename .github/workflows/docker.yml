@@ -119,12 +119,13 @@ jobs:
           TRADING_SEED_PASSWORD_SALT: rXA+be7/gEYYZQrQDsUr2g==
         run: |
           docker compose -f docker/docker-compose.yml config --quiet
+          docker compose -f docker/docker-compose.yml -f docker/docker-compose.unavailable.yml config --quiet
           docker compose -f docker/docker-compose.yml -f docker/docker-compose.observability.yml config --quiet
           docker compose -f docker/docker-compose.yml -f docker/docker-compose.conformance.yml config --quiet
           docker compose -f docker/docker-compose.yml -f docker/docker-compose.demo.yml config --quiet
 
   conformance:
-    name: Run conformance suite against compose stack
+    name: Run conformance suite against unavailable-mode stack
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: trading-host
@@ -139,6 +140,12 @@ jobs:
           # alice/wonderland — the committed hash/salt match this plaintext.
           # Signing key is a CI-only placeholder; conformance only checks
           # the round-trip works, not that the key is unique.
+          # The unavailable.yml overlay flips trading-host back to
+          # Mode=Unavailable (the pre-default-Real posture) so this job
+          # exercises the no-broker fail-closed contract — admin/firms
+          # CRUD, auth, risk-rejection-shape — without spinning up
+          # matching-platform. The real-stack-conformance job below
+          # covers the Mode=Real wire end-to-end.
           TRADING_AUTH_SIGNING_KEY: ci-conformance-placeholder-key-min-32-bytes-long-aaaaa
           TRADING_SEED_USER: alice
           TRADING_SEED_PASSWORD: wonderland
@@ -147,6 +154,7 @@ jobs:
         run: |
           docker compose \
               -f docker/docker-compose.yml \
+              -f docker/docker-compose.unavailable.yml \
               -f docker/docker-compose.conformance.yml \
               up -d --build --wait trading-host
 
@@ -160,6 +168,7 @@ jobs:
         run: |
           docker compose \
               -f docker/docker-compose.yml \
+              -f docker/docker-compose.unavailable.yml \
               -f docker/docker-compose.conformance.yml \
               run --rm --no-deps conformance
 
@@ -172,6 +181,7 @@ jobs:
         run: |
           docker compose \
               -f docker/docker-compose.yml \
+              -f docker/docker-compose.unavailable.yml \
               -f docker/docker-compose.conformance.yml \
               logs trading-host || true
 
@@ -184,6 +194,7 @@ jobs:
         run: |
           docker compose \
               -f docker/docker-compose.yml \
+              -f docker/docker-compose.unavailable.yml \
               -f docker/docker-compose.conformance.yml \
               down -v
 
@@ -246,7 +257,7 @@ jobs:
       - name: Logs (always)
         if: always()
         run: |
-          for svc in trading-host matching-platform marketdata-live; do
+          for svc in trading-host matching-platform marketdata; do
             echo "::group::$svc"
             docker compose \
                 -f docker/docker-compose.yml \
