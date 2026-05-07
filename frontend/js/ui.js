@@ -1397,8 +1397,19 @@ function orderRow(o, st) {
   const highlightAt = st.ordersHighlight?.get(o.clOrdId);
   const fresh = highlightAt && (Date.now() - highlightAt) < HIGHLIGHT_MS;
   const selected = st.selectedClOrdId === o.clOrdId;
-  const cls = [fresh ? "row-fresh" : "", selected ? "row-selected" : ""].filter(Boolean).join(" ");
-  const cancelDisabled = terminal || cancelInflight || modifyInflight;
+  // Slice 3 of #132. Surfaced from OrderDto.IsStale/StaleReason/StaledAtUtc.
+  // The platform's auto-detect (slice 2) bulk-marks every working order
+  // for a firm when the FIXP gateway sees a venue-divergence signal, so
+  // the trader needs an at-a-glance "this may not be at the venue any
+  // more" cue plus disabled actions (the backend already 409s; we gate
+  // client-side to avoid the round-trip and to show intent honestly).
+  const isStale = !!o.isStale;
+  const cls = [
+    fresh ? "row-fresh" : "",
+    selected ? "row-selected" : "",
+    isStale ? "row-stale" : "",
+  ].filter(Boolean).join(" ");
+  const cancelDisabled = terminal || cancelInflight || modifyInflight || isStale;
   const cancelLabel = cancelInflight ? "Cancelling…" : "Cancel";
   const cancelCls = "cancel-btn" + (cancelInflight ? " cancelling" : "");
   // Slice 5 of #122. Modify button shares row-selection delegation
@@ -1407,9 +1418,16 @@ function orderRow(o, st) {
   // or while either a cancel or another modify is in flight — the
   // backend's in-flight guard would 409 a second modify anyway, but
   // gating client-side avoids the round-trip and keeps the UX honest.
-  const modifyDisabled = terminal || modifyInflight || cancelInflight;
+  const modifyDisabled = terminal || modifyInflight || cancelInflight || isStale;
   const modifyLabel = modifyInflight ? "Modifying…" : "Modify";
   const modifyCls = "modify-btn" + (modifyInflight ? " modifying" : "");
+  const staleTitle = isStale
+    ? `Stale: ${o.staleReason || "venue desync"}${o.staledAtUtc ? ` (${o.staledAtUtc})` : ""}`
+    : "";
+  const staleBadge = isStale
+    ? `<span class="order-stale-badge" title="${escapeHtml(staleTitle)}">stale</span>`
+    : "";
+  const actionTitle = isStale ? `disabled — ${staleTitle}` : "";
   return `<tr data-clordid="${escapeHtml(o.clOrdId)}"${cls ? ` class="${cls}"` : ""}>
     <td><code>${escapeHtml(o.clOrdId)}</code></td>
     <td>${escapeHtml(o.symbol)}</td>
@@ -1419,9 +1437,9 @@ function orderRow(o, st) {
     <td class="num">${fmtQty(o.leavesQuantity)}</td>
     <td class="num">${fmtQty(o.cumulativeQuantity)}</td>
     <td class="num">${price}</td>
-    <td class="status-cell-${escapeHtml(o.status)}">${escapeHtml(o.status)}</td>
-    <td><button class="${modifyCls}" data-clordid="${escapeHtml(o.clOrdId)}" aria-label="Modify order ${escapeHtml(o.clOrdId)}" title="Modify" ${modifyDisabled ? "disabled" : ""}>${modifyLabel}</button></td>
-    <td><button class="${cancelCls}" data-clordid="${escapeHtml(o.clOrdId)}" aria-label="Cancel order ${escapeHtml(o.clOrdId)}" title="Cancel (Del)" ${cancelDisabled ? "disabled" : ""}>${cancelLabel}</button></td>
+    <td class="status-cell-${escapeHtml(o.status)}">${escapeHtml(o.status)}${staleBadge}</td>
+    <td class="row-stale-actions"><button class="${modifyCls}" data-clordid="${escapeHtml(o.clOrdId)}" aria-label="Modify order ${escapeHtml(o.clOrdId)}" title="${escapeHtml(actionTitle || "Modify")}" ${modifyDisabled ? "disabled" : ""}>${modifyLabel}</button></td>
+    <td class="row-stale-actions"><button class="${cancelCls}" data-clordid="${escapeHtml(o.clOrdId)}" aria-label="Cancel order ${escapeHtml(o.clOrdId)}" title="${escapeHtml(actionTitle || "Cancel (Del)")}" ${cancelDisabled ? "disabled" : ""}>${cancelLabel}</button></td>
   </tr>`;
 }
 

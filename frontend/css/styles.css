@@ -318,6 +318,30 @@ td { padding: .35rem .5rem; border-bottom: 1px solid #20283a; }
 .status-cell-Filled    { color: var(--accent); }
 .status-cell-Rejected  { color: var(--red); }
 
+/* Slice 3 of #132. Order-row staleness overlay. The row is dimmed
+ * (row dim mirrors the panel--stale convention used elsewhere) and a
+ * compact badge is appended next to the status cell. Cancel/Modify
+ * buttons fall back to the standard :disabled style because the JS
+ * sets `disabled` on them when IsStale is true — backend already 409s,
+ * but gating client-side avoids the round-trip and tells the trader
+ * unambiguously that the venue may not know the order. */
+tr.row-stale > td { opacity: .55; }
+tr.row-stale > td.row-stale-actions { opacity: 1; }
+.order-stale-badge {
+  display: inline-block;
+  margin-left: .35rem;
+  padding: 0 .35rem;
+  border: 1px solid var(--warn);
+  border-radius: 3px;
+  color: var(--warn);
+  font-size: .65rem;
+  font-weight: 600;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+  vertical-align: middle;
+  cursor: help;
+}
+
 /* ---------- Executions log ---------- */
 .executions-log {
   list-style: none; padding: 0; margin: 0; overflow: auto; flex: 1;
