@@ -331,6 +331,7 @@ if (earlyIsReal)
         return new FirmGatewayRegistry(gateways);
     });
     builder.Services.AddSingleton<IEntryPointClient>(sp => sp.GetRequiredService<FirmGatewayRegistry>());
+    builder.Services.AddSingleton<IFirmSessionStatusProvider>(sp => sp.GetRequiredService<FirmGatewayRegistry>());
     builder.Services.AddSingleton<MultiFirmExchangeGateway>(sp =>
         new MultiFirmExchangeGateway(sp.GetRequiredService<FirmGatewayRegistry>()));
     builder.Services.AddSingleton<EntryPointExecutionReportRouter>();

@@ -40,6 +40,11 @@ public static class HealthEndpoints
             // perspective so legacy test hosts that skip the wire-side
             // setup still serve /health.
             var exchange = ctx.RequestServices.GetService<ExchangeStatus>();
+            // Live FIXP session state per firm. Only registered in Real
+            // mode (FirmGatewayRegistry); Mock/Stub/Unavailable hosts get
+            // null here and the response collapses to the legacy shape
+            // (no firms[] array; readyForOrders driven by mode alone).
+            var sessions = ctx.RequestServices.GetService<IFirmSessionStatusProvider>();
             return Results.Json(new
             {
                 status = drain.IsDraining ? "draining" : "ready",
@@ -52,15 +57,50 @@ public static class HealthEndpoints
                     dataDirectory = p.DataDirectory,
                     snapshotInterval = p.SnapshotInterval,
                 },
-                exchange = exchange is null ? null : (object)new
-                {
-                    mode = exchange.Mode.ToString(),
-                    readyForOrders = exchange.ReadyForOrders,
-                    firmCount = exchange.FirmCount,
-                },
+                exchange = exchange is null ? null : BuildExchangeBlock(exchange, sessions),
             });
         });
 
         return app;
+    }
+
+    /// <summary>
+    /// Compose the <c>exchange</c> block of <c>/health</c>. When live session
+    /// state is available (Real mode), <c>readyForOrders</c> is the AND of
+    /// the configuration-level <see cref="ExchangeStatus.ReadyForOrders"/>
+    /// and "every firm in <c>established</c>". A configured-but-disconnected
+    /// gateway therefore reports <c>readyForOrders=false</c>, fixing the
+    /// long-standing surfacing bug where the badge stayed green while
+    /// submits were silently rejected by the SDK guard. Without a session
+    /// provider we keep the legacy shape (no <c>firms[]</c>, ready by mode
+    /// alone) so Mock/Stub/Unavailable smoke tests don't have to be retaught.
+    /// </summary>
+    private static object BuildExchangeBlock(ExchangeStatus exchange, IFirmSessionStatusProvider? sessions)
+    {
+        if (sessions is null)
+        {
+            return new
+            {
+                mode = exchange.Mode.ToString(),
+                readyForOrders = exchange.ReadyForOrders,
+                firmCount = exchange.FirmCount,
+            };
+        }
+
+        var firms = sessions.Snapshot();
+        var allEstablished = firms.Count == 0 || firms.All(f => f.IsEstablished);
+        return new
+        {
+            mode = exchange.Mode.ToString(),
+            readyForOrders = exchange.ReadyForOrders && allEstablished,
+            firmCount = exchange.FirmCount,
+            firms = firms.Select(f => new
+            {
+                firmId = f.FirmId,
+                state = f.SessionState,
+                reconnecting = f.IsReconnecting,
+                sessionVerId = f.SessionVerId,
+            }).ToArray(),
+        };
     }
 }

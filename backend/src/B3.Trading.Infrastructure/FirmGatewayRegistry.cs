@@ -15,7 +15,7 @@ namespace B3.Trading.Infrastructure;
 ///         consume all firms transparently.</item>
 /// </list>
 /// </summary>
-public sealed class FirmGatewayRegistry : IEntryPointClient, IAsyncDisposable
+public sealed class FirmGatewayRegistry : IEntryPointClient, IFirmSessionStatusProvider, IAsyncDisposable
 {
     private readonly Dictionary<string, B3EntryPointClientGateway> _gateways;
     private readonly Action<ExecutionReportEnvelope> _bridge;
@@ -46,6 +46,26 @@ public sealed class FirmGatewayRegistry : IEntryPointClient, IAsyncDisposable
 
     public Task ConnectAllAsync(CancellationToken ct) =>
         Task.WhenAll(_gateways.Values.Select(g => g.ConnectAsync(ct)));
+
+    /// <inheritdoc />
+    public IReadOnlyList<FirmSessionStatus> Snapshot()
+    {
+        var result = new FirmSessionStatus[_gateways.Count];
+        var i = 0;
+        foreach (var g in _gateways.Values)
+        {
+            // SessionStateTag and IsReconnecting both read volatile snapshots
+            // off the gateway. SessionStateTag projects the SDK's live
+            // FixpClientState, so a Suspended/Terminated session is
+            // immediately visible to /health on the next request.
+            result[i++] = new FirmSessionStatus(
+                g.FirmId,
+                g.SessionStateTag,
+                g.IsReconnecting,
+                g.CurrentSessionVerId);
+        }
+        return result;
+    }
 
     public event Action<ExecutionReportEnvelope>? ExecutionReportReceived;
 

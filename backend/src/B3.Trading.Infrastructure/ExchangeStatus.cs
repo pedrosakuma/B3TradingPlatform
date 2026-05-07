@@ -5,11 +5,13 @@ namespace B3.Trading.Infrastructure;
 /// as a singleton at host startup so <c>/health</c> can surface
 /// <c>exchange.{mode, readyForOrders, firmCount}</c> without poking DI.
 /// <para>
-/// <c>ReadyForOrders</c> reflects configuration, not live session state —
-/// a <see cref="ExchangeMode.Real"/> gateway with a disconnected FIXP
-/// session is still <c>true</c> here. Live connection state surfaces
-/// separately via <c>trading.entrypoint.connected</c> metrics and (Phase 8)
-/// per-firm readiness.
+/// <c>ReadyForOrders</c> here reflects configuration only — a
+/// <see cref="ExchangeMode.Real"/> gateway with a disconnected FIXP
+/// session is still <c>true</c> at this layer. The lifecycle endpoint
+/// AND-s this against per-firm live session state from
+/// <see cref="IFirmSessionStatusProvider"/> when one is registered, so the
+/// JSON-facing <c>readyForOrders</c> only flips green when every
+/// configured firm is actually <c>established</c>.
 /// </para>
 /// </summary>
 public sealed class ExchangeStatus
