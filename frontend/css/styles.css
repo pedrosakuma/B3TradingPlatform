@@ -230,6 +230,14 @@ body {
 .ticket-form input, .ticket-form select {
   background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
   border-radius: 4px; padding: .4rem .5rem; font: inherit;
+  /* Inputs inherit a default intrinsic width from the user-agent
+     (≈200px from `size=20`). Inside the row-two grid, a 1fr column on
+     the 280px ticket panel ends up ~130px wide — narrower than the
+     intrinsic min, so the input overflows the box on the right side
+     (visible in the ticket panel). `width:100%` + `min-width:0` lets
+     the input shrink with the grid track instead of clipping out. */
+  width: 100%;
+  min-width: 0;
 }
 .ticket-form .row-two { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; }
 .ticket-form button {
