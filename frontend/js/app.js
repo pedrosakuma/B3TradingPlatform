@@ -562,6 +562,15 @@ async function handleCancelOrder(clOrdId) {
   if (st.inflightCancels && st.inflightCancels.has(clOrdId)) return;
   const order = st.orders.get(clOrdId);
   if (order && ["Filled", "Cancelled", "Rejected", "PendingCancel"].includes(order.status)) return;
+  // Slice 3 of #132. Stale orders are gated client-side: the backend
+  // would 409 with reason "order is marked stale", but skipping the
+  // round-trip keeps the UX honest (the row already shows the badge
+  // and a disabled button — the keyboard Del shortcut routes here too,
+  // so this is the canonical safety point).
+  if (order && order.isStale) {
+    ui.setTicketFeedback(`cannot cancel — order ${clOrdId} is marked stale`, "warn");
+    return;
+  }
   // Both the mouse (blotter Cancel button) and the keyboard (Del)
   // routes funnel through here; confirmation is centralised so the two
   // paths can't drift in safety.
@@ -597,6 +606,7 @@ async function handleCancelAll(clOrdIds) {
     if (st.inflightCancels && st.inflightCancels.has(id)) return false;
     const o = st.orders.get(id);
     if (!o) return false;
+    if (o.isStale) return false; // slice 3 of #132 — gated client-side too
     return !["Filled", "Cancelled", "Rejected", "PendingCancel"].includes(o.status);
   });
   const total = queue.length;
@@ -652,6 +662,12 @@ async function handleModifyOrder(clOrdId, payload) {
   const order = st.orders.get(clOrdId);
   if (!order || ["Filled", "Cancelled", "Rejected"].includes(order.status)) {
     ui.setModifyModalError("Order is no longer modifiable.");
+    return;
+  }
+  if (order.isStale) {
+    // Slice 3 of #132. Modal is open at this point — surface the
+    // reason inline so the trader sees why the submit was blocked.
+    ui.setModifyModalError(`Order is marked stale${order.staleReason ? ` (${order.staleReason})` : ""} — modify disabled.`);
     return;
   }
   state.markModifyInflight(clOrdId, true);
