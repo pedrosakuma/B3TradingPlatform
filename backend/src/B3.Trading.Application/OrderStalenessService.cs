@@ -34,11 +34,13 @@ public sealed class OrderStalenessService
 {
     private readonly EventDispatcher _dispatcher;
     private readonly WorkingOrderBook _orders;
+    private readonly IExecutionEventSink _sink;
 
-    public OrderStalenessService(EventDispatcher dispatcher, WorkingOrderBook orders)
+    public OrderStalenessService(EventDispatcher dispatcher, WorkingOrderBook orders, IExecutionEventSink? sink = null)
     {
         _dispatcher = dispatcher;
         _orders = orders;
+        _sink = sink ?? new NoOpExecutionEventSink();
     }
 
     public MarkStaleResult MarkStale(string firmId, ulong clOrdId, string reason, DateTimeOffset atUtc, string? actorUserId)
@@ -75,6 +77,7 @@ public sealed class OrderStalenessService
             // so this is a sufficient barrier.
             marked = order.MarkStale(reason, atUtc);
         });
+        if (marked) PublishSyntheticEvent(order, ExecKind.Suspended, reason, atUtc);
         return marked ? MarkStaleResult.Marked : MarkStaleResult.NotEligible;
     }
 
@@ -129,6 +132,7 @@ public sealed class OrderStalenessService
                 didMark = order.MarkStale(reason, atUtc);
             });
             if (didMark) marked++;
+            if (didMark) PublishSyntheticEvent(order, ExecKind.Suspended, reason, atUtc);
         }
         return marked;
     }
@@ -154,7 +158,48 @@ public sealed class OrderStalenessService
         };
         var cleared = false;
         _dispatcher.Dispatch(evt, () => cleared = order.ClearStale());
+        if (cleared) PublishSyntheticEvent(order, ExecKind.Restored, reason: "admin_clear", atUtc: DateTimeOffset.UtcNow);
         return cleared ? ClearStaleResult.Cleared : ClearStaleResult.NotStale;
+    }
+
+    /// <summary>
+    /// Slice 5 of #132. Publishes a synthetic ExecutionEvent so
+    /// downstream consumers (UI executions log + orders.me, future
+    /// risk/positions projections) observe the staleness state-change
+    /// in real-time rather than waiting for the next reconnect /
+    /// refresh. Carries <c>LastQuantity=0</c> and no fill price
+    /// because no economic event occurred — the order's
+    /// <c>IsStale</c> overlay is the only mutation. The published
+    /// event runs OUTSIDE the dispatcher lock (after the WAL write)
+    /// so a slow subscriber cannot back-pressure the staleness path.
+    /// Sink failures are swallowed: WAL state is already authoritative
+    /// and a missed broadcast is fixable on the next reconnect.
+    /// </summary>
+    private void PublishSyntheticEvent(Order order, ExecKind kind, string reason, DateTimeOffset atUtc)
+    {
+        try
+        {
+            _sink.Publish(new ExecutionEvent(
+                Owner: order.Owner,
+                ClOrdId: order.ClOrdId,
+                Symbol: order.Symbol,
+                Side: order.Side,
+                Status: order.Status,
+                Kind: kind,
+                LeavesQuantity: order.LeavesQuantity,
+                CumulativeQuantity: order.CumulativeQuantity,
+                LastQuantity: 0,
+                LastPrice: 0m,
+                RejectReason: reason,
+                TimestampUtc: atUtc));
+        }
+        catch
+        {
+            // Intentionally swallowed — the WAL event is already
+            // committed and re-attempting the broadcast here would
+            // risk a duplicate. Operators see staleness via the
+            // metrics counter and the next reload of orders.me.
+        }
     }
 }
 

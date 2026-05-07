@@ -436,4 +436,26 @@ public enum ExecKind
     Canceled,
     Replaced,
     Rejected,
+    /// <summary>
+    /// Slice 5 of #132. Synthetic notification emitted by
+    /// <see cref="OrderStalenessService"/> when an order is flagged as
+    /// suspected-stale-by-venue (admin path or auto-detect on FIXP
+    /// peer desync). Not produced by the venue — it carries
+    /// <c>LastQuantity=0</c>, no fill price, and only changes the
+    /// advisory <c>IsStale</c> overlay on the order. Downstream
+    /// consumers (UI executions log, future risk/positions
+    /// projections) treat it as a state-change ping, not as an
+    /// economic event.
+    /// </summary>
+    Suspended,
+    /// <summary>
+    /// Slice 5 of #132. Synthetic counterpart of <see cref="Suspended"/>:
+    /// emitted when the stale overlay is lifted (admin clear path). The
+    /// auto-clear branch in <see cref="ExecutionReportProcessor"/> does
+    /// NOT publish a separate Restored event — it lifts the stale flag
+    /// as a side-effect of the genuine ER (Filled/Canceled/Rejected/
+    /// Replaced) which already broadcasts; emitting both would
+    /// double-update consumers for the same observation.
+    /// </summary>
+    Restored,
 }
