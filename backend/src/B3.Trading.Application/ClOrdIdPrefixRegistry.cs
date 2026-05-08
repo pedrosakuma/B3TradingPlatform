@@ -91,6 +91,84 @@ public sealed class ClOrdIdPrefixRegistry
         }
     }
 
+    /// <summary>
+    /// Monotonically advances the per-end-client counter and the global
+    /// prefix watermark to reflect a ClOrdID observed during WAL replay
+    /// (#157). Closes the snapshot/WAL-replay regression that #156's
+    /// defensive guard turned into a 409 — without this, after recovery
+    /// the next <see cref="Generate"/> for an end-client whose post-snapshot
+    /// activity advanced its counter would re-allocate IDs already in
+    /// the book.
+    ///
+    /// <para><b>Replay-only.</b> Single-threaded at startup, before the
+    /// host accepts traffic. The CAS loops are correct under contention
+    /// but the API is not designed to coexist with concurrent
+    /// <see cref="Generate"/> on the same end-client (a live request
+    /// could win <c>GetOrAdd</c> with a freshly allocated prefix that
+    /// disagrees with the persisted prefix, leaving the entry split).</para>
+    ///
+    /// <para><b>Validation.</b> A structurally invalid <paramref name="observedClOrdId"/>
+    /// (zero counter — never produced by <see cref="Generate"/>; or
+    /// prefix outside <see cref="MaxPrefixIndex"/>) emits the
+    /// <c>ClOrdIdRegistryCorruption</c> metric and is dropped. We do
+    /// not touch state from data we cannot trust.</para>
+    ///
+    /// <para><b>Prefix mismatch.</b> If <paramref name="endClient"/> is
+    /// already registered with a different <c>prefixIdx</c>, the existing
+    /// entry is preserved (overwriting would invalidate every ID already
+    /// generated under the live prefix). The corruption metric fires.
+    /// Critically, the observed prefix is still globally reserved via
+    /// <c>_nextPrefix</c> so a future end-client allocation does not
+    /// reuse it and produce fresh collisions.</para>
+    /// </summary>
+    public void AdvanceCounterTo(EndClientId endClient, ulong observedClOrdId)
+    {
+        ArgumentNullException.ThrowIfNull(endClient);
+
+        var prefixIdx = observedClOrdId >> CounterBits;
+        var counter = (long)(observedClOrdId & CounterMask);
+
+        if (counter == 0 || prefixIdx >= (ulong)MaxPrefixIndex)
+        {
+            Observability.MetricsRegistry.ClOrdIdRegistryCorruption.Add(1,
+                new KeyValuePair<string, object?>("end_client", endClient.Value),
+                new KeyValuePair<string, object?>("reason", "invalid_observed_clordid"));
+            return;
+        }
+
+        // Always reserve the observed prefix globally — even if the
+        // per-end-client mismatch path below bails early, we cannot
+        // leave this prefix slot available for a future fresh allocation.
+        AdvanceNextPrefixPast((long)prefixIdx);
+
+        var entry = _counters.GetOrAdd(endClient, _ => new EndClientCounter(prefixIdx));
+        if (entry.PrefixIdx != prefixIdx)
+        {
+            Observability.MetricsRegistry.ClOrdIdRegistryCorruption.Add(1,
+                new KeyValuePair<string, object?>("end_client", endClient.Value),
+                new KeyValuePair<string, object?>("reason", "prefix_mismatch"));
+            return;
+        }
+
+        long current;
+        do
+        {
+            current = Interlocked.Read(ref entry.Counter);
+            if (current >= counter) return;
+        } while (Interlocked.CompareExchange(ref entry.Counter, counter, current) != current);
+    }
+
+    private void AdvanceNextPrefixPast(long observedPrefix)
+    {
+        long current;
+        var target = observedPrefix + 1;
+        do
+        {
+            current = Interlocked.Read(ref _nextPrefix);
+            if (current >= target) return;
+        } while (Interlocked.CompareExchange(ref _nextPrefix, target, current) != current);
+    }
+
     private sealed class EndClientCounter
     {
         public readonly ulong PrefixIdx;
