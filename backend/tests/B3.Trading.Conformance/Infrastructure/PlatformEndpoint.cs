@@ -35,6 +35,9 @@ public sealed record PlatformEndpoint(
     public const string EnvAdminPassword = "B3T_ADMIN_PASS";
     public const string EnvSimulatorMode = "B3T_SIMULATOR_MODE";
     public const string EnvRealStackConformance = "B3T_REAL_STACK_CONFORMANCE";
+    public const string EnvAuthSigningKey = "B3T_AUTH_SIGNING_KEY";
+    public const string EnvAuthIssuer = "B3T_AUTH_ISSUER";
+    public const string EnvAuthAudience = "B3T_AUTH_AUDIENCE";
 
     public static PlatformEndpoint? TryResolve()
     {
@@ -94,6 +97,33 @@ public sealed record PlatformEndpoint(
         return string.Equals(v, "true", StringComparison.OrdinalIgnoreCase) || v == "1";
     }
 
+    /// <summary>
+    /// True when the operator wired the host's HS256 JWT signing key into
+    /// the conformance environment via <c>B3T_AUTH_SIGNING_KEY</c>. Tests
+    /// that need to mint deterministic tokens (e.g. expired-JWT rejection
+    /// scenarios) require the same key the host validates with — that's
+    /// the only way to assert that an authentically-signed-but-expired
+    /// token is rejected vs. just an unsigned/garbage one.
+    /// </summary>
+    public static bool IsAuthSigningKeyConfigured() =>
+        !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(EnvAuthSigningKey));
+
+    public static string GetAuthSigningKey() =>
+        Environment.GetEnvironmentVariable(EnvAuthSigningKey)
+            ?? throw new InvalidOperationException(
+                $"{EnvAuthSigningKey} not set. Gate the test with RequiresAuthSigningKey=true.");
+
+    /// <summary>
+    /// Issuer claim the host validates against. Defaults to the upstream
+    /// <see cref="JwtIssuer"/> default; override via env if the operator
+    /// changed <c>Trading:Auth:Issuer</c>.
+    /// </summary>
+    public static string GetAuthIssuer() =>
+        Environment.GetEnvironmentVariable(EnvAuthIssuer) ?? "b3-trading";
+
+    public static string GetAuthAudience() =>
+        Environment.GetEnvironmentVariable(EnvAuthAudience) ?? "b3-trading-clients";
+
     public const string SkipReason =
         "Conformance platform not configured. Set B3T_BASE_URL, B3T_AUTH_USER, B3T_AUTH_PASS to run.";
 
@@ -105,4 +135,7 @@ public sealed record PlatformEndpoint(
 
     public const string RealStackConformanceSkipReason =
         "Real-stack scenario skipped: B3T_REAL_STACK_CONFORMANCE=true not set (host is not the docker-compose real-stack sandbox).";
+
+    public const string AuthSigningKeySkipReason =
+        "Signing-key scenario skipped: B3T_AUTH_SIGNING_KEY not set (operator must mirror the host's Trading:Auth:SigningKey to mint deterministic tokens).";
 }
