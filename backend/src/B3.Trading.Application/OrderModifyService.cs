@@ -140,6 +140,34 @@ public sealed class OrderModifyService
         }
 
         var newClOrdId = _clOrdIds.Generate(req.Owner);
+        // #108 — DuplicateClOrdID defensive guard. The new ID must
+        // be unique against BOTH the working book AND in-flight
+        // pending replacements (an upstream NewClOrdId collision in
+        // PendingReplacementRegistry.TryAdd would otherwise be
+        // silently lost in the dispatch callback). Reject before
+        // risk/margin to avoid burning a margin reserve we'd then
+        // have to abort. See rubber-duck critique on PR for #153
+        // follow-up — same class of "ignored TryAdd return" bug.
+        if (_book.TryGet(newClOrdId, out _))
+        {
+            MetricsRegistry.ClOrdIdDuplicateDetected.Add(1,
+                new KeyValuePair<string, object?>("op", "modify"),
+                new KeyValuePair<string, object?>("scope", "book"));
+            _logger.LogError(
+                "Duplicate ClOrdID {NewClOrdId} for modify of {OriginalClOrdId} (owner {Owner}); refusing.",
+                newClOrdId, req.OriginalClOrdId, req.Owner.Value);
+            return OrderModifyResult.DuplicateClOrdId(newClOrdId);
+        }
+        if (_replacements.TryGet(newClOrdId, out _))
+        {
+            MetricsRegistry.ClOrdIdDuplicateDetected.Add(1,
+                new KeyValuePair<string, object?>("op", "modify"),
+                new KeyValuePair<string, object?>("scope", "pending"));
+            _logger.LogError(
+                "Duplicate ClOrdID {NewClOrdId} collides with in-flight pending replacement; refusing modify of {OriginalClOrdId}.",
+                newClOrdId, req.OriginalClOrdId);
+            return OrderModifyResult.DuplicateClOrdId(newClOrdId);
+        }
         var effectiveLeaves = req.NewQuantity - orig.CumulativeQuantity;
         var riskCtx = new RiskContext(
             req.Owner, orig.FirmId, orig.Symbol, orig.Side, orig.Type,
@@ -299,6 +327,14 @@ public sealed class OrderModifyResult
         new(OrderModifyResultKind.NotFound, 0, null, null);
     public static OrderModifyResult Drained { get; } =
         new(OrderModifyResultKind.Drained, 0, "service draining", null);
+    /// <summary>
+    /// #108 — DuplicateClOrdID guard. The just-allocated new ClOrdID
+    /// already exists in <see cref="WorkingOrderBook"/> or
+    /// <see cref="PendingReplacementRegistry"/>. No risk/margin run,
+    /// no WAL event, no gateway call. Endpoints map to <c>409 Conflict</c>.
+    /// </summary>
+    public static OrderModifyResult DuplicateClOrdId(ulong newClOrdId) =>
+        new(OrderModifyResultKind.DuplicateClOrdId, newClOrdId, "duplicate_clordid", null);
 }
 
 public enum OrderModifyResultKind
@@ -311,4 +347,5 @@ public enum OrderModifyResultKind
     GatewayFailed,
     WalBackpressure,
     Drained,
+    DuplicateClOrdId,
 }

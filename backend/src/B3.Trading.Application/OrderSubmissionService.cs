@@ -88,6 +88,26 @@ public sealed class OrderSubmissionService
             return OrderSubmissionResult.BadRequest("symbol is required");
 
         var clOrdId = _clOrdIds.Generate(req.Owner);
+        // #108 — DuplicateClOrdID defensive guard. The registry's
+        // per-end-client counter is allocated atomically, so two
+        // concurrent submits never collide here. The realistic
+        // failure mode is a snapshot/WAL-replay regression where
+        // the counter watermark fell behind the persisted state at
+        // recovery — we'd then re-allocate IDs already in the book.
+        // Reject pre-WAL: no event appended, no order created, no
+        // gateway message sent. Operators alert on the metric and
+        // the next host restart with a fixed snapshot recovers.
+        if (_book.TryGet(clOrdId, out _))
+        {
+            MetricsRegistry.ClOrdIdDuplicateDetected.Add(1,
+                new KeyValuePair<string, object?>("op", "submit"),
+                new KeyValuePair<string, object?>("scope", "book"));
+            _logger.LogError(
+                "Duplicate ClOrdID {ClOrdId} for end-client {Owner} (firm {Firm}); refusing submit. " +
+                "Likely snapshot/WAL-replay regression — investigate ClOrdIdPrefixRegistry watermark.",
+                clOrdId, req.Owner.Value, req.FirmId);
+            return OrderSubmissionResult.DuplicateClOrdId(clOrdId);
+        }
         var order = new Order(
             clOrdId, req.Owner, req.Symbol, req.SecurityId, req.Side, req.Type,
             req.Quantity, req.Price, req.FirmId,
@@ -112,7 +132,20 @@ public sealed class OrderSubmissionService
                 },
                 () =>
                 {
-                    _book.TryAdd(order);
+                    if (!_book.TryAdd(order))
+                    {
+                        // Belt-and-suspenders: pre-flight TryGet
+                        // already handled the expected case. If we
+                        // somehow reach here with a collision, the
+                        // WAL is already appended — log critical so
+                        // the inconsistency surfaces in postmortem.
+                        MetricsRegistry.ClOrdIdDuplicateDetected.Add(1,
+                            new KeyValuePair<string, object?>("op", "submit"),
+                            new KeyValuePair<string, object?>("scope", "callback"));
+                        _logger.LogCritical(
+                            "WorkingOrderBook.TryAdd failed for {ClOrdId} after pre-flight passed; book/WAL diverged.",
+                            clOrdId);
+                    }
                     _ownership.Register(clOrdId, req.Owner);
                 });
         }
@@ -255,6 +288,16 @@ public sealed class OrderSubmissionResult
         new(OrderSubmissionResultKind.BadRequest, 0, reason, null);
     public static OrderSubmissionResult Drained { get; } =
         new(OrderSubmissionResultKind.Drained, 0, "service draining", null);
+    /// <summary>
+    /// #108 — DuplicateClOrdID guard. The just-allocated ClOrdID
+    /// already exists in the <see cref="WorkingOrderBook"/>. No WAL
+    /// event was appended, no order was created, no gateway call was
+    /// made. Endpoints should map this to <c>409 Conflict</c> so
+    /// callers can distinguish it from ordinary input validation
+    /// failures and so operators can spot the invariant breach.
+    /// </summary>
+    public static OrderSubmissionResult DuplicateClOrdId(ulong clOrdId) =>
+        new(OrderSubmissionResultKind.DuplicateClOrdId, clOrdId, "duplicate_clordid", null);
 }
 
 public enum OrderSubmissionResultKind
@@ -265,4 +308,5 @@ public enum OrderSubmissionResultKind
     WalBackpressure,
     BadRequest,
     Drained,
+    DuplicateClOrdId,
 }
