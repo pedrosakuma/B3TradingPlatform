@@ -66,7 +66,7 @@ public class RecoveryAndSnapshotTests : IDisposable
         await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
         {
             var (book, positions, killSwitch, ownership, snapshotter, _, processor, _, algos) = BuildState(store);
-            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), processor, algos);
+            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), new SessionPhaseService(), processor, algos);
             var recovery = new PersistenceRecovery(store,
                 snapshotter,
                 replayer,
@@ -120,7 +120,7 @@ public class RecoveryAndSnapshotTests : IDisposable
         await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
         {
             var (book, _, killSwitch, ownership, snapshotter, _, processor, _, algos) = BuildState(store);
-            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), processor, algos);
+            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), new SessionPhaseService(), processor, algos);
             var recovery = new PersistenceRecovery(store, snapshotter, replayer,
                 new SnapshotStore(_root, "test"), NullLogger<PersistenceRecovery>.Instance);
             await recovery.RunAsync();
@@ -179,7 +179,7 @@ public class RecoveryAndSnapshotTests : IDisposable
         {
             var (book, _, killSwitch, ownership, snapshotter, _, processor, _, algos) = BuildState(store);
             var replacements = new PendingReplacementRegistry();
-            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), processor, algos, replacements);
+            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), new SessionPhaseService(), processor, algos, replacements);
             var recovery = new PersistenceRecovery(store, snapshotter, replayer,
                 new SnapshotStore(_root, "test"), NullLogger<PersistenceRecovery>.Instance);
             await recovery.RunAsync();
@@ -226,7 +226,7 @@ public class RecoveryAndSnapshotTests : IDisposable
         await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
         {
             var (book, _, killSwitch, ownership, snapshotter, _, processor, _, algos) = BuildState(store);
-            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), processor, algos);
+            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), new SessionPhaseService(), processor, algos);
             var recovery = new PersistenceRecovery(store, snapshotter, replayer,
                 new SnapshotStore(_root, "test"), NullLogger<PersistenceRecovery>.Instance);
             await recovery.RunAsync();
@@ -255,7 +255,7 @@ public class RecoveryAndSnapshotTests : IDisposable
         var sink = new TestSink();
         var processor = new ExecutionReportProcessor(ownership, book, positions, sink,
             new NoOpMarginProvider(), NullLogger<ExecutionReportProcessor>.Instance);
-        var snapshotter = new StateSnapshotter(book, positions, killSwitch, new SymbolHaltService(), clOrdIds, ownership, algos, new AlgoIdRegistry(), new CashLedger());
+        var snapshotter = new StateSnapshotter(book, positions, killSwitch, new SymbolHaltService(), new SessionPhaseService(), clOrdIds, ownership, algos, new AlgoIdRegistry(), new CashLedger());
         var dispatcher = new EventDispatcher(store);
         return (book, positions, killSwitch, ownership, snapshotter, dispatcher, processor, sink, algos);
     }
@@ -301,6 +301,67 @@ public class RecoveryAndSnapshotTests : IDisposable
                 Synthetic = false,
             },
             () => proc.Apply(clOrdId, kind, leaves, cum, last, lastPx, null));
+    }
+
+    [Fact]
+    public void EventReplayer_AppliesSessionPhaseChangedEvents()
+    {
+        // #108 — verify replayer rebuilds default + per-symbol phase state
+        // from the WAL stream alone (no snapshot).
+        var book = new WorkingOrderBook();
+        var ownership = new OrderOwnershipMap();
+        var killSwitch = new KillSwitchService();
+        var phases = new SessionPhaseService(SessionPhase.Continuous);
+        var algos = new AlgoBook();
+        var processor = new ExecutionReportProcessor(ownership, book, new PositionKeeper(),
+            new TestSink(), new NoOpMarginProvider(), NullLogger<ExecutionReportProcessor>.Instance);
+        var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(),
+            phases, processor, algos);
+
+        replayer.Apply(new SessionPhaseChangedEvent { Symbol = null, Phase = "Closed" });
+        Assert.Equal(SessionPhase.Closed, phases.DefaultPhase);
+
+        replayer.Apply(new SessionPhaseChangedEvent { Symbol = "PETR4", Phase = "OpeningAuction" });
+        Assert.Equal(SessionPhase.OpeningAuction, phases.GetPhase("PETR4"));
+        Assert.Equal(SessionPhase.Closed, phases.GetPhase("VALE3")); // no override → default
+
+        replayer.Apply(new SessionPhaseChangedEvent { Symbol = "PETR4", Phase = "Continuous", Cleared = true });
+        Assert.Equal(SessionPhase.Closed, phases.GetPhase("PETR4")); // override removed → default
+    }
+
+    [Fact]
+    public void StateSnapshotter_RoundTripsSessionPhase()
+    {
+        // #108 — the snapshot must carry the default + per-symbol overrides,
+        // otherwise the WAL+snapshot recovery path drops phase state every
+        // time the snapshot rotates.
+        var phases1 = new SessionPhaseService(SessionPhase.Continuous);
+        phases1.SetDefaultPhase(SessionPhase.AfterHours);
+        phases1.SetPhase("PETR4", SessionPhase.OpeningAuction);
+        phases1.SetPhase("VALE3", SessionPhase.Closed);
+
+        var snapshotter1 = new StateSnapshotter(
+            new WorkingOrderBook(), new PositionKeeper(), new KillSwitchService(),
+            new SymbolHaltService(), phases1,
+            new ClOrdIdPrefixRegistry(), new OrderOwnershipMap(), new AlgoBook(),
+            new AlgoIdRegistry(), new CashLedger());
+        var snap = snapshotter1.Capture(seq: 42);
+
+        // Round-trip through JSON to mimic file-store materialisation.
+        var json = System.Text.Json.JsonSerializer.Serialize(snap);
+        var snapBack = System.Text.Json.JsonSerializer.Deserialize<PlatformSnapshot>(json)!;
+
+        var phases2 = new SessionPhaseService(SessionPhase.Continuous);
+        var snapshotter2 = new StateSnapshotter(
+            new WorkingOrderBook(), new PositionKeeper(), new KillSwitchService(),
+            new SymbolHaltService(), phases2,
+            new ClOrdIdPrefixRegistry(), new OrderOwnershipMap(), new AlgoBook(),
+            new AlgoIdRegistry(), new CashLedger());
+        snapshotter2.Restore(snapBack);
+
+        Assert.Equal(SessionPhase.AfterHours, phases2.DefaultPhase);
+        Assert.Equal(SessionPhase.OpeningAuction, phases2.GetPhase("PETR4"));
+        Assert.Equal(SessionPhase.Closed, phases2.GetPhase("VALE3"));
     }
 
     private sealed class TestSink : IExecutionEventSink

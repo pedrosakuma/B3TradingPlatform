@@ -151,6 +151,17 @@ builder.Services.AddSingleton<EventDispatcher>();
 // the RiskPipeline through the IEnumerable<IRiskCheck> ctor injection.
 builder.Services.AddSingleton<KillSwitchService>();
 builder.Services.AddSingleton<SymbolHaltService>();
+builder.Services.AddSingleton<SessionPhaseService>(_ =>
+{
+    // #108 SessionPhase. Default is Continuous (back-compat); ops can pin
+    // production to a stricter posture (e.g. Closed at boot, then flip via
+    // the admin endpoint or feed) by setting Trading:SessionPhase:Default.
+    var raw = builder.Configuration["Trading:SessionPhase:Default"];
+    var def = !string.IsNullOrWhiteSpace(raw)
+        && Enum.TryParse<SessionPhase>(raw, ignoreCase: true, out var parsed)
+        ? parsed : SessionPhase.Continuous;
+    return new SessionPhaseService(def);
+});
 builder.Services.AddSingleton<OrderStalenessService>();
 // Slice 2 of #132. Reactor reads the flag set off the Trading:AutoStale section.
 builder.Services.Configure<AutoStaleOptions>(builder.Configuration.GetSection(AutoStaleOptions.SectionName));
@@ -182,6 +193,7 @@ builder.Services.AddSingleton<IReplaceMarginCoordinator>(sp =>
     sp.GetRequiredService<ReserveOnSubmitMarginProvider>());
 builder.Services.AddSingleton<IRiskCheck, KillSwitchCheck>();
 builder.Services.AddSingleton<IRiskCheck, SymbolHaltedCheck>();
+builder.Services.AddSingleton<IRiskCheck, SessionPhaseCheck>();
 builder.Services.AddSingleton<IRiskCheck, OrderTypeAllowedCheck>();
 builder.Services.AddSingleton<IRiskCheck, MinTickSizeCheck>();
 builder.Services.AddSingleton<IRiskCheck, MinLotSizeCheck>();

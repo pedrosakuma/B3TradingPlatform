@@ -12,6 +12,34 @@ public enum OrderType
     Market,
 }
 
+/// <summary>
+/// Trading session phase for an instrument (or the venue as a whole).
+/// Drives the <c>SessionPhaseCheck</c> pre-trade gate (#108): every
+/// phase admits a different subset of order types.
+///
+/// <para>B3 cash-equities reality has more granular sub-phases (e.g.
+/// random opening window, post-trade), but for pre-trade routing what
+/// matters is whether a continuous match or a call-auction is on, and
+/// whether the venue is open at all. The six values below cover that
+/// product surface without leaking match-engine internals into the
+/// risk model.</para>
+/// </summary>
+public enum SessionPhase
+{
+    /// <summary>Venue closed — no orders accepted.</summary>
+    Closed,
+    /// <summary>Pre-opening cancel-and-amend window before the call.</summary>
+    PreOpening,
+    /// <summary>Opening call auction — limit orders only, no market.</summary>
+    OpeningAuction,
+    /// <summary>Continuous matching — all order types allowed.</summary>
+    Continuous,
+    /// <summary>Closing call auction — limit orders only, no market.</summary>
+    ClosingAuction,
+    /// <summary>After-hours session — limit orders only, no market.</summary>
+    AfterHours,
+}
+
 public enum OrderStatus
 {
     PendingNew,

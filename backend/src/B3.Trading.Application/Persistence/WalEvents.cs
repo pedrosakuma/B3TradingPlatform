@@ -21,6 +21,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(ExecutionReportReceivedEvent), "er.received")]
 [JsonDerivedType(typeof(KillSwitchToggledEvent), "killswitch.toggled")]
 [JsonDerivedType(typeof(SymbolHaltToggledEvent), "symbol-halt.toggled")]
+[JsonDerivedType(typeof(SessionPhaseChangedEvent), "session-phase.changed")]
 [JsonDerivedType(typeof(AlgoCreatedEvent), "algo.created")]
 [JsonDerivedType(typeof(AlgoCancelRequestedEvent), "algo.cancel-requested")]
 [JsonDerivedType(typeof(AlgoTerminalStateRecordedEvent), "algo.terminal")]
@@ -141,6 +142,27 @@ public sealed record SymbolHaltToggledEvent : WalEvent
 {
     public required string Symbol { get; init; }
     public required bool Halted { get; init; }    // true=halt, false=resume
+    public string? ActorUserId { get; init; }
+}
+
+/// <summary>
+/// Trading session phase change for a symbol or the venue default
+/// (#108). Mirrors the audit-trail posture of <see cref="SymbolHaltToggledEvent"/>:
+/// "who moved which scope into which phase, when". Recovery rebuilds
+/// the per-symbol overrides + global default by replaying these in
+/// arrival order on top of the snapshot.
+///
+/// <para>When <see cref="Symbol"/> is null/empty the event sets the
+/// global default (<c>SetDefaultPhase</c>); otherwise it sets/clears
+/// a per-symbol override. <see cref="Cleared"/> = true means "remove
+/// the override" (the per-symbol path falls back to the default);
+/// the <see cref="Phase"/> field is then advisory only.</para>
+/// </summary>
+public sealed record SessionPhaseChangedEvent : WalEvent
+{
+    public string? Symbol { get; init; }
+    public required string Phase { get; init; }
+    public bool Cleared { get; init; }
     public string? ActorUserId { get; init; }
 }
 

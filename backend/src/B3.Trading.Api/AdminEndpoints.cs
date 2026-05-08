@@ -54,6 +54,34 @@ public static class AdminEndpoints
         group.MapDelete("/halts/{symbol}", (string symbol, HttpContext ctx, SymbolHaltService svc, EventDispatcher dispatcher) =>
             ToggleHalt(dispatcher, symbol, halted: false, ctx, () => svc.Resume(symbol)));
 
+        // ── Session phase (#108) ──────────────────────────────────
+        // Per-symbol override + global default trading phase. Drives
+        // SessionPhaseCheck; auctions reject Market, Closed rejects
+        // everything. Persisted via SessionPhaseChangedEvent so a
+        // restart restores the last known restriction — losing a
+        // non-Continuous phase on crash would silently revert to the
+        // least restrictive mode.
+        group.MapGet("/session-phase", (SessionPhaseService svc) => Results.Ok(new
+        {
+            Default = svc.DefaultPhase.ToString(),
+            Overrides = svc.ListOverrides().ToDictionary(kv => kv.Key, kv => kv.Value.ToString()),
+        }));
+
+        group.MapPost("/session-phase/default", (SessionPhasePayload req, HttpContext ctx, SessionPhaseService svc, EventDispatcher dispatcher) =>
+            ChangeSessionPhase(dispatcher, symbol: null, cleared: false, req?.Phase, ctx,
+                phase => svc.SetDefaultPhase(phase),
+                requirePhase: true));
+
+        group.MapPost("/session-phase/{symbol}", (string symbol, SessionPhasePayload req, HttpContext ctx, SessionPhaseService svc, EventDispatcher dispatcher) =>
+            ChangeSessionPhase(dispatcher, symbol, cleared: false, req?.Phase, ctx,
+                phase => svc.SetPhase(symbol, phase),
+                requirePhase: true));
+
+        group.MapDelete("/session-phase/{symbol}", (string symbol, HttpContext ctx, SessionPhaseService svc, EventDispatcher dispatcher) =>
+            ChangeSessionPhase(dispatcher, symbol, cleared: true, phaseStr: null, ctx,
+                _ => svc.ClearPhase(symbol),
+                requirePhase: false));
+
         // ── Order staleness overlay (#132 slice 1) ────────────────
         // Lets an admin flag a specific working order as
         // suspected-stale-by-venue (matching restart, FIXP gap, etc.)
@@ -373,9 +401,59 @@ public static class AdminEndpoints
                 statusCode: StatusCodes.Status503ServiceUnavailable);
         }
     }
+    private static IResult ChangeSessionPhase(
+        EventDispatcher dispatcher,
+        string? symbol,
+        bool cleared,
+        string? phaseStr,
+        HttpContext ctx,
+        Action<SessionPhase> mutate,
+        bool requirePhase)
+    {
+        SessionPhase parsed = SessionPhase.Continuous;
+        if (requirePhase)
+        {
+            if (string.IsNullOrWhiteSpace(phaseStr) || !Enum.TryParse(phaseStr, ignoreCase: true, out parsed))
+                return Results.BadRequest(new { error = "phase must be one of: Closed, PreOpening, OpeningAuction, Continuous, ClosingAuction, AfterHours" });
+        }
+
+        var actor = ctx.User.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+        try
+        {
+            dispatcher.Dispatch(
+                new SessionPhaseChangedEvent
+                {
+                    Symbol = symbol,
+                    Phase = parsed.ToString(),
+                    Cleared = cleared,
+                    ActorUserId = actor,
+                },
+                () => mutate(parsed));
+            MetricsRegistry.SessionPhaseChanged.Add(1,
+                new KeyValuePair<string, object?>("scope", string.IsNullOrWhiteSpace(symbol) ? "default" : "symbol"),
+                new KeyValuePair<string, object?>("phase", cleared ? "cleared" : parsed.ToString()));
+            return Results.NoContent();
+        }
+        catch (WalBackpressureException ex)
+        {
+            MetricsRegistry.WalBackpressure.Add(1,
+                new KeyValuePair<string, object?>("call_site", "admin.session-phase"));
+            return Results.Json(
+                new { error = "system busy (WAL backpressure)", detail = ex.Message },
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+    }
 }
 
 /// <summary>
-/// Slice 1 of #132. Body for <c>POST /admin/firms/{firmId}/orders/{clOrdId}/mark-stale</c>.
+/// Body for <c>POST /admin/session-phase[/{symbol}|/default]</c> (#108).
+/// </summary>
+public sealed class SessionPhasePayload
+{
+    public string? Phase { get; set; }
+}
+
+/// <summary>
+/// Body for <c>POST /admin/firms/{firmId}/orders/{clOrdId}/mark-stale</c> (#132 slice 1).
 /// </summary>
 public sealed record MarkStaleRequest(string? Reason);

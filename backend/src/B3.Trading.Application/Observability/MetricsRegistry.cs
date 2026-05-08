@@ -57,6 +57,16 @@ public static class MetricsRegistry
     public static readonly Counter<long> SymbolHaltToggled =
         Meter.CreateCounter<long>("trading.symbol_halt.toggled");
 
+    /// <summary>
+    /// Session-phase change counter (#108). Tagged <c>scope=default|symbol</c>
+    /// and <c>phase</c> with the new value (or <c>cleared</c> when an
+    /// override is removed). Drives ops dashboards for "did the venue
+    /// transition into/out of an auction" and audit-trail correlation
+    /// with reject spikes.
+    /// </summary>
+    public static readonly Counter<long> SessionPhaseChanged =
+        Meter.CreateCounter<long>("trading.session_phase.changed");
+
     // WAL
     public static readonly Counter<long> WalAppended =
         Meter.CreateCounter<long>("trading.wal.appended");

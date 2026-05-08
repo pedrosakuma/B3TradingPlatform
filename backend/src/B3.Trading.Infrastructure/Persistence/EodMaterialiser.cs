@@ -71,6 +71,7 @@ public sealed class EodMaterialiser
                         break;
                     case KillSwitchToggledEvent: report.KillSwitchToggleCount++; break;
                     case SymbolHaltToggledEvent: report.SymbolHaltToggleCount++; break;
+                    case SessionPhaseChangedEvent: report.SessionPhaseChangeCount++; break;
                 }
             }
         }
@@ -101,6 +102,7 @@ public sealed class EodReport
     public long RejectedCount { get; set; }
     public long KillSwitchToggleCount { get; set; }
     public long SymbolHaltToggleCount { get; set; }
+    public long SessionPhaseChangeCount { get; set; }
     public string Sha256 { get; set; } = "";
     public string Path { get; set; } = "";
 }
