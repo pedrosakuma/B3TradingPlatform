@@ -200,6 +200,15 @@ public static class MetricsRegistry
     public static readonly Counter<long> ClOrdIdRegistryCorruption =
         Meter.CreateCounter<long>("trading.orders.clordid_registry_corruption");
 
+    /// <summary>
+    /// #160. Counts AlgoIdRegistry watermark-advance refusals during WAL
+    /// replay (mirror of <see cref="ClOrdIdRegistryCorruption"/> for the
+    /// per-firm AlgoId counter). MUST be flat at zero in healthy
+    /// operation. Tagged <c>{firm, reason=invalid_observed_algoid}</c>.
+    /// </summary>
+    public static readonly Counter<long> AlgoIdRegistryCorruption =
+        Meter.CreateCounter<long>("trading.algos.algoid_registry_corruption");
+
     public static readonly Counter<long> MarginOvercommitOnRestore =
         Meter.CreateCounter<long>("trading.risk.margin_overcommit_on_restore");
 
