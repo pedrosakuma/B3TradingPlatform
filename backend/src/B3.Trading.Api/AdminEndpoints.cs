@@ -306,14 +306,17 @@ public static class AdminEndpoints
             });
         });
 
-        // POST /admin/simulator/er — synthetic ER injection for slice-4
-        // simulator mode (RFC algo-orders-v0 §4.10/§7-B3). Only mapped
-        // when Mode=Simulator at boot, so the route is invisible to other
-        // deployments. A second runtime barrier (404 if mode flips
-        // unexpectedly) is intentionally omitted because mode is fixed
-        // at startup; the not-mapped check is the single source of truth.
-        var modeAtBoot = app.ServiceProvider.GetRequiredService<IOptions<ExchangeOptions>>().Value.ResolveMode();
-        if (modeAtBoot == ExchangeMode.Simulator)
+        // POST /admin/simulator/er — synthetic ER injection (formerly the
+        // ExchangeMode.Simulator-only route; merged into Mock+AllowErInjection
+        // in #163). URL kept as /admin/simulator/er for conformance-contract
+        // stability. Only mapped when the in-process Mock gateway is active
+        // AND the operator opted in via Trading:Exchange:AllowErInjection;
+        // ExchangeOptionsValidator already refused Mode=Real/Stub/Unavailable
+        // alongside the flag, so reaching this branch implies Mode=Mock and
+        // MockEntryPointClient is in DI. The not-mapped check is the single
+        // source of truth — no second runtime barrier needed.
+        var exchangeOptsValue = app.ServiceProvider.GetRequiredService<IOptions<ExchangeOptions>>().Value;
+        if (exchangeOptsValue.ResolveMode() == ExchangeMode.Mock && exchangeOptsValue.AllowErInjection)
         {
             group.MapPost("/simulator/er", SimulatorEndpoint.Inject);
         }

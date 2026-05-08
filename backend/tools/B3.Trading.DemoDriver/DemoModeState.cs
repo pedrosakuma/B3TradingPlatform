@@ -7,15 +7,17 @@ namespace B3.Trading.DemoDriver;
 /// between the submitter and injector workers. Polls /health until the host
 /// is ready (or until cancellation), then exposes derived flags.
 ///
-/// The mode determines behavior per the rubber-duck design review:
-///   Simulator   → submits enabled, injects enabled (target mode).
-///   Mock        → submits enabled, injects disabled (orders sit working).
-///   Stub        → submits enabled but will get 502; we let the bots try
-///                 anyway, so the operator sees the failure mode honestly.
-///   Real        → submits enabled, injects disabled (cross requires real
-///                 cross-firm setup; out of D1 scope).
-///   Unavailable → submits disabled (loud warning); host explicitly refuses
-///                 orders. Bots would just spam 502s.
+/// Auto-detect uses <c>health.exchange.erInjectionEnabled</c> (Mock +
+/// AllowErInjection=true, after #163) to enable injects, NOT the legacy
+/// <c>mode == "Simulator"</c> string check that no longer exists. Mode
+/// alone is the fallback for submits-vs-no-submits decisions.
+///   ER injection enabled (Mock+flag) → submits + injects (target mode).
+///   Mock                             → submits only (orders sit working).
+///   Stub                             → submits attempted (will get 502).
+///   Real                             → submits only (cross requires real
+///                                       cross-firm setup; out of D1 scope).
+///   Unavailable                      → submits disabled (loud warning);
+///                                       host explicitly refuses orders.
 /// </summary>
 internal sealed class DemoModeState
 {
@@ -30,6 +32,7 @@ internal sealed class DemoModeState
     }
 
     public string ExchangeMode { get; private set; } = "unknown";
+    public bool ErInjectionEnabled { get; private set; }
     public bool SubmitsEnabled { get; private set; }
     public bool InjectsEnabled { get; private set; }
 
@@ -63,10 +66,12 @@ internal sealed class DemoModeState
         {
             _log.LogError("[mode] /health never became reachable; assuming Unavailable.");
             ExchangeMode = "Unavailable";
+            ErInjectionEnabled = false;
         }
         else
         {
             ExchangeMode = health.Exchange?.Mode ?? "unknown";
+            ErInjectionEnabled = health.Exchange?.ErInjectionEnabled ?? false;
         }
 
         var explicitMode = _options.Mode?.ToLowerInvariant() ?? "auto-detect";
@@ -92,12 +97,17 @@ internal sealed class DemoModeState
 
     private void ApplyAutoDetect()
     {
+        // #163: capability check replaces "mode == Simulator" string check.
+        // erInjectionEnabled is true iff Mock + AllowErInjection=true.
+        if (ErInjectionEnabled)
+        {
+            SubmitsEnabled = true;
+            InjectsEnabled = true;
+            return;
+        }
+
         switch (ExchangeMode)
         {
-            case "Simulator":
-                SubmitsEnabled = true;
-                InjectsEnabled = true;
-                break;
             case "Mock":
             case "Real":
                 SubmitsEnabled = true;
@@ -109,7 +119,7 @@ internal sealed class DemoModeState
                 InjectsEnabled = false;
                 break;
             case "Unavailable":
-                _log.LogWarning("[mode] exchange=Unavailable — demo requires Mode=Simulator. Configure docker-compose.demo.yml overlay.");
+                _log.LogWarning("[mode] exchange=Unavailable — demo requires Mock+AllowErInjection. Configure docker-compose.demo.yml overlay.");
                 SubmitsEnabled = false;
                 InjectsEnabled = false;
                 break;

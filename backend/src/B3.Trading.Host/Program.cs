@@ -387,7 +387,6 @@ builder.Services.AddSingleton<IExchangeGateway>(sp =>
         ExchangeMode.Real => throw new InvalidOperationException(
             "Trading:Exchange:Mode=Real requires the early-read flag too: set Trading:Exchange:UseRealEntryPointClient=true in env/appsettings (Real-mode hosted services must be wired pre-Build)."),
         ExchangeMode.Mock => sp.GetRequiredService<EntryPointClientGateway>(),
-        ExchangeMode.Simulator => sp.GetRequiredService<EntryPointClientGateway>(),
         _ => sp.GetRequiredService<EntryPointClientGateway>(),
     };
 });
@@ -454,23 +453,23 @@ var app = builder.Build();
     AuthSigningKeyValidator.Validate(app.Environment.EnvironmentName, authOpts.SigningKey);
 }
 
-// Simulator-mode safeguards (RFC algo-orders-v0 §4.10/§7-B3). Synthetic
-// ER injection is a powerful test feature with catastrophic blast radius
-// if it leaks into production. Four barriers: (1) loud boot-time warning,
-// (2) refuse-to-boot in Production unless an explicit opt-out is set,
-// (3) trading.simulator.mode_active gauge so dashboards/alerts can spot
-// drift, (4) /health body already exposes the mode via ExchangeStatus.
+// ER-injection safeguards (formerly Simulator-mode safeguards; #163
+// merged Simulator into Mock + AllowErInjection). Synthetic ER
+// injection is a powerful test feature with catastrophic blast radius
+// if it leaks into production. Four barriers: (1) loud boot-time
+// warning, (2) refuse-to-boot in Production unless an explicit opt-out
+// is set, (3) trading.er_injection.enabled gauge so dashboards/alerts
+// can spot drift, (4) /health body exposes erInjectionEnabled
+// alongside mode so the demo-driver and dashboards can react.
 {
-    var exchange = app.Services.GetRequiredService<ExchangeStatus>();
-    if (exchange.Mode == ExchangeMode.Simulator)
+    var exchangeOpts = app.Services.GetRequiredService<IOptions<ExchangeOptions>>().Value;
+    if (exchangeOpts.AllowErInjection)
     {
-        var exchangeOpts = app.Services.GetRequiredService<IOptions<ExchangeOptions>>().Value;
-        SimulatorBootGuard.Validate(app.Environment.EnvironmentName, exchange.Mode, exchangeOpts.AllowSimulatorInProduction);
-        var warning = SimulatorBootGuard.BuildWarning(app.Environment.EnvironmentName, exchange.Mode, exchangeOpts.AllowSimulatorInProduction);
+        ErInjectionBootGuard.Validate(app.Environment.EnvironmentName, exchangeOpts.AllowErInjection, exchangeOpts.AllowErInjectionInProduction);
+        var warning = ErInjectionBootGuard.BuildWarning(app.Environment.EnvironmentName, exchangeOpts.AllowErInjection, exchangeOpts.AllowErInjectionInProduction);
         if (warning is not null)
-            app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Simulator").LogWarning("{Warning}", warning);
-        B3.Trading.Application.Observability.MetricsRegistry.SimulatorModeActive.Add(1);
-        B3.Trading.Application.Observability.MetricsRegistry.SimulatorModeDeprecated.Add(1);
+            app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("ErInjection").LogWarning("{Warning}", warning);
+        B3.Trading.Application.Observability.MetricsRegistry.ErInjectionEnabled.Add(1);
     }
 }
 

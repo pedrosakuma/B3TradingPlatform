@@ -109,7 +109,7 @@ internal sealed class TradingClient
     // request/response use ulong rather than string.
     private sealed record InjectErRequest(ulong ClOrdId, string Type, long? LastQty, decimal? LastPx, string? RejectReason);
     private sealed record InjectErResponse(ulong ClOrdId, string ExecType, long LeavesQuantity, long CumulativeQuantity);
-    public sealed record ExchangeBlock(string Mode, bool ReadyForOrders, int FirmCount);
+    public sealed record ExchangeBlock(string Mode, bool ReadyForOrders, int FirmCount, bool ErInjectionEnabled = false);
 }
 
 internal sealed record HealthResponse(string Status, TradingClient.ExchangeBlock? Exchange);

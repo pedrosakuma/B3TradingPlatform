@@ -6,8 +6,10 @@ using System.Text.Json;
 namespace B3.Trading.Api.Tests;
 
 /// <summary>
-/// End-to-end coverage for slice 4 (Simulator gateway). Boots the host
-/// with <c>Trading:Exchange:Mode=Simulator</c>, submits a real order via
+/// End-to-end coverage for synthetic ER injection (formerly slice 4
+/// Simulator gateway; merged into Mock+AllowErInjection in #163). Boots
+/// the host with <c>Trading:Exchange:Mode=Mock</c> +
+/// <c>AllowErInjection=true</c>, submits a real order via
 /// <c>POST /orders</c>, then drives synthetic ERs via
 /// <c>POST /admin/simulator/er</c> and asserts that
 /// <c>WorkingOrderBook</c> state mutates as if a venue had emitted them.
@@ -17,7 +19,8 @@ public class SimulatorEndpointTests
     private static IDictionary<string, string?> Simulator() =>
         new Dictionary<string, string?>
         {
-            ["Trading:Exchange:Mode"] = "Simulator",
+            ["Trading:Exchange:Mode"] = "Mock",
+            ["Trading:Exchange:AllowErInjection"] = "true",
         };
 
     private static IDictionary<string, string?> WithMock() =>
@@ -154,8 +157,11 @@ public class SimulatorEndpointTests
     }
 
     [Fact]
-    public async Task Mode_NotSimulator_Route_Returns_404()
+    public async Task Mode_Mock_Without_AllowErInjection_Route_Returns_404()
     {
+        // Negative path: in #163 the route gates on
+        // Mode==Mock && AllowErInjection==true. WithMock() supplies just
+        // Mock, so /admin/simulator/er must not be mapped.
         using var f = TestAppFactory.WithOverrides(WithMock());
         using var http = f.CreateClient();
         var adminToken = await f.LoginAsync(http, "admin");

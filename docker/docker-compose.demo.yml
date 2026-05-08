@@ -1,8 +1,9 @@
 # Demo overlay for the family stack. Brings the trading-host up in
-# Mode=Simulator (synthetic ER injection enabled, NOT FOR PRODUCTION),
-# seeds three additional users (one admin + two user bots), and starts
-# the demo-driver process that hammers the trader UI with continuous
-# order/fill activity.
+# Mode=Mock + AllowErInjection=true (synthetic ER injection enabled,
+# NOT FOR PRODUCTION; #163 collapsed the legacy Mode=Simulator into
+# this combination), seeds three additional users (one admin + two user
+# bots), and starts the demo-driver process that hammers the trader UI
+# with continuous order/fill activity.
 #
 # Usage (laptop demos only):
 #   docker compose \
@@ -19,13 +20,17 @@
 # password "demopass". Both the password and the hashes are public —
 # DO NOT enable this overlay against a host reachable beyond your
 # laptop. The trading-host refuses to boot in Production with
-# Mode=Simulator unless AllowSimulatorInProduction=true is also set.
+# AllowErInjection=true unless AllowErInjectionInProduction=true is
+# also set.
 
 services:
   trading-host:
     environment:
-      # Flip to Simulator so the InjectorWorker can POST /admin/simulator/er.
-      Trading__Exchange__Mode: Simulator
+      # Flip to Mock + ER-injection so the InjectorWorker can
+      # POST /admin/simulator/er. The demo-driver auto-detects this via
+      # health.exchange.erInjectionEnabled — no DEMO_MODE override needed.
+      Trading__Exchange__Mode: Mock
+      Trading__Exchange__AllowErInjection: "true"
 
       # User-bot 1 (default seed; submits orders).
       Trading__Auth__Users__1__Username: ${DEMO_BOT_A_USER:-bot-clientA}
@@ -35,7 +40,7 @@ services:
       Trading__Auth__Users__1__Role: user
       # FIRM01 so the bots route correctly when this overlay is combined
       # with docker-compose.real.yml (real-stack registers FIRM01 only).
-      # In standalone Simulator mode the firm name is irrelevant.
+      # In standalone Mock+ER-injection mode the firm name is irrelevant.
       Trading__Auth__Users__1__Firm: FIRM01
 
       # User-bot 2 (default seed; submits orders).

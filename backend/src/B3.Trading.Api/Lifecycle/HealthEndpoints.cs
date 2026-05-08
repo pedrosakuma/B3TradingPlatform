@@ -84,6 +84,7 @@ public static class HealthEndpoints
                 mode = exchange.Mode.ToString(),
                 readyForOrders = exchange.ReadyForOrders,
                 firmCount = exchange.FirmCount,
+                erInjectionEnabled = exchange.ErInjectionEnabled,
             };
         }
 
@@ -94,6 +95,7 @@ public static class HealthEndpoints
             mode = exchange.Mode.ToString(),
             readyForOrders = exchange.ReadyForOrders && allEstablished,
             firmCount = exchange.FirmCount,
+            erInjectionEnabled = exchange.ErInjectionEnabled,
             firms = firms.Select(f => new
             {
                 firmId = f.FirmId,

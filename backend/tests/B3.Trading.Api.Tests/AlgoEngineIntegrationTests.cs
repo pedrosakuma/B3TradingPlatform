@@ -10,7 +10,8 @@ namespace B3.Trading.Api.Tests;
 
 /// <summary>
 /// End-to-end coverage for the algo orders v0 Iceberg engine (RFC §4).
-/// Boots the host with <c>Trading:Exchange:Mode=Simulator</c> so that
+/// Boots the host with <c>Trading:Exchange:Mode=Mock</c> +
+/// <c>AllowErInjection=true</c> so
 /// child orders the engine submits land in <c>WorkingOrderBook</c>
 /// and synthetic ERs can be driven via <c>POST /admin/simulator/er</c>.
 /// </summary>
@@ -19,7 +20,8 @@ public class AlgoEngineIntegrationTests
     private static IDictionary<string, string?> Simulator() =>
         new Dictionary<string, string?>
         {
-            ["Trading:Exchange:Mode"] = "Simulator",
+            ["Trading:Exchange:Mode"] = "Mock",
+            ["Trading:Exchange:AllowErInjection"] = "true",
             ["Trading:SymbolDirectory:SecurityIds:PETR4"] = "4321",
         };
 

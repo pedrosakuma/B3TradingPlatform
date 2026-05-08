@@ -48,7 +48,7 @@ public enum ExchangeMode
     /// <summary>No-op <see cref="StubExchangeGateway"/>. Submits succeed silently. CI / smoke.</summary>
     Stub,
 
-    /// <summary>In-process <c>MockEntryPointClient</c> + <c>EntryPointClientGateway</c>. No TCP. Dev loop and integration tests.</summary>
+    /// <summary>In-process <c>MockEntryPointClient</c> + <c>EntryPointClientGateway</c>. No TCP. Dev loop and integration tests. When paired with <see cref="ExchangeOptions.AllowErInjection"/>=<c>true</c>, the admin-gated <c>POST /admin/simulator/er</c> endpoint is mapped (formerly the standalone <c>Simulator</c> variant; merged into Mock in #163).</summary>
     Mock,
 
     /// <summary>Real <c>B3.EntryPoint.Client.EntryPointClient</c> per <see cref="FirmConfig"/> behind <c>MultiFirmExchangeGateway</c>.</summary>
@@ -62,16 +62,6 @@ public enum ExchangeMode
     /// orders that nothing on the wire will ever match.
     /// </summary>
     Unavailable,
-
-    /// <summary>
-    /// In-process <c>MockEntryPointClient</c> + <c>EntryPointClientGateway</c>
-    /// (same wiring as <see cref="Mock"/>) plus an admin-gated
-    /// <c>POST /admin/simulator/er</c> endpoint that lets test harnesses inject
-    /// synthetic execution reports for any working <c>ClOrdId</c>. Unblocks
-    /// algo engines (Iceberg/TWAP) without requiring a real venue.
-    /// **Never enable in production** — see <see cref="ExchangeOptions.AllowSimulatorInProduction"/>.
-    /// </summary>
-    Simulator,
 }
 
 /// <summary>
@@ -103,12 +93,29 @@ public sealed class ExchangeOptions
     public List<FirmConfig> Firms { get; set; } = new();
 
     /// <summary>
-    /// Production opt-out for <see cref="ExchangeMode.Simulator"/>. When
-    /// <c>false</c> (default), the host refuses to boot if Simulator is
-    /// selected while <c>Environment=Production</c>. Set to <c>true</c> only
+    /// When <c>true</c> AND <see cref="ResolveMode"/> is
+    /// <see cref="ExchangeMode.Mock"/>, the admin-gated
+    /// <c>POST /admin/simulator/er</c> endpoint is mapped so test harnesses
+    /// can inject synthetic execution reports for any working
+    /// <c>ClOrdId</c>. Required by Iceberg / TWAP integration + conformance
+    /// tests; replaces the legacy <c>ExchangeMode.Simulator</c> variant
+    /// (#163).
+    /// <para>
+    /// Refused for any non-Mock mode (validated at startup). Refused in
+    /// Production unless <see cref="AllowErInjectionInProduction"/> is also
+    /// <c>true</c> — synthetic ER injection has catastrophic blast radius
+    /// if it leaks into a real-money deployment.
+    /// </para>
+    /// </summary>
+    public bool AllowErInjection { get; set; }
+
+    /// <summary>
+    /// Production opt-out for <see cref="AllowErInjection"/>. When
+    /// <c>false</c> (default), the host refuses to boot if ER injection is
+    /// enabled while <c>Environment=Production</c>. Set to <c>true</c> only
     /// for explicit production-shaped sandboxes that have no real-money risk.
     /// </summary>
-    public bool AllowSimulatorInProduction { get; set; }
+    public bool AllowErInjectionInProduction { get; set; }
 
     /// <summary>
     /// Resolves the effective mode: explicit <see cref="Mode"/> if set, else

@@ -35,10 +35,11 @@
 #       on top of the real stack to opt into RequiresSandboxMatching specs.
 #   - docker-compose.real-conformance.yml → see above; sets
 #       B3T_REAL_STACK_CONFORMANCE=true and exempts alice from short/STP.
-#   - docker-compose.demo.yml         → flip to Mode=Simulator + demo bots
+#   - docker-compose.demo.yml         → flip to Mode=Mock + AllowErInjection
+#                                        (demo bots + InjectorWorker, #163)
 #       (synthetic ER injection inside trading-host; not for production).
 #       Implicitly disables matching/marketdata (still come up by default
-#       but Simulator path doesn't talk to them).
+#       but the in-process Mock+ER-injection path doesn't talk to them).
 #   - docker-compose.e2e.yml          → flip to Mode=Stub for the frontend
 #       smoke E2E (StubExchangeGateway echoes ERs in-process; matching/
 #       marketdata suppressed via profiles).

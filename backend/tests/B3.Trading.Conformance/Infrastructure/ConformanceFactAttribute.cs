@@ -27,11 +27,21 @@ public sealed class ConformanceFactAttribute : FactAttribute
     public bool RequiresAdmin { get; init; }
 
     /// <summary>
-    /// When true, the scenario only runs against a host configured with
-    /// <c>Trading:Exchange:Mode=Simulator</c> (operator declares it via
-    /// <c>B3T_SIMULATOR_MODE=true</c>). Mock/Real/Stub deployments skip.
+    /// When true, the scenario only runs against a host that opted into
+    /// synthetic ER injection (<c>POST /admin/simulator/er</c> mapped via
+    /// <c>Mode=Mock + AllowErInjection=true</c>; operator declares it via
+    /// <c>B3T_ER_INJECTION=true</c>, with legacy <c>B3T_SIMULATOR_MODE=true</c>
+    /// honored as a fallback). Real / Stub / plain-Mock deployments skip.
     /// </summary>
-    public bool RequiresSimulator { get; init; }
+    public bool RequiresErInjection { get; init; }
+
+    /// <summary>Legacy alias; kept for spec sources that haven't migrated. Same semantics as <see cref="RequiresErInjection"/>.</summary>
+    [Obsolete("Use RequiresErInjection — Mode=Simulator was merged into Mode=Mock + AllowErInjection in #163.")]
+    public bool RequiresSimulator
+    {
+        get => RequiresErInjection;
+        init => RequiresErInjection = value;
+    }
 
     /// <summary>
     /// When true, the scenario is gated to the dedicated docker-compose
@@ -90,7 +100,7 @@ public sealed class ConformanceFactAttribute : FactAttribute
             if (peer is null) return PlatformEndpoint.SkipReason;
             if (RequiresAdmin && !peer.HasAdminCredentials)
                 return PlatformEndpoint.AdminSkipReason;
-            if (RequiresSimulator && !PlatformEndpoint.IsSimulatorMode())
+            if (RequiresErInjection && !PlatformEndpoint.IsErInjectionEnabled())
                 return PlatformEndpoint.SimulatorSkipReason;
             if (RequiresSandboxMatching && !PlatformEndpoint.IsRealStackConformance())
                 return PlatformEndpoint.RealStackConformanceSkipReason;

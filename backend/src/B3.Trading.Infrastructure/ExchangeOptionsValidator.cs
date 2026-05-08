@@ -30,7 +30,27 @@ public sealed class ExchangeOptionsValidator : IValidateOptions<ExchangeOptions>
         if (options is null)
             return ValidateOptionsResult.Fail("ExchangeOptions is null.");
 
-        if (options.ResolveMode() != ExchangeMode.Real)
+        var resolved = options.ResolveMode();
+
+        // ER injection (admin-gated /admin/simulator/er) is only valid
+        // alongside the in-process Mock gateway because SimulatorEndpoint
+        // depends on MockEntryPointClient — Real / Stub / Unavailable
+        // don't register that type. Failing fast here avoids the worse
+        // outcome of an operator setting AllowErInjection=true alongside
+        // Mode=Real and assuming the test endpoint is wired.
+        if (options.AllowErInjection && resolved != ExchangeMode.Mock)
+        {
+            return ValidateOptionsResult.Fail(
+                $"Trading:Exchange:AllowErInjection=true requires Mode=Mock; got Mode={resolved}. " +
+                "ER injection is wired through MockEntryPointClient and is not registered for any other mode.");
+        }
+        if (options.AllowErInjectionInProduction && !options.AllowErInjection)
+        {
+            return ValidateOptionsResult.Fail(
+                "Trading:Exchange:AllowErInjectionInProduction=true is meaningless without AllowErInjection=true.");
+        }
+
+        if (resolved != ExchangeMode.Real)
             return ValidateOptionsResult.Success;
 
         if (options.Firms.Count == 0)

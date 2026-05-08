@@ -238,8 +238,9 @@ jobs:
 
       - name: Run conformance
         # Per RFC integration-real-stack-v0 §4.7: auth + admin/firms +
-        # risk-rejection-shape exercise the real wire; simulator + algo
-        # specs auto-skip on RequiresSimulator (no Mode=Simulator).
+        # risk-rejection-shape exercise the real wire; ER-injection +
+        # algo specs auto-skip on RequiresErInjection (host doesn't set
+        # AllowErInjection in the real-stack profile, #163).
         # `--no-deps` is critical: without it, `docker compose run` will
         # recreate trading-host (and its FIXP session) between the
         # `up --wait` step and conformance execution, which leaves the

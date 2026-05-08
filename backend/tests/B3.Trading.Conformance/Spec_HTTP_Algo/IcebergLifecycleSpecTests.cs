@@ -14,15 +14,16 @@ namespace B3.Trading.Conformance.Spec_HTTP_Algo;
 /// (3) <c>DELETE /algo/{id}</c> + cancel ER on the live child →
 ///     parent terminalises to <c>Cancelled/UserRequested</c>.
 ///
-/// Skipped unless the peer is in <c>Mode=Simulator</c>
-/// (<c>B3T_SIMULATOR_MODE=true</c>) and admin credentials are configured
-/// (<c>B3T_ADMIN_USER</c>/<c>B3T_ADMIN_PASS</c>) — the synthetic ER
-/// injection is the admin-only seam from slice 4.
+/// Skipped unless the peer opted into ER injection
+/// (<c>B3T_ER_INJECTION=true</c>; legacy <c>B3T_SIMULATOR_MODE=true</c>
+/// honored as fallback after the #163 mode collapse) and admin credentials
+/// are configured (<c>B3T_ADMIN_USER</c>/<c>B3T_ADMIN_PASS</c>) — the
+/// synthetic ER injection is the admin-only seam from slice 4.
 /// </summary>
 [Trait("Category", "Conformance")]
 public class IcebergLifecycleSpecTests
 {
-    [ConformanceFact(RequiresAdmin = true, RequiresSimulator = true)]
+    [ConformanceFact(RequiresAdmin = true, RequiresErInjection = true)]
     public async Task Iceberg_FirstChild_ThenRefill_ThenCancel()
     {
         var peer = PlatformEndpoint.TryResolve()!;
