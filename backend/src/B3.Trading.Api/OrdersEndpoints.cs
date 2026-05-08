@@ -73,6 +73,8 @@ public static class OrdersEndpoints
                         statusCode: StatusCodes.Status503ServiceUnavailable),
                 OrderSubmissionResultKind.BadRequest =>
                     Results.BadRequest(new { error = result.Reason }),
+                OrderSubmissionResultKind.DuplicateClOrdId =>
+                    Results.Conflict(new { error = result.Reason, clOrdId = result.ClOrdId.ToString() }),
                 _ => Results.StatusCode(StatusCodes.Status500InternalServerError),
             };
         });
@@ -118,6 +120,8 @@ public static class OrdersEndpoints
                     Results.Json(
                         new { error = "service draining" },
                         statusCode: StatusCodes.Status503ServiceUnavailable),
+                OrderModifyResultKind.DuplicateClOrdId =>
+                    Results.Conflict(new { error = result.Reason, newClOrdId = result.NewClOrdId.ToString() }),
                 _ => Results.StatusCode(StatusCodes.Status500InternalServerError),
             };
         });

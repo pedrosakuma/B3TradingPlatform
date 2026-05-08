@@ -164,6 +164,20 @@ public static class MetricsRegistry
     /// should monitor this counter and reconcile by cancelling stale
     /// orders. Tagged <c>{owner}</c>.
     /// </summary>
+    /// <summary>
+    /// #108 — DuplicateClOrdID guard. Counts pre-flight rejections
+    /// where <see cref="ClOrdIdPrefixRegistry"/> generated a ClOrdID
+    /// that collided with an existing entry in
+    /// <see cref="WorkingOrderBook"/> (or, for modify, also in
+    /// <see cref="PendingReplacementRegistry"/>). This counter MUST
+    /// be flat at zero in healthy operation; non-zero indicates a
+    /// registry/snapshot/WAL-replay regression where the per-end-client
+    /// counter watermark fell behind the persisted state — alert and
+    /// investigate. Tagged <c>{op=submit|modify, scope=book|pending}</c>.
+    /// </summary>
+    public static readonly Counter<long> ClOrdIdDuplicateDetected =
+        Meter.CreateCounter<long>("trading.orders.duplicate_clordid");
+
     public static readonly Counter<long> MarginOvercommitOnRestore =
         Meter.CreateCounter<long>("trading.risk.margin_overcommit_on_restore");
 
