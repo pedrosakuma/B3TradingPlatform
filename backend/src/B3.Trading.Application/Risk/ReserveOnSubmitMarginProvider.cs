@@ -283,6 +283,33 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
     internal decimal AvailableForTesting(string owner) =>
         ResolveBaseAvailable(owner) - ReservedForTesting(owner);
 
+    /// <summary>
+    /// Memory-growth observability for the suspended-reservation
+    /// path (#153 follow-up). A reservation entry that flipped to
+    /// <c>IsSuspended</c> stays in the dictionary until either an
+    /// admin clear-stale fires <see cref="ExecKind.Restored"/>, the
+    /// venue eventually delivers a terminal ER, or the host
+    /// restarts. If the venue never recovers and admin never acts,
+    /// those entries leak. Operators can watch the suspended count
+    /// here (gauge <c>trading.risk.margin_reservations{state}</c>)
+    /// to spot accumulation; the value should track the number of
+    /// flagged-stale orders visible in the trader UI.
+    /// </summary>
+    public (int Active, int Suspended) GetReservationCounts()
+    {
+        // No lock needed: ConcurrentDictionary's enumerator is
+        // weakly-consistent and a snapshot count is good enough for
+        // an observability gauge sampled every few seconds.
+        var suspended = 0;
+        var active = 0;
+        foreach (var kv in _reservations)
+        {
+            if (kv.Value.IsSuspended) suspended++;
+            else active++;
+        }
+        return (active, suspended);
+    }
+
     // ----- IReplaceMarginCoordinator (slice 2 of #122) -----
 
     /// <inheritdoc />

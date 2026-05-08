@@ -308,6 +308,47 @@ public class ReserveOnSubmitMarginProviderTests
     }
 
     [Fact]
+    public async Task GetReservationCounts_TracksActiveAndSuspendedSeparately()
+    {
+        // #153 follow-up. Memory-growth gauge: operators need to see
+        // suspended entries accumulating so a venue that never recovers
+        // doesn't quietly leak the reservation dictionary.
+        var (p, _) = Build(initial: 10_000m);
+        Assert.Equal((0, 0), p.GetReservationCounts());
+
+        await p.TryReserveAsync(1, Buy("alice", 10m, 50), CancellationToken.None);
+        await p.TryReserveAsync(2, Buy("alice", 10m, 50), CancellationToken.None);
+        Assert.Equal((2, 0), p.GetReservationCounts());
+
+        p.OnExecution(1, ExecKind.Suspended, 0);
+        Assert.Equal((1, 1), p.GetReservationCounts());
+
+        // Restored flips back to active without changing total.
+        p.OnExecution(1, ExecKind.Restored, 0);
+        Assert.Equal((2, 0), p.GetReservationCounts());
+
+        // Terminal removes the entry entirely.
+        p.OnExecution(2, ExecKind.Canceled, 0);
+        Assert.Equal((1, 0), p.GetReservationCounts());
+    }
+
+    [Fact]
+    public async Task GetReservationCounts_SuspendedThenFilled_DoesNotLeak()
+    {
+        // The auto-clear path (terminal ER on a suspended order) must
+        // remove the entry, otherwise the gauge would grow without
+        // bound on every venue restart.
+        var (p, _) = Build(initial: 1_000m);
+        await p.TryReserveAsync(1, Buy("alice", 10m, 100), CancellationToken.None);
+        p.OnExecution(1, ExecKind.Suspended, 0);
+        Assert.Equal((0, 1), p.GetReservationCounts());
+
+        p.OnExecution(1, ExecKind.Fill, 100);
+
+        Assert.Equal((0, 0), p.GetReservationCounts());
+    }
+
+    [Fact]
     public async Task CommitReplace_originalSuspended_doesNotDoubleCredit()
     {
         // CommitReplace's adjustment math: subtracting the suspended

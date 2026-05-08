@@ -421,6 +421,15 @@ var app = builder.Build();
     B3.Trading.Application.Observability.MetricsRegistry.RegisterOrderRateSources(
         () => rate.EndClientLedger.ActiveBucketCount,
         () => rate.FirmLedger.ActiveBucketCount);
+    var marginProvider = app.Services.GetService<ReserveOnSubmitMarginProvider>();
+    if (marginProvider is not null)
+    {
+        // #153 follow-up: only register when the concrete provider
+        // is in the container (Margin.Enabled=true). NoOp mode has
+        // no reservations to count.
+        B3.Trading.Application.Observability.MetricsRegistry.RegisterMarginReservationCountsSource(
+            () => marginProvider.GetReservationCounts());
+    }
 }
 
 // Fail-fast on weak / missing JWT signing key outside Development. The

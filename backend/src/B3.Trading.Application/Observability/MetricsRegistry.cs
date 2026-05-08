@@ -180,6 +180,35 @@ public static class MetricsRegistry
     /// </summary>
     public static readonly Counter<long> MarginStaleTransitionFailed =
         Meter.CreateCounter<long>("trading.risk.margin_stale_transition_failed");
+
+    /// <summary>
+    /// Memory-growth observability for the cash-margin reservation
+    /// ledger (#153 follow-up). Tagged <c>{state=active|suspended}</c>:
+    /// <list type="bullet">
+    /// <item><description><c>active</c>: live working / partially-filled orders that hold cash in <c>_reserved</c>.</description></item>
+    /// <item><description><c>suspended</c>: stale-flagged orders whose cash was released but whose tracking entry stays so a future <see cref="ExecKind.Restored"/> can re-acquire. A sustained climb of this count signals stale orders that admin never cleared and the venue never terminalized — the dictionary leaks until host restart.</description></item>
+    /// </list>
+    /// Source registered by the host once at startup via
+    /// <see cref="RegisterMarginReservationCountsSource"/>; absent
+    /// when the provider is not wired (tests, NoOp mode).
+    /// </summary>
+    private static volatile Func<(int Active, int Suspended)>? _marginReservationCountsSource;
+    public static readonly ObservableGauge<int> MarginReservations =
+        Meter.CreateObservableGauge<int>(
+            "trading.risk.margin_reservations",
+            () =>
+            {
+                var src = _marginReservationCountsSource;
+                if (src is null) return Array.Empty<Measurement<int>>();
+                var (active, suspended) = src();
+                return new[]
+                {
+                    new Measurement<int>(active, new KeyValuePair<string, object?>("state", "active")),
+                    new Measurement<int>(suspended, new KeyValuePair<string, object?>("state", "suspended")),
+                };
+            });
+    public static void RegisterMarginReservationCountsSource(Func<(int Active, int Suspended)> source) =>
+        _marginReservationCountsSource = source;
     // Last SessionVerId successfully Established for the firm. Reported as
     // an observable gauge so a stuck reconnect (gauge frozen while attempts
     // counter climbs) is visible at a glance.
