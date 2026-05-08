@@ -66,7 +66,7 @@ public class RecoveryAndSnapshotTests : IDisposable
         await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
         {
             var (book, positions, killSwitch, ownership, snapshotter, _, processor, _, algos) = BuildState(store);
-            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), new SessionPhaseService(), processor, algos, new ClOrdIdPrefixRegistry());
+            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), new SessionPhaseService(), processor, algos, new ClOrdIdPrefixRegistry(), new AlgoIdRegistry());
             var recovery = new PersistenceRecovery(store,
                 snapshotter,
                 replayer,
@@ -120,7 +120,7 @@ public class RecoveryAndSnapshotTests : IDisposable
         await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
         {
             var (book, _, killSwitch, ownership, snapshotter, _, processor, _, algos) = BuildState(store);
-            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), new SessionPhaseService(), processor, algos, new ClOrdIdPrefixRegistry());
+            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), new SessionPhaseService(), processor, algos, new ClOrdIdPrefixRegistry(), new AlgoIdRegistry());
             var recovery = new PersistenceRecovery(store, snapshotter, replayer,
                 new SnapshotStore(_root, "test"), NullLogger<PersistenceRecovery>.Instance);
             await recovery.RunAsync();
@@ -179,7 +179,7 @@ public class RecoveryAndSnapshotTests : IDisposable
         {
             var (book, _, killSwitch, ownership, snapshotter, _, processor, _, algos) = BuildState(store);
             var replacements = new PendingReplacementRegistry();
-            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), new SessionPhaseService(), processor, algos, new ClOrdIdPrefixRegistry(), replacements);
+            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), new SessionPhaseService(), processor, algos, new ClOrdIdPrefixRegistry(), new AlgoIdRegistry(), replacements);
             var recovery = new PersistenceRecovery(store, snapshotter, replayer,
                 new SnapshotStore(_root, "test"), NullLogger<PersistenceRecovery>.Instance);
             await recovery.RunAsync();
@@ -226,7 +226,7 @@ public class RecoveryAndSnapshotTests : IDisposable
         await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
         {
             var (book, _, killSwitch, ownership, snapshotter, _, processor, _, algos) = BuildState(store);
-            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), new SessionPhaseService(), processor, algos, new ClOrdIdPrefixRegistry());
+            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), new SessionPhaseService(), processor, algos, new ClOrdIdPrefixRegistry(), new AlgoIdRegistry());
             var recovery = new PersistenceRecovery(store, snapshotter, replayer,
                 new SnapshotStore(_root, "test"), NullLogger<PersistenceRecovery>.Instance);
             await recovery.RunAsync();
@@ -316,7 +316,7 @@ public class RecoveryAndSnapshotTests : IDisposable
         var processor = new ExecutionReportProcessor(ownership, book, new PositionKeeper(),
             new TestSink(), new NoOpMarginProvider(), NullLogger<ExecutionReportProcessor>.Instance);
         var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(),
-            phases, processor, algos, new ClOrdIdPrefixRegistry());
+            phases, processor, algos, new ClOrdIdPrefixRegistry(), new AlgoIdRegistry());
 
         replayer.Apply(new SessionPhaseChangedEvent { Symbol = null, Phase = "Closed" });
         Assert.Equal(SessionPhase.Closed, phases.DefaultPhase);
@@ -381,7 +381,7 @@ public class RecoveryAndSnapshotTests : IDisposable
             new TestSink(), new NoOpMarginProvider(), NullLogger<ExecutionReportProcessor>.Instance);
         var replacements = new PendingReplacementRegistry();
         var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(),
-            phases, processor, algos, clOrdIds, replacements);
+            phases, processor, algos, clOrdIds, new AlgoIdRegistry(), replacements);
 
         var alice = new EndClientId("alice");
         // Synthesise the kind of IDs the live registry would have produced
@@ -436,6 +436,44 @@ public class RecoveryAndSnapshotTests : IDisposable
         var next = clOrdIds.Generate(alice);
         Assert.Equal(prefix, next >> ClOrdIdPrefixRegistry.CounterBits);
         Assert.Equal(13UL, next & ClOrdIdPrefixRegistry.CounterMask);
+    }
+
+    [Fact]
+    public void EventReplayer_AdvancesAlgoIdWatermark_FromAlgoCreatedEvent()
+    {
+        // #160 — replay of AlgoCreatedEvent must advance AlgoIdRegistry's
+        // per-firm counter so the next live Generate doesn't regress and
+        // re-issue an AlgoId already owned by a restored algo.
+        var book = new WorkingOrderBook();
+        var ownership = new OrderOwnershipMap();
+        var killSwitch = new KillSwitchService();
+        var phases = new SessionPhaseService();
+        var algos = new AlgoBook();
+        var clOrdIds = new ClOrdIdPrefixRegistry();
+        var algoIds = new AlgoIdRegistry();
+        var processor = new ExecutionReportProcessor(ownership, book, new PositionKeeper(),
+            new TestSink(), new NoOpMarginProvider(), NullLogger<ExecutionReportProcessor>.Instance);
+        var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(),
+            phases, processor, algos, clOrdIds, algoIds);
+
+        replayer.Apply(new AlgoCreatedEvent
+        {
+            AlgoId = 42UL,
+            EndClientId = "alice",
+            FirmId = "TEST",
+            Symbol = "PETR4",
+            SecurityId = 4321UL,
+            Side = "Buy",
+            Type = "Iceberg",
+            TotalQuantity = 1000,
+            CreatedAtUtc = DateTimeOffset.UtcNow,
+            IcebergDisplayQuantity = 100,
+            IcebergLimitPrice = 30m,
+        });
+
+        Assert.Equal(43UL, algoIds.Generate("TEST"));
+        // Other firms unaffected.
+        Assert.Equal(1UL, algoIds.Generate("OTHER"));
     }
 
     private sealed class TestSink : IExecutionEventSink

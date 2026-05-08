@@ -108,6 +108,7 @@ public sealed class EventReplayer
     private readonly ExecutionReportProcessor _processor;
     private readonly AlgoBook _algos;
     private readonly ClOrdIdPrefixRegistry _clOrdIds;
+    private readonly AlgoIdRegistry _algoIds;
     private readonly PendingReplacementRegistry? _replacements;
 
     public EventReplayer(
@@ -119,6 +120,7 @@ public sealed class EventReplayer
         ExecutionReportProcessor processor,
         AlgoBook algos,
         ClOrdIdPrefixRegistry clOrdIds,
+        AlgoIdRegistry algoIds,
         PendingReplacementRegistry? replacements = null)
     {
         _orders = orders;
@@ -129,6 +131,7 @@ public sealed class EventReplayer
         _processor = processor;
         _algos = algos;
         _clOrdIds = clOrdIds;
+        _algoIds = algoIds;
         _replacements = replacements;
     }
 
@@ -266,6 +269,7 @@ public sealed class EventReplayer
 
     private void ApplyAlgoCreated(AlgoCreatedEvent ac)
     {
+        _algoIds.AdvanceCounterTo(ac.FirmId, ac.AlgoId);
         var owner = new EndClientId(ac.EndClientId);
         var side = Enum.Parse<OrderSide>(ac.Side, ignoreCase: true);
         var type = Enum.Parse<AlgoType>(ac.Type, ignoreCase: true);
