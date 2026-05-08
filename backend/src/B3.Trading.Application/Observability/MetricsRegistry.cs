@@ -142,6 +142,17 @@ public static class MetricsRegistry
     public static readonly UpDownCounter<int> SimulatorModeActive =
         Meter.CreateUpDownCounter<int>("trading.simulator.mode_active");
 
+    /// <summary>
+    /// 1 when the host booted with <c>ExchangeMode.Simulator</c>, which is
+    /// on the deprecation ramp toward removal (#134). Mirrors
+    /// <see cref="SimulatorModeActive"/> shape so the deprecation warning
+    /// can fire from a separate Prometheus alert without disturbing the
+    /// existing operational gauge. Will go away when Simulator mode is
+    /// removed in the follow-up slice.
+    /// </summary>
+    public static readonly UpDownCounter<int> SimulatorModeDeprecated =
+        Meter.CreateUpDownCounter<int>("trading.simulator.mode_deprecated");
+
     // EntryPoint upstream client (real adapter)
     public static readonly UpDownCounter<int> EntryPointConnected =
         Meter.CreateUpDownCounter<int>("trading.entrypoint.connected");

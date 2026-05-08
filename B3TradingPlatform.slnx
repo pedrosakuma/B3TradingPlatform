@@ -11,8 +11,10 @@
     <Project Path="backend/tests/B3.Trading.Application.Tests/B3.Trading.Application.Tests.csproj" />
     <Project Path="backend/tests/B3.Trading.Api.Tests/B3.Trading.Api.Tests.csproj" />
     <Project Path="backend/tests/B3.Trading.Conformance/B3.Trading.Conformance.csproj" />
+    <Project Path="backend/tests/B3.Trading.SimulatorBot.Tests/B3.Trading.SimulatorBot.Tests.csproj" />
   </Folder>
   <Folder Name="/backend/tools/">
     <Project Path="backend/tools/B3.Trading.DemoDriver/B3.Trading.DemoDriver.csproj" />
+    <Project Path="backend/tools/B3.Trading.SimulatorBot/B3.Trading.SimulatorBot.csproj" />
   </Folder>
 </Solution>

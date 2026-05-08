@@ -42,6 +42,11 @@ public static class SimulatorBootGuard
         var prodNote = isProduction && allowInProduction
             ? " AllowSimulatorInProduction=true is currently set — opt-out is ACTIVE."
             : string.Empty;
-        return $"⚠ EXCHANGE MODE: SIMULATOR — synthetic ER injection enabled. NEVER USE IN PRODUCTION.{prodNote}";
+        // #134: this in-process synthetic-ER path is on the deprecation
+        // ramp; the external SimulatorBot (docker-compose.simulator-bot.yml)
+        // is the supported replacement and goes through real FIXP.
+        return $"⚠ EXCHANGE MODE: SIMULATOR — synthetic ER injection enabled. " +
+            $"DEPRECATED (#134): use the external SimulatorBot via " +
+            $"docker/docker-compose.simulator-bot.yml instead. NEVER USE IN PRODUCTION.{prodNote}";
     }
 }

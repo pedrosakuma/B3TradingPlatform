@@ -38,7 +38,11 @@
     { "id": "FIRM01", "name": "Alpha Corretora", "enteringFirmCode": 100 }
   ],
   "sessions": [
-    { "sessionId": "10101", "firmId": "FIRM01", "accessKey": "dev-key-1" }
+    { "sessionId": "10101", "firmId": "FIRM01", "accessKey": "dev-key-1" },
+    // Reserved for the external simulator bot (issue #134). Lets the
+    // bot connect to matching-platform on its own FIXP session without
+    // colliding with trading-host's 10101.
+    { "sessionId": "10102", "firmId": "FIRM01", "accessKey": "dev-key-2" }
   ],
   "http": {
     "listen": "0.0.0.0:8080",

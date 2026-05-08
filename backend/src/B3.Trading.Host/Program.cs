@@ -470,6 +470,7 @@ var app = builder.Build();
         if (warning is not null)
             app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Simulator").LogWarning("{Warning}", warning);
         B3.Trading.Application.Observability.MetricsRegistry.SimulatorModeActive.Add(1);
+        B3.Trading.Application.Observability.MetricsRegistry.SimulatorModeDeprecated.Add(1);
     }
 }
 
