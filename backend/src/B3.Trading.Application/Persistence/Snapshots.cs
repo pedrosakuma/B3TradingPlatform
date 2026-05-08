@@ -21,6 +21,23 @@ public sealed class PlatformSnapshot
     /// "no halts" semantics they actually carried.
     /// </summary>
     public List<string> HaltedSymbols { get; init; } = new();
+
+    /// <summary>
+    /// Global default <see cref="B3.Trading.Domain.SessionPhase"/>
+    /// (#108) — applied when a symbol has no override. Older snapshots
+    /// pre-date the field and deserialise as <c>"Continuous"</c>, which
+    /// matches the implicit "trading is on" semantics they carried.
+    /// Stored as the enum name to keep the wire format stable across
+    /// future enum renumberings.
+    /// </summary>
+    public string DefaultSessionPhase { get; init; } = "Continuous";
+
+    /// <summary>
+    /// Per-symbol session-phase overrides (#108). Empty on snapshots
+    /// pre-dating the field, which collapses to "everything follows
+    /// the default" — same behaviour as before the slice existed.
+    /// </summary>
+    public List<SessionPhaseOverrideSnapshot> SessionPhaseOverrides { get; init; } = new();
     public ClOrdIdRegistrySnapshot ClOrdIds { get; init; } = new();
     public List<OwnershipMappingSnapshot> Ownership { get; init; } = new();
     public List<AlgoSnapshot> Algos { get; init; } = new();
@@ -123,3 +140,9 @@ public sealed class AlgoIdRegistrySnapshot
 }
 
 public sealed record AlgoIdCounterSnapshot(string FirmId, long Counter);
+
+/// <summary>
+/// One per-symbol session-phase override (#108). Phase stored as the
+/// enum name for forward-compat across reorderings.
+/// </summary>
+public sealed record SessionPhaseOverrideSnapshot(string Symbol, string Phase);

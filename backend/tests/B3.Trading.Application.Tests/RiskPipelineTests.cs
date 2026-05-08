@@ -93,6 +93,113 @@ public class RiskPipelineTests
         Assert.True(halts.IsHalted("ITUB4"));
     }
 
+    // ── SessionPhase (#108) ────────────────────────────────────────────────
+
+    [Fact]
+    public void SessionPhase_DefaultContinuous_ApprovesEverything()
+    {
+        var svc = new SessionPhaseService(); // default = Continuous
+        var check = new SessionPhaseCheck(svc);
+        Assert.True(check.Check(Ctx(type: OrderType.Limit)).Approved);
+        Assert.True(check.Check(Ctx(type: OrderType.Market, price: null)).Approved);
+    }
+
+    [Fact]
+    public void SessionPhase_Closed_RejectsAll()
+    {
+        var svc = new SessionPhaseService(SessionPhase.Closed);
+        var check = new SessionPhaseCheck(svc);
+        var lim = check.Check(Ctx(type: OrderType.Limit));
+        var mkt = check.Check(Ctx(type: OrderType.Market, price: null));
+        Assert.False(lim.Approved);
+        Assert.False(mkt.Approved);
+        Assert.Contains("phase_not_allowed:closed", lim.Reason);
+        Assert.Contains("phase_not_allowed:closed", mkt.Reason);
+    }
+
+    [Theory]
+    [InlineData(SessionPhase.PreOpening)]
+    [InlineData(SessionPhase.OpeningAuction)]
+    [InlineData(SessionPhase.ClosingAuction)]
+    public void SessionPhase_Auction_RejectsMarketAllowsLimit(SessionPhase phase)
+    {
+        var svc = new SessionPhaseService();
+        svc.SetPhase("PETR4", phase);
+        var check = new SessionPhaseCheck(svc);
+        Assert.True(check.Check(Ctx(symbol: "PETR4", type: OrderType.Limit)).Approved);
+        var mkt = check.Check(Ctx(symbol: "PETR4", type: OrderType.Market, price: null));
+        Assert.False(mkt.Approved);
+        Assert.Contains("phase_not_allowed:auction", mkt.Reason);
+    }
+
+    [Fact]
+    public void SessionPhase_AfterHours_RejectsMarketAllowsLimit()
+    {
+        var svc = new SessionPhaseService();
+        svc.SetPhase("PETR4", SessionPhase.AfterHours);
+        var check = new SessionPhaseCheck(svc);
+        Assert.True(check.Check(Ctx(symbol: "PETR4", type: OrderType.Limit)).Approved);
+        var mkt = check.Check(Ctx(symbol: "PETR4", type: OrderType.Market, price: null));
+        Assert.False(mkt.Approved);
+        Assert.Contains("phase_not_allowed:after_hours", mkt.Reason);
+    }
+
+    [Fact]
+    public void SessionPhase_PerSymbolOverrideWinsOverDefault()
+    {
+        // Default closed; PETR4 explicitly continuous → only PETR4 trades.
+        var svc = new SessionPhaseService(SessionPhase.Closed);
+        svc.SetPhase("PETR4", SessionPhase.Continuous);
+        var check = new SessionPhaseCheck(svc);
+        Assert.True(check.Check(Ctx(symbol: "PETR4")).Approved);
+        Assert.False(check.Check(Ctx(symbol: "VALE3")).Approved);
+    }
+
+    [Fact]
+    public void SessionPhase_ClearOverride_FallsBackToDefault()
+    {
+        var svc = new SessionPhaseService(SessionPhase.Closed);
+        svc.SetPhase("PETR4", SessionPhase.Continuous);
+        Assert.Equal(SessionPhase.Continuous, svc.GetPhase("PETR4"));
+        Assert.True(svc.ClearPhase("PETR4"));
+        Assert.Equal(SessionPhase.Closed, svc.GetPhase("PETR4"));
+    }
+
+    [Fact]
+    public void SessionPhase_IsCaseInsensitive()
+    {
+        var svc = new SessionPhaseService();
+        svc.SetPhase("petr4", SessionPhase.OpeningAuction);
+        Assert.Equal(SessionPhase.OpeningAuction, svc.GetPhase("PETR4"));
+    }
+
+    [Fact]
+    public void SessionPhase_Restore_ReplacesAllState()
+    {
+        var svc = new SessionPhaseService(SessionPhase.Continuous);
+        svc.SetPhase("PETR4", SessionPhase.OpeningAuction);
+        svc.Restore(SessionPhase.Closed, new[]
+        {
+            new KeyValuePair<string, SessionPhase>("VALE3", SessionPhase.AfterHours),
+        });
+        Assert.Equal(SessionPhase.Closed, svc.DefaultPhase);
+        Assert.Equal(SessionPhase.AfterHours, svc.GetPhase("VALE3"));
+        Assert.Equal(SessionPhase.Closed, svc.GetPhase("PETR4")); // override gone, falls back
+    }
+
+    [Fact]
+    public void SessionPhase_DefaultPhaseChange_AffectsUnoverriddenSymbols()
+    {
+        var svc = new SessionPhaseService(SessionPhase.Continuous);
+        svc.SetPhase("PETR4", SessionPhase.AfterHours);
+        svc.SetDefaultPhase(SessionPhase.Closed);
+        var check = new SessionPhaseCheck(svc);
+        // VALE3 has no override → uses new default Closed → reject.
+        Assert.False(check.Check(Ctx(symbol: "VALE3")).Approved);
+        // PETR4 retains explicit AfterHours override → limit ok.
+        Assert.True(check.Check(Ctx(symbol: "PETR4", type: OrderType.Limit)).Approved);
+    }
+
     [Fact]
     public void KillSwitch_PerFirm_Blocks()
     {

@@ -139,6 +139,73 @@ public class RiskAndAdminEndpointsTests : IClassFixture<TestAppFactory>
         }
     }
 
+    [Fact]
+    public async Task AdminSessionPhaseEndpoints_RequireAdminRole()
+    {
+        using var userClient = await _factory.CreateAuthedClientAsync(); // alice (user role)
+        var get = await userClient.GetAsync("/admin/session-phase");
+        Assert.Equal(HttpStatusCode.Forbidden, get.StatusCode);
+        var post = await userClient.PostAsJsonAsync("/admin/session-phase/PETR4", new { phase = "Closed" });
+        Assert.Equal(HttpStatusCode.Forbidden, post.StatusCode);
+    }
+
+    [Fact]
+    public async Task AdminSessionPhase_SetGetClear_RoundTrips()
+    {
+        using var admin = await _factory.CreateAuthedClientAsync("admin");
+        await admin.DeleteAsync("/admin/session-phase/WEGE3"); // clean
+
+        var setResp = await admin.PostAsJsonAsync("/admin/session-phase/WEGE3", new { phase = "OpeningAuction" });
+        Assert.Equal(HttpStatusCode.NoContent, setResp.StatusCode);
+
+        var state = await admin.GetFromJsonAsync<SessionPhaseStateDto>("/admin/session-phase");
+        Assert.NotNull(state);
+        Assert.Equal("OpeningAuction", state!.Overrides["WEGE3"]);
+
+        var clr = await admin.DeleteAsync("/admin/session-phase/WEGE3");
+        Assert.Equal(HttpStatusCode.NoContent, clr.StatusCode);
+
+        state = await admin.GetFromJsonAsync<SessionPhaseStateDto>("/admin/session-phase");
+        Assert.False(state!.Overrides.ContainsKey("WEGE3"));
+    }
+
+    [Fact]
+    public async Task AdminSessionPhase_RejectsBadPhase()
+    {
+        using var admin = await _factory.CreateAuthedClientAsync("admin");
+        var resp = await admin.PostAsJsonAsync("/admin/session-phase/PETR4", new { phase = "Banana" });
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task SessionPhase_OpeningAuction_RejectsMarketOrder_ThenResumes()
+    {
+        // Use a unique symbol to avoid colliding with other tests/clients on the shared factory.
+        const string sym = "PHASE_TEST";
+        using var http = _factory.CreateClient();
+        var token = await _factory.LoginAsync(http, "bob");
+        using var admin = await _factory.CreateAuthedClientAsync("admin");
+
+        var ws = await OpenSubscribedAsync(token, Channels.ExecutionsMe);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        await admin.PostAsJsonAsync($"/admin/session-phase/{sym}", new { phase = "OpeningAuction" });
+        try
+        {
+            // Market order in auction → reject with phase_not_allowed:auction.
+            var blocked = await PostAsync(http, token, "/orders",
+                new { Symbol = sym, SecurityId = 4321UL, Side = "Buy", Type = "Market", Quantity = 1, Price = (decimal?)null });
+            Assert.Equal(HttpStatusCode.Accepted, blocked.StatusCode);
+            var delta = await ReadJsonAsync(ws, cts.Token);
+            Assert.Equal("Rejected", delta.GetProperty("data").GetProperty("kind").GetString());
+            Assert.Contains("phase_not_allowed", delta.GetProperty("data").GetProperty("rejectReason").GetString());
+        }
+        finally
+        {
+            await admin.DeleteAsync($"/admin/session-phase/{sym}");
+        }
+    }
+
     private async Task<WebSocket> OpenSubscribedAsync(string token, string channel)
     {
         var wsClient = _factory.Server.CreateWebSocketClient();
@@ -181,4 +248,5 @@ public class RiskAndAdminEndpointsTests : IClassFixture<TestAppFactory>
 
     private sealed record KillStateDto(string[] EndClients, string[] Firms);
     private sealed record HaltStateDto(string[] Symbols);
+    private sealed record SessionPhaseStateDto(string Default, Dictionary<string, string> Overrides);
 }

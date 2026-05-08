@@ -117,8 +117,8 @@ public class AlgoRecoveryTests : IDisposable
         {
             var (book, ownership, killSwitch, processor, algos, _) = Build(store);
             var algoIds = new AlgoIdRegistry();
-            var snapshotter = new StateSnapshotter(book, new PositionKeeper(), killSwitch, new SymbolHaltService(), new ClOrdIdPrefixRegistry(), ownership, algos, algoIds, new CashLedger());
-            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), processor, algos);
+            var snapshotter = new StateSnapshotter(book, new PositionKeeper(), killSwitch, new SymbolHaltService(), new SessionPhaseService(), new ClOrdIdPrefixRegistry(), ownership, algos, algoIds, new CashLedger());
+            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), new SessionPhaseService(), processor, algos);
             var recovery = new PersistenceRecovery(store, snapshotter, replayer,
                 new SnapshotStore(_root, "test"), NullLogger<PersistenceRecovery>.Instance);
             await recovery.RunAsync();
@@ -151,7 +151,7 @@ public class AlgoRecoveryTests : IDisposable
         {
             var (book, ownership, killSwitch, _, algos, dispatcher) = Build(store);
             var algoIds = new AlgoIdRegistry();
-            var snapshotter = new StateSnapshotter(book, new PositionKeeper(), killSwitch, new SymbolHaltService(), new ClOrdIdPrefixRegistry(), ownership, algos, algoIds, new CashLedger());
+            var snapshotter = new StateSnapshotter(book, new PositionKeeper(), killSwitch, new SymbolHaltService(), new SessionPhaseService(), new ClOrdIdPrefixRegistry(), ownership, algos, algoIds, new CashLedger());
 
             dispatcher.Dispatch(
                 new AlgoCreatedEvent

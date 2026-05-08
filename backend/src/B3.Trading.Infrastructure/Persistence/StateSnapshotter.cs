@@ -18,6 +18,7 @@ public sealed class StateSnapshotter
     private readonly PositionKeeper _positions;
     private readonly KillSwitchService _killSwitch;
     private readonly SymbolHaltService _symbolHalts;
+    private readonly SessionPhaseService _sessionPhases;
     private readonly ClOrdIdPrefixRegistry _clOrdIds;
     private readonly OrderOwnershipMap _ownership;
     private readonly AlgoBook _algos;
@@ -29,6 +30,7 @@ public sealed class StateSnapshotter
         PositionKeeper positions,
         KillSwitchService killSwitch,
         SymbolHaltService symbolHalts,
+        SessionPhaseService sessionPhases,
         ClOrdIdPrefixRegistry clOrdIds,
         OrderOwnershipMap ownership,
         AlgoBook algos,
@@ -39,6 +41,7 @@ public sealed class StateSnapshotter
         _positions = positions;
         _killSwitch = killSwitch;
         _symbolHalts = symbolHalts;
+        _sessionPhases = sessionPhases;
         _clOrdIds = clOrdIds;
         _ownership = ownership;
         _algos = algos;
@@ -55,6 +58,10 @@ public sealed class StateSnapshotter
         KilledEndClients = _killSwitch.ListKilledEndClients().ToList(),
         KilledFirms = _killSwitch.ListKilledFirms().ToList(),
         HaltedSymbols = _symbolHalts.ListHalted().ToList(),
+        DefaultSessionPhase = _sessionPhases.DefaultPhase.ToString(),
+        SessionPhaseOverrides = _sessionPhases.ListOverrides()
+            .Select(kv => new SessionPhaseOverrideSnapshot(kv.Key, kv.Value.ToString()))
+            .ToList(),
         ClOrdIds = _clOrdIds.Snapshot(),
         Ownership = _ownership.Snapshot().ToList(),
         Algos = _algos.Snapshot().ToList(),
@@ -69,6 +76,13 @@ public sealed class StateSnapshotter
         _positions.Restore(snap.Positions);
         _killSwitch.Restore(snap.KilledEndClients, snap.KilledFirms);
         _symbolHalts.Restore(snap.HaltedSymbols);
+        var defaultPhase = Enum.TryParse<SessionPhase>(snap.DefaultSessionPhase, ignoreCase: true, out var dp)
+            ? dp : SessionPhase.Continuous;
+        var overrides = snap.SessionPhaseOverrides
+            .Select(o => new KeyValuePair<string, SessionPhase>(
+                o.Symbol,
+                Enum.TryParse<SessionPhase>(o.Phase, ignoreCase: true, out var p) ? p : SessionPhase.Continuous));
+        _sessionPhases.Restore(defaultPhase, overrides);
         _clOrdIds.Restore(snap.ClOrdIds);
         _ownership.Restore(snap.Ownership);
         _algos.Restore(snap.Algos);
@@ -90,6 +104,7 @@ public sealed class EventReplayer
     private readonly OrderOwnershipMap _ownership;
     private readonly KillSwitchService _killSwitch;
     private readonly SymbolHaltService _symbolHalts;
+    private readonly SessionPhaseService _sessionPhases;
     private readonly ExecutionReportProcessor _processor;
     private readonly AlgoBook _algos;
     private readonly PendingReplacementRegistry? _replacements;
@@ -99,6 +114,7 @@ public sealed class EventReplayer
         OrderOwnershipMap ownership,
         KillSwitchService killSwitch,
         SymbolHaltService symbolHalts,
+        SessionPhaseService sessionPhases,
         ExecutionReportProcessor processor,
         AlgoBook algos,
         PendingReplacementRegistry? replacements = null)
@@ -107,6 +123,7 @@ public sealed class EventReplayer
         _ownership = ownership;
         _killSwitch = killSwitch;
         _symbolHalts = symbolHalts;
+        _sessionPhases = sessionPhases;
         _processor = processor;
         _algos = algos;
         _replacements = replacements;
@@ -180,6 +197,21 @@ public sealed class EventReplayer
             case SymbolHaltToggledEvent sh:
                 if (sh.Halted) _symbolHalts.Halt(sh.Symbol);
                 else _symbolHalts.Resume(sh.Symbol);
+                break;
+            case SessionPhaseChangedEvent sp:
+                if (string.IsNullOrWhiteSpace(sp.Symbol))
+                {
+                    if (Enum.TryParse<SessionPhase>(sp.Phase, ignoreCase: true, out var defPhase))
+                        _sessionPhases.SetDefaultPhase(defPhase);
+                }
+                else if (sp.Cleared)
+                {
+                    _sessionPhases.ClearPhase(sp.Symbol);
+                }
+                else if (Enum.TryParse<SessionPhase>(sp.Phase, ignoreCase: true, out var symPhase))
+                {
+                    _sessionPhases.SetPhase(sp.Symbol, symPhase);
+                }
                 break;
             case AlgoCreatedEvent ac:
                 ApplyAlgoCreated(ac);
