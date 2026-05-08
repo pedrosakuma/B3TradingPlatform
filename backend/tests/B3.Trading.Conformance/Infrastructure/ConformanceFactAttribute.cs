@@ -43,6 +43,14 @@ public sealed class ConformanceFactAttribute : FactAttribute
     /// </summary>
     public bool RequiresSandboxMatching { get; init; }
 
+    /// <summary>
+    /// When true, the scenario needs the host's HS256 JWT signing key
+    /// (env <c>B3T_AUTH_SIGNING_KEY</c>) so it can mint authentically
+    /// signed tokens with custom claims/expiry. Skipped at discovery
+    /// time when not configured.
+    /// </summary>
+    public bool RequiresAuthSigningKey { get; init; }
+
     public ConformanceFactAttribute()
     {
         var peer = PlatformEndpoint.TryResolve();
@@ -86,6 +94,8 @@ public sealed class ConformanceFactAttribute : FactAttribute
                 return PlatformEndpoint.SimulatorSkipReason;
             if (RequiresSandboxMatching && !PlatformEndpoint.IsRealStackConformance())
                 return PlatformEndpoint.RealStackConformanceSkipReason;
+            if (RequiresAuthSigningKey && !PlatformEndpoint.IsAuthSigningKeyConfigured())
+                return PlatformEndpoint.AuthSigningKeySkipReason;
             return null;
         }
         set => base.Skip = value;

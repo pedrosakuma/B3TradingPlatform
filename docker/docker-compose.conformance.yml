@@ -52,5 +52,11 @@ services:
       # password material, different username + admin role.
       B3T_ADMIN_USER: ${TRADING_ADMIN_USER:-carol}
       B3T_ADMIN_PASS: ${TRADING_SEED_PASSWORD:-wonderland}
+      # Mirror the host's HS256 signing key into the conformance container
+      # so scenarios that need to mint deterministic tokens (e.g. expired-
+      # JWT rejection, see Spec_HTTP_Auth/ExpiredTokenTests) can sign with
+      # the same key the host validates against. Without this, those
+      # scenarios skip cleanly — they're optional, not gated.
+      B3T_AUTH_SIGNING_KEY: ${TRADING_AUTH_SIGNING_KEY:-}
     networks:
       - b3-net
