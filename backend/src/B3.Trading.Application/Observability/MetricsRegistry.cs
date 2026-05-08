@@ -188,6 +188,18 @@ public static class MetricsRegistry
     public static readonly Counter<long> ClOrdIdDuplicateDetected =
         Meter.CreateCounter<long>("trading.orders.duplicate_clordid");
 
+    /// <summary>
+    /// ClOrdID registry corruption detector (#157). Fires when WAL
+    /// replay observes a structurally invalid ClOrdID or a per-end-client
+    /// prefix mismatch (same end-client mapped to a different prefix
+    /// than the snapshot/restore path remembers). MUST be flat at zero
+    /// in healthy operation; non-zero means manual investigation —
+    /// schema migration, partial snapshot, or registry bug.
+    /// Tagged <c>{end_client, reason=invalid_observed_clordid|prefix_mismatch}</c>.
+    /// </summary>
+    public static readonly Counter<long> ClOrdIdRegistryCorruption =
+        Meter.CreateCounter<long>("trading.orders.clordid_registry_corruption");
+
     public static readonly Counter<long> MarginOvercommitOnRestore =
         Meter.CreateCounter<long>("trading.risk.margin_overcommit_on_restore");
 

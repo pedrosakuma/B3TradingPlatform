@@ -42,6 +42,129 @@ public class ClOrdIdPrefixRegistryTests
         var owner = new EndClientId("alice");
         Assert.Equal(registry.AllocatePrefix(owner), registry.AllocatePrefix(owner));
     }
+
+    // ── #157 AdvanceCounterTo (WAL replay watermark) ──────────────────────
+
+    [Fact]
+    public void AdvanceCounterTo_NewEndClient_AdoptsObservedPrefixAndCounter()
+    {
+        var registry = new ClOrdIdPrefixRegistry();
+        var alice = new EndClientId("alice");
+        // Observed ID: prefix=5, counter=42.
+        var observed = (5UL << ClOrdIdPrefixRegistry.CounterBits) | 42UL;
+        registry.AdvanceCounterTo(alice, observed);
+
+        // Next Generate must return prefix=5, counter=43 — never the same as observed.
+        var next = registry.Generate(alice);
+        Assert.Equal(5UL, next >> ClOrdIdPrefixRegistry.CounterBits);
+        Assert.Equal(43UL, next & ClOrdIdPrefixRegistry.CounterMask);
+    }
+
+    [Fact]
+    public void AdvanceCounterTo_BumpsNextPrefixSoFutureEndClientsDoNotCollide()
+    {
+        var registry = new ClOrdIdPrefixRegistry();
+        var alice = new EndClientId("alice");
+        // Pretend a snapshot+WAL stream observed alice with prefix=7.
+        var observed = (7UL << ClOrdIdPrefixRegistry.CounterBits) | 1UL;
+        registry.AdvanceCounterTo(alice, observed);
+
+        // A brand-new end-client must NOT be assigned prefix 7 (which alice owns).
+        var bob = registry.Generate(new EndClientId("bob"));
+        Assert.NotEqual(7UL, bob >> ClOrdIdPrefixRegistry.CounterBits);
+        Assert.True((bob >> ClOrdIdPrefixRegistry.CounterBits) >= 8UL);
+    }
+
+    [Fact]
+    public void AdvanceCounterTo_IsMonotonic_DoesNotRegressCounter()
+    {
+        var registry = new ClOrdIdPrefixRegistry();
+        var alice = new EndClientId("alice");
+        var high = (3UL << ClOrdIdPrefixRegistry.CounterBits) | 100UL;
+        var low = (3UL << ClOrdIdPrefixRegistry.CounterBits) | 50UL;
+        registry.AdvanceCounterTo(alice, high);
+        registry.AdvanceCounterTo(alice, low); // must NOT regress
+
+        var next = registry.Generate(alice);
+        Assert.Equal(101UL, next & ClOrdIdPrefixRegistry.CounterMask);
+    }
+
+    [Fact]
+    public void AdvanceCounterTo_Idempotent_OnReObservation()
+    {
+        var registry = new ClOrdIdPrefixRegistry();
+        var alice = new EndClientId("alice");
+        var observed = (1UL << ClOrdIdPrefixRegistry.CounterBits) | 10UL;
+        registry.AdvanceCounterTo(alice, observed);
+        registry.AdvanceCounterTo(alice, observed);
+        Assert.Equal(11UL, registry.Generate(alice) & ClOrdIdPrefixRegistry.CounterMask);
+    }
+
+    [Fact]
+    public void AdvanceCounterTo_InvalidObservedClOrdId_IsDropped()
+    {
+        var registry = new ClOrdIdPrefixRegistry();
+        var alice = new EndClientId("alice");
+        // Counter zero is never produced by Generate — treat as corruption.
+        registry.AdvanceCounterTo(alice, observedClOrdId: 0UL);
+        registry.AdvanceCounterTo(alice, observedClOrdId: 1UL << ClOrdIdPrefixRegistry.CounterBits); // counter=0
+        // Registry must remain pristine: alice is unknown, Generate falls into fresh-allocation path.
+        var first = registry.Generate(alice);
+        Assert.Equal(1UL, first & ClOrdIdPrefixRegistry.CounterMask);
+    }
+
+    [Fact]
+    public void AdvanceCounterTo_PrefixMismatch_KeepsExistingButReservesObservedPrefixGlobally()
+    {
+        var registry = new ClOrdIdPrefixRegistry();
+        var alice = new EndClientId("alice");
+        // Live allocation: alice gets prefix 0.
+        var aliceFirst = registry.Generate(alice);
+        var alicePrefix = aliceFirst >> ClOrdIdPrefixRegistry.CounterBits;
+
+        // Replay observes alice with a different prefix (data corruption / bug).
+        var corruptPrefix = alicePrefix + 5;
+        var corrupt = (corruptPrefix << ClOrdIdPrefixRegistry.CounterBits) | 99UL;
+        registry.AdvanceCounterTo(alice, corrupt);
+
+        // Alice's existing entry preserved (next Generate keeps prefix 0).
+        var aliceNext = registry.Generate(alice);
+        Assert.Equal(alicePrefix, aliceNext >> ClOrdIdPrefixRegistry.CounterBits);
+
+        // But the corrupt prefix is globally reserved — bob can NOT receive it.
+        var bobPrefix = registry.Generate(new EndClientId("bob")) >> ClOrdIdPrefixRegistry.CounterBits;
+        Assert.NotEqual(corruptPrefix, bobPrefix);
+        Assert.True(bobPrefix >= corruptPrefix + 1);
+    }
+
+    [Fact]
+    public void AdvanceCounterTo_AfterRestore_NextGenerateSkipsPastWalReplayedIds()
+    {
+        // Full snapshot-then-WAL-replay scenario: snapshot watermark
+        // captured at counter N; WAL events advanced to N+k; restore +
+        // replay must put the next Generate past N+k, not at N+1.
+        var live = new ClOrdIdPrefixRegistry();
+        var alice = new EndClientId("alice");
+        var first = live.Generate(alice);            // counter=1
+        var second = live.Generate(alice);           // counter=2
+        var snap = live.Snapshot();                  // snapshot at counter=2
+
+        // Pretend the live process kept allocating after the snapshot.
+        var third = live.Generate(alice);            // counter=3
+        var fourth = live.Generate(alice);           // counter=4
+
+        // Cold boot: fresh registry, restore snapshot, replay WAL.
+        var recovered = new ClOrdIdPrefixRegistry();
+        recovered.Restore(snap);
+        recovered.AdvanceCounterTo(alice, third);
+        recovered.AdvanceCounterTo(alice, fourth);
+
+        // Next Generate MUST be 5 (not 3, which would collide with `third`).
+        var nextAfterReplay = recovered.Generate(alice);
+        Assert.Equal(5UL, nextAfterReplay & ClOrdIdPrefixRegistry.CounterMask);
+        Assert.NotEqual(third, nextAfterReplay);
+        Assert.NotEqual(fourth, nextAfterReplay);
+    }
 }
 
 public class OrderOwnershipMapTests

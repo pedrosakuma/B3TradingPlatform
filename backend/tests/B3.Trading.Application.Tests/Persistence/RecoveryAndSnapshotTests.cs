@@ -66,7 +66,7 @@ public class RecoveryAndSnapshotTests : IDisposable
         await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
         {
             var (book, positions, killSwitch, ownership, snapshotter, _, processor, _, algos) = BuildState(store);
-            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), new SessionPhaseService(), processor, algos);
+            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), new SessionPhaseService(), processor, algos, new ClOrdIdPrefixRegistry());
             var recovery = new PersistenceRecovery(store,
                 snapshotter,
                 replayer,
@@ -120,7 +120,7 @@ public class RecoveryAndSnapshotTests : IDisposable
         await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
         {
             var (book, _, killSwitch, ownership, snapshotter, _, processor, _, algos) = BuildState(store);
-            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), new SessionPhaseService(), processor, algos);
+            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), new SessionPhaseService(), processor, algos, new ClOrdIdPrefixRegistry());
             var recovery = new PersistenceRecovery(store, snapshotter, replayer,
                 new SnapshotStore(_root, "test"), NullLogger<PersistenceRecovery>.Instance);
             await recovery.RunAsync();
@@ -179,7 +179,7 @@ public class RecoveryAndSnapshotTests : IDisposable
         {
             var (book, _, killSwitch, ownership, snapshotter, _, processor, _, algos) = BuildState(store);
             var replacements = new PendingReplacementRegistry();
-            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), new SessionPhaseService(), processor, algos, replacements);
+            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), new SessionPhaseService(), processor, algos, new ClOrdIdPrefixRegistry(), replacements);
             var recovery = new PersistenceRecovery(store, snapshotter, replayer,
                 new SnapshotStore(_root, "test"), NullLogger<PersistenceRecovery>.Instance);
             await recovery.RunAsync();
@@ -226,7 +226,7 @@ public class RecoveryAndSnapshotTests : IDisposable
         await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
         {
             var (book, _, killSwitch, ownership, snapshotter, _, processor, _, algos) = BuildState(store);
-            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), new SessionPhaseService(), processor, algos);
+            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), new SessionPhaseService(), processor, algos, new ClOrdIdPrefixRegistry());
             var recovery = new PersistenceRecovery(store, snapshotter, replayer,
                 new SnapshotStore(_root, "test"), NullLogger<PersistenceRecovery>.Instance);
             await recovery.RunAsync();
@@ -316,7 +316,7 @@ public class RecoveryAndSnapshotTests : IDisposable
         var processor = new ExecutionReportProcessor(ownership, book, new PositionKeeper(),
             new TestSink(), new NoOpMarginProvider(), NullLogger<ExecutionReportProcessor>.Instance);
         var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(),
-            phases, processor, algos);
+            phases, processor, algos, new ClOrdIdPrefixRegistry());
 
         replayer.Apply(new SessionPhaseChangedEvent { Symbol = null, Phase = "Closed" });
         Assert.Equal(SessionPhase.Closed, phases.DefaultPhase);
@@ -362,6 +362,80 @@ public class RecoveryAndSnapshotTests : IDisposable
         Assert.Equal(SessionPhase.AfterHours, phases2.DefaultPhase);
         Assert.Equal(SessionPhase.OpeningAuction, phases2.GetPhase("PETR4"));
         Assert.Equal(SessionPhase.Closed, phases2.GetPhase("VALE3"));
+    }
+
+    [Fact]
+    public void EventReplayer_AdvancesClOrdIdWatermark_FromOrderSubmittedAndReplaceAndEr()
+    {
+        // #157 — full coverage: OrderSubmittedEvent, OrderReplaceRequestedEvent
+        // (new ID), and ExecutionReportReceivedEvent (cancel-side ID resolved
+        // via OrigClOrdId) must all advance the registry watermark so the
+        // next live Generate cannot regress.
+        var book = new WorkingOrderBook();
+        var ownership = new OrderOwnershipMap();
+        var killSwitch = new KillSwitchService();
+        var phases = new SessionPhaseService();
+        var algos = new AlgoBook();
+        var clOrdIds = new ClOrdIdPrefixRegistry();
+        var processor = new ExecutionReportProcessor(ownership, book, new PositionKeeper(),
+            new TestSink(), new NoOpMarginProvider(), NullLogger<ExecutionReportProcessor>.Instance);
+        var replacements = new PendingReplacementRegistry();
+        var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(),
+            phases, processor, algos, clOrdIds, replacements);
+
+        var alice = new EndClientId("alice");
+        // Synthesise the kind of IDs the live registry would have produced
+        // for alice after a snapshot at watermark 0 (prefix=0, counter=N).
+        const ulong prefix = 3UL;
+        ulong Pack(ulong counter) => (prefix << ClOrdIdPrefixRegistry.CounterBits) | counter;
+        var orig = Pack(10UL);
+        var newId = Pack(11UL);
+        var cancelId = Pack(12UL);
+
+        replayer.Apply(new OrderSubmittedEvent
+        {
+            ClOrdId = orig,
+            EndClientId = "alice",
+            FirmId = "TEST",
+            Symbol = "PETR4",
+            SecurityId = 4321UL,
+            Side = "Buy",
+            Type = "Limit",
+            Quantity = 100,
+            Price = 30m,
+        });
+
+        replayer.Apply(new OrderReplaceRequestedEvent
+        {
+            OriginalClOrdId = orig,
+            NewClOrdId = newId,
+            EndClientId = "alice",
+            FirmId = "TEST",
+            Symbol = "PETR4",
+            SecurityId = 4321UL,
+            Side = "Buy",
+            Type = "Limit",
+            NewQuantity = 100,
+            NewPrice = 31m,
+        });
+
+        // Cancel-side ID: only the ER carries it; OrigClOrdId resolves owner.
+        replayer.Apply(new ExecutionReportReceivedEvent
+        {
+            ClOrdId = cancelId,
+            OrigClOrdId = newId,
+            ExecKind = ExecKind.Canceled.ToString(),
+            LeavesQuantity = 0,
+            CumulativeQuantity = 0,
+            LastQuantity = 0,
+            LastPrice = 0m,
+            Synthetic = false,
+        });
+
+        // Next Generate(alice) must skip past 12 — not regress to 1.
+        var next = clOrdIds.Generate(alice);
+        Assert.Equal(prefix, next >> ClOrdIdPrefixRegistry.CounterBits);
+        Assert.Equal(13UL, next & ClOrdIdPrefixRegistry.CounterMask);
     }
 
     private sealed class TestSink : IExecutionEventSink
