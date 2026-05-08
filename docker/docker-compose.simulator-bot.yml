@@ -1,0 +1,85 @@
+# Simulator-bot overlay (#134). Stacks on top of the default real
+# stack to add a single external FIXP client that submits a steady flow
+# of orders against matching-platform. Replaces the in-process
+# `Mode=Simulator` synthetic-ER injector — the trading-host stays Real,
+# the bot generates traffic from the outside.
+#
+# Usage:
+#   docker compose \
+#       -f docker/docker-compose.yml \
+#       -f docker/docker-compose.simulator-bot.yml \
+#       up -d
+#
+# This overlay is ADDITIVE — it does NOT replace docker-compose.demo.yml.
+# Stacking demo + simulator-bot is supported but redundant: pick one.
+#
+# The bot connects on FIXP session 10102 (NOT 10101 — that one belongs to
+# trading-host's FIRM01 wiring). Both sessions are pre-declared in
+# docker/real/exchange-simulator.bridge.json so matching-platform accepts
+# the bot's Negotiate without operator intervention.
+
+name: b3trading
+
+services:
+  simulator-bot:
+    build:
+      context: ..
+      dockerfile: backend/tools/B3.Trading.SimulatorBot/Dockerfile
+    image: ${SIMULATOR_BOT_IMAGE:-b3-simulator-bot:dev}
+    container_name: b3-simulator-bot
+    restart: unless-stopped
+    networks:
+      - b3-net
+    depends_on:
+      matching-platform:
+        condition: service_healthy
+    environment:
+      # ── FIXP session ───────────────────────────────────────────────
+      Bot__Endpoint: matching-platform:9876
+      Bot__SessionId: "10102"
+      Bot__SessionVerId: "1"
+      Bot__EnteringFirm: "100"  # FIRM01 enteringFirmCode
+      # Matching's FixpSession parses Credentials as JSON expecting
+      # {auth_type, username, access_key} — see docker/docker-compose.yml
+      # for the same shape on trading-host's session 10101.
+      Bot__AccessKey: '{"auth_type":"basic","username":"10102","access_key":"dev-key-2"}'
+      Bot__SenderLocation: SP
+      Bot__EnteringTrader: BOT
+
+      # ── Behaviour ──────────────────────────────────────────────────
+      Bot__StateDirectory: /var/lib/b3-simulator-bot
+      Bot__TickInterval: "00:00:00.500"
+      Bot__MaxInFlightPerSymbol: "5"
+      Bot__AutoCancelAfter: "00:00:30"
+      Bot__CrossProbability: "0.25"
+
+      # ── Instruments (must match docker/real/instruments-eqt.json) ──
+      Bot__Instruments__0__Symbol: PETR4
+      Bot__Instruments__0__SecurityId: "900000000001"
+      Bot__Instruments__0__RefPrice: "30.00"
+      Bot__Instruments__0__TickSize: "0.01"
+      Bot__Instruments__0__LotSize: "100"
+      Bot__Instruments__0__MinLots: "1"
+      Bot__Instruments__0__MaxLots: "5"
+
+      Bot__Instruments__1__Symbol: VALE3
+      Bot__Instruments__1__SecurityId: "900000000002"
+      Bot__Instruments__1__RefPrice: "70.00"
+      Bot__Instruments__1__TickSize: "0.01"
+      Bot__Instruments__1__LotSize: "100"
+      Bot__Instruments__1__MinLots: "1"
+      Bot__Instruments__1__MaxLots: "3"
+
+      Bot__Instruments__2__Symbol: ITUB4
+      Bot__Instruments__2__SecurityId: "900000000003"
+      Bot__Instruments__2__RefPrice: "32.00"
+      Bot__Instruments__2__TickSize: "0.01"
+      Bot__Instruments__2__LotSize: "100"
+      Bot__Instruments__2__MinLots: "1"
+      Bot__Instruments__2__MaxLots: "5"
+    volumes:
+      - simulator-bot-state:/var/lib/b3-simulator-bot
+
+volumes:
+  simulator-bot-state:
+    driver: local
