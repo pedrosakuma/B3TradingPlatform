@@ -134,24 +134,16 @@ public static class MetricsRegistry
             description: "Estimated number of signals queued for the AlgoEngine consumer.");
 
     /// <summary>
-    /// 1 when the host booted with <c>ExchangeMode.Simulator</c> active, 0
-    /// otherwise. Set once at startup and never decremented (mode is fixed
-    /// at runtime). Surfaces "this host is injecting synthetic ERs" to
-    /// dashboards / alerts so production drift is loud.
+    /// 1 when the host booted with <c>Trading:Exchange:AllowErInjection=true</c>
+    /// (admin-gated <c>POST /admin/simulator/er</c> is mapped). Set once at
+    /// startup and never decremented (config is fixed at runtime). Surfaces
+    /// "this host accepts synthetic ERs" to dashboards / alerts so any
+    /// production drift is loud — replaces the old
+    /// <c>trading.simulator.mode_active</c> + <c>trading.simulator.mode_deprecated</c>
+    /// pair after #163 collapsed Simulator into Mock.
     /// </summary>
-    public static readonly UpDownCounter<int> SimulatorModeActive =
-        Meter.CreateUpDownCounter<int>("trading.simulator.mode_active");
-
-    /// <summary>
-    /// 1 when the host booted with <c>ExchangeMode.Simulator</c>, which is
-    /// on the deprecation ramp toward removal (#134). Mirrors
-    /// <see cref="SimulatorModeActive"/> shape so the deprecation warning
-    /// can fire from a separate Prometheus alert without disturbing the
-    /// existing operational gauge. Will go away when Simulator mode is
-    /// removed in the follow-up slice.
-    /// </summary>
-    public static readonly UpDownCounter<int> SimulatorModeDeprecated =
-        Meter.CreateUpDownCounter<int>("trading.simulator.mode_deprecated");
+    public static readonly UpDownCounter<int> ErInjectionEnabled =
+        Meter.CreateUpDownCounter<int>("trading.er_injection.enabled");
 
     // EntryPoint upstream client (real adapter)
     public static readonly UpDownCounter<int> EntryPointConnected =

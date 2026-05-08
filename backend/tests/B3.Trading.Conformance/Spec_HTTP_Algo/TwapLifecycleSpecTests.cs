@@ -24,7 +24,7 @@ namespace B3.Trading.Conformance.Spec_HTTP_Algo;
 [Trait("Category", "Conformance")]
 public class TwapLifecycleSpecTests
 {
-    [ConformanceFact(RequiresAdmin = true, RequiresSimulator = true)]
+    [ConformanceFact(RequiresAdmin = true, RequiresErInjection = true)]
     public async Task Twap_TwoSlices_FillsSequentially_ParentCompletes()
     {
         var peer = PlatformEndpoint.TryResolve()!;

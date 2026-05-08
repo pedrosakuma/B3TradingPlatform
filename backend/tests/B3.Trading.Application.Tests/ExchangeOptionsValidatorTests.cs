@@ -164,4 +164,43 @@ public class ExchangeOptionsValidatorTests
         Assert.True(r.Failures!.Count() >= 5,
             $"Expected aggregate of multiple failures, got: {string.Join(" | ", r.Failures!)}");
     }
+
+    // #163: AllowErInjection only valid alongside Mock — the SimulatorEndpoint
+    // depends on MockEntryPointClient which is not registered in any other
+    // mode, so silently mapping the route while DI can't resolve the impl
+    // would lead to a confusing 500-on-first-request instead of a fail-fast
+    // boot. Validator catches the misconfig at startup.
+
+    [Fact]
+    public void AllowErInjection_True_With_Mock_Succeeds()
+    {
+        var opts = new ExchangeOptions { Mode = ExchangeMode.Mock, AllowErInjection = true };
+        Assert.True(Sut().Validate(null, opts).Succeeded);
+    }
+
+    [Theory]
+    [InlineData(ExchangeMode.Real)]
+    [InlineData(ExchangeMode.Stub)]
+    [InlineData(ExchangeMode.Unavailable)]
+    public void AllowErInjection_True_With_NonMock_Fails(ExchangeMode mode)
+    {
+        var opts = new ExchangeOptions { Mode = mode, AllowErInjection = true };
+        var r = Sut().Validate(null, opts);
+        Assert.False(r.Succeeded);
+        Assert.Contains(r.Failures!, f => f.Contains("AllowErInjection", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AllowErInjectionInProduction_True_Without_AllowErInjection_Fails()
+    {
+        var opts = new ExchangeOptions
+        {
+            Mode = ExchangeMode.Mock,
+            AllowErInjection = false,
+            AllowErInjectionInProduction = true,
+        };
+        var r = Sut().Validate(null, opts);
+        Assert.False(r.Succeeded);
+        Assert.Contains(r.Failures!, f => f.Contains("meaningless", StringComparison.OrdinalIgnoreCase));
+    }
 }

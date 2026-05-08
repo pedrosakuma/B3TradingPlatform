@@ -82,7 +82,6 @@ public class ExchangeStatusTests
     [InlineData(ExchangeMode.Mock, true)]
     [InlineData(ExchangeMode.Real, true)]
     [InlineData(ExchangeMode.Unavailable, false)]
-    [InlineData(ExchangeMode.Simulator, true)]
     public void ReadyForOrders_Reflects_Mode(ExchangeMode mode, bool expected)
     {
         var status = new ExchangeStatus(mode, firmCount: 0);

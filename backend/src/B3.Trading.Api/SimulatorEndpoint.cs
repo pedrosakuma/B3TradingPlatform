@@ -6,8 +6,9 @@ using Microsoft.AspNetCore.Mvc;
 namespace B3.Trading.Api;
 
 /// <summary>
-/// Synthetic ER injection for <see cref="ExchangeMode.Simulator"/> (RFC
-/// algo-orders-v0 §4.10/§7-B3). Caller supplies a lean payload
+/// Synthetic ER injection (formerly <see cref="ExchangeMode.Simulator"/>;
+/// merged into <see cref="ExchangeMode.Mock"/> + <c>AllowErInjection</c>
+/// in #163). Caller supplies a lean payload
 /// (<c>clOrdId</c>, <c>type</c>, optional <c>lastQty</c>/<c>lastPx</c>);
 /// the server reads the resting <see cref="B3.Trading.Domain.Order"/> from
 /// <see cref="WorkingOrderBook"/> to fill SecurityId/Side/firm and computes

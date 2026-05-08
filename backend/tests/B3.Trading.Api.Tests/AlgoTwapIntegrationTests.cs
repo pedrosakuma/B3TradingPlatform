@@ -10,7 +10,8 @@ namespace B3.Trading.Api.Tests;
 
 /// <summary>
 /// End-to-end coverage for the algo orders v0 TWAP engine (RFC §4.6 +
-/// §4.8). Boots the host with <c>Trading:Exchange:Mode=Simulator</c> so
+/// §4.8). Boots the host with <c>Trading:Exchange:Mode=Mock</c> +
+/// <c>AllowErInjection=true</c> so
 /// the scheduler-driven child orders land in <c>WorkingOrderBook</c> and
 /// synthetic ERs can be driven via <c>POST /admin/simulator/er</c>.
 ///
@@ -26,7 +27,8 @@ public class AlgoTwapIntegrationTests
     private static IDictionary<string, string?> Simulator() =>
         new Dictionary<string, string?>
         {
-            ["Trading:Exchange:Mode"] = "Simulator",
+            ["Trading:Exchange:Mode"] = "Mock",
+            ["Trading:Exchange:AllowErInjection"] = "true",
             ["Trading:SymbolDirectory:SecurityIds:PETR4"] = "4321",
         };
 

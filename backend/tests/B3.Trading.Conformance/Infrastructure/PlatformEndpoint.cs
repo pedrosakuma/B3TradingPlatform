@@ -34,6 +34,7 @@ public sealed record PlatformEndpoint(
     public const string EnvAdminUsername = "B3T_ADMIN_USER";
     public const string EnvAdminPassword = "B3T_ADMIN_PASS";
     public const string EnvSimulatorMode = "B3T_SIMULATOR_MODE";
+    public const string EnvErInjection = "B3T_ER_INJECTION";
     public const string EnvRealStackConformance = "B3T_REAL_STACK_CONFORMANCE";
     public const string EnvAuthSigningKey = "B3T_AUTH_SIGNING_KEY";
     public const string EnvAuthIssuer = "B3T_AUTH_ISSUER";
@@ -71,17 +72,27 @@ public sealed record PlatformEndpoint(
         !string.IsNullOrWhiteSpace(AdminUsername) && !string.IsNullOrWhiteSpace(AdminPassword);
 
     /// <summary>
-    /// True when the operator declared the host is running with
-    /// <c>Trading:Exchange:Mode=Simulator</c> (env var
-    /// <c>B3T_SIMULATOR_MODE=true</c>). Simulator-only scenarios skip
-    /// otherwise — the same suite stays valid against Mock/Real/Stub
-    /// deployments without false failures.
+    /// True when the operator declared the host accepts synthetic ER
+    /// injection (env <c>B3T_ER_INJECTION=true</c>). The legacy env var
+    /// <c>B3T_SIMULATOR_MODE</c> is honored as a fallback for
+    /// runbooks/.env files that predate #163's
+    /// <c>Mode=Simulator</c> → <c>Mode=Mock + AllowErInjection</c> migration.
+    /// Specs that depend on <c>POST /admin/simulator/er</c> being mapped
+    /// skip when neither env var is set — the same suite stays valid
+    /// against Real / Stub / plain-Mock deployments without false failures.
     /// </summary>
-    public static bool IsSimulatorMode()
+    public static bool IsErInjectionEnabled()
     {
-        var v = Environment.GetEnvironmentVariable(EnvSimulatorMode);
-        return string.Equals(v, "true", StringComparison.OrdinalIgnoreCase) || v == "1";
+        var primary = Environment.GetEnvironmentVariable(EnvErInjection);
+        if (string.Equals(primary, "true", StringComparison.OrdinalIgnoreCase) || primary == "1")
+            return true;
+        var legacy = Environment.GetEnvironmentVariable(EnvSimulatorMode);
+        return string.Equals(legacy, "true", StringComparison.OrdinalIgnoreCase) || legacy == "1";
     }
+
+    /// <summary>Legacy name; kept for any external caller that hasn't migrated. Same semantics as <see cref="IsErInjectionEnabled"/>.</summary>
+    [Obsolete("Use IsErInjectionEnabled — Mode=Simulator was merged into Mode=Mock + AllowErInjection in #163.")]
+    public static bool IsSimulatorMode() => IsErInjectionEnabled();
 
     /// <summary>
     /// True when the operator declared this is the dedicated docker-compose
@@ -131,7 +142,7 @@ public sealed record PlatformEndpoint(
         "Admin scenario skipped: B3T_ADMIN_USER / B3T_ADMIN_PASS not configured.";
 
     public const string SimulatorSkipReason =
-        "Simulator scenario skipped: B3T_SIMULATOR_MODE=true not set (host is not in Mode=Simulator).";
+        "ER-injection scenario skipped: neither B3T_ER_INJECTION nor B3T_SIMULATOR_MODE (legacy) is true (host has not opted into POST /admin/simulator/er).";
 
     public const string RealStackConformanceSkipReason =
         "Real-stack scenario skipped: B3T_REAL_STACK_CONFORMANCE=true not set (host is not the docker-compose real-stack sandbox).";

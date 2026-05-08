@@ -16,24 +16,25 @@ namespace B3.Trading.Infrastructure;
 /// </summary>
 public sealed class ExchangeStatus
 {
-    public ExchangeStatus(ExchangeMode mode, int firmCount)
+    public ExchangeStatus(ExchangeMode mode, int firmCount, bool erInjectionEnabled = false)
     {
         Mode = mode;
         FirmCount = firmCount;
+        ErInjectionEnabled = erInjectionEnabled;
     }
 
     public ExchangeMode Mode { get; }
     public int FirmCount { get; }
 
     /// <summary>
-    /// Build the <c>/health</c>-facing snapshot from the bound options so
-    /// the same semantics apply in tests, in <c>Program.cs</c>, and any
-    /// future composition root: <see cref="ExchangeMode.Unavailable"/>
-    /// reports zero firms (nothing is operationally wired regardless of
-    /// what the config slot contains), and configured slots with empty
-    /// FirmIds are filtered so the count matches what the gateway
-    /// actually sees.
+    /// True when the host booted with <c>Trading:Exchange:AllowErInjection=true</c>
+    /// and the in-process Mock gateway is active. Surfaced on <c>/health</c>
+    /// so the demo-driver and dashboards can detect synthetic-ER capability
+    /// without coupling to the legacy <c>Mode==Simulator</c> string check
+    /// (#163).
     /// </summary>
+    public bool ErInjectionEnabled { get; }
+
     public static ExchangeStatus FromOptions(ExchangeOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -41,7 +42,11 @@ public sealed class ExchangeStatus
         var count = mode == ExchangeMode.Unavailable
             ? 0
             : options.Firms.Count(f => !string.IsNullOrWhiteSpace(f.FirmId));
-        return new ExchangeStatus(mode, count);
+        // Validator already guarantees AllowErInjection=true ⇒ Mode=Mock,
+        // but we re-check the mode here so a misconfigured composition
+        // root that bypasses validation still surfaces the safe value.
+        var erInjection = options.AllowErInjection && mode == ExchangeMode.Mock;
+        return new ExchangeStatus(mode, count, erInjection);
     }
 
     /// <summary>

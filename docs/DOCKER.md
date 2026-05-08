@@ -102,8 +102,10 @@ docker compose \
 # open http://localhost:8080 and log in as bot-clientA / demopass
 ```
 
-Flips the trading-host to `Mode=Simulator` (synthetic ER injection
-enabled) and starts the **demo-driver** console
+Flips the trading-host to `Mode=Mock` + `AllowErInjection=true`
+(synthetic ER injection enabled; #163 collapsed the legacy
+`Mode=Simulator` into this combination) and starts the **demo-driver**
+console
 ([`backend/tools/B3.Trading.DemoDriver`](../backend/tools/B3.Trading.DemoDriver))
 which:
 
@@ -120,17 +122,18 @@ on their own. **Log in as one of the bots** to see that bot's view —
 
 | Service | What it does |
 |---|---|
-| `trading-host` | flipped to `Mode=Simulator`; seeds 3 extra users (`bot-clientA`, `bot-clientB`, `demo-admin`) |
+| `trading-host` | flipped to `Mode=Mock` + `AllowErInjection=true`; seeds 3 extra users (`bot-clientA`, `bot-clientB`, `demo-admin`) |
 | `demo-driver` | hosts the submit + inject loops; logs to stdout |
 
 ### Safety
 
-`Mode=Simulator` MUST NOT be enabled against a host reachable beyond
-your laptop — anyone with admin creds (default `demo-admin/demopass`,
-public in this repo) can mint synthetic fills. The trading-host
-**refuses to boot** in `ASPNETCORE_ENVIRONMENT=Production` with
-`Mode=Simulator` unless `Trading:Exchange:AllowSimulatorInProduction=true`
-is also set; do not flip that switch.
+`AllowErInjection=true` MUST NOT be enabled against a host reachable
+beyond your laptop — anyone with admin creds (default
+`demo-admin/demopass`, public in this repo) can mint synthetic fills.
+The trading-host **refuses to boot** in `ASPNETCORE_ENVIRONMENT=Production`
+with `AllowErInjection=true` unless
+`Trading:Exchange:AllowErInjectionInProduction=true` is also set; do not
+flip that switch.
 
 The demo passwords are PBKDF2-hashed and committed in
 `docker/docker-compose.demo.yml` so the overlay works zero-config.

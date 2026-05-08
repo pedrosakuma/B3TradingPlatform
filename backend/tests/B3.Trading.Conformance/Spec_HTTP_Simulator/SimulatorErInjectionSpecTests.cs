@@ -10,13 +10,14 @@ namespace B3.Trading.Conformance.Spec_HTTP_Simulator;
 /// (1) submit a real order via <c>POST /orders</c>,
 /// (2) inject a synthetic Fill via <c>POST /admin/simulator/er</c>,
 /// (3) verify <c>GET /orders/</c> reflects the fill.
-/// Skipped unless the operator declares the host is in
-/// <c>Mode=Simulator</c> via <c>B3T_SIMULATOR_MODE=true</c>.
+/// Skipped unless the operator declares the host opted into ER
+/// injection via <c>B3T_ER_INJECTION=true</c> (legacy
+/// <c>B3T_SIMULATOR_MODE=true</c> honored as fallback after #163).
 /// </summary>
 [Trait("Category", "Conformance")]
 public class SimulatorErInjectionSpecTests
 {
-    [ConformanceFact(RequiresAdmin = true, RequiresSimulator = true)]
+    [ConformanceFact(RequiresAdmin = true, RequiresErInjection = true)]
     public async Task SimulatorEr_FullFill_DrivesOrderToFilled()
     {
         var peer = PlatformEndpoint.TryResolve()!;

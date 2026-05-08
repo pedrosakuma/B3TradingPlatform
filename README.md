@@ -115,8 +115,10 @@ docker compose \
 # open http://localhost:8080 and log in as bot-clientA / demopass
 ```
 
-This brings up the trading-host in `Mode=Simulator` and starts a
-companion **demo-driver** process
+This brings up the trading-host in `Mode=Mock` + `AllowErInjection=true`
+(synthetic ER injection enabled; #163 collapsed the legacy
+`Mode=Simulator` into this combination) and starts a companion
+**demo-driver** process
 ([`backend/tools/B3.Trading.DemoDriver`](backend/tools/B3.Trading.DemoDriver))
 that:
 
@@ -132,9 +134,9 @@ view, since alice does not submit orders.
 
 Tear down with `docker compose -f docker/docker-compose.yml -f docker/docker-compose.demo.yml down -v`.
 
-The overlay is **for laptop demos only** — `Mode=Simulator` is gated
-to non-Production environments and the demo credentials are public in
-this repo. See
+The overlay is **for laptop demos only** — `AllowErInjection=true` is
+gated to non-Production environments and the demo credentials are
+public in this repo. See
 [docs/DOCKER.md § Demo overlay](docs/DOCKER.md#demo-overlay-opt-in-laptop-only)
 for tuning, safety notes, and what is intentionally out of scope (live
 MD ticks, real-stack cross-firm bots).
