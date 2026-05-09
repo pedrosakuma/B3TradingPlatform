@@ -27,6 +27,7 @@ public sealed class StateSnapshotter
     private readonly CashLedger _cash;
     private readonly InMemoryUserBotCredentialRegistry? _userBotCredentials;
     private readonly InMemoryUserBotSessionRegistry? _userBotSessions;
+    private readonly IUserBotOrderMappingRegistry? _userBotMappings;
 
     public StateSnapshotter(
         WorkingOrderBook orders,
@@ -40,7 +41,8 @@ public sealed class StateSnapshotter
         AlgoIdRegistry algoIds,
         CashLedger cash,
         InMemoryUserBotCredentialRegistry? userBotCredentials = null,
-        InMemoryUserBotSessionRegistry? userBotSessions = null)
+        InMemoryUserBotSessionRegistry? userBotSessions = null,
+        IUserBotOrderMappingRegistry? userBotMappings = null)
     {
         _orders = orders;
         _positions = positions;
@@ -54,6 +56,7 @@ public sealed class StateSnapshotter
         _cash = cash;
         _userBotCredentials = userBotCredentials;
         _userBotSessions = userBotSessions;
+        _userBotMappings = userBotMappings;
     }
 
     public PlatformSnapshot Capture(long seq) => new()
@@ -76,6 +79,8 @@ public sealed class StateSnapshotter
         CashBalances = _cash.Snapshot().ToList(),
         UserBotCredentials = _userBotCredentials?.Snapshot().ToList() ?? new(),
         BotSessions = _userBotSessions?.Snapshot().ToList() ?? new(),
+        BotOrderMappings = _userBotMappings?.SnapshotOrders().ToList() ?? new(),
+        BotCancelMappings = _userBotMappings?.SnapshotCancels().ToList() ?? new(),
     };
 
     public void Restore(PlatformSnapshot snap)
@@ -99,6 +104,7 @@ public sealed class StateSnapshotter
         _cash.Restore(snap.CashBalances);
         _userBotCredentials?.Restore(snap.UserBotCredentials);
         _userBotSessions?.Restore(snap.BotSessions);
+        _userBotMappings?.Restore(snap.BotOrderMappings, snap.BotCancelMappings);
     }
 }
 
@@ -123,6 +129,7 @@ public sealed class EventReplayer
     private readonly PendingReplacementRegistry? _replacements;
     private readonly InMemoryUserBotCredentialRegistry? _userBotCredentials;
     private readonly InMemoryUserBotSessionRegistry? _userBotSessions;
+    private readonly IUserBotOrderMappingRegistry? _userBotMappings;
 
     public EventReplayer(
         WorkingOrderBook orders,
@@ -136,7 +143,8 @@ public sealed class EventReplayer
         AlgoIdRegistry algoIds,
         PendingReplacementRegistry? replacements = null,
         InMemoryUserBotCredentialRegistry? userBotCredentials = null,
-        InMemoryUserBotSessionRegistry? userBotSessions = null)
+        InMemoryUserBotSessionRegistry? userBotSessions = null,
+        IUserBotOrderMappingRegistry? userBotMappings = null)
     {
         _orders = orders;
         _ownership = ownership;
@@ -150,6 +158,7 @@ public sealed class EventReplayer
         _replacements = replacements;
         _userBotCredentials = userBotCredentials;
         _userBotSessions = userBotSessions;
+        _userBotMappings = userBotMappings;
     }
 
     public void Apply(WalEvent evt)
@@ -166,10 +175,34 @@ public sealed class EventReplayer
                 // #157: advance the ClOrdID registry watermark so the next
                 // live Generate(owner) cannot re-allocate this ID.
                 _clOrdIds.AdvanceCounterTo(owner, o.ClOrdId);
+                // Sub-issue #171 (E): rebuild the bot order mapping side
+                // record for FIXP-origin orders. Same call shape as the
+                // live submit-time apply callback so a snapshot taken
+                // mid-life and a clean restart from WAL produce identical
+                // registry state.
+                if (o.BotMapping is { } bm && _userBotMappings is not null)
+                    _userBotMappings.RegisterOrderInternal(
+                        o.ClOrdId, bm.CredentialId, bm.ExternalClOrdId);
                 // Parent state-machine progression on first child accept is
                 // engine-side (slice 5/6); replay only re-creates the order
                 // — the parent's Working/Filled state is reconstructed from
                 // the child ER stream through the processor below.
+                break;
+            case OrderCancelRequestedEvent ocr:
+                // Sub-issue #171 (E). Re-runs the same in-memory mutations
+                // the live cancel path's apply callback ran. No gateway
+                // call on replay (the original Cancel was either acked
+                // by the venue and its ER will replay, or it never was
+                // and the operator/bot will retry).
+                var ocrOwner = new EndClientId(ocr.OwnerEndClientId);
+                _ownership.RegisterCancelLink(ocr.CancelClOrdId, ocr.OriginalClOrdId);
+                _clOrdIds.AdvanceCounterTo(ocrOwner, ocr.CancelClOrdId);
+                if (ocr.BotMapping is { } cbm && _userBotMappings is not null)
+                    _userBotMappings.RegisterCancelInternal(
+                        cancelInternalClOrdId: ocr.CancelClOrdId,
+                        originalInternalClOrdId: ocr.OriginalClOrdId,
+                        credentialId: cbm.CredentialId,
+                        externalCancelClOrdId: cbm.ExternalClOrdId);
                 break;
             case OrderReplaceRequestedEvent rr:
                 // Slice 4 of #122. Re-register the in-flight intent and

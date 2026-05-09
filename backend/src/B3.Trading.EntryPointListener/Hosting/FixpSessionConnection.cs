@@ -46,6 +46,7 @@ internal sealed class FixpSessionConnection
     private readonly ILogger _logger;
     private readonly IUserBotCredentialRegistry _credentials;
     private readonly IUserBotSessionRegistry _sessions;
+    private readonly FixpOrderAdapter? _orders;
     private readonly string _connectionId;
     private readonly FixpHandshakeStateMachine _sm = new();
 
@@ -56,11 +57,13 @@ internal sealed class FixpSessionConnection
         TcpClient tcpClient,
         IUserBotCredentialRegistry credentials,
         IUserBotSessionRegistry sessions,
-        ILogger logger)
+        ILogger logger,
+        FixpOrderAdapter? orders = null)
     {
         _tcpClient = tcpClient;
         _credentials = credentials;
         _sessions = sessions;
+        _orders = orders;
         _logger = logger;
         _connectionId = Guid.NewGuid().ToString("N");
     }
@@ -171,6 +174,24 @@ internal sealed class FixpSessionConnection
 
             case TerminateData.MESSAGE_ID:
                 return await HandleTerminateAsync(stream, frame, ct).ConfigureAwait(false);
+
+            case NewOrderSingleData.MESSAGE_ID:
+                if (_sm.State != FixpSessionState.Established) goto default;
+                if (_orders is not null && _scope is not null)
+                {
+                    await _orders.HandleNewOrderSingleAsync(stream, frame.Payload, _scope, ct)
+                        .ConfigureAwait(false);
+                }
+                return true;
+
+            case OrderCancelRequestData.MESSAGE_ID:
+                if (_sm.State != FixpSessionState.Established) goto default;
+                if (_orders is not null && _scope is not null)
+                {
+                    await _orders.HandleOrderCancelRequestAsync(stream, frame.Payload, _scope, ct)
+                        .ConfigureAwait(false);
+                }
+                return true;
 
             default:
                 if (_sm.State == FixpSessionState.Established)

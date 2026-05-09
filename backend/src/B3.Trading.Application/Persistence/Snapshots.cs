@@ -68,7 +68,46 @@ public sealed class PlatformSnapshot
     /// <c>BotSessionVerAdvancedEvent</c>, which yields the same shape.
     /// </summary>
     public List<BotSessionStateSnapshot> BotSessions { get; init; } = new();
+
+    /// <summary>
+    /// Sub-issue #171 (E). FIXP order mappings — one entry per live
+    /// (non-reaped) bot-origin order, keyed by internal ClOrdID. Empty
+    /// on snapshots pre-dating the field; reconstructed on replay from
+    /// <see cref="OrderSubmittedEvent.BotMapping"/> entries past the
+    /// snapshot seq.
+    /// </summary>
+    public List<BotOrderMappingSnapshot> BotOrderMappings { get; init; } = new();
+
+    /// <summary>
+    /// Sub-issue #171 (E). FIXP cancel-side mappings — one entry per
+    /// in-flight bot-origin cancel keyed by cancel-side internal ClOrdID,
+    /// pointing at both the original internal ClOrdID and the bot's
+    /// external cancel ClOrdID. Empty on snapshots pre-dating the field.
+    /// </summary>
+    public List<BotCancelMappingSnapshot> BotCancelMappings { get; init; } = new();
 }
+
+/// <summary>
+/// Sub-issue #171 (E). One row of the
+/// <c>internalClOrdId → (credentialId, externalClOrdId)</c> bot-origin
+/// order map.
+/// </summary>
+public sealed record BotOrderMappingSnapshot(
+    ulong InternalClOrdId,
+    Guid CredentialId,
+    ulong ExternalClOrdId);
+
+/// <summary>
+/// Sub-issue #171 (E). One row of the bot-origin cancel-side map. The
+/// cancel's internal ClOrdID resolves to both the original internal
+/// ClOrdID (so cancel-ack ER routing can find the original order) and
+/// the bot's external cancel ClOrdID (so F can echo it back to the bot).
+/// </summary>
+public sealed record BotCancelMappingSnapshot(
+    ulong CancelInternalClOrdId,
+    ulong OriginalInternalClOrdId,
+    Guid CredentialId,
+    ulong ExternalCancelClOrdId);
 
 /// <summary>
 /// Captures one per-credential FIXP session row. The active-connection

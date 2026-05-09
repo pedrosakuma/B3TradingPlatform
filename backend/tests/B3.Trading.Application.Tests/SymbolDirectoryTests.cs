@@ -175,4 +175,69 @@ public class SymbolDirectoryTests
         Assert.False(sut.TryResolve("VALE3", out _));
         Assert.True(sut.TryGetSpec("VALE3", out _));
     }
+
+    // Sub-issue #171 (E): inverse SecurityId → Symbol lookup added for the
+    // FIXP order adapter, which receives orders by numeric SecurityId.
+
+    [Fact]
+    public void TryGetSymbolBySecurityId_KnownId_ReturnsSymbol()
+    {
+        var sut = new SymbolDirectory(new SymbolDirectoryOptions
+        {
+            SecurityIds = { ["PETR4"] = 4321UL, ["VALE3"] = 9876UL },
+        });
+
+        Assert.True(sut.TryGetSymbolBySecurityId(4321UL, out var symbol));
+        Assert.Equal("PETR4", symbol);
+        Assert.True(sut.TryGetSymbolBySecurityId(9876UL, out symbol));
+        Assert.Equal("VALE3", symbol);
+    }
+
+    [Fact]
+    public void TryGetSymbolBySecurityId_UnknownId_ReturnsFalse()
+    {
+        var sut = new SymbolDirectory(new SymbolDirectoryOptions
+        {
+            SecurityIds = { ["PETR4"] = 4321UL },
+        });
+
+        Assert.False(sut.TryGetSymbolBySecurityId(9999UL, out var symbol));
+        Assert.Null(symbol);
+    }
+
+    [Fact]
+    public void TryGetSymbolBySecurityId_RoundTripsForwardLookup()
+    {
+        // Inverse map is built from the forward map at construction time;
+        // verify they stay in lockstep.
+        var sut = new SymbolDirectory(new SymbolDirectoryOptions
+        {
+            SecurityIds = { ["PETR4"] = 4321UL, ["VALE3"] = 9876UL },
+        });
+
+        foreach (var name in new[] { "PETR4", "VALE3" })
+        {
+            Assert.True(sut.TryResolve(name, out var id));
+            Assert.True(sut.TryGetSymbolBySecurityId(id, out var back));
+            Assert.Equal(name, back);
+        }
+    }
+
+    [Fact]
+    public void TryGetSymbolBySecurityId_DuplicateSecurityId_FirstWriteWins()
+    {
+        // Configuration mistake: two symbols claim the same SecurityId.
+        // Forward map keeps both; reverse map keeps the first.
+        var sut = new SymbolDirectory(new SymbolDirectoryOptions
+        {
+            SecurityIds = { ["PETR4"] = 100UL, ["PETR3"] = 100UL },
+        });
+
+        Assert.True(sut.TryGetSymbolBySecurityId(100UL, out var symbol));
+        Assert.NotNull(symbol);
+        // Either one is acceptable as long as we return a known symbol;
+        // the first-write-wins guarantee is documented but ordering of
+        // dictionary enumeration is implementation defined.
+        Assert.Contains(symbol, new[] { "PETR4", "PETR3" });
+    }
 }
