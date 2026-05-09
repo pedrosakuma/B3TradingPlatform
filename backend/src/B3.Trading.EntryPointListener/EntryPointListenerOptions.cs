@@ -28,6 +28,24 @@ public sealed class EntryPointListenerOptions
     /// </summary>
     public bool AllowInProduction { get; set; }
 
+    /// <summary>
+    /// Sub-issue #173 (G). Cadence (ms) at which an established
+    /// connection emits <c>Sequence</c> as a server→bot heartbeat / gap
+    /// signal. Suppressed when a real outbound message was sent within
+    /// the window (piggyback semantics, RFC §4.7). Default 3000 ms.
+    /// Set ≤0 to disable.
+    /// </summary>
+    public int HeartbeatIntervalMs { get; set; } = 3000;
+
+    /// <summary>
+    /// Sub-issue #173 (G). Maximum bot inbound message-rate window the
+    /// listener will tolerate gaps within before considering the gap
+    /// permanent. Currently advisory — v0 does not auto-Terminate on
+    /// unfilled gaps (idempotent flow: bot reconciles via REST instead);
+    /// surfaced for forward compatibility with H's hardening pass.
+    /// </summary>
+    public int RetransmitTimeoutMs { get; set; } = 5000;
+
     /// <summary>Nested TLS configuration.</summary>
     public sealed class TlsOptions
     {

@@ -8,6 +8,7 @@ using B3.Trading.Application.UserBots;
 using B3.Trading.EntryPointListener.Framing;
 using B3.Trading.EntryPointListener.Handshake;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace B3.Trading.EntryPointListener.Hosting;
 
@@ -48,8 +49,33 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     private readonly IUserBotSessionRegistry _sessions;
     private readonly FixpOrderAdapter? _orders;
     private readonly IBotSessionConnectionDirectory? _connectionDirectory;
+    private readonly BotOutboundCoordinator? _outboundCoordinator;
+    private readonly EntryPointListenerOptions _options;
+    private readonly TimeProvider _clock;
     private readonly string _connectionId;
     private readonly FixpHandshakeStateMachine _sm = new();
+
+    // Sub-issue #173 (G). Inbound/outbound seq state.
+    //
+    // _nextExpectedInboundSeq is the SeqNum the listener expects on the
+    // BusinessHeader.MsgSeqNum of the *next* application message from
+    // the bot. Init=1 per FIXP convention; bumped on every successfully
+    // accepted application message and on every Sequence/RetransmitRequest
+    // that carries a NextSeqNo > our expected (gap detected → emit
+    // NotApplied, re-sync the watermark to the bot's claimed value).
+    //
+    // Application messages carrying MsgSeqNum=0 are treated as "implicit"
+    // by the receiver and consume the expected slot without strict
+    // validation — a mode kept for backward compatibility with the F-era
+    // tests that did not stamp the business header.
+    private long _nextExpectedInboundSeq = 1;
+    // Tick of the most recent outbound write the connection is aware
+    // of (handshake/order-ack/multiplexer push or session-control). Used
+    // by the heartbeat loop to suppress a Sequence emission when the
+    // bot has already observed a real frame within the cadence window.
+    private long _lastOutboundTicks;
+    private CancellationTokenSource? _heartbeatCts;
+    private Task? _heartbeatLoop;
 
     // Outbound-write serialisation for the multiplexer (sub-issue F).
     // The handshake/order-ack writers and the multiplexer's enqueue
@@ -69,15 +95,22 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         IUserBotSessionRegistry sessions,
         ILogger logger,
         FixpOrderAdapter? orders = null,
-        IBotSessionConnectionDirectory? connectionDirectory = null)
+        IBotSessionConnectionDirectory? connectionDirectory = null,
+        BotOutboundCoordinator? outboundCoordinator = null,
+        EntryPointListenerOptions? options = null,
+        TimeProvider? clock = null)
     {
         _tcpClient = tcpClient;
         _credentials = credentials;
         _sessions = sessions;
         _orders = orders;
         _connectionDirectory = connectionDirectory;
+        _outboundCoordinator = outboundCoordinator;
+        _options = options ?? new EntryPointListenerOptions();
+        _clock = clock ?? TimeProvider.System;
         _logger = logger;
         _connectionId = Guid.NewGuid().ToString("N");
+        _lastOutboundTicks = _clock.GetUtcNow().UtcTicks;
     }
 
     public async Task RunAsync(CancellationToken ct)
@@ -135,6 +168,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         finally
         {
             _closed = true;
+            StopHeartbeatLoop();
             ArrayPool<byte>.Shared.Return(readBuf);
             // Deregister BEFORE the stream is closed so a racing ER from
             // the multiplexer hot path either sees us in the directory
@@ -199,10 +233,32 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
             case TerminateData.MESSAGE_ID:
                 return await HandleTerminateAsync(stream, frame, ct).ConfigureAwait(false);
 
+            case SequenceData.MESSAGE_ID:
+                if (_sm.State != FixpSessionState.Established) goto default;
+                await HandleInboundSequenceAsync(stream, frame, ct).ConfigureAwait(false);
+                return true;
+
+            case RetransmitRequestData.MESSAGE_ID:
+                if (_sm.State != FixpSessionState.Established) goto default;
+                await HandleInboundRetransmitRequestAsync(stream, frame, ct).ConfigureAwait(false);
+                return true;
+
             case NewOrderSingleData.MESSAGE_ID:
                 if (_sm.State != FixpSessionState.Established) goto default;
                 if (_orders is not null && _scope is not null)
                 {
+                    // Sub-issue #173 (G): track inbound seq via the
+                    // BusinessHeader.MsgSeqNum. Out-of-order forward
+                    // (seq > expected) ⇒ NotApplied (gap signal); the
+                    // current message is still processed (bot's
+                    // idempotent ClOrdId flow swallows true duplicates
+                    // upstream). Backward (seq < expected) ⇒ duplicate,
+                    // suppress dispatch entirely so the order adapter
+                    // does not double-emit a side-effect.
+                    var fresh = await TrackInboundAppMessageAsync(
+                        stream, frame.Payload, NewOrderSingleData.BLOCK_LENGTH, ct).ConfigureAwait(false);
+                    if (!fresh) return true;
+
                     // Sub-issue #172 (F): the order adapter writes ER
                     // acks/rejects directly to the same stream the
                     // multiplexer's TryEnqueue path writes to. Take the
@@ -212,6 +268,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
                     {
                         await _orders.HandleNewOrderSingleAsync(stream, frame.Payload, _scope, ct)
                             .ConfigureAwait(false);
+                        TouchOutbound();
                     }
                     finally { _writeMutex.Release(); }
                 }
@@ -221,11 +278,16 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
                 if (_sm.State != FixpSessionState.Established) goto default;
                 if (_orders is not null && _scope is not null)
                 {
+                    var fresh = await TrackInboundAppMessageAsync(
+                        stream, frame.Payload, OrderCancelRequestData.BLOCK_LENGTH, ct).ConfigureAwait(false);
+                    if (!fresh) return true;
+
                     await _writeMutex.WaitAsync(ct).ConfigureAwait(false);
                     try
                     {
                         await _orders.HandleOrderCancelRequestAsync(stream, frame.Payload, _scope, ct)
                             .ConfigureAwait(false);
+                        TouchOutbound();
                     }
                     finally { _writeMutex.Release(); }
                 }
@@ -416,6 +478,12 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
             _connectionDirectory.Register(credentialId, this);
             _registeredInDirectory = true;
         }
+
+        // Sub-issue #173 (G): start the heartbeat loop that emits
+        // Sequence on the configured cadence whenever idle. Started AFTER
+        // directory registration so the loop can read the coordinator's
+        // current outbound seq without racing the first multiplexer push.
+        StartHeartbeatLoop(stream);
         return true;
     }
 
@@ -437,6 +505,302 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         var action = _sm.OnTerminate(in msg);
         await SendActionAsync(stream, action, sid, ver, ct).ConfigureAwait(false);
         return false; // always close after Terminate
+    }
+
+    // ─── Inbound seq tracking (sub-issue G #173) ────────────────────────
+
+    /// <summary>
+    /// Reads the FIXP <c>InboundBusinessHeader.MsgSeqNum</c> off an
+    /// application-message payload and reconciles it against
+    /// <see cref="_nextExpectedInboundSeq"/>. Behaviour:
+    /// <list type="bullet">
+    /// <item>SeqNum == 0 ⇒ "implicit" mode (legacy F-era tests). Just
+    /// bump the watermark; no validation.</item>
+    /// <item>SeqNum &gt; expected ⇒ gap. Emit a <c>NotApplied(from=expected,
+    /// count=delta)</c> framing message to signal the bot, then re-sync
+    /// the watermark to <c>seq+1</c>. The current message is still
+    /// processed downstream (RFC §4.7 — idempotent flow leaves duplicate
+    /// detection to ClOrdId; dropping a reachable order would be worse
+    /// than telling the bot "we missed N earlier ones, here's this
+    /// one").</item>
+    /// <item>SeqNum &lt; expected ⇒ duplicate. Per FIXP idempotent
+    /// recipient convention, log debug and ignore (the application
+    /// layer's ClOrdId uniqueness check will reject any reused id with
+    /// a <c>DuplicateClOrdId</c> business reject anyway).</item>
+    /// <item>SeqNum == expected ⇒ in-order. Bump.</item>
+    /// </list>
+    /// Returns <c>true</c> when the caller should proceed with the
+    /// downstream order-adapter dispatch, <c>false</c> for duplicates
+    /// the caller should swallow.
+    /// </summary>
+    private async Task<bool> TrackInboundAppMessageAsync(
+        NetworkStream stream, byte[] payload, int blockLength, CancellationToken ct)
+    {
+        // The InboundBusinessHeader is the first field of the message
+        // block (offset 0 within the SBE block — see InboundBusinessHeader
+        // and NewOrderSingleData layout). Defensive bounds check first.
+        if (payload.Length < blockLength) return true;
+        var header = MemoryMarshal.Read<InboundBusinessHeader>(payload);
+        var seq = (ulong)header.MsgSeqNum;
+        if (seq == 0)
+        {
+            // Implicit mode — the bot did not stamp an explicit seq. We
+            // still advance the local counter so a later explicit seq is
+            // compared against a sane baseline.
+            Interlocked.Increment(ref _nextExpectedInboundSeq);
+            return true;
+        }
+
+        var expected = (ulong)Interlocked.Read(ref _nextExpectedInboundSeq);
+        if (seq == expected)
+        {
+            Interlocked.Increment(ref _nextExpectedInboundSeq);
+            return true;
+        }
+        if (seq > expected)
+        {
+            var gap = seq - expected;
+            _logger.LogInformation(
+                "fixp.inbound.gap connectionId={ConnectionId} expected={Expected} received={Received} gap={Gap}",
+                _connectionId, expected, seq, gap);
+            await SendNotAppliedAsync(stream, expected, (uint)Math.Min(gap, uint.MaxValue), ct)
+                .ConfigureAwait(false);
+            // Re-sync past the gap AND the current message.
+            Interlocked.Exchange(ref _nextExpectedInboundSeq, (long)(seq + 1));
+            return true;
+        }
+        // seq < expected: duplicate. Idempotent flow: ignore.
+        _logger.LogDebug(
+            "fixp.inbound.duplicate connectionId={ConnectionId} expected={Expected} received={Received}",
+            _connectionId, expected, seq);
+        return false;
+    }
+
+    private async Task HandleInboundSequenceAsync(
+        NetworkStream stream, DecodedFrame frame, CancellationToken ct)
+    {
+        if (frame.Payload.Length < SequenceData.BLOCK_LENGTH) return;
+        var msg = MemoryMarshal.Read<SequenceData>(frame.Payload);
+        var nextSeqNo = (ulong)msg.NextSeqNo;
+        var expected = (ulong)Interlocked.Read(ref _nextExpectedInboundSeq);
+
+        if (nextSeqNo > expected)
+        {
+            var gap = nextSeqNo - expected;
+            _logger.LogInformation(
+                "fixp.inbound.sequence.gap connectionId={ConnectionId} expected={Expected} botNext={BotNext} gap={Gap}",
+                _connectionId, expected, nextSeqNo, gap);
+            await SendNotAppliedAsync(stream, expected, (uint)Math.Min(gap, uint.MaxValue), ct)
+                .ConfigureAwait(false);
+            Interlocked.Exchange(ref _nextExpectedInboundSeq, (long)nextSeqNo);
+        }
+        // nextSeqNo == expected → in-sync, no-op.
+        // nextSeqNo < expected → bot is behind; per FIXP this is a
+        // protocol error but the conservative v0 behaviour is to log
+        // and leave our watermark untouched (the bot will resync via a
+        // subsequent message or Terminate of its own accord).
+        else if (nextSeqNo < expected)
+        {
+            _logger.LogWarning(
+                "fixp.inbound.sequence.behind connectionId={ConnectionId} expected={Expected} botNext={BotNext}",
+                _connectionId, expected, nextSeqNo);
+        }
+    }
+
+    private async Task HandleInboundRetransmitRequestAsync(
+        NetworkStream stream, DecodedFrame frame, CancellationToken ct)
+    {
+        if (frame.Payload.Length < RetransmitRequestData.BLOCK_LENGTH) return;
+        var msg = MemoryMarshal.Read<RetransmitRequestData>(frame.Payload);
+        var sessionId = (uint)msg.SessionID;
+        var requestTs = msg.Timestamp.Time;
+        var fromSeq = (ulong)msg.FromSeqNo;
+        var count = (uint)msg.Count;
+
+        if (_scope is null || _outboundCoordinator is null)
+        {
+            // No outbound state to replay against — should not happen
+            // post-Establish but defensively reject as INVALID_SESSION.
+            await SendRetransmitRejectAsync(stream, sessionId, requestTs,
+                RetransmitRejectCode.INVALID_SESSION, ct).ConfigureAwait(false);
+            return;
+        }
+
+        if (fromSeq == 0)
+        {
+            await SendRetransmitRejectAsync(stream, sessionId, requestTs,
+                RetransmitRejectCode.INVALID_FROMSEQNO, ct).ConfigureAwait(false);
+            return;
+        }
+        if (count == 0)
+        {
+            await SendRetransmitRejectAsync(stream, sessionId, requestTs,
+                RetransmitRejectCode.INVALID_COUNT, ct).ConfigureAwait(false);
+            return;
+        }
+
+        var credentialId = _scope.Principal.CredentialId;
+        var currentSeq = _outboundCoordinator.GetCurrentSeq(credentialId);
+        // toInclusive = fromSeq + count - 1; reject when bot asks for
+        // anything past what the allocator has handed out.
+        var toInclusive = fromSeq + count - 1;
+        if (fromSeq > currentSeq || toInclusive > currentSeq)
+        {
+            _logger.LogInformation(
+                "fixp.retransmit.reject reason=INVALID_FROMSEQNO connectionId={ConnectionId} from={From} count={Count} current={Current}",
+                _connectionId, fromSeq, count, currentSeq);
+            await SendRetransmitRejectAsync(stream, sessionId, requestTs,
+                RetransmitRejectCode.INVALID_FROMSEQNO, ct).ConfigureAwait(false);
+            return;
+        }
+
+        var buffer = _outboundCoordinator.GetOrCreateBuffer(credentialId);
+        var range = buffer.GetRange(fromSeq, toInclusive);
+        var allPresent = range.Count == (int)count
+                         && range[0].Seq == fromSeq
+                         && range[^1].Seq == toInclusive;
+        if (!allPresent || buffer.IsOverflowed)
+        {
+            _logger.LogInformation(
+                "fixp.retransmit.reject reason=OUT_OF_RANGE connectionId={ConnectionId} from={From} count={Count} have={Have} overflowed={Overflowed}",
+                _connectionId, fromSeq, count, range.Count, buffer.IsOverflowed);
+            await SendRetransmitRejectAsync(stream, sessionId, requestTs,
+                RetransmitRejectCode.OUT_OF_RANGE, ct).ConfigureAwait(false);
+            return;
+        }
+
+        // Replay in order under the write mutex. The mutex blocks the
+        // multiplexer's TryEnqueue path so a freshly-allocated live ER
+        // cannot land mid-replay and break the bot's seq monotonicity.
+        // The historical seqs and bytes are written as-is — no
+        // re-allocation, no re-framing.
+        await _writeMutex.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_closed) return;
+            var framing = OutboundSessionMessageEncoder.EncodeRetransmission(
+                sessionId, requestTs, fromSeq, count);
+            await stream.WriteAsync(framing, ct).ConfigureAwait(false);
+            foreach (var entry in range)
+            {
+                await stream.WriteAsync(entry.Bytes, ct).ConfigureAwait(false);
+            }
+            TouchOutbound();
+            _logger.LogInformation(
+                "fixp.retransmit.replay connectionId={ConnectionId} from={From} count={Count}",
+                _connectionId, fromSeq, count);
+        }
+        finally
+        {
+            _writeMutex.Release();
+        }
+    }
+
+    private async Task SendNotAppliedAsync(
+        NetworkStream stream, ulong fromSeqNo, uint count, CancellationToken ct)
+    {
+        var bytes = OutboundSessionMessageEncoder.EncodeNotApplied(fromSeqNo, count);
+        await _writeMutex.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_closed) return;
+            await stream.WriteAsync(bytes, ct).ConfigureAwait(false);
+            TouchOutbound();
+        }
+        finally { _writeMutex.Release(); }
+    }
+
+    private async Task SendRetransmitRejectAsync(
+        NetworkStream stream, uint sessionId, ulong requestTimestamp,
+        RetransmitRejectCode code, CancellationToken ct)
+    {
+        var bytes = OutboundSessionMessageEncoder.EncodeRetransmitReject(
+            sessionId, requestTimestamp, code);
+        await _writeMutex.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_closed) return;
+            await stream.WriteAsync(bytes, ct).ConfigureAwait(false);
+            TouchOutbound();
+        }
+        finally { _writeMutex.Release(); }
+    }
+
+    /// <summary>
+    /// Server→bot heartbeat <c>Sequence(NextSeqNo)</c> emitted on the
+    /// configured cadence whenever no real outbound frame has been sent
+    /// inside the last cadence window. Lets the bot detect server-side
+    /// gaps (its expected vs <c>NextSeqNo</c>) and lets B3-style
+    /// keepalive timers stay live during quiet periods. Disabled when
+    /// <see cref="EntryPointListenerOptions.HeartbeatIntervalMs"/> ≤ 0.
+    /// </summary>
+    private void StartHeartbeatLoop(NetworkStream stream)
+    {
+        var intervalMs = _options.HeartbeatIntervalMs;
+        if (intervalMs <= 0) return;
+        var interval = TimeSpan.FromMilliseconds(intervalMs);
+        _heartbeatCts = new CancellationTokenSource();
+        _heartbeatLoop = Task.Run(async () =>
+        {
+            var ct = _heartbeatCts.Token;
+            try
+            {
+                while (!ct.IsCancellationRequested && !_closed)
+                {
+                    await Task.Delay(interval, _clock, ct).ConfigureAwait(false);
+                    if (_closed) return;
+                    var sinceLast = _clock.GetUtcNow().UtcTicks - Interlocked.Read(ref _lastOutboundTicks);
+                    if (sinceLast < interval.Ticks) continue; // piggyback: a real frame already went out
+                    await SendHeartbeatSequenceAsync(stream, ct).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) { /* shutdown */ }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "fixp.heartbeat.loop.error connectionId={ConnectionId}", _connectionId);
+            }
+        });
+    }
+
+    private async Task SendHeartbeatSequenceAsync(NetworkStream stream, CancellationToken ct)
+    {
+        if (_scope is null || _outboundCoordinator is null) return;
+        await _writeMutex.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_closed) return;
+            // Re-check piggyback under the mutex: a live ER could have
+            // queued and acquired the mutex while we were waiting; in
+            // that case it has already advertised the latest seq and a
+            // heartbeat now would be redundant (and would race the
+            // current-seq read below against any not-yet-flushed ER on
+            // a sibling thread).
+            var interval = TimeSpan.FromMilliseconds(
+                _options?.HeartbeatIntervalMs ?? 3000);
+            var sinceLast = _clock.GetUtcNow().UtcTicks - Interlocked.Read(ref _lastOutboundTicks);
+            if (sinceLast < interval.Ticks) return;
+
+            var current = _outboundCoordinator.GetCurrentSeq(_scope.Principal.CredentialId);
+            var nextSeq = current + 1;
+            var bytes = OutboundSessionMessageEncoder.EncodeSequence(nextSeq);
+            await stream.WriteAsync(bytes, ct).ConfigureAwait(false);
+            TouchOutbound();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "fixp.heartbeat.send.error connectionId={ConnectionId}", _connectionId);
+        }
+        finally { _writeMutex.Release(); }
+    }
+
+    private void TouchOutbound()
+        => Interlocked.Exchange(ref _lastOutboundTicks, _clock.GetUtcNow().UtcTicks);
+
+    private void StopHeartbeatLoop()
+    {
+        try { _heartbeatCts?.Cancel(); } catch { /* ignore */ }
+        try { _heartbeatCts?.Dispose(); } catch { /* ignore */ }
+        _heartbeatCts = null;
     }
 
     // ─── Async response writers ──────────────────────────────────────────
@@ -669,6 +1033,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
             {
                 if (_closed) return;
                 await stream.WriteAsync(framedBytes, CancellationToken.None).ConfigureAwait(false);
+                TouchOutbound();
             }
             catch (Exception ex)
             {
@@ -688,6 +1053,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     {
         // Used by the multiplexer's overflow path to force-close.
         _closed = true;
+        StopHeartbeatLoop();
         try { _stream?.Close(); } catch { /* ignore */ }
         try { _tcpClient.Close(); } catch { /* ignore */ }
         _writeMutex.Dispose();
