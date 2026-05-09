@@ -30,6 +30,7 @@ namespace B3.Trading.Application;
 public sealed class SymbolDirectory
 {
     private readonly IReadOnlyDictionary<string, ulong> _byName;
+    private readonly IReadOnlyDictionary<ulong, string> _bySecurityId;
     private readonly IReadOnlyDictionary<string, InstrumentSpec> _specs;
 
     public SymbolDirectory(SymbolDirectoryOptions options)
@@ -38,12 +39,24 @@ public sealed class SymbolDirectory
         // Always copy to enforce case-insensitive comparison even if
         // the binder produced a culture-sensitive dictionary.
         var copy = new Dictionary<string, ulong>(StringComparer.OrdinalIgnoreCase);
+        // Sub-issue #171 (E): inverse lookup (SecurityId → Symbol) for the
+        // FIXP adapter, which receives orders by numeric SecurityId on the
+        // wire and must translate to the Symbol the submit pipeline
+        // expects. Computed at construction time from the same forward
+        // map — no extra config surface.
+        var inverse = new Dictionary<ulong, string>();
         foreach (var kv in options.SecurityIds)
         {
             if (string.IsNullOrWhiteSpace(kv.Key) || kv.Value == 0) continue;
             copy[kv.Key] = kv.Value;
+            // First-write-wins: if two symbols claim the same SecurityId
+            // (configuration mistake), the inverse map keeps the first
+            // one we saw rather than silently overwriting. The forward
+            // map remains correct for both.
+            inverse.TryAdd(kv.Value, kv.Key);
         }
         _byName = copy;
+        _bySecurityId = inverse;
 
         var specs = new Dictionary<string, InstrumentSpec>(StringComparer.OrdinalIgnoreCase);
         foreach (var kv in options.Specs)
@@ -71,6 +84,32 @@ public sealed class SymbolDirectory
             return false;
         }
         return _byName.TryGetValue(symbol, out securityId);
+    }
+
+    /// <summary>
+    /// Sub-issue #171 (E). Inverse of <see cref="TryResolve(string, out ulong)"/>:
+    /// resolves a numeric SecurityId back to its configured symbol. The
+    /// FIXP listener calls this on every <c>NewOrderSingle</c> /
+    /// <c>OrderCancelRequest</c> because the SBE wire only carries the
+    /// SecurityId, but <c>OrderSubmissionService</c> requires a non-empty
+    /// symbol. Returns <c>false</c> for unknown ids — the listener turns
+    /// that into a <c>BusinessMessageReject(UnknownSecurity)</c> without
+    /// touching the submit pipeline.
+    /// </summary>
+    public bool TryGetSymbolBySecurityId(ulong securityId, out string? symbol)
+    {
+        if (securityId == 0)
+        {
+            symbol = null;
+            return false;
+        }
+        if (_bySecurityId.TryGetValue(securityId, out var found))
+        {
+            symbol = found;
+            return true;
+        }
+        symbol = null;
+        return false;
     }
 
     /// <summary>

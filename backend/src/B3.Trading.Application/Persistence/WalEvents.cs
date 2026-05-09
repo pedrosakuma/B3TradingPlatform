@@ -31,6 +31,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(UserBotCredentialRevokedEvent), "userbot.cred.revoked")]
 [JsonDerivedType(typeof(BotSessionInitializedEvent), "userbot.session.initialized")]
 [JsonDerivedType(typeof(BotSessionVerAdvancedEvent), "userbot.session.ver-advanced")]
+[JsonDerivedType(typeof(OrderCancelRequestedEvent), "order.cancel-requested")]
 public abstract record WalEvent
 {
     public DateTimeOffset TimestampUtc { get; init; } = DateTimeOffset.UtcNow;
@@ -64,6 +65,52 @@ public sealed record OrderSubmittedEvent : WalEvent
     /// </summary>
     public ulong? ParentAlgoId { get; init; }
     public int? AlgoSliceSeq { get; init; }
+
+    /// <summary>
+    /// Sub-issue #171 (E). When non-null, the order was submitted via
+    /// the FIXP listener on behalf of a user-bot credential. Carries
+    /// the side-mapping needed by <c>IUserBotOrderMappingRegistry</c>
+    /// to reverse-route subsequent ERs back to the originating bot
+    /// session (sub-issue F #172). Field is purely informational for
+    /// REST/WS submissions where it serialises as <c>null</c>; older
+    /// WAL segments without the field deserialise as <c>null</c> too,
+    /// matching the manual-order semantics they actually carried.
+    /// </summary>
+    public BotOrderMapping? BotMapping { get; init; }
+}
+
+/// <summary>
+/// Sub-record carried by <see cref="OrderSubmittedEvent"/> /
+/// <see cref="OrderCancelRequestedEvent"/> when the order originates from
+/// the FIXP listener (RFC §4.6 ClOrdId / §4.8 persistence). The pair
+/// <c>(CredentialId, ExternalClOrdId)</c> is the bot-visible identity
+/// for the order; the platform's internal <c>ulong</c> ClOrdID continues
+/// to be the on-the-wire and on-WAL identifier.
+/// </summary>
+public sealed record BotOrderMapping(Guid CredentialId, ulong ExternalClOrdId);
+
+/// <summary>
+/// Sub-issue #171 (E). Recorded the moment a cancel request reaches the
+/// platform — REST <c>DELETE /orders/{clOrdId}</c> or a FIXP
+/// <c>OrderCancelRequest</c>. The previous in-memory-only path
+/// (<c>OwnershipMap.RegisterCancelLink</c>) lost cancel-side state on
+/// restart; persisting it as a WAL event closes the FIXP-cancel ER
+/// round-trip across restart per RFC §4.6.
+///
+/// <para>The dispatcher <c>apply</c> callback runs the in-memory
+/// mutations under the lock: ownership cancel-link, ClOrdID watermark
+/// advance, and (when <see cref="BotMapping"/> is set) the bot
+/// cancel-mapping registration. The async <c>gateway.CancelAsync</c>
+/// I/O is invoked OUTSIDE the dispatcher lock per the dispatcher's
+/// "synchronous in-memory work only" contract. On replay only the
+/// in-memory mutation runs (no gateway call).</para>
+/// </summary>
+public sealed record OrderCancelRequestedEvent : WalEvent
+{
+    public required ulong CancelClOrdId { get; init; }
+    public required ulong OriginalClOrdId { get; init; }
+    public required string OwnerEndClientId { get; init; }
+    public BotOrderMapping? BotMapping { get; init; }
 }
 
 /// <summary>

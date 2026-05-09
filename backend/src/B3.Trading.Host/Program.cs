@@ -106,11 +106,17 @@ builder.Services.AddSingleton<IUserBotCredentialRegistry>(sp =>
 builder.Services.AddSingleton<InMemoryUserBotSessionRegistry>();
 builder.Services.AddSingleton<IUserBotSessionRegistry>(sp =>
     sp.GetRequiredService<InMemoryUserBotSessionRegistry>());
+// Sub-issue #171 (E): bot order mapping side-registry. Singleton so
+// snapshot capture/restore + WAL replay all share the same instance.
+builder.Services.AddSingleton<InMemoryUserBotOrderMappingRegistry>();
+builder.Services.AddSingleton<IUserBotOrderMappingRegistry>(sp =>
+    sp.GetRequiredService<InMemoryUserBotOrderMappingRegistry>());
 builder.Services.AddSingleton<SubscriptionManager>();
 builder.Services.AddSingleton<IExecutionEventSink, WebSocketExecutionEventSink>();
 builder.Services.AddSingleton<IAlgoEventSink, WebSocketAlgoEventSink>();
 builder.Services.AddSingleton<ExecutionReportProcessor>();
 builder.Services.AddSingleton<OrderSubmissionService>();
+builder.Services.AddSingleton<OrderCancelService>();
 builder.Services.AddSingleton<OrderModifyService>();
 
 // Algo engine signal channel + hosted consumer (RFC algo-orders-v0 §4.3).

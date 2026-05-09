@@ -2,6 +2,7 @@ using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.Risk.Accounting;
+using B3.Trading.Application.UserBots;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Logging;
 
@@ -35,6 +36,7 @@ public sealed class OrderSubmissionService
     private readonly CompositeRiskAccountant _accountant;
     private readonly EventDispatcher _dispatcher;
     private readonly Lifecycle.IDrainGate _drain;
+    private readonly IUserBotOrderMappingRegistry? _botMappings;
     private readonly ILogger<OrderSubmissionService> _logger;
 
     public OrderSubmissionService(
@@ -48,7 +50,8 @@ public sealed class OrderSubmissionService
         CompositeRiskAccountant accountant,
         EventDispatcher dispatcher,
         Lifecycle.IDrainGate drain,
-        ILogger<OrderSubmissionService> logger)
+        ILogger<OrderSubmissionService> logger,
+        IUserBotOrderMappingRegistry? botMappings = null)
     {
         _clOrdIds = clOrdIds;
         _ownership = ownership;
@@ -60,6 +63,7 @@ public sealed class OrderSubmissionService
         _accountant = accountant;
         _dispatcher = dispatcher;
         _drain = drain;
+        _botMappings = botMappings;
         _logger = logger;
     }
 
@@ -115,6 +119,16 @@ public sealed class OrderSubmissionService
 
         try
         {
+            // Sub-issue #171 (E): when the order originates from the FIXP
+            // listener, the WAL event carries the BotMapping side-record
+            // (RFC §4.6 / §4.8) and the apply callback registers the
+            // forward+reverse lookups in the in-memory registry under the
+            // same dispatcher lock as the WAL append. REST/WS submissions
+            // pass req.BotOrigin == null and the field serialises as null.
+            BotOrderMapping? botMapping = req.BotOrigin is { } origin
+                ? new BotOrderMapping(origin.CredentialId, origin.ExternalClOrdId)
+                : null;
+
             _dispatcher.Dispatch(
                 new OrderSubmittedEvent
                 {
@@ -129,6 +143,7 @@ public sealed class OrderSubmissionService
                     Price = req.Price,
                     ParentAlgoId = req.ParentAlgoId,
                     AlgoSliceSeq = req.AlgoSliceSeq,
+                    BotMapping = botMapping,
                 },
                 () =>
                 {
@@ -147,6 +162,15 @@ public sealed class OrderSubmissionService
                             clOrdId);
                     }
                     _ownership.Register(clOrdId, req.Owner);
+                    if (botMapping is not null && _botMappings is not null)
+                    {
+                        // Same lock-held call shape on live submit and on
+                        // WAL replay (EventReplayer invokes the same
+                        // method) so the registry is rehydrated by exactly
+                        // the same code path that populated it originally.
+                        _botMappings.RegisterOrderInternal(
+                            clOrdId, botMapping.CredentialId, botMapping.ExternalClOrdId);
+                    }
                 });
         }
         catch (WalBackpressureException ex)
@@ -251,7 +275,28 @@ public sealed record OrderSubmissionRequest(
     decimal? Price,
     OrderSubmissionSource Source = OrderSubmissionSource.Manual,
     ulong? ParentAlgoId = null,
-    int? AlgoSliceSeq = null);
+    int? AlgoSliceSeq = null)
+{
+    /// <summary>
+    /// Sub-issue #171 (E). When non-null, the request originates from
+    /// the FIXP listener on behalf of a user-bot credential. The submit
+    /// pipeline ignores this for matching/risk purposes; it is recorded
+    /// on the <see cref="Persistence.OrderSubmittedEvent.BotMapping"/>
+    /// side-record so sub-issue F can reverse-route ERs back to the
+    /// originating bot session. REST/WS callers pass <c>null</c>.
+    /// </summary>
+    public BotOrigin? BotOrigin { get; init; }
+}
+
+/// <summary>
+/// Sub-issue #171 (E). FIXP-origin annotation on
+/// <see cref="OrderSubmissionRequest"/>. <see cref="ExternalClOrdId"/>
+/// is the bot's own wire ClOrdID (uint64 per the SBE schema); the
+/// platform's internal <c>ulong</c> ClOrdID is allocated independently
+/// by <see cref="ClOrdIdPrefixRegistry"/> and remains the on-the-wire
+/// identifier for the gateway and the WAL.
+/// </summary>
+public sealed record BotOrigin(Guid CredentialId, ulong ExternalClOrdId);
 
 /// <summary>
 /// Outcome of <see cref="OrderSubmissionService.SubmitAsync"/>. The

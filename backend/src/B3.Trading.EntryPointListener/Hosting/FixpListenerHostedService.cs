@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using B3.Trading.Application;
 using B3.Trading.Application.UserBots;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -25,6 +26,7 @@ public sealed class FixpListenerHostedService : BackgroundService
     private readonly EntryPointListenerOptions _opts;
     private readonly IUserBotCredentialRegistry _credentials;
     private readonly IUserBotSessionRegistry _sessions;
+    private readonly FixpOrderAdapter? _orders;
     private readonly ILogger<FixpListenerHostedService> _logger;
     private readonly TaskCompletionSource<IPEndPoint> _boundTcs =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -35,12 +37,25 @@ public sealed class FixpListenerHostedService : BackgroundService
         IOptions<EntryPointListenerOptions> opts,
         IUserBotCredentialRegistry credentials,
         IUserBotSessionRegistry sessions,
-        ILogger<FixpListenerHostedService> logger)
+        ILogger<FixpListenerHostedService> logger,
+        SymbolDirectory? symbols = null,
+        OrderSubmissionService? submit = null,
+        OrderCancelService? cancel = null,
+        IUserBotOrderMappingRegistry? botMappings = null)
     {
         _opts = opts.Value;
         _credentials = credentials;
         _sessions = sessions;
         _logger = logger;
+        // Sub-issue #171 (E): the order/cancel adapter is only wired when
+        // the host has registered the full submit pipeline. Tests (and
+        // any future handshake-only mode) leave the deps null and the
+        // listener falls back to the v0 "ignore application messages"
+        // behaviour.
+        if (symbols is not null && submit is not null && cancel is not null && botMappings is not null)
+        {
+            _orders = new FixpOrderAdapter(symbols, submit, cancel, botMappings, logger);
+        }
     }
 
     /// <summary>
@@ -91,7 +106,7 @@ public sealed class FixpListenerHostedService : BackgroundService
                     continue;
                 }
 
-                var conn = new FixpSessionConnection(client, _credentials, _sessions, _logger);
+                var conn = new FixpSessionConnection(client, _credentials, _sessions, _logger, _orders);
                 _ = Task.Run(() => conn.RunAsync(stoppingToken), stoppingToken);
             }
         }

@@ -2,7 +2,6 @@ using System.Security.Claims;
 using B3.Trading.Api.Auth;
 using B3.Trading.Api.WebSockets;
 using B3.Trading.Application;
-using B3.Trading.Application.Observability;
 using B3.Trading.Domain;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -130,42 +129,33 @@ public static class OrdersEndpoints
             string clOrdId,
             HttpContext ctx,
             EndClientRegistry registry,
-            ClOrdIdPrefixRegistry clOrdIds,
-            WorkingOrderBook book,
-            OrderOwnershipMap ownership,
-            IExchangeGateway gateway,
+            OrderCancelService canceller,
             CancellationToken ct) =>
         {
             if (!ulong.TryParse(clOrdId, out var clOrdIdU))
                 return Results.NotFound();
 
             var owner = ResolveOwner(ctx, registry);
-            if (!book.TryGet(clOrdIdU, out var order) || order is null)
-                return Results.NotFound();
-
-            if (order.Owner != owner)
-                return Results.NotFound();
-
-            // Slice 1 of #132. Reject Cancel against an order the operator
-            // has flagged as suspected-stale-by-venue: the venue most
-            // likely doesn't know the original ClOrdID either, and we'd
-            // burn a fresh ClOrdID for nothing. Operator must explicitly
-            // clear the stale overlay first (admin endpoint) when the
-            // venue catches up, or rely on the eventual real terminal ER
-            // to auto-clear.
-            if (order.IsStale)
-                return Results.Conflict(new { error = "order is marked stale", reason = order.StaleReason });
-
-            var cancelClOrdId = clOrdIds.Generate(owner);
-            // Record the cancel-side → original mapping BEFORE sending so
-            // the cancel-ack ER can resolve back to the right order even
-            // when upstream omits OrigClOrdID on the wire.
-            ownership.RegisterCancelLink(cancelClOrdId, order.ClOrdId);
-            await gateway.CancelAsync(order, cancelClOrdId, ct);
-            MetricsRegistry.OrdersCancelRequested.Add(1);
-            // Status transition to Cancelled happens when the exchange ER
-            // arrives, not synchronously here.
-            return Results.NoContent();
+            // Sub-issue #171 (E): REST cancels now go through the WAL-
+            // durable OrderCancelRequestedEvent path (RFC §4.6 / §4.8).
+            // botOrigin is null — REST is not a bot session.
+            var result = await canceller.CancelAsync(owner, clOrdIdU, ct);
+            return result.Kind switch
+            {
+                OrderCancelResultKind.Accepted => Results.NoContent(),
+                OrderCancelResultKind.NotFound => Results.NotFound(),
+                OrderCancelResultKind.Stale =>
+                    Results.Conflict(new { error = "order is marked stale", reason = result.Reason }),
+                OrderCancelResultKind.WalBackpressure =>
+                    Results.Json(
+                        new { error = "system busy (WAL backpressure)", detail = result.Reason },
+                        statusCode: StatusCodes.Status503ServiceUnavailable),
+                OrderCancelResultKind.GatewayFailed =>
+                    Results.Json(
+                        new { error = "gateway unavailable", clOrdId = result.CancelClOrdId.ToString() },
+                        statusCode: StatusCodes.Status502BadGateway),
+                _ => Results.StatusCode(StatusCodes.Status500InternalServerError),
+            };
         });
 
         return app;
