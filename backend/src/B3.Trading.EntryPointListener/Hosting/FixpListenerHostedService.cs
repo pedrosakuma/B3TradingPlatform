@@ -28,6 +28,8 @@ public sealed class FixpListenerHostedService : BackgroundService
     private readonly IUserBotSessionRegistry _sessions;
     private readonly FixpOrderAdapter? _orders;
     private readonly IBotSessionConnectionDirectory? _connectionDirectory;
+    private readonly BotOutboundCoordinator? _outboundCoordinator;
+    private readonly TimeProvider _clock;
     private readonly ILogger<FixpListenerHostedService> _logger;
     private readonly TaskCompletionSource<IPEndPoint> _boundTcs =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -43,13 +45,17 @@ public sealed class FixpListenerHostedService : BackgroundService
         OrderSubmissionService? submit = null,
         OrderCancelService? cancel = null,
         IUserBotOrderMappingRegistry? botMappings = null,
-        IBotSessionConnectionDirectory? connectionDirectory = null)
+        IBotSessionConnectionDirectory? connectionDirectory = null,
+        BotOutboundCoordinator? outboundCoordinator = null,
+        TimeProvider? clock = null)
     {
         _opts = opts.Value;
         _credentials = credentials;
         _sessions = sessions;
         _logger = logger;
         _connectionDirectory = connectionDirectory;
+        _outboundCoordinator = outboundCoordinator;
+        _clock = clock ?? TimeProvider.System;
         // Sub-issue #171 (E): the order/cancel adapter is only wired when
         // the host has registered the full submit pipeline. Tests (and
         // any future handshake-only mode) leave the deps null and the
@@ -109,7 +115,9 @@ public sealed class FixpListenerHostedService : BackgroundService
                     continue;
                 }
 
-                var conn = new FixpSessionConnection(client, _credentials, _sessions, _logger, _orders, _connectionDirectory);
+                var conn = new FixpSessionConnection(
+                    client, _credentials, _sessions, _logger,
+                    _orders, _connectionDirectory, _outboundCoordinator, _opts, _clock);
                 _ = Task.Run(() => conn.RunAsync(stoppingToken), stoppingToken);
             }
         }
