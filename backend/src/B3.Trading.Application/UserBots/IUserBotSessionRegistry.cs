@@ -84,4 +84,15 @@ public interface IUserBotSessionRegistry
     /// the caller can echo it on the very reject that follows.
     /// </summary>
     Task<ulong> BumpVersionAsync(Guid credentialId, string reason, CancellationToken ct);
+
+    /// <summary>
+    /// Sub-issue #172 (F). Records a periodic checkpoint of the credential's
+    /// outbound seq watermark — see RFC §4.8 cadence (5s OR 100 msgs). The
+    /// implementation appends a <c>BotSessionSeqAdvancedEvent</c> via the
+    /// dispatcher (best-effort durability — no FlushAsync) and updates the
+    /// in-memory <see cref="BotSessionState.LastCheckpointedOutboundSeq"/>
+    /// under the apply callback. No-op when <paramref name="checkpointedSeq"/>
+    /// is <c>≤</c> the existing watermark (idempotent / reordering safe).
+    /// </summary>
+    void UpdateCheckpointedOutboundSeq(Guid credentialId, ulong checkpointedSeq);
 }

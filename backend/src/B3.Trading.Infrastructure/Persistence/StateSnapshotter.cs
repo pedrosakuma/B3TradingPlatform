@@ -329,6 +329,9 @@ public sealed class EventReplayer
             case BotSessionVerAdvancedEvent bsv:
                 _userBotSessions?.ApplyVerAdvanced(bsv.CredentialId, bsv.NewVer);
                 break;
+            case BotSessionSeqAdvancedEvent bss:
+                _userBotSessions?.ApplyCheckpointedSeq(bss.CredentialId, bss.CheckpointedOutboundSeq);
+                break;
         }
     }
 

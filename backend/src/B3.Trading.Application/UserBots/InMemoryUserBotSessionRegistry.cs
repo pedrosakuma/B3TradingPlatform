@@ -221,6 +221,55 @@ public sealed class InMemoryUserBotSessionRegistry : IUserBotSessionRegistry
         }
     }
 
+    /// <summary>
+    /// Replay hook for <see cref="BotSessionSeqAdvancedEvent"/>. Idempotent
+    /// + reordering-safe: only advances the watermark, never regresses it.
+    /// </summary>
+    internal void ApplyCheckpointedSeq(Guid credentialId, ulong checkpointedSeq)
+    {
+        lock (_gate)
+        {
+            if (_byCredentialId.TryGetValue(credentialId, out var existing)
+                && checkpointedSeq > existing.LastCheckpointedOutboundSeq)
+            {
+                _byCredentialId[credentialId] = existing with
+                {
+                    LastCheckpointedOutboundSeq = checkpointedSeq,
+                };
+            }
+        }
+    }
+
+    public void UpdateCheckpointedOutboundSeq(Guid credentialId, ulong checkpointedSeq)
+    {
+        if (credentialId == Guid.Empty) return;
+
+        BotSessionSeqAdvancedEvent? evt = null;
+        lock (_gate)
+        {
+            if (!_byCredentialId.TryGetValue(credentialId, out var existing))
+                return;
+            if (checkpointedSeq <= existing.LastCheckpointedOutboundSeq)
+                return;
+
+            evt = new BotSessionSeqAdvancedEvent
+            {
+                CredentialId = credentialId,
+                CheckpointedOutboundSeq = checkpointedSeq,
+                At = DateTimeOffset.UtcNow,
+            };
+
+            // Dispatch under the gate so the apply callback's mutation
+            // and the WAL append form a single atomic step w.r.t.
+            // snapshot capture (mirrors BumpVersionAsync). No FlushAsync —
+            // RFC §4.8 says this is a best-effort watermark.
+            if (_dispatcher is not null)
+                _dispatcher.Dispatch(evt, () => ApplyCheckpointedSeq(credentialId, checkpointedSeq));
+            else
+                ApplyCheckpointedSeq(credentialId, checkpointedSeq);
+        }
+    }
+
     // RFC §4.5: SessionId is non-zero uint32. Birthday-collisions on
     // 2^32 minus-one are negligible at participant counts; a defensive
     // collision check still avoids re-issuing an id while the lock is held.

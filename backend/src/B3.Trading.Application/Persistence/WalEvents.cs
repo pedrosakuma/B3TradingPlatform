@@ -31,6 +31,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(UserBotCredentialRevokedEvent), "userbot.cred.revoked")]
 [JsonDerivedType(typeof(BotSessionInitializedEvent), "userbot.session.initialized")]
 [JsonDerivedType(typeof(BotSessionVerAdvancedEvent), "userbot.session.ver-advanced")]
+[JsonDerivedType(typeof(BotSessionSeqAdvancedEvent), "userbot.session.seq-advanced")]
 [JsonDerivedType(typeof(OrderCancelRequestedEvent), "order.cancel-requested")]
 public abstract record WalEvent
 {
@@ -366,4 +367,22 @@ public sealed record BotSessionVerAdvancedEvent : WalEvent
     public required ulong OldVer { get; init; }
     public required ulong NewVer { get; init; }
     public required string Reason { get; init; }
+}
+
+/// <summary>
+/// Sub-issue #172 (F). Periodic outbound-seq watermark for a credential's
+/// FIXP session. Appended on the cadence defined by RFC §4.8: every 5
+/// seconds OR every 100 outbound messages, whichever comes first. NOT
+/// appended per-ER (would double WAL pressure of FIXP-originated orders).
+///
+/// <para>This event is a "best-effort durability watermark" — it does
+/// NOT need <c>FlushAsync</c>. Recovery seeds the registry with the
+/// most recent value seen; sub-issue G's retransmit treats requests
+/// older than the checkpoint as unreplayable.</para>
+/// </summary>
+public sealed record BotSessionSeqAdvancedEvent : WalEvent
+{
+    public required Guid CredentialId { get; init; }
+    public required ulong CheckpointedOutboundSeq { get; init; }
+    public required DateTimeOffset At { get; init; }
 }
