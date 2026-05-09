@@ -4,12 +4,14 @@ import { defaultBackend, defaultMarketDataUrl, login, signup, submitOrder, cance
          validateSession,
          getKillStatus, killFirm, reviveFirm, killEndClient, reviveEndClient,
          getHaltStatus, haltSymbol, resumeSymbol,
-         runEod } from "./protocol.js";
+         runEod,
+         listUserBotCredentials, createUserBotCredential, deleteUserBotCredential } from "./protocol.js";
 import { claimsFromToken } from "./jwt.js";
 import { validateOrder, pretradeWarnings, payloadKey } from "./validation.js";
 import * as state from "./state.js";
 import * as ui from "./ui.js";
 import * as adminUi from "./adminUi.js";
+import * as botCredentialsUi from "./botCredentialsUi.js";
 import { FLAGS } from "./mdProtocol.js";
 
 const SESSION_KEY = "b3tp.session";
@@ -60,6 +62,7 @@ function init() {
   document.getElementById("signup-go-login")?.addEventListener("click", () => showSignupCard(false));
   ui.bindUi();
   adminUi.bindAdminUi();
+  botCredentialsUi.bindBotCredentialsUi();
   ui.setHandlers({
     onSubmitOrder: handleSubmitOrder,
     onCancelOrder: handleCancelOrder,
@@ -84,6 +87,13 @@ function init() {
     onAddHalt:         handleAddHalt,
     onRunEod:          handleRunEod,
     onRefresh:         refreshAdminData,
+  });
+  botCredentialsUi.setBotCredentialsHandlers({
+    onOpenView: () => handleSwitchView("bot-credentials"),
+    onBack:     () => handleSwitchView("trader"),
+    onRefresh:  refreshBotCredentials,
+    onCreate:   handleCreateBotCredential,
+    onRevoke:   handleRevokeBotCredential,
   });
 
   const stored = readSession();
@@ -767,6 +777,7 @@ function logout() {
   state.setHaltStatus(null);
   state.setEodReport(null);
   state.setCurrentView("trader");
+  botCredentialsUi.clearBotCredentials();
   state.setBlotterFilter(readBlotterFilter());
   state.setSelectedOrder(null);
   state.setPendingFatFinger(null);
@@ -879,10 +890,94 @@ function handleSwitchView(view) {
   if (view === "admin" && session?.role !== "admin") return; // safety
   state.setCurrentView(view);
   if (view === "admin") refreshAdminData();
+  if (view === "bot-credentials") refreshBotCredentials();
 }
 
 async function refreshAdminData() {
   await pollFirmsOnce();
+}
+
+// ── User-bot credentials (sub-issue #169) ──────────────────────────
+//
+// All three operations rely on the JWT — the backend scopes by `sub`,
+// so we never pass a user id. The plaintext PAT returned by POST is
+// handed straight to the modal and dropped from memory once the user
+// dismisses it; nothing is persisted.
+
+async function refreshBotCredentials() {
+  if (!session) return;
+  const captured = session;
+  botCredentialsUi.setBotCredentialsLoading(true);
+  botCredentialsUi.setBotCredentialsFeedback(null);
+  try {
+    const rows = await listUserBotCredentials(captured.backend, captured.token);
+    // Discard the response if the session changed under us (logout, or
+    // another user signed in on the same tab). Otherwise we'd write
+    // the previous session's credential metadata into the DOM after
+    // logout, or leak it across user switches.
+    if (session !== captured) return;
+    botCredentialsUi.setBotCredentialsRows(rows ?? []);
+  } catch (err) {
+    if (session !== captured) return;
+    if (err?.status === 401) { logout(); return; }
+    botCredentialsUi.setBotCredentialsRows([]);
+    botCredentialsUi.setBotCredentialsFeedback(
+      err?.message || "Failed to load credentials.", "error");
+  }
+}
+
+async function handleCreateBotCredential({ label }) {
+  if (!session) return;
+  const captured = session;
+  botCredentialsUi.setCreateSubmitting(true);
+  botCredentialsUi.setBotCredentialsFeedback(null);
+  try {
+    const created = await createUserBotCredential(captured.backend, captured.token, label);
+    // Critical: if the user logged out (or a new user signed in) while
+    // the POST was in flight, drop the plaintext PAT on the floor —
+    // surfacing it to whoever is now in front of the browser would
+    // violate the "shown once, to the issuing user only" invariant.
+    if (session !== captured) return;
+    botCredentialsUi.resetCreateForm();
+    // The plaintext secret only lives inside the modal's input element.
+    // Do not log it, do not stash it on `session`, do not put it in state.
+    botCredentialsUi.openBotCredentialsSecretModal({
+      label: created?.label ?? label,
+      plainSecret: created?.plainSecret ?? "",
+    });
+    botCredentialsUi.setBotCredentialsFeedback(
+      `Credential "${created?.label ?? label}" created.`, "ok");
+    // Refresh asynchronously — do not await; the modal stays up while
+    // the table updates underneath.
+    refreshBotCredentials();
+  } catch (err) {
+    if (session !== captured) return;
+    if (err?.status === 401) { logout(); return; }
+    botCredentialsUi.setBotCredentialsFeedback(
+      err?.message || "Failed to create credential.", "error");
+  } finally {
+    if (session === captured) {
+      botCredentialsUi.setCreateSubmitting(false);
+    }
+  }
+}
+
+async function handleRevokeBotCredential({ id, label }) {
+  if (!session) return;
+  const captured = session;
+  botCredentialsUi.setBotCredentialsFeedback(null);
+  try {
+    await deleteUserBotCredential(captured.backend, captured.token, id);
+    if (session !== captured) return;
+    botCredentialsUi.setBotCredentialsFeedback(
+      `Credential "${label}" revoked.`, "ok");
+    await refreshBotCredentials();
+  } catch (err) {
+    if (session !== captured) return;
+    if (err?.status === 401) { logout(); return; }
+    botCredentialsUi.setBotCredentialsFeedback(
+      err?.message || "Failed to revoke credential.", "error");
+  }
 }
 
 async function withAdminCall(fn, okMessage) {
