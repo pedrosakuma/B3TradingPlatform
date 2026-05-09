@@ -1,6 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
-using System.Security.Cryptography;
+using B3.Trading.Application.UserBots;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -23,6 +23,8 @@ namespace B3.Trading.EntryPointListener.Hosting;
 public sealed class FixpListenerHostedService : BackgroundService
 {
     private readonly EntryPointListenerOptions _opts;
+    private readonly IUserBotCredentialRegistry _credentials;
+    private readonly IUserBotSessionRegistry _sessions;
     private readonly ILogger<FixpListenerHostedService> _logger;
     private readonly TaskCompletionSource<IPEndPoint> _boundTcs =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -31,9 +33,13 @@ public sealed class FixpListenerHostedService : BackgroundService
 
     public FixpListenerHostedService(
         IOptions<EntryPointListenerOptions> opts,
+        IUserBotCredentialRegistry credentials,
+        IUserBotSessionRegistry sessions,
         ILogger<FixpListenerHostedService> logger)
     {
         _opts = opts.Value;
+        _credentials = credentials;
+        _sessions = sessions;
         _logger = logger;
     }
 
@@ -85,10 +91,7 @@ public sealed class FixpListenerHostedService : BackgroundService
                     continue;
                 }
 
-                var sessionId = AllocateSessionId();
-                _logger.LogDebug("FIXP connection accepted; internalSessionId={Id}.", sessionId);
-
-                var conn = new FixpSessionConnection(client, _logger);
+                var conn = new FixpSessionConnection(client, _credentials, _sessions, _logger);
                 _ = Task.Run(() => conn.RunAsync(stoppingToken), stoppingToken);
             }
         }
@@ -96,23 +99,5 @@ public sealed class FixpListenerHostedService : BackgroundService
         {
             _listener.Stop();
         }
-    }
-
-    /// <summary>
-    /// Generates a random non-zero uint32 used as an internal connection
-    /// identifier for log correlation.  Sub-issue D will replace this with
-    /// a monotonic sequence-version manager.
-    /// </summary>
-    private static uint AllocateSessionId()
-    {
-        Span<byte> buf = stackalloc byte[4];
-        uint id;
-        do
-        {
-            RandomNumberGenerator.Fill(buf);
-            id = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(buf);
-        }
-        while (id == 0);
-        return id;
     }
 }

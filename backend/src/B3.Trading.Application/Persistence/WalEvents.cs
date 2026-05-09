@@ -29,6 +29,8 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(OrderStaleClearedEvent), "order.stale-cleared")]
 [JsonDerivedType(typeof(UserBotCredentialCreatedEvent), "userbot.cred.created")]
 [JsonDerivedType(typeof(UserBotCredentialRevokedEvent), "userbot.cred.revoked")]
+[JsonDerivedType(typeof(BotSessionInitializedEvent), "userbot.session.initialized")]
+[JsonDerivedType(typeof(BotSessionVerAdvancedEvent), "userbot.session.ver-advanced")]
 public abstract record WalEvent
 {
     public DateTimeOffset TimestampUtc { get; init; } = DateTimeOffset.UtcNow;
@@ -287,4 +289,34 @@ public sealed record UserBotCredentialRevokedEvent : WalEvent
     public required Guid Id { get; init; }
     public required string UserId { get; init; }
     public required DateTimeOffset RevokedAtUtc { get; init; }
+}
+
+/// <summary>
+/// Sub-issue #170. First-access allocation of a per-credential FIXP
+/// session: the platform mints a stable <see cref="SessionId"/> (uint32,
+/// non-zero) and seeds <see cref="InitialVer"/>=1. Replay reconstructs
+/// the row in <c>InMemoryUserBotSessionRegistry</c>.
+/// </summary>
+public sealed record BotSessionInitializedEvent : WalEvent
+{
+    public required Guid CredentialId { get; init; }
+    public required uint SessionId { get; init; }
+    public required ulong InitialVer { get; init; }
+    public required DateTimeOffset CreatedAtUtc { get; init; }
+}
+
+/// <summary>
+/// Sub-issue #170. Forced version bump (RFC §4.8). Persisted **before**
+/// the platform sends any bot-observable response carrying the new ver,
+/// guarded by an explicit <c>FlushAsync</c> fence so a crash cannot let
+/// the bot observe a newVer that recovery would roll back. Reasons in
+/// v0: <c>"single-active-violation"</c> (sub-issue D),
+/// <c>"overflow"</c> (sub-issue G), <c>"operator"</c> (admin endpoint).
+/// </summary>
+public sealed record BotSessionVerAdvancedEvent : WalEvent
+{
+    public required Guid CredentialId { get; init; }
+    public required ulong OldVer { get; init; }
+    public required ulong NewVer { get; init; }
+    public required string Reason { get; init; }
 }

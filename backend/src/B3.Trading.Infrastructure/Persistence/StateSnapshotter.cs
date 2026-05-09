@@ -26,6 +26,7 @@ public sealed class StateSnapshotter
     private readonly AlgoIdRegistry _algoIds;
     private readonly CashLedger _cash;
     private readonly InMemoryUserBotCredentialRegistry? _userBotCredentials;
+    private readonly InMemoryUserBotSessionRegistry? _userBotSessions;
 
     public StateSnapshotter(
         WorkingOrderBook orders,
@@ -38,7 +39,8 @@ public sealed class StateSnapshotter
         AlgoBook algos,
         AlgoIdRegistry algoIds,
         CashLedger cash,
-        InMemoryUserBotCredentialRegistry? userBotCredentials = null)
+        InMemoryUserBotCredentialRegistry? userBotCredentials = null,
+        InMemoryUserBotSessionRegistry? userBotSessions = null)
     {
         _orders = orders;
         _positions = positions;
@@ -51,6 +53,7 @@ public sealed class StateSnapshotter
         _algoIds = algoIds;
         _cash = cash;
         _userBotCredentials = userBotCredentials;
+        _userBotSessions = userBotSessions;
     }
 
     public PlatformSnapshot Capture(long seq) => new()
@@ -72,6 +75,7 @@ public sealed class StateSnapshotter
         AlgoIds = _algoIds.Snapshot(),
         CashBalances = _cash.Snapshot().ToList(),
         UserBotCredentials = _userBotCredentials?.Snapshot().ToList() ?? new(),
+        BotSessions = _userBotSessions?.Snapshot().ToList() ?? new(),
     };
 
     public void Restore(PlatformSnapshot snap)
@@ -94,6 +98,7 @@ public sealed class StateSnapshotter
         _algoIds.Restore(snap.AlgoIds);
         _cash.Restore(snap.CashBalances);
         _userBotCredentials?.Restore(snap.UserBotCredentials);
+        _userBotSessions?.Restore(snap.BotSessions);
     }
 }
 
@@ -117,6 +122,7 @@ public sealed class EventReplayer
     private readonly AlgoIdRegistry _algoIds;
     private readonly PendingReplacementRegistry? _replacements;
     private readonly InMemoryUserBotCredentialRegistry? _userBotCredentials;
+    private readonly InMemoryUserBotSessionRegistry? _userBotSessions;
 
     public EventReplayer(
         WorkingOrderBook orders,
@@ -129,7 +135,8 @@ public sealed class EventReplayer
         ClOrdIdPrefixRegistry clOrdIds,
         AlgoIdRegistry algoIds,
         PendingReplacementRegistry? replacements = null,
-        InMemoryUserBotCredentialRegistry? userBotCredentials = null)
+        InMemoryUserBotCredentialRegistry? userBotCredentials = null,
+        InMemoryUserBotSessionRegistry? userBotSessions = null)
     {
         _orders = orders;
         _ownership = ownership;
@@ -142,6 +149,7 @@ public sealed class EventReplayer
         _algoIds = algoIds;
         _replacements = replacements;
         _userBotCredentials = userBotCredentials;
+        _userBotSessions = userBotSessions;
     }
 
     public void Apply(WalEvent evt)
@@ -280,6 +288,13 @@ public sealed class EventReplayer
                 break;
             case UserBotCredentialRevokedEvent ubr:
                 _userBotCredentials?.ApplyRevoked(ubr.Id, ubr.RevokedAtUtc);
+                break;
+            case BotSessionInitializedEvent bsi:
+                _userBotSessions?.ApplyInitialized(new BotSessionState(
+                    bsi.CredentialId, bsi.SessionId, bsi.InitialVer, LastCheckpointedOutboundSeq: 0));
+                break;
+            case BotSessionVerAdvancedEvent bsv:
+                _userBotSessions?.ApplyVerAdvanced(bsv.CredentialId, bsv.NewVer);
                 break;
         }
     }
