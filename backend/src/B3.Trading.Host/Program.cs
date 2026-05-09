@@ -12,6 +12,7 @@ using B3.Trading.Application.Risk;
 using B3.Trading.Application.Risk.Accounting;
 using B3.Trading.Application.Risk.Checks;
 using B3.Trading.Domain;
+using B3.Trading.EntryPointListener;
 using B3.Trading.Host.Observability;
 using B3.Trading.Host.MarketData;
 using B3.Trading.Infrastructure;
@@ -48,6 +49,7 @@ builder.Services.Configure<PositionSeedOptions>(
     builder.Configuration.GetSection(PositionSeedOptions.SectionName));
 builder.Services.Configure<CashSeedOptions>(
     builder.Configuration.GetSection(CashSeedOptions.SectionName));
+builder.Services.AddEntryPointListener(builder.Configuration);
 
 // CORS: opt-in allowlist for the dev/prod frontend origins. Empty list
 // disables CORS entirely (server-only deploys, integration tests).
@@ -471,6 +473,16 @@ var app = builder.Build();
             app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("ErInjection").LogWarning("{Warning}", warning);
         B3.Trading.Application.Observability.MetricsRegistry.ErInjectionEnabled.Add(1);
     }
+}
+
+// FIXP listener boot guard: enforce Production safety rules and emit a
+// warning banner when the listener is active. Mirrors ErInjectionBootGuard.
+{
+    var listenerOpts = app.Services.GetRequiredService<IOptions<EntryPointListenerOptions>>().Value;
+    EntryPointListenerBootGuard.Validate(app.Environment.EnvironmentName, listenerOpts);
+    var listenerWarning = EntryPointListenerBootGuard.BuildWarning(app.Environment.EnvironmentName, listenerOpts);
+    if (listenerWarning is not null)
+        app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("EntryPointListener").LogWarning("{Warning}", listenerWarning);
 }
 
 // Synchronous recovery before any traffic is accepted: load latest

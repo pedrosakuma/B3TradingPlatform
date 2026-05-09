@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>B3.Trading.EntryPointListener</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="B3.EntryPoint.Sbe" Version="0.14.3" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="*" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="*" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="*" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="*" />
+    <PackageReference Include="Microsoft.Extensions.Options" Version="*" />
+    <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="B3.Trading.EntryPointListener.Tests" />
+  </ItemGroup>
+
+</Project>
