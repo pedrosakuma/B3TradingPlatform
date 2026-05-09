@@ -12,6 +12,7 @@
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="*" />
     <PackageReference Include="Microsoft.Extensions.Options" Version="*" />
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="*" />
+    <PackageReference Include="BCrypt.Net-Next" Version="4.0.3" />
   </ItemGroup>
 
   <ItemGroup>

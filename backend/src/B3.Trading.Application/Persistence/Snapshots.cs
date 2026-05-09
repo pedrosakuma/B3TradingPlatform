@@ -51,7 +51,29 @@ public sealed class PlatformSnapshot
     /// or a fill arrives).
     /// </summary>
     public List<CashBalanceSnapshot> CashBalances { get; init; } = new();
+
+    /// <summary>
+    /// User-issued bot credentials (sub-issue #169). Empty on snapshots
+    /// pre-dating the field — credentials are reconstructed instead by
+    /// the WAL replay path on top of the empty list, which matches the
+    /// "no PATs minted" semantics those snapshots actually carried.
+    /// </summary>
+    public List<UserBotCredentialSnapshot> UserBotCredentials { get; init; } = new();
 }
+
+/// <summary>
+/// Captures one row from <c>InMemoryUserBotCredentialRegistry</c>.
+/// Mirrors the <c>UserBotCredential</c> record one-to-one; the secret
+/// is stored only as the bcrypt hash (never plaintext).
+/// </summary>
+public sealed record UserBotCredentialSnapshot(
+    Guid Id,
+    string UserId,
+    string CredShortId,
+    string Label,
+    string SecretHash,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset? RevokedAtUtc);
 
 public sealed record OrderSnapshot(
     ulong ClOrdId,

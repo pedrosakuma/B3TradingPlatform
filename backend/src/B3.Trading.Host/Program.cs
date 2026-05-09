@@ -11,6 +11,7 @@ using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.Risk.Accounting;
 using B3.Trading.Application.Risk.Checks;
+using B3.Trading.Application.UserBots;
 using B3.Trading.Domain;
 using B3.Trading.Host.Observability;
 using B3.Trading.Host.MarketData;
@@ -97,6 +98,9 @@ builder.Services.AddSingleton<AlgoBook>();
 builder.Services.AddSingleton<AlgoIdRegistry>();
 builder.Services.AddSingleton<PositionKeeper>();
 builder.Services.AddSingleton<CashLedger>();
+builder.Services.AddSingleton<InMemoryUserBotCredentialRegistry>();
+builder.Services.AddSingleton<IUserBotCredentialRegistry>(sp =>
+    sp.GetRequiredService<InMemoryUserBotCredentialRegistry>());
 builder.Services.AddSingleton<SubscriptionManager>();
 builder.Services.AddSingleton<IExecutionEventSink, WebSocketExecutionEventSink>();
 builder.Services.AddSingleton<IAlgoEventSink, WebSocketAlgoEventSink>();
@@ -613,6 +617,7 @@ app.MapAlgo();
 app.MapPositions();
 app.MapBalance();
 app.MapAdmin();
+app.MapUserBotCredentials();
 app.MapWebSocketHub();
 
 app.Run();
