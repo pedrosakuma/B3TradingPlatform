@@ -1,6 +1,7 @@
 using B3.Trading.Application;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
+using B3.Trading.Application.UserBots;
 using B3.Trading.Domain;
 
 namespace B3.Trading.Infrastructure.Persistence;
@@ -24,6 +25,7 @@ public sealed class StateSnapshotter
     private readonly AlgoBook _algos;
     private readonly AlgoIdRegistry _algoIds;
     private readonly CashLedger _cash;
+    private readonly InMemoryUserBotCredentialRegistry? _userBotCredentials;
 
     public StateSnapshotter(
         WorkingOrderBook orders,
@@ -35,7 +37,8 @@ public sealed class StateSnapshotter
         OrderOwnershipMap ownership,
         AlgoBook algos,
         AlgoIdRegistry algoIds,
-        CashLedger cash)
+        CashLedger cash,
+        InMemoryUserBotCredentialRegistry? userBotCredentials = null)
     {
         _orders = orders;
         _positions = positions;
@@ -47,6 +50,7 @@ public sealed class StateSnapshotter
         _algos = algos;
         _algoIds = algoIds;
         _cash = cash;
+        _userBotCredentials = userBotCredentials;
     }
 
     public PlatformSnapshot Capture(long seq) => new()
@@ -67,6 +71,7 @@ public sealed class StateSnapshotter
         Algos = _algos.Snapshot().ToList(),
         AlgoIds = _algoIds.Snapshot(),
         CashBalances = _cash.Snapshot().ToList(),
+        UserBotCredentials = _userBotCredentials?.Snapshot().ToList() ?? new(),
     };
 
     public void Restore(PlatformSnapshot snap)
@@ -88,6 +93,7 @@ public sealed class StateSnapshotter
         _algos.Restore(snap.Algos);
         _algoIds.Restore(snap.AlgoIds);
         _cash.Restore(snap.CashBalances);
+        _userBotCredentials?.Restore(snap.UserBotCredentials);
     }
 }
 
@@ -110,6 +116,7 @@ public sealed class EventReplayer
     private readonly ClOrdIdPrefixRegistry _clOrdIds;
     private readonly AlgoIdRegistry _algoIds;
     private readonly PendingReplacementRegistry? _replacements;
+    private readonly InMemoryUserBotCredentialRegistry? _userBotCredentials;
 
     public EventReplayer(
         WorkingOrderBook orders,
@@ -121,7 +128,8 @@ public sealed class EventReplayer
         AlgoBook algos,
         ClOrdIdPrefixRegistry clOrdIds,
         AlgoIdRegistry algoIds,
-        PendingReplacementRegistry? replacements = null)
+        PendingReplacementRegistry? replacements = null,
+        InMemoryUserBotCredentialRegistry? userBotCredentials = null)
     {
         _orders = orders;
         _ownership = ownership;
@@ -133,6 +141,7 @@ public sealed class EventReplayer
         _clOrdIds = clOrdIds;
         _algoIds = algoIds;
         _replacements = replacements;
+        _userBotCredentials = userBotCredentials;
     }
 
     public void Apply(WalEvent evt)
@@ -263,6 +272,14 @@ public sealed class EventReplayer
             case OrderStaleClearedEvent osc:
                 if (_orders.TryGet(osc.ClOrdId, out var clearOrd) && clearOrd is not null)
                     clearOrd.ClearStale();
+                break;
+            case UserBotCredentialCreatedEvent ubc:
+                _userBotCredentials?.ApplyCreated(new UserBotCredential(
+                    ubc.Id, ubc.UserId, ubc.CredShortId, ubc.Label, ubc.SecretHash,
+                    ubc.CreatedAtUtc, RevokedAtUtc: null));
+                break;
+            case UserBotCredentialRevokedEvent ubr:
+                _userBotCredentials?.ApplyRevoked(ubr.Id, ubr.RevokedAtUtc);
                 break;
         }
     }

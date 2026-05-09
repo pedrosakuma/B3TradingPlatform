@@ -27,6 +27,8 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(AlgoTerminalStateRecordedEvent), "algo.terminal")]
 [JsonDerivedType(typeof(OrderStaledEvent), "order.staled")]
 [JsonDerivedType(typeof(OrderStaleClearedEvent), "order.stale-cleared")]
+[JsonDerivedType(typeof(UserBotCredentialCreatedEvent), "userbot.cred.created")]
+[JsonDerivedType(typeof(UserBotCredentialRevokedEvent), "userbot.cred.revoked")]
 public abstract record WalEvent
 {
     public DateTimeOffset TimestampUtc { get; init; } = DateTimeOffset.UtcNow;
@@ -256,4 +258,33 @@ public sealed record OrderStaleClearedEvent : WalEvent
     public required string FirmId { get; init; }
     public required string ResolvedBy { get; init; }    // "admin" or "er-terminal"
     public string? ActorUserId { get; init; }
+}
+
+/// <summary>
+/// Sub-issue #169. Recorded the moment a user mints a new bot
+/// credential. Replay reconstructs the credential row in
+/// <c>InMemoryUserBotCredentialRegistry</c>; the plaintext secret is
+/// shown to the caller exactly once at create time and is never
+/// included on the WAL. The bcrypt(cost=12) hash is the only secret-
+/// derived material persisted.
+/// </summary>
+public sealed record UserBotCredentialCreatedEvent : WalEvent
+{
+    public required Guid Id { get; init; }
+    public required string UserId { get; init; }
+    public required string CredShortId { get; init; }
+    public required string Label { get; init; }
+    public required string SecretHash { get; init; }
+    public required DateTimeOffset CreatedAtUtc { get; init; }
+}
+
+/// <summary>
+/// Sub-issue #169. Soft-revoke audit record. Replay flips the row's
+/// <c>RevokedAtUtc</c> field — listeners reject the PAT after restore.
+/// </summary>
+public sealed record UserBotCredentialRevokedEvent : WalEvent
+{
+    public required Guid Id { get; init; }
+    public required string UserId { get; init; }
+    public required DateTimeOffset RevokedAtUtc { get; init; }
 }
