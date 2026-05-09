@@ -91,6 +91,8 @@
         <span id="ws-reconnect" class="reconnect-countdown" hidden></span>
         <span id="user-label" class="user-label"></span>
         <span id="user-role" class="role-badge" hidden></span>
+        <button id="bot-credentials-open" class="link-button" type="button"
+                aria-label="Bot credentials">Bot credentials</button>
         <button id="logout" class="link-button" type="button" aria-label="Logout">Logout</button>
       </div>
     </header>
@@ -425,6 +427,78 @@
       <div class="modal-actions">
         <button type="button" id="cancel-all-close" class="link-button">Close</button>
         <button type="submit" id="cancel-all-submit" disabled>Cancel orders</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- BOT CREDENTIALS VIEW (sub-issue #169 of user-bot-fixp-listener-v0)
+       Manage user-issued PATs that authenticate external FIXP bots.
+       Visible to every authenticated user (no admin gate). -->
+  <section id="bot-credentials-view" class="view bot-credentials-view" hidden>
+    <header class="admin-subbar">
+      <h2>Bot credentials</h2>
+      <div class="admin-actions">
+        <button id="bot-credentials-back" type="button" class="link-button">Back to trader</button>
+        <button id="bot-credentials-refresh" type="button" class="link-button">Refresh</button>
+      </div>
+    </header>
+    <p id="bot-credentials-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
+
+    <section class="panel admin-panel">
+      <h3>Create credential</h3>
+      <form id="bot-credentials-create-form" class="admin-inline-form">
+        <input id="bot-credentials-label" type="text" placeholder="label (e.g. my-bot)"
+               maxlength="128" autocomplete="off" required />
+        <button type="submit" id="bot-credentials-create-submit">Create credential</button>
+      </form>
+      <p class="muted-line">
+        The plaintext token is shown only once, immediately after creation —
+        copy it before dismissing the dialog.
+      </p>
+    </section>
+
+    <section class="panel admin-panel">
+      <h3>Your credentials</h3>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Label</th><th>CredShortId</th><th>Created</th>
+              <th>Status</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="bot-credentials-body">
+            <tr><td colspan="5" class="muted">loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </section>
+
+  <!-- "Shown once" PAT modal — surfaces the plaintext secret returned by
+       POST /api/user-bot-credentials. The secret lives in this dialog's
+       DOM only; it is never persisted to storage, never rendered into a
+       URL, and never logged to the console. Dismissing the modal drops
+       the value from memory. -->
+  <div id="bot-credentials-secret-modal" class="modal-backdrop" hidden role="dialog"
+       aria-modal="true" aria-labelledby="bot-credentials-secret-title">
+    <form id="bot-credentials-secret-form" class="modal-card bot-credentials-secret-card">
+      <h2 id="bot-credentials-secret-title">New credential created</h2>
+      <p class="muted-line">
+        Label: <strong id="bot-credentials-secret-label"></strong>
+      </p>
+      <p class="bot-credentials-secret-warning" role="alert">
+        Save this token now. It will not be shown again.
+      </p>
+      <label>
+        <span>Personal access token</span>
+        <input id="bot-credentials-secret-value" type="text" readonly spellcheck="false"
+               autocomplete="off" aria-describedby="bot-credentials-secret-copy-status" />
+      </label>
+      <p id="bot-credentials-secret-copy-status" class="feedback" role="status" aria-live="polite" hidden></p>
+      <div class="modal-actions">
+        <button type="button" id="bot-credentials-secret-copy">Copy to clipboard</button>
+        <button type="submit" id="bot-credentials-secret-done">Done</button>
       </div>
     </form>
   </div>

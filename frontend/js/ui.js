@@ -61,6 +61,8 @@ export function showLogin() {
   $("login-view").hidden = false;
   $("trader-view").hidden = true;
   $("admin-view").hidden = true;
+  const cred = $("bot-credentials-view");
+  if (cred) cred.hidden = true;
   // Default to the login card; a user that previously toggled to the
   // signup card and was bumped back to login (e.g. logout, expiry)
   // shouldn't land staring at the signup form.
@@ -75,6 +77,8 @@ export function showTrader() {
   $("login-view").hidden = true;
   $("trader-view").hidden = false;
   $("admin-view").hidden = true;
+  const cred = $("bot-credentials-view");
+  if (cred) cred.hidden = true;
 }
 
 function setViewToggleVisible(visible, current) {
@@ -779,15 +783,22 @@ export function setUserLabel(user) {
 function applyCurrentView(view) {
   const trader = $("trader-view");
   const admin = $("admin-view");
+  const credentials = $("bot-credentials-view");
   if (!trader || !admin) return;
-  if (view === "admin") {
-    trader.hidden = true;
-    admin.hidden = false;
+  const showTraderView = view === "trader";
+  const showAdminView = view === "admin";
+  const showCredentialsView = view === "bot-credentials";
+  trader.hidden = !showTraderView;
+  admin.hidden = !showAdminView;
+  if (credentials) credentials.hidden = !showCredentialsView;
+  // The trader/admin pill toggle stays hidden when the credentials
+  // view is up — it's a self-contained sub-page reached via the
+  // header link, not a sibling of trader/admin.
+  if (showCredentialsView) {
+    setViewToggleVisible(false, view);
   } else {
-    trader.hidden = false;
-    admin.hidden = true;
+    setViewToggleVisible(getState().user?.role === "admin", view);
   }
-  setViewToggleVisible(getState().user?.role === "admin", view);
 }
 
 // Periodic UI tick for time-based elements (in-flight elapsed, reconnect

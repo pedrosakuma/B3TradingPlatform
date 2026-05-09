@@ -175,3 +175,45 @@ export async function runEod(backend, token) {
   });
   return jsonOrThrow(resp);
 }
+
+// ── User-bot credentials (sub-issue #169 of RFC user-bot-fixp-listener-v0).
+// All operations act on the authenticated user's `sub` claim — the backend
+// scopes by JWT, so no user-id parameter is sent. Cross-user reads/writes
+// always 404, so the UI only ever sees its own caller's rows.
+
+// GET /api/user-bot-credentials -> [{ id, label, credShortId, createdAtUtc, revokedAt }]
+// Read-side DTO; never includes the bearer secret.
+export async function listUserBotCredentials(backend, token) {
+  const resp = await fetch(`${backend}/api/user-bot-credentials`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return jsonOrThrow(resp);
+}
+
+// POST /api/user-bot-credentials { label } -> 201 with the same shape
+// PLUS a `plainSecret` field. This is the ONLY response that carries
+// the plaintext PAT (`b3t_xxx_yyy`) — the platform discards the secret
+// after returning it, so callers MUST surface it to the user immediately.
+// Never persist `plainSecret` to storage; keep it in component state and
+// drop it as soon as the user dismisses the "shown once" modal.
+export async function createUserBotCredential(backend, token, label) {
+  const resp = await fetch(`${backend}/api/user-bot-credentials`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ label }),
+  });
+  return jsonOrThrow(resp);
+}
+
+// DELETE /api/user-bot-credentials/{id} -> 204 on success, 404 if
+// the credential never belonged to this user (oracle-safe). Idempotent.
+export async function deleteUserBotCredential(backend, token, id) {
+  const resp = await fetch(
+    `${backend}/api/user-bot-credentials/${encodeURIComponent(id)}`,
+    {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  if (resp.status === 204 || resp.status === 404) return null;
+  return jsonOrThrow(resp);
+}

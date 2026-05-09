@@ -64,7 +64,7 @@ const state = {
   killStatus: null,        // { endClients: [], firms: [], fetchedAt } | null — admin-only
   haltStatus: null,        // { symbols: [], fetchedAt } | null — admin-only
   eodReport: null,         // { ranAt, report } | null — last EOD response in this session
-  currentView: "trader",   // "trader" | "admin" — which view is mounted
+  currentView: "trader",   // "trader" | "admin" | "bot-credentials" — which view is mounted
   // Blotter UX (section 3 of #30).
   blotterFilter: { text: "", status: "" }, // { text: substring, status: "" | <OrderStatus> }
   // Per-ClOrdID monotonic arrival sequence. Newly-seen orders get the
