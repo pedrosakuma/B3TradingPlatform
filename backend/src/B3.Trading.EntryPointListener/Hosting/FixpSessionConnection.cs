@@ -101,6 +101,7 @@ internal sealed class FixpSessionConnection
     private struct DecodedFrame
     {
         public ushort TemplateId;
+        public bool DecodeFailed;   // true when a known template has an undersized payload
         public uint SessionId;      // (uint)SessionID
         public ulong SessionVerId;  // (ulong)SessionVerID
         public TerminationCode TermCode;
@@ -134,6 +135,12 @@ internal sealed class FixpSessionConnection
                     d.TermCode = msg.TerminationCode;
                     break;
                 }
+            // Known handshake template with undersized payload — reject rather than dispatch zeroes.
+            case NegotiateData.MESSAGE_ID:
+            case EstablishData.MESSAGE_ID:
+            case TerminateData.MESSAGE_ID:
+                d.DecodeFailed = true;
+                break;
         }
 
         return d;
@@ -141,6 +148,9 @@ internal sealed class FixpSessionConnection
 
     private HandshakeAction Dispatch(in DecodedFrame d)
     {
+        if (d.DecodeFailed)
+            return HandshakeAction.Terminate(TerminationCode.UNSPECIFIED);
+
         switch (d.TemplateId)
         {
             case NegotiateData.MESSAGE_ID:

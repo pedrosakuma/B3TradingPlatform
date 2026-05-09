@@ -141,5 +141,33 @@ public class FixpListenerIntegrationTests
 
         await host.StopAsync(cts.Token);
     }
+
+    [Fact(Timeout = 10_000)]
+    public async Task TruncatedNegotiateFrame_ServerTerminates()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        using var host = BuildHost(out var listenerService);
+        await host.StartAsync(cts.Token);
+
+        var endpoint = await listenerService.WhenBound.WaitAsync(TimeSpan.FromSeconds(5), cts.Token);
+
+        using var tcpClient = new TcpClient();
+        await tcpClient.ConnectAsync(endpoint.Address, endpoint.Port, cts.Token);
+        var stream = tcpClient.GetStream();
+        var reader = new SofhFrameReader();
+
+        // Send a Negotiate frame whose body is 1 byte shorter than BLOCK_LENGTH.
+        var truncatedBody = new byte[NegotiateData.BLOCK_LENGTH - 1];
+        await SendFrameAsync(stream,
+            (ushort)(NegotiateData.BLOCK_LENGTH - 1), (ushort)NegotiateData.MESSAGE_ID,
+            1, 6, truncatedBody, cts.Token);
+
+        var response = await ReadFrameAsync(reader, stream, cts.Token);
+        Assert.True(response.IsValid, "Server should respond to a truncated frame");
+        Assert.Equal((ushort)TerminateData.MESSAGE_ID, response.TemplateId);
+
+        await host.StopAsync(cts.Token);
+    }
 }
 
