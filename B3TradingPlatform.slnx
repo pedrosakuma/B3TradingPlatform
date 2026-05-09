@@ -5,6 +5,7 @@
     <Project Path="backend/src/B3.Trading.Infrastructure/B3.Trading.Infrastructure.csproj" />
     <Project Path="backend/src/B3.Trading.Api/B3.Trading.Api.csproj" />
     <Project Path="backend/src/B3.Trading.Host/B3.Trading.Host.csproj" />
+    <Project Path="backend/src/B3.Trading.EntryPointListener/B3.Trading.EntryPointListener.csproj" />
   </Folder>
   <Folder Name="/backend/tests/">
     <Project Path="backend/tests/B3.Trading.Domain.Tests/B3.Trading.Domain.Tests.csproj" />
@@ -12,6 +13,7 @@
     <Project Path="backend/tests/B3.Trading.Api.Tests/B3.Trading.Api.Tests.csproj" />
     <Project Path="backend/tests/B3.Trading.Conformance/B3.Trading.Conformance.csproj" />
     <Project Path="backend/tests/B3.Trading.SimulatorBot.Tests/B3.Trading.SimulatorBot.Tests.csproj" />
+    <Project Path="backend/tests/B3.Trading.EntryPointListener.Tests/B3.Trading.EntryPointListener.Tests.csproj" />
   </Folder>
   <Folder Name="/backend/tools/">
     <Project Path="backend/tools/B3.Trading.DemoDriver/B3.Trading.DemoDriver.csproj" />
