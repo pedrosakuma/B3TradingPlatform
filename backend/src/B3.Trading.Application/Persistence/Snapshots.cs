@@ -59,7 +59,28 @@ public sealed class PlatformSnapshot
     /// "no PATs minted" semantics those snapshots actually carried.
     /// </summary>
     public List<UserBotCredentialSnapshot> UserBotCredentials { get; init; } = new();
+
+    /// <summary>
+    /// Per-credential FIXP session state (sub-issue #170 / RFC §4.8
+    /// "Snapshot scope"). Empty on snapshots pre-dating the field — the
+    /// state is then reconstructed by WAL replay of
+    /// <c>BotSessionInitializedEvent</c> +
+    /// <c>BotSessionVerAdvancedEvent</c>, which yields the same shape.
+    /// </summary>
+    public List<BotSessionStateSnapshot> BotSessions { get; init; } = new();
 }
+
+/// <summary>
+/// Captures one per-credential FIXP session row. The active-connection
+/// slot is intentionally <b>not</b> persisted — single-active enforcement
+/// is per-process and any in-flight TCP connection is gone after a
+/// restart anyway.
+/// </summary>
+public sealed record BotSessionStateSnapshot(
+    Guid CredentialId,
+    uint SessionId,
+    ulong CurrentVer,
+    ulong LastCheckpointedOutboundSeq);
 
 /// <summary>
 /// Captures one row from <c>InMemoryUserBotCredentialRegistry</c>.

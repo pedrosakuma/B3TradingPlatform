@@ -5,6 +5,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\B3.Trading.Application\B3.Trading.Application.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="B3.EntryPoint.Sbe" Version="0.14.3" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="*" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="*" />

@@ -103,6 +103,9 @@ builder.Services.AddSingleton<CashLedger>();
 builder.Services.AddSingleton<InMemoryUserBotCredentialRegistry>();
 builder.Services.AddSingleton<IUserBotCredentialRegistry>(sp =>
     sp.GetRequiredService<InMemoryUserBotCredentialRegistry>());
+builder.Services.AddSingleton<InMemoryUserBotSessionRegistry>();
+builder.Services.AddSingleton<IUserBotSessionRegistry>(sp =>
+    sp.GetRequiredService<InMemoryUserBotSessionRegistry>());
 builder.Services.AddSingleton<SubscriptionManager>();
 builder.Services.AddSingleton<IExecutionEventSink, WebSocketExecutionEventSink>();
 builder.Services.AddSingleton<IAlgoEventSink, WebSocketAlgoEventSink>();

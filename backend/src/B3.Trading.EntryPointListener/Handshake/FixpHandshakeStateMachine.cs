@@ -21,6 +21,13 @@ internal sealed class FixpHandshakeStateMachine
 
     public FixpSessionState State => _state;
 
+    /// <summary>
+    /// Internal hook for the connection layer (sub-issue #170) — lets the
+    /// async auth/session-registry post-checks force a terminal state
+    /// after the FSM has otherwise approved a transition.
+    /// </summary>
+    internal void SetState(FixpSessionState state) => _state = state;
+
     /// <summary>Session ID echoed from the client's Negotiate — valid after first successful <see cref="OnNegotiate"/>.</summary>
     public SessionID SessionId => _sessionId;
 
