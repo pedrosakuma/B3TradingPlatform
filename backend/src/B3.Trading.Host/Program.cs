@@ -638,6 +638,10 @@ app.MapAlgo();
 app.MapPositions();
 app.MapBalance();
 app.MapAdmin();
+{
+    var lo = app.Services.GetRequiredService<IOptions<EntryPointListenerOptions>>().Value;
+    if (lo.Enabled) app.MapAdminFixp();
+}
 app.MapUserBotCredentials();
 app.MapWebSocketHub();
 

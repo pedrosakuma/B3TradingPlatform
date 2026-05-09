@@ -40,6 +40,11 @@ public sealed record PlatformEndpoint(
     public const string EnvAuthIssuer = "B3T_AUTH_ISSUER";
     public const string EnvAuthAudience = "B3T_AUTH_AUDIENCE";
 
+    // FIXP listener conformance env vars
+    public const string EnvFixpEndpoint = "B3T_FIXP_ENDPOINT";
+    public const string EnvFixpTls = "B3T_FIXP_TLS";
+    public const string EnvFixpCredentialToken = "B3T_FIXP_CREDENTIAL";
+
     public static PlatformEndpoint? TryResolve()
     {
         var baseUrl = Environment.GetEnvironmentVariable(EnvBaseUrl);
@@ -149,4 +154,11 @@ public sealed record PlatformEndpoint(
 
     public const string AuthSigningKeySkipReason =
         "Signing-key scenario skipped: B3T_AUTH_SIGNING_KEY not set (operator must mirror the host's Trading:Auth:SigningKey to mint deterministic tokens).";
+
+    /// <summary>True when the FIXP listener env vars are configured for conformance.</summary>
+    public static bool IsFixpListenerConfigured() =>
+        !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(EnvFixpEndpoint));
+
+    public const string FixpListenerSkipReason =
+        "FIXP listener scenario skipped: B3T_FIXP_ENDPOINT not set.";
 }

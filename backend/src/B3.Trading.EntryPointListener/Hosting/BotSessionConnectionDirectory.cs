@@ -46,4 +46,24 @@ public sealed class BotSessionConnectionDirectory : IBotSessionConnectionDirecto
         sender = null!;
         return false;
     }
+
+    /// <summary>Number of currently registered active sessions.</summary>
+    public int ActiveCount => _byCredentialId.Count;
+
+    /// <summary>Returns all registered credential IDs (for admin enumeration).</summary>
+    public ICollection<Guid> RegisteredCredentialIds => _byCredentialId.Keys;
+
+    /// <summary>
+    /// Looks up the connection for <paramref name="credentialId"/> and
+    /// disposes it (force-terminate). Returns <c>true</c> when found.
+    /// </summary>
+    public bool TryForceTerminate(Guid credentialId)
+    {
+        if (_byCredentialId.TryRemove(credentialId, out var sender))
+        {
+            if (sender is IDisposable d) d.Dispose();
+            return true;
+        }
+        return false;
+    }
 }

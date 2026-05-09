@@ -45,6 +45,12 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the longer-form notes,
 including ER routing, ClOrdID namespacing, and the open architecture
 questions flagged in issue #1.
 
+### FIXP Listener (inbound)
+
+External user bots can connect via native B3 FIXP/SBE protocol using
+self-service credentials. See the [FIXP listener operations guide](docs/operations/fixp-listener.md)
+and the [RFC](docs/rfcs/user-bot-fixp-listener-v0.md).
+
 ## Layout
 
 ```

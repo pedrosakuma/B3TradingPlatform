@@ -46,20 +46,69 @@ public sealed class EntryPointListenerOptions
     /// </summary>
     public int RetransmitTimeoutMs { get; set; } = 5000;
 
+    /// <summary>
+    /// Maximum number of concurrent FIXP sessions a single user may hold
+    /// across all their credentials. A 4th session for the same userId is
+    /// rejected with <c>NegotiateReject(CREDENTIALS)</c>.
+    /// </summary>
+    public int MaxSessionsPerUser { get; set; } = 3;
+
+    /// <summary>Rate-limit options for Negotiate requests.</summary>
+    public RateLimitOptions RateLimit { get; set; } = new();
+
+    /// <summary>Outbound buffer sizing options.</summary>
+    public BuffersOptions Buffers { get; set; } = new();
+
     /// <summary>Nested TLS configuration.</summary>
     public sealed class TlsOptions
     {
-        /// <summary>Path to the PEM certificate file.</summary>
+        /// <summary>
+        /// Path to the certificate file. PEM (<c>.crt</c>/<c>.pem</c>) or
+        /// PFX/PKCS#12 (<c>.pfx</c>/<c>.p12</c>). When using PFX, leave
+        /// <see cref="KeyPath"/> empty — the private key is inside the PFX.
+        /// </summary>
         public string? CertPath { get; set; }
 
-        /// <summary>Path to the PEM private-key file.</summary>
+        /// <summary>Path to the PEM private-key file. Required for PEM certs, optional for PFX.</summary>
         public string? KeyPath { get; set; }
 
         /// <summary>
-        /// When true the host refuses to serve unencrypted sessions.
-        /// TLS in-socket is deferred to sub-issue E; the boot guard
-        /// enforces this flag but no <c>SslStream</c> wrapping occurs yet.
+        /// When true the host refuses to serve unencrypted sessions and wraps
+        /// accepted connections in <see cref="System.Net.Security.SslStream"/>.
         /// </summary>
         public bool Required { get; set; }
+
+        /// <summary>
+        /// Optional passphrase for an encrypted PEM private key or PFX file.
+        /// </summary>
+        public string? Password { get; set; }
+
+        /// <summary>Returns true when <see cref="CertPath"/> ends in a PFX/P12 extension.</summary>
+        public bool IsPfx => CertPath is not null &&
+            (CertPath.EndsWith(".pfx", StringComparison.OrdinalIgnoreCase) ||
+             CertPath.EndsWith(".p12", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>Token-bucket rate limiting for Negotiate requests.</summary>
+    public sealed class RateLimitOptions
+    {
+        /// <summary>Max Negotiate requests per minute per source IP.</summary>
+        public int NegotiatesPerMinutePerIp { get; set; } = 30;
+
+        /// <summary>
+        /// Max Negotiate requests per minute per credential identity (applied
+        /// after credential lookup succeeds, keyed by CredentialId).
+        /// </summary>
+        public int NegotiatesPerMinutePerUsername { get; set; } = 10;
+    }
+
+    /// <summary>Outbound buffer sizing.</summary>
+    public sealed class BuffersOptions
+    {
+        /// <summary>Outbound ring buffer size (entries).</summary>
+        public int OutboundRingSize { get; set; } = 1024;
+
+        /// <summary>Idle bot-mapping reap interval.</summary>
+        public TimeSpan MappingReapAfter { get; set; } = TimeSpan.FromMinutes(10);
     }
 }

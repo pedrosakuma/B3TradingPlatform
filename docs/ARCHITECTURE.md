@@ -134,7 +134,7 @@ small POCO contract declared alongside the interface.
 
 ## Auth + WebSocket hub (Phase 2)
 
-The participant-side platform exposes:
+The participant-side platform exposes three inbound channels:
 
 - **REST + JWT.** `POST /auth/login` against a local user store
   (PBKDF2-SHA256, 600k iterations by default; per-user iteration count
@@ -145,6 +145,12 @@ The participant-side platform exposes:
   `Authorization: Bearer` header or `?access_token=` (for browsers,
   which can't attach headers on a WS upgrade). Query-string acceptance
   is scoped to `/ws` only.
+- **FIXP listener (inbound).** A native B3 EntryPoint–compatible TCP
+  listener that lets external user bots connect via FIXP/SBE, authenticate
+  with platform-issued credentials, and submit orders through the same
+  post-auth pipeline. Opt-in via `Trading:EntryPointListener:Enabled`.
+  See the [FIXP listener operations guide](operations/fixp-listener.md)
+  and the [RFC](rfcs/user-bot-fixp-listener-v0.md).
 - **Subscription channels.** `orders.me`, `executions.me`,
   `positions.me`. Snapshot-on-subscribe + delta stream. Per-`(connection,
   channel)` monotonic `seq` (snapshot is `seq=0`, deltas start at 1).

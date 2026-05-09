@@ -1,3 +1,4 @@
+using B3.Trading.EntryPointListener;
 using B3.Trading.Infrastructure;
 using B3.Trading.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Builder;
@@ -35,16 +36,23 @@ public static class HealthEndpoints
         app.MapGet("/health", (HttpContext ctx, DrainState drain, IOptions<PersistenceOptions> persist) =>
         {
             var p = persist.Value;
-            // ExchangeStatus is registered by Program.cs whenever any
-            // gateway is wired; it is optional from the API project's
-            // perspective so legacy test hosts that skip the wire-side
-            // setup still serve /health.
             var exchange = ctx.RequestServices.GetService<ExchangeStatus>();
-            // Live FIXP session state per firm. Only registered in Real
-            // mode (FirmGatewayRegistry); Mock/Stub/Unavailable hosts get
-            // null here and the response collapses to the legacy shape
-            // (no firms[] array; readyForOrders driven by mode alone).
             var sessions = ctx.RequestServices.GetService<IFirmSessionStatusProvider>();
+
+            // FIXP listener status
+            var listenerOpts = ctx.RequestServices.GetService<IOptions<EntryPointListenerOptions>>()?.Value;
+            var sessionDir = ctx.RequestServices.GetService<B3.Trading.EntryPointListener.Hosting.BotSessionConnectionDirectory>();
+            object? entryPointListener = null;
+            if (listenerOpts is not null)
+            {
+                entryPointListener = new
+                {
+                    enabled = listenerOpts.Enabled,
+                    listening = listenerOpts.Enabled,
+                    activeSessions = sessionDir?.ActiveCount ?? 0,
+                };
+            }
+
             return Results.Json(new
             {
                 status = drain.IsDraining ? "draining" : "ready",
@@ -58,6 +66,7 @@ public static class HealthEndpoints
                     snapshotInterval = p.SnapshotInterval,
                 },
                 exchange = exchange is null ? null : BuildExchangeBlock(exchange, sessions),
+                entryPointListener,
             });
         });
 

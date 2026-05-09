@@ -16,14 +16,6 @@ namespace B3.Trading.EntryPointListener.Hosting;
 /// Manages the FIXP session lifecycle for a single accepted TCP
 /// connection. Reads SOFH-framed SBE messages, drives
 /// <see cref="FixpHandshakeStateMachine"/>, and writes responses.
-///
-/// <para>Sub-issue #170 (<c>D</c>): authenticates the
-/// <c>Negotiate.Credentials</c> buffer against
-/// <see cref="IUserBotCredentialRegistry"/>, attaches the resulting
-/// <see cref="FixpConnectionScope"/> to the connection, and on
-/// <c>Establish</c> claims the per-credential session via
-/// <see cref="IUserBotSessionRegistry"/> with single-active enforcement.
-/// </para>
 /// </summary>
 internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDisposable
 {
@@ -36,10 +28,6 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
 
     /// <summary>
     /// Hard ceiling on the credential buffer length we will UTF-8 decode.
-    /// The PAT shape is ≤ 50 bytes (<c>b3t_</c> + 10 short-id + <c>_</c> +
-    /// 32 base64url secret); we stay generous to absorb future format
-    /// growth without lifting the cap into config. Anything larger is
-    /// rejected without allocation as a malformed buffer.
     /// </summary>
     private const int MaxCredentialBufferBytes = 256;
 
@@ -50,45 +38,60 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     private readonly FixpOrderAdapter? _orders;
     private readonly IBotSessionConnectionDirectory? _connectionDirectory;
     private readonly BotOutboundCoordinator? _outboundCoordinator;
+    private readonly RateLimiterRegistry? _rateLimiter;
+    private readonly UserSessionCounter? _sessionCounter;
     private readonly EntryPointListenerOptions _options;
     private readonly TimeProvider _clock;
     private readonly string _connectionId;
     private readonly FixpHandshakeStateMachine _sm = new();
 
-    // Sub-issue #173 (G). Inbound/outbound seq state.
-    //
-    // _nextExpectedInboundSeq is the SeqNum the listener expects on the
-    // BusinessHeader.MsgSeqNum of the *next* application message from
-    // the bot. Init=1 per FIXP convention; bumped on every successfully
-    // accepted application message and on every Sequence/RetransmitRequest
-    // that carries a NextSeqNo > our expected (gap detected → emit
-    // NotApplied, re-sync the watermark to the bot's claimed value).
-    //
-    // Application messages carrying MsgSeqNum=0 are treated as "implicit"
-    // by the receiver and consume the expected slot without strict
-    // validation — a mode kept for backward compatibility with the F-era
-    // tests that did not stamp the business header.
     private long _nextExpectedInboundSeq = 1;
-    // Tick of the most recent outbound write the connection is aware
-    // of (handshake/order-ack/multiplexer push or session-control). Used
-    // by the heartbeat loop to suppress a Sequence emission when the
-    // bot has already observed a real frame within the cadence window.
     private long _lastOutboundTicks;
     private CancellationTokenSource? _heartbeatCts;
     private Task? _heartbeatLoop;
 
-    // Outbound-write serialisation for the multiplexer (sub-issue F).
-    // The handshake/order-ack writers and the multiplexer's enqueue
-    // hand-off both lock on this when emitting bytes to the stream so
-    // partial frames cannot interleave.
     private readonly SemaphoreSlim _writeMutex = new(1, 1);
-    private NetworkStream? _stream;
+    private Stream? _stream;
     private volatile bool _registeredInDirectory;
     private volatile bool _closed;
+    private volatile bool _userSlotHeld;
 
     private FixpConnectionScope? _scope;
     private bool _slotClaimed;
 
+    public FixpSessionConnection(
+        TcpClient tcpClient,
+        Stream stream,
+        IUserBotCredentialRegistry credentials,
+        IUserBotSessionRegistry sessions,
+        ILogger logger,
+        FixpOrderAdapter? orders = null,
+        IBotSessionConnectionDirectory? connectionDirectory = null,
+        BotOutboundCoordinator? outboundCoordinator = null,
+        EntryPointListenerOptions? options = null,
+        TimeProvider? clock = null,
+        RateLimiterRegistry? rateLimiter = null,
+        UserSessionCounter? sessionCounter = null)
+    {
+        _tcpClient = tcpClient;
+        _stream = stream;
+        _credentials = credentials;
+        _sessions = sessions;
+        _orders = orders;
+        _connectionDirectory = connectionDirectory;
+        _outboundCoordinator = outboundCoordinator;
+        _rateLimiter = rateLimiter;
+        _sessionCounter = sessionCounter;
+        _options = options ?? new EntryPointListenerOptions();
+        _clock = clock ?? TimeProvider.System;
+        _logger = logger;
+        _connectionId = Guid.NewGuid().ToString("N");
+        _lastOutboundTicks = _clock.GetUtcNow().UtcTicks;
+    }
+
+    /// <summary>
+    /// Legacy constructor for tests that don't supply a pre-wrapped stream.
+    /// </summary>
     public FixpSessionConnection(
         TcpClient tcpClient,
         IUserBotCredentialRegistry credentials,
@@ -98,26 +101,19 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         IBotSessionConnectionDirectory? connectionDirectory = null,
         BotOutboundCoordinator? outboundCoordinator = null,
         EntryPointListenerOptions? options = null,
-        TimeProvider? clock = null)
+        TimeProvider? clock = null,
+        RateLimiterRegistry? rateLimiter = null,
+        UserSessionCounter? sessionCounter = null)
+        : this(tcpClient, tcpClient.GetStream(), credentials, sessions, logger,
+               orders, connectionDirectory, outboundCoordinator, options, clock,
+               rateLimiter, sessionCounter)
     {
-        _tcpClient = tcpClient;
-        _credentials = credentials;
-        _sessions = sessions;
-        _orders = orders;
-        _connectionDirectory = connectionDirectory;
-        _outboundCoordinator = outboundCoordinator;
-        _options = options ?? new EntryPointListenerOptions();
-        _clock = clock ?? TimeProvider.System;
-        _logger = logger;
-        _connectionId = Guid.NewGuid().ToString("N");
-        _lastOutboundTicks = _clock.GetUtcNow().UtcTicks;
     }
 
     public async Task RunAsync(CancellationToken ct)
     {
         using var client = _tcpClient;
-        var stream = client.GetStream();
-        _stream = stream;
+        var stream = _stream!;
         var remote = SafeRemote(client);
         var reader = new SofhFrameReader();
         var readBuf = ArrayPool<byte>.Shared.Rent(4096);
@@ -195,6 +191,13 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
                     _logger.LogDebug(ex, "FIXP single-active slot release failed (best-effort).");
                 }
             }
+            // Release per-user session counter
+            if (_userSlotHeld && _scope is not null && _sessionCounter is not null)
+            {
+                _sessionCounter.Decrement(_scope.Principal.UserId);
+            }
+            if (_slotClaimed)
+                FixpListenerMetrics.SessionsActive.Add(-1);
         }
     }
 
@@ -220,7 +223,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     /// to terminate the session and close the socket.
     /// </summary>
     private async Task<bool> HandleFrameAsync(
-        NetworkStream stream, DecodedFrame frame, string remote, CancellationToken ct)
+        Stream stream, DecodedFrame frame, string remote, CancellationToken ct)
     {
         switch (frame.TemplateId)
         {
@@ -309,12 +312,13 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     // ─── Negotiate ───────────────────────────────────────────────────────
 
     private async Task<bool> HandleNegotiateAsync(
-        NetworkStream stream, DecodedFrame frame, string remote, CancellationToken ct)
+        Stream stream, DecodedFrame frame, string remote, CancellationToken ct)
     {
         if (frame.Payload.Length < NegotiateData.BLOCK_LENGTH)
         {
             _logger.LogInformation(
                 "fixp.negotiate.reject reason=INVALID_FRAME remote={Remote}", remote);
+            FixpListenerMetrics.NegotiateTotal.Add(1, new KeyValuePair<string, object?>("outcome", "reject:invalid_frame"));
             await SendActionAsync(stream, HandshakeAction.Terminate(TerminationCode.UNSPECIFIED),
                 sessionId: 0, sessionVerId: 0, ct).ConfigureAwait(false);
             return false;
@@ -329,18 +333,35 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         var fsmAction = _sm.OnNegotiate(in msg);
         if (fsmAction.Kind != HandshakeActionKind.SendNegotiateResponse)
         {
+            FixpListenerMetrics.NegotiateTotal.Add(1, new KeyValuePair<string, object?>("outcome", "reject:fsm"));
             await SendActionAsync(stream, fsmAction, sessionId, sessionVerId, ct).ConfigureAwait(false);
             return !fsmAction.IsTerminating;
         }
 
+        // Rate limit: per-IP check (pre-auth)
+        if (_rateLimiter is not null)
+        {
+            var remoteIp = GetRemoteIp();
+            if (remoteIp is not null && !_rateLimiter.TryAcquireForIp(remoteIp, _clock))
+            {
+                _logger.LogInformation(
+                    "fixp.negotiate.reject reason=RATE_LIMIT_IP remote={Remote}", remote);
+                FixpListenerMetrics.NegotiateTotal.Add(1, new KeyValuePair<string, object?>("outcome", "reject:rate_limit_ip"));
+                await WriteNegotiateRejectAsync(stream, sessionId, sessionVerId,
+                    NegotiationRejectCode.CREDENTIALS, ct).ConfigureAwait(false);
+                _sm.ForceTerminated();
+                return false;
+            }
+        }
+
         // Auth: pull the Credentials var-data field from the SBE payload
-        // and resolve it through the credential registry. The token itself
-        // is intentionally never logged — only the public CredShortId.
+        // and resolve it through the credential registry.
         if (!TryReadCredentials(frame.Payload, out var token))
         {
             _logger.LogInformation(
                 "fixp.negotiate.reject reason=CREDENTIALS detail=malformed-buffer remote={Remote}",
                 remote);
+            FixpListenerMetrics.NegotiateTotal.Add(1, new KeyValuePair<string, object?>("outcome", "reject:credentials"));
             await WriteNegotiateRejectAsync(stream, sessionId, sessionVerId,
                 NegotiationRejectCode.CREDENTIALS, ct).ConfigureAwait(false);
             _sm.ForceTerminated();
@@ -353,11 +374,41 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
             _logger.LogInformation(
                 "fixp.negotiate.reject reason=CREDENTIALS remote={Remote}",
                 remote);
+            FixpListenerMetrics.NegotiateTotal.Add(1, new KeyValuePair<string, object?>("outcome", "reject:credentials"));
             await WriteNegotiateRejectAsync(stream, sessionId, sessionVerId,
                 NegotiationRejectCode.CREDENTIALS, ct).ConfigureAwait(false);
             _sm.ForceTerminated();
             return false;
         }
+
+        // Rate limit: per-credential check (post-auth)
+        if (_rateLimiter is not null && !_rateLimiter.TryAcquireForCredential(credential.Id, _clock))
+        {
+            _logger.LogInformation(
+                "fixp.negotiate.reject reason=RATE_LIMIT_CREDENTIAL credShortId={CredShortId} remote={Remote}",
+                credential.CredShortId, remote);
+            FixpListenerMetrics.NegotiateTotal.Add(1, new KeyValuePair<string, object?>("outcome", "reject:rate_limit_credential"));
+            await WriteNegotiateRejectAsync(stream, sessionId, sessionVerId,
+                NegotiationRejectCode.CREDENTIALS, ct).ConfigureAwait(false);
+            _sm.ForceTerminated();
+            return false;
+        }
+
+        // Per-user max sessions check
+        if (_sessionCounter is not null &&
+            !_sessionCounter.TryIncrement(credential.UserId, _options.MaxSessionsPerUser))
+        {
+            _logger.LogInformation(
+                "fixp.negotiate.reject reason=MAX_SESSIONS_PER_USER userId={UserId} remote={Remote}",
+                credential.UserId, remote);
+            FixpListenerMetrics.NegotiateTotal.Add(1, new KeyValuePair<string, object?>("outcome", "reject:max_sessions"));
+            await WriteNegotiateRejectAsync(stream, sessionId, sessionVerId,
+                NegotiationRejectCode.CREDENTIALS, ct).ConfigureAwait(false);
+            _sm.ForceTerminated();
+            return false;
+        }
+        if (_sessionCounter is not null)
+            _userSlotHeld = true;
 
         // Allocate (or load) the per-credential session state up-front so
         // Establish can validate sid/ver synchronously off the resolved
@@ -371,6 +422,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
             "fixp.negotiate.ok credShortId={CredShortId} userId={UserId} remote={Remote} connectionId={ConnectionId}",
             credential.CredShortId, credential.UserId, remote, _connectionId);
 
+        FixpListenerMetrics.NegotiateTotal.Add(1, new KeyValuePair<string, object?>("outcome", "ok"));
         await WriteNegotiateResponseAsync(stream, sessionId, sessionVerId, ct).ConfigureAwait(false);
         return true;
     }
@@ -378,7 +430,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     // ─── Establish ───────────────────────────────────────────────────────
 
     private async Task<bool> HandleEstablishAsync(
-        NetworkStream stream, DecodedFrame frame, CancellationToken ct)
+        Stream stream, DecodedFrame frame, CancellationToken ct)
     {
         if (frame.Payload.Length < EstablishData.BLOCK_LENGTH)
         {
@@ -462,6 +514,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         }
 
         _slotClaimed = true;
+        FixpListenerMetrics.SessionsActive.Add(1);
         _logger.LogInformation(
             "fixp.establish.ok credShortId={CredShortId} userId={UserId} sessionId={Sid} sessionVerId={Ver} connectionId={ConnectionId}",
             _scope.Principal.CredShortId, _scope.Principal.UserId,
@@ -490,7 +543,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     // ─── Terminate ───────────────────────────────────────────────────────
 
     private async Task<bool> HandleTerminateAsync(
-        NetworkStream stream, DecodedFrame frame, CancellationToken ct)
+        Stream stream, DecodedFrame frame, CancellationToken ct)
     {
         TerminateData msg = default;
         uint sid = 0;
@@ -534,7 +587,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     /// the caller should swallow.
     /// </summary>
     private async Task<bool> TrackInboundAppMessageAsync(
-        NetworkStream stream, byte[] payload, int blockLength, CancellationToken ct)
+        Stream stream, byte[] payload, int blockLength, CancellationToken ct)
     {
         // The InboundBusinessHeader is the first field of the message
         // block (offset 0 within the SBE block — see InboundBusinessHeader
@@ -577,7 +630,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     }
 
     private async Task HandleInboundSequenceAsync(
-        NetworkStream stream, DecodedFrame frame, CancellationToken ct)
+        Stream stream, DecodedFrame frame, CancellationToken ct)
     {
         if (frame.Payload.Length < SequenceData.BLOCK_LENGTH) return;
         var msg = MemoryMarshal.Read<SequenceData>(frame.Payload);
@@ -608,7 +661,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     }
 
     private async Task HandleInboundRetransmitRequestAsync(
-        NetworkStream stream, DecodedFrame frame, CancellationToken ct)
+        Stream stream, DecodedFrame frame, CancellationToken ct)
     {
         if (frame.Payload.Length < RetransmitRequestData.BLOCK_LENGTH) return;
         var msg = MemoryMarshal.Read<RetransmitRequestData>(frame.Payload);
@@ -651,6 +704,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
                 _connectionId, fromSeq, count, currentSeq);
             await SendRetransmitRejectAsync(stream, sessionId, requestTs,
                 RetransmitRejectCode.INVALID_FROMSEQNO, ct).ConfigureAwait(false);
+            FixpListenerMetrics.RetransmitRequestsTotal.Add(1, new KeyValuePair<string, object?>("outcome", "reject"));
             return;
         }
 
@@ -666,6 +720,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
                 _connectionId, fromSeq, count, range.Count, buffer.IsOverflowed);
             await SendRetransmitRejectAsync(stream, sessionId, requestTs,
                 RetransmitRejectCode.OUT_OF_RANGE, ct).ConfigureAwait(false);
+            FixpListenerMetrics.RetransmitRequestsTotal.Add(1, new KeyValuePair<string, object?>("outcome", "reject"));
             return;
         }
 
@@ -689,6 +744,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
             _logger.LogInformation(
                 "fixp.retransmit.replay connectionId={ConnectionId} from={From} count={Count}",
                 _connectionId, fromSeq, count);
+            FixpListenerMetrics.RetransmitRequestsTotal.Add(1, new KeyValuePair<string, object?>("outcome", "replay"));
         }
         finally
         {
@@ -697,7 +753,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     }
 
     private async Task SendNotAppliedAsync(
-        NetworkStream stream, ulong fromSeqNo, uint count, CancellationToken ct)
+        Stream stream, ulong fromSeqNo, uint count, CancellationToken ct)
     {
         var bytes = OutboundSessionMessageEncoder.EncodeNotApplied(fromSeqNo, count);
         await _writeMutex.WaitAsync(ct).ConfigureAwait(false);
@@ -711,7 +767,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     }
 
     private async Task SendRetransmitRejectAsync(
-        NetworkStream stream, uint sessionId, ulong requestTimestamp,
+        Stream stream, uint sessionId, ulong requestTimestamp,
         RetransmitRejectCode code, CancellationToken ct)
     {
         var bytes = OutboundSessionMessageEncoder.EncodeRetransmitReject(
@@ -734,7 +790,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     /// keepalive timers stay live during quiet periods. Disabled when
     /// <see cref="EntryPointListenerOptions.HeartbeatIntervalMs"/> ≤ 0.
     /// </summary>
-    private void StartHeartbeatLoop(NetworkStream stream)
+    private void StartHeartbeatLoop(Stream stream)
     {
         var intervalMs = _options.HeartbeatIntervalMs;
         if (intervalMs <= 0) return;
@@ -762,7 +818,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         });
     }
 
-    private async Task SendHeartbeatSequenceAsync(NetworkStream stream, CancellationToken ct)
+    private async Task SendHeartbeatSequenceAsync(Stream stream, CancellationToken ct)
     {
         if (_scope is null || _outboundCoordinator is null) return;
         await _writeMutex.WaitAsync(ct).ConfigureAwait(false);
@@ -806,7 +862,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     // ─── Async response writers ──────────────────────────────────────────
 
     private static async Task SendActionAsync(
-        NetworkStream stream,
+        Stream stream,
         HandshakeAction action,
         uint sessionId,
         ulong sessionVerId,
@@ -835,7 +891,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     }
 
     private static async Task WriteNegotiateResponseAsync(
-        NetworkStream stream, uint sessionId, ulong sessionVerId, CancellationToken ct)
+        Stream stream, uint sessionId, ulong sessionVerId, CancellationToken ct)
     {
         var frameSize = SofhFrameWriter.FrameSize(NegotiateResponseData.BLOCK_LENGTH);
         var buf = ArrayPool<byte>.Shared.Rent(frameSize);
@@ -857,7 +913,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     }
 
     private static async Task WriteNegotiateRejectAsync(
-        NetworkStream stream, uint sessionId, ulong sessionVerId,
+        Stream stream, uint sessionId, ulong sessionVerId,
         NegotiationRejectCode code, CancellationToken ct)
     {
         var frameSize = SofhFrameWriter.FrameSize(NegotiateRejectData.BLOCK_LENGTH);
@@ -881,7 +937,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     }
 
     private static async Task WriteEstablishAckAsync(
-        NetworkStream stream, uint sessionId, ulong sessionVerId, CancellationToken ct)
+        Stream stream, uint sessionId, ulong sessionVerId, CancellationToken ct)
     {
         var frameSize = SofhFrameWriter.FrameSize(EstablishAckData.BLOCK_LENGTH);
         var buf = ArrayPool<byte>.Shared.Rent(frameSize);
@@ -903,7 +959,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     }
 
     private static async Task WriteEstablishRejectAsync(
-        NetworkStream stream, uint sessionId, ulong sessionVerId,
+        Stream stream, uint sessionId, ulong sessionVerId,
         EstablishRejectCode code, CancellationToken ct)
     {
         var frameSize = SofhFrameWriter.FrameSize(EstablishRejectData.BLOCK_LENGTH);
@@ -927,7 +983,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     }
 
     private static async Task WriteTerminateAsync(
-        NetworkStream stream,
+        Stream stream,
         uint sessionId,
         ulong sessionVerId,
         TerminationCode code,
@@ -954,7 +1010,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     }
 
     private static async Task BestEffortSendTerminateAsync(
-        NetworkStream stream, TerminationCode code, CancellationToken ct)
+        Stream stream, TerminationCode code, CancellationToken ct)
     {
         try { await WriteTerminateAsync(stream, 0, 0, code, ct).ConfigureAwait(false); }
         catch { /* best effort */ }
@@ -1004,6 +1060,15 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
             };
         }
         catch { return "?"; }
+    }
+
+    private IPAddress? GetRemoteIp()
+    {
+        try
+        {
+            return _tcpClient.Client.RemoteEndPoint is IPEndPoint ep ? ep.Address : null;
+        }
+        catch { return null; }
     }
 
     // ─── IBotSessionOutboundSender (sub-issue F #172) ────────────────────

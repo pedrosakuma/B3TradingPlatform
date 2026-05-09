@@ -27,20 +27,33 @@ public sealed class EntryPointListenerOptionsValidator : IValidateOptions<EntryP
                 $"Trading:EntryPointListener:Endpoint '{options.Endpoint}' is not a valid " +
                 "IP-literal endpoint. Use 'ip:port', '*:port', or '[ipv6]:port'. DNS names are not accepted.");
 
+        var failures = new List<string>();
+
+        // Rate limit validation
+        if (options.RateLimit.NegotiatesPerMinutePerIp <= 0)
+            failures.Add("Trading:EntryPointListener:RateLimit:NegotiatesPerMinutePerIp must be > 0.");
+        if (options.RateLimit.NegotiatesPerMinutePerUsername <= 0)
+            failures.Add("Trading:EntryPointListener:RateLimit:NegotiatesPerMinutePerUsername must be > 0.");
+
+        // MaxSessionsPerUser validation
+        if (options.MaxSessionsPerUser <= 0)
+            failures.Add("Trading:EntryPointListener:MaxSessionsPerUser must be > 0.");
+
+        // TLS validation
         if (options.Tls.Required)
         {
-            var failures = new List<string>();
             if (string.IsNullOrWhiteSpace(options.Tls.CertPath))
                 failures.Add("Trading:EntryPointListener:Tls:CertPath must be set when Tls:Required=true.");
-            if (string.IsNullOrWhiteSpace(options.Tls.KeyPath))
-                failures.Add("Trading:EntryPointListener:Tls:KeyPath must be set when Tls:Required=true.");
+            if (!options.Tls.IsPfx && string.IsNullOrWhiteSpace(options.Tls.KeyPath))
+                failures.Add("Trading:EntryPointListener:Tls:KeyPath must be set when Tls:Required=true and CertPath is PEM (not .pfx/.p12).");
             if (!string.IsNullOrWhiteSpace(options.Tls.CertPath) && !File.Exists(options.Tls.CertPath))
                 failures.Add($"Trading:EntryPointListener:Tls:CertPath '{options.Tls.CertPath}' does not exist.");
             if (!string.IsNullOrWhiteSpace(options.Tls.KeyPath) && !File.Exists(options.Tls.KeyPath))
                 failures.Add($"Trading:EntryPointListener:Tls:KeyPath '{options.Tls.KeyPath}' does not exist.");
-            if (failures.Count > 0)
-                return ValidateOptionsResult.Fail(failures);
         }
+
+        if (failures.Count > 0)
+            return ValidateOptionsResult.Fail(failures);
 
         return ValidateOptionsResult.Success;
     }
