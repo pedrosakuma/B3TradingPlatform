@@ -42,11 +42,7 @@ public static class EntryPointListenerServiceCollectionExtensions
                 .Bind(configuration.GetSection(BotErMultiplexerOptions.SectionName));
 
             // The mapping registry is the lookup key for routing ERs to
-            // the originating bot. Host.Program.cs already registers it
-            // for the production composition; TryAdd keeps that as the
-            // winning binding while letting handshake-only test hosts
-            // (which never persist mappings anyway) fall through to the
-            // in-memory implementation.
+            // the originating bot.
             services.TryAddSingleton<InMemoryUserBotOrderMappingRegistry>();
             services.TryAddSingleton<IUserBotOrderMappingRegistry>(sp =>
                 sp.GetRequiredService<InMemoryUserBotOrderMappingRegistry>());
@@ -63,6 +59,14 @@ public static class EntryPointListenerServiceCollectionExtensions
 
             services.AddSingleton<BotSessionSeqCheckpointer>();
             services.AddHostedService(sp => sp.GetRequiredService<BotSessionSeqCheckpointer>());
+
+            // Sub-issue #174 (H): rate limiter + per-user session counter.
+            services.AddSingleton(sp =>
+            {
+                var opts = sp.GetRequiredService<IOptions<EntryPointListenerOptions>>().Value;
+                return new RateLimiterRegistry(opts);
+            });
+            services.AddSingleton<UserSessionCounter>();
 
             services.AddSingleton<Hosting.FixpListenerHostedService>();
             services.AddHostedService(sp =>

@@ -1,5 +1,5 @@
 using System.Buffers;
-using System.Net.Sockets;
+
 using System.Runtime.InteropServices;
 using B3.Entrypoint.Fixp.Sbe.V6;
 using B3.Trading.Application;
@@ -81,7 +81,7 @@ internal sealed class FixpOrderAdapter
     /// caller, not here).
     /// </summary>
     public async Task HandleNewOrderSingleAsync(
-        NetworkStream stream,
+        Stream stream,
         ReadOnlyMemory<byte> payload,
         FixpConnectionScope scope,
         CancellationToken ct)
@@ -199,7 +199,7 @@ internal sealed class FixpOrderAdapter
     /// platform's internal id via the side-mapping registry.
     /// </summary>
     public async Task HandleOrderCancelRequestAsync(
-        NetworkStream stream,
+        Stream stream,
         ReadOnlyMemory<byte> payload,
         FixpConnectionScope scope,
         CancellationToken ct)
@@ -299,7 +299,7 @@ internal sealed class FixpOrderAdapter
     // ─── Outbound writers ────────────────────────────────────────────────
 
     private static async Task WriteBusinessMessageRejectAsync(
-        NetworkStream stream,
+        Stream stream,
         MessageType refMsgType,
         uint refSeqNum,
         ulong businessRejectRefID,
@@ -332,7 +332,7 @@ internal sealed class FixpOrderAdapter
     }
 
     private static async Task WriteExecutionReportRejectAsync(
-        NetworkStream stream,
+        Stream stream,
         ulong externalClOrdId,
         ulong origExternalClOrdId,
         ulong securityId,

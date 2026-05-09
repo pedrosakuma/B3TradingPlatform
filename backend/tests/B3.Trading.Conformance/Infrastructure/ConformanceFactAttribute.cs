@@ -61,6 +61,12 @@ public sealed class ConformanceFactAttribute : FactAttribute
     /// </summary>
     public bool RequiresAuthSigningKey { get; init; }
 
+    /// <summary>
+    /// When true, the scenario requires a running FIXP listener configured
+    /// via <c>B3T_FIXP_ENDPOINT</c>. Skipped when the env var is not set.
+    /// </summary>
+    public bool RequiresFixpListener { get; init; }
+
     public ConformanceFactAttribute()
     {
         var peer = PlatformEndpoint.TryResolve();
@@ -106,6 +112,8 @@ public sealed class ConformanceFactAttribute : FactAttribute
                 return PlatformEndpoint.RealStackConformanceSkipReason;
             if (RequiresAuthSigningKey && !PlatformEndpoint.IsAuthSigningKeyConfigured())
                 return PlatformEndpoint.AuthSigningKeySkipReason;
+            if (RequiresFixpListener && !PlatformEndpoint.IsFixpListenerConfigured())
+                return PlatformEndpoint.FixpListenerSkipReason;
             return null;
         }
         set => base.Skip = value;

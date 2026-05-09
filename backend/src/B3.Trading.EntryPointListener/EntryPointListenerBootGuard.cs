@@ -49,11 +49,18 @@ public static class EntryPointListenerBootGuard
                 "Serving unencrypted FIXP sessions in Production is not permitted.");
         }
 
-        if (string.IsNullOrWhiteSpace(opts.Tls.CertPath) || string.IsNullOrWhiteSpace(opts.Tls.KeyPath))
+        if (string.IsNullOrWhiteSpace(opts.Tls.CertPath))
         {
             throw new InvalidOperationException(
                 "Trading:EntryPointListener:Enabled=true in Production requires non-empty " +
-                "Trading:EntryPointListener:Tls:CertPath and Tls:KeyPath.");
+                "Trading:EntryPointListener:Tls:CertPath.");
+        }
+
+        if (!opts.Tls.IsPfx && string.IsNullOrWhiteSpace(opts.Tls.KeyPath))
+        {
+            throw new InvalidOperationException(
+                "Trading:EntryPointListener:Enabled=true in Production requires non-empty " +
+                "Trading:EntryPointListener:Tls:KeyPath (or use a .pfx/.p12 CertPath).");
         }
     }
 
@@ -70,14 +77,13 @@ public static class EntryPointListenerBootGuard
             environmentName, Environments.Production, StringComparison.OrdinalIgnoreCase);
 
         var tlsNote = opts.Tls.Required
-            ? " TLS.Required=true (in-socket TLS not yet active — serving plaintext; see sub-issue E)."
+            ? " TLS.Required=true — connections wrapped in SslStream."
             : " ⚠ TLS.Required=false — listener is serving PLAINTEXT. Do NOT use in Production.";
 
         var prodNote = isProduction
             ? " ‼ PRODUCTION ENVIRONMENT — AllowInProduction=true is set. Verify TLS configuration."
             : string.Empty;
 
-        return "⚠ FIXP LISTENER ENABLED on " + opts.Endpoint + "." + tlsNote + prodNote +
-               " Auth is STUBBED (always-accept). Real auth added in sub-issue C.";
+        return "⚠ FIXP LISTENER ENABLED on " + opts.Endpoint + "." + tlsNote + prodNote;
     }
 }

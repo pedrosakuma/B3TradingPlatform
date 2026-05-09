@@ -421,3 +421,23 @@ The build context is the **repo root** (the Dockerfile copies
   good enough for the trader UI scope.
 - **Single-instance only** — the event store is local-disk; running two
   trading-host replicas against the same volume would corrupt the WAL.
+
+## FIXP Listener
+
+The inbound FIXP listener can be enabled in the docker stack. Add these env vars
+to the `trading-host` service:
+
+```yaml
+environment:
+  Trading__EntryPointListener__Enabled: "true"
+  Trading__EntryPointListener__Endpoint: "0.0.0.0:5001"
+  Trading__EntryPointListener__Tls__Required: "false"  # true in Production
+  # For TLS, mount cert files and set:
+  # Trading__EntryPointListener__Tls__CertPath: /certs/server.crt
+  # Trading__EntryPointListener__Tls__KeyPath: /certs/server.key
+ports:
+  - "5001:5001"  # expose FIXP port
+```
+
+See the full [FIXP listener operations guide](operations/fixp-listener.md) for
+TLS setup, rate-limit tuning, and monitoring.

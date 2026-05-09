@@ -1,5 +1,8 @@
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 using B3.Trading.Application;
 using B3.Trading.Application.UserBots;
 using Microsoft.Extensions.Hosting;
@@ -16,10 +19,9 @@ namespace B3.Trading.EntryPointListener.Hosting;
 /// <para>The service is only registered when
 /// <c>Trading:EntryPointListener:Enabled=true</c>.</para>
 ///
-/// <para>TLS in-socket is deferred to sub-issue E.  When
-/// <see cref="EntryPointListenerOptions.TlsOptions.Required"/> is set the
-/// boot guard has already enforced the configuration, but connections are
-/// still served over plaintext; a loud warning is logged at startup.</para>
+/// <para>When <see cref="EntryPointListenerOptions.TlsOptions.Required"/>
+/// is set, accepted TCP connections are wrapped in <see cref="SslStream"/>
+/// before being handed to <see cref="FixpSessionConnection"/>.</para>
 /// </summary>
 public sealed class FixpListenerHostedService : BackgroundService
 {
@@ -29,12 +31,15 @@ public sealed class FixpListenerHostedService : BackgroundService
     private readonly FixpOrderAdapter? _orders;
     private readonly IBotSessionConnectionDirectory? _connectionDirectory;
     private readonly BotOutboundCoordinator? _outboundCoordinator;
+    private readonly RateLimiterRegistry? _rateLimiter;
+    private readonly UserSessionCounter? _sessionCounter;
     private readonly TimeProvider _clock;
     private readonly ILogger<FixpListenerHostedService> _logger;
     private readonly TaskCompletionSource<IPEndPoint> _boundTcs =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     private TcpListener? _listener;
+    private X509Certificate2? _tlsCert;
 
     public FixpListenerHostedService(
         IOptions<EntryPointListenerOptions> opts,
@@ -47,6 +52,8 @@ public sealed class FixpListenerHostedService : BackgroundService
         IUserBotOrderMappingRegistry? botMappings = null,
         IBotSessionConnectionDirectory? connectionDirectory = null,
         BotOutboundCoordinator? outboundCoordinator = null,
+        RateLimiterRegistry? rateLimiter = null,
+        UserSessionCounter? sessionCounter = null,
         TimeProvider? clock = null)
     {
         _opts = opts.Value;
@@ -55,12 +62,9 @@ public sealed class FixpListenerHostedService : BackgroundService
         _logger = logger;
         _connectionDirectory = connectionDirectory;
         _outboundCoordinator = outboundCoordinator;
+        _rateLimiter = rateLimiter;
+        _sessionCounter = sessionCounter;
         _clock = clock ?? TimeProvider.System;
-        // Sub-issue #171 (E): the order/cancel adapter is only wired when
-        // the host has registered the full submit pipeline. Tests (and
-        // any future handshake-only mode) leave the deps null and the
-        // listener falls back to the v0 "ignore application messages"
-        // behaviour.
         if (symbols is not null && submit is not null && cancel is not null && botMappings is not null)
         {
             _orders = new FixpOrderAdapter(symbols, submit, cancel, botMappings, logger);
@@ -84,13 +88,31 @@ public sealed class FixpListenerHostedService : BackgroundService
             return;
         }
 
-        if (_opts.Tls.Required)
+        // Load TLS certificate once at startup
+        if (!string.IsNullOrWhiteSpace(_opts.Tls.CertPath))
         {
-            _logger.LogWarning(
-                "FIXP listener: Tls:Required=true but in-socket TLS is not yet implemented " +
-                "(sub-issue E). Serving PLAINTEXT on {Ep}. Do NOT expose to the public internet.",
-                endpoint);
+            try
+            {
+                _tlsCert = LoadCertificate(_opts.Tls);
+                _logger.LogInformation("FIXP listener: TLS certificate loaded from {CertPath}.", _opts.Tls.CertPath);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "FIXP listener: failed to load TLS certificate from {CertPath}.", _opts.Tls.CertPath);
+                _boundTcs.TrySetException(ex);
+                return;
+            }
         }
+
+        if (_opts.Tls.Required && _tlsCert is null)
+        {
+            var msg = "FIXP listener: Tls:Required=true but no certificate could be loaded.";
+            _logger.LogError(msg);
+            _boundTcs.TrySetException(new InvalidOperationException(msg));
+            return;
+        }
+
+        FixpListenerMetrics.Enabled.Add(1);
 
         _listener = new TcpListener(endpoint);
         _listener.Start();
@@ -115,15 +137,94 @@ public sealed class FixpListenerHostedService : BackgroundService
                     continue;
                 }
 
-                var conn = new FixpSessionConnection(
-                    client, _credentials, _sessions, _logger,
-                    _orders, _connectionDirectory, _outboundCoordinator, _opts, _clock);
-                _ = Task.Run(() => conn.RunAsync(stoppingToken), stoppingToken);
+                _ = Task.Run(() => HandleAcceptedClientAsync(client, stoppingToken), stoppingToken);
             }
         }
         finally
         {
             _listener.Stop();
+            _tlsCert?.Dispose();
         }
+    }
+
+    private async Task HandleAcceptedClientAsync(TcpClient client, CancellationToken ct)
+    {
+        Stream stream;
+        try
+        {
+            if (_tlsCert is not null && _opts.Tls.Required)
+            {
+                var sslStream = new SslStream(client.GetStream(), leaveInnerStreamOpen: false);
+                try
+                {
+                    using var handshakeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    handshakeCts.CancelAfter(TimeSpan.FromSeconds(5));
+                    await sslStream.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
+                    {
+                        ServerCertificate = _tlsCert,
+                        EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                        ClientCertificateRequired = false,
+                    }, handshakeCts.Token).ConfigureAwait(false);
+                    FixpListenerMetrics.TlsHandshakeCompleted.Add(1);
+                    _logger.LogInformation("fixp.tls.handshake.completed remote={Remote}", SafeRemote(client));
+                }
+                catch (Exception ex)
+                {
+                    FixpListenerMetrics.ConnectionsRejected.Add(1, new KeyValuePair<string, object?>("reason", "tls"));
+                    _logger.LogWarning(ex, "fixp.tls.handshake.failed remote={Remote}", SafeRemote(client));
+                    sslStream.Dispose();
+                    client.Dispose();
+                    return;
+                }
+                stream = sslStream;
+            }
+            else
+            {
+                stream = client.GetStream();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "fixp.accept.error remote={Remote}", SafeRemote(client));
+            client.Dispose();
+            return;
+        }
+
+        _logger.LogDebug("fixp.accept remote={Remote}", SafeRemote(client));
+
+        var conn = new FixpSessionConnection(
+            client, stream, _credentials, _sessions, _logger,
+            _orders, _connectionDirectory, _outboundCoordinator, _opts, _clock,
+            _rateLimiter, _sessionCounter);
+        await conn.RunAsync(ct).ConfigureAwait(false);
+    }
+
+    private static X509Certificate2 LoadCertificate(EntryPointListenerOptions.TlsOptions tls)
+    {
+        if (tls.IsPfx)
+        {
+            return X509CertificateLoader.LoadPkcs12FromFile(tls.CertPath!, tls.Password);
+        }
+
+        // PEM: load from cert + key files, then re-export to PFX-backed
+        // cert for SslStream compatibility.
+        var pem = X509Certificate2.CreateFromPemFile(tls.CertPath!, tls.KeyPath);
+        var exported = X509CertificateLoader.LoadPkcs12(pem.Export(X509ContentType.Pfx), null);
+        pem.Dispose();
+        return exported;
+    }
+
+    private static string SafeRemote(TcpClient client)
+    {
+        try
+        {
+            return client.Client.RemoteEndPoint switch
+            {
+                IPEndPoint ip => $"{ip.Address}:{ip.Port}",
+                { } ep => ep.ToString() ?? "?",
+                _ => "?",
+            };
+        }
+        catch { return "?"; }
     }
 }
