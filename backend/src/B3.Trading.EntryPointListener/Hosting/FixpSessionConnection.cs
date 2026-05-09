@@ -24,7 +24,7 @@ namespace B3.Trading.EntryPointListener.Hosting;
 /// <see cref="IUserBotSessionRegistry"/> with single-active enforcement.
 /// </para>
 /// </summary>
-internal sealed class FixpSessionConnection
+internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDisposable
 {
     private const ushort SchemaIdV6 = 1;
     private const ushort VersionNegotiateResponse = 6;
@@ -47,8 +47,18 @@ internal sealed class FixpSessionConnection
     private readonly IUserBotCredentialRegistry _credentials;
     private readonly IUserBotSessionRegistry _sessions;
     private readonly FixpOrderAdapter? _orders;
+    private readonly IBotSessionConnectionDirectory? _connectionDirectory;
     private readonly string _connectionId;
     private readonly FixpHandshakeStateMachine _sm = new();
+
+    // Outbound-write serialisation for the multiplexer (sub-issue F).
+    // The handshake/order-ack writers and the multiplexer's enqueue
+    // hand-off both lock on this when emitting bytes to the stream so
+    // partial frames cannot interleave.
+    private readonly SemaphoreSlim _writeMutex = new(1, 1);
+    private NetworkStream? _stream;
+    private volatile bool _registeredInDirectory;
+    private volatile bool _closed;
 
     private FixpConnectionScope? _scope;
     private bool _slotClaimed;
@@ -58,12 +68,14 @@ internal sealed class FixpSessionConnection
         IUserBotCredentialRegistry credentials,
         IUserBotSessionRegistry sessions,
         ILogger logger,
-        FixpOrderAdapter? orders = null)
+        FixpOrderAdapter? orders = null,
+        IBotSessionConnectionDirectory? connectionDirectory = null)
     {
         _tcpClient = tcpClient;
         _credentials = credentials;
         _sessions = sessions;
         _orders = orders;
+        _connectionDirectory = connectionDirectory;
         _logger = logger;
         _connectionId = Guid.NewGuid().ToString("N");
     }
@@ -72,6 +84,7 @@ internal sealed class FixpSessionConnection
     {
         using var client = _tcpClient;
         var stream = client.GetStream();
+        _stream = stream;
         var remote = SafeRemote(client);
         var reader = new SofhFrameReader();
         var readBuf = ArrayPool<byte>.Shared.Rent(4096);
@@ -121,7 +134,18 @@ internal sealed class FixpSessionConnection
         }
         finally
         {
+            _closed = true;
             ArrayPool<byte>.Shared.Return(readBuf);
+            // Deregister BEFORE the stream is closed so a racing ER from
+            // the multiplexer hot path either sees us in the directory
+            // (and TryEnqueue takes the write mutex which we still own)
+            // or sees us absent (and falls through to buffering). Either
+            // outcome is safe; no NRE on a half-disposed stream.
+            if (_registeredInDirectory && _scope is not null && _connectionDirectory is not null)
+            {
+                _connectionDirectory.Deregister(_scope.Principal.CredentialId, this);
+                _registeredInDirectory = false;
+            }
             // Always release any single-active slot we hold, even on
             // abrupt close — otherwise a crashed bot would lock its own
             // credential out until the next version bump.
@@ -179,8 +203,17 @@ internal sealed class FixpSessionConnection
                 if (_sm.State != FixpSessionState.Established) goto default;
                 if (_orders is not null && _scope is not null)
                 {
-                    await _orders.HandleNewOrderSingleAsync(stream, frame.Payload, _scope, ct)
-                        .ConfigureAwait(false);
+                    // Sub-issue #172 (F): the order adapter writes ER
+                    // acks/rejects directly to the same stream the
+                    // multiplexer's TryEnqueue path writes to. Take the
+                    // shared write mutex so frames cannot interleave.
+                    await _writeMutex.WaitAsync(ct).ConfigureAwait(false);
+                    try
+                    {
+                        await _orders.HandleNewOrderSingleAsync(stream, frame.Payload, _scope, ct)
+                            .ConfigureAwait(false);
+                    }
+                    finally { _writeMutex.Release(); }
                 }
                 return true;
 
@@ -188,8 +221,13 @@ internal sealed class FixpSessionConnection
                 if (_sm.State != FixpSessionState.Established) goto default;
                 if (_orders is not null && _scope is not null)
                 {
-                    await _orders.HandleOrderCancelRequestAsync(stream, frame.Payload, _scope, ct)
-                        .ConfigureAwait(false);
+                    await _writeMutex.WaitAsync(ct).ConfigureAwait(false);
+                    try
+                    {
+                        await _orders.HandleOrderCancelRequestAsync(stream, frame.Payload, _scope, ct)
+                            .ConfigureAwait(false);
+                    }
+                    finally { _writeMutex.Release(); }
                 }
                 return true;
 
@@ -367,6 +405,17 @@ internal sealed class FixpSessionConnection
             _scope.Principal.CredShortId, _scope.Principal.UserId,
             serverState.SessionId, serverState.CurrentVer, _connectionId);
         await WriteEstablishAckAsync(stream, requestedSid, requestedVer, ct).ConfigureAwait(false);
+
+        // Sub-issue #172 (F): make the connection discoverable by the
+        // outbound multiplexer. Registration AFTER EstablishAck is sent
+        // so a racing ER cannot reach the bot before the bot's own
+        // handshake completes — the bot's parser would interpret a
+        // pre-Ack ER as a protocol violation and drop the session.
+        if (_connectionDirectory is not null)
+        {
+            _connectionDirectory.Register(credentialId, this);
+            _registeredInDirectory = true;
+        }
         return true;
     }
 
@@ -591,5 +640,56 @@ internal sealed class FixpSessionConnection
             };
         }
         catch { return "?"; }
+    }
+
+    // ─── IBotSessionOutboundSender (sub-issue F #172) ────────────────────
+
+    /// <summary>
+    /// Synchronously enqueues outbound bytes from the multiplexer. We
+    /// fire a fire-and-forget Task that takes the write mutex and writes
+    /// to the underlying stream — this is the right ordering primitive
+    /// because (a) the multiplexer's drain thread must not block on
+    /// socket I/O, and (b) the write mutex serialises against any
+    /// handshake/order-ack writes the connection's own request loop is
+    /// emitting concurrently.
+    /// </summary>
+    bool IBotSessionOutboundSender.TryEnqueue(ReadOnlyMemory<byte> framedBytes)
+    {
+        if (_closed) return false;
+        var stream = _stream;
+        if (stream is null) return false;
+
+        // Fire-and-forget. Errors land in the catch and quietly close
+        // the connection; the read loop will observe the broken stream
+        // on its next iteration and run the deregister/release path.
+        _ = Task.Run(async () =>
+        {
+            await _writeMutex.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                if (_closed) return;
+                await stream.WriteAsync(framedBytes, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "fixp.outbound.write.error connectionId={ConnectionId}", _connectionId);
+                _closed = true;
+                try { stream.Close(); } catch { /* ignore */ }
+            }
+            finally
+            {
+                _writeMutex.Release();
+            }
+        });
+        return true;
+    }
+
+    public void Dispose()
+    {
+        // Used by the multiplexer's overflow path to force-close.
+        _closed = true;
+        try { _stream?.Close(); } catch { /* ignore */ }
+        try { _tcpClient.Close(); } catch { /* ignore */ }
+        _writeMutex.Dispose();
     }
 }

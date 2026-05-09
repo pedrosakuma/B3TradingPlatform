@@ -1,5 +1,6 @@
 
 using B3.Trading.Application.Observability;
+using B3.Trading.Application.UserBots;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Logging;
 
@@ -37,6 +38,7 @@ public sealed class ExecutionReportProcessor
     private readonly CashLedger? _cash;
     private readonly PendingReplacementRegistry? _replacements;
     private readonly Risk.IReplaceMarginCoordinator? _replaceMargin;
+    private readonly IBotErRouter? _botErRouter;
 
     public ExecutionReportProcessor(
         OrderOwnershipMap ownership,
@@ -48,7 +50,8 @@ public sealed class ExecutionReportProcessor
         IAlgoSignalQueue? algoSignals = null,
         CashLedger? cash = null,
         PendingReplacementRegistry? replacements = null,
-        Risk.IReplaceMarginCoordinator? replaceMargin = null)
+        Risk.IReplaceMarginCoordinator? replaceMargin = null,
+        IBotErRouter? botErRouter = null)
     {
         _ownership = ownership;
         _orders = orders;
@@ -60,6 +63,7 @@ public sealed class ExecutionReportProcessor
         _cash = cash;
         _replacements = replacements;
         _replaceMargin = replaceMargin;
+        _botErRouter = botErRouter;
     }
 
     /// <summary>
@@ -242,7 +246,7 @@ public sealed class ExecutionReportProcessor
                 lookupId, owner.Value, order.Symbol, order.Side, rejectReason);
         }
 
-        _sink.Publish(new ExecutionEvent(
+        var ev = new ExecutionEvent(
             owner,
             lookupId,
             order.Symbol,
@@ -255,7 +259,15 @@ public sealed class ExecutionReportProcessor
             lastPx,
             rejectReason,
             DateTimeOffset.UtcNow,
-            isNativeStp));
+            isNativeStp);
+        _sink.Publish(ev);
+
+        // Sub-issue #172 (F): forward to the FIXP outbound multiplexer
+        // when wired. The router enqueues onto an internal channel
+        // drained by a background worker — the call is non-blocking and
+        // safe to make from inside the dispatcher's apply callback (no
+        // async I/O on this thread, no socket writes on this thread).
+        _botErRouter?.Route(ev);
 
         // Algo engine hook: signal AFTER fan-out so the engine reactor
         // sees the same world the WS subscribers see, and so the dispatch
@@ -294,6 +306,29 @@ public sealed class ExecutionReportProcessor
         _logger.LogInformation(
             "event=order.replace.rejected newClOrdId={NewClOrdId} origClOrdId={OrigClOrdId} owner={Owner} symbol={Symbol} reason={Reason}",
             newClOrdId, intent.OriginalClOrdId, intent.Owner.Value, intent.Symbol, rejectReason ?? "(none)");
+
+        // Sub-issue #172 (F): the bot owns the cancel/replace ClOrdID
+        // it issued and must see a terminal Reject for it. Synthesise
+        // a minimal ExecutionEvent — there is no Order in the book for
+        // the replace-side ClOrdID by design (replace requests don't
+        // create an order until accepted).
+        if (_botErRouter is not null)
+        {
+            _botErRouter.Route(new ExecutionEvent(
+                intent.Owner,
+                newClOrdId,
+                intent.Symbol,
+                intent.Side,
+                OrderStatus.Rejected,
+                ExecKind.Rejected,
+                LeavesQuantity: 0,
+                CumulativeQuantity: 0,
+                LastQuantity: 0,
+                LastPrice: 0m,
+                RejectReason: rejectReason,
+                TimestampUtc: DateTimeOffset.UtcNow,
+                IsNativeStp: false));
+        }
     }
 
     private void ApplyReplaceAccepted(
@@ -328,7 +363,7 @@ public sealed class ExecutionReportProcessor
         if (origOrder.IsStale)
             origOrder.ClearStale();
 
-        _sink.Publish(new ExecutionEvent(
+        var origEv = new ExecutionEvent(
             intent.Owner,
             origId,
             origOrder.Symbol,
@@ -341,7 +376,11 @@ public sealed class ExecutionReportProcessor
             0m,
             null,
             DateTimeOffset.UtcNow,
-            false));
+            false);
+        _sink.Publish(origEv);
+        // Sub-issue #172 (F): the bot must observe the original's
+        // terminalisation as part of the replace ack stream.
+        _botErRouter?.Route(origEv);
 
         // 2) Hydrate the replacement with intent metadata + venue's
         //    cum/leaves baseline. Existing fills booked under the
@@ -384,7 +423,7 @@ public sealed class ExecutionReportProcessor
 
         // 4) Publish event for the new order — same shape as a New ack
         //    so WS subscribers see the order appear in the blotter.
-        _sink.Publish(new ExecutionEvent(
+        var newEv = new ExecutionEvent(
             intent.Owner,
             newClOrdId,
             newOrder.Symbol,
@@ -397,7 +436,9 @@ public sealed class ExecutionReportProcessor
             erLastPx,
             null,
             DateTimeOffset.UtcNow,
-            false));
+            false);
+        _sink.Publish(newEv);
+        _botErRouter?.Route(newEv);
 
         // 5) Algo-engine signal: replacement is, for the engine's
         //    purposes, an execution observation on the parent. Mirrors
