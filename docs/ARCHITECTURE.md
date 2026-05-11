@@ -9,14 +9,21 @@ deliberately did **not** resolve.
 ## Layered model
 
 ```
-┌──────────────────────────────────────────────┐
-│ B3.Trading.Host   (ASP.NET Core composition) │
-└───────────────┬──────────────────────────────┘
+                ┌──────────┐  ┌────────────┐  ┌──────────────────┐
+inbound ───►    │  REST    │  │ WebSocket  │  │ FIXP/SBE TCP     │
+                │  /orders │  │   /ws      │  │ (user-bot listener)│
+                └────┬─────┘  └─────┬──────┘  └─────────┬────────┘
+                     │              │                   │
+┌────────────────────▼──────────────▼───────────────────▼─────────┐
+│ B3.Trading.Host   (ASP.NET Core composition)                    │
+└───────────────┬─────────────────────────────────────────────────┘
                 │ depends on
 ┌───────────────▼──────────────────────────────┐
 │ B3.Trading.Api                               │
 │   - REST endpoints (Orders, Positions, …)    │
-│   - (later) WebSocket hub for subscriptions  │
+│   - WebSocket hub for subscriptions          │
+│ B3.Trading.EntryPointListener                │
+│   - Native FIXP/SBE listener for user bots   │
 └───────────────┬──────────────────────────────┘
                 │
 ┌───────────────▼──────────────────────────────┐
@@ -24,17 +31,17 @@ deliberately did **not** resolve.
 │   - EndClientRegistry                        │
 │   - WorkingOrderBook                         │
 │   - PositionKeeper                           │
-│   - (later) SubscriptionManager, PreTradeRisk│
+│   - SubscriptionManager, PreTradeRisk        │
 └──────┬───────────────────────────┬───────────┘
        │                           │
-┌──────▼───────────────┐  ┌────────▼───────────┐
-│ B3.Trading.Domain    │  │ B3.Trading.Infra   │
-│   - aggregates       │  │   - IExchangeGateway│
-│   - value objects    │  │   - StubExchange…   │
-│                      │  │   - (later) EntryPoint │
-└──────────────────────┘  │     adapter via       │
-                          │     B3EntryPointClient│
-                          └───────────────────────┘
+┌──────▼───────────────┐  ┌────────▼────────────────┐
+│ B3.Trading.Domain    │  │ B3.Trading.Infrastructure│
+│   - aggregates       │  │   - IExchangeGateway     │
+│   - value objects    │  │   - Stub / Mock / Real / │
+│                      │  │     Unavailable gateways │
+│                      │  │   - B3EntryPointClient   │
+│                      │  │     adapter              │
+└──────────────────────┘  └──────────────────────────┘
 ```
 
 `Application` knows nothing about ASP.NET Core or FIXP; `Domain` knows
@@ -83,13 +90,14 @@ the book mutation so an immediate ER cannot race the routing path).
    fan out (default impl is `NoOpExecutionEventSink`; the WebSocket hub
    in #3 will plug a real one).
 
-## Wire boundary (Phase 1)
+## Wire boundary
 
-`B3.Trading.Infrastructure` defines a placeholder `IEntryPointClient`
-interface representing the surface the upstream
+`B3.Trading.Infrastructure` references the upstream
 [`B3EntryPointClient`](https://github.com/pedrosakuma/B3EntryPointClient)
-library is expected to expose. The upstream repo is intentionally starting
-with API design + mocks first; this lets us lock our boundary in early.
+NuGet (pinned in `B3.Trading.Infrastructure.csproj`) for the FIXP/SBE
+wire layer. The `IEntryPointClient` contract owns the surface the
+`Infrastructure` adapters consume so the wire library remains a
+swappable detail.
 
 - `EntryPointClientGateway` implements `IExchangeGateway` against
   `IEntryPointClient` (one gateway instance per FIXP session).
@@ -127,10 +135,9 @@ with API design + mocks first; this lets us lock our boundary in early.
   host **refuses to boot** when `Environment=Production` unless
   `Trading:Exchange:AllowErInjectionInProduction=true` is explicitly set.
 
-When the real lib publishes its surface, the swap is local: replace the
-`IEntryPointClient` placeholder with the upstream type (or adapt it
-behind the same name). The rest of the codebase only depends on the
-small POCO contract declared alongside the interface.
+When upstream releases new wire surface, the swap is local: update the
+`IEntryPointClient` adapter to the new shape. The rest of the codebase
+only depends on the small POCO contract declared alongside the interface.
 
 ## Auth + WebSocket hub (Phase 2)
 
