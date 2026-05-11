@@ -60,7 +60,12 @@ public class EntryPointGatewayAndRouterTests
         var sink = new TestSink();
         var proc = new ExecutionReportProcessor(ownership, book, positions, sink, new NoOpMarginProvider(), NullLogger<ExecutionReportProcessor>.Instance);
         var client = new MockEntryPointClient();
-        var dispatcher = new EventDispatcher(new NullEventStore());
+        // RFC §5.2 (F2). Wire the test sink as a fan-out sink so the
+        // dispatcher's per-sink-channel fan-out (under the lock) routes
+        // captured ERs into it. The legacy synchronous sink.Publish
+        // path is no longer invoked from inside Apply when an
+        // ExecutionFanOut writer is supplied.
+        var dispatcher = new EventDispatcher(new NullEventStore(), new[] { (IExecutionFanOutSink)sink });
         using var router = new EntryPointExecutionReportRouter(client, proc, dispatcher);
 
         client.EmitExecutionReport(new ExecutionReportEnvelope(1UL, EpExecType.Fill, 0, 100, 100, 30m, null));
@@ -69,9 +74,11 @@ public class EntryPointGatewayAndRouterTests
         Assert.Single(sink.Events);
     }
 
-    private sealed class TestSink : IExecutionEventSink
+    private sealed class TestSink : IExecutionEventSink, IExecutionFanOutSink
     {
         public readonly List<ExecutionEvent> Events = new();
-        public void Publish(ExecutionEvent ev) => Events.Add(ev);
+        public ExecutionFanOutTargets Target => ExecutionFanOutTargets.All;
+        public void Publish(ExecutionEvent ev) { lock (Events) Events.Add(ev); }
+        public void Enqueue(long seq, ExecutionEvent ev) { lock (Events) Events.Add(ev); }
     }
 }

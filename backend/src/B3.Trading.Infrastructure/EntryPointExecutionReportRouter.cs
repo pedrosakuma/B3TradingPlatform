@@ -51,6 +51,15 @@ public sealed class EntryPointExecutionReportRouter : IDisposable
 
         try
         {
+            // RFC §5.2 (F2). Use the outcome-capture Dispatch overload:
+            // the apply callback records the resulting ExecutionEvent(s)
+            // onto the supplied writer, and the dispatcher TryWrites
+            // each entry into every per-sink fan-out channel WHILE
+            // STILL HOLDING the dispatcher lock. Per-sink drain order
+            // therefore matches WAL append order even though the
+            // expensive publish work (subscriber walk + DTO build for
+            // the WS hub; SBE encode + outbound enqueue for the bot
+            // router) runs OFF the lock on each sink's drain thread.
             _dispatcher.Dispatch(
                 new ExecutionReportReceivedEvent
                 {
@@ -64,17 +73,18 @@ public sealed class EntryPointExecutionReportRouter : IDisposable
                     Synthetic = false,
                     OrigClOrdId = er.OrigClOrdId,
                 },
-                () => _processor.Apply(er.ClOrdId, kind, er.LeavesQuantity, er.CumulativeQuantity,
-                    er.LastQuantity, er.LastPrice, er.RejectReason, er.OrigClOrdId));
+                fanOut => _processor.Apply(er.ClOrdId, kind, er.LeavesQuantity, er.CumulativeQuantity,
+                    er.LastQuantity, er.LastPrice, er.RejectReason, er.OrigClOrdId, fanOut));
         }
         catch (WalBackpressureException)
         {
             MetricsRegistry.WalBackpressure.Add(1,
                 new KeyValuePair<string, object?>("call_site", "er.router"));
             // ER inbound is single-direction — losing audit on backpressure
-            // is preferable to dropping the state mutation. Apply directly;
-            // this is a "log dropped, state intact" branch and shows up in
-            // metrics as a backpressure event.
+            // is preferable to dropping the state mutation. Apply directly
+            // (legacy synchronous-publish path: no fanOut writer); this is
+            // a "log dropped, state intact" branch and shows up in metrics
+            // as a backpressure event.
             _processor.Apply(er.ClOrdId, kind, er.LeavesQuantity, er.CumulativeQuantity,
                 er.LastQuantity, er.LastPrice, er.RejectReason, er.OrigClOrdId);
         }

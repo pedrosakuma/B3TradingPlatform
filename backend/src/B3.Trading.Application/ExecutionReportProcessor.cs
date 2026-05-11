@@ -71,8 +71,23 @@ public sealed class ExecutionReportProcessor
     /// When set, the processor mutates the order identified by that ID
     /// (the original order) — the cancel/replace request itself uses a
     /// fresh ClOrdID that has no in-memory order behind it.
+    ///
+    /// <para>
+    /// RFC §5.2 (F2). When invoked from
+    /// <see cref="EventDispatcher.Dispatch(WalEvent, System.Action{Persistence.ExecutionFanOut})"/>,
+    /// <paramref name="fanOut"/> is non-null and every outbound
+    /// <see cref="ExecutionEvent"/> is recorded onto it instead of being
+    /// synchronously published. The dispatcher then enqueues the
+    /// captured events onto every registered fan-out sink WHILE STILL
+    /// HOLDING THE LOCK so subscribers see ERs in WAL-append order even
+    /// though the actual publish work happens off-lock on each sink's
+    /// drain thread. When <paramref name="fanOut"/> is null (test
+    /// helpers that drive the processor directly without going through
+    /// a dispatcher) the legacy synchronous-publish behavior is
+    /// preserved so existing tests don't need rewiring.
+    /// </para>
     /// </summary>
-    public void Apply(ulong clOrdId, ExecKind kind, long leaves, long cumQty, long lastQty, decimal lastPx, string? rejectReason, ulong origClOrdId = 0)
+    public void Apply(ulong clOrdId, ExecKind kind, long leaves, long cumQty, long lastQty, decimal lastPx, string? rejectReason, ulong origClOrdId = 0, Persistence.ExecutionFanOut? fanOut = null)
     {
         // Slice 2 of #122: replace lifecycle early intercepts. Both
         // branches are gated on the registry having an intent recorded
@@ -84,14 +99,14 @@ public sealed class ExecutionReportProcessor
                 && _replacements.TryConsume(clOrdId, out var rejectedIntent)
                 && rejectedIntent is not null)
             {
-                ApplyReplaceRejected(clOrdId, rejectedIntent, rejectReason);
+                ApplyReplaceRejected(clOrdId, rejectedIntent, rejectReason, fanOut);
                 return;
             }
             if (kind == ExecKind.Replaced
                 && _replacements.TryConsume(clOrdId, out var replaceIntent)
                 && replaceIntent is not null)
             {
-                ApplyReplaceAccepted(clOrdId, leaves, cumQty, lastPx, origClOrdId, replaceIntent);
+                ApplyReplaceAccepted(clOrdId, leaves, cumQty, lastPx, origClOrdId, replaceIntent, fanOut);
                 return;
             }
         }
@@ -260,14 +275,22 @@ public sealed class ExecutionReportProcessor
             rejectReason,
             DateTimeOffset.UtcNow,
             isNativeStp);
-        _sink.Publish(ev);
-
-        // Sub-issue #172 (F): forward to the FIXP outbound multiplexer
-        // when wired. The router enqueues onto an internal channel
-        // drained by a background worker — the call is non-blocking and
-        // safe to make from inside the dispatcher's apply callback (no
-        // async I/O on this thread, no socket writes on this thread).
-        _botErRouter?.Route(ev);
+        // RFC §5.2 (F2). Capture-then-fan-out path: the dispatcher walks
+        // the writer and TryWrites into every per-sink channel while still
+        // under the dispatcher lock so subscribers observe events in WAL
+        // seq order; actual Publish/Route work happens on each sink's
+        // drain thread (off-lock). When the writer is null we fall back
+        // to the legacy synchronous publish path used by tests that drive
+        // the processor without a dispatcher.
+        if (fanOut is not null)
+        {
+            fanOut.Add(ev);
+        }
+        else
+        {
+            _sink.Publish(ev);
+            _botErRouter?.Route(ev);
+        }
 
         // Algo engine hook: signal AFTER fan-out so the engine reactor
         // sees the same world the WS subscribers see, and so the dispatch
@@ -298,7 +321,7 @@ public sealed class ExecutionReportProcessor
     private static KeyValuePair<string, object?> KindTag(ExecKind kind) =>
         new("kind", kind.ToString());
 
-    private void ApplyReplaceRejected(ulong newClOrdId, OrderReplacementIntent intent, string? rejectReason)
+    private void ApplyReplaceRejected(ulong newClOrdId, OrderReplacementIntent intent, string? rejectReason, Persistence.ExecutionFanOut? fanOut)
     {
         // Replace-reject: original order is untouched (continues
         // Working / PartiallyFilled), pending margin delta is released.
@@ -311,23 +334,31 @@ public sealed class ExecutionReportProcessor
         // it issued and must see a terminal Reject for it. Synthesise
         // a minimal ExecutionEvent — there is no Order in the book for
         // the replace-side ClOrdID by design (replace requests don't
-        // create an order until accepted).
-        if (_botErRouter is not null)
+        // create an order until accepted) so this event is meaningful
+        // only to the bot router; tagging with BotRouter prevents the
+        // WS hub channel from receiving an event for a ClOrdID its
+        // orders.me view has no record of (RFC §5.2 / §6.3).
+        var rejectedEv = new ExecutionEvent(
+            intent.Owner,
+            newClOrdId,
+            intent.Symbol,
+            intent.Side,
+            OrderStatus.Rejected,
+            ExecKind.Rejected,
+            LeavesQuantity: 0,
+            CumulativeQuantity: 0,
+            LastQuantity: 0,
+            LastPrice: 0m,
+            RejectReason: rejectReason,
+            TimestampUtc: DateTimeOffset.UtcNow,
+            IsNativeStp: false);
+        if (fanOut is not null)
         {
-            _botErRouter.Route(new ExecutionEvent(
-                intent.Owner,
-                newClOrdId,
-                intent.Symbol,
-                intent.Side,
-                OrderStatus.Rejected,
-                ExecKind.Rejected,
-                LeavesQuantity: 0,
-                CumulativeQuantity: 0,
-                LastQuantity: 0,
-                LastPrice: 0m,
-                RejectReason: rejectReason,
-                TimestampUtc: DateTimeOffset.UtcNow,
-                IsNativeStp: false));
+            fanOut.Add(rejectedEv, Persistence.ExecutionFanOutTargets.BotRouter);
+        }
+        else if (_botErRouter is not null)
+        {
+            _botErRouter.Route(rejectedEv);
         }
     }
 
@@ -337,7 +368,8 @@ public sealed class ExecutionReportProcessor
         long erCum,
         decimal erLastPx,
         ulong erOrigClOrdId,
-        OrderReplacementIntent intent)
+        OrderReplacementIntent intent,
+        Persistence.ExecutionFanOut? fanOut)
     {
         var origId = erOrigClOrdId != 0 ? erOrigClOrdId : intent.OriginalClOrdId;
 
@@ -377,10 +409,17 @@ public sealed class ExecutionReportProcessor
             null,
             DateTimeOffset.UtcNow,
             false);
-        _sink.Publish(origEv);
-        // Sub-issue #172 (F): the bot must observe the original's
-        // terminalisation as part of the replace ack stream.
-        _botErRouter?.Route(origEv);
+        if (fanOut is not null)
+        {
+            fanOut.Add(origEv);
+        }
+        else
+        {
+            _sink.Publish(origEv);
+            // Sub-issue #172 (F): the bot must observe the original's
+            // terminalisation as part of the replace ack stream.
+            _botErRouter?.Route(origEv);
+        }
 
         // 2) Hydrate the replacement with intent metadata + venue's
         //    cum/leaves baseline. Existing fills booked under the
@@ -437,8 +476,15 @@ public sealed class ExecutionReportProcessor
             null,
             DateTimeOffset.UtcNow,
             false);
-        _sink.Publish(newEv);
-        _botErRouter?.Route(newEv);
+        if (fanOut is not null)
+        {
+            fanOut.Add(newEv);
+        }
+        else
+        {
+            _sink.Publish(newEv);
+            _botErRouter?.Route(newEv);
+        }
 
         // 5) Algo-engine signal: replacement is, for the engine's
         //    purposes, an execution observation on the parent. Mirrors

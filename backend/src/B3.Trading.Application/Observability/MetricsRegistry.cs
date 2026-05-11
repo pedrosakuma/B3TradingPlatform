@@ -103,6 +103,12 @@ public static class MetricsRegistry
     // operation; non-zero indicates a stuck consumer or a runaway loop.
     public static readonly Counter<long> AlgoSignalsDropped =
         Meter.CreateCounter<long>("trading.algo.signals_dropped");
+    // RFC §5.2 / F2. Bumped each time the WS hub fan-out per-sink channel
+    // overflows and DropOldest evicts an event. Non-zero means the WS hub
+    // drain thread can't keep up with the dispatcher; subscribers should
+    // observe sequence gaps and reconnect-and-replay (existing WS path).
+    public static readonly Counter<long> WsHubFanOutDropped =
+        Meter.CreateCounter<long>("trading.dispatcher.ws_fanout_dropped");
     // Child orders submitted by the engine on behalf of an algo parent.
     // Tagged by algo type so iceberg vs twap are distinguishable.
     public static readonly Counter<long> AlgoChildrenSubmitted =
