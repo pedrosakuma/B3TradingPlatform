@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>B3.Trading.Benchmarks</RootNamespace>
+    <!-- See README.md for runner spec. IsPackable=false keeps the harness out of pack/publish; CI's dotnet test skips it because it is not a test project. -->
+    <IsPackable>false</IsPackable>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <NoWarn>$(NoWarn);CA1822;CA1051</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BenchmarkDotNet" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Options" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\B3.Trading.Domain\B3.Trading.Domain.csproj" />
+    <ProjectReference Include="..\..\src\B3.Trading.Application\B3.Trading.Application.csproj" />
+    <ProjectReference Include="..\..\src\B3.Trading.Infrastructure\B3.Trading.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\B3.Trading.EntryPointListener\B3.Trading.EntryPointListener.csproj" />
+  </ItemGroup>
+
+</Project>
