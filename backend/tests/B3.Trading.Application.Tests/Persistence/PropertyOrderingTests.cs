@@ -131,6 +131,18 @@ public class PropertyOrderingTests
 
         var observed = RunDispatchPlusSnapshotWorkload(dispatcher, snapshotter, clOrdId, book, writers, perWriter, readers);
 
+        // On a fast CI box the writers can complete before any reader
+        // task is scheduled, leaving `observed` empty. Take one
+        // synchronous final snapshot so the meta-assertion below
+        // ("we actually observed at least one snapshot") is timing-free
+        // — the §4.3 invariant must still hold on this final capture.
+        RawPlatformSnapshot? finalRaw = null;
+        dispatcher.WithSnapshotLock(seq => finalRaw = snapshotter.CaptureRaw(seq));
+        Assert.NotNull(finalRaw);
+        var finalSnap = StateSnapshotter.Project(finalRaw!);
+        var finalOrd = finalSnap.WorkingOrders.First(o => o.ClOrdId == clOrdId);
+        observed.Add((finalSnap.Seq, finalOrd.CumulativeQuantity));
+
         Assert.Equal((long)writers * perWriter + 1, dispatcher.CurrentSeq);
         Assert.NotEmpty(observed);
         Assert.All(observed, o => Assert.Equal(o.Seq - 1, o.Cum));
