@@ -82,6 +82,33 @@ public sealed class InMemoryUserBotOrderMappingRegistry : IUserBotOrderMappingRe
             .OrderBy(s => s.CancelInternalClOrdId)
             .ToList();
 
+    /// <inheritdoc />
+    public BotOrderMappingRaw[] RawSnapshotOrders()
+    {
+        var pairs = _byInternal.ToArray();
+        if (pairs.Length == 0) return Array.Empty<BotOrderMappingRaw>();
+        var raw = new BotOrderMappingRaw[pairs.Length];
+        for (var i = 0; i < pairs.Length; i++)
+            raw[i] = new BotOrderMappingRaw(
+                pairs[i].Key, pairs[i].Value.CredentialId, pairs[i].Value.ExternalClOrdId);
+        return raw;
+    }
+
+    /// <inheritdoc />
+    public BotCancelMappingRaw[] RawSnapshotCancels()
+    {
+        var pairs = _cancelsByInternal.ToArray();
+        if (pairs.Length == 0) return Array.Empty<BotCancelMappingRaw>();
+        var raw = new BotCancelMappingRaw[pairs.Length];
+        for (var i = 0; i < pairs.Length; i++)
+            raw[i] = new BotCancelMappingRaw(
+                pairs[i].Key,
+                pairs[i].Value.OriginalInternalClOrdId,
+                pairs[i].Value.CredentialId,
+                pairs[i].Value.ExternalCancelClOrdId);
+        return raw;
+    }
+
     public void Restore(
         IEnumerable<BotOrderMappingSnapshot> orders,
         IEnumerable<BotCancelMappingSnapshot> cancels)

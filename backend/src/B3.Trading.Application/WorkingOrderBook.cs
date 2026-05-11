@@ -211,6 +211,33 @@ public sealed class WorkingOrderBook
         }
     }
 
+    /// <summary>
+    /// Phase-1 (lock-side) snapshot capture for the two-phase pipeline
+    /// described in RFC §5.8 / P6. Caller MUST hold
+    /// <c>EventDispatcher.WithSnapshotLock</c> while invoking this so the
+    /// captured mutable scalars (<c>Status</c>, <c>LeavesQuantity</c>,
+    /// <c>CumulativeQuantity</c>, <c>IsStale</c>, …) reflect the same
+    /// logical instant as the snapshot's <c>seq</c> (RFC §4.3). The
+    /// returned array is independent of <see cref="_orders"/>; subsequent
+    /// dispatcher mutations cannot perturb it because every per-element
+    /// mutable field is captured by value into <see cref="Persistence.OrderRaw"/>
+    /// here and the projection step reads only the captured copy.
+    /// </summary>
+    public Persistence.OrderRaw[] RawSnapshot()
+    {
+        var pairs = _orders.ToArray();
+        if (pairs.Length == 0) return Array.Empty<Persistence.OrderRaw>();
+        var raw = new Persistence.OrderRaw[pairs.Length];
+        for (var i = 0; i < pairs.Length; i++)
+        {
+            var o = pairs[i].Value;
+            raw[i] = new Persistence.OrderRaw(
+                o, o.Status, o.LeavesQuantity, o.CumulativeQuantity,
+                o.IsStale, o.StaleReason, o.StaledAtUtc);
+        }
+        return raw;
+    }
+
     public void Restore(IEnumerable<Persistence.OrderSnapshot> snaps)
     {
         ArgumentNullException.ThrowIfNull(snaps);

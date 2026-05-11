@@ -28,6 +28,45 @@ public sealed class KillSwitchService
 
     public IReadOnlyCollection<string> ListKilledFirms() => _killedFirms.Keys.ToArray();
 
+    /// <summary>
+    /// Phase-1 (lock-side) capture for the two-phase snapshot pipeline
+    /// (RFC §5.8 / P6). Same data as <see cref="ListKilledEndClients"/>
+    /// but returned as a plain <c>string[]</c> for direct stitching into
+    /// <see cref="Persistence.RawPlatformSnapshot"/> without an extra
+    /// projection allocation.
+    /// </summary>
+    public string[] RawSnapshotKilledEndClients()
+    {
+        var keys = _killedEndClients.Keys;
+        if (keys.Count == 0) return Array.Empty<string>();
+        var raw = new string[keys.Count];
+        var i = 0;
+        foreach (var k in keys)
+        {
+            if (i == raw.Length) break; // dictionary grew between Count and enumeration; bail safely.
+            raw[i++] = k.Value;
+        }
+        return i == raw.Length ? raw : raw[..i];
+    }
+
+    /// <summary>
+    /// Phase-1 (lock-side) capture; same shape as
+    /// <see cref="RawSnapshotKilledEndClients"/>.
+    /// </summary>
+    public string[] RawSnapshotKilledFirms()
+    {
+        var keys = _killedFirms.Keys;
+        if (keys.Count == 0) return Array.Empty<string>();
+        var raw = new string[keys.Count];
+        var i = 0;
+        foreach (var k in keys)
+        {
+            if (i == raw.Length) break;
+            raw[i++] = k;
+        }
+        return i == raw.Length ? raw : raw[..i];
+    }
+
     public void Restore(IEnumerable<string> killedEndClients, IEnumerable<string> killedFirms)
     {
         ArgumentNullException.ThrowIfNull(killedEndClients);

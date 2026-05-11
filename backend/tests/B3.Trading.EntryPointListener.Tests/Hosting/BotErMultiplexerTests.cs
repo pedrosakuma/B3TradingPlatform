@@ -191,6 +191,8 @@ public class BotErMultiplexerTests
         public void RegisterCancelInternal(ulong c, ulong o, Guid g, ulong e) { }
         public IReadOnlyList<BotOrderMappingSnapshot> SnapshotOrders() => Array.Empty<BotOrderMappingSnapshot>();
         public IReadOnlyList<BotCancelMappingSnapshot> SnapshotCancels() => Array.Empty<BotCancelMappingSnapshot>();
+        public BotOrderMappingRaw[] RawSnapshotOrders() => Array.Empty<BotOrderMappingRaw>();
+        public BotCancelMappingRaw[] RawSnapshotCancels() => Array.Empty<BotCancelMappingRaw>();
         public void Restore(IEnumerable<BotOrderMappingSnapshot> orders, IEnumerable<BotCancelMappingSnapshot> cancels) { }
     }
 }

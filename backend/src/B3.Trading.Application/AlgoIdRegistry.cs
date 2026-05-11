@@ -41,6 +41,22 @@ public sealed class AlgoIdRegistry
         return snap;
     }
 
+    /// <summary>
+    /// Phase-1 (lock-side) capture for the two-phase snapshot pipeline
+    /// (RFC §5.8 / P6). Defers the
+    /// <see cref="Persistence.AlgoIdRegistrySnapshot"/> + inner
+    /// <c>List&lt;T&gt;</c> allocation to the projection step.
+    /// </summary>
+    public Persistence.AlgoIdCounterRaw[] RawSnapshot()
+    {
+        var pairs = _counters.ToArray();
+        if (pairs.Length == 0) return Array.Empty<Persistence.AlgoIdCounterRaw>();
+        var raw = new Persistence.AlgoIdCounterRaw[pairs.Length];
+        for (var i = 0; i < pairs.Length; i++)
+            raw[i] = new Persistence.AlgoIdCounterRaw(pairs[i].Key, Interlocked.Read(ref pairs[i].Value.Counter));
+        return raw;
+    }
+
     public void Restore(Persistence.AlgoIdRegistrySnapshot snap)
     {
         ArgumentNullException.ThrowIfNull(snap);

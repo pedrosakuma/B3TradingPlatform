@@ -121,9 +121,26 @@ public sealed class SnapshotService : Microsoft.Extensions.Hosting.BackgroundSer
         var sw = Stopwatch.StartNew();
         try
         {
-            PlatformSnapshot? snap = null;
-            _dispatcher.WithSnapshotLock(seq => snap = _snapshotter.Capture(seq));
-            if (snap is null) return;
+            // Two-phase capture (RFC §5.8 / P6).
+            //
+            // Phase 1 — under the dispatcher lock — captures only the
+            // raw arrays of point-in-time values. No projection, no
+            // sorting, no enum→string formatting, no DTO allocation.
+            // This keeps the lock-hold within the F8 budget (≤ 1ms p99
+            // at 50k working orders) and preserves §4.3 by construction:
+            // Order/Algo/Position mutable scalars are captured by value
+            // into the per-element raw structs while still holding the
+            // lock, so the projection step never re-reads the live
+            // aggregate after the lock is released.
+            //
+            // Phase 2 — outside the dispatcher lock — runs the
+            // expensive projection (per-DTO allocation, OrderBy sort,
+            // enum.ToString, final List<T> materialisation) and then
+            // the disk write.
+            RawPlatformSnapshot? raw = null;
+            _dispatcher.WithSnapshotLock(seq => raw = _snapshotter.CaptureRaw(seq));
+            if (raw is null) return;
+            var snap = StateSnapshotter.Project(raw);
             _store.Write(snap);
             sw.Stop();
             MetricsRegistry.SnapshotsTaken.Add(1);

@@ -61,6 +61,33 @@ public sealed class PositionKeeper
         }
     }
 
+    /// <summary>
+    /// Phase-1 (lock-side) capture for the two-phase snapshot pipeline
+    /// (RFC §5.8 / P6). Same flat-position skip as <see cref="Snapshot"/>.
+    /// Caller must hold <c>EventDispatcher.WithSnapshotLock</c> so the
+    /// scalar reads of <c>NetQuantity</c> / <c>AverageEntryPrice</c>
+    /// reflect the snapshot's <c>seq</c> (RFC §4.3).
+    /// </summary>
+    public Persistence.PositionRaw[] RawSnapshot()
+    {
+        var pairs = _positions.ToArray();
+        if (pairs.Length == 0) return Array.Empty<Persistence.PositionRaw>();
+        var buf = new Persistence.PositionRaw[pairs.Length];
+        var n = 0;
+        for (var i = 0; i < pairs.Length; i++)
+        {
+            var p = pairs[i].Value;
+            if (p.NetQuantity == 0) continue;
+            buf[n++] = new Persistence.PositionRaw(
+                pairs[i].Key.Owner.Value, pairs[i].Key.Symbol,
+                p.NetQuantity, p.AverageEntryPrice);
+        }
+        if (n == buf.Length) return buf;
+        var trimmed = new Persistence.PositionRaw[n];
+        Array.Copy(buf, trimmed, n);
+        return trimmed;
+    }
+
     public void Restore(IEnumerable<Persistence.PositionSnapshot> snaps)
     {
         ArgumentNullException.ThrowIfNull(snaps);

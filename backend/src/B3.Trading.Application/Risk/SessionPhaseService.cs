@@ -69,6 +69,24 @@ public sealed class SessionPhaseService
     public IReadOnlyDictionary<string, SessionPhase> ListOverrides() =>
         _overrides.ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Phase-1 (lock-side) capture for the two-phase snapshot pipeline
+    /// (RFC §5.8 / P6). Returns the per-symbol overrides as a flat array
+    /// of <see cref="Persistence.SessionPhaseOverrideRaw"/> — defers the
+    /// enum→string formatting and the
+    /// <see cref="Persistence.SessionPhaseOverrideSnapshot"/> DTO
+    /// allocation to the projection step.
+    /// </summary>
+    public Persistence.SessionPhaseOverrideRaw[] RawSnapshotOverrides()
+    {
+        var pairs = _overrides.ToArray();
+        if (pairs.Length == 0) return Array.Empty<Persistence.SessionPhaseOverrideRaw>();
+        var raw = new Persistence.SessionPhaseOverrideRaw[pairs.Length];
+        for (var i = 0; i < pairs.Length; i++)
+            raw[i] = new Persistence.SessionPhaseOverrideRaw(pairs[i].Key, pairs[i].Value);
+        return raw;
+    }
+
     /// <summary>Replaces overrides + default from a snapshot. Used during recovery.</summary>
     public void Restore(SessionPhase defaultPhase, IEnumerable<KeyValuePair<string, SessionPhase>> overrides)
     {
