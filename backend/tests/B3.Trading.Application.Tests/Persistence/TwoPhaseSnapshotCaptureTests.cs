@@ -55,7 +55,7 @@ public class TwoPhaseSnapshotCaptureTests
             {
                 DataDirectory = root,
                 FirmId = "test",
-                ChannelCapacity = 4096,
+                ChannelCapacity = 32_768,
                 GroupCommitMaxRecords = 32,
                 GroupCommitWindow = TimeSpan.FromMilliseconds(5),
                 FsyncOnFlush = false,
