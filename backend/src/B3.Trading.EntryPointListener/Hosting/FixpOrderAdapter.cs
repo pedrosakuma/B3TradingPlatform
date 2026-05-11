@@ -80,25 +80,40 @@ internal sealed class FixpOrderAdapter
     /// terminate the session are framing-level (those are handled by the
     /// caller, not here).
     /// </summary>
-    public async Task HandleNewOrderSingleAsync(
+    public Task HandleNewOrderSingleAsync(
         Stream stream,
         ReadOnlyMemory<byte> payload,
         FixpConnectionScope scope,
         CancellationToken ct)
     {
-        if (payload.Length < NewOrderSingleData.BLOCK_LENGTH)
+        // Legacy entry point retained for the malformed-length fall-through
+        // and any caller that has not yet adopted the zero-copy decode.
+        // Hot in-Established traffic now flows through the
+        // `in DecodedNewOrderSingle` overload below (RFC §5.6 / P10).
+        if (!InboundDecoders.TryDecodeNewOrderSingle(payload.Span, out var decoded))
         {
-            await WriteBusinessMessageRejectAsync(stream,
+            return WriteBusinessMessageRejectAsync(stream,
                 refMsgType: MessageType.NewOrderSingle,
                 refSeqNum: 0, businessRejectRefID: 0,
-                reason: RejectReason.InvalidShape, ct).ConfigureAwait(false);
-            return;
+                reason: RejectReason.InvalidShape, ct);
         }
+        return HandleNewOrderSingleAsync(stream, decoded, scope, ct);
+    }
 
-        var msg = MemoryMarshal.Read<NewOrderSingleData>(payload.Span);
-        var externalClOrdId = (ulong)msg.ClOrdID;
-        var securityId = (ulong)msg.SecurityID;
-        var refSeqNum = (uint)msg.BusinessHeader.MsgSeqNum;
+    /// <summary>
+    /// RFC §5.6 (P10/F6) zero-copy entry point. The dispatcher has
+    /// already decoded the SBE block into <paramref name="decoded"/>;
+    /// no <c>byte[]</c> survives across the awaits below.
+    /// </summary>
+    public async Task HandleNewOrderSingleAsync(
+        Stream stream,
+        DecodedNewOrderSingle decoded,
+        FixpConnectionScope scope,
+        CancellationToken ct)
+    {
+        var externalClOrdId = decoded.ClOrdId;
+        var securityId = decoded.SecurityId;
+        var refSeqNum = decoded.MsgSeqNum;
 
         // 1. Resolve SecurityId → Symbol. Without a directory entry the
         //    submit pipeline would reject anyway with "symbol is required";
@@ -118,7 +133,7 @@ internal sealed class FixpOrderAdapter
         //    a clean BMR rather than a generic BadRequest from the
         //    pipeline. Only the LIMIT/MARKET subset is supported by the
         //    domain model in v0; everything else is rejected.
-        if (!TryMapSide(msg.Side, out var side) || !TryMapOrdType(msg.OrdType, out var type))
+        if (!TryMapSide(decoded.Side, out var side) || !TryMapOrdType(decoded.OrdType, out var type))
         {
             await WriteBusinessMessageRejectAsync(stream,
                 MessageType.NewOrderSingle, refSeqNum, externalClOrdId,
@@ -140,8 +155,8 @@ internal sealed class FixpOrderAdapter
         }
 
         var owner = OwnerFor(scope);
-        var qty = (long)(ulong)msg.OrderQty;
-        decimal? price = msg.Price.Mantissa is { } m
+        var qty = (long)decoded.OrderQty;
+        decimal? price = decoded.PriceMantissa is { } m
             ? m / (decimal)PriceOptional.Multiplier
             : null;
 
@@ -183,10 +198,10 @@ internal sealed class FixpOrderAdapter
             externalClOrdId: externalClOrdId,
             origExternalClOrdId: 0,
             securityId: securityId,
-            side: msg.Side,
-            ordType: msg.OrdType,
-            qty: (ulong)msg.OrderQty,
-            priceMantissa: msg.Price.Mantissa ?? PriceOptional.MantissaNullValue,
+            side: decoded.Side,
+            ordType: decoded.OrdType,
+            qty: decoded.OrderQty,
+            priceMantissa: decoded.PriceMantissa ?? PriceOptional.MantissaNullValue,
             ordRejReason: reason,
             cxlRejResponseTo: CxlRejResponseTo.NEW,
             ct).ConfigureAwait(false);
@@ -198,25 +213,37 @@ internal sealed class FixpOrderAdapter
     /// resolving the bot's external <c>OrigClOrdID</c> back to the
     /// platform's internal id via the side-mapping registry.
     /// </summary>
-    public async Task HandleOrderCancelRequestAsync(
+    public Task HandleOrderCancelRequestAsync(
         Stream stream,
         ReadOnlyMemory<byte> payload,
         FixpConnectionScope scope,
         CancellationToken ct)
     {
-        if (payload.Length < OrderCancelRequestData.BLOCK_LENGTH)
+        // Legacy entry point retained for the malformed-length fall-through.
+        if (!InboundDecoders.TryDecodeOrderCancelRequest(payload.Span, out var decoded))
         {
-            await WriteBusinessMessageRejectAsync(stream,
+            return WriteBusinessMessageRejectAsync(stream,
                 MessageType.OrderCancelRequest, 0, 0,
-                RejectReason.InvalidShape, ct).ConfigureAwait(false);
-            return;
+                RejectReason.InvalidShape, ct);
         }
+        return HandleOrderCancelRequestAsync(stream, decoded, scope, ct);
+    }
 
-        var msg = MemoryMarshal.Read<OrderCancelRequestData>(payload.Span);
-        var externalCancelClOrdId = (ulong)msg.ClOrdID;
-        var externalOrigClOrdId = msg.OrigClOrdID.GetValueOrDefault();
-        var securityId = (ulong)msg.SecurityID;
-        var refSeqNum = (uint)msg.BusinessHeader.MsgSeqNum;
+    /// <summary>
+    /// RFC §5.6 (P10/F6) zero-copy entry point. The dispatcher has
+    /// already decoded the SBE block into <paramref name="decoded"/>;
+    /// no <c>byte[]</c> survives across the awaits below.
+    /// </summary>
+    public async Task HandleOrderCancelRequestAsync(
+        Stream stream,
+        DecodedOrderCancelRequest decoded,
+        FixpConnectionScope scope,
+        CancellationToken ct)
+    {
+        var externalCancelClOrdId = decoded.ClOrdId;
+        var externalOrigClOrdId = decoded.OrigClOrdId;
+        var securityId = decoded.SecurityId;
+        var refSeqNum = decoded.MsgSeqNum;
 
         // Resolve original order via the bot mapping side-registry.
         // The registry's TryGetByExternal already enforces the
@@ -259,7 +286,7 @@ internal sealed class FixpOrderAdapter
             externalClOrdId: externalCancelClOrdId,
             origExternalClOrdId: externalOrigClOrdId,
             securityId: securityId,
-            side: msg.Side,
+            side: decoded.Side,
             ordType: 0,
             qty: 0,
             priceMantissa: PriceOptional.MantissaNullValue,

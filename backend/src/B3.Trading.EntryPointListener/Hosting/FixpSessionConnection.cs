@@ -148,8 +148,13 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
 
                 while (reader.TryReadFrame(out var frame))
                 {
-                    var decoded = ExtractFrame(frame);
-                    var keepGoing = await HandleFrameAsync(stream, decoded, remote, ct).ConfigureAwait(false);
+                    // RFC §5.6 (P10/F6): hot message types are decoded
+                    // synchronously from the framer's rotating span into
+                    // a stack-resident struct *before* the dispatcher's
+                    // first await — no per-frame `byte[]` survives the
+                    // await. Cold types still take the legacy heap-copy
+                    // path inside DispatchFrameAsync.
+                    var keepGoing = await DispatchFrameAsync(stream, in frame, remote, ct).ConfigureAwait(false);
                     if (!keepGoing) return;
                 }
 
@@ -217,6 +222,68 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         TemplateId = frame.TemplateId,
         Payload = frame.Payload.ToArray(),
     };
+
+    /// <summary>
+    /// RFC §5.6 (P10/F6) entry point. Synchronous switch over the SBE
+    /// template id that:
+    ///
+    /// <list type="bullet">
+    ///   <item>Decodes the hot message types (NewOrderSingle,
+    ///     OrderCancelRequest, Sequence) directly from
+    ///     <see cref="SofhFrame.Payload"/> into a stack-resident
+    ///     <c>Decoded*</c> struct and forwards to the matching
+    ///     zero-copy async handler — no <c>byte[]</c> allocated.</item>
+    ///   <item>For the cold/error fall-through (handshake messages,
+    ///     RetransmitRequest, malformed-length frames of hot types)
+    ///     copies the payload through <see cref="ExtractFrame"/> and
+    ///     delegates to the legacy <see cref="HandleFrameAsync"/>.</item>
+    /// </list>
+    ///
+    /// <para>This method is intentionally non-<c>async</c> so it can
+    /// receive the framer's <see cref="SofhFrame"/> ref-struct by
+    /// reference. The first <c>await</c> happens inside the returned
+    /// <see cref="Task{TResult}"/>, by which point the decode has
+    /// already snapshotted every span field the handler needs.</para>
+    /// </summary>
+    private Task<bool> DispatchFrameAsync(
+        Stream stream, in SofhFrame frame, string remote, CancellationToken ct)
+    {
+        switch (frame.TemplateId)
+        {
+            case NewOrderSingleData.MESSAGE_ID:
+                if (_sm.State == FixpSessionState.Established
+                    && InboundDecoders.TryDecodeNewOrderSingle(frame.Payload, out var nos))
+                {
+                    EnsureOrderAdapterWired();
+                    return HandleNewOrderSingleZeroCopyAsync(stream, nos, ct);
+                }
+                break;
+
+            case OrderCancelRequestData.MESSAGE_ID:
+                if (_sm.State == FixpSessionState.Established
+                    && InboundDecoders.TryDecodeOrderCancelRequest(frame.Payload, out var ocr))
+                {
+                    EnsureOrderAdapterWired();
+                    return HandleOrderCancelRequestZeroCopyAsync(stream, ocr, ct);
+                }
+                break;
+
+            case SequenceData.MESSAGE_ID:
+                if (_sm.State == FixpSessionState.Established
+                    && InboundDecoders.TryDecodeSequence(frame.Payload, out var seq))
+                {
+                    return HandleInboundSequenceZeroCopyKeepAliveAsync(stream, seq, ct);
+                }
+                break;
+        }
+
+        // Fall-through for: handshake/control messages, hot-type frames
+        // received outside Established, and malformed-length hot frames
+        // (the legacy adapter path emits the appropriate
+        // BusinessMessageReject(InvalidShape) for the latter).
+        var legacy = ExtractFrame(frame);
+        return HandleFrameAsync(stream, legacy, remote, ct);
+    }
 
     /// <summary>
     /// Issue #185 invariant: by the time we accept an
@@ -617,15 +684,29 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     /// downstream order-adapter dispatch, <c>false</c> for duplicates
     /// the caller should swallow.
     /// </summary>
-    private async Task<bool> TrackInboundAppMessageAsync(
+    private Task<bool> TrackInboundAppMessageAsync(
         Stream stream, byte[] payload, int blockLength, CancellationToken ct)
     {
         // The InboundBusinessHeader is the first field of the message
         // block (offset 0 within the SBE block — see InboundBusinessHeader
         // and NewOrderSingleData layout). Defensive bounds check first.
-        if (payload.Length < blockLength) return true;
+        if (payload.Length < blockLength) return Task.FromResult(true);
         var header = MemoryMarshal.Read<InboundBusinessHeader>(payload);
-        var seq = (ulong)header.MsgSeqNum;
+        return TrackInboundAppSeqAsync(stream, (uint)header.MsgSeqNum, ct);
+    }
+
+    /// <summary>
+    /// RFC §5.6 (P10/F6) zero-copy entry point for the
+    /// <c>NewOrderSingle</c>/<c>OrderCancelRequest</c> sequence-watermark
+    /// bookkeeping. Identical semantics to
+    /// <see cref="TrackInboundAppMessageAsync"/> but takes the already
+    /// decoded <c>MsgSeqNum</c> field instead of re-decoding the
+    /// inbound business header from a heap-copied payload.
+    /// </summary>
+    private async Task<bool> TrackInboundAppSeqAsync(
+        Stream stream, uint msgSeqNum, CancellationToken ct)
+    {
+        var seq = (ulong)msgSeqNum;
         if (seq == 0)
         {
             // Implicit mode — the bot did not stamp an explicit seq. We
@@ -689,6 +770,95 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
                 "fixp.inbound.sequence.behind connectionId={ConnectionId} expected={Expected} botNext={BotNext}",
                 _connectionId, expected, nextSeqNo);
         }
+    }
+
+    /// <summary>
+    /// RFC §5.6 (P10/F6) zero-copy variant of
+    /// <see cref="HandleInboundSequenceAsync"/>. Behaviour and watermark
+    /// arithmetic are unchanged; the only difference is that
+    /// <see cref="DecodedSequence.NextSeqNo"/> is supplied by the
+    /// dispatcher's synchronous SBE decode instead of being re-read
+    /// from a heap-copied payload.
+    /// </summary>
+    private async Task<bool> HandleInboundSequenceZeroCopyKeepAliveAsync(
+        Stream stream, DecodedSequence decoded, CancellationToken ct)
+    {
+        await HandleInboundSequenceZeroCopyAsync(stream, decoded, ct).ConfigureAwait(false);
+        return true;
+    }
+
+    private async Task HandleInboundSequenceZeroCopyAsync(
+        Stream stream, DecodedSequence decoded, CancellationToken ct)
+    {
+        var nextSeqNo = decoded.NextSeqNo;
+        var expected = (ulong)Interlocked.Read(ref _nextExpectedInboundSeq);
+
+        if (nextSeqNo > expected)
+        {
+            var gap = nextSeqNo - expected;
+            _logger.LogInformation(
+                "fixp.inbound.sequence.gap connectionId={ConnectionId} expected={Expected} botNext={BotNext} gap={Gap}",
+                _connectionId, expected, nextSeqNo, gap);
+            await SendNotAppliedAsync(stream, expected, (uint)Math.Min(gap, uint.MaxValue), ct)
+                .ConfigureAwait(false);
+            Interlocked.Exchange(ref _nextExpectedInboundSeq, (long)nextSeqNo);
+        }
+        else if (nextSeqNo < expected)
+        {
+            _logger.LogWarning(
+                "fixp.inbound.sequence.behind connectionId={ConnectionId} expected={Expected} botNext={BotNext}",
+                _connectionId, expected, nextSeqNo);
+        }
+    }
+
+    /// <summary>
+    /// RFC §5.6 (P10/F6). Zero-copy <c>NewOrderSingle</c> handler. The
+    /// caller (<see cref="DispatchFrameAsync"/>) has already decoded
+    /// the SBE block synchronously into <paramref name="decoded"/>, so
+    /// no <c>byte[]</c> survives across this method's awaits. The
+    /// behaviour mirrors the legacy switch arm: track inbound seq, take
+    /// the shared write mutex, dispatch to the order adapter, then
+    /// touch the outbound timestamp.
+    /// </summary>
+    private async Task<bool> HandleNewOrderSingleZeroCopyAsync(
+        Stream stream, DecodedNewOrderSingle decoded, CancellationToken ct)
+    {
+        var fresh = await TrackInboundAppSeqAsync(stream, decoded.MsgSeqNum, ct)
+            .ConfigureAwait(false);
+        if (!fresh) return true;
+
+        await _writeMutex.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await _orders!.HandleNewOrderSingleAsync(stream, decoded, _scope!, ct)
+                .ConfigureAwait(false);
+            TouchOutbound();
+        }
+        finally { _writeMutex.Release(); }
+        return true;
+    }
+
+    /// <summary>
+    /// RFC §5.6 (P10/F6). Zero-copy <c>OrderCancelRequest</c> handler.
+    /// Same structural contract as
+    /// <see cref="HandleNewOrderSingleZeroCopyAsync"/>.
+    /// </summary>
+    private async Task<bool> HandleOrderCancelRequestZeroCopyAsync(
+        Stream stream, DecodedOrderCancelRequest decoded, CancellationToken ct)
+    {
+        var fresh = await TrackInboundAppSeqAsync(stream, decoded.MsgSeqNum, ct)
+            .ConfigureAwait(false);
+        if (!fresh) return true;
+
+        await _writeMutex.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await _orders!.HandleOrderCancelRequestAsync(stream, decoded, _scope!, ct)
+                .ConfigureAwait(false);
+            TouchOutbound();
+        }
+        finally { _writeMutex.Release(); }
+        return true;
     }
 
     private async Task HandleInboundRetransmitRequestAsync(
