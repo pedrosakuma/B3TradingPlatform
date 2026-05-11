@@ -9,6 +9,7 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0.201 AS build
 WORKDIR /src
 
 COPY global.json Directory.Build.props ./
+COPY backend/Directory.Packages.props ./backend/
 COPY backend/tools/B3.Trading.DemoDriver ./backend/tools/B3.Trading.DemoDriver
 
 WORKDIR /src/backend/tools/B3.Trading.DemoDriver

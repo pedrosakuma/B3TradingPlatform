@@ -11,6 +11,7 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0.201 AS build
 WORKDIR /src
 
 COPY global.json Directory.Build.props ./
+COPY backend/Directory.Packages.props ./backend/
 COPY backend/tools/B3.Trading.SimulatorBot ./backend/tools/B3.Trading.SimulatorBot
 
 WORKDIR /src/backend/tools/B3.Trading.SimulatorBot
