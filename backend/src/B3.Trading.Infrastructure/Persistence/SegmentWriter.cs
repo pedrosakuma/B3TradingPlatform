@@ -42,7 +42,16 @@ internal sealed class SegmentWriter : IAsyncDisposable
 
     private long _bytesAtLastIndex;
     private int _recordsSinceIndex;
+    private bool _indexDirty;
     private bool _disposed;
+
+    // Test seam: internal counters of how many times we've actually issued
+    // a Flush(_fsyncOnFlush) on the underlying log/idx streams. Used by
+    // SegmentWriter tests to assert the conditional-index-fsync path
+    // (P5/F7) — we must not fsync .idx on batches that wrote no index
+    // records. Not exposed publicly; gated by InternalsVisibleTo.
+    internal long LogFlushCount;
+    internal long IndexFlushCount;
 
     public SegmentWriter(string logPath, string idxPath, int indexEveryNRecords, int indexEveryNBytes, bool fsyncOnFlush)
     {
@@ -84,12 +93,25 @@ internal sealed class SegmentWriter : IAsyncDisposable
         BinaryPrimitives.WriteInt64LittleEndian(rec[8..], offset);
         BinaryPrimitives.WriteInt64LittleEndian(rec[16..], timestampMs);
         _idx.Write(rec);
+        _indexDirty = true;
     }
 
     public void Flush()
     {
         _log.Flush(_fsyncOnFlush);
-        _idx.Flush(_fsyncOnFlush);
+        LogFlushCount++;
+        // P5/F7: skip the index fsync when no index record has been written
+        // since the last flush. The default index cadence is every 64
+        // records, so on typical 64-record batches this elides ~63 of every
+        // 64 .idx fsyncs. Recovery is unaffected: an unflushed .idx tail
+        // just means the next replay rescans a few more .log records to
+        // rebuild the in-memory index, which it already does on cold start.
+        if (_indexDirty)
+        {
+            _idx.Flush(_fsyncOnFlush);
+            IndexFlushCount++;
+            _indexDirty = false;
+        }
     }
 
     public async ValueTask DisposeAsync()

@@ -35,7 +35,15 @@ public sealed class PersistenceOptions
 
     /// <summary>Group-commit window: writer flushes after either limit.</summary>
     public TimeSpan GroupCommitWindow { get; set; } = TimeSpan.FromMilliseconds(10);
-    public int GroupCommitMaxRecords { get; set; } = 64;
+
+    /// <summary>
+    /// Maximum records per group-commit batch. Raised from 64 → 512 in P5/F7
+    /// to amortise fsync over more records at participant-volume throughput
+    /// without breaching the <see cref="GroupCommitWindow"/> latency cap.
+    /// Worst-case crash exposure (acked-but-unfsynced records) is
+    /// <c>ChannelCapacity + GroupCommitMaxRecords</c>; see RFC §4.2 / §5.7.
+    /// </summary>
+    public int GroupCommitMaxRecords { get; set; } = 512;
 
     /// <summary>Snapshot cadence.</summary>
     public TimeSpan SnapshotInterval { get; set; } = TimeSpan.FromMinutes(5);
