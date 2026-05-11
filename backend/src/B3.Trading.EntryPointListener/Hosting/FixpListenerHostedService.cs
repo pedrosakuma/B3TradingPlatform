@@ -146,6 +146,7 @@ public sealed class FixpListenerHostedService : BackgroundService
                 try
                 {
                     client = await _listener.AcceptTcpClientAsync(stoppingToken).ConfigureAwait(false);
+                    ApplyTcpOptions(client);
                 }
                 catch (OperationCanceledException) { break; }
                 catch (Exception ex)
@@ -214,6 +215,53 @@ public sealed class FixpListenerHostedService : BackgroundService
             _orders, _connectionDirectory, _outboundCoordinator, _opts, _clock,
             _rateLimiter, _sessionCounter);
         await conn.RunAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Test-only hook fired immediately after
+    /// <see cref="TryApplyTcpOptions"/> runs against an accepted client.
+    /// Lets integration tests observe the accept-path actually applies
+    /// the configured <see cref="FixpTcpOptions"/> (issue #205).
+    /// </summary>
+    internal static event Action<TcpClient>? AcceptedClientConfigured;
+
+    private void ApplyTcpOptions(TcpClient client)
+    {
+        // RFC §5.9 / P11 — disable Nagle and pin SO_SNDBUF / SO_RCVBUF on
+        // every accepted FIXP connection. Failures are logged but
+        // non-fatal: the connection is still functional with OS defaults.
+        if (!TryApplyTcpOptions(client, _opts.Tcp, out var ex))
+        {
+            _logger.LogWarning(ex,
+                "fixp.accept.tcp_options.failed remote={Remote}", SafeRemote(client));
+        }
+
+        AcceptedClientConfigured?.Invoke(client);
+    }
+
+    /// <summary>
+    /// Applies <paramref name="tcp"/> to <paramref name="client"/>
+    /// (NoDelay + send/receive buffer sizing). Returns <c>false</c> and
+    /// surfaces the captured exception when the kernel rejects any of
+    /// the settings — callers may ignore and proceed with OS defaults.
+    /// Exposed <c>internal</c> for direct test coverage of the
+    /// FIXP/OUCH socket-config contract (issue #205).
+    /// </summary>
+    internal static bool TryApplyTcpOptions(TcpClient client, FixpTcpOptions tcp, out Exception? error)
+    {
+        try
+        {
+            client.NoDelay = tcp.NoDelay;
+            client.SendBufferSize = tcp.SendBufferBytes;
+            client.ReceiveBufferSize = tcp.ReceiveBufferBytes;
+            error = null;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = ex;
+            return false;
+        }
     }
 
     private static X509Certificate2 LoadCertificate(EntryPointListenerOptions.TlsOptions tls)
