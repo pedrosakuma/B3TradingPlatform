@@ -184,6 +184,85 @@ public class FileEventStoreTests : IDisposable
             $"Index file size {size} should be sparse, not one entry per record.");
     }
 
+    [Fact]
+    public async Task Append_WithPreSerialisedPayload_ProducesIdenticalWalBytesToLegacyAppend()
+    {
+        // RFC §4.1 / §5.1 invariant: the (evt, payload) overload is byte-
+        // for-byte equivalent to Append(evt) on the resulting WAL stream.
+        // Same option set (source-gen WalEventJsonContext.Default), same
+        // segment framing, same index cadence — only the call site that
+        // materialises the JSON differs.
+        var optsLegacy = OptsForTest();
+        optsLegacy.DataDirectory = Path.Combine(_root, "legacy");
+        Directory.CreateDirectory(optsLegacy.DataDirectory);
+        var optsFast = OptsForTest();
+        optsFast.DataDirectory = Path.Combine(_root, "fast");
+        Directory.CreateDirectory(optsFast.DataDirectory);
+
+        var events = Enumerable.Range(0, 8).Select(NewOrder).ToArray();
+
+        await using (var legacy = new FileEventStore(optsLegacy, NullLogger<FileEventStore>.Instance))
+        {
+            foreach (var e in events) legacy.Append(e);
+            await legacy.FlushAsync();
+        }
+        await using (var fast = new FileEventStore(optsFast, NullLogger<FileEventStore>.Instance))
+        {
+            foreach (var e in events)
+            {
+                var payload = JsonSerializer.SerializeToUtf8Bytes(e, WalEventJsonContext.Default.WalEvent);
+                fast.Append(e, payload);
+            }
+            await fast.FlushAsync();
+        }
+
+        var legacyLog = Directory.EnumerateFiles(Path.Combine(optsLegacy.DataDirectory, "test", "wal"),
+            "*.log", SearchOption.AllDirectories).Single();
+        var fastLog = Directory.EnumerateFiles(Path.Combine(optsFast.DataDirectory, "test", "wal"),
+            "*.log", SearchOption.AllDirectories).Single();
+        Assert.Equal(await File.ReadAllBytesAsync(legacyLog), await File.ReadAllBytesAsync(fastLog));
+    }
+
+    [Fact]
+    public async Task Append_WithPreSerialisedPayload_AssignsSeqAndIsReplayable()
+    {
+        await using (var store = new FileEventStore(OptsForTest(), NullLogger<FileEventStore>.Instance))
+        {
+            for (var i = 0; i < 5; i++)
+            {
+                var e = NewOrder(i);
+                var payload = JsonSerializer.SerializeToUtf8Bytes(e, WalEventJsonContext.Default.WalEvent);
+                var seq = store.Append(e, payload);
+                Assert.Equal(i + 1, seq);
+            }
+            await store.FlushAsync();
+        }
+
+        await using var reopened = new FileEventStore(OptsForTest(), NullLogger<FileEventStore>.Instance);
+        var seqs = new List<long>();
+        await foreach (var (seq, _) in reopened.ReadFromAsync(0)) seqs.Add(seq);
+        Assert.Equal(new[] { 1L, 2L, 3L, 4L, 5L }, seqs);
+    }
+
+    [Fact]
+    public async Task Append_WithPreSerialisedPayload_FullChannel_ThrowsWalBackpressureException()
+    {
+        var opts = OptsForTest(channelCapacity: 8);
+        opts.GroupCommitWindow = TimeSpan.FromSeconds(1);
+        opts.GroupCommitMaxRecords = 1;
+        await using var store = new FileEventStore(opts, NullLogger<FileEventStore>.Instance);
+
+        var thrown = false;
+        for (var i = 0; i < 1000 && !thrown; i++)
+        {
+            var e = NewOrder(i);
+            var payload = JsonSerializer.SerializeToUtf8Bytes(e, WalEventJsonContext.Default.WalEvent);
+            try { store.Append(e, payload); }
+            catch (WalBackpressureException) { thrown = true; }
+        }
+        Assert.True(thrown, "Expected WalBackpressureException once channel is saturated.");
+    }
+
     private static OrderSubmittedEvent NewOrder(int i) => new()
     {
         ClOrdId = (ulong)(i + 1),

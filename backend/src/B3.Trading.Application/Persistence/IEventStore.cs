@@ -32,6 +32,22 @@ public interface IEventStore : IAsyncDisposable
     long Append(WalEvent evt);
 
     /// <summary>
+    /// RFC §5.1 (F1) fast path: identical to <see cref="Append(WalEvent)"/>
+    /// but the caller has already JSON-serialised <paramref name="evt"/>
+    /// (e.g. via <c>WalEventJsonContext.Default.WalEvent</c>) and supplies
+    /// the bytes in <paramref name="preSerialisedPayload"/>. The store
+    /// MUST treat the payload as the canonical on-disk representation —
+    /// it is byte-for-byte what the legacy overload would have produced
+    /// from the same event under the same options. This lets
+    /// <see cref="EventDispatcher"/> hoist the (reflection-replacing,
+    /// allocation-heavy) serialisation step out of the dispatcher
+    /// critical section while keeping seq assignment + channel enqueue
+    /// strictly under the lock so that total WAL ordering (RFC §4.1) is
+    /// preserved.
+    /// </summary>
+    long Append(WalEvent evt, ReadOnlyMemory<byte> preSerialisedPayload);
+
+    /// <summary>
     /// Awaits durable persistence of every event appended so far.
     /// Used by the snapshot service before recording the snapshot's
     /// reference seq, and at graceful shutdown.

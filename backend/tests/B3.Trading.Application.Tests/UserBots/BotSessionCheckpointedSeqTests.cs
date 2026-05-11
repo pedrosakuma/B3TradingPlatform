@@ -75,6 +75,8 @@ public class BotSessionCheckpointedSeqTests
             return Interlocked.Increment(ref _seq);
         }
 
+        public long Append(WalEvent evt, ReadOnlyMemory<byte> preSerialisedPayload) => Append(evt);
+
         public ValueTask FlushAsync(CancellationToken ct = default) => ValueTask.CompletedTask;
 
         public async IAsyncEnumerable<(long Seq, WalEvent Event)> ReadFromAsync(

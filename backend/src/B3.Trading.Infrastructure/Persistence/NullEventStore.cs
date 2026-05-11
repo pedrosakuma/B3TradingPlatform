@@ -16,6 +16,9 @@ public sealed class NullEventStore : IEventStore
 
     public long Append(WalEvent evt) => Interlocked.Increment(ref _seq);
 
+    public long Append(WalEvent evt, ReadOnlyMemory<byte> preSerialisedPayload) =>
+        Interlocked.Increment(ref _seq);
+
     public ValueTask FlushAsync(CancellationToken ct = default) => ValueTask.CompletedTask;
 
     public async IAsyncEnumerable<(long Seq, WalEvent Event)> ReadFromAsync(

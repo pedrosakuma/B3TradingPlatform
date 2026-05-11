@@ -86,6 +86,36 @@ public sealed class FileEventStore : IEventStore
         if (_disposed) throw new ObjectDisposedException(nameof(FileEventStore));
 
         var payload = JsonSerializer.SerializeToUtf8Bytes(evt, JsonContext.WalEvent);
+        return AppendCore(evt, payload);
+    }
+
+    public long Append(WalEvent evt, ReadOnlyMemory<byte> preSerialisedPayload)
+    {
+        ArgumentNullException.ThrowIfNull(evt);
+        if (_disposed) throw new ObjectDisposedException(nameof(FileEventStore));
+
+        // Materialise the payload to a byte[] exactly once. The channel
+        // record owns the buffer past the originating call, so pooling
+        // here is intentionally avoided (RFC §5.1 Trade-offs / §6.2).
+        // When the caller already hands us a heap byte[] via .AsMemory(),
+        // we adopt it without copying; otherwise we materialise.
+        byte[] payload;
+        if (System.Runtime.InteropServices.MemoryMarshal.TryGetArray(preSerialisedPayload, out var seg)
+            && seg.Array is not null
+            && seg.Offset == 0
+            && seg.Count == seg.Array.Length)
+        {
+            payload = seg.Array;
+        }
+        else
+        {
+            payload = preSerialisedPayload.ToArray();
+        }
+        return AppendCore(evt, payload);
+    }
+
+    private long AppendCore(WalEvent evt, byte[] payload)
+    {
         long seq;
         lock (_seqLock)
         {
