@@ -163,7 +163,7 @@ public class BotErMultiplexerTests
     {
         public int SentCount;
         public bool Disposed;
-        public bool TryEnqueue(ReadOnlyMemory<byte> framedBytes)
+        public bool TryEnqueue(OutboundFrame frame)
         {
             if (Disposed) return false;
             Interlocked.Increment(ref SentCount);

@@ -160,7 +160,7 @@ public class BotErRouter_RouteOne_Bench
         private int _sent;
         public int SentCount => Volatile.Read(ref _sent);
         public void Reset() => Volatile.Write(ref _sent, 0);
-        public bool TryEnqueue(ReadOnlyMemory<byte> framedBytes)
+        public bool TryEnqueue(OutboundFrame frame)
         {
             Interlocked.Increment(ref _sent);
             return true;

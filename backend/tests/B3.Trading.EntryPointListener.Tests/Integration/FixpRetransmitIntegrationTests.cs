@@ -199,8 +199,13 @@ public class FixpRetransmitIntegrationTests
         BotOutboundCoordinator coord, IBotSessionOutboundSender sender, Guid credId, byte[] framed)
     {
         var seq = coord.AllocateNext(credId);
-        coord.GetOrCreateBuffer(credId).Append(seq, framed);
-        sender.TryEnqueue(framed);
+        // Wrap once and pass the same instance to both Append and
+        // TryEnqueue: Append takes ownership (single-disposer rule)
+        // and TryEnqueue only borrows frame.Bytes via the per-conn
+        // drain loop (RFC §5.3 / §5.5).
+        var frame = OutboundFrame.Unowned(framed);
+        coord.GetOrCreateBuffer(credId).Append(seq, frame);
+        sender.TryEnqueue(frame);
     }
 
     // ─── Tests ───────────────────────────────────────────────────────────
