@@ -1488,3 +1488,19 @@ keeps that bounded; operators can tune via
   per-process per-firm model assumes one process per firm.
   If a firm needs >1 process worth of throughput, a sharded
   WAL + cross-shard ordering protocol is its own RFC.
+
+## 14. Outcome (post P1–P13)
+
+The 14-PR perf-hardening v0 spine (P1 bench harness, P2 sourcegen
+JSON, P3 dispatcher lock narrowing, P4 per-sink fan-out, P5 WAL
+group-commit + conditional index fsync, P6 two-phase snapshot
+capture, P7 pooled `OutboundFrame`, P8 per-conn outbound channel,
+P9 synchronous credential resolve, P10 zero-copy SBE decode, P11
+TCP `NoDelay` + buffer sizing, P12 property-based ordering tests,
+P13 integrated load-test harness, P14 composite results) all
+landed against `main`. Composite numbers, comparison vs. the
+PR #216 pre-Wave-1 baseline, and the §7.3 acceptance-gate verdict
+(provisional — capacity demonstrated, strict driven-rate gate
+pending production-host evaluation) are documented in:
+
+- [docs/perf-hardening-v0-results.md](../perf-hardening-v0-results.md)
