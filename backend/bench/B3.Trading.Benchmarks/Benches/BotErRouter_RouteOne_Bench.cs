@@ -76,7 +76,6 @@ public class BotErRouter_RouteOne_Bench
         {
             // Big enough to swallow the largest batch without overflow.
             OutboundBufferMaxMessages = Math.Max(8192, BatchSize * 4),
-            RouterChannelCapacity = 65536,
         });
         var coord = new BotOutboundCoordinator(sessions, opts.Value);
         _coord = coord;

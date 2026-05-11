@@ -106,7 +106,6 @@ public class BotErMultiplexerTests
         var opts = Options.Create(new BotErMultiplexerOptions
         {
             OutboundBufferMaxMessages = bufferCap,
-            RouterChannelCapacity = 1024,
         });
         var coord = new BotOutboundCoordinator(sessions, opts.Value);
         var mux = new BotErMultiplexer(mappings, sessions, directory, coord,

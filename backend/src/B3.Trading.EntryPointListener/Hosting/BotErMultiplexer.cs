@@ -10,7 +10,7 @@ using Microsoft.Extensions.Options;
 namespace B3.Trading.EntryPointListener.Hosting;
 
 /// <summary>
-/// Sub-issue #172 (F). Background drain that turns each
+/// Sub-issue #172 (F) / RFC §5.4 (P9, F4). Turns each
 /// <see cref="ExecutionEvent"/> dispatched by
 /// <see cref="ExecutionReportProcessor"/> into a per-bot SBE
 /// ExecutionReport, allocates the next outbound seq from the
@@ -18,23 +18,52 @@ namespace B3.Trading.EntryPointListener.Hosting;
 /// either pushes them onto the bot's live connection (when online)
 /// or buffers them for retransmit (when offline).
 ///
-/// <para>The drain is single-threaded by design — there is no
-/// per-credential ordering requirement beyond "FIFO within a
-/// credential" and a single drain trivially satisfies it without a
-/// per-credential lock. If the channel ever becomes a throughput
-/// bottleneck, the right move is to shard by credentialId across N
-/// drain tasks (still preserving per-credential order); v0 keeps it
-/// simple.</para>
+/// <para><b>P9 / F4 — synchronous credential resolve.</b> There is no
+/// global multiplexer channel and no router drain thread. <see cref="Route"/>
+/// and the <see cref="IExecutionFanOutSink.Enqueue"/> hook resolve the
+/// originating credential synchronously (a lock-free
+/// <see cref="System.Collections.Concurrent.ConcurrentDictionary{TKey,TValue}"/>
+/// hit on <see cref="IUserBotOrderMappingRegistry"/>) and dispatch
+/// directly into the per-credential <see cref="BotOutboundBuffer"/> +
+/// per-connection writer channel (P8). The pre-P9 unbounded
+/// <c>Channel&lt;ExecutionEvent&gt;</c> and its single-reader drain
+/// loop are gone: they were the lossy global hop that made memory
+/// growth single-bot-bound (one slow consumer queued every ER for
+/// every credential), and bounding that channel would have silently
+/// dropped ERs at a point where the credential was not yet known and
+/// no per-bot recovery signal could be emitted (RFC §5.4 / §6.3).</para>
 ///
-/// <para><b>Overflow handling:</b> when the per-credential
-/// <see cref="BotOutboundBuffer"/> hits its cap, its overflow callback
-/// signals back into the multiplexer, which then asynchronously
-/// invokes <see cref="IUserBotSessionRegistry.BumpVersionAsync"/> with
-/// <c>reason="overflow"</c> and force-closes the offending sender.
-/// The version-bump must happen BEFORE the close so the bot's
-/// reconnect attempt fails Establish with the new ver
+/// <para><b>Sole bounded layer.</b> Backpressure is concentrated in
+/// two places: the per-credential <see cref="BotOutboundBuffer"/>
+/// (cap → version-bump + force-close, RFC §4.7) and the
+/// per-connection writer channel (P8 / RFC §5.3.1, full → leave the
+/// frame in the buffer for retransmit on the next reconnect). No
+/// unbounded queue separates a slow credential from any other
+/// credential — slow-credential isolation is by construction.</para>
+///
+/// <para><b>Per-credential ordering (RFC §4.3).</b>
+/// <see cref="IExecutionFanOutSink.Enqueue"/> is invoked UNDER the
+/// dispatcher lock (see <see cref="EventDispatcher"/>), so the
+/// `seq → resolve → buffer.Append → sender.TryEnqueue` chain runs
+/// in WAL append order. The per-credential allocator and the
+/// per-credential buffer's internal lock then carry that order all
+/// the way to the per-connection FIFO writer channel (P8). The
+/// legacy <see cref="Route"/> entry point — used by tests that drive
+/// <see cref="ExecutionReportProcessor"/> without a dispatcher — has
+/// the same guarantee per single producer thread.</para>
+///
+/// <para><b>Overflow handling.</b> When the per-credential buffer
+/// hits its cap, its overflow callback signals back into the
+/// multiplexer, which posts the credentialId to a small
+/// (credentialId-only) overflow channel drained out-of-band. The
+/// drain calls <see cref="IUserBotSessionRegistry.BumpVersionAsync"/>
+/// with <c>reason="overflow"</c> and force-closes the offending
+/// sender. The version-bump must happen BEFORE the close so the
+/// bot's reconnect attempt fails Establish with the new ver
 /// (<c>InvalidSessionVerId</c>) and the bot reconciles via REST
-/// rather than silently observing a gap (RFC §4.7).</para>
+/// rather than silently observing a gap (RFC §4.7). Async work
+/// stays out-of-band because the synchronous resolve path runs
+/// under the dispatcher lock and MUST NOT block.</para>
 /// </summary>
 public sealed class BotErMultiplexer : BackgroundService, IBotErRouter, IExecutionFanOutSink
 {
@@ -43,7 +72,6 @@ public sealed class BotErMultiplexer : BackgroundService, IBotErRouter, IExecuti
     private readonly IBotSessionConnectionDirectory _directory;
     private readonly BotOutboundCoordinator _outbound;
     private readonly ILogger<BotErMultiplexer> _logger;
-    private readonly Channel<ExecutionEvent> _eventChannel;
     private readonly Channel<Guid> _overflowChannel;
 
     public BotErMultiplexer(
@@ -59,22 +87,15 @@ public sealed class BotErMultiplexer : BackgroundService, IBotErRouter, IExecuti
         _directory = directory;
         _outbound = outbound;
         _logger = logger;
-        _ = options; // RouterChannelCapacity is reserved for a future bounded variant; channel is currently unbounded — see comment below.
+        _ = options; // P9 (F4) removed the global router channel; RouterChannelCapacity is retained on the options type only for backwards-compatible config binding (see BotErMultiplexerOptions).
 
-        // Unbounded so the synchronous Route() from the ER hot path
-        // never blocks and never silently drops. Memory pressure is
-        // bounded by the per-credential outbound buffer caps — when a
-        // bot is offline its ERs accumulate in the Channel only briefly
-        // (single drain pass) before landing in the per-credential
-        // BotOutboundBuffer, which is the layer that observes overflow
-        // and triggers the version-bump path. A bounded channel here
-        // (DropOldest) would silently lose ERs without any sequence-gap
-        // signal to the bot — see code-review concern (1).
-        _eventChannel = Channel.CreateUnbounded<ExecutionEvent>(new UnboundedChannelOptions
-        {
-            SingleReader = true,
-            SingleWriter = false,
-        });
+        // CredentialId-only overflow signal channel. Unbounded is safe
+        // here because the message is a 16-byte Guid and the post rate
+        // is bounded by the number of credentials (one signal per
+        // credential per overflow → BumpVersion cycle, not by the ER
+        // rate). The route hot path posts here from inside the
+        // BotOutboundBuffer overflow callback (under the buffer's
+        // internal lock), so the post itself MUST be non-blocking.
         _overflowChannel = Channel.CreateUnbounded<Guid>(new UnboundedChannelOptions
         {
             SingleReader = true,
@@ -100,64 +121,67 @@ public sealed class BotErMultiplexer : BackgroundService, IBotErRouter, IExecuti
     }
 
     /// <inheritdoc />
-    public void Route(ExecutionEvent ev)
-    {
-        // Synchronous, non-blocking. The bounded channel's DropOldest
-        // policy means a hung drain cannot stall the ER processor.
-        _eventChannel.Writer.TryWrite(ev);
-    }
+    /// <remarks>
+    /// RFC §5.4 (P9 / F4). Synchronous credential resolve + direct
+    /// dispatch into the per-credential <see cref="BotOutboundBuffer"/>
+    /// and per-connection writer (P8). No async hop, no global queue.
+    /// Used by tests / non-dispatcher call sites in
+    /// <see cref="ExecutionReportProcessor"/>; the production fan-out
+    /// path goes through <see cref="IExecutionFanOutSink.Enqueue"/>
+    /// (called under the dispatcher lock).
+    /// </remarks>
+    public void Route(ExecutionEvent ev) => RouteOne(ev);
+
+    /// <inheritdoc />
+    public ExecutionFanOutTargets Target => ExecutionFanOutTargets.BotRouter;
 
     /// <inheritdoc />
     /// <remarks>
-    /// RFC §5.2 (F2). The dispatcher invokes this UNDER the dispatcher
-    /// lock so the relative order of TryWrites onto the unbounded
-    /// channel matches WAL seq order. The drain reads in FIFO order, so
-    /// each bot's outbound stream observes ERs in WAL-append order
-    /// regardless of how the dispatch threads interleave. <paramref name="seq"/>
+    /// RFC §5.2 (F2) + §5.4 (F4). The dispatcher invokes this UNDER
+    /// the dispatcher lock so the resolve / encode / append /
+    /// per-connection-enqueue chain runs in strict WAL seq order. All
+    /// work is non-blocking and synchronous: <see cref="IUserBotOrderMappingRegistry.TryGetOrderMapping"/>
+    /// is a lock-free dictionary hit, <see cref="BotOutboundBuffer.Append"/>
+    /// only takes a short per-credential lock, and the per-connection
+    /// <see cref="IBotSessionOutboundSender.TryEnqueue"/> is a
+    /// non-blocking <c>Channel.TryWrite</c> (P8). <paramref name="seq"/>
     /// is captured for diagnostics only — the encoder uses the
     /// per-credential outbound seq allocator, not the WAL seq.
     /// </remarks>
-    public ExecutionFanOutTargets Target => ExecutionFanOutTargets.BotRouter;
-
     void IExecutionFanOutSink.Enqueue(long seq, ExecutionEvent ev)
     {
         _ = seq;
-        _eventChannel.Writer.TryWrite(ev);
+        RouteOne(ev);
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    protected override Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // Two cooperating loops: one drains the event channel and
-        // performs the routing/encode work synchronously; the other
-        // handles overflow events out-of-band so the version-bump
-        // FlushAsync does not stall the ER pipeline.
-        var routeLoop = Task.Run(() => RunRouteLoopAsync(stoppingToken), stoppingToken);
-        var overflowLoop = Task.Run(() => RunOverflowLoopAsync(stoppingToken), stoppingToken);
-        await Task.WhenAll(routeLoop, overflowLoop).ConfigureAwait(false);
-    }
-
-    private async Task RunRouteLoopAsync(CancellationToken ct)
-    {
-        try
-        {
-            await foreach (var ev in _eventChannel.Reader.ReadAllAsync(ct).ConfigureAwait(false))
-            {
-                try
-                {
-                    RouteOne(ev);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex,
-                        "fixp.outbound.route.error clOrdId={ClOrdId} kind={Kind}",
-                        ev.ClOrdId, ev.Kind);
-                }
-            }
-        }
-        catch (OperationCanceledException) { /* shutdown */ }
+        // Post-P9 there is no router drain — only the out-of-band
+        // overflow handler, whose async BumpVersion+close work cannot
+        // run inline under the dispatcher lock.
+        return Task.Run(() => RunOverflowLoopAsync(stoppingToken), stoppingToken);
     }
 
     private void RouteOne(ExecutionEvent ev)
+    {
+        try
+        {
+            RouteOneCore(ev);
+        }
+        catch (Exception ex)
+        {
+            // The route path runs under the dispatcher lock; an
+            // unhandled throw would tear down the entire ER pipeline
+            // and (worse) block any other dispatch waiting on the
+            // lock. Swallow and log — a single bot's encode failure
+            // must not stall every other bot.
+            _logger.LogError(ex,
+                "fixp.outbound.route.error clOrdId={ClOrdId} kind={Kind}",
+                ev.ClOrdId, ev.Kind);
+        }
+    }
+
+    private void RouteOneCore(ExecutionEvent ev)
     {
         if (!_mappings.TryGetOrderMapping(ev.ClOrdId, out var mapping))
         {
@@ -225,14 +249,37 @@ public sealed class BotErMultiplexer : BackgroundService, IBotErRouter, IExecuti
             // the drain loop (RFC §5.3 / §5.5).
             if (!sender.TryEnqueue(frame))
             {
-                // Race or backpressure (RFC §5.3.1): the connection
-                // went away between TryGet and TryEnqueue, OR the
-                // per-connection bounded outbound channel is full.
-                // Either way, the buffer already holds the message,
-                // so retransmit (G) will pick it up on reconnect.
-                _logger.LogDebug(
-                    "fixp.outbound.send.race-or-backpressure credentialId={CredentialId} seq={Seq}",
+                // RFC §5.3.1 / §5.4: per-session writer-channel
+                // backpressure (P8 channel full) MUST trigger the
+                // version-bump path. The frame is already in the
+                // per-credential buffer so retransmit can replay it,
+                // but every subsequent successfully-enqueued ER would
+                // carry a higher per-credential outbound seq — the bot
+                // would observe an N+1 on the wire without ever seeing
+                // N. Without a forced reconnect (with bumped ver), the
+                // gap is silent. Signal the same out-of-band overflow
+                // handler the buffer-cap path uses: BumpVersion +
+                // force-close + Reset. The signal is a Guid only and
+                // the channel is unbounded; the credential-rate cap
+                // (one signal per credential per overflow→bump cycle)
+                // is enforced by the buffer's own _overflowed gate
+                // once the cleared buffer goes back into Append-reject
+                // mode after this frame.
+                //
+                // We also trigger this on a TryGet/TryEnqueue race
+                // (sender removed between calls, or sender already
+                // disposed): the cost is one redundant version bump
+                // for a bot that will reconnect anyway, which is
+                // strictly safer than a silent gap.
+                _logger.LogWarning(
+                    "fixp.outbound.send.backpressure-or-race credentialId={CredentialId} seq={Seq}",
                     mapping.CredentialId, seq);
+                if (!_overflowChannel.Writer.TryWrite(mapping.CredentialId))
+                {
+                    _logger.LogWarning(
+                        "fixp.outbound.overflow.signal-dropped credentialId={CredentialId}",
+                        mapping.CredentialId);
+                }
             }
         }
         // else: bot offline, message is buffered for G's retransmit.
