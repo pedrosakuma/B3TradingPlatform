@@ -80,6 +80,31 @@ public sealed class CashLedger
         }
     }
 
+    /// <summary>
+    /// Phase-1 (lock-side) capture for the two-phase snapshot pipeline
+    /// (RFC §5.8 / P6). Caller must hold
+    /// <c>EventDispatcher.WithSnapshotLock</c> so the <c>Available</c>
+    /// reads reflect the snapshot's <c>seq</c> (RFC §4.3). Same flat-row
+    /// skip as <see cref="Snapshot"/>.
+    /// </summary>
+    public Persistence.CashRaw[] RawSnapshot()
+    {
+        var pairs = _balances.ToArray();
+        if (pairs.Length == 0) return Array.Empty<Persistence.CashRaw>();
+        var buf = new Persistence.CashRaw[pairs.Length];
+        var n = 0;
+        for (var i = 0; i < pairs.Length; i++)
+        {
+            var bal = pairs[i].Value;
+            if (bal.Available == 0m) continue;
+            buf[n++] = new Persistence.CashRaw(pairs[i].Key.Value, bal.Available);
+        }
+        if (n == buf.Length) return buf;
+        var trimmed = new Persistence.CashRaw[n];
+        Array.Copy(buf, trimmed, n);
+        return trimmed;
+    }
+
     public void Restore(IEnumerable<Persistence.CashBalanceSnapshot> snaps)
     {
         ArgumentNullException.ThrowIfNull(snaps);

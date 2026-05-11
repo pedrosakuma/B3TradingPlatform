@@ -79,6 +79,28 @@ public sealed class ClOrdIdPrefixRegistry
         return snap;
     }
 
+    /// <summary>
+    /// Phase-1 (lock-side) capture for the two-phase snapshot pipeline
+    /// (RFC §5.8 / P6). Same monotonic <see cref="Interlocked.Read"/>
+    /// reads as <see cref="Snapshot"/>; defers the
+    /// <see cref="Persistence.ClOrdIdRegistrySnapshot"/> DTO + inner
+    /// <c>List&lt;T&gt;</c> allocation to the projection step.
+    /// </summary>
+    public Persistence.ClOrdIdRegistryRaw RawSnapshot()
+    {
+        var pairs = _counters.ToArray();
+        if (pairs.Length == 0)
+            return new Persistence.ClOrdIdRegistryRaw(Interlocked.Read(ref _nextPrefix), Array.Empty<Persistence.ClOrdIdCounterRaw>());
+        var raw = new Persistence.ClOrdIdCounterRaw[pairs.Length];
+        for (var i = 0; i < pairs.Length; i++)
+        {
+            raw[i] = new Persistence.ClOrdIdCounterRaw(
+                pairs[i].Key.Value, pairs[i].Value.PrefixIdx,
+                Interlocked.Read(ref pairs[i].Value.Counter));
+        }
+        return new Persistence.ClOrdIdRegistryRaw(Interlocked.Read(ref _nextPrefix), raw);
+    }
+
     public void Restore(Persistence.ClOrdIdRegistrySnapshot snap)
     {
         ArgumentNullException.ThrowIfNull(snap);

@@ -88,6 +88,21 @@ public interface IUserBotOrderMappingRegistry
     /// <summary>Snapshot capture — called under <c>WithSnapshotLock</c>.</summary>
     IReadOnlyList<BotCancelMappingSnapshot> SnapshotCancels();
 
+    /// <summary>
+    /// Phase-1 (lock-side) raw capture for the two-phase snapshot
+    /// pipeline (RFC §5.8 / P6). Returns the live order mappings as a
+    /// fresh array of immutable <see cref="BotOrderMappingRaw"/> tuples.
+    /// Deterministic ordering and DTO allocation are deferred to the
+    /// projection step in <c>StateSnapshotter</c>.
+    /// </summary>
+    BotOrderMappingRaw[] RawSnapshotOrders();
+
+    /// <summary>
+    /// Phase-1 (lock-side) raw capture for cancel-side mappings; same
+    /// rationale as <see cref="RawSnapshotOrders"/>.
+    /// </summary>
+    BotCancelMappingRaw[] RawSnapshotCancels();
+
     /// <summary>Snapshot restore — single-threaded at startup.</summary>
     void Restore(
         IEnumerable<BotOrderMappingSnapshot> orders,

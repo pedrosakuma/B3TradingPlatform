@@ -176,6 +176,23 @@ public sealed class InMemoryUserBotSessionRegistry : IUserBotSessionRegistry
         }
     }
 
+    /// <summary>
+    /// Phase-1 (lock-side) capture for the two-phase snapshot pipeline
+    /// (RFC §5.8 / P6). Copies the immutable <see cref="BotSessionState"/>
+    /// records into a fresh array under <c>_gate</c>; the OrderBy and
+    /// DTO projection move to the projection step.
+    /// </summary>
+    public BotSessionState[] RawSnapshot()
+    {
+        lock (_gate)
+        {
+            if (_byCredentialId.Count == 0) return Array.Empty<BotSessionState>();
+            var raw = new BotSessionState[_byCredentialId.Count];
+            _byCredentialId.Values.CopyTo(raw, 0);
+            return raw;
+        }
+    }
+
     /// <summary>Snapshot restore hook — single-threaded at startup.</summary>
     public void Restore(IEnumerable<BotSessionStateSnapshot> snapshots)
     {

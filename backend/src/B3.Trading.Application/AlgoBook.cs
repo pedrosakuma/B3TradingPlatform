@@ -97,6 +97,71 @@ public sealed class AlgoBook
         }
     }
 
+    /// <summary>
+    /// Phase-1 (lock-side) capture for the two-phase snapshot pipeline
+    /// (RFC §5.8 / P6). Captures every algo's mutable scalars
+    /// (<c>FilledQuantity</c>, <c>Status</c>, <c>TerminalReason</c>,
+    /// <c>TerminalAtUtc</c>) by value while the caller still holds the
+    /// dispatcher lock; immutable construction fields are read off the
+    /// captured <see cref="Algo"/> reference during projection. Same
+    /// §4.3 invariant as <c>WorkingOrderBook.RawSnapshot</c>.
+    /// </summary>
+    public Persistence.AlgoRaw[] RawSnapshot()
+    {
+        var pairs = _algos.ToArray();
+        if (pairs.Length == 0) return Array.Empty<Persistence.AlgoRaw>();
+        var raw = new Persistence.AlgoRaw[pairs.Length];
+        for (var i = 0; i < pairs.Length; i++)
+        {
+            var a = pairs[i].Value;
+            raw[i] = new Persistence.AlgoRaw(a, a.FilledQuantity, a.Status, a.TerminalReason, a.TerminalAtUtc);
+        }
+        return raw;
+    }
+
+    /// <summary>
+    /// Phase-2 projection of a <see cref="Persistence.AlgoRaw"/> captured
+    /// by <see cref="RawSnapshot"/>. Pulls the immutable construction-time
+    /// fields off the live <see cref="Algo"/> reference and the mutable
+    /// scalars from the raw struct, so the result is consistent with the
+    /// snapshot's <c>seq</c> (RFC §4.3) even though it runs outside the
+    /// dispatcher lock.
+    /// </summary>
+    internal static Persistence.AlgoSnapshot ProjectRaw(Persistence.AlgoRaw r)
+    {
+        var a = r.Algo;
+        long? icebergDisplay = null;
+        decimal? icebergLimit = null;
+        DateTimeOffset? twapStart = null;
+        DateTimeOffset? twapEnd = null;
+        int? twapSliceCount = null;
+        string? twapChildType = null;
+        decimal? twapChildPrice = null;
+
+        switch (a.Parameters)
+        {
+            case IcebergParameters ip:
+                icebergDisplay = ip.DisplayQuantity;
+                icebergLimit = ip.LimitPrice;
+                break;
+            case TwapParameters tp:
+                twapStart = tp.StartUtc;
+                twapEnd = tp.EndUtc;
+                twapSliceCount = tp.SliceCount;
+                twapChildType = tp.ChildOrderType.ToString();
+                twapChildPrice = tp.ChildPrice;
+                break;
+        }
+
+        return new Persistence.AlgoSnapshot(
+            a.AlgoId, a.Owner.Value, a.FirmId, a.Symbol, a.SecurityId,
+            a.Side.ToString(), a.Type.ToString(), a.TotalQuantity, r.Filled,
+            r.Status.ToString(), r.Reason.ToString(),
+            a.CreatedAtUtc, r.TerminalAtUtc,
+            icebergDisplay, icebergLimit,
+            twapStart, twapEnd, twapSliceCount, twapChildType, twapChildPrice);
+    }
+
     public void Restore(IEnumerable<Persistence.AlgoSnapshot> snaps)
     {
         ArgumentNullException.ThrowIfNull(snaps);

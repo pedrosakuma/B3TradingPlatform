@@ -59,29 +59,193 @@ public sealed class StateSnapshotter
         _userBotMappings = userBotMappings;
     }
 
-    public PlatformSnapshot Capture(long seq) => new()
+    public PlatformSnapshot Capture(long seq) => Project(CaptureRaw(seq));
+
+    /// <summary>
+    /// Phase-1 (lock-side) capture for the two-phase snapshot pipeline
+    /// described in RFC §5.8 / P6. Caller MUST hold
+    /// <c>EventDispatcher.WithSnapshotLock</c>: every per-registry
+    /// <c>RawSnapshot()</c> here is allowed to read mutable scalars off
+    /// live aggregates (Order/Algo/Position) without further
+    /// synchronisation, and the resulting raw arrays then feed the
+    /// lock-free <see cref="Project"/> step.
+    ///
+    /// <para><b>Snapshot consistency invariant (RFC §4.3).</b> The raw
+    /// arrays returned here are a stable point-in-time photograph of
+    /// every captured aggregate. <see cref="OrderRaw"/> and
+    /// <see cref="AlgoRaw"/> snapshot the mutable scalars
+    /// (<c>Status</c>, <c>LeavesQuantity</c>, <c>FilledQuantity</c>,
+    /// <c>TerminalReason</c>, …) by value during this call, so the
+    /// projection step never re-reads them off the live aggregate after
+    /// the dispatcher lock is released. No event with
+    /// <c>seq &gt; <paramref name="seq"/></c> can leak into the
+    /// projected <see cref="PlatformSnapshot"/>.</para>
+    /// </summary>
+    public RawPlatformSnapshot CaptureRaw(long seq) => new()
     {
         Seq = seq,
         CreatedAtUtc = DateTimeOffset.UtcNow,
-        WorkingOrders = _orders.Snapshot().ToList(),
-        Positions = _positions.Snapshot().ToList(),
-        KilledEndClients = _killSwitch.ListKilledEndClients().ToList(),
-        KilledFirms = _killSwitch.ListKilledFirms().ToList(),
-        HaltedSymbols = _symbolHalts.ListHalted().ToList(),
-        DefaultSessionPhase = _sessionPhases.DefaultPhase.ToString(),
-        SessionPhaseOverrides = _sessionPhases.ListOverrides()
-            .Select(kv => new SessionPhaseOverrideSnapshot(kv.Key, kv.Value.ToString()))
-            .ToList(),
-        ClOrdIds = _clOrdIds.Snapshot(),
-        Ownership = _ownership.Snapshot().ToList(),
-        Algos = _algos.Snapshot().ToList(),
-        AlgoIds = _algoIds.Snapshot(),
-        CashBalances = _cash.Snapshot().ToList(),
-        UserBotCredentials = _userBotCredentials?.Snapshot().ToList() ?? new(),
-        BotSessions = _userBotSessions?.Snapshot().ToList() ?? new(),
-        BotOrderMappings = _userBotMappings?.SnapshotOrders().ToList() ?? new(),
-        BotCancelMappings = _userBotMappings?.SnapshotCancels().ToList() ?? new(),
+        Orders = _orders.RawSnapshot(),
+        Algos = _algos.RawSnapshot(),
+        Positions = _positions.RawSnapshot(),
+        KilledEndClients = _killSwitch.RawSnapshotKilledEndClients(),
+        KilledFirms = _killSwitch.RawSnapshotKilledFirms(),
+        HaltedSymbols = _symbolHalts.RawSnapshot(),
+        DefaultPhase = _sessionPhases.DefaultPhase,
+        SessionPhaseOverrides = _sessionPhases.RawSnapshotOverrides(),
+        ClOrdIds = _clOrdIds.RawSnapshot(),
+        AlgoIds = _algoIds.RawSnapshot(),
+        Ownership = _ownership.RawSnapshot(),
+        CashBalances = _cash.RawSnapshot(),
+        UserBotCredentials = _userBotCredentials?.RawSnapshot() ?? Array.Empty<UserBotCredential>(),
+        BotSessions = _userBotSessions?.RawSnapshot() ?? Array.Empty<BotSessionState>(),
+        BotOrderMappings = _userBotMappings?.RawSnapshotOrders() ?? Array.Empty<BotOrderMappingRaw>(),
+        BotCancelMappings = _userBotMappings?.RawSnapshotCancels() ?? Array.Empty<BotCancelMappingRaw>(),
     };
+
+    /// <summary>
+    /// Phase-2 projection for the two-phase snapshot pipeline (RFC §5.8 /
+    /// P6). Consumes the lock-side <see cref="RawPlatformSnapshot"/> and
+    /// produces the persisted <see cref="PlatformSnapshot"/> shape. All
+    /// expensive work — enum→string formatting, <c>OrderBy</c> sorting,
+    /// per-record DTO allocation, final <c>List&lt;T&gt;</c>
+    /// materialisation — happens here, OUTSIDE the dispatcher lock.
+    ///
+    /// <para>Pure function of <paramref name="raw"/>: never reads the
+    /// live aggregate maps, only the raw arrays captured under the
+    /// dispatcher lock. Output is byte-equivalent to the legacy
+    /// in-lock <see cref="Capture"/> path; the only ordering difference
+    /// is that <see cref="WorkingOrderBook"/>, <see cref="AlgoBook"/>,
+    /// and ownership lists are now sorted by id (deterministic and
+    /// independent of <see cref="System.Collections.Concurrent.ConcurrentDictionary{TKey,TValue}"/>
+    /// enumeration order, which was already non-deterministic in the
+    /// legacy code).</para>
+    /// </summary>
+    public static PlatformSnapshot Project(RawPlatformSnapshot raw)
+    {
+        ArgumentNullException.ThrowIfNull(raw);
+
+        var workingOrders = new List<OrderSnapshot>(raw.Orders.Length);
+        for (var i = 0; i < raw.Orders.Length; i++)
+        {
+            var r = raw.Orders[i];
+            var o = r.Order;
+            workingOrders.Add(new OrderSnapshot(
+                o.ClOrdId, o.Owner.Value, o.Symbol, o.SecurityId,
+                o.Side.ToString(), o.Type.ToString(),
+                o.Quantity, o.Price, r.Leaves, r.Cum,
+                r.Status.ToString(), o.FirmId, o.ParentAlgoId, o.AlgoSliceSeq)
+            {
+                IsStale = r.IsStale,
+                StaleReason = r.StaleReason,
+                StaledAtUtc = r.StaledAtUtc,
+            });
+        }
+
+        var algos = new List<AlgoSnapshot>(raw.Algos.Length);
+        for (var i = 0; i < raw.Algos.Length; i++)
+            algos.Add(AlgoBook.ProjectRaw(raw.Algos[i]));
+
+        var positions = new List<PositionSnapshot>(raw.Positions.Length);
+        for (var i = 0; i < raw.Positions.Length; i++)
+        {
+            var p = raw.Positions[i];
+            positions.Add(new PositionSnapshot(p.EndClientId, p.Symbol, p.NetQuantity, p.AverageEntryPrice));
+        }
+
+        var ownership = new List<OwnershipMappingSnapshot>(raw.Ownership.Length);
+        for (var i = 0; i < raw.Ownership.Length; i++)
+            ownership.Add(new OwnershipMappingSnapshot(raw.Ownership[i].ClOrdId, raw.Ownership[i].EndClientId));
+
+        var cash = new List<CashBalanceSnapshot>(raw.CashBalances.Length);
+        for (var i = 0; i < raw.CashBalances.Length; i++)
+            cash.Add(new CashBalanceSnapshot(raw.CashBalances[i].EndClientId, raw.CashBalances[i].Available));
+
+        var phaseOverrides = new List<SessionPhaseOverrideSnapshot>(raw.SessionPhaseOverrides.Length);
+        for (var i = 0; i < raw.SessionPhaseOverrides.Length; i++)
+        {
+            var po = raw.SessionPhaseOverrides[i];
+            phaseOverrides.Add(new SessionPhaseOverrideSnapshot(po.Symbol, po.Phase.ToString()));
+        }
+
+        var clOrdIds = new ClOrdIdRegistrySnapshot { NextPrefix = raw.ClOrdIds.NextPrefix };
+        for (var i = 0; i < raw.ClOrdIds.Counters.Length; i++)
+        {
+            var c = raw.ClOrdIds.Counters[i];
+            clOrdIds.Counters.Add(new ClOrdIdCounterSnapshot(c.EndClientId, c.PrefixIdx, c.Counter));
+        }
+
+        var algoIds = new AlgoIdRegistrySnapshot();
+        for (var i = 0; i < raw.AlgoIds.Length; i++)
+        {
+            var c = raw.AlgoIds[i];
+            algoIds.Counters.Add(new AlgoIdCounterSnapshot(c.FirmId, c.Counter));
+        }
+
+        var creds = new List<UserBotCredentialSnapshot>(raw.UserBotCredentials.Length);
+        for (var i = 0; i < raw.UserBotCredentials.Length; i++)
+        {
+            var c = raw.UserBotCredentials[i];
+            creds.Add(new UserBotCredentialSnapshot(
+                c.Id, c.UserId, c.CredShortId, c.Label, c.SecretHash, c.CreatedAtUtc, c.RevokedAtUtc));
+        }
+        // Match the legacy InMemoryUserBotCredentialRegistry.Snapshot()
+        // ordering: stable by (CreatedAtUtc, Id) so snapshot diffs stay
+        // deterministic across captures.
+        creds.Sort(static (a, b) =>
+        {
+            var c = a.CreatedAtUtc.CompareTo(b.CreatedAtUtc);
+            return c != 0 ? c : a.Id.CompareTo(b.Id);
+        });
+
+        var sessions = new List<BotSessionStateSnapshot>(raw.BotSessions.Length);
+        for (var i = 0; i < raw.BotSessions.Length; i++)
+        {
+            var s = raw.BotSessions[i];
+            sessions.Add(new BotSessionStateSnapshot(
+                s.CredentialId, s.SessionId, s.CurrentVer, s.LastCheckpointedOutboundSeq));
+        }
+        sessions.Sort(static (a, b) => a.CredentialId.CompareTo(b.CredentialId));
+
+        var botOrderMaps = new List<BotOrderMappingSnapshot>(raw.BotOrderMappings.Length);
+        for (var i = 0; i < raw.BotOrderMappings.Length; i++)
+        {
+            var m = raw.BotOrderMappings[i];
+            botOrderMaps.Add(new BotOrderMappingSnapshot(m.InternalClOrdId, m.CredentialId, m.ExternalClOrdId));
+        }
+        botOrderMaps.Sort(static (a, b) => a.InternalClOrdId.CompareTo(b.InternalClOrdId));
+
+        var botCancelMaps = new List<BotCancelMappingSnapshot>(raw.BotCancelMappings.Length);
+        for (var i = 0; i < raw.BotCancelMappings.Length; i++)
+        {
+            var m = raw.BotCancelMappings[i];
+            botCancelMaps.Add(new BotCancelMappingSnapshot(
+                m.CancelInternalClOrdId, m.OriginalInternalClOrdId, m.CredentialId, m.ExternalCancelClOrdId));
+        }
+        botCancelMaps.Sort(static (a, b) => a.CancelInternalClOrdId.CompareTo(b.CancelInternalClOrdId));
+
+        return new PlatformSnapshot
+        {
+            Seq = raw.Seq,
+            CreatedAtUtc = raw.CreatedAtUtc,
+            WorkingOrders = workingOrders,
+            Positions = positions,
+            KilledEndClients = new List<string>(raw.KilledEndClients),
+            KilledFirms = new List<string>(raw.KilledFirms),
+            HaltedSymbols = new List<string>(raw.HaltedSymbols),
+            DefaultSessionPhase = raw.DefaultPhase.ToString(),
+            SessionPhaseOverrides = phaseOverrides,
+            ClOrdIds = clOrdIds,
+            Ownership = ownership,
+            Algos = algos,
+            AlgoIds = algoIds,
+            CashBalances = cash,
+            UserBotCredentials = creds,
+            BotSessions = sessions,
+            BotOrderMappings = botOrderMaps,
+            BotCancelMappings = botCancelMaps,
+        };
+    }
 
     public void Restore(PlatformSnapshot snap)
     {

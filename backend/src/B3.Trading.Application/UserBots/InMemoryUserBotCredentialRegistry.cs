@@ -176,6 +176,26 @@ public sealed class InMemoryUserBotCredentialRegistry : IUserBotCredentialRegist
         }
     }
 
+    /// <summary>
+    /// Phase-1 (lock-side) capture for the two-phase snapshot pipeline
+    /// (RFC §5.8 / P6). Copies the underlying immutable
+    /// <see cref="UserBotCredential"/> records into a fresh array under
+    /// <c>_gate</c> and returns it; deterministic ordering and
+    /// <see cref="UserBotCredentialSnapshot"/> DTO allocation move to the
+    /// projection step. The records themselves are immutable so reading
+    /// them outside the registry lock is safe by construction.
+    /// </summary>
+    public UserBotCredential[] RawSnapshot()
+    {
+        lock (_gate)
+        {
+            if (_byId.Count == 0) return Array.Empty<UserBotCredential>();
+            var raw = new UserBotCredential[_byId.Count];
+            _byId.Values.CopyTo(raw, 0);
+            return raw;
+        }
+    }
+
     /// <summary>Snapshot restore hook (single-threaded at startup).</summary>
     public void Restore(IEnumerable<UserBotCredentialSnapshot> snapshots)
     {

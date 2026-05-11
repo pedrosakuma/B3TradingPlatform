@@ -102,6 +102,25 @@ public sealed class OrderOwnershipMap
             yield return new Persistence.OwnershipMappingSnapshot(kv.Key, kv.Value.Value);
     }
 
+    /// <summary>
+    /// Phase-1 (lock-side) capture for the two-phase snapshot pipeline
+    /// (RFC §5.8 / P6). The underlying entries are immutable
+    /// <c>(ulong, EndClientId)</c> pairs, so a single
+    /// <c>ConcurrentDictionary.ToArray()</c> snapshot already gives us
+    /// stable raw data; we merely shape it into the lighter
+    /// <see cref="Persistence.OwnershipRaw"/> tuple here so the projection
+    /// step does not need to touch <see cref="EndClientId"/> again.
+    /// </summary>
+    public Persistence.OwnershipRaw[] RawSnapshot()
+    {
+        var pairs = _byClOrdId.ToArray();
+        if (pairs.Length == 0) return Array.Empty<Persistence.OwnershipRaw>();
+        var raw = new Persistence.OwnershipRaw[pairs.Length];
+        for (var i = 0; i < pairs.Length; i++)
+            raw[i] = new Persistence.OwnershipRaw(pairs[i].Key, pairs[i].Value.Value);
+        return raw;
+    }
+
     public void Restore(IEnumerable<Persistence.OwnershipMappingSnapshot> snaps)
     {
         ArgumentNullException.ThrowIfNull(snaps);

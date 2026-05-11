@@ -36,6 +36,25 @@ public sealed class SymbolHaltService
 
     public IReadOnlyCollection<string> ListHalted() => _haltedSymbols.Keys.ToArray();
 
+    /// <summary>
+    /// Phase-1 (lock-side) capture for the two-phase snapshot pipeline
+    /// (RFC §5.8 / P6). Same data as <see cref="ListHalted"/>, returned
+    /// as <c>string[]</c> for direct stitching into the raw aggregate.
+    /// </summary>
+    public string[] RawSnapshot()
+    {
+        var keys = _haltedSymbols.Keys;
+        if (keys.Count == 0) return Array.Empty<string>();
+        var raw = new string[keys.Count];
+        var i = 0;
+        foreach (var k in keys)
+        {
+            if (i == raw.Length) break;
+            raw[i++] = k;
+        }
+        return i == raw.Length ? raw : raw[..i];
+    }
+
     public void Restore(IEnumerable<string> haltedSymbols)
     {
         ArgumentNullException.ThrowIfNull(haltedSymbols);
