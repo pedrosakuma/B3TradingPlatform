@@ -86,23 +86,57 @@ public sealed class FileEventStore : IEventStore
         if (_disposed) throw new ObjectDisposedException(nameof(FileEventStore));
 
         var payload = JsonSerializer.SerializeToUtf8Bytes(evt, JsonContext.WalEvent);
-        long seq;
+        return AppendCore(evt, payload);
+    }
+
+    public long Append(WalEvent evt, ReadOnlyMemory<byte> preSerialisedPayload)
+    {
+        ArgumentNullException.ThrowIfNull(evt);
+        if (preSerialisedPayload.IsEmpty)
+        {
+            // A zero-length record would survive Append (be acknowledged
+            // and applied in memory) but recovery treats length==0 as a
+            // torn write and stops replay before it — exactly the §4.2
+            // "applied in memory but not recoverable" state we forbid.
+            throw new ArgumentException(
+                "Pre-serialised WAL payload must not be empty.", nameof(preSerialisedPayload));
+        }
+        if (_disposed) throw new ObjectDisposedException(nameof(FileEventStore));
+
+        // Defensively copy the caller's bytes. The channel record owns
+        // the buffer until the writer drains it (well past this call's
+        // return), and the public API surface cannot guarantee the
+        // caller will not mutate the original array in the meantime.
+        // Pooling here is intentionally avoided (RFC §5.1 Trade-offs /
+        // §6.2 — pool-leasing across the channel-writer boundary is a
+        // known footgun).
+        var payload = preSerialisedPayload.ToArray();
+        return AppendCore(evt, payload);
+    }
+
+    private long AppendCore(WalEvent evt, byte[] payload)
+    {
+        // Hold _seqLock across both seq assignment and channel enqueue
+        // so concurrent direct callers cannot interleave (assign seq A,
+        // assign+enqueue seq B, enqueue seq A) and break §4.1's total
+        // WAL ordering. TryWrite on a bounded channel is non-blocking,
+        // so the critical section stays tiny.
         lock (_seqLock)
         {
-            seq = ++_seq;
+            var seq = ++_seq;
+            var record = new PendingRecord(seq, payload, evt.TimestampUtc.ToUnixTimeMilliseconds());
+            if (!_channel.Writer.TryWrite(record))
+            {
+                // Roll back the seq so we don't leave a hole in the log.
+                _seq--;
+                MetricsRegistry.WalBackpressure.Add(1,
+                    new KeyValuePair<string, object?>("call_site", "store.append"));
+                throw new WalBackpressureException(
+                    $"WAL channel is full ({_opts.ChannelCapacity}); refusing append.");
+            }
+            MetricsRegistry.WalAppended.Add(1);
+            return seq;
         }
-        var record = new PendingRecord(seq, payload, evt.TimestampUtc.ToUnixTimeMilliseconds());
-        if (!_channel.Writer.TryWrite(record))
-        {
-            // Roll back the seq so we don't leave a hole in the log.
-            lock (_seqLock) _seq--;
-            MetricsRegistry.WalBackpressure.Add(1,
-                new KeyValuePair<string, object?>("call_site", "store.append"));
-            throw new WalBackpressureException(
-                $"WAL channel is full ({_opts.ChannelCapacity}); refusing append.");
-        }
-        MetricsRegistry.WalAppended.Add(1);
-        return seq;
     }
 
     public async ValueTask FlushAsync(CancellationToken ct = default)

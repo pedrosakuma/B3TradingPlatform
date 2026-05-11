@@ -183,6 +183,8 @@ public class InMemoryUserBotSessionRegistryTests
             return s;
         }
 
+        public long Append(WalEvent evt, ReadOnlyMemory<byte> preSerialisedPayload) => Append(evt);
+
         public ValueTask FlushAsync(CancellationToken ct = default)
         {
             lock (_gate) Actions.Add(new FlushAction());

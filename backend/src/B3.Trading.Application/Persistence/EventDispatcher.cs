@@ -1,13 +1,27 @@
+using System.Text.Json;
+
 namespace B3.Trading.Application.Persistence;
 
 /// <summary>
 /// Serialises append-then-mutate critical sections so snapshots see a
-/// consistent view of (event log seq) + (in-memory state). Every call to
-/// <see cref="Dispatch"/> takes a single lock that:
+/// consistent view of (event log seq) + (in-memory state).
+///
+/// <para>
+/// <b>Lock scope (RFC §5.1, F1).</b> JSON serialisation of the WAL
+/// payload happens <i>outside</i> the dispatcher lock via the
+/// source-generated <see cref="WalEventJsonContext"/>. The lock then
+/// covers exactly:
 /// <list type="number">
-///   <item>assigns a WAL seq + queues the event;</item>
-///   <item>runs the in-memory mutation while holding the same lock.</item>
+///   <item>seq assignment + bounded-channel enqueue (inside
+///   <c>IEventStore.Append(evt, payload)</c>);</item>
+///   <item>the in-memory <c>apply()</c> mutation.</item>
 /// </list>
+/// Total WAL ordering (RFC §4.1) is preserved by design: no event can
+/// observe another's <c>apply()</c> side effects without also having a
+/// strictly greater seq, because both still happen under one lock per
+/// dispatch. The pre-serialised payload is just bytes — it has no seq
+/// and no observable effect until <c>Append</c> hands it to the channel.
+/// </para>
 ///
 /// <para>
 /// <see cref="WithSnapshotLock"/> is for the snapshot service: it reads
@@ -22,8 +36,7 @@ namespace B3.Trading.Application.Persistence;
 /// The lock is process-global (one platform instance per firm pool) and
 /// is held for the duration of synchronous, in-memory work only. No I/O
 /// happens while it is held — the WAL append is a synchronous channel
-/// enqueue; disk flush runs on a background task. Contention is
-/// negligible at participant volumes.
+/// enqueue; disk flush runs on a background task.
 /// </para>
 /// </summary>
 public sealed class EventDispatcher
@@ -48,9 +61,13 @@ public sealed class EventDispatcher
     {
         ArgumentNullException.ThrowIfNull(evt);
         ArgumentNullException.ThrowIfNull(apply);
+        // Pre-serialise OUTSIDE the lock (RFC §5.1). Reflection-free via
+        // the source-gen context. The bytes carry no seq and have no
+        // observable effect until Append enqueues them under the lock.
+        var payload = JsonSerializer.SerializeToUtf8Bytes(evt, WalEventJsonContext.Default.WalEvent);
         lock (_lock)
         {
-            var seq = _store.Append(evt);
+            var seq = _store.Append(evt, payload);
             apply();
             return seq;
         }
