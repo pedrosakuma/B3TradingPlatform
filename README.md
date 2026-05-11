@@ -25,11 +25,14 @@ subscriptions, position keeping, frontend.
 ## Architecture sketch
 
 ```
-Browser / Mobile
+Browser / Mobile                          External user bots
        │ WebSocket (subscribe: orders.me, executions.me, positions.me, …)
        │ REST     (submit/cancel/replace, login, account ops)
-       ▼
+       │                                          │ FIXP/SBE TCP
+       ▼                                          ▼
 B3TradingPlatform backend
+  ├── REST + WebSocket API     (browsers, REST clients)
+  ├── FIXP Listener            (external user bots; opt-in via Trading:EntryPointListener:Enabled)
   ├── EndClientRegistry        end-client identity, login (JWT/session)
   ├── SubscriptionManager      per-end-client streams
   ├── PositionKeeper           cumulative position derived from ER stream
@@ -59,7 +62,7 @@ backend/
     B3.Trading.Domain/           end-client, position, order aggregate
     B3.Trading.Application/      use-cases, registry, position keeper
     B3.Trading.Api/              REST + WebSocket endpoints
-    B3.Trading.Infrastructure/   B3EntryPointClient adapter (stub for now)
+    B3.Trading.Infrastructure/   B3EntryPointClient adapter (Stub/Mock/Real/Unavailable modes)
     B3.Trading.Host/             composition root (ASP.NET Core)
   tests/
     B3.Trading.Domain.Tests/
@@ -99,10 +102,18 @@ curl -XPOST http://localhost:5000/orders \
 curl 'http://localhost:5000/orders?login=alice'
 ```
 
-The `IExchangeGateway` is a no-op stub today; once wired to
-[`B3EntryPointClient`](https://github.com/pedrosakuma/B3EntryPointClient)
-it will dispatch to a real `B3MatchingPlatform` instance (or B3 UAT — same
-lib, different endpoint + creds).
+The `IExchangeGateway` wiring is selected at startup via
+`Trading:Exchange:Mode` (composition root in
+[`Program.cs`](backend/src/B3.Trading.Host/Program.cs); see
+[ARCHITECTURE.md § Wire boundary](docs/ARCHITECTURE.md#wire-boundary)
+for the full table):
+
+| Mode          | Behavior                                                                     |
+| ------------- | ---------------------------------------------------------------------------- |
+| `Stub`        | No-op gateway; CI smoke / API-only tests                                     |
+| `Mock`        | In-process `MockEntryPointClient`; dev loop, integration tests, demo overlay |
+| `Real`        | Per-firm [`B3EntryPointClient`](https://github.com/pedrosakuma/B3EntryPointClient) over FIXP/SBE against `B3MatchingPlatform` (or B3 UAT) |
+| `Unavailable` | Fail-closed; submits return 502 (Docker bootstrap default before broker wiring) |
 
 ## Quick demo (laptop)
 
@@ -146,6 +157,17 @@ public in this repo. See
 [docs/DOCKER.md § Demo overlay](docs/DOCKER.md#demo-overlay-opt-in-laptop-only)
 for tuning, safety notes, and what is intentionally out of scope (live
 MD ticks, real-stack cross-firm bots).
+
+## Documentation
+
+Start at [`docs/README.md`](docs/README.md) for the full index — it
+maps every architecture note, RFC, runbook, and operations guide in
+this repo. Highlights:
+
+- [Architecture](docs/ARCHITECTURE.md) — layered model, wire boundary, ER routing.
+- [FIXP listener — operations](docs/operations/fixp-listener.md) — the third inbound channel.
+- [Docker](docs/DOCKER.md) — canonical container topology + overlays.
+- [WebSocket protocol](docs/WEBSOCKET-PROTOCOL.md) and [Frontend](docs/FRONTEND.md).
 
 ## Bootstrap scope (issue #1)
 
