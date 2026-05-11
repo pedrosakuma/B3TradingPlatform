@@ -40,7 +40,7 @@ namespace B3.Trading.Infrastructure.Persistence;
 /// </summary>
 public sealed class FileEventStore : IEventStore
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly WalEventJsonContext JsonContext = WalEventJsonContext.Default;
 
     private readonly PersistenceOptions _opts;
     private readonly ILogger<FileEventStore> _logger;
@@ -85,7 +85,7 @@ public sealed class FileEventStore : IEventStore
         ArgumentNullException.ThrowIfNull(evt);
         if (_disposed) throw new ObjectDisposedException(nameof(FileEventStore));
 
-        var payload = JsonSerializer.SerializeToUtf8Bytes<WalEvent>(evt, JsonOptions);
+        var payload = JsonSerializer.SerializeToUtf8Bytes(evt, JsonContext.WalEvent);
         long seq;
         lock (_seqLock)
         {
@@ -122,7 +122,7 @@ public sealed class FileEventStore : IEventStore
         {
             if (ct.IsCancellationRequested) yield break;
             if (seq <= sinceSeqExclusive) continue;
-            var evt = JsonSerializer.Deserialize<WalEvent>(payload, JsonOptions);
+            var evt = JsonSerializer.Deserialize(payload, JsonContext.WalEvent);
             if (evt is not null) yield return (seq, evt);
         }
         await Task.CompletedTask;

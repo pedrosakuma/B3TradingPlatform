@@ -56,7 +56,7 @@ public sealed class EodMaterialiser : IEodMaterialiser
             {
                 report.RecordCount++;
                 sha.TransformBlock(payload, 0, payload.Length, null, 0);
-                var evt = JsonSerializer.Deserialize<WalEvent>(payload, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+                var evt = JsonSerializer.Deserialize(payload, WalEventJsonContext.Default.WalEvent);
                 switch (evt)
                 {
                     case OrderSubmittedEvent: report.OrderSubmittedCount++; break;
