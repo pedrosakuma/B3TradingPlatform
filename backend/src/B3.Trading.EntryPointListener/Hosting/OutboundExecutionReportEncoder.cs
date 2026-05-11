@@ -28,6 +28,16 @@ namespace B3.Trading.EntryPointListener.Hosting;
 /// <c>FixpOrderAdapter.WriteExecutionReportRejectAsync</c> (some SBE
 /// optionals expose only <c>Nullable&lt;T&gt;</c> getters and require
 /// raw memory writes to set the wire layout).</para>
+///
+/// <para>P7 / F5 (issue #201): the framed bytes live in a buffer
+/// rented from <see cref="MemoryPool{T}.Shared"/>. The encoder writes
+/// the SOFH header + body in-place into that buffer and returns an
+/// <see cref="OutboundFrame"/> whose
+/// <see cref="OutboundFrame.Owner"/> the per-credential
+/// <see cref="BotOutboundBuffer"/> takes over via
+/// <see cref="BotOutboundBuffer.Append(ulong, OutboundFrame)"/>. The
+/// encoder NEVER disposes the rented owner after constructing the
+/// frame — single-disposer rule (RFC §5.5).</para>
 /// </summary>
 internal static class OutboundExecutionReportEncoder
 {
@@ -36,12 +46,15 @@ internal static class OutboundExecutionReportEncoder
 
     /// <summary>
     /// Encodes a SOFH-framed SBE ExecutionReport for the given
-    /// <paramref name="ev"/> + bot mapping. Returns a heap-allocated
-    /// byte array sized exactly to the frame (no slack). The buffer is
-    /// what the multiplexer hands to <c>BotOutboundBuffer.Append</c> and
-    /// to <c>IBotSessionOutboundSender.TryEnqueue</c> simultaneously.
+    /// <paramref name="ev"/> + bot mapping. Rents the framed bytes from
+    /// <see cref="MemoryPool{T}.Shared"/>; the returned
+    /// <see cref="OutboundFrame"/> transfers ownership of the rented
+    /// buffer to whoever calls <c>BotOutboundBuffer.Append</c>. The
+    /// caller MUST hand the frame to a buffer (or, in the rare drop
+    /// path, dispose via <c>OutboundFrame.DisposeOwner</c>) — never
+    /// dispose after a successful append.
     /// </summary>
-    public static byte[] Encode(
+    public static OutboundFrame Encode(
         ExecutionEvent ev,
         ulong externalClOrdId,
         ulong externalOrigClOrdId)
@@ -58,7 +71,7 @@ internal static class OutboundExecutionReportEncoder
         };
     }
 
-    private static byte[] EncodeNew(ExecutionEvent ev, ulong externalClOrdId)
+    private static OutboundFrame EncodeNew(ExecutionEvent ev, ulong externalClOrdId)
     {
         Span<byte> body = stackalloc byte[ExecutionReport_NewData.BLOCK_LENGTH];
         body.Clear();
@@ -74,7 +87,7 @@ internal static class OutboundExecutionReportEncoder
             body);
     }
 
-    private static byte[] EncodeTrade(ExecutionEvent ev, ulong externalClOrdId)
+    private static OutboundFrame EncodeTrade(ExecutionEvent ev, ulong externalClOrdId)
     {
         Span<byte> body = stackalloc byte[ExecutionReport_TradeData.BLOCK_LENGTH];
         body.Clear();
@@ -98,7 +111,7 @@ internal static class OutboundExecutionReportEncoder
             body);
     }
 
-    private static byte[] EncodeCancel(ExecutionEvent ev, ulong externalClOrdId, ulong externalOrigClOrdId)
+    private static OutboundFrame EncodeCancel(ExecutionEvent ev, ulong externalClOrdId, ulong externalOrigClOrdId)
     {
         Span<byte> body = stackalloc byte[ExecutionReport_CancelData.BLOCK_LENGTH];
         body.Clear();
@@ -120,7 +133,7 @@ internal static class OutboundExecutionReportEncoder
             body);
     }
 
-    private static byte[] EncodeModify(ExecutionEvent ev, ulong externalClOrdId, ulong externalOrigClOrdId)
+    private static OutboundFrame EncodeModify(ExecutionEvent ev, ulong externalClOrdId, ulong externalOrigClOrdId)
     {
         Span<byte> body = stackalloc byte[ExecutionReport_ModifyData.BLOCK_LENGTH];
         body.Clear();
@@ -142,7 +155,7 @@ internal static class OutboundExecutionReportEncoder
             body);
     }
 
-    private static byte[] EncodeReject(ExecutionEvent ev, ulong externalClOrdId, ulong externalOrigClOrdId)
+    private static OutboundFrame EncodeReject(ExecutionEvent ev, ulong externalClOrdId, ulong externalOrigClOrdId)
     {
         Span<byte> body = stackalloc byte[ExecutionReport_RejectData.BLOCK_LENGTH];
         body.Clear();
@@ -163,12 +176,18 @@ internal static class OutboundExecutionReportEncoder
             body);
     }
 
-    private static byte[] Frame(ushort blockLength, ushort templateId, ReadOnlySpan<byte> body)
+    private static OutboundFrame Frame(ushort blockLength, ushort templateId, ReadOnlySpan<byte> body)
     {
         var frameSize = SofhFrameWriter.FrameSize(body.Length);
-        var buf = new byte[frameSize];
-        SofhFrameWriter.WriteFrame(buf, blockLength, templateId, SchemaIdV6, VersionApp, body);
-        return buf;
+        // Rent from the shared pool. The pool returns a buffer at LEAST
+        // frameSize bytes; we tell OutboundFrame the exact framed length
+        // so downstream code (TryEnqueue, retransmit) sees the right
+        // slice. The owner travels with the frame and is disposed
+        // exactly once by BotOutboundBuffer (RFC §5.5 single-disposer).
+        var owner = MemoryPool<byte>.Shared.Rent(frameSize);
+        SofhFrameWriter.WriteFrame(
+            owner.Memory.Span[..frameSize], blockLength, templateId, SchemaIdV6, VersionApp, body);
+        return OutboundFrame.Pooled(owner, frameSize);
     }
 
     private static Side ToSbeSide(OrderSide side) => side switch

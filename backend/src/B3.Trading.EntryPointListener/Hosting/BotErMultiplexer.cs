@@ -158,10 +158,10 @@ public sealed class BotErMultiplexer : BackgroundService, IBotErRouter
             ? mapping.ExternalClOrdId
             : 0UL;
 
-        byte[] framed;
+        OutboundFrame frame;
         try
         {
-            framed = OutboundExecutionReportEncoder.Encode(ev, mapping.ExternalClOrdId, externalOrig);
+            frame = OutboundExecutionReportEncoder.Encode(ev, mapping.ExternalClOrdId, externalOrig);
         }
         catch (NotSupportedException ex)
         {
@@ -178,8 +178,13 @@ public sealed class BotErMultiplexer : BackgroundService, IBotErRouter
         // trips overflow, we must not also push the message onto a
         // live connection — the bot would observe an ER and then a
         // version bump that effectively rolled it back.
+        //
+        // Append takes ownership of `frame`'s pooled memory on success
+        // (RFC §5.5 single-disposer rule). If it returns false it has
+        // already disposed the rejected frame on our behalf — we must
+        // NOT touch frame.Bytes after a false return.
         var buffer = _outbound.GetOrCreateBuffer(mapping.CredentialId);
-        var accepted = buffer.Append(seq, framed);
+        var accepted = buffer.Append(seq, frame);
         _outbound.RecordOutbound(mapping.CredentialId);
 
         if (!accepted)
@@ -194,7 +199,11 @@ public sealed class BotErMultiplexer : BackgroundService, IBotErRouter
 
         if (_directory.TryGet(mapping.CredentialId, out var sender))
         {
-            if (!sender.TryEnqueue(framed))
+            // The buffer is now the sole owner of frame's pooled
+            // memory; the sender only borrows the bytes. Eviction (or
+            // overflow / reset) is what eventually disposes — never
+            // TryEnqueue, never the drain loop.
+            if (!sender.TryEnqueue(frame.Bytes))
             {
                 // Race: the connection went away between TryGet and
                 // TryEnqueue. The buffer already holds the message,

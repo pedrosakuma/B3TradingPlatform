@@ -4,8 +4,29 @@ namespace B3.Trading.Application.UserBots;
 /// Sub-issue #172 (F). Per-credential bounded buffer of outbound
 /// application messages awaiting either send (when the bot is offline)
 /// or potential retransmit-on-request (sub-issue G #173). Stores
-/// <c>(seq, rawSbeBytes)</c> pairs in arrival order, keyed by the
+/// <c>(seq, OutboundFrame)</c> pairs in arrival order, keyed by the
 /// allocator-assigned outbound seq. Thread-safe.
+///
+/// <para><b>Single-disposer of pooled outbound memory (RFC §5.5,
+/// issue #201).</b> When <see cref="Append"/> accepts an
+/// <see cref="OutboundFrame"/> backed by an
+/// <see cref="System.Buffers.IMemoryOwner{T}"/> rented from a
+/// <see cref="System.Buffers.MemoryPool{T}"/>, this buffer becomes the
+/// sole owner of that pooled memory. Disposal happens exactly once,
+/// in one of these mutually-exclusive places:
+/// <list type="bullet">
+///   <item><see cref="EvictUpTo"/> — when the bot acks a watermark
+///         past the frame's seq.</item>
+///   <item><see cref="Append"/> overflow branch — bulk-clears every
+///         buffered frame the moment the cap trips.</item>
+///   <item><see cref="Append"/> rejected branch — disposes the
+///         <i>incoming</i> frame before returning <c>false</c> so the
+///         caller never has to.</item>
+///   <item><see cref="Reset"/> — clears the buffer on the recovery
+///         path after a version bump.</item>
+/// </list>
+/// No other call site disposes; the live-send / drain / retransmit
+/// paths only borrow <see cref="OutboundFrame.Bytes"/>.</para>
 ///
 /// <para>v0 is in-memory only — the RFC §4.8 explicitly defers WAL
 /// persistence of the buffer; bots reconcile lost messages via REST
@@ -66,40 +87,77 @@ public sealed class BotOutboundBuffer
     }
 
     /// <summary>
-    /// Appends an outbound message. Returns <c>false</c> when the cap is
-    /// hit — the buffer is cleared and <see cref="OnOverflow"/> fires.
-    /// Subsequent <c>Append</c> calls return <c>false</c> and do nothing
-    /// until <see cref="Reset"/> is called.
+    /// Appends an outbound <paramref name="frame"/> at sequence
+    /// <paramref name="seq"/>. On success the buffer takes ownership of
+    /// <paramref name="frame"/>'s pooled memory (if any) — see the
+    /// single-disposer rule on the type-level doc. Returns <c>false</c>
+    /// when the buffer is closed or the cap is hit; in both refused
+    /// branches <see cref="OutboundFrame.DisposeOwner"/> is invoked on
+    /// the rejected frame before returning, so the caller must NOT
+    /// dispose. On overflow the buffer is bulk-cleared (every entry's
+    /// pooled owner disposed) and <see cref="OnOverflow"/> fires.
+    /// Subsequent <c>Append</c> calls return <c>false</c> (and dispose
+    /// the rejected frame) until <see cref="Reset"/> is called.
     /// </summary>
-    public bool Append(ulong seq, ReadOnlyMemory<byte> bytes)
+    public bool Append(ulong seq, OutboundFrame frame)
     {
+        ArgumentNullException.ThrowIfNull(frame);
         lock (_gate)
         {
-            if (_overflowed) return false;
+            if (_overflowed)
+            {
+                // Single-disposer rule: nothing else may dispose the
+                // rejected frame, so the buffer does it on the way out.
+                frame.DisposeOwner();
+                return false;
+            }
             if (_entries.Count >= _maxMessages)
             {
                 _overflowed = true;
+                DisposeAllLocked();
                 _entries.Clear();
                 _index.Clear();
                 _onOverflow?.Invoke(_credentialId);
+                frame.DisposeOwner();
                 return false;
             }
 
-            // Defensive copy — the caller's `bytes` may come from a pooled
-            // buffer that gets returned to the pool after the publish call
-            // returns. Holding a reference to a reused span would corrupt
-            // both the buffer and the next caller.
-            var copy = bytes.ToArray();
-            var node = _entries.AddLast(new Entry(seq, copy));
+            // Take ownership — no defensive copy. The encoder rented
+            // the pooled buffer specifically for us; copying would be
+            // the second copy that issue #201 (RFC §5.5 / F5) exists
+            // to eliminate. The buffer holds the frame until the bot's
+            // acked-watermark eviction (or overflow / reset) releases
+            // the pooled owner.
+            var node = _entries.AddLast(new Entry(seq, frame));
             _index[seq] = node;
             return true;
         }
     }
 
     /// <summary>
+    /// Convenience overload for callers (and tests) whose payload is a
+    /// plain in-memory buffer rather than a pooled frame. Wraps the
+    /// bytes in <see cref="OutboundFrame.Unowned"/> — there is nothing
+    /// to dispose, but the contract is otherwise identical to the
+    /// frame-taking overload (see the single-disposer rule).
+    /// </summary>
+    public bool Append(ulong seq, ReadOnlyMemory<byte> bytes)
+        => Append(seq, OutboundFrame.Unowned(bytes));
+
+    /// <summary>
     /// Returns the buffered messages in <c>[fromSeq, toSeq]</c>, sorted
     /// by seq ascending. Returns an empty list when no entries match.
     /// Sub-issue G consumes this for <c>RetransmitRequest</c> handling.
+    ///
+    /// <para>Each returned <see cref="BufferedOutboundMessage.Bytes"/>
+    /// is a private heap snapshot taken under <c>_gate</c> — the
+    /// retransmit replay loop awaits across socket writes, and a later
+    /// <see cref="EvictUpTo"/> / overflow / <see cref="Reset"/> would
+    /// otherwise dispose the underlying pooled owner mid-write. The
+    /// snapshot keeps the buffer the sole disposer of pooled memory
+    /// (RFC §5.5) without exposing that memory across an
+    /// <c>await</c>. Retransmit is a rare recovery path; the copy
+    /// cost is on the cold path by design.</para>
     /// </summary>
     public IReadOnlyList<BufferedOutboundMessage> GetRange(ulong fromSeq, ulong toSeq)
     {
@@ -111,17 +169,19 @@ public sealed class BotOutboundBuffer
             {
                 if (node.Value.Seq < fromSeq) continue;
                 if (node.Value.Seq > toSeq) break;
-                list.Add(new BufferedOutboundMessage(node.Value.Seq, node.Value.Bytes));
+                // Snapshot under the lock; see the lifetime note above.
+                list.Add(new BufferedOutboundMessage(node.Value.Seq, node.Value.Frame.Bytes.ToArray()));
             }
             return list;
         }
     }
 
     /// <summary>
-    /// Drops every entry with <c>seq ≤ throughSeq</c>. Cleanup hook for
-    /// when the bot acknowledges its inbound watermark via the next
-    /// <c>Sequence</c> message it sends (G's responsibility to call).
-    /// Idempotent.
+    /// Drops every entry with <c>seq ≤ throughSeq</c> and disposes the
+    /// pooled <c>Owner</c> backing each dropped frame (single-disposer
+    /// rule, RFC §5.5). Cleanup hook for when the bot acknowledges its
+    /// inbound watermark via the next <c>Sequence</c> message it sends
+    /// (G's responsibility to call). Idempotent.
     /// </summary>
     public void EvictUpTo(ulong throughSeq)
     {
@@ -130,29 +190,41 @@ public sealed class BotOutboundBuffer
             while (_entries.First is { } first && first.Value.Seq <= throughSeq)
             {
                 _index.Remove(first.Value.Seq);
+                first.Value.Frame.DisposeOwner();
                 _entries.RemoveFirst();
             }
         }
     }
 
     /// <summary>
-    /// Clears the buffer and resets the overflow flag. Called by the
-    /// recovery path after the credential's <c>SessionVerId</c> has been
-    /// bumped and the offending connection forcibly closed — the next
-    /// reconnect attempt fails Establish with the new ver, the bot
-    /// reconciles via REST, and we start fresh.
+    /// Clears the buffer and resets the overflow flag. Disposes every
+    /// pooled <c>Owner</c> still held (single-disposer rule, RFC §5.5).
+    /// Called by the recovery path after the credential's
+    /// <c>SessionVerId</c> has been bumped and the offending connection
+    /// forcibly closed — the next reconnect attempt fails Establish
+    /// with the new ver, the bot reconciles via REST, and we start
+    /// fresh.
     /// </summary>
     public void Reset()
     {
         lock (_gate)
         {
+            DisposeAllLocked();
             _entries.Clear();
             _index.Clear();
             _overflowed = false;
         }
     }
 
-    private readonly record struct Entry(ulong Seq, byte[] Bytes);
+    private void DisposeAllLocked()
+    {
+        for (var node = _entries.First; node is not null; node = node.Next)
+        {
+            node.Value.Frame.DisposeOwner();
+        }
+    }
+
+    private readonly record struct Entry(ulong Seq, OutboundFrame Frame);
 }
 
 /// <summary>

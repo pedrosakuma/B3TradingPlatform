@@ -1282,12 +1282,30 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     /// socket I/O, and (b) the write mutex serialises against any
     /// handshake/order-ack writes the connection's own request loop is
     /// emitting concurrently.
+    ///
+    /// <para><b>Pre-F3 transitional copy (RFC §5.5 / §5.3, issue #201).</b>
+    /// The caller's <paramref name="framedBytes"/> may alias pooled
+    /// memory owned by <c>BotOutboundBuffer</c>. The buffer can dispose
+    /// that memory on the bot's next acked-watermark eviction (or on
+    /// overflow / reset), and the eviction is not synchronised with the
+    /// fire-and-forget write task we schedule below. Until F3 lands —
+    /// where the per-session channel's reader holds the
+    /// <c>OutboundFrame</c> until the write completes — we materialise
+    /// a private heap copy so the async write never observes pooled
+    /// memory after the buffer has released it. The single-disposer
+    /// rule in §5.5 still holds: this method does not touch the
+    /// caller's owner.</para>
     /// </summary>
     bool IBotSessionOutboundSender.TryEnqueue(ReadOnlyMemory<byte> framedBytes)
     {
         if (_closed) return false;
         var stream = _stream;
         if (stream is null) return false;
+
+        // Copy out of the borrowed (potentially pooled) memory before
+        // the Task.Run captures it — see the §5.5 transitional note
+        // above. Cheap relative to the SBE encode + socket write.
+        var owned = framedBytes.ToArray();
 
         // Fire-and-forget. Errors land in the catch and quietly close
         // the connection; the read loop will observe the broken stream
@@ -1298,7 +1316,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
             try
             {
                 if (_closed) return;
-                await stream.WriteAsync(framedBytes, CancellationToken.None).ConfigureAwait(false);
+                await stream.WriteAsync(owned, CancellationToken.None).ConfigureAwait(false);
                 TouchOutbound();
             }
             catch (Exception ex)
