@@ -17,6 +17,7 @@
   </Folder>
   <Folder Name="/backend/bench/">
     <Project Path="backend/bench/B3.Trading.Benchmarks/B3.Trading.Benchmarks.csproj" />
+    <Project Path="backend/bench/B3.Trading.LoadTest/B3.Trading.LoadTest.csproj" />
   </Folder>
   <Folder Name="/backend/tools/">
     <Project Path="backend/tools/B3.Trading.DemoDriver/B3.Trading.DemoDriver.csproj" />

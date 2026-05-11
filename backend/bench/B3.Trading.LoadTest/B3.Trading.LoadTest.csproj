@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>B3.Trading.LoadTest</RootNamespace>
+    <!-- See README.md for runner spec. IsPackable=false keeps the harness out
+         of pack/publish; CI's dotnet test skips it because it is not a test
+         project. The bench harness (B3.Trading.Benchmarks) follows the same
+         pattern — micro-bench there, macro/load here. -->
+    <IsPackable>false</IsPackable>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Options" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\B3.Trading.Domain\B3.Trading.Domain.csproj" />
+    <ProjectReference Include="..\..\src\B3.Trading.Application\B3.Trading.Application.csproj" />
+    <ProjectReference Include="..\..\src\B3.Trading.Infrastructure\B3.Trading.Infrastructure.csproj" />
+  </ItemGroup>
+
+</Project>
