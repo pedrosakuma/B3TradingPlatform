@@ -82,9 +82,15 @@ public class TwoPhaseSnapshotCaptureTests
             dispatcher.Dispatch(
                 new OrderSubmittedEvent
                 {
-                    ClOrdId = clOrdId, EndClientId = "alice", FirmId = "TEST",
-                    Symbol = "PETR4", SecurityId = 4321UL,
-                    Side = "Buy", Type = "Limit", Quantity = quantity, Price = 30m,
+                    ClOrdId = clOrdId,
+                    EndClientId = "alice",
+                    FirmId = "TEST",
+                    Symbol = "PETR4",
+                    SecurityId = 4321UL,
+                    Side = "Buy",
+                    Type = "Limit",
+                    Quantity = quantity,
+                    Price = 30m,
                 },
                 () =>
                 {
