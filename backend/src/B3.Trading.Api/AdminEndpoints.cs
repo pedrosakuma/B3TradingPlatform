@@ -1,13 +1,12 @@
 using System.Security.Claims;
 using B3.Trading.Api.Auth;
 using B3.Trading.Application;
+using B3.Trading.Application.Lifecycle;
 using B3.Trading.Application.MarketData;
 using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
-using B3.Trading.Infrastructure;
-using B3.Trading.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -147,43 +146,35 @@ public static class AdminEndpoints
                 }
             });
 
-        group.MapPost("/eod", (EodMaterialiser eod, IOptions<PersistenceOptions> opts) =>
+        group.MapPost("/eod", (IEodMaterialiser eod) =>
         {
             // EOD materialisation runs against persisted segments, so it
             // is a no-op (and arguably misleading) when persistence is
             // disabled. Surface that as 409 rather than silently producing
             // an empty report.
-            if (!opts.Value.Enabled)
+            if (!eod.IsAvailable)
                 return Results.Conflict(new { error = "persistence_disabled" });
             var report = eod.Materialise(DateOnly.FromDateTime(DateTime.UtcNow));
             return Results.Ok(report);
         });
 
         // Per-firm operator visibility. In Real mode the response folds in
-        // live FIXP state from the FirmGatewayRegistry; in other modes it
+        // live FIXP state from the firm directory; in other modes it
         // returns the configured shape only (state fields are null) — useful
         // both as a config sanity check and as a stable schema for dashboards.
-        group.MapGet("/firms", (IOptions<ExchangeOptions> opts, IServiceProvider sp) =>
+        group.MapGet("/firms", (IFirmDirectory directory) =>
         {
-            var mode = opts.Value.ResolveMode();
-            // Optional injection: FirmGatewayRegistry is only registered in Real mode.
-            var registry = sp.GetService<FirmGatewayRegistry>();
-            var firms = opts.Value.Firms.Select(cfg =>
+            var snapshot = directory.Snapshot();
+            var firms = snapshot.Firms.Select(f => new
             {
-                B3EntryPointClientGateway? live = null;
-                if (registry is not null && registry.TryGet(cfg.FirmId, out var gw))
-                    live = gw;
-                return new
-                {
-                    firmId = cfg.FirmId,
-                    endpoint = cfg.Endpoint,
-                    sessionId = cfg.SessionId,
-                    sessionState = live?.SessionStateTag,
-                    sessionVerId = live?.CurrentSessionVerId,
-                    reconnecting = live?.IsReconnecting,
-                };
+                firmId = f.FirmId,
+                endpoint = f.Endpoint,
+                sessionId = f.SessionId,
+                sessionState = f.SessionState,
+                sessionVerId = f.SessionVerId,
+                reconnecting = f.Reconnecting,
             }).ToArray();
-            return Results.Ok(new { mode = mode.ToString(), firms });
+            return Results.Ok(new { mode = snapshot.Mode, firms });
         });
 
         // Debug helper for ops: surface the *effective* RiskLimits the
@@ -253,7 +244,7 @@ public static class AdminEndpoints
             IServiceProvider sp,
             IOptions<MarketDataOptions> mdOpts,
             IOptionsMonitor<RiskOptions> riskOpts,
-            IOptions<ExchangeOptions> exchangeOpts) =>
+            IFirmDirectory firmDirectory) =>
         {
             // MarketDataReferencePrice is registered only when the WsUrl
             // gate is set (see MarketDataRegistration.cs). When absent,
@@ -300,7 +291,7 @@ public static class AdminEndpoints
 
             return Results.Ok(new
             {
-                mode = exchangeOpts.Value.ResolveMode().ToString(),
+                mode = firmDirectory.Snapshot().Mode,
                 marketDataEnabled = mdRef is not null,
                 symbols = items,
             });
@@ -308,19 +299,11 @@ public static class AdminEndpoints
 
         // POST /admin/simulator/er — synthetic ER injection (formerly the
         // ExchangeMode.Simulator-only route; merged into Mock+AllowErInjection
-        // in #163). URL kept as /admin/simulator/er for conformance-contract
-        // stability. Only mapped when the in-process Mock gateway is active
-        // AND the operator opted in via Trading:Exchange:AllowErInjection;
-        // ExchangeOptionsValidator already refused Mode=Real/Stub/Unavailable
-        // alongside the flag, so reaching this branch implies Mode=Mock and
-        // MockEntryPointClient is in DI. The not-mapped check is the single
-        // source of truth — no second runtime barrier needed.
-        var exchangeOptsValue = app.ServiceProvider.GetRequiredService<IOptions<ExchangeOptions>>().Value;
-        if (exchangeOptsValue.ResolveMode() == ExchangeMode.Mock && exchangeOptsValue.AllowErInjection)
-        {
-            group.MapPost("/simulator/er", SimulatorEndpoint.Inject);
-        }
-
+        // in #163). The route itself moved to the Infrastructure project as
+        // part of the #188 layering refactor — see SimulatorEndpoint.MapSimulatorEndpoints,
+        // which the Host composition root mounts conditionally on
+        // Trading:Exchange:Mode=Mock + AllowErInjection. Kept out of this
+        // file so the Api project no longer references Infrastructure.
         return app;
     }
 
