@@ -1,0 +1,114 @@
+using B3.Trading.Application;
+using B3.Trading.Application.Risk;
+using B3.Trading.Application.Risk.Accounting;
+using B3.Trading.Application.Risk.Checks;
+using B3.Trading.Domain;
+using B3.Trading.Host.MarketData;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+
+namespace B3.Trading.Host.Composition;
+
+/// <summary>
+/// Registers the pre-trade risk surface: kill-switch, halts, session phase,
+/// staleness reactor, the full <see cref="IRiskCheck"/> set + pipeline,
+/// margin provider + replace coordinator, and the throttle accountants.
+/// Also brings up the market-data reference-price subscriber via the
+/// pre-existing <see cref="MarketDataRegistration.AddTradingMarketData"/>
+/// hook because the risk pipeline (PriceCollar / StaleReferencePrice
+/// checks) is the only consumer of <c>IReferencePrice</c>.
+/// </summary>
+public static class TradingRiskServiceCollectionExtensions
+{
+    public static IServiceCollection AddTradingRisk(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        services.Configure<RiskOptions>(
+            configuration.GetSection(RiskOptions.SectionName));
+        services.Configure<SymbolDirectoryOptions>(
+            configuration.GetSection(SymbolDirectoryOptions.SectionName));
+        services.AddSingleton(sp =>
+            new SymbolDirectory(sp.GetRequiredService<IOptions<SymbolDirectoryOptions>>().Value));
+
+        // Pre-trade risk: pipeline + checks + kill-switch + reference price +
+        // margin provider. Each IRiskCheck registration is auto-discovered by
+        // the RiskPipeline through the IEnumerable<IRiskCheck> ctor injection.
+        services.AddSingleton<KillSwitchService>();
+        services.AddSingleton<SymbolHaltService>();
+        services.AddSingleton<SessionPhaseService>(_ =>
+        {
+            // #108 SessionPhase. Default is Continuous (back-compat); ops can pin
+            // production to a stricter posture (e.g. Closed at boot, then flip via
+            // the admin endpoint or feed) by setting Trading:SessionPhase:Default.
+            var raw = configuration["Trading:SessionPhase:Default"];
+            var def = !string.IsNullOrWhiteSpace(raw)
+                && Enum.TryParse<SessionPhase>(raw, ignoreCase: true, out var parsed)
+                ? parsed : SessionPhase.Continuous;
+            return new SessionPhaseService(def);
+        });
+        services.AddSingleton<OrderStalenessService>();
+        // Slice 2 of #132. Reactor reads the flag set off the Trading:AutoStale section.
+        services.Configure<AutoStaleOptions>(configuration.GetSection(AutoStaleOptions.SectionName));
+        services.AddSingleton<IVenueDisconnectReactor>(sp =>
+            new OrderStaleningVenueReactor(
+                sp.GetRequiredService<OrderStalenessService>(),
+                sp.GetRequiredService<IOptions<AutoStaleOptions>>().Value,
+                sp.GetService<TimeProvider>()));
+        services.AddTradingMarketData(configuration);
+        services.AddSingleton<ReserveOnSubmitMarginProvider>(sp =>
+            new ReserveOnSubmitMarginProvider(
+                sp.GetRequiredService<IOptionsMonitor<RiskOptions>>(),
+                sp.GetRequiredService<ILogger<ReserveOnSubmitMarginProvider>>(),
+                sp.GetRequiredService<CashLedger>()));
+        services.AddSingleton<IMarginProvider>(sp =>
+        {
+            var opts = sp.GetRequiredService<IOptionsMonitor<RiskOptions>>().CurrentValue;
+            return opts.Margin.Enabled
+                ? sp.GetRequiredService<ReserveOnSubmitMarginProvider>()
+                : new NoOpMarginProvider();
+        });
+        // Slice 2 of #122: the replace coordinator shares the reservation
+        // ledger with IMarginProvider, so it always points at the concrete
+        // ReserveOnSubmitMarginProvider singleton — even when margin is
+        // disabled the coordinator's Commit/Abort are harmless no-ops on an
+        // empty ledger.
+        services.AddSingleton<PendingReplacementRegistry>();
+        services.AddSingleton<IReplaceMarginCoordinator>(sp =>
+            sp.GetRequiredService<ReserveOnSubmitMarginProvider>());
+        services.AddSingleton<IRiskCheck, KillSwitchCheck>();
+        services.AddSingleton<IRiskCheck, SymbolHaltedCheck>();
+        services.AddSingleton<IRiskCheck, SessionPhaseCheck>();
+        services.AddSingleton<IRiskCheck, OrderTypeAllowedCheck>();
+        services.AddSingleton<IRiskCheck, MinTickSizeCheck>();
+        services.AddSingleton<IRiskCheck, MinLotSizeCheck>();
+        services.AddSingleton<IRiskCheck, MaxQuantityCheck>();
+        services.AddSingleton<IRiskCheck, MaxNotionalCheck>();
+        services.AddSingleton<IRiskCheck, MinNotionalCheck>();
+        services.AddSingleton<IRiskCheck, PositionLimitCheck>();
+        services.AddSingleton<IRiskCheck, RollingNotionalCheck>();
+        services.AddSingleton<IRiskCheck, OrderRateLimitCheck>();
+        services.AddSingleton<IRiskCheck, MaxOpenOrdersCheck>();
+        services.AddSingleton<IRiskCheck, NoNakedShortCheck>();
+        services.AddSingleton<IRiskCheck, SelfTradePreventionCheck>();
+        services.AddSingleton<IRiskCheck, PriceCollarCheck>();
+        services.AddSingleton<IRiskCheck, StaleReferencePriceCheck>();
+        services.AddSingleton<RiskPipeline>();
+
+        // Throttle accountants (slice 7). TimeProvider is fetched from DI so
+        // tests can substitute a FakeTimeProvider; production resolves to
+        // TimeProvider.System via the registration below.
+        services.TryAddSingleton(TimeProvider.System);
+        services.AddSingleton<RollingNotionalAccountant>();
+        services.AddSingleton<OrderRateAccountant>();
+        services.AddSingleton<IRiskAccountant>(sp => sp.GetRequiredService<RollingNotionalAccountant>());
+        services.AddSingleton<IRiskAccountant>(sp => sp.GetRequiredService<OrderRateAccountant>());
+        services.AddSingleton<CompositeRiskAccountant>();
+        services.AddHostedService<ThrottleLedgerSweeper>();
+
+        return services;
+    }
+}
