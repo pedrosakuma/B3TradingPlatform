@@ -59,6 +59,11 @@ public sealed class EntryPointListenerOptions
     /// <summary>Outbound buffer sizing options.</summary>
     public BuffersOptions Buffers { get; set; } = new();
 
+    /// <summary>
+    /// TCP socket tunables applied to every accepted client (RFC §5.9 / P11).
+    /// </summary>
+    public FixpTcpOptions Tcp { get; set; } = new();
+
     /// <summary>Nested TLS configuration.</summary>
     public sealed class TlsOptions
     {

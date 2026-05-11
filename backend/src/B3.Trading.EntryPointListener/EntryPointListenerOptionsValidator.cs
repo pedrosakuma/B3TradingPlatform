@@ -39,6 +39,12 @@ public sealed class EntryPointListenerOptionsValidator : IValidateOptions<EntryP
         if (options.MaxSessionsPerUser <= 0)
             failures.Add("Trading:EntryPointListener:MaxSessionsPerUser must be > 0.");
 
+        // TCP tunables (RFC §5.9 / P11)
+        if (options.Tcp.SendBufferBytes <= 0)
+            failures.Add("Trading:EntryPointListener:Tcp:SendBufferBytes must be > 0.");
+        if (options.Tcp.ReceiveBufferBytes <= 0)
+            failures.Add("Trading:EntryPointListener:Tcp:ReceiveBufferBytes must be > 0.");
+
         // TLS validation
         if (options.Tls.Required)
         {
