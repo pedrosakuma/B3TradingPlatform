@@ -1,5 +1,6 @@
 using System.Threading.Channels;
 using B3.Trading.Application;
+using B3.Trading.Application.Persistence;
 using B3.Trading.Application.UserBots;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Hosting;
@@ -35,7 +36,7 @@ namespace B3.Trading.EntryPointListener.Hosting;
 /// (<c>InvalidSessionVerId</c>) and the bot reconciles via REST
 /// rather than silently observing a gap (RFC §4.7).</para>
 /// </summary>
-public sealed class BotErMultiplexer : BackgroundService, IBotErRouter
+public sealed class BotErMultiplexer : BackgroundService, IBotErRouter, IExecutionFanOutSink
 {
     private readonly IUserBotOrderMappingRegistry _mappings;
     private readonly IUserBotSessionRegistry _sessions;
@@ -103,6 +104,24 @@ public sealed class BotErMultiplexer : BackgroundService, IBotErRouter
     {
         // Synchronous, non-blocking. The bounded channel's DropOldest
         // policy means a hung drain cannot stall the ER processor.
+        _eventChannel.Writer.TryWrite(ev);
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// RFC §5.2 (F2). The dispatcher invokes this UNDER the dispatcher
+    /// lock so the relative order of TryWrites onto the unbounded
+    /// channel matches WAL seq order. The drain reads in FIFO order, so
+    /// each bot's outbound stream observes ERs in WAL-append order
+    /// regardless of how the dispatch threads interleave. <paramref name="seq"/>
+    /// is captured for diagnostics only — the encoder uses the
+    /// per-credential outbound seq allocator, not the WAL seq.
+    /// </remarks>
+    public ExecutionFanOutTargets Target => ExecutionFanOutTargets.BotRouter;
+
+    void IExecutionFanOutSink.Enqueue(long seq, ExecutionEvent ev)
+    {
+        _ = seq;
         _eventChannel.Writer.TryWrite(ev);
     }
 

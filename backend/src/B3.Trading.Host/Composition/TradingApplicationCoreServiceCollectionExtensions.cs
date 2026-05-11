@@ -46,7 +46,17 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         services.AddSingleton<IUserBotOrderMappingRegistry>(sp =>
             sp.GetRequiredService<InMemoryUserBotOrderMappingRegistry>());
         services.AddSingleton<SubscriptionManager>();
-        services.AddSingleton<IExecutionEventSink, WebSocketExecutionEventSink>();
+        // RFC §5.2 (F2). The WS hub sink is channel-backed and runs as
+        // a hosted service so its drain task starts/stops with the host.
+        // Both the IExecutionEventSink (synthetic publishes from
+        // OrderStalenessService etc.) and the IExecutionFanOutSink
+        // (dispatcher fan-out under the lock) routes funnel into the
+        // same per-sink channel — see the type doc-comment for ordering
+        // semantics.
+        services.AddSingleton<WebSocketExecutionEventSink>();
+        services.AddSingleton<IExecutionEventSink>(sp => sp.GetRequiredService<WebSocketExecutionEventSink>());
+        services.AddSingleton<IExecutionFanOutSink>(sp => sp.GetRequiredService<WebSocketExecutionEventSink>());
+        services.AddHostedService(sp => sp.GetRequiredService<WebSocketExecutionEventSink>());
         services.AddSingleton<IAlgoEventSink, WebSocketAlgoEventSink>();
         services.AddSingleton<ExecutionReportProcessor>();
         services.AddSingleton<OrderSubmissionService>();

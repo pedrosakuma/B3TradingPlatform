@@ -65,6 +65,16 @@ public static class EntryPointListenerServiceCollectionExtensions
 
             services.AddSingleton<BotErMultiplexer>();
             services.AddSingleton<IBotErRouter>(sp => sp.GetRequiredService<BotErMultiplexer>());
+            // RFC §5.2 (F2). Register the multiplexer as a fan-out sink
+            // so the EventDispatcher TryWrites onto its (unbounded)
+            // internal channel UNDER the dispatcher lock — preserving
+            // per-bot ordering = WAL append order. Unbounded is required:
+            // dropping an ER pre-credential-resolve would leave the bot
+            // unable to emit any per-bot recovery signal (RFC §5.4),
+            // and memory is bounded transitively by the per-credential
+            // BotOutboundBuffer.MaxMessages caps (§5.2 / §6.3).
+            services.AddSingleton<B3.Trading.Application.Persistence.IExecutionFanOutSink>(
+                sp => sp.GetRequiredService<BotErMultiplexer>());
             services.AddHostedService(sp => sp.GetRequiredService<BotErMultiplexer>());
 
             services.AddSingleton<BotSessionSeqCheckpointer>();

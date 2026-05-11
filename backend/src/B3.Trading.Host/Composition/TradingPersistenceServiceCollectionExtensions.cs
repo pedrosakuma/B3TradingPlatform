@@ -59,7 +59,13 @@ public static class TradingPersistenceServiceCollectionExtensions
                 : new DisabledEodMaterialiser();
         });
         services.AddHostedService<SnapshotService>();
-        services.AddSingleton<EventDispatcher>();
+        // RFC §5.2 (F2). Resolve all registered IExecutionFanOutSink
+        // singletons (WS hub channel sink, bot router) and snapshot
+        // them into the dispatcher's flat array so the dispatch hot
+        // path is allocation-free.
+        services.AddSingleton<EventDispatcher>(sp => new EventDispatcher(
+            sp.GetRequiredService<IEventStore>(),
+            sp.GetServices<IExecutionFanOutSink>()));
 
         return services;
     }

@@ -88,7 +88,7 @@ public class SubscriptionManagerTests
 public class WebSocketExecutionEventSinkTests
 {
     [Fact]
-    public void Fill_PublishesToAllThreeChannels()
+    public async Task Fill_PublishesToAllThreeChannels()
     {
         var book = new WorkingOrderBook();
         var positions = new PositionKeeper();
@@ -111,9 +111,23 @@ public class WebSocketExecutionEventSinkTests
         client.Reader.TryRead(out _);
 
         var sink = new WebSocketExecutionEventSink(mgr, book, positions);
-        sink.Publish(new ExecutionEvent(
-            owner, 1UL, "PETR4", OrderSide.Buy, order.Status, ExecKind.Fill,
-            0, 100, 100, 30m, null, DateTimeOffset.UtcNow));
+        await sink.StartAsync(default);
+        try
+        {
+            sink.Publish(new ExecutionEvent(
+                owner, 1UL, "PETR4", OrderSide.Buy, order.Status, ExecKind.Fill,
+                0, 100, 100, 30m, null, DateTimeOffset.UtcNow));
+
+            // RFC §5.2: the sink is channel-backed; wait briefly for the
+            // drain task to consume the event and call into SubscriptionManager.
+            var deadline = Environment.TickCount64 + 2_000;
+            while (Environment.TickCount64 < deadline)
+            {
+                if (client.Reader.Count >= 3) break;
+                await Task.Delay(5);
+            }
+        }
+        finally { await sink.StopAsync(default); }
 
         var msgs = new List<OutboundMessage>();
         while (client.Reader.TryRead(out var m)) msgs.Add(m);
@@ -124,7 +138,7 @@ public class WebSocketExecutionEventSinkTests
     }
 
     [Fact]
-    public void Cancel_PublishesToOrdersAndExecutions_NotPositions()
+    public async Task Cancel_PublishesToOrdersAndExecutions_NotPositions()
     {
         var book = new WorkingOrderBook();
         var positions = new PositionKeeper();
@@ -144,9 +158,21 @@ public class WebSocketExecutionEventSinkTests
         client.Reader.TryRead(out _);
 
         var sink = new WebSocketExecutionEventSink(mgr, book, positions);
-        sink.Publish(new ExecutionEvent(
-            owner, 1UL, "PETR4", OrderSide.Buy, order.Status, ExecKind.Canceled,
-            0, 0, 0, 0m, null, DateTimeOffset.UtcNow));
+        await sink.StartAsync(default);
+        try
+        {
+            sink.Publish(new ExecutionEvent(
+                owner, 1UL, "PETR4", OrderSide.Buy, order.Status, ExecKind.Canceled,
+                0, 0, 0, 0m, null, DateTimeOffset.UtcNow));
+
+            var deadline = Environment.TickCount64 + 2_000;
+            while (Environment.TickCount64 < deadline)
+            {
+                if (client.Reader.Count >= 2) break;
+                await Task.Delay(5);
+            }
+        }
+        finally { await sink.StopAsync(default); }
 
         var msgs = new List<OutboundMessage>();
         while (client.Reader.TryRead(out var m)) msgs.Add(m);

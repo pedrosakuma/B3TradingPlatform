@@ -1,4 +1,9 @@
+using System.Threading.Channels;
 using B3.Trading.Application;
+using B3.Trading.Application.Observability;
+using B3.Trading.Application.Persistence;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 
 namespace B3.Trading.Api.WebSockets;
 
@@ -6,21 +11,127 @@ namespace B3.Trading.Api.WebSockets;
 /// Real <see cref="IExecutionEventSink"/> backed by the WebSocket
 /// <see cref="SubscriptionManager"/>. Routes a single
 /// <see cref="ExecutionEvent"/> to all impacted channels for the owner.
+///
+/// <para>
+/// RFC §5.2 (F2). The sink is channel-backed: both the
+/// <see cref="EventDispatcher"/> fan-out path
+/// (<see cref="IExecutionFanOutSink.Enqueue"/>, written UNDER the
+/// dispatcher lock) and the synthetic out-of-WAL publishes
+/// (<see cref="IExecutionEventSink.Publish"/>, used by
+/// <c>OrderStalenessService</c> and the <c>EntryPointExecutionReportRouter</c>
+/// WAL-backpressure fallback) end up on the SAME bounded
+/// <see cref="Channel{T}"/>. A single background drain consumes the
+/// channel and runs the expensive subscriber-walk + DTO build OFF the
+/// dispatcher lock, while preserving WAL-append order for events that
+/// arrived via the dispatcher (RFC §4.1, §5.2 ordering note).
+/// </para>
+///
+/// <para>
+/// Per-sink overflow policy (RFC §6.3): bounded at
+/// <see cref="ChannelCapacity"/> with <c>FullMode = DropOldest</c> and
+/// an item-dropped callback that bumps
+/// <see cref="MetricsRegistry.WsHubFanOutDropped"/>. A drop indicates
+/// the WS publish thread cannot keep up; subscribers detect the gap
+/// via existing reconnect-and-replay (the WS client sees a missed
+/// frame at the connection layer or via a stale orders.me snapshot
+/// and refetches state).
+/// </para>
 /// </summary>
-public sealed class WebSocketExecutionEventSink : IExecutionEventSink
+public sealed class WebSocketExecutionEventSink : IExecutionEventSink, IExecutionFanOutSink, IHostedService, IAsyncDisposable
 {
+    /// <summary>
+    /// 64 K events per RFC §5.2. At a sustained 50 K ER/s with a drain
+    /// thread that publishes in tens of microseconds per event, the
+    /// queue depth is zero in steady state; the cap exists only to
+    /// bound memory under a stuck-drain scenario.
+    /// </summary>
+    public const int ChannelCapacity = 65_536;
+
     private readonly SubscriptionManager _subs;
     private readonly WorkingOrderBook _orders;
     private readonly PositionKeeper _positions;
+    private readonly ILogger<WebSocketExecutionEventSink>? _logger;
+    private readonly Channel<ExecutionEvent> _channel;
+    private readonly CancellationTokenSource _cts = new();
+    private Task? _drainTask;
 
-    public WebSocketExecutionEventSink(SubscriptionManager subs, WorkingOrderBook orders, PositionKeeper positions)
+    public WebSocketExecutionEventSink(
+        SubscriptionManager subs,
+        WorkingOrderBook orders,
+        PositionKeeper positions,
+        ILogger<WebSocketExecutionEventSink>? logger = null)
     {
         _subs = subs;
         _orders = orders;
         _positions = positions;
+        _logger = logger;
+        _channel = Channel.CreateBounded<ExecutionEvent>(
+            new BoundedChannelOptions(ChannelCapacity)
+            {
+                SingleReader = true,
+                SingleWriter = false,
+                FullMode = BoundedChannelFullMode.DropOldest,
+            },
+            itemDropped: static _ => MetricsRegistry.WsHubFanOutDropped.Add(1));
     }
 
-    public void Publish(ExecutionEvent ev)
+    /// <inheritdoc />
+    public ExecutionFanOutTargets Target => ExecutionFanOutTargets.WsHub;
+
+    /// <inheritdoc />
+    public void Publish(ExecutionEvent ev) => _channel.Writer.TryWrite(ev);
+
+    /// <inheritdoc />
+    public void Enqueue(long seq, ExecutionEvent ev) => _channel.Writer.TryWrite(ev);
+
+    private int _stopped;
+
+    public Task StartAsync(CancellationToken cancellationToken)
+    {
+        _drainTask = Task.Run(DrainAsync);
+        return Task.CompletedTask;
+    }
+
+    public async Task StopAsync(CancellationToken cancellationToken)
+    {
+        if (Interlocked.Exchange(ref _stopped, 1) != 0) return;
+        _cts.Cancel();
+        _channel.Writer.TryComplete();
+        if (_drainTask is not null)
+        {
+            try { await _drainTask.ConfigureAwait(false); } catch { /* drain stop is best-effort */ }
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await StopAsync(CancellationToken.None).ConfigureAwait(false);
+        _cts.Dispose();
+    }
+
+    private async Task DrainAsync()
+    {
+        var reader = _channel.Reader;
+        try
+        {
+            while (await reader.WaitToReadAsync(_cts.Token).ConfigureAwait(false))
+            {
+                while (reader.TryRead(out var ev))
+                {
+                    try { PublishCore(ev); }
+                    catch (Exception ex)
+                    {
+                        _logger?.LogWarning(ex,
+                            "ws hub fan-out publish failed for owner={Owner} clOrdId={ClOrdId}",
+                            ev.Owner.Value, ev.ClOrdId);
+                    }
+                }
+            }
+        }
+        catch (OperationCanceledException) { /* shutdown */ }
+    }
+
+    private void PublishCore(ExecutionEvent ev)
     {
         if (_subs.CountFor(ev.Owner) == 0)
             return;
