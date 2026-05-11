@@ -17,6 +17,10 @@ Start here. This is the map for everything under `docs/` in
 
 ## RFCs (latest first)
 
+- [perf-hardening-v0](rfcs/perf-hardening-v0.md) — pre-production
+  performance hardening: dispatcher lock narrowing, per-connection
+  outbound writers, synchronous bot-ER router, pooled outbound
+  buffers, WAL fsync tuning (epic #189).
 - [user-bot-fixp-listener-v0](rfcs/user-bot-fixp-listener-v0.md) —
   third inbound channel: native FIXP/SBE listener for external user
   bots (epic #166).
