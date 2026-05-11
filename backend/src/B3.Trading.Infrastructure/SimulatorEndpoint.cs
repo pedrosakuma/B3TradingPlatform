@@ -1,9 +1,10 @@
 using B3.Trading.Application;
-using B3.Trading.Infrastructure;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Routing;
 
-namespace B3.Trading.Api;
+namespace B3.Trading.Infrastructure;
 
 /// <summary>
 /// Synthetic ER injection (formerly <see cref="ExchangeMode.Simulator"/>;
@@ -15,6 +16,13 @@ namespace B3.Trading.Api;
 /// <c>leaves</c>/<c>cum</c> server-side. This inverts the failure mode of
 /// "caller forgot to bump cum" — engines like Iceberg refill on
 /// <c>leaves==0</c> and silent drift would be a nasty bug to hunt.
+///
+/// <para>Lives in the Infrastructure project (#188 layering refactor)
+/// because the endpoint is the only consumer of the Mock-mode
+/// <see cref="MockEntryPointClient"/> + <see cref="ExecutionReportEnvelope"/>
+/// concretions. Mapped from the composition root via
+/// <see cref="MapSimulatorEndpoints"/>; the Api layer no longer references
+/// Infrastructure.</para>
 /// </summary>
 public static class SimulatorEndpoint
 {
@@ -24,6 +32,21 @@ public static class SimulatorEndpoint
         long? LastQty,
         decimal? LastPx,
         string? RejectReason);
+
+    /// <summary>
+    /// Maps <c>POST /admin/simulator/er</c> under the admin authorization
+    /// policy. URL kept stable for conformance-contract compatibility
+    /// (#163) — callers must check <c>ExchangeOptions.ResolveMode()==Mock
+    /// &amp;&amp; AllowErInjection</c> before invoking; the validator
+    /// already refuses Mode=Real/Stub/Unavailable + the flag at startup so
+    /// reaching this branch implies a Mock gateway is in DI.
+    /// </summary>
+    public static IEndpointRouteBuilder MapSimulatorEndpoints(this IEndpointRouteBuilder app)
+    {
+        app.MapPost("/admin/simulator/er", Inject)
+            .RequireAuthorization("admin");
+        return app;
+    }
 
     public static IResult Inject(
         [FromBody] InjectRequest req,

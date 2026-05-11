@@ -1,17 +1,21 @@
 using B3.Trading.Application.UserBots;
-using B3.Trading.EntryPointListener;
-using B3.Trading.EntryPointListener.Hosting;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Options;
 
-namespace B3.Trading.Api;
+namespace B3.Trading.EntryPointListener.Hosting.Admin;
 
 /// <summary>
 /// Admin endpoints for FIXP listener introspection and control.
 /// Mounted at <c>/admin/fixp</c> with admin authorization.
+///
+/// <para>Lives in the EntryPointListener project (#188 layering refactor)
+/// because every consumed type — <see cref="BotSessionConnectionDirectory"/>,
+/// <see cref="BotOutboundCoordinator"/>, the listener-internal session
+/// registry — is owned by this project. The Api layer no longer references
+/// the listener; the Host composition root maps this extension when the
+/// listener is enabled.</para>
 /// </summary>
 public static class AdminFixpEndpoints
 {

@@ -7,6 +7,7 @@ using B3.Trading.Api.Auth;
 using B3.Trading.Api.Lifecycle;
 using B3.Trading.Api.WebSockets;
 using B3.Trading.Application;
+using B3.Trading.Application.Lifecycle;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.Risk.Accounting;
@@ -14,6 +15,8 @@ using B3.Trading.Application.Risk.Checks;
 using B3.Trading.Application.UserBots;
 using B3.Trading.Domain;
 using B3.Trading.EntryPointListener;
+using B3.Trading.EntryPointListener.Hosting.Admin;
+using B3.Trading.Host.Lifecycle;
 using B3.Trading.Host.Observability;
 using B3.Trading.Host.MarketData;
 using B3.Trading.Infrastructure;
@@ -158,6 +161,16 @@ builder.Services.AddSingleton<StateSnapshotter>();
 builder.Services.AddSingleton<EventReplayer>();
 builder.Services.AddSingleton<PersistenceRecovery>();
 builder.Services.AddSingleton<EodMaterialiser>();
+builder.Services.AddSingleton<IEodMaterialiser>(sp =>
+{
+    // #188: Api consumes IEodMaterialiser only; the Persistence-disabled
+    // case is satisfied by DisabledEodMaterialiser whose IsAvailable=false
+    // makes the admin endpoint surface 409 cleanly.
+    var opts = sp.GetRequiredService<IOptions<PersistenceOptions>>().Value;
+    return opts.Enabled
+        ? sp.GetRequiredService<EodMaterialiser>()
+        : new DisabledEodMaterialiser();
+});
 builder.Services.AddHostedService<SnapshotService>();
 builder.Services.AddSingleton<EventDispatcher>();
 
@@ -412,6 +425,15 @@ builder.Services.AddSingleton<ExchangeStatus>(sp =>
     return ExchangeStatus.FromOptions(opts);
 });
 
+// #188: Api consumes IFirmDirectory only. ConfigFirmDirectory always reads
+// per-firm config from ExchangeOptions; FirmGatewayRegistry is optional
+// (only registered in Real mode) and overlays live FIXP session state when
+// present. The endpoint shape is identical regardless of mode.
+builder.Services.AddSingleton<IFirmDirectory>(sp =>
+    new ConfigFirmDirectory(
+        sp.GetRequiredService<IOptions<ExchangeOptions>>(),
+        sp.GetService<FirmGatewayRegistry>()));
+
 // Persist DataProtection keys onto the data volume. JWT auth uses HMAC and
 // doesn't depend on DataProtection, but ASP.NET still spins it up for
 // cookie/antiforgery defaults. Without persistence it logs a warning every
@@ -638,6 +660,17 @@ app.MapAlgo();
 app.MapPositions();
 app.MapBalance();
 app.MapAdmin();
+{
+    // #188: simulator/er moved to Infrastructure (it's the only consumer
+    // of MockEntryPointClient + ExecutionReportEnvelope). Mounted here
+    // conditionally so the Mock-only route stays gated identically to
+    // the legacy in-AdminEndpoints check.
+    var exchangeOpts = app.Services.GetRequiredService<IOptions<ExchangeOptions>>().Value;
+    if (exchangeOpts.ResolveMode() == ExchangeMode.Mock && exchangeOpts.AllowErInjection)
+    {
+        app.MapSimulatorEndpoints();
+    }
+}
 {
     var lo = app.Services.GetRequiredService<IOptions<EntryPointListenerOptions>>().Value;
     if (lo.Enabled) app.MapAdminFixp();

@@ -1,3 +1,4 @@
+using B3.Trading.Api.Lifecycle;
 using B3.Trading.EntryPointListener;
 using B3.Trading.Infrastructure;
 using B3.Trading.Infrastructure.Persistence;
@@ -7,7 +8,7 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 
-namespace B3.Trading.Api.Lifecycle;
+namespace B3.Trading.Host.Lifecycle;
 
 /// <summary>
 /// Kubernetes-/orchestrator-shaped lifecycle probes:
@@ -21,6 +22,13 @@ namespace B3.Trading.Api.Lifecycle;
 ///   uptime, drain state, persistence config snapshot.</item>
 /// </list>
 /// Mirrors the layout used by <c>B3MarketDataPlatform/WebSocketHost</c>.
+///
+/// <para>Lives in the Host project (#188 layering refactor) because the
+/// rich /health body composes Infrastructure-owned types
+/// (<see cref="ExchangeStatus"/>, <see cref="PersistenceOptions"/>) and
+/// listener-owned types (<see cref="EntryPointListenerOptions"/>,
+/// <see cref="Hosting.BotSessionConnectionDirectory"/>) that the Api layer
+/// must not reference.</para>
 /// </summary>
 public static class HealthEndpoints
 {

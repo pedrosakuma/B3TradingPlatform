@@ -20,8 +20,10 @@ namespace B3.Trading.Infrastructure.Persistence;
 /// today?") and for diff'ing against a manually-supplied EP report.
 /// </para>
 /// </summary>
-public sealed class EodMaterialiser
+public sealed class EodMaterialiser : IEodMaterialiser
 {
+    public bool IsAvailable => true;
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = true,
@@ -88,21 +90,17 @@ public sealed class EodMaterialiser
     }
 }
 
-public sealed class EodReport
+/// <summary>
+/// Drop-in <see cref="IEodMaterialiser"/> registered when persistence is
+/// disabled. <see cref="IsAvailable"/> is <c>false</c>, and
+/// <see cref="Materialise"/> throws so any caller that bypasses the
+/// availability check fails loudly instead of producing an empty report.
+/// </summary>
+public sealed class DisabledEodMaterialiser : IEodMaterialiser
 {
-    public string Date { get; set; } = "";
-    public string FirmId { get; set; } = "";
-    public DateTimeOffset GeneratedAtUtc { get; set; }
-    public long RecordCount { get; set; }
-    public long OrderSubmittedCount { get; set; }
-    public long ExecutionReportCount { get; set; }
-    public long FilledCount { get; set; }
-    public long PartialFillCount { get; set; }
-    public long CanceledCount { get; set; }
-    public long RejectedCount { get; set; }
-    public long KillSwitchToggleCount { get; set; }
-    public long SymbolHaltToggleCount { get; set; }
-    public long SessionPhaseChangeCount { get; set; }
-    public string Sha256 { get; set; } = "";
-    public string Path { get; set; } = "";
+    public bool IsAvailable => false;
+
+    public EodReport Materialise(DateOnly date) =>
+        throw new InvalidOperationException(
+            "EOD materialisation is unavailable: persistence is disabled.");
 }
