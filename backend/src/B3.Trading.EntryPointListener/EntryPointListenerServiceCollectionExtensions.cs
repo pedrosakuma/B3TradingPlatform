@@ -1,3 +1,4 @@
+using B3.Trading.Application;
 using B3.Trading.Application.UserBots;
 using B3.Trading.EntryPointListener.Hosting;
 using Microsoft.Extensions.Configuration;
@@ -36,6 +37,15 @@ public static class EntryPointListenerServiceCollectionExtensions
 
         if (enabled)
         {
+            // Issue #185: composition guard runs first so a missing
+            // order-path dependency aborts host startup with a clear,
+            // actionable message before FixpListenerHostedService binds
+            // its socket and starts silently swallowing inbound orders.
+            // IHostedService.StartAsync is invoked in registration order,
+            // so registering the guard ahead of the listener guarantees
+            // it fires first.
+            services.AddHostedService<Hosting.EntryPointListenerCompositionGuardHostedService>();
+
             // Sub-issue #172 (F): outbound ER multiplexer wiring.
             services
                 .AddOptions<BotErMultiplexerOptions>()
@@ -68,7 +78,37 @@ public static class EntryPointListenerServiceCollectionExtensions
             });
             services.AddSingleton<UserSessionCounter>();
 
-            services.AddSingleton<Hosting.FixpListenerHostedService>();
+            // Issue #185: build the order adapter through a DI factory.
+            // The composition guard above produces the friendly error
+            // message before we get here when any of the four order-path
+            // dependencies are missing in production wiring; this
+            // factory is the structural backstop. We resolve via
+            // GetService (not GetRequiredService) so test harnesses can
+            // register null-returning factories purely to satisfy
+            // IServiceProviderIsService — see
+            // OrderPathStubRegistrations in the test project.
+            services.AddSingleton<Hosting.FixpOrderAdapter>(sp =>
+                new Hosting.FixpOrderAdapter(
+                    sp.GetService<SymbolDirectory>()!,
+                    sp.GetService<OrderSubmissionService>()!,
+                    sp.GetService<OrderCancelService>()!,
+                    sp.GetService<IUserBotOrderMappingRegistry>()!,
+                    sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<Hosting.FixpListenerHostedService>>()));
+
+            // Use an explicit factory so DI binds to the internal
+            // overload that accepts FixpOrderAdapter (issue #185).
+            services.AddSingleton<Hosting.FixpListenerHostedService>(sp =>
+                new Hosting.FixpListenerHostedService(
+                    sp.GetRequiredService<IOptions<EntryPointListenerOptions>>(),
+                    sp.GetRequiredService<IUserBotCredentialRegistry>(),
+                    sp.GetRequiredService<IUserBotSessionRegistry>(),
+                    sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<Hosting.FixpListenerHostedService>>(),
+                    sp.GetRequiredService<Hosting.FixpOrderAdapter>(),
+                    sp.GetRequiredService<IBotSessionConnectionDirectory>(),
+                    sp.GetRequiredService<BotOutboundCoordinator>(),
+                    sp.GetRequiredService<RateLimiterRegistry>(),
+                    sp.GetRequiredService<UserSessionCounter>(),
+                    sp.GetService<TimeProvider>()));
             services.AddHostedService(sp =>
                 sp.GetRequiredService<Hosting.FixpListenerHostedService>());
         }

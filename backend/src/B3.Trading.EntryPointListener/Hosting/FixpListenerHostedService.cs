@@ -46,10 +46,30 @@ public sealed class FixpListenerHostedService : BackgroundService
         IUserBotCredentialRegistry credentials,
         IUserBotSessionRegistry sessions,
         ILogger<FixpListenerHostedService> logger,
-        SymbolDirectory? symbols = null,
-        OrderSubmissionService? submit = null,
-        OrderCancelService? cancel = null,
-        IUserBotOrderMappingRegistry? botMappings = null,
+        IBotSessionConnectionDirectory? connectionDirectory = null,
+        BotOutboundCoordinator? outboundCoordinator = null,
+        RateLimiterRegistry? rateLimiter = null,
+        UserSessionCounter? sessionCounter = null,
+        TimeProvider? clock = null)
+        : this(opts, credentials, sessions, logger, orders: null,
+               connectionDirectory, outboundCoordinator, rateLimiter, sessionCounter, clock)
+    {
+    }
+
+    /// <summary>
+    /// Internal constructor that also accepts a fully-wired
+    /// <see cref="FixpOrderAdapter"/>. Invoked by the DI factory in
+    /// <see cref="EntryPointListenerServiceCollectionExtensions.AddEntryPointListener"/>
+    /// (issue #185) and by tests that exercise the order-path end to
+    /// end. The adapter type is internal-only to the listener
+    /// assembly, which is why this overload is internal.
+    /// </summary>
+    internal FixpListenerHostedService(
+        IOptions<EntryPointListenerOptions> opts,
+        IUserBotCredentialRegistry credentials,
+        IUserBotSessionRegistry sessions,
+        ILogger<FixpListenerHostedService> logger,
+        FixpOrderAdapter? orders,
         IBotSessionConnectionDirectory? connectionDirectory = null,
         BotOutboundCoordinator? outboundCoordinator = null,
         RateLimiterRegistry? rateLimiter = null,
@@ -60,15 +80,12 @@ public sealed class FixpListenerHostedService : BackgroundService
         _credentials = credentials;
         _sessions = sessions;
         _logger = logger;
+        _orders = orders;
         _connectionDirectory = connectionDirectory;
         _outboundCoordinator = outboundCoordinator;
         _rateLimiter = rateLimiter;
         _sessionCounter = sessionCounter;
         _clock = clock ?? TimeProvider.System;
-        if (symbols is not null && submit is not null && cancel is not null && botMappings is not null)
-        {
-            _orders = new FixpOrderAdapter(symbols, submit, cancel, botMappings, logger);
-        }
     }
 
     /// <summary>

@@ -219,6 +219,37 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     };
 
     /// <summary>
+    /// Issue #185 invariant: by the time we accept an
+    /// application-layer <c>NewOrderSingle</c>/<c>OrderCancelRequest</c>
+    /// frame the connection MUST have a fully-wired order adapter and a
+    /// resolved <see cref="FixpConnectionScope"/> (set during Negotiate).
+    /// In production this is enforced eagerly at host startup by
+    /// <see cref="EntryPointListenerCompositionGuard"/>; if either is
+    /// still null here we fail loudly rather than silently swallowing
+    /// the order.
+    /// </summary>
+    private void EnsureOrderAdapterWired()
+    {
+        if (_orders is null)
+        {
+            throw new InvalidOperationException(
+                "FIXP listener received an application order frame but the order " +
+                "adapter is not wired. EntryPointListenerCompositionGuard should " +
+                "have rejected host startup; this indicates a test harness that " +
+                "enabled the listener without registering the order-path " +
+                "dependencies (SymbolDirectory, OrderSubmissionService, " +
+                "OrderCancelService, IUserBotOrderMappingRegistry).");
+        }
+        if (_scope is null)
+        {
+            throw new InvalidOperationException(
+                "FIXP listener received an application order frame in Established " +
+                "state but the connection scope is null. This violates the " +
+                "Negotiate→Establish ordering invariant.");
+        }
+    }
+
+    /// <summary>
     /// Returns <c>true</c> to keep the connection loop running, <c>false</c>
     /// to terminate the session and close the socket.
     /// </summary>
@@ -248,7 +279,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
 
             case NewOrderSingleData.MESSAGE_ID:
                 if (_sm.State != FixpSessionState.Established) goto default;
-                if (_orders is not null && _scope is not null)
+                EnsureOrderAdapterWired();
                 {
                     // Sub-issue #173 (G): track inbound seq via the
                     // BusinessHeader.MsgSeqNum. Out-of-order forward
@@ -269,7 +300,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
                     await _writeMutex.WaitAsync(ct).ConfigureAwait(false);
                     try
                     {
-                        await _orders.HandleNewOrderSingleAsync(stream, frame.Payload, _scope, ct)
+                        await _orders!.HandleNewOrderSingleAsync(stream, frame.Payload, _scope!, ct)
                             .ConfigureAwait(false);
                         TouchOutbound();
                     }
@@ -279,7 +310,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
 
             case OrderCancelRequestData.MESSAGE_ID:
                 if (_sm.State != FixpSessionState.Established) goto default;
-                if (_orders is not null && _scope is not null)
+                EnsureOrderAdapterWired();
                 {
                     var fresh = await TrackInboundAppMessageAsync(
                         stream, frame.Payload, OrderCancelRequestData.BLOCK_LENGTH, ct).ConfigureAwait(false);
@@ -288,7 +319,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
                     await _writeMutex.WaitAsync(ct).ConfigureAwait(false);
                     try
                     {
-                        await _orders.HandleOrderCancelRequestAsync(stream, frame.Payload, _scope, ct)
+                        await _orders!.HandleOrderCancelRequestAsync(stream, frame.Payload, _scope!, ct)
                             .ConfigureAwait(false);
                         TouchOutbound();
                     }

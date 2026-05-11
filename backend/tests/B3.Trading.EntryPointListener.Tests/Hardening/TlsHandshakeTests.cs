@@ -53,6 +53,7 @@ public class TlsHandshakeTests
                     s.AddSingleton<InMemoryUserBotSessionRegistry>();
                     s.AddSingleton<IUserBotSessionRegistry>(sp =>
                         sp.GetRequiredService<InMemoryUserBotSessionRegistry>());
+                    s.AddNoopOrderPathStubs();
                     s.AddEntryPointListener(config);
                 })
                 .Build();
@@ -120,6 +121,7 @@ public class TlsHandshakeTests
                     s.AddSingleton<InMemoryUserBotSessionRegistry>();
                     s.AddSingleton<IUserBotSessionRegistry>(sp =>
                         sp.GetRequiredService<InMemoryUserBotSessionRegistry>());
+                    s.AddNoopOrderPathStubs();
                     s.AddEntryPointListener(config);
                 })
                 .Build();
