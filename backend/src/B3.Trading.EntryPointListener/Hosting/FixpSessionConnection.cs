@@ -52,6 +52,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
 
     private readonly SemaphoreSlim _writeMutex = new(1, 1);
     private Stream? _stream;
+    private FixpOutboundChannelWriter? _outboundWriter;
     private volatile bool _registeredInDirectory;
     private volatile bool _closed;
     private volatile bool _userSlotHeld;
@@ -168,14 +169,42 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         }
         finally
         {
-            _closed = true;
             StopHeartbeatLoop();
             ArrayPool<byte>.Shared.Return(readBuf);
+            // RFC §5.3.2 shutdown drain: flush queued outbound frames
+            // BEFORE flipping _closed / tearing down the stream so the
+            // drain callback's WriteAsync calls go to a still-live
+            // socket. Bounded by OutboundDrainShutdownTimeout so a
+            // dead peer cannot stall connection cleanup; remaining
+            // queued frames stay owned by the per-credential
+            // BotOutboundBuffer (drain loop NEVER disposes — RFC §5.5)
+            // and ride retransmit on the next reconnect.
+            //
+            // Drain BEFORE deregister: a frame the multiplexer
+            // enqueued while we were still in the directory must
+            // still get a chance to flush.
+            var writerForDrain = _outboundWriter;
+            if (writerForDrain is not null)
+            {
+                try
+                {
+                    await writerForDrain.CompleteAsync(_options.Buffers.OutboundDrainShutdownTimeout)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex,
+                        "fixp.outbound.drain.shutdown.error connectionId={ConnectionId}",
+                        _connectionId);
+                }
+            }
+            _closed = true;
             // Deregister BEFORE the stream is closed so a racing ER from
             // the multiplexer hot path either sees us in the directory
-            // (and TryEnqueue takes the write mutex which we still own)
-            // or sees us absent (and falls through to buffering). Either
-            // outcome is safe; no NRE on a half-disposed stream.
+            // (and TryEnqueue lands in the now-completed writer, which
+            // returns false → buffer-only path) or sees us absent (and
+            // falls through to buffering). Either outcome is safe; no
+            // NRE on a half-disposed stream.
             if (_registeredInDirectory && _scope is not null && _connectionDirectory is not null)
             {
                 _connectionDirectory.Deregister(_scope.Principal.CredentialId, this);
@@ -626,6 +655,16 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         // pre-Ack ER as a protocol violation and drop the session.
         if (_connectionDirectory is not null)
         {
+            // RFC §5.3 / P8 / F3 — start the per-connection bounded
+            // outbound channel + dedicated drain loop BEFORE we publish
+            // ourselves to the directory, so the very first
+            // multiplexer push lands on a live writer (no race where
+            // TryGet returns us but the writer is not yet wired).
+            _outboundWriter = new FixpOutboundChannelWriter(
+                capacity: Math.Max(1, _options.Buffers.OutboundChannelCapacity),
+                writeAsync: WriteOutboundFromDrainLoopAsync,
+                connectionId: _connectionId,
+                logger: _logger);
             _connectionDirectory.Register(credentialId, this);
             _registeredInDirectory = true;
         }
@@ -654,7 +693,23 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         }
 
         var action = _sm.OnTerminate(in msg);
-        await SendActionAsync(stream, action, sid, ver, ct).ConfigureAwait(false);
+        // RFC §5.3 / P8: post-Establish writes must serialise against
+        // the per-connection drain loop's outbound writes. The pre-P8
+        // path was racy too (drain loop's Task.Run used the mutex but
+        // this call site never did); now that the writer reliably
+        // takes _writeMutex on every drained frame, holding it here
+        // closes the byte-interleave window for free.
+        await _writeMutex.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await SendActionAsync(stream, action, sid, ver, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            try { _writeMutex.Release(); }
+            catch (ObjectDisposedException) { }
+            catch (SemaphoreFullException) { }
+        }
         return false; // always close after Terminate
     }
 
@@ -1272,65 +1327,92 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         catch { return null; }
     }
 
-    // ─── IBotSessionOutboundSender (sub-issue F #172) ────────────────────
+    // ─── IBotSessionOutboundSender (sub-issue F #172, RFC §5.3 / P8 / F3) ─
 
     /// <summary>
-    /// Synchronously enqueues outbound bytes from the multiplexer. We
-    /// fire a fire-and-forget Task that takes the write mutex and writes
-    /// to the underlying stream — this is the right ordering primitive
-    /// because (a) the multiplexer's drain thread must not block on
-    /// socket I/O, and (b) the write mutex serialises against any
-    /// handshake/order-ack writes the connection's own request loop is
-    /// emitting concurrently.
+    /// Synchronously hands <paramref name="frame"/> to the
+    /// per-connection bounded outbound channel (RFC §5.3 / P8 / F3).
+    /// Non-blocking: returns <c>false</c> when the connection has
+    /// closed or the channel is full (slow-consumer backpressure,
+    /// §5.3.1).
     ///
-    /// <para><b>Pre-F3 transitional copy (RFC §5.5 / §5.3, issue #201).</b>
-    /// The caller's <paramref name="framedBytes"/> may alias pooled
-    /// memory owned by <c>BotOutboundBuffer</c>. The buffer can dispose
-    /// that memory on the bot's next acked-watermark eviction (or on
-    /// overflow / reset), and the eviction is not synchronised with the
-    /// fire-and-forget write task we schedule below. Until F3 lands —
-    /// where the per-session channel's reader holds the
-    /// <c>OutboundFrame</c> until the write completes — we materialise
-    /// a private heap copy so the async write never observes pooled
-    /// memory after the buffer has released it. The single-disposer
-    /// rule in §5.5 still holds: this method does not touch the
-    /// caller's owner.</para>
+    /// <para>Replaces the pre-F3 <c>Task.Run</c>-per-send fire-and-
+    /// forget path: a single dedicated drain loop now owns the socket
+    /// and writes serially under <see cref="_writeMutex"/> to interleave
+    /// safely with handshake/order-ack writes from the request loop.
+    /// One <see cref="Task"/> per connection, not per outbound message.</para>
+    ///
+    /// <para>The drain loop NEVER disposes <paramref name="frame"/> —
+    /// the per-credential <see cref="BotOutboundBuffer"/> is the sole
+    /// disposer (RFC §5.5 single-disposer rule). Lifetime safety
+    /// across the awaited socket write is guaranteed by the protocol:
+    /// a bot can only ack a watermark for sequences it has actually
+    /// received, so an unsent frame's seq cannot be evicted under us;
+    /// overflow / version-bump force-closes the connection (and ends
+    /// the drain loop) BEFORE the buffer's <c>Reset</c> clears pooled
+    /// owners. See <see cref="FixpOutboundChannelWriter"/> doc.</para>
     /// </summary>
-    bool IBotSessionOutboundSender.TryEnqueue(ReadOnlyMemory<byte> framedBytes)
+    bool IBotSessionOutboundSender.TryEnqueue(OutboundFrame frame)
     {
         if (_closed) return false;
+        var writer = _outboundWriter;
+        if (writer is null) return false;
+        return writer.TryEnqueue(frame);
+    }
+
+    /// <summary>
+    /// Drain-loop callback: serialises writes against handshake /
+    /// order-ack writes via <see cref="_writeMutex"/>. Returns
+    /// <c>false</c> when the writer should stop draining (stream
+    /// gone or socket failure). Errors during the actual socket
+    /// write close the stream and return <c>false</c>; the read loop
+    /// observes the broken stream and runs the deregister/release
+    /// path.
+    ///
+    /// <para>Intentionally does NOT short-circuit on
+    /// <see cref="_closed"/>: shutdown drain (RFC §5.3.2) runs while
+    /// <c>_closed</c> may already be set, and we must still flush
+    /// queued frames before the stream is torn down. The stream's
+    /// own state (closed / faulted) is the authoritative signal —
+    /// surfaced as an exception from
+    /// <see cref="System.IO.Stream.WriteAsync(System.ReadOnlyMemory{byte}, System.Threading.CancellationToken)"/>.</para>
+    /// </summary>
+    private async ValueTask<bool> WriteOutboundFromDrainLoopAsync(
+        ReadOnlyMemory<byte> bytes, CancellationToken ct)
+    {
         var stream = _stream;
         if (stream is null) return false;
 
-        // Copy out of the borrowed (potentially pooled) memory before
-        // the Task.Run captures it — see the §5.5 transitional note
-        // above. Cheap relative to the SBE encode + socket write.
-        var owned = framedBytes.ToArray();
-
-        // Fire-and-forget. Errors land in the catch and quietly close
-        // the connection; the read loop will observe the broken stream
-        // on its next iteration and run the deregister/release path.
-        _ = Task.Run(async () =>
+        await _writeMutex.WaitAsync(ct).ConfigureAwait(false);
+        try
         {
-            await _writeMutex.WaitAsync().ConfigureAwait(false);
-            try
-            {
-                if (_closed) return;
-                await stream.WriteAsync(owned, CancellationToken.None).ConfigureAwait(false);
-                TouchOutbound();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogDebug(ex, "fixp.outbound.write.error connectionId={ConnectionId}", _connectionId);
-                _closed = true;
-                try { stream.Close(); } catch { /* ignore */ }
-            }
-            finally
-            {
-                _writeMutex.Release();
-            }
-        });
-        return true;
+            await stream.WriteAsync(bytes, ct).ConfigureAwait(false);
+            TouchOutbound();
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            // Shutdown / write-mutex wait was cancelled. Surface to
+            // the drain loop, which treats cancellation as "shutdown
+            // drain timeout fired" and returns without disposing.
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex,
+                "fixp.outbound.write.error connectionId={ConnectionId}", _connectionId);
+            _closed = true;
+            try { stream.Close(); } catch { /* ignore */ }
+            return false;
+        }
+        finally
+        {
+            // Defensive: WaitAsync may have thrown ObjectDisposedException
+            // if Dispose() raced with us. Guard the release.
+            try { _writeMutex.Release(); }
+            catch (ObjectDisposedException) { }
+            catch (SemaphoreFullException) { }
+        }
     }
 
     public void Dispose()
@@ -1338,6 +1420,23 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         // Used by the multiplexer's overflow path to force-close.
         _closed = true;
         StopHeartbeatLoop();
+
+        // RFC §5.3.2 shutdown drain: best-effort flush of in-flight
+        // outbound frames, bounded by OutboundDrainShutdownTimeout.
+        // Frames not drained remain owned by the per-credential
+        // BotOutboundBuffer and ride retransmit on next reconnect —
+        // never silently dropped. Drain loop never disposes (RFC §5.5).
+        var writer = _outboundWriter;
+        if (writer is not null)
+        {
+            try
+            {
+                writer.CompleteAsync(_options.Buffers.OutboundDrainShutdownTimeout)
+                    .GetAwaiter().GetResult();
+            }
+            catch { /* best-effort on shutdown */ }
+        }
+
         try { _stream?.Close(); } catch { /* ignore */ }
         try { _tcpClient.Close(); } catch { /* ignore */ }
         _writeMutex.Dispose();

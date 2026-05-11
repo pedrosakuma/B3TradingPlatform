@@ -115,5 +115,30 @@ public sealed class EntryPointListenerOptions
 
         /// <summary>Idle bot-mapping reap interval.</summary>
         public TimeSpan MappingReapAfter { get; set; } = TimeSpan.FromMinutes(10);
+
+        /// <summary>
+        /// RFC §5.3 / P8 / F3. Capacity of the per-FIXP-connection
+        /// bounded outbound channel that the drain loop reads from.
+        /// When the channel fills up, <c>TryEnqueue</c> returns false
+        /// (RFC §5.3.1 backpressure: surface, never silently drop) —
+        /// the message stays owned by the per-credential
+        /// <see cref="UserBots.BotOutboundBuffer"/> and is replayed via
+        /// retransmit on the next reconnect. Default 4096 — sized to
+        /// absorb a transient socket-write stall of several seconds
+        /// at typical ER rates without surfacing backpressure.
+        /// </summary>
+        public int OutboundChannelCapacity { get; set; } = 4096;
+
+        /// <summary>
+        /// RFC §5.3.2 / P8 / F3. Maximum time the per-connection drain
+        /// loop will spend flushing already-queued outbound frames on
+        /// connection close before giving up and returning. Frames
+        /// still queued when the deadline elapses remain owned by the
+        /// per-credential <see cref="UserBots.BotOutboundBuffer"/> and
+        /// are replayed via retransmit on the next reconnect — they
+        /// are NEVER silently dropped from the bot's perspective.
+        /// Default 1s.
+        /// </summary>
+        public TimeSpan OutboundDrainShutdownTimeout { get; set; } = TimeSpan.FromSeconds(1);
     }
 }

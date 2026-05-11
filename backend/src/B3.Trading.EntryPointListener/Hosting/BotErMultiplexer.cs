@@ -200,16 +200,19 @@ public sealed class BotErMultiplexer : BackgroundService, IBotErRouter
         if (_directory.TryGet(mapping.CredentialId, out var sender))
         {
             // The buffer is now the sole owner of frame's pooled
-            // memory; the sender only borrows the bytes. Eviction (or
-            // overflow / reset) is what eventually disposes — never
-            // TryEnqueue, never the drain loop.
-            if (!sender.TryEnqueue(frame.Bytes))
+            // memory; the sender only borrows the bytes via the
+            // per-connection drain loop. Eviction (or overflow / reset)
+            // is what eventually disposes — never TryEnqueue, never
+            // the drain loop (RFC §5.3 / §5.5).
+            if (!sender.TryEnqueue(frame))
             {
-                // Race: the connection went away between TryGet and
-                // TryEnqueue. The buffer already holds the message,
+                // Race or backpressure (RFC §5.3.1): the connection
+                // went away between TryGet and TryEnqueue, OR the
+                // per-connection bounded outbound channel is full.
+                // Either way, the buffer already holds the message,
                 // so retransmit (G) will pick it up on reconnect.
                 _logger.LogDebug(
-                    "fixp.outbound.send.race credentialId={CredentialId} seq={Seq}",
+                    "fixp.outbound.send.race-or-backpressure credentialId={CredentialId} seq={Seq}",
                     mapping.CredentialId, seq);
             }
         }
