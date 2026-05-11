@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="B3.Trading.EntryPointListener.Tests" />
+    <InternalsVisibleTo Include="B3.Trading.Benchmarks" />
   </ItemGroup>
 
 </Project>
