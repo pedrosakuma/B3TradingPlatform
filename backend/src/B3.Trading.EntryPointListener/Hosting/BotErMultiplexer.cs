@@ -249,14 +249,37 @@ public sealed class BotErMultiplexer : BackgroundService, IBotErRouter, IExecuti
             // the drain loop (RFC §5.3 / §5.5).
             if (!sender.TryEnqueue(frame))
             {
-                // Race or backpressure (RFC §5.3.1): the connection
-                // went away between TryGet and TryEnqueue, OR the
-                // per-connection bounded outbound channel is full.
-                // Either way, the buffer already holds the message,
-                // so retransmit (G) will pick it up on reconnect.
-                _logger.LogDebug(
-                    "fixp.outbound.send.race-or-backpressure credentialId={CredentialId} seq={Seq}",
+                // RFC §5.3.1 / §5.4: per-session writer-channel
+                // backpressure (P8 channel full) MUST trigger the
+                // version-bump path. The frame is already in the
+                // per-credential buffer so retransmit can replay it,
+                // but every subsequent successfully-enqueued ER would
+                // carry a higher per-credential outbound seq — the bot
+                // would observe an N+1 on the wire without ever seeing
+                // N. Without a forced reconnect (with bumped ver), the
+                // gap is silent. Signal the same out-of-band overflow
+                // handler the buffer-cap path uses: BumpVersion +
+                // force-close + Reset. The signal is a Guid only and
+                // the channel is unbounded; the credential-rate cap
+                // (one signal per credential per overflow→bump cycle)
+                // is enforced by the buffer's own _overflowed gate
+                // once the cleared buffer goes back into Append-reject
+                // mode after this frame.
+                //
+                // We also trigger this on a TryGet/TryEnqueue race
+                // (sender removed between calls, or sender already
+                // disposed): the cost is one redundant version bump
+                // for a bot that will reconnect anyway, which is
+                // strictly safer than a silent gap.
+                _logger.LogWarning(
+                    "fixp.outbound.send.backpressure-or-race credentialId={CredentialId} seq={Seq}",
                     mapping.CredentialId, seq);
+                if (!_overflowChannel.Writer.TryWrite(mapping.CredentialId))
+                {
+                    _logger.LogWarning(
+                        "fixp.outbound.overflow.signal-dropped credentialId={CredentialId}",
+                        mapping.CredentialId);
+                }
             }
         }
         // else: bot offline, message is buffered for G's retransmit.

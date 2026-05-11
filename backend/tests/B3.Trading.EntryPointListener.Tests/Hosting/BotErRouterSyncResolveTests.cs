@@ -127,7 +127,9 @@ public class BotErRouterSyncResolveTests
         // up the drain for all credentials. Post-P9 the resolve runs
         // on the producer thread itself; only the slow credential's
         // per-connection writer (P8) can backpressure, and TryEnqueue
-        // returns false instantly. Other credentials are unaffected.
+        // returns false instantly. The false return triggers the
+        // out-of-band version-bump + force-close (RFC §5.3.1 / §5.4).
+        // The fast credential is unaffected throughout.
         var (mux, ctx) = await NewMuxAsync(bufferCap: 10_000);
 
         var slow = Guid.NewGuid();
@@ -135,13 +137,15 @@ public class BotErRouterSyncResolveTests
         await ctx.Sessions.GetOrCreateAsync(slow, default);
         await ctx.Sessions.GetOrCreateAsync(fast, default);
 
-        var slowSender = new BlockingSender(); // TryEnqueue returns false (full)
+        var slowSender = new BlockingSender(); // TryEnqueue always returns false
         var fastSender = new RecordingSender();
         ctx.Directory.Register(slow, slowSender);
         ctx.Directory.Register(fast, fastSender);
 
         ctx.Mappings.Add(internalId: 1, credId: slow, externalId: 100);
         ctx.Mappings.Add(internalId: 2, credId: fast, externalId: 200);
+
+        var slowStartVer = (await ctx.Sessions.GetOrCreateAsync(slow, default)).CurrentVer;
 
         // Hammer the slow credential first — would stall the pre-P9
         // drain. Time the subsequent fast-credential burst.
@@ -157,10 +161,19 @@ public class BotErRouterSyncResolveTests
         // exact regression P9 is meant to prevent.
         Assert.True(sw.Elapsed < TimeSpan.FromSeconds(5),
             $"fast burst took {sw.ElapsedMilliseconds} ms — slow credential leaked backpressure");
-        // The slow sender's TryEnqueue returned false every time, but
-        // the per-credential buffer absorbed the frames (sole bounded
-        // layer). Nothing was lost; retransmit replays them.
-        Assert.Equal(5_000, ctx.Coordinator.GetOrCreateBuffer(slow).Count);
+
+        // The slow credential triggers the version-bump + force-close
+        // recovery path (RFC §5.3.1). Bounded retries — the overflow
+        // loop is async and runs out-of-band.
+        for (var i = 0; i < 50 && !slowSender.Disposed; i++)
+            await Task.Delay(20);
+        Assert.True(slowSender.Disposed,
+            "slow credential's writer-channel backpressure must trigger force-close");
+        var slowNewVer = (await ctx.Sessions.GetOrCreateAsync(slow, default)).CurrentVer;
+        Assert.True(slowNewVer > slowStartVer,
+            "slow credential's session version must be bumped on writer-channel backpressure");
+        // Fast credential is untouched by the slow's recovery path.
+        Assert.False(fastSender.Disposed);
     }
 
     [Fact]
@@ -284,12 +297,15 @@ public class BotErRouterSyncResolveTests
         public void Dispose() => Disposed = true;
     }
 
-    private sealed class BlockingSender : IBotSessionOutboundSender
+    private sealed class BlockingSender : IBotSessionOutboundSender, IDisposable
     {
         // Models the P8 per-connection writer channel being full —
         // TryEnqueue returns false instantly without touching the
-        // frame. This is the slow-credential signature.
+        // frame. This is the slow-credential signature. IDisposable
+        // so the overflow handler can force-close us.
+        public bool Disposed { get; private set; }
         public bool TryEnqueue(OutboundFrame frame) => false;
+        public void Dispose() => Disposed = true;
     }
 
     private sealed class FakeMappingRegistry : IUserBotOrderMappingRegistry
