@@ -33,6 +33,7 @@ WORKDIR /src
 # backend/tests/B3.Trading.Conformance/** through and excludes every
 # other test project plus all bin/obj.
 COPY global.json Directory.Build.props ./
+COPY backend/Directory.Packages.props ./backend/
 COPY backend/tests/B3.Trading.Conformance/ ./backend/tests/B3.Trading.Conformance/
 
 # Restore + build the conformance project explicitly. We do NOT restore

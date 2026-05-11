@@ -10,11 +10,11 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="B3.EntryPoint.Client" Version="0.14.3" />
-    <PackageReference Include="System.IO.Hashing" Version="*" />
-    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="*" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="*" />
-    <PackageReference Include="Microsoft.Extensions.Options" Version="*" />
+    <PackageReference Include="B3.EntryPoint.Client" />
+    <PackageReference Include="System.IO.Hashing" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Options" />
   </ItemGroup>
 
   <ItemGroup>

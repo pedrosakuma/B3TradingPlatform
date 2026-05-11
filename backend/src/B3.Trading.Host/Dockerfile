@@ -11,6 +11,7 @@ WORKDIR /src
 
 # Copy the things that change rarely first so the restore layer caches well.
 COPY global.json Directory.Build.props B3TradingPlatform.slnx ./
+COPY backend/Directory.Packages.props ./backend/
 COPY backend/src ./backend/src
 
 WORKDIR /src/backend/src/B3.Trading.Host
