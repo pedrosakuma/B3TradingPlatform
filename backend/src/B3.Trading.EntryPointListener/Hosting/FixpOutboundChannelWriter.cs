@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using B3.Trading.Application.Observability;
 using B3.Trading.Application.UserBots;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -190,6 +191,7 @@ internal sealed class FixpOutboundChannelWriter
                 // Drain still hung — log and abandon. Connection
                 // cleanup proceeds; the (orphaned) drain task will
                 // exit when its WriteAsync eventually unblocks.
+                MetricsRegistry.FixpOutboundDrainShutdownAbandoned.Add(1);
                 _logger.LogWarning(
                     "fixp.outbound.drain.shutdown.abandoned connectionId={ConnectionId} timeoutMs={TimeoutMs}",
                     _connectionId, (int)timeout.TotalMilliseconds);
