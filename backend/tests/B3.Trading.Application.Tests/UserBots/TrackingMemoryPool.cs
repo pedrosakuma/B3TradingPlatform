@@ -4,61 +4,63 @@ using System.Collections.Concurrent;
 namespace B3.Trading.Application.Tests.UserBots;
 
 /// <summary>
-/// RFC §5.5 / issue #201 test double. Wraps
-/// <see cref="MemoryPool{T}.Shared"/> and tracks rent / dispose counts
-/// per outstanding owner so tests can assert the
+/// RFC §5.5 / issue #230 test double. Wraps
+/// <see cref="ArrayPool{T}.Shared"/> and tracks rent / return counts per
+/// outstanding array so tests can assert the
 /// <see cref="B3.Trading.Application.UserBots.BotOutboundBuffer"/>
-/// single-disposer invariant: every rented owner is disposed exactly
-/// once and never disposed twice.
+/// single-disposer invariant: every rented array is returned exactly
+/// once and never returned twice.
+///
+/// <para>Successor to the pre-#230 <c>TrackingMemoryPool</c>: that
+/// double wrapped <see cref="MemoryPool{T}.Shared"/> and produced an
+/// <see cref="IMemoryOwner{T}"/> wrapper per rent. After #230 the
+/// production encoder rents raw arrays directly from
+/// <see cref="ArrayPool{T}.Shared"/>; this double mirrors that path
+/// so the dispose-count invariant translates exactly.</para>
 /// </summary>
-internal sealed class TrackingMemoryPool : MemoryPool<byte>
+internal sealed class TrackingMemoryPool : ArrayPool<byte>, IDisposable
 {
     private int _rentCount;
     private int _disposeCount;
-    // We track each rented owner individually so a double-dispose
+    // We track each rented array by identity so a double-return
     // surfaces as a deterministic test failure instead of a silent
     // double-decrement on a shared counter.
-    private readonly ConcurrentDictionary<TrackingOwner, byte> _outstanding = new();
+    private readonly ConcurrentDictionary<byte[], byte> _outstanding =
+        new(ReferenceEqualityComparer<byte[]>.Instance);
 
     public int RentCount => Volatile.Read(ref _rentCount);
     public int DisposeCount => Volatile.Read(ref _disposeCount);
     public int OutstandingCount => _outstanding.Count;
-    public override int MaxBufferSize => Shared.MaxBufferSize;
 
-    public override IMemoryOwner<byte> Rent(int minBufferSize = -1)
+    public override byte[] Rent(int minimumLength)
     {
-        var inner = Shared.Rent(minBufferSize);
+        var arr = Shared.Rent(minimumLength);
         Interlocked.Increment(ref _rentCount);
-        var wrapper = new TrackingOwner(this, inner);
-        _outstanding[wrapper] = 0;
-        return wrapper;
+        if (!_outstanding.TryAdd(arr, 0))
+        {
+            // The shared pool handed us back an array we already
+            // believe is outstanding — that would mean we missed a
+            // Return upstream. Fail loudly so the test surfaces it.
+            throw new InvalidOperationException(
+                "TrackingMemoryPool received a rent for an array that is still tracked as outstanding.");
+        }
+        return arr;
     }
 
-    internal void OnOwnerDisposed(TrackingOwner owner)
+    public override void Return(byte[] array, bool clearArray = false)
     {
-        if (!_outstanding.TryRemove(owner, out _))
-            throw new InvalidOperationException("OutboundFrame double-dispose detected by TrackingMemoryPool.");
+        if (!_outstanding.TryRemove(array, out _))
+            throw new InvalidOperationException("OutboundFrame double-return detected by TrackingMemoryPool.");
         Interlocked.Increment(ref _disposeCount);
+        Shared.Return(array, clearArray);
     }
 
-    protected override void Dispose(bool disposing) { /* nothing — Shared owns the underlying */ }
+    public void Dispose() { /* nothing — Shared owns the underlying inventory */ }
 
-    internal sealed class TrackingOwner : IMemoryOwner<byte>
+    private sealed class ReferenceEqualityComparer<T> : IEqualityComparer<T> where T : class
     {
-        private readonly TrackingMemoryPool _pool;
-        private IMemoryOwner<byte>? _inner;
-        public TrackingOwner(TrackingMemoryPool pool, IMemoryOwner<byte> inner)
-        {
-            _pool = pool;
-            _inner = inner;
-        }
-        public Memory<byte> Memory => (_inner ?? throw new ObjectDisposedException(nameof(TrackingOwner))).Memory;
-        public void Dispose()
-        {
-            var inner = Interlocked.Exchange(ref _inner, null)
-                ?? throw new InvalidOperationException("TrackingOwner double-dispose.");
-            inner.Dispose();
-            _pool.OnOwnerDisposed(this);
-        }
+        public static readonly ReferenceEqualityComparer<T> Instance = new();
+        public bool Equals(T? x, T? y) => ReferenceEquals(x, y);
+        public int GetHashCode(T obj) => System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(obj);
     }
 }

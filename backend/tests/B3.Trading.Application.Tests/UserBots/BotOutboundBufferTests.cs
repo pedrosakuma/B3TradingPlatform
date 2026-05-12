@@ -26,13 +26,14 @@ public class BotOutboundBufferTests
         // Successor to the old "DefensivelyCopiesPayload" test. After
         // RFC §5.5 / issue #201, Append no longer copies — the buffer
         // takes ownership of the pooled memory and disposes it on
-        // EvictUpTo. We verify the lifecycle through a tracking pool.
+        // EvictUpTo. Issue #230 moved the rent from MemoryPool to
+        // ArrayPool; the lifecycle through a tracking pool is the same.
         using var pool = new TrackingMemoryPool();
         var buf = new BotOutboundBuffer(Guid.NewGuid(), maxMessages: 10);
-        var owner = pool.Rent(8);
-        owner.Memory.Span[..3].Clear();
-        owner.Memory.Span[0] = 1; owner.Memory.Span[1] = 2; owner.Memory.Span[2] = 3;
-        var frame = OutboundFrame.Pooled(owner, 3);
+        var arr = pool.Rent(8);
+        arr.AsSpan(0, 3).Clear();
+        arr[0] = 1; arr[1] = 2; arr[2] = 3;
+        var frame = OutboundFrame.Pooled(arr, 3, pool);
 
         Assert.True(buf.Append(1, frame));
         Assert.Equal(1, pool.RentCount);

@@ -219,42 +219,29 @@ public sealed class FixpOutboundChannelWriterTests
     }
 
     /// <summary>
-    /// Test-only owner that flips a flag on Dispose so the test can
-    /// assert the writer never invoked <c>DisposeOwner</c>.
+    /// Test-only pool that tracks how many of its rented arrays got
+    /// returned, so the test can assert the writer never invoked
+    /// <c>DisposeOwner</c> (RFC §5.5 single-disposer rule). Issue #230:
+    /// switched from <c>IMemoryOwner&lt;byte&gt;</c> to a raw
+    /// <see cref="System.Buffers.ArrayPool{T}"/>-based path; this
+    /// double subclasses <see cref="System.Buffers.ArrayPool{T}"/> to
+    /// observe the return.
     /// </summary>
-    private sealed class TrackingPool
+    private sealed class TrackingPool : System.Buffers.ArrayPool<byte>
     {
         private int _disposed;
         public int DisposedCount => Volatile.Read(ref _disposed);
 
         public OutboundFrame RentFrame(byte payload)
         {
-            var owner = new TrackingOwner(this, payload);
-            return OutboundFrame.Pooled(owner, length: 1);
+            var arr = Rent(1);
+            arr[0] = payload;
+            return OutboundFrame.Pooled(arr, length: 1, pool: this);
         }
 
-        internal void NotifyDisposed() => Interlocked.Increment(ref _disposed);
+        public override byte[] Rent(int minimumLength) => new byte[Math.Max(minimumLength, 1)];
 
-        private sealed class TrackingOwner : System.Buffers.IMemoryOwner<byte>
-        {
-            private readonly TrackingPool _pool;
-            private readonly byte[] _buf;
-            private bool _disposed;
-
-            public TrackingOwner(TrackingPool pool, byte payload)
-            {
-                _pool = pool;
-                _buf = new byte[1] { payload };
-            }
-
-            public Memory<byte> Memory => _buf;
-
-            public void Dispose()
-            {
-                if (_disposed) return;
-                _disposed = true;
-                _pool.NotifyDisposed();
-            }
-        }
+        public override void Return(byte[] array, bool clearArray = false)
+            => Interlocked.Increment(ref _disposed);
     }
 }

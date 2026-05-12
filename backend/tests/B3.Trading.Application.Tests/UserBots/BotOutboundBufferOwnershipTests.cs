@@ -15,10 +15,10 @@ public class BotOutboundBufferOwnershipTests
 {
     private static OutboundFrame Pooled(TrackingMemoryPool pool, int length, byte tag)
     {
-        var owner = pool.Rent(length);
-        owner.Memory.Span[..length].Clear();
-        owner.Memory.Span[0] = tag;
-        return OutboundFrame.Pooled(owner, length);
+        var arr = pool.Rent(length);
+        arr.AsSpan(0, length).Clear();
+        arr[0] = tag;
+        return OutboundFrame.Pooled(arr, length, pool);
     }
 
     [Fact]
@@ -49,18 +49,20 @@ public class BotOutboundBufferOwnershipTests
     public void Encoder_HandsOff_NeverDisposes()
     {
         // Encoder hands off to Append; once Append accepts, only the
-        // buffer disposes — *never* the caller. We model the encoder
-        // by renting via the tracking pool and confirm that even after
-        // we drop our reference to the frame, the pool sees a dispose
-        // exactly once when the buffer evicts.
+        // buffer disposes — *never* the caller. Post issue #230 the
+        // frame is a readonly struct (no finalizer, no heap), so the
+        // pre-#230 "drop reference + GC.Collect" rehearsal no longer
+        // applies. The substantive invariant remains: dispose is
+        // observed only after the buffer evicts.
         using var pool = new TrackingMemoryPool();
         var buf = new BotOutboundBuffer(Guid.NewGuid(), maxMessages: 4);
 
-        var frame = Pooled(pool, 32, tag: 0xAB);
-        Assert.True(buf.Append(1, frame));
+        Assert.True(buf.Append(1, Pooled(pool, 32, tag: 0xAB)));
+        Assert.Equal(0, pool.DisposeCount);
 
-        // Caller drops the reference; nothing must dispose yet.
-        frame = null!;
+        // Force a GC to confirm that even with the struct's
+        // copy-by-value flying around the stack, no finalizer-based
+        // path disposes the owner — only the buffer's eviction does.
         GC.Collect();
         GC.WaitForPendingFinalizers();
         Assert.Equal(0, pool.DisposeCount);

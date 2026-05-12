@@ -33,8 +33,8 @@ namespace B3.Trading.EntryPointListener.Hosting;
 /// diagnosable cause (RFC §5.3.1, code-review concern (1)).</para>
 ///
 /// <para><b>Single-disposer rule (RFC §5.5).</b> The drain loop NEVER
-/// disposes <see cref="OutboundFrame.Owner"/>. The frame remains
-/// owned by the per-credential <see cref="BotOutboundBuffer"/> from
+/// returns the pooled array backing
+/// <see cref="OutboundFrame.PooledArray"/>. The frame remains owned by the per-credential <see cref="BotOutboundBuffer"/> from
 /// the moment <c>buffer.Append</c> succeeded upstream; the buffer is
 /// the sole disposer (on <c>EvictUpTo</c> / overflow / <c>Reset</c>).
 /// This writer only borrows <see cref="OutboundFrame.Bytes"/> for
@@ -131,7 +131,6 @@ internal sealed class FixpOutboundChannelWriter
     /// </summary>
     public bool TryEnqueue(OutboundFrame frame)
     {
-        ArgumentNullException.ThrowIfNull(frame);
         if (_completed) return false;
         // TryWrite is non-blocking and returns false when the bounded
         // channel is full — exactly the surface §5.3.1 wants. We also
