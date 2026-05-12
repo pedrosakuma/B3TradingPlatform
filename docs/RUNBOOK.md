@@ -165,13 +165,16 @@ deferring frames into the post-reconnect replay path. Do **not**
 raise it as a workaround for `.abandoned` — that path is not
 deadline-bounded and a longer timeout cannot help.
 
-**Drift detection.** Today the trading-host does **not** emit a
-gauge for the running value, so a Prometheus `expr: <gauge> != 1`
-rule would silently never fire. Until a `build-info`-style gauge
-lands (tracked as a follow-up to #231), enforce drift at deploy
-time by diffing the rendered config against the documented
-default in CI; see [`ops/perf-v0-alerts.md`](ops/perf-v0-alerts.md)
-§1.1 for the skeleton runtime rule to enable later.
+**Drift detection.** Since #234 the trading-host emits the
+build-info gauge
+`trading_entrypoint_listener_outbound_drain_shutdown_timeout_seconds`
+(OTel meter:
+`trading.entrypoint_listener.outbound_drain_shutdown_timeout`,
+unit `s`), sourced from
+`IOptionsMonitor<EntryPointListenerOptions>.CurrentValue.Buffers.OutboundDrainShutdownTimeout`
+so config reloads are reflected on the next scrape without a host
+restart. The matching `PerfV0OutboundDrainTimeoutDrift` Prometheus
+rule lives in [`ops/perf-v0-alerts.md`](ops/perf-v0-alerts.md) §1.1.
 
 ### 1.4 `Trading:Persistence:GroupCommitMaxRecords` (config, default `512`)
 
@@ -206,10 +209,14 @@ batch size.
   Larger batches risk exceeding `GroupCommitWindow` under load,
   pushing latency past the §7.3 gate.
 
-**Drift detection.** Same constraint as §1.3: no runtime gauge
-exists today, so enforce drift at deploy time. Skeleton
-Prometheus rule for when the gauge lands is in
-[`ops/perf-v0-alerts.md`](ops/perf-v0-alerts.md) §1.1.
+**Drift detection.** Since #234 the trading-host emits the
+build-info gauge `trading_persistence_group_commit_max_records`
+(OTel meter: `trading.persistence.group_commit_max_records`),
+sourced from
+`IOptionsMonitor<PersistenceOptions>.CurrentValue.GroupCommitMaxRecords`
+so config reloads are reflected on the next scrape without a host
+restart. The matching `PerfV0GroupCommitMaxRecordsDrift` Prometheus
+rule lives in [`ops/perf-v0-alerts.md`](ops/perf-v0-alerts.md) §1.1.
 
 ---
 

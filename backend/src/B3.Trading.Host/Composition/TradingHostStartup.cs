@@ -47,6 +47,17 @@ internal static class TradingHostStartup
             B3.Trading.Application.Observability.MetricsRegistry.RegisterMarginReservationCountsSource(
                 () => marginProvider.GetReservationCounts());
         }
+
+        // Issue #234 — build-info gauges for the perf-v0 tunables
+        // (RUNBOOK §1.3 / §1.4). Sourced from IOptionsMonitor so
+        // a config reload (file-watcher or IConfigurationRoot.Reload())
+        // is reflected on the next scrape without a host restart.
+        var entryPointOpts = app.Services.GetRequiredService<IOptionsMonitor<EntryPointListenerOptions>>();
+        B3.Trading.Application.Observability.MetricsRegistry.RegisterOutboundDrainShutdownTimeoutSource(
+            () => entryPointOpts.CurrentValue.Buffers.OutboundDrainShutdownTimeout.TotalSeconds);
+        var persistenceOpts = app.Services.GetRequiredService<IOptionsMonitor<PersistenceOptions>>();
+        B3.Trading.Application.Observability.MetricsRegistry.RegisterGroupCommitMaxRecordsSource(
+            () => persistenceOpts.CurrentValue.GroupCommitMaxRecords);
     }
 
     /// <summary>
