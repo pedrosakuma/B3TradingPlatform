@@ -90,38 +90,71 @@ groups:
 
 ```
 
-### 1.1 Config-drift detection (deferred)
+### 1.1 Config-drift detection
 
 Issue #231 also asks for info-level drift detection on
 `OutboundDrainShutdownTimeout` (default `1s`) and
-`GroupCommitMaxRecords` (default `512`). Implementing those as
-**Prometheus alerts requires a `build-info`-style config gauge that
-the trading-host does not emit today** — there is no
-`trading_entrypoint_listener_outbound_drain_shutdown_timeout_seconds`
-or `trading_persistence_group_commit_max_records` series in the
-current scrape, so any rule of the form `expr: <metric> != <default>`
-would silently never fire (no series → no samples → no alert).
+`GroupCommitMaxRecords` (default `512`). Since #234 the trading-host
+emits **build-info-style** gauges for both:
 
-Until those gauges are added (tracked as a follow-up to #231), the
-recommended path is a **deploy-time** check rather than a runtime
-alert: diff the rendered `appsettings.Production.json` (or the
-equivalent K8s `ConfigMap` / Helm values) against the documented
-defaults in CI, and fail the deploy on unexplained drift. Skeleton
-rule for when the gauges land:
+| OTel meter instrument | Prometheus series (post-translation) | Source of truth |
+|---|---|---|
+| `trading.entrypoint_listener.outbound_drain_shutdown_timeout` (unit `s`) | `trading_entrypoint_listener_outbound_drain_shutdown_timeout_seconds` | `IOptionsMonitor<EntryPointListenerOptions>.CurrentValue.Buffers.OutboundDrainShutdownTimeout` |
+| `trading.persistence.group_commit_max_records` (unit `records`) | `trading_persistence_group_commit_max_records` | `IOptionsMonitor<PersistenceOptions>.CurrentValue.GroupCommitMaxRecords` |
+
+Both source callbacks read the live `IOptionsMonitor.CurrentValue`
+on every scrape, so a config reload (file-watcher or
+`IConfigurationRoot.Reload()`) is reflected on the next scrape
+without a host restart. The gauges carry **no labels** — one
+series per process; cardinality is bounded by construction.
+
+The matching alerting rules — append them to the
+`perf-hardening-v0` group above:
 
 ```yaml
-# To be enabled once the trading-host emits build-info gauges
-# for the perf-v0 config knobs (follow-up to #231).
-#
-# - alert: PerfV0OutboundDrainTimeoutDrift
-#   expr: trading_entrypoint_listener_outbound_drain_shutdown_timeout_seconds != 1
-#   for: 5m
-#   labels:  { severity: info, subsystem: fixp-listener,  rfc_section: "5.3" }
-# - alert: PerfV0GroupCommitMaxRecordsDrift
-#   expr: trading_persistence_group_commit_max_records != 512
-#   for: 5m
-#   labels:  { severity: info, subsystem: persistence,    rfc_section: "4.2" }
+      # 1.1.1 OutboundDrainShutdownTimeout drift — RUNBOOK §1.3 / PR #219.
+      - alert: PerfV0OutboundDrainTimeoutDrift
+        expr: trading_entrypoint_listener_outbound_drain_shutdown_timeout_seconds != 1
+        for: 5m
+        labels:
+          severity: info
+          subsystem: fixp-listener
+          rfc: perf-hardening-v0
+          rfc_section: "5.3"
+        annotations:
+          summary: "OutboundDrainShutdownTimeout drifted from documented default (1s)"
+          description: |
+            trading_entrypoint_listener_outbound_drain_shutdown_timeout_seconds
+            on {{ $labels.instance }} reports {{ $value }}s, which differs
+            from the documented v0 default of 1s. Confirm the deploy
+            intended this and update docs/RUNBOOK.md §1.3 if so.
+          runbook_url: "https://github.com/pedrosakuma/B3TradingPlatform/blob/main/docs/RUNBOOK.md#13-outbounddrainshutdowntimeout-config-default-000001"
+
+      # 1.1.2 GroupCommitMaxRecords drift — RUNBOOK §1.4 / PR #214.
+      - alert: PerfV0GroupCommitMaxRecordsDrift
+        expr: trading_persistence_group_commit_max_records != 512
+        for: 5m
+        labels:
+          severity: info
+          subsystem: persistence
+          rfc: perf-hardening-v0
+          rfc_section: "4.2"
+        annotations:
+          summary: "GroupCommitMaxRecords drifted from documented default (512)"
+          description: |
+            trading_persistence_group_commit_max_records on
+            {{ $labels.instance }} reports {{ $value }}, which differs
+            from the documented v0 default of 512. Confirm the deploy
+            intended this and update docs/RUNBOOK.md §1.4 if so.
+          runbook_url: "https://github.com/pedrosakuma/B3TradingPlatform/blob/main/docs/RUNBOOK.md#14-tradingpersistencegroupcommitmaxrecords-config-default-512"
 ```
+
+> **Why `info` severity.** A drift from the documented default is
+> not necessarily a bug — the v0 numbers are tuned for participant
+> volumes (RFC §4.2 / §5.3.2) and may legitimately be re-tuned in a
+> deploy. The alert exists to surface unintended drift (typo in a
+> Helm values file, stale ConfigMap not re-rendered) for a human to
+> confirm, not to wake an on-call.
 
 ## 2. Log-derived fallback (`.abandoned`, `info`)
 
@@ -160,5 +193,5 @@ is recoverable by design.
 | `WsHubFanOutDropping` | Prometheus | page | PR #220 |
 | `FixpOutboundDrainShutdownAbandoned` | Prometheus | page | PR #219 (log) + #233 (counter) |
 | Drain `.abandoned` (log fallback) | log-derived | info | PR #219 |
-| `OutboundDrainShutdownTimeout` drift | deploy-time check (gauge TBD, follow-up to #231) | info | PR #219 |
-| `GroupCommitMaxRecords` drift | deploy-time check (gauge TBD, follow-up to #231) | info | PR #214 |
+| `PerfV0OutboundDrainTimeoutDrift` | Prometheus (build-info gauge) | info | PR #219 / #234 |
+| `PerfV0GroupCommitMaxRecordsDrift` | Prometheus (build-info gauge) | info | PR #214 / #234 |

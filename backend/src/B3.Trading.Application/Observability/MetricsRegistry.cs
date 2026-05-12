@@ -450,4 +450,47 @@ public static class MetricsRegistry
         _orderRateActiveBucketsEc = endClient;
         _orderRateActiveBucketsFirm = firm;
     }
+
+    // Issue #234 — build-info gauges for perf-v0 tunables.
+    //
+    // Both gauges report the *runtime configured value* of the
+    // associated <c>IOptionsMonitor&lt;T&gt;</c> binding, so a config
+    // reload (file-watcher or IConfigurationRoot.Reload()) is
+    // reflected on the next scrape without a host restart. The source
+    // callbacks are intentionally untagged: one series per process,
+    // no high-cardinality labels — these are config drift signals,
+    // not per-tenant operational metrics. See
+    // <c>docs/ops/perf-v0-alerts.md</c> §1.1 for the matching
+    // PromQL drift rules.
+    private static volatile Func<double>? _outboundDrainShutdownTimeoutSecondsSource;
+    public static readonly ObservableGauge<double> FixpOutboundDrainShutdownTimeoutSeconds =
+        Meter.CreateObservableGauge<double>(
+            "trading.entrypoint_listener.outbound_drain_shutdown_timeout",
+            () =>
+            {
+                var src = _outboundDrainShutdownTimeoutSecondsSource;
+                return src is null
+                    ? Array.Empty<Measurement<double>>()
+                    : new[] { new Measurement<double>(src()) };
+            },
+            unit: "s",
+            description: "Configured EntryPointListener:Buffers:OutboundDrainShutdownTimeout (seconds). Build-info-style gauge sourced from IOptionsMonitor; reflects config reloads.");
+    public static void RegisterOutboundDrainShutdownTimeoutSource(Func<double> sourceSeconds) =>
+        _outboundDrainShutdownTimeoutSecondsSource = sourceSeconds;
+
+    private static volatile Func<int>? _groupCommitMaxRecordsSource;
+    public static readonly ObservableGauge<int> PersistenceGroupCommitMaxRecords =
+        Meter.CreateObservableGauge<int>(
+            "trading.persistence.group_commit_max_records",
+            () =>
+            {
+                var src = _groupCommitMaxRecordsSource;
+                return src is null
+                    ? Array.Empty<Measurement<int>>()
+                    : new[] { new Measurement<int>(src()) };
+            },
+            unit: "records",
+            description: "Configured Trading:Persistence:GroupCommitMaxRecords. Build-info-style gauge sourced from IOptionsMonitor; reflects config reloads.");
+    public static void RegisterGroupCommitMaxRecordsSource(Func<int> source) =>
+        _groupCommitMaxRecordsSource = source;
 }
