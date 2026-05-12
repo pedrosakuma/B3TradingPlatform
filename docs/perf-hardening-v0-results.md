@@ -284,3 +284,18 @@ to this document under a "§6 production-host re-run" section and
 flip the §4 verdict accordingly. Until that happens the v0
 composite-gate sign-off remains **provisional**: capacity demonstrated,
 strict driven-rate gate pending production-host evaluation.
+
+## Appendix — re-bench with harness v2 (#228)
+
+Bench-harness v2 closes the v1 gaps that PR #214 (P5 fsync) and PR #219 (P8 per-conn writer) flagged. Runner: AMD EPYC 7763, .NET 10.0.5 Server GC, `--job Short` (3 warmup / 3 iterations).
+
+**P5 — `WAL_Append_Flush_Bench`, real-disk row (`/tmp`)**
+- `BatchSize=1   /dev/shm` 12.52 ms · `/tmp` 14.42 ms (+15 %)
+- `BatchSize=64  /dev/shm` 12.13 ms · `/tmp` 15.86 ms (+31 %)
+- The disk-backed row is the one P5 (#199) is allowed to gate against; tmpfs remains the no-fsync ceiling.
+
+**P8 — `BotErRouter_RouteOne_LiveSocket_Bench` (real TCP loopback, `Socket.NoDelay`)**
+- `BatchSize=64  Creds=1`  2.40 ms · `Creds=16` 2.09 ms
+- `BatchSize=1024 Creds=1` 11.61 ms · `Creds=16` 2.91 ms
+
+ShortRun confidence intervals are wide (BDN warns) — these numbers exist to validate the harness, not to re-open the §4 verdict. Full-Default-job comparisons against `main` belong in per-fix PRs that touch the relevant hot path.
