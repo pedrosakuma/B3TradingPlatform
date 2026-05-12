@@ -261,6 +261,17 @@ that can carry it.
   pure measurement-and-documentation pass. All ~1 050 backend
   tests still pass on the underlying merge (`6c72880`).
 
+### What to watch in prod
+
+The metric / log / config surface introduced by the v0 fixes
+(WS hub fan-out drops, FIXP outbound drain shutdown,
+`GroupCommitMaxRecords`, `OutboundDrainShutdownTimeout`) is
+documented in [`RUNBOOK.md`](RUNBOOK.md) §1, with concrete
+Prometheus + log-derived alert rules in
+[`ops/perf-v0-alerts.md`](ops/perf-v0-alerts.md). Operators
+deploying a build that includes the perf-hardening v0 wave
+(P1–P14) should wire those alerts before promoting to prod.
+
 ### Recommended next step before declaring v0 fully signed off
 
 Re-run the full §7.3 composite scenario on a host that can carry
