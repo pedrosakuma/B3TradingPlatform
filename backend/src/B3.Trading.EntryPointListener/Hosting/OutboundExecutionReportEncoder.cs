@@ -29,14 +29,14 @@ namespace B3.Trading.EntryPointListener.Hosting;
 /// optionals expose only <c>Nullable&lt;T&gt;</c> getters and require
 /// raw memory writes to set the wire layout).</para>
 ///
-/// <para>P7 / F5 (issue #201): the framed bytes live in a buffer
-/// rented from <see cref="MemoryPool{T}.Shared"/>. The encoder writes
-/// the SOFH header + body in-place into that buffer and returns an
-/// <see cref="OutboundFrame"/> whose
-/// <see cref="OutboundFrame.Owner"/> the per-credential
+/// <para>P7 / F5 (issue #201) + #230: the framed bytes live in a
+/// buffer rented from <see cref="ArrayPool{T}.Shared"/>. The encoder
+/// writes the SOFH header + body in-place into that array and returns
+/// an <see cref="OutboundFrame"/> whose <see cref="OutboundFrame.PooledArray"/>
+/// + <see cref="OutboundFrame.Pool"/> the per-credential
 /// <see cref="BotOutboundBuffer"/> takes over via
 /// <see cref="BotOutboundBuffer.Append(ulong, OutboundFrame)"/>. The
-/// encoder NEVER disposes the rented owner after constructing the
+/// encoder NEVER returns the rented array after constructing the
 /// frame — single-disposer rule (RFC §5.5).</para>
 /// </summary>
 internal static class OutboundExecutionReportEncoder
@@ -179,15 +179,17 @@ internal static class OutboundExecutionReportEncoder
     private static OutboundFrame Frame(ushort blockLength, ushort templateId, ReadOnlySpan<byte> body)
     {
         var frameSize = SofhFrameWriter.FrameSize(body.Length);
-        // Rent from the shared pool. The pool returns a buffer at LEAST
-        // frameSize bytes; we tell OutboundFrame the exact framed length
-        // so downstream code (TryEnqueue, retransmit) sees the right
-        // slice. The owner travels with the frame and is disposed
-        // exactly once by BotOutboundBuffer (RFC §5.5 single-disposer).
-        var owner = MemoryPool<byte>.Shared.Rent(frameSize);
+        // Issue #230: rent the raw byte[] directly from
+        // ArrayPool<byte>.Shared (rather than MemoryPool<byte>.Shared,
+        // whose Rent allocates an ArrayMemoryPoolBuffer wrapper per
+        // call) so the encoder produces zero managed allocations
+        // beyond the pool's already-resident inventory. The frame
+        // travels with its (array, pool) pair and is returned exactly
+        // once by BotOutboundBuffer (RFC §5.5 single-disposer).
+        var array = ArrayPool<byte>.Shared.Rent(frameSize);
         SofhFrameWriter.WriteFrame(
-            owner.Memory.Span[..frameSize], blockLength, templateId, SchemaIdV6, VersionApp, body);
-        return OutboundFrame.Pooled(owner, frameSize);
+            array.AsSpan(0, frameSize), blockLength, templateId, SchemaIdV6, VersionApp, body);
+        return OutboundFrame.Pooled(array, frameSize, ArrayPool<byte>.Shared);
     }
 
     private static Side ToSbeSide(OrderSide side) => side switch

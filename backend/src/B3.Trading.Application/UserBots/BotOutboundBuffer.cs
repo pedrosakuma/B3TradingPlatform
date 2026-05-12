@@ -101,7 +101,6 @@ public sealed class BotOutboundBuffer
     /// </summary>
     public bool Append(ulong seq, OutboundFrame frame)
     {
-        ArgumentNullException.ThrowIfNull(frame);
         lock (_gate)
         {
             if (_overflowed)
