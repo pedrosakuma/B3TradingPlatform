@@ -36,6 +36,12 @@ Start here. This is the map for everything under `docs/` in
 
 ## Operations / Runbooks
 
+- [RUNBOOK.md](RUNBOOK.md) — top-level operations runbook;
+  cross-cutting "what to watch in prod" items including the
+  perf-hardening v0 metric / log / config surface.
+- [ops/perf-v0-alerts.md](ops/perf-v0-alerts.md) — concrete
+  Prometheus + log-derived alert rules for the perf-hardening v0
+  observability surface (companion to the RUNBOOK §1).
 - [operations/fixp-listener.md](operations/fixp-listener.md) —
   enabling, sizing, credentials, retransmit, drain & shutdown for the
   FIXP listener.
