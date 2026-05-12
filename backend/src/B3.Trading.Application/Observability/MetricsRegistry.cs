@@ -94,6 +94,16 @@ public static class MetricsRegistry
     // Drain
     public static readonly Counter<long> DrainRejections =
         Meter.CreateCounter<long>("trading.drain.rejections");
+    // RFC §5.3.2 / P8 / F3. Bumped each time the per-FIXP-connection
+    // outbound drain loop ignored cancellation for >250 ms past the
+    // configured shutdown timeout and the writer abandoned it
+    // (FixpOutboundChannelWriter.WaitForDrainAsync). Sibling of the
+    // existing structured warning log of the same name; the log
+    // remains the source of truth for the `connectionId` field, the
+    // counter is intentionally untagged to keep cardinality bounded
+    // (one series per process, no per-connection labels). Issue #233.
+    public static readonly Counter<long> FixpOutboundDrainShutdownAbandoned =
+        Meter.CreateCounter<long>("trading.fixp.outbound.drain.shutdown.abandoned");
 
     // Algo engine (RFC algo-orders-v0 §7 C1)
     public static readonly Counter<long> AlgoSignalsConsumed =

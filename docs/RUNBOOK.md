@@ -70,13 +70,16 @@ existing WS recovery path.
    increase it without an issue tracking the new value — the
    cap is also the worst-case in-memory queue bound.
 
-### 1.2 `fixp.outbound.drain.shutdown.abandoned` (warning log)
+### 1.2 `trading.fixp.outbound.drain.shutdown.abandoned` (counter + warning log)
 
 | Field | Value |
 |---|---|
-| Source | Structured log line in [`Hosting/FixpOutboundChannelWriter.cs`](../backend/src/B3.Trading.EntryPointListener/Hosting/FixpOutboundChannelWriter.cs) at `LogWarning` (the `_drainLoop.WaitAsync` 250 ms catch) |
-| Origin | P8 / F3 — PR [#219](https://github.com/pedrosakuma/B3TradingPlatform/pull/219), RFC §5.3.2 |
-| Type   | **Warning log** — *not* an OTel counter today (see follow-up note below) |
+| Source | OTel `Counter<long>` on the `B3.Trading` meter + structured log line in [`Hosting/FixpOutboundChannelWriter.cs`](../backend/src/B3.Trading.EntryPointListener/Hosting/FixpOutboundChannelWriter.cs) at `LogWarning` (the `_drainLoop.WaitAsync` 250 ms catch) |
+| OTel name | `trading.fixp.outbound.drain.shutdown.abandoned` |
+| Prom name | `trading_fixp_outbound_drain_shutdown_abandoned_total` |
+| Labels | none — untagged on purpose, see "follow-up" below |
+| Origin | P8 / F3 — PR [#219](https://github.com/pedrosakuma/B3TradingPlatform/pull/219) (log), issue [#233](https://github.com/pedrosakuma/B3TradingPlatform/issues/233) (counter), RFC §5.3.2 |
+| Type   | Counter (Prometheus-native, page-severity) + structured warning log (operator-readable `connectionId`) |
 
 **Message shape.**
 
@@ -103,11 +106,14 @@ slot was closed without a clean drain; the credential is freed
 for a successor session per §4.5 only after the orphaned task
 finally exits.
 
-**Alert.** Any occurrence is operator-visible. Recommended:
-`count_over_time({msg=~"fixp.outbound.drain.shutdown.abandoned.*"}[5m]) > 0`
-→ **page**. (Translate the LogQL above to your stack — Loki
-example shown.) Contrast with the sibling `.timeout` line, which
-should be alerted at info-level only — that one is the documented
+**Alert.** Any occurrence is operator-visible. Prometheus-native
+rule (preferred): `increase(trading_fixp_outbound_drain_shutdown_abandoned_total[5m]) > 0`
+→ **page**. The legacy LogQL fallback
+(`count_over_time({msg=~"fixp.outbound.drain.shutdown.abandoned.*"}[5m]) > 0`)
+remains valid for stacks without the OTel scrape but is
+demoted to `info` in [`perf-v0-alerts.md`](ops/perf-v0-alerts.md) §2.
+Contrast with the sibling `.timeout` line, which should be
+alerted at info-level only — that one is the documented
 "slow peer, deadline elapsed" path and is bounded by
 `OutboundDrainShutdownTimeout` (§1.3 below).
 
@@ -115,7 +121,9 @@ should be alerted at info-level only — that one is the documented
 
 1. Pull the `connectionId` from the log line and grep recent
    FIXP listener logs for matching `Negotiate`, `Establish`,
-   `Terminate` to identify the credential / firm.
+   `Terminate` to identify the credential / firm. (The counter
+   itself is intentionally untagged; the `connectionId` lives
+   on the sibling log line.)
 2. If isolated to one peer, the peer is misbehaving — coordinate a
    forced session cleanup via `/admin/fixp` (see fixp-listener
    ops doc).
@@ -123,12 +131,12 @@ should be alerted at info-level only — that one is the documented
    write path itself has regressed in cancellation behaviour. Roll
    back the most recent listener change and open a P0.
 
-> **Follow-up.** Today this is a log line only. Issue
-> [#231](https://github.com/pedrosakuma/B3TradingPlatform/issues/231)'s
-> table named `fixp.outbound.drain.shutdown.abandoned` as a
-> *metric*; it is currently emitted **only** as a structured log.
-> A counter equivalent is tracked as a separate follow-up
-> (TBD — to be filed). Until then alerting must be log-derived.
+> **Cardinality note.** The counter is emitted **untagged** so
+> that the Prometheus series is bounded to one per process. The
+> `connectionId` is preserved on the sibling structured log line
+> for operator triage; do not promote it to a metric label
+> without a follow-up issue weighing the cardinality cost
+> (FIXP connection IDs are not bounded over time).
 
 ### 1.3 `OutboundDrainShutdownTimeout` (config, default `00:00:01`)
 

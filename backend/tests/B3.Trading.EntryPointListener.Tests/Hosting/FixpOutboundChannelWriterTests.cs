@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Diagnostics.Metrics;
+using B3.Trading.Application.Observability;
 using B3.Trading.Application.UserBots;
 using B3.Trading.EntryPointListener.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -227,6 +229,58 @@ public sealed class FixpOutboundChannelWriterTests
     /// double subclasses <see cref="System.Buffers.ArrayPool{T}"/> to
     /// observe the return.
     /// </summary>
+    [Fact(Timeout = 10_000)]
+    public async Task CompleteAsync_AbandonedPath_IncrementsOtelCounter()
+    {
+        // Issue #233. The abandoned path must increment the
+        // `trading.fixp.outbound.drain.shutdown.abandoned` OTel
+        // counter exactly once, at the same call site as the
+        // existing structured warning log. We force the abandoned
+        // branch by handing the writer a write callback that
+        // ignores the cancellation token entirely — after the
+        // configured timeout the writer cancels its CTS, waits
+        // 250 ms, observes the drain loop still has not returned,
+        // logs `.abandoned` and bumps the counter.
+        long captured = 0;
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (instrument, ml) =>
+        {
+            if (instrument.Name == "trading.fixp.outbound.drain.shutdown.abandoned")
+                ml.EnableMeasurementEvents(instrument);
+        };
+        listener.SetMeasurementEventCallback<long>((instrument, measurement, tags, state) =>
+        {
+            Interlocked.Add(ref captured, measurement);
+        });
+        listener.Start();
+
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var writer = new FixpOutboundChannelWriter(
+            capacity: 4,
+            // Intentionally ignores ct — this is the "drain loop
+            // ignored cancellation" pathology the abandoned path
+            // exists to detect.
+            writeAsync: async (_, _) =>
+            {
+                await release.Task.ConfigureAwait(false);
+                return true;
+            },
+            connectionId: "conn-abandoned",
+            logger: NullLogger.Instance);
+
+        Assert.True(writer.TryEnqueue(OutboundFrame.Unowned(new byte[] { 0x01 })));
+
+        // Short timeout → quick to the abandoned branch
+        // (timeout + 250 ms cancel grace ≈ 300 ms).
+        await writer.CompleteAsync(TimeSpan.FromMilliseconds(50));
+
+        Assert.Equal(1, Interlocked.Read(ref captured));
+
+        // Unblock so the orphaned drain task can exit cleanly and
+        // the test does not leak it.
+        release.TrySetResult();
+    }
+
     private sealed class TrackingPool : System.Buffers.ArrayPool<byte>
     {
         private int _disposed;

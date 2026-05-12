@@ -23,10 +23,11 @@ post-translation names.
 >   recording / alerting equivalent in your ops platform
 >   (Datadog monitor, Grafana Cloud alert, etc.) — the
 >   `expr:` / `for:` / labels are the contract.
-> - The `.abandoned` rule is **log-derived** (Loki / equivalent),
->   not Prometheus — see §1.2 of the runbook for why. The example
->   below is LogQL; translate the selector to whatever log query
->   language your aggregator uses.
+> - The `.abandoned` rule is **Prometheus-native** as of issue #233
+>   (the OTel counter `trading.fixp.outbound.drain.shutdown.abandoned`
+>   is now emitted on the same code path as the structured warning
+>   log). The legacy LogQL form is retained below as `info` for
+>   stacks without the OTel scrape.
 
 ---
 
@@ -58,6 +59,34 @@ groups:
             WS clients will see a gap and must reconnect-and-replay.
             See docs/RUNBOOK.md §1.1 for the triage sequence.
           runbook_url: "https://github.com/pedrosakuma/B3TradingPlatform/blob/main/docs/RUNBOOK.md#11-tradingdispatcherws_fanout_dropped-counter"
+
+      # 1.2 FIXP outbound drain shutdown abandoned — see RUNBOOK §1.2
+      # / PR #219 (log) + issue #233 (counter). Any increase means
+      # the per-FIXP-connection drain loop ignored cancellation for
+      # >250 ms past the configured shutdown timeout. Counter is
+      # untagged on purpose (one series per process); the
+      # connectionId is on the sibling structured warning log.
+      - alert: FixpOutboundDrainShutdownAbandoned
+        expr: increase(trading_fixp_outbound_drain_shutdown_abandoned_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: page
+          subsystem: fixp-listener
+          rfc: perf-hardening-v0
+          rfc_section: "5.3.2"
+        annotations:
+          summary: "FIXP outbound drain abandoned (cancellation ignored on shutdown)"
+          description: |
+            trading.fixp.outbound.drain.shutdown.abandoned incremented
+            on {{ $labels.instance }}. A per-connection outbound drain
+            loop ignored cancellation for >250 ms past its configured
+            shutdown timeout and the writer abandoned it; the orphaned
+            task will exit when its in-flight WriteAsync unblocks.
+            No per-frame data is lost (BotOutboundBuffer replays on
+            reconnect) but the connection slot was closed without a
+            clean drain. See docs/RUNBOOK.md §1.2 for the triage
+            sequence (grep the sibling log line for the connectionId).
+          runbook_url: "https://github.com/pedrosakuma/B3TradingPlatform/blob/main/docs/RUNBOOK.md#12-tradingfixpoutbounddrainshutdownabandoned-counter--warning-log"
 
 ```
 
@@ -94,11 +123,15 @@ rule for when the gauges land:
 #   labels:  { severity: info, subsystem: persistence,    rfc_section: "4.2" }
 ```
 
-## 2. Log-derived alert (`.abandoned`)
+## 2. Log-derived fallback (`.abandoned`, `info`)
 
-The drain-loop **abandoned** signal is a structured warning log,
-not an OTel counter (see RUNBOOK §1.2). LogQL example for a
-Loki-backed stack:
+As of issue #233 the `.abandoned` signal is emitted as a
+Prometheus-native counter (see §1.2 above —
+`trading_fixp_outbound_drain_shutdown_abandoned_total`). The
+LogQL rule below is retained as an **info-severity fallback**
+for stacks that do not yet scrape the OTel collector (or for
+correlating the counter increment with the `connectionId` /
+`timeoutMs` structured fields on the sibling warning log).
 
 ```logql
 sum(count_over_time({app="b3-trading-host"}
@@ -110,10 +143,10 @@ AlertManager wiring:
 
 | Field | Value |
 |---|---|
-| Severity | `page` |
+| Severity | `info` (page severity is owned by the Prom rule in §1.2) |
 | Subsystem | `fixp-listener` |
 | For | immediate (any occurrence) |
-| Runbook | [`../RUNBOOK.md#12-fixpoutbounddrainshutdownabandoned-warning-log`](../RUNBOOK.md#12-fixpoutbounddrainshutdownabandoned-warning-log) |
+| Runbook | [`../RUNBOOK.md#12-tradingfixpoutbounddrainshutdownabandoned-counter--warning-log`](../RUNBOOK.md#12-tradingfixpoutbounddrainshutdownabandoned-counter--warning-log) |
 
 Do **not** alert on the sibling `fixp.outbound.drain.shutdown.timeout`
 log line at page severity — that is the documented "deadline
@@ -125,6 +158,7 @@ is recoverable by design.
 | Rule | Type | Severity | Source |
 |---|---|---|---|
 | `WsHubFanOutDropping` | Prometheus | page | PR #220 |
-| Drain `.abandoned` | log-derived | page | PR #219 |
+| `FixpOutboundDrainShutdownAbandoned` | Prometheus | page | PR #219 (log) + #233 (counter) |
+| Drain `.abandoned` (log fallback) | log-derived | info | PR #219 |
 | `OutboundDrainShutdownTimeout` drift | deploy-time check (gauge TBD, follow-up to #231) | info | PR #219 |
 | `GroupCommitMaxRecords` drift | deploy-time check (gauge TBD, follow-up to #231) | info | PR #214 |
