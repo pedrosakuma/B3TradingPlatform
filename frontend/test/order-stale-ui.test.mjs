@@ -61,7 +61,8 @@ function buildCancelAllQueue(ids, ordersMap, inflightCancels = new Set()) {
     const o = ordersMap.get(id);
     if (!o) return false;
     if (o.isStale) return false;
-    return !["Filled", "Cancelled", "Rejected", "PendingCancel"].includes(o.status);
+    if (state.isTerminalOrderStatus(o.status)) return false;
+    return o.status !== "PendingCancel";
   });
 }
 
@@ -72,8 +73,9 @@ test("cancel-all queue excludes stale orders alongside terminal ones", () => {
     ["C", { clOrdId: "C", status: "Filled" }],
     ["D", { clOrdId: "D", status: "PartiallyFilled", isStale: true }],
     ["E", { clOrdId: "E", status: "Working" }],
+    ["F", { clOrdId: "F", status: "Replaced" }],
   ]);
-  const queue = buildCancelAllQueue(["A", "B", "C", "D", "E"], orders);
+  const queue = buildCancelAllQueue(["A", "B", "C", "D", "E", "F"], orders);
   assert.deepEqual(queue, ["A", "E"]);
 });
 
