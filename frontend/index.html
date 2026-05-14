@@ -410,6 +410,37 @@
     </form>
   </div>
 
+  <!-- ORDER DETAIL MODAL (#245) ------------------------------------- -->
+  <!-- Drill-down per ClOrdID: header (order summary + VWAP + progress)
+       and an executions table filtered by the same ClOrdID. Opened by
+       clicking any non-button cell on a Working Orders row. -->
+  <div id="order-detail-modal" class="modal-backdrop order-detail-backdrop" hidden
+       role="dialog" aria-modal="true" aria-labelledby="order-detail-title">
+    <div class="modal-card order-detail-card">
+      <header class="order-detail-header">
+        <div class="order-detail-title-row">
+          <h2 id="order-detail-title">Order detail</h2>
+          <button type="button" id="order-detail-close" class="order-detail-close"
+                  aria-label="Close order detail">×</button>
+        </div>
+        <div id="order-detail-body" class="order-detail-body"></div>
+      </header>
+      <div class="table-scroll order-detail-exec-scroll">
+        <table id="order-detail-exec-table" class="order-detail-table">
+          <thead>
+            <tr>
+              <th>Time</th><th>Kind</th>
+              <th class="num">LastQty</th><th class="num">LastPx</th>
+              <th class="num">CumQty</th><th class="num">Leaves</th>
+              <th>Status</th><th>Notes</th>
+            </tr>
+          </thead>
+          <tbody id="order-detail-exec-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
   <!-- Cancel-all modal (T3). Two-stage: trader must type CANCEL to
        arm submit, then the burst kicks off with progress. Only the
        Close button is enabled once the burst is running. -->
