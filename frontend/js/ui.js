@@ -305,7 +305,7 @@ function focusableInDialog(dialog) {
     .filter(el => !el.hidden && el.offsetParent !== null);
 }
 
-function openOrderDetail(clOrdId, row) {
+export function openOrderDetail(clOrdId, row) {
   if (clOrdId == null) return;
   const modal = $("order-detail-modal");
   if (!modal) return;
@@ -325,22 +325,43 @@ function openOrderDetail(clOrdId, row) {
 export function closeOrderDetail() {
   const modal = $("order-detail-modal");
   if (!modal) return;
+  // Idempotent: nothing to do when the modal isn't currently open.
+  // This matters because state.clearAll() fan-outs to "all" and we
+  // call closeOrderDetail() unconditionally from renderForSlice — it
+  // must be safe regardless of whether the user actually had it open.
+  if (openClOrdId == null && modal.hidden && !orderDetailKeyHandler) return;
   modal.hidden = true;
-  $("order-detail-body").innerHTML = "";
-  $("order-detail-exec-body").innerHTML = "";
+  const body = $("order-detail-body");
+  if (body) body.innerHTML = "";
+  const execBody = $("order-detail-exec-body");
+  if (execBody) execBody.innerHTML = "";
   if (orderDetailKeyHandler) {
     document.removeEventListener("keydown", orderDetailKeyHandler, true);
     orderDetailKeyHandler = null;
   }
   const row = originatingRow;
+  const clOrdIdToRestore = openClOrdId;
   openClOrdId = null;
   originatingRow = null;
-  // Return focus to the originating row when it's still in the DOM;
-  // pagination / re-renders may have detached it, in which case we
-  // intentionally let the browser fall back to <body>.
-  if (row && document.contains(row)) {
-    row.setAttribute("tabindex", "-1");
-    try { row.focus({ preventScroll: true }); } catch { /* ignore */ }
+  // Return focus to the originating row. Live `orders.delta` updates
+  // re-render #blotter-body and detach the stored node, so when the
+  // original reference is gone we re-resolve the row by ClOrdID. If
+  // even that is missing (terminalized + paginated off), fall back to
+  // the blotter body so focus stays in the trader pane instead of
+  // silently landing on <body>.
+  let target = (row && document.contains(row)) ? row : null;
+  if (!target && clOrdIdToRestore != null && document.querySelector) {
+    const escaped = (typeof CSS !== "undefined" && CSS.escape)
+      ? CSS.escape(clOrdIdToRestore)
+      : String(clOrdIdToRestore).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    try {
+      target = document.querySelector(`#blotter-body tr[data-clordid="${escaped}"]`);
+    } catch { target = null; }
+  }
+  if (!target) target = $("blotter-body") || null;
+  if (target) {
+    try { target.setAttribute("tabindex", "-1"); } catch { /* ignore */ }
+    try { target.focus({ preventScroll: true }); } catch { /* ignore */ }
   }
 }
 
@@ -1185,6 +1206,13 @@ function renderGatewayPill() {
 }
 
 function renderForSlice(slice) {
+  // state.clearAll() (logout / session expiry / WS "clear" frame)
+  // notifies "all". The Order Detail modal is owned by ui and would
+  // otherwise survive the state wipe — leaving the previous user's
+  // ClOrdID rendered on top of the login screen with the capture-
+  // phase Esc/Tab listener still live. Close it before any panel
+  // re-render so subsequent renders run against a clean slate.
+  if (slice === "all") closeOrderDetail();
   if (slice === "orders" || slice === "all" || slice === "blotterFilter" || slice === "blotterPage" || slice === "selectedOrder") renderBlotter();
   if (slice === "orders" || slice === "all") renderCancelAllButton();
   if (slice === "positions" || slice === "all") renderPositions();

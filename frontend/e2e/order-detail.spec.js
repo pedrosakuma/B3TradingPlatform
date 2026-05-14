@@ -179,5 +179,13 @@ test.describe("Order detail modal (#245)", () => {
 
     await expect(modal.locator("#order-detail-exec-body tr")).toHaveCount(3);
     await expect(modal.locator(".status-cell-Filled").first()).toBeVisible();
+
+    // P2 — after a live `orders.delta` the originating row reference
+    // we cached on open is detached (renderBlotter() replaces
+    // #blotter-body.innerHTML). Closing must still return focus to the
+    // row matching the same ClOrdID, re-resolved from the new DOM.
+    await page.locator("#order-detail-close").click();
+    await expect(modal).toBeHidden();
+    await expect(row).toBeFocused();
   });
 });
