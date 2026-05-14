@@ -578,3 +578,65 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
 .bot-credentials-secret-card .modal-actions button[type="button"]:hover {
   background: rgba(255,255,255,.05);
 }
+
+/* ---------- Order detail modal (#245) ---------- */
+.order-detail-backdrop { align-items: start; padding-top: 4vh; }
+.order-detail-card {
+  width: min(880px, 94vw);
+  max-height: 90vh;
+  padding: 1rem 1.25rem 1.25rem;
+  gap: .75rem;
+}
+.order-detail-header { display: flex; flex-direction: column; gap: .5rem; }
+.order-detail-title-row {
+  display: flex; align-items: center; justify-content: space-between; gap: .75rem;
+}
+.order-detail-title-row h2 { font-size: 1rem; margin: 0; }
+.order-detail-close {
+  background: transparent; border: 0; color: var(--muted); font-size: 1.4rem;
+  line-height: 1; padding: .1rem .4rem; cursor: pointer; border-radius: 4px;
+}
+.order-detail-close:hover { color: var(--text); background: rgba(255,255,255,.05); }
+.order-detail-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.order-detail-body {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: .5rem .85rem; font-size: .8rem;
+}
+.order-detail-body .field { display: flex; flex-direction: column; gap: .15rem; }
+.order-detail-body .field .label {
+  color: var(--muted); font-size: .65rem; letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.order-detail-body .field .value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .85rem; color: var(--text);
+}
+.order-detail-body .field.field-wide { grid-column: 1 / -1; }
+.modal-progress {
+  position: relative;
+  height: 6px; border-radius: 3px; background: var(--panel-2);
+  overflow: hidden; margin-top: .25rem;
+}
+.modal-progress > .modal-progress-fill {
+  position: absolute; top: 0; left: 0; bottom: 0;
+  background: var(--accent);
+}
+.order-detail-exec-scroll { max-height: 50vh; overflow: auto; }
+.order-detail-table {
+  width: 100%; border-collapse: collapse;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .75rem;
+}
+.order-detail-table th, .order-detail-table td {
+  padding: .3rem .5rem; border-bottom: 1px solid #20283a; text-align: left;
+}
+.order-detail-table th {
+  position: sticky; top: 0; background: var(--panel);
+  color: var(--muted); font-weight: 600; font-size: .7rem;
+  text-transform: uppercase; letter-spacing: .04em;
+}
+.order-detail-table td.num, .order-detail-table th.num {
+  text-align: right; font-variant-numeric: tabular-nums;
+}
+.order-detail-table tr.empty td { color: var(--muted); text-align: center; padding: .8rem; }
+#blotter-body tr[data-clordid] { cursor: pointer; }
+#blotter-body tr[data-clordid] td.row-stale-actions { cursor: default; }

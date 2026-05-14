@@ -244,6 +244,253 @@ export function setModifyModalSubmitting(busy) {
   submit.textContent = busy ? "Sending…" : "Send modify";
 }
 
+// ── Order detail modal (#245) ──────────────────────────────────────
+//
+// Read-only drill-down per ClOrdID. Surfaces the executions that
+// belong to a single client order (no Replace-chain following, no
+// algo slice expansion — those are deliberately out of scope per the
+// issue). Re-renders idempotently when new ERs arrive while open.
+
+let openClOrdId = null;
+let originatingRow = null;
+let orderDetailKeyHandler = null;
+
+/**
+ * Volume-Weighted Average Price across the executions array, restricted
+ * to ones that actually moved size (lastQuantity > 0). Returns `null`
+ * when no qualifying fills exist so callers can render `—` instead of
+ * a misleading `0.00`.
+ */
+export function vwapOf(executions) {
+  if (!Array.isArray(executions) || executions.length === 0) return null;
+  let notional = 0;
+  let qty = 0;
+  for (const e of executions) {
+    const lq = Number(e?.lastQuantity);
+    const lp = Number(e?.lastPrice);
+    if (!Number.isFinite(lq) || lq <= 0) continue;
+    if (!Number.isFinite(lp)) continue;
+    notional += lq * lp;
+    qty += lq;
+  }
+  if (qty === 0) return null;
+  return notional / qty;
+}
+
+/**
+ * Filters the executions ring to only those whose ClOrdID matches.
+ * Comparison is string-based (DtoMappings already `.toString()`s the
+ * server-side ClOrdId so equality on numbers is unsafe).
+ */
+export function executionsForClOrdId(executions, clOrdId) {
+  if (!Array.isArray(executions) || clOrdId == null) return [];
+  const key = String(clOrdId);
+  return executions.filter(e => e != null && String(e.clOrdId) === key);
+}
+
+function fmtExecTime(ts) {
+  if (ts == null) return "—";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toISOString().slice(11, 23);
+}
+
+function focusableInDialog(dialog) {
+  const sel = [
+    "a[href]", "button:not([disabled])", "input:not([disabled])",
+    "select:not([disabled])", "textarea:not([disabled])",
+    "[tabindex]:not([tabindex='-1'])",
+  ].join(",");
+  return Array.from(dialog.querySelectorAll(sel))
+    .filter(el => !el.hidden && el.offsetParent !== null);
+}
+
+export function openOrderDetail(clOrdId, row) {
+  if (clOrdId == null) return;
+  const modal = $("order-detail-modal");
+  if (!modal) return;
+  openClOrdId = String(clOrdId);
+  originatingRow = row ?? null;
+  modal.hidden = false;
+  renderOrderDetail();
+  if (!orderDetailKeyHandler) {
+    orderDetailKeyHandler = (e) => onOrderDetailKeydown(e);
+    document.addEventListener("keydown", orderDetailKeyHandler, true);
+  }
+  // Focus the close button so keyboard-only users land inside the
+  // dialog immediately; focus trap takes care of the rest.
+  setTimeout(() => $("order-detail-close")?.focus(), 0);
+}
+
+export function closeOrderDetail() {
+  const modal = $("order-detail-modal");
+  if (!modal) return;
+  // Idempotent: nothing to do when the modal isn't currently open.
+  // This matters because state.clearAll() fan-outs to "all" and we
+  // call closeOrderDetail() unconditionally from renderForSlice — it
+  // must be safe regardless of whether the user actually had it open.
+  if (openClOrdId == null && modal.hidden && !orderDetailKeyHandler) return;
+  modal.hidden = true;
+  const body = $("order-detail-body");
+  if (body) body.innerHTML = "";
+  const execBody = $("order-detail-exec-body");
+  if (execBody) execBody.innerHTML = "";
+  if (orderDetailKeyHandler) {
+    document.removeEventListener("keydown", orderDetailKeyHandler, true);
+    orderDetailKeyHandler = null;
+  }
+  const row = originatingRow;
+  const clOrdIdToRestore = openClOrdId;
+  openClOrdId = null;
+  originatingRow = null;
+  // Return focus to the originating row. Live `orders.delta` updates
+  // re-render #blotter-body and detach the stored node, so when the
+  // original reference is gone we re-resolve the row by ClOrdID. If
+  // even that is missing (terminalized + paginated off), fall back to
+  // the blotter body so focus stays in the trader pane instead of
+  // silently landing on <body>.
+  let target = (row && document.contains(row)) ? row : null;
+  if (!target && clOrdIdToRestore != null && document.querySelector) {
+    const escaped = (typeof CSS !== "undefined" && CSS.escape)
+      ? CSS.escape(clOrdIdToRestore)
+      : String(clOrdIdToRestore).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    try {
+      target = document.querySelector(`#blotter-body tr[data-clordid="${escaped}"]`);
+    } catch { target = null; }
+  }
+  if (!target) target = $("blotter-body") || null;
+  if (target) {
+    try { target.setAttribute("tabindex", "-1"); } catch { /* ignore */ }
+    try { target.focus({ preventScroll: true }); } catch { /* ignore */ }
+  }
+}
+
+function refreshOpenOrderDetail() {
+  if (openClOrdId == null) return;
+  renderOrderDetail();
+}
+
+function renderOrderDetail() {
+  if (openClOrdId == null) return;
+  const st = getState();
+  const order = st.orders?.get(openClOrdId);
+  const execs = executionsForClOrdId(st.executions, openClOrdId);
+  renderOrderDetailHeader(order, execs);
+  renderOrderDetailExecutions(execs);
+}
+
+function renderOrderDetailHeader(order, execs) {
+  const body = $("order-detail-body");
+  const title = $("order-detail-title");
+  if (!body) return;
+  if (!order) {
+    if (title) title.textContent = `Order ${openClOrdId}`;
+    body.innerHTML = `<div class="field field-wide"><span class="value">Order not found in current cache.</span></div>`;
+    return;
+  }
+  if (title) title.textContent = `Order ${order.clOrdId}`;
+  const vwap = vwapOf(execs);
+  const qty = Number(order.quantity) || 0;
+  const cum = Number(order.cumulativeQuantity) || 0;
+  const leaves = Number(order.leavesQuantity) || 0;
+  const pct = qty > 0 ? Math.max(0, Math.min(100, (cum / qty) * 100)) : 0;
+  const price = order.price == null ? "MKT" : fmtPx(order.price);
+  const staleBadge = order.isStale
+    ? ` <span class="order-stale-badge" title="${escapeHtml(order.staleReason || "stale")}">stale</span>`
+    : "";
+  const algoBlock = order.parentAlgoId
+    ? `<div class="field"><span class="label">Parent algo</span><span class="value"><code>${escapeHtml(order.parentAlgoId)}</code>${order.algoSliceSeq != null ? ` · slice ${escapeHtml(order.algoSliceSeq)}` : ""}</span></div>`
+    : "";
+  body.innerHTML = `
+    <div class="field"><span class="label">ClOrdID</span><span class="value"><code>${escapeHtml(order.clOrdId)}</code></span></div>
+    <div class="field"><span class="label">Symbol</span><span class="value">${escapeHtml(order.symbol)}${order.securityId != null ? ` <span class="muted-line">· ${escapeHtml(order.securityId)}</span>` : ""}</span></div>
+    <div class="field"><span class="label">Side</span><span class="value">${escapeHtml(order.side)}</span></div>
+    <div class="field"><span class="label">Type</span><span class="value">${escapeHtml(order.type)}</span></div>
+    <div class="field"><span class="label">Status</span><span class="value status-cell-${escapeHtml(order.status)}">${escapeHtml(order.status)}${staleBadge}</span></div>
+    <div class="field"><span class="label">Price</span><span class="value">${price}</span></div>
+    <div class="field"><span class="label">VWAP fills</span><span class="value">${vwap == null ? "—" : fmtPx(vwap)}</span></div>
+    <div class="field field-wide">
+      <span class="label">Qty / Cum / Leaves</span>
+      <span class="value">${fmtQty(qty)} · ${fmtQty(cum)} · ${fmtQty(leaves)}</span>
+      <div class="modal-progress" role="progressbar" aria-valuenow="${cum}" aria-valuemin="0" aria-valuemax="${qty}">
+        <div class="modal-progress-fill" style="width: ${pct}%"></div>
+      </div>
+    </div>
+    ${algoBlock}
+  `;
+}
+
+function renderOrderDetailExecutions(execs) {
+  const tbody = $("order-detail-exec-body");
+  if (!tbody) return;
+  if (execs.length === 0) {
+    tbody.innerHTML = `<tr class="empty"><td colspan="8">No executions for this ClOrdID yet.</td></tr>`;
+    return;
+  }
+  // Newest first.
+  const sorted = execs.slice().sort((a, b) => {
+    const ta = Date.parse(a.timestampUtc) || 0;
+    const tb = Date.parse(b.timestampUtc) || 0;
+    return tb - ta;
+  });
+  tbody.innerHTML = sorted.map(execDetailRow).join("");
+}
+
+function execDetailRow(e) {
+  const ts = fmtExecTime(e.timestampUtc);
+  const hasFill = Number(e.lastQuantity) > 0;
+  const lastQty = hasFill ? fmtQty(e.lastQuantity) : "";
+  const lastPx = hasFill ? fmtPx(e.lastPrice) : "";
+  const stp = stpBadgeFor(e);
+  const reason = e.rejectReason ? escapeHtml(e.rejectReason) : "";
+  const notes = [reason, stp].filter(Boolean).join(" ");
+  return `<tr>
+    <td>${ts}</td>
+    <td class="kind ${escapeHtml(e.kind)}">${escapeHtml(e.kind)}</td>
+    <td class="num">${lastQty}</td>
+    <td class="num">${lastPx}</td>
+    <td class="num">${fmtQty(e.cumulativeQuantity)}</td>
+    <td class="num">${fmtQty(e.leavesQuantity)}</td>
+    <td class="status-cell-${escapeHtml(e.status)}">${escapeHtml(e.status)}</td>
+    <td>${notes}</td>
+  </tr>`;
+}
+
+function onOrderDetailKeydown(e) {
+  const modal = $("order-detail-modal");
+  if (!modal || modal.hidden) return;
+  if (e.key === "Escape") {
+    e.stopPropagation();
+    e.preventDefault();
+    closeOrderDetail();
+    return;
+  }
+  if (e.key !== "Tab") return;
+  // Focus trap. Loop the focusable set inside the dialog.
+  const dialog = modal.querySelector(".order-detail-card");
+  if (!dialog) return;
+  const focusables = focusableInDialog(dialog);
+  if (focusables.length === 0) {
+    e.preventDefault();
+    return;
+  }
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  const active = document.activeElement;
+  if (!dialog.contains(active)) {
+    e.preventDefault();
+    first.focus();
+    return;
+  }
+  if (e.shiftKey && active === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && active === last) {
+    e.preventDefault();
+    first.focus();
+  }
+}
+
 function submitModifyForm() {
   const form  = $("modify-modal-form");
   const qtyEl = $("modify-modal-qty");
@@ -457,7 +704,7 @@ export function bindUi() {
 
   // Event delegation for per-row Cancel + Modify buttons in the
   // blotter, plus row selection (clicking anywhere outside the
-  // action buttons).
+  // action buttons) and the order-detail drill-down (#245).
   $("blotter-body").addEventListener("click", (e) => {
     const cancelBtn = e.target.closest(".cancel-btn");
     if (cancelBtn) {
@@ -472,8 +719,27 @@ export function bindUi() {
       return;
     }
     const row = e.target.closest("tr[data-clordid]");
-    if (row) onSelectOrder(row.dataset.clordid);
+    if (!row) return;
+    onSelectOrder(row.dataset.clordid);
+    // Order-detail modal opens for any non-button cell click. Skip
+    // links / form controls just in case future renders embed any.
+    if (e.target.closest("button, a, input, select, textarea")) return;
+    openOrderDetail(row.dataset.clordid, row);
   });
+
+  // Order-detail modal wiring (#245). Backdrop click and × button both
+  // dismiss; Esc + focus trap handled by the keydown listener installed
+  // when the modal opens.
+  const orderDetailModal = $("order-detail-modal");
+  if (orderDetailModal) {
+    orderDetailModal.addEventListener("click", (e) => {
+      if (e.target === orderDetailModal) closeOrderDetail();
+    });
+  }
+  const orderDetailCloseBtn = $("order-detail-close");
+  if (orderDetailCloseBtn) {
+    orderDetailCloseBtn.addEventListener("click", () => closeOrderDetail());
+  }
 
   // Modify modal wiring (slice 5 of #122).
   const modifyForm = $("modify-modal-form");
@@ -940,10 +1206,18 @@ function renderGatewayPill() {
 }
 
 function renderForSlice(slice) {
+  // state.clearAll() (logout / session expiry / WS "clear" frame)
+  // notifies "all". The Order Detail modal is owned by ui and would
+  // otherwise survive the state wipe — leaving the previous user's
+  // ClOrdID rendered on top of the login screen with the capture-
+  // phase Esc/Tab listener still live. Close it before any panel
+  // re-render so subsequent renders run against a clean slate.
+  if (slice === "all") closeOrderDetail();
   if (slice === "orders" || slice === "all" || slice === "blotterFilter" || slice === "blotterPage" || slice === "selectedOrder") renderBlotter();
   if (slice === "orders" || slice === "all") renderCancelAllButton();
   if (slice === "positions" || slice === "all") renderPositions();
   if (slice === "executions" || slice === "all") renderExecutions();
+  if (slice === "executions" || slice === "orders" || slice === "all") refreshOpenOrderDetail();
   if (slice === "status") {
     setStatusPill(getState().status);
     renderReconnect(); // pill change usually correlates with countdown reset
