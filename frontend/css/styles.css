@@ -317,6 +317,7 @@ td { padding: .35rem .5rem; border-bottom: 1px solid #20283a; }
 .status-cell-Cancelled { color: var(--gray); }
 .status-cell-Filled    { color: var(--accent); }
 .status-cell-Rejected  { color: var(--red); }
+.status-cell-Replaced  { color: var(--gray); }
 
 /* Slice 3 of #132. Order-row staleness overlay. The row is dimmed
  * (row dim mirrors the panel--stale convention used elsewhere) and a
@@ -355,6 +356,7 @@ tr.row-stale > td.row-stale-actions { opacity: 1; }
 .executions-log .Rejected    { color: var(--red); }
 .executions-log .Canceled    { color: var(--gray); }
 .executions-log .New         { color: var(--accent); }
+.executions-log .Replaced    { color: var(--gray); }
 .executions-log .meta { color: var(--muted); }
 .executions-log .badge {
   display: inline-block;
