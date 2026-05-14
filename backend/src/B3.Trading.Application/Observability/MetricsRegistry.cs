@@ -49,6 +49,14 @@ public static class MetricsRegistry
     // its terminal status.
     public static readonly Counter<long> ExecutionReportsLateFillAfterTerminal =
         Meter.CreateCounter<long>("trading.er.late_fill_after_terminal");
+    // Issue #241: an ER resolved to a known owner via OrderOwnershipMap
+    // but the corresponding Order is absent from WorkingOrderBook —
+    // we have nowhere to apply the fill / status mutation. Most often
+    // a venue cancel-as-replace (priority-lost) path that wasn't
+    // intercepted as a replacement. A non-zero rate here means a
+    // silent fill loss with position/cash divergence; alertable.
+    public static readonly Counter<long> ExecutionReportsDroppedKnownOwnerMissingOrder =
+        Meter.CreateCounter<long>("trading.execution_reports.dropped_known_owner_missing_order");
 
     // Risk / kill-switch
     public static readonly Counter<long> KillSwitchToggled =

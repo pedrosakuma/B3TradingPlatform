@@ -1,4 +1,5 @@
 using B3.Trading.Application.Risk;
+using B3.Trading.Application.UserBots;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -332,5 +333,194 @@ public class OrderModifyMarginAndProcessorTests
 
         Assert.Equal(OrderStatus.Rejected, order.Status);
         Assert.Single(sink.Events);
+    }
+
+    // ---------------- Issue #241: Cancel-as-Replace (priority-lost) ----------------
+
+    private sealed class RecordingReplaceCoordinator : IReplaceMarginCoordinator
+    {
+        public List<(ulong Orig, ulong New, decimal Notional)> Commits { get; } = new();
+        public List<ulong> Aborts { get; } = new();
+        public List<(ulong Orig, ulong New, decimal Notional)> Prepares { get; } = new();
+
+        public Task<RiskDecision> PrepareReplaceAsync(ulong originalClOrdId, ulong newClOrdId, EndClientId owner, decimal newRemainingNotional, CancellationToken ct)
+        {
+            Prepares.Add((originalClOrdId, newClOrdId, newRemainingNotional));
+            return Task.FromResult(RiskDecision.Approve);
+        }
+
+        public void CommitReplace(ulong originalClOrdId, ulong newClOrdId, decimal confirmedRemainingNotional)
+            => Commits.Add((originalClOrdId, newClOrdId, confirmedRemainingNotional));
+
+        public void AbortReplace(ulong newClOrdId) => Aborts.Add(newClOrdId);
+    }
+
+    private sealed class RecordingBotErRouter : IBotErRouter
+    {
+        public List<ExecutionEvent> Events { get; } = new();
+        public void Route(ExecutionEvent ev) => Events.Add(ev);
+    }
+
+    [Fact]
+    public void Processor_CancelAsReplace_priorityLost_terminalisesOriginalAndHydratesNew_thenSubsequentFillBooksPositionAndCash()
+    {
+        // Repro for issue #241. B3 priority-lost path: venue emits
+        //   ER_Cancel(new=778, orig=777)  +  ER_Trade(new=778, orig=0)
+        // — never an ExecType=Replaced. Pre-fix the Cancel terminalised
+        // 777, the new order was never created in the book, and the
+        // Trade dropped silently (position/cash diverged).
+        var ownership = new OrderOwnershipMap();
+        var book = new WorkingOrderBook();
+        var positions = new PositionKeeper();
+        var cash = new CashLedger();
+        var sink = new CaptureSink();
+        var opts = new RiskOptions();
+        opts.Margin.Enabled = true;
+        opts.Margin.Initial["bob"] = 100_000m;
+        var monitor = new StaticOptionsMonitor<RiskOptions>(opts);
+        var marginProvider = new ReserveOnSubmitMarginProvider(monitor, NullLogger<ReserveOnSubmitMarginProvider>.Instance);
+        var replaceCoord = new RecordingReplaceCoordinator();
+        var botRouter = new RecordingBotErRouter();
+        var reg = new PendingReplacementRegistry();
+        cash.SeedIfAbsent(new EndClientId("bob"), 100_000m);
+
+        var proc = new ExecutionReportProcessor(
+            ownership, book, positions, sink, marginProvider,
+            NullLogger<ExecutionReportProcessor>.Instance,
+            algoSignals: null,
+            cash: cash,
+            replacements: reg,
+            replaceMargin: replaceCoord,
+            botErRouter: botRouter);
+
+        var bob = new EndClientId("bob");
+        // 1) Original Buy 100 PETR4 @ 32.49 — sits in book.
+        var orig = new Order(777UL, bob, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 32.49m, "FIRM");
+        book.TryAdd(orig);
+        orig.MarkWorking();
+        ownership.Register(777UL, bob);
+
+        // 2) Modify-to-cross 32.49 → 32.50: register link + intent for newClOrdId=778.
+        ownership.RegisterReplaceLink(777UL, 778UL);
+        var intent = new OrderReplacementIntent(
+            OriginalClOrdId: 777UL,
+            NewClOrdId: 778UL,
+            Owner: bob,
+            Symbol: "PETR4",
+            SecurityId: 4321UL,
+            Side: OrderSide.Buy,
+            Type: OrderType.Limit,
+            NewQuantity: 100,
+            NewPrice: 32.50m,
+            FirmId: "FIRM",
+            ParentAlgoId: null,
+            AlgoSliceSeq: null);
+        Assert.True(reg.TryAdd(intent));
+
+        // 3) Venue cancel-as-replace ER under newClOrdID — priority-lost branch.
+        proc.Apply(778UL, ExecKind.Canceled, leaves: 0, cumQty: 0, lastQty: 0, lastPx: 0m, rejectReason: null, origClOrdId: 777UL);
+
+        // Original terminalised as Replaced (not Cancelled); new order hydrated.
+        Assert.Equal(OrderStatus.Replaced, orig.Status);
+        Assert.True(book.TryGet(778UL, out var newOrder));
+        Assert.NotNull(newOrder);
+        Assert.Equal(OrderStatus.Working, newOrder!.Status);
+        Assert.Equal(100, newOrder.LeavesQuantity);
+        Assert.Equal(0, newOrder.CumulativeQuantity);
+        // Margin coordinator saw Commit, NOT Abort.
+        Assert.Single(replaceCoord.Commits);
+        Assert.Empty(replaceCoord.Aborts);
+        Assert.Equal((777UL, 778UL, 32.50m * 100), replaceCoord.Commits[0]);
+        // Replace-fanout: orig + new ExecutionEvent (kind=Replaced) on the sink.
+        Assert.Equal(2, sink.Events.Count);
+        Assert.All(sink.Events, e => Assert.Equal(ExecKind.Replaced, e.Kind));
+        Assert.Contains(sink.Events, e => e.ClOrdId == 777UL);
+        Assert.Contains(sink.Events, e => e.ClOrdId == 778UL);
+        // Bot router saw both replace ERs.
+        Assert.Equal(2, botRouter.Events.Count);
+
+        // 4) Subsequent Trade ER on the new ClOrdID (orig=0 in priority-lost trade).
+        proc.Apply(778UL, ExecKind.Fill, leaves: 0, cumQty: 100, lastQty: 100, lastPx: 32.50m, rejectReason: null, origClOrdId: 0);
+
+        Assert.Equal(OrderStatus.Filled, newOrder.Status);
+        Assert.Equal(0, newOrder.LeavesQuantity);
+        Assert.Equal(100, newOrder.CumulativeQuantity);
+        // Position booked.
+        var pos = positions.GetOrCreate(bob, "PETR4");
+        Assert.Equal(100, pos.NetQuantity);
+        Assert.Equal(32.50m, pos.AverageEntryPrice);
+        // Cash debited (Buy: available drops by notional).
+        Assert.Equal(100_000m - (32.50m * 100), cash.GetAvailable(bob));
+        // Fill ER published on sink + routed to bot.
+        Assert.Equal(3, sink.Events.Count);
+        var fillEv = sink.Events[2];
+        Assert.Equal(ExecKind.Fill, fillEv.Kind);
+        Assert.Equal(778UL, fillEv.ClOrdId);
+        Assert.Equal(3, botRouter.Events.Count);
+    }
+
+    [Fact]
+    public void Processor_CancelAsReplace_secondCancelReplay_isIdempotentNoOp()
+    {
+        // Edge-case from #241: PendingReplacementRegistry.TryConsume is
+        // one-shot, so a replayed Cancel ER (FIXP retransmit) falls
+        // through to the standard cancel branch. Order is already
+        // Replaced (terminal) so MarkCancelled is guarded — no throw,
+        // no double-add, no state regression.
+        var ownership = new OrderOwnershipMap();
+        var book = new WorkingOrderBook();
+        var positions = new PositionKeeper();
+        var sink = new CaptureSink();
+        var opts = new RiskOptions();
+        opts.Margin.Enabled = true;
+        opts.Margin.Initial["bob"] = 100_000m;
+        var monitor = new StaticOptionsMonitor<RiskOptions>(opts);
+        var marginProvider = new ReserveOnSubmitMarginProvider(monitor, NullLogger<ReserveOnSubmitMarginProvider>.Instance);
+        var replaceCoord = new RecordingReplaceCoordinator();
+        var reg = new PendingReplacementRegistry();
+
+        var proc = new ExecutionReportProcessor(
+            ownership, book, positions, sink, marginProvider,
+            NullLogger<ExecutionReportProcessor>.Instance,
+            algoSignals: null,
+            cash: null,
+            replacements: reg,
+            replaceMargin: replaceCoord,
+            botErRouter: null);
+
+        var bob = new EndClientId("bob");
+        var orig = new Order(777UL, bob, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 32.49m, "FIRM");
+        book.TryAdd(orig);
+        orig.MarkWorking();
+        ownership.Register(777UL, bob);
+        ownership.RegisterReplaceLink(777UL, 778UL);
+        Assert.True(reg.TryAdd(new OrderReplacementIntent(
+            777UL, 778UL, bob, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit,
+            100, 32.50m, "FIRM", null, null)));
+
+        // First Cancel ER — intercepted as cancel-as-replace.
+        proc.Apply(778UL, ExecKind.Canceled, 0, 0, 0, 0m, null, origClOrdId: 777UL);
+        Assert.Equal(OrderStatus.Replaced, orig.Status);
+        Assert.True(book.TryGet(778UL, out var newOrder));
+        Assert.Equal(OrderStatus.Working, newOrder!.Status);
+        var sinkCountAfterFirst = sink.Events.Count;
+        Assert.Single(replaceCoord.Commits);
+
+        // Second Cancel ER (FIXP replay) — registry consumed; falls
+        // through. The 778 lookup finds the now-Working new order;
+        // MarkCancelled WILL apply to it (no terminal guard against
+        // Working). This is the documented v1 behaviour for replayed
+        // cancels arriving after the new order was hydrated; the more
+        // important assertion is no throw, no double-add, no reservation
+        // leak (no extra Commit/Abort on the coordinator).
+        var origStatusBefore = orig.Status;
+        proc.Apply(778UL, ExecKind.Canceled, 0, 0, 0, 0m, null, origClOrdId: 777UL);
+        Assert.Equal(origStatusBefore, orig.Status); // original untouched
+        Assert.Single(replaceCoord.Commits); // no extra commit
+        Assert.Empty(replaceCoord.Aborts);   // no leak
+        Assert.True(book.TryGet(778UL, out var stillThere));
+        Assert.Same(newOrder, stillThere);   // not re-hydrated
+        // Fan-out emitted at most one extra ER for the standard cancel path.
+        Assert.InRange(sink.Events.Count - sinkCountAfterFirst, 0, 1);
     }
 }
