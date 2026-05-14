@@ -109,6 +109,31 @@ public sealed class ExecutionReportProcessor
                 ApplyReplaceAccepted(clOrdId, leaves, cumQty, lastPx, origClOrdId, replaceIntent, fanOut);
                 return;
             }
+            // Issue #241: B3MatchingPlatform implements OrderCancelReplaceRequest
+            // via a "priority-lost" path (any change other than same-price /
+            // qty-down) by emitting Cancel(orig) + Trade/New(new) under the
+            // replace's NEW ClOrdID — never an ExecType=Replaced. Without this
+            // intercept the Cancel terminalises the original AND the new
+            // ClOrdID is never created in the book, so the subsequent Trade
+            // ER drops with "missing order" and the fill is silently lost
+            // (position/cash diverge from the venue). Funnel through
+            // ApplyReplaceAccepted so the original goes Replaced (not
+            // Cancelled), the new Order is hydrated under newClOrdId, and
+            // the margin coordinator sees Commit (not a leaked reservation).
+            if (kind == ExecKind.Canceled
+                && _replacements.TryConsume(clOrdId, out var cancelAsReplaceIntent)
+                && cancelAsReplaceIntent is not null)
+            {
+                ApplyReplaceAccepted(
+                    newClOrdId: clOrdId,
+                    erLeaves: cancelAsReplaceIntent.NewQuantity,
+                    erCum: 0,
+                    erLastPx: 0m,
+                    erOrigClOrdId: origClOrdId,
+                    intent: cancelAsReplaceIntent,
+                    fanOut: fanOut);
+                return;
+            }
         }
 
         // For cancel/replace acks, the meaningful identity is the original
@@ -139,7 +164,14 @@ public sealed class ExecutionReportProcessor
 
         if (!_orders.TryGet(lookupId, out var order) || order is null)
         {
-            _logger.LogWarning("ER for known owner {Owner} but missing order {ClOrdId} (orig={Orig}); dropping.", owner, clOrdId, origClOrdId);
+            // Issue #241: silent loss of a fill for a known owner is a P0
+            // correctness bug (position/cash divergence with the venue),
+            // not an idiomatic "ephemeral state" miss. Surface as error +
+            // metric so ops can alert; the most common cause is the
+            // priority-lost cancel-as-replace branch above failing to
+            // intercept (e.g. registry not wired or already consumed).
+            MetricsRegistry.ExecutionReportsDroppedKnownOwnerMissingOrder.Add(1, KindTag(kind));
+            _logger.LogError("ER for known owner {Owner} but missing order {ClOrdId} (orig={Orig}); dropping.", owner, clOrdId, origClOrdId);
             return;
         }
 
