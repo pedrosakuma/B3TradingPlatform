@@ -2,7 +2,7 @@
 // holds the source-of-truth Map and posts diff/replace messages; this
 // module just stores what arrives and notifies subscribers.
 
-const TERMINAL_ORDER_STATUSES = new Set(["Filled", "Cancelled", "Rejected"]);
+const TERMINAL_ORDER_STATUSES = new Set(["Filled", "Cancelled", "Rejected", "Replaced"]);
 
 const listeners = new Set();
 const state = {

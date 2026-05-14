@@ -9,6 +9,7 @@ import { defaultBackend, defaultMarketDataUrl, login, signup, submitOrder, cance
 import { claimsFromToken } from "./jwt.js";
 import { validateOrder, pretradeWarnings, payloadKey } from "./validation.js";
 import * as state from "./state.js";
+import { isTerminalOrderStatus } from "./state.js";
 import * as ui from "./ui.js";
 import * as adminUi from "./adminUi.js";
 import * as botCredentialsUi from "./botCredentialsUi.js";
@@ -571,7 +572,7 @@ async function handleCancelOrder(clOrdId) {
   // and skip orders that already finished or have a cancel acked.
   if (st.inflightCancels && st.inflightCancels.has(clOrdId)) return;
   const order = st.orders.get(clOrdId);
-  if (order && ["Filled", "Cancelled", "Rejected", "PendingCancel"].includes(order.status)) return;
+  if (order && (isTerminalOrderStatus(order.status) || order.status === "PendingCancel")) return;
   // Slice 3 of #132. Stale orders are gated client-side: the backend
   // would 409 with reason "order is marked stale", but skipping the
   // round-trip keeps the UX honest (the row already shows the badge
@@ -617,7 +618,7 @@ async function handleCancelAll(clOrdIds) {
     const o = st.orders.get(id);
     if (!o) return false;
     if (o.isStale) return false; // slice 3 of #132 — gated client-side too
-    return !["Filled", "Cancelled", "Rejected", "PendingCancel"].includes(o.status);
+    return !(isTerminalOrderStatus(o.status) || o.status === "PendingCancel");
   });
   const total = queue.length;
   if (total === 0) {
@@ -670,7 +671,7 @@ async function handleModifyOrder(clOrdId, payload) {
   const st = state.getState();
   if (st.inflightModifies && st.inflightModifies.has(clOrdId)) return;
   const order = st.orders.get(clOrdId);
-  if (!order || ["Filled", "Cancelled", "Rejected"].includes(order.status)) {
+  if (!order || isTerminalOrderStatus(order.status)) {
     ui.setModifyModalError("Order is no longer modifiable.");
     return;
   }
@@ -725,7 +726,7 @@ function handleKeyboardCancel() {
   const id = state.getState().selectedClOrdId;
   if (!id) return;
   const order = state.getState().orders.get(id);
-  if (!order || ["Filled", "Cancelled", "Rejected"].includes(order.status)) return;
+  if (!order || isTerminalOrderStatus(order.status)) return;
   // Confirmation lives inside handleCancelOrder so mouse and keyboard
   // routes share the same safety prompt.
   handleCancelOrder(id);
