@@ -16,6 +16,18 @@ public class InMemoryUserBotCredentialRegistryTests
     private static InMemoryUserBotCredentialRegistry Reg() => new();
 
     [Fact]
+    public void BCrypt_LegacyHashFromV4_0_3_StillVerifiesUnderCurrentVersion()
+    {
+        // Hash produced by BCrypt.Net-Next 4.0.3 (the previous pinned version)
+        // for the plaintext "hunter2-legacy" with workFactor=11. Embedded as a
+        // literal so the test fails loud if a future BCrypt bump ever breaks
+        // the on-disk hash format used by stored bot credentials.
+        const string legacyHash = "$2a$11$uSDHF7qiiPXH6ieX8MD8SOzSdu00/4PBrjkJcy/UulOLvvFPt1sj2";
+        Assert.True(BCrypt.Net.BCrypt.Verify("hunter2-legacy", legacyHash));
+        Assert.False(BCrypt.Net.BCrypt.Verify("wrong-password", legacyHash));
+    }
+
+    [Fact]
     public async Task Create_ReturnsPlainTokenInExpectedShape()
     {
         var r = Reg();
