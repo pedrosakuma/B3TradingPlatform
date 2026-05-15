@@ -89,6 +89,17 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         services.AddSingleton<OrderCancelService>();
         services.AddSingleton<OrderModifyService>();
 
+        // Q1.3 (#255). GTD expiration scheduler. Registered as both a
+        // singleton (so OrderSubmissionService + ExecutionReportProcessor
+        // can take an optional ctor dependency on it) AND as a hosted
+        // service (so its StartAsync runs after WAL recovery has
+        // populated WorkingOrderBook — RunRecoveryAndSeedingAsync
+        // awaits before app.Run, IHostedService.StartAsync runs at
+        // app.Run).
+        services.AddSingleton<B3.Trading.Application.Scheduling.GtdExpirationScheduler>();
+        services.AddHostedService(sp =>
+            sp.GetRequiredService<B3.Trading.Application.Scheduling.GtdExpirationScheduler>());
+
         // Algo engine signal channel + hosted consumer (RFC algo-orders-v0 §4.3).
         // In slice 5a the consumer body was a no-op reactor; slice 5b plugged in the
         // Iceberg state machine; slice 6 adds the AlgoScheduler hosted service that

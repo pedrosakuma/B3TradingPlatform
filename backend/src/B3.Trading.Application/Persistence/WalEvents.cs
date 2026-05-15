@@ -34,6 +34,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(BotSessionVerAdvancedEvent), "userbot.session.ver-advanced")]
 [JsonDerivedType(typeof(BotSessionSeqAdvancedEvent), "userbot.session.seq-advanced")]
 [JsonDerivedType(typeof(OrderCancelRequestedEvent), "order.cancel-requested")]
+[JsonDerivedType(typeof(OrderExpiredEvent), "order.expired")]
 public abstract record WalEvent
 {
     public DateTimeOffset TimestampUtc { get; init; } = DateTimeOffset.UtcNow;
@@ -425,4 +426,27 @@ public sealed record BotSessionSeqAdvancedEvent : WalEvent
     public required Guid CredentialId { get; init; }
     public required ulong CheckpointedOutboundSeq { get; init; }
     public required DateTimeOffset At { get; init; }
+}
+
+/// <summary>
+/// Q1.3 (#255). Recorded the moment the GTD scheduler decides an order
+/// has reached its <see cref="Domain.Order.GoodTillDate"/> and dispatches
+/// a cancel for it. Strictly informational: the cancel itself flows
+/// through the regular <c>OrderCancelService</c> pipeline (which
+/// produces the eventual <c>ExecutionReportReceivedEvent</c> with
+/// <c>Canceled</c>), and this event is what lets downstream sinks
+/// project the cancel as <c>kind=Expired</c> instead of the usual
+/// <c>kind=Canceled</c>. <see cref="Reason"/> is an open-ended string
+/// (<c>"Gtd"</c> in v0; future auction-expired flows reuse the same
+/// envelope with a different reason). Replay is a no-op — the
+/// downstream <c>Canceled</c> ER (also on the WAL) drives all in-memory
+/// state mutation; this event only carries audit / WS-projection
+/// metadata. Additive: older WAL segments without this event replay
+/// unchanged.
+/// </summary>
+public sealed record OrderExpiredEvent : WalEvent
+{
+    public required ulong ClOrdId { get; init; }
+    public required string Reason { get; init; }
+    public required DateTimeOffset AtUtc { get; init; }
 }

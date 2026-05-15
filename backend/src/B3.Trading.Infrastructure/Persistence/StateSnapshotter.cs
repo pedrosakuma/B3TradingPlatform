@@ -1,6 +1,7 @@
 using B3.Trading.Application;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
+using B3.Trading.Application.Scheduling;
 using B3.Trading.Application.UserBots;
 using B3.Trading.Domain;
 
@@ -28,6 +29,16 @@ public sealed class StateSnapshotter
     private readonly InMemoryUserBotCredentialRegistry? _userBotCredentials;
     private readonly InMemoryUserBotSessionRegistry? _userBotSessions;
     private readonly IUserBotOrderMappingRegistry? _userBotMappings;
+    /// <summary>
+    /// Pass-4 review (#255). Optional. When wired (production
+    /// composition includes the GTD scheduler), <see cref="CaptureRaw"/>
+    /// snapshots the scheduler's in-flight audited-expired set under
+    /// the dispatcher lock and <see cref="Restore"/> re-marks every id
+    /// before WAL replay begins, closing the snapshot-mid-fire window
+    /// where an audit envelope was on disk at <c>seq &lt;= snap.Seq</c>
+    /// but the order was still working in the snapshot.
+    /// </summary>
+    private readonly GtdExpirationScheduler? _gtdScheduler;
 
     public StateSnapshotter(
         WorkingOrderBook orders,
@@ -42,7 +53,8 @@ public sealed class StateSnapshotter
         CashLedger cash,
         InMemoryUserBotCredentialRegistry? userBotCredentials = null,
         InMemoryUserBotSessionRegistry? userBotSessions = null,
-        IUserBotOrderMappingRegistry? userBotMappings = null)
+        IUserBotOrderMappingRegistry? userBotMappings = null,
+        GtdExpirationScheduler? gtdScheduler = null)
     {
         _orders = orders;
         _positions = positions;
@@ -57,6 +69,7 @@ public sealed class StateSnapshotter
         _userBotCredentials = userBotCredentials;
         _userBotSessions = userBotSessions;
         _userBotMappings = userBotMappings;
+        _gtdScheduler = gtdScheduler;
     }
 
     public PlatformSnapshot Capture(long seq) => Project(CaptureRaw(seq));
@@ -101,6 +114,7 @@ public sealed class StateSnapshotter
         BotSessions = _userBotSessions?.RawSnapshot() ?? Array.Empty<BotSessionState>(),
         BotOrderMappings = _userBotMappings?.RawSnapshotOrders() ?? Array.Empty<BotOrderMappingRaw>(),
         BotCancelMappings = _userBotMappings?.RawSnapshotCancels() ?? Array.Empty<BotCancelMappingRaw>(),
+        AuditedExpiredIds = _gtdScheduler?.SnapshotAuditedExpiredIds() ?? Array.Empty<ulong>(),
     };
 
     /// <summary>
@@ -247,6 +261,7 @@ public sealed class StateSnapshotter
             BotSessions = sessions,
             BotOrderMappings = botOrderMaps,
             BotCancelMappings = botCancelMaps,
+            AuditedExpiredIds = raw.AuditedExpiredIds,
         };
     }
 
@@ -272,6 +287,16 @@ public sealed class StateSnapshotter
         _userBotCredentials?.Restore(snap.UserBotCredentials);
         _userBotSessions?.Restore(snap.BotSessions);
         _userBotMappings?.Restore(snap.BotOrderMappings, snap.BotCancelMappings);
+        // Pass-4 review (#255). Re-mark the in-flight audit-set BEFORE
+        // WAL replay starts (PersistenceRecovery calls Restore then
+        // ReadFromAsync). EventReplayer.Apply(OrderExpiredEvent) for
+        // events past snap.Seq also calls MarkExpiredAuditAppended;
+        // both writers are HashSet.Add so the operation is idempotent.
+        if (_gtdScheduler is not null && snap.AuditedExpiredIds is { Count: > 0 })
+        {
+            foreach (var id in snap.AuditedExpiredIds)
+                _gtdScheduler.MarkExpiredAuditAppended(id);
+        }
     }
 }
 
@@ -297,6 +322,21 @@ public sealed class EventReplayer
     private readonly InMemoryUserBotCredentialRegistry? _userBotCredentials;
     private readonly InMemoryUserBotSessionRegistry? _userBotSessions;
     private readonly IUserBotOrderMappingRegistry? _userBotMappings;
+    /// <summary>
+    /// Pass-3 review (#255). Optional. When wired (production
+    /// composition includes the GTD scheduler), every replayed
+    /// <see cref="OrderExpiredEvent"/> calls
+    /// <see cref="GtdExpirationScheduler.MarkExpiredAuditAppended"/>
+    /// so the scheduler's cold-start <see cref="GtdExpirationScheduler.StartAsync"/>
+    /// seeds surviving GTD orders' <c>Entry.ExpiredAuditAppended</c>
+    /// to <c>true</c>, preventing a duplicate audit envelope when a
+    /// crash landed between OrderExpiredEvent append and
+    /// OrderCancelRequestedEvent append. Order matters:
+    /// <c>RunRecoveryAndSeedingAsync</c> drains the WAL via this
+    /// replayer BEFORE <c>app.Run()</c> kicks off the scheduler's
+    /// hosted-service <c>StartAsync</c>.
+    /// </summary>
+    private readonly GtdExpirationScheduler? _gtdScheduler;
 
     public EventReplayer(
         WorkingOrderBook orders,
@@ -311,7 +351,8 @@ public sealed class EventReplayer
         PendingReplacementRegistry? replacements = null,
         InMemoryUserBotCredentialRegistry? userBotCredentials = null,
         InMemoryUserBotSessionRegistry? userBotSessions = null,
-        IUserBotOrderMappingRegistry? userBotMappings = null)
+        IUserBotOrderMappingRegistry? userBotMappings = null,
+        GtdExpirationScheduler? gtdScheduler = null)
     {
         _orders = orders;
         _ownership = ownership;
@@ -326,6 +367,7 @@ public sealed class EventReplayer
         _userBotCredentials = userBotCredentials;
         _userBotSessions = userBotSessions;
         _userBotMappings = userBotMappings;
+        _gtdScheduler = gtdScheduler;
     }
 
     public void Apply(WalEvent evt)
@@ -508,6 +550,17 @@ public sealed class EventReplayer
                 break;
             case BotSessionSeqAdvancedEvent bss:
                 _userBotSessions?.ApplyCheckpointedSeq(bss.CredentialId, bss.CheckpointedOutboundSeq);
+                break;
+            case OrderExpiredEvent oe:
+                // Pass-3 review (#255). The audit envelope itself is a
+                // no-op for in-memory state — the downstream Canceled ER
+                // (also on the WAL) drives the order's terminal
+                // transition. But we MUST inform the GTD scheduler that
+                // this audit is durably on disk so its cold-start
+                // Schedule() does not re-emit a duplicate when the
+                // pre-crash cancel ER never landed. Null-tolerant for
+                // compositions / tests that don't wire a scheduler.
+                _gtdScheduler?.MarkExpiredAuditAppended(oe.ClOrdId);
                 break;
         }
     }

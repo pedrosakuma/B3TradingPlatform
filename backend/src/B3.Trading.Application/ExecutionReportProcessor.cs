@@ -39,6 +39,7 @@ public sealed class ExecutionReportProcessor
     private readonly PendingReplacementRegistry? _replacements;
     private readonly Risk.IReplaceMarginCoordinator? _replaceMargin;
     private readonly IBotErRouter? _botErRouter;
+    private readonly Scheduling.GtdExpirationScheduler? _gtdScheduler;
 
     public ExecutionReportProcessor(
         OrderOwnershipMap ownership,
@@ -51,7 +52,8 @@ public sealed class ExecutionReportProcessor
         CashLedger? cash = null,
         PendingReplacementRegistry? replacements = null,
         Risk.IReplaceMarginCoordinator? replaceMargin = null,
-        IBotErRouter? botErRouter = null)
+        IBotErRouter? botErRouter = null,
+        Scheduling.GtdExpirationScheduler? gtdScheduler = null)
     {
         _ownership = ownership;
         _orders = orders;
@@ -64,6 +66,7 @@ public sealed class ExecutionReportProcessor
         _replacements = replacements;
         _replaceMargin = replaceMargin;
         _botErRouter = botErRouter;
+        _gtdScheduler = gtdScheduler;
     }
 
     /// <summary>
@@ -277,6 +280,16 @@ public sealed class ExecutionReportProcessor
             order.ClearStale();
         }
 
+        // Q1.3 (#255). GTD scheduler bookkeeping: drop tracked orders
+        // whose lifecycle just ended, regardless of whether they
+        // ended via venue cancel, fill, reject, or replace. Cheap
+        // no-op for orders the scheduler is not tracking.
+        if (order.Status is OrderStatus.Filled or OrderStatus.Cancelled
+            or OrderStatus.Rejected or OrderStatus.Replaced)
+        {
+            _gtdScheduler?.OnOrderTerminal(lookupId);
+        }
+
         // Server-side STP detection (#117): if the matching engine
         // emitted a cancel with a SelfTradePrevention restatement
         // reason, mark the outbound event so the UI/logs can surface
@@ -426,6 +439,10 @@ public sealed class ExecutionReportProcessor
         // Slice 1 of #132: terminalising clears any advisory stale.
         if (origOrder.IsStale)
             origOrder.ClearStale();
+        // Q1.3 (#255): drop tracked GTD entry for the original now
+        // that it is terminal (the replacement may or may not carry
+        // GTD; OnOrderTracked re-adds it after TryAdd below).
+        _gtdScheduler?.OnOrderTerminal(origId);
 
         var origEv = new ExecutionEvent(
             intent.Owner,
@@ -481,6 +498,15 @@ public sealed class ExecutionReportProcessor
             _replaceMargin?.AbortReplace(newClOrdId);
             return;
         }
+
+        // Q1.3 (#255). The replacement may carry a different TIF/GTD
+        // than the original. Notify the scheduler so a TIF change to
+        // GTD starts tracking, a TIF change away from GTD stops
+        // tracking the old entry (the original was already terminal-
+        // cleared via OnOrderTerminal at the top of Apply when we
+        // marked it Replaced), and a same-TIF change re-arms the
+        // timer with the new expiry.
+        _gtdScheduler?.OnOrderTracked(newOrder);
 
         // 3) Margin commit: rebalance to venue-confirmed remaining.
         //    For Buy + margin-bearing type (Limit / StopLimit /
@@ -569,6 +595,20 @@ public enum ExecKind
     /// economic event.
     /// </summary>
     Suspended,
+    /// <summary>
+    /// Q1.3 (#255). Synthetic projection of an
+    /// <see cref="Persistence.OrderExpiredEvent"/>: the GTD scheduler
+    /// determined an order's <c>GoodTillDate</c> has elapsed and
+    /// dispatched a cancel against it through the regular
+    /// <c>OrderCancelService</c>. The order's actual terminal status
+    /// transition still flows from the eventual <see cref="Canceled"/>
+    /// ER produced by the cancel pipeline; this synthetic event lets
+    /// WS subscribers see <c>kind=Expired</c> alongside the regular
+    /// <c>kind=Canceled</c> so the UI can distinguish a venue cancel
+    /// from a policy expiry. Carries <c>LastQuantity=0</c> and no
+    /// fill price (no economic event).
+    /// </summary>
+    Expired,
     /// <summary>
     /// Slice 5 of #132. Synthetic counterpart of <see cref="Suspended"/>:
     /// emitted when the stale overlay is lifted (admin clear path). The

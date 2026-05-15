@@ -56,6 +56,14 @@ public sealed class RawPlatformSnapshot
         Array.Empty<BotOrderMappingRaw>();
     public BotCancelMappingRaw[] BotCancelMappings { get; init; } =
         Array.Empty<BotCancelMappingRaw>();
+
+    /// <summary>
+    /// Pass-4 review (#255). Mirror of
+    /// <c>PlatformSnapshot.AuditedExpiredIds</c> at the raw-capture
+    /// stage. Populated under the dispatcher lock from
+    /// <c>GtdExpirationScheduler.SnapshotAuditedExpiredIds()</c>.
+    /// </summary>
+    public ulong[] AuditedExpiredIds { get; init; } = Array.Empty<ulong>();
 }
 
 /// <summary>

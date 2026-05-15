@@ -25,6 +25,17 @@ public static class MetricsRegistry
         Meter.CreateCounter<long>("trading.orders.gateway_failed");
     public static readonly Counter<long> OrdersCancelRequested =
         Meter.CreateCounter<long>("trading.orders.cancel_requested");
+    /// <summary>
+    /// Q1.3 (#255). Counts every GTD expiry the scheduler dispatched.
+    /// Tagged with <c>cancel_result</c> = the
+    /// <see cref="OrderCancelResultKind"/> the cancel pipeline
+    /// returned (Accepted / NotFound / Stale / WalBackpressure /
+    /// GatewayFailed) so a sustained climb on a non-Accepted bucket
+    /// flags scheduler-vs-pipeline drift (e.g. the scheduler keeps
+    /// firing for orders the book no longer knows about).
+    /// </summary>
+    public static readonly Counter<long> GtdOrdersExpired =
+        Meter.CreateCounter<long>("trading.orders.gtd_expired");
     public static readonly Counter<long> OrdersModifyRequested =
         Meter.CreateCounter<long>("trading.orders.modify_requested");
 

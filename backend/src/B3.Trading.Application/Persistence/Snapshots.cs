@@ -85,6 +85,26 @@ public sealed class PlatformSnapshot
     /// external cancel ClOrdID. Empty on snapshots pre-dating the field.
     /// </summary>
     public List<BotCancelMappingSnapshot> BotCancelMappings { get; init; } = new();
+
+    /// <summary>
+    /// Pass-4 review (#255). ClOrdIds whose <c>OrderExpiredEvent</c>
+    /// audit envelope is durably on the WAL but whose downstream
+    /// <c>OrderCancelRequestedEvent</c> has not yet been observed.
+    /// Captured under the dispatcher lock so the persisted set is
+    /// consistent with the snapshot's <c>Seq</c>: when a snapshot is
+    /// taken between the audit append and the cancel append, this set
+    /// records that the audit is already on disk so the post-restart
+    /// timer fire (which sees an order still in working state in the
+    /// snapshot) does not emit a duplicate audit envelope.
+    /// <para>
+    /// Empty on snapshots pre-dating the field, which collapses to the
+    /// pre-pass-4 behaviour: <c>EventReplayer.Apply(OrderExpiredEvent)</c>
+    /// is then the only writer. The bug pass-4 fixes is the small
+    /// window where <c>EventReplayer</c> never sees the audit because
+    /// its seq is &lt;= snapshot.Seq.
+    /// </para>
+    /// </summary>
+    public IReadOnlyCollection<ulong> AuditedExpiredIds { get; init; } = Array.Empty<ulong>();
 }
 
 /// <summary>
