@@ -98,6 +98,25 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
     public static readonly TimeSpan MaxTimerPoll = TimeSpan.FromHours(1);
 
     /// <summary>
+    /// Pass-2 review (#255). Initial WAL-backpressure retry delay; the
+    /// scheduler re-arms the heap entry at <c>now + RetryBaseDelay</c>
+    /// after the first transient failure (audit append or
+    /// <see cref="OrderCancelService.CancelAsync"/> returning
+    /// <see cref="OrderCancelResultKind.WalBackpressure"/>) and then
+    /// doubles each subsequent attempt up to <see cref="RetryMaxDelay"/>.
+    /// </summary>
+    public static readonly TimeSpan RetryBaseDelay = TimeSpan.FromMilliseconds(100);
+
+    /// <summary>
+    /// Pass-2 review (#255). Cap on the WAL-backpressure retry delay.
+    /// Once reached, the scheduler keeps retrying at this cadence
+    /// indefinitely — WAL pressure is treated as transient (drained as
+    /// the background writer catches up); abandoning would re-introduce
+    /// the orphan-at-venue bug the retry is meant to fix.
+    /// </summary>
+    public static readonly TimeSpan RetryMaxDelay = TimeSpan.FromSeconds(5);
+
+    /// <summary>
     /// Free-text reason carried on <see cref="OrderExpiredEvent.Reason"/>
     /// + the synthetic <c>ExecutionEvent.RejectReason</c> when the
     /// trigger is a GTD expiry. Stable wire format (string, not
@@ -106,9 +125,39 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
     /// </summary>
     public const string ReasonGtd = "Gtd";
 
+    /// <summary>
+    /// Per-order tracking state held in <see cref="_index"/>. Mutable
+    /// reference type so retry bookkeeping (audit-append dedupe, retry
+    /// count for backoff calc) survives the heap dequeue+re-enqueue
+    /// cycle that a WAL-backpressure retry performs.
+    /// </summary>
+    private sealed class Entry
+    {
+        /// <summary>Currently scheduled fire time (original GTD on first
+        /// arm; <c>now + backoff</c> after each WAL-backpressure
+        /// failure). The heap key always equals this value at the moment
+        /// of enqueue, so a divergence between
+        /// <c>_index[id].Expiry</c> and a peeked heap priority is the
+        /// canonical "tombstone" signal.</summary>
+        public DateTimeOffset Expiry;
+        /// <summary>The order's actual <see cref="Order.GoodTillDate"/>
+        /// captured at first arm. Used as the
+        /// <see cref="OrderExpiredEvent.AtUtc"/> on every (re)try so the
+        /// audit trail reflects the policy boundary, not the wall-clock
+        /// time of the eventual successful append.</summary>
+        public DateTimeOffset OriginalGtd;
+        /// <summary>True once <see cref="OrderExpiredEvent"/> has been
+        /// successfully appended for this expiry. Prevents duplicate
+        /// audit envelopes across WAL-backpressure retry attempts.</summary>
+        public bool ExpiredAuditAppended;
+        /// <summary>Number of WAL-backpressure re-arms so far; drives
+        /// the exponential backoff in <see cref="ComputeBackoff"/>.</summary>
+        public int RetryCount;
+    }
+
     private readonly object _lock = new();
     private readonly PriorityQueue<ulong, DateTimeOffset> _heap = new();
-    private readonly Dictionary<ulong, DateTimeOffset> _index = new();
+    private readonly Dictionary<ulong, Entry> _index = new();
     private readonly WorkingOrderBook _book;
     private readonly OrderCancelService _cancel;
     private readonly EventDispatcher _dispatcher;
@@ -182,7 +231,21 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
     {
         lock (_lock)
         {
-            _index[clOrdId] = expiry;
+            if (_index.TryGetValue(clOrdId, out var existing))
+            {
+                // Re-track (e.g., modify in place, replay): treat as a
+                // fresh scheduling — reset audit/retry state so the new
+                // GTD gets its own OrderExpiredEvent and a clean backoff
+                // ladder if it too hits WAL pressure.
+                existing.Expiry = expiry;
+                existing.OriginalGtd = expiry;
+                existing.ExpiredAuditAppended = false;
+                existing.RetryCount = 0;
+            }
+            else
+            {
+                _index[clOrdId] = new Entry { Expiry = expiry, OriginalGtd = expiry };
+            }
             _heap.Enqueue(clOrdId, expiry);
             Reschedule_NoLock();
         }
@@ -197,6 +260,23 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
         }
     }
 
+    /// <summary>
+    /// Bounded exponential backoff: <c>RetryBaseDelay * 2^retryCount</c>
+    /// capped at <see cref="RetryMaxDelay"/>. Caller passes the
+    /// post-increment retry count (1 for the first re-arm, 2 for the
+    /// second, …); shift is clamped at 10 to keep the multiplier well
+    /// inside <see cref="long"/> range before the cap kicks in.
+    /// </summary>
+    private DateTimeOffset ComputeBackoff(int retryCount)
+    {
+        var shift = Math.Min(Math.Max(retryCount - 1, 0), 10);
+        var ms = RetryBaseDelay.TotalMilliseconds * (1L << shift);
+        var delay = ms >= RetryMaxDelay.TotalMilliseconds
+            ? RetryMaxDelay
+            : TimeSpan.FromMilliseconds(ms);
+        return _clock.GetUtcNow() + delay;
+    }
+
     private void Reschedule_NoLock()
     {
         // Drop tombstoned heads (entries whose live priority no longer
@@ -204,7 +284,7 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
         // re-scheduled with a different expiry).
         while (_heap.TryPeek(out var topId, out var topExpiry))
         {
-            if (_index.TryGetValue(topId, out var liveExpiry) && liveExpiry == topExpiry)
+            if (_index.TryGetValue(topId, out var liveEntry) && liveEntry.Expiry == topExpiry)
                 break;
             _heap.Dequeue();
         }
@@ -232,22 +312,28 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
 
     private void OnTimer()
     {
-        List<(ulong ClOrdId, DateTimeOffset Expiry)>? batch = null;
+        List<ulong>? batch = null;
         lock (_lock)
         {
             var now = _clock.GetUtcNow();
             while (_heap.TryPeek(out var topId, out var topExpiry))
             {
-                if (!_index.TryGetValue(topId, out var liveExpiry) || liveExpiry != topExpiry)
+                if (!_index.TryGetValue(topId, out var entry) || entry.Expiry != topExpiry)
                 {
                     _heap.Dequeue();
                     continue;
                 }
                 if (topExpiry > now) break;
 
+                // Pass-2 review (#255): dequeue the heap entry but
+                // LEAVE the order in _index. DispatchExpireAsync takes
+                // ownership: on a terminal CancelAsync result it calls
+                // Resolve to evict, on a WAL-backpressure result it
+                // calls ReArmRetry to re-enqueue with backoff. Removing
+                // here would orphan the order at the venue if cancel
+                // returned WalBackpressure (the original P1 bug).
                 _heap.Dequeue();
-                _index.Remove(topId);
-                (batch ??= new()).Add((topId, topExpiry));
+                (batch ??= new()).Add(topId);
             }
             // Force re-arm: zero out _scheduledFor so the next
             // Reschedule_NoLock recomputes against the new head.
@@ -256,56 +342,150 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
         }
 
         if (batch is null) return;
-        foreach (var entry in batch)
+        foreach (var clOrdId in batch)
         {
             // Dispatch each cancel onto the thread-pool. The cancel
             // pipeline serialises its WAL write through the dispatcher
             // lock, so concurrent expiries cannot interleave WAL
             // appends — same posture as user-initiated cancels racing
             // each other through the REST endpoint.
-            _ = Task.Run(() => DispatchExpireAsync(entry.ClOrdId, entry.Expiry));
+            _ = Task.Run(() => DispatchExpireAsync(clOrdId));
         }
     }
 
-    private async Task DispatchExpireAsync(ulong clOrdId, DateTimeOffset atUtc)
+    /// <summary>
+    /// Drops <paramref name="clOrdId"/> from the live tracking index
+    /// after a terminal dispatch outcome (CancelAsync returned
+    /// Accepted / NotFound / Stale / GatewayFailed, or the order was
+    /// already terminal in the book). No heap mutation needed: the
+    /// dispatching code already dequeued the heap entry; any future
+    /// Schedule() for the same id starts fresh.
+    /// </summary>
+    private void Resolve(ulong clOrdId)
+    {
+        lock (_lock)
+        {
+            _index.Remove(clOrdId);
+        }
+    }
+
+    /// <summary>
+    /// Pass-2 review (#255). Re-arms a transient WAL-backpressure
+    /// failure with bounded exponential backoff. If the order was
+    /// concurrently removed (OnOrderTerminal raced ahead — venue fill
+    /// or external cancel landed before our retry), the re-arm is
+    /// suppressed: the entry is gone from the index and there is
+    /// nothing to retry.
+    /// </summary>
+    private void ReArmRetry(ulong clOrdId)
+    {
+        lock (_lock)
+        {
+            if (!_index.TryGetValue(clOrdId, out var entry))
+                return;
+            entry.RetryCount++;
+            entry.Expiry = ComputeBackoff(entry.RetryCount);
+            _heap.Enqueue(clOrdId, entry.Expiry);
+            // Force re-arm: the new backoff expiry might be later than
+            // the previously-scheduled head; Reschedule_NoLock will
+            // recompute regardless because we dequeued in OnTimer.
+            _scheduledFor = DateTimeOffset.MaxValue;
+            Reschedule_NoLock();
+        }
+    }
+
+    private async Task DispatchExpireAsync(ulong clOrdId)
     {
         try
         {
+            // Snapshot the per-order tracking state under the lock so
+            // we observe a consistent (audit-flag, original-gtd) pair
+            // even if a concurrent OnOrderTerminal evicts the entry
+            // mid-dispatch.
+            DateTimeOffset originalGtd;
+            bool auditAlreadyAppended;
+            lock (_lock)
+            {
+                if (!_index.TryGetValue(clOrdId, out var entry))
+                    return;
+                originalGtd = entry.OriginalGtd;
+                auditAlreadyAppended = entry.ExpiredAuditAppended;
+            }
+
             if (!_book.TryGet(clOrdId, out var order) || order is null)
+            {
+                Resolve(clOrdId);
                 return;
+            }
             if (IsTerminal(order.Status))
+            {
+                Resolve(clOrdId);
                 return;
-
-            // Append the GTD-expiry audit envelope BEFORE issuing the
-            // cancel so a crash mid-cancel still leaves the
-            // expiry-attribution durable. On replay we re-attempt the
-            // cancel with the reason already on disk; CancelAsync is
-            // idempotent on a still-pending cancel (deduplicates via
-            // order status / clOrdId in the book). The downstream venue
-            // Canceled ER is what flips order status; this event is
-            // informational only.
-            try
-            {
-                _dispatcher.Dispatch(
-                    new OrderExpiredEvent
-                    {
-                        ClOrdId = clOrdId,
-                        Reason = ReasonGtd,
-                        AtUtc = atUtc,
-                    },
-                    static () => { /* no in-memory mutation; audit-only */ });
-            }
-            catch (WalBackpressureException ex)
-            {
-                MetricsRegistry.WalBackpressure.Add(1,
-                    new KeyValuePair<string, object?>("call_site", "gtd.expired"));
-                _logger?.LogWarning(ex,
-                    "WAL backpressure appending OrderExpiredEvent for {ClOrdId}; proceeding with cancel.",
-                    clOrdId);
             }
 
+            // 1) Append the GTD-expiry audit envelope BEFORE issuing
+            // the cancel so a crash mid-cancel still leaves the
+            // expiry-attribution durable. Pass-2 review (#255): if WAL
+            // append itself hits backpressure, re-arm with backoff and
+            // retry on the next timer tick — DO NOT proceed to cancel
+            // (CancelAsync would also write to the same pressured
+            // channel and we'd have no audit record on disk).
+            if (!auditAlreadyAppended)
+            {
+                try
+                {
+                    _dispatcher.Dispatch(
+                        new OrderExpiredEvent
+                        {
+                            ClOrdId = clOrdId,
+                            Reason = ReasonGtd,
+                            AtUtc = originalGtd,
+                        },
+                        static () => { /* no in-memory mutation; audit-only */ });
+                }
+                catch (WalBackpressureException ex)
+                {
+                    MetricsRegistry.WalBackpressure.Add(1,
+                        new KeyValuePair<string, object?>("call_site", "gtd.expired"));
+                    _logger?.LogWarning(ex,
+                        "WAL backpressure appending OrderExpiredEvent for {ClOrdId}; retrying with backoff.",
+                        clOrdId);
+                    MetricsRegistry.GtdOrdersExpired.Add(1,
+                        new KeyValuePair<string, object?>("cancel_result", "WalBackpressureRetry"));
+                    ReArmRetry(clOrdId);
+                    return;
+                }
+
+                // Persist the audit-appended flag so a subsequent
+                // backpressure on the cancel side doesn't double-emit
+                // OrderExpiredEvent on retry.
+                lock (_lock)
+                {
+                    if (_index.TryGetValue(clOrdId, out var cur))
+                        cur.ExpiredAuditAppended = true;
+                }
+            }
+
+            // 2) Issue the cancel through the regular pipeline.
             var result = await _cancel.CancelAsync(order.Owner, clOrdId, CancellationToken.None)
                 .ConfigureAwait(false);
+
+            if (result.Kind == OrderCancelResultKind.WalBackpressure)
+            {
+                _logger?.LogWarning(
+                    "WAL backpressure on CancelAsync for GTD-expired {ClOrdId}; retrying with backoff.",
+                    clOrdId);
+                MetricsRegistry.GtdOrdersExpired.Add(1,
+                    new KeyValuePair<string, object?>("cancel_result", result.Kind.ToString()));
+                ReArmRetry(clOrdId);
+                return;
+            }
+
+            // Terminal outcome (Accepted / NotFound / Stale /
+            // GatewayFailed): drop the entry. NotFound covers the race
+            // where OnOrderTerminal already cleaned up but Resolve is
+            // still safe (Dictionary.Remove is no-op on missing key).
+            Resolve(clOrdId);
 
             // WS projection: emit a synthetic Expired ExecutionEvent so
             // subscribers see kind=Expired alongside the regular
@@ -325,7 +505,7 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
                     LastQuantity: 0,
                     LastPrice: 0m,
                     RejectReason: ReasonGtd,
-                    TimestampUtc: atUtc));
+                    TimestampUtc: originalGtd));
             }
             catch (Exception ex)
             {
