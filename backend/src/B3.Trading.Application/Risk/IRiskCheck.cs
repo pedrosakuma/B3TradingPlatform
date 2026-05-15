@@ -28,7 +28,16 @@ public sealed record RiskContext(
     long Quantity,
     decimal? Price,
     ulong? ReplaceOriginalClOrdId = null,
-    long? EffectiveLeavesQuantity = null);
+    long? EffectiveLeavesQuantity = null,
+    // Q1.2 (#254). TIF / StopPrice / GoodTillDate are forwarded to the
+    // pipeline so the new gates (stop-trigger, IOC/FOK + MarketWithLeftover,
+    // GoodForAuction phase, GTD bounds) can run without re-reading the
+    // request. Default values keep the legacy plain-Limit/Day call sites
+    // ergonomic — every existing test still constructs `new RiskContext(...)`
+    // with the original positional arguments.
+    TimeInForce TimeInForce = TimeInForce.Day,
+    decimal? StopPrice = null,
+    DateTimeOffset? GoodTillDate = null);
 
 public sealed record RiskDecision(bool Approved, string? Reason)
 {

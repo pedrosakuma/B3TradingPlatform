@@ -21,6 +21,18 @@ public sealed class RiskOptions
     public MarginOptions Margin { get; set; } = new();
 
     /// <summary>
+    /// Q1.2 (#254). Maximum allowed horizon between "now" and a
+    /// <see cref="B3.Trading.Domain.TimeInForce.GTD"/> order's
+    /// <c>GoodTillDate</c>. Defaults to 30 days — picked to match
+    /// the regulatory / clearing window most B3 brokers honor for
+    /// good-till-date instructions. Bound at the global level only
+    /// (not per-firm / per-symbol): a tenant-scoped override would
+    /// just be a way to push expiries further out, which is the
+    /// thing the cap exists to prevent.
+    /// </summary>
+    public TimeSpan MaxGtdHorizon { get; set; } = TimeSpan.FromDays(30);
+
+    /// <summary>
     /// Rolling-window notional cap (slice 7). Modeled as its own
     /// section instead of a field on <see cref="RiskLimits"/> because
     /// the underlying ledger is keyed per-end-client (and per-firm)

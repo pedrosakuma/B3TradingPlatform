@@ -96,6 +96,15 @@ public static class TradingRiskServiceCollectionExtensions
         services.AddSingleton<IRiskCheck, SelfTradePreventionCheck>();
         services.AddSingleton<IRiskCheck, PriceCollarCheck>();
         services.AddSingleton<IRiskCheck, StaleReferencePriceCheck>();
+        // Q1.2 (#254). Stop-trigger / IOC-FOK-leftover / GFA-phase /
+        // GTD-bounds gates for the new Q1.1 order surface.
+        // IPhaseProvider defaults to NoPhaseProvider until #257 wires
+        // the auction-MD-driven implementation — see IPhaseProvider.cs.
+        services.TryAddSingleton<IPhaseProvider, NoPhaseProvider>();
+        services.AddSingleton<IRiskCheck, StopTriggerCheck>();
+        services.AddSingleton<IRiskCheck, IocFokMarketWithLeftoverCheck>();
+        services.AddSingleton<IRiskCheck, GoodForAuctionPhaseCheck>();
+        services.AddSingleton<IRiskCheck, GtdBoundsCheck>();
         services.AddSingleton<RiskPipeline>();
 
         // Throttle accountants (slice 7). TimeProvider is fetched from DI so

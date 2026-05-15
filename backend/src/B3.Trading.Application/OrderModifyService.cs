@@ -187,11 +187,34 @@ public sealed class OrderModifyService
             return OrderModifyResult.DuplicateClOrdId(newClOrdId);
         }
         var effectiveLeaves = req.NewQuantity - orig.CumulativeQuantity;
+        // Q1.2 (#254). Resolve the effective TIF/StopPrice/GoodTillDate
+        // through the same merge the domain ctor will use (null on the
+        // request = inherit the original) so the pipeline's stop-trigger,
+        // IOC/FOK leftover, GFA-phase and GTD-bounds checks see the same
+        // post-replace values that would land on the new Order.
+        TimeInForce effTif;
+        decimal? effStop;
+        DateTimeOffset? effGtd;
+        try
+        {
+            (effTif, effStop, effGtd) = Order.MergeReplacementOptionals(
+                orig.Type, orig.TimeInForce, orig.StopPrice, orig.GoodTillDate,
+                req.NewTimeInForce, req.NewStopPrice, req.NewGoodTillDate);
+        }
+        catch (ArgumentException ex)
+        {
+            // Same posture as submit: domain cross-field invariants
+            // surface as BadRequest (400) before any WAL append.
+            return OrderModifyResult.BadRequest(ex.Message);
+        }
         var riskCtx = new RiskContext(
             req.Owner, orig.FirmId, orig.Symbol, orig.Side, orig.Type,
             req.NewQuantity, req.NewPrice,
             ReplaceOriginalClOrdId: req.OriginalClOrdId,
-            EffectiveLeavesQuantity: effectiveLeaves);
+            EffectiveLeavesQuantity: effectiveLeaves,
+            TimeInForce: effTif,
+            StopPrice: effStop,
+            GoodTillDate: effGtd);
 
         var decision = _risk.Evaluate(riskCtx);
         if (!decision.Approved)
