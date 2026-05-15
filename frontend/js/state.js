@@ -2,7 +2,40 @@
 // holds the source-of-truth Map and posts diff/replace messages; this
 // module just stores what arrives and notifies subscribers.
 
+import { bumpRiskPolicyGeneration } from "./riskPolicy.js";
+
+// Q1.4 (#256). Terminal order statuses mirror the backend
+// `OrderStatus` enum. NOTE: `Expired` is intentionally absent —
+// the GTD-expiry pipeline (#255) emits an `ExecKind.Expired`
+// execution event but the order itself terminalises as
+// `Cancelled` (the GTD scheduler routes through the cancel
+// pipeline). The `Expired` value belongs to the executions log
+// only.
 const TERMINAL_ORDER_STATUSES = new Set(["Filled", "Cancelled", "Rejected", "Replaced"]);
+
+// Q1.4 (#256). Mirrors of the backend OrderType / TimeInForce enums
+// expanded by Q1.1 (#253). The ticket UI exposes every value listed
+// here; the helpers below drive the conditional StopPrice + GTD inputs
+// and the client-side validation rules.
+export const ORDER_TYPES = ["Limit", "Market", "StopLoss", "StopLimit", "MarketWithLeftover"];
+export const TIME_IN_FORCES = ["Day", "IOC", "FOK", "GTC", "GTD", "AtClose", "GoodForAuction"];
+
+export function isStopOrderType(type) {
+  return type === "StopLoss" || type === "StopLimit";
+}
+
+export function isGtdTif(tif) {
+  return tif === "GTD";
+}
+
+// Type chip abbreviations used by the working-orders table.
+export const ORDER_TYPE_CHIP = {
+  Limit:               { label: "LIM",  cls: "chip-lim"  },
+  Market:              { label: "MKT",  cls: "chip-mkt"  },
+  StopLoss:            { label: "STP",  cls: "chip-stp"  },
+  StopLimit:           { label: "STPL", cls: "chip-stpl" },
+  MarketWithLeftover:  { label: "MWL",  cls: "chip-mwl"  },
+};
 
 const listeners = new Set();
 const state = {
@@ -113,6 +146,12 @@ const state = {
   // null when the panel is collapsed. Used by the WS subscription
   // manager to decide whether to (un)subscribe `auction.${symbol}`.
   auctionPanelSymbol: null,
+  // Q1.4 (#256). Effective risk-policy values fetched from
+  // `GET /policy/risk` on session start. `null` until the first
+  // successful fetch lands; readers fall back to safe client-side
+  // defaults (e.g. 30-day GTD cap) so a slow/failed fetch never
+  // blocks the ticket. Shape: `{ maxGtdHorizonDays: number }`.
+  riskPolicy: null,
 };
 
 const EXECUTIONS_CAPACITY = 500;
@@ -217,6 +256,18 @@ export function clearAll() {
   state.phaseBySymbol.clear();
   state.phaseAtBySymbol.clear();
   state.auctionBySymbol.clear();
+  // Q1.4 (#256). Risk policy is per-session — the cap is sourced from
+  // the backend via `GET /policy/risk` on session start. Carrying a
+  // previous session's value across logout/reconnect risks validating
+  // the next trader against the wrong horizon, so reset to null and
+  // let the next loadRiskPolicy() refill (readers fall back to the
+  // documented 30d client-side default in the meantime).
+  state.riskPolicy = null;
+  // Invalidate any in-flight applyRiskPolicyFetch() started under the
+  // previous session — without this, a delayed response from the prior
+  // backend could resolve after the new session has loaded its own
+  // policy and overwrite (or null out) the newer value.
+  bumpRiskPolicyGeneration();
   notify("all");
 }
 
@@ -578,6 +629,11 @@ export function setWatchlist(symbols) {
 
 export function isTerminalOrderStatus(status) {
   return TERMINAL_ORDER_STATUSES.has(status);
+}
+
+export function setRiskPolicy(policy) {
+  state.riskPolicy = policy;
+  notify("riskPolicy");
 }
 
 // ── UX-only slices (operability pass) ──────────────────────────────

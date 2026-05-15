@@ -29,6 +29,7 @@ public static class TradingEndpointsExtensions
         app.MapAlgo();
         app.MapPositions();
         app.MapBalance();
+        app.MapPolicy();
         app.MapAdmin();
         {
             // #188: simulator/er moved to Infrastructure (it's the only consumer

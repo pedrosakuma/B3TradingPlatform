@@ -338,7 +338,8 @@ public class OrderModifyMarginAndProcessorTests
     private sealed class CapturingGateway : IExchangeGateway
     {
         public List<(Order Original, ulong NewClOrdId, long NewQty, decimal? NewPrice,
-                     TimeInForce? Tif, decimal? Stop, DateTimeOffset? Gtd)> Replaces { get; } = new();
+                     TimeInForce? Tif, decimal? Stop, DateTimeOffset? Gtd)> Replaces
+        { get; } = new();
 
         public Task SubmitAsync(Order order, CancellationToken ct) => Task.CompletedTask;
         public Task CancelAsync(Order order, ulong newClOrdId, CancellationToken ct) => Task.CompletedTask;
