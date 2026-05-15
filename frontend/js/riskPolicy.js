@@ -10,6 +10,20 @@
 
 let warned = false;
 
+// Monotonic per-session generation token. Every applyRiskPolicyFetch()
+// call snapshots this counter BEFORE awaiting the network; on
+// resolution it re-checks and silently drops its result if the counter
+// has moved on. clearAll() (state.js) calls bumpRiskPolicyGeneration()
+// on session boundaries (logout / WS reconnect), so an in-flight load
+// from a prior session can never overwrite — or null out — the new
+// session's policy.
+let _policyGeneration = 0;
+
+export function bumpRiskPolicyGeneration() {
+  _policyGeneration += 1;
+  return _policyGeneration;
+}
+
 // Test seam: lets a test reset the once-only warn latch between cases
 // without monkey-patching console.
 export function _resetRiskPolicyWarnedForTests() {
@@ -17,6 +31,10 @@ export function _resetRiskPolicyWarnedForTests() {
 }
 
 export async function applyRiskPolicyFetch({ fetchPolicy, setRiskPolicy, warn = console.warn }) {
+  // Capture the generation BEFORE the up-front clear and the await so
+  // that any session boundary crossed while the fetch is in flight
+  // invalidates this call's result on resolution.
+  const myGen = _policyGeneration;
   // Drop any prior policy snapshot up-front so an in-flight fetch on a
   // fresh session never validates the new trader's ticket against the
   // previous backend's cap. Readers fall back to the documented 30d
@@ -25,6 +43,11 @@ export async function applyRiskPolicyFetch({ fetchPolicy, setRiskPolicy, warn = 
   setRiskPolicy(null);
   try {
     const policy = await fetchPolicy();
+    // Stale-response guard: if the generation moved while we were
+    // awaiting, a newer session has already taken ownership of the
+    // riskPolicy slice. Drop our result on the floor — applying it
+    // (even as null) would clobber the newer session's loaded policy.
+    if (myGen !== _policyGeneration) return;
     const days = Number(policy?.maxGtdHorizonDays);
     if (Number.isFinite(days) && days > 0) {
       setRiskPolicy({ maxGtdHorizonDays: days });
@@ -40,6 +63,7 @@ export async function applyRiskPolicyFetch({ fetchPolicy, setRiskPolicy, warn = 
       warned = true;
     }
   } catch (err) {
+    if (myGen !== _policyGeneration) return;
     setRiskPolicy(null);
     if (!warned) {
       warn("risk-policy fetch failed; using FE default", err);

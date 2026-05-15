@@ -2,6 +2,8 @@
 // holds the source-of-truth Map and posts diff/replace messages; this
 // module just stores what arrives and notifies subscribers.
 
+import { bumpRiskPolicyGeneration } from "./riskPolicy.js";
+
 // Q1.4 (#256). Terminal order statuses mirror the backend
 // `OrderStatus` enum. NOTE: `Expired` is intentionally absent —
 // the GTD-expiry pipeline (#255) emits an `ExecKind.Expired`
@@ -261,6 +263,11 @@ export function clearAll() {
   // let the next loadRiskPolicy() refill (readers fall back to the
   // documented 30d client-side default in the meantime).
   state.riskPolicy = null;
+  // Invalidate any in-flight applyRiskPolicyFetch() started under the
+  // previous session — without this, a delayed response from the prior
+  // backend could resolve after the new session has loaded its own
+  // policy and overwrite (or null out) the newer value.
+  bumpRiskPolicyGeneration();
   notify("all");
 }
 
