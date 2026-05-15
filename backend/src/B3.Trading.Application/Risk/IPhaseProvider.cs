@@ -1,3 +1,9 @@
+// LOCKED LOCATION: this interface is consumed by GoodForAuctionPhaseCheck and
+// will be implemented by issue #257 (auction MD ingest + AuctionStateStore).
+// Do NOT move to another namespace without coordinating both PRs - DI binding
+// is by exact type identity. The temporary NoPhaseProvider registration in
+// TradingRiskServiceCollectionExtensions is replaced by #257's
+// AuctionStateStore-backed provider for the same interface type.
 namespace B3.Trading.Application.Risk;
 
 /// <summary>
