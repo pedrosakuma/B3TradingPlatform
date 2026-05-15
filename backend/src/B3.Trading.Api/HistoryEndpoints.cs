@@ -97,10 +97,20 @@ public static class HistoryEndpoints
             }
 
             var orders = await ProjectOrdersAsync(store, owner.Value, symbol, fromTs, toTs, snapshotSeq, ct);
-            // Sort newest-first by the order's last touching seq (cursor anchor).
-            orders.Sort(static (a, b) => b.LastSeq.CompareTo(a.LastSeq));
+            // Sort newest-first by the composite key (LastSeq, ClOrdId).
+            // The ClOrdId tie-breaker is required because a Replaced ER
+            // updates BOTH the original and the replacement projection
+            // with the same LastSeq; pagination by LastSeq alone would
+            // drop one sibling whenever the page boundary fell between
+            // them. See ApplyCursorAndPage for the matching cursor
+            // filter.
+            orders.Sort(static (a, b) =>
+            {
+                var c = b.LastSeq.CompareTo(a.LastSeq);
+                return c != 0 ? c : b.ClOrdId.CompareTo(a.ClOrdId);
+            });
 
-            var page = ApplyCursorAndPage(orders, cursorState, pageSize, snapshotSeq, static x => (x.LastSeq, x.LastTs));
+            var page = ApplyCursorAndPage(orders, cursorState, pageSize, snapshotSeq, static x => (x.LastSeq, x.ClOrdId, x.LastTs));
             var items = new List<OrderHistoryItemDto>(page.Items.Count);
             foreach (var p in page.Items) items.Add(p.ToDto());
 
@@ -129,7 +139,7 @@ public static class HistoryEndpoints
             var executions = await ProjectExecutionsAsync(store, owner.Value, symbol, fromTs, toTs, ct);
             executions.Sort(static (a, b) => b.Seq.CompareTo(a.Seq));
 
-            var page = ApplyCursorAndPage(executions, cursorState, pageSize, snapshotSeq: 0, static x => (x.Seq, x.TimestampUtc));
+            var page = ApplyCursorAndPage(executions, cursorState, pageSize, snapshotSeq: 0, static x => (x.Seq, 0UL, x.TimestampUtc));
             var items = new List<ExecutionHistoryItemDto>(page.Items.Count);
             foreach (var e in page.Items) items.Add(e.ToDto());
 
@@ -160,6 +170,17 @@ public static class HistoryEndpoints
         // time (not submit). Tracking firm-wide is fine — we filter to
         // the requested owner only when materialising the projection.
         var ownerByClOrdId = new Dictionary<ulong, (string Owner, string Symbol)>();
+        // Cancel/replace link maps. Mirror the in-memory
+        // OrderOwnershipMap.RegisterCancelLink / RegisterReplaceLink the
+        // runtime maintains on dispatch (see OrderCancelService and
+        // OrderModifyService). When a venue ER drops OrigClOrdId on a
+        // cancel-ack or Replaced — some EntryPoint SDK versions do —
+        // ExecutionReportProcessor.Apply falls back to that ownership
+        // map (TryResolveOrig) to find the original order. The history
+        // projector must mirror that fallback or it silently strands
+        // every cancel/replace ack whose OrigClOrdId field was missing.
+        var cancelLinks = new Dictionary<ulong, ulong>();   // cancelClOrdId -> originalClOrdId
+        var replaceLinks = new Dictionary<ulong, ulong>();  // newClOrdId    -> originalClOrdId
         // Tracks which projections have at least one event in [from,to].
         // We must apply ALL events with ts <= to to project the correct
         // state-at-`to` (a partial fill at 10:00 followed by a full fill
@@ -197,15 +218,53 @@ public static class HistoryEndpoints
                     // live ExecutionReportProcessor.HandleReplaced semantics
                     // where the new ID is a separate Order).
                     ownerByClOrdId[rr.NewClOrdId] = (rr.EndClientId, rr.Symbol);
+                    // Mirror OrderOwnershipMap.RegisterReplaceLink — needed
+                    // when the venue's Replaced ER omits OrigClOrdId.
+                    replaceLinks[rr.NewClOrdId] = rr.OriginalClOrdId;
                     if (!OwnerMatches(rr.EndClientId, owner)) break;
                     if (symbol is not null && !rr.Symbol.Equals(symbol, StringComparison.Ordinal)) break;
                     byClOrdId[rr.NewClOrdId] = OrderProjection.FromReplace(seq, rr);
                     if (inWindow) hadEventInWindow.Add(rr.NewClOrdId);
                     break;
 
+                case OrderCancelRequestedEvent cr:
+                    // No projection row for cancel-side ClOrdIDs (they
+                    // never become an Order in the runtime book either).
+                    // We only need the link so a cancel-ack ER without
+                    // OrigClOrdId still resolves to the original order.
+                    // Mirrors OrderOwnershipMap.RegisterCancelLink.
+                    cancelLinks[cr.CancelClOrdId] = cr.OriginalClOrdId;
+                    break;
+
                 case ExecutionReportReceivedEvent er:
                     Enum.TryParse<ExecKind>(er.ExecKind, ignoreCase: true, out var kind);
-                    if (kind == ExecKind.Replaced && er.OrigClOrdId != 0)
+                    // Resolve OrigClOrdId from the link maps when the venue
+                    // dropped it on the wire. Mirrors the runtime
+                    // ExecutionReportProcessor.Apply OrigClOrdId fallback
+                    // (TryResolveOrig) — without this, history strands
+                    // cancel-acks and Replaced ERs whose OrigClOrdId was 0.
+                    var resolvedOrig = er.OrigClOrdId;
+                    if (resolvedOrig == 0)
+                    {
+                        // Two distinct link maps mirror the runtime
+                        // OrderOwnershipMap fallback: a cancel-side ack
+                        // resolves only via cancelLinks (so a Cancel ER
+                        // for a ClOrdID that ALSO happens to be the
+                        // "new" side of an in-flight replace is treated
+                        // as a direct cancel of that order, not a cancel
+                        // of its predecessor — matches runtime, which
+                        // routes the priority-lost cancel-as-replace
+                        // through PendingReplacementRegistry instead of
+                        // the OrigClOrdId fallback). Replaced ERs
+                        // resolve only via replaceLinks.
+                        if (kind == ExecKind.Replaced && replaceLinks.TryGetValue(er.ClOrdId, out var rOrig))
+                            resolvedOrig = rOrig;
+                        else if ((kind is ExecKind.Canceled or ExecKind.Rejected or ExecKind.Expired)
+                            && cancelLinks.TryGetValue(er.ClOrdId, out var cOrig))
+                            resolvedOrig = cOrig;
+                    }
+
+                    if (kind == ExecKind.Replaced && resolvedOrig != 0)
                     {
                         // Mirror ExecutionReportProcessor.ApplyReplaceAccepted
                         // + Order.HydrateReplacement: the original goes
@@ -217,10 +276,10 @@ public static class HistoryEndpoints
                         // row would stay at PendingNew forever — the
                         // venue never issues a separate New ER for the
                         // replacement.
-                        if (byClOrdId.TryGetValue(er.OrigClOrdId, out var origProj))
+                        if (byClOrdId.TryGetValue(resolvedOrig, out var origProj))
                         {
                             origProj.ApplyReplacedTerminal(seq, er);
-                            if (inWindow) hadEventInWindow.Add(er.OrigClOrdId);
+                            if (inWindow) hadEventInWindow.Add(resolvedOrig);
                         }
                         if (byClOrdId.TryGetValue(er.ClOrdId, out var newProj))
                         {
@@ -235,8 +294,8 @@ public static class HistoryEndpoints
                     // lands on the cancel-side ID — never carried by an
                     // OrderSubmittedEvent — but mutates the original).
                     var targetId = er.ClOrdId;
-                    if (er.OrigClOrdId != 0 && byClOrdId.ContainsKey(er.OrigClOrdId))
-                        targetId = er.OrigClOrdId;
+                    if (resolvedOrig != 0 && byClOrdId.ContainsKey(resolvedOrig))
+                        targetId = resolvedOrig;
                     if (byClOrdId.TryGetValue(targetId, out var proj))
                     {
                         proj.ApplyEr(seq, er);
@@ -290,6 +349,13 @@ public static class HistoryEndpoints
         // Same side-table rationale as ProjectOrdersAsync: ER carries no
         // owner/symbol so we backfill from the prior submit/replace.
         var ownerByClOrdId = new Dictionary<ulong, (string Owner, string Symbol, string Side)>();
+        // Mirrors OrderOwnershipMap.RegisterCancelLink/RegisterReplaceLink
+        // so cancel/replace ack ERs that the venue emitted with
+        // OrigClOrdId=0 still resolve back to the original order's
+        // owner/firm — without this fallback the executions endpoint
+        // silently drops every such ack for the firm-isolation filter.
+        var cancelLinks = new Dictionary<ulong, ulong>();
+        var replaceLinks = new Dictionary<ulong, ulong>();
         var result = new List<ExecutionProjection>();
 
         await foreach (var (seq, evt) in store.ReadFromAsync(0, ct))
@@ -301,15 +367,39 @@ public static class HistoryEndpoints
                     break;
                 case OrderReplaceRequestedEvent rr:
                     ownerByClOrdId[rr.NewClOrdId] = (rr.EndClientId, rr.Symbol, rr.Side);
+                    replaceLinks[rr.NewClOrdId] = rr.OriginalClOrdId;
+                    break;
+                case OrderCancelRequestedEvent cr:
+                    cancelLinks[cr.CancelClOrdId] = cr.OriginalClOrdId;
                     break;
                 case ExecutionReportReceivedEvent er:
                     if (er.TimestampUtc < from || er.TimestampUtc > to) break;
-                    // Owner resolution falls back to OrigClOrdId for cancel/
-                    // replace acks where the cancel-side ID was never carried
-                    // by an OrderSubmittedEvent.
+                    // Owner resolution: try the ER's own ClOrdId first,
+                    // then OrigClOrdId, then the link maps (mirroring the
+                    // runtime ExecutionReportProcessor.Apply fallback).
                     (string Owner, string Symbol, string Side)? meta = null;
                     if (ownerByClOrdId.TryGetValue(er.ClOrdId, out var m1)) meta = m1;
                     else if (er.OrigClOrdId != 0 && ownerByClOrdId.TryGetValue(er.OrigClOrdId, out var m2)) meta = m2;
+                    else
+                    {
+                        // OrigClOrdId fallback: same separation as
+                        // ProjectOrdersAsync — replaceLinks is consulted
+                        // only for Replaced ERs, cancelLinks only for
+                        // cancel-side acks (Canceled / Rejected /
+                        // Expired). Mirrors runtime
+                        // OrderOwnershipMap.TryResolveOrig + the
+                        // cancel-as-replace intercept that owns the
+                        // "Cancel ER for the new side of an in-flight
+                        // replace" case via PendingReplacementRegistry,
+                        // not via the OrigClOrdId fallback.
+                        Enum.TryParse<ExecKind>(er.ExecKind, ignoreCase: true, out var execKind);
+                        if (execKind == ExecKind.Replaced
+                            && replaceLinks.TryGetValue(er.ClOrdId, out var rOrig)
+                            && ownerByClOrdId.TryGetValue(rOrig, out var m3)) meta = m3;
+                        else if (execKind is ExecKind.Canceled or ExecKind.Rejected or ExecKind.Expired
+                            && cancelLinks.TryGetValue(er.ClOrdId, out var cOrig)
+                            && ownerByClOrdId.TryGetValue(cOrig, out var m4)) meta = m4;
+                    }
                     if (meta is null) break;
                     if (!OwnerMatches(meta.Value.Owner, owner)) break;
                     if (symbol is not null && !meta.Value.Symbol.Equals(symbol, StringComparison.Ordinal)) break;
@@ -338,17 +428,25 @@ public static class HistoryEndpoints
 
     private static PageResult<T> ApplyCursorAndPage<T>(
         List<T> sortedDesc, CursorState? cursor, int pageSize, long snapshotSeq,
-        Func<T, (long Seq, DateTimeOffset Ts)> anchor)
+        Func<T, (long Seq, ulong TieBreaker, DateTimeOffset Ts)> anchor)
     {
-        // Items are sorted seq-DESC. The cursor anchors the LAST item we
-        // returned previously; the next page strictly precedes it.
+        // Items are sorted (Seq DESC, TieBreaker DESC). The cursor anchors
+        // the LAST item we returned previously; the next page strictly
+        // precedes it under the same composite ordering. The TieBreaker
+        // is the order's ClOrdId for /orders/history (a Replaced ER
+        // updates both the original and the replacement with the same
+        // LastSeq, so paging by Seq alone would drop the sibling at the
+        // boundary). For /executions/history each ER occupies a unique
+        // WAL Seq so the tie-breaker is unused (passed as 0).
         IEnumerable<T> windowed = sortedDesc;
         if (cursor is { } c)
         {
             windowed = sortedDesc.Where(x =>
             {
                 var a = anchor(x);
-                return a.Seq < c.Seq;
+                if (a.Seq < c.Seq) return true;
+                if (a.Seq > c.Seq) return false;
+                return a.TieBreaker < c.ClOrdId;
             });
         }
 
@@ -373,7 +471,7 @@ public static class HistoryEndpoints
             // snapshotSeq travels with the cursor so every page in the
             // walk reads the same frozen view. Executions pass 0 here
             // and ProjectExecutionsAsync ignores the field.
-            next = EncodeCursor(new CursorState(a.Seq, a.Ts) { SnapshotSeq = snapshotSeq });
+            next = EncodeCursor(new CursorState(a.Seq, a.Ts) { ClOrdId = a.TieBreaker, SnapshotSeq = snapshotSeq });
         }
         return new PageResult<T>(taken, next);
     }
@@ -549,23 +647,123 @@ public static class HistoryEndpoints
             LastTs = rr.TimestampUtc,
         };
 
+        /// <summary>
+        /// Applies an ER to this projection. Mirrors the runtime
+        /// state-transition guards in
+        /// <c>ExecutionReportProcessor.Apply</c> and
+        /// <see cref="B3.Trading.Domain.Order.ApplyCumulativeFill"/> /
+        /// <see cref="B3.Trading.Domain.Order.MarkCancelled"/> /
+        /// <see cref="B3.Trading.Domain.Order.MarkRejected"/> /
+        /// <see cref="B3.Trading.Domain.Order.MarkWorking"/>:
+        /// <list type="bullet">
+        ///   <item>Fills only advance forward on cumulative quantity and
+        ///   never regress a terminal status (<c>Cancelled</c> /
+        ///   <c>Rejected</c> / <c>Replaced</c>); a late fill on a
+        ///   cancelled order keeps the order Cancelled.</item>
+        ///   <item>Cancels are dropped if the order is already terminal
+        ///   (<c>Filled</c> / <c>Rejected</c> / <c>Cancelled</c> /
+        ///   <c>Replaced</c>).</item>
+        ///   <item>Rejects are dropped if the order has any fill or is
+        ///   terminal.</item>
+        ///   <item><c>New</c> only transitions from <c>PendingNew</c> and
+        ///   never touches leaves/cum.</item>
+        /// </list>
+        /// Without these guards, the history view diverges from the
+        /// runtime book on ER orderings the runtime de-duplicates
+        /// (e.g. <c>[Canceled(A), Fill(A)]</c> → runtime keeps A
+        /// Cancelled; history previously flipped to Filled).
+        /// </summary>
         public void ApplyEr(long seq, ExecutionReportReceivedEvent er)
         {
-            LeavesQuantity = er.LeavesQuantity;
-            CumulativeQuantity = er.CumulativeQuantity;
             if (Enum.TryParse<ExecKind>(er.ExecKind, ignoreCase: true, out var kind))
             {
-                Status = kind switch
+                switch (kind)
                 {
-                    ExecKind.New => OrderStatus.Working,
-                    ExecKind.PartialFill => OrderStatus.PartiallyFilled,
-                    ExecKind.Fill => er.LeavesQuantity == 0 ? OrderStatus.Filled : OrderStatus.PartiallyFilled,
-                    ExecKind.Canceled => OrderStatus.Cancelled,
-                    ExecKind.Expired => OrderStatus.Cancelled,
-                    ExecKind.Rejected => OrderStatus.Rejected,
-                    ExecKind.Replaced => OrderStatus.Replaced,
-                    _ => Status,
-                };
+                    case ExecKind.New:
+                        // Order.MarkWorking: PendingNew → Working only.
+                        // Leaves/cum are NOT touched (the runtime never
+                        // alters them on a New ER either; a re-delivered
+                        // New must not regress a fillable order).
+                        if (Status == OrderStatus.PendingNew)
+                            Status = OrderStatus.Working;
+                        break;
+
+                    case ExecKind.PartialFill:
+                    case ExecKind.Fill:
+                        // Order.ApplyCumulativeFill: only advance when
+                        // cumQty > current; preserve terminal status on
+                        // late fills (Cancelled / Rejected / Replaced
+                        // remain — exchange's truth still books to
+                        // positions in the runtime, but the order
+                        // surface keeps its terminal label).
+                        if (er.CumulativeQuantity > CumulativeQuantity)
+                        {
+                            CumulativeQuantity = er.CumulativeQuantity;
+                            LeavesQuantity = Math.Max(0, Quantity - CumulativeQuantity);
+                            if (Status is not (OrderStatus.Cancelled
+                                or OrderStatus.Rejected
+                                or OrderStatus.Replaced))
+                            {
+                                Status = LeavesQuantity == 0
+                                    ? OrderStatus.Filled
+                                    : OrderStatus.PartiallyFilled;
+                            }
+                        }
+                        break;
+
+                    case ExecKind.Canceled:
+                    case ExecKind.Expired:
+                        // Order.MarkCancelled: dropped if already terminal.
+                        // Note ExecutionReportProcessor.Apply also drops a
+                        // Canceled ER for an already-PartiallyFilled order
+                        // only via the MarkCancelled guard — which DOES
+                        // allow PartiallyFilled→Cancelled (a working order
+                        // with a partial can still be cancelled). Mirror
+                        // exactly: only Filled/Rejected/Cancelled/Replaced
+                        // block.
+                        if (Status is not (OrderStatus.Filled
+                            or OrderStatus.Rejected
+                            or OrderStatus.Cancelled
+                            or OrderStatus.Replaced))
+                        {
+                            Status = OrderStatus.Cancelled;
+                            LeavesQuantity = er.LeavesQuantity;
+                            CumulativeQuantity = Math.Max(CumulativeQuantity, er.CumulativeQuantity);
+                        }
+                        break;
+
+                    case ExecKind.Rejected:
+                        // Order.MarkRejected: dropped after any fill or
+                        // any terminal. Matches the
+                        // ExecutionReportProcessor guard set exactly.
+                        if (Status is not (OrderStatus.Filled
+                            or OrderStatus.PartiallyFilled
+                            or OrderStatus.Rejected
+                            or OrderStatus.Cancelled
+                            or OrderStatus.Replaced))
+                        {
+                            Status = OrderStatus.Rejected;
+                            LeavesQuantity = er.LeavesQuantity;
+                            CumulativeQuantity = Math.Max(CumulativeQuantity, er.CumulativeQuantity);
+                        }
+                        break;
+
+                    case ExecKind.Replaced:
+                        // Defensive only: Replaced ERs flow through
+                        // ApplyReplacedTerminal/HydrateFromReplaceEr in
+                        // ProjectOrdersAsync. If we land here it means
+                        // OrigClOrdId was missing AND no replace link
+                        // was registered — fall back to MarkReplaced
+                        // semantics on the targeted projection.
+                        if (Status is not (OrderStatus.Filled
+                            or OrderStatus.Rejected
+                            or OrderStatus.Cancelled
+                            or OrderStatus.Replaced))
+                        {
+                            Status = OrderStatus.Replaced;
+                        }
+                        break;
+                }
             }
             LastSeq = seq;
             LastTs = er.TimestampUtc;
@@ -704,6 +902,15 @@ public static class HistoryEndpoints
         // Default 0 means "no snapshot" — old cursors (pre-fix) and the
         // executions endpoint both deserialise/encode that way.
         [System.Text.Json.Serialization.JsonPropertyName("snap")] public long SnapshotSeq { get; init; }
+        // Q2.1 (#268) — composite-keyset tie-breaker. Required because
+        // a Replaced ER advances both the original and the replacement
+        // projection to the same LastSeq; sorting/paging by Seq alone
+        // would silently drop one sibling whenever the page boundary
+        // fell between them. ClOrdId is the secondary sort key for the
+        // /orders/history walk; /executions/history sets it to 0
+        // (each ER is one WAL row with a unique Seq). Default 0 keeps
+        // pre-fix encoded cursors decodable.
+        [System.Text.Json.Serialization.JsonPropertyName("cl")] public ulong ClOrdId { get; init; }
     }
 
     private sealed record PageResult<T>(IReadOnlyList<T> Items, string? NextCursor);

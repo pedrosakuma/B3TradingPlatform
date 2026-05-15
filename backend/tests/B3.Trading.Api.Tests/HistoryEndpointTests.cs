@@ -542,6 +542,239 @@ public class HistoryEndpointTests : IDisposable
         Assert.Equal("Working", byId[cId.ToString()].GetProperty("status").GetString());
     }
 
+    [Fact]
+    public async Task OrdersHistory_ReplacePairAtPageBoundary_BothSiblingsAppearAcrossPages()
+    {
+        // P1 regression for #275 pass-3: a Replaced ER updates BOTH the
+        // original and the replacement projection with the same LastSeq.
+        // The pre-fix cursor filter (a.Seq < c.Seq) silently dropped the
+        // sibling at the boundary whenever pagination split the pair.
+        // The composite (LastSeq, ClOrdId) keyset cursor must surface
+        // both rows across the two pages exactly once.
+        using var f = TestAppFactory.WithOverrides(Overrides());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        // One filler order so we can paginate with limit=1 without the
+        // "single result fits the page" short-circuit.
+        var fillerStr = await SubmitOrder(http, token, qty: 10, price: 29m);
+        await InjectEr(http, adminToken, new { ClOrdId = ulong.Parse(fillerStr), Type = "New" });
+
+        // The replace pair: A submitted + acked, then replaced into B.
+        // The Replaced ER touches both A (terminal) and B (hydrate)
+        // at the same WAL seq.
+        var origStr = await SubmitOrder(http, token, qty: 10, price: 30m);
+        var origId = ulong.Parse(origStr);
+        await InjectEr(http, adminToken, new { ClOrdId = origId, Type = "New" });
+
+        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origStr}")
+        {
+            Content = JsonContent.Create(new { Quantity = 10L, Price = 31m }),
+        };
+        modifyReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var modifyResp = await http.SendAsync(modifyReq);
+        Assert.Equal(HttpStatusCode.Accepted, modifyResp.StatusCode);
+        var newId = ulong.Parse((await modifyResp.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("clOrdId").GetString()!);
+
+        var mock = (B3.Trading.Infrastructure.MockEntryPointClient)
+            f.Services.GetRequiredService<B3.Trading.Infrastructure.IEntryPointClient>();
+        mock.EmitExecutionReport(new B3.Trading.Infrastructure.ExecutionReportEnvelope(
+            ClOrdId: newId,
+            ExecType: B3.Trading.Infrastructure.EpExecType.Replaced,
+            LeavesQuantity: 10,
+            CumulativeQuantity: 0,
+            LastQuantity: 0,
+            LastPrice: 0m,
+            RejectReason: null,
+            OrigClOrdId: origId));
+
+        // Walk every page with limit=1 — boundary necessarily falls
+        // between every adjacent pair, including the replace siblings.
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        string? cursor = null;
+        var pages = 0;
+        do
+        {
+            pages++;
+            Assert.True(pages <= 10, "pagination did not terminate");
+            var page = await GetOrdersHistory(http, token, limit: 1, cursor: cursor);
+            foreach (var item in page.Items)
+                Assert.True(seen.Add(item.GetProperty("clOrdId").GetString()!),
+                    "duplicate ClOrdId returned across pages");
+            cursor = page.NextCursor;
+        } while (cursor is not null);
+
+        Assert.Contains(origStr, seen);
+        Assert.Contains(newId.ToString(), seen);
+        Assert.Contains(fillerStr, seen);
+    }
+
+    [Fact]
+    public async Task OrdersHistory_LateFillOnCancelledOrder_PreservesCancelledStatus()
+    {
+        // P1 regression for #275 pass-3: WAL [Canceled(A), Fill(A)] —
+        // the runtime's Order.ApplyCumulativeFill keeps A=Cancelled
+        // (terminal status preserved on late fill). The pre-fix
+        // ApplyEr unconditionally re-mapped Fill → Filled, so
+        // /orders/history reported A=Filled while the live runtime
+        // reported A=Cancelled.
+        using var f = TestAppFactory.WithOverrides(Overrides());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var clOrdIdStr = await SubmitOrder(http, token, qty: 10, price: 30m);
+        var clOrdId = ulong.Parse(clOrdIdStr);
+        await InjectEr(http, adminToken, new { ClOrdId = clOrdId, Type = "New" });
+        await InjectEr(http, adminToken, new { ClOrdId = clOrdId, Type = "Canceled" });
+        // Late fill ER directly via the mock — the simulator endpoint
+        // refuses to inject fills against an order the runtime book
+        // considers terminal, but the venue can still legally deliver
+        // one (see ExecutionReportProcessor late-fill path).
+        var mock = (B3.Trading.Infrastructure.MockEntryPointClient)
+            f.Services.GetRequiredService<B3.Trading.Infrastructure.IEntryPointClient>();
+        mock.EmitExecutionReport(new B3.Trading.Infrastructure.ExecutionReportEnvelope(
+            ClOrdId: clOrdId,
+            ExecType: B3.Trading.Infrastructure.EpExecType.Fill,
+            LeavesQuantity: 0,
+            CumulativeQuantity: 10,
+            LastQuantity: 10,
+            LastPrice: 30m,
+            RejectReason: null,
+            OrigClOrdId: 0));
+
+        var page = await GetOrdersHistory(http, token);
+        var byId = page.Items.ToDictionary(
+            o => o.GetProperty("clOrdId").GetString()!,
+            o => o,
+            StringComparer.Ordinal);
+
+        var orig = byId[clOrdIdStr];
+        Assert.Equal("Cancelled", orig.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task OrdersHistory_CancelAckWithMissingOrigClOrdId_ResolvesViaCancelLinkMap()
+    {
+        // P1 regression for #275 pass-3: when the venue's Canceled ER
+        // arrives with OrigClOrdId=0 (some EntryPoint SDK versions drop
+        // the field) the runtime falls back to the cancel-link map
+        // populated by OrderCancelService. The history projector now
+        // mirrors that fallback by replaying OrderCancelRequestedEvent
+        // → cancelLinks[cancelClOrdId] = originalClOrdId. Without this
+        // the cancel ack is silently stranded and the original order
+        // never transitions to Cancelled in the history view.
+        using var f = TestAppFactory.WithOverrides(Overrides());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var origStr = await SubmitOrder(http, token, qty: 10, price: 30m);
+        var origId = ulong.Parse(origStr);
+        await InjectEr(http, adminToken, new { ClOrdId = origId, Type = "New" });
+
+        // DELETE writes OrderCancelRequestedEvent + dispatches a
+        // OrderCancelRequest with a freshly-allocated cancel-side ClOrdID
+        // to the wire. We grab that cancel-side ID from the mock.
+        var mock = (B3.Trading.Infrastructure.MockEntryPointClient)
+            f.Services.GetRequiredService<B3.Trading.Infrastructure.IEntryPointClient>();
+        var cancelsBefore = mock.SubmittedCancels.Count;
+        var del = new HttpRequestMessage(HttpMethod.Delete, $"/orders/{origStr}");
+        del.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var delResp = await http.SendAsync(del);
+        Assert.Equal(HttpStatusCode.NoContent, delResp.StatusCode);
+        var cancelReq = mock.SubmittedCancels.Skip(cancelsBefore).Single();
+        var cancelClOrdId = cancelReq.ClOrdId;
+        Assert.NotEqual(0UL, cancelClOrdId);
+
+        // Venue Canceled ER targeting the cancel-side ID with
+        // OrigClOrdId=0. The history projector must resolve it via the
+        // cancel-link map and apply the cancel to `origId`.
+        mock.EmitExecutionReport(new B3.Trading.Infrastructure.ExecutionReportEnvelope(
+            ClOrdId: cancelClOrdId,
+            ExecType: B3.Trading.Infrastructure.EpExecType.Canceled,
+            LeavesQuantity: 10,
+            CumulativeQuantity: 0,
+            LastQuantity: 0,
+            LastPrice: 0m,
+            RejectReason: null,
+            OrigClOrdId: 0));
+
+        var page = await GetOrdersHistory(http, token);
+        var byId = page.Items.ToDictionary(
+            o => o.GetProperty("clOrdId").GetString()!,
+            o => o,
+            StringComparer.Ordinal);
+
+        Assert.True(byId.ContainsKey(origStr), "original must surface in history");
+        Assert.Equal("Cancelled", byId[origStr].GetProperty("status").GetString());
+
+        // /executions/history: the cancel ack itself must also appear,
+        // resolved through the cancel-link map for firm-isolation.
+        var execPage = await GetExecutionsHistory(http, token);
+        Assert.Contains(execPage.Items,
+            e => e.GetProperty("clOrdId").GetString() == cancelClOrdId.ToString()
+                 && e.GetProperty("kind").GetString() == "Canceled");
+    }
+
+    [Fact]
+    public async Task OrdersHistory_ReplaceAckWithMissingOrigClOrdId_ResolvesViaReplaceLinkMap()
+    {
+        // P1 regression for #275 pass-3: same fallback as the cancel
+        // case above, but the venue's Replaced ER drops OrigClOrdId.
+        // The history projector must replay
+        // OrderReplaceRequestedEvent → replaceLinks[newClOrdId] =
+        // originalClOrdId, recover the original from there, and project
+        // both sides (terminal Replaced on original; hydrate new).
+        using var f = TestAppFactory.WithOverrides(Overrides());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var origStr = await SubmitOrder(http, token, qty: 10, price: 30m);
+        var origId = ulong.Parse(origStr);
+        await InjectEr(http, adminToken, new { ClOrdId = origId, Type = "New" });
+
+        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origStr}")
+        {
+            Content = JsonContent.Create(new { Quantity = 10L, Price = 31m }),
+        };
+        modifyReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var modifyResp = await http.SendAsync(modifyReq);
+        Assert.Equal(HttpStatusCode.Accepted, modifyResp.StatusCode);
+        var newId = ulong.Parse((await modifyResp.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("clOrdId").GetString()!);
+
+        // Venue Replaced ER with OrigClOrdId=0 — must resolve via
+        // replaceLinks[newId] = origId.
+        var mock = (B3.Trading.Infrastructure.MockEntryPointClient)
+            f.Services.GetRequiredService<B3.Trading.Infrastructure.IEntryPointClient>();
+        mock.EmitExecutionReport(new B3.Trading.Infrastructure.ExecutionReportEnvelope(
+            ClOrdId: newId,
+            ExecType: B3.Trading.Infrastructure.EpExecType.Replaced,
+            LeavesQuantity: 10,
+            CumulativeQuantity: 0,
+            LastQuantity: 0,
+            LastPrice: 0m,
+            RejectReason: null,
+            OrigClOrdId: 0));
+
+        var page = await GetOrdersHistory(http, token);
+        var byId = page.Items.ToDictionary(
+            o => o.GetProperty("clOrdId").GetString()!,
+            o => o,
+            StringComparer.Ordinal);
+
+        Assert.True(byId.ContainsKey(origStr), "original must appear");
+        Assert.True(byId.ContainsKey(newId.ToString()), "replacement must appear");
+        Assert.Equal("Replaced", byId[origStr].GetProperty("status").GetString());
+        // Replacement is hydrated as Working (leaves==NewQty, cum==0).
+        Assert.Equal("Working", byId[newId.ToString()].GetProperty("status").GetString());
+        Assert.Equal(10L, byId[newId.ToString()].GetProperty("leavesQuantity").GetInt64());
+    }
+
     // -----------------------------------------------------------------
     // helpers
     // -----------------------------------------------------------------
