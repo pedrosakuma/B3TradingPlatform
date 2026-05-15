@@ -26,6 +26,7 @@ public static class TradingEndpointsExtensions
 
         app.MapAuth();
         app.MapOrders();
+        app.MapHistory();
         app.MapAlgo();
         app.MapPositions();
         app.MapBalance();

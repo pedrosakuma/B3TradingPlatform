@@ -249,14 +249,24 @@ public sealed class FileEventStore : IEventStore
 
     private void FlushBatch(List<PendingRecord> batch)
     {
-        TaskCompletionSource? lastFence = null;
+        // Collect every fence's TCS in the batch. A previous version
+        // tracked only the LAST fence and dropped earlier ones — two
+        // concurrent FlushAsync calls landing in the same batch would
+        // hang the first caller until cancellation/timeout because its
+        // TCS was overwritten before being completed. Tracking all
+        // fences here completes every waiter promptly.
+        List<TaskCompletionSource>? fences = null;
         foreach (var rec in batch)
         {
             if (rec.FlushTcs is not null)
             {
-                // Sentinel: flush whatever is buffered so far, ack the waiter.
+                // Sentinel: flush whatever is buffered so far so the
+                // ack is honest about what's durable. The TCS itself
+                // is completed below, after the post-batch flush, so
+                // every fence — first, middle, last — sees the full
+                // batch's writes on disk.
                 _activeWriter?.Flush();
-                lastFence = rec.FlushTcs;
+                (fences ??= new List<TaskCompletionSource>()).Add(rec.FlushTcs);
                 continue;
             }
 
@@ -264,8 +274,10 @@ public sealed class FileEventStore : IEventStore
             _activeWriter!.Append(rec.Seq, rec.Payload, rec.TimestampMs);
         }
         _activeWriter?.Flush();
-        lastFence?.TrySetResult();
-        // Sentinels earlier in the batch are also satisfied at this point — they were ack'd inline.
+        if (fences is not null)
+        {
+            foreach (var f in fences) f.TrySetResult();
+        }
     }
 
     private void EnsureActiveSegmentFor(PendingRecord rec)
