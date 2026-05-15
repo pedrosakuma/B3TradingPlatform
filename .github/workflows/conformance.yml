@@ -1,0 +1,112 @@
+name: Conformance (OrderType × TIF)
+
+# Q1.7 (#259). Manual trigger only — the conformance suite spins up the
+# trading-host with synthetic ER injection enabled and runs the
+# (OrderType × TimeInForce) golden snapshots end-to-end against it.
+# Not gated on PR merges; opt-in until the golden suite has been
+# run a few times against main and proven stable.
+#
+# Triggers:
+#   - workflow_dispatch  → operator-initiated run
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    name: OrderType × TIF golden snapshots
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Bring up trading-host (Mock + ER injection)
+        env:
+          # Re-use the same throwaway placeholders the e2e-smoke job
+          # uses; both stacks are sandboxed in CI and never touch
+          # production secrets.
+          TRADING_AUTH_SIGNING_KEY: ci-conformance-placeholder-key-min-32-bytes-long-aaaaa
+          TRADING_SEED_USER: alice
+          TRADING_SEED_PASSWORD: wonderland
+          TRADING_SEED_PASSWORD_HASH: ZDzDHANAHq8NDQK3BWk/YZjybKLCMKdRzw0z9Da5wic=
+          TRADING_SEED_PASSWORD_SALT: rXA+be7/gEYYZQrQDsUr2g==
+          TRADING_ADMIN_USER: carol
+          # Pass-1 review fix (#259, P1#5): admin slot must NOT use the
+          # committed dev defaults when AllowErInjection=true; the host's
+          # AdminCredentialDefaultGuard refuses to boot otherwise. The
+          # values below are a CI-only, sandboxed PBKDF2 triple
+          # (plaintext "ci-conformance-2024-do-not-use-in-prod",
+          # 600_000 iterations) that is DIFFERENT from the dev default.
+          B3T_CONFORMANCE_ADMIN_PASSWORD: ci-conformance-2024-do-not-use-in-prod
+          B3T_CONFORMANCE_ADMIN_PASSWORD_HASH: YPCvuCrUq4h6e8ebNKvxRAda8DWQdOf+0uakwAxar9E=
+          B3T_CONFORMANCE_ADMIN_PASSWORD_SALT: Q0lDb25mb3JtYW5jZTE2Qg==
+        run: |
+          docker compose \
+              -f docker/docker-compose.yml \
+              -f docker/docker-compose.conformance.yml \
+              -f docker/docker-compose.er-injection.yml \
+              up -d --build --wait trading-host
+
+      - name: Run conformance suite
+        env:
+          TRADING_AUTH_SIGNING_KEY: ci-conformance-placeholder-key-min-32-bytes-long-aaaaa
+          TRADING_SEED_PASSWORD_HASH: ZDzDHANAHq8NDQK3BWk/YZjybKLCMKdRzw0z9Da5wic=
+          TRADING_SEED_PASSWORD_SALT: rXA+be7/gEYYZQrQDsUr2g==
+          TRADING_ADMIN_USER: carol
+          B3T_CONFORMANCE_ADMIN_PASSWORD: ci-conformance-2024-do-not-use-in-prod
+          B3T_CONFORMANCE_ADMIN_PASSWORD_HASH: YPCvuCrUq4h6e8ebNKvxRAda8DWQdOf+0uakwAxar9E=
+          B3T_CONFORMANCE_ADMIN_PASSWORD_SALT: Q0lDb25mb3JtYW5jZTE2Qg==
+        run: |
+          docker compose \
+              -f docker/docker-compose.yml \
+              -f docker/docker-compose.conformance.yml \
+              -f docker/docker-compose.er-injection.yml \
+              run --rm conformance \
+              --filter "Category=Conformance"
+
+      - name: Trading-host logs (always)
+        if: always()
+        env:
+          TRADING_AUTH_SIGNING_KEY: ci-conformance-placeholder-key-min-32-bytes-long-aaaaa
+          TRADING_SEED_PASSWORD_HASH: ZDzDHANAHq8NDQK3BWk/YZjybKLCMKdRzw0z9Da5wic=
+          TRADING_SEED_PASSWORD_SALT: rXA+be7/gEYYZQrQDsUr2g==
+          B3T_CONFORMANCE_ADMIN_PASSWORD: ci-conformance-2024-do-not-use-in-prod
+          B3T_CONFORMANCE_ADMIN_PASSWORD_HASH: YPCvuCrUq4h6e8ebNKvxRAda8DWQdOf+0uakwAxar9E=
+          B3T_CONFORMANCE_ADMIN_PASSWORD_SALT: Q0lDb25mb3JtYW5jZTE2Qg==
+        run: |
+          mkdir -p artifacts
+          docker compose \
+              -f docker/docker-compose.yml \
+              -f docker/docker-compose.conformance.yml \
+              -f docker/docker-compose.er-injection.yml \
+              logs trading-host > artifacts/trading-host.log 2>&1 || true
+
+      - name: Upload trading-host logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trading-host-logs
+          path: artifacts/
+          retention-days: 7
+
+      - name: Tear down
+        if: always()
+        env:
+          TRADING_AUTH_SIGNING_KEY: ci-conformance-placeholder-key-min-32-bytes-long-aaaaa
+          TRADING_SEED_PASSWORD_HASH: ZDzDHANAHq8NDQK3BWk/YZjybKLCMKdRzw0z9Da5wic=
+          TRADING_SEED_PASSWORD_SALT: rXA+be7/gEYYZQrQDsUr2g==
+          B3T_CONFORMANCE_ADMIN_PASSWORD: ci-conformance-2024-do-not-use-in-prod
+          B3T_CONFORMANCE_ADMIN_PASSWORD_HASH: YPCvuCrUq4h6e8ebNKvxRAda8DWQdOf+0uakwAxar9E=
+          B3T_CONFORMANCE_ADMIN_PASSWORD_SALT: Q0lDb25mb3JtYW5jZTE2Qg==
+        run: |
+          docker compose \
+              -f docker/docker-compose.yml \
+              -f docker/docker-compose.conformance.yml \
+              -f docker/docker-compose.er-injection.yml \
+              down -v

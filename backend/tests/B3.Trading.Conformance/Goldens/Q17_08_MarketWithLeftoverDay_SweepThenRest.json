@@ -1,0 +1,34 @@
+{
+  "scenario": {
+    "orderQty": 100,
+    "orderType": "MarketWithLeftover",
+    "price": 30,
+    "timeInForce": "Day"
+  },
+  "executionReports": [
+    {
+      "cumulativeQuantity": 0,
+      "isNativeStp": false,
+      "kind": "New",
+      "lastPrice": 0,
+      "lastQuantity": 0,
+      "leavesQuantity": 100,
+      "rejectReason": null,
+      "side": "Buy",
+      "status": "Working",
+      "symbol": "PETR4"
+    },
+    {
+      "cumulativeQuantity": 40,
+      "isNativeStp": false,
+      "kind": "PartialFill",
+      "lastPrice": 30,
+      "lastQuantity": 40,
+      "leavesQuantity": 60,
+      "rejectReason": null,
+      "side": "Buy",
+      "status": "PartiallyFilled",
+      "symbol": "PETR4"
+    }
+  ]
+}

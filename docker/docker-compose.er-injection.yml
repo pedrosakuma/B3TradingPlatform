@@ -1,0 +1,94 @@
+# ER-injection overlay (#259, Q1.7). Layers ON TOP of the base stack +
+# conformance overlay to flip trading-host into Mock + synthetic ER
+# injection so the OrderType×TIF golden suite can drive deterministic
+# ER sequences via POST /admin/simulator/er. Kept SEPARATE from
+# docker-compose.conformance.yml so the existing conformance jobs
+# (conformance, real-stack-conformance) — which exercise auth, admin/firms,
+# and risk-rejection-shape against a non-Mock host — are not silently
+# forced into Mock and don't require admin-credential env vars.
+#
+# SECURITY NOTE (#259, P1#5):
+#   * This overlay enables synthetic ER injection
+#     (Trading__Exchange__AllowErInjection=true) AND seeds a user with
+#     role=admin. To prevent the stack from accidentally standing up an
+#     internet-reachable POST /admin/simulator/er with the committed dev
+#     defaults, this overlay:
+#       (a) DOES NOT publish trading-host or frontend to the docker host.
+#           The conformance container reaches trading-host via the b3-net
+#           bridge by service name (http://trading-host:5000). The
+#           frontend's nginx reverse-proxies /admin to trading-host so
+#           it must also be unpublished, otherwise an attacker hitting
+#           http://<host>:8080/admin/simulator/er would still reach the
+#           ER-injection endpoint.
+#       (b) REQUIRES the operator to pass a fresh PBKDF2 hash/salt for
+#           the admin seed via B3T_CONFORMANCE_ADMIN_PASSWORD_HASH and
+#           B3T_CONFORMANCE_ADMIN_PASSWORD_SALT (no defaults). The host
+#           refuses to boot if the admin slot still carries the
+#           committed dev defaults — see
+#           AdminCredentialDefaultGuard.Validate.
+#       (c) REQUIRES B3T_CONFORMANCE_ADMIN_PASSWORD (plaintext that the
+#           hash/salt above were derived from) so the conformance
+#           container can log in. Like (b), no default.
+#
+# Generate a fresh credential triple before invoking:
+#   dotnet run --project backend/tools/PasswordHasher -- '<your-password>'
+#   # then export the three env vars in your shell or pass via --env-file.
+#
+# Usage:
+#   docker compose \
+#       -f docker/docker-compose.yml \
+#       -f docker/docker-compose.conformance.yml \
+#       -f docker/docker-compose.er-injection.yml \
+#       up -d --wait trading-host
+#   docker compose \
+#       -f docker/docker-compose.yml \
+#       -f docker/docker-compose.conformance.yml \
+#       -f docker/docker-compose.er-injection.yml \
+#       run --rm conformance --filter "Category=Conformance"
+
+services:
+  trading-host:
+    # Override the base service's `ports:` to an empty list so trading-host
+    # is NOT published to the docker host while ER injection is active.
+    # Compose merges list fields by union by default; a bare `ports: []`
+    # would keep the parent's host mapping. The `!override` tag (Compose
+    # v2.20+) forces a replacement, dropping the published port.
+    # Reachable inside the b3-net bridge by service name.
+    ports: !override []
+    environment:
+      # Replace the conformance overlay's admin seed (which falls back
+      # to the committed dev TRADING_SEED_PASSWORD_HASH/SALT) with a
+      # per-run PBKDF2 triple — the host's AdminCredentialDefaultGuard
+      # refuses to boot when AllowErInjection=true if the admin slot
+      # still carries the committed dev defaults.
+      Trading__Auth__Users__4__PasswordHash: ${B3T_CONFORMANCE_ADMIN_PASSWORD_HASH:?Set B3T_CONFORMANCE_ADMIN_PASSWORD_HASH per-run (NEVER reuse the dev default — see file header)}
+      Trading__Auth__Users__4__Salt: ${B3T_CONFORMANCE_ADMIN_PASSWORD_SALT:?Set B3T_CONFORMANCE_ADMIN_PASSWORD_SALT per-run}
+
+      # Flip the host into Mock + ER-injection so the OrderType×TIF
+      # golden suite can drive deterministic synthetic ER sequences via
+      # POST /admin/simulator/er. Base compose defaults to Mode=Real
+      # which would refuse the injection endpoint at startup.
+      Trading__Exchange__Mode: Mock
+      Trading__Exchange__AllowErInjection: "true"
+
+  conformance:
+    environment:
+      # Override the conformance overlay's admin plaintext (which
+      # defaults to "wonderland") with the per-run plaintext that
+      # matches the hash/salt seeded into trading-host above.
+      B3T_ADMIN_PASS: ${B3T_CONFORMANCE_ADMIN_PASSWORD:?Set B3T_CONFORMANCE_ADMIN_PASSWORD per-run (matches B3T_CONFORMANCE_ADMIN_PASSWORD_HASH/SALT seeded into trading-host)}
+      # Declare ER injection is available so the OrderType×TIF golden
+      # suite stops skipping at discovery time. Wired in tandem with
+      # Trading__Exchange__AllowErInjection above.
+      B3T_ER_INJECTION: "true"
+
+  # The base stack publishes `frontend` on host port 8080, and
+  # frontend/nginx.conf proxies `~^/admin` → `trading-host:5000`. So
+  # even with trading-host itself unpublished (above), an attacker
+  # hitting http://<host>:8080/admin/simulator/er would still reach the
+  # ER-injection endpoint through the nginx reverse proxy — defeating
+  # the unpublish. Drop the frontend's host mapping in this overlay;
+  # conformance specs talk to trading-host directly over the b3-net
+  # bridge and don't need the UI.
+  frontend:
+    ports: !override []
