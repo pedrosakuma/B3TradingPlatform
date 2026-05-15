@@ -286,6 +286,62 @@ public static class HistoryEndpoints
                             newProj.HydrateFromReplaceEr(seq, er);
                             if (inWindow) hadEventInWindow.Add(er.ClOrdId);
                         }
+                        // Consume the replace link — mirrors
+                        // PendingReplacementRegistry.TryConsume's
+                        // remove-on-success contract on the runtime's
+                        // Replaced branch. Without this a later cancel of
+                        // er.ClOrdId (which is now Working in its own
+                        // right and may be modified/cancelled directly)
+                        // would be re-intercepted by the cancel-as-replace
+                        // branch below as if the link were still in
+                        // flight.
+                        replaceLinks.Remove(er.ClOrdId);
+                        break;
+                    }
+
+                    // Issue #241 mirror: B3MatchingPlatform's "priority-lost"
+                    // cancel-as-replace path. The venue implements an effective
+                    // modify by emitting Cancel(orig) + Trade/New(new) under
+                    // the replacement's NEW ClOrdID — never an ExecType=Replaced.
+                    // Runtime intercepts in ExecutionReportProcessor.Apply via
+                    // PendingReplacementRegistry.TryConsume on the Canceled
+                    // branch and funnels through ApplyReplaceAccepted. The
+                    // projector mirrors that contract: a Canceled ER whose
+                    // ClOrdId matches an unresolved replace link (i.e. the new
+                    // side of an in-flight replace where no Replaced ER has
+                    // landed yet) terminalises the original at Replaced
+                    // (subject to terminal-preservation in ApplyReplacedTerminal)
+                    // and hydrates the new ClOrdID from the ER's leaves/cum,
+                    // then CONSUMES the link so a subsequent true cancel ack
+                    // on the same ClOrdID is processed as a normal cancel of
+                    // the new order rather than re-intercepted. The check
+                    // uses er.ClOrdId directly (the registry is keyed by
+                    // newClOrdId, same as replaceLinks) and runs BEFORE any
+                    // OrigClOrdId-fallback resolution above wired via cancelLinks
+                    // (the new-side ClOrdID is never in cancelLinks).
+                    if (kind == ExecKind.Canceled
+                        && replaceLinks.TryGetValue(er.ClOrdId, out var carOrig))
+                    {
+                        // Mirror ApplyReplaceAccepted: prefer the ER's
+                        // OrigClOrdId when the venue did supply one,
+                        // otherwise fall back to the intent's original
+                        // (here: the replaceLinks entry).
+                        var origId = er.OrigClOrdId != 0 ? er.OrigClOrdId : carOrig;
+                        if (byClOrdId.TryGetValue(origId, out var carOrigProj))
+                        {
+                            carOrigProj.ApplyReplacedTerminal(seq, er);
+                            if (inWindow) hadEventInWindow.Add(origId);
+                        }
+                        if (byClOrdId.TryGetValue(er.ClOrdId, out var carNewProj))
+                        {
+                            carNewProj.HydrateFromReplaceEr(seq, er);
+                            if (inWindow) hadEventInWindow.Add(er.ClOrdId);
+                        }
+                        // Consume the link — mirrors PendingReplacementRegistry
+                        // .TryConsume's remove-on-success contract so the next
+                        // Canceled ER on this ClOrdID is treated as a real
+                        // cancel of the new order, not re-intercepted.
+                        replaceLinks.Remove(er.ClOrdId);
                         break;
                     }
 
