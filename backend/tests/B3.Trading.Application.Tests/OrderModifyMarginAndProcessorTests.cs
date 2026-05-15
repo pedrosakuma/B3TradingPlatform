@@ -665,4 +665,47 @@ public class OrderModifyMarginAndProcessorTests
         Assert.Contains(loggerProvider.Records, r =>
             r.Level == LogLevel.Error && r.Message.Contains("dropping", StringComparison.OrdinalIgnoreCase));
     }
+
+    [Fact]
+    public async Task Issue247_PR248_CommitReplace_AfterMarginDisabledToggle_StillReleasesOriginalReservation()
+    {
+        // PR #248 P2: the Margin.Enabled gate in CommitReplace must NOT
+        // skip the cleanup path when reservations were created while
+        // margin was enabled and then the operator toggled it off via
+        // the admin reload path (IOptionsMonitor). Otherwise the
+        // original slot leaks forever — _reservations[orig] stays set
+        // and _reserved[owner] never returns to zero.
+        var loggerProvider = new CapturingLoggerProvider();
+        using var loggerFactory = LoggerFactory.Create(b => b.AddProvider(loggerProvider));
+        var marginLogger = loggerFactory.CreateLogger<ReserveOnSubmitMarginProvider>();
+
+        var enabled = new RiskOptions();
+        enabled.Margin.Enabled = true;
+        enabled.Margin.Initial["bob"] = 100_000m;
+        var monitor = new StaticOptionsMonitor<RiskOptions>(enabled);
+        var margin = new ReserveOnSubmitMarginProvider(monitor, marginLogger);
+        var bob = new EndClientId("bob");
+
+        // Reserve while margin is enabled.
+        Assert.True((await margin.TryReserveAsync(
+            777UL,
+            new RiskContext(bob, "FIRM", "PETR4", OrderSide.Buy, OrderType.Limit, 100, 32.49m),
+            default)).Approved);
+        Assert.Equal(32.49m * 100, margin.ReservedForTesting("bob"));
+
+        // Operator flips margin OFF mid-session via admin reload.
+        var disabled = new RiskOptions();
+        disabled.Margin.Enabled = false;
+        disabled.Margin.Initial["bob"] = 100_000m;
+        monitor.Set(disabled);
+        Assert.False(monitor.CurrentValue.Margin.Enabled);
+
+        // Cancel-as-Replace lands AFTER the toggle. confirmedRemainingNotional=0
+        // simulates a flat-out cancel-as-replace (modify-to-fill collapses it
+        // to zero). This must release the original reservation cleanly.
+        ((IReplaceMarginCoordinator)margin).CommitReplace(777UL, 778UL, 0m);
+
+        Assert.Equal(0m, margin.ReservedForTesting("bob"));
+        Assert.DoesNotContain(loggerProvider.Records, r => r.Level >= LogLevel.Warning);
+    }
 }

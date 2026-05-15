@@ -385,17 +385,17 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
         ulong newClOrdId,
         decimal confirmedRemainingNotional)
     {
-        // Issue #247. Margin globally disabled: TryReserveAsync and
-        // PrepareReplaceAsync both short-circuit without populating
-        // _reservations, so any CommitReplace landing here is a true
-        // no-op — not a "dropped reservation" worth a warn. Mirror the
-        // gate in PrepareReplaceAsync so the legitimate disabled-margin
-        // deployment doesn't spam logs on every modify-to-fill.
-        if (!_options.CurrentValue.Margin.Enabled)
-            return;
-
         lock (_gate)
         {
+            // Issue #247 / PR #248 P2. The Margin.Enabled gate must live
+            // inside the lock and must NOT skip the cleanup path: the
+            // toggle can flip live via IOptionsMonitor (admin reload),
+            // and TryReserveAsync/PrepareReplaceAsync don't gate on
+            // Margin.Enabled. So _reservations[orig] / [new] may exist
+            // even when Margin is currently disabled — those slots must
+            // still be released here, otherwise a mid-session disable
+            // leaks every in-flight reservation.
+            //
             // Remove the transient entry (set up by Prepare) — its
             // RemainingNotional is the upsize delta we already reserved
             // (or zero for downsize/same).
@@ -422,6 +422,13 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
 
             if (owner is null)
             {
+                // No reservation existed on either side. If margin is
+                // currently disabled, this is the legitimate "started
+                // disabled, nothing was ever reserved" case — silent
+                // no-op (don't spam logs on every modify-to-fill).
+                if (!_options.CurrentValue.Margin.Enabled)
+                    return;
+
                 // Margin is enabled and yet neither side carried a
                 // reservation: this is a real bug (not a config no-op),
                 // because the matching PrepareReplaceAsync should have
