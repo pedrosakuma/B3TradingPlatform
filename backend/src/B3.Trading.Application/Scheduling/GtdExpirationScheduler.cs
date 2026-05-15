@@ -308,6 +308,40 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
         lock (_lock) _auditedExpiredIds.Add(clOrdId);
     }
 
+    /// <summary>
+    /// Pass-4 review (#255). Snapshot-time export of the in-flight
+    /// audit-set: every ClOrdId whose <see cref="OrderExpiredEvent"/>
+    /// has already been written to the WAL but whose downstream cancel
+    /// has not yet resolved (terminal cancel result evicts the id via
+    /// <see cref="Resolve"/>). Returned as a sorted array for
+    /// deterministic snapshot bytes.
+    /// <para>
+    /// <b>Lock ordering.</b> Caller (the snapshot service) holds
+    /// <c>EventDispatcher.WithSnapshotLock</c>; this method then takes
+    /// the scheduler's own <see cref="_lock"/>. Mutators of
+    /// <see cref="_auditedExpiredIds"/> live in two places:
+    /// <list type="bullet">
+    ///   <item><see cref="DispatchExpireAsync"/> performs the
+    ///   <c>Add</c> inside the <see cref="EventDispatcher.Dispatch(WalEvent, Action)"/>
+    ///   apply callback, i.e. under the dispatcher lock first then the
+    ///   scheduler lock — same order as snapshot capture (no deadlock).</item>
+    ///   <item><see cref="Resolve"/> takes only the scheduler lock and
+    ///   never re-enters the dispatcher.</item>
+    /// </list>
+    /// </para>
+    /// </summary>
+    public ulong[] SnapshotAuditedExpiredIds()
+    {
+        lock (_lock)
+        {
+            if (_auditedExpiredIds.Count == 0) return Array.Empty<ulong>();
+            var copy = new ulong[_auditedExpiredIds.Count];
+            _auditedExpiredIds.CopyTo(copy);
+            Array.Sort(copy);
+            return copy;
+        }
+    }
+
     private void Remove(ulong clOrdId)
     {
         lock (_lock)
@@ -506,7 +540,28 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
                             Reason = ReasonGtd,
                             AtUtc = originalGtd,
                         },
-                        static () => { /* no in-memory mutation; audit-only */ });
+                        // Pass-4 review (#255): record the audit-appended
+                        // bookkeeping INSIDE the dispatcher's apply
+                        // callback so it is atomic with the WAL append
+                        // under the dispatcher lock. A snapshot taken
+                        // between the audit append and the cancel append
+                        // (snapshot capture also holds the dispatcher
+                        // lock via WithSnapshotLock) now observes both
+                        // the post-append seq AND the populated
+                        // _auditedExpiredIds — the snapshot then carries
+                        // the id forward in PlatformSnapshot.AuditedExpiredIds
+                        // and the post-restart Schedule() seeds
+                        // ExpiredAuditAppended=true so the next timer
+                        // fire does not emit a duplicate audit envelope.
+                        () =>
+                        {
+                            lock (_lock)
+                            {
+                                if (_index.TryGetValue(clOrdId, out var cur))
+                                    cur.ExpiredAuditAppended = true;
+                                _auditedExpiredIds.Add(clOrdId);
+                            }
+                        });
                 }
                 catch (WalBackpressureException ex)
                 {
@@ -519,22 +574,6 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
                         new KeyValuePair<string, object?>("cancel_result", "WalBackpressureRetry"));
                     ReArmRetry(clOrdId);
                     return;
-                }
-
-                // Persist the audit-appended flag so a subsequent
-                // backpressure on the cancel side doesn't double-emit
-                // OrderExpiredEvent on retry. Pass-3 review (#255):
-                // also record the id in _auditedExpiredIds so a crash
-                // between this point and the cancel ER landing on
-                // disk reconstructs the same audit-already-appended
-                // state during the next replay (the EventReplayer
-                // hook would otherwise be the only writer, and that
-                // hook only fires on already-on-disk events).
-                lock (_lock)
-                {
-                    if (_index.TryGetValue(clOrdId, out var cur))
-                        cur.ExpiredAuditAppended = true;
-                    _auditedExpiredIds.Add(clOrdId);
                 }
             }
 

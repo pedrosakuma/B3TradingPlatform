@@ -398,6 +398,175 @@ public class GtdSchedulerRegressionTests
     }
 
     // -----------------------------------------------------------------
+    // Pass-4 review (#255): durable audit-set in PlatformSnapshot
+    // -----------------------------------------------------------------
+
+    /// <summary>
+    /// Pass-4 P1 — when SnapshotService takes a snapshot mid-fire
+    /// (between <c>OrderExpiredEvent</c> append and the cancel
+    /// append), the snapshot's seq is past the audit event but the
+    /// order is still in working state in the captured book. The
+    /// snapshot MUST carry the ClOrdId in its
+    /// <c>AuditedExpiredIds</c> so the post-restart timer fire does
+    /// not emit a duplicate audit envelope. Once the cancel resolves
+    /// the id must be evicted so the set stays bounded by the
+    /// in-flight expired-but-cancel-not-completed window.
+    /// </summary>
+    [Fact]
+    public async Task SnapshotMidFire_PersistsAuditedExpiredIds_AndEvictsAfterResolve()
+    {
+        var h = new ExpireHarness();
+        var pastGtd = h.Clock.GetUtcNow().AddSeconds(-1);
+        h.SeedGtd(42UL, pastGtd);
+
+        // Wire a snapshotter against the harness so we can capture
+        // the same way SnapshotService does in production (under
+        // dispatcher lock via WithSnapshotLock).
+        var snapshotter = new StateSnapshotter(
+            h.Book, new PositionKeeper(), new KillSwitchService(),
+            new SymbolHaltService(), new SessionPhaseService(),
+            h.ClOrdIds, h.Ownership, new AlgoBook(), new AlgoIdRegistry(),
+            new CashLedger(), gtdScheduler: h.Sut);
+
+        await h.Sut.StartAsync(CancellationToken.None);
+        h.Store.Reset();
+
+        // Force a single WAL backpressure on the cancel side so the
+        // dispatch is parked in the post-audit / pre-cancel window
+        // when we take the snapshot — modelling the exact race the
+        // pass-4 fix targets.
+        h.Store.BackpressureFor<OrderCancelRequestedEvent>(1);
+
+        // Past-due head fires immediately; wait for the audit event to land.
+        h.Clock.Advance(GtdExpirationScheduler.MinTimerFloor + TimeSpan.FromMilliseconds(5));
+        for (int i = 0; i < 200 && h.Store.AppendedTypes.Count(t => t == typeof(OrderExpiredEvent)) == 0; i++)
+            await Task.Delay(10);
+        Assert.Equal(1, h.Store.AppendedTypes.Count(t => t == typeof(OrderExpiredEvent)));
+        // Cancel was rejected → still tracked, awaiting backoff retry.
+        for (int i = 0; i < 200 && h.Sut.TrackedCount == 0; i++)
+            await Task.Delay(10);
+        Assert.Equal(1, h.Sut.TrackedCount);
+
+        // Take snapshot under the dispatcher lock — same as SnapshotService.
+        PlatformSnapshot? snap = null;
+        h.Dispatcher.WithSnapshotLock(seq =>
+            snap = StateSnapshotter.Project(snapshotter.CaptureRaw(seq)));
+        Assert.NotNull(snap);
+        Assert.Contains(42UL, snap!.AuditedExpiredIds);
+
+        // Drain the backoff and let the cancel succeed.
+        h.Clock.Advance(TimeSpan.FromMilliseconds(110));
+        for (int i = 0; i < 200 && h.Sut.TrackedCount > 0; i++)
+            await Task.Delay(10);
+        Assert.Equal(0, h.Sut.TrackedCount);
+
+        // SECOND snapshot after resolve — id must be gone so the set
+        // does not grow unbounded across snapshot cycles.
+        PlatformSnapshot? snap2 = null;
+        h.Dispatcher.WithSnapshotLock(seq =>
+            snap2 = StateSnapshotter.Project(snapshotter.CaptureRaw(seq)));
+        Assert.NotNull(snap2);
+        Assert.DoesNotContain(42UL, snap2!.AuditedExpiredIds);
+    }
+
+    /// <summary>
+    /// Pass-4 P1 — restart from a snapshot that contains
+    /// <c>AuditedExpiredIds=[42]</c> AND a still-working past-due GTD
+    /// order with <c>ClOrdId=42</c>. The WAL has the audit event at
+    /// <c>seq &lt;= snap.Seq</c> (so replay does NOT re-call
+    /// <see cref="GtdExpirationScheduler.MarkExpiredAuditAppended"/>).
+    /// Without the snapshot-side restore the post-restart timer would
+    /// re-append OrderExpiredEvent. Asserts the cancel still happens
+    /// and zero new audit envelopes are written.
+    /// </summary>
+    [Fact]
+    public async Task RestartFromSnapshotWithAuditedSet_NoDuplicateAuditEvent()
+    {
+        var h = new ExpireHarness();
+        var pastGtd = h.Clock.GetUtcNow().AddSeconds(-5);
+
+        var snapshotter = new StateSnapshotter(
+            h.Book, new PositionKeeper(), new KillSwitchService(),
+            new SymbolHaltService(), new SessionPhaseService(),
+            h.ClOrdIds, h.Ownership, new AlgoBook(), new AlgoIdRegistry(),
+            new CashLedger(), gtdScheduler: h.Sut);
+
+        // Build a fixture snapshot directly: working past-due GTD order
+        // 42 in the book, owner mapping registered, AuditedExpiredIds
+        // carries 42 (modelling the snapshot-mid-fire crash).
+        var fixtureSnap = new PlatformSnapshot
+        {
+            Seq = 5L,
+            CreatedAtUtc = h.Clock.GetUtcNow(),
+            WorkingOrders = new List<OrderSnapshot>
+            {
+                new(42UL, Alice.Value, "PETR4", 4321UL, nameof(OrderSide.Buy),
+                    nameof(OrderType.Limit), 100, 30m,
+                    LeavesQuantity: 100, CumulativeQuantity: 0,
+                    Status: nameof(OrderStatus.Working))
+                {
+                    TimeInForce = nameof(TimeInForce.GTD),
+                    GoodTillDate = pastGtd,
+                },
+            },
+            Ownership = new List<OwnershipMappingSnapshot>
+            {
+                new(42UL, Alice.Value),
+            },
+            AuditedExpiredIds = new ulong[] { 42UL },
+        };
+        snapshotter.Restore(fixtureSnap);
+
+        // No WAL replay (events all <= snap.Seq) → MarkExpiredAuditAppended
+        // is NOT invoked from the EventReplayer hook. Without the
+        // pass-4 fix the scheduler's audited-set would be empty here.
+        await h.Sut.StartAsync(CancellationToken.None);
+        h.Store.Reset();
+
+        // Past-due head: timer floor fires the dispatch immediately.
+        h.Clock.Advance(GtdExpirationScheduler.MinTimerFloor + TimeSpan.FromMilliseconds(5));
+        for (int i = 0; i < 200 && h.Gateway.CancelCount == 0; i++)
+            await Task.Delay(10);
+
+        Assert.Equal(1, h.Gateway.CancelCount);
+        // No duplicate audit envelope: the snapshot already represented
+        // "audit written" via AuditedExpiredIds.
+        Assert.Equal(0, h.Store.AppendedTypes.Count(t => t == typeof(OrderExpiredEvent)));
+        Assert.Equal(1, h.Store.AppendedTypes.Count(t => t == typeof(OrderCancelRequestedEvent)));
+        Assert.Equal(0, h.Sut.TrackedCount);
+    }
+
+    /// <summary>
+    /// Pass-4 P1 — backward compatibility: snapshots produced before
+    /// this slice did not carry an <c>AuditedExpiredIds</c> field.
+    /// They must deserialise into a <see cref="PlatformSnapshot"/>
+    /// with an empty set so behaviour collapses to the pre-pass-4
+    /// path (the EventReplayer hook is the only writer).
+    /// </summary>
+    [Fact]
+    public void OldSnapshotJson_WithoutAuditedExpiredIds_HydratesWithEmptySet()
+    {
+        // Minimal old-shape JSON: only Seq and CreatedAtUtc, no
+        // AuditedExpiredIds field. System.Text.Json must hydrate the
+        // field with its declared default of Array.Empty<ulong>().
+        const string oldJson = """
+            {
+              "seq": 123,
+              "createdAtUtc": "2025-01-01T12:00:00Z"
+            }
+            """;
+
+        var snap = System.Text.Json.JsonSerializer.Deserialize<PlatformSnapshot>(
+            oldJson,
+            new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+
+        Assert.NotNull(snap);
+        Assert.Equal(123L, snap!.Seq);
+        Assert.NotNull(snap.AuditedExpiredIds);
+        Assert.Empty(snap.AuditedExpiredIds);
+    }
+
+    // -----------------------------------------------------------------
     // Test infrastructure
     // -----------------------------------------------------------------
 
