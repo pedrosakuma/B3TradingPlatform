@@ -1,0 +1,46 @@
+{
+  "scenario": {
+    "orderQty": 100,
+    "orderType": "Limit",
+    "price": 30,
+    "timeInForce": "GTD"
+  },
+  "executionReports": [
+    {
+      "cumulativeQuantity": 0,
+      "isNativeStp": false,
+      "kind": "New",
+      "lastPrice": 0,
+      "lastQuantity": 0,
+      "leavesQuantity": 100,
+      "rejectReason": null,
+      "side": "Buy",
+      "status": "Working",
+      "symbol": "PETR4"
+    },
+    {
+      "cumulativeQuantity": 0,
+      "isNativeStp": false,
+      "kind": "Expired",
+      "lastPrice": 0,
+      "lastQuantity": 0,
+      "leavesQuantity": 100,
+      "rejectReason": "Gtd",
+      "side": "Buy",
+      "status": "Working",
+      "symbol": "PETR4"
+    },
+    {
+      "cumulativeQuantity": 0,
+      "isNativeStp": false,
+      "kind": "Canceled",
+      "lastPrice": 0,
+      "lastQuantity": 0,
+      "leavesQuantity": 0,
+      "rejectReason": null,
+      "side": "Buy",
+      "status": "Cancelled",
+      "symbol": "PETR4"
+    }
+  ]
+}

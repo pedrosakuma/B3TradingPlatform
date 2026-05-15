@@ -1,0 +1,34 @@
+{
+  "scenario": {
+    "orderQty": 100,
+    "orderType": "Limit",
+    "price": 30,
+    "timeInForce": "GoodForAuction"
+  },
+  "executionReports": [
+    {
+      "cumulativeQuantity": 0,
+      "isNativeStp": false,
+      "kind": "New",
+      "lastPrice": 0,
+      "lastQuantity": 0,
+      "leavesQuantity": 100,
+      "rejectReason": null,
+      "side": "Buy",
+      "status": "Working",
+      "symbol": "PETR4"
+    },
+    {
+      "cumulativeQuantity": 100,
+      "isNativeStp": false,
+      "kind": "Fill",
+      "lastPrice": 30,
+      "lastQuantity": 100,
+      "leavesQuantity": 0,
+      "rejectReason": null,
+      "side": "Buy",
+      "status": "Filled",
+      "symbol": "PETR4"
+    }
+  ]
+}

@@ -30,6 +30,15 @@ services:
       Trading__Auth__Users__4__Role: admin
       Trading__Auth__Users__4__Firm: default
 
+      # Q1.7 (#259). Flip the host into Mock + ER-injection so the
+      # OrderType×TIF golden suite can drive deterministic synthetic
+      # ER sequences via POST /admin/simulator/er. Base compose
+      # defaults to Mode=Real which would refuse the injection
+      # endpoint at startup; the conformance overlay is the
+      # documented opt-in.
+      Trading__Exchange__Mode: Mock
+      Trading__Exchange__AllowErInjection: "true"
+
   conformance:
     build:
       context: ..
@@ -58,5 +67,9 @@ services:
       # the same key the host validates against. Without this, those
       # scenarios skip cleanly — they're optional, not gated.
       B3T_AUTH_SIGNING_KEY: ${TRADING_AUTH_SIGNING_KEY:-}
+      # Q1.7 (#259). Declare ER injection is available so the
+      # OrderType×TIF golden suite stops skipping at discovery time.
+      # Wired in tandem with Trading__Exchange__AllowErInjection above.
+      B3T_ER_INJECTION: "true"
     networks:
       - b3-net

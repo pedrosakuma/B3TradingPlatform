@@ -17,4 +17,12 @@
     <Using Include="Xunit" />
   </ItemGroup>
 
+  <!-- Q1.7 (#259). Conformance goldens shipped beside the test
+       assembly so AppContext.BaseDirectory + "Goldens/" resolves under
+       both `dotnet test` (bin/Debug/.../Goldens) and the docker-compose
+       conformance image. -->
+  <ItemGroup>
+    <None Include="Goldens\**\*.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
