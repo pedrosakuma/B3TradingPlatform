@@ -205,7 +205,11 @@ public sealed class OrderSubmissionService
             new KeyValuePair<string, object?>("source",
                 req.Source == OrderSubmissionSource.Algo ? "algo" : "manual"));
 
-        var riskCtx = new RiskContext(req.Owner, req.FirmId, req.Symbol, req.Side, req.Type, req.Quantity, req.Price);
+        var riskCtx = new RiskContext(
+            req.Owner, req.FirmId, req.Symbol, req.Side, req.Type, req.Quantity, req.Price,
+            TimeInForce: req.TimeInForce,
+            StopPrice: req.StopPrice,
+            GoodTillDate: req.GoodTillDate);
         var decision = _risk.Evaluate(riskCtx);
         var marginReserved = false;
         if (decision.Approved)

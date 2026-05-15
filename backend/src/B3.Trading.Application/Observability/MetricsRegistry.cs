@@ -398,6 +398,14 @@ public static class MetricsRegistry
     public static readonly Counter<long> CollarBypassedNoReference =
         Meter.CreateCounter<long>("trading.risk.collar.bypassed_no_reference");
 
+    // Q1.2 (#254). Counts the cases where StopTriggerCheck approved a
+    // Stop* order purely because it could not obtain a reference price
+    // for the symbol — the StopPrice > 0 invariant still ran, but the
+    // Buy>=ref / Sell<=ref relation was skipped. Tagged by symbol so
+    // ops can spot the coverage gap before it hides a fat-finger stop.
+    public static readonly Counter<long> StopCheckSkippedNoRef =
+        Meter.CreateCounter<long>("trading.risk.stop_check_skipped_no_ref");
+
     // Per-symbol age (seconds) of the last live MD update held in the
     // MarketDataReferencePrice cache. Sourced from a callback registered
     // by the provider on construction (singleton). Symbols that have
