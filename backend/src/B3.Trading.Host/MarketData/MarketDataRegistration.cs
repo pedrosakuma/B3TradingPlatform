@@ -60,6 +60,14 @@ public static class MarketDataRegistration
         {
             services.AddSingleton<IReferencePrice>(sp =>
                 sp.GetRequiredService<ConfigReferencePrice>());
+
+            // Q1.5 (#257). AuctionStateStore needs an IMarketDataSubscriber
+            // unconditionally so the risk pipeline (IPhaseProvider) and
+            // the public phases.* / auction.* WS channels resolve in DI.
+            // When the live feed is off we wire a no-op subscriber that
+            // never raises events; the store stays empty, GetPhase
+            // returns Unknown, snapshots are empty.
+            services.AddSingleton<IMarketDataSubscriber, NullMarketDataSubscriber>();
             return services;
         }
 

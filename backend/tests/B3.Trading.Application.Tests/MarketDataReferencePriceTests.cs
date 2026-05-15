@@ -1,5 +1,6 @@
 using B3.Trading.Application.MarketData;
 using B3.Trading.Application.Risk;
+using B3.Trading.Domain;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Xunit;
@@ -206,6 +207,9 @@ internal sealed class FakeMarketDataSubscriber : IMarketDataSubscriber
     public event Action<MarketInfoSnapshot>? InfoSnapshot;
     public event Action<MarketDataConnectionState>? ConnectionStateChanged;
     public event Action<MarketSubscribeError>? SubscribeError;
+    public event Action<MarketTheoreticalOpening>? TheoreticalOpening;
+    public event Action<MarketAuctionImbalance>? AuctionImbalance;
+    public event Action<MarketAuctionPrint>? AuctionPrint;
 
     public MarketDataConnectionState State { get; private set; } = MarketDataConnectionState.Disconnected;
     public long DroppedEventCount => 0;
@@ -235,4 +239,15 @@ internal sealed class FakeMarketDataSubscriber : IMarketDataSubscriber
 
     public void RaiseSubscribeError(string symbol, string reason) =>
         SubscribeError?.Invoke(new MarketSubscribeError(symbol, reason));
+
+    // Q1.5 (#257). Helpers for tests that exercise AuctionStateStore +
+    // the public phases.* / auction.* WS channels.
+    public void RaiseTheoreticalOpening(string symbol, decimal price, long qty, DateTimeOffset ts) =>
+        TheoreticalOpening?.Invoke(new MarketTheoreticalOpening(symbol, 0UL, price, qty, ts));
+
+    public void RaiseAuctionImbalance(string symbol, long qty, OrderSide side, DateTimeOffset ts) =>
+        AuctionImbalance?.Invoke(new MarketAuctionImbalance(symbol, 0UL, qty, side, ts));
+
+    public void RaiseAuctionPrint(string symbol, AuctionPrintKind kind, decimal price, long qty, DateTimeOffset ts) =>
+        AuctionPrint?.Invoke(new MarketAuctionPrint(symbol, 0UL, kind, price, qty, ts));
 }

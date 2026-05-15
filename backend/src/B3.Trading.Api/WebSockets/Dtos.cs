@@ -11,8 +11,75 @@ public static class Channels
     public const string PositionsMe = "positions.me";
     public const string AlgoMe = "algo.me";
 
+    /// <summary>
+    /// Q1.5 (#257). Public per-symbol market-data channels of the form
+    /// <c>phases.${symbol}</c> and <c>auction.${symbol}</c> — fed off
+    /// the UMDF auction listener via <c>AuctionStateStore</c>. They are
+    /// authenticated (the WS hub still requires a valid bearer) but
+    /// not per-firm filtered: any logged-in client may subscribe.
+    /// </summary>
+    public const string PhasesPrefix = "phases.";
+    public const string AuctionPrefix = "auction.";
+
+    /// <summary>
+    /// Per-owner channel names (validated against an exact set).
+    /// Per-symbol public channels (<see cref="PhasesPrefix"/> /
+    /// <see cref="AuctionPrefix"/>) are validated separately via
+    /// <see cref="TryParsePublic"/>.
+    /// </summary>
     public static readonly IReadOnlySet<string> All =
         new HashSet<string>(StringComparer.Ordinal) { OrdersMe, ExecutionsMe, PositionsMe, AlgoMe };
+
+    /// <summary>
+    /// Recognises <c>phases.SYMBOL</c> / <c>auction.SYMBOL</c> and
+    /// returns the <paramref name="kind"/> + <paramref name="symbol"/>.
+    /// Symbol validation matches the rest of the trading host:
+    /// non-empty, ≤ 16 chars, ASCII alpha-numeric only.
+    /// </summary>
+    public static bool TryParsePublic(string channel, out PublicChannelKind kind, out string symbol)
+    {
+        kind = PublicChannelKind.None;
+        symbol = string.Empty;
+        if (string.IsNullOrEmpty(channel)) return false;
+
+        string raw;
+        if (channel.StartsWith(PhasesPrefix, StringComparison.Ordinal))
+        {
+            kind = PublicChannelKind.Phases;
+            raw = channel[PhasesPrefix.Length..];
+        }
+        else if (channel.StartsWith(AuctionPrefix, StringComparison.Ordinal))
+        {
+            kind = PublicChannelKind.Auction;
+            raw = channel[AuctionPrefix.Length..];
+        }
+        else
+        {
+            return false;
+        }
+
+        if (raw.Length is 0 or > 16) { kind = PublicChannelKind.None; return false; }
+        foreach (var c in raw)
+        {
+            if (!(char.IsAsciiLetterOrDigit(c)))
+            {
+                kind = PublicChannelKind.None;
+                return false;
+            }
+        }
+        symbol = raw;
+        return true;
+    }
+
+    public static string PhasesFor(string symbol) => PhasesPrefix + symbol;
+    public static string AuctionFor(string symbol) => AuctionPrefix + symbol;
+}
+
+public enum PublicChannelKind
+{
+    None,
+    Phases,
+    Auction,
 }
 
 /// <summary>Inbound command from a connected client.</summary>
