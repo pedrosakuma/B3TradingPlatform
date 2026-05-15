@@ -432,6 +432,29 @@ public sealed class PnlKeeper
             foreach (var row in unknownBasisRows)
                 if (row.NetQuantity != 0)
                     _unknownBasisQty[(row.EndClientId, row.Symbol)] = row.NetQuantity;
+        // Pass-4 review (#278) P2#3. Enforce mutual exclusivity
+        // between _avgCost and _unknownBasisQty after restore. The
+        // live keeper holds these collections strictly disjoint by
+        // construction (ApplyFillToAvgCost moves a key out of one
+        // before populating the other), but a malformed snapshot
+        // could carry the same key in both blocks. Without this
+        // fix-up the Apply path would route fills through the
+        // unknown-basis branch (the first check in
+        // ApplyFillToAvgCost), then once the unknown leg fully
+        // closed the stale _avgCost entry would resurface and the
+        // next fill would realise phantom P&L against it.
+        //
+        // Policy: prefer unknown (best-effort recovery) and surface
+        // the inconsistency on a metric so ops can investigate the
+        // snapshot writer rather than silently masking the bug.
+        if (_unknownBasisQty.Count > 0 && _avgCost.Count > 0)
+        {
+            foreach (var key in _unknownBasisQty.Keys)
+            {
+                if (_avgCost.TryRemove(key, out _))
+                    Observability.MetricsRegistry.PnlSnapshotBasisInconsistent.Add(1);
+            }
+        }
         if (seenExecutionIds is not null)
             foreach (var id in seenExecutionIds)
                 _seenExecutionIds.TryAdd(id, 0);

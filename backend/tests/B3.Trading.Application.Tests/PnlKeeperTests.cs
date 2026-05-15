@@ -464,4 +464,62 @@ public class PnlKeeperTests
         Assert.Equal(0, dst.GetUnknownBasisQty("alice", "PETR4"));
         Assert.Null(dst.GetAvgCost("alice", "PETR4"));
     }
+
+    [Fact]
+    public void Restore_PrefersUnknownBasis_WhenSnapshotCarriesBothBlocks()
+    {
+        // Pass-4 (#278) P2#3 — a malformed snapshot containing the
+        // same key in BOTH PnlAvgCost and PnlUnknownBasis must not
+        // leave a stale avg-cost entry that would resurface after
+        // the unknown leg fully closes and silently realise phantom
+        // P&L on the next fill. Restore enforces mutual exclusivity
+        // by dropping the avg-cost entry (prefer unknown) and
+        // bumping the basis_inconsistent metric.
+        var dst = new PnlKeeper();
+        var avgList = new[] { new PnlAvgCostSnapshot("alice", "PETR4", 100, 25m) };
+        var unknownList = new[] { new PnlUnknownBasisSnapshot("alice", "PETR4", 100) };
+        dst.Restore(new Dictionary<string, decimal>(), avgList, null, unknownList);
+
+        // Avg-cost for the duplicated key was dropped; unknown wins.
+        Assert.Null(dst.GetAvgCost("alice", "PETR4"));
+        Assert.Equal(100, dst.GetUnknownBasisQty("alice", "PETR4"));
+
+        // Closing the unknown leg fully realises 0 — and there is
+        // no stale avg-cost entry left behind to corrupt subsequent
+        // fills.
+        Assert.Equal(0m, dst.ApplyFillToAvgCost("alice", "PETR4", OrderSide.Sell, 100, 30m));
+        Assert.Equal(0, dst.GetUnknownBasisQty("alice", "PETR4"));
+        Assert.Null(dst.GetAvgCost("alice", "PETR4"));
+
+        // A fresh fill after the leg goes flat establishes a real
+        // basis at the fill price (not invented from the prior
+        // stale avg).
+        Assert.Equal(0m, dst.ApplyFillToAvgCost("alice", "PETR4", OrderSide.Buy, 50, 40m));
+        var s = dst.GetAvgCost("alice", "PETR4")!;
+        Assert.Equal(50, s.NetQuantity);
+        Assert.Equal(40m, s.AvgPrice);
+    }
+
+    [Fact]
+    public void Restore_LeavesDisjointKeysUntouched()
+    {
+        // Pass-4 (#278) P2#3 — the dedup pass must only affect keys
+        // that appear in BOTH dicts; non-overlapping rows are
+        // preserved exactly.
+        var dst = new PnlKeeper();
+        var avgList = new[]
+        {
+            new PnlAvgCostSnapshot("alice", "PETR4", 100, 25m),
+            new PnlAvgCostSnapshot("bob", "VALE3", -50, 60m),
+        };
+        var unknownList = new[]
+        {
+            new PnlUnknownBasisSnapshot("carol", "ITSA4", 200),
+        };
+        dst.Restore(new Dictionary<string, decimal>(), avgList, null, unknownList);
+
+        Assert.Equal(100, dst.GetAvgCost("alice", "PETR4")!.NetQuantity);
+        Assert.Equal(-50, dst.GetAvgCost("bob", "VALE3")!.NetQuantity);
+        Assert.Equal(200, dst.GetUnknownBasisQty("carol", "ITSA4"));
+    }
 }

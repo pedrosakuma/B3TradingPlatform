@@ -374,8 +374,18 @@ public sealed class StateSnapshotter
         // would be a no-op for non-zero basis rows but would
         // re-discover the zero-basis rows and double-count the
         // skipped_zero metric).
+        //
+        // Pass-4 review (#278) P1#1. The PnlAvgCost.Count==0 guard
+        // was wrong: a pass-2-shaped snapshot has PnlAvgCost
+        // populated (the non-zero-basis rows seeded under pass-1)
+        // but no PnlUnknownBasis block (the field didn't exist yet),
+        // so the previous gate skipped seeding entirely and the
+        // zero-basis Position rows fell back to the original
+        // phantom-P&L bug. Drop the avg-cost guard and rely on
+        // SeedAvgCostFromLegacyPositions being idempotent (it skips
+        // keys already present in _avgCost), so re-seeding only
+        // adds the zero-basis legacy rows to _unknownBasisQty.
         if (_pnlKeeper is not null
-            && snap.PnlAvgCost.Count == 0
             && snap.PnlUnknownBasis.Count == 0
             && snap.Positions.Count > 0)
         {

@@ -158,6 +158,17 @@ public static class MetricsRegistry
     // basis from (operator follow-up).
     public static readonly Counter<long> PnlLegacySnapshotBasisSkippedZero =
         Meter.CreateCounter<long>("trading.pnl.legacy_snapshot_basis_skipped_zero");
+    // Pass-4 review (#278) P2#3. Bumped per (endClient, symbol) row
+    // when Restore observes the same key in BOTH PnlAvgCost AND
+    // PnlUnknownBasis (a malformed snapshot — the two collections are
+    // mutually exclusive by construction in the live keeper). Recovery
+    // applies a "prefer unknown" policy: the avg-cost entry is dropped
+    // so subsequent fills go through the unknown-basis path (realising
+    // 0 instead of phantom against the stale basis), and the metric
+    // surfaces the inconsistency for ops to investigate the snapshot
+    // writer.
+    public static readonly Counter<long> PnlSnapshotBasisInconsistent =
+        Meter.CreateCounter<long>("trading.pnl.snapshot_basis_inconsistent");
     // Pass-1 review (#278) P1#3. Bumped each time the refprice
     // fan-out coalesced one or more (subscriber, symbol) updates into
     // a single pnl.me delta publish under the per-symbol throttle.

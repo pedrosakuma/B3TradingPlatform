@@ -107,11 +107,23 @@ public static class PnlProjection
         // Unrealized: one row per OPEN position with a live ref price.
         // Symbols whose ref-price lookup misses are omitted (rather
         // than reported as 0) so the total stays honest.
+        //
+        // Pass-4 review (#278) P1#2. Unknown-basis legacy positions
+        // (seeded from pre-#271 snapshots whose AverageEntryPrice was
+        // zero) carry no usable basis: Position.AverageEntryPrice is
+        // either 0 or some polluted value, so a naive
+        // (refPrice - avg) * qty would publish phantom unrealized
+        // P&L. Skip them entirely — the position simply doesn't
+        // appear in the unrealized array until the legacy leg goes
+        // flat and a real basis is established by a fresh fill (see
+        // PnlKeeper.ApplyFillToAvgCost). The realized side is
+        // unaffected (those rows come from PnlKeeper.ForEndClientDay).
         var unrealized = new List<PnlUnrealizedEntry>();
         decimal totalUnrealized = 0m;
         foreach (var p in positions.ForEndClient(owner))
         {
             if (p.NetQuantity == 0) continue;
+            if (pnl.GetUnknownBasisQty(owner.Value, p.Symbol) != 0) continue;
             if (!refPrice.TryGet(p.Symbol, out var px)) continue;
             var value = p.NetQuantity >= 0
                 ? (px - p.AverageEntryPrice) * p.NetQuantity

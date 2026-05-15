@@ -97,4 +97,51 @@ public class PnlEndpointTests : IClassFixture<TestAppFactory>
             Assert.Equal(0m, body.TotalUnrealized);
         }
     }
+
+    [Fact]
+    public void PnlProjection_OmitsUnknownBasisPositions_FromUnrealizedArray()
+    {
+        // Pass-4 (#278) P1#2 — unknown-basis legacy positions carry
+        // no usable AverageEntryPrice, so the projection must NOT
+        // publish phantom unrealized for them on either /pnl/today
+        // (REST) or pnl.me (WS — both share PnlProjection.Build).
+        // Symbols WITH a real basis are still surfaced; the
+        // unknown-basis symbol is simply absent from the unrealized
+        // array, and its (zero) contribution is excluded from the
+        // total.
+        var owner = new EndClientId("alice");
+        var positions = new PositionKeeper();
+        // Real basis: open 100 @ 30.
+        positions.ApplyFill(owner, "PETR4", OrderSide.Buy, 100, 30m);
+        // Legacy zero-basis position: ApplyFill with 0 price seeds
+        // a degenerate AverageEntryPrice, mimicking the pass-2
+        // restore that produced the bug.
+        positions.ApplyFill(owner, "VALE3", OrderSide.Buy, 50, 0m);
+
+        var pnl = new PnlKeeper();
+        pnl.ApplyFillToAvgCost(owner.Value, "PETR4", OrderSide.Buy, 100, 30m);
+        // Mark VALE3 as unknown-basis via the legacy seed path.
+        pnl.SeedAvgCostFromLegacyPositions(new[]
+        {
+            new Application.Persistence.PositionSnapshot(owner.Value, "VALE3", 50, 0m),
+        });
+        Assert.Equal(50, pnl.GetUnknownBasisQty(owner.Value, "VALE3"));
+
+        var refPrice = new StubAllPrices(35m);
+
+        var dto = PnlProjection.Build(owner, pnl, positions, refPrice);
+
+        var unr = Assert.Single(dto.Unrealized);
+        Assert.Equal("PETR4", unr.Symbol);
+        Assert.Equal((35m - 30m) * 100, unr.Value);
+        Assert.Equal(unr.Value, dto.TotalUnrealized);
+        Assert.DoesNotContain(dto.Unrealized, e => e.Symbol == "VALE3");
+    }
+
+    private sealed class StubAllPrices : IReferencePrice
+    {
+        private readonly decimal _px;
+        public StubAllPrices(decimal px) => _px = px;
+        public bool TryGet(string symbol, out decimal price) { price = _px; return true; }
+    }
 }
