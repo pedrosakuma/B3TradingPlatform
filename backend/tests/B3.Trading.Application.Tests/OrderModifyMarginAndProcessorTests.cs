@@ -1,6 +1,7 @@
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.UserBots;
 using B3.Trading.Domain;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 #pragma warning disable CS0618 // legacy Margin.Initial used to seed capacity in tests
@@ -522,5 +523,189 @@ public class OrderModifyMarginAndProcessorTests
         Assert.Same(newOrder, stillThere);   // not re-hydrated
         // Fan-out emitted at most one extra ER for the standard cancel path.
         Assert.InRange(sink.Events.Count - sinkCountAfterFirst, 0, 1);
+    }
+
+    // ---------------- Issue #247: CommitReplace reservation drop ----------------
+
+    private sealed class CapturingLoggerProvider : ILoggerProvider
+    {
+        public List<(LogLevel Level, string Message)> Records { get; } = new();
+        public ILogger CreateLogger(string categoryName) => new CapturingLogger(this);
+        public void Dispose() { }
+        private sealed class CapturingLogger : ILogger
+        {
+            private readonly CapturingLoggerProvider _owner;
+            public CapturingLogger(CapturingLoggerProvider owner) { _owner = owner; }
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+            public bool IsEnabled(LogLevel logLevel) => true;
+            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state,
+                Exception? exception, Func<TState, Exception?, string> formatter)
+            {
+                _owner.Records.Add((logLevel, formatter(state, exception)));
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Issue247_CancelAsReplace_realProvider_priorityLostFlow_keepsReservedConsistent()
+    {
+        // Issue #247 reproducer. End-to-end sequence with the REAL
+        // ReserveOnSubmitMarginProvider (not the recording stub):
+        //   1) Bob submits Buy 100 @ 32.49 PETR4 → reservations[777]=3249.
+        //   2) Modify 32.49 → 32.50 (same qty)        → reservations[778]=delta(1).
+        //   3) Venue priority-lost: ER_Cancel(778, orig=777) intercepted →
+        //      ApplyReplaceAccepted → CommitReplace(777, 778, 3250).
+        //   4) Subsequent ER_Trade(778, fill 100) → margin released.
+        // Acceptance: the warn "neither original nor pending reservation
+        // has an owner; dropping" must NOT fire and reserved must end at 0.
+        var loggerProvider = new CapturingLoggerProvider();
+        using var loggerFactory = LoggerFactory.Create(b => b.AddProvider(loggerProvider));
+        var marginLogger = loggerFactory.CreateLogger<ReserveOnSubmitMarginProvider>();
+
+        var ownership = new OrderOwnershipMap();
+        var book = new WorkingOrderBook();
+        var positions = new PositionKeeper();
+        var sink = new CaptureSink();
+        var opts = new RiskOptions();
+        opts.Margin.Enabled = true;
+        opts.Margin.Initial["bob"] = 100_000m;
+        var monitor = new StaticOptionsMonitor<RiskOptions>(opts);
+        var margin = new ReserveOnSubmitMarginProvider(monitor, marginLogger);
+        var reg = new PendingReplacementRegistry();
+
+        var proc = new ExecutionReportProcessor(
+            ownership, book, positions, sink, margin,
+            NullLogger<ExecutionReportProcessor>.Instance,
+            algoSignals: null,
+            cash: null,
+            replacements: reg,
+            replaceMargin: margin);
+
+        var bob = new EndClientId("bob");
+
+        // 1) Bob submits original.
+        var orig = new Order(777UL, bob, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 32.49m, "FIRM");
+        book.TryAdd(orig);
+        orig.MarkWorking();
+        ownership.Register(777UL, bob);
+        Assert.True((await margin.TryReserveAsync(
+            777UL,
+            new RiskContext(bob, "FIRM", "PETR4", OrderSide.Buy, OrderType.Limit, 100, 32.49m),
+            default)).Approved);
+        Assert.Equal(32.49m * 100, margin.ReservedForTesting("bob"));
+
+        // 2) Modify-to-cross 32.49 → 32.50.
+        ownership.RegisterReplaceLink(777UL, 778UL);
+        Assert.True((await ((IReplaceMarginCoordinator)margin).PrepareReplaceAsync(
+            777UL, 778UL, bob, newRemainingNotional: 32.50m * 100, default)).Approved);
+        Assert.True(reg.TryAdd(new OrderReplacementIntent(
+            777UL, 778UL, bob, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit,
+            100, 32.50m, "FIRM", null, null)));
+        // Delta path: prepare reserved +1 (3250 - 3249).
+        Assert.Equal(32.50m * 100, margin.ReservedForTesting("bob"));
+
+        // 3) Venue priority-lost path: ER_Cancel under newClOrdID with orig=777.
+        proc.Apply(778UL, ExecKind.Canceled, leaves: 0, cumQty: 0, lastQty: 0,
+                   lastPx: 0m, rejectReason: null, origClOrdId: 777UL);
+
+        // CommitReplace must have transferred ownership cleanly: reserved
+        // stays at the new notional (3250). The "dropping" warn must NOT fire.
+        Assert.DoesNotContain(loggerProvider.Records, r =>
+            r.Level == LogLevel.Warning && r.Message.Contains("dropping", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(32.50m * 100, margin.ReservedForTesting("bob"));
+
+        // 4) Subsequent Fill ER on the new ClOrdID releases everything.
+        proc.Apply(778UL, ExecKind.Fill, leaves: 0, cumQty: 100, lastQty: 100,
+                   lastPx: 32.50m, rejectReason: null, origClOrdId: 0);
+        Assert.Equal(0m, margin.ReservedForTesting("bob"));
+    }
+
+    [Fact]
+    public void Issue247_CommitReplace_isSilentNoOpWhenMarginDisabled()
+    {
+        // Spin-off acceptance criterion: in deployments with
+        // Margin.Enabled=false the coordinator is still wired (so it can
+        // clean up if margin is toggled mid-session), but a normal
+        // Cancel-as-Replace still funnels through CommitReplace — that
+        // call must be a silent no-op, not a noisy warn-and-drop.
+        var loggerProvider = new CapturingLoggerProvider();
+        using var loggerFactory = LoggerFactory.Create(b => b.AddProvider(loggerProvider));
+        var marginLogger = loggerFactory.CreateLogger<ReserveOnSubmitMarginProvider>();
+        var opts = new RiskOptions();
+        opts.Margin.Enabled = false;
+        var monitor = new StaticOptionsMonitor<RiskOptions>(opts);
+        var margin = new ReserveOnSubmitMarginProvider(monitor, marginLogger);
+
+        ((IReplaceMarginCoordinator)margin).CommitReplace(777UL, 778UL, 3250m);
+
+        Assert.DoesNotContain(loggerProvider.Records, r => r.Level >= LogLevel.Warning);
+        Assert.Equal(0m, margin.ReservedForTesting("bob"));
+    }
+
+    [Fact]
+    public void Issue247_CommitReplace_marginEnabled_neitherSideTracked_logsErrorAndCountsDrop()
+    {
+        // Defensive: if some future code path registers an intent
+        // without going through PrepareReplaceAsync, CommitReplace must
+        // still surface the drop loudly (error + metric) instead of the
+        // silent warn it used to emit. This protects the alertable-leak
+        // semantics called out in #247's acceptance criteria.
+        var loggerProvider = new CapturingLoggerProvider();
+        using var loggerFactory = LoggerFactory.Create(b => b.AddProvider(loggerProvider));
+        var marginLogger = loggerFactory.CreateLogger<ReserveOnSubmitMarginProvider>();
+        var opts = new RiskOptions();
+        opts.Margin.Enabled = true;
+        opts.Margin.Initial["bob"] = 10_000m;
+        var monitor = new StaticOptionsMonitor<RiskOptions>(opts);
+        var margin = new ReserveOnSubmitMarginProvider(monitor, marginLogger);
+
+        // Skip both TryReserveAsync and PrepareReplaceAsync — empty ledger.
+        ((IReplaceMarginCoordinator)margin).CommitReplace(777UL, 778UL, 3250m);
+
+        Assert.Contains(loggerProvider.Records, r =>
+            r.Level == LogLevel.Error && r.Message.Contains("dropping", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Issue247_PR248_CommitReplace_AfterMarginDisabledToggle_StillReleasesOriginalReservation()
+    {
+        // PR #248 P2: the Margin.Enabled gate in CommitReplace must NOT
+        // skip the cleanup path when reservations were created while
+        // margin was enabled and then the operator toggled it off via
+        // the admin reload path (IOptionsMonitor). Otherwise the
+        // original slot leaks forever — _reservations[orig] stays set
+        // and _reserved[owner] never returns to zero.
+        var loggerProvider = new CapturingLoggerProvider();
+        using var loggerFactory = LoggerFactory.Create(b => b.AddProvider(loggerProvider));
+        var marginLogger = loggerFactory.CreateLogger<ReserveOnSubmitMarginProvider>();
+
+        var enabled = new RiskOptions();
+        enabled.Margin.Enabled = true;
+        enabled.Margin.Initial["bob"] = 100_000m;
+        var monitor = new StaticOptionsMonitor<RiskOptions>(enabled);
+        var margin = new ReserveOnSubmitMarginProvider(monitor, marginLogger);
+        var bob = new EndClientId("bob");
+
+        // Reserve while margin is enabled.
+        Assert.True((await margin.TryReserveAsync(
+            777UL,
+            new RiskContext(bob, "FIRM", "PETR4", OrderSide.Buy, OrderType.Limit, 100, 32.49m),
+            default)).Approved);
+        Assert.Equal(32.49m * 100, margin.ReservedForTesting("bob"));
+
+        // Operator flips margin OFF mid-session via admin reload.
+        var disabled = new RiskOptions();
+        disabled.Margin.Enabled = false;
+        disabled.Margin.Initial["bob"] = 100_000m;
+        monitor.Set(disabled);
+        Assert.False(monitor.CurrentValue.Margin.Enabled);
+
+        // Cancel-as-Replace lands AFTER the toggle. confirmedRemainingNotional=0
+        // simulates a flat-out cancel-as-replace (modify-to-fill collapses it
+        // to zero). This must release the original reservation cleanly.
+        ((IReplaceMarginCoordinator)margin).CommitReplace(777UL, 778UL, 0m);
+
+        Assert.Equal(0m, margin.ReservedForTesting("bob"));
+        Assert.DoesNotContain(loggerProvider.Records, r => r.Level >= LogLevel.Warning);
     }
 }

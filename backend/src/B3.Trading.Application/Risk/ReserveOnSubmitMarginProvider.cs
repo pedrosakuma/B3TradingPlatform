@@ -387,6 +387,15 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
     {
         lock (_gate)
         {
+            // Issue #247 / PR #248 P2. The Margin.Enabled gate must live
+            // inside the lock and must NOT skip the cleanup path: the
+            // toggle can flip live via IOptionsMonitor (admin reload),
+            // and TryReserveAsync/PrepareReplaceAsync don't gate on
+            // Margin.Enabled. So _reservations[orig] / [new] may exist
+            // even when Margin is currently disabled — those slots must
+            // still be released here, otherwise a mid-session disable
+            // leaks every in-flight reservation.
+            //
             // Remove the transient entry (set up by Prepare) — its
             // RemainingNotional is the upsize delta we already reserved
             // (or zero for downsize/same).
@@ -413,13 +422,26 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
 
             if (owner is null)
             {
-                // No reservation existed on either side (sell or
-                // never-reserved). Nothing to track going forward.
+                // No reservation existed on either side. If margin is
+                // currently disabled, this is the legitimate "started
+                // disabled, nothing was ever reserved" case — silent
+                // no-op (don't spam logs on every modify-to-fill).
+                if (!_options.CurrentValue.Margin.Enabled)
+                    return;
+
+                // Margin is enabled and yet neither side carried a
+                // reservation: this is a real bug (not a config no-op),
+                // because the matching PrepareReplaceAsync should have
+                // populated the transient entry under newClOrdId. Most
+                // likely culprit is a code path that registered the
+                // intent without going through the coordinator. Surface
+                // it as an error + counter so it's alertable.
                 if (confirmedRemainingNotional > 0m)
                 {
-                    _logger.LogWarning(
-                        "CommitReplace asked to track {Notional} for new ClOrdID {NewClOrdId} but neither original nor pending reservation has an owner; dropping.",
-                        confirmedRemainingNotional, newClOrdId);
+                    _logger.LogError(
+                        "CommitReplace asked to track {Notional} for new ClOrdID {NewClOrdId} (orig {OrigClOrdId}) but neither original nor pending reservation has an owner; dropping. This indicates a Prepare/Commit mismatch — reservation will leak.",
+                        confirmedRemainingNotional, newClOrdId, originalClOrdId);
+                    MetricsRegistry.MarginCommitReplaceDropped.Add(1);
                 }
                 return;
             }
