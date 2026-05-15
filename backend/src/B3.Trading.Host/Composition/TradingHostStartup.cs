@@ -82,6 +82,14 @@ internal static class TradingHostStartup
         if (exchangeOpts.AllowErInjection)
         {
             ErInjectionBootGuard.Validate(app.Environment.EnvironmentName, exchangeOpts.AllowErInjection, exchangeOpts.AllowErInjectionInProduction);
+            // Pass-1 review fix (#259, P1#5): when ER injection is on,
+            // refuse to boot if any seeded non-user role is still using
+            // the committed dev-default password material — that would
+            // make POST /admin/simulator/er trivially exploitable for
+            // anyone with a copy of this repo.
+            AdminCredentialDefaultGuard.Validate(
+                exchangeOpts.AllowErInjection,
+                authOpts.Users.Select(u => (u.Role, u.PasswordHash, u.Salt)));
             var warning = ErInjectionBootGuard.BuildWarning(app.Environment.EnvironmentName, exchangeOpts.AllowErInjection, exchangeOpts.AllowErInjectionInProduction);
             if (warning is not null)
                 app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("ErInjection").LogWarning("{Warning}", warning);

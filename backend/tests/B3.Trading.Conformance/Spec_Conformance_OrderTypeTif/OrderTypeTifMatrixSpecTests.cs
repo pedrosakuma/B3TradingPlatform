@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using B3.Trading.Conformance.Infrastructure;
 
@@ -12,12 +13,28 @@ namespace B3.Trading.Conformance.Spec_Conformance_OrderTypeTif;
 /// golden after the platform-wide normalisation rules in
 /// <see cref="ConformanceRunner.Normalize"/>.
 ///
+/// <para>Pass-1 review fix: <see cref="MockEntryPointClient"/> does NOT
+/// auto-emit a New ER on submit; every active scenario therefore
+/// explicitly injects the venue <c>New</c> ER as the first ER in the
+/// stream, before any subsequent fills/cancels, by calling
+/// <see cref="ConformanceRunner.InjectErAsync"/> with type=<c>"New"</c>
+/// once the order is visible in the WorkingOrderBook.</para>
+///
+/// <para>Pass-1 review fix: the golden's <c>scenario</c> block now
+/// reflects values OBSERVED via <c>GET /orders/</c> (i.e. the platform's
+/// persisted <see cref="OrderDto"/>) instead of the test's input
+/// dictionary. An explicit pre-ER assertion compares observed-vs-expected
+/// for type/TIF/price/stopPrice/qty/goodTillDate so a Q1.1 wiring drop
+/// fails loudly with a clear diff before we ever touch the golden file.
+/// </para>
+///
 /// <para>10 scenarios are active here; 2 are <c>[Skip]</c>'d pending
 /// upstream <c>B3MatchingPlatform#321</c> (the phase scheduler that
-/// orchestrates auction uncross transitions). The skipped scenarios are
-/// fully written so they will run as soon as the upstream lands —
-/// flipping the <c>Skip</c> attribute to a <c>ConformanceFact</c> will
-/// suffice.</para>
+/// orchestrates auction uncross transitions). The skipped bodies are
+/// intentionally <c>Assert.Fail</c> stubs so that flipping <c>Skip</c>
+/// off without rewriting the body to drive a real phase transition
+/// surfaces immediately instead of silently passing on a synthetic
+/// fill.</para>
 ///
 /// <para>All scenarios are gated behind <c>RequiresErInjection=true</c>
 /// + <c>RequiresAdmin=true</c>, mirroring the existing
@@ -28,18 +45,12 @@ namespace B3.Trading.Conformance.Spec_Conformance_OrderTypeTif;
 [Trait("Category", "Conformance")]
 public class OrderTypeTifMatrixSpecTests
 {
-    // The host's MockEntryPointClient auto-emits a New ER for every
-    // admitted submit, so every scenario starts with at least one ER in
-    // the WS stream before any synthetic injection.
     private const int CaptureTimeoutSeconds = 10;
     private const string Symbol = "PETR4";
     private const ulong SecurityId = 4321UL;
 
     // ------------------------------------------------------------------
-    // Scenario 1 — Limit + Day (baseline). Just submit, capture the
-    // platform's New ER. This is the existing-behaviour smoke test that
-    // the rest of the matrix builds on; if it diverges from golden, the
-    // submit→ER pipeline regressed.
+    // Scenario 1 — Limit + Day. Submit, inject New, capture single ER.
     // ------------------------------------------------------------------
     [ConformanceFact(RequiresAdmin = true, RequiresErInjection = true)]
     public async Task Q17_LimitDay_BaselineNewEr()
@@ -55,16 +66,20 @@ public class OrderTypeTifMatrixSpecTests
             Price = 30m,
             TimeInForce = "Day",
         });
+        var ctx = await CaptureObservedScenarioAsync(runner, clOrdId,
+            expectedType: "Limit", expectedTif: "Day", expectedQty: 100, expectedPrice: 30m);
+
+        await runner.InjectErAsync(clOrdId, "New");
+
         var ers = await runner.CaptureExecutionsAsync(clOrdId, expectedCount: 1, TimeSpan.FromSeconds(CaptureTimeoutSeconds));
         ConformanceRunner.AssertGoldenMatches(
-            runner.Normalize(ers, ScenarioCtx("Limit", "Day", qty: 100, price: 30m)),
+            runner.Normalize(ers, ctx),
             "Q17_01_LimitDay_BaselineNewEr.json");
     }
 
     // ------------------------------------------------------------------
-    // Scenario 2 — Limit + IOC. Submit, partial-fill 40/100, then the
-    // remainder is cancelled immediately (IOC contract). Three ERs:
-    // New, PartialFill, Canceled.
+    // Scenario 2 — Limit + IOC. Submit, inject New + PartialFill 40/100
+    // + Canceled (IOC contract). Three ERs.
     // ------------------------------------------------------------------
     [ConformanceFact(RequiresAdmin = true, RequiresErInjection = true)]
     public async Task Q17_LimitIoc_PartialFillThenCancelRemainder()
@@ -80,21 +95,21 @@ public class OrderTypeTifMatrixSpecTests
             Price = 30m,
             TimeInForce = "IOC",
         });
-        await WaitForFirstErAsync(runner, clOrdId);
+        var ctx = await CaptureObservedScenarioAsync(runner, clOrdId,
+            expectedType: "Limit", expectedTif: "IOC", expectedQty: 100, expectedPrice: 30m);
+
+        await runner.InjectErAsync(clOrdId, "New");
         await runner.InjectErAsync(clOrdId, "PartialFill", lastQty: 40, lastPx: 30m);
         await runner.InjectErAsync(clOrdId, "Canceled");
 
         var ers = await runner.CaptureExecutionsAsync(clOrdId, expectedCount: 3, TimeSpan.FromSeconds(CaptureTimeoutSeconds));
         ConformanceRunner.AssertGoldenMatches(
-            runner.Normalize(ers, ScenarioCtx("Limit", "IOC", qty: 100, price: 30m)),
+            runner.Normalize(ers, ctx),
             "Q17_02_LimitIoc_PartialFillThenCancel.json");
     }
 
     // ------------------------------------------------------------------
-    // Scenario 3 — Limit + FOK. Fill-all-or-cancel-all. We exercise the
-    // fill-all branch (the cancel-all branch would need market-state
-    // pre-condition that the synthetic seam doesn't model). Two ERs:
-    // New, Fill (cum=qty).
+    // Scenario 3 — Limit + FOK. Fill-all branch: New, Fill (cum=qty).
     // ------------------------------------------------------------------
     [ConformanceFact(RequiresAdmin = true, RequiresErInjection = true)]
     public async Task Q17_LimitFok_FillAll()
@@ -110,21 +125,21 @@ public class OrderTypeTifMatrixSpecTests
             Price = 30m,
             TimeInForce = "FOK",
         });
-        await WaitForFirstErAsync(runner, clOrdId);
+        var ctx = await CaptureObservedScenarioAsync(runner, clOrdId,
+            expectedType: "Limit", expectedTif: "FOK", expectedQty: 100, expectedPrice: 30m);
+
+        await runner.InjectErAsync(clOrdId, "New");
         await runner.InjectErAsync(clOrdId, "Fill", lastQty: 100, lastPx: 30m);
 
         var ers = await runner.CaptureExecutionsAsync(clOrdId, expectedCount: 2, TimeSpan.FromSeconds(CaptureTimeoutSeconds));
         ConformanceRunner.AssertGoldenMatches(
-            runner.Normalize(ers, ScenarioCtx("Limit", "FOK", qty: 100, price: 30m)),
+            runner.Normalize(ers, ctx),
             "Q17_03_LimitFok_FillAll.json");
     }
 
     // ------------------------------------------------------------------
-    // Scenario 4 — Limit + GTC. Submit, capture the New ER, verify the
-    // order is still live shortly after (representing "survives the
-    // session window" within the test's wall-clock budget — the host
-    // does not expose an admin /admin/daily-reset hook in the current
-    // surface, see PR notes for follow-up).
+    // Scenario 4 — Limit + GTC. Inject New, capture, then verify the
+    // order is still live shortly after.
     // ------------------------------------------------------------------
     [ConformanceFact(RequiresAdmin = true, RequiresErInjection = true)]
     public async Task Q17_LimitGtc_RestsAndStaysLive()
@@ -140,15 +155,16 @@ public class OrderTypeTifMatrixSpecTests
             Price = 30m,
             TimeInForce = "GTC",
         });
+        var ctx = await CaptureObservedScenarioAsync(runner, clOrdId,
+            expectedType: "Limit", expectedTif: "GTC", expectedQty: 100, expectedPrice: 30m);
+
+        await runner.InjectErAsync(clOrdId, "New");
+
         var ers = await runner.CaptureExecutionsAsync(clOrdId, expectedCount: 1, TimeSpan.FromSeconds(CaptureTimeoutSeconds));
         ConformanceRunner.AssertGoldenMatches(
-            runner.Normalize(ers, ScenarioCtx("Limit", "GTC", qty: 100, price: 30m)),
+            runner.Normalize(ers, ctx),
             "Q17_04_LimitGtc_RestsAndStaysLive.json");
 
-        // Live-after-pause check: the GTC order must not get auto-
-        // cancelled within the test's natural wall-clock budget. Polls
-        // /orders/ to confirm the working order is still present and
-        // not in a terminal state.
         await Task.Delay(TimeSpan.FromMilliseconds(500));
         var order = await runner.GetOrderAsync(clOrdId);
         Assert.NotNull(order);
@@ -158,10 +174,10 @@ public class OrderTypeTifMatrixSpecTests
     }
 
     // ------------------------------------------------------------------
-    // Scenario 5 — Limit + GTD. Submit with a near-future expiry; the
-    // host's GTD scheduler (Q1.3 / #255) emits a synthetic Expired ER
-    // when the deadline elapses, then the regular cancel pipeline
-    // produces a Canceled ER. Three ERs: New, Expired, Canceled.
+    // Scenario 5 — Limit + GTD. Inject New; the host's GTD scheduler
+    // (Q1.3 / #255) emits a synthetic Expired ER when the deadline
+    // elapses, then the regular cancel pipeline produces a Canceled ER.
+    // Three ERs: New, Expired, Canceled.
     // ------------------------------------------------------------------
     [ConformanceFact(RequiresAdmin = true, RequiresErInjection = true)]
     public async Task Q17_LimitGtd_ExpiresAtDeadline()
@@ -179,17 +195,22 @@ public class OrderTypeTifMatrixSpecTests
             TimeInForce = "GTD",
             GoodTillDate = goodTill,
         });
+        var ctx = await CaptureObservedScenarioAsync(runner, clOrdId,
+            expectedType: "Limit", expectedTif: "GTD", expectedQty: 100, expectedPrice: 30m,
+            expectedGoodTillDateSet: true);
+
+        await runner.InjectErAsync(clOrdId, "New");
+
         // Wait long enough for the scheduler tick + cancel pipeline.
         var ers = await runner.CaptureExecutionsAsync(clOrdId, expectedCount: 3, TimeSpan.FromSeconds(15));
         ConformanceRunner.AssertGoldenMatches(
-            runner.Normalize(ers, ScenarioCtx("Limit", "GTD", qty: 100, price: 30m)),
+            runner.Normalize(ers, ctx),
             "Q17_05_LimitGtd_Expires.json");
     }
 
     // ------------------------------------------------------------------
-    // Scenario 6 — Market + IOC. Sweeps marketable book, residual
-    // cancelled. Modeled here as Fill 60 + Canceled 40 to exercise the
-    // partial-sweep+cancel-residual sequence. Three ERs.
+    // Scenario 6 — Market + IOC. Sweep + cancel residual: three ERs
+    // (New, PartialFill 60, Canceled).
     // ------------------------------------------------------------------
     [ConformanceFact(RequiresAdmin = true, RequiresErInjection = true)]
     public async Task Q17_MarketIoc_SweepThenCancelResidual()
@@ -205,13 +226,16 @@ public class OrderTypeTifMatrixSpecTests
             Price = (decimal?)null,
             TimeInForce = "IOC",
         });
-        await WaitForFirstErAsync(runner, clOrdId);
+        var ctx = await CaptureObservedScenarioAsync(runner, clOrdId,
+            expectedType: "Market", expectedTif: "IOC", expectedQty: 100, expectedPrice: null);
+
+        await runner.InjectErAsync(clOrdId, "New");
         await runner.InjectErAsync(clOrdId, "PartialFill", lastQty: 60, lastPx: 30m);
         await runner.InjectErAsync(clOrdId, "Canceled");
 
         var ers = await runner.CaptureExecutionsAsync(clOrdId, expectedCount: 3, TimeSpan.FromSeconds(CaptureTimeoutSeconds));
         ConformanceRunner.AssertGoldenMatches(
-            runner.Normalize(ers, ScenarioCtx("Market", "IOC", qty: 100, price: null)),
+            runner.Normalize(ers, ctx),
             "Q17_06_MarketIoc_SweepThenCancel.json");
     }
 
@@ -232,20 +256,21 @@ public class OrderTypeTifMatrixSpecTests
             Price = (decimal?)null,
             TimeInForce = "FOK",
         });
-        await WaitForFirstErAsync(runner, clOrdId);
+        var ctx = await CaptureObservedScenarioAsync(runner, clOrdId,
+            expectedType: "Market", expectedTif: "FOK", expectedQty: 100, expectedPrice: null);
+
+        await runner.InjectErAsync(clOrdId, "New");
         await runner.InjectErAsync(clOrdId, "Fill", lastQty: 100, lastPx: 30m);
 
         var ers = await runner.CaptureExecutionsAsync(clOrdId, expectedCount: 2, TimeSpan.FromSeconds(CaptureTimeoutSeconds));
         ConformanceRunner.AssertGoldenMatches(
-            runner.Normalize(ers, ScenarioCtx("Market", "FOK", qty: 100, price: null)),
+            runner.Normalize(ers, ctx),
             "Q17_07_MarketFok_FillAll.json");
     }
 
     // ------------------------------------------------------------------
-    // Scenario 8 — MarketWithLeftover + Day. Marketable up to Price;
-    // residual rests on book as a Day Limit. The conformance contract
-    // is the ER stream: New, PartialFill (sweep portion). The leftover
-    // remains a working order (no terminal cancel ER).
+    // Scenario 8 — MarketWithLeftover + Day. Sweep + rest: two ERs
+    // (New, PartialFill 40).
     // ------------------------------------------------------------------
     [ConformanceFact(RequiresAdmin = true, RequiresErInjection = true)]
     public async Task Q17_MarketWithLeftoverDay_SweepThenRest()
@@ -261,20 +286,20 @@ public class OrderTypeTifMatrixSpecTests
             Price = 30m,
             TimeInForce = "Day",
         });
-        await WaitForFirstErAsync(runner, clOrdId);
+        var ctx = await CaptureObservedScenarioAsync(runner, clOrdId,
+            expectedType: "MarketWithLeftover", expectedTif: "Day", expectedQty: 100, expectedPrice: 30m);
+
+        await runner.InjectErAsync(clOrdId, "New");
         await runner.InjectErAsync(clOrdId, "PartialFill", lastQty: 40, lastPx: 30m);
 
         var ers = await runner.CaptureExecutionsAsync(clOrdId, expectedCount: 2, TimeSpan.FromSeconds(CaptureTimeoutSeconds));
         ConformanceRunner.AssertGoldenMatches(
-            runner.Normalize(ers, ScenarioCtx("MarketWithLeftover", "Day", qty: 100, price: 30m)),
+            runner.Normalize(ers, ctx),
             "Q17_08_MarketWithLeftoverDay_SweepThenRest.json");
     }
 
     // ------------------------------------------------------------------
-    // Scenario 9 — StopLoss + Day. Stop order's New ER is the contract
-    // surface; the trigger-into-Market is the matching engine's
-    // responsibility (and would be modeled as a separate child clOrdId
-    // upstream). Single New ER captured.
+    // Scenario 9 — StopLoss + Day. Single New ER captured.
     // ------------------------------------------------------------------
     [ConformanceFact(RequiresAdmin = true, RequiresErInjection = true)]
     public async Task Q17_StopLossDay_RestsAtStop()
@@ -291,14 +316,20 @@ public class OrderTypeTifMatrixSpecTests
             StopPrice = 28m,
             TimeInForce = "Day",
         });
+        var ctx = await CaptureObservedScenarioAsync(runner, clOrdId,
+            expectedType: "StopLoss", expectedTif: "Day", expectedQty: 100,
+            expectedPrice: null, expectedStopPrice: 28m);
+
+        await runner.InjectErAsync(clOrdId, "New");
+
         var ers = await runner.CaptureExecutionsAsync(clOrdId, expectedCount: 1, TimeSpan.FromSeconds(CaptureTimeoutSeconds));
         ConformanceRunner.AssertGoldenMatches(
-            runner.Normalize(ers, ScenarioCtx("StopLoss", "Day", qty: 100, price: null, stopPrice: 28m)),
+            runner.Normalize(ers, ctx),
             "Q17_09_StopLossDay_Rests.json");
     }
 
     // ------------------------------------------------------------------
-    // Scenario 10 — StopLimit + Day. Same as 9, with a Price too.
+    // Scenario 10 — StopLimit + Day. Single New ER captured.
     // ------------------------------------------------------------------
     [ConformanceFact(RequiresAdmin = true, RequiresErInjection = true)]
     public async Task Q17_StopLimitDay_RestsAtStop()
@@ -315,74 +346,59 @@ public class OrderTypeTifMatrixSpecTests
             StopPrice = 28m,
             TimeInForce = "Day",
         });
+        var ctx = await CaptureObservedScenarioAsync(runner, clOrdId,
+            expectedType: "StopLimit", expectedTif: "Day", expectedQty: 100,
+            expectedPrice: 27m, expectedStopPrice: 28m);
+
+        await runner.InjectErAsync(clOrdId, "New");
+
         var ers = await runner.CaptureExecutionsAsync(clOrdId, expectedCount: 1, TimeSpan.FromSeconds(CaptureTimeoutSeconds));
         ConformanceRunner.AssertGoldenMatches(
-            runner.Normalize(ers, ScenarioCtx("StopLimit", "Day", qty: 100, price: 27m, stopPrice: 28m)),
+            runner.Normalize(ers, ctx),
             "Q17_10_StopLimitDay_Rests.json");
     }
 
     // ------------------------------------------------------------------
-    // Scenario 11 — Limit + GoodForAuction. Requires the upstream
-    // matching-platform phase scheduler (B3MatchingPlatform#321) to
-    // orchestrate phase transitions and emit the uncross fill. Body is
-    // ready to run; flip the Skip to ConformanceFact when upstream
-    // lands.
+    // Scenario 11 — Limit + GoodForAuction. SKIPPED pending upstream
+    // B3MatchingPlatform#321. Body is intentionally Assert.Fail so that
+    // un-skipping without rewriting to drive a real phase transition
+    // surfaces immediately. Injecting a synthetic Fill would not exercise
+    // auction phase transitions, reservations, or uncross emission and
+    // would silently pass — defeating the purpose of the matrix.
     // ------------------------------------------------------------------
     [Fact(Skip = "blocked by upstream B3MatchingPlatform#321 (phase scheduler / auction uncross orchestration)")]
-    public async Task Q17_LimitGoodForAuction_OpeningCallUncrossEmitsFill()
+    public void Q17_LimitGoodForAuction_OpeningCallUncrossEmitsFill()
     {
-        await using var runner = await ConformanceRunner.CreateAsync(PlatformEndpoint.TryResolve()!);
-        var clOrdId = await runner.SubmitOrderAsync(new
-        {
-            Symbol,
-            SecurityId,
-            Side = "Buy",
-            Type = "Limit",
-            Quantity = 100,
-            Price = 30m,
-            TimeInForce = "GoodForAuction",
-        });
-        await WaitForFirstErAsync(runner, clOrdId);
-        // When upstream lands, the phase scheduler will flip
-        // Continuous→OpeningAuction→Continuous and the engine will
-        // emit a Fill at the call price. Until then the synthetic
-        // seam can't model the phase transition; the scenario is
-        // intentionally code-complete so the only diff to enable is
-        // the attribute.
-        await runner.InjectErAsync(clOrdId, "Fill", lastQty: 100, lastPx: 30m);
-
-        var ers = await runner.CaptureExecutionsAsync(clOrdId, expectedCount: 2, TimeSpan.FromSeconds(CaptureTimeoutSeconds));
-        ConformanceRunner.AssertGoldenMatches(
-            runner.Normalize(ers, ScenarioCtx("Limit", "GoodForAuction", qty: 100, price: 30m)),
-            "Q17_11_LimitGoodForAuction_OpeningCallFill.json");
+        // TODO(B3MatchingPlatform#321): when the phase scheduler lands,
+        // rewrite this body to:
+        //   1. Submit the GoodForAuction order.
+        //   2. Inject New ER (admission).
+        //   3. Drive Continuous→OpeningAuction→Continuous via the phase
+        //      scheduler admin hook (TBD endpoint shape).
+        //   4. Capture the engine-emitted uncross Fill ER.
+        //   5. Assert the captured sequence matches the golden.
+        // Do NOT shortcut by injecting a synthetic Fill — that path
+        // doesn't exercise reservations or uncross emission, which is
+        // the whole point of the GoodForAuction TIF.
+        Assert.Fail(
+            "Body must be rewritten when B3MatchingPlatform#321 lands to drive a real phase transition " +
+            "and observe a real uncross ER. Do NOT inject a synthetic Fill — see body comment.");
     }
 
     // ------------------------------------------------------------------
-    // Scenario 12 — Limit + AtClose. Same upstream dependency: only
-    // the closing call uncross may execute the order. Body is ready
-    // to run.
+    // Scenario 12 — Limit + AtClose. SKIPPED pending upstream
+    // B3MatchingPlatform#321. See Scenario 11 rationale.
     // ------------------------------------------------------------------
     [Fact(Skip = "blocked by upstream B3MatchingPlatform#321 (phase scheduler / closing auction orchestration)")]
-    public async Task Q17_LimitAtClose_OnlyClosingUncrossExecutes()
+    public void Q17_LimitAtClose_OnlyClosingUncrossExecutes()
     {
-        await using var runner = await ConformanceRunner.CreateAsync(PlatformEndpoint.TryResolve()!);
-        var clOrdId = await runner.SubmitOrderAsync(new
-        {
-            Symbol,
-            SecurityId,
-            Side = "Sell",
-            Type = "Limit",
-            Quantity = 100,
-            Price = 30m,
-            TimeInForce = "AtClose",
-        });
-        await WaitForFirstErAsync(runner, clOrdId);
-        await runner.InjectErAsync(clOrdId, "Fill", lastQty: 100, lastPx: 30m);
-
-        var ers = await runner.CaptureExecutionsAsync(clOrdId, expectedCount: 2, TimeSpan.FromSeconds(CaptureTimeoutSeconds));
-        ConformanceRunner.AssertGoldenMatches(
-            runner.Normalize(ers, ScenarioCtx("Limit", "AtClose", qty: 100, price: 30m)),
-            "Q17_12_LimitAtClose_ClosingUncrossFill.json");
+        // TODO(B3MatchingPlatform#321): when the phase scheduler lands,
+        // rewrite this body to drive the closing-call uncross — see
+        // the Q17_LimitGoodForAuction_* sibling for the analogous shape.
+        // Do NOT shortcut by injecting a synthetic Fill.
+        Assert.Fail(
+            "Body must be rewritten when B3MatchingPlatform#321 lands to drive a real closing auction phase " +
+            "transition and observe a real uncross ER. Do NOT inject a synthetic Fill — see body comment.");
     }
 
     // ------------------------------------------------------------------
@@ -390,36 +406,66 @@ public class OrderTypeTifMatrixSpecTests
     // ------------------------------------------------------------------
 
     /// <summary>
-    /// Wait for the platform to emit the implicit New ER before we start
-    /// injecting synthetic follow-ups. Without this gate the simulator
-    /// endpoint can race and reject the inject because the WorkingOrder
-    /// hasn't materialised yet (the inject endpoint reads from
-    /// WorkingOrderBook).
+    /// Pass-1 review fix: poll <c>GET /orders/</c> until the just-submitted
+    /// order is visible, then assert the platform's persisted
+    /// <see cref="OrderDto"/> matches the test's expected
+    /// type/TIF/price/stopPrice/qty/goodTillDate values. Returns a
+    /// scenario context dictionary populated from the OBSERVED DTO so
+    /// the golden's <c>scenario</c> block reflects what
+    /// REST→Domain→Persistence preserved (not what the test typed).
+    /// A wiring drop fails this method with a clear field-by-field diff
+    /// before the golden comparison ever runs.
     /// </summary>
-    private static async Task WaitForFirstErAsync(ConformanceRunner runner, ulong clOrdId)
+    private static async Task<IDictionary<string, JsonNode?>> CaptureObservedScenarioAsync(
+        ConformanceRunner runner, ulong clOrdId,
+        string expectedType, string expectedTif, long expectedQty,
+        decimal? expectedPrice = null, decimal? expectedStopPrice = null,
+        bool expectedGoodTillDateSet = false)
     {
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        JsonElement? order = null;
         while (DateTime.UtcNow < deadline)
         {
-            var o = await runner.GetOrderAsync(clOrdId);
-            if (o is not null) return;
+            order = await runner.GetOrderAsync(clOrdId);
+            if (order is not null) break;
             await Task.Delay(50);
         }
-        throw new TimeoutException($"Order {clOrdId} did not become visible in /orders within 5s.");
-    }
+        if (order is null)
+            throw new TimeoutException($"Order {clOrdId} did not become visible in /orders within 5s.");
 
-    private static IDictionary<string, JsonNode?> ScenarioCtx(
-        string orderType, string tif, long qty, decimal? price,
-        decimal? stopPrice = null)
-    {
+        var observedType = order.Value.GetProperty("type").GetString();
+        var observedTif = order.Value.GetProperty("timeInForce").GetString();
+        var observedQty = order.Value.GetProperty("quantity").GetInt64();
+        decimal? observedPrice = TryGetDecimal(order.Value, "price");
+        decimal? observedStop = TryGetDecimal(order.Value, "stopPrice");
+        var observedGtdSet = order.Value.TryGetProperty("goodTillDate", out var g)
+            && g.ValueKind != JsonValueKind.Null;
+
+        Assert.Equal(expectedType, observedType);
+        Assert.Equal(expectedTif, observedTif);
+        Assert.Equal(expectedQty, observedQty);
+        Assert.Equal(expectedPrice, observedPrice);
+        Assert.Equal(expectedStopPrice, observedStop);
+        Assert.Equal(expectedGoodTillDateSet, observedGtdSet);
+
         var d = new Dictionary<string, JsonNode?>(StringComparer.Ordinal)
         {
-            ["orderType"] = orderType,
-            ["timeInForce"] = tif,
-            ["orderQty"] = qty,
+            ["orderType"] = observedType,
+            ["timeInForce"] = observedTif,
+            ["orderQty"] = observedQty,
         };
-        if (price is not null) d["price"] = price.Value;
-        if (stopPrice is not null) d["stopPrice"] = stopPrice.Value;
+        if (observedPrice is not null) d["price"] = observedPrice.Value;
+        if (observedStop is not null) d["stopPrice"] = observedStop.Value;
+        // GoodTillDate is volatile (DateTimeOffset.UtcNow.AddSeconds(2));
+        // the assertion above already validates the field is present,
+        // so the golden only records the boolean fact "was set" to keep
+        // the snapshot stable across runs.
+        if (observedGtdSet) d["goodTillDateSet"] = true;
         return d;
     }
+
+    private static decimal? TryGetDecimal(JsonElement obj, string name) =>
+        obj.TryGetProperty(name, out var v) && v.ValueKind != JsonValueKind.Null
+            ? v.GetDecimal()
+            : null;
 }

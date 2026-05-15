@@ -31,6 +31,20 @@ namespace B3.Trading.Conformance.Infrastructure;
 /// </summary>
 public sealed class ConformanceRunner : IAsyncDisposable
 {
+    /// <summary>
+    /// Pass-1 review fix: after <see cref="CaptureExecutionsAsync"/>
+    /// reaches <c>expectedCount</c> ERs, keep the WS open for this long
+    /// to make sure no extra ER for the same order arrives. A forbidden
+    /// extra ER fails the call with a clear message instead of being
+    /// silently dropped (which would let "expected 2, host actually
+    /// emitted 3" regressions slip through). Override per-process via
+    /// the <c>B3T_CONFORMANCE_QUIESCENCE_MS</c> env var.
+    /// </summary>
+    public static int QuiescenceWindowMs { get; } =
+        int.TryParse(Environment.GetEnvironmentVariable("B3T_CONFORMANCE_QUIESCENCE_MS"), out var v) && v >= 0
+            ? v
+            : 250;
+
     private static readonly JsonSerializerOptions GoldenJsonOptions = new()
     {
         WriteIndented = true,
@@ -190,13 +204,33 @@ public sealed class ConformanceRunner : IAsyncDisposable
         var deadline = DateTime.UtcNow + timeout;
         var buf = new byte[8 * 1024];
         var closed = false;
+        DateTime? quiescenceDeadline = null;
         try
         {
-            while (!closed && captured.Count < expectedCount && DateTime.UtcNow < deadline)
+            while (!closed && DateTime.UtcNow < deadline)
             {
+                // Pass-1 review fix: once we have the expected count,
+                // switch into a fixed-duration "quiescence" window. Any
+                // additional ER for this order during the window is a
+                // contract violation; the WS receive timeout exits the
+                // loop normally if nothing arrives.
+                if (captured.Count >= expectedCount && quiescenceDeadline is null)
+                {
+                    quiescenceDeadline = DateTime.UtcNow + TimeSpan.FromMilliseconds(QuiescenceWindowMs);
+                }
+
                 using var recvCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                var remaining = deadline - DateTime.UtcNow;
-                if (remaining <= TimeSpan.Zero) break;
+                TimeSpan remaining;
+                if (quiescenceDeadline is { } qd)
+                {
+                    remaining = qd - DateTime.UtcNow;
+                    if (remaining <= TimeSpan.Zero) break;
+                }
+                else
+                {
+                    remaining = deadline - DateTime.UtcNow;
+                    if (remaining <= TimeSpan.Zero) break;
+                }
                 recvCts.CancelAfter(remaining);
 
                 var sb = new StringBuilder();
@@ -216,7 +250,10 @@ public sealed class ConformanceRunner : IAsyncDisposable
                 }
                 catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                 {
-                    // Receive timed out (no frames in window). Loop, deadline check exits.
+                    // Receive timed out (no frames in window). For the
+                    // pre-expectedCount path, this is a hard timeout and
+                    // we exit. For the quiescence path, this is the
+                    // success signal — no extra ER arrived.
                     break;
                 }
                 if (closed) break;
@@ -233,6 +270,18 @@ public sealed class ConformanceRunner : IAsyncDisposable
                 if (erClOrdId != clOrdId.ToString()) continue;
 
                 captured.Add(erData);
+
+                // If we already had the expected count and another ER
+                // for this order arrived within the quiescence window,
+                // fail loudly with the offending payload — better than
+                // a downstream golden mismatch.
+                if (quiescenceDeadline is not null && captured.Count > expectedCount)
+                {
+                    throw new Xunit.Sdk.XunitException(
+                        $"Forbidden extra ER for clOrdId={clOrdId} arrived inside the {QuiescenceWindowMs}ms " +
+                        $"quiescence window after the expected {expectedCount} ERs were captured. " +
+                        $"Offending payload: {erData.ToJsonString()}");
+                }
             }
         }
         finally
@@ -243,6 +292,17 @@ public sealed class ConformanceRunner : IAsyncDisposable
                     await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
             }
             catch (WebSocketException) { /* best-effort */ }
+        }
+
+        // Final assertion: the captured ER count must EXACTLY equal the
+        // expected count — neither a short-fall (timeout before all
+        // expected ERs arrived) nor an over-shoot (caught above) is
+        // acceptable.
+        if (captured.Count != expectedCount)
+        {
+            throw new Xunit.Sdk.XunitException(
+                $"Expected exactly {expectedCount} ERs for clOrdId={clOrdId}, captured {captured.Count} " +
+                $"within {timeout.TotalSeconds:F1}s + {QuiescenceWindowMs}ms quiescence.");
         }
         return captured;
     }
