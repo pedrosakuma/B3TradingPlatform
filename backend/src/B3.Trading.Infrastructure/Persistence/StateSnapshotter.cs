@@ -26,6 +26,7 @@ public sealed class StateSnapshotter
     private readonly AlgoBook _algos;
     private readonly AlgoIdRegistry _algoIds;
     private readonly CashLedger _cash;
+    private readonly CashKeeper? _cashKeeper;
     private readonly InMemoryUserBotCredentialRegistry? _userBotCredentials;
     private readonly InMemoryUserBotSessionRegistry? _userBotSessions;
     private readonly IUserBotOrderMappingRegistry? _userBotMappings;
@@ -54,7 +55,8 @@ public sealed class StateSnapshotter
         InMemoryUserBotCredentialRegistry? userBotCredentials = null,
         InMemoryUserBotSessionRegistry? userBotSessions = null,
         IUserBotOrderMappingRegistry? userBotMappings = null,
-        GtdExpirationScheduler? gtdScheduler = null)
+        GtdExpirationScheduler? gtdScheduler = null,
+        CashKeeper? cashKeeper = null)
     {
         _orders = orders;
         _positions = positions;
@@ -66,6 +68,7 @@ public sealed class StateSnapshotter
         _algos = algos;
         _algoIds = algoIds;
         _cash = cash;
+        _cashKeeper = cashKeeper;
         _userBotCredentials = userBotCredentials;
         _userBotSessions = userBotSessions;
         _userBotMappings = userBotMappings;
@@ -110,6 +113,7 @@ public sealed class StateSnapshotter
         AlgoIds = _algoIds.RawSnapshot(),
         Ownership = _ownership.RawSnapshot(),
         CashBalances = _cash.RawSnapshot(),
+        CashByEndclient = _cashKeeper?.RawSnapshot() ?? Array.Empty<CashKeeperRaw>(),
         UserBotCredentials = _userBotCredentials?.RawSnapshot() ?? Array.Empty<UserBotCredential>(),
         BotSessions = _userBotSessions?.RawSnapshot() ?? Array.Empty<BotSessionState>(),
         BotOrderMappings = _userBotMappings?.RawSnapshotOrders() ?? Array.Empty<BotOrderMappingRaw>(),
@@ -177,6 +181,14 @@ public sealed class StateSnapshotter
         var cash = new List<CashBalanceSnapshot>(raw.CashBalances.Length);
         for (var i = 0; i < raw.CashBalances.Length; i++)
             cash.Add(new CashBalanceSnapshot(raw.CashBalances[i].EndClientId, raw.CashBalances[i].Available));
+
+        // Q2.2 (#269). Project the CashKeeper's raw rows into the
+        // persisted dict shape. Dictionary (vs list) is mandated by the
+        // spec; deterministic insertion order is not required (callers
+        // index by end-client id).
+        var cashByEndclient = new Dictionary<string, decimal>(raw.CashByEndclient.Length);
+        for (var i = 0; i < raw.CashByEndclient.Length; i++)
+            cashByEndclient[raw.CashByEndclient[i].EndClientId] = raw.CashByEndclient[i].Available;
 
         var phaseOverrides = new List<SessionPhaseOverrideSnapshot>(raw.SessionPhaseOverrides.Length);
         for (var i = 0; i < raw.SessionPhaseOverrides.Length; i++)
@@ -257,6 +269,7 @@ public sealed class StateSnapshotter
             Algos = algos,
             AlgoIds = algoIds,
             CashBalances = cash,
+            CashByEndclient = cashByEndclient,
             UserBotCredentials = creds,
             BotSessions = sessions,
             BotOrderMappings = botOrderMaps,
@@ -284,6 +297,7 @@ public sealed class StateSnapshotter
         _algos.Restore(snap.Algos);
         _algoIds.Restore(snap.AlgoIds);
         _cash.Restore(snap.CashBalances);
+        _cashKeeper?.Restore(snap.CashByEndclient);
         _userBotCredentials?.Restore(snap.UserBotCredentials);
         _userBotSessions?.Restore(snap.BotSessions);
         _userBotMappings?.Restore(snap.BotOrderMappings, snap.BotCancelMappings);
@@ -337,6 +351,7 @@ public sealed class EventReplayer
     /// hosted-service <c>StartAsync</c>.
     /// </summary>
     private readonly GtdExpirationScheduler? _gtdScheduler;
+    private readonly CashKeeper? _cashKeeper;
 
     public EventReplayer(
         WorkingOrderBook orders,
@@ -352,7 +367,8 @@ public sealed class EventReplayer
         InMemoryUserBotCredentialRegistry? userBotCredentials = null,
         InMemoryUserBotSessionRegistry? userBotSessions = null,
         IUserBotOrderMappingRegistry? userBotMappings = null,
-        GtdExpirationScheduler? gtdScheduler = null)
+        GtdExpirationScheduler? gtdScheduler = null,
+        CashKeeper? cashKeeper = null)
     {
         _orders = orders;
         _ownership = ownership;
@@ -368,6 +384,7 @@ public sealed class EventReplayer
         _userBotSessions = userBotSessions;
         _userBotMappings = userBotMappings;
         _gtdScheduler = gtdScheduler;
+        _cashKeeper = cashKeeper;
     }
 
     public void Apply(WalEvent evt)
@@ -561,6 +578,12 @@ public sealed class EventReplayer
                 // pre-crash cancel ER never landed. Null-tolerant for
                 // compositions / tests that don't wire a scheduler.
                 _gtdScheduler?.MarkExpiredAuditAppended(oe.ClOrdId);
+                break;
+            case CashLedgerEvent cle:
+                // Q2.2 (#269). Replay folds the deposit/withdrawal into
+                // CashKeeper. Null-tolerant for compositions/tests that
+                // don't wire the keeper.
+                _cashKeeper?.Apply(cle.Operation, new EndClientId(cle.EndClientId), cle.Amount);
                 break;
         }
     }
