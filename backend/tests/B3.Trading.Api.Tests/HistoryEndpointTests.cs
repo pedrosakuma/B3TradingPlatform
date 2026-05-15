@@ -806,14 +806,19 @@ public class HistoryEndpointTests : IDisposable
             .GetProperty("clOrdId").GetString()!);
 
         // Venue cancel-as-replace: Canceled ER under newId, OrigClOrdId=0.
-        // Runtime intercepts via the replacement registry; the WAL records
-        // the raw Canceled ER. Replay must reproduce the intercept.
+        // Real venue shape — LeavesQuantity=0 / CumulativeQuantity=0 (the
+        // ER is reporting a cancel of the original). The runtime intercepts
+        // via the replacement registry and funnels through
+        // ApplyReplaceAccepted(erLeaves: intent.NewQuantity, erCum: 0); the
+        // history projector must mirror that, hydrating B from the originating
+        // OrderReplaceRequestedEvent's NewQuantity rather than the ER's
+        // zeroed leaves/cum (which would otherwise mark B as Filled).
         var mock = (B3.Trading.Infrastructure.MockEntryPointClient)
             f.Services.GetRequiredService<B3.Trading.Infrastructure.IEntryPointClient>();
         mock.EmitExecutionReport(new B3.Trading.Infrastructure.ExecutionReportEnvelope(
             ClOrdId: newId,
             ExecType: B3.Trading.Infrastructure.EpExecType.Canceled,
-            LeavesQuantity: 10,
+            LeavesQuantity: 0,
             CumulativeQuantity: 0,
             LastQuantity: 0,
             LastPrice: 0m,
@@ -829,10 +834,13 @@ public class HistoryEndpointTests : IDisposable
         Assert.True(byId.ContainsKey(origStr), "original must appear");
         Assert.True(byId.ContainsKey(newId.ToString()), "replacement must appear");
         Assert.Equal("Replaced", byId[origStr].GetProperty("status").GetString());
-        // Replacement hydrated as Working (leaves==NewQty, cum==0) — same
-        // surface state as a true Replaced ER on the same baseline.
+        // Replacement hydrated as Working with leaves==NewQuantity (10) and
+        // cum==0 — proving the projector pulls leaves from the replace
+        // intent, not from the ER's (zeroed) LeavesQuantity. Was previously
+        // masked by a test that happened to set LeavesQuantity==NewQuantity.
         Assert.Equal("Working", byId[newId.ToString()].GetProperty("status").GetString());
         Assert.Equal(10L, byId[newId.ToString()].GetProperty("leavesQuantity").GetInt64());
+        Assert.Equal(0L, byId[newId.ToString()].GetProperty("cumulativeQuantity").GetInt64());
     }
 
     [Fact]
@@ -866,10 +874,11 @@ public class HistoryEndpointTests : IDisposable
             f.Services.GetRequiredService<B3.Trading.Infrastructure.IEntryPointClient>();
 
         // First Canceled ER under newId — cancel-as-replace intercept.
+        // Real venue shape: LeavesQuantity=0 / CumulativeQuantity=0.
         mock.EmitExecutionReport(new B3.Trading.Infrastructure.ExecutionReportEnvelope(
             ClOrdId: newId,
             ExecType: B3.Trading.Infrastructure.EpExecType.Canceled,
-            LeavesQuantity: 10,
+            LeavesQuantity: 0,
             CumulativeQuantity: 0,
             LastQuantity: 0,
             LastPrice: 0m,
@@ -928,10 +937,11 @@ public class HistoryEndpointTests : IDisposable
 
         var mock = (B3.Trading.Infrastructure.MockEntryPointClient)
             f.Services.GetRequiredService<B3.Trading.Infrastructure.IEntryPointClient>();
+        // Real venue shape: cancel-side ER reports LeavesQuantity=0.
         mock.EmitExecutionReport(new B3.Trading.Infrastructure.ExecutionReportEnvelope(
             ClOrdId: newId,
             ExecType: B3.Trading.Infrastructure.EpExecType.Canceled,
-            LeavesQuantity: 10,
+            LeavesQuantity: 0,
             CumulativeQuantity: 0,
             LastQuantity: 0,
             LastPrice: 0m,
@@ -950,6 +960,78 @@ public class HistoryEndpointTests : IDisposable
         Assert.True(byId.ContainsKey(newId.ToString()), "replacement must appear");
         Assert.Equal("Working", byId[newId.ToString()].GetProperty("status").GetString());
         Assert.Equal(10L, byId[newId.ToString()].GetProperty("leavesQuantity").GetInt64());
+    }
+
+    [Fact]
+    public async Task OrdersHistory_CancelAsReplaceWithPartiallyFilledOriginal_ReplacementCumResetsToZero()
+    {
+        // P1 #275 pass-5: when the original has accumulated partial fills
+        // before the venue's cancel-as-replace lands, the runtime's
+        // ApplyReplaceAccepted resets the replacement to (leaves: NewQuantity,
+        // cum: 0) — the new ClOrdID is a brand-new order in the book and does
+        // not inherit the predecessor's fills. The history projector must
+        // mirror that: B's leaves come from the OrderReplaceRequestedEvent's
+        // NewQuantity, NOT from the original's residual leaves, and cum is 0
+        // regardless of the predecessor's cumulative.
+        using var f = TestAppFactory.WithOverrides(Overrides());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var origStr = await SubmitOrder(http, token, qty: 10, price: 30m);
+        var origId = ulong.Parse(origStr);
+        await InjectEr(http, adminToken, new { ClOrdId = origId, Type = "New" });
+
+        // Partial fill: 3 of 10 done, leaves 7.
+        await InjectEr(http, adminToken, new
+        {
+            ClOrdId = origId,
+            Type = "Fill",
+            LastQty = 3L,
+            LastPx = 30m,
+        });
+
+        // Modify to a DIFFERENT new quantity (8) so the assertion proves the
+        // value came from the replace intent, not coincidentally from the
+        // original quantity, leaves, or cum.
+        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origStr}")
+        {
+            Content = JsonContent.Create(new { Quantity = 8L, Price = 31m }),
+        };
+        modifyReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var modifyResp = await http.SendAsync(modifyReq);
+        Assert.Equal(HttpStatusCode.Accepted, modifyResp.StatusCode);
+        var newId = ulong.Parse((await modifyResp.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("clOrdId").GetString()!);
+
+        // Real venue cancel-as-replace shape: LeavesQuantity=0 / cum=0 under newId.
+        var mock = (B3.Trading.Infrastructure.MockEntryPointClient)
+            f.Services.GetRequiredService<B3.Trading.Infrastructure.IEntryPointClient>();
+        mock.EmitExecutionReport(new B3.Trading.Infrastructure.ExecutionReportEnvelope(
+            ClOrdId: newId,
+            ExecType: B3.Trading.Infrastructure.EpExecType.Canceled,
+            LeavesQuantity: 0,
+            CumulativeQuantity: 0,
+            LastQuantity: 0,
+            LastPrice: 0m,
+            RejectReason: null,
+            OrigClOrdId: 0));
+
+        var page = await GetOrdersHistory(http, token);
+        var byId = page.Items.ToDictionary(
+            o => o.GetProperty("clOrdId").GetString()!,
+            o => o,
+            StringComparer.Ordinal);
+
+        // Original goes Replaced (terminal-preservation doesn't apply: it
+        // was PartiallyFilled, not terminal).
+        Assert.Equal("Replaced", byId[origStr].GetProperty("status").GetString());
+        // Replacement: leaves=NewQuantity (8), cum reset to 0, Working —
+        // mirrors ExecutionReportProcessor.ApplyReplaceAccepted.
+        Assert.True(byId.ContainsKey(newId.ToString()), "replacement must appear");
+        Assert.Equal("Working", byId[newId.ToString()].GetProperty("status").GetString());
+        Assert.Equal(8L, byId[newId.ToString()].GetProperty("leavesQuantity").GetInt64());
+        Assert.Equal(0L, byId[newId.ToString()].GetProperty("cumulativeQuantity").GetInt64());
     }
 
     // -----------------------------------------------------------------

@@ -179,8 +179,8 @@ public static class HistoryEndpoints
         // map (TryResolveOrig) to find the original order. The history
         // projector must mirror that fallback or it silently strands
         // every cancel/replace ack whose OrigClOrdId field was missing.
-        var cancelLinks = new Dictionary<ulong, ulong>();   // cancelClOrdId -> originalClOrdId
-        var replaceLinks = new Dictionary<ulong, ulong>();  // newClOrdId    -> originalClOrdId
+        var cancelLinks = new Dictionary<ulong, ulong>();           // cancelClOrdId -> originalClOrdId
+        var replaceLinks = new Dictionary<ulong, ReplaceIntent>();  // newClOrdId    -> (originalClOrdId, requested NewQuantity)
         // Tracks which projections have at least one event in [from,to].
         // We must apply ALL events with ts <= to to project the correct
         // state-at-`to` (a partial fill at 10:00 followed by a full fill
@@ -220,7 +220,7 @@ public static class HistoryEndpoints
                     ownerByClOrdId[rr.NewClOrdId] = (rr.EndClientId, rr.Symbol);
                     // Mirror OrderOwnershipMap.RegisterReplaceLink — needed
                     // when the venue's Replaced ER omits OrigClOrdId.
-                    replaceLinks[rr.NewClOrdId] = rr.OriginalClOrdId;
+                    replaceLinks[rr.NewClOrdId] = new ReplaceIntent(rr.OriginalClOrdId, rr.NewQuantity);
                     if (!OwnerMatches(rr.EndClientId, owner)) break;
                     if (symbol is not null && !rr.Symbol.Equals(symbol, StringComparison.Ordinal)) break;
                     byClOrdId[rr.NewClOrdId] = OrderProjection.FromReplace(seq, rr);
@@ -257,8 +257,8 @@ public static class HistoryEndpoints
                         // through PendingReplacementRegistry instead of
                         // the OrigClOrdId fallback). Replaced ERs
                         // resolve only via replaceLinks.
-                        if (kind == ExecKind.Replaced && replaceLinks.TryGetValue(er.ClOrdId, out var rOrig))
-                            resolvedOrig = rOrig;
+                        if (kind == ExecKind.Replaced && replaceLinks.TryGetValue(er.ClOrdId, out var rIntent))
+                            resolvedOrig = rIntent.OriginalClOrdId;
                         else if ((kind is ExecKind.Canceled or ExecKind.Rejected or ExecKind.Expired)
                             && cancelLinks.TryGetValue(er.ClOrdId, out var cOrig))
                             resolvedOrig = cOrig;
@@ -320,13 +320,13 @@ public static class HistoryEndpoints
                     // OrigClOrdId-fallback resolution above wired via cancelLinks
                     // (the new-side ClOrdID is never in cancelLinks).
                     if (kind == ExecKind.Canceled
-                        && replaceLinks.TryGetValue(er.ClOrdId, out var carOrig))
+                        && replaceLinks.TryGetValue(er.ClOrdId, out var carIntent))
                     {
                         // Mirror ApplyReplaceAccepted: prefer the ER's
                         // OrigClOrdId when the venue did supply one,
                         // otherwise fall back to the intent's original
                         // (here: the replaceLinks entry).
-                        var origId = er.OrigClOrdId != 0 ? er.OrigClOrdId : carOrig;
+                        var origId = er.OrigClOrdId != 0 ? er.OrigClOrdId : carIntent.OriginalClOrdId;
                         if (byClOrdId.TryGetValue(origId, out var carOrigProj))
                         {
                             carOrigProj.ApplyReplacedTerminal(seq, er);
@@ -334,7 +334,16 @@ public static class HistoryEndpoints
                         }
                         if (byClOrdId.TryGetValue(er.ClOrdId, out var carNewProj))
                         {
-                            carNewProj.HydrateFromReplaceEr(seq, er);
+                            // Mirror ExecutionReportProcessor.Apply for the
+                            // Canceled cancel-as-replace branch: runtime calls
+                            // ApplyReplaceAccepted(erLeaves: intent.NewQuantity,
+                            // erCum: 0) — the venue's cancel-side ER reports
+                            // LeavesQuantity=0 (it's a cancel ack), so we MUST
+                            // hydrate from the originating
+                            // OrderReplaceRequestedEvent's NewQuantity, not
+                            // from the ER's leaves/cum (which would mark the
+                            // replacement as Filled).
+                            carNewProj.HydrateFromCancelAsReplaceIntent(seq, er, carIntent.NewQuantity);
                             if (inWindow) hadEventInWindow.Add(er.ClOrdId);
                         }
                         // Consume the link — mirrors PendingReplacementRegistry
@@ -411,7 +420,7 @@ public static class HistoryEndpoints
         // owner/firm — without this fallback the executions endpoint
         // silently drops every such ack for the firm-isolation filter.
         var cancelLinks = new Dictionary<ulong, ulong>();
-        var replaceLinks = new Dictionary<ulong, ulong>();
+        var replaceLinks = new Dictionary<ulong, ReplaceIntent>();
         var result = new List<ExecutionProjection>();
 
         await foreach (var (seq, evt) in store.ReadFromAsync(0, ct))
@@ -423,7 +432,7 @@ public static class HistoryEndpoints
                     break;
                 case OrderReplaceRequestedEvent rr:
                     ownerByClOrdId[rr.NewClOrdId] = (rr.EndClientId, rr.Symbol, rr.Side);
-                    replaceLinks[rr.NewClOrdId] = rr.OriginalClOrdId;
+                    replaceLinks[rr.NewClOrdId] = new ReplaceIntent(rr.OriginalClOrdId, rr.NewQuantity);
                     break;
                 case OrderCancelRequestedEvent cr:
                     cancelLinks[cr.CancelClOrdId] = cr.OriginalClOrdId;
@@ -450,8 +459,8 @@ public static class HistoryEndpoints
                         // not via the OrigClOrdId fallback.
                         Enum.TryParse<ExecKind>(er.ExecKind, ignoreCase: true, out var execKind);
                         if (execKind == ExecKind.Replaced
-                            && replaceLinks.TryGetValue(er.ClOrdId, out var rOrig)
-                            && ownerByClOrdId.TryGetValue(rOrig, out var m3)) meta = m3;
+                            && replaceLinks.TryGetValue(er.ClOrdId, out var rIntent)
+                            && ownerByClOrdId.TryGetValue(rIntent.OriginalClOrdId, out var m3)) meta = m3;
                         else if (execKind is ExecKind.Canceled or ExecKind.Rejected or ExecKind.Expired
                             && cancelLinks.TryGetValue(er.ClOrdId, out var cOrig)
                             && ownerByClOrdId.TryGetValue(cOrig, out var m4)) meta = m4;
@@ -634,6 +643,18 @@ public static class HistoryEndpoints
     // -----------------------------------------------------------------
     // Internal projection types
     // -----------------------------------------------------------------
+
+    /// <summary>
+    /// Replace-link entry recorded from <see cref="OrderReplaceRequestedEvent"/>:
+    /// the original ClOrdID being replaced and the requested
+    /// <c>NewQuantity</c>. The latter is needed by the cancel-as-replace
+    /// branch to mirror <c>ExecutionReportProcessor.Apply</c>'s
+    /// <c>ApplyReplaceAccepted(erLeaves: intent.NewQuantity, erCum: 0)</c>
+    /// for <c>ExecKind.Canceled</c> — the cancel-side ER's
+    /// <c>LeavesQuantity</c> is 0 and cannot be used to hydrate the
+    /// replacement.
+    /// </summary>
+    private readonly record struct ReplaceIntent(ulong OriginalClOrdId, long NewQuantity);
 
     private sealed class OrderProjection
     {
@@ -874,6 +895,28 @@ public static class HistoryEndpoints
             Status = er.LeavesQuantity == 0
                 ? OrderStatus.Filled
                 : (er.CumulativeQuantity > 0 ? OrderStatus.PartiallyFilled : OrderStatus.Working);
+            LastSeq = seq;
+            LastTs = er.TimestampUtc;
+        }
+
+        /// <summary>
+        /// Applied to the NEW ClOrdID's projection on a cancel-as-replace
+        /// Canceled ER (B3MatchingPlatform "priority-lost" path, issue #241).
+        /// Mirrors <c>ExecutionReportProcessor.Apply</c> for
+        /// <c>ExecKind.Canceled</c>, which calls
+        /// <c>ApplyReplaceAccepted(erLeaves: intent.NewQuantity, erCum: 0)</c>:
+        /// the venue's cancel-side ER reports <c>LeavesQuantity=0</c>
+        /// (it's a cancel ack), so we hydrate from the originating
+        /// <see cref="OrderReplaceRequestedEvent"/>'s
+        /// <c>NewQuantity</c>, not from the ER's leaves/cum. Cumulative is
+        /// reset to 0 — the replacement is a brand-new order in the runtime
+        /// book and does not inherit the predecessor's fills.
+        /// </summary>
+        public void HydrateFromCancelAsReplaceIntent(long seq, ExecutionReportReceivedEvent er, long intentNewQuantity)
+        {
+            LeavesQuantity = intentNewQuantity;
+            CumulativeQuantity = 0;
+            Status = intentNewQuantity == 0 ? OrderStatus.Filled : OrderStatus.Working;
             LastSeq = seq;
             LastTs = er.TimestampUtc;
         }
