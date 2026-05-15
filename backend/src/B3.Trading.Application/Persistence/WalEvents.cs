@@ -37,6 +37,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(OrderExpiredEvent), "order.expired")]
 [JsonDerivedType(typeof(CashLedgerEvent), "cash.ledger")]
 [JsonDerivedType(typeof(FeeAccruedEvent), "fee.accrued")]
+[JsonDerivedType(typeof(RealizedPnlEvent), "pnl.realized")]
 public abstract record WalEvent
 {
     public DateTimeOffset TimestampUtc { get; init; } = DateTimeOffset.UtcNow;
@@ -564,4 +565,72 @@ public sealed record FeeAccruedEvent : WalEvent
     public required decimal Emolumentos { get; init; }
     public required decimal Liquidacao { get; init; }
     public required decimal Total { get; init; }
+}
+
+/// <summary>
+/// Q2.4 (#271). Realized P&amp;L delta emitted by
+/// <c>ExecutionReportProcessor</c> immediately after a Fill ER on the
+/// opposing side of the current position has been folded into
+/// <c>PositionKeeper</c>. Lands AFTER the originating
+/// <see cref="ExecutionReportReceivedEvent"/> in the WAL by virtue of
+/// the dispatcher's append ordering — the same sequencing rule that
+/// governs <see cref="FeeAccruedEvent"/>.
+///
+/// <para>
+/// <b>Avg-cost basis (decision documented in #271).</b> Realized
+/// proceeds are computed as <c>(price - avgPrice) * closedQty</c> for
+/// long positions and <c>(avgPrice - price) * closedQty</c> for shorts,
+/// where <c>avgPrice</c> is the <i>pre-fill</i>
+/// <c>Position.AverageEntryPrice</c> and <c>closedQty</c> is the portion
+/// of the fill that offset the pre-fill quantity (the remainder, if the
+/// position flipped past zero, opens fresh and contributes no realized
+/// component). Avg-cost is the B3/CVM-standard basis for cash equities
+/// and avoids the per-lot bookkeeping FIFO would require.
+/// </para>
+///
+/// <para>
+/// <b>Idempotence.</b> <see cref="ExecutionId"/> uses the same stable
+/// <c>{ClOrdId}:{CumulativeQuantityAfterFill}</c> shape as
+/// <see cref="FeeAccruedEvent.ExecutionId"/>; <c>PnlKeeper.Apply</c>
+/// dedupes on it so a re-applied event (FIXP retransmit, WAL replay)
+/// is a no-op.
+/// </para>
+///
+/// <para>
+/// <b>GROSS, not NET.</b> <see cref="DeltaRealized"/> /
+/// <see cref="RunningTotal"/> are pre-fee. The Q2.5 statement (#272)
+/// composes fees on top.
+/// </para>
+/// </summary>
+public sealed record RealizedPnlEvent : WalEvent
+{
+    public required ulong ClOrdId { get; init; }
+
+    /// <summary>
+    /// Stable per-fill identity — see the type-level remarks. Format:
+    /// <c>{ClOrdId}:{CumulativeQuantityAfterFill}</c>.
+    /// </summary>
+    public required string ExecutionId { get; init; }
+
+    public required string EndClientId { get; init; }
+    public required string Symbol { get; init; }
+
+    /// <summary>
+    /// UTC day key used to bucket <see cref="DeltaRealized"/>; matches
+    /// <c>DateOnly.FromDateTime(TimestampUtc.UtcDateTime)</c>. Persisted
+    /// explicitly so a future timezone migration cannot retroactively
+    /// re-bucket historical events.
+    /// </summary>
+    public required DateOnly DayKey { get; init; }
+
+    public required decimal DeltaRealized { get; init; }
+
+    /// <summary>
+    /// Cumulative realized for (<see cref="EndClientId"/>,
+    /// <see cref="Symbol"/>, <see cref="DayKey"/>) AFTER applying
+    /// <see cref="DeltaRealized"/>. Persisted so a snapshot+tail
+    /// recovery treats the durable value as authoritative even if the
+    /// avg-cost calculation in the keeper has drifted between runs.
+    /// </summary>
+    public required decimal RunningTotal { get; init; }
 }

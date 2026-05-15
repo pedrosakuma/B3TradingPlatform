@@ -90,6 +90,32 @@ public sealed class PlatformSnapshot
     public List<string> FeeSeenExecutionIds { get; init; } = new();
 
     /// <summary>
+    /// Q2.4 (#271). Per-(end-client, symbol, day) realized-P&amp;L
+    /// running totals projected from the <c>RealizedPnlEvent</c> stream
+    /// by <c>PnlKeeper</c>. Key is
+    /// <c>{endClientId}|{symbol}|{yyyy-MM-dd}</c> (see
+    /// <c>PnlKeeper.FormatRealizedKey</c>); value is the running BRL
+    /// realized total. Empty on snapshots pre-dating the field —
+    /// rebuilt from the WAL alone in that case.
+    /// </summary>
+    public Dictionary<string, decimal> PnlRealizedByEndclientSymbolDay { get; init; } = new();
+
+    /// <summary>
+    /// Q2.4 (#271). Per-(end-client, symbol) avg-cost basis tracked by
+    /// <c>PnlKeeper</c> in parallel with <see cref="Positions"/>. Empty
+    /// on older snapshots; rebuilt from <see cref="Positions"/> by the
+    /// recovery path (<c>PersistenceRecovery</c>) when missing.
+    /// </summary>
+    public List<PnlAvgCostSnapshot> PnlAvgCost { get; init; } = new();
+
+    /// <summary>
+    /// Q2.4 (#271). Idempotence guard for the realized-P&amp;L
+    /// projection — the set of <c>RealizedPnlEvent.ExecutionId</c>
+    /// values already folded into <see cref="PnlRealizedByEndclientSymbolDay"/>.
+    /// </summary>
+    public List<string> PnlSeenExecutionIds { get; init; } = new();
+
+    /// <summary>
     /// User-issued bot credentials (sub-issue #169). Empty on snapshots
     /// pre-dating the field — credentials are reconstructed instead by
     /// the WAL replay path on top of the empty list, which matches the
@@ -276,6 +302,16 @@ public sealed record PositionSnapshot(
 public sealed record CashBalanceSnapshot(
     string EndClientId,
     decimal Available);
+
+/// <summary>
+/// Q2.4 (#271). Avg-cost basis row persisted alongside
+/// <see cref="PlatformSnapshot.PnlRealizedByEndclientSymbolDay"/>.
+/// </summary>
+public sealed record PnlAvgCostSnapshot(
+    string EndClientId,
+    string Symbol,
+    long NetQuantity,
+    decimal AvgPrice);
 
 public sealed class ClOrdIdRegistrySnapshot
 {

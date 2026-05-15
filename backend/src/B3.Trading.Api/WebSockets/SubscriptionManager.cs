@@ -31,12 +31,21 @@ public sealed class SubscriptionManager
     private readonly WorkingOrderBook _orders;
     private readonly PositionKeeper _positions;
     private readonly AlgoBook _algos;
+    private readonly PnlKeeper? _pnl;
+    private readonly Application.Risk.IReferencePrice? _refPrice;
 
-    public SubscriptionManager(WorkingOrderBook orders, PositionKeeper positions, AlgoBook algos)
+    public SubscriptionManager(
+        WorkingOrderBook orders,
+        PositionKeeper positions,
+        AlgoBook algos,
+        PnlKeeper? pnl = null,
+        Application.Risk.IReferencePrice? refPrice = null)
     {
         _orders = orders;
         _positions = positions;
         _algos = algos;
+        _pnl = pnl;
+        _refPrice = refPrice;
     }
 
     private object LockFor(EndClientId owner) =>
@@ -81,6 +90,9 @@ public sealed class SubscriptionManager
                 Channels.PositionsMe => _positions.ForEndClient(client.Owner).Select(p => p.ToDto()).ToArray(),
                 Channels.ExecutionsMe => Array.Empty<ExecutionDto>(), // no historical exec log in v1
                 Channels.AlgoMe => _algos.EnumerateForOwner(client.FirmId, client.Owner).Select(a => a.ToDto()).ToArray(),
+                Channels.PnlMe => (_pnl is not null && _refPrice is not null)
+                    ? PnlProjection.Build(client.Owner, _pnl, _positions, _refPrice)
+                    : null,
                 _ => null,
             };
 

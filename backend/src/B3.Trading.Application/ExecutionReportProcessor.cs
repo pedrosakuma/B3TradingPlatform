@@ -38,6 +38,7 @@ public sealed class ExecutionReportProcessor
     private readonly CashLedger? _cash;
     private readonly IFeeCalculator? _feeCalculator;
     private readonly FeeKeeper? _feeKeeper;
+    private readonly PnlKeeper? _pnlKeeper;
     private readonly Persistence.EventDispatcher? _dispatcher;
     private readonly PendingReplacementRegistry? _replacements;
     private readonly Risk.IReplaceMarginCoordinator? _replaceMargin;
@@ -59,7 +60,8 @@ public sealed class ExecutionReportProcessor
         Scheduling.GtdExpirationScheduler? gtdScheduler = null,
         IFeeCalculator? feeCalculator = null,
         FeeKeeper? feeKeeper = null,
-        Persistence.EventDispatcher? dispatcher = null)
+        Persistence.EventDispatcher? dispatcher = null,
+        PnlKeeper? pnlKeeper = null)
     {
         _ownership = ownership;
         _orders = orders;
@@ -76,6 +78,7 @@ public sealed class ExecutionReportProcessor
         _feeCalculator = feeCalculator;
         _feeKeeper = feeKeeper;
         _dispatcher = dispatcher;
+        _pnlKeeper = pnlKeeper;
     }
 
     /// <summary>
@@ -234,6 +237,20 @@ public sealed class ExecutionReportProcessor
                             "Fill delta mismatch for {ClOrdId}: ER lastQty={LastQty}, computed delta={Delta}.",
                             lookupId, lastQty, delta);
                     }
+                    // Q2.4 (#271). Capture the pre-fill avg-cost basis
+                    // BEFORE _positions.ApplyFill mutates it — realized
+                    // delta is computed off the pre-fill state. We read
+                    // off PnlKeeper's parallel basis tracker (kept in
+                    // lockstep with PositionKeeper via
+                    // ApplyFillToAvgCost below) so the snapshot/restore
+                    // path is independent of PositionKeeper.
+                    long preFillQty = 0;
+                    decimal preFillAvg = 0m;
+                    if (_pnlKeeper is not null)
+                    {
+                        var avg = _pnlKeeper.GetAvgCost(owner.Value, order.Symbol);
+                        if (avg is not null) { preFillQty = avg.NetQuantity; preFillAvg = avg.AvgPrice; }
+                    }
                     _positions.ApplyFill(owner, order.Symbol, order.Side, delta, lastPx);
                     // Book the cash leg of the fill on the same delta as
                     // the position. Buys debit, Sells credit; T+0 settle.
@@ -333,6 +350,88 @@ public sealed class ExecutionReportProcessor
                                     "Dropping FeeAccruedEvent for {ClOrdId} on WAL backpressure; applying fee directly to keeper.",
                                     lookupId);
                                 keeper.Apply(feeEvt);
+                            }
+                        }
+                    }
+                    // Q2.4 (#271). Realized P&L. Compute the delta from
+                    // the pre-fill (qty, avg) snapshot captured above
+                    // and advance the avg-cost basis tracker. Same
+                    // live/replay split as fees:
+                    //
+                    //   Live:    advance avg-cost basis, then Append
+                    //            RealizedPnlEvent + PnlKeeper.Apply
+                    //            under the dispatcher lock — single
+                    //            ER@N, Pnl@N+k ordering preserved.
+                    //   Replay:  defer a pending synth via the pre-fill
+                    //            snapshot. A durable RealizedPnlEvent
+                    //            following in the WAL supersedes it via
+                    //            Apply(RealizedPnlEvent); FinalizeReplay
+                    //            materialises any survivor (true
+                    //            ER-then-crash window).
+                    //
+                    // Same WalBackpressureException swallow policy as
+                    // the fees branch: in-memory state stays accurate,
+                    // audit event is dropped (surfaced as a metric).
+                    if (_pnlKeeper is not null)
+                    {
+                        var nowUtcPnl = eventTimestampUtc ?? DateTimeOffset.UtcNow;
+                        var executionIdPnl = lookupId.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                            + ":" + order.CumulativeQuantity.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                        if (isReplay || _dispatcher is null)
+                        {
+                            // Mirror the live-path guard: only register
+                            // a synth when the fill would produce a
+                            // non-zero realized delta. Opening fills
+                            // and same-side adds emit no event in live
+                            // mode, so they have nothing to reconcile
+                            // — registering them would only inflate
+                            // the FinalizeReplay materialisation count.
+                            var wouldRealize = PnlKeeper.ComputeRealizedDelta(preFillQty, preFillAvg, order.Side, delta, lastPx);
+                            if (wouldRealize != 0m)
+                            {
+                                _pnlKeeper.RegisterPendingReplaySynth(
+                                    executionIdPnl, owner.Value, order.Symbol, order.Side,
+                                    delta, lastPx, nowUtcPnl, preFillQty, preFillAvg);
+                            }
+                            // Still advance the basis tracker on replay
+                            // — the durable event Apply path uses
+                            // RunningTotal directly, so basis is purely
+                            // in-memory state used for live computation.
+                            _pnlKeeper.ApplyFillToAvgCost(owner.Value, order.Symbol, order.Side, delta, lastPx);
+                        }
+                        else
+                        {
+                            var realizedDelta = _pnlKeeper.ApplyFillToAvgCost(owner.Value, order.Symbol, order.Side, delta, lastPx);
+                            if (realizedDelta != 0m)
+                            {
+                                var dayKey = DateOnly.FromDateTime(nowUtcPnl.UtcDateTime);
+                                var running = _pnlKeeper.GetDayRealized(owner.Value, order.Symbol, dayKey) + realizedDelta;
+                                var pnlEvt = new Persistence.RealizedPnlEvent
+                                {
+                                    ClOrdId = lookupId,
+                                    ExecutionId = executionIdPnl,
+                                    EndClientId = owner.Value,
+                                    Symbol = order.Symbol,
+                                    DayKey = dayKey,
+                                    DeltaRealized = realizedDelta,
+                                    RunningTotal = running,
+                                    TimestampUtc = nowUtcPnl,
+                                };
+                                var keeperPnl = _pnlKeeper;
+                                try
+                                {
+                                    _dispatcher.Dispatch(pnlEvt, () => keeperPnl.Apply(pnlEvt));
+                                    MetricsRegistry.PnlRealizedAppended.Add(1);
+                                }
+                                catch (Persistence.WalBackpressureException)
+                                {
+                                    MetricsRegistry.WalBackpressure.Add(1,
+                                        new KeyValuePair<string, object?>("call_site", "pnl.dispatch"));
+                                    _logger.LogWarning(
+                                        "Dropping RealizedPnlEvent for {ClOrdId} on WAL backpressure; applying realized pnl directly to keeper.",
+                                        lookupId);
+                                    keeperPnl.Apply(pnlEvt);
+                                }
                             }
                         }
                     }

@@ -28,6 +28,7 @@ public sealed class StateSnapshotter
     private readonly CashLedger _cash;
     private readonly CashKeeper? _cashKeeper;
     private readonly FeeKeeper? _feeKeeper;
+    private readonly PnlKeeper? _pnlKeeper;
     private readonly InMemoryUserBotCredentialRegistry? _userBotCredentials;
     private readonly InMemoryUserBotSessionRegistry? _userBotSessions;
     private readonly IUserBotOrderMappingRegistry? _userBotMappings;
@@ -58,7 +59,8 @@ public sealed class StateSnapshotter
         IUserBotOrderMappingRegistry? userBotMappings = null,
         GtdExpirationScheduler? gtdScheduler = null,
         CashKeeper? cashKeeper = null,
-        FeeKeeper? feeKeeper = null)
+        FeeKeeper? feeKeeper = null,
+        PnlKeeper? pnlKeeper = null)
     {
         _orders = orders;
         _positions = positions;
@@ -72,6 +74,7 @@ public sealed class StateSnapshotter
         _cash = cash;
         _cashKeeper = cashKeeper;
         _feeKeeper = feeKeeper;
+        _pnlKeeper = pnlKeeper;
         _userBotCredentials = userBotCredentials;
         _userBotSessions = userBotSessions;
         _userBotMappings = userBotMappings;
@@ -119,6 +122,9 @@ public sealed class StateSnapshotter
         CashByEndclient = _cashKeeper?.RawSnapshot() ?? Array.Empty<CashKeeperRaw>(),
         FeesByEndclientDay = _feeKeeper?.RawSnapshot() ?? Array.Empty<FeeKeeperRaw>(),
         FeeSeenExecutionIds = _feeKeeper?.RawSnapshotSeenIds() ?? Array.Empty<string>(),
+        PnlRealizedByEndclientSymbolDay = _pnlKeeper?.RawSnapshotRealized() ?? Array.Empty<PnlRealizedRaw>(),
+        PnlAvgCost = _pnlKeeper?.RawSnapshotAvgCost() ?? Array.Empty<PnlAvgCostRaw>(),
+        PnlSeenExecutionIds = _pnlKeeper?.RawSnapshotSeenIds() ?? Array.Empty<string>(),
         UserBotCredentials = _userBotCredentials?.RawSnapshot() ?? Array.Empty<UserBotCredential>(),
         BotSessions = _userBotSessions?.RawSnapshot() ?? Array.Empty<BotSessionState>(),
         BotOrderMappings = _userBotMappings?.RawSnapshotOrders() ?? Array.Empty<BotOrderMappingRaw>(),
@@ -210,6 +216,26 @@ public sealed class StateSnapshotter
         for (var i = 0; i < raw.FeeSeenExecutionIds.Length; i++)
             feeSeen.Add(raw.FeeSeenExecutionIds[i]);
 
+        // Q2.4 (#271). PnlKeeper rows projected into the persisted
+        // shape. Same dict choice as fees — callers index by composite
+        // key, no deterministic order required. Avg-cost basis is a
+        // list (1:1 with positions) and the seen-set is a flat list.
+        var pnlRealized = new Dictionary<string, decimal>(raw.PnlRealizedByEndclientSymbolDay.Length);
+        for (var i = 0; i < raw.PnlRealizedByEndclientSymbolDay.Length; i++)
+        {
+            var p = raw.PnlRealizedByEndclientSymbolDay[i];
+            pnlRealized[PnlKeeper.FormatRealizedKey(p.EndClientId, p.Symbol, p.Day)] = p.Realized;
+        }
+        var pnlAvgCost = new List<PnlAvgCostSnapshot>(raw.PnlAvgCost.Length);
+        for (var i = 0; i < raw.PnlAvgCost.Length; i++)
+        {
+            var a = raw.PnlAvgCost[i];
+            pnlAvgCost.Add(new PnlAvgCostSnapshot(a.EndClientId, a.Symbol, a.NetQuantity, a.AvgPrice));
+        }
+        var pnlSeen = new List<string>(raw.PnlSeenExecutionIds.Length);
+        for (var i = 0; i < raw.PnlSeenExecutionIds.Length; i++)
+            pnlSeen.Add(raw.PnlSeenExecutionIds[i]);
+
         var phaseOverrides = new List<SessionPhaseOverrideSnapshot>(raw.SessionPhaseOverrides.Length);
         for (var i = 0; i < raw.SessionPhaseOverrides.Length; i++)
         {
@@ -292,6 +318,9 @@ public sealed class StateSnapshotter
             CashByEndclient = cashByEndclient,
             FeesByEndclientDay = feesByEndclientDay,
             FeeSeenExecutionIds = feeSeen,
+            PnlRealizedByEndclientSymbolDay = pnlRealized,
+            PnlAvgCost = pnlAvgCost,
+            PnlSeenExecutionIds = pnlSeen,
             UserBotCredentials = creds,
             BotSessions = sessions,
             BotOrderMappings = botOrderMaps,
@@ -321,6 +350,7 @@ public sealed class StateSnapshotter
         _cash.Restore(snap.CashBalances);
         _cashKeeper?.Restore(snap.CashByEndclient);
         _feeKeeper?.Restore(snap.FeesByEndclientDay, snap.FeeSeenExecutionIds);
+        _pnlKeeper?.Restore(snap.PnlRealizedByEndclientSymbolDay, snap.PnlAvgCost, snap.PnlSeenExecutionIds);
         _userBotCredentials?.Restore(snap.UserBotCredentials);
         _userBotSessions?.Restore(snap.BotSessions);
         _userBotMappings?.Restore(snap.BotOrderMappings, snap.BotCancelMappings);
@@ -376,6 +406,7 @@ public sealed class EventReplayer
     private readonly GtdExpirationScheduler? _gtdScheduler;
     private readonly CashKeeper? _cashKeeper;
     private readonly FeeKeeper? _feeKeeper;
+    private readonly PnlKeeper? _pnlKeeper;
     private readonly IFeeCalculator? _feeCalculator;
 
     public EventReplayer(
@@ -395,7 +426,8 @@ public sealed class EventReplayer
         GtdExpirationScheduler? gtdScheduler = null,
         CashKeeper? cashKeeper = null,
         FeeKeeper? feeKeeper = null,
-        IFeeCalculator? feeCalculator = null)
+        IFeeCalculator? feeCalculator = null,
+        PnlKeeper? pnlKeeper = null)
     {
         _orders = orders;
         _ownership = ownership;
@@ -414,6 +446,7 @@ public sealed class EventReplayer
         _cashKeeper = cashKeeper;
         _feeKeeper = feeKeeper;
         _feeCalculator = feeCalculator;
+        _pnlKeeper = pnlKeeper;
     }
 
     /// <summary>
@@ -429,8 +462,12 @@ public sealed class EventReplayer
     /// </summary>
     public int FinalizeReplay()
     {
-        if (_feeKeeper is null || _feeCalculator is null) return 0;
-        return _feeKeeper.FinalizeReplay(_feeCalculator);
+        var n = 0;
+        if (_feeKeeper is not null && _feeCalculator is not null)
+            n += _feeKeeper.FinalizeReplay(_feeCalculator);
+        if (_pnlKeeper is not null)
+            n += _pnlKeeper.FinalizeReplay();
+        return n;
     }
 
     public void Apply(WalEvent evt)
@@ -638,6 +675,13 @@ public sealed class EventReplayer
                 // untouched (FeeSeenExecutionIds restored alongside the
                 // totals — see StateSnapshotter.Restore).
                 _feeKeeper?.Apply(fae);
+                break;
+            case RealizedPnlEvent rpe:
+                // Q2.4 (#271). Forward to PnlKeeper. Apply uses
+                // RunningTotal as authoritative so a snapshot+tail
+                // recovery converges on the persisted value even if the
+                // basis tracker projection drifts.
+                _pnlKeeper?.Apply(rpe);
                 break;
         }
     }

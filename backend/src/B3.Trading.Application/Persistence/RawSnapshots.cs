@@ -69,6 +69,26 @@ public sealed class RawPlatformSnapshot
     /// </summary>
     public string[] FeeSeenExecutionIds { get; init; } = Array.Empty<string>();
 
+    /// <summary>
+    /// Q2.4 (#271). Per-(end-client, symbol, day) realized P&amp;L
+    /// projected from the <c>RealizedPnlEvent</c> stream by
+    /// <c>PnlKeeper</c>.
+    /// </summary>
+    public PnlRealizedRaw[] PnlRealizedByEndclientSymbolDay { get; init; } = Array.Empty<PnlRealizedRaw>();
+
+    /// <summary>
+    /// Q2.4 (#271). Per-(end-client, symbol) avg-cost basis tracked
+    /// by <c>PnlKeeper</c> in parallel with <see cref="Positions"/>.
+    /// Required so the keeper can compute realized deltas after a
+    /// snapshot+tail restore even if its peer keepers are wiped.
+    /// </summary>
+    public PnlAvgCostRaw[] PnlAvgCost { get; init; } = Array.Empty<PnlAvgCostRaw>();
+
+    /// <summary>
+    /// Q2.4 (#271). Idempotence guard for <c>PnlKeeper.Apply</c>.
+    /// </summary>
+    public string[] PnlSeenExecutionIds { get; init; } = Array.Empty<string>();
+
     public UserBotCredential[] UserBotCredentials { get; init; } =
         Array.Empty<UserBotCredential>();
     public BotSessionState[] BotSessions { get; init; } = Array.Empty<BotSessionState>();
@@ -144,6 +164,19 @@ public readonly record struct CashKeeperRaw(string EndClientId, decimal Availabl
 /// total for one (end-client, day) bucket.
 /// </summary>
 public readonly record struct FeeKeeperRaw(string EndClientId, DateOnly Day, decimal Total);
+
+/// <summary>
+/// Q2.4 (#271). Raw lock-side capture of one (end-client, symbol, day)
+/// realized-P&amp;L bucket from <see cref="B3.Trading.Application.PnlKeeper"/>.
+/// </summary>
+public readonly record struct PnlRealizedRaw(string EndClientId, string Symbol, DateOnly Day, decimal Realized);
+
+/// <summary>
+/// Q2.4 (#271). Raw lock-side capture of one (end-client, symbol)
+/// avg-cost basis row tracked by <see cref="B3.Trading.Application.PnlKeeper"/>
+/// in parallel with <see cref="B3.Trading.Application.PositionKeeper"/>.
+/// </summary>
+public readonly record struct PnlAvgCostRaw(string EndClientId, string Symbol, long NetQuantity, decimal AvgPrice);
 
 public readonly record struct ClOrdIdCounterRaw(string EndClientId, ulong PrefixIdx, long Counter);
 

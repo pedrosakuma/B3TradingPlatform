@@ -43,6 +43,7 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         services.Configure<FeeOptions>(configuration.GetSection(FeeOptions.SectionName));
         services.AddSingleton<IFeeCalculator, BpsFeeCalculator>();
         services.AddSingleton<FeeKeeper>();
+        services.AddSingleton<PnlKeeper>();
         services.AddSingleton<InMemoryUserBotCredentialRegistry>();
         services.AddSingleton<IUserBotCredentialRegistry>(sp =>
             sp.GetRequiredService<InMemoryUserBotCredentialRegistry>());

@@ -126,6 +126,21 @@ public static class MetricsRegistry
     public static readonly Counter<long> FeeReplaySynth =
         Meter.CreateCounter<long>("trading.fees.replay_synth");
 
+    // Q2.4 (#271). P&L engine.
+    // pnl.realized_appended — bumped on every successful RealizedPnlEvent
+    // append via the dispatcher path (live, NOT replay). pnl.replay_synth
+    // mirrors the FeeKeeper synth metric: tag reconciled=true when a
+    // durable RealizedPnlEvent superseded a pending synth (happy path),
+    // false when FinalizeReplay had to materialise the synth (the actual
+    // ER-then-crash window). pnl.endpoint_requests counts /pnl/today
+    // hits.
+    public static readonly Counter<long> PnlRealizedAppended =
+        Meter.CreateCounter<long>("trading.pnl.realized_appended");
+    public static readonly Counter<long> PnlReplaySynth =
+        Meter.CreateCounter<long>("trading.pnl.replay_synth");
+    public static readonly Counter<long> PnlEndpointRequests =
+        Meter.CreateCounter<long>("trading.pnl.endpoint_requests");
+
     // WebSocket fan-out
     public static readonly UpDownCounter<int> WsConnectionsActive =
         Meter.CreateUpDownCounter<int>("trading.ws.connections.active");
