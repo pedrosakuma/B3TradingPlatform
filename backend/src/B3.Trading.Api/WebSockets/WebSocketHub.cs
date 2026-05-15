@@ -19,7 +19,7 @@ public static class WebSocketHub
 
     public static IEndpointRouteBuilder MapWebSocketHub(this IEndpointRouteBuilder app)
     {
-        app.MapGet("/ws", [Authorize] async (HttpContext ctx, SubscriptionManager subs, EndClientRegistry registry) =>
+        app.MapGet("/ws", [Authorize] async (HttpContext ctx, SubscriptionManager subs, EndClientRegistry registry, IPublicChannelSnapshots publicSnapshots) =>
         {
             if (!ctx.WebSockets.IsWebSocketRequest)
                 return Results.BadRequest(new { error = "websocket required" });
@@ -38,7 +38,7 @@ public static class WebSocketHub
             try
             {
                 var sendTask = SendLoopAsync(ws, client, ctx.RequestAborted);
-                var recvTask = ReceiveLoopAsync(ws, client, subs, ctx.RequestAborted);
+                var recvTask = ReceiveLoopAsync(ws, client, subs, publicSnapshots, ctx.RequestAborted);
                 await Task.WhenAny(sendTask, recvTask);
                 client.Complete();
                 await Task.WhenAll(
@@ -48,6 +48,7 @@ public static class WebSocketHub
             finally
             {
                 subs.Remove(client);
+                subs.RemoveFromPublic(client);
                 MetricsRegistry.WsConnectionsActive.Add(-1);
                 if (ws.State == WebSocketState.Open)
                 {
@@ -84,7 +85,7 @@ public static class WebSocketHub
         catch (WebSocketException) { /* peer gone */ }
     }
 
-    private static async Task ReceiveLoopAsync(WebSocket ws, SubscribedClient client, SubscriptionManager subs, CancellationToken ct)
+    private static async Task ReceiveLoopAsync(WebSocket ws, SubscribedClient client, SubscriptionManager subs, IPublicChannelSnapshots publicSnapshots, CancellationToken ct)
     {
         var buffer = new byte[MaxInboundFrameBytes];
         try
@@ -106,14 +107,14 @@ public static class WebSocketHub
                     }
                 } while (!result.EndOfMessage);
 
-                HandleCommand(sb.ToString(), client, subs);
+                HandleCommand(sb.ToString(), client, subs, publicSnapshots);
             }
         }
         catch (OperationCanceledException) { /* shutdown */ }
         catch (WebSocketException) { /* peer gone */ }
     }
 
-    private static void HandleCommand(string json, SubscribedClient client, SubscriptionManager subs)
+    private static void HandleCommand(string json, SubscribedClient client, SubscriptionManager subs, IPublicChannelSnapshots publicSnapshots)
     {
         InboundCommand? cmd;
         try
@@ -137,12 +138,21 @@ public static class WebSocketHub
             case "subscribe":
                 foreach (var ch in cmd.Channels ?? Array.Empty<string>())
                 {
-                    if (!Channels.All.Contains(ch))
+                    if (Channels.All.Contains(ch))
+                    {
+                        subs.SubscribeWithSnapshot(client, ch);
+                    }
+                    else if (Channels.TryParsePublic(ch, out var kind, out var symbol))
+                    {
+                        var capturedKind = kind;
+                        var capturedSymbol = symbol;
+                        subs.SubscribePublicWithSnapshot(client, ch,
+                            () => publicSnapshots.GetSnapshot(capturedKind, capturedSymbol));
+                    }
+                    else
                     {
                         client.Enqueue(new OutboundMessage("error", ch, 0, null, "unknown_channel", $"Channel '{ch}' is not supported."));
-                        continue;
                     }
-                    subs.SubscribeWithSnapshot(client, ch);
                 }
                 break;
             case "unsubscribe":

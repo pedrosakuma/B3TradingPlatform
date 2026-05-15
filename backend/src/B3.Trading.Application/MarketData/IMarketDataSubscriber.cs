@@ -33,6 +33,27 @@ public interface IMarketDataSubscriber : IAsyncDisposable
     /// </summary>
     event Action<MarketSubscribeError>? SubscribeError;
 
+    // -------------------------------------------------------------
+    // Auction frames (Q1.5 / #257). These project the three UMDF
+    // auction frame types — TheoreticalOpeningPrice_16,
+    // AuctionImbalance_19 and AuctionPrint — into application-owned
+    // records. They feed AuctionStateStore which in turn drives the
+    // public phases.* / auction.* WS channels.
+    //
+    // Note (SDK gap): B3.MarketData.WebSocketClient 0.1.0 does NOT
+    // surface dedicated auction events today; the wire protocol does
+    // carry the fields (FieldTheoreticalOpeningPrice=7,
+    // FieldTheoreticalOpeningSize=8, FieldAuctionImbalanceSize=9 in
+    // InfoSnapshot) but the SDK reader skips them. The adapter
+    // (SdkMarketDataSubscriber) leaves these events unraised until
+    // the SDK is bumped; tests use an in-process fake to drive them.
+    // Tracking: B3MatchingPlatform#321 / #322.
+    // -------------------------------------------------------------
+
+    event Action<MarketTheoreticalOpening>? TheoreticalOpening;
+    event Action<MarketAuctionImbalance>? AuctionImbalance;
+    event Action<MarketAuctionPrint>? AuctionPrint;
+
     Task ConnectAsync(CancellationToken ct = default);
 
     /// <summary>

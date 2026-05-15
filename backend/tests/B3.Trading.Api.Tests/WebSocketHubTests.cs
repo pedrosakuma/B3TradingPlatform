@@ -94,6 +94,51 @@ public class WebSocketHubTests : IClassFixture<TestAppFactory>
         await Assert.ThrowsAsync<InvalidOperationException>(() => wsClient.ConnectAsync(uri, cts.Token));
     }
 
+    [Fact]
+    public async Task PublicChannel_PhasesPetr4_ReceivesUnknownSnapshotOnSubscribe()
+    {
+        using var http = _factory.CreateClient();
+        var token = await _factory.LoginAsync(http);
+
+        var wsClient = _factory.Server.CreateWebSocketClient();
+        var uri = new UriBuilder(_factory.Server.BaseAddress) { Scheme = "ws", Path = "/ws", Query = $"access_token={token}" }.Uri;
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var ws = await wsClient.ConnectAsync(uri, cts.Token);
+
+        await SendJsonAsync(ws, new { type = "subscribe", channels = new[] { "phases.PETR4", "auction.PETR4" } }, cts.Token);
+
+        var snap1 = await ReadJsonAsync(ws, cts.Token);
+        var snap2 = await ReadJsonAsync(ws, cts.Token);
+        Assert.Equal("snapshot", snap1.GetProperty("type").GetString());
+        Assert.Equal("snapshot", snap2.GetProperty("type").GetString());
+        var channels = new[] { snap1, snap2 }.Select(d => d.GetProperty("channel").GetString()).ToHashSet();
+        Assert.Contains("phases.PETR4", channels);
+        Assert.Contains("auction.PETR4", channels);
+
+        // The phases snapshot should report Unknown (no auction frames
+        // ever observed in the in-memory test host: SDK is the no-op
+        // NullMarketDataSubscriber).
+        var phasesSnap = snap1.GetProperty("channel").GetString() == "phases.PETR4" ? snap1 : snap2;
+        Assert.Equal("Unknown", phasesSnap.GetProperty("data").GetProperty("phase").GetString());
+    }
+
+    [Fact]
+    public async Task PublicChannel_BadAuctionSymbol_ReceivesUnknownChannelError()
+    {
+        using var http = _factory.CreateClient();
+        var token = await _factory.LoginAsync(http);
+        var wsClient = _factory.Server.CreateWebSocketClient();
+        var uri = new UriBuilder(_factory.Server.BaseAddress) { Scheme = "ws", Path = "/ws", Query = $"access_token={token}" }.Uri;
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var ws = await wsClient.ConnectAsync(uri, cts.Token);
+
+        await SendJsonAsync(ws, new { type = "subscribe", channels = new[] { "phases.bad-symbol" } }, cts.Token);
+
+        var msg = await ReadJsonAsync(ws, cts.Token);
+        Assert.Equal("error", msg.GetProperty("type").GetString());
+        Assert.Equal("unknown_channel", msg.GetProperty("code").GetString());
+    }
+
     private static async Task SendJsonAsync(WebSocket ws, object payload, CancellationToken ct)
     {
         var bytes = JsonSerializer.SerializeToUtf8Bytes(payload, JsonOptions);

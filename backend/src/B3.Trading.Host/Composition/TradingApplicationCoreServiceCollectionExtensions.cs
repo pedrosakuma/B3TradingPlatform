@@ -58,6 +58,32 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         services.AddSingleton<IExecutionFanOutSink>(sp => sp.GetRequiredService<WebSocketExecutionEventSink>());
         services.AddHostedService(sp => sp.GetRequiredService<WebSocketExecutionEventSink>());
         services.AddSingleton<IAlgoEventSink, WebSocketAlgoEventSink>();
+
+        // Q1.5 (#257). Auction state-store + public WS channels
+        // (phases.${symbol} / auction.${symbol}). The store is wired
+        // unconditionally (cheap; idle when the SDK never raises an
+        // auction event) so IPhaseProvider is always available to the
+        // risk pipeline. The auction sink doubles as the snapshot
+        // resolver for the WS hub via IPublicChannelSnapshots — same
+        // singleton routes both reads and writes.
+        //
+        // Coordination with #261: the canonical IPhaseProvider lives
+        // in B3.Trading.Application.Risk and AddTradingRisk(...) below
+        // performs a TryAddSingleton<NoPhaseProvider> stub. Because we
+        // register the live AuctionStateStore-backed provider here
+        // FIRST (Program.cs calls AddTradingApplicationCore before
+        // AddTradingRisk), TryAdd in the risk module is a no-op and
+        // GoodForAuctionPhaseCheck resolves the live provider.
+        services.AddSingleton<B3.Trading.Application.MarketData.AuctionStateStore>();
+        services.AddSingleton<B3.Trading.Application.Risk.IPhaseProvider>(sp =>
+            sp.GetRequiredService<B3.Trading.Application.MarketData.AuctionStateStore>());
+        services.AddHostedService(sp =>
+            sp.GetRequiredService<B3.Trading.Application.MarketData.AuctionStateStore>());
+        services.AddSingleton<WebSocketAuctionEventSink>();
+        services.AddSingleton<IPublicChannelSnapshots>(sp =>
+            sp.GetRequiredService<WebSocketAuctionEventSink>());
+        services.AddHostedService(sp => sp.GetRequiredService<WebSocketAuctionEventSink>());
+
         services.AddSingleton<ExecutionReportProcessor>();
         services.AddSingleton<OrderSubmissionService>();
         services.AddSingleton<OrderCancelService>();

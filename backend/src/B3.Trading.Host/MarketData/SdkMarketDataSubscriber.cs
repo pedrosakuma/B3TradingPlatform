@@ -37,6 +37,17 @@ internal sealed class SdkMarketDataSubscriber : IMarketDataSubscriber
     public event Action<AppConnState>? ConnectionStateChanged;
     public event Action<MarketSubscribeError>? SubscribeError;
 
+    // SDK gap: B3.MarketData.WebSocketClient 0.1.0 does not surface
+    // dedicated auction events. We declare the events on the seam so
+    // AuctionStateStore + WS channels are wired end-to-end; they
+    // simply never fire under the live SDK today. Tests inject a fake
+    // subscriber that raises them. Tracking: B3MatchingPlatform#321/#322.
+#pragma warning disable CS0067 // event never used — see SDK-gap note above.
+    public event Action<B3.Trading.Application.MarketData.MarketTheoreticalOpening>? TheoreticalOpening;
+    public event Action<B3.Trading.Application.MarketData.MarketAuctionImbalance>? AuctionImbalance;
+    public event Action<B3.Trading.Application.MarketData.MarketAuctionPrint>? AuctionPrint;
+#pragma warning restore CS0067
+
     public SdkMarketDataSubscriber(MarketDataClient client, ILogger<SdkMarketDataSubscriber> logger)
     {
         _client = client;
