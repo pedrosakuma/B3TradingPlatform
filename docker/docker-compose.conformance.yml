@@ -2,32 +2,6 @@
 # `conformance` service that runs the B3.Trading.Conformance suite
 # against the running trading-host on the same network.
 #
-# SECURITY NOTE (#259, P1#5 — pass-1 review fix):
-#   * This overlay enables synthetic ER injection
-#     (Trading__Exchange__AllowErInjection=true) AND seeds a user with
-#     role=admin. To prevent the conformance stack from accidentally
-#     standing up an internet-reachable
-#     POST /admin/simulator/er with the committed dev defaults, this
-#     overlay:
-#       (a) DOES NOT publish trading-host to the docker host. The
-#           conformance container reaches it via the b3-net bridge
-#           by service name (http://trading-host:5000). If you need
-#           host-side curl access, layer a separate overlay or run
-#           inside the conformance network.
-#       (b) REQUIRES the operator to pass a fresh PBKDF2 hash/salt for
-#           the admin seed via B3T_CONFORMANCE_ADMIN_PASSWORD_HASH and
-#           B3T_CONFORMANCE_ADMIN_PASSWORD_SALT (no defaults). The host
-#           refuses to boot if the admin slot still carries the
-#           committed dev defaults — see
-#           AdminCredentialDefaultGuard.Validate.
-#       (c) REQUIRES B3T_CONFORMANCE_ADMIN_PASSWORD (plaintext that the
-#           hash/salt above were derived from) so the conformance
-#           container can log in. Like (b), no default.
-#
-# Generate a fresh credential triple before invoking:
-#   dotnet run --project backend/tools/PasswordHasher -- '<your-password>'
-#   # then export the three env vars in your shell or pass via --env-file.
-#
 # Usage:
 #   docker compose \
 #       -f docker/docker-compose.yml \
@@ -43,34 +17,18 @@
 
 services:
   # Add an admin-role seed user so the conformance suite can hit /admin/*.
-  # Hash + salt MUST be operator-supplied (no fallback to TRADING_SEED_*
-  # defaults — see file header). Slot Users__4 to avoid colliding with
-  # base (alice=0, bob=3) and demo (bot-clientA=1, bot-clientB=2).
+  # Reuses alice's hash/salt (PBKDF2 is deterministic on plaintext+salt)
+  # under a different username + role=admin, so no extra secret-management
+  # is required. Slot Users__4 to avoid colliding with base (alice=0,
+  # bob=3) and demo (bot-clientA=1, bot-clientB=2).
   trading-host:
-    # Pass-2 review fix (#259, P1): override the base service's
-    # `ports:` to an empty list so trading-host is NOT published to the
-    # docker host while ER injection is active. Compose merges list
-    # fields by union by default; a bare `ports: []` would keep the
-    # parent's host mapping. The `!override` tag (Compose v2.20+)
-    # forces a replacement, dropping the published port. Reachable
-    # inside the b3-net bridge by service name.
-    ports: !override []
     environment:
       Trading__Auth__Users__4__Username: ${TRADING_ADMIN_USER:-carol}
-      Trading__Auth__Users__4__PasswordHash: ${B3T_CONFORMANCE_ADMIN_PASSWORD_HASH:?Set B3T_CONFORMANCE_ADMIN_PASSWORD_HASH per-run (NEVER reuse the dev default — see file header)}
-      Trading__Auth__Users__4__Salt: ${B3T_CONFORMANCE_ADMIN_PASSWORD_SALT:?Set B3T_CONFORMANCE_ADMIN_PASSWORD_SALT per-run}
+      Trading__Auth__Users__4__PasswordHash: ${TRADING_SEED_PASSWORD_HASH:?Set TRADING_SEED_PASSWORD_HASH in .env (PBKDF2 base64)}
+      Trading__Auth__Users__4__Salt: ${TRADING_SEED_PASSWORD_SALT:?Set TRADING_SEED_PASSWORD_SALT in .env (base64)}
       Trading__Auth__Users__4__Iterations: "600000"
       Trading__Auth__Users__4__Role: admin
       Trading__Auth__Users__4__Firm: default
-
-      # Q1.7 (#259). Flip the host into Mock + ER-injection so the
-      # OrderType×TIF golden suite can drive deterministic synthetic
-      # ER sequences via POST /admin/simulator/er. Base compose
-      # defaults to Mode=Real which would refuse the injection
-      # endpoint at startup; the conformance overlay is the
-      # documented opt-in.
-      Trading__Exchange__Mode: Mock
-      Trading__Exchange__AllowErInjection: "true"
 
   conformance:
     build:
@@ -89,32 +47,16 @@ services:
       # _SALT. Default `wonderland` matches the seeds committed in
       # .env.example. Override in .env when rotating.
       B3T_AUTH_PASS: ${TRADING_SEED_PASSWORD:-wonderland}
-      # Admin user for /admin/* coverage. Pass-1 review fix (#259,
-      # P1#5): plaintext is no longer defaulted to "wonderland" — it
-      # MUST come from B3T_CONFORMANCE_ADMIN_PASSWORD which matches the
-      # hash/salt seeded into the host above.
+      # Admin user for /admin/* coverage. Reuses the same PBKDF2 hash/salt
+      # because PBKDF2 is deterministic for a given plaintext+salt — same
+      # password material, different username + admin role.
       B3T_ADMIN_USER: ${TRADING_ADMIN_USER:-carol}
-      B3T_ADMIN_PASS: ${B3T_CONFORMANCE_ADMIN_PASSWORD:?Set B3T_CONFORMANCE_ADMIN_PASSWORD per-run (matches B3T_CONFORMANCE_ADMIN_PASSWORD_HASH/SALT seeded into trading-host)}
+      B3T_ADMIN_PASS: ${TRADING_SEED_PASSWORD:-wonderland}
       # Mirror the host's HS256 signing key into the conformance container
       # so scenarios that need to mint deterministic tokens (e.g. expired-
       # JWT rejection, see Spec_HTTP_Auth/ExpiredTokenTests) can sign with
       # the same key the host validates against. Without this, those
       # scenarios skip cleanly — they're optional, not gated.
       B3T_AUTH_SIGNING_KEY: ${TRADING_AUTH_SIGNING_KEY:-}
-      # Q1.7 (#259). Declare ER injection is available so the
-      # OrderType×TIF golden suite stops skipping at discovery time.
-      # Wired in tandem with Trading__Exchange__AllowErInjection above.
-      B3T_ER_INJECTION: "true"
     networks:
       - b3-net
-
-  # Pass-3 review fix (#259, P1): the base stack publishes `frontend` on
-  # host port 8080, and frontend/nginx.conf proxies `~^/admin` →
-  # `trading-host:5000`. So even with trading-host itself unpublished
-  # (above), an attacker hitting http://<host>:8080/admin/simulator/er
-  # would still reach the ER-injection endpoint through the nginx
-  # reverse proxy — defeating the unpublish. Drop the frontend's host
-  # mapping in this overlay; conformance specs talk to trading-host
-  # directly over the b3-net bridge and don't need the UI.
-  frontend:
-    ports: !override []
