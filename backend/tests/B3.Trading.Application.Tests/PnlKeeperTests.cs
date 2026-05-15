@@ -216,4 +216,128 @@ public class PnlKeeperTests
         // Idempotent: surviving execution id is now in the seen-set.
         Assert.False(k.Apply(Evt(1, 50, "alice", "PETR4", 50m, 50m, Day)));
     }
+
+    [Fact]
+    public void SeedAvgCostFromLegacyPositions_FillsBasis_WhenPnlAvgCostEmpty()
+    {
+        // Pass-1 review (#278) P1#1. Legacy snapshot scenario:
+        // PnlAvgCost block is empty (pre-#271 snapshot) but Positions
+        // has rows. The next sell on PETR4 must realise against the
+        // basis carried by PositionSnapshot.AverageEntryPrice.
+        var k = new PnlKeeper();
+        k.Restore(
+            new Dictionary<string, decimal>(),
+            Array.Empty<PnlAvgCostSnapshot>());
+        var positions = new[]
+        {
+            new PositionSnapshot("alice", "PETR4", 100, 30m),
+            new PositionSnapshot("bob", "VALE3", -50, 60m),
+            new PositionSnapshot("carol", "ITSA4", 0, 0m), // flat skipped
+        };
+
+        var seeded = k.SeedAvgCostFromLegacyPositions(positions);
+        Assert.Equal(2, seeded);
+
+        var ap = k.GetAvgCost("alice", "PETR4")!;
+        Assert.Equal(100, ap.NetQuantity);
+        Assert.Equal(30m, ap.AvgPrice);
+        var bp = k.GetAvgCost("bob", "VALE3")!;
+        Assert.Equal(-50, bp.NetQuantity);
+        Assert.Equal(60m, bp.AvgPrice);
+        Assert.Null(k.GetAvgCost("carol", "ITSA4"));
+
+        // Selling 50 of PETR4 @ 31 must now realise the (31-30)*50 = 50
+        // spread against the seeded basis — without the seed the
+        // realised value would be silently zero.
+        var realized = k.ApplyFillToAvgCost("alice", "PETR4", OrderSide.Sell, 50, 31m);
+        Assert.Equal(50m, realized);
+    }
+
+    [Fact]
+    public void SeedAvgCostFromLegacyPositions_PreservesExistingPnlAvgCost()
+    {
+        // Snapshot already has PnlAvgCost rows — the legacy seed must
+        // be a no-op for those keys (PnlKeeper's own block is
+        // authoritative when present).
+        var k = new PnlKeeper();
+        k.Restore(
+            new Dictionary<string, decimal>(),
+            new[] { new PnlAvgCostSnapshot("alice", "PETR4", 100, 25m) });
+
+        var seeded = k.SeedAvgCostFromLegacyPositions(new[]
+        {
+            new PositionSnapshot("alice", "PETR4", 100, 30m), // mismatched basis
+            new PositionSnapshot("alice", "VALE3", 200, 40m), // not in PnlAvgCost
+        });
+
+        Assert.Equal(1, seeded);
+        Assert.Equal(25m, k.GetAvgCost("alice", "PETR4")!.AvgPrice);
+        Assert.Equal(40m, k.GetAvgCost("alice", "VALE3")!.AvgPrice);
+    }
+
+    [Fact]
+    public async Task ApplyFillUnderLock_SerialisesConcurrentFillsForSameKey()
+    {
+        // Pass-1 review (#278) P1#2. Two concurrent fills for the
+        // same (endClient, symbol) must not race the running-total
+        // computation. The per-key lock guarantees that the realized
+        // delta and running total observed by each callback are
+        // consistent with the in-memory state visible at the time of
+        // the lock acquisition.
+        var k = new PnlKeeper();
+        // Open 1000 @ 30 so both concurrent sells realise spread.
+        k.ApplyFillToAvgCost("alice", "PETR4", OrderSide.Buy, 1000, 30m);
+
+        var observed = new System.Collections.Concurrent.ConcurrentBag<(decimal Delta, decimal Running)>();
+        var t1 = Task.Run(() => k.ApplyFillUnderLock(
+            "alice", "PETR4", OrderSide.Sell, 100, 31m, Day,
+            ctx =>
+            {
+                observed.Add((ctx.RealizedDelta, ctx.RunningTotal));
+                k.Apply(new RealizedPnlEvent
+                {
+                    ClOrdId = 1,
+                    ExecutionId = "1:100",
+                    EndClientId = "alice",
+                    Symbol = "PETR4",
+                    DayKey = Day,
+                    DeltaRealized = ctx.RealizedDelta,
+                    RunningTotal = ctx.RunningTotal,
+                    TimestampUtc = Ts,
+                });
+            }));
+        var t2 = Task.Run(() => k.ApplyFillUnderLock(
+            "alice", "PETR4", OrderSide.Sell, 100, 32m, Day,
+            ctx =>
+            {
+                observed.Add((ctx.RealizedDelta, ctx.RunningTotal));
+                k.Apply(new RealizedPnlEvent
+                {
+                    ClOrdId = 2,
+                    ExecutionId = "2:100",
+                    EndClientId = "alice",
+                    Symbol = "PETR4",
+                    DayKey = Day,
+                    DeltaRealized = ctx.RealizedDelta,
+                    RunningTotal = ctx.RunningTotal,
+                    TimestampUtc = Ts,
+                });
+            }));
+        await Task.WhenAll(t1, t2);
+
+        // Realised: (31-30)*100 = 100 and (32-30)*100 = 200. The
+        // observed (delta, running) pairs depend on lock acquisition
+        // order, but the invariants are: sum of deltas = 300; the
+        // larger running equals 300; the smaller running equals the
+        // delta of the fill that won the lock first; the keeper's
+        // final GetDayRealized must be 300.
+        var ordered = observed.OrderBy(o => o.Running).ToArray();
+        Assert.Equal(2, ordered.Length);
+        Assert.Equal(ordered[0].Delta, ordered[0].Running); // first under lock
+        Assert.Equal(300m, ordered[1].Running);
+        Assert.Equal(300m, ordered[0].Delta + ordered[1].Delta);
+        Assert.Contains(ordered, o => o.Delta == 100m);
+        Assert.Contains(ordered, o => o.Delta == 200m);
+        Assert.Equal(300m, k.GetDayRealized("alice", "PETR4", Day));
+    }
 }

@@ -401,38 +401,52 @@ public sealed class ExecutionReportProcessor
                         }
                         else
                         {
-                            var realizedDelta = _pnlKeeper.ApplyFillToAvgCost(owner.Value, order.Symbol, order.Side, delta, lastPx);
-                            if (realizedDelta != 0m)
-                            {
-                                var dayKey = DateOnly.FromDateTime(nowUtcPnl.UtcDateTime);
-                                var running = _pnlKeeper.GetDayRealized(owner.Value, order.Symbol, dayKey) + realizedDelta;
-                                var pnlEvt = new Persistence.RealizedPnlEvent
+                            // Pass-1 review (#278) P1#2. Run the whole
+                            // "advance basis → compute realized delta
+                            // → fold into running total → Append +
+                            // Apply" sequence under PnlKeeper's per-key
+                            // lock. The dispatcher's process-global
+                            // lock is NOT enough because the WAL-
+                            // backpressure fallback path
+                            // (EntryPointExecutionReportRouter) re-
+                            // invokes Apply WITHOUT the dispatcher
+                            // lock — two concurrent fills on the same
+                            // (endClient, symbol) would otherwise
+                            // race and persist inconsistent
+                            // RunningTotal values into the WAL.
+                            var dayKey = DateOnly.FromDateTime(nowUtcPnl.UtcDateTime);
+                            var keeperPnl = _pnlKeeper;
+                            _pnlKeeper.ApplyFillUnderLock(
+                                owner.Value, order.Symbol, order.Side, delta, lastPx, dayKey,
+                                ctx =>
                                 {
-                                    ClOrdId = lookupId,
-                                    ExecutionId = executionIdPnl,
-                                    EndClientId = owner.Value,
-                                    Symbol = order.Symbol,
-                                    DayKey = dayKey,
-                                    DeltaRealized = realizedDelta,
-                                    RunningTotal = running,
-                                    TimestampUtc = nowUtcPnl,
-                                };
-                                var keeperPnl = _pnlKeeper;
-                                try
-                                {
-                                    _dispatcher.Dispatch(pnlEvt, () => keeperPnl.Apply(pnlEvt));
-                                    MetricsRegistry.PnlRealizedAppended.Add(1);
-                                }
-                                catch (Persistence.WalBackpressureException)
-                                {
-                                    MetricsRegistry.WalBackpressure.Add(1,
-                                        new KeyValuePair<string, object?>("call_site", "pnl.dispatch"));
-                                    _logger.LogWarning(
-                                        "Dropping RealizedPnlEvent for {ClOrdId} on WAL backpressure; applying realized pnl directly to keeper.",
-                                        lookupId);
-                                    keeperPnl.Apply(pnlEvt);
-                                }
-                            }
+                                    if (ctx.RealizedDelta == 0m) return;
+                                    var pnlEvt = new Persistence.RealizedPnlEvent
+                                    {
+                                        ClOrdId = lookupId,
+                                        ExecutionId = executionIdPnl,
+                                        EndClientId = owner.Value,
+                                        Symbol = order.Symbol,
+                                        DayKey = dayKey,
+                                        DeltaRealized = ctx.RealizedDelta,
+                                        RunningTotal = ctx.RunningTotal,
+                                        TimestampUtc = nowUtcPnl,
+                                    };
+                                    try
+                                    {
+                                        _dispatcher.Dispatch(pnlEvt, () => keeperPnl.Apply(pnlEvt));
+                                        MetricsRegistry.PnlRealizedAppended.Add(1);
+                                    }
+                                    catch (Persistence.WalBackpressureException)
+                                    {
+                                        MetricsRegistry.WalBackpressure.Add(1,
+                                            new KeyValuePair<string, object?>("call_site", "pnl.dispatch"));
+                                        _logger.LogWarning(
+                                            "Dropping RealizedPnlEvent for {ClOrdId} on WAL backpressure; applying realized pnl directly to keeper.",
+                                            lookupId);
+                                        keeperPnl.Apply(pnlEvt);
+                                    }
+                                });
                         }
                     }
                     // Release reserved margin against the actual booked

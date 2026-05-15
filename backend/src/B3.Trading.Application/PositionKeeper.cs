@@ -47,6 +47,26 @@ public sealed class PositionKeeper
         return list;
     }
 
+    /// <summary>
+    /// Pass-1 review (#278) P1#3. Enumerates open (non-flat)
+    /// positions for <paramref name="symbol"/> across every
+    /// end-client. Used by the refprice → <c>pnl.me</c> fan-out to
+    /// resolve which owners should receive an unrealized-P&amp;L
+    /// delta when a symbol's mark moves. Returns a materialised list
+    /// to free the caller from ToArray-on-iterate.
+    /// </summary>
+    public IReadOnlyList<Position> ForSymbol(string symbol)
+    {
+        if (string.IsNullOrEmpty(symbol)) return Array.Empty<Position>();
+        var list = new List<Position>();
+        foreach (var kv in _positions)
+        {
+            if (kv.Key.Symbol == symbol && kv.Value.NetQuantity != 0)
+                list.Add(kv.Value);
+        }
+        return list;
+    }
+
     public IEnumerable<Persistence.PositionSnapshot> Snapshot()
     {
         foreach (var kv in _positions)

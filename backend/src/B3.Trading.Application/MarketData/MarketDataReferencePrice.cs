@@ -186,7 +186,30 @@ public sealed class MarketDataReferencePrice : IReferencePrice, IHostedService
     {
         var key = symbol.Trim();
         _cache[key] = new CacheEntry(price, receivedUtc);
+        // Pass-1 review (#278) P1#3. Notify subscribers (currently the
+        // pnl.me WS fan-out) that this symbol's mark moved. Handlers
+        // are expected to be cheap (per-symbol throttled queue
+        // enqueue) — we do NOT walk subscribers here. Listener
+        // exceptions are swallowed so a misbehaving handler cannot
+        // break the price cache write.
+        var handler = PriceChanged;
+        if (handler is not null)
+        {
+            try { handler(key); }
+            catch { /* defensive: handlers must be tolerant of exceptions */ }
+        }
     }
+
+    /// <summary>
+    /// Pass-1 review (#278) P1#3. Raised AFTER the cache entry for
+    /// <c>symbol</c> has been updated. Fired on every Trade /
+    /// InfoSnapshot update — consumers MUST throttle / coalesce
+    /// before doing expensive work because L1 ticks can be very
+    /// frequent. The published payload is just the symbol so
+    /// consumers can re-read the latest price from
+    /// <see cref="TryGet"/> if they need the value.
+    /// </summary>
+    public event Action<string>? PriceChanged;
 
     private void OnConnectionStateChanged(MarketDataConnectionState state)
     {

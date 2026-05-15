@@ -35,9 +35,10 @@ public class PnlEndpointTests : IClassFixture<TestAppFactory>
 
         var body = await client.GetFromJsonAsync<PnlTodayDto>("/pnl/today");
         Assert.NotNull(body);
-        Assert.Equal(0m, body!.RealizedTotal);
-        Assert.Equal(0m, body.UnrealizedTotal);
-        Assert.Empty(body.Symbols);
+        Assert.Equal(0m, body!.TotalRealized);
+        Assert.Equal(0m, body.TotalUnrealized);
+        Assert.Empty(body.Realized);
+        Assert.Empty(body.Unrealized);
     }
 
     [Fact]
@@ -71,26 +72,29 @@ public class PnlEndpointTests : IClassFixture<TestAppFactory>
 
         var body = await client.GetFromJsonAsync<PnlTodayDto>("/pnl/today");
         Assert.NotNull(body);
-        Assert.Equal(50m, body!.RealizedTotal);
-        // No reference price configured for PETR4 in the test factory →
-        // unrealized list omits the symbol but realized is still
-        // surfaced.
+        Assert.Equal(50m, body!.TotalRealized);
+        var realizedRow = Assert.Single(body.Realized);
+        Assert.Equal("PETR4", realizedRow.Symbol);
+        Assert.Equal(50m, realizedRow.Value);
+
+        // Unrealized appears only when the test ref-price source has
+        // a value for PETR4; the test factory may or may not configure
+        // one — accept both shapes.
         var refPrice = factory.Services.GetRequiredService<IReferencePrice>();
-        var hasRef = refPrice.TryGet("PETR4", out var px);
-        var row = Assert.Single(body.Symbols);
-        Assert.Equal("PETR4", row.Symbol);
-        Assert.Equal(50, row.NetQuantity);
-        Assert.Equal(50m, row.Realized);
-        if (hasRef)
+        if (refPrice.TryGet("PETR4", out var px))
         {
-            Assert.NotNull(row.ReferencePrice);
-            Assert.Equal(px, row.ReferencePrice);
-            Assert.Equal((px - 30m) * 50, row.Unrealized);
+            var unr = Assert.Single(body.Unrealized);
+            Assert.Equal("PETR4", unr.Symbol);
+            Assert.Equal(50, unr.Position);
+            Assert.Equal(30m, unr.AvgPrice);
+            Assert.Equal(px, unr.RefPrice);
+            Assert.Equal((px - 30m) * 50, unr.Value);
+            Assert.Equal((px - 30m) * 50, body.TotalUnrealized);
         }
         else
         {
-            Assert.Null(row.ReferencePrice);
-            Assert.Null(row.Unrealized);
+            Assert.Empty(body.Unrealized);
+            Assert.Equal(0m, body.TotalUnrealized);
         }
     }
 }

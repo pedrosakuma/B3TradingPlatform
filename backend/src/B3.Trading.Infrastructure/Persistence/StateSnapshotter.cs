@@ -351,6 +351,18 @@ public sealed class StateSnapshotter
         _cashKeeper?.Restore(snap.CashByEndclient);
         _feeKeeper?.Restore(snap.FeesByEndclientDay, snap.FeeSeenExecutionIds);
         _pnlKeeper?.Restore(snap.PnlRealizedByEndclientSymbolDay, snap.PnlAvgCost, snap.PnlSeenExecutionIds);
+        // Pass-1 review (#278) P1#1. Legacy snapshots taken before
+        // #271 deployed have Positions populated but PnlAvgCost empty.
+        // Without this seed the next sell on a pre-existing position
+        // would compute realized off a zero basis and silently
+        // realise nothing. PositionSnapshot carries AverageEntryPrice
+        // so we reconstruct the basis from there; the seed is a
+        // no-op when PnlAvgCost is already populated (current
+        // snapshot format).
+        if (_pnlKeeper is not null && snap.PnlAvgCost.Count == 0 && snap.Positions.Count > 0)
+        {
+            _pnlKeeper.SeedAvgCostFromLegacyPositions(snap.Positions);
+        }
         _userBotCredentials?.Restore(snap.UserBotCredentials);
         _userBotSessions?.Restore(snap.BotSessions);
         _userBotMappings?.Restore(snap.BotOrderMappings, snap.BotCancelMappings);

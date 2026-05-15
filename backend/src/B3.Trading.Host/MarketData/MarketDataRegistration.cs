@@ -96,6 +96,23 @@ public static class MarketDataRegistration
         // event handlers in MarketDataReferencePrice's constructor.
         services.AddHostedService(sp => sp.GetRequiredService<MarketDataReferencePrice>());
 
+        // Pass-1 review (#278) P1#3. Bridge MarketDataReferencePrice
+        // ticks to the pnl.me WS channel so subscribers' unrealized
+        // P&L tracks refprice without needing a fill in between.
+        // Wired only here (i.e. only when the live MD feed is on) AND
+        // only when the application-core composition has registered
+        // SubscriptionManager + PnlKeeper + PositionKeeper. The
+        // SubscriptionManager check keeps the MarketData-only test
+        // scenarios (which don't compose the full hub) green.
+        if (services.Any(d => d.ServiceType == typeof(B3.Trading.Api.WebSockets.SubscriptionManager))
+            && services.Any(d => d.ServiceType == typeof(B3.Trading.Application.PnlKeeper))
+            && services.Any(d => d.ServiceType == typeof(B3.Trading.Application.PositionKeeper)))
+        {
+            services.AddSingleton<B3.Trading.Api.WebSockets.PnlRefPriceFanOut>();
+            services.AddHostedService(sp =>
+                sp.GetRequiredService<B3.Trading.Api.WebSockets.PnlRefPriceFanOut>());
+        }
+
         return services;
     }
 }
