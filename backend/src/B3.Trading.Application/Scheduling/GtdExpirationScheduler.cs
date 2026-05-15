@@ -276,14 +276,14 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
             if (IsTerminal(order.Status))
                 return;
 
-            var result = await _cancel.CancelAsync(order.Owner, clOrdId, CancellationToken.None)
-                .ConfigureAwait(false);
-
-            // Whatever the cancel outcome (Accepted / GatewayFailed /
-            // Stale / NotFound / WalBackpressure), append the audit
-            // envelope so operators can tell the heap actually fired.
-            // The downstream venue Canceled ER is what flips order
-            // status; this event is informational only.
+            // Append the GTD-expiry audit envelope BEFORE issuing the
+            // cancel so a crash mid-cancel still leaves the
+            // expiry-attribution durable. On replay we re-attempt the
+            // cancel with the reason already on disk; CancelAsync is
+            // idempotent on a still-pending cancel (deduplicates via
+            // order status / clOrdId in the book). The downstream venue
+            // Canceled ER is what flips order status; this event is
+            // informational only.
             try
             {
                 _dispatcher.Dispatch(
@@ -300,9 +300,12 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
                 MetricsRegistry.WalBackpressure.Add(1,
                     new KeyValuePair<string, object?>("call_site", "gtd.expired"));
                 _logger?.LogWarning(ex,
-                    "WAL backpressure appending OrderExpiredEvent for {ClOrdId}; cancel already requested.",
+                    "WAL backpressure appending OrderExpiredEvent for {ClOrdId}; proceeding with cancel.",
                     clOrdId);
             }
+
+            var result = await _cancel.CancelAsync(order.Owner, clOrdId, CancellationToken.None)
+                .ConfigureAwait(false);
 
             // WS projection: emit a synthetic Expired ExecutionEvent so
             // subscribers see kind=Expired alongside the regular

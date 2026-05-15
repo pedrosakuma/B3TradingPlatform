@@ -202,12 +202,6 @@ public sealed class OrderSubmissionService
             return OrderSubmissionResult.WalBackpressure(ex.Message);
         }
 
-        // Q1.3 (#255). After the WAL append + book insert have committed
-        // (Dispatch returned without throwing), seed the GTD scheduler.
-        // No-ops for non-GTD orders; no-ops when the scheduler is not
-        // wired (test contexts that don't need expiry firing).
-        _gtdScheduler?.OnOrderTracked(order);
-
         MetricsRegistry.OrdersSubmitted.Add(1,
             new KeyValuePair<string, object?>("symbol", req.Symbol),
             new KeyValuePair<string, object?>("side", req.Side.ToString()),
@@ -249,6 +243,19 @@ public sealed class OrderSubmissionService
             PublishSyntheticRejection(order, "gateway_unavailable");
             return OrderSubmissionResult.GatewayFailed(clOrdId, ex);
         }
+
+        // Q1.3 (#255). Arm the GTD scheduler ONLY after the gateway submit
+        // returns without throwing. Doing this earlier (e.g. right after
+        // the WAL append) lets a near-term GTD timer race the in-flight
+        // SubmitAsync — the scheduler would issue a cancel for a clOrdId
+        // the venue has not yet seen. By placing the hook here the
+        // semantic is: "submit success" == SubmitAsync completed without
+        // throwing. Venue ACK remains async (NewReject ER drives the
+        // reject path, which marks the order terminal and the
+        // OnOrderTerminal subscription removes it from the heap).
+        // No-ops for non-GTD orders; no-ops when the scheduler is not
+        // wired (test contexts that don't need expiry firing).
+        _gtdScheduler?.OnOrderTracked(order);
 
         return OrderSubmissionResult.Accepted(clOrdId);
     }
