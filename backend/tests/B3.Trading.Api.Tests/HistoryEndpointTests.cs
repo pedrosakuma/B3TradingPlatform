@@ -1121,6 +1121,64 @@ public class HistoryEndpointTests : IDisposable
     }
 
     [Fact]
+    public async Task OrdersHistory_TerminalEr_ClearsAdvisoryStaleOverlay()
+    {
+        // P1 regression for #275 pass-7 follow-up: ExecutionReportProcessor
+        // (slice 1 of #132) clears the advisory IsStale overlay after a
+        // real terminal ER (Filled/Cancelled/Rejected/Replaced). The
+        // history projector must mirror that side effect — otherwise a
+        // [OrderStaledEvent → Canceled] WAL pair surfaces status=Cancelled
+        // with isStale=true while the live runtime book reports
+        // isStale=false.
+        using var f = TestAppFactory.WithOverrides(Overrides());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var clOrdIdStr = await SubmitOrder(http, token, qty: 10, price: 30m);
+        var clOrdId = ulong.Parse(clOrdIdStr);
+        await InjectEr(http, adminToken, new { ClOrdId = clOrdId, Type = "New" });
+
+        // Append OrderStaledEvent directly through the WAL — easier than
+        // negotiating WorkingOrderBook seeding from the API surface for a
+        // pure projection test. The history projector reads raw WAL events.
+        var store = (B3.Trading.Application.Persistence.IEventStore)
+            f.Services.GetRequiredService(typeof(B3.Trading.Application.Persistence.IEventStore));
+        store.Append(new B3.Trading.Application.Persistence.OrderStaledEvent
+        {
+            ClOrdId = clOrdId,
+            FirmId = "TEST",
+            Reason = "test-suspect",
+            StaledAtUtc = DateTimeOffset.UtcNow,
+            ActorUserId = "admin",
+        });
+        await store.FlushAsync();
+
+        var mock = (B3.Trading.Infrastructure.MockEntryPointClient)
+            f.Services.GetRequiredService<B3.Trading.Infrastructure.IEntryPointClient>();
+        mock.EmitExecutionReport(new B3.Trading.Infrastructure.ExecutionReportEnvelope(
+            ClOrdId: clOrdId,
+            ExecType: B3.Trading.Infrastructure.EpExecType.Canceled,
+            LeavesQuantity: 0,
+            CumulativeQuantity: 0,
+            LastQuantity: 0,
+            LastPrice: 0m,
+            RejectReason: null,
+            OrigClOrdId: 0));
+
+        var page = await GetOrdersHistory(http, token);
+        var byId = page.Items.ToDictionary(
+            o => o.GetProperty("clOrdId").GetString()!,
+            o => o,
+            StringComparer.Ordinal);
+
+        var orig = byId[clOrdIdStr];
+        Assert.Equal("Cancelled", orig.GetProperty("status").GetString());
+        Assert.False(orig.GetProperty("isStale").GetBoolean(),
+            "terminal Canceled ER must clear the advisory stale overlay (mirrors ExecutionReportProcessor.Apply)");
+    }
+
+    [Fact]
     public async Task OrdersHistory_QuantityOnlyReplaceOfGtdOrder_InheritsTifAndGoodTillDate()
     {
         // P1 regression for #275 pass-6: Order.HydrateReplacement /

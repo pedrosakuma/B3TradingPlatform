@@ -899,6 +899,20 @@ public static class HistoryEndpoints
                         break;
                 }
             }
+            // Mirror ExecutionReportProcessor.Apply (slice 1 of #132): a real
+            // terminal ER proves the venue still knew the order, so any prior
+            // advisory stale overlay was a false positive. Clear stale on
+            // Filled/Cancelled/Rejected/Replaced — but NOT on PartiallyFilled
+            // (trader's concern about the un-filled remainder is still valid).
+            if (IsStale && Status is OrderStatus.Filled
+                or OrderStatus.Cancelled
+                or OrderStatus.Rejected
+                or OrderStatus.Replaced)
+            {
+                IsStale = false;
+                StaleReason = null;
+                StaledAtUtc = null;
+            }
             LastSeq = seq;
             LastTs = er.TimestampUtc;
         }
