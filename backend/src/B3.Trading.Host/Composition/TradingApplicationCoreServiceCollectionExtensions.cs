@@ -34,6 +34,7 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         services.AddSingleton<AlgoIdRegistry>();
         services.AddSingleton<PositionKeeper>();
         services.AddSingleton<CashLedger>();
+        services.AddSingleton<CashKeeper>();
         services.AddSingleton<InMemoryUserBotCredentialRegistry>();
         services.AddSingleton<IUserBotCredentialRegistry>(sp =>
             sp.GetRequiredService<InMemoryUserBotCredentialRegistry>());

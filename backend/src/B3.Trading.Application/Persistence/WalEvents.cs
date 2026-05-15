@@ -35,6 +35,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(BotSessionSeqAdvancedEvent), "userbot.session.seq-advanced")]
 [JsonDerivedType(typeof(OrderCancelRequestedEvent), "order.cancel-requested")]
 [JsonDerivedType(typeof(OrderExpiredEvent), "order.expired")]
+[JsonDerivedType(typeof(CashLedgerEvent), "cash.ledger")]
 public abstract record WalEvent
 {
     public DateTimeOffset TimestampUtc { get; init; } = DateTimeOffset.UtcNow;
@@ -449,4 +450,47 @@ public sealed record OrderExpiredEvent : WalEvent
     public required ulong ClOrdId { get; init; }
     public required string Reason { get; init; }
     public required DateTimeOffset AtUtc { get; init; }
+}
+
+/// <summary>
+/// Q2.2 (#269). Operator-driven cash deposit or withdrawal for an
+/// end-client. The platform's cash projection (see
+/// <see cref="B3.Trading.Application.CashKeeper"/>) is built from this
+/// event stream ONLY — it is intentionally decoupled from
+/// <see cref="ExecutionReportReceivedEvent"/> fills (which feed the
+/// separate <see cref="B3.Trading.Application.CashLedger"/> used by the
+/// margin pipeline). Folding fill-driven cash deltas into the same
+/// projection is deferred to the P&amp;L engine slice (#271) so the
+/// audit-grade ledger here stays a pure record of operator activity.
+///
+/// <para>
+/// Field semantics: <see cref="Kind"/> is the literal string
+/// <c>"Deposit"</c> or <c>"Withdrawal"</c> (mirrors the enum-name
+/// stability convention used by other WAL records, e.g. TIF). Amount is
+/// strictly positive; sign is implied by <see cref="Kind"/>. Currency
+/// is whitelisted to <c>"BRL"</c> in v0; future multi-currency expands
+/// the whitelist without changing the wire shape. <see cref="Reference"/>
+/// is operator free-form (ticket id, journal note); persisted verbatim
+/// for the operator audit trail. <see cref="OperatorId"/> is the JWT
+/// <c>sub</c> of the admin who issued the call (nullable to match the
+/// existing <c>ActorUserId</c> nullability on other admin-side events).
+/// </para>
+/// </summary>
+public sealed record CashLedgerEvent : WalEvent
+{
+    public required string EndClientId { get; init; }
+    /// <summary>
+    /// <c>"Deposit"</c> or <c>"Withdrawal"</c>. Property is named
+    /// <c>Operation</c> (not <c>Kind</c>) so it does not collide with
+    /// the polymorphism discriminator on <see cref="WalEvent"/>, which
+    /// is also serialised as <c>"kind"</c>. The HTTP request payload
+    /// continues to use <c>kind</c> at the API surface (see
+    /// <c>CashLedgerRequest</c>); the API handler maps it onto this
+    /// field at dispatch time.
+    /// </summary>
+    public required string Operation { get; init; }
+    public required decimal Amount { get; init; }
+    public required string Currency { get; init; }
+    public string? Reference { get; init; }
+    public string? OperatorId { get; init; }
 }

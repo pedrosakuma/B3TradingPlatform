@@ -164,6 +164,55 @@ public sealed class EventDispatcher
     }
 
     /// <summary>
+    /// Q2.2 (#269) P1 fix. Atomic "validate + debit + append" primitive
+    /// used by callers whose in-memory mutation MUST be visible to the
+    /// snapshot service iff the WAL append also lands. Concretely: the
+    /// cash withdrawal path must not let a snapshot interleave between
+    /// the keeper debit and the WAL append, otherwise a snapshot would
+    /// persist a reduced balance with no matching event in the WAL —
+    /// permanent cash loss on restore.
+    ///
+    /// <para>
+    /// Semantics, all under the dispatcher lock (the same lock
+    /// <see cref="WithSnapshotLock"/> takes):
+    /// <list type="number">
+    ///   <item>invoke <paramref name="preApply"/>; if it returns
+    ///   <c>false</c>, no append, no rollback — the caller surfaces
+    ///   a structured business-rule failure (e.g. 422);</item>
+    ///   <item>append <paramref name="evt"/> to the WAL;</item>
+    ///   <item>if append throws, run <paramref name="rollback"/> WHILE
+    ///   STILL HOLDING THE LOCK so a snapshot cannot observe the
+    ///   transient debited-but-no-event state, then rethrow.</item>
+    /// </list>
+    /// JSON serialisation runs OUTSIDE the lock — same F1 narrowing as
+    /// the regular <see cref="Dispatch(WalEvent, Action)"/> overloads.
+    /// </para>
+    /// </summary>
+    public DispatchOutcome DispatchWithPreApply(WalEvent evt, Func<bool> preApply, Action rollback)
+    {
+        ArgumentNullException.ThrowIfNull(evt);
+        ArgumentNullException.ThrowIfNull(preApply);
+        ArgumentNullException.ThrowIfNull(rollback);
+        var payload = JsonSerializer.SerializeToUtf8Bytes(evt, WalEventJsonContext.Default.WalEvent);
+        lock (_lock)
+        {
+            if (!preApply())
+                return new DispatchOutcome(false, 0);
+            long seq;
+            try
+            {
+                seq = _store.Append(evt, payload);
+            }
+            catch
+            {
+                rollback();
+                throw;
+            }
+            return new DispatchOutcome(true, seq);
+        }
+    }
+
+    /// <summary>
     /// Captures a consistent <c>(seq, state)</c> view by running
     /// <paramref name="capture"/> under the dispatcher lock.
     /// </summary>
@@ -176,3 +225,11 @@ public sealed class EventDispatcher
         }
     }
 }
+
+/// <summary>
+/// Result of <see cref="EventDispatcher.DispatchWithPreApply"/>.
+/// <c>Applied=false</c> means the pre-apply check returned false and no
+/// WAL append was made; <c>Seq</c> is meaningful only when
+/// <c>Applied=true</c>.
+/// </summary>
+public readonly record struct DispatchOutcome(bool Applied, long Seq);

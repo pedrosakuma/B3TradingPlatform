@@ -53,6 +53,18 @@ public sealed class PlatformSnapshot
     public List<CashBalanceSnapshot> CashBalances { get; init; } = new();
 
     /// <summary>
+    /// Q2.2 (#269). Per-end-client cash balances projected from
+    /// <c>CashLedgerEvent</c> (operator deposits/withdrawals) by
+    /// <c>CashKeeper</c>. Additive field; older snapshots that pre-date
+    /// it deserialise with an empty dictionary, which matches the
+    /// "no operator activity recorded" semantics they actually carried.
+    /// Init-only and default-empty so callers cannot accidentally null
+    /// it out post-deserialisation. Dict (not list) by spec — keyed on
+    /// end-client id, value is the running balance.
+    /// </summary>
+    public Dictionary<string, decimal> CashByEndclient { get; init; } = new();
+
+    /// <summary>
     /// User-issued bot credentials (sub-issue #169). Empty on snapshots
     /// pre-dating the field — credentials are reconstructed instead by
     /// the WAL replay path on top of the empty list, which matches the

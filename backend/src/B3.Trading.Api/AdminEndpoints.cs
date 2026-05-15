@@ -297,6 +297,14 @@ public static class AdminEndpoints
             });
         });
 
+        // ── Cash ledger (Q2.2 / #269) ───────────────────────────
+        // Admin-driven deposits and withdrawals, persisted as
+        // CashLedgerEvent on the WAL and projected into CashKeeper.
+        // Decoupled from ER fills — fill-driven cash deltas land via
+        // the existing CashLedger and the future P&L engine (#271).
+        group.MapPost("/cash", (CashLedgerRequest? req, HttpContext ctx, CashKeeper keeper, EventDispatcher dispatcher) =>
+            HandleCashLedger(req, ctx, keeper, dispatcher));
+
         // POST /admin/simulator/er — synthetic ER injection (formerly the
         // ExchangeMode.Simulator-only route; merged into Mock+AllowErInjection
         // in #163). The route itself moved to the Infrastructure project as
@@ -319,6 +327,107 @@ public static class AdminEndpoints
                 ordered.Add(raw);
         }
         return ordered;
+    }
+
+    private static IResult HandleCashLedger(
+        CashLedgerRequest? req,
+        HttpContext ctx,
+        CashKeeper keeper,
+        EventDispatcher dispatcher)
+    {
+        if (req is null)
+            return Results.BadRequest(new { error = "request body required" });
+        if (string.IsNullOrWhiteSpace(req.Endclient))
+            return Results.BadRequest(new { error = "endclient required" });
+        if (string.IsNullOrWhiteSpace(req.Kind))
+            return Results.BadRequest(new { error = "kind required (Deposit|Withdrawal)" });
+
+        var kind = req.Kind.Trim();
+        if (!string.Equals(kind, "Deposit", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(kind, "Withdrawal", StringComparison.OrdinalIgnoreCase))
+            return Results.BadRequest(new { error = "kind must be one of: Deposit, Withdrawal" });
+        // Normalise to the canonical wire spelling so the WAL string is
+        // stable regardless of caller casing.
+        kind = string.Equals(kind, "Deposit", StringComparison.OrdinalIgnoreCase) ? "Deposit" : "Withdrawal";
+
+        if (req.Amount <= 0m)
+            return Results.BadRequest(new { error = "amount must be > 0" });
+
+        var currency = (req.Currency ?? string.Empty).Trim().ToUpperInvariant();
+        // v0 whitelist: BRL only. Multi-currency expands the list without
+        // changing the wire shape (see CashLedgerEvent doc comment).
+        if (currency != "BRL")
+            return Results.BadRequest(new { error = "currency must be one of: BRL" });
+
+        var owner = new EndClientId(req.Endclient);
+        var operatorId = ctx.User.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+
+        try
+        {
+            // Q2.2 (#269) P1 fix: debit + WAL append must be atomic with
+            // respect to the snapshot lock. The previous flow ran
+            // TryWithdraw OUTSIDE the dispatcher lock; a snapshot could
+            // interleave between a successful debit and the WAL append,
+            // persisting a reduced balance with no matching event and
+            // permanently losing cash on restore. We now route the
+            // withdrawal through DispatchWithPreApply so TryWithdraw,
+            // the WAL append, and any rollback all run under the same
+            // lock the snapshot service takes.
+            if (kind == "Withdrawal")
+            {
+                var outcome = dispatcher.DispatchWithPreApply(
+                    new CashLedgerEvent
+                    {
+                        EndClientId = req.Endclient,
+                        Operation = kind,
+                        Amount = req.Amount,
+                        Currency = currency,
+                        Reference = req.Reference,
+                        OperatorId = operatorId,
+                    },
+                    preApply: () => keeper.TryWithdraw(owner, req.Amount),
+                    rollback: () => keeper.ApplyDeposit(owner, req.Amount));
+
+                if (!outcome.Applied)
+                    return Results.UnprocessableEntity(new
+                    {
+                        error = "insufficient_funds",
+                        available = keeper.GetAvailable(owner),
+                        requested = req.Amount,
+                    });
+            }
+            else
+            {
+                dispatcher.Dispatch(
+                    new CashLedgerEvent
+                    {
+                        EndClientId = req.Endclient,
+                        Operation = kind,
+                        Amount = req.Amount,
+                        Currency = currency,
+                        Reference = req.Reference,
+                        OperatorId = operatorId,
+                    },
+                    () => keeper.ApplyDeposit(owner, req.Amount));
+            }
+
+            return Results.Ok(new
+            {
+                endclient = req.Endclient,
+                kind,
+                amount = req.Amount,
+                currency,
+                available = keeper.GetAvailable(owner),
+            });
+        }
+        catch (WalBackpressureException ex)
+        {
+            MetricsRegistry.WalBackpressure.Add(1,
+                new KeyValuePair<string, object?>("call_site", "admin.cash"));
+            return Results.Json(
+                new { error = "system busy (WAL backpressure)", detail = ex.Message },
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
     }
 
     private static IResult ToggleKill(
@@ -443,3 +552,19 @@ public sealed class SessionPhasePayload
 /// Body for <c>POST /admin/firms/{firmId}/orders/{clOrdId}/mark-stale</c> (#132 slice 1).
 /// </summary>
 public sealed record MarkStaleRequest(string? Reason);
+
+/// <summary>
+/// Body for <c>POST /admin/cash</c> (Q2.2 / #269). Operator-driven
+/// deposit or withdrawal. <see cref="Kind"/> is <c>"Deposit"</c> or
+/// <c>"Withdrawal"</c> (case-insensitive); <see cref="Amount"/> is
+/// strictly positive (sign is implied by Kind); <see cref="Currency"/>
+/// is whitelisted to <c>"BRL"</c> in v0.
+/// </summary>
+public sealed class CashLedgerRequest
+{
+    public string? Endclient { get; set; }
+    public string? Kind { get; set; }
+    public decimal Amount { get; set; }
+    public string? Currency { get; set; }
+    public string? Reference { get; set; }
+}

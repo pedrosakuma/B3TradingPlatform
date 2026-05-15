@@ -46,6 +46,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonSerializable(typeof(BotSessionSeqAdvancedEvent))]
 [JsonSerializable(typeof(BotOrderMapping))]
 [JsonSerializable(typeof(OrderExpiredEvent))]
+[JsonSerializable(typeof(CashLedgerEvent))]
 public sealed partial class WalEventJsonContext : JsonSerializerContext
 {
 }

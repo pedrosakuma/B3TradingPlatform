@@ -48,6 +48,14 @@ public sealed class RawPlatformSnapshot
     public OwnershipRaw[] Ownership { get; init; } = Array.Empty<OwnershipRaw>();
     public CashRaw[] CashBalances { get; init; } = Array.Empty<CashRaw>();
 
+    /// <summary>
+    /// Q2.2 (#269). Per-end-client cash balances projected from the
+    /// <c>CashLedgerEvent</c> stream by <c>CashKeeper</c>. Distinct from
+    /// <see cref="CashBalances"/> (which is the fill-derived projection
+    /// used by the margin pipeline).
+    /// </summary>
+    public CashKeeperRaw[] CashByEndclient { get; init; } = Array.Empty<CashKeeperRaw>();
+
     public UserBotCredential[] UserBotCredentials { get; init; } =
         Array.Empty<UserBotCredential>();
     public BotSessionState[] BotSessions { get; init; } = Array.Empty<BotSessionState>();
@@ -107,6 +115,15 @@ public readonly record struct OwnershipRaw(ulong ClOrdId, string EndClientId);
 public readonly record struct SessionPhaseOverrideRaw(string Symbol, SessionPhase Phase);
 
 public readonly record struct CashRaw(string EndClientId, decimal Available);
+
+/// <summary>
+/// Q2.2 (#269). Raw lock-side capture of one row from
+/// <see cref="B3.Trading.Application.CashKeeper"/>. Distinct from
+/// <see cref="CashRaw"/> (which captures the fill-derived
+/// <see cref="B3.Trading.Application.CashLedger"/>) so the two
+/// projections can evolve independently.
+/// </summary>
+public readonly record struct CashKeeperRaw(string EndClientId, decimal Available);
 
 public readonly record struct ClOrdIdCounterRaw(string EndClientId, ulong PrefixIdx, long Counter);
 
