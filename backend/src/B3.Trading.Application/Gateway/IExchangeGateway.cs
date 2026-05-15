@@ -28,6 +28,23 @@ public interface IExchangeGateway
     /// <summary>
     /// Cancel-replace a working order. <paramref name="newClOrdId"/> must
     /// already be allocated; the original ClOrdID is the one being replaced.
+    ///
+    /// <para>
+    /// Q1.1 (#253). The trailing optionals carry the modify pipeline's
+    /// new-value overrides for TIF / StopPrice / GoodTillDate. Null on
+    /// any one of them means "inherit from <paramref name="original"/>";
+    /// non-null means "use the requested value on the outbound
+    /// ReplaceOrderRequest". OrderType is intentionally NOT modifiable
+    /// at this layer (FIX 35=G semantics on B3).
+    /// </para>
     /// </summary>
-    Task CancelReplaceAsync(Order original, ulong newClOrdId, long newQuantity, decimal? newPrice, CancellationToken cancellationToken);
+    Task CancelReplaceAsync(
+        Order original,
+        ulong newClOrdId,
+        long newQuantity,
+        decimal? newPrice,
+        TimeInForce? requestedTimeInForce,
+        decimal? requestedStopPrice,
+        DateTimeOffset? requestedGoodTillDate,
+        CancellationToken cancellationToken);
 }

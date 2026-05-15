@@ -197,13 +197,33 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             ct => _client.CancelAsync(req, ct), cancellationToken);
     }
 
-    public Task CancelReplaceAsync(Order original, ulong newClOrdId, long newQuantity, decimal? newPrice, CancellationToken cancellationToken)
+    public Task CancelReplaceAsync(
+        Order original,
+        ulong newClOrdId,
+        long newQuantity,
+        decimal? newPrice,
+        TimeInForce? requestedTimeInForce,
+        decimal? requestedStopPrice,
+        DateTimeOffset? requestedGoodTillDate,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(original);
         if (newClOrdId == 0)
             throw new ArgumentOutOfRangeException(nameof(newClOrdId), "Replace ClOrdID must be non-zero.");
         if (newQuantity < 0)
             throw new ArgumentOutOfRangeException(nameof(newQuantity));
+
+        // Q1.1 (#253). Merge requested overrides with the original's
+        // values so the venue sees a coherent ReplaceOrderRequest. The
+        // domain helper enforces the invariants (StopPrice required iff
+        // Stop*; GoodTillDate required iff TIF==GTD; auto-clear when
+        // TIF moves away from GTD). Any violation throws ArgumentException,
+        // which the caller (OrderModifyService) treats as a gateway-side
+        // failure and rolls back the same way it does any other replace
+        // dispatch failure.
+        var (effTif, effStop, effGtd) = Order.MergeReplacementOptionals(
+            original.Type, original.TimeInForce, original.StopPrice, original.GoodTillDate,
+            requestedTimeInForce, requestedStopPrice, requestedGoodTillDate);
 
         var req = new UpModels.ReplaceOrderRequest
         {
@@ -213,14 +233,10 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             Side = original.Side == OrderSide.Buy ? UpModels.Side.Buy : UpModels.Side.Sell,
             OrderType = MapOrderType(original.Type),
             Price = newPrice,
-            // Q1.1 (#253). The modify pipeline only mutates qty+price;
-            // type/TIF/StopPrice/GoodTillDate are inherited from the
-            // original order so the venue sees a consistent surface
-            // across the cancel-replace boundary.
-            StopPrice = original.StopPrice,
+            StopPrice = effStop,
             OrderQty = (ulong)newQuantity,
-            TimeInForce = MapTimeInForce(original.TimeInForce),
-            ExpireDate = original.GoodTillDate,
+            TimeInForce = MapTimeInForce(effTif),
+            ExpireDate = effGtd,
         };
 
         return SendAsync(newClOrdId, OrderEntryLatencyProbe.OpReplace,

@@ -113,9 +113,14 @@ public sealed class MultiFirmExchangeGateway : IExchangeGateway
         return _registry.For(order.FirmId).CancelAsync(order, newClOrdId, cancellationToken);
     }
 
-    public Task CancelReplaceAsync(Order original, ulong newClOrdId, long newQuantity, decimal? newPrice, CancellationToken cancellationToken)
+    public Task CancelReplaceAsync(
+        Order original, ulong newClOrdId, long newQuantity, decimal? newPrice,
+        TimeInForce? requestedTimeInForce, decimal? requestedStopPrice, DateTimeOffset? requestedGoodTillDate,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(original);
-        return _registry.For(original.FirmId).CancelReplaceAsync(original, newClOrdId, newQuantity, newPrice, cancellationToken);
+        return _registry.For(original.FirmId).CancelReplaceAsync(
+            original, newClOrdId, newQuantity, newPrice,
+            requestedTimeInForce, requestedStopPrice, requestedGoodTillDate, cancellationToken);
     }
 }

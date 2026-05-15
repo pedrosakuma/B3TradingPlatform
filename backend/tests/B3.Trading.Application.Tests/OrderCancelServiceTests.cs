@@ -44,7 +44,10 @@ public class OrderCancelServiceTests
             if (CancelGate is { } g) await g.Task.ConfigureAwait(false);
         }
 
-        public Task CancelReplaceAsync(Order original, ulong newClOrdId, long newQuantity, decimal? newPrice, CancellationToken cancellationToken)
+        public Task CancelReplaceAsync(
+            Order original, ulong newClOrdId, long newQuantity, decimal? newPrice,
+            TimeInForce? requestedTimeInForce, decimal? requestedStopPrice, DateTimeOffset? requestedGoodTillDate,
+            CancellationToken cancellationToken)
             => Task.CompletedTask;
     }
 

@@ -401,7 +401,12 @@ public sealed class EventReplayer
                         NewPrice: rr.NewPrice,
                         FirmId: rr.FirmId,
                         ParentAlgoId: rr.ParentAlgoId,
-                        AlgoSliceSeq: rr.AlgoSliceSeq);
+                        AlgoSliceSeq: rr.AlgoSliceSeq,
+                        RequestedTimeInForce: rr.RequestedTimeInForce is { } rrTif
+                            ? Enum.Parse<TimeInForce>(rrTif, ignoreCase: true)
+                            : (TimeInForce?)null,
+                        RequestedStopPrice: rr.RequestedStopPrice,
+                        RequestedGoodTillDate: rr.RequestedGoodTillDate);
                     _replacements.TryAdd(intent);
                     _ownership.RegisterReplaceLink(rr.OriginalClOrdId, rr.NewClOrdId);
                 }

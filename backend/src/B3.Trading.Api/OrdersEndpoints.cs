@@ -101,7 +101,10 @@ public static class OrdersEndpoints
 
             var owner = ResolveOwner(ctx, registry);
             var result = await modifier.ModifyAsync(
-                new OrderModifyRequest(owner, clOrdIdU, req.Quantity, req.Price), ct);
+                new OrderModifyRequest(
+                    owner, clOrdIdU, req.Quantity, req.Price,
+                    req.TimeInForce, req.StopPrice, req.GoodTillDate),
+                ct);
 
             return result.Kind switch
             {
@@ -198,5 +201,11 @@ public sealed record SubmitOrderRequest(
 
 public sealed record ModifyOrderRequest(
     long Quantity,
-    decimal? Price);
+    decimal? Price,
+    /// <summary>Q1.1 (#253). Optional override; null = keep original.</summary>
+    TimeInForce? TimeInForce = null,
+    /// <summary>Q1.1 (#253). Optional override; null = keep original. Required when modifying into <c>StopLoss</c>/<c>StopLimit</c> — but OrderType is not modifiable, so in practice only meaningful for orders that already are stop orders.</summary>
+    decimal? StopPrice = null,
+    /// <summary>Q1.1 (#253). Optional override; null = keep original (or auto-cleared when TIF is moved away from <c>GTD</c>). Required when changing TIF to <c>GTD</c>.</summary>
+    DateTimeOffset? GoodTillDate = null);
 

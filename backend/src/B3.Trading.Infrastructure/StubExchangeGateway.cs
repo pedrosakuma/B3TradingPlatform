@@ -13,5 +13,8 @@ public sealed class StubExchangeGateway : IExchangeGateway
 {
     public Task SubmitAsync(Order order, CancellationToken cancellationToken) => Task.CompletedTask;
     public Task CancelAsync(Order order, ulong newClOrdId, CancellationToken cancellationToken) => Task.CompletedTask;
-    public Task CancelReplaceAsync(Order original, ulong newClOrdId, long newQuantity, decimal? newPrice, CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task CancelReplaceAsync(
+        Order original, ulong newClOrdId, long newQuantity, decimal? newPrice,
+        TimeInForce? requestedTimeInForce, decimal? requestedStopPrice, DateTimeOffset? requestedGoodTillDate,
+        CancellationToken cancellationToken) => Task.CompletedTask;
 }

@@ -49,7 +49,10 @@ public sealed class LoopbackFillGateway : IExchangeGateway
 
     public Task CancelAsync(Order order, ulong newClOrdId, CancellationToken cancellationToken) => Task.CompletedTask;
 
-    public Task CancelReplaceAsync(Order original, ulong newClOrdId, long newQuantity, decimal? newPrice, CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task CancelReplaceAsync(
+        Order original, ulong newClOrdId, long newQuantity, decimal? newPrice,
+        TimeInForce? requestedTimeInForce, decimal? requestedStopPrice, DateTimeOffset? requestedGoodTillDate,
+        CancellationToken cancellationToken) => Task.CompletedTask;
 
     private void DispatchFill(Order order)
     {

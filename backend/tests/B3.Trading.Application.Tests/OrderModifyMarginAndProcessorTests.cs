@@ -1,6 +1,8 @@
+using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.UserBots;
 using B3.Trading.Domain;
+using B3.Trading.Infrastructure.Persistence;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -132,6 +134,334 @@ public class OrderModifyMarginAndProcessorTests
         var orig = new Order(1UL, new EndClientId("alice"), "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m, "FIRM");
         Assert.Throws<ArgumentOutOfRangeException>(() =>
             Order.HydrateReplacement(orig, 0UL, 200, 31m, 200, 0));
+    }
+
+    // ---------------- Q1.1 (#253) optionals through replace pipeline ----------------
+
+    [Fact]
+    public void HydrateReplacement_inheritsTifStopGtdWhenAllNull()
+    {
+        // Default behaviour: caller passed no Q1.1 overrides → the
+        // replacement Order carries the original's TIF/StopPrice/GTD.
+        var owner = new EndClientId("alice");
+        var orig = new Order(
+            1UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.StopLimit,
+            100, 30m, "FIRM",
+            timeInForce: TimeInForce.GTD,
+            stopPrice: 29m,
+            goodTillDate: new DateTimeOffset(2030, 1, 2, 18, 0, 0, TimeSpan.Zero));
+        var replacement = Order.HydrateReplacement(orig, 2UL, 200, 31m, erLeaves: 200, erCumulative: 0);
+        Assert.Equal(TimeInForce.GTD, replacement.TimeInForce);
+        Assert.Equal(29m, replacement.StopPrice);
+        Assert.Equal(orig.GoodTillDate, replacement.GoodTillDate);
+    }
+
+    [Fact]
+    public void HydrateReplacement_overridesStopPriceOnExistingStopLimit()
+    {
+        var owner = new EndClientId("alice");
+        var orig = new Order(
+            1UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.StopLimit,
+            100, 30m, "FIRM",
+            timeInForce: TimeInForce.Day, stopPrice: 29m);
+        var replacement = Order.HydrateReplacement(
+            orig, 2UL, 100, 30m, erLeaves: 100, erCumulative: 0,
+            requestedStopPrice: 28.5m);
+        Assert.Equal(28.5m, replacement.StopPrice);
+        Assert.Equal(TimeInForce.Day, replacement.TimeInForce);
+    }
+
+    [Fact]
+    public void Merge_changesTifDayToGtc()
+    {
+        var (tif, stop, gtd) = Order.MergeReplacementOptionals(
+            OrderType.Limit, TimeInForce.Day, originalStopPrice: null, originalGoodTillDate: null,
+            requestedTimeInForce: TimeInForce.GTC, requestedStopPrice: null, requestedGoodTillDate: null);
+        Assert.Equal(TimeInForce.GTC, tif);
+        Assert.Null(stop);
+        Assert.Null(gtd);
+    }
+
+    [Fact]
+    public void Merge_changesTifDayToGtdRequiresGoodTillDate()
+    {
+        var future = DateTimeOffset.UtcNow.AddDays(1);
+        var (tif, _, gtd) = Order.MergeReplacementOptionals(
+            OrderType.Limit, TimeInForce.Day, null, null,
+            TimeInForce.GTD, null, future);
+        Assert.Equal(TimeInForce.GTD, tif);
+        Assert.Equal(future, gtd);
+
+        // Without supplying GoodTillDate the merge rejects (caller must
+        // explicitly carry the expiry when transitioning into GTD).
+        Assert.Throws<ArgumentException>(() => Order.MergeReplacementOptionals(
+            OrderType.Limit, TimeInForce.Day, null, null,
+            TimeInForce.GTD, null, null));
+    }
+
+    [Fact]
+    public void Merge_tifAwayFromGtdAutoClearsGoodTillDate()
+    {
+        // Documented semantic: changing TIF away from GTD without
+        // explicitly nulling GoodTillDate auto-clears the inherited
+        // expiry rather than forcing a redundant null in the request.
+        var origGtd = new DateTimeOffset(2030, 6, 1, 18, 0, 0, TimeSpan.Zero);
+        var (tif, _, gtd) = Order.MergeReplacementOptionals(
+            OrderType.Limit, TimeInForce.GTD, null, origGtd,
+            TimeInForce.Day, null, null);
+        Assert.Equal(TimeInForce.Day, tif);
+        Assert.Null(gtd);
+    }
+
+    [Fact]
+    public void Merge_rejectsGoodTillDateWhenEffectiveTifIsNotGtd()
+    {
+        // Caller asked TIF=Day but supplied a GoodTillDate. Auto-clearing
+        // would silently discard the value; reject loudly instead so the
+        // caller fixes their request.
+        var fut = DateTimeOffset.UtcNow.AddDays(1);
+        Assert.Throws<ArgumentException>(() => Order.MergeReplacementOptionals(
+            OrderType.Limit, TimeInForce.GTD, null, fut,
+            TimeInForce.Day, null, fut));
+    }
+
+    [Fact]
+    public void Merge_rejectsStopPriceForNonStopOrder()
+    {
+        Assert.Throws<ArgumentException>(() => Order.MergeReplacementOptionals(
+            OrderType.Limit, TimeInForce.Day, null, null,
+            null, requestedStopPrice: 10m, null));
+    }
+
+    [Fact]
+    public void Merge_rejectsNonPositiveStopPriceForStopOrder()
+    {
+        // Original StopLimit has StopPrice=29; caller "overrides" with 0.
+        Assert.Throws<ArgumentException>(() => Order.MergeReplacementOptionals(
+            OrderType.StopLimit, TimeInForce.Day, originalStopPrice: 29m, null,
+            null, requestedStopPrice: 0m, null));
+    }
+
+    [Fact]
+    public void HydrateReplacement_changesTifDayToGtdWithExpiry()
+    {
+        var owner = new EndClientId("alice");
+        var orig = new Order(1UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m, "FIRM");
+        var future = new DateTimeOffset(2030, 12, 31, 18, 0, 0, TimeSpan.Zero);
+        var replacement = Order.HydrateReplacement(
+            orig, 2UL, 100, 30m, erLeaves: 100, erCumulative: 0,
+            requestedTimeInForce: TimeInForce.GTD,
+            requestedGoodTillDate: future);
+        Assert.Equal(TimeInForce.GTD, replacement.TimeInForce);
+        Assert.Equal(future, replacement.GoodTillDate);
+    }
+
+    [Fact]
+    public void HydrateReplacement_changesTifGtdToDayClearsGoodTillDate()
+    {
+        var owner = new EndClientId("alice");
+        var orig = new Order(
+            1UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit,
+            100, 30m, "FIRM",
+            timeInForce: TimeInForce.GTD,
+            goodTillDate: new DateTimeOffset(2030, 6, 1, 18, 0, 0, TimeSpan.Zero));
+        var replacement = Order.HydrateReplacement(
+            orig, 2UL, 100, 30m, erLeaves: 100, erCumulative: 0,
+            requestedTimeInForce: TimeInForce.Day);
+        Assert.Equal(TimeInForce.Day, replacement.TimeInForce);
+        Assert.Null(replacement.GoodTillDate);
+    }
+
+    [Fact]
+    public void OrderReplaceRequestedEvent_OldPayloadDeserializesWithNullOptionals()
+    {
+        // Backward-compat: WAL segments written before the Q1.1
+        // overrides existed lack the three Requested* fields. The
+        // source-generated context must hydrate them as null so the
+        // ER-replay path inherits everything from the original Order
+        // (preserving exact pre-Q1.1 behaviour).
+        const string oldJson = """
+        {
+            "OriginalClOrdId": 1,
+            "NewClOrdId": 2,
+            "EndClientId": "alice",
+            "FirmId": "FIRM",
+            "Symbol": "PETR4",
+            "SecurityId": 4321,
+            "Side": "Buy",
+            "Type": "Limit",
+            "NewQuantity": 200,
+            "NewPrice": 30.5
+        }
+        """;
+        var ev = System.Text.Json.JsonSerializer.Deserialize(
+            oldJson,
+            B3.Trading.Application.Persistence.WalEventJsonContext.Default.OrderReplaceRequestedEvent);
+        Assert.NotNull(ev);
+        Assert.Equal(1UL, ev!.OriginalClOrdId);
+        Assert.Equal(2UL, ev.NewClOrdId);
+        Assert.Null(ev.RequestedTimeInForce);
+        Assert.Null(ev.RequestedStopPrice);
+        Assert.Null(ev.RequestedGoodTillDate);
+    }
+
+    [Fact]
+    public void OrderReplaceRequestedEvent_RoundTripsOptionalsWhenSet()
+    {
+        var future = new DateTimeOffset(2030, 6, 1, 18, 0, 0, TimeSpan.Zero);
+        var ev = new OrderReplaceRequestedEvent
+        {
+            OriginalClOrdId = 1UL,
+            NewClOrdId = 2UL,
+            EndClientId = "alice",
+            FirmId = "FIRM",
+            Symbol = "PETR4",
+            SecurityId = 4321UL,
+            Side = "Buy",
+            Type = "Limit",
+            NewQuantity = 100,
+            NewPrice = 30m,
+            RequestedTimeInForce = nameof(TimeInForce.GTD),
+            RequestedStopPrice = null,
+            RequestedGoodTillDate = future,
+        };
+        var json = System.Text.Json.JsonSerializer.Serialize(
+            ev, B3.Trading.Application.Persistence.WalEventJsonContext.Default.OrderReplaceRequestedEvent);
+        var roundtrip = System.Text.Json.JsonSerializer.Deserialize(
+            json, B3.Trading.Application.Persistence.WalEventJsonContext.Default.OrderReplaceRequestedEvent);
+        Assert.Equal(nameof(TimeInForce.GTD), roundtrip!.RequestedTimeInForce);
+        Assert.Equal(future, roundtrip.RequestedGoodTillDate);
+    }
+
+    // ---------------- OrderModifyService end-to-end (Q1.1 dispatch) ----------------
+
+    private sealed class CapturingGateway : IExchangeGateway
+    {
+        public List<(Order Original, ulong NewClOrdId, long NewQty, decimal? NewPrice,
+                     TimeInForce? Tif, decimal? Stop, DateTimeOffset? Gtd)> Replaces { get; } = new();
+
+        public Task SubmitAsync(Order order, CancellationToken ct) => Task.CompletedTask;
+        public Task CancelAsync(Order order, ulong newClOrdId, CancellationToken ct) => Task.CompletedTask;
+        public Task CancelReplaceAsync(
+            Order original, ulong newClOrdId, long newQty, decimal? newPrice,
+            TimeInForce? tif, decimal? stop, DateTimeOffset? gtd, CancellationToken ct)
+        {
+            Replaces.Add((original, newClOrdId, newQty, newPrice, tif, stop, gtd));
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class NoOpReplaceMargin : IReplaceMarginCoordinator
+    {
+        public Task<RiskDecision> PrepareReplaceAsync(ulong _, ulong __, EndClientId ___, decimal ____, CancellationToken _____)
+            => Task.FromResult(RiskDecision.Approve);
+        public void CommitReplace(ulong _, ulong __, decimal ___) { }
+        public void AbortReplace(ulong _) { }
+    }
+
+    private sealed class CapturingSink : IExecutionEventSink
+    {
+        public readonly List<ExecutionEvent> Events = new();
+        public void Publish(ExecutionEvent ev) => Events.Add(ev);
+    }
+
+    private sealed class NeverDrain : Lifecycle.IDrainGate { public bool IsDraining => false; }
+
+    private static (OrderModifyService svc, CapturingGateway gw, WorkingOrderBook book, PendingReplacementRegistry reg)
+        BuildModifyService(Order seedOrder)
+    {
+        var owner = seedOrder.Owner;
+        var clOrdIds = new ClOrdIdPrefixRegistry();
+        var ownership = new OrderOwnershipMap();
+        var book = new WorkingOrderBook();
+        Assert.True(book.TryAdd(seedOrder));
+        ownership.Register(seedOrder.ClOrdId, owner);
+        var gateway = new CapturingGateway();
+        var sink = new CapturingSink();
+        var risk = new Risk.RiskPipeline(Array.Empty<Risk.IRiskCheck>());
+        var margin = new NoOpReplaceMargin();
+        var replacements = new PendingReplacementRegistry();
+        var dispatcher = new EventDispatcher(new NullEventStore());
+        var svc = new OrderModifyService(
+            clOrdIds, ownership, book, gateway, sink, risk, margin, replacements, dispatcher,
+            new NeverDrain(), NullLogger<OrderModifyService>.Instance);
+        return (svc, gateway, book, replacements);
+    }
+
+    [Fact]
+    public async Task Modify_changesStopPriceOnExistingStopLimit_outboundCarriesNewStopPrice()
+    {
+        var owner = new EndClientId("alice");
+        var stopLimit = new Order(
+            1_000_001UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.StopLimit,
+            100, 30m, "FIRM", timeInForce: TimeInForce.Day, stopPrice: 29m);
+        var (svc, gw, _, _) = BuildModifyService(stopLimit);
+
+        var result = await svc.ModifyAsync(
+            new OrderModifyRequest(owner, stopLimit.ClOrdId, NewQuantity: 100, NewPrice: 30m,
+                NewTimeInForce: null, NewStopPrice: 28.25m, NewGoodTillDate: null),
+            CancellationToken.None);
+
+        Assert.Equal(OrderModifyResultKind.Accepted, result.Kind);
+        var call = Assert.Single(gw.Replaces);
+        Assert.Equal(28.25m, call.Stop);
+        Assert.Null(call.Tif);
+        Assert.Null(call.Gtd);
+    }
+
+    [Fact]
+    public async Task Modify_changesTifDayToGtc_outboundCarriesGtc()
+    {
+        var owner = new EndClientId("alice");
+        var orig = new Order(1_000_002UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m, "FIRM");
+        var (svc, gw, _, _) = BuildModifyService(orig);
+
+        var result = await svc.ModifyAsync(
+            new OrderModifyRequest(owner, orig.ClOrdId, 100, 30m, NewTimeInForce: TimeInForce.GTC),
+            CancellationToken.None);
+
+        Assert.Equal(OrderModifyResultKind.Accepted, result.Kind);
+        Assert.Equal(TimeInForce.GTC, gw.Replaces.Single().Tif);
+    }
+
+    [Fact]
+    public async Task Modify_changesTifDayToGtdWithExpiry_outboundCarriesBoth()
+    {
+        var owner = new EndClientId("alice");
+        var orig = new Order(1_000_003UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m, "FIRM");
+        var (svc, gw, _, _) = BuildModifyService(orig);
+        var future = new DateTimeOffset(2030, 12, 31, 18, 0, 0, TimeSpan.Zero);
+
+        var result = await svc.ModifyAsync(
+            new OrderModifyRequest(owner, orig.ClOrdId, 100, 30m,
+                NewTimeInForce: TimeInForce.GTD, NewGoodTillDate: future),
+            CancellationToken.None);
+
+        Assert.Equal(OrderModifyResultKind.Accepted, result.Kind);
+        var call = gw.Replaces.Single();
+        Assert.Equal(TimeInForce.GTD, call.Tif);
+        Assert.Equal(future, call.Gtd);
+    }
+
+    [Fact]
+    public async Task Modify_invariantViolation_isRejectedBeforeWalAndGateway()
+    {
+        var owner = new EndClientId("alice");
+        var orig = new Order(1_000_004UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m, "FIRM");
+        var (svc, gw, book, reg) = BuildModifyService(orig);
+
+        var result = await svc.ModifyAsync(
+            new OrderModifyRequest(owner, orig.ClOrdId, 100, 30m, NewTimeInForce: TimeInForce.GTD),
+            CancellationToken.None);
+
+        Assert.Equal(OrderModifyResultKind.BadRequest, result.Kind);
+        Assert.NotNull(result.Reason);
+        Assert.Contains("GoodTillDate", result.Reason);
+        Assert.Empty(gw.Replaces);
+        Assert.False(reg.IsOriginalInFlight(orig.ClOrdId));
+        Assert.True(book.TryGet(orig.ClOrdId, out var still));
+        Assert.NotNull(still);
+        Assert.NotEqual(OrderStatus.Replaced, still!.Status);
     }
 
     // ---------------- IReplaceMarginCoordinator ----------------

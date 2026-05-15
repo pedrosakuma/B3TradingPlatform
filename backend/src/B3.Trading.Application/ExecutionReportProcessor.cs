@@ -463,7 +463,8 @@ public sealed class ExecutionReportProcessor
         try
         {
             newOrder = Order.HydrateReplacement(
-                origOrder, newClOrdId, intent.NewQuantity, intent.NewPrice, erLeaves, erCum);
+                origOrder, newClOrdId, intent.NewQuantity, intent.NewPrice, erLeaves, erCum,
+                intent.RequestedTimeInForce, intent.RequestedStopPrice, intent.RequestedGoodTillDate);
         }
         catch (Exception ex)
         {

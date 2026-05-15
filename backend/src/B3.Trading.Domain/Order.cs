@@ -453,7 +453,10 @@ public sealed class Order
         long newQuantity,
         decimal? newPrice,
         long erLeaves,
-        long erCumulative)
+        long erCumulative,
+        TimeInForce? requestedTimeInForce = null,
+        decimal? requestedStopPrice = null,
+        DateTimeOffset? requestedGoodTillDate = null)
     {
         ArgumentNullException.ThrowIfNull(original);
         if (newClOrdId == 0)
@@ -464,6 +467,10 @@ public sealed class Order
             throw new ArgumentOutOfRangeException(nameof(erCumulative));
         if (erLeaves < 0)
             throw new ArgumentOutOfRangeException(nameof(erLeaves));
+
+        var (effTif, effStop, effGtd) = MergeReplacementOptionals(
+            original.Type, original.TimeInForce, original.StopPrice, original.GoodTillDate,
+            requestedTimeInForce, requestedStopPrice, requestedGoodTillDate);
 
         var status = erCumulative >= newQuantity
             ? OrderStatus.Filled
@@ -484,11 +491,95 @@ public sealed class Order
             firmId: original.FirmId,
             parentAlgoId: original.ParentAlgoId,
             algoSliceSeq: original.AlgoSliceSeq,
-            // Q1.1 (#253) — modify pipeline only mutates qty+price; TIF,
-            // StopPrice and GoodTillDate are inherited from the original
-            // so the replacement order keeps the same surface semantics.
-            timeInForce: original.TimeInForce,
-            stopPrice: original.StopPrice,
-            goodTillDate: original.GoodTillDate);
+            // Q1.1 (#253) — TIF / StopPrice / GoodTillDate are mergeable
+            // through the modify pipeline. Null on the requested side =
+            // inherit the original; non-null = override. OrderType is NOT
+            // modifiable in B3 cancel-replace (FIX standard) so it is
+            // always inherited from the original.
+            timeInForce: effTif,
+            stopPrice: effStop,
+            goodTillDate: effGtd);
+    }
+
+    /// <summary>
+    /// Q1.1 (#253). Pure merge function for the modify pipeline's
+    /// optional Q1.1 fields. The rule, mirrored at every site that
+    /// computes a replacement (early validation in
+    /// <c>OrderModifyService</c>, hydration in
+    /// <see cref="HydrateReplacement"/>, gateway dispatch in
+    /// <c>B3EntryPointClientGateway.CancelReplaceAsync</c>):
+    ///
+    /// <list type="bullet">
+    ///   <item><c>effTif</c> = requested ?? original.</item>
+    ///   <item>If <c>effType</c> ∈ {StopLoss, StopLimit}:
+    ///     <c>effStop</c> = requested ?? original (must be &gt; 0).
+    ///     Otherwise: <c>requestedStop</c> must be null and
+    ///     <c>effStop</c> is null.</item>
+    ///   <item>If <c>effTif == GTD</c>: <c>effGtd</c> = requested ??
+    ///     original (must be non-null). Otherwise: <c>requestedGtd</c>
+    ///     must be null AND <c>effGtd</c> is auto-cleared to null —
+    ///     this is how callers move TIF away from GTD without having
+    ///     to redundantly null-out an inherited expiry.</item>
+    /// </list>
+    ///
+    /// <para>
+    /// Throws <see cref="ArgumentException"/> on any violation; the
+    /// caller is expected to translate it into a modify rejection
+    /// (<c>OrderModifyResultKind.BadRequest</c>) before WAL append.
+    /// </para>
+    /// </summary>
+    public static (TimeInForce EffectiveTimeInForce, decimal? EffectiveStopPrice, DateTimeOffset? EffectiveGoodTillDate)
+        MergeReplacementOptionals(
+            OrderType originalType,
+            TimeInForce originalTimeInForce,
+            decimal? originalStopPrice,
+            DateTimeOffset? originalGoodTillDate,
+            TimeInForce? requestedTimeInForce,
+            decimal? requestedStopPrice,
+            DateTimeOffset? requestedGoodTillDate)
+    {
+        var effTif = requestedTimeInForce ?? originalTimeInForce;
+
+        var requiresStop = originalType is OrderType.StopLoss or OrderType.StopLimit;
+        decimal? effStop;
+        if (requiresStop)
+        {
+            effStop = requestedStopPrice ?? originalStopPrice;
+            if (!effStop.HasValue || effStop.Value <= 0m)
+                throw new ArgumentException(
+                    $"StopPrice is required and must be positive for OrderType.{originalType}.",
+                    nameof(requestedStopPrice));
+        }
+        else
+        {
+            if (requestedStopPrice.HasValue)
+                throw new ArgumentException(
+                    $"StopPrice must be null for OrderType.{originalType} (only StopLoss/StopLimit accept a stop trigger).",
+                    nameof(requestedStopPrice));
+            effStop = null;
+        }
+
+        DateTimeOffset? effGtd;
+        if (effTif == TimeInForce.GTD)
+        {
+            effGtd = requestedGoodTillDate ?? originalGoodTillDate;
+            if (!effGtd.HasValue)
+                throw new ArgumentException(
+                    "GoodTillDate is required when TimeInForce == GTD.",
+                    nameof(requestedGoodTillDate));
+        }
+        else
+        {
+            if (requestedGoodTillDate.HasValue)
+                throw new ArgumentException(
+                    $"GoodTillDate must be null when TimeInForce == {effTif} (only GTD carries an expiry).",
+                    nameof(requestedGoodTillDate));
+            // TIF moving away from GTD: auto-clear inherited expiry so
+            // the merged Order satisfies the GTD-iff-GoodTillDate
+            // invariant without forcing callers to null it explicitly.
+            effGtd = null;
+        }
+
+        return (effTif, effStop, effGtd);
     }
 }

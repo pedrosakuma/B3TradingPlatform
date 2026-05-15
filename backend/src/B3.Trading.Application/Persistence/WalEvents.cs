@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using B3.Trading.Domain;
 
 namespace B3.Trading.Application.Persistence;
 
@@ -170,6 +171,19 @@ public sealed record OrderReplaceRequestedEvent : WalEvent
     public decimal? NewPrice { get; init; }
     public ulong? ParentAlgoId { get; init; }
     public int? AlgoSliceSeq { get; init; }
+
+    // Q1.1 (#253) — optional modify-pipeline overrides for the three
+    // Q1.1 fields. Null defaults so deserializing pre-Q1.1 WAL payloads
+    // (which never carried these properties) hydrates as "no override
+    // requested" → HydrateReplacement inherits everything from the
+    // original Order. Distinct names (Requested*) avoid ambiguity with
+    // the hydrated Order's TimeInForce/StopPrice/GoodTillDate fields.
+    // TIF is stored as the enum name (string) to mirror
+    // <see cref="OrderSubmittedEvent.TimeInForce"/> and stay stable
+    // across enum renumberings.
+    public string? RequestedTimeInForce { get; init; }
+    public decimal? RequestedStopPrice { get; init; }
+    public DateTimeOffset? RequestedGoodTillDate { get; init; }
 }
 
 /// <summary>

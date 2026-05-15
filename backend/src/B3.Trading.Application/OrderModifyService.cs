@@ -116,6 +116,24 @@ public sealed class OrderModifyService
             return OrderModifyResult.Conflict("order is terminal");
         }
 
+        // Q1.1 (#253) — pre-validate the optional TIF/StopPrice/
+        // GoodTillDate overrides against the original's invariants so a
+        // bad request fails BEFORE we burn a ClOrdID, run risk/margin,
+        // append to the WAL or hit the gateway. Mirror of the merge that
+        // Order.HydrateReplacement runs when the venue acks; throwing
+        // there would surface as an opaque replace-rejected ER, here it
+        // surfaces as a clean 400 with the invariant message.
+        try
+        {
+            _ = Order.MergeReplacementOptionals(
+                orig.Type, orig.TimeInForce, orig.StopPrice, orig.GoodTillDate,
+                req.NewTimeInForce, req.NewStopPrice, req.NewGoodTillDate);
+        }
+        catch (ArgumentException ex)
+        {
+            return OrderModifyResult.BadRequest(ex.Message);
+        }
+
         // Slice 1 of #132: refuse Modify against a stale-flagged order.
         // Same rationale as the cancel gate: the venue most likely
         // doesn't know the original ClOrdID, so a CancelReplace would
@@ -213,7 +231,10 @@ public sealed class OrderModifyService
             NewPrice: req.NewPrice,
             FirmId: orig.FirmId,
             ParentAlgoId: orig.ParentAlgoId,
-            AlgoSliceSeq: orig.AlgoSliceSeq);
+            AlgoSliceSeq: orig.AlgoSliceSeq,
+            RequestedTimeInForce: req.NewTimeInForce,
+            RequestedStopPrice: req.NewStopPrice,
+            RequestedGoodTillDate: req.NewGoodTillDate);
 
         try
         {
@@ -232,6 +253,9 @@ public sealed class OrderModifyService
                     NewPrice = req.NewPrice,
                     ParentAlgoId = orig.ParentAlgoId,
                     AlgoSliceSeq = orig.AlgoSliceSeq,
+                    RequestedTimeInForce = req.NewTimeInForce?.ToString(),
+                    RequestedStopPrice = req.NewStopPrice,
+                    RequestedGoodTillDate = req.NewGoodTillDate,
                 },
                 () =>
                 {
@@ -251,7 +275,9 @@ public sealed class OrderModifyService
 
         try
         {
-            await _gateway.CancelReplaceAsync(orig, newClOrdId, req.NewQuantity, req.NewPrice, ct);
+            await _gateway.CancelReplaceAsync(
+                orig, newClOrdId, req.NewQuantity, req.NewPrice,
+                req.NewTimeInForce, req.NewStopPrice, req.NewGoodTillDate, ct);
         }
         catch (Exception ex)
         {
@@ -285,11 +311,30 @@ public sealed class OrderModifyService
     }
 }
 
+/// <summary>
+/// Inputs for <see cref="OrderModifyService.ModifyAsync"/>.
+///
+/// <para>
+/// Q1.1 (#253). The trailing optionals — <see cref="NewTimeInForce"/>,
+/// <see cref="NewStopPrice"/>, <see cref="NewGoodTillDate"/> — follow
+/// the modify-pipeline override convention: <b>null = inherit the
+/// original order's value</b> across the cancel-replace boundary;
+/// <b>non-null = replace it with the supplied value</b>. Domain
+/// invariants (StopPrice required iff Stop*; GoodTillDate required
+/// iff TIF==GTD; auto-cleared when TIF moves away from GTD) are
+/// re-evaluated on the merged result and a violation surfaces as
+/// <see cref="OrderModifyResultKind.BadRequest"/> before any WAL
+/// append or gateway dispatch.
+/// </para>
+/// </summary>
 public sealed record OrderModifyRequest(
     EndClientId Owner,
     ulong OriginalClOrdId,
     long NewQuantity,
-    decimal? NewPrice);
+    decimal? NewPrice,
+    TimeInForce? NewTimeInForce = null,
+    decimal? NewStopPrice = null,
+    DateTimeOffset? NewGoodTillDate = null);
 
 /// <summary>
 /// Outcome of <see cref="OrderModifyService.ModifyAsync"/>. The
