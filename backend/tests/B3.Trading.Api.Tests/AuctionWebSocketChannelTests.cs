@@ -109,14 +109,46 @@ public class AuctionWebSocketChannelTests
 
         feed.RaiseAuctionPrint("PETR4", AuctionPrintKind.Opening, 31m, 5000, DateTimeOffset.UtcNow);
 
-        // PhaseChanged is broadcast on phases.PETR4 — not subscribed
-        // here, so we expect exactly one delta on auction.PETR4 (the
-        // print itself).
+        // Print delta itself (Q1.5 #257 wire shape).
         Assert.True(client.Reader.TryRead(out var delta));
         Assert.Equal("delta", delta!.Type);
         var dto = Assert.IsType<AuctionPrintDto>(delta.Data);
         Assert.Equal("Opening", dto.Kind);
         Assert.Equal(31m, dto.Price);
+
+        // Followed by an empty top frame so subscribers stop seeing
+        // the pre-cross indicative as current (P2 fix).
+        Assert.True(client.Reader.TryRead(out var clear));
+        Assert.Equal("delta", clear!.Type);
+        var emptied = Assert.IsType<AuctionSnapshotDto>(clear.Data);
+        Assert.Null(emptied.Top);
+        Assert.Null(emptied.IndicativeMatchQty);
+        Assert.Null(emptied.Imbalance);
+        Assert.Null(emptied.ImbalanceSide);
+        Assert.Null(emptied.At);
+    }
+
+    [Fact]
+    public void Auction_subscribe_after_print_serves_empty_snapshot()
+    {
+        var (subs, _, sink, feed) = Build();
+        var t = DateTimeOffset.UtcNow;
+        feed.RaiseTheoreticalOpening("PETR4", 30.5m, 1000, t);
+        feed.RaiseAuctionImbalance("PETR4", 250, OrderSide.Sell, t);
+        feed.RaiseAuctionPrint("PETR4", AuctionPrintKind.Opening, 30.25m, 5000, t);
+
+        var client = new SubscribedClient(new EndClientId("late"), "TEST");
+        subs.SubscribePublicWithSnapshot(client, "auction.PETR4",
+            () => sink.GetSnapshot(PublicChannelKind.Auction, "PETR4"));
+
+        Assert.True(client.Reader.TryRead(out var snap));
+        Assert.Equal("snapshot", snap!.Type);
+        var dto = Assert.IsType<AuctionSnapshotDto>(snap.Data);
+        Assert.Null(dto.Top);
+        Assert.Null(dto.IndicativeMatchQty);
+        Assert.Null(dto.Imbalance);
+        Assert.Null(dto.ImbalanceSide);
+        Assert.Null(dto.At);
     }
 
     [Fact]

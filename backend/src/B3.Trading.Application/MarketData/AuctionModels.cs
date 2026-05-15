@@ -1,3 +1,4 @@
+using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
 
 namespace B3.Trading.Application.MarketData;

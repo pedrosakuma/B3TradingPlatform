@@ -66,8 +66,16 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         // risk pipeline. The auction sink doubles as the snapshot
         // resolver for the WS hub via IPublicChannelSnapshots — same
         // singleton routes both reads and writes.
+        //
+        // Coordination with #261: the canonical IPhaseProvider lives
+        // in B3.Trading.Application.Risk and AddTradingRisk(...) below
+        // performs a TryAddSingleton<NoPhaseProvider> stub. Because we
+        // register the live AuctionStateStore-backed provider here
+        // FIRST (Program.cs calls AddTradingApplicationCore before
+        // AddTradingRisk), TryAdd in the risk module is a no-op and
+        // GoodForAuctionPhaseCheck resolves the live provider.
         services.AddSingleton<B3.Trading.Application.MarketData.AuctionStateStore>();
-        services.AddSingleton<B3.Trading.Application.MarketData.IPhaseProvider>(sp =>
+        services.AddSingleton<B3.Trading.Application.Risk.IPhaseProvider>(sp =>
             sp.GetRequiredService<B3.Trading.Application.MarketData.AuctionStateStore>());
         services.AddHostedService(sp =>
             sp.GetRequiredService<B3.Trading.Application.MarketData.AuctionStateStore>());

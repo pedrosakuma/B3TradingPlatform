@@ -1,4 +1,5 @@
 using B3.Trading.Application.MarketData;
+using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
@@ -154,8 +155,10 @@ public class AuctionStateStoreTests
         foreach (var sym in symbols)
         {
             Assert.Equal(TradingPhase.Open, store.GetPhase(sym));
-            Assert.True(store.TryGetTop(sym, out var top));
-            Assert.NotNull(top);
+            // Print clears the retained indicative top under the
+            // per-symbol lock — see AuctionStateStore.OnAuctionPrint.
+            Assert.False(store.TryGetTop(sym, out var top));
+            Assert.Null(top);
         }
     }
 
@@ -198,6 +201,48 @@ public class AuctionStateStoreTests
         })).ToArray();
 
         await Task.WhenAll(new[] { writer }.Concat(readers));
+    }
+
+    [Fact]
+    public void AuctionPrint_clears_retained_top_and_imbalance()
+    {
+        var store = Build(out var sub);
+        var t = DateTimeOffset.UtcNow;
+
+        sub.RaiseTheoreticalOpening("PETR4", 30.5m, 1000, t);
+        sub.RaiseAuctionImbalance("PETR4", 7000, OrderSide.Buy, t);
+        Assert.True(store.TryGetTop("PETR4", out var beforeTop));
+        Assert.NotNull(beforeTop);
+
+        sub.RaiseAuctionPrint("PETR4", AuctionPrintKind.Opening, 30.25m, 5000, t);
+
+        // Post-cross: the indicative top is dead, snapshot must not
+        // surface it as current.
+        Assert.False(store.TryGetTop("PETR4", out var afterTop));
+        Assert.Null(afterTop);
+        Assert.Empty(store.SnapshotTops());
+    }
+
+    [Fact]
+    public void TheoreticalOpening_after_AuctionPrint_starts_fresh_top()
+    {
+        var store = Build(out var sub);
+        var t = DateTimeOffset.UtcNow;
+
+        sub.RaiseTheoreticalOpening("PETR4", 30m, 100, t);
+        sub.RaiseAuctionPrint("PETR4", AuctionPrintKind.Opening, 30.25m, 5000, t);
+        Assert.False(store.TryGetTop("PETR4", out _));
+
+        // Re-auction scenario: a new TheoreticalOpening wakes the
+        // symbol back up with fresh indicative state (no leakage from
+        // the pre-print numbers).
+        sub.RaiseTheoreticalOpening("PETR4", 31m, 250, t);
+
+        Assert.True(store.TryGetTop("PETR4", out var top));
+        Assert.Equal(31m, top!.Top);
+        Assert.Equal(250, top.IndicativeMatchQty);
+        // Imbalance was reset on the print, not carried over.
+        Assert.Equal(0, top.Imbalance);
     }
 
     [Fact]

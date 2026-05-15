@@ -95,10 +95,21 @@ public sealed class WebSocketAuctionEventSink : IPublicChannelSnapshots, IHosted
             Channels.AuctionFor(top.Symbol),
             AuctionSnapshotDto.From(top));
 
-    private void OnPrint(AuctionPrint p) =>
+    private void OnPrint(AuctionPrint p)
+    {
+        var channel = Channels.AuctionFor(p.Symbol);
         _subs.BroadcastPublic(
-            Channels.AuctionFor(p.Symbol),
+            channel,
             new AuctionPrintDto(p.Symbol, p.Kind.ToString(), p.Price, p.Qty, p.At));
+        // The store clears its retained top/imbalance under the lock
+        // when a print is received (see AuctionStateStore.OnAuctionPrint).
+        // Echo that on the wire as an empty top frame — same shape as
+        // the cold snapshot — so subscribers that joined before the
+        // print stop seeing the pre-cross indicative as "current".
+        _subs.BroadcastPublic(
+            channel,
+            new AuctionSnapshotDto(p.Symbol, null, null, null, null, null, null));
+    }
 }
 
 /// <summary>

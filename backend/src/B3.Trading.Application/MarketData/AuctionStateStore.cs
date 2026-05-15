@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -224,8 +225,16 @@ public sealed class AuctionStateStore : IPhaseProvider, IHostedService
         lock (entry.Sync)
         {
             // Auction prints clear the indicative top — the cross has
-            // happened, the next top will be reported by the next
-            // TheoreticalOpening (or the symbol will go quiet).
+            // happened, the pre-cross theoretical top is now stale.
+            // Reset retained top / imbalance under the lock so
+            // TryGetTop / SnapshotTops stop returning the dead state;
+            // the next top is whatever the next TheoreticalOpening
+            // reports (e.g. a re-auction) or nothing at all.
+            entry.HasTop = false;
+            entry.Top = default;
+            entry.IndicativeMatchQty = default;
+            entry.Imbalance = default;
+            entry.ImbalanceSide = default;
             entry.LastUpdateAt = ev.ReceivedUtc;
             var nextPhase = ev.Kind == AuctionPrintKind.Opening
                 ? TradingPhase.Open
