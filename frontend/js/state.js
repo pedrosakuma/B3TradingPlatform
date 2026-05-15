@@ -254,6 +254,13 @@ export function clearAll() {
   state.phaseBySymbol.clear();
   state.phaseAtBySymbol.clear();
   state.auctionBySymbol.clear();
+  // Q1.4 (#256). Risk policy is per-session — the cap is sourced from
+  // the backend via `GET /policy/risk` on session start. Carrying a
+  // previous session's value across logout/reconnect risks validating
+  // the next trader against the wrong horizon, so reset to null and
+  // let the next loadRiskPolicy() refill (readers fall back to the
+  // documented 30d client-side default in the meantime).
+  state.riskPolicy = null;
   notify("all");
 }
 

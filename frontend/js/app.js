@@ -14,6 +14,7 @@ import * as ui from "./ui.js";
 import * as adminUi from "./adminUi.js";
 import * as botCredentialsUi from "./botCredentialsUi.js";
 import { FLAGS } from "./mdProtocol.js";
+import { applyRiskPolicyFetch } from "./riskPolicy.js";
 
 const SESSION_KEY = "b3tp.session";
 const MD_KEY = "b3tp.md";
@@ -261,26 +262,12 @@ function startSession(next) {
 // ticket validator's GTD horizon matches the backend cap. Failure is
 // silent (single console.warn) — the validator falls back to a 30-day
 // cap so the trader is never blocked by a slow/broken policy fetch.
-let riskPolicyWarned = false;
 async function loadRiskPolicy() {
   if (!session?.token) return;
-  try {
-    const policy = await getRiskPolicy(session.backend, session.token);
-    const days = Number(policy?.maxGtdHorizonDays);
-    if (Number.isFinite(days) && days > 0) {
-      state.setRiskPolicy({ maxGtdHorizonDays: days });
-      return;
-    }
-    if (!riskPolicyWarned) {
-      console.warn("risk-policy fetch returned malformed payload; using FE default", policy);
-      riskPolicyWarned = true;
-    }
-  } catch (err) {
-    if (!riskPolicyWarned) {
-      console.warn("risk-policy fetch failed; using FE default", err);
-      riskPolicyWarned = true;
-    }
-  }
+  await applyRiskPolicyFetch({
+    fetchPolicy: () => getRiskPolicy(session.backend, session.token),
+    setRiskPolicy: state.setRiskPolicy,
+  });
 }
 
 function scheduleExpiry() {

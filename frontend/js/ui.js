@@ -696,6 +696,15 @@ export function bindUi() {
 
   $("ticket-form").addEventListener("submit", (e) => {
     e.preventDefault();
+    // Q1.4 (#256). Re-validate against the live policy snapshot just
+    // before submit. The submit-disabled state is driven by the last
+    // input/change event + the riskPolicy slice notify, but a policy
+    // update that lands between the trader's last keystroke and the
+    // click could otherwise (a) silently block a now-valid GTD by
+    // leaving validationFailed set, or (b) let a now-over-cap GTD
+    // through. Running validation here closes that window.
+    const liveResult = refreshTicketValidation();
+    if (liveResult && liveResult.valid === false) return;
     const tifEl = $("ticket-tif");
     const type  = typeEl.value;
     const tif   = tifEl ? tifEl.value : "Day";
@@ -1324,7 +1333,7 @@ function renderGatewayPill() {
   el.title = tooltip;
 }
 
-function renderForSlice(slice) {
+export function renderForSlice(slice) {
   // state.clearAll() (logout / session expiry / WS "clear" frame)
   // notifies "all". The Order Detail modal is owned by ui and would
   // otherwise survive the state wipe — leaving the previous user's
@@ -1365,6 +1374,12 @@ function renderForSlice(slice) {
     renderTicketPhaseCoupling();
   }
   if (slice === "auction" || slice === "auctionPanelSymbol" || slice === "all") renderAuctionPanel();
+  // Q1.4 (#256). The risk-policy slice flips the GTD horizon used by
+  // validateTicketState, so a policy update must re-run ticket
+  // validation — otherwise a late-arriving fetch leaves the submit
+  // button in a stale enabled/disabled state until the trader nudges
+  // an input.
+  if (slice === "riskPolicy" || slice === "all") refreshTicketValidation();
 }
 
 // ── Stale-data overlay (T2) ────────────────────────────────────────
