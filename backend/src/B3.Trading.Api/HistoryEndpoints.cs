@@ -92,8 +92,17 @@ public static class HistoryEndpoints
             }
             else
             {
-                await store.FlushAsync(ct);
+                // Capture the boundary BEFORE the flush — IEventStore.CurrentSeq
+                // includes appends that have not yet hit disk, so reading it after
+                // FlushAsync allows a concurrent AppendCore (between the flush
+                // returning and CurrentSeq being read) to inflate snapshotSeq with
+                // a record that page 1 cannot see. That record's (LastSeq, ClOrdId)
+                // would sort above page 1's cursor anchor and be filtered out of
+                // every subsequent page forever. Capturing first and flushing after
+                // gives a stable frozen view: late appends get a seq > snapshotSeq
+                // and are intentionally invisible to this walk.
                 snapshotSeq = store.CurrentSeq;
+                await store.FlushAsync(ct);
             }
 
             var orders = await ProjectOrdersAsync(store, owner.Value, symbol, fromTs, toTs, snapshotSeq, ct);
