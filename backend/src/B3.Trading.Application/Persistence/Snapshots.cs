@@ -109,6 +109,16 @@ public sealed class PlatformSnapshot
     public List<PnlAvgCostSnapshot> PnlAvgCost { get; init; } = new();
 
     /// <summary>
+    /// Pass-3 review (#278) P1. Per-(end-client, symbol) "unknown
+    /// basis" qty rows seeded from a legacy <c>Positions</c> row whose
+    /// <c>AverageEntryPrice</c> was zero. Empty on snapshots
+    /// pre-dating the field; recovery code re-derives the set from
+    /// <see cref="Positions"/> in that case via
+    /// <c>PnlKeeper.SeedAvgCostFromLegacyPositions</c>.
+    /// </summary>
+    public List<PnlUnknownBasisSnapshot> PnlUnknownBasis { get; init; } = new();
+
+    /// <summary>
     /// Q2.4 (#271). Idempotence guard for the realized-P&amp;L
     /// projection — the set of <c>RealizedPnlEvent.ExecutionId</c>
     /// values already folded into <see cref="PnlRealizedByEndclientSymbolDay"/>.
@@ -312,6 +322,15 @@ public sealed record PnlAvgCostSnapshot(
     string Symbol,
     long NetQuantity,
     decimal AvgPrice);
+
+/// <summary>
+/// Pass-3 review (#278) P1. Persisted "unknown basis" qty row —
+/// see <see cref="PlatformSnapshot.PnlUnknownBasis"/>.
+/// </summary>
+public sealed record PnlUnknownBasisSnapshot(
+    string EndClientId,
+    string Symbol,
+    long NetQuantity);
 
 public sealed class ClOrdIdRegistrySnapshot
 {

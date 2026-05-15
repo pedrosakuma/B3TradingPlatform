@@ -282,16 +282,20 @@ public class PnlKeeperTests
         // zero AverageEntryPrice is degenerate: seeding it would
         // book the next sell as realized = sellPrice * qty against
         // a zero basis, surfacing phantom realized P&L on first
-        // close after restore. Guard skips the row so the keeper
-        // simply has no basis until a fresh fill establishes one.
+        // close after restore. Pass-3 (#278) tracks the qty as
+        // "unknown basis" instead of dropping it on the floor —
+        // GetAvgCost still returns null for the key (no usable
+        // basis), but ApplyFillToAvgCost realises 0 against the
+        // tracked unknown leg instead of opening a synthetic short
+        // at the sell price.
         var k = new PnlKeeper();
         k.Restore(
             new Dictionary<string, decimal>(),
             Array.Empty<PnlAvgCostSnapshot>());
         var positions = new[]
         {
-            new PositionSnapshot("alice", "PETR4", 100, 0m),  // zero basis, skipped
-            new PositionSnapshot("bob", "VALE3", -50, 0m),    // zero basis, skipped
+            new PositionSnapshot("alice", "PETR4", 100, 0m),  // zero basis, unknown
+            new PositionSnapshot("bob", "VALE3", -50, 0m),    // zero basis, unknown
             new PositionSnapshot("carol", "ITSA4", 75, 12m),  // valid basis, seeded
         };
 
@@ -299,15 +303,165 @@ public class PnlKeeperTests
         Assert.Equal(1, seeded);
         Assert.Null(k.GetAvgCost("alice", "PETR4"));
         Assert.Null(k.GetAvgCost("bob", "VALE3"));
+        Assert.Equal(100, k.GetUnknownBasisQty("alice", "PETR4"));
+        Assert.Equal(-50, k.GetUnknownBasisQty("bob", "VALE3"));
         var c = k.GetAvgCost("carol", "ITSA4")!;
         Assert.Equal(75, c.NetQuantity);
         Assert.Equal(12m, c.AvgPrice);
 
-        // The next sell on a skipped key opens fresh at the fill
-        // price (no pre-existing basis tracker entry → opening fill
-        // path), so realized = 0 — i.e. no phantom P&L is booked.
+        // The next sell on a tracked-unknown key realises 0 — it
+        // closes against the unknown leg, not against an invented
+        // basis. (Previously it would have opened a synthetic
+        // short at the sell price and surfaced phantom P&L on
+        // subsequent fills.)
         var realized = k.ApplyFillToAvgCost("alice", "PETR4", OrderSide.Sell, 50, 31m);
         Assert.Equal(0m, realized);
         Assert.Equal(0m, k.GetDayRealized("alice", "PETR4", Day));
+        Assert.Equal(50, k.GetUnknownBasisQty("alice", "PETR4"));
+        Assert.Null(k.GetAvgCost("alice", "PETR4"));
+    }
+
+    [Fact]
+    public void LegacyZeroBasisSnapshot_FirstSell_RealizesZero_NotPhantom()
+    {
+        // Sanity guard for the Pass-3 (#278) P1 fix. A legacy
+        // long position with no carried basis must NOT book any
+        // realized P&L on the first close — it closes against the
+        // unknown leg.
+        var k = new PnlKeeper();
+        k.SeedAvgCostFromLegacyPositions(new[]
+        {
+            new PositionSnapshot("alice", "PETR4", 100, 0m),
+        });
+
+        var realized = k.ApplyFillToAvgCost("alice", "PETR4", OrderSide.Sell, 40, 31m);
+        Assert.Equal(0m, realized);
+        Assert.Equal(60, k.GetUnknownBasisQty("alice", "PETR4"));
+    }
+
+    [Fact]
+    public void LegacyZeroBasisSnapshot_BuyAfterPartialSell_DoesNotRealizePhantom()
+    {
+        // Pass-3 (#278) P1 — sell partial → buy more → sell again.
+        // All fills against the unknown leg realise 0; only after
+        // the unknown leg goes flat does a real basis form, and
+        // only after that real basis forms can a close realise a
+        // non-zero spread.
+        var k = new PnlKeeper();
+        k.SeedAvgCostFromLegacyPositions(new[]
+        {
+            new PositionSnapshot("alice", "PETR4", 100, 0m),
+        });
+
+        Assert.Equal(0m, k.ApplyFillToAvgCost("alice", "PETR4", OrderSide.Sell, 30, 32m));
+        Assert.Equal(70, k.GetUnknownBasisQty("alice", "PETR4"));
+
+        // Same-side add to the unknown leg — still unknown, still 0.
+        Assert.Equal(0m, k.ApplyFillToAvgCost("alice", "PETR4", OrderSide.Buy, 20, 33m));
+        Assert.Equal(90, k.GetUnknownBasisQty("alice", "PETR4"));
+
+        // Sell back down — still unknown, still 0.
+        Assert.Equal(0m, k.ApplyFillToAvgCost("alice", "PETR4", OrderSide.Sell, 40, 34m));
+        Assert.Equal(50, k.GetUnknownBasisQty("alice", "PETR4"));
+
+        Assert.Null(k.GetAvgCost("alice", "PETR4"));
+        Assert.Equal(0m, k.GetDayRealized("alice", "PETR4", Day));
+    }
+
+    [Fact]
+    public void LegacyZeroBasisSnapshot_FullCloseAndReopen_EstablishesBasisFromFirstFreshFill()
+    {
+        // Pass-3 (#278) P1 — close to flat, then a new buy → next
+        // sell realises correctly using the fresh basis.
+        var k = new PnlKeeper();
+        k.SeedAvgCostFromLegacyPositions(new[]
+        {
+            new PositionSnapshot("alice", "PETR4", 100, 0m),
+        });
+
+        // Close the unknown leg fully — realise 0.
+        Assert.Equal(0m, k.ApplyFillToAvgCost("alice", "PETR4", OrderSide.Sell, 100, 31m));
+        Assert.Equal(0, k.GetUnknownBasisQty("alice", "PETR4"));
+        Assert.Null(k.GetAvgCost("alice", "PETR4"));
+
+        // Fresh open at a known price.
+        Assert.Equal(0m, k.ApplyFillToAvgCost("alice", "PETR4", OrderSide.Buy, 50, 28m));
+        var s = k.GetAvgCost("alice", "PETR4")!;
+        Assert.Equal(50, s.NetQuantity);
+        Assert.Equal(28m, s.AvgPrice);
+
+        // Now a sell at 30 realises (30-28)*40 = 80 against the fresh basis.
+        Assert.Equal(80m, k.ApplyFillToAvgCost("alice", "PETR4", OrderSide.Sell, 40, 30m));
+    }
+
+    [Fact]
+    public void LegacyZeroBasisSnapshot_SignFlip_TreatsResidualAsFreshOpen()
+    {
+        // Pass-3 (#278) P1 — long 100 unknown basis + sell 150 →
+        // realised 0 for the 100 closed against the unknown leg,
+        // residual 50 short opens at the fill price as a KNOWN
+        // basis. Next buy then realises against that fresh basis.
+        var k = new PnlKeeper();
+        k.SeedAvgCostFromLegacyPositions(new[]
+        {
+            new PositionSnapshot("alice", "PETR4", 100, 0m),
+        });
+
+        Assert.Equal(0m, k.ApplyFillToAvgCost("alice", "PETR4", OrderSide.Sell, 150, 31m));
+        Assert.Equal(0, k.GetUnknownBasisQty("alice", "PETR4"));
+        var s = k.GetAvgCost("alice", "PETR4")!;
+        Assert.Equal(-50, s.NetQuantity);
+        Assert.Equal(31m, s.AvgPrice);
+
+        // Buy back the 50 short @ 29 → short profit (31-29)*50 = 100.
+        Assert.Equal(100m, k.ApplyFillToAvgCost("alice", "PETR4", OrderSide.Buy, 50, 29m));
+    }
+
+    [Fact]
+    public void UnknownBasis_RoundTripsThroughSnapshotRestore()
+    {
+        // Pass-3 (#278) P1 — the unknown-basis set must be
+        // persisted alongside the avg-cost block so a snapshot+tail
+        // recovery doesn't re-skip and re-introduce the phantom-
+        // P&L bug on every restart. Mid-recovery state must match
+        // a single-pass recovery.
+        var src = new PnlKeeper();
+        src.SeedAvgCostFromLegacyPositions(new[]
+        {
+            new PositionSnapshot("alice", "PETR4", 100, 0m),
+            new PositionSnapshot("bob", "VALE3", -50, 0m),
+            new PositionSnapshot("carol", "ITSA4", 200, 12m), // known basis
+        });
+        // Mutate the unknown leg before snapshotting.
+        src.ApplyFillToAvgCost("alice", "PETR4", OrderSide.Sell, 30, 32m); // unknown 70
+
+        var avg = src.RawSnapshotAvgCost();
+        var unknown = src.RawSnapshotUnknownBasis();
+        var realized = src.RawSnapshotRealized();
+        var seen = src.RawSnapshotSeenIds();
+
+        var avgList = avg.Select(a => new PnlAvgCostSnapshot(a.EndClientId, a.Symbol, a.NetQuantity, a.AvgPrice));
+        var unknownList = unknown.Select(u => new PnlUnknownBasisSnapshot(u.EndClientId, u.Symbol, u.NetQuantity));
+        var realizedDict = realized.ToDictionary(
+            r => PnlKeeper.FormatRealizedKey(r.EndClientId, r.Symbol, r.Day),
+            r => r.Realized);
+
+        var dst = new PnlKeeper();
+        dst.Restore(realizedDict, avgList, seen, unknownList);
+
+        Assert.Equal(70, dst.GetUnknownBasisQty("alice", "PETR4"));
+        Assert.Equal(-50, dst.GetUnknownBasisQty("bob", "VALE3"));
+        Assert.Null(dst.GetAvgCost("alice", "PETR4"));
+        Assert.Null(dst.GetAvgCost("bob", "VALE3"));
+        var c = dst.GetAvgCost("carol", "ITSA4")!;
+        Assert.Equal(200, c.NetQuantity);
+        Assert.Equal(12m, c.AvgPrice);
+
+        // A fill on the restored unknown leg still realises 0 —
+        // i.e. the post-restore behaviour matches the live
+        // pre-snapshot state.
+        Assert.Equal(0m, dst.ApplyFillToAvgCost("alice", "PETR4", OrderSide.Sell, 70, 33m));
+        Assert.Equal(0, dst.GetUnknownBasisQty("alice", "PETR4"));
+        Assert.Null(dst.GetAvgCost("alice", "PETR4"));
     }
 }

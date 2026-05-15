@@ -124,6 +124,7 @@ public sealed class StateSnapshotter
         FeeSeenExecutionIds = _feeKeeper?.RawSnapshotSeenIds() ?? Array.Empty<string>(),
         PnlRealizedByEndclientSymbolDay = _pnlKeeper?.RawSnapshotRealized() ?? Array.Empty<PnlRealizedRaw>(),
         PnlAvgCost = _pnlKeeper?.RawSnapshotAvgCost() ?? Array.Empty<PnlAvgCostRaw>(),
+        PnlUnknownBasis = _pnlKeeper?.RawSnapshotUnknownBasis() ?? Array.Empty<PnlUnknownBasisRaw>(),
         PnlSeenExecutionIds = _pnlKeeper?.RawSnapshotSeenIds() ?? Array.Empty<string>(),
         UserBotCredentials = _userBotCredentials?.RawSnapshot() ?? Array.Empty<UserBotCredential>(),
         BotSessions = _userBotSessions?.RawSnapshot() ?? Array.Empty<BotSessionState>(),
@@ -232,6 +233,12 @@ public sealed class StateSnapshotter
             var a = raw.PnlAvgCost[i];
             pnlAvgCost.Add(new PnlAvgCostSnapshot(a.EndClientId, a.Symbol, a.NetQuantity, a.AvgPrice));
         }
+        var pnlUnknownBasis = new List<PnlUnknownBasisSnapshot>(raw.PnlUnknownBasis.Length);
+        for (var i = 0; i < raw.PnlUnknownBasis.Length; i++)
+        {
+            var u = raw.PnlUnknownBasis[i];
+            pnlUnknownBasis.Add(new PnlUnknownBasisSnapshot(u.EndClientId, u.Symbol, u.NetQuantity));
+        }
         var pnlSeen = new List<string>(raw.PnlSeenExecutionIds.Length);
         for (var i = 0; i < raw.PnlSeenExecutionIds.Length; i++)
             pnlSeen.Add(raw.PnlSeenExecutionIds[i]);
@@ -320,6 +327,7 @@ public sealed class StateSnapshotter
             FeeSeenExecutionIds = feeSeen,
             PnlRealizedByEndclientSymbolDay = pnlRealized,
             PnlAvgCost = pnlAvgCost,
+            PnlUnknownBasis = pnlUnknownBasis,
             PnlSeenExecutionIds = pnlSeen,
             UserBotCredentials = creds,
             BotSessions = sessions,
@@ -350,7 +358,7 @@ public sealed class StateSnapshotter
         _cash.Restore(snap.CashBalances);
         _cashKeeper?.Restore(snap.CashByEndclient);
         _feeKeeper?.Restore(snap.FeesByEndclientDay, snap.FeeSeenExecutionIds);
-        _pnlKeeper?.Restore(snap.PnlRealizedByEndclientSymbolDay, snap.PnlAvgCost, snap.PnlSeenExecutionIds);
+        _pnlKeeper?.Restore(snap.PnlRealizedByEndclientSymbolDay, snap.PnlAvgCost, snap.PnlSeenExecutionIds, snap.PnlUnknownBasis);
         // Pass-1 review (#278) P1#1. Legacy snapshots taken before
         // #271 deployed have Positions populated but PnlAvgCost empty.
         // Without this seed the next sell on a pre-existing position
@@ -359,7 +367,17 @@ public sealed class StateSnapshotter
         // so we reconstruct the basis from there; the seed is a
         // no-op when PnlAvgCost is already populated (current
         // snapshot format).
-        if (_pnlKeeper is not null && snap.PnlAvgCost.Count == 0 && snap.Positions.Count > 0)
+        //
+        // Pass-3 review (#278) P1. Also gated on PnlUnknownBasis being
+        // empty: a snapshot taken AFTER pass-3 carries the unknown-
+        // basis set explicitly, so we must not re-seed (re-seeding
+        // would be a no-op for non-zero basis rows but would
+        // re-discover the zero-basis rows and double-count the
+        // skipped_zero metric).
+        if (_pnlKeeper is not null
+            && snap.PnlAvgCost.Count == 0
+            && snap.PnlUnknownBasis.Count == 0
+            && snap.Positions.Count > 0)
         {
             _pnlKeeper.SeedAvgCostFromLegacyPositions(snap.Positions);
         }

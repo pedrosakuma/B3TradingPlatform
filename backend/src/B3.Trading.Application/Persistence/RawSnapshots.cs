@@ -85,6 +85,15 @@ public sealed class RawPlatformSnapshot
     public PnlAvgCostRaw[] PnlAvgCost { get; init; } = Array.Empty<PnlAvgCostRaw>();
 
     /// <summary>
+    /// Pass-3 review (#278) P1. Per-(end-client, symbol) "unknown
+    /// basis" qty rows — legacy positions for which the rehydrated
+    /// snapshot carried no usable avg price. Persisted so a
+    /// snapshot+tail recovery doesn't re-skip and re-introduce
+    /// phantom-P&amp;L on the next restart.
+    /// </summary>
+    public PnlUnknownBasisRaw[] PnlUnknownBasis { get; init; } = Array.Empty<PnlUnknownBasisRaw>();
+
+    /// <summary>
     /// Q2.4 (#271). Idempotence guard for <c>PnlKeeper.Apply</c>.
     /// </summary>
     public string[] PnlSeenExecutionIds { get; init; } = Array.Empty<string>();
@@ -177,6 +186,15 @@ public readonly record struct PnlRealizedRaw(string EndClientId, string Symbol, 
 /// in parallel with <see cref="B3.Trading.Application.PositionKeeper"/>.
 /// </summary>
 public readonly record struct PnlAvgCostRaw(string EndClientId, string Symbol, long NetQuantity, decimal AvgPrice);
+
+/// <summary>
+/// Pass-3 review (#278) P1. Raw lock-side capture of one
+/// (end-client, symbol) "unknown basis" qty row tracked by
+/// <see cref="B3.Trading.Application.PnlKeeper"/> after a legacy
+/// snapshot rehydration. Persisting this set keeps a snapshot+tail
+/// recovery from re-creating the phantom-P&amp;L bug on every restart.
+/// </summary>
+public readonly record struct PnlUnknownBasisRaw(string EndClientId, string Symbol, long NetQuantity);
 
 public readonly record struct ClOrdIdCounterRaw(string EndClientId, ulong PrefixIdx, long Counter);
 

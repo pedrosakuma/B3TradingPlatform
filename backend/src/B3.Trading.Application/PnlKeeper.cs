@@ -50,6 +50,23 @@ public sealed class PnlKeeper
     /// </summary>
     private readonly ConcurrentDictionary<(string EndClient, string Symbol), AvgCostState> _avgCost = new();
 
+    /// <summary>
+    /// Pass-3 review (#278) P1. Per-(end-client, symbol) net quantity
+    /// for positions whose basis is UNKNOWN — i.e. seeded from a legacy
+    /// <see cref="PositionSnapshot"/> row whose <c>AverageEntryPrice</c>
+    /// was zero (pre-#271 snapshot format). Keys here are mutually
+    /// exclusive with <see cref="_avgCost"/>: a key in this set has no
+    /// usable avg-price, so <see cref="ApplyFillToAvgCost"/> realises
+    /// 0 for any fill against it (no phantom P&amp;L from an invented
+    /// basis); fills only adjust the unknown qty until the position
+    /// goes flat (entry removed → next fresh fill establishes a real
+    /// basis via the normal opening path) or flips through zero (the
+    /// closing portion realises 0; the residual opens fresh at the
+    /// fill price as a real basis — matching the standard avg-cost
+    /// convention for sign flips on a known basis).
+    /// </summary>
+    private readonly ConcurrentDictionary<(string EndClient, string Symbol), long> _unknownBasisQty = new();
+
     private readonly ConcurrentDictionary<string, byte> _seenExecutionIds = new();
     private readonly ConcurrentDictionary<string, PendingReplaySynth> _pendingReplaySynths = new();
 
@@ -81,6 +98,16 @@ public sealed class PnlKeeper
 
     public AvgCostState? GetAvgCost(string endClient, string symbol) =>
         _avgCost.TryGetValue((endClient, symbol), out var s) ? s : null;
+
+    /// <summary>
+    /// Pass-3 review (#278) P1. Returns the net quantity carried as
+    /// "unknown basis" for the given key, or 0 when the key has either
+    /// a known basis or no position at all. Exposed for tests and for
+    /// observability — production code paths route through
+    /// <see cref="ApplyFillToAvgCost"/>.
+    /// </summary>
+    public long GetUnknownBasisQty(string endClient, string symbol) =>
+        _unknownBasisQty.TryGetValue((endClient, symbol), out var q) ? q : 0;
 
     /// <summary>
     /// Pure avg-cost realized-delta calculator. Public so the ER processor
@@ -163,6 +190,47 @@ public sealed class PnlKeeper
     {
         if (fillQuantity <= 0) return 0m;
         var key = (endClient, symbol);
+
+        // Pass-3 review (#278) P1. Unknown-basis path: legacy snapshot
+        // seeded a quantity but no usable avg price, so we cannot
+        // compute realized against an invented basis without surfacing
+        // phantom P&L. Realise 0 unconditionally and adjust the
+        // unknown qty by the fill (signed by side):
+        //   * if newQty == 0  → position is flat: drop the unknown
+        //     entry. The next fresh fill goes through the opening
+        //     branch below and establishes a real basis at its price.
+        //   * if newQty flips sign (e.g. legacy long 100 + sell 150
+        //     → short 50): the closing portion (|current|) realises 0
+        //     against the unknown basis; the residual (|newQty|)
+        //     opens fresh at the fill price as a KNOWN basis. This
+        //     matches the standard avg-cost convention for sign flips
+        //     on a known basis (Position.ApplyFill / ProjectAvgCost),
+        //     and is safe because the residual leg is fully attributable
+        //     to the current fill.
+        //   * otherwise (same direction, or shrink without flip):
+        //     update the unknown qty in place. No real basis is
+        //     formed yet — only a flat-then-reopen sequence resets
+        //     the basis to known.
+        if (_unknownBasisQty.TryGetValue(key, out var unknownQty))
+        {
+            var signedFill = side == OrderSide.Buy ? fillQuantity : -fillQuantity;
+            var newQty = unknownQty + signedFill;
+            if (newQty == 0)
+            {
+                _unknownBasisQty.TryRemove(key, out _);
+            }
+            else if (Math.Sign(newQty) != Math.Sign(unknownQty))
+            {
+                _unknownBasisQty.TryRemove(key, out _);
+                _avgCost[key] = new AvgCostState(newQty, fillPrice);
+            }
+            else
+            {
+                _unknownBasisQty[key] = newQty;
+            }
+            return 0m;
+        }
+
         if (!_avgCost.TryGetValue(key, out var current))
         {
             var signed = side == OrderSide.Buy ? fillQuantity : -fillQuantity;
@@ -170,7 +238,15 @@ public sealed class PnlKeeper
             return 0m;
         }
         var realized = ComputeRealizedDelta(current.NetQuantity, current.AvgPrice, side, fillQuantity, fillPrice);
-        _avgCost[key] = ProjectAvgCost(current, side, fillQuantity, fillPrice);
+        var projected = ProjectAvgCost(current, side, fillQuantity, fillPrice);
+        if (projected.NetQuantity == 0)
+        {
+            _avgCost.TryRemove(key, out _);
+        }
+        else
+        {
+            _avgCost[key] = projected;
+        }
         return realized;
     }
 
@@ -294,6 +370,30 @@ public sealed class PnlKeeper
         return trimmed;
     }
 
+    /// <summary>
+    /// Pass-3 review (#278) P1. Phase-1 (lock-side) capture of the
+    /// unknown-basis qty rows. Persisted alongside <see cref="RawSnapshotAvgCost"/>
+    /// so a snapshot+tail recovery doesn't lose the "this leg has no
+    /// usable basis" fact and re-seed the same degenerate position
+    /// from <see cref="PositionSnapshot"/> on every restore.
+    /// </summary>
+    public PnlUnknownBasisRaw[] RawSnapshotUnknownBasis()
+    {
+        var pairs = _unknownBasisQty.ToArray();
+        if (pairs.Length == 0) return Array.Empty<PnlUnknownBasisRaw>();
+        var buf = new PnlUnknownBasisRaw[pairs.Length];
+        var n = 0;
+        for (var i = 0; i < pairs.Length; i++)
+        {
+            if (pairs[i].Value == 0) continue;
+            buf[n++] = new PnlUnknownBasisRaw(pairs[i].Key.EndClient, pairs[i].Key.Symbol, pairs[i].Value);
+        }
+        if (n == buf.Length) return buf;
+        var trimmed = new PnlUnknownBasisRaw[n];
+        Array.Copy(buf, trimmed, n);
+        return trimmed;
+    }
+
     public string[] RawSnapshotSeenIds()
     {
         var ids = new string[_seenExecutionIds.Count];
@@ -312,12 +412,14 @@ public sealed class PnlKeeper
     public void Restore(
         IReadOnlyDictionary<string, decimal> realizedByKey,
         IEnumerable<PnlAvgCostSnapshot> avgCostRows,
-        IEnumerable<string>? seenExecutionIds = null)
+        IEnumerable<string>? seenExecutionIds = null,
+        IEnumerable<PnlUnknownBasisSnapshot>? unknownBasisRows = null)
     {
         ArgumentNullException.ThrowIfNull(realizedByKey);
         ArgumentNullException.ThrowIfNull(avgCostRows);
         _realizedByDay.Clear();
         _avgCost.Clear();
+        _unknownBasisQty.Clear();
         _seenExecutionIds.Clear();
         foreach (var kv in realizedByKey)
         {
@@ -326,6 +428,10 @@ public sealed class PnlKeeper
         }
         foreach (var row in avgCostRows)
             _avgCost[(row.EndClientId, row.Symbol)] = new AvgCostState(row.NetQuantity, row.AvgPrice);
+        if (unknownBasisRows is not null)
+            foreach (var row in unknownBasisRows)
+                if (row.NetQuantity != 0)
+                    _unknownBasisQty[(row.EndClientId, row.Symbol)] = row.NetQuantity;
         if (seenExecutionIds is not null)
             foreach (var id in seenExecutionIds)
                 _seenExecutionIds.TryAdd(id, 0);
@@ -364,17 +470,28 @@ public sealed class PnlKeeper
         foreach (var p in positions)
         {
             if (p.NetQuantity == 0) continue;
-            // Pass-2 review (#278) P1#2. A non-flat row with a zero
+            // Pass-3 review (#278) P1. A non-flat row with a zero
             // AverageEntryPrice is degenerate (legacy snapshots
             // produced before the position keeper started carrying
-            // basis): seeding it would book the next sell as
-            // realized = sellPrice * qty against a zero basis and
-            // surface phantom P&L on the first close after restore.
-            // Skip and surface the count via a dedicated metric so
-            // ops can flag snapshots that needed the guard.
+            // basis). Previously we simply skipped these rows, but
+            // PositionKeeper STILL holds the open leg — so the next
+            // sell against an existing long became a synthetic SHORT
+            // opening in PnlKeeper at the sell price, and subsequent
+            // fills realised phantom P&L against that invented basis.
+            //
+            // Track the qty as "unknown basis" instead. ApplyFillToAvgCost
+            // then realises 0 for any fill against the unknown leg
+            // (no phantom P&L), adjusts the unknown qty in place,
+            // drops the entry on flat (next fresh fill establishes a
+            // real basis), and treats sign-flips as residual-fresh-open
+            // at the fill price. The skipped_zero counter still bumps
+            // so ops can spot the legacy-recovery transition.
             if (p.AverageEntryPrice <= 0m)
             {
                 Observability.MetricsRegistry.PnlLegacySnapshotBasisSkippedZero.Add(1);
+                var unknownKey = (p.EndClientId, p.Symbol);
+                if (!_avgCost.ContainsKey(unknownKey))
+                    _unknownBasisQty.TryAdd(unknownKey, p.NetQuantity);
                 continue;
             }
             var key = (p.EndClientId, p.Symbol);
