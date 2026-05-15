@@ -263,6 +263,38 @@ public class FileEventStoreTests : IDisposable
         Assert.True(thrown, "Expected WalBackpressureException once channel is saturated.");
     }
 
+    [Fact]
+    public async Task FlushAsync_TwoConcurrentCallers_BothCompleteWithoutHanging()
+    {
+        // Regression: FlushBatch used to track only the LAST fence in
+        // a batch — two FlushAsync sentinels landing in the same group-
+        // commit would leave the FIRST caller's TCS uncompleted, hanging
+        // it until cancellation/timeout. With per-fence completion, both
+        // callers must return promptly even when the batcher coalesces
+        // both sentinels into one drain cycle.
+        var opts = OptsForTest();
+        // Force a wide group-commit window so both fences are very
+        // likely to land in the same batch.
+        opts.GroupCommitWindow = TimeSpan.FromMilliseconds(200);
+        opts.GroupCommitMaxRecords = 16;
+        await using var store = new FileEventStore(opts, NullLogger<FileEventStore>.Instance);
+
+        // Append a few records so the writer has buffered work to flush
+        // — exercises the post-batch flush path that completes fences.
+        for (var i = 0; i < 4; i++) store.Append(NewOrder(i));
+
+        // Cap the test at 5s; with the bug the first caller would hang
+        // until its CT expires (here we'd never set one) so the timeout
+        // is what makes the regression observable.
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var first = store.FlushAsync(timeout.Token).AsTask();
+        var second = store.FlushAsync(timeout.Token).AsTask();
+
+        await Task.WhenAll(first, second);
+        Assert.True(first.IsCompletedSuccessfully, "first FlushAsync must complete (was hanging on overwritten fence).");
+        Assert.True(second.IsCompletedSuccessfully, "second FlushAsync must complete.");
+    }
+
     private static OrderSubmittedEvent NewOrder(int i) => new()
     {
         ClOrdId = (ulong)(i + 1),

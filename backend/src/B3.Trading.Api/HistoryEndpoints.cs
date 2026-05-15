@@ -72,11 +72,35 @@ public static class HistoryEndpoints
             var owner = ResolveOwner(ctx, registry);
             var pageSize = ClampLimit(limit);
 
-            var orders = await ProjectOrdersAsync(store, owner.Value, symbol, fromTs, toTs, ct);
+            // Freeze the read view across the entire pagination walk.
+            // Order projections are mutable: an order returned on page 1
+            // can have its LastSeq advance (e.g. a new ER) before page 2
+            // is fetched, sliding it past the cursor anchor and silently
+            // dropping it from the result. Capturing snapshotSeq once on
+            // the first request and threading it through every subsequent
+            // page guarantees a stable, repeatable pagination — any WAL
+            // record with seq > snapshotSeq is invisible to the walk.
+            //
+            // Executions don't need this because their projection rows
+            // are immutable per-seq: a new ER can only land at a higher
+            // seq, and ApplyCursorAndPage already excludes seq >= cursor,
+            // so newcomers naturally fall outside the in-progress walk.
+            long snapshotSeq;
+            if (cursorState is { SnapshotSeq: > 0 })
+            {
+                snapshotSeq = cursorState.SnapshotSeq;
+            }
+            else
+            {
+                await store.FlushAsync(ct);
+                snapshotSeq = store.CurrentSeq;
+            }
+
+            var orders = await ProjectOrdersAsync(store, owner.Value, symbol, fromTs, toTs, snapshotSeq, ct);
             // Sort newest-first by the order's last touching seq (cursor anchor).
             orders.Sort(static (a, b) => b.LastSeq.CompareTo(a.LastSeq));
 
-            var page = ApplyCursorAndPage(orders, cursorState, pageSize, static x => (x.LastSeq, x.LastTs));
+            var page = ApplyCursorAndPage(orders, cursorState, pageSize, snapshotSeq, static x => (x.LastSeq, x.LastTs));
             var items = new List<OrderHistoryItemDto>(page.Items.Count);
             foreach (var p in page.Items) items.Add(p.ToDto());
 
@@ -105,7 +129,7 @@ public static class HistoryEndpoints
             var executions = await ProjectExecutionsAsync(store, owner.Value, symbol, fromTs, toTs, ct);
             executions.Sort(static (a, b) => b.Seq.CompareTo(a.Seq));
 
-            var page = ApplyCursorAndPage(executions, cursorState, pageSize, static x => (x.Seq, x.TimestampUtc));
+            var page = ApplyCursorAndPage(executions, cursorState, pageSize, snapshotSeq: 0, static x => (x.Seq, x.TimestampUtc));
             var items = new List<ExecutionHistoryItemDto>(page.Items.Count);
             foreach (var e in page.Items) items.Add(e.ToDto());
 
@@ -120,12 +144,15 @@ public static class HistoryEndpoints
     // -----------------------------------------------------------------
 
     private static async Task<List<OrderProjection>> ProjectOrdersAsync(
-        IEventStore store, string owner, string? symbol, DateTimeOffset from, DateTimeOffset to, CancellationToken ct)
+        IEventStore store, string owner, string? symbol,
+        DateTimeOffset from, DateTimeOffset to, long snapshotSeq, CancellationToken ct)
     {
-        // Force the WAL writer to drain so freshly-appended events are
-        // visible on disk: ReadFromAsync only reads persisted segments.
-        // Cheap when nothing is pending.
-        await store.FlushAsync(ct);
+        // The endpoint already drained the writer + captured snapshotSeq
+        // for first-page requests so the read view is frozen for the
+        // entire pagination walk. On subsequent pages the snapshotSeq
+        // comes from the cursor; the on-disk WAL is at least as fresh as
+        // when we captured it, but anything appended past snapshotSeq is
+        // explicitly ignored below.
         var byClOrdId = new Dictionary<ulong, OrderProjection>();
         // Side-table: every ClOrdId we have ever seen on the WAL, mapped
         // to its owner + symbol. Needed because ER events do not carry
@@ -133,9 +160,27 @@ public static class HistoryEndpoints
         // time (not submit). Tracking firm-wide is fine — we filter to
         // the requested owner only when materialising the projection.
         var ownerByClOrdId = new Dictionary<ulong, (string Owner, string Symbol)>();
+        // Tracks which projections have at least one event in [from,to].
+        // We must apply ALL events with ts <= to to project the correct
+        // state-at-`to` (a partial fill at 10:00 followed by a full fill
+        // at 12:00 with to=11:00 must surface the partial — ignoring
+        // post-`to` events keeps the result a slice, not a final snapshot).
+        // Pre-`from` events are still applied so the seed state is right;
+        // we just don't flag them as in-window.
+        var hadEventInWindow = new HashSet<ulong>();
 
         await foreach (var (seq, evt) in store.ReadFromAsync(0, ct))
         {
+            // Snapshot fence — see endpoint comment. snapshotSeq==0 means
+            // the caller did not capture one (only the executions path
+            // takes that branch and never calls this method).
+            if (snapshotSeq > 0 && seq > snapshotSeq) break;
+            // Future events relative to the requested window must NOT
+            // mutate state — they would over-advance the projection past
+            // the slice the caller asked for.
+            if (evt.TimestampUtc > to) continue;
+            var inWindow = evt.TimestampUtc >= from;
+
             switch (evt)
             {
                 case OrderSubmittedEvent o:
@@ -143,6 +188,7 @@ public static class HistoryEndpoints
                     if (!OwnerMatches(o.EndClientId, owner)) break;
                     if (symbol is not null && !o.Symbol.Equals(symbol, StringComparison.Ordinal)) break;
                     byClOrdId[o.ClOrdId] = OrderProjection.FromSubmit(seq, o);
+                    if (inWindow) hadEventInWindow.Add(o.ClOrdId);
                     break;
 
                 case OrderReplaceRequestedEvent rr:
@@ -154,40 +200,78 @@ public static class HistoryEndpoints
                     if (!OwnerMatches(rr.EndClientId, owner)) break;
                     if (symbol is not null && !rr.Symbol.Equals(symbol, StringComparison.Ordinal)) break;
                     byClOrdId[rr.NewClOrdId] = OrderProjection.FromReplace(seq, rr);
+                    if (inWindow) hadEventInWindow.Add(rr.NewClOrdId);
                     break;
 
                 case ExecutionReportReceivedEvent er:
-                    // ER may target either ClOrdId directly (New, Fill, etc.)
-                    // or via OrigClOrdId (cancel-replace ack lands on the
-                    // new ID but mutates the original). Mirror the live
-                    // processor's resolution exactly.
+                    Enum.TryParse<ExecKind>(er.ExecKind, ignoreCase: true, out var kind);
+                    if (kind == ExecKind.Replaced && er.OrigClOrdId != 0)
+                    {
+                        // Mirror ExecutionReportProcessor.ApplyReplaceAccepted
+                        // + Order.HydrateReplacement: the original goes
+                        // terminal (Replaced) and the new ClOrdID is
+                        // hydrated from the ER's leaves/cum baseline so
+                        // subsequent fill ERs (which arrive under the
+                        // new ID with OrigClOrdId=0) advance from the
+                        // correct starting point. Without this the new
+                        // row would stay at PendingNew forever — the
+                        // venue never issues a separate New ER for the
+                        // replacement.
+                        if (byClOrdId.TryGetValue(er.OrigClOrdId, out var origProj))
+                        {
+                            origProj.ApplyReplacedTerminal(seq, er);
+                            if (inWindow) hadEventInWindow.Add(er.OrigClOrdId);
+                        }
+                        if (byClOrdId.TryGetValue(er.ClOrdId, out var newProj))
+                        {
+                            newProj.HydrateFromReplaceEr(seq, er);
+                            if (inWindow) hadEventInWindow.Add(er.ClOrdId);
+                        }
+                        break;
+                    }
+
+                    // Non-Replaced ER: may target either ClOrdId directly
+                    // (New, Fill, etc.) or via OrigClOrdId (cancel ack
+                    // lands on the cancel-side ID — never carried by an
+                    // OrderSubmittedEvent — but mutates the original).
                     var targetId = er.ClOrdId;
                     if (er.OrigClOrdId != 0 && byClOrdId.ContainsKey(er.OrigClOrdId))
                         targetId = er.OrigClOrdId;
                     if (byClOrdId.TryGetValue(targetId, out var proj))
+                    {
                         proj.ApplyEr(seq, er);
+                        if (inWindow) hadEventInWindow.Add(targetId);
+                    }
                     break;
 
                 case OrderStaledEvent os:
                     if (byClOrdId.TryGetValue(os.ClOrdId, out var staleProj))
+                    {
                         staleProj.ApplyStaled(seq, os);
+                        if (inWindow) hadEventInWindow.Add(os.ClOrdId);
+                    }
                     break;
 
                 case OrderStaleClearedEvent osc:
                     if (byClOrdId.TryGetValue(osc.ClOrdId, out var clearProj))
+                    {
                         clearProj.ApplyStaleCleared(seq, osc);
+                        if (inWindow) hadEventInWindow.Add(osc.ClOrdId);
+                    }
                     break;
             }
         }
 
-        // Keep only the orders whose last-touching event falls inside
-        // the requested window. Sub-window orders that are still
-        // working would not appear — that matches the spec (history is
-        // a slice of WAL events, not "all currently open").
+        // Include an order iff at least one of its events fell inside
+        // the requested window. State is projected as of `to` (post-`to`
+        // events were skipped above), so the surfaced snapshot is the
+        // order's state at the end of the window — even when the order's
+        // most recent event predates `from`, as long as something inside
+        // [from,to] touched it.
         var result = new List<OrderProjection>(byClOrdId.Count);
         foreach (var p in byClOrdId.Values)
         {
-            if (p.LastTs < from || p.LastTs > to) continue;
+            if (!hadEventInWindow.Contains(p.ClOrdId)) continue;
             result.Add(p);
         }
         return result;
@@ -253,7 +337,7 @@ public static class HistoryEndpoints
     // -----------------------------------------------------------------
 
     private static PageResult<T> ApplyCursorAndPage<T>(
-        List<T> sortedDesc, CursorState? cursor, int pageSize,
+        List<T> sortedDesc, CursorState? cursor, int pageSize, long snapshotSeq,
         Func<T, (long Seq, DateTimeOffset Ts)> anchor)
     {
         // Items are sorted seq-DESC. The cursor anchors the LAST item we
@@ -286,7 +370,10 @@ public static class HistoryEndpoints
         if (hasMore && last is not null)
         {
             var a = anchor(last);
-            next = EncodeCursor(new CursorState(a.Seq, a.Ts));
+            // snapshotSeq travels with the cursor so every page in the
+            // walk reads the same frozen view. Executions pass 0 here
+            // and ProjectExecutionsAsync ignores the field.
+            next = EncodeCursor(new CursorState(a.Seq, a.Ts) { SnapshotSeq = snapshotSeq });
         }
         return new PageResult<T>(taken, next);
     }
@@ -484,6 +571,47 @@ public static class HistoryEndpoints
             LastTs = er.TimestampUtc;
         }
 
+        /// <summary>
+        /// Applied to the ORIGINAL order on a Replaced ER. Mirrors
+        /// <c>ExecutionReportProcessor.ApplyReplaceAccepted</c> +
+        /// <c>Order.MarkReplaced</c>: terminalize the original at
+        /// <see cref="OrderStatus.Replaced"/> without disturbing its
+        /// historical leaves/cum (the ER's leaves/cum belong to the
+        /// new ClOrdID, not the original — they describe the venue's
+        /// post-replacement state, which the original order never owns).
+        /// </summary>
+        public void ApplyReplacedTerminal(long seq, ExecutionReportReceivedEvent er)
+        {
+            Status = OrderStatus.Replaced;
+            // MarkReplaced clears any advisory stale (slice 1 of #132);
+            // mirror that here so the projection matches the runtime.
+            IsStale = false;
+            StaleReason = null;
+            StaledAtUtc = null;
+            LastSeq = seq;
+            LastTs = er.TimestampUtc;
+        }
+
+        /// <summary>
+        /// Applied to the NEW ClOrdID's projection on a Replaced ER.
+        /// Mirrors <c>Order.HydrateReplacement</c>: copy the venue's
+        /// leaves/cum baseline and derive status (Filled when leaves==0,
+        /// PartiallyFilled when cum>0, otherwise Working — never PendingNew
+        /// because the venue has already accepted the replacement).
+        /// Subsequent ERs targeting the new ClOrdID flow through
+        /// <see cref="ApplyEr"/> and accumulate from this baseline.
+        /// </summary>
+        public void HydrateFromReplaceEr(long seq, ExecutionReportReceivedEvent er)
+        {
+            LeavesQuantity = er.LeavesQuantity;
+            CumulativeQuantity = er.CumulativeQuantity;
+            Status = er.LeavesQuantity == 0
+                ? OrderStatus.Filled
+                : (er.CumulativeQuantity > 0 ? OrderStatus.PartiallyFilled : OrderStatus.Working);
+            LastSeq = seq;
+            LastTs = er.TimestampUtc;
+        }
+
         public void ApplyStaled(long seq, OrderStaledEvent os)
         {
             IsStale = true;
@@ -558,6 +686,12 @@ public static class HistoryEndpoints
         // keys via [JsonPropertyName] keeps the wire format compact.
         [System.Text.Json.Serialization.JsonPropertyName("seq")] public long Seq { get; init; } = Seq;
         [System.Text.Json.Serialization.JsonPropertyName("ts")] public DateTimeOffset Ts { get; init; } = Ts;
+        // Q2.1 (#268). Pagination snapshot anchor for /orders/history.
+        // Captured on the first request (no cursor) and threaded through
+        // every subsequent page so the walk reads a frozen WAL view.
+        // Default 0 means "no snapshot" — old cursors (pre-fix) and the
+        // executions endpoint both deserialise/encode that way.
+        [System.Text.Json.Serialization.JsonPropertyName("snap")] public long SnapshotSeq { get; init; }
     }
 
     private sealed record PageResult<T>(IReadOnlyList<T> Items, string? NextCursor);
