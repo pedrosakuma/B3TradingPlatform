@@ -276,36 +276,45 @@ public sealed class ExecutionReportProcessor
                     // _margin.OnExecution + fan-out below.
                     if (_feeCalculator is not null && _feeKeeper is not null)
                     {
-                        var breakdown = _feeCalculator.Compute(order.Symbol, order.Side, delta, lastPx);
                         var nowUtc = eventTimestampUtc ?? DateTimeOffset.UtcNow;
-                        var feeEvt = new Persistence.FeeAccruedEvent
-                        {
-                            ClOrdId = lookupId,
-                            ExecutionId = lookupId.ToString(System.Globalization.CultureInfo.InvariantCulture)
-                                + ":" + order.CumulativeQuantity.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                            EndClientId = owner.Value,
-                            Symbol = order.Symbol,
-                            Side = order.Side.ToString(),
-                            FillQuantity = delta,
-                            FillPrice = lastPx,
-                            Notional = delta * lastPx,
-                            Brokerage = breakdown.Brokerage,
-                            Emolumentos = breakdown.Emolumentos,
-                            Liquidacao = breakdown.Liquidacao,
-                            Total = breakdown.Total,
-                            TimestampUtc = nowUtc,
-                        };
-                        var keeper = _feeKeeper;
+                        var executionId = lookupId.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                            + ":" + order.CumulativeQuantity.ToString(System.Globalization.CultureInfo.InvariantCulture);
                         if (isReplay || _dispatcher is null)
                         {
                             // Replay (or test path with no dispatcher):
-                            // apply directly. FeeKeeper dedupes on
-                            // ExecutionId so a subsequent
-                            // FeeAccruedEvent replay is a no-op.
-                            keeper.Apply(feeEvt);
+                            // defer the synth as a pending entry. If a
+                            // durable FeeAccruedEvent follows in the
+                            // WAL, Apply(FeeAccruedEvent) will supersede
+                            // it (and emit reconciled=true). If not —
+                            // i.e. the true ER-then-crash window —
+                            // PersistenceRecovery.FinalizeReplay
+                            // materialises it with the current
+                            // FeeOptions snapshot (known limitation
+                            // documented above).
+                            _feeKeeper.RegisterPendingReplaySynth(
+                                executionId, owner.Value, order.Symbol, order.Side,
+                                delta, lastPx, nowUtc, lookupId);
                         }
                         else
                         {
+                            var breakdown = _feeCalculator.Compute(order.Symbol, order.Side, delta, lastPx);
+                            var feeEvt = new Persistence.FeeAccruedEvent
+                            {
+                                ClOrdId = lookupId,
+                                ExecutionId = executionId,
+                                EndClientId = owner.Value,
+                                Symbol = order.Symbol,
+                                Side = order.Side.ToString(),
+                                FillQuantity = delta,
+                                FillPrice = lastPx,
+                                Notional = delta * lastPx,
+                                Brokerage = breakdown.Brokerage,
+                                Emolumentos = breakdown.Emolumentos,
+                                Liquidacao = breakdown.Liquidacao,
+                                Total = breakdown.Total,
+                                TimestampUtc = nowUtc,
+                            };
+                            var keeper = _feeKeeper;
                             try
                             {
                                 _dispatcher.Dispatch(feeEvt, () => keeper.Apply(feeEvt));

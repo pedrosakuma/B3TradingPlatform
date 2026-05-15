@@ -259,7 +259,8 @@ public class FeeKeeperRecoveryTests : IDisposable
         var replayer = new EventReplayer(book, ownership, killSwitch,
             new SymbolHaltService(), new SessionPhaseService(),
             processor, algos, clOrdIds, new AlgoIdRegistry(),
-            feeKeeper: keeper);
+            feeKeeper: keeper,
+            feeCalculator: calc);
         return (snapshotter, replayer);
     }
 

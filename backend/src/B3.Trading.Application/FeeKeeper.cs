@@ -31,6 +31,30 @@ public sealed class FeeKeeper
 {
     private readonly ConcurrentDictionary<(string EndClient, DateOnly Day), decimal> _totals = new();
     private readonly ConcurrentDictionary<string, byte> _seenExecutionIds = new();
+    /// <summary>
+    /// Pass-3 review (#277). Holds ER-synthesised fee placeholders
+    /// during a replay run. The WAL sequencing guarantees a durable
+    /// <see cref="FeeAccruedEvent"/> (if it exists) follows its ER, so
+    /// we defer the synth until the entire WAL has been drained and
+    /// then materialise only those without a matching durable event —
+    /// the actual crash-window cases. The reconciled path keeps the
+    /// persisted breakdown (computed under the original
+    /// <c>FeeOptions</c> snapshot), so a hot-reload between the
+    /// original run and recovery cannot silently change historical
+    /// fees.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, PendingReplaySynth> _pendingReplaySynths = new();
+
+    /// <summary>
+    /// Captured inputs to the deterministic fee calculator for a
+    /// fill ER observed during replay. Materialised at
+    /// <see cref="FinalizeReplay"/> if no durable
+    /// <see cref="FeeAccruedEvent"/> arrived in the meantime.
+    /// </summary>
+    private readonly record struct PendingReplaySynth(
+        string EndClientId, string Symbol, B3.Trading.Domain.OrderSide Side,
+        long FillQuantity, decimal FillPrice, DateTimeOffset TimestampUtc,
+        ulong ClOrdId);
 
     public decimal GetDayTotal(string endClient, DateOnly day) =>
         _totals.TryGetValue((endClient, day), out var t) ? t : 0m;
@@ -44,11 +68,87 @@ public sealed class FeeKeeper
     public bool Apply(FeeAccruedEvent evt)
     {
         ArgumentNullException.ThrowIfNull(evt);
+        // A durable fee event always wins over the ER-synth placeholder:
+        // remove any pending entry for this ExecutionId so
+        // FinalizeReplay won't materialise it. The persisted breakdown
+        // becomes authoritative even if FeeOptions changed between runs.
+        // When this fires it means the ER replay (or live ER apply on
+        // some future code path that pre-registers) had queued a synth
+        // that we just superseded — emit reconciled=true so ops can
+        // distinguish the harmless replay-ordering case from a true
+        // crash-window materialisation (reconciled=false in
+        // FinalizeReplay).
+        if (_pendingReplaySynths.TryRemove(evt.ExecutionId, out _))
+        {
+            Observability.MetricsRegistry.FeeReplaySynth.Add(1,
+                new KeyValuePair<string, object?>("reconciled", true));
+        }
         if (!_seenExecutionIds.TryAdd(evt.ExecutionId, 0)) return false;
         var day = DateOnly.FromDateTime(evt.TimestampUtc.UtcDateTime);
         var key = (evt.EndClientId, day);
         _totals.AddOrUpdate(key, evt.Total, (_, current) => current + evt.Total);
         return true;
+    }
+
+    /// <summary>
+    /// Pass-3 review (#277). Called from
+    /// <see cref="ExecutionReportProcessor.Apply"/> on the replay path
+    /// (isReplay=true or no dispatcher) instead of applying a synthetic
+    /// fee directly. The synth is deferred so that a durable
+    /// <see cref="FeeAccruedEvent"/> arriving later in the same replay
+    /// can supersede it via <see cref="Apply(FeeAccruedEvent)"/> —
+    /// preserving the original breakdown (and the original FeeOptions
+    /// snapshot) under historical recovery.
+    ///
+    /// If the ExecutionId is already in the seen-set (snapshot+tail
+    /// case where the snapshot already recorded this fee) the
+    /// registration is a no-op — the totals are already correct.
+    /// </summary>
+    public void RegisterPendingReplaySynth(
+        string executionId, string endClientId, string symbol,
+        B3.Trading.Domain.OrderSide side, long fillQuantity, decimal fillPrice,
+        DateTimeOffset timestampUtc, ulong clOrdId)
+    {
+        ArgumentNullException.ThrowIfNull(executionId);
+        if (_seenExecutionIds.ContainsKey(executionId)) return;
+        _pendingReplaySynths.TryAdd(executionId,
+            new PendingReplaySynth(endClientId, symbol, side, fillQuantity, fillPrice, timestampUtc, clOrdId));
+    }
+
+    /// <summary>
+    /// Pass-3 review (#277). Materialises any pending replay synths
+    /// for which no durable <see cref="FeeAccruedEvent"/> arrived
+    /// during recovery — i.e. the true ER-append-then-crash window.
+    /// Called by <see cref="Infrastructure.Persistence.PersistenceRecovery"/>
+    /// at the end of its WAL drain. Each surviving entry is folded
+    /// into totals via <paramref name="calculator"/> using the current
+    /// <c>FeeOptions</c> snapshot — the documented limitation of the
+    /// synth path (a future FeeRateChangedEvent with seq markers would
+    /// close it). Increments
+    /// <see cref="MetricsRegistry.FeeReplaySynth"/> tagged
+    /// <c>reconciled=false</c> for each materialised row;
+    /// reconciled-true increments are emitted on the
+    /// <see cref="Apply(FeeAccruedEvent)"/> side instead (see that
+    /// path).
+    /// </summary>
+    public int FinalizeReplay(IFeeCalculator calculator)
+    {
+        ArgumentNullException.ThrowIfNull(calculator);
+        if (_pendingReplaySynths.IsEmpty) return 0;
+        var materialised = 0;
+        foreach (var kv in _pendingReplaySynths.ToArray())
+        {
+            if (!_pendingReplaySynths.TryRemove(kv.Key, out var p)) continue;
+            if (!_seenExecutionIds.TryAdd(kv.Key, 0)) continue;
+            var breakdown = calculator.Compute(p.Symbol, p.Side, p.FillQuantity, p.FillPrice);
+            var day = DateOnly.FromDateTime(p.TimestampUtc.UtcDateTime);
+            var key = (p.EndClientId, day);
+            _totals.AddOrUpdate(key, breakdown.Total, (_, current) => current + breakdown.Total);
+            Observability.MetricsRegistry.FeeReplaySynth.Add(1,
+                new KeyValuePair<string, object?>("reconciled", false));
+            materialised++;
+        }
+        return materialised;
     }
 
     /// <summary>

@@ -127,17 +127,16 @@ public class ExecutionReportProcessorFeeTests
     }
 
     [Fact]
-    public void ReplayPath_IsReplayTrue_DoesNotAppendFeeEvent_ButUpdatesKeeperDirectly()
+    public void ReplayPath_IsReplayTrue_DefersSynthUntilFinalize_NoWalAppend()
     {
-        // EventReplayer invokes Apply with isReplay: true so the fee
-        // event is NOT re-appended to the WAL. But the keeper IS
-        // updated directly so a missing FeeAccruedEvent in the WAL
-        // (process crashed in the window between the ER append and
-        // the Fee append) still recovers correctly. If the
-        // FeeAccruedEvent IS in the WAL too, EventReplayer's switch
-        // case calls FeeKeeper.Apply and the seen-set dedupes — no
-        // double-count.
-        var (proc, _, store, keeper, ownership, book, _, _) = Build();
+        // Pass-3 review fix. On the replay path the processor MUST NOT
+        // (a) append a FeeAccruedEvent to the WAL nor (b) eagerly apply
+        // a synth to the keeper. Instead it registers a pending synth
+        // that's only materialised by FinalizeReplay if no durable
+        // FeeAccruedEvent superseded it during the replay drain. This
+        // keeps persisted breakdowns authoritative when FeeOptions is
+        // hot-reloaded between runs.
+        var (proc, _, store, keeper, ownership, book, calc, _) = Build();
         var owner = new EndClientId("alice");
         var order = new Order(2UL, owner, "PETR4", 1UL, OrderSide.Buy, OrderType.Limit, 100, 1_000m);
         book.TryAdd(order);
@@ -148,18 +147,27 @@ public class ExecutionReportProcessorFeeTests
 
         Assert.Empty(store.Recorded);
         var day = DateOnly.FromDateTime(DateTime.UtcNow);
-        // 100k notional → brokerage 50 + emol 32.50 + liq 27.50 = 110
+        // Before FinalizeReplay: pending, not yet folded.
+        Assert.Equal(0m, keeper.GetDayTotal("alice", day));
+
+        // After FinalizeReplay: synth materialises (no durable event
+        // arrived → crash-window path). 100k notional → 110.
+        var materialised = keeper.FinalizeReplay(calc);
+        Assert.Equal(1, materialised);
         Assert.Equal(110m, keeper.GetDayTotal("alice", day));
     }
 
     [Fact]
-    public void ReplayPath_FeeEventReplayedAfterErSynth_DoesNotDoubleCount()
+    public void ReplayPath_DurableFeeEventSupersedesPendingSynth_PersistedValueWins()
     {
-        // Defense in depth: simulate the normal recovery path where the
-        // ER replay synth applies a fee, and then EventReplayer hits
-        // the FeeAccruedEvent and forwards it to FeeKeeper.Apply. The
-        // ExecutionId-based seen-set must dedupe the second call.
-        var (proc, _, _, keeper, ownership, book, _, _) = Build();
+        // Defense in depth: the WAL ordering guarantees a durable
+        // FeeAccruedEvent (if present) follows its ER. On replay the ER
+        // queues a pending synth; the durable event then arrives via
+        // Apply(FeeAccruedEvent) which removes the pending and applies
+        // the PERSISTED breakdown. Even if FeeOptions changed between
+        // runs, the historical total stays anchored to what was written
+        // — that's the whole point of the durable event.
+        var (proc, _, _, keeper, ownership, book, calc, _) = Build();
         var owner = new EndClientId("alice");
         var order = new Order(5UL, owner, "PETR4", 1UL, OrderSide.Buy, OrderType.Limit, 100, 1_000m);
         book.TryAdd(order);
@@ -168,11 +176,10 @@ public class ExecutionReportProcessorFeeTests
         proc.Apply(5UL, ExecKind.Fill, leaves: 0, cumQty: 100, lastQty: 100, lastPx: 1_000m,
             rejectReason: null, origClOrdId: 0, fanOut: null, isReplay: true);
 
-        var day = DateOnly.FromDateTime(DateTime.UtcNow);
-        var beforeReplayFeeEvt = keeper.GetDayTotal("alice", day);
-
-        // Replay the FeeAccruedEvent that the ER synth would have
-        // produced. ExecutionId formula must match what the synth used.
+        // Persisted breakdown deliberately uses a DIFFERENT total from
+        // what the current calculator would produce — proves the
+        // persisted value wins on reconciliation.
+        var persistedTotal = 77.77m;
         var replayedFee = new FeeAccruedEvent
         {
             ClOrdId = 5UL,
@@ -184,15 +191,22 @@ public class ExecutionReportProcessorFeeTests
             FillPrice = 1_000m,
             Notional = 100_000m,
             Brokerage = 50m,
-            Emolumentos = 32.50m,
-            Liquidacao = 27.50m,
-            Total = 110m,
+            Emolumentos = 20m,
+            Liquidacao = 7.77m,
+            Total = persistedTotal,
             TimestampUtc = DateTimeOffset.UtcNow,
         };
         var applied = keeper.Apply(replayedFee);
 
-        Assert.False(applied, "FeeKeeper.Apply must dedupe on ExecutionId");
-        Assert.Equal(beforeReplayFeeEvt, keeper.GetDayTotal("alice", day));
+        Assert.True(applied, "Persisted fee event must fold its breakdown — pending synth removed, not deduped.");
+        var day = DateOnly.FromDateTime(replayedFee.TimestampUtc.UtcDateTime);
+        Assert.Equal(persistedTotal, keeper.GetDayTotal("alice", day));
+
+        // FinalizeReplay must NOT add the synth on top — pending was
+        // already cleared by the reconciliation.
+        var materialised = keeper.FinalizeReplay(calc);
+        Assert.Equal(0, materialised);
+        Assert.Equal(persistedTotal, keeper.GetDayTotal("alice", day));
     }
 
     [Fact]

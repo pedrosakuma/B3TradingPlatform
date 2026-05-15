@@ -376,6 +376,7 @@ public sealed class EventReplayer
     private readonly GtdExpirationScheduler? _gtdScheduler;
     private readonly CashKeeper? _cashKeeper;
     private readonly FeeKeeper? _feeKeeper;
+    private readonly IFeeCalculator? _feeCalculator;
 
     public EventReplayer(
         WorkingOrderBook orders,
@@ -393,7 +394,8 @@ public sealed class EventReplayer
         IUserBotOrderMappingRegistry? userBotMappings = null,
         GtdExpirationScheduler? gtdScheduler = null,
         CashKeeper? cashKeeper = null,
-        FeeKeeper? feeKeeper = null)
+        FeeKeeper? feeKeeper = null,
+        IFeeCalculator? feeCalculator = null)
     {
         _orders = orders;
         _ownership = ownership;
@@ -411,6 +413,24 @@ public sealed class EventReplayer
         _gtdScheduler = gtdScheduler;
         _cashKeeper = cashKeeper;
         _feeKeeper = feeKeeper;
+        _feeCalculator = feeCalculator;
+    }
+
+    /// <summary>
+    /// Q2.3 (#270) pass-3 review. Called by
+    /// <see cref="PersistenceRecovery"/> after the WAL drain completes
+    /// to materialise any deferred fee synths (ER-fill events that
+    /// were not paired with a durable
+    /// <see cref="Application.Persistence.FeeAccruedEvent"/> — the true
+    /// crash-window cases). No-op when fees aren't wired (legacy test
+    /// configs without a calculator). Returns the number of synths
+    /// materialised so the recovery driver can log a warning when this
+    /// fires above zero.
+    /// </summary>
+    public int FinalizeReplay()
+    {
+        if (_feeKeeper is null || _feeCalculator is null) return 0;
+        return _feeKeeper.FinalizeReplay(_feeCalculator);
     }
 
     public void Apply(WalEvent evt)
