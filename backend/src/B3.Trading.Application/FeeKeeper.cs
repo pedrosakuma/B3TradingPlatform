@@ -53,8 +53,7 @@ public sealed class FeeKeeper
     /// </summary>
     private readonly record struct PendingReplaySynth(
         string EndClientId, string Symbol, B3.Trading.Domain.OrderSide Side,
-        long FillQuantity, decimal FillPrice, DateTimeOffset TimestampUtc,
-        ulong ClOrdId);
+        long FillQuantity, decimal FillPrice, DateTimeOffset TimestampUtc);
 
     public decimal GetDayTotal(string endClient, DateOnly day) =>
         _totals.TryGetValue((endClient, day), out var t) ? t : 0m;
@@ -107,12 +106,12 @@ public sealed class FeeKeeper
     public void RegisterPendingReplaySynth(
         string executionId, string endClientId, string symbol,
         B3.Trading.Domain.OrderSide side, long fillQuantity, decimal fillPrice,
-        DateTimeOffset timestampUtc, ulong clOrdId)
+        DateTimeOffset timestampUtc)
     {
         ArgumentNullException.ThrowIfNull(executionId);
         if (_seenExecutionIds.ContainsKey(executionId)) return;
         _pendingReplaySynths.TryAdd(executionId,
-            new PendingReplaySynth(endClientId, symbol, side, fillQuantity, fillPrice, timestampUtc, clOrdId));
+            new PendingReplaySynth(endClientId, symbol, side, fillQuantity, fillPrice, timestampUtc));
     }
 
     /// <summary>

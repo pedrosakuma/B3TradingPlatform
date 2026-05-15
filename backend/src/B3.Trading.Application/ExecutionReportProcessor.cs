@@ -293,7 +293,7 @@ public sealed class ExecutionReportProcessor
                             // documented above).
                             _feeKeeper.RegisterPendingReplaySynth(
                                 executionId, owner.Value, order.Symbol, order.Side,
-                                delta, lastPx, nowUtc, lookupId);
+                                delta, lastPx, nowUtc);
                         }
                         else
                         {
