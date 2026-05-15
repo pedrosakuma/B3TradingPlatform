@@ -167,10 +167,12 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             ClOrdID = new UpModels.ClOrdID(order.ClOrdId),
             SecurityId = order.SecurityId,
             Side = order.Side == OrderSide.Buy ? UpModels.Side.Buy : UpModels.Side.Sell,
-            OrderType = order.Type == OrderType.Limit ? UpModels.OrderType.Limit : UpModels.OrderType.Market,
+            OrderType = MapOrderType(order.Type),
             Price = order.Price,
+            StopPrice = order.StopPrice,
             OrderQty = (ulong)order.Quantity,
-            TimeInForce = UpModels.TimeInForce.Day,
+            TimeInForce = MapTimeInForce(order.TimeInForce),
+            ExpireDate = order.GoodTillDate,
         };
 
         return SendAsync(req.ClOrdID.Value, OrderEntryLatencyProbe.OpSubmit,
@@ -195,7 +197,15 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             ct => _client.CancelAsync(req, ct), cancellationToken);
     }
 
-    public Task CancelReplaceAsync(Order original, ulong newClOrdId, long newQuantity, decimal? newPrice, CancellationToken cancellationToken)
+    public Task CancelReplaceAsync(
+        Order original,
+        ulong newClOrdId,
+        long newQuantity,
+        decimal? newPrice,
+        TimeInForce? requestedTimeInForce,
+        decimal? requestedStopPrice,
+        DateTimeOffset? requestedGoodTillDate,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(original);
         if (newClOrdId == 0)
@@ -203,16 +213,30 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         if (newQuantity < 0)
             throw new ArgumentOutOfRangeException(nameof(newQuantity));
 
+        // Q1.1 (#253). Merge requested overrides with the original's
+        // values so the venue sees a coherent ReplaceOrderRequest. The
+        // domain helper enforces the invariants (StopPrice required iff
+        // Stop*; GoodTillDate required iff TIF==GTD; auto-clear when
+        // TIF moves away from GTD). Any violation throws ArgumentException,
+        // which the caller (OrderModifyService) treats as a gateway-side
+        // failure and rolls back the same way it does any other replace
+        // dispatch failure.
+        var (effTif, effStop, effGtd) = Order.MergeReplacementOptionals(
+            original.Type, original.TimeInForce, original.StopPrice, original.GoodTillDate,
+            requestedTimeInForce, requestedStopPrice, requestedGoodTillDate);
+
         var req = new UpModels.ReplaceOrderRequest
         {
             ClOrdID = new UpModels.ClOrdID(newClOrdId),
             OrigClOrdID = new UpModels.ClOrdID(original.ClOrdId),
             SecurityId = original.SecurityId,
             Side = original.Side == OrderSide.Buy ? UpModels.Side.Buy : UpModels.Side.Sell,
-            OrderType = original.Type == OrderType.Limit ? UpModels.OrderType.Limit : UpModels.OrderType.Market,
+            OrderType = MapOrderType(original.Type),
             Price = newPrice,
+            StopPrice = effStop,
             OrderQty = (ulong)newQuantity,
-            TimeInForce = UpModels.TimeInForce.Day,
+            TimeInForce = MapTimeInForce(effTif),
+            ExpireDate = effGtd,
         };
 
         return SendAsync(newClOrdId, OrderEntryLatencyProbe.OpReplace,
@@ -248,6 +272,38 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             new KeyValuePair<string, object?>("firm", _firmId),
             new KeyValuePair<string, object?>("op", op));
     }
+
+    /// <summary>
+    /// Q1.1 (#253). Domain → SDK <see cref="UpModels.OrderType"/> mapping
+    /// covering the full B3 order surface exposed at v0. Internal so the
+    /// gateway tests can pin the table without going through reflection
+    /// on the SDK's private encoder.
+    /// </summary>
+    internal static UpModels.OrderType MapOrderType(OrderType type) => type switch
+    {
+        OrderType.Limit => UpModels.OrderType.Limit,
+        OrderType.Market => UpModels.OrderType.Market,
+        OrderType.StopLoss => UpModels.OrderType.StopLoss,
+        OrderType.StopLimit => UpModels.OrderType.StopLimit,
+        OrderType.MarketWithLeftover => UpModels.OrderType.MarketWithLeftoverAsLimit,
+        _ => throw new ArgumentOutOfRangeException(nameof(type), type, "Unmapped Domain.OrderType."),
+    };
+
+    /// <summary>
+    /// Q1.1 (#253). Domain → SDK <see cref="UpModels.TimeInForce"/> mapping
+    /// covering all 7 v0 values.
+    /// </summary>
+    internal static UpModels.TimeInForce MapTimeInForce(TimeInForce tif) => tif switch
+    {
+        TimeInForce.Day => UpModels.TimeInForce.Day,
+        TimeInForce.IOC => UpModels.TimeInForce.ImmediateOrCancel,
+        TimeInForce.FOK => UpModels.TimeInForce.FillOrKill,
+        TimeInForce.GTC => UpModels.TimeInForce.GoodTillCancel,
+        TimeInForce.GTD => UpModels.TimeInForce.GoodTillDate,
+        TimeInForce.AtClose => UpModels.TimeInForce.AtTheClose,
+        TimeInForce.GoodForAuction => UpModels.TimeInForce.GoodForAuction,
+        _ => throw new ArgumentOutOfRangeException(nameof(tif), tif, "Unmapped Domain.TimeInForce."),
+    };
 
     // The IEntryPointClient submit-side surface is unused on the real adapter
     // (OrdersEndpoints calls IExchangeGateway directly). We implement it to

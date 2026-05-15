@@ -36,7 +36,7 @@ public class EntryPointGatewayAndRouterTests
         var gateway = new EntryPointClientGateway(client, "FIRM-A");
         var original = new Order(100UL, new EndClientId("alice"), "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m);
 
-        await gateway.CancelReplaceAsync(original, 101UL, 200, 30m, CancellationToken.None);
+        await gateway.CancelReplaceAsync(original, 101UL, 200, 30m, null, null, null, CancellationToken.None);
 
         var sent = Assert.Single(client.SubmittedReplaces);
         Assert.Equal(100UL, sent.OriginalClOrdId);

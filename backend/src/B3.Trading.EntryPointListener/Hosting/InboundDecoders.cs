@@ -43,6 +43,11 @@ internal static class InboundDecoders
             OrdType = msg.OrdType,
             OrderQty = (ulong)msg.OrderQty,
             PriceMantissa = msg.Price.Mantissa,
+            // Q1.1 (#253) — additional surface fields plumbed for
+            // Stop/StopLimit + GTD + non-Day TIF support.
+            TimeInForce = msg.TimeInForce,
+            StopPxMantissa = msg.StopPx.Mantissa,
+            ExpireDateRaw = msg.ExpireDate ?? 0,
         };
         return true;
     }
@@ -99,6 +104,23 @@ internal readonly struct DecodedNewOrderSingle
     public OrdType OrdType { get; init; }
     public ulong OrderQty { get; init; }
     public long? PriceMantissa { get; init; }
+
+    /// <summary>Q1.1 (#253). SBE wire byte for time-in-force.</summary>
+    public TimeInForce TimeInForce { get; init; }
+
+    /// <summary>
+    /// Q1.1 (#253). PriceOptional mantissa for the stop trigger; null
+    /// when the wire field was the SBE null sentinel. Same scaling as
+    /// <see cref="PriceMantissa"/>.
+    /// </summary>
+    public long? StopPxMantissa { get; init; }
+
+    /// <summary>
+    /// Q1.1 (#253). Raw SBE <c>ExpireDate</c> (<c>ushort</c>, 0 = null).
+    /// Encoded as days since 1970-01-01 by B3 convention. Decoded into a
+    /// <see cref="DateTimeOffset"/> at the dispatch boundary.
+    /// </summary>
+    public ushort ExpireDateRaw { get; init; }
 }
 
 /// <summary>

@@ -36,7 +36,13 @@ public sealed record OrderDto(
     int? AlgoSliceSeq = null,
     bool IsStale = false,
     string? StaleReason = null,
-    DateTimeOffset? StaledAtUtc = null);
+    DateTimeOffset? StaledAtUtc = null,
+    /// <summary>Q1.1 (#253). Time-in-force; defaults to <c>"Day"</c>.</summary>
+    string TimeInForce = "Day",
+    /// <summary>Q1.1 (#253). Trigger price for StopLoss/StopLimit; null otherwise.</summary>
+    decimal? StopPrice = null,
+    /// <summary>Q1.1 (#253). Expiry timestamp for GTD; null otherwise.</summary>
+    DateTimeOffset? GoodTillDate = null);
 
 public sealed record PositionDto(
     string Symbol,
@@ -102,7 +108,8 @@ public static class DtoMappings
         o.ClOrdId.ToString(), o.Symbol, o.SecurityId, o.Side.ToString(), o.Type.ToString(),
         o.Quantity, o.LeavesQuantity, o.CumulativeQuantity, o.Price, o.Status.ToString(),
         o.ParentAlgoId?.ToString(), o.AlgoSliceSeq,
-        o.IsStale, o.StaleReason, o.StaledAtUtc);
+        o.IsStale, o.StaleReason, o.StaledAtUtc,
+        o.TimeInForce.ToString(), o.StopPrice, o.GoodTillDate);
 
     public static PositionDto ToDto(this Position p) => new(p.Symbol, p.NetQuantity, p.AverageEntryPrice);
 

@@ -71,7 +71,7 @@ public class UnavailableExchangeGatewayTests
     {
         var gw = new UnavailableExchangeGateway();
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            gw.CancelReplaceAsync(MakeOrder(), 2UL, 200, 31m, default));
+            gw.CancelReplaceAsync(MakeOrder(), 2UL, 200, 31m, null, null, null, default));
     }
 }
 

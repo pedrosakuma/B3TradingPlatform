@@ -463,7 +463,8 @@ public sealed class ExecutionReportProcessor
         try
         {
             newOrder = Order.HydrateReplacement(
-                origOrder, newClOrdId, intent.NewQuantity, intent.NewPrice, erLeaves, erCum);
+                origOrder, newClOrdId, intent.NewQuantity, intent.NewPrice, erLeaves, erCum,
+                intent.RequestedTimeInForce, intent.RequestedStopPrice, intent.RequestedGoodTillDate);
         }
         catch (Exception ex)
         {
@@ -482,10 +483,11 @@ public sealed class ExecutionReportProcessor
         }
 
         // 3) Margin commit: rebalance to venue-confirmed remaining.
-        //    For Buy + Limit + cash, that's intent.NewPrice * leaves;
+        //    For Buy + margin-bearing type (Limit / StopLimit /
+        //    MarketWithLeftover) + cash, that's intent.NewPrice * leaves;
         //    everything else is zero (the coordinator no-ops on 0).
         var confirmedRemaining = (intent.Side == OrderSide.Buy
-                                  && intent.Type == OrderType.Limit
+                                  && intent.Type.IsMarginBearing()
                                   && intent.NewPrice is { } px
                                   && erLeaves > 0)
             ? px * erLeaves

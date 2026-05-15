@@ -207,6 +207,9 @@ public sealed class WorkingOrderBook
                 IsStale = o.IsStale,
                 StaleReason = o.StaleReason,
                 StaledAtUtc = o.StaledAtUtc,
+                TimeInForce = o.TimeInForce.ToString(),
+                StopPrice = o.StopPrice,
+                GoodTillDate = o.GoodTillDate,
             };
         }
     }
@@ -250,10 +253,15 @@ public sealed class WorkingOrderBook
             var side = Enum.Parse<OrderSide>(s.Side);
             var type = Enum.Parse<OrderType>(s.Type);
             var status = Enum.Parse<OrderStatus>(s.Status);
+            // Q1.1 (#253): older snapshots default to "Day" via the
+            // OrderSnapshot record's init default, so a missing field
+            // round-trips through Enum.Parse cleanly.
+            var tif = Enum.Parse<TimeInForce>(s.TimeInForce);
             _orders[s.ClOrdId] = Order.Hydrate(s.ClOrdId, owner, s.Symbol, s.SecurityId, side, type,
                 s.Quantity, s.Price, s.LeavesQuantity, s.CumulativeQuantity, status, s.FirmId,
                 s.ParentAlgoId, s.AlgoSliceSeq,
-                isStale: s.IsStale, staleReason: s.StaleReason, staledAtUtc: s.StaledAtUtc);
+                isStale: s.IsStale, staleReason: s.StaleReason, staledAtUtc: s.StaledAtUtc,
+                timeInForce: tif, stopPrice: s.StopPrice, goodTillDate: s.GoodTillDate);
             var firmSet = _byFirm.GetOrAdd(s.FirmId, static _ => new ConcurrentDictionary<ulong, byte>());
             firmSet.TryAdd(s.ClOrdId, 0);
             var ownerSet = _byOwner.GetOrAdd(s.EndClientId, static _ => new ConcurrentDictionary<ulong, byte>());

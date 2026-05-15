@@ -161,6 +161,25 @@ public sealed record OrderSnapshot(
     public string? StaleReason { get; init; }
 
     public DateTimeOffset? StaledAtUtc { get; init; }
+
+    /// <summary>
+    /// Q1.1 (#253). Time-in-force at submit time. Defaults to
+    /// <c>"Day"</c> so older snapshots without the field hydrate with
+    /// the implicit "Day" semantics they actually carried.
+    /// </summary>
+    public string TimeInForce { get; init; } = nameof(B3.Trading.Domain.TimeInForce.Day);
+
+    /// <summary>
+    /// Q1.1 (#253). Trigger price for StopLoss/StopLimit; <c>null</c>
+    /// otherwise. Older snapshots default to <c>null</c>.
+    /// </summary>
+    public decimal? StopPrice { get; init; }
+
+    /// <summary>
+    /// Q1.1 (#253). Expiry timestamp for GTD; <c>null</c> otherwise.
+    /// Older snapshots default to <c>null</c>.
+    /// </summary>
+    public DateTimeOffset? GoodTillDate { get; init; }
 }
 
 /// <summary>

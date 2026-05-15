@@ -55,9 +55,17 @@ public sealed class EntryPointClientGateway : IExchangeGateway
             cancellationToken);
     }
 
-    public Task CancelReplaceAsync(Order original, ulong newClOrdId, long newQuantity, decimal? newPrice, CancellationToken cancellationToken)
+    public Task CancelReplaceAsync(
+        Order original, ulong newClOrdId, long newQuantity, decimal? newPrice,
+        TimeInForce? requestedTimeInForce, decimal? requestedStopPrice, DateTimeOffset? requestedGoodTillDate,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(original);
+        // Legacy adapter: OrderCancelReplaceRequest predates Q1.1 and
+        // does not carry TIF / StopPrice / GoodTillDate over the wire.
+        // The Q1.1 modify pipeline targets the B3EntryPointClientGateway
+        // (real adapter); this path is retained for the older
+        // IEntryPointClient seam used by tests and the demo driver.
         return _client.SubmitCancelReplaceAsync(
             new OrderCancelReplaceRequest(
                 original.ClOrdId, newClOrdId, original.SecurityId,

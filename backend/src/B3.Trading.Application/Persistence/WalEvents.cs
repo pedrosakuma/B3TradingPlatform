@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using B3.Trading.Domain;
 
 namespace B3.Trading.Application.Persistence;
 
@@ -78,6 +79,32 @@ public sealed record OrderSubmittedEvent : WalEvent
     /// matching the manual-order semantics they actually carried.
     /// </summary>
     public BotOrderMapping? BotMapping { get; init; }
+
+    /// <summary>
+    /// Q1.1 (#253). Time-in-force at submit time. Defaults to
+    /// <c>"Day"</c> so older WAL segments without the field deserialise
+    /// with the implicit "Day" semantics they actually carried (the
+    /// gateway hardcoded TIF=Day before this slice). Stored as the
+    /// enum name to keep the wire format stable across future
+    /// renumberings of <see cref="Domain.TimeInForce"/>.
+    /// </summary>
+    public string TimeInForce { get; init; } = nameof(B3.Trading.Domain.TimeInForce.Day);
+
+    /// <summary>
+    /// Q1.1 (#253). Trigger price for <see cref="Domain.OrderType.StopLoss"/> /
+    /// <see cref="Domain.OrderType.StopLimit"/>. <c>null</c> for every other
+    /// type. Older WAL segments without the field deserialise as
+    /// <c>null</c>, matching the no-stop-orders semantics they carried.
+    /// </summary>
+    public decimal? StopPrice { get; init; }
+
+    /// <summary>
+    /// Q1.1 (#253). Expiry timestamp for <see cref="Domain.TimeInForce.GTD"/>.
+    /// <c>null</c> for every other TIF. Older WAL segments without the
+    /// field deserialise as <c>null</c>, matching the no-GTD semantics
+    /// they carried.
+    /// </summary>
+    public DateTimeOffset? GoodTillDate { get; init; }
 }
 
 /// <summary>
@@ -144,6 +171,19 @@ public sealed record OrderReplaceRequestedEvent : WalEvent
     public decimal? NewPrice { get; init; }
     public ulong? ParentAlgoId { get; init; }
     public int? AlgoSliceSeq { get; init; }
+
+    // Q1.1 (#253) — optional modify-pipeline overrides for the three
+    // Q1.1 fields. Null defaults so deserializing pre-Q1.1 WAL payloads
+    // (which never carried these properties) hydrates as "no override
+    // requested" → HydrateReplacement inherits everything from the
+    // original Order. Distinct names (Requested*) avoid ambiguity with
+    // the hydrated Order's TimeInForce/StopPrice/GoodTillDate fields.
+    // TIF is stored as the enum name (string) to mirror
+    // <see cref="OrderSubmittedEvent.TimeInForce"/> and stay stable
+    // across enum renumberings.
+    public string? RequestedTimeInForce { get; init; }
+    public decimal? RequestedStopPrice { get; init; }
+    public DateTimeOffset? RequestedGoodTillDate { get; init; }
 }
 
 /// <summary>

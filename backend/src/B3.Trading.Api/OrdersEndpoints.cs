@@ -34,6 +34,13 @@ public static class OrdersEndpoints
                 return Results.BadRequest(new { error = $"invalid side '{req.Side}'" });
             if (!Enum.TryParse<OrderType>(req.Type, ignoreCase: true, out var type))
                 return Results.BadRequest(new { error = $"invalid type '{req.Type}'" });
+            // Q1.1 (#253). Optional TIF (default Day); reject malformed
+            // before allocating a ClOrdID so the bad request never enters
+            // the WAL pipeline.
+            var tif = TimeInForce.Day;
+            if (!string.IsNullOrWhiteSpace(req.TimeInForce)
+                && !Enum.TryParse<TimeInForce>(req.TimeInForce, ignoreCase: true, out tif))
+                return Results.BadRequest(new { error = $"invalid timeInForce '{req.TimeInForce}'" });
 
             // SecurityId resolution: explicit non-zero in the payload
             // wins (preserves the conformance contract). Otherwise look
@@ -49,7 +56,10 @@ public static class OrdersEndpoints
 
             var result = await submitter.SubmitAsync(new OrderSubmissionRequest(
                 owner, firm, req.Symbol, securityId, side, type,
-                req.Quantity, req.Price, OrderSubmissionSource.Manual), ct);
+                req.Quantity, req.Price, OrderSubmissionSource.Manual,
+                TimeInForce: tif,
+                StopPrice: req.StopPrice,
+                GoodTillDate: req.GoodTillDate), ct);
 
             return result.Kind switch
             {
@@ -89,9 +99,25 @@ public static class OrdersEndpoints
             if (!ulong.TryParse(clOrdId, out var clOrdIdU))
                 return Results.NotFound();
 
+            // Q1.1 (#253). Optional TIF (null = no change) — parse as
+            // string + case-insensitive enum to mirror POST exactly,
+            // since the host does not register JsonStringEnumConverter
+            // and would otherwise force REST callers to send the
+            // numeric enum value over JSON.
+            TimeInForce? tif = null;
+            if (!string.IsNullOrWhiteSpace(req.TimeInForce))
+            {
+                if (!Enum.TryParse<TimeInForce>(req.TimeInForce, ignoreCase: true, out var parsed))
+                    return Results.BadRequest(new { error = $"invalid timeInForce '{req.TimeInForce}'" });
+                tif = parsed;
+            }
+
             var owner = ResolveOwner(ctx, registry);
             var result = await modifier.ModifyAsync(
-                new OrderModifyRequest(owner, clOrdIdU, req.Quantity, req.Price), ct);
+                new OrderModifyRequest(
+                    owner, clOrdIdU, req.Quantity, req.Price,
+                    tif, req.StopPrice, req.GoodTillDate),
+                ct);
 
             return result.Kind switch
             {
@@ -178,9 +204,24 @@ public sealed record SubmitOrderRequest(
     string Side,
     string Type,
     long Quantity,
-    decimal? Price);
+    decimal? Price,
+    /// <summary>Q1.1 (#253). Optional; defaults to <c>"Day"</c>.</summary>
+    string? TimeInForce = null,
+    /// <summary>Q1.1 (#253). Required for <c>StopLoss</c>/<c>StopLimit</c>.</summary>
+    decimal? StopPrice = null,
+    /// <summary>Q1.1 (#253). Required when <c>TimeInForce == "GTD"</c>.</summary>
+    DateTimeOffset? GoodTillDate = null);
 
 public sealed record ModifyOrderRequest(
     long Quantity,
-    decimal? Price);
+    decimal? Price,
+    /// <summary>Q1.1 (#253). Optional override; null = keep original. Accepts
+    /// the case-insensitive <see cref="TimeInForce"/> name (e.g. <c>"GTD"</c>)
+    /// — mirrors the POST submit contract since the host does not register
+    /// <c>JsonStringEnumConverter</c>.</summary>
+    string? TimeInForce = null,
+    /// <summary>Q1.1 (#253). Optional override; null = keep original. Required when modifying into <c>StopLoss</c>/<c>StopLimit</c> — but OrderType is not modifiable, so in practice only meaningful for orders that already are stop orders.</summary>
+    decimal? StopPrice = null,
+    /// <summary>Q1.1 (#253). Optional override; null = keep original (or auto-cleared when TIF is moved away from <c>GTD</c>). Required when changing TIF to <c>GTD</c>.</summary>
+    DateTimeOffset? GoodTillDate = null);
 

@@ -121,4 +121,12 @@ public sealed record OrderReplacementIntent(
     decimal? NewPrice,
     string FirmId,
     ulong? ParentAlgoId,
-    int? AlgoSliceSeq);
+    int? AlgoSliceSeq,
+    // Q1.1 (#253). Optional modify-pipeline overrides. Null = inherit
+    // the original Order's value at HydrateReplacement time; non-null
+    // = override. CommitReplace passes these through Order.HydrateReplacement
+    // so the replacement Order carries either the new requested value
+    // or the original, as decided by the modify request.
+    TimeInForce? RequestedTimeInForce = null,
+    decimal? RequestedStopPrice = null,
+    DateTimeOffset? RequestedGoodTillDate = null);

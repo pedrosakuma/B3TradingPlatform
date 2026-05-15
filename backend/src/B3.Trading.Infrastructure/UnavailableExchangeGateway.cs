@@ -27,6 +27,9 @@ public sealed class UnavailableExchangeGateway : IExchangeGateway
     public Task CancelAsync(Order order, ulong newClOrdId, CancellationToken cancellationToken) =>
         throw new InvalidOperationException(Reason);
 
-    public Task CancelReplaceAsync(Order original, ulong newClOrdId, long newQuantity, decimal? newPrice, CancellationToken cancellationToken) =>
+    public Task CancelReplaceAsync(
+        Order order, ulong newClOrdId, long newQuantity, decimal? newPrice,
+        TimeInForce? requestedTimeInForce, decimal? requestedStopPrice, DateTimeOffset? requestedGoodTillDate,
+        CancellationToken cancellationToken) =>
         throw new InvalidOperationException(Reason);
 }

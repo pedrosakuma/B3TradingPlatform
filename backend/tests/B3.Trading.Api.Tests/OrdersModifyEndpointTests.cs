@@ -107,6 +107,75 @@ public class OrdersModifyEndpointTests
         Assert.Equal(HttpStatusCode.Conflict, second.StatusCode);
     }
 
+    [Fact]
+    public async Task PUT_orders_TimeInForceAsString_AcceptsCaseInsensitive()
+    {
+        using var f = new TestAppFactory();
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var posted = await PostOrder(http, token, qty: 100, price: 30m);
+        var origAck = await posted.Content.ReadFromJsonAsync<OrderAck>();
+
+        var future = DateTimeOffset.UtcNow.AddDays(7);
+        var req = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origAck!.ClOrdId}")
+        {
+            Content = JsonContent.Create(new
+            {
+                Quantity = 200,
+                Price = 30m,
+                TimeInForce = "gtd", // lowercase string — must parse to TimeInForce.GTD
+                GoodTillDate = future,
+            }),
+        };
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var put = await http.SendAsync(req);
+        var body = await put.Content.ReadAsStringAsync();
+
+        Assert.True(put.StatusCode == HttpStatusCode.Accepted, $"Expected 202, got {put.StatusCode}: {body}");
+    }
+
+    [Fact]
+    public async Task PUT_orders_InvalidTimeInForceString_Returns400_WithReason()
+    {
+        using var f = new TestAppFactory();
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var posted = await PostOrder(http, token, qty: 100, price: 30m);
+        var origAck = await posted.Content.ReadFromJsonAsync<OrderAck>();
+
+        var req = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origAck!.ClOrdId}")
+        {
+            Content = JsonContent.Create(new { Quantity = 200, Price = 30m, TimeInForce = "Garbage" }),
+        };
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var put = await http.SendAsync(req);
+
+        Assert.Equal(HttpStatusCode.BadRequest, put.StatusCode);
+        var body = await put.Content.ReadAsStringAsync();
+        Assert.Contains("timeInForce", body, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Garbage", body);
+    }
+
+    [Fact]
+    public async Task PUT_orders_OmittedTimeInForce_TreatedAsNoChange()
+    {
+        using var f = new TestAppFactory();
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var posted = await PostOrder(http, token, qty: 100, price: 30m);
+        var origAck = await posted.Content.ReadFromJsonAsync<OrderAck>();
+
+        // Body literally omits TimeInForce — must accept and not blow up.
+        var req = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origAck!.ClOrdId}")
+        {
+            Content = JsonContent.Create(new { Quantity = 200, Price = 30m }),
+        };
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var put = await http.SendAsync(req);
+
+        Assert.Equal(HttpStatusCode.Accepted, put.StatusCode);
+    }
+
     private static async Task<HttpResponseMessage> PostOrder(
         HttpClient http, string token, int qty, decimal price, string side = "Buy")
     {

@@ -8,6 +8,11 @@ using B3.Trading.Domain;
 using B3.Trading.EntryPointListener.Framing;
 using Microsoft.Extensions.Logging;
 
+// Q1.1 (#253). Both SBE V6 and Domain expose a `TimeInForce` type;
+// alias them to disambiguate references inside this file.
+using DomainTif = B3.Trading.Domain.TimeInForce;
+using SbeTif = B3.Entrypoint.Fixp.Sbe.V6.TimeInForce;
+
 namespace B3.Trading.EntryPointListener.Hosting;
 
 /// <summary>
@@ -129,11 +134,16 @@ internal sealed class FixpOrderAdapter
             return;
         }
 
-        // 2. Validate side/ordType up-front so a malformed wire byte is
-        //    a clean BMR rather than a generic BadRequest from the
-        //    pipeline. Only the LIMIT/MARKET subset is supported by the
-        //    domain model in v0; everything else is rejected.
-        if (!TryMapSide(decoded.Side, out var side) || !TryMapOrdType(decoded.OrdType, out var type))
+        // 2. Validate side/ordType + TIF up-front so a malformed wire
+        //    byte is a clean BMR rather than a generic BadRequest from
+        //    the pipeline. Stop variants and the full TIF set are
+        //    accepted at the wire (Q1.1 / #253) — domain-side cross-
+        //    field invariants (StopPrice required for Stop*; ExpireDate
+        //    required for GTD) are checked inside the Order ctor and
+        //    bubble back up as BadRequest below.
+        if (!TryMapSide(decoded.Side, out var side)
+            || !TryMapOrdType(decoded.OrdType, out var type)
+            || !TryMapTimeInForce(decoded.TimeInForce, out var tif))
         {
             await WriteBusinessMessageRejectAsync(stream,
                 MessageType.NewOrderSingle, refSeqNum, externalClOrdId,
@@ -159,6 +169,15 @@ internal sealed class FixpOrderAdapter
         decimal? price = decoded.PriceMantissa is { } m
             ? m / (decimal)PriceOptional.Multiplier
             : null;
+        // Q1.1 (#253) — StopPx and ExpireDate are optional on the wire.
+        // SBE encodes ExpireDate as ushort days since 1970-01-01 with 0
+        // as the null sentinel.
+        decimal? stopPrice = decoded.StopPxMantissa is { } sm
+            ? sm / (decimal)PriceOptional.Multiplier
+            : null;
+        DateTimeOffset? goodTillDate = decoded.ExpireDateRaw == 0
+            ? null
+            : DateTimeOffset.FromUnixTimeSeconds(decoded.ExpireDateRaw * 86400L);
 
         var req = new OrderSubmissionRequest(
             Owner: owner,
@@ -168,7 +187,10 @@ internal sealed class FixpOrderAdapter
             Side: side,
             Type: type,
             Quantity: qty,
-            Price: price)
+            Price: price,
+            TimeInForce: tif,
+            StopPrice: stopPrice,
+            GoodTillDate: goodTillDate)
         {
             BotOrigin = new BotOrigin(scope.Principal.CredentialId, externalClOrdId),
         };
@@ -313,13 +335,40 @@ internal sealed class FixpOrderAdapter
         }
     }
 
-    private static bool TryMapOrdType(OrdType raw, out OrderType type)
+    internal static bool TryMapOrdType(OrdType raw, out OrderType type)
     {
         switch (raw)
         {
             case OrdType.LIMIT: type = OrderType.Limit; return true;
             case OrdType.MARKET: type = OrderType.Market; return true;
+            // Q1.1 (#253). Stop variants and MWL added with the order
+            // surface expansion. RLP / PEGGED_MIDPOINT remain unsupported
+            // in v0 — the domain has no representation for them yet.
+            case OrdType.STOP_LOSS: type = OrderType.StopLoss; return true;
+            case OrdType.STOP_LIMIT: type = OrderType.StopLimit; return true;
+            case OrdType.MARKET_WITH_LEFTOVER_AS_LIMIT: type = OrderType.MarketWithLeftover; return true;
             default: type = default; return false;
+        }
+    }
+
+    /// <summary>
+    /// Q1.1 (#253). Inbound SBE <c>TimeInForce</c> → Domain mapping.
+    /// Rejects unknown wire bytes so a malformed inbound order is a
+    /// clean BMR rather than an opaque BadRequest deeper in the
+    /// pipeline.
+    /// </summary>
+    internal static bool TryMapTimeInForce(SbeTif raw, out DomainTif tif)
+    {
+        switch (raw)
+        {
+            case SbeTif.DAY: tif = DomainTif.Day; return true;
+            case SbeTif.GOOD_TILL_CANCEL: tif = DomainTif.GTC; return true;
+            case SbeTif.IMMEDIATE_OR_CANCEL: tif = DomainTif.IOC; return true;
+            case SbeTif.FILL_OR_KILL: tif = DomainTif.FOK; return true;
+            case SbeTif.GOOD_TILL_DATE: tif = DomainTif.GTD; return true;
+            case SbeTif.AT_THE_CLOSE: tif = DomainTif.AtClose; return true;
+            case SbeTif.GOOD_FOR_AUCTION: tif = DomainTif.GoodForAuction; return true;
+            default: tif = default; return false;
         }
     }
 
