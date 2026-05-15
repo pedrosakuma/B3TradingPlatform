@@ -37,6 +37,7 @@ public sealed class OrderSubmissionService
     private readonly EventDispatcher _dispatcher;
     private readonly Lifecycle.IDrainGate _drain;
     private readonly IUserBotOrderMappingRegistry? _botMappings;
+    private readonly Scheduling.GtdExpirationScheduler? _gtdScheduler;
     private readonly ILogger<OrderSubmissionService> _logger;
 
     public OrderSubmissionService(
@@ -51,7 +52,8 @@ public sealed class OrderSubmissionService
         EventDispatcher dispatcher,
         Lifecycle.IDrainGate drain,
         ILogger<OrderSubmissionService> logger,
-        IUserBotOrderMappingRegistry? botMappings = null)
+        IUserBotOrderMappingRegistry? botMappings = null,
+        Scheduling.GtdExpirationScheduler? gtdScheduler = null)
     {
         _clOrdIds = clOrdIds;
         _ownership = ownership;
@@ -64,6 +66,7 @@ public sealed class OrderSubmissionService
         _dispatcher = dispatcher;
         _drain = drain;
         _botMappings = botMappings;
+        _gtdScheduler = gtdScheduler;
         _logger = logger;
     }
 
@@ -198,6 +201,12 @@ public sealed class OrderSubmissionService
                     req.Source == OrderSubmissionSource.Algo ? "algo.submit" : "orders.submit"));
             return OrderSubmissionResult.WalBackpressure(ex.Message);
         }
+
+        // Q1.3 (#255). After the WAL append + book insert have committed
+        // (Dispatch returned without throwing), seed the GTD scheduler.
+        // No-ops for non-GTD orders; no-ops when the scheduler is not
+        // wired (test contexts that don't need expiry firing).
+        _gtdScheduler?.OnOrderTracked(order);
 
         MetricsRegistry.OrdersSubmitted.Add(1,
             new KeyValuePair<string, object?>("symbol", req.Symbol),
