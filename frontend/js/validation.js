@@ -140,6 +140,20 @@ export function pretradeWarnings(payload, lastPrice) {
 
 // Stable key for a payload so the UI can detect "same submission"
 // when the user clicks Submit a second time to override the warning.
+// Includes every field the trader can edit between submits — bumping
+// TIF, StopPrice, or GoodTillDate must produce a fresh key so the
+// fat-finger override doesn't carry over to a meaningfully different
+// order. Absent fields use stable placeholders ("" / "Day") so legacy
+// Limit/Day shapes hash identically to the pre-Q1.4 form of the key.
 export function payloadKey(payload) {
-  return [payload.symbol, payload.side, payload.type, payload.quantity, payload.price ?? ""].join("|");
+  return [
+    payload.symbol,
+    payload.side,
+    payload.type,
+    payload.quantity,
+    payload.price ?? "",
+    payload.timeInForce ?? "Day",
+    payload.stopPrice ?? "",
+    payload.goodTillDate ?? "",
+  ].join("|");
 }

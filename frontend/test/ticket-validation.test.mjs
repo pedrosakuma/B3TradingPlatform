@@ -146,6 +146,34 @@ test("GTD beyond 30 days → error", () => {
   assert.match(r.errors.goodTillDate, /30 days/);
 });
 
+// Q1.4 (#256). The GTD horizon mirrors the backend
+// `Trading:Risk:MaxGtdHorizon` exposed via /policy/risk. When the FE
+// stashes a different (e.g. 7-day) policy, the validator must honor it.
+test("GTD honors maxGtdHorizonDays from risk policy (7d cap)", () => {
+  const okAt5 = new Date(NOW + 5 * ONE_DAY).toISOString();
+  const tooFarAt8 = new Date(NOW + 8 * ONE_DAY).toISOString();
+  const ok = validateTicketState(f({
+    tif: "GTD", goodTillDate: okAt5, gtdHidden: false, maxGtdHorizonDays: 7,
+  }));
+  assert.equal(ok.valid, true);
+  const bad = validateTicketState(f({
+    tif: "GTD", goodTillDate: tooFarAt8, gtdHidden: false, maxGtdHorizonDays: 7,
+  }));
+  assert.equal(bad.valid, false);
+  assert.match(bad.errors.goodTillDate, /7 days/);
+});
+
+test("GTD falls back to 30-day cap when policy missing/malformed", () => {
+  const tooFar = new Date(NOW + 31 * ONE_DAY).toISOString();
+  for (const bad of [undefined, null, 0, -1, NaN, "x"]) {
+    const r = validateTicketState(f({
+      tif: "GTD", goodTillDate: tooFar, gtdHidden: false, maxGtdHorizonDays: bad,
+    }));
+    assert.equal(r.valid, false, `expected fallback to reject for policy=${bad}`);
+    assert.match(r.errors.goodTillDate, /30 days/);
+  }
+});
+
 test("MarketWithLeftover + IOC → incompatible TIF error", () => {
   const r = validateTicketState(f({
     type: "MarketWithLeftover", price: "32.5", tif: "IOC",

@@ -72,6 +72,18 @@ export async function validateSession(backend, token) {
   return resp.ok;
 }
 
+// Q1.4 (#256). Effective risk-policy values mirrored to the FE so the
+// ticket validator can match the server cap on GTD horizon. The server
+// stays authoritative — this is a hint, not a substitute. Returns
+// `{ maxGtdHorizonDays: number }` on 2xx; throws on auth/network
+// failure so the caller can decide to fall back silently.
+export async function getRiskPolicy(backend, token) {
+  const resp = await fetch(`${backend}/policy/risk`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return jsonOrThrow(resp);
+}
+
 export async function submitOrder(backend, token, payload) {
   const resp = await fetch(`${backend}/orders`, {
     method: "POST",

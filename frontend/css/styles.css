@@ -389,7 +389,10 @@ tr.row-stale > td.row-stale-actions { opacity: 1; }
 .type-chip.chip-stpl { background: #4a2455; color: #f0c8ff; }
 .type-chip.chip-mwl  { background: #145a4a; color: #8af0d4; }
 
-/* Status cell coloring for Expired, mirroring the executions log. */
+/* Status cell coloring reserved for potential future OrderStatus.Expired
+   addition; not currently rendered (backend OrderStatus has no Expired
+   member — GTD expiry terminalises as Cancelled). Kept so a future
+   slice that adds the enum value gets the styling for free. */
 .status-cell-Expired { color: #888; }
 
 /* ---------- Responsive ---------- */

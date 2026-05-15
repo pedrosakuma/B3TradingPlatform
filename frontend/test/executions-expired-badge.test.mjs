@@ -1,18 +1,13 @@
 // Q1.4 (#256) — Expired ER (kind=Expired from #255 backend) renders
-// in the executions log with the gray .Expired class. Also verifies
-// that "Expired" is now a terminal order status so the blotter
-// terminalises GTD-expired rows the same way Cancelled does.
+// in the executions log with the gray .Expired class. Pass-1 review
+// correction: `Expired` belongs to `ExecKind` (executions log) only —
+// the backend `OrderStatus` enum has no Expired member, and a GTD
+// order's terminal status is `Cancelled` (set by the cancel pipeline
+// the GTD scheduler invokes). The dedicated assertion that this is
+// NOT an OrderStatus lives in expired-status-surfaces.test.mjs.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-
-import { isTerminalOrderStatus } from "../js/state.js";
-
-test("Expired is a terminal order status (Q1.4 #256)", () => {
-  assert.equal(isTerminalOrderStatus("Expired"), true);
-  assert.equal(isTerminalOrderStatus("New"), false);
-  assert.equal(isTerminalOrderStatus("Filled"), true);
-});
 
 // Inspect the CSS bundle once — guarantees the gray Expired badge
 // rule actually shipped instead of silently falling back to default

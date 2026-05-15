@@ -2205,6 +2205,7 @@ export function validateTicketState(formState) {
     price, stopPrice, goodTillDate,
     priceHidden, stopPriceHidden, gtdHidden,
     now,
+    maxGtdHorizonDays,
   } = formState ?? {};
   const errors = {};
 
@@ -2232,18 +2233,25 @@ export function validateTicketState(formState) {
     }
   }
 
-  // GTD requires goodTillDate in (now, now + 30d).
+  // GTD requires goodTillDate in (now, now + maxGtdHorizonDays].
+  // The horizon mirrors the backend `Trading:Risk:MaxGtdHorizon`
+  // surfaced via /policy/risk; falls back to 30 days when the
+  // policy fetch hasn't completed (or failed) so the UI is never
+  // blocked by a slow boot.
   if (!gtdHidden && isGtdTif(tif)) {
     if (!goodTillDate) {
       errors.goodTillDate = "good-till-date required";
     } else {
       const t  = Date.parse(goodTillDate);
       const ts = typeof now === "number" ? now : Date.now();
-      const cap = ts + 30 * 24 * 60 * 60 * 1000;
+      const horizonDays = Number.isFinite(maxGtdHorizonDays) && maxGtdHorizonDays > 0
+        ? maxGtdHorizonDays
+        : 30;
+      const cap = ts + horizonDays * 24 * 60 * 60 * 1000;
       if (!Number.isFinite(t) || t <= ts) {
         errors.goodTillDate = "good-till-date must be in the future";
       } else if (t > cap) {
-        errors.goodTillDate = "good-till-date must be within 30 days";
+        errors.goodTillDate = `good-till-date must be within ${horizonDays} days`;
       }
     }
   }
@@ -2285,6 +2293,7 @@ function refreshTicketValidation() {
     stopPriceHidden: stopLabel ? !!stopLabel.hidden : !!stopEl?.disabled,
     gtdHidden:       gtdLabel  ? !!gtdLabel.hidden  : !!gtdEl?.disabled,
     now: Date.now(),
+    maxGtdHorizonDays: getState().riskPolicy?.maxGtdHorizonDays,
   });
 
   if (errEl) {

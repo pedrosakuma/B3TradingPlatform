@@ -112,3 +112,47 @@ test("backwards-compat: fatFingerCheck still callable directly", () => {
   assert.ok(ff);
   assert.equal(ff.warn, true);
 });
+
+// ── payloadKey: Q1.4 (#256) extended fields ──
+// The fat-finger override is keyed by payloadKey. If TIF / StopPrice /
+// GoodTillDate weren't part of the key, the trader could trip the
+// warning, edit one of those fields, and the second click would silently
+// "confirm" a meaningfully different order.
+
+import { payloadKey } from "../js/validation.js";
+
+const BASE = Object.freeze({
+  symbol: "PETR4", side: "Buy", type: "Limit", quantity: 100, price: 32.5,
+});
+
+test("payloadKey: identical submits hash to the same key", () => {
+  const a = payloadKey({ ...BASE });
+  const b = payloadKey({ ...BASE });
+  assert.equal(a, b);
+});
+
+test("payloadKey: legacy Limit/Day shape (no new fields) hashes stably", () => {
+  // Regression: the absent-field placeholders must be deterministic so
+  // pre-Q1.4 callers keep producing the same key shape across submits.
+  const a = payloadKey({ ...BASE });
+  const b = payloadKey({ ...BASE, timeInForce: "Day", stopPrice: undefined });
+  assert.equal(a, b);
+});
+
+test("payloadKey: changing only TIF yields a different key", () => {
+  const a = payloadKey({ ...BASE, timeInForce: "Day" });
+  const b = payloadKey({ ...BASE, timeInForce: "GTC" });
+  assert.notEqual(a, b);
+});
+
+test("payloadKey: changing only StopPrice yields a different key", () => {
+  const a = payloadKey({ ...BASE, type: "StopLimit", stopPrice: 32.0 });
+  const b = payloadKey({ ...BASE, type: "StopLimit", stopPrice: 33.0 });
+  assert.notEqual(a, b);
+});
+
+test("payloadKey: changing only GoodTillDate yields a different key", () => {
+  const a = payloadKey({ ...BASE, timeInForce: "GTD", goodTillDate: "2026-01-10" });
+  const b = payloadKey({ ...BASE, timeInForce: "GTD", goodTillDate: "2026-01-20" });
+  assert.notEqual(a, b);
+});

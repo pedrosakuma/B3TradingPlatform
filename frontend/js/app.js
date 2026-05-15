@@ -1,7 +1,7 @@
 // App entry point: wires login → worker → state → UI together.
 
 import { defaultBackend, defaultMarketDataUrl, login, signup, submitOrder, cancelOrder, modifyOrder, getAdminFirms,
-         validateSession,
+         validateSession, getRiskPolicy,
          getKillStatus, killFirm, reviveFirm, killEndClient, reviveEndClient,
          getHaltStatus, haltSymbol, resumeSymbol,
          runEod,
@@ -254,6 +254,33 @@ function startSession(next) {
   startFirmsPoll();
   startGatewayPoll();
   scheduleExpiry();
+  loadRiskPolicy();
+}
+
+// Q1.4 (#256). Fetch the effective risk policy on session start so the
+// ticket validator's GTD horizon matches the backend cap. Failure is
+// silent (single console.warn) — the validator falls back to a 30-day
+// cap so the trader is never blocked by a slow/broken policy fetch.
+let riskPolicyWarned = false;
+async function loadRiskPolicy() {
+  if (!session?.token) return;
+  try {
+    const policy = await getRiskPolicy(session.backend, session.token);
+    const days = Number(policy?.maxGtdHorizonDays);
+    if (Number.isFinite(days) && days > 0) {
+      state.setRiskPolicy({ maxGtdHorizonDays: days });
+      return;
+    }
+    if (!riskPolicyWarned) {
+      console.warn("risk-policy fetch returned malformed payload; using FE default", policy);
+      riskPolicyWarned = true;
+    }
+  } catch (err) {
+    if (!riskPolicyWarned) {
+      console.warn("risk-policy fetch failed; using FE default", err);
+      riskPolicyWarned = true;
+    }
+  }
 }
 
 function scheduleExpiry() {

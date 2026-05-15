@@ -2,9 +2,14 @@
 // holds the source-of-truth Map and posts diff/replace messages; this
 // module just stores what arrives and notifies subscribers.
 
-// Q1.4 (#256). `Expired` joins the terminal set so the GTD-expiry ER
-// (#255 backend) terminalises blotter rows the same way Cancelled does.
-const TERMINAL_ORDER_STATUSES = new Set(["Filled", "Cancelled", "Rejected", "Replaced", "Expired"]);
+// Q1.4 (#256). Terminal order statuses mirror the backend
+// `OrderStatus` enum. NOTE: `Expired` is intentionally absent —
+// the GTD-expiry pipeline (#255) emits an `ExecKind.Expired`
+// execution event but the order itself terminalises as
+// `Cancelled` (the GTD scheduler routes through the cancel
+// pipeline). The `Expired` value belongs to the executions log
+// only.
+const TERMINAL_ORDER_STATUSES = new Set(["Filled", "Cancelled", "Rejected", "Replaced"]);
 
 // Q1.4 (#256). Mirrors of the backend OrderType / TimeInForce enums
 // expanded by Q1.1 (#253). The ticket UI exposes every value listed
@@ -139,6 +144,12 @@ const state = {
   // null when the panel is collapsed. Used by the WS subscription
   // manager to decide whether to (un)subscribe `auction.${symbol}`.
   auctionPanelSymbol: null,
+  // Q1.4 (#256). Effective risk-policy values fetched from
+  // `GET /policy/risk` on session start. `null` until the first
+  // successful fetch lands; readers fall back to safe client-side
+  // defaults (e.g. 30-day GTD cap) so a slow/failed fetch never
+  // blocks the ticket. Shape: `{ maxGtdHorizonDays: number }`.
+  riskPolicy: null,
 };
 
 const EXECUTIONS_CAPACITY = 500;
@@ -604,6 +615,11 @@ export function setWatchlist(symbols) {
 
 export function isTerminalOrderStatus(status) {
   return TERMINAL_ORDER_STATUSES.has(status);
+}
+
+export function setRiskPolicy(policy) {
+  state.riskPolicy = policy;
+  notify("riskPolicy");
 }
 
 // ── UX-only slices (operability pass) ──────────────────────────────
