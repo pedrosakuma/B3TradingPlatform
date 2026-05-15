@@ -1038,4 +1038,148 @@ public class OrderModifyMarginAndProcessorTests
         Assert.Equal(0m, margin.ReservedForTesting("bob"));
         Assert.DoesNotContain(loggerProvider.Records, r => r.Level >= LogLevel.Warning);
     }
+
+    // ---------------- PR #260 P2: IsMarginBearing predicate covers StopLimit / MarketWithLeftover ----------------
+
+    private static (OrderModifyService svc, CapturingGateway gw, RecordingReplaceCoordinator coord)
+        BuildModifyServiceWithCoordinator(Order seedOrder)
+    {
+        var owner = seedOrder.Owner;
+        var clOrdIds = new ClOrdIdPrefixRegistry();
+        var ownership = new OrderOwnershipMap();
+        var book = new WorkingOrderBook();
+        Assert.True(book.TryAdd(seedOrder));
+        ownership.Register(seedOrder.ClOrdId, owner);
+        var gateway = new CapturingGateway();
+        var sink = new CapturingSink();
+        var risk = new Risk.RiskPipeline(Array.Empty<Risk.IRiskCheck>());
+        var coord = new RecordingReplaceCoordinator();
+        var replacements = new PendingReplacementRegistry();
+        var dispatcher = new EventDispatcher(new NullEventStore());
+        var svc = new OrderModifyService(
+            clOrdIds, ownership, book, gateway, sink, risk, coord, replacements, dispatcher,
+            new NeverDrain(), NullLogger<OrderModifyService>.Instance);
+        return (svc, gateway, coord);
+    }
+
+    [Fact]
+    public async Task Modify_StopLimit_downsize_passesNewNotionalToCoordinator_notZero()
+    {
+        // Pre-fix the gate was `orig.Type == OrderType.Limit`, so a
+        // buy StopLimit replace silently passed 0 to PrepareReplaceAsync
+        // (and later 0 to CommitReplace), freeing the cash-reservation
+        // even though the new working order still consumed margin.
+        var owner = new EndClientId("alice");
+        var stopLimit = new Order(
+            500_001UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.StopLimit,
+            100, 30m, "FIRM", timeInForce: TimeInForce.Day, stopPrice: 29m);
+        var (svc, _, coord) = BuildModifyServiceWithCoordinator(stopLimit);
+
+        // Downsize 100 → 60 at the same limit price.
+        var result = await svc.ModifyAsync(
+            new OrderModifyRequest(owner, stopLimit.ClOrdId, NewQuantity: 60, NewPrice: 30m),
+            CancellationToken.None);
+
+        Assert.Equal(OrderModifyResultKind.Accepted, result.Kind);
+        var prep = Assert.Single(coord.Prepares);
+        Assert.Equal(30m * 60, prep.Notional);
+    }
+
+    [Fact]
+    public async Task Modify_StopLimit_upsize_deltaCheckEnforced_rejectsWhenInsufficient()
+    {
+        // Real provider so the upsize delta check actually fires. Pre-fix
+        // a buy StopLimit upsize sent 0 to PrepareReplaceAsync, so the
+        // capacity check was bypassed and an over-margin upsize would
+        // sneak through.
+        var owner = new EndClientId("alice");
+        var clOrdIds = new ClOrdIdPrefixRegistry();
+        var ownership = new OrderOwnershipMap();
+        var book = new WorkingOrderBook();
+        var stopLimit = new Order(
+            500_002UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.StopLimit,
+            100, 30m, "FIRM", timeInForce: TimeInForce.Day, stopPrice: 29m);
+        Assert.True(book.TryAdd(stopLimit));
+        ownership.Register(stopLimit.ClOrdId, owner);
+
+        var opts = new RiskOptions();
+        opts.Margin.Enabled = true;
+        opts.Margin.Initial["alice"] = 3_500m; // room for 100*30=3000 + only 500 headroom
+        var monitor = new StaticOptionsMonitor<RiskOptions>(opts);
+        var margin = new ReserveOnSubmitMarginProvider(monitor, NullLogger<ReserveOnSubmitMarginProvider>.Instance);
+        Assert.True((await margin.TryReserveAsync(
+            stopLimit.ClOrdId,
+            new RiskContext(owner, "FIRM", "PETR4", OrderSide.Buy, OrderType.StopLimit, 100, 30m),
+            default)).Approved);
+        Assert.Equal(3000m, margin.ReservedForTesting("alice"));
+
+        var svc = new OrderModifyService(
+            clOrdIds, ownership, book, new CapturingGateway(), new CapturingSink(),
+            new Risk.RiskPipeline(Array.Empty<Risk.IRiskCheck>()),
+            margin, new PendingReplacementRegistry(), new EventDispatcher(new NullEventStore()),
+            new NeverDrain(), NullLogger<OrderModifyService>.Instance);
+
+        // Upsize 100 → 200 @ 30 = 6000, delta = +3000 against 500 headroom → reject.
+        var result = await svc.ModifyAsync(
+            new OrderModifyRequest(owner, stopLimit.ClOrdId, NewQuantity: 200, NewPrice: 30m),
+            CancellationToken.None);
+
+        Assert.Equal(OrderModifyResultKind.RiskRejected, result.Kind);
+        Assert.Contains("insufficient margin", result.Reason);
+        // Original reservation untouched.
+        Assert.Equal(3000m, margin.ReservedForTesting("alice"));
+    }
+
+    [Fact]
+    public async Task Modify_MarketWithLeftover_downsize_passesNewNotionalToCoordinator_notZero()
+    {
+        // MarketWithLeftover carries a Price (the leftover-as-limit
+        // price) and is therefore reserved on submit by the
+        // ReserveOnSubmitMarginProvider — so the same gate fix applies
+        // here, otherwise replace silently frees the cash.
+        var owner = new EndClientId("alice");
+        var mwl = new Order(
+            500_003UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.MarketWithLeftover,
+            100, 30m, "FIRM");
+        var (svc, _, coord) = BuildModifyServiceWithCoordinator(mwl);
+
+        var result = await svc.ModifyAsync(
+            new OrderModifyRequest(owner, mwl.ClOrdId, NewQuantity: 50, NewPrice: 30m),
+            CancellationToken.None);
+
+        Assert.Equal(OrderModifyResultKind.Accepted, result.Kind);
+        var prep = Assert.Single(coord.Prepares);
+        Assert.Equal(30m * 50, prep.Notional);
+    }
+
+    [Fact]
+    public async Task Processor_Replaced_StopLimit_commitsAtNewNotional_notZero()
+    {
+        // Processor-side mirror of the same predicate fix: confirmedRemaining
+        // for StopLimit must reflect price * leaves so CommitReplace
+        // rebalances the ledger. Pre-fix it was 0, releasing the original
+        // reservation while the new order was still alive in the book.
+        var (proc, ownership, book, reg, margin, _) = BuildProcessor();
+        var owner = new EndClientId("alice");
+        var orig = new Order(
+            10UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.StopLimit,
+            100, 10m, "FIRM", timeInForce: TimeInForce.Day, stopPrice: 9m);
+        book.TryAdd(orig);
+        ownership.Register(10UL, owner);
+        Assert.True((await margin.TryReserveAsync(
+            10UL,
+            new RiskContext(owner, "FIRM", "PETR4", OrderSide.Buy, OrderType.StopLimit, 100, 10m),
+            default)).Approved);
+
+        // Downsize 100 → 60 @ 10 → new reservation should be 600.
+        Assert.True(reg.TryAdd(new OrderReplacementIntent(
+            10UL, 11UL, owner, "PETR4", 4321UL,
+            OrderSide.Buy, OrderType.StopLimit, 60, 10m, "FIRM", null, null)));
+        await ((IReplaceMarginCoordinator)margin).PrepareReplaceAsync(10UL, 11UL, owner, 600m, default);
+
+        proc.Apply(11UL, ExecKind.Replaced, leaves: 60, cumQty: 0, lastQty: 0,
+                   lastPx: 0m, rejectReason: null, origClOrdId: 10UL);
+
+        Assert.Equal(600m, margin.ReservedForTesting("alice"));
+    }
 }

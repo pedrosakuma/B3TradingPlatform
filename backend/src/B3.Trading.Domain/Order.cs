@@ -30,6 +30,30 @@ public enum OrderType
 }
 
 /// <summary>
+/// Helpers over <see cref="OrderType"/> that capture cross-cutting
+/// classifications used by the risk / margin pipeline.
+/// </summary>
+public static class OrderTypeExtensions
+{
+    /// <summary>
+    /// True iff this order type carries a limit price that the
+    /// reserve-on-submit margin provider will use to up-front reserve
+    /// cash on a buy submit. Must stay in lock-step with that
+    /// provider's reserve criterion (Buy +
+    /// <see cref="Order.Price"/> non-null + positive notional): every
+    /// listed type below is one that *can* be priced and therefore can
+    /// have a reservation that the cancel-replace pipeline must
+    /// re-baseline. <see cref="OrderType.Market"/> and
+    /// <see cref="OrderType.StopLoss"/> are excluded — they trigger
+    /// into a Market and have no upfront price to reserve against.
+    /// </summary>
+    public static bool IsMarginBearing(this OrderType type) =>
+        type is OrderType.Limit
+             or OrderType.StopLimit
+             or OrderType.MarketWithLeftover;
+}
+
+/// <summary>
 /// Time-In-Force for a working order. The default value is <see cref="Day"/>
 /// so older WAL/snapshot payloads that pre-date this enum hydrate with
 /// the implicit "Day" semantics they actually carried.

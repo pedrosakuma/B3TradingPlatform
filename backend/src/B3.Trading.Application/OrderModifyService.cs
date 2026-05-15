@@ -205,7 +205,7 @@ public sealed class OrderModifyService
         // Margin Prepare: reserve only the upsize delta. The
         // coordinator no-ops on sells / markets / non-positive notionals.
         var newRemainingNotional = (orig.Side == OrderSide.Buy
-                                    && orig.Type == OrderType.Limit
+                                    && orig.Type.IsMarginBearing()
                                     && req.NewPrice is { } px)
             ? px * effectiveLeaves
             : 0m;

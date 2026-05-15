@@ -99,11 +99,24 @@ public static class OrdersEndpoints
             if (!ulong.TryParse(clOrdId, out var clOrdIdU))
                 return Results.NotFound();
 
+            // Q1.1 (#253). Optional TIF (null = no change) — parse as
+            // string + case-insensitive enum to mirror POST exactly,
+            // since the host does not register JsonStringEnumConverter
+            // and would otherwise force REST callers to send the
+            // numeric enum value over JSON.
+            TimeInForce? tif = null;
+            if (!string.IsNullOrWhiteSpace(req.TimeInForce))
+            {
+                if (!Enum.TryParse<TimeInForce>(req.TimeInForce, ignoreCase: true, out var parsed))
+                    return Results.BadRequest(new { error = $"invalid timeInForce '{req.TimeInForce}'" });
+                tif = parsed;
+            }
+
             var owner = ResolveOwner(ctx, registry);
             var result = await modifier.ModifyAsync(
                 new OrderModifyRequest(
                     owner, clOrdIdU, req.Quantity, req.Price,
-                    req.TimeInForce, req.StopPrice, req.GoodTillDate),
+                    tif, req.StopPrice, req.GoodTillDate),
                 ct);
 
             return result.Kind switch
@@ -202,8 +215,11 @@ public sealed record SubmitOrderRequest(
 public sealed record ModifyOrderRequest(
     long Quantity,
     decimal? Price,
-    /// <summary>Q1.1 (#253). Optional override; null = keep original.</summary>
-    TimeInForce? TimeInForce = null,
+    /// <summary>Q1.1 (#253). Optional override; null = keep original. Accepts
+    /// the case-insensitive <see cref="TimeInForce"/> name (e.g. <c>"GTD"</c>)
+    /// — mirrors the POST submit contract since the host does not register
+    /// <c>JsonStringEnumConverter</c>.</summary>
+    string? TimeInForce = null,
     /// <summary>Q1.1 (#253). Optional override; null = keep original. Required when modifying into <c>StopLoss</c>/<c>StopLimit</c> — but OrderType is not modifiable, so in practice only meaningful for orders that already are stop orders.</summary>
     decimal? StopPrice = null,
     /// <summary>Q1.1 (#253). Optional override; null = keep original (or auto-cleared when TIF is moved away from <c>GTD</c>). Required when changing TIF to <c>GTD</c>.</summary>
