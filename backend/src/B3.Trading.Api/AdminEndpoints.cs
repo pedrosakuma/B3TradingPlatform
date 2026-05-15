@@ -364,26 +364,31 @@ public static class AdminEndpoints
 
         try
         {
-            // Withdrawal: pre-check + atomic debit happens INSIDE the
-            // dispatcher's mutate callback so the WAL append only lands
-            // when the debit actually succeeded. The keeper's TryWithdraw
-            // is its own CAS loop; we wrap the failure case as 422 so the
-            // caller can distinguish "insufficient funds" from "bad
-            // request". The throw-from-mutate path skips the apply step
-            // but the event is already on disk — to avoid that, we
-            // pre-check the balance OUTSIDE the dispatcher (best-effort)
-            // and then re-check INSIDE via TryWithdraw, which is the only
-            // authoritative read. If the inside check fails we throw a
-            // sentinel that the catch maps to 422; the WAL append for a
-            // failed withdraw is rolled back by the dispatcher's
-            // throw-skips-apply contract... except the dispatcher already
-            // committed seq. So: structure the flow so the keeper's
-            // TryWithdraw runs FIRST (under no lock — the keeper is
-            // thread-safe), and the dispatcher only fires when we've
-            // already debited. On Deposit the apply is unconditional.
+            // Q2.2 (#269) P1 fix: debit + WAL append must be atomic with
+            // respect to the snapshot lock. The previous flow ran
+            // TryWithdraw OUTSIDE the dispatcher lock; a snapshot could
+            // interleave between a successful debit and the WAL append,
+            // persisting a reduced balance with no matching event and
+            // permanently losing cash on restore. We now route the
+            // withdrawal through DispatchWithPreApply so TryWithdraw,
+            // the WAL append, and any rollback all run under the same
+            // lock the snapshot service takes.
             if (kind == "Withdrawal")
             {
-                if (!keeper.TryWithdraw(owner, req.Amount))
+                var outcome = dispatcher.DispatchWithPreApply(
+                    new CashLedgerEvent
+                    {
+                        EndClientId = req.Endclient,
+                        Operation = kind,
+                        Amount = req.Amount,
+                        Currency = currency,
+                        Reference = req.Reference,
+                        OperatorId = operatorId,
+                    },
+                    preApply: () => keeper.TryWithdraw(owner, req.Amount),
+                    rollback: () => keeper.ApplyDeposit(owner, req.Amount));
+
+                if (!outcome.Applied)
                     return Results.UnprocessableEntity(new
                     {
                         error = "insufficient_funds",
@@ -391,8 +396,7 @@ public static class AdminEndpoints
                         requested = req.Amount,
                     });
             }
-
-            try
+            else
             {
                 dispatcher.Dispatch(
                     new CashLedgerEvent
@@ -404,25 +408,7 @@ public static class AdminEndpoints
                         Reference = req.Reference,
                         OperatorId = operatorId,
                     },
-                    () =>
-                    {
-                        // Withdrawal already debited above; only the deposit
-                        // mutates state inside the dispatcher lock. Both
-                        // arms keep the (event-on-disk, balance-mutated)
-                        // pair atomic from the dispatcher's perspective.
-                        if (kind == "Deposit")
-                            keeper.ApplyDeposit(owner, req.Amount);
-                    });
-            }
-            catch
-            {
-                // Compensating credit: if the WAL append throws AFTER we
-                // already debited (Withdrawal path), restore the balance
-                // so the operator-visible state matches the on-disk
-                // truth. Re-throw so the outer handler maps it to 503.
-                if (kind == "Withdrawal")
-                    keeper.ApplyDeposit(owner, req.Amount);
-                throw;
+                    () => keeper.ApplyDeposit(owner, req.Amount));
             }
 
             return Results.Ok(new

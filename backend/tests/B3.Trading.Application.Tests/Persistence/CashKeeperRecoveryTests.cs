@@ -121,21 +121,26 @@ public class CashKeeperRecoveryTests : IDisposable
     private static void DispatchCash(EventDispatcher d, CashKeeper k, string ec, string kind, decimal amount)
     {
         var owner = new EndClientId(ec);
-        d.Dispatch(
-            new CashLedgerEvent
-            {
-                EndClientId = ec,
-                Operation = kind,
-                Amount = amount,
-                Currency = "BRL",
-                Reference = "test",
-                OperatorId = "test-operator",
-            },
-            () =>
-            {
-                if (kind == "Deposit") k.ApplyDeposit(owner, amount);
-                else k.TryWithdraw(owner, amount);
-            });
+        var evt = new CashLedgerEvent
+        {
+            EndClientId = ec,
+            Operation = kind,
+            Amount = amount,
+            Currency = "BRL",
+            Reference = "test",
+            OperatorId = "test-operator",
+        };
+        if (kind == "Deposit")
+        {
+            d.Dispatch(evt, () => k.ApplyDeposit(owner, amount));
+        }
+        else
+        {
+            d.DispatchWithPreApply(
+                evt,
+                preApply: () => k.TryWithdraw(owner, amount),
+                rollback: () => k.ApplyDeposit(owner, amount));
+        }
     }
 
     private (StateSnapshotter, EventReplayer) BuildSnapshotterAndReplayer(CashKeeper keeper)
