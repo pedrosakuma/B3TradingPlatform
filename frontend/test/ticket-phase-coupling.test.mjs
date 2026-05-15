@@ -128,3 +128,55 @@ test("non-auction, non-Reserved phase shows no hint and leaves submit enabled", 
   assert.equal(hintEl.hidden, true);
   assert.equal(submitEl.disabled, false);
 });
+
+// ── Submit disabled-state OR semantics (Pass-1 review fix) ─────────
+//
+// The Submit button has two independent disable conditions tracked on
+// dataset flags: dataset.submitInflight (set by setTicketSubmitting) and
+// dataset.haltDisabled (set by renderTicketPhaseCoupling for Reserved).
+// The disabled bit must be the OR of both — neither writer is allowed
+// to clear the other's intent.
+
+test("Reserved + setTicketSubmitting(false) keeps Submit disabled (halt wins)", () => {
+  const { submitEl } = setupTicket();
+  state.applyPhaseFrame({ symbol: SYM, phase: "Reserved" });
+  ui.renderTicketPhaseCoupling();
+  ui.setTicketSubmitting(true);
+  assert.equal(submitEl.disabled, true, "in-flight + halted both disable");
+  ui.setTicketSubmitting(false);
+  assert.equal(submitEl.disabled, true,
+    "clearing in-flight must NOT re-enable while halted");
+  assert.equal(submitEl.dataset.haltDisabled, "1");
+  assert.equal(submitEl.getAttribute("aria-disabled"), "true");
+});
+
+test("In-flight + phase Reserved→Open keeps Submit disabled (in-flight wins)", () => {
+  const { submitEl } = setupTicket();
+  state.applyPhaseFrame({ symbol: SYM, phase: "Reserved" });
+  ui.renderTicketPhaseCoupling();
+  ui.setTicketSubmitting(true);
+  assert.equal(submitEl.disabled, true);
+  // Phase exits Reserved while submit is still in flight.
+  state.applyPhaseFrame({ symbol: SYM, phase: "Open" });
+  ui.renderTicketPhaseCoupling();
+  assert.equal(submitEl.disabled, true,
+    "leaving Reserved must NOT re-enable while a submit is in flight");
+  assert.equal(submitEl.dataset.submitInflight, "1");
+  assert.equal(submitEl.getAttribute("aria-disabled"), "true");
+  // Now clear in-flight: both conditions gone → enabled.
+  ui.setTicketSubmitting(false);
+  assert.equal(submitEl.disabled, false);
+  assert.equal(submitEl.getAttribute("aria-disabled"), null);
+});
+
+test("Both flags clear → Submit enabled, aria-disabled removed", () => {
+  const { submitEl } = setupTicket();
+  state.applyPhaseFrame({ symbol: SYM, phase: "Open" });
+  ui.renderTicketPhaseCoupling();
+  ui.setTicketSubmitting(true);
+  ui.setTicketSubmitting(false);
+  assert.equal(submitEl.disabled, false);
+  assert.equal(submitEl.dataset.submitInflight, undefined);
+  assert.equal(submitEl.dataset.haltDisabled,   undefined);
+  assert.equal(submitEl.getAttribute("aria-disabled"), null);
+});

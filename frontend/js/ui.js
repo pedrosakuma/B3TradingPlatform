@@ -1019,9 +1019,34 @@ export function setTicketFeedbackIfMatches(expected, replacement) {
   setTicketFeedback(replacement, null);
 }
 
+// Submit button disabled-state is the OR of two independent conditions
+// tracked on dataset flags so two writers (the in-flight submit path and
+// the phase-coupling halt path) don't clobber each other's intent.
+// Always go through applySubmitDisabled() — never write submit.disabled
+// directly.
+function applySubmitDisabled() {
+  const el = $("ticket-submit");
+  if (!el) return;
+  const inflight = el.dataset.submitInflight === "1";
+  const halted   = el.dataset.haltDisabled   === "1";
+  const disabled = inflight || halted;
+  el.disabled = disabled;
+  if (disabled) {
+    el.setAttribute("aria-disabled", "true");
+  } else {
+    el.removeAttribute("aria-disabled");
+  }
+}
+
 export function setTicketSubmitting(submitting) {
-  $("ticket-submit").disabled = !!submitting;
-  $("ticket-submit").textContent = submitting ? "Submitting…" : "Submit";
+  const el = $("ticket-submit");
+  if (submitting) {
+    el.dataset.submitInflight = "1";
+  } else {
+    delete el.dataset.submitInflight;
+  }
+  el.textContent = submitting ? "Submitting…" : "Submit";
+  applySubmitDisabled();
 }
 
 export function clearTicket() {
@@ -1424,7 +1449,7 @@ export function phaseBadgeHtml(symbol) {
 // phase. Called whenever phases or selectedSymbol changes. The "open"
 // state is owned by state.auctionPanelSymbol so the WS layer can key
 // off it for subscribe/unsubscribe.
-function reconcileAuctionPanel() {
+export function reconcileAuctionPanel() {
   const st = getState();
   const sym = st.selectedSymbol;
   if (!sym) {
@@ -1433,12 +1458,21 @@ function reconcileAuctionPanel() {
   }
   const phase = getPhase(sym);
   if (isAuctionPhase(phase)) {
+    // Auto-open / switch to the selected symbol. Assigning a new symbol
+    // implicitly drops any previous panel-symbol subscription so symbol
+    // switches in-flight don't leak an orphaned auction.${prev} sub.
     if (st.auctionPanelSymbol !== sym) setAuctionPanelSymbol(sym);
   } else {
-    // Leaving the auction phase — collapse the panel automatically so
-    // the trader doesn't see a stale Top after the cross prints. Manual
-    // toggle still works (renderAuctionPanel respects the current sym).
-    if (st.auctionPanelSymbol !== null && st.auctionPanelSymbol === sym) {
+    // Selected symbol is NOT in an auction phase. Drop the panel +
+    // subscription whenever it's open — covers both cases:
+    //   (a) the same symbol left auction (cross printed),
+    //   (b) the trader switched to a non-auction symbol while a panel
+    //       for a different symbol was still pinned (the previous
+    //       implementation only closed when symbols matched, leaking
+    //       the auction.${prev} subscription).
+    // The trader can manually re-open via the toggle button for any
+    // selected symbol if they want to keep watching.
+    if (st.auctionPanelSymbol !== null) {
       setAuctionPanelSymbol(null);
     }
   }
@@ -1586,20 +1620,18 @@ export function renderTicketPhaseCoupling() {
   }
 
   // (3) Reserved (halt) disables Submit. We track the halt-disable
-  // independently of the inflight-disable so toggling phases doesn't
-  // re-enable a submitting button.
+  // independently of the inflight-disable via dataset flags so toggling
+  // phases doesn't re-enable a submitting button (and vice-versa).
+  // applySubmitDisabled() ORs both conditions together.
   const halted = phase === "Reserved";
   if (halted) {
-    submitEl.disabled = true;
-    submitEl.setAttribute("aria-disabled", "true");
-    submitEl.setAttribute("title", "Instrumento halted");
     submitEl.dataset.haltDisabled = "1";
+    submitEl.setAttribute("title", "Instrumento halted");
   } else if (submitEl.dataset.haltDisabled === "1") {
-    submitEl.disabled = false;
-    submitEl.removeAttribute("aria-disabled");
-    submitEl.removeAttribute("title");
     delete submitEl.dataset.haltDisabled;
+    submitEl.removeAttribute("title");
   }
+  applySubmitDisabled();
 }
 
 const DOB_TOP_N = 10;

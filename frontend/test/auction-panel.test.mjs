@@ -156,3 +156,93 @@ test("renderAuctionPanel renders the print history newest-first", () => {
   assert.ok(html.indexOf("31,00") < html.indexOf("30,00"),
     "newest print must appear first in the list");
 });
+
+// ── reconcileAuctionPanel symbol-switch contract (Pass-1 review fix) ──
+//
+// Bug being fixed: reconcileAuctionPanel previously only closed the
+// panel when auctionPanelSymbol === selectedSymbol, so switching to a
+// non-auction symbol left the panel pinned to the previous symbol and
+// leaked the auction.${prev} subscription. The contract is now:
+//   * Newly selected symbol IS in auction → panel switches to it (auto-
+//     open / drop previous).
+//   * Newly selected symbol is NOT in auction → panel closes whenever
+//     it's open (regardless of which symbol it was pinned to). The
+//     trader can manually re-open via the toggle for any symbol.
+
+const SYM_A = "PETR4";
+const SYM_B = "VALE3";
+
+function resetReconcile() {
+  state.getState().auctionBySymbol.delete(SYM_A);
+  state.getState().auctionBySymbol.delete(SYM_B);
+  state.getState().phaseBySymbol.delete(SYM_A);
+  state.getState().phaseBySymbol.delete(SYM_B);
+  state.setAuctionPanelSymbol(null);
+  state.setSelectedSymbol(null);
+}
+
+test("reconcile auto-opens panel when selected symbol is in OpeningCall", () => {
+  resetReconcile();
+  state.applyPhaseFrame({ symbol: SYM_A, phase: "OpeningCall" });
+  state.setSelectedSymbol(SYM_A);
+  ui.reconcileAuctionPanel();
+  assert.equal(state.getState().auctionPanelSymbol, SYM_A);
+});
+
+test("reconcile closes panel + drops sub when switching to a non-auction symbol", () => {
+  resetReconcile();
+  state.applyPhaseFrame({ symbol: SYM_A, phase: "OpeningCall" });
+  state.setSelectedSymbol(SYM_A);
+  ui.reconcileAuctionPanel();
+  assert.equal(state.getState().auctionPanelSymbol, SYM_A);
+  // Switch to a symbol in the regular Open phase — panel must close so
+  // the auction.${SYM_A} subscription doesn't leak.
+  state.applyPhaseFrame({ symbol: SYM_B, phase: "Open" });
+  state.setSelectedSymbol(SYM_B);
+  ui.reconcileAuctionPanel();
+  assert.equal(state.getState().auctionPanelSymbol, null,
+    "panel must close on switch to non-auction symbol (no leak)");
+});
+
+test("reconcile switches panel symbol when moving between two auction phases", () => {
+  resetReconcile();
+  state.applyPhaseFrame({ symbol: SYM_A, phase: "OpeningCall" });
+  state.setSelectedSymbol(SYM_A);
+  ui.reconcileAuctionPanel();
+  assert.equal(state.getState().auctionPanelSymbol, SYM_A);
+  state.applyPhaseFrame({ symbol: SYM_B, phase: "FinalClosingCall" });
+  state.setSelectedSymbol(SYM_B);
+  ui.reconcileAuctionPanel();
+  assert.equal(state.getState().auctionPanelSymbol, SYM_B,
+    "panel switches to new auction symbol; previous sub dropped implicitly");
+});
+
+test("reconcile closes a manually-opened panel when selected symbol is non-auction", () => {
+  // Documented behavior: there is no manual-open marker, so we close on
+  // any selected-symbol change to a non-auction symbol. Trader can
+  // re-open via toggle if they want to keep watching.
+  resetReconcile();
+  state.applyPhaseFrame({ symbol: SYM_A, phase: "Open" });
+  state.setSelectedSymbol(SYM_A);
+  // Trader manually toggles open for SYM_A while it's in Open.
+  state.setAuctionPanelSymbol(SYM_A);
+  // Switch to another symbol also in Open.
+  state.applyPhaseFrame({ symbol: SYM_B, phase: "Open" });
+  state.setSelectedSymbol(SYM_B);
+  ui.reconcileAuctionPanel();
+  assert.equal(state.getState().auctionPanelSymbol, null,
+    "manual-open does not survive a non-auction symbol switch");
+});
+
+test("clearAll clears phase cache so reconcile closes the panel", () => {
+  resetReconcile();
+  state.applyPhaseFrame({ symbol: SYM_A, phase: "OpeningCall" });
+  state.setSelectedSymbol(SYM_A);
+  ui.reconcileAuctionPanel();
+  assert.equal(state.getState().auctionPanelSymbol, SYM_A);
+  // clearAll wipes phaseBySymbol; reconcile then sees Unknown phase
+  // (not an auction phase) and closes the panel.
+  state.clearAll();
+  ui.reconcileAuctionPanel();
+  assert.equal(state.getState().auctionPanelSymbol, null);
+});
