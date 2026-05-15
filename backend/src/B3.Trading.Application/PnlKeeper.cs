@@ -50,42 +50,6 @@ public sealed class PnlKeeper
     /// </summary>
     private readonly ConcurrentDictionary<(string EndClient, string Symbol), AvgCostState> _avgCost = new();
 
-    /// <summary>
-    /// Pass-1 review (#278) P1#2. Per-(end-client, symbol) lock used to
-    /// serialise the whole "compute pre-fill basis → mutate avg-cost →
-    /// fold realized delta into running total → produce
-    /// <see cref="RealizedPnlEvent"/> → keeper Apply" sequence on the
-    /// live path. The dispatcher's process-global lock alone is NOT
-    /// sufficient because the WAL-backpressure fallback path
-    /// (<c>EntryPointExecutionReportRouter</c>) re-invokes
-    /// <c>ExecutionReportProcessor.Apply</c> WITHOUT the dispatcher
-    /// lock — two concurrent fills for the same key on that path would
-    /// otherwise race and persist inconsistent <c>RunningTotal</c>
-    /// values into the WAL.
-    ///
-    /// <para>
-    /// Lock ordering: per-key lock OUTSIDE the dispatcher lock. The
-    /// snapshot path takes the dispatcher lock only and never the
-    /// per-key locks, so a fill in flight does not block snapshots.
-    /// </para>
-    /// </summary>
-    private readonly ConcurrentDictionary<(string EndClient, string Symbol), object> _keyLocks = new();
-
-    private object LockFor(string endClient, string symbol) =>
-        _keyLocks.GetOrAdd((endClient, symbol), static _ => new object());
-
-    /// <summary>
-    /// Public hook for callers that need to perform a multi-step
-    /// operation atomically per (endClient, symbol) — primarily the
-    /// processor's "compute realized + Dispatch + Apply" critical
-    /// section. See <see cref="_keyLocks"/> for the rationale.
-    /// </summary>
-    public T WithKeyLock<T>(string endClient, string symbol, Func<T> body)
-    {
-        ArgumentNullException.ThrowIfNull(body);
-        lock (LockFor(endClient, symbol)) return body();
-    }
-
     private readonly ConcurrentDictionary<string, byte> _seenExecutionIds = new();
     private readonly ConcurrentDictionary<string, PendingReplaySynth> _pendingReplaySynths = new();
 
@@ -180,92 +144,35 @@ public sealed class PnlKeeper
     /// <see cref="RealizedPnlEvent"/>.
     ///
     /// <para>
-    /// Pass-1 review (#278) P1#2. The mutation runs under the per-key
-    /// lock (see <see cref="WithKeyLock{T}"/>), eliminating the
-    /// outer-variable capture race that the previous
-    /// <c>AddOrUpdate</c>-based implementation had under contention.
+    /// Pass-2 review (#278) P1#1. Serialisation is provided by the
+    /// caller (the dispatcher lock on both the live and the
+    /// WAL-backpressure fallback paths — see
+    /// <see cref="EventDispatcher.RunExclusive"/>). No per-key lock is
+    /// taken here: an inner per-key lock under the dispatcher lock is
+    /// fine in isolation, but the previous design also acquired the
+    /// per-key lock OUTSIDE the dispatcher lock on the fallback path
+    /// (router caught WalBackpressureException → no dispatcher lock →
+    /// processor took per-key lock → nested Dispatch took dispatcher
+    /// lock), creating a classic AB-BA inversion against the live
+    /// path. Eliminating the per-key lock removes the inversion;
+    /// dispatcher serialisation is sufficient because all live ER
+    /// processing flows through it.
     /// </para>
     /// </summary>
     public decimal ApplyFillToAvgCost(string endClient, string symbol, OrderSide side, long fillQuantity, decimal fillPrice)
     {
         if (fillQuantity <= 0) return 0m;
         var key = (endClient, symbol);
-        lock (LockFor(endClient, symbol))
+        if (!_avgCost.TryGetValue(key, out var current))
         {
-            if (!_avgCost.TryGetValue(key, out var current))
-            {
-                var signed = side == OrderSide.Buy ? fillQuantity : -fillQuantity;
-                _avgCost[key] = new AvgCostState(signed, fillPrice);
-                return 0m;
-            }
-            var realized = ComputeRealizedDelta(current.NetQuantity, current.AvgPrice, side, fillQuantity, fillPrice);
-            _avgCost[key] = ProjectAvgCost(current, side, fillQuantity, fillPrice);
-            return realized;
+            var signed = side == OrderSide.Buy ? fillQuantity : -fillQuantity;
+            _avgCost[key] = new AvgCostState(signed, fillPrice);
+            return 0m;
         }
+        var realized = ComputeRealizedDelta(current.NetQuantity, current.AvgPrice, side, fillQuantity, fillPrice);
+        _avgCost[key] = ProjectAvgCost(current, side, fillQuantity, fillPrice);
+        return realized;
     }
-
-    /// <summary>
-    /// Pass-1 review (#278) P1#2. Atomic per-(endClient, symbol)
-    /// "compute realized + advance basis + fold into running total"
-    /// primitive used by the live ER path. Runs the supplied
-    /// <paramref name="onComputed"/> callback INSIDE the per-key lock
-    /// so the caller can append the <see cref="RealizedPnlEvent"/> to
-    /// the WAL (via the dispatcher) and call <see cref="Apply"/> back
-    /// on this keeper without a second concurrent fill on the same
-    /// key racing the running-total computation.
-    ///
-    /// <para>
-    /// The <paramref name="onComputed"/> callback receives a
-    /// <see cref="PnlFillContext"/> with the pre-fill snapshot, the
-    /// realized delta this fill produced, and the running total AFTER
-    /// folding the delta. Both values are derived from state held
-    /// under the lock, so they are guaranteed consistent with the
-    /// avg-cost mutation already applied.
-    /// </para>
-    ///
-    /// <para>
-    /// The avg-cost is mutated regardless of the realized delta. The
-    /// callback decides whether the realized delta is worth a WAL
-    /// event (matches the existing live-path policy: only non-zero
-    /// realized deltas append a <see cref="RealizedPnlEvent"/>).
-    /// </para>
-    /// </summary>
-    public void ApplyFillUnderLock(
-        string endClient,
-        string symbol,
-        OrderSide side,
-        long fillQuantity,
-        decimal fillPrice,
-        DateOnly day,
-        Action<PnlFillContext> onComputed)
-    {
-        ArgumentNullException.ThrowIfNull(onComputed);
-        if (fillQuantity <= 0) return;
-        var key = (endClient, symbol);
-        lock (LockFor(endClient, symbol))
-        {
-            var pre = _avgCost.TryGetValue(key, out var c) ? c : new AvgCostState(0, 0m);
-            var realized = ComputeRealizedDelta(pre.NetQuantity, pre.AvgPrice, side, fillQuantity, fillPrice);
-            _avgCost[key] = ProjectAvgCost(pre, side, fillQuantity, fillPrice);
-            var prevTotal = _realizedByDay.TryGetValue((endClient, symbol, day), out var t) ? t : 0m;
-            var running = prevTotal + realized;
-            onComputed(new PnlFillContext(pre.NetQuantity, pre.AvgPrice, realized, running));
-        }
-    }
-
-    /// <summary>
-    /// Snapshot of the per-key state produced inside
-    /// <see cref="ApplyFillUnderLock"/>. Carries both the pre-fill
-    /// (qty, avg) so the caller can build the WAL event and the
-    /// already-computed running total so the persisted
-    /// <see cref="RealizedPnlEvent.RunningTotal"/> matches the value
-    /// the keeper observed under the lock.
-    /// </summary>
-    public readonly record struct PnlFillContext(
-        long PreFillQuantity,
-        decimal PreFillAvgPrice,
-        decimal RealizedDelta,
-        decimal RunningTotal);
 
     /// <summary>
     /// Pure projection of the avg-cost state under one fill. Mirrors
@@ -457,6 +364,19 @@ public sealed class PnlKeeper
         foreach (var p in positions)
         {
             if (p.NetQuantity == 0) continue;
+            // Pass-2 review (#278) P1#2. A non-flat row with a zero
+            // AverageEntryPrice is degenerate (legacy snapshots
+            // produced before the position keeper started carrying
+            // basis): seeding it would book the next sell as
+            // realized = sellPrice * qty against a zero basis and
+            // surface phantom P&L on the first close after restore.
+            // Skip and surface the count via a dedicated metric so
+            // ops can flag snapshots that needed the guard.
+            if (p.AverageEntryPrice <= 0m)
+            {
+                Observability.MetricsRegistry.PnlLegacySnapshotBasisSkippedZero.Add(1);
+                continue;
+            }
             var key = (p.EndClientId, p.Symbol);
             if (_avgCost.ContainsKey(key)) continue;
             if (_avgCost.TryAdd(key, new AvgCostState(p.NetQuantity, p.AverageEntryPrice)))

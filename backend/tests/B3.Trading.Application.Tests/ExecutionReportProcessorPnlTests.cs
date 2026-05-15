@@ -174,4 +174,103 @@ public class ExecutionReportProcessorPnlTests
         Assert.Equal(1, pnl.FinalizeReplay());
         Assert.Equal(50m, pnl.GetDayRealized("alice", "PETR4", day));
     }
+
+    [Fact]
+    public async Task LockOrdering_NormalAndFallbackPaths_NoDeadlock_MonotonicRunningTotal()
+    {
+        // Pass-2 review (#278) P1#1. Regression for the AB-BA
+        // deadlock the per-key lock introduced. Two threads target
+        // the same (endClient, symbol) concurrently:
+        //
+        //   Path A (normal live): EventDispatcher.Dispatch → applies
+        //     processor → nested Dispatch for RealizedPnlEvent
+        //     (reentrant on the same thread).
+        //   Path B (WAL-backpressure fallback): EventDispatcher.RunExclusive
+        //     → applies processor → nested Dispatch for
+        //     RealizedPnlEvent.
+        //
+        // Pre-fix: A holds dispatcher then takes per-key lock; B
+        // takes per-key lock first then nested Dispatch needs
+        // dispatcher → AB-BA deadlock. Post-fix: both paths take the
+        // dispatcher lock, no per-key lock, so they serialise
+        // cleanly and RealizedPnlEvent.RunningTotal is monotonic.
+        var (proc, dispatcher, store, pnl, ownership, book, _) = Build();
+        var owner = new EndClientId("alice");
+
+        // Open 1000 @ 30 so both concurrent sells realise spread.
+        book.TryAdd(new Order(1UL, owner, "PETR4", 1UL, OrderSide.Buy, OrderType.Limit, 1000, 30m));
+        ownership.Register(1UL, owner);
+        dispatcher.Dispatch(
+            new ExecutionReportReceivedEvent
+            {
+                ClOrdId = 1UL,
+                ExecKind = nameof(ExecKind.Fill),
+                LeavesQuantity = 0,
+                CumulativeQuantity = 1000,
+                LastQuantity = 1000,
+                LastPrice = 30m,
+                Synthetic = false,
+                OrigClOrdId = 0,
+            },
+            fanOut => proc.Apply(1UL, ExecKind.Fill, 0, 1000, 1000, 30m, null, 0, fanOut));
+
+        book.TryAdd(new Order(2UL, owner, "PETR4", 1UL, OrderSide.Sell, OrderType.Limit, 100, 31m));
+        ownership.Register(2UL, owner);
+        book.TryAdd(new Order(3UL, owner, "PETR4", 1UL, OrderSide.Sell, OrderType.Limit, 100, 32m));
+        ownership.Register(3UL, owner);
+
+        var ready = new ManualResetEventSlim(false);
+        Task taskA = Task.Run(() =>
+        {
+            ready.Wait();
+            // Normal live path.
+            dispatcher.Dispatch(
+                new ExecutionReportReceivedEvent
+                {
+                    ClOrdId = 2UL,
+                    ExecKind = nameof(ExecKind.Fill),
+                    LeavesQuantity = 0,
+                    CumulativeQuantity = 100,
+                    LastQuantity = 100,
+                    LastPrice = 31m,
+                    Synthetic = false,
+                    OrigClOrdId = 0,
+                },
+                fanOut => proc.Apply(2UL, ExecKind.Fill, 0, 100, 100, 31m, null, 0, fanOut));
+        });
+        Task taskB = Task.Run(() =>
+        {
+            ready.Wait();
+            // Fallback path.
+            dispatcher.RunExclusive(() =>
+                proc.Apply(3UL, ExecKind.Fill, 0, 100, 100, 32m, null, 0));
+        });
+        ready.Set();
+
+        var allDone = Task.WhenAll(taskA, taskB);
+        var completed = await Task.WhenAny(allDone, Task.Delay(TimeSpan.FromSeconds(5)));
+        Assert.Same(allDone, completed);
+        await allDone; // surface any exception
+
+        var realizedEvents = store.Recorded.ToArray()
+            .Where(r => r.Event is RealizedPnlEvent)
+            .Select(r => (RealizedPnlEvent)r.Event)
+            .ToArray();
+        // Normal path appends a RealizedPnlEvent; fallback path skips
+        // the WAL append by design (it's the backpressure branch).
+        // Either way the keeper's GetDayRealized must reflect both
+        // sells: (31-30)*100 + (32-30)*100 = 100 + 200 = 300.
+        Assert.Equal(300m, pnl.GetDayRealized("alice", "PETR4", DateOnly.FromDateTime(DateTime.UtcNow)));
+
+        // Among the events that DID get appended, RunningTotal must
+        // be monotonically non-decreasing (lock serialisation
+        // guarantees the keeper-vs-WAL view stays consistent).
+        decimal previous = decimal.MinValue;
+        foreach (var e in realizedEvents)
+        {
+            Assert.True(e.RunningTotal >= previous,
+                $"RunningTotal not monotonic: {previous} → {e.RunningTotal}");
+            previous = e.RunningTotal;
+        }
+    }
 }

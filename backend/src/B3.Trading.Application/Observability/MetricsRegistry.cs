@@ -149,6 +149,15 @@ public static class MetricsRegistry
     // pre-#271 snapshot at least once.
     public static readonly Counter<long> PnlLegacySnapshotBasisSeeded =
         Meter.CreateCounter<long>("trading.pnl.legacy_snapshot_basis_seeded");
+    // Pass-2 review (#278) P1#2. Bumped per (endClient, symbol) row
+    // skipped by SeedAvgCostFromLegacyPositions because the legacy
+    // position carries a zero AverageEntryPrice — seeding such a
+    // degenerate row would realize phantom P&L against a zero basis
+    // on the first close after restore. A non-zero count flags a
+    // snapshot containing position rows the host could not derive a
+    // basis from (operator follow-up).
+    public static readonly Counter<long> PnlLegacySnapshotBasisSkippedZero =
+        Meter.CreateCounter<long>("trading.pnl.legacy_snapshot_basis_skipped_zero");
     // Pass-1 review (#278) P1#3. Bumped each time the refprice
     // fan-out coalesced one or more (subscriber, symbol) updates into
     // a single pnl.me delta publish under the per-symbol throttle.

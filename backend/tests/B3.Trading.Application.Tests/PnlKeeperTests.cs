@@ -276,68 +276,38 @@ public class PnlKeeperTests
     }
 
     [Fact]
-    public async Task ApplyFillUnderLock_SerialisesConcurrentFillsForSameKey()
+    public void SeedAvgCostFromLegacyPositions_SkipsZeroAvgPriceRows()
     {
-        // Pass-1 review (#278) P1#2. Two concurrent fills for the
-        // same (endClient, symbol) must not race the running-total
-        // computation. The per-key lock guarantees that the realized
-        // delta and running total observed by each callback are
-        // consistent with the in-memory state visible at the time of
-        // the lock acquisition.
+        // Pass-2 review (#278) P1#2. A non-flat position row with a
+        // zero AverageEntryPrice is degenerate: seeding it would
+        // book the next sell as realized = sellPrice * qty against
+        // a zero basis, surfacing phantom realized P&L on first
+        // close after restore. Guard skips the row so the keeper
+        // simply has no basis until a fresh fill establishes one.
         var k = new PnlKeeper();
-        // Open 1000 @ 30 so both concurrent sells realise spread.
-        k.ApplyFillToAvgCost("alice", "PETR4", OrderSide.Buy, 1000, 30m);
+        k.Restore(
+            new Dictionary<string, decimal>(),
+            Array.Empty<PnlAvgCostSnapshot>());
+        var positions = new[]
+        {
+            new PositionSnapshot("alice", "PETR4", 100, 0m),  // zero basis, skipped
+            new PositionSnapshot("bob", "VALE3", -50, 0m),    // zero basis, skipped
+            new PositionSnapshot("carol", "ITSA4", 75, 12m),  // valid basis, seeded
+        };
 
-        var observed = new System.Collections.Concurrent.ConcurrentBag<(decimal Delta, decimal Running)>();
-        var t1 = Task.Run(() => k.ApplyFillUnderLock(
-            "alice", "PETR4", OrderSide.Sell, 100, 31m, Day,
-            ctx =>
-            {
-                observed.Add((ctx.RealizedDelta, ctx.RunningTotal));
-                k.Apply(new RealizedPnlEvent
-                {
-                    ClOrdId = 1,
-                    ExecutionId = "1:100",
-                    EndClientId = "alice",
-                    Symbol = "PETR4",
-                    DayKey = Day,
-                    DeltaRealized = ctx.RealizedDelta,
-                    RunningTotal = ctx.RunningTotal,
-                    TimestampUtc = Ts,
-                });
-            }));
-        var t2 = Task.Run(() => k.ApplyFillUnderLock(
-            "alice", "PETR4", OrderSide.Sell, 100, 32m, Day,
-            ctx =>
-            {
-                observed.Add((ctx.RealizedDelta, ctx.RunningTotal));
-                k.Apply(new RealizedPnlEvent
-                {
-                    ClOrdId = 2,
-                    ExecutionId = "2:100",
-                    EndClientId = "alice",
-                    Symbol = "PETR4",
-                    DayKey = Day,
-                    DeltaRealized = ctx.RealizedDelta,
-                    RunningTotal = ctx.RunningTotal,
-                    TimestampUtc = Ts,
-                });
-            }));
-        await Task.WhenAll(t1, t2);
+        var seeded = k.SeedAvgCostFromLegacyPositions(positions);
+        Assert.Equal(1, seeded);
+        Assert.Null(k.GetAvgCost("alice", "PETR4"));
+        Assert.Null(k.GetAvgCost("bob", "VALE3"));
+        var c = k.GetAvgCost("carol", "ITSA4")!;
+        Assert.Equal(75, c.NetQuantity);
+        Assert.Equal(12m, c.AvgPrice);
 
-        // Realised: (31-30)*100 = 100 and (32-30)*100 = 200. The
-        // observed (delta, running) pairs depend on lock acquisition
-        // order, but the invariants are: sum of deltas = 300; the
-        // larger running equals 300; the smaller running equals the
-        // delta of the fill that won the lock first; the keeper's
-        // final GetDayRealized must be 300.
-        var ordered = observed.OrderBy(o => o.Running).ToArray();
-        Assert.Equal(2, ordered.Length);
-        Assert.Equal(ordered[0].Delta, ordered[0].Running); // first under lock
-        Assert.Equal(300m, ordered[1].Running);
-        Assert.Equal(300m, ordered[0].Delta + ordered[1].Delta);
-        Assert.Contains(ordered, o => o.Delta == 100m);
-        Assert.Contains(ordered, o => o.Delta == 200m);
-        Assert.Equal(300m, k.GetDayRealized("alice", "PETR4", Day));
+        // The next sell on a skipped key opens fresh at the fill
+        // price (no pre-existing basis tracker entry → opening fill
+        // path), so realized = 0 — i.e. no phantom P&L is booked.
+        var realized = k.ApplyFillToAvgCost("alice", "PETR4", OrderSide.Sell, 50, 31m);
+        Assert.Equal(0m, realized);
+        Assert.Equal(0m, k.GetDayRealized("alice", "PETR4", Day));
     }
 }
