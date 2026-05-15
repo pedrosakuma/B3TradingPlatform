@@ -223,7 +223,16 @@ public static class HistoryEndpoints
                     replaceLinks[rr.NewClOrdId] = new ReplaceIntent(rr.OriginalClOrdId, rr.NewQuantity);
                     if (!OwnerMatches(rr.EndClientId, owner)) break;
                     if (symbol is not null && !rr.Symbol.Equals(symbol, StringComparison.Ordinal)) break;
-                    byClOrdId[rr.NewClOrdId] = OrderProjection.FromReplace(seq, rr);
+                    byClOrdId[rr.NewClOrdId] = OrderProjection.FromReplace(
+                        seq,
+                        rr,
+                        // Inherit TIF/StopPrice/GoodTillDate from the
+                        // original projection when the modify request
+                        // omits them — mirrors Order.HydrateReplacement
+                        // / Order.MergeReplacementOptionals so a quantity-
+                        // only replace of a GTD or stop order doesn't
+                        // silently drop those fields in the history view.
+                        byClOrdId.TryGetValue(rr.OriginalClOrdId, out var origReplaceFrom) ? origReplaceFrom : null);
                     if (inWindow) hadEventInWindow.Add(rr.NewClOrdId);
                     break;
 
@@ -703,26 +712,60 @@ public static class HistoryEndpoints
             LastTs = o.TimestampUtc,
         };
 
-        public static OrderProjection FromReplace(long seq, OrderReplaceRequestedEvent rr) => new()
+        public static OrderProjection FromReplace(long seq, OrderReplaceRequestedEvent rr, OrderProjection? original)
         {
-            ClOrdId = rr.NewClOrdId,
-            Symbol = rr.Symbol,
-            SecurityId = rr.SecurityId,
-            Side = rr.Side,
-            Type = rr.Type,
-            Quantity = rr.NewQuantity,
-            Price = rr.NewPrice,
-            TimeInForce = rr.RequestedTimeInForce ?? nameof(B3.Trading.Domain.TimeInForce.Day),
-            StopPrice = rr.RequestedStopPrice,
-            GoodTillDate = rr.RequestedGoodTillDate,
-            LeavesQuantity = rr.NewQuantity,
-            CumulativeQuantity = 0,
-            Status = OrderStatus.PendingNew,
-            FirstSeq = seq,
-            CreatedAtUtc = rr.TimestampUtc,
-            LastSeq = seq,
-            LastTs = rr.TimestampUtc,
-        };
+            // Q1.1 (#253) parity with Order.HydrateReplacement /
+            // Order.MergeReplacementOptionals: when the modify request
+            // omits TIF / StopPrice / GoodTillDate, the runtime
+            // INHERITS them from the original order. Treating the
+            // requested fields as final values would silently demote a
+            // GTD or stop order on a quantity-only replace (history
+            // would show TIF=Day + null stop/gtd while the live book
+            // kept the original semantics).
+            //
+            // Mirror MergeReplacementOptionals exactly so the projection
+            // matches HydrateReplacement's effective fields:
+            //   • effTif  = requested ?? original
+            //   • effStop = requested ?? original
+            //   • effGtd  = requested ?? original IF effTif == GTD;
+            //               otherwise auto-cleared (same trick the
+            //               domain uses to let callers shed an inherited
+            //               expiry just by switching TIF away from GTD).
+            //
+            // If the original projection isn't available (e.g. owner
+            // filter dropped it, or the WAL slice begins after the
+            // original) we fall back to the request as-is — there is
+            // no inheritance source.
+            var effTif = rr.RequestedTimeInForce
+                ?? original?.TimeInForce
+                ?? nameof(B3.Trading.Domain.TimeInForce.Day);
+            var effStop = rr.RequestedStopPrice ?? original?.StopPrice;
+            var isGtd = string.Equals(effTif, nameof(B3.Trading.Domain.TimeInForce.GTD), StringComparison.Ordinal);
+            var effGtd = isGtd
+                ? (rr.RequestedGoodTillDate ?? original?.GoodTillDate)
+                : null;
+
+            return new OrderProjection
+            {
+                ClOrdId = rr.NewClOrdId,
+                Symbol = rr.Symbol,
+                SecurityId = rr.SecurityId,
+                Side = rr.Side,
+                Type = rr.Type,
+                Quantity = rr.NewQuantity,
+                Price = rr.NewPrice,
+                TimeInForce = effTif,
+                StopPrice = effStop,
+                GoodTillDate = effGtd,
+                LeavesQuantity = rr.NewQuantity,
+                CumulativeQuantity = 0,
+                Status = OrderStatus.PendingNew,
+                FirstSeq = seq,
+                CreatedAtUtc = rr.TimestampUtc,
+                LastSeq = seq,
+                LastTs = rr.TimestampUtc,
+            };
+        }
 
         /// <summary>
         /// Applies an ER to this projection. Mirrors the runtime
@@ -797,15 +840,20 @@ public static class HistoryEndpoints
                         // allow PartiallyFilled→Cancelled (a working order
                         // with a partial can still be cancelled). Mirror
                         // exactly: only Filled/Rejected/Cancelled/Replaced
-                        // block.
+                        // block. Crucially, MarkCancelled only flips
+                        // Status — it does NOT touch leaves/cum. Real
+                        // venue cancels typically carry LeavesQuantity=0,
+                        // so copying them into the projection would
+                        // diverge from the runtime book (a 10-lot working
+                        // order cancelled would show leaves=0 in history
+                        // while runtime keeps leaves=10). Quantities only
+                        // advance from fill ERs.
                         if (Status is not (OrderStatus.Filled
                             or OrderStatus.Rejected
                             or OrderStatus.Cancelled
                             or OrderStatus.Replaced))
                         {
                             Status = OrderStatus.Cancelled;
-                            LeavesQuantity = er.LeavesQuantity;
-                            CumulativeQuantity = Math.Max(CumulativeQuantity, er.CumulativeQuantity);
                         }
                         break;
 
@@ -813,6 +861,8 @@ public static class HistoryEndpoints
                         // Order.MarkRejected: dropped after any fill or
                         // any terminal. Matches the
                         // ExecutionReportProcessor guard set exactly.
+                        // Like MarkCancelled, MarkRejected is status-only;
+                        // do not copy leaves/cum from the ER.
                         if (Status is not (OrderStatus.Filled
                             or OrderStatus.PartiallyFilled
                             or OrderStatus.Rejected
@@ -820,8 +870,6 @@ public static class HistoryEndpoints
                             or OrderStatus.Replaced))
                         {
                             Status = OrderStatus.Rejected;
-                            LeavesQuantity = er.LeavesQuantity;
-                            CumulativeQuantity = Math.Max(CumulativeQuantity, er.CumulativeQuantity);
                         }
                         break;
 

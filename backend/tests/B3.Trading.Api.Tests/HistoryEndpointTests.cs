@@ -1034,6 +1034,264 @@ public class HistoryEndpointTests : IDisposable
         Assert.Equal(0L, byId[newId.ToString()].GetProperty("cumulativeQuantity").GetInt64());
     }
 
+    [Fact]
+    public async Task OrdersHistory_CancelEr_PreservesLeavesAndCumFromRuntimeBook()
+    {
+        // P1 regression for #275 pass-6: Order.MarkCancelled only flips
+        // Status — it does NOT touch leaves/cum. A real venue Canceled
+        // ER typically carries LeavesQuantity=0, so the previous
+        // ApplyEr (which copied er.LeavesQuantity into the projection)
+        // showed a 10-lot working order as leaves=0 in /orders/history
+        // while the live runtime kept leaves=10.
+        using var f = TestAppFactory.WithOverrides(Overrides());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var clOrdIdStr = await SubmitOrder(http, token, qty: 10, price: 30m);
+        var clOrdId = ulong.Parse(clOrdIdStr);
+        await InjectEr(http, adminToken, new { ClOrdId = clOrdId, Type = "New" });
+
+        // Direct mock emit so we control the Canceled ER's leaves
+        // exactly (the simulator endpoint synthesises leaves=0 by
+        // default, but going through the mock makes the contract
+        // explicit in the test).
+        var mock = (B3.Trading.Infrastructure.MockEntryPointClient)
+            f.Services.GetRequiredService<B3.Trading.Infrastructure.IEntryPointClient>();
+        mock.EmitExecutionReport(new B3.Trading.Infrastructure.ExecutionReportEnvelope(
+            ClOrdId: clOrdId,
+            ExecType: B3.Trading.Infrastructure.EpExecType.Canceled,
+            LeavesQuantity: 0,
+            CumulativeQuantity: 0,
+            LastQuantity: 0,
+            LastPrice: 0m,
+            RejectReason: null,
+            OrigClOrdId: 0));
+
+        var page = await GetOrdersHistory(http, token);
+        var byId = page.Items.ToDictionary(
+            o => o.GetProperty("clOrdId").GetString()!,
+            o => o,
+            StringComparer.Ordinal);
+
+        var orig = byId[clOrdIdStr];
+        Assert.Equal("Cancelled", orig.GetProperty("status").GetString());
+        // Leaves/cum must mirror runtime parity (MarkCancelled is
+        // status-only). Original 10-lot has had no fills.
+        Assert.Equal(10L, orig.GetProperty("leavesQuantity").GetInt64());
+        Assert.Equal(0L, orig.GetProperty("cumulativeQuantity").GetInt64());
+    }
+
+    [Fact]
+    public async Task OrdersHistory_RejectedEr_PreservesLeavesAndCumFromRuntimeBook()
+    {
+        // P1 regression for #275 pass-6: Order.MarkRejected is also
+        // status-only. A Rejected ER on a 10-lot pending order with
+        // leaves=0 in the ER must still surface leaves=10 in the
+        // projection (matching the runtime book).
+        using var f = TestAppFactory.WithOverrides(Overrides());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+
+        var clOrdIdStr = await SubmitOrder(http, token, qty: 10, price: 30m);
+        var clOrdId = ulong.Parse(clOrdIdStr);
+
+        var mock = (B3.Trading.Infrastructure.MockEntryPointClient)
+            f.Services.GetRequiredService<B3.Trading.Infrastructure.IEntryPointClient>();
+        mock.EmitExecutionReport(new B3.Trading.Infrastructure.ExecutionReportEnvelope(
+            ClOrdId: clOrdId,
+            ExecType: B3.Trading.Infrastructure.EpExecType.Rejected,
+            LeavesQuantity: 0,
+            CumulativeQuantity: 0,
+            LastQuantity: 0,
+            LastPrice: 0m,
+            RejectReason: "venue rejected",
+            OrigClOrdId: 0));
+
+        var page = await GetOrdersHistory(http, token);
+        var byId = page.Items.ToDictionary(
+            o => o.GetProperty("clOrdId").GetString()!,
+            o => o,
+            StringComparer.Ordinal);
+
+        var orig = byId[clOrdIdStr];
+        Assert.Equal("Rejected", orig.GetProperty("status").GetString());
+        Assert.Equal(10L, orig.GetProperty("leavesQuantity").GetInt64());
+        Assert.Equal(0L, orig.GetProperty("cumulativeQuantity").GetInt64());
+    }
+
+    [Fact]
+    public async Task OrdersHistory_QuantityOnlyReplaceOfGtdOrder_InheritsTifAndGoodTillDate()
+    {
+        // P1 regression for #275 pass-6: Order.HydrateReplacement /
+        // Order.MergeReplacementOptionals INHERIT TIF / StopPrice /
+        // GoodTillDate from the original when the modify request omits
+        // them. The projector previously treated the request fields as
+        // final values, so a quantity-only replace of a GTD order
+        // surfaced TIF=Day + GoodTillDate=null in /orders/history while
+        // the live runtime kept GTD + the original expiry.
+        using var f = TestAppFactory.WithOverrides(Overrides());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var gtd = DateTimeOffset.UtcNow.AddDays(20);
+        var origStr = await SubmitGtdOrder(http, token, qty: 10, price: 30m, goodTillDate: gtd);
+        var origId = ulong.Parse(origStr);
+        await InjectEr(http, adminToken, new { ClOrdId = origId, Type = "New" });
+
+        // Quantity-only modify — TIF / StopPrice / GoodTillDate omitted.
+        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origStr}")
+        {
+            Content = JsonContent.Create(new { Quantity = 20L }),
+        };
+        modifyReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var modifyResp = await http.SendAsync(modifyReq);
+        if (modifyResp.StatusCode != HttpStatusCode.Accepted)
+        {
+            var errBody = await modifyResp.Content.ReadAsStringAsync();
+            Assert.Fail($"modify failed: {modifyResp.StatusCode} {errBody}");
+        }
+        var modifyBody = await modifyResp.Content.ReadFromJsonAsync<JsonElement>();
+        var newId = ulong.Parse(modifyBody.GetProperty("clOrdId").GetString()!);
+
+        var mock = (B3.Trading.Infrastructure.MockEntryPointClient)
+            f.Services.GetRequiredService<B3.Trading.Infrastructure.IEntryPointClient>();
+        mock.EmitExecutionReport(new B3.Trading.Infrastructure.ExecutionReportEnvelope(
+            ClOrdId: newId,
+            ExecType: B3.Trading.Infrastructure.EpExecType.Replaced,
+            LeavesQuantity: 20,
+            CumulativeQuantity: 0,
+            LastQuantity: 0,
+            LastPrice: 0m,
+            RejectReason: null,
+            OrigClOrdId: origId));
+
+        var page = await GetOrdersHistory(http, token);
+        var byId = page.Items.ToDictionary(
+            o => o.GetProperty("clOrdId").GetString()!,
+            o => o,
+            StringComparer.Ordinal);
+
+        var replacement = byId[newId.ToString()];
+        Assert.Equal("GTD", replacement.GetProperty("timeInForce").GetString());
+        Assert.Equal(gtd, replacement.GetProperty("goodTillDate").GetDateTimeOffset());
+        Assert.Equal(20L, replacement.GetProperty("quantity").GetInt64());
+    }
+
+    [Fact]
+    public async Task OrdersHistory_QuantityOnlyReplaceOfStopOrder_InheritsStopPrice()
+    {
+        // P1 regression for #275 pass-6: a quantity-only replace of a
+        // stop order must inherit the original StopPrice — the modify
+        // pipeline does so via MergeReplacementOptionals; the projector
+        // now mirrors the same merge.
+        using var f = TestAppFactory.WithOverrides(Overrides());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var origStr = await SubmitStopLimitOrder(
+            http, token, qty: 10, price: 31m, stopPrice: 30m);
+        var origId = ulong.Parse(origStr);
+        await InjectEr(http, adminToken, new { ClOrdId = origId, Type = "New" });
+
+        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origStr}")
+        {
+            // Price is supplied explicitly because the modify pipeline
+            // requires NewPrice on stop-limit (limit-vs-stop sanity is
+            // re-evaluated in risk). The Q1.1 inheritance under test is
+            // for StopPrice / TIF / GoodTillDate only — those are the
+            // optionals MergeReplacementOptionals merges.
+            Content = JsonContent.Create(new { Quantity = 20L, Price = 31m }),
+        };
+        modifyReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var modifyResp = await http.SendAsync(modifyReq);
+        if (modifyResp.StatusCode != HttpStatusCode.Accepted)
+        {
+            var errBody = await modifyResp.Content.ReadAsStringAsync();
+            Assert.Fail($"modify failed: {modifyResp.StatusCode} {errBody}");
+        }
+        var modifyBody = await modifyResp.Content.ReadFromJsonAsync<JsonElement>();
+        var newId = ulong.Parse(modifyBody.GetProperty("clOrdId").GetString()!);
+
+        var mock = (B3.Trading.Infrastructure.MockEntryPointClient)
+            f.Services.GetRequiredService<B3.Trading.Infrastructure.IEntryPointClient>();
+        mock.EmitExecutionReport(new B3.Trading.Infrastructure.ExecutionReportEnvelope(
+            ClOrdId: newId,
+            ExecType: B3.Trading.Infrastructure.EpExecType.Replaced,
+            LeavesQuantity: 20,
+            CumulativeQuantity: 0,
+            LastQuantity: 0,
+            LastPrice: 0m,
+            RejectReason: null,
+            OrigClOrdId: origId));
+
+        var page = await GetOrdersHistory(http, token);
+        var byId = page.Items.ToDictionary(
+            o => o.GetProperty("clOrdId").GetString()!,
+            o => o,
+            StringComparer.Ordinal);
+
+        var replacement = byId[newId.ToString()];
+        Assert.Equal("Day", replacement.GetProperty("timeInForce").GetString());
+        Assert.Equal(30m, replacement.GetProperty("stopPrice").GetDecimal());
+        Assert.Equal(20L, replacement.GetProperty("quantity").GetInt64());
+    }
+
+    [Fact]
+    public async Task OrdersHistory_ReplaceTifGtdToDay_ClearsGoodTillDate()
+    {
+        // P1 regression for #275 pass-6: when the replace explicitly
+        // moves TIF GTD → Day, MergeReplacementOptionals auto-clears
+        // GoodTillDate (the trick callers use to shed an inherited
+        // expiry without redundantly nulling it). The projector must
+        // mirror that auto-clear so the history view doesn't drag the
+        // original expiry forward onto a Day order.
+        using var f = TestAppFactory.WithOverrides(Overrides());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var gtd = DateTimeOffset.UtcNow.AddDays(20);
+        var origStr = await SubmitGtdOrder(http, token, qty: 10, price: 30m, goodTillDate: gtd);
+        var origId = ulong.Parse(origStr);
+        await InjectEr(http, adminToken, new { ClOrdId = origId, Type = "New" });
+
+        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origStr}")
+        {
+            Content = JsonContent.Create(new { Quantity = 10L, TimeInForce = "Day" }),
+        };
+        modifyReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var modifyResp = await http.SendAsync(modifyReq);
+        Assert.Equal(HttpStatusCode.Accepted, modifyResp.StatusCode);
+        var modifyBody = await modifyResp.Content.ReadFromJsonAsync<JsonElement>();
+        var newId = ulong.Parse(modifyBody.GetProperty("clOrdId").GetString()!);
+
+        var mock = (B3.Trading.Infrastructure.MockEntryPointClient)
+            f.Services.GetRequiredService<B3.Trading.Infrastructure.IEntryPointClient>();
+        mock.EmitExecutionReport(new B3.Trading.Infrastructure.ExecutionReportEnvelope(
+            ClOrdId: newId,
+            ExecType: B3.Trading.Infrastructure.EpExecType.Replaced,
+            LeavesQuantity: 10,
+            CumulativeQuantity: 0,
+            LastQuantity: 0,
+            LastPrice: 0m,
+            RejectReason: null,
+            OrigClOrdId: origId));
+
+        var page = await GetOrdersHistory(http, token);
+        var byId = page.Items.ToDictionary(
+            o => o.GetProperty("clOrdId").GetString()!,
+            o => o,
+            StringComparer.Ordinal);
+
+        var replacement = byId[newId.ToString()];
+        Assert.Equal("Day", replacement.GetProperty("timeInForce").GetString());
+        var gtdProp = replacement.GetProperty("goodTillDate");
+        Assert.Equal(JsonValueKind.Null, gtdProp.ValueKind);
+    }
+
     // -----------------------------------------------------------------
     // helpers
     // -----------------------------------------------------------------
@@ -1096,6 +1354,55 @@ public class HistoryEndpointTests : IDisposable
                 Type = "Limit",
                 Quantity = qty,
                 Price = price,
+            }),
+        };
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var resp = await http.SendAsync(req);
+        Assert.Equal(HttpStatusCode.Accepted, resp.StatusCode);
+        var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        return body.GetProperty("clOrdId").GetString()!;
+    }
+
+    private static async Task<string> SubmitGtdOrder(
+        HttpClient http, string token, int qty, decimal price, DateTimeOffset goodTillDate,
+        string symbol = "PETR4")
+    {
+        var req = new HttpRequestMessage(HttpMethod.Post, "/orders")
+        {
+            Content = JsonContent.Create(new
+            {
+                Symbol = symbol,
+                SecurityId = 4321UL,
+                Side = "Buy",
+                Type = "Limit",
+                Quantity = qty,
+                Price = price,
+                TimeInForce = "GTD",
+                GoodTillDate = goodTillDate,
+            }),
+        };
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var resp = await http.SendAsync(req);
+        Assert.Equal(HttpStatusCode.Accepted, resp.StatusCode);
+        var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        return body.GetProperty("clOrdId").GetString()!;
+    }
+
+    private static async Task<string> SubmitStopLimitOrder(
+        HttpClient http, string token, int qty, decimal price, decimal stopPrice,
+        string symbol = "PETR4")
+    {
+        var req = new HttpRequestMessage(HttpMethod.Post, "/orders")
+        {
+            Content = JsonContent.Create(new
+            {
+                Symbol = symbol,
+                SecurityId = 4321UL,
+                Side = "Buy",
+                Type = "StopLimit",
+                Quantity = qty,
+                Price = price,
+                StopPrice = stopPrice,
             }),
         };
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
