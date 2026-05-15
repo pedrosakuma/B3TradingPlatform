@@ -385,6 +385,15 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
         ulong newClOrdId,
         decimal confirmedRemainingNotional)
     {
+        // Issue #247. Margin globally disabled: TryReserveAsync and
+        // PrepareReplaceAsync both short-circuit without populating
+        // _reservations, so any CommitReplace landing here is a true
+        // no-op — not a "dropped reservation" worth a warn. Mirror the
+        // gate in PrepareReplaceAsync so the legitimate disabled-margin
+        // deployment doesn't spam logs on every modify-to-fill.
+        if (!_options.CurrentValue.Margin.Enabled)
+            return;
+
         lock (_gate)
         {
             // Remove the transient entry (set up by Prepare) — its
@@ -413,13 +422,19 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
 
             if (owner is null)
             {
-                // No reservation existed on either side (sell or
-                // never-reserved). Nothing to track going forward.
+                // Margin is enabled and yet neither side carried a
+                // reservation: this is a real bug (not a config no-op),
+                // because the matching PrepareReplaceAsync should have
+                // populated the transient entry under newClOrdId. Most
+                // likely culprit is a code path that registered the
+                // intent without going through the coordinator. Surface
+                // it as an error + counter so it's alertable.
                 if (confirmedRemainingNotional > 0m)
                 {
-                    _logger.LogWarning(
-                        "CommitReplace asked to track {Notional} for new ClOrdID {NewClOrdId} but neither original nor pending reservation has an owner; dropping.",
-                        confirmedRemainingNotional, newClOrdId);
+                    _logger.LogError(
+                        "CommitReplace asked to track {Notional} for new ClOrdID {NewClOrdId} (orig {OrigClOrdId}) but neither original nor pending reservation has an owner; dropping. This indicates a Prepare/Commit mismatch — reservation will leak.",
+                        confirmedRemainingNotional, newClOrdId, originalClOrdId);
+                    MetricsRegistry.MarginCommitReplaceDropped.Add(1);
                 }
                 return;
             }

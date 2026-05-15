@@ -58,6 +58,16 @@ public static class MetricsRegistry
     public static readonly Counter<long> ExecutionReportsDroppedKnownOwnerMissingOrder =
         Meter.CreateCounter<long>("trading.execution_reports.dropped_known_owner_missing_order");
 
+    // Issue #247: CommitReplace landed on the reservation ledger but
+    // neither the original nor the transient (Prepare-side) entry was
+    // present, so the venue-confirmed remaining notional could not be
+    // tracked under the new ClOrdID. With Margin.Enabled=true this is
+    // a Prepare/Commit pipeline mismatch (some path registered a
+    // replace intent without going through the coordinator) and means
+    // the owner's reserved figure will leak until restart. Alertable.
+    public static readonly Counter<long> MarginCommitReplaceDropped =
+        Meter.CreateCounter<long>("trading.margin.commit_replace_dropped");
+
     // Risk / kill-switch
     public static readonly Counter<long> KillSwitchToggled =
         Meter.CreateCounter<long>("trading.kill_switch.toggled");
