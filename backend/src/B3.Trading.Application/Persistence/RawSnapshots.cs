@@ -56,6 +56,19 @@ public sealed class RawPlatformSnapshot
     /// </summary>
     public CashKeeperRaw[] CashByEndclient { get; init; } = Array.Empty<CashKeeperRaw>();
 
+    /// <summary>
+    /// Q2.3 (#270). Per-(end-client, day) total fees projected from
+    /// the <c>FeeAccruedEvent</c> stream by <c>FeeKeeper</c>.
+    /// </summary>
+    public FeeKeeperRaw[] FeesByEndclientDay { get; init; } = Array.Empty<FeeKeeperRaw>();
+
+    /// <summary>
+    /// Q2.3 (#270). Idempotence guard for <c>FeeKeeper.Apply</c> —
+    /// captured under the dispatcher lock alongside <see cref="FeesByEndclientDay"/>
+    /// so a snapshot+tail recovery dedupes the tail correctly.
+    /// </summary>
+    public string[] FeeSeenExecutionIds { get; init; } = Array.Empty<string>();
+
     public UserBotCredential[] UserBotCredentials { get; init; } =
         Array.Empty<UserBotCredential>();
     public BotSessionState[] BotSessions { get; init; } = Array.Empty<BotSessionState>();
@@ -124,6 +137,13 @@ public readonly record struct CashRaw(string EndClientId, decimal Available);
 /// projections can evolve independently.
 /// </summary>
 public readonly record struct CashKeeperRaw(string EndClientId, decimal Available);
+
+/// <summary>
+/// Q2.3 (#270). Raw lock-side capture of one row from
+/// <see cref="B3.Trading.Application.FeeKeeper"/>: the running fee
+/// total for one (end-client, day) bucket.
+/// </summary>
+public readonly record struct FeeKeeperRaw(string EndClientId, DateOnly Day, decimal Total);
 
 public readonly record struct ClOrdIdCounterRaw(string EndClientId, ulong PrefixIdx, long Counter);
 

@@ -27,6 +27,7 @@ public sealed class StateSnapshotter
     private readonly AlgoIdRegistry _algoIds;
     private readonly CashLedger _cash;
     private readonly CashKeeper? _cashKeeper;
+    private readonly FeeKeeper? _feeKeeper;
     private readonly InMemoryUserBotCredentialRegistry? _userBotCredentials;
     private readonly InMemoryUserBotSessionRegistry? _userBotSessions;
     private readonly IUserBotOrderMappingRegistry? _userBotMappings;
@@ -56,7 +57,8 @@ public sealed class StateSnapshotter
         InMemoryUserBotSessionRegistry? userBotSessions = null,
         IUserBotOrderMappingRegistry? userBotMappings = null,
         GtdExpirationScheduler? gtdScheduler = null,
-        CashKeeper? cashKeeper = null)
+        CashKeeper? cashKeeper = null,
+        FeeKeeper? feeKeeper = null)
     {
         _orders = orders;
         _positions = positions;
@@ -69,6 +71,7 @@ public sealed class StateSnapshotter
         _algoIds = algoIds;
         _cash = cash;
         _cashKeeper = cashKeeper;
+        _feeKeeper = feeKeeper;
         _userBotCredentials = userBotCredentials;
         _userBotSessions = userBotSessions;
         _userBotMappings = userBotMappings;
@@ -114,6 +117,8 @@ public sealed class StateSnapshotter
         Ownership = _ownership.RawSnapshot(),
         CashBalances = _cash.RawSnapshot(),
         CashByEndclient = _cashKeeper?.RawSnapshot() ?? Array.Empty<CashKeeperRaw>(),
+        FeesByEndclientDay = _feeKeeper?.RawSnapshot() ?? Array.Empty<FeeKeeperRaw>(),
+        FeeSeenExecutionIds = _feeKeeper?.RawSnapshotSeenIds() ?? Array.Empty<string>(),
         UserBotCredentials = _userBotCredentials?.RawSnapshot() ?? Array.Empty<UserBotCredential>(),
         BotSessions = _userBotSessions?.RawSnapshot() ?? Array.Empty<BotSessionState>(),
         BotOrderMappings = _userBotMappings?.RawSnapshotOrders() ?? Array.Empty<BotOrderMappingRaw>(),
@@ -189,6 +194,21 @@ public sealed class StateSnapshotter
         var cashByEndclient = new Dictionary<string, decimal>(raw.CashByEndclient.Length);
         for (var i = 0; i < raw.CashByEndclient.Length; i++)
             cashByEndclient[raw.CashByEndclient[i].EndClientId] = raw.CashByEndclient[i].Available;
+
+        // Q2.3 (#270). FeeKeeper rows projected into the
+        // <c>{endClientId}|{yyyy-MM-dd} → total</c> dict shape; same
+        // shape rationale as cashByEndclient (no-deterministic order
+        // required, callers index by composite key). Seen-set is a
+        // flat list — order does not matter on restore (HashSet add).
+        var feesByEndclientDay = new Dictionary<string, decimal>(raw.FeesByEndclientDay.Length);
+        for (var i = 0; i < raw.FeesByEndclientDay.Length; i++)
+        {
+            var f = raw.FeesByEndclientDay[i];
+            feesByEndclientDay[FeeKeeper.FormatKey(f.EndClientId, f.Day)] = f.Total;
+        }
+        var feeSeen = new List<string>(raw.FeeSeenExecutionIds.Length);
+        for (var i = 0; i < raw.FeeSeenExecutionIds.Length; i++)
+            feeSeen.Add(raw.FeeSeenExecutionIds[i]);
 
         var phaseOverrides = new List<SessionPhaseOverrideSnapshot>(raw.SessionPhaseOverrides.Length);
         for (var i = 0; i < raw.SessionPhaseOverrides.Length; i++)
@@ -270,6 +290,8 @@ public sealed class StateSnapshotter
             AlgoIds = algoIds,
             CashBalances = cash,
             CashByEndclient = cashByEndclient,
+            FeesByEndclientDay = feesByEndclientDay,
+            FeeSeenExecutionIds = feeSeen,
             UserBotCredentials = creds,
             BotSessions = sessions,
             BotOrderMappings = botOrderMaps,
@@ -298,6 +320,7 @@ public sealed class StateSnapshotter
         _algoIds.Restore(snap.AlgoIds);
         _cash.Restore(snap.CashBalances);
         _cashKeeper?.Restore(snap.CashByEndclient);
+        _feeKeeper?.Restore(snap.FeesByEndclientDay, snap.FeeSeenExecutionIds);
         _userBotCredentials?.Restore(snap.UserBotCredentials);
         _userBotSessions?.Restore(snap.BotSessions);
         _userBotMappings?.Restore(snap.BotOrderMappings, snap.BotCancelMappings);
@@ -352,6 +375,7 @@ public sealed class EventReplayer
     /// </summary>
     private readonly GtdExpirationScheduler? _gtdScheduler;
     private readonly CashKeeper? _cashKeeper;
+    private readonly FeeKeeper? _feeKeeper;
 
     public EventReplayer(
         WorkingOrderBook orders,
@@ -368,7 +392,8 @@ public sealed class EventReplayer
         InMemoryUserBotSessionRegistry? userBotSessions = null,
         IUserBotOrderMappingRegistry? userBotMappings = null,
         GtdExpirationScheduler? gtdScheduler = null,
-        CashKeeper? cashKeeper = null)
+        CashKeeper? cashKeeper = null,
+        FeeKeeper? feeKeeper = null)
     {
         _orders = orders;
         _ownership = ownership;
@@ -385,6 +410,7 @@ public sealed class EventReplayer
         _userBotMappings = userBotMappings;
         _gtdScheduler = gtdScheduler;
         _cashKeeper = cashKeeper;
+        _feeKeeper = feeKeeper;
     }
 
     public void Apply(WalEvent evt)
@@ -584,6 +610,14 @@ public sealed class EventReplayer
                 // CashKeeper. Null-tolerant for compositions/tests that
                 // don't wire the keeper.
                 _cashKeeper?.Apply(cle.Operation, new EndClientId(cle.EndClientId), cle.Amount);
+                break;
+            case FeeAccruedEvent fae:
+                // Q2.3 (#270). Forward the accrual to FeeKeeper. The
+                // keeper itself dedupes on ExecutionId so a snapshot
+                // whose totals already include this event is left
+                // untouched (FeeSeenExecutionIds restored alongside the
+                // totals — see StateSnapshotter.Restore).
+                _feeKeeper?.Apply(fae);
                 break;
         }
     }

@@ -36,6 +36,9 @@ public sealed class ExecutionReportProcessor
     private readonly ILogger<ExecutionReportProcessor> _logger;
     private readonly IAlgoSignalQueue? _algoSignals;
     private readonly CashLedger? _cash;
+    private readonly IFeeCalculator? _feeCalculator;
+    private readonly FeeKeeper? _feeKeeper;
+    private readonly Persistence.EventDispatcher? _dispatcher;
     private readonly PendingReplacementRegistry? _replacements;
     private readonly Risk.IReplaceMarginCoordinator? _replaceMargin;
     private readonly IBotErRouter? _botErRouter;
@@ -53,7 +56,10 @@ public sealed class ExecutionReportProcessor
         PendingReplacementRegistry? replacements = null,
         Risk.IReplaceMarginCoordinator? replaceMargin = null,
         IBotErRouter? botErRouter = null,
-        Scheduling.GtdExpirationScheduler? gtdScheduler = null)
+        Scheduling.GtdExpirationScheduler? gtdScheduler = null,
+        IFeeCalculator? feeCalculator = null,
+        FeeKeeper? feeKeeper = null,
+        Persistence.EventDispatcher? dispatcher = null)
     {
         _ownership = ownership;
         _orders = orders;
@@ -67,6 +73,9 @@ public sealed class ExecutionReportProcessor
         _replaceMargin = replaceMargin;
         _botErRouter = botErRouter;
         _gtdScheduler = gtdScheduler;
+        _feeCalculator = feeCalculator;
+        _feeKeeper = feeKeeper;
+        _dispatcher = dispatcher;
     }
 
     /// <summary>
@@ -231,6 +240,45 @@ public sealed class ExecutionReportProcessor
                     // Null when the host hasn't wired CashLedger yet
                     // (test contexts only — production DI always injects).
                     _cash?.ApplyFill(owner, order.Side, delta, lastPx);
+                    // Q2.3 (#270). Fees are computed off the fill delta
+                    // (NOT the cumulative quantity) using the live
+                    // FeeOptions snapshot, then dispatched as a
+                    // standalone FeeAccruedEvent that lands AFTER the
+                    // ER in the WAL — same dispatcher, same lock,
+                    // sequential Append. Replay path: fanOut is null
+                    // (EventReplayer + test paths bypass the dispatcher
+                    // and pass no writer), so we MUST NOT re-append on
+                    // replay; the replayed FeeAccruedEvent itself feeds
+                    // FeeKeeper directly via EventReplayer.Apply, and
+                    // FeeKeeper.Apply dedupes on ExecutionId so even a
+                    // bogus double would be a no-op.
+                    if (fanOut is not null
+                        && _feeCalculator is not null
+                        && _feeKeeper is not null
+                        && _dispatcher is not null)
+                    {
+                        var breakdown = _feeCalculator.Compute(order.Symbol, order.Side, delta, lastPx);
+                        var nowUtc = DateTimeOffset.UtcNow;
+                        var feeEvt = new Persistence.FeeAccruedEvent
+                        {
+                            ClOrdId = lookupId,
+                            ExecutionId = lookupId.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                                + ":" + order.CumulativeQuantity.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                            EndClientId = owner.Value,
+                            Symbol = order.Symbol,
+                            Side = order.Side.ToString(),
+                            FillQuantity = delta,
+                            FillPrice = lastPx,
+                            Notional = delta * lastPx,
+                            Brokerage = breakdown.Brokerage,
+                            Emolumentos = breakdown.Emolumentos,
+                            Liquidacao = breakdown.Liquidacao,
+                            Total = breakdown.Total,
+                            TimestampUtc = nowUtc,
+                        };
+                        var keeper = _feeKeeper;
+                        _dispatcher.Dispatch(feeEvt, () => keeper.Apply(feeEvt));
+                    }
                     // Release reserved margin against the actual booked
                     // delta — not the wire lastQty — so a lost
                     // intermediate ER can't leave the ledger under-released.
