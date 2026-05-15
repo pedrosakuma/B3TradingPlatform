@@ -114,6 +114,18 @@ public static class MetricsRegistry
     public static readonly Counter<long> RecoveryEventsReplayed =
         Meter.CreateCounter<long>("trading.recovery.events_replayed");
 
+    // Q2.3 (#270). Fee-keeper deterministic replay synth — surfaces the
+    // crash window between ER append (seq N) and FeeAccruedEvent append
+    // (seq N+1). Tag `reconciled` is true when a durable FeeAccruedEvent
+    // arrived later in the replay and superseded the pending synth (the
+    // happy path — process didn't actually crash, just the synth got
+    // queued first by ER replay ordering). Tag `reconciled` is false
+    // when FinalizeReplay had to materialise the synth because no
+    // durable fee event was found — that IS the crash-window case and
+    // ops should be alerted when this fires above baseline noise.
+    public static readonly Counter<long> FeeReplaySynth =
+        Meter.CreateCounter<long>("trading.fees.replay_synth");
+
     // WebSocket fan-out
     public static readonly UpDownCounter<int> WsConnectionsActive =
         Meter.CreateUpDownCounter<int>("trading.ws.connections.active");

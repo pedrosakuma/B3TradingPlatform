@@ -65,6 +65,31 @@ public sealed class PlatformSnapshot
     public Dictionary<string, decimal> CashByEndclient { get; init; } = new();
 
     /// <summary>
+    /// Q2.3 (#270). Per-(end-client, day) running fee totals projected
+    /// from the <c>FeeAccruedEvent</c> stream by <c>FeeKeeper</c>. Key
+    /// is <c>{endClientId}|{yyyy-MM-dd}</c> (see
+    /// <c>FeeKeeper.FormatKey</c>); value is the running BRL total.
+    /// Additive field; older snapshots that pre-date it deserialise
+    /// with an empty dictionary, which matches the "no fees recorded"
+    /// semantics those snapshots actually carried (the tail's
+    /// <c>FeeAccruedEvent</c> stream then rebuilds the running totals
+    /// from scratch).
+    /// </summary>
+    public Dictionary<string, decimal> FeesByEndclientDay { get; init; } = new();
+
+    /// <summary>
+    /// Q2.3 (#270). Idempotence guard for the fee projection — the set
+    /// of <c>FeeAccruedEvent.ExecutionId</c> values that have already
+    /// been folded into <see cref="FeesByEndclientDay"/>. Persisted so
+    /// a snapshot+tail recovery does not double-count the events whose
+    /// effect is already baked into the snapshot's totals. Empty on
+    /// older snapshots that pre-date the field, which collapses to
+    /// "rebuild from the WAL alone" — also safe because the tail then
+    /// contains every event since seq 0.
+    /// </summary>
+    public List<string> FeeSeenExecutionIds { get; init; } = new();
+
+    /// <summary>
     /// User-issued bot credentials (sub-issue #169). Empty on snapshots
     /// pre-dating the field — credentials are reconstructed instead by
     /// the WAL replay path on top of the empty list, which matches the

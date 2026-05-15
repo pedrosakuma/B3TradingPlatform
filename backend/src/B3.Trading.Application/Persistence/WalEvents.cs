@@ -36,6 +36,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(OrderCancelRequestedEvent), "order.cancel-requested")]
 [JsonDerivedType(typeof(OrderExpiredEvent), "order.expired")]
 [JsonDerivedType(typeof(CashLedgerEvent), "cash.ledger")]
+[JsonDerivedType(typeof(FeeAccruedEvent), "fee.accrued")]
 public abstract record WalEvent
 {
     public DateTimeOffset TimestampUtc { get; init; } = DateTimeOffset.UtcNow;
@@ -493,4 +494,74 @@ public sealed record CashLedgerEvent : WalEvent
     public required string Currency { get; init; }
     public string? Reference { get; init; }
     public string? OperatorId { get; init; }
+}
+
+/// <summary>
+/// Q2.3 (#270). Per-fill fee accrual emitted by
+/// <c>ExecutionReportProcessor</c> immediately after a successful
+/// PartialFill / Fill ER is folded into <c>PositionKeeper</c> /
+/// <c>CashLedger</c>. Lands AFTER the originating
+/// <see cref="ExecutionReportReceivedEvent"/> in the WAL by virtue of
+/// the dispatcher's append ordering — same lock; sequential
+/// <c>Append</c> calls — so a tail-replay walking events in seq order
+/// always sees the fill before its fees.
+///
+/// <para>
+/// <b>ExecutionId stability for idempotence.</b>
+/// <see cref="ExecutionId"/> is the deterministic combination
+/// <c>{ClOrdId}:{CumulativeQuantityAfterFill}</c>: a re-applied fill
+/// at the same cumulative quantity (FIXP retransmit, WAL replay) will
+/// re-produce the same id, and <c>FeeKeeper.Apply</c> deduplicates on
+/// it before advancing the totals. The cum-after-fill choice — rather
+/// than the wire <c>LastQuantity</c> — matches
+/// <see cref="B3.Trading.Domain.Order.ApplyCumulativeFill"/>'s own
+/// idempotence pivot, so the keeper and the order book never disagree
+/// on whether a given fill was already booked.
+/// </para>
+///
+/// <para>
+/// <b>Fields.</b> <see cref="EventSeq"/> is intentionally absent: seq
+/// is assigned by the WAL store on append. <see cref="Notional"/> /
+/// <see cref="Brokerage"/> / <see cref="Emolumentos"/> /
+/// <see cref="Liquidacao"/> / <see cref="Total"/> are pre-computed
+/// (every component rounded to 2dp <c>AwayFromZero</c>; total is the
+/// sum of the rounded components) so consumers downstream do not
+/// re-derive them and risk drifting from the calculator's rounding.
+/// </para>
+/// </summary>
+public sealed record FeeAccruedEvent : WalEvent
+{
+    public required ulong ClOrdId { get; init; }
+
+    /// <summary>
+    /// Stable per-fill identity — see the type-level remarks. Format:
+    /// <c>{ClOrdId}:{CumulativeQuantityAfterFill}</c>. Plain string so
+    /// downstream consumers can index/dedupe without reconstructing the
+    /// composite key.
+    /// </summary>
+    public required string ExecutionId { get; init; }
+
+    public required string EndClientId { get; init; }
+    public required string Symbol { get; init; }
+
+    /// <summary>
+    /// Order side at the time of the fill, serialised as the enum name
+    /// (<c>"Buy"</c> / <c>"Sell"</c>) to keep the wire format stable
+    /// across enum renumberings.
+    /// </summary>
+    public required string Side { get; init; }
+
+    /// <summary>
+    /// Forward-delta quantity for this fill (<i>not</i> cumulative);
+    /// matches the <c>delta</c> booked to <c>PositionKeeper</c> /
+    /// <c>CashLedger</c> in the same dispatch.
+    /// </summary>
+    public required long FillQuantity { get; init; }
+
+    public required decimal FillPrice { get; init; }
+    public required decimal Notional { get; init; }
+    public required decimal Brokerage { get; init; }
+    public required decimal Emolumentos { get; init; }
+    public required decimal Liquidacao { get; init; }
+    public required decimal Total { get; init; }
 }

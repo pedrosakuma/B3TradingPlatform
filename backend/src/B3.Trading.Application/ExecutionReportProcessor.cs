@@ -36,6 +36,9 @@ public sealed class ExecutionReportProcessor
     private readonly ILogger<ExecutionReportProcessor> _logger;
     private readonly IAlgoSignalQueue? _algoSignals;
     private readonly CashLedger? _cash;
+    private readonly IFeeCalculator? _feeCalculator;
+    private readonly FeeKeeper? _feeKeeper;
+    private readonly Persistence.EventDispatcher? _dispatcher;
     private readonly PendingReplacementRegistry? _replacements;
     private readonly Risk.IReplaceMarginCoordinator? _replaceMargin;
     private readonly IBotErRouter? _botErRouter;
@@ -53,7 +56,10 @@ public sealed class ExecutionReportProcessor
         PendingReplacementRegistry? replacements = null,
         Risk.IReplaceMarginCoordinator? replaceMargin = null,
         IBotErRouter? botErRouter = null,
-        Scheduling.GtdExpirationScheduler? gtdScheduler = null)
+        Scheduling.GtdExpirationScheduler? gtdScheduler = null,
+        IFeeCalculator? feeCalculator = null,
+        FeeKeeper? feeKeeper = null,
+        Persistence.EventDispatcher? dispatcher = null)
     {
         _ownership = ownership;
         _orders = orders;
@@ -67,6 +73,9 @@ public sealed class ExecutionReportProcessor
         _replaceMargin = replaceMargin;
         _botErRouter = botErRouter;
         _gtdScheduler = gtdScheduler;
+        _feeCalculator = feeCalculator;
+        _feeKeeper = feeKeeper;
+        _dispatcher = dispatcher;
     }
 
     /// <summary>
@@ -90,7 +99,7 @@ public sealed class ExecutionReportProcessor
     /// preserved so existing tests don't need rewiring.
     /// </para>
     /// </summary>
-    public void Apply(ulong clOrdId, ExecKind kind, long leaves, long cumQty, long lastQty, decimal lastPx, string? rejectReason, ulong origClOrdId = 0, Persistence.ExecutionFanOut? fanOut = null)
+    public void Apply(ulong clOrdId, ExecKind kind, long leaves, long cumQty, long lastQty, decimal lastPx, string? rejectReason, ulong origClOrdId = 0, Persistence.ExecutionFanOut? fanOut = null, bool isReplay = false, DateTimeOffset? eventTimestampUtc = null)
     {
         // Slice 2 of #122: replace lifecycle early intercepts. Both
         // branches are gated on the registry having an intent recorded
@@ -231,6 +240,102 @@ public sealed class ExecutionReportProcessor
                     // Null when the host hasn't wired CashLedger yet
                     // (test contexts only — production DI always injects).
                     _cash?.ApplyFill(owner, order.Side, delta, lastPx);
+                    // Q2.3 (#270). Fees are computed off the fill delta
+                    // (NOT the cumulative quantity) using the live
+                    // FeeOptions snapshot. The breakdown is deterministic
+                    // from (symbol, side, delta, lastPx) + options, so
+                    // we apply it on BOTH live and replay paths:
+                    //
+                    //   Live:    Append FeeAccruedEvent (seq N+1) +
+                    //            FeeKeeper.Apply under the dispatcher
+                    //            lock — single ER@N, Fee@N+1 ordering.
+                    //   Replay:  FeeKeeper.Apply only (no WAL append).
+                    //            FeeAccruedEvent in the WAL is also
+                    //            replayed via EventReplayer's switch
+                    //            case → FeeKeeper dedupes on ExecutionId,
+                    //            so no double-count. If the WAL is
+                    //            missing the FeeAccruedEvent (process
+                    //            crashed in the window between the ER
+                    //            append and the Fee append), the synth
+                    //            here recovers the keeper state — fees
+                    //            remain accurate even when the audit
+                    //            event is lost. Known limitation: this
+                    //            assumes FeeOptions has not changed
+                    //            since the original event; a future
+                    //            FeeRateChangedEvent would close that
+                    //            gap.
+                    //
+                    // The live backpressure-fallback path (router catches
+                    // WalBackpressureException on the ER and re-invokes
+                    // Apply WITHOUT a fanOut) is NOT replay — fees are
+                    // accrued via the dispatcher branch. If that nested
+                    // Dispatch itself throws backpressure, swallow it
+                    // (metric + log + direct keeper.Apply): same "log
+                    // dropped, state intact" tradeoff the router makes
+                    // for the ER itself, and bubbling here would skip
+                    // _margin.OnExecution + fan-out below.
+                    if (_feeCalculator is not null && _feeKeeper is not null)
+                    {
+                        var nowUtc = eventTimestampUtc ?? DateTimeOffset.UtcNow;
+                        var executionId = lookupId.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                            + ":" + order.CumulativeQuantity.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                        if (isReplay || _dispatcher is null)
+                        {
+                            // Replay (or test path with no dispatcher):
+                            // defer the synth as a pending entry. If a
+                            // durable FeeAccruedEvent follows in the
+                            // WAL, Apply(FeeAccruedEvent) will supersede
+                            // it (and emit reconciled=true). If not —
+                            // i.e. the true ER-then-crash window —
+                            // PersistenceRecovery.FinalizeReplay
+                            // materialises it with the current
+                            // FeeOptions snapshot (known limitation
+                            // documented above).
+                            _feeKeeper.RegisterPendingReplaySynth(
+                                executionId, owner.Value, order.Symbol, order.Side,
+                                delta, lastPx, nowUtc);
+                        }
+                        else
+                        {
+                            var breakdown = _feeCalculator.Compute(order.Symbol, order.Side, delta, lastPx);
+                            var feeEvt = new Persistence.FeeAccruedEvent
+                            {
+                                ClOrdId = lookupId,
+                                ExecutionId = executionId,
+                                EndClientId = owner.Value,
+                                Symbol = order.Symbol,
+                                Side = order.Side.ToString(),
+                                FillQuantity = delta,
+                                FillPrice = lastPx,
+                                Notional = delta * lastPx,
+                                Brokerage = breakdown.Brokerage,
+                                Emolumentos = breakdown.Emolumentos,
+                                Liquidacao = breakdown.Liquidacao,
+                                Total = breakdown.Total,
+                                TimestampUtc = nowUtc,
+                            };
+                            var keeper = _feeKeeper;
+                            try
+                            {
+                                _dispatcher.Dispatch(feeEvt, () => keeper.Apply(feeEvt));
+                            }
+                            catch (Persistence.WalBackpressureException)
+                            {
+                                // ER-level state already mutated; we
+                                // can't roll back the WAL append of the
+                                // ER. Apply the fee directly to the
+                                // keeper so in-memory fees stay
+                                // accurate; the audit event is dropped
+                                // (surfaced as a backpressure metric).
+                                MetricsRegistry.WalBackpressure.Add(1,
+                                    new KeyValuePair<string, object?>("call_site", "fees.dispatch"));
+                                _logger.LogWarning(
+                                    "Dropping FeeAccruedEvent for {ClOrdId} on WAL backpressure; applying fee directly to keeper.",
+                                    lookupId);
+                                keeper.Apply(feeEvt);
+                            }
+                        }
+                    }
                     // Release reserved margin against the actual booked
                     // delta — not the wire lastQty — so a lost
                     // intermediate ER can't leave the ledger under-released.

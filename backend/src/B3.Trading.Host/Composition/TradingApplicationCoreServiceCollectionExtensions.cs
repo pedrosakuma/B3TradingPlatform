@@ -35,6 +35,14 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         services.AddSingleton<PositionKeeper>();
         services.AddSingleton<CashLedger>();
         services.AddSingleton<CashKeeper>();
+        // Q2.3 (#270). Fee calculator + keeper.
+        // FeeOptions is bound from Trading:Fees so the calculator's
+        // IOptionsMonitor.CurrentValue picks up hot-reload changes per
+        // call. Keeper is a singleton so live folds + replay folds +
+        // snapshot capture all see the same instance.
+        services.Configure<FeeOptions>(configuration.GetSection(FeeOptions.SectionName));
+        services.AddSingleton<IFeeCalculator, BpsFeeCalculator>();
+        services.AddSingleton<FeeKeeper>();
         services.AddSingleton<InMemoryUserBotCredentialRegistry>();
         services.AddSingleton<IUserBotCredentialRegistry>(sp =>
             sp.GetRequiredService<InMemoryUserBotCredentialRegistry>());

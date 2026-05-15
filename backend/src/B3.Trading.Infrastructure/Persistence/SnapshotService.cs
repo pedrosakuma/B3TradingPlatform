@@ -58,6 +58,18 @@ public sealed class PersistenceRecovery
             replayed++;
             _ = seq;
         }
+        // Q2.3 (#270) pass-3. After draining the WAL, materialise any
+        // ER-fill fee synths that were not superseded by a durable
+        // FeeAccruedEvent — these are the true ER-append-then-crash
+        // window cases. Surviving entries are counted on
+        // trading.fees.replay_synth{reconciled=false}.
+        var synthesised = _replayer.FinalizeReplay();
+        if (synthesised > 0)
+        {
+            _logger.LogWarning(
+                "Persistence recovery: materialised {Count} fee synths with no matching FeeAccruedEvent (crash window).",
+                synthesised);
+        }
         MetricsRegistry.RecoveryEventsReplayed.Add(replayed);
         _logger.LogInformation("Persistence recovery: replayed {Count} events past seq={Since}.", replayed, since);
     }
