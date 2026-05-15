@@ -23,6 +23,13 @@ let stopped = false;
 
 const CHANNELS = ["orders.me", "executions.me", "positions.me"];
 
+// Q1.6 (#258). Wanted set of public per-symbol channels that should be
+// subscribed any time the WS is connected. Drives diff (un)subscribes
+// when the main thread calls setPublicChannels, and is replayed on
+// (re)connect after the static CHANNELS go out. Held across reconnects
+// so a flap doesn't lose the watchlist subscriptions.
+const wantedPublic = new Set();
+
 function send(obj) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
 }
@@ -70,6 +77,12 @@ function connect() {
     post({ type: "status", value: "connected" });
     post({ type: "reconnect.scheduled", nextAt: null });
     send({ type: "subscribe", channels: CHANNELS });
+    // Q1.6 (#258). Replay the public-channel set the main thread had
+    // configured so the watchlist phase badges + auction panel keep
+    // working across reconnects without a re-set from app.js.
+    if (wantedPublic.size > 0) {
+      send({ type: "subscribe", channels: [...wantedPublic] });
+    }
   };
 
   socket.onmessage = (ev) => {
@@ -107,7 +120,39 @@ function handleFrame(frame) {
     case "executions.me":
       post({ type: frame.type === "snapshot" ? "executions.snapshot" : "executions.delta", data: frame.data });
       break;
+    default:
+      // Q1.6 (#258). Public per-symbol channels — phases.${symbol} and
+      // auction.${symbol}. Snapshot and delta share the same payload
+      // shape (the state setters merge both); collapse to a single
+      // event type per channel kind to keep the main-thread router
+      // simple. Anything else is an unknown channel — drop silently.
+      if (typeof frame.channel !== "string") return;
+      if (frame.channel.startsWith("phases.")) {
+        post({ type: "phases.frame", data: frame.data });
+      } else if (frame.channel.startsWith("auction.")) {
+        post({ type: "auction.frame", data: frame.data });
+      }
+      break;
   }
+}
+
+// Q1.6 (#258). Diff the wanted public-channel set against the new one
+// and send subscribe/unsubscribe deltas. Idempotent — repeated calls
+// with the same set are no-ops. Gracefully handles the disconnected
+// state: the wanted set is recorded and replayed on next onopen.
+function setPublicChannels(channels) {
+  const next = new Set();
+  for (const c of channels || []) {
+    if (typeof c === "string" && c.length > 0) next.add(c);
+  }
+  const toAdd = [];
+  const toRemove = [];
+  for (const c of next)         if (!wantedPublic.has(c)) toAdd.push(c);
+  for (const c of wantedPublic) if (!next.has(c))         toRemove.push(c);
+  wantedPublic.clear();
+  for (const c of next) wantedPublic.add(c);
+  if (toAdd.length    > 0) send({ type: "subscribe",   channels: toAdd });
+  if (toRemove.length > 0) send({ type: "unsubscribe", channels: toRemove });
 }
 
 self.onmessage = (ev) => {
@@ -128,6 +173,10 @@ self.onmessage = (ev) => {
         try { ws.close(1000, "client logout"); } catch { /* swallow */ }
       }
       ws = null;
+      wantedPublic.clear();
+      break;
+    case "setPublicChannels":
+      setPublicChannels(msg.channels);
       break;
   }
 };

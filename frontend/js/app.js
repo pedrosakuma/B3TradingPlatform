@@ -97,6 +97,16 @@ function init() {
     onRevoke:   handleRevokeBotCredential,
   });
 
+  // Q1.6 (#258). Whenever the watchlist or auctionPanelSymbol slice
+  // changes, re-diff the public WS subscription set so phase badges
+  // stay in sync with the watchlist and auction.${symbol} is only
+  // subscribed while the panel is open.
+  state.subscribe((slice) => {
+    if (slice === "watchlist" || slice === "auctionPanelSymbol" || slice === "all") {
+      syncPublicChannels();
+    }
+  });
+
   const stored = readSession();
   if (stored) {
     // Boot guard: if the stored session is already inside the warning
@@ -310,6 +320,24 @@ function startWorker() {
   worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
   worker.onmessage = (ev) => onWorkerMessage(ev.data);
   worker.postMessage({ type: "start", backend: session.backend, token: session.token });
+  // Q1.6 (#258). Push the current public-channel set immediately so the
+  // worker has it queued by the time the WS opens. Idempotent — same
+  // hook fires on watchlist / auctionPanelSymbol slice changes below.
+  syncPublicChannels();
+}
+
+// Q1.6 (#258). Build the public-channel set the worker should be
+// subscribed to right now: phases.${symbol} for every watchlist
+// symbol (so badges populate immediately), plus auction.${symbol}
+// only while the panel is open (cost control on WS fan-out).
+function syncPublicChannels() {
+  if (!worker) return;
+  const st = state.getState();
+  const channels = [];
+  for (const sym of st.watchlist) channels.push("phases." + sym);
+  if (st.auctionPanelSymbol) channels.push("auction." + st.auctionPanelSymbol);
+  try { worker.postMessage({ type: "setPublicChannels", channels }); }
+  catch { /* worker not ready yet — replayed by next slice notify */ }
 }
 
 function restartWorker() {
@@ -488,6 +516,8 @@ function onWorkerMessage(msg) {
     case "positions.delta":     state.applyPositionsDelta(msg.data); break;
     case "executions.snapshot": state.applyExecutionsSnapshot(msg.data); break;
     case "executions.delta":    state.applyExecutionsDelta(msg.data); break;
+    case "phases.frame":        state.applyPhaseFrame(msg.data); break;
+    case "auction.frame":       state.applyAuctionFrame(msg.data); break;
     case "error":
       // A frame-level error from the server (e.g., unknown_channel).
       // Surface in the executions log to keep it visible without a toast.

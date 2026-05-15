@@ -3,6 +3,7 @@
 
 import {
   getState, subscribe, isTerminalOrderStatus,
+  getPhase, getAuctionState, isAuctionPhase, setAuctionPanelSymbol,
 } from "./state.js";
 import { rulesFor } from "./validation.js";
 
@@ -665,15 +666,31 @@ export function bindUi() {
 
   $("ticket-form").addEventListener("submit", (e) => {
     e.preventDefault();
+    const tifEl = $("ticket-tif");
     const payload = {
       symbol: $("ticket-symbol").value.trim().toUpperCase(),
       side:   $("ticket-side").value,
       type:   $("ticket-type").value,
       quantity: Number($("ticket-qty").value),
       price: priceEl.disabled || priceEl.value === "" ? null : Number(priceEl.value),
+      // Q1.6 (#258). Backend defaults to Day when omitted, but we
+      // always pass the visible value so what the trader sees on the
+      // ticket is exactly what hits the venue.
+      timeInForce: tifEl ? tifEl.value : "Day",
     };
     onSubmitOrder(payload);
   });
+
+  // Q1.6 (#258). Track the trader's manual TIF picks so the auction
+  // auto-pick (renderTicketPhaseCoupling) doesn't trample them.
+  const tifEl = $("ticket-tif");
+  if (tifEl) {
+    tifEl.addEventListener("change", () => {
+      tifEl.dataset.userPicked = "1";
+      delete tifEl.dataset.autoPicked;
+      renderTicketPhaseCoupling();
+    });
+  }
 
   // Auto-uppercase the symbol field as the trader types so the visual
   // matches what we actually submit (we already toUpperCase on submit).
@@ -688,14 +705,21 @@ export function bindUi() {
         e.target.value = upper;
         try { e.target.setSelectionRange(pos, pos); } catch {}
       }
+      // Q1.6 (#258). Symbol changes reset the user's TIF affinity so a
+      // new ticket starts from defaults — otherwise a manual pick on
+      // ticket A locks the auto-pick on ticket B for a different symbol.
+      const tifEl2 = $("ticket-tif");
+      if (tifEl2) { delete tifEl2.dataset.userPicked; delete tifEl2.dataset.autoPicked; }
       syncTicketRules();
+      renderTicketPhaseCoupling();
     });
     symEl.addEventListener("compositionend", (e) => {
       const upper = e.target.value.toUpperCase();
       if (e.target.value !== upper) e.target.value = upper;
       syncTicketRules();
+      renderTicketPhaseCoupling();
     });
-    symEl.addEventListener("change", syncTicketRules);
+    symEl.addEventListener("change", () => { syncTicketRules(); renderTicketPhaseCoupling(); });
     // Initial paint so the hint reflects defaults before any input.
     syncTicketRules();
   }
@@ -900,6 +924,23 @@ export function bindUi() {
   // NOT a cancel shortcut — too easy to fire accidentally.
   document.addEventListener("keydown", onGlobalKeydown);
 
+  // Q1.6 (#258). Auction-panel manual toggle. The panel auto-opens
+  // when the selected symbol enters an auction phase, but the trader
+  // can also collapse it manually — clicking the header collapses to
+  // the symbol-only state without unsubscribing (re-open replays the
+  // current state).
+  const auctionToggle = $("auction-toggle");
+  if (auctionToggle) {
+    auctionToggle.addEventListener("click", () => {
+      const st = getState();
+      if (st.auctionPanelSymbol) {
+        setAuctionPanelSymbol(null);
+      } else if (st.selectedSymbol) {
+        setAuctionPanelSymbol(st.selectedSymbol);
+      }
+    });
+  }
+
   subscribe(renderForSlice);
   renderAll();
 }
@@ -978,9 +1019,34 @@ export function setTicketFeedbackIfMatches(expected, replacement) {
   setTicketFeedback(replacement, null);
 }
 
+// Submit button disabled-state is the OR of two independent conditions
+// tracked on dataset flags so two writers (the in-flight submit path and
+// the phase-coupling halt path) don't clobber each other's intent.
+// Always go through applySubmitDisabled() — never write submit.disabled
+// directly.
+function applySubmitDisabled() {
+  const el = $("ticket-submit");
+  if (!el) return;
+  const inflight = el.dataset.submitInflight === "1";
+  const halted   = el.dataset.haltDisabled   === "1";
+  const disabled = inflight || halted;
+  el.disabled = disabled;
+  if (disabled) {
+    el.setAttribute("aria-disabled", "true");
+  } else {
+    el.removeAttribute("aria-disabled");
+  }
+}
+
 export function setTicketSubmitting(submitting) {
-  $("ticket-submit").disabled = !!submitting;
-  $("ticket-submit").textContent = submitting ? "Submitting…" : "Submit";
+  const el = $("ticket-submit");
+  if (submitting) {
+    el.dataset.submitInflight = "1";
+  } else {
+    delete el.dataset.submitInflight;
+  }
+  el.textContent = submitting ? "Submitting…" : "Submit";
+  applySubmitDisabled();
 }
 
 export function clearTicket() {
@@ -1239,6 +1305,13 @@ function renderForSlice(slice) {
   if (slice === "watchlist" || slice === "selectedSymbol" || slice === "book" || slice === "all") renderDob();
   if (slice === "watchlist" || slice === "selectedSymbol" || slice === "chartResolution" || slice === "candles" || slice === "all") scheduleChartRender();
   if (slice === "watchlist" || slice === "selectedSymbol" || slice === "tapeShowAll" || slice === "tape" || slice === "all") scheduleTapeRender();
+  // Q1.6 (#258). Phase + auction wiring.
+  if (slice === "phases" || slice === "marketData" || slice === "watchlist" || slice === "all") renderMarketData();
+  if (slice === "phases" || slice === "selectedSymbol" || slice === "all") {
+    reconcileAuctionPanel();
+    renderTicketPhaseCoupling();
+  }
+  if (slice === "auction" || slice === "auctionPanelSymbol" || slice === "all") renderAuctionPanel();
 }
 
 // ── Stale-data overlay (T2) ────────────────────────────────────────
@@ -1303,6 +1376,9 @@ function renderAll() {
   renderInflight();
   renderReconnect();
   renderFirmsHealth();
+  reconcileAuctionPanel();
+  renderAuctionPanel();
+  renderTicketPhaseCoupling();
   ensureTicker();
 }
 
@@ -1332,19 +1408,230 @@ function renderMarketData() {
   body.innerHTML = rows.map(symbol => {
     const e = md.get(symbol);
     if (!e || e.lastPrice == null) {
-      return `<tr><td>${escapeHtml(symbol)}</td><td colspan="4" class="muted-cell">awaiting data…</td></tr>`;
+      return `<tr><td>${escapeHtml(symbol)}${phaseBadgeHtml(symbol)}</td><td colspan="4" class="muted-cell">awaiting data…</td></tr>`;
     }
     const ts = e.updatedAt ? new Date(e.updatedAt).toISOString().slice(11, 19) : "—";
     const stale = e.updatedAt && (now - e.updatedAt) > MD_STALE_MS;
     const tsCls = stale ? ' class="md-cell-stale"' : "";
     return `<tr>
-      <td>${escapeHtml(symbol)}</td>
+      <td>${escapeHtml(symbol)}${phaseBadgeHtml(symbol)}</td>
       <td class="num">${fmtPx(e.lastPrice)}</td>
       <td class="num">${fmtQty(e.lastQty)}</td>
       <td class="num">${e.lastTradeId ?? "—"}</td>
       <td${tsCls}>${ts}</td>
     </tr>`;
   }).join("");
+}
+
+// ── Q1.6 (#258): Phase badge + auction panel + ticket coupling ────
+
+// Maps the wire-side TradingPhase enum names to the trader-facing
+// labels + CSS class fragments. Unknown is intentionally not in the
+// map: we render no badge at all when the phase is Unknown so a
+// not-yet-loaded snapshot doesn't show a misleading "OPEN" default.
+const PHASE_LABELS = {
+  Reserved:         { label: "RESERVED",  cls: "RESERVED"  },
+  OpeningCall:      { label: "PRE-OPEN",  cls: "PRE-OPEN"  },
+  Open:             { label: "OPEN",      cls: "OPEN"      },
+  FinalClosingCall: { label: "CLOSING",   cls: "CLOSING"   },
+  Close:            { label: "CLOSED",    cls: "CLOSED"    },
+};
+
+export function phaseBadgeHtml(symbol) {
+  const phase = getPhase(symbol);
+  const meta = PHASE_LABELS[phase];
+  if (!meta) return "";
+  const aria = `${symbol} phase: ${meta.label}`;
+  return ` <span class="phase-badge ${meta.cls}" data-symbol="${escapeHtml(symbol)}" aria-label="${escapeHtml(aria)}">${meta.label}</span>`;
+}
+
+// Auto-open / refresh the auction panel based on the selected symbol's
+// phase. Called whenever phases or selectedSymbol changes. The "open"
+// state is owned by state.auctionPanelSymbol so the WS layer can key
+// off it for subscribe/unsubscribe.
+export function reconcileAuctionPanel() {
+  const st = getState();
+  const sym = st.selectedSymbol;
+  if (!sym) {
+    if (st.auctionPanelSymbol !== null) setAuctionPanelSymbol(null);
+    return;
+  }
+  const phase = getPhase(sym);
+  if (isAuctionPhase(phase)) {
+    // Auto-open / switch to the selected symbol. Assigning a new symbol
+    // implicitly drops any previous panel-symbol subscription so symbol
+    // switches in-flight don't leak an orphaned auction.${prev} sub.
+    if (st.auctionPanelSymbol !== sym) setAuctionPanelSymbol(sym);
+  } else {
+    // Selected symbol is NOT in an auction phase. Drop the panel +
+    // subscription whenever it's open — covers both cases:
+    //   (a) the same symbol left auction (cross printed),
+    //   (b) the trader switched to a non-auction symbol while a panel
+    //       for a different symbol was still pinned (the previous
+    //       implementation only closed when symbols matched, leaking
+    //       the auction.${prev} subscription).
+    // The trader can manually re-open via the toggle button for any
+    // selected symbol if they want to keep watching.
+    if (st.auctionPanelSymbol !== null) {
+      setAuctionPanelSymbol(null);
+    }
+  }
+}
+
+export function renderAuctionPanel() {
+  const panel = $("auction-panel");
+  if (!panel) return;
+  const st = getState();
+  const sym = st.auctionPanelSymbol;
+  if (!sym) {
+    panel.hidden = true;
+    panel.classList.add("collapsed");
+    const body = $("auction-body");
+    if (body) body.hidden = true;
+    const toggle = $("auction-toggle");
+    if (toggle) toggle.setAttribute("aria-expanded", "false");
+    const caret = panel.querySelector(".auction-caret");
+    if (caret) caret.textContent = "▸";
+    return;
+  }
+
+  panel.hidden = false;
+  panel.classList.remove("collapsed");
+  panel.setAttribute("aria-label", `Auction state for ${sym}`);
+  const body = $("auction-body");
+  if (body) body.hidden = false;
+  const toggle = $("auction-toggle");
+  if (toggle) toggle.setAttribute("aria-expanded", "true");
+  const caret = panel.querySelector(".auction-caret");
+  if (caret) caret.textContent = "▾";
+
+  const tag = $("auction-symbol-tag");
+  if (tag) tag.textContent = sym;
+
+  const aux = getAuctionState(sym);
+  const top = aux?.top ?? null;
+  const prev = aux?.prevTop ?? null;
+  const matchQty = aux?.indicativeMatchQty ?? null;
+  const imb = aux?.imbalance ?? null;
+  const imbSide = aux?.imbalanceSide ?? null;
+
+  const topPriceEl = $("auction-top-price");
+  if (topPriceEl) topPriceEl.textContent = top == null ? "—" : fmtPx(top);
+  const arrowEl = $("auction-top-arrow");
+  if (arrowEl) {
+    if (top != null && prev != null && top !== prev) {
+      arrowEl.textContent = top > prev ? "▲" : "▼";
+      arrowEl.className = "auction-arrow " + (top > prev ? "up" : "down");
+    } else {
+      arrowEl.textContent = "";
+      arrowEl.className = "auction-arrow";
+    }
+  }
+
+  const matchEl = $("auction-match-qty");
+  if (matchEl) matchEl.textContent = matchQty == null ? "—" : fmtQty(matchQty);
+
+  const imbEl = $("auction-imbalance");
+  if (imbEl) {
+    if (imb == null || imb === 0) {
+      imbEl.textContent = imb == null ? "—" : "0";
+      imbEl.className = "auction-value";
+    } else {
+      const sideLabel = imbSide && imbSide !== "None" ? imbSide : "";
+      imbEl.textContent = `${fmtQty(imb)}${sideLabel ? ` ${sideLabel}` : ""}`;
+      imbEl.className = "auction-value " + (imbSide === "Buy"  ? "imb-buy"
+                                          : imbSide === "Sell" ? "imb-sell"
+                                          : "");
+    }
+  }
+
+  // Time-to-uncross: upstream B3MatchingPlatform doesn't expose this
+  // today (#321 in the upstream tracker — when it lands, the auction
+  // frame will gain a field we can render here without further UI
+  // work). For now ship the placeholder.
+  const ttuEl = $("auction-ttu");
+  if (ttuEl) ttuEl.textContent = "—";
+
+  const printsEl = $("auction-prints");
+  if (printsEl) {
+    const prints = aux?.lastPrints ?? [];
+    if (prints.length === 0) {
+      printsEl.innerHTML = `<li class="muted-line">No prints yet</li>`;
+    } else {
+      printsEl.innerHTML = prints.map(p => {
+        const ts = p.at ? new Date(p.at).toISOString().slice(11, 19) : "—";
+        const kind = escapeHtml(p.kind ?? "");
+        return `<li><span class="auction-print-kind">${kind}</span> <span class="auction-print-px">${fmtPx(p.price)}</span> × <span class="auction-print-qty">${fmtQty(p.qty)}</span> <span class="muted-line">${escapeHtml(ts)}</span></li>`;
+      }).join("");
+    }
+  }
+}
+
+// Order-ticket coupling. Reacts to phase transitions on the symbol the
+// trader is currently typing into. Three things happen:
+//   1. TIF default flips to GoodForAuction in OpeningCall /
+//      FinalClosingCall (the trader gets a hint explaining why).
+//   2. TIF=Day in an auction phase shows a soft warning that the order
+//      will sit pending until the cross — non-blocking.
+//   3. Reserved (halt) disables Submit with an explanatory tooltip.
+export function renderTicketPhaseCoupling() {
+  const symEl = $("ticket-symbol");
+  const tifEl = $("ticket-tif");
+  const submitEl = $("ticket-submit");
+  const hintEl = $("ticket-tif-hint");
+  if (!symEl || !tifEl || !submitEl) return;
+
+  const sym = (symEl.value || "").trim().toUpperCase();
+  const phase = sym ? getPhase(sym) : "Unknown";
+
+  // (1) Auto-pick GoodForAuction the first time we see an auction
+  // phase for this symbol — but don't trample a value the trader has
+  // explicitly chosen for this ticket. We mark the auto-pick on the
+  // dataset so a manual change clears it.
+  const inAuction = isAuctionPhase(phase);
+  if (inAuction) {
+    if (tifEl.value === "Day" && tifEl.dataset.userPicked !== "1") {
+      tifEl.value = "GoodForAuction";
+      tifEl.dataset.autoPicked = "1";
+    }
+  } else if (tifEl.dataset.autoPicked === "1") {
+    // Phase left auction territory — revert the auto-pick to Day so
+    // the trader doesn't accidentally submit a GoodForAuction on the
+    // wrong phase.
+    tifEl.value = "Day";
+    delete tifEl.dataset.autoPicked;
+  }
+
+  // (2) Hint / soft warning under the TIF select.
+  if (hintEl) {
+    if (inAuction && tifEl.value === "GoodForAuction") {
+      hintEl.hidden = false;
+      hintEl.className = "field-hint hint-info";
+      hintEl.textContent = "Auction phase — GoodForAuction recommended";
+    } else if (inAuction && tifEl.value === "Day") {
+      hintEl.hidden = false;
+      hintEl.className = "field-hint hint-warn";
+      hintEl.textContent = "Esta ordem ficará pending até a abertura.";
+    } else {
+      hintEl.hidden = true;
+      hintEl.textContent = "";
+      hintEl.className = "field-hint";
+    }
+  }
+
+  // (3) Reserved (halt) disables Submit. We track the halt-disable
+  // independently of the inflight-disable via dataset flags so toggling
+  // phases doesn't re-enable a submitting button (and vice-versa).
+  // applySubmitDisabled() ORs both conditions together.
+  const halted = phase === "Reserved";
+  if (halted) {
+    submitEl.dataset.haltDisabled = "1";
+    submitEl.setAttribute("title", "Instrumento halted");
+  } else if (submitEl.dataset.haltDisabled === "1") {
+    delete submitEl.dataset.haltDisabled;
+    submitEl.removeAttribute("title");
+  }
+  applySubmitDisabled();
 }
 
 const DOB_TOP_N = 10;

@@ -133,6 +133,18 @@
               <input id="ticket-price" type="number" min="0" step="0.01" />
             </label>
           </div>
+          <label>
+            <span>Time in force</span>
+            <select id="ticket-tif" aria-describedby="ticket-tif-hint">
+              <option value="Day">Day</option>
+              <option value="IOC">IOC</option>
+              <option value="FOK">FOK</option>
+              <option value="GTC">GTC</option>
+              <option value="GoodForAuction">GoodForAuction</option>
+              <option value="AtClose">AtClose</option>
+            </select>
+          </label>
+          <p id="ticket-tif-hint" class="field-hint" role="status" aria-live="polite" hidden></p>
           <p id="ticket-rules-hint" class="field-hint" aria-live="polite">lot 100 · tick 0.01</p>
           <button type="submit" id="ticket-submit">Submit</button>
           <p id="ticket-inflight" class="inflight" hidden></p>
@@ -220,6 +232,48 @@
             </thead>
             <tbody id="md-body"></tbody>
           </table>
+        </div>
+      </section>
+
+      <!-- AUCTION PANEL (Q1.6 / #258) ------------------------------- -->
+      <!-- Collapsed by default; auto-expands when the selected symbol -->
+      <!-- enters an auction phase (OpeningCall / FinalClosingCall).   -->
+      <section id="auction-panel" class="panel auction-panel collapsed"
+               role="region" aria-label="Auction state" hidden>
+        <h2>
+          <button type="button" id="auction-toggle" class="auction-toggle"
+                  aria-expanded="false" aria-controls="auction-body">
+            <span class="auction-caret" aria-hidden="true">▸</span>
+            Auction
+            <span id="auction-symbol-tag" class="symbol-tag" aria-live="polite">—</span>
+          </button>
+        </h2>
+        <div id="auction-body" class="auction-body" hidden>
+          <div class="auction-grid">
+            <div class="auction-cell">
+              <span class="auction-label">TOP</span>
+              <span id="auction-top" class="auction-value">
+                <span id="auction-top-arrow" class="auction-arrow" aria-hidden="true"></span>
+                <span id="auction-top-price">—</span>
+              </span>
+            </div>
+            <div class="auction-cell">
+              <span class="auction-label">Match qty</span>
+              <span id="auction-match-qty" class="auction-value">—</span>
+            </div>
+            <div class="auction-cell">
+              <span class="auction-label">Imbalance</span>
+              <span id="auction-imbalance" class="auction-value">—</span>
+            </div>
+            <div class="auction-cell">
+              <span class="auction-label" title="Time to uncross — not yet emitted upstream">TTU</span>
+              <span id="auction-ttu" class="auction-value">—</span>
+            </div>
+          </div>
+          <h3 class="auction-prints-title">Recent prints</h3>
+          <ol id="auction-prints" class="auction-prints">
+            <li class="muted-line">No prints yet</li>
+          </ol>
         </div>
       </section>
 
