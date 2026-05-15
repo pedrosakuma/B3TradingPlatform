@@ -289,9 +289,117 @@ public class GtdSchedulerRegressionTests
         Assert.Equal(0, h.Store.AppendedTypes.Count(t => t == typeof(OrderCancelRequestedEvent)));
     }
 
-    // =================================================================
+    // -----------------------------------------------------------------
+    // Pass-3 review (#255): durable audit-set reconstruction on replay
+    // -----------------------------------------------------------------
+
+    /// <summary>
+    /// Pass-3 P2 — crash sequence: timer fires →
+    /// <see cref="OrderExpiredEvent"/> appended (audit on disk) →
+    /// CancelAsync starts but <c>OrderCancelRequestedEvent</c> never
+    /// makes it to disk (process killed) → restart. The order is
+    /// still working in the book (no cancel ER replayed). Without
+    /// the durable audit-set hook the post-restart
+    /// <see cref="GtdExpirationScheduler.StartAsync"/> seeds a fresh
+    /// <c>Entry</c> with <c>ExpiredAuditAppended=false</c> and the
+    /// next timer fire emits a SECOND <c>OrderExpiredEvent</c> for
+    /// the same ClOrdId. With the hook, the EventReplayer informs
+    /// the scheduler that the audit is already durably recorded and
+    /// the restart-side dispatch skips straight to the cancel.
+    /// </summary>
+    [Fact]
+    public async Task ReplayAfterMidFireCrash_DoesNotEmitDuplicateOrderExpiredEvent()
+    {
+        var h = new ExpireHarness();
+        var pastGtd = h.Clock.GetUtcNow().AddSeconds(-5);
+
+        // Reconstruct post-crash world: order is back in the book
+        // (replayed from OrderSubmittedEvent), the OrderExpiredEvent
+        // is on the WAL but the cancel ER is not, so the order is
+        // still in working state.
+        h.SeedGtd(7UL, pastGtd);
+
+        // EventReplayer's hook fires for the on-disk OrderExpiredEvent
+        // BEFORE the scheduler's hosted StartAsync — same ordering
+        // RunRecoveryAndSeedingAsync guarantees in production.
+        h.Sut.MarkExpiredAuditAppended(7UL);
+
+        await h.Sut.StartAsync(CancellationToken.None);
+
+        h.Store.Reset();
+
+        // Past-due head: timer floor fires the dispatch immediately.
+        h.Clock.Advance(GtdExpirationScheduler.MinTimerFloor + TimeSpan.FromMilliseconds(5));
+        for (int i = 0; i < 200 && h.Gateway.CancelCount == 0; i++)
+            await Task.Delay(10);
+
+        // Cancel went through (1 OrderCancelRequestedEvent), but NO
+        // duplicate OrderExpiredEvent was appended on this tick — the
+        // pre-crash audit envelope is the canonical record.
+        Assert.Equal(1, h.Gateway.CancelCount);
+        Assert.Equal(0, h.Store.AppendedTypes.Count(t => t == typeof(OrderExpiredEvent)));
+        Assert.Equal(1, h.Store.AppendedTypes.Count(t => t == typeof(OrderCancelRequestedEvent)));
+        Assert.Equal(0, h.Sut.TrackedCount);
+    }
+
+    /// <summary>
+    /// Pass-3 P2 — two-restart sequence. Crash mid-fire (audit on
+    /// disk, cancel not), restart #1 reconstructs the audit-set,
+    /// dispatch fires the cancel cleanly. We then simulate a SECOND
+    /// crash-and-restart (e.g., another process kill before the next
+    /// graceful shutdown) where the OrderExpiredEvent is re-replayed
+    /// to a fresh scheduler instance. The order is no longer in the
+    /// book by then (the cancel ER from restart #1 IS on disk), so
+    /// the scheduler short-circuits at the snapshot scan and never
+    /// even arms the heap. No duplicate audit on either restart.
+    /// </summary>
+    [Fact]
+    public async Task TwoRestartSequence_NeverDuplicatesAuditEvent()
+    {
+        // ---- Restart #1 ----
+        var h1 = new ExpireHarness();
+        var pastGtd = h1.Clock.GetUtcNow().AddSeconds(-5);
+        h1.SeedGtd(9UL, pastGtd);
+        h1.Sut.MarkExpiredAuditAppended(9UL);
+
+        await h1.Sut.StartAsync(CancellationToken.None);
+        h1.Store.Reset();
+
+        h1.Clock.Advance(GtdExpirationScheduler.MinTimerFloor + TimeSpan.FromMilliseconds(5));
+        for (int i = 0; i < 200 && h1.Gateway.CancelCount == 0; i++)
+            await Task.Delay(10);
+
+        Assert.Equal(1, h1.Gateway.CancelCount);
+        Assert.Equal(0, h1.Store.AppendedTypes.Count(t => t == typeof(OrderExpiredEvent)));
+        Assert.Equal(1, h1.Store.AppendedTypes.Count(t => t == typeof(OrderCancelRequestedEvent)));
+
+        // ---- Restart #2 ----
+        // After restart #1's graceful behaviour the order is cancelled
+        // at the venue and the Cancelled ER landed on disk. Replay
+        // therefore reconstructs the order as terminal (or, modelled
+        // simply here: not in the book at all). The OrderExpiredEvent
+        // still gets re-replayed because it predates the snapshot
+        // cutoff.
+        var h2 = new ExpireHarness();
+        // Order NOT seeded into book — it terminated before snapshot.
+        h2.Sut.MarkExpiredAuditAppended(9UL);
+
+        await h2.Sut.StartAsync(CancellationToken.None);
+        h2.Store.Reset();
+
+        // No live entry was seeded (book has no working GTD order),
+        // so no timer fires and no audit can possibly be re-emitted.
+        h2.Clock.Advance(TimeSpan.FromSeconds(10));
+        await Task.Delay(50);
+
+        Assert.Equal(0, h2.Gateway.CancelCount);
+        Assert.Equal(0, h2.Store.AppendedTypes.Count(t => t == typeof(OrderExpiredEvent)));
+        Assert.Equal(0, h2.Sut.TrackedCount);
+    }
+
+    // -----------------------------------------------------------------
     // Test infrastructure
-    // =================================================================
+    // -----------------------------------------------------------------
 
     private sealed class ExpireHarness
     {

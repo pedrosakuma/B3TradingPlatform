@@ -158,6 +158,24 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
     private readonly object _lock = new();
     private readonly PriorityQueue<ulong, DateTimeOffset> _heap = new();
     private readonly Dictionary<ulong, Entry> _index = new();
+    /// <summary>
+    /// Pass-3 review (#255). Set of ClOrdIds whose
+    /// <see cref="OrderExpiredEvent"/> audit envelope has already been
+    /// observed on the WAL — populated either by the live dispatch
+    /// path (after a successful audit append) or by the
+    /// <see cref="MarkExpiredAuditAppended"/> hook the
+    /// <c>EventReplayer</c> calls during cold-start replay. When
+    /// <see cref="Schedule"/> seeds a new <see cref="Entry"/> for an
+    /// id present in this set, it pre-sets
+    /// <see cref="Entry.ExpiredAuditAppended"/> so the post-restart
+    /// timer fire does NOT emit a second
+    /// <see cref="OrderExpiredEvent"/> for the same expiry.
+    /// Bookkeeping is bounded: <see cref="Resolve"/> removes the id
+    /// once the cancel completes (or the entry is evicted) so the
+    /// set stays the size of the in-flight expired-but-not-yet-cancel-
+    /// completed window.
+    /// </summary>
+    private readonly HashSet<ulong> _auditedExpiredIds = new();
     private readonly WorkingOrderBook _book;
     private readonly OrderCancelService _cancel;
     private readonly EventDispatcher _dispatcher;
@@ -244,11 +262,50 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
             }
             else
             {
-                _index[clOrdId] = new Entry { Expiry = expiry, OriginalGtd = expiry };
+                // Pass-3 review (#255). If a prior incarnation of the
+                // process appended OrderExpiredEvent for this ClOrdId
+                // before crashing (audit on disk, cancel not yet
+                // requested), the EventReplayer hook
+                // MarkExpiredAuditAppended will have populated
+                // _auditedExpiredIds during cold-start replay. Seed
+                // ExpiredAuditAppended=true so the post-restart timer
+                // fire reuses the existing audit envelope instead of
+                // emitting a duplicate.
+                _index[clOrdId] = new Entry
+                {
+                    Expiry = expiry,
+                    OriginalGtd = expiry,
+                    ExpiredAuditAppended = _auditedExpiredIds.Contains(clOrdId),
+                };
             }
             _heap.Enqueue(clOrdId, expiry);
             Reschedule_NoLock();
         }
+    }
+
+    /// <summary>
+    /// Pass-3 review (#255). Hook called by the WAL <c>EventReplayer</c>
+    /// for every <see cref="OrderExpiredEvent"/> it encounters during
+    /// cold-start replay. Records that the audit envelope is durably
+    /// on disk for the given <paramref name="clOrdId"/> so a
+    /// subsequent <see cref="Schedule"/> call (issued from
+    /// <see cref="StartAsync"/> for an order whose cancel ER did NOT
+    /// land before the crash) seeds the resulting <see cref="Entry"/>
+    /// with <see cref="Entry.ExpiredAuditAppended"/> already set.
+    /// Without this hook the post-restart timer fire would re-append
+    /// <see cref="OrderExpiredEvent"/> for the same expiry, producing
+    /// a duplicate audit envelope on the WAL.
+    /// <para>
+    /// Idempotent. Must be called BEFORE
+    /// <see cref="StartAsync"/> seeds the heap from the book snapshot
+    /// — guaranteed by <c>TradingHostStartup.RunRecoveryAndSeedingAsync</c>
+    /// which awaits WAL recovery before <c>app.Run()</c> kicks off
+    /// hosted-service <c>StartAsync</c>.
+    /// </para>
+    /// </summary>
+    public void MarkExpiredAuditAppended(ulong clOrdId)
+    {
+        lock (_lock) _auditedExpiredIds.Add(clOrdId);
     }
 
     private void Remove(ulong clOrdId)
@@ -366,6 +423,14 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
         lock (_lock)
         {
             _index.Remove(clOrdId);
+            // Pass-3 review (#255). Drop the audited-id bookkeeping
+            // alongside the index entry: once the cancel pipeline
+            // resolved (Accepted / NotFound / Stale / GatewayFailed),
+            // the order is no longer at risk of a post-crash duplicate
+            // audit because Schedule will not re-arm a terminal/
+            // missing-from-book order. Keeps the set bounded by the
+            // in-flight expired-but-cancel-not-completed window.
+            _auditedExpiredIds.Remove(clOrdId);
         }
     }
 
@@ -458,11 +523,18 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
 
                 // Persist the audit-appended flag so a subsequent
                 // backpressure on the cancel side doesn't double-emit
-                // OrderExpiredEvent on retry.
+                // OrderExpiredEvent on retry. Pass-3 review (#255):
+                // also record the id in _auditedExpiredIds so a crash
+                // between this point and the cancel ER landing on
+                // disk reconstructs the same audit-already-appended
+                // state during the next replay (the EventReplayer
+                // hook would otherwise be the only writer, and that
+                // hook only fires on already-on-disk events).
                 lock (_lock)
                 {
                     if (_index.TryGetValue(clOrdId, out var cur))
                         cur.ExpiredAuditAppended = true;
+                    _auditedExpiredIds.Add(clOrdId);
                 }
             }
 
