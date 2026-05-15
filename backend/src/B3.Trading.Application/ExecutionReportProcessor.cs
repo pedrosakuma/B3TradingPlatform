@@ -99,7 +99,7 @@ public sealed class ExecutionReportProcessor
     /// preserved so existing tests don't need rewiring.
     /// </para>
     /// </summary>
-    public void Apply(ulong clOrdId, ExecKind kind, long leaves, long cumQty, long lastQty, decimal lastPx, string? rejectReason, ulong origClOrdId = 0, Persistence.ExecutionFanOut? fanOut = null, bool isReplay = false)
+    public void Apply(ulong clOrdId, ExecKind kind, long leaves, long cumQty, long lastQty, decimal lastPx, string? rejectReason, ulong origClOrdId = 0, Persistence.ExecutionFanOut? fanOut = null, bool isReplay = false, DateTimeOffset? eventTimestampUtc = null)
     {
         // Slice 2 of #122: replace lifecycle early intercepts. Both
         // branches are gated on the registry having an intent recorded
@@ -242,33 +242,42 @@ public sealed class ExecutionReportProcessor
                     _cash?.ApplyFill(owner, order.Side, delta, lastPx);
                     // Q2.3 (#270). Fees are computed off the fill delta
                     // (NOT the cumulative quantity) using the live
-                    // FeeOptions snapshot, then dispatched as a
-                    // standalone FeeAccruedEvent that lands AFTER the
-                    // ER in the WAL — same dispatcher, same lock,
-                    // sequential Append. Replay path: caller passes
-                    // isReplay=true (EventReplayer) so we MUST NOT
-                    // re-append; the replayed FeeAccruedEvent itself
-                    // feeds FeeKeeper directly via EventReplayer.Apply,
-                    // and FeeKeeper.Apply dedupes on ExecutionId so
-                    // even a bogus double would be a no-op.
+                    // FeeOptions snapshot. The breakdown is deterministic
+                    // from (symbol, side, delta, lastPx) + options, so
+                    // we apply it on BOTH live and replay paths:
                     //
-                    // The live backpressure fallback path (router
-                    // catches WalBackpressureException on the ER and
-                    // re-invokes Apply WITHOUT a fanOut) is NOT replay —
-                    // we still want to accrue fees there. So the gate
-                    // is `!isReplay`, not `fanOut != null`. If the
-                    // nested fee Dispatch itself throws backpressure we
-                    // swallow it (metric + log): same "log dropped,
-                    // state intact" tradeoff the router makes for the
-                    // ER itself, and bubbling here would skip
+                    //   Live:    Append FeeAccruedEvent (seq N+1) +
+                    //            FeeKeeper.Apply under the dispatcher
+                    //            lock — single ER@N, Fee@N+1 ordering.
+                    //   Replay:  FeeKeeper.Apply only (no WAL append).
+                    //            FeeAccruedEvent in the WAL is also
+                    //            replayed via EventReplayer's switch
+                    //            case → FeeKeeper dedupes on ExecutionId,
+                    //            so no double-count. If the WAL is
+                    //            missing the FeeAccruedEvent (process
+                    //            crashed in the window between the ER
+                    //            append and the Fee append), the synth
+                    //            here recovers the keeper state — fees
+                    //            remain accurate even when the audit
+                    //            event is lost. Known limitation: this
+                    //            assumes FeeOptions has not changed
+                    //            since the original event; a future
+                    //            FeeRateChangedEvent would close that
+                    //            gap.
+                    //
+                    // The live backpressure-fallback path (router catches
+                    // WalBackpressureException on the ER and re-invokes
+                    // Apply WITHOUT a fanOut) is NOT replay — fees are
+                    // accrued via the dispatcher branch. If that nested
+                    // Dispatch itself throws backpressure, swallow it
+                    // (metric + log + direct keeper.Apply): same "log
+                    // dropped, state intact" tradeoff the router makes
+                    // for the ER itself, and bubbling here would skip
                     // _margin.OnExecution + fan-out below.
-                    if (!isReplay
-                        && _feeCalculator is not null
-                        && _feeKeeper is not null
-                        && _dispatcher is not null)
+                    if (_feeCalculator is not null && _feeKeeper is not null)
                     {
                         var breakdown = _feeCalculator.Compute(order.Symbol, order.Side, delta, lastPx);
-                        var nowUtc = DateTimeOffset.UtcNow;
+                        var nowUtc = eventTimestampUtc ?? DateTimeOffset.UtcNow;
                         var feeEvt = new Persistence.FeeAccruedEvent
                         {
                             ClOrdId = lookupId,
@@ -287,22 +296,35 @@ public sealed class ExecutionReportProcessor
                             TimestampUtc = nowUtc,
                         };
                         var keeper = _feeKeeper;
-                        try
+                        if (isReplay || _dispatcher is null)
                         {
-                            _dispatcher.Dispatch(feeEvt, () => keeper.Apply(feeEvt));
+                            // Replay (or test path with no dispatcher):
+                            // apply directly. FeeKeeper dedupes on
+                            // ExecutionId so a subsequent
+                            // FeeAccruedEvent replay is a no-op.
+                            keeper.Apply(feeEvt);
                         }
-                        catch (Persistence.WalBackpressureException)
+                        else
                         {
-                            // Same tradeoff as the ER router's backpressure
-                            // fallback: state already mutated (order/position/
-                            // cash) — skipping the fee append keeps the
-                            // pipeline going so margin release + fan-out
-                            // still run. Surfaces as a backpressure metric.
-                            MetricsRegistry.WalBackpressure.Add(1,
-                                new KeyValuePair<string, object?>("call_site", "fees.dispatch"));
-                            _logger.LogWarning(
-                                "Dropping FeeAccruedEvent for {ClOrdId} on WAL backpressure; state intact, fee under-accrued.",
-                                lookupId);
+                            try
+                            {
+                                _dispatcher.Dispatch(feeEvt, () => keeper.Apply(feeEvt));
+                            }
+                            catch (Persistence.WalBackpressureException)
+                            {
+                                // ER-level state already mutated; we
+                                // can't roll back the WAL append of the
+                                // ER. Apply the fee directly to the
+                                // keeper so in-memory fees stay
+                                // accurate; the audit event is dropped
+                                // (surfaced as a backpressure metric).
+                                MetricsRegistry.WalBackpressure.Add(1,
+                                    new KeyValuePair<string, object?>("call_site", "fees.dispatch"));
+                                _logger.LogWarning(
+                                    "Dropping FeeAccruedEvent for {ClOrdId} on WAL backpressure; applying fee directly to keeper.",
+                                    lookupId);
+                                keeper.Apply(feeEvt);
+                            }
                         }
                     }
                     // Release reserved margin against the actual booked

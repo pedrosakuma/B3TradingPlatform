@@ -125,6 +125,83 @@ public class FeeKeeperRecoveryTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task SnapshotPlusTail_CrashAfterErAppendBeforeFeeAppend_RecoversFeeFromReplaySynth()
+    {
+        // P1 regression for #277 pass-2: simulate the crash window.
+        // Live phase: append an ER fill but DO NOT append the matching
+        // FeeAccruedEvent (the WAL writer crashed mid-window). Cold
+        // boot: recovery replays the ER with isReplay=true and the
+        // ExecutionReportProcessor synthesises the fee directly into
+        // FeeKeeper, so the keeper recovers despite the missing audit
+        // event.
+        var t = new DateTimeOffset(2025, 1, 15, 12, 0, 0, TimeSpan.Zero);
+
+        await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
+        {
+            // Seed the order via OrderSubmittedEvent so the replayer's
+            // book has it before the ER replays.
+            store.Append(new OrderSubmittedEvent
+            {
+                ClOrdId = 100UL,
+                EndClientId = "alice",
+                FirmId = "TEST",
+                Symbol = "PETR4",
+                SecurityId = 1UL,
+                Quantity = 100,
+                Price = 1_000m,
+                Side = "Buy",
+                Type = "Limit",
+                TimestampUtc = t,
+            });
+            // ER New (so order is Working) then ER Fill — but NO matching
+            // FeeAccruedEvent (simulated crash in window between ER Fill
+            // append and Fee append).
+            store.Append(new ExecutionReportReceivedEvent
+            {
+                ClOrdId = 100UL,
+                ExecKind = nameof(ExecKind.New),
+                LeavesQuantity = 100,
+                CumulativeQuantity = 0,
+                LastQuantity = 0,
+                LastPrice = 0m,
+                RejectReason = null,
+                Synthetic = false,
+                OrigClOrdId = 0,
+                TimestampUtc = t,
+            });
+            store.Append(new ExecutionReportReceivedEvent
+            {
+                ClOrdId = 100UL,
+                ExecKind = nameof(ExecKind.Fill),
+                LeavesQuantity = 0,
+                CumulativeQuantity = 100,
+                LastQuantity = 100,
+                LastPrice = 1_000m,
+                RejectReason = null,
+                Synthetic = false,
+                OrigClOrdId = 0,
+                TimestampUtc = t,
+            });
+            await store.FlushAsync();
+        }
+
+        await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
+        {
+            var keeper = new FeeKeeper();
+            var (snapshotter, replayer) = BuildSnapshotterAndReplayer(keeper, withFees: true);
+            var recovery = new PersistenceRecovery(store, snapshotter, replayer,
+                new SnapshotStore(_root, "test"),
+                NullLogger<PersistenceRecovery>.Instance);
+            await recovery.RunAsync();
+
+            var day = new DateOnly(2025, 1, 15);
+            // 100k notional → brokerage 50 + emol 32.50 + liq 27.50 = 110.
+            // Synthesised on replay even though FeeAccruedEvent is missing.
+            Assert.Equal(110m, keeper.GetDayTotal("alice", day));
+        }
+    }
+
     private static void DispatchFee(EventDispatcher d, FeeKeeper k, string ec,
         string executionId, decimal total, DateTimeOffset ts)
     {
@@ -148,7 +225,7 @@ public class FeeKeeperRecoveryTests : IDisposable
         d.Dispatch(evt, () => k.Apply(evt));
     }
 
-    private (StateSnapshotter, EventReplayer) BuildSnapshotterAndReplayer(FeeKeeper keeper)
+    private (StateSnapshotter, EventReplayer) BuildSnapshotterAndReplayer(FeeKeeper keeper, bool withFees = false)
     {
         var book = new WorkingOrderBook();
         var positions = new PositionKeeper();
@@ -157,9 +234,23 @@ public class FeeKeeperRecoveryTests : IDisposable
         var clOrdIds = new ClOrdIdPrefixRegistry();
         var algos = new AlgoBook();
         var sink = new NullSink();
+        IFeeCalculator? calc = null;
+        if (withFees)
+        {
+            var optsMonitor = new TestOptionsMonitor<FeeOptions>(new FeeOptions
+            {
+                BrokerageBps = 5m,
+                BrokerageMin = 0m,
+                EmolumentosBps = 3.25m,
+                LiquidacaoBps = 2.75m,
+            });
+            calc = new BpsFeeCalculator(optsMonitor);
+        }
         var processor = new ExecutionReportProcessor(ownership, book, positions, sink,
             new NoOpMarginProvider(),
-            NullLogger<ExecutionReportProcessor>.Instance);
+            NullLogger<ExecutionReportProcessor>.Instance,
+            feeCalculator: calc,
+            feeKeeper: withFees ? keeper : null);
         var snapshotter = new StateSnapshotter(book, positions, killSwitch,
             new SymbolHaltService(), new SessionPhaseService(),
             clOrdIds, ownership, algos, new AlgoIdRegistry(),
@@ -170,6 +261,15 @@ public class FeeKeeperRecoveryTests : IDisposable
             processor, algos, clOrdIds, new AlgoIdRegistry(),
             feeKeeper: keeper);
         return (snapshotter, replayer);
+    }
+
+    private sealed class TestOptionsMonitor<T> : Microsoft.Extensions.Options.IOptionsMonitor<T>
+    {
+        private readonly T _value;
+        public TestOptionsMonitor(T value) => _value = value;
+        public T CurrentValue => _value;
+        public T Get(string? name) => _value;
+        public IDisposable? OnChange(Action<T, string?> listener) => null;
     }
 
     private sealed class NullSink : IExecutionEventSink

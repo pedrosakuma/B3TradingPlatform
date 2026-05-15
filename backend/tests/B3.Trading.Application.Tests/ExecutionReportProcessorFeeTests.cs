@@ -127,11 +127,16 @@ public class ExecutionReportProcessorFeeTests
     }
 
     [Fact]
-    public void ReplayPath_IsReplayTrue_DoesNotAppendFeeEvent()
+    public void ReplayPath_IsReplayTrue_DoesNotAppendFeeEvent_ButUpdatesKeeperDirectly()
     {
         // EventReplayer invokes Apply with isReplay: true so the fee
-        // event is NOT re-appended (the replayed FeeAccruedEvent itself
-        // is fed to FeeKeeper directly via the replayer's switch case).
+        // event is NOT re-appended to the WAL. But the keeper IS
+        // updated directly so a missing FeeAccruedEvent in the WAL
+        // (process crashed in the window between the ER append and
+        // the Fee append) still recovers correctly. If the
+        // FeeAccruedEvent IS in the WAL too, EventReplayer's switch
+        // case calls FeeKeeper.Apply and the seen-set dedupes — no
+        // double-count.
         var (proc, _, store, keeper, ownership, book, _, _) = Build();
         var owner = new EndClientId("alice");
         var order = new Order(2UL, owner, "PETR4", 1UL, OrderSide.Buy, OrderType.Limit, 100, 1_000m);
@@ -142,7 +147,52 @@ public class ExecutionReportProcessorFeeTests
             rejectReason: null, origClOrdId: 0, fanOut: null, isReplay: true);
 
         Assert.Empty(store.Recorded);
-        Assert.Equal(0m, keeper.GetDayTotal("alice", DateOnly.FromDateTime(DateTime.UtcNow)));
+        var day = DateOnly.FromDateTime(DateTime.UtcNow);
+        // 100k notional → brokerage 50 + emol 32.50 + liq 27.50 = 110
+        Assert.Equal(110m, keeper.GetDayTotal("alice", day));
+    }
+
+    [Fact]
+    public void ReplayPath_FeeEventReplayedAfterErSynth_DoesNotDoubleCount()
+    {
+        // Defense in depth: simulate the normal recovery path where the
+        // ER replay synth applies a fee, and then EventReplayer hits
+        // the FeeAccruedEvent and forwards it to FeeKeeper.Apply. The
+        // ExecutionId-based seen-set must dedupe the second call.
+        var (proc, _, _, keeper, ownership, book, _, _) = Build();
+        var owner = new EndClientId("alice");
+        var order = new Order(5UL, owner, "PETR4", 1UL, OrderSide.Buy, OrderType.Limit, 100, 1_000m);
+        book.TryAdd(order);
+        ownership.Register(5UL, owner);
+
+        proc.Apply(5UL, ExecKind.Fill, leaves: 0, cumQty: 100, lastQty: 100, lastPx: 1_000m,
+            rejectReason: null, origClOrdId: 0, fanOut: null, isReplay: true);
+
+        var day = DateOnly.FromDateTime(DateTime.UtcNow);
+        var beforeReplayFeeEvt = keeper.GetDayTotal("alice", day);
+
+        // Replay the FeeAccruedEvent that the ER synth would have
+        // produced. ExecutionId formula must match what the synth used.
+        var replayedFee = new FeeAccruedEvent
+        {
+            ClOrdId = 5UL,
+            ExecutionId = "5:100",
+            EndClientId = "alice",
+            Symbol = "PETR4",
+            Side = "Buy",
+            FillQuantity = 100,
+            FillPrice = 1_000m,
+            Notional = 100_000m,
+            Brokerage = 50m,
+            Emolumentos = 32.50m,
+            Liquidacao = 27.50m,
+            Total = 110m,
+            TimestampUtc = DateTimeOffset.UtcNow,
+        };
+        var applied = keeper.Apply(replayedFee);
+
+        Assert.False(applied, "FeeKeeper.Apply must dedupe on ExecutionId");
+        Assert.Equal(beforeReplayFeeEvt, keeper.GetDayTotal("alice", day));
     }
 
     [Fact]
