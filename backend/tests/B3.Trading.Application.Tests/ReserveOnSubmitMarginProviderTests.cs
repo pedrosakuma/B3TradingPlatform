@@ -98,6 +98,68 @@ public class ReserveOnSubmitMarginProviderTests
     }
 
     [Fact]
+    public async Task BuyMarket_withStrayPrice_skipsReservation()
+    {
+        // Pass-3 alignment (#253): the OrderType gate must apply even
+        // when a buy Market carries a non-null Price (e.g. caller
+        // populated it for telemetry). The replace pipeline gates on
+        // IsMarginBearing() — submit must agree, otherwise we'd reserve
+        // here and silently release on the next cancel-replace.
+        var (p, _) = Build(initial: 100_000m);
+        var ctx = new RiskContext(
+            new EndClientId("alice"), "FIRM", "PETR4",
+            OrderSide.Buy, OrderType.Market, 100, 50m);
+        var d = await p.TryReserveAsync(1, ctx, CancellationToken.None);
+        Assert.True(d.Approved);
+        Assert.Equal(0m, p.ReservedForTesting("alice"));
+    }
+
+    [Fact]
+    public async Task BuyStopLoss_withStrayPrice_skipsReservation()
+    {
+        // Same alignment as BuyMarket: StopLoss is a stop-into-Market;
+        // it has no resting limit price to reserve against, regardless
+        // of any Price set on the context.
+        var (p, _) = Build(initial: 100_000m);
+        var ctx = new RiskContext(
+            new EndClientId("alice"), "FIRM", "PETR4",
+            OrderSide.Buy, OrderType.StopLoss, 100, 50m);
+        var d = await p.TryReserveAsync(1, ctx, CancellationToken.None);
+        Assert.True(d.Approved);
+        Assert.Equal(0m, p.ReservedForTesting("alice"));
+    }
+
+    [Fact]
+    public async Task BuyMarginBearingTypes_reserveAsBefore()
+    {
+        // Regression guard: the three OrderType.IsMarginBearing() types
+        // (Limit / StopLimit / MarketWithLeftover) must continue to
+        // reserve cash on a Buy with a positive notional.
+        var (p, _) = Build(initial: 10_000m);
+        Assert.True((await p.TryReserveAsync(1, Buy("alice", 10m, 100, OrderType.Limit), CancellationToken.None)).Approved);
+        Assert.True((await p.TryReserveAsync(2, Buy("alice", 10m, 100, OrderType.StopLimit), CancellationToken.None)).Approved);
+        Assert.True((await p.TryReserveAsync(3, Buy("alice", 10m, 100, OrderType.MarketWithLeftover), CancellationToken.None)).Approved);
+        Assert.Equal(3_000m, p.ReservedForTesting("alice"));
+    }
+
+    [Fact]
+    public async Task Sell_ofAnyType_skipsReservation()
+    {
+        // Regression guard: the Side gate runs first, so even
+        // margin-bearing types with a price never reserve on Sell.
+        var (p, _) = Build(initial: 10_000m);
+        foreach (var t in new[] { OrderType.Limit, OrderType.StopLimit, OrderType.MarketWithLeftover, OrderType.Market, OrderType.StopLoss })
+        {
+            var ctx = new RiskContext(
+                new EndClientId("alice"), "FIRM", "PETR4",
+                OrderSide.Sell, t, 100, 50m);
+            var d = await p.TryReserveAsync((ulong)t + 100, ctx, CancellationToken.None);
+            Assert.True(d.Approved);
+        }
+        Assert.Equal(0m, p.ReservedForTesting("alice"));
+    }
+
+    [Fact]
     public async Task Unknown_owner_has_zero_balance_and_is_rejected()
     {
         var (p, _) = Build(initial: 1_000m, owner: "alice");

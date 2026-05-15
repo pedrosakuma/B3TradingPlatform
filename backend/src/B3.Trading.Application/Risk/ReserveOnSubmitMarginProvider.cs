@@ -85,6 +85,15 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
         if (!ctx.Price.HasValue)
             return Task.FromResult(RiskDecision.Approve);
 
+        // Pass-3 alignment (#253): the cancel-replace pipeline gates
+        // its re-baseline on OrderType.IsMarginBearing(); the submit
+        // path must use the IDENTICAL predicate. Otherwise a buy
+        // Market or buy StopLoss carrying a stray Price would reserve
+        // here at submit but commit 0 on replace, silently freeing the
+        // hold while the order is still working.
+        if (!ctx.Type.IsMarginBearing())
+            return Task.FromResult(RiskDecision.Approve);
+
         var notional = ctx.Price.Value * ctx.Quantity;
         if (notional <= 0m)
             return Task.FromResult(RiskDecision.Approve);
