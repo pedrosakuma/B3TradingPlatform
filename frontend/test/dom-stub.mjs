@@ -25,6 +25,7 @@ class FakeElement {
     this.tagName = String(tag || "div").toUpperCase();
     this._listeners = new Map();
     this._dataset = {};
+    this._attributes = new Map();
     this.classList = new FakeClassList();
     this.hidden = false;
     this.disabled = false;
@@ -45,11 +46,14 @@ class FakeElement {
     const i = l.indexOf(fn);
     if (i >= 0) l.splice(i, 1);
   }
-  setAttribute() {}
-  removeAttribute() {}
+  setAttribute(name, value) { this._attributes.set(String(name), String(value)); }
+  removeAttribute(name)     { this._attributes.delete(String(name)); }
+  getAttribute(name)        { return this._attributes.has(String(name)) ? this._attributes.get(String(name)) : null; }
+  hasAttribute(name)        { return this._attributes.has(String(name)); }
   focus() {}
   select() {}
   closest() { return null; }
+  querySelector() { return null; }
   querySelectorAll() { return []; }
   appendChild(c) { this.children.push(c); return c; }
 }

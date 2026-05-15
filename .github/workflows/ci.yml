@@ -105,4 +105,4 @@ jobs:
         run: node --test frontend/test/decoder.test.mjs
 
       - name: Run state reducer tests (no deps, node:test)
-        run: node --test frontend/test/state-modify.test.mjs frontend/test/state-staleness.test.mjs frontend/test/cancel-all.test.mjs frontend/test/validation-rules.test.mjs frontend/test/pretrade-guards.test.mjs frontend/test/bot-credentials-ui.test.mjs
+        run: node --test frontend/test/state-modify.test.mjs frontend/test/state-staleness.test.mjs frontend/test/cancel-all.test.mjs frontend/test/validation-rules.test.mjs frontend/test/pretrade-guards.test.mjs frontend/test/bot-credentials-ui.test.mjs frontend/test/phase-badge.test.mjs frontend/test/auction-panel.test.mjs frontend/test/ticket-phase-coupling.test.mjs

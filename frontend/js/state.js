@@ -94,6 +94,25 @@ const state = {
   // placeholder to a louder "no book — check MD settings ⚙" warning
   // (after ~10s without a snapshot).
   selectedSymbolSetAt: 0,
+  // Q1.6 (#258). Per-symbol auction-phase state from the public
+  // `phases.${symbol}` WS channel. Populated for every watchlist
+  // symbol via auto-subscribe; absent until the first snapshot lands
+  // (treated as "Unknown" by readers).
+  phaseBySymbol: new Map(),     // Symbol -> phase string ("OpeningCall" | "Open" | ...)
+  phaseAtBySymbol: new Map(),   // Symbol -> ISO timestamp of last transition (or null)
+  // Q1.6 (#258). Per-symbol auction-state cache from the public
+  // `auction.${symbol}` channel. Only populated while the auction
+  // panel is open (cost control on WS fan-out). Shape:
+  //   { top, indicativeMatchQty, imbalance, imbalanceSide, at,
+  //     prevTop, lastPrints: [{kind, price, qty, at}, ...] }
+  // `prevTop` retains the previous top so the renderer can draw the
+  // up/down trend arrow without a separate per-renderer cache.
+  // `lastPrints` is bounded — see AUCTION_PRINT_HISTORY.
+  auctionBySymbol: new Map(),
+  // Q1.6 (#258). Symbol the auction panel is currently rendering, or
+  // null when the panel is collapsed. Used by the WS subscription
+  // manager to decide whether to (un)subscribe `auction.${symbol}`.
+  auctionPanelSymbol: null,
 };
 
 const EXECUTIONS_CAPACITY = 500;
@@ -192,6 +211,12 @@ export function clearAll() {
   state.inflightModifies.clear();
   state.lastWsActivity = null;
   state.lastMdActivity = null;
+  // Q1.6 (#258). Phase + auction caches survive market-data restarts
+  // but die with the trader-WS reconnect (which is what triggers
+  // clearAll) — the server replays snapshots after the (re)subscribe.
+  state.phaseBySymbol.clear();
+  state.phaseAtBySymbol.clear();
+  state.auctionBySymbol.clear();
   notify("all");
 }
 
@@ -649,4 +674,96 @@ export function markModifyInflight(clOrdId, inflight) {
   if (inflight) state.inflightModifies.add(clOrdId);
   else state.inflightModifies.delete(clOrdId);
   if (before !== inflight) notify("orders");
+}
+
+// ── Q1.6 (#258): Auction phase + auction state slices ──────────────
+//
+// Two public WS channels per symbol:
+//   • phases.${symbol}  → { symbol, phase, at }   (snapshot + deltas)
+//   • auction.${symbol} → either { symbol, top, indicativeMatchQty,
+//                                 imbalance, imbalanceSide, at, kind:null }
+//                         (top frame; nullable fields after a print)
+//                       or { symbol, kind:"Opening"|"Closing", price,
+//                            qty, at }            (cross print delta)
+// The two frames are discriminated on the wire by `price` presence:
+// only AuctionPrintDto carries `price`. Snapshot vs delta distinction
+// is irrelevant on the auction channel — both shapes are merged.
+
+// Phases the order ticket should treat as auction (see #258 §Ticket
+// coupling: TIF default → GoodForAuction, Day → soft warning).
+const AUCTION_PHASES = new Set(["OpeningCall", "FinalClosingCall"]);
+
+// Cap on the per-symbol AuctionPrint history rendered in the panel.
+// Five matches the visible scrollless rows in the panel layout.
+const AUCTION_PRINT_HISTORY = 5;
+
+export function applyPhaseFrame(payload) {
+  if (!payload || typeof payload.symbol !== "string") return;
+  const symbol = payload.symbol;
+  const phase = typeof payload.phase === "string" ? payload.phase : "Unknown";
+  state.phaseBySymbol.set(symbol, phase);
+  state.phaseAtBySymbol.set(symbol, payload.at ?? null);
+  notify("phases");
+}
+
+export function applyAuctionFrame(payload) {
+  if (!payload || typeof payload.symbol !== "string") return;
+  const symbol = payload.symbol;
+  let entry = state.auctionBySymbol.get(symbol);
+  if (!entry) {
+    entry = {
+      top: null, indicativeMatchQty: null,
+      imbalance: null, imbalanceSide: null,
+      at: null, prevTop: null, lastPrints: [],
+    };
+    state.auctionBySymbol.set(symbol, entry);
+  }
+  // Discriminator: AuctionPrintDto has `price`; AuctionSnapshotDto has
+  // `top` (possibly null) and no `price` field.
+  if (payload.price !== undefined) {
+    entry.lastPrints.unshift({
+      kind:  payload.kind ?? null,
+      price: payload.price,
+      qty:   payload.qty,
+      at:    payload.at ?? null,
+    });
+    if (entry.lastPrints.length > AUCTION_PRINT_HISTORY) {
+      entry.lastPrints.length = AUCTION_PRINT_HISTORY;
+    }
+  } else {
+    // Top / imbalance frame. Track previous top BEFORE overwriting so
+    // the renderer can draw the up/down trend arrow. Skip the bookkeep
+    // when both are null (an "empty" snapshot served on cold subscribe
+    // — no trend yet).
+    if (entry.top != null && payload.top != null && entry.top !== payload.top) {
+      entry.prevTop = entry.top;
+    }
+    entry.top                = payload.top ?? null;
+    entry.indicativeMatchQty = payload.indicativeMatchQty ?? null;
+    entry.imbalance          = payload.imbalance ?? null;
+    entry.imbalanceSide      = payload.imbalanceSide ?? null;
+    entry.at                 = payload.at ?? null;
+  }
+  notify("auction");
+}
+
+export function setAuctionPanelSymbol(symbol) {
+  const next = symbol == null || symbol === "" ? null : symbol;
+  if (state.auctionPanelSymbol === next) return;
+  state.auctionPanelSymbol = next;
+  notify("auctionPanelSymbol");
+}
+
+export function getPhase(symbol) {
+  if (!symbol) return "Unknown";
+  return state.phaseBySymbol.get(symbol) ?? "Unknown";
+}
+
+export function getAuctionState(symbol) {
+  if (!symbol) return null;
+  return state.auctionBySymbol.get(symbol) ?? null;
+}
+
+export function isAuctionPhase(phase) {
+  return AUCTION_PHASES.has(phase);
 }

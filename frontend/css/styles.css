@@ -640,3 +640,73 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
 .order-detail-table tr.empty td { color: var(--muted); text-align: center; padding: .8rem; }
 #blotter-body tr[data-clordid] { cursor: pointer; }
 #blotter-body tr[data-clordid] td.row-stale-actions { cursor: default; }
+
+/* ---------- Phase badges + auction panel (Q1.6 / #258) ---------- */
+
+/* Compact pill rendered next to the symbol cell in the market-data
+   table. Color tokens reuse the global --green / --warn / --red /
+   --gray surface so the palette stays consistent with status-cell-*. */
+.phase-badge {
+  display: inline-block;
+  margin-left: .35rem;
+  padding: .05rem .35rem;
+  font-size: .65rem; font-weight: 600;
+  letter-spacing: .03em; text-transform: uppercase;
+  border-radius: 999px; border: 1px solid currentColor;
+  vertical-align: middle;
+  font-variant-numeric: tabular-nums;
+}
+.phase-badge.PRE-OPEN { color: var(--warn);   background: rgba(245,166,35,.12); }
+.phase-badge.OPEN     { color: var(--green);  background: rgba(54,196,111,.12); }
+.phase-badge.CLOSING  { color: #f08c2e;       background: rgba(240,140,46,.14); }
+.phase-badge.CLOSED   { color: var(--gray);   background: rgba(107,114,128,.16); }
+.phase-badge.RESERVED { color: var(--red);    background: rgba(239,83,80,.14); }
+
+/* Auction panel — collapsible, wedged into the trader grid. Default
+   collapsed visual is just the toggle line; expanded state surfaces a
+   2-column metric grid + a recent-prints list. */
+.auction-panel { padding: .55rem .75rem; }
+.auction-panel.collapsed { padding-bottom: .45rem; }
+.auction-toggle {
+  display: inline-flex; align-items: center; gap: .35rem;
+  background: transparent; border: 0; color: var(--text);
+  font: inherit; font-weight: 600; cursor: pointer; padding: 0;
+}
+.auction-toggle:hover { color: var(--accent); }
+.auction-caret { display: inline-block; width: .9em; color: var(--muted); }
+.auction-body { margin-top: .5rem; }
+.auction-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: .35rem .8rem;
+  margin-bottom: .55rem;
+}
+.auction-cell { display: flex; flex-direction: column; gap: .1rem; }
+.auction-label {
+  font-size: .68rem; color: var(--muted); text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.auction-value {
+  font-size: .95rem; font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.auction-arrow { display: inline-block; margin-right: .15rem; }
+.auction-arrow.up   { color: var(--green); }
+.auction-arrow.down { color: var(--red); }
+.auction-value.imb-buy  { color: var(--green); }
+.auction-value.imb-sell { color: var(--red); }
+.auction-prints-title {
+  margin: .35rem 0 .25rem 0; font-size: .72rem; font-weight: 600;
+  color: var(--muted); text-transform: uppercase; letter-spacing: .04em;
+}
+.auction-prints {
+  list-style: none; padding: 0; margin: 0;
+  font-size: .8rem; max-height: 7rem; overflow-y: auto;
+}
+.auction-prints li { padding: .15rem 0; border-bottom: 1px solid var(--border); }
+.auction-prints li:last-child { border-bottom: 0; }
+.auction-print-kind { color: var(--muted); margin-right: .25rem; }
+.auction-print-px,
+.auction-print-qty { font-variant-numeric: tabular-nums; }
+
+/* Ticket coupling: TIF hint colors (info vs. soft warning). */
+.field-hint.hint-info { color: var(--accent); }
+.field-hint.hint-warn { color: var(--warn); }
