@@ -50,6 +50,8 @@ public sealed class WebSocketExecutionEventSink : IExecutionEventSink, IExecutio
     private readonly SubscriptionManager _subs;
     private readonly WorkingOrderBook _orders;
     private readonly PositionKeeper _positions;
+    private readonly PnlKeeper? _pnl;
+    private readonly Application.Risk.IReferencePrice? _refPrice;
     private readonly ILogger<WebSocketExecutionEventSink>? _logger;
     private readonly Channel<ExecutionEvent> _channel;
     private readonly CancellationTokenSource _cts = new();
@@ -59,11 +61,15 @@ public sealed class WebSocketExecutionEventSink : IExecutionEventSink, IExecutio
         SubscriptionManager subs,
         WorkingOrderBook orders,
         PositionKeeper positions,
+        PnlKeeper? pnl = null,
+        Application.Risk.IReferencePrice? refPrice = null,
         ILogger<WebSocketExecutionEventSink>? logger = null)
     {
         _subs = subs;
         _orders = orders;
         _positions = positions;
+        _pnl = pnl;
+        _refPrice = refPrice;
         _logger = logger;
         _channel = Channel.CreateBounded<ExecutionEvent>(
             new BoundedChannelOptions(ChannelCapacity)
@@ -148,6 +154,19 @@ public sealed class WebSocketExecutionEventSink : IExecutionEventSink, IExecutio
         {
             var position = _positions.GetOrCreate(ev.Owner, ev.Symbol);
             _subs.Publish(ev.Owner, Channels.PositionsMe, position.ToDto());
+
+            // Q2.4 (#271). pnl.me — fills move both the realized
+            // bucket (via PnlKeeper) and unrealized (via the new
+            // avg-cost basis). Re-project the whole snapshot so
+            // subscribers can swap it in atomically. Note we project
+            // OFF the dispatcher path (this drain is async and
+            // ordered with positions.me — guaranteeing pnl reflects
+            // the same fill the position update reports).
+            if (_pnl is not null && _refPrice is not null)
+            {
+                var pnlSnap = PnlProjection.Build(ev.Owner, _pnl, _positions, _refPrice);
+                _subs.Publish(ev.Owner, Channels.PnlMe, pnlSnap);
+            }
         }
     }
 }

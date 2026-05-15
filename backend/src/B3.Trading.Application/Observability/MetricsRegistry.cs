@@ -126,6 +126,57 @@ public static class MetricsRegistry
     public static readonly Counter<long> FeeReplaySynth =
         Meter.CreateCounter<long>("trading.fees.replay_synth");
 
+    // Q2.4 (#271). P&L engine.
+    // pnl.realized_appended — bumped on every successful RealizedPnlEvent
+    // append via the dispatcher path (live, NOT replay). pnl.replay_synth
+    // mirrors the FeeKeeper synth metric: tag reconciled=true when a
+    // durable RealizedPnlEvent superseded a pending synth (happy path),
+    // false when FinalizeReplay had to materialise the synth (the actual
+    // ER-then-crash window). pnl.endpoint_requests counts /pnl/today
+    // hits.
+    public static readonly Counter<long> PnlRealizedAppended =
+        Meter.CreateCounter<long>("trading.pnl.realized_appended");
+    public static readonly Counter<long> PnlReplaySynth =
+        Meter.CreateCounter<long>("trading.pnl.replay_synth");
+    public static readonly Counter<long> PnlEndpointRequests =
+        Meter.CreateCounter<long>("trading.pnl.endpoint_requests");
+    // Pass-1 review (#278) P1#1. Bumped once per (endClient, symbol)
+    // row when StateSnapshotter restores a legacy snapshot whose
+    // PnlAvgCost block is empty but Positions has rows — the avg-cost
+    // basis is reconstructed from the position's AverageEntryPrice so
+    // a subsequent close still realises against the carried basis.
+    // A non-zero count just means the platform restored from a
+    // pre-#271 snapshot at least once.
+    public static readonly Counter<long> PnlLegacySnapshotBasisSeeded =
+        Meter.CreateCounter<long>("trading.pnl.legacy_snapshot_basis_seeded");
+    // Pass-2 review (#278) P1#2. Bumped per (endClient, symbol) row
+    // skipped by SeedAvgCostFromLegacyPositions because the legacy
+    // position carries a zero AverageEntryPrice — seeding such a
+    // degenerate row would realize phantom P&L against a zero basis
+    // on the first close after restore. A non-zero count flags a
+    // snapshot containing position rows the host could not derive a
+    // basis from (operator follow-up).
+    public static readonly Counter<long> PnlLegacySnapshotBasisSkippedZero =
+        Meter.CreateCounter<long>("trading.pnl.legacy_snapshot_basis_skipped_zero");
+    // Pass-4 review (#278) P2#3. Bumped per (endClient, symbol) row
+    // when Restore observes the same key in BOTH PnlAvgCost AND
+    // PnlUnknownBasis (a malformed snapshot — the two collections are
+    // mutually exclusive by construction in the live keeper). Recovery
+    // applies a "prefer unknown" policy: the avg-cost entry is dropped
+    // so subsequent fills go through the unknown-basis path (realising
+    // 0 instead of phantom against the stale basis), and the metric
+    // surfaces the inconsistency for ops to investigate the snapshot
+    // writer.
+    public static readonly Counter<long> PnlSnapshotBasisInconsistent =
+        Meter.CreateCounter<long>("trading.pnl.snapshot_basis_inconsistent");
+    // Pass-1 review (#278) P1#3. Bumped each time the refprice
+    // fan-out coalesced one or more (subscriber, symbol) updates into
+    // a single pnl.me delta publish under the per-symbol throttle.
+    public static readonly Counter<long> PnlRefPricePublishes =
+        Meter.CreateCounter<long>("trading.pnl.refprice_publishes");
+    public static readonly Counter<long> PnlRefPriceThrottled =
+        Meter.CreateCounter<long>("trading.pnl.refprice_throttled");
+
     // WebSocket fan-out
     public static readonly UpDownCounter<int> WsConnectionsActive =
         Meter.CreateUpDownCounter<int>("trading.ws.connections.active");

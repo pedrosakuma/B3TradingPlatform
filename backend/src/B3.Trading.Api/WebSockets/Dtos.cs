@@ -10,6 +10,8 @@ public static class Channels
     public const string ExecutionsMe = "executions.me";
     public const string PositionsMe = "positions.me";
     public const string AlgoMe = "algo.me";
+    /// <summary>Q2.4 (#271). Realized + unrealized P&amp;L per end-client.</summary>
+    public const string PnlMe = "pnl.me";
 
     /// <summary>
     /// Q1.5 (#257). Public per-symbol market-data channels of the form
@@ -28,7 +30,7 @@ public static class Channels
     /// <see cref="TryParsePublic"/>.
     /// </summary>
     public static readonly IReadOnlySet<string> All =
-        new HashSet<string>(StringComparer.Ordinal) { OrdersMe, ExecutionsMe, PositionsMe, AlgoMe };
+        new HashSet<string>(StringComparer.Ordinal) { OrdersMe, ExecutionsMe, PositionsMe, AlgoMe, PnlMe };
 
     /// <summary>
     /// Recognises <c>phases.SYMBOL</c> / <c>auction.SYMBOL</c> and

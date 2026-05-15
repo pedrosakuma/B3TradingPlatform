@@ -85,8 +85,20 @@ public sealed class EntryPointExecutionReportRouter : IDisposable
             // (legacy synchronous-publish path: no fanOut writer); this is
             // a "log dropped, state intact" branch and shows up in metrics
             // as a backpressure event.
-            _processor.Apply(er.ClOrdId, kind, er.LeavesQuantity, er.CumulativeQuantity,
-                er.LastQuantity, er.LastPrice, er.RejectReason, er.OrigClOrdId);
+            //
+            // Pass-2 review (#278) P1#1. Take the dispatcher lock for the
+            // whole fallback Apply via RunExclusive so the same
+            // serialisation discipline that the regular Dispatch path
+            // gives us still holds: nested Dispatch calls for derived
+            // fee/PnL events (reentrant on this thread) interleave
+            // safely with concurrent live ER dispatches on other
+            // threads, and there is no AB-BA inversion against any
+            // downstream lock the keepers take. The WAL append is
+            // intentionally skipped here — we are at backpressure —
+            // so holding the dispatcher lock involves no I/O.
+            _dispatcher.RunExclusive(() =>
+                _processor.Apply(er.ClOrdId, kind, er.LeavesQuantity, er.CumulativeQuantity,
+                    er.LastQuantity, er.LastPrice, er.RejectReason, er.OrigClOrdId));
         }
     }
 }

@@ -365,6 +365,51 @@ public class RecoveryAndSnapshotTests : IDisposable
     }
 
     [Fact]
+    public void StateSnapshotter_Restore_SeedsLegacyZeroBasis_FromPass2ShapedSnapshot()
+    {
+        // Pass-4 (#278) P1#1 — a pass-2-shaped snapshot has
+        // PnlAvgCost populated (the non-zero-basis rows seeded by
+        // pass-1's SeedAvgCostFromLegacyPositions) but no
+        // PnlUnknownBasis block (the field didn't exist yet). The
+        // previous gate (PnlAvgCost.Count == 0 && PnlUnknownBasis.Count == 0)
+        // refused to seed in this case, leaving zero-basis Position
+        // rows as phantom-P&L sources. Seeding must run whenever
+        // PnlUnknownBasis is empty; SeedAvgCostFromLegacyPositions
+        // is idempotent on existing _avgCost keys, so we only add
+        // _unknownBasisQty for the zero-basis rows that need it.
+        var snap = new PlatformSnapshot
+        {
+            Seq = 1,
+            Positions =
+            {
+                new PositionSnapshot("alice", "PETR4", 100, 25m), // already in PnlAvgCost
+                new PositionSnapshot("alice", "VALE3", 50, 0m),   // legacy zero-basis row
+            },
+            PnlAvgCost = { new PnlAvgCostSnapshot("alice", "PETR4", 100, 25m) },
+            // PnlUnknownBasis intentionally empty — pass-2 snapshot.
+        };
+
+        var pnl = new PnlKeeper();
+        var snapshotter = new StateSnapshotter(
+            new WorkingOrderBook(), new PositionKeeper(), new KillSwitchService(),
+            new SymbolHaltService(), new SessionPhaseService(),
+            new ClOrdIdPrefixRegistry(), new OrderOwnershipMap(), new AlgoBook(),
+            new AlgoIdRegistry(), new CashLedger(),
+            pnlKeeper: pnl);
+        snapshotter.Restore(snap);
+
+        // Existing PnlAvgCost row preserved, zero-basis row tracked
+        // as unknown.
+        var known = pnl.GetAvgCost("alice", "PETR4")!;
+        Assert.Equal(100, known.NetQuantity);
+        Assert.Equal(25m, known.AvgPrice);
+        Assert.Equal(50, pnl.GetUnknownBasisQty("alice", "VALE3"));
+
+        // Next sell on the unknown leg realises 0 (not phantom).
+        Assert.Equal(0m, pnl.ApplyFillToAvgCost("alice", "VALE3", OrderSide.Sell, 50, 33m));
+    }
+
+    [Fact]
     public void EventReplayer_AdvancesClOrdIdWatermark_FromOrderSubmittedAndReplaceAndEr()
     {
         // #157 — full coverage: OrderSubmittedEvent, OrderReplaceRequestedEvent
