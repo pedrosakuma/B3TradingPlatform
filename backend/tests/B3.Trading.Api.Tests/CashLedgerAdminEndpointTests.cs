@@ -71,11 +71,17 @@ public class CashLedgerAdminEndpointTests : IClassFixture<TestAppFactory>
 
         await admin.PostAsJsonAsync("/admin/cash", new
         {
-            endclient, kind = "Deposit", amount = 1_000m, currency = "BRL",
+            endclient,
+            kind = "Deposit",
+            amount = 1_000m,
+            currency = "BRL",
         });
         var resp = await admin.PostAsJsonAsync("/admin/cash", new
         {
-            endclient, kind = "Withdrawal", amount = 400m, currency = "BRL",
+            endclient,
+            kind = "Withdrawal",
+            amount = 400m,
+            currency = "BRL",
         });
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var body = await resp.Content.ReadFromJsonAsync<CashResponse>(Json);
@@ -90,11 +96,17 @@ public class CashLedgerAdminEndpointTests : IClassFixture<TestAppFactory>
 
         await admin.PostAsJsonAsync("/admin/cash", new
         {
-            endclient, kind = "Deposit", amount = 100m, currency = "BRL",
+            endclient,
+            kind = "Deposit",
+            amount = 100m,
+            currency = "BRL",
         });
         var resp = await admin.PostAsJsonAsync("/admin/cash", new
         {
-            endclient, kind = "Withdrawal", amount = 250m, currency = "BRL",
+            endclient,
+            kind = "Withdrawal",
+            amount = 250m,
+            currency = "BRL",
         });
         Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
@@ -105,7 +117,10 @@ public class CashLedgerAdminEndpointTests : IClassFixture<TestAppFactory>
         // Balance unchanged after the rejected withdrawal.
         var probe = await admin.PostAsJsonAsync("/admin/cash", new
         {
-            endclient, kind = "Deposit", amount = 1m, currency = "BRL",
+            endclient,
+            kind = "Deposit",
+            amount = 1m,
+            currency = "BRL",
         });
         var probeBody = await probe.Content.ReadFromJsonAsync<CashResponse>(Json);
         Assert.Equal(101m, probeBody!.Available);
