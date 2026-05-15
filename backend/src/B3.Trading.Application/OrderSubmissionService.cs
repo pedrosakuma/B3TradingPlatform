@@ -112,10 +112,25 @@ public sealed class OrderSubmissionService
                 clOrdId, req.Owner.Value, req.FirmId);
             return OrderSubmissionResult.DuplicateClOrdId(clOrdId);
         }
-        var order = new Order(
-            clOrdId, req.Owner, req.Symbol, req.SecurityId, req.Side, req.Type,
-            req.Quantity, req.Price, req.FirmId,
-            parentAlgoId: req.ParentAlgoId, algoSliceSeq: req.AlgoSliceSeq);
+        Order order;
+        try
+        {
+            order = new Order(
+                clOrdId, req.Owner, req.Symbol, req.SecurityId, req.Side, req.Type,
+                req.Quantity, req.Price, req.FirmId,
+                parentAlgoId: req.ParentAlgoId, algoSliceSeq: req.AlgoSliceSeq,
+                timeInForce: req.TimeInForce, stopPrice: req.StopPrice, goodTillDate: req.GoodTillDate);
+        }
+        catch (ArgumentException ex)
+        {
+            // Q1.1 (#253). Cross-field invariants (StopPrice required iff
+            // Stop*; GoodTillDate required iff GTD) are enforced inside
+            // the Order ctor so WAL replay can't reconstitute illegal
+            // combinations. At the live submit boundary we surface them
+            // as BadRequest so REST callers get a clear 400 rather than
+            // a 500 from an uncaught exception.
+            return OrderSubmissionResult.BadRequest(ex.Message);
+        }
 
         try
         {
@@ -144,6 +159,9 @@ public sealed class OrderSubmissionService
                     ParentAlgoId = req.ParentAlgoId,
                     AlgoSliceSeq = req.AlgoSliceSeq,
                     BotMapping = botMapping,
+                    TimeInForce = req.TimeInForce.ToString(),
+                    StopPrice = req.StopPrice,
+                    GoodTillDate = req.GoodTillDate,
                 },
                 () =>
                 {
@@ -275,7 +293,10 @@ public sealed record OrderSubmissionRequest(
     decimal? Price,
     OrderSubmissionSource Source = OrderSubmissionSource.Manual,
     ulong? ParentAlgoId = null,
-    int? AlgoSliceSeq = null)
+    int? AlgoSliceSeq = null,
+    TimeInForce TimeInForce = TimeInForce.Day,
+    decimal? StopPrice = null,
+    DateTimeOffset? GoodTillDate = null)
 {
     /// <summary>
     /// Sub-issue #171 (E). When non-null, the request originates from

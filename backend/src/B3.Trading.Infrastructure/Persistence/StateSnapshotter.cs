@@ -139,6 +139,9 @@ public sealed class StateSnapshotter
                 IsStale = r.IsStale,
                 StaleReason = r.StaleReason,
                 StaledAtUtc = r.StaledAtUtc,
+                TimeInForce = o.TimeInForce.ToString(),
+                StopPrice = o.StopPrice,
+                GoodTillDate = o.GoodTillDate,
             });
         }
 
@@ -333,8 +336,13 @@ public sealed class EventReplayer
                 var owner = new EndClientId(o.EndClientId);
                 var side = Enum.Parse<OrderSide>(o.Side, ignoreCase: true);
                 var type = Enum.Parse<OrderType>(o.Type, ignoreCase: true);
+                // Q1.1 (#253) — older WAL segments default to "Day" via
+                // the OrderSubmittedEvent record's init default, so a
+                // missing field round-trips through Enum.Parse cleanly.
+                var tif = Enum.Parse<TimeInForce>(o.TimeInForce, ignoreCase: true);
                 _orders.TryAdd(new Order(o.ClOrdId, owner, o.Symbol, o.SecurityId, side, type,
-                    o.Quantity, o.Price, o.FirmId, o.ParentAlgoId, o.AlgoSliceSeq));
+                    o.Quantity, o.Price, o.FirmId, o.ParentAlgoId, o.AlgoSliceSeq,
+                    timeInForce: tif, stopPrice: o.StopPrice, goodTillDate: o.GoodTillDate));
                 _ownership.Register(o.ClOrdId, owner);
                 // #157: advance the ClOrdID registry watermark so the next
                 // live Generate(owner) cannot re-allocate this ID.

@@ -167,10 +167,12 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             ClOrdID = new UpModels.ClOrdID(order.ClOrdId),
             SecurityId = order.SecurityId,
             Side = order.Side == OrderSide.Buy ? UpModels.Side.Buy : UpModels.Side.Sell,
-            OrderType = order.Type == OrderType.Limit ? UpModels.OrderType.Limit : UpModels.OrderType.Market,
+            OrderType = MapOrderType(order.Type),
             Price = order.Price,
+            StopPrice = order.StopPrice,
             OrderQty = (ulong)order.Quantity,
-            TimeInForce = UpModels.TimeInForce.Day,
+            TimeInForce = MapTimeInForce(order.TimeInForce),
+            ExpireDate = order.GoodTillDate,
         };
 
         return SendAsync(req.ClOrdID.Value, OrderEntryLatencyProbe.OpSubmit,
@@ -209,10 +211,16 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             OrigClOrdID = new UpModels.ClOrdID(original.ClOrdId),
             SecurityId = original.SecurityId,
             Side = original.Side == OrderSide.Buy ? UpModels.Side.Buy : UpModels.Side.Sell,
-            OrderType = original.Type == OrderType.Limit ? UpModels.OrderType.Limit : UpModels.OrderType.Market,
+            OrderType = MapOrderType(original.Type),
             Price = newPrice,
+            // Q1.1 (#253). The modify pipeline only mutates qty+price;
+            // type/TIF/StopPrice/GoodTillDate are inherited from the
+            // original order so the venue sees a consistent surface
+            // across the cancel-replace boundary.
+            StopPrice = original.StopPrice,
             OrderQty = (ulong)newQuantity,
-            TimeInForce = UpModels.TimeInForce.Day,
+            TimeInForce = MapTimeInForce(original.TimeInForce),
+            ExpireDate = original.GoodTillDate,
         };
 
         return SendAsync(newClOrdId, OrderEntryLatencyProbe.OpReplace,
@@ -248,6 +256,38 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             new KeyValuePair<string, object?>("firm", _firmId),
             new KeyValuePair<string, object?>("op", op));
     }
+
+    /// <summary>
+    /// Q1.1 (#253). Domain → SDK <see cref="UpModels.OrderType"/> mapping
+    /// covering the full B3 order surface exposed at v0. Internal so the
+    /// gateway tests can pin the table without going through reflection
+    /// on the SDK's private encoder.
+    /// </summary>
+    internal static UpModels.OrderType MapOrderType(OrderType type) => type switch
+    {
+        OrderType.Limit => UpModels.OrderType.Limit,
+        OrderType.Market => UpModels.OrderType.Market,
+        OrderType.StopLoss => UpModels.OrderType.StopLoss,
+        OrderType.StopLimit => UpModels.OrderType.StopLimit,
+        OrderType.MarketWithLeftover => UpModels.OrderType.MarketWithLeftoverAsLimit,
+        _ => throw new ArgumentOutOfRangeException(nameof(type), type, "Unmapped Domain.OrderType."),
+    };
+
+    /// <summary>
+    /// Q1.1 (#253). Domain → SDK <see cref="UpModels.TimeInForce"/> mapping
+    /// covering all 7 v0 values.
+    /// </summary>
+    internal static UpModels.TimeInForce MapTimeInForce(TimeInForce tif) => tif switch
+    {
+        TimeInForce.Day => UpModels.TimeInForce.Day,
+        TimeInForce.IOC => UpModels.TimeInForce.ImmediateOrCancel,
+        TimeInForce.FOK => UpModels.TimeInForce.FillOrKill,
+        TimeInForce.GTC => UpModels.TimeInForce.GoodTillCancel,
+        TimeInForce.GTD => UpModels.TimeInForce.GoodTillDate,
+        TimeInForce.AtClose => UpModels.TimeInForce.AtTheClose,
+        TimeInForce.GoodForAuction => UpModels.TimeInForce.GoodForAuction,
+        _ => throw new ArgumentOutOfRangeException(nameof(tif), tif, "Unmapped Domain.TimeInForce."),
+    };
 
     // The IEntryPointClient submit-side surface is unused on the real adapter
     // (OrdersEndpoints calls IExchangeGateway directly). We implement it to

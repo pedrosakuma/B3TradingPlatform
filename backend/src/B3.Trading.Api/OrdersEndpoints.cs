@@ -34,6 +34,13 @@ public static class OrdersEndpoints
                 return Results.BadRequest(new { error = $"invalid side '{req.Side}'" });
             if (!Enum.TryParse<OrderType>(req.Type, ignoreCase: true, out var type))
                 return Results.BadRequest(new { error = $"invalid type '{req.Type}'" });
+            // Q1.1 (#253). Optional TIF (default Day); reject malformed
+            // before allocating a ClOrdID so the bad request never enters
+            // the WAL pipeline.
+            var tif = TimeInForce.Day;
+            if (!string.IsNullOrWhiteSpace(req.TimeInForce)
+                && !Enum.TryParse<TimeInForce>(req.TimeInForce, ignoreCase: true, out tif))
+                return Results.BadRequest(new { error = $"invalid timeInForce '{req.TimeInForce}'" });
 
             // SecurityId resolution: explicit non-zero in the payload
             // wins (preserves the conformance contract). Otherwise look
@@ -49,7 +56,10 @@ public static class OrdersEndpoints
 
             var result = await submitter.SubmitAsync(new OrderSubmissionRequest(
                 owner, firm, req.Symbol, securityId, side, type,
-                req.Quantity, req.Price, OrderSubmissionSource.Manual), ct);
+                req.Quantity, req.Price, OrderSubmissionSource.Manual,
+                TimeInForce: tif,
+                StopPrice: req.StopPrice,
+                GoodTillDate: req.GoodTillDate), ct);
 
             return result.Kind switch
             {
@@ -178,7 +188,13 @@ public sealed record SubmitOrderRequest(
     string Side,
     string Type,
     long Quantity,
-    decimal? Price);
+    decimal? Price,
+    /// <summary>Q1.1 (#253). Optional; defaults to <c>"Day"</c>.</summary>
+    string? TimeInForce = null,
+    /// <summary>Q1.1 (#253). Required for <c>StopLoss</c>/<c>StopLimit</c>.</summary>
+    decimal? StopPrice = null,
+    /// <summary>Q1.1 (#253). Required when <c>TimeInForce == "GTD"</c>.</summary>
+    DateTimeOffset? GoodTillDate = null);
 
 public sealed record ModifyOrderRequest(
     long Quantity,

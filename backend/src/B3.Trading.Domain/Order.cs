@@ -10,6 +10,46 @@ public enum OrderType
 {
     Limit,
     Market,
+    /// <summary>
+    /// Stop order: triggers a Market order when last trade price reaches
+    /// <see cref="Order.StopPrice"/>. Wire byte = SBE <c>STOP_LOSS</c>.
+    /// </summary>
+    StopLoss,
+    /// <summary>
+    /// Stop-limit order: triggers a Limit order at <see cref="Order.Price"/>
+    /// when last trade price reaches <see cref="Order.StopPrice"/>. Wire
+    /// byte = SBE <c>STOP_LIMIT</c>.
+    /// </summary>
+    StopLimit,
+    /// <summary>
+    /// Market-with-leftover-as-Limit: marketable up to <see cref="Order.Price"/>;
+    /// any unfilled remainder rests on the book as a Limit at that price.
+    /// Wire byte = SBE <c>MARKET_WITH_LEFTOVER_AS_LIMIT</c>.
+    /// </summary>
+    MarketWithLeftover,
+}
+
+/// <summary>
+/// Time-In-Force for a working order. The default value is <see cref="Day"/>
+/// so older WAL/snapshot payloads that pre-date this enum hydrate with
+/// the implicit "Day" semantics they actually carried.
+/// </summary>
+public enum TimeInForce
+{
+    /// <summary>Resting until the end of the trading day; cancelled at session close.</summary>
+    Day,
+    /// <summary>Match what is immediately marketable; cancel any remainder.</summary>
+    IOC,
+    /// <summary>All-or-nothing on the immediately marketable book; otherwise cancel.</summary>
+    FOK,
+    /// <summary>Resting until cancelled.</summary>
+    GTC,
+    /// <summary>Resting until <see cref="Order.GoodTillDate"/>; cancelled at end of that day.</summary>
+    GTD,
+    /// <summary>Submitted to (only) the closing auction.</summary>
+    AtClose,
+    /// <summary>Submitted to (only) the next opening / re-opening call auction.</summary>
+    GoodForAuction,
 }
 
 /// <summary>
@@ -86,7 +126,10 @@ public sealed class Order
         decimal? price,
         string firmId = "DEFAULT",
         ulong? parentAlgoId = null,
-        int? algoSliceSeq = null)
+        int? algoSliceSeq = null,
+        TimeInForce timeInForce = TimeInForce.Day,
+        decimal? stopPrice = null,
+        DateTimeOffset? goodTillDate = null)
     {
         if (clOrdId == 0)
             throw new ArgumentOutOfRangeException(nameof(clOrdId), "ClOrdID cannot be zero (reserved as null sentinel by EntryPoint).");
@@ -98,6 +141,30 @@ public sealed class Order
             throw new ArgumentException("ParentAlgoId and AlgoSliceSeq must be set together (both null = manual order; both set = algo child).");
         if (algoSliceSeq is < 0)
             throw new ArgumentOutOfRangeException(nameof(algoSliceSeq));
+
+        // Q1.1 (#253) — StopPrice/GoodTillDate cross-field invariants.
+        // Always-true invariants checked here (so WAL replay and snapshot
+        // hydrate cannot reconstitute illegal combinations). The wallclock
+        // "GoodTillDate must be in the future" check belongs at submit
+        // time and lives in the API surface, not in the ctor.
+        var requiresStop = type is OrderType.StopLoss or OrderType.StopLimit;
+        if (requiresStop && (!stopPrice.HasValue || stopPrice.Value <= 0m))
+            throw new ArgumentException(
+                $"StopPrice is required and must be positive for OrderType.{type}.",
+                nameof(stopPrice));
+        if (!requiresStop && stopPrice.HasValue)
+            throw new ArgumentException(
+                $"StopPrice must be null for OrderType.{type} (only StopLoss/StopLimit accept a stop trigger).",
+                nameof(stopPrice));
+        if (timeInForce == TimeInForce.GTD && !goodTillDate.HasValue)
+            throw new ArgumentException(
+                "GoodTillDate is required when TimeInForce == GTD.",
+                nameof(goodTillDate));
+        if (timeInForce != TimeInForce.GTD && goodTillDate.HasValue)
+            throw new ArgumentException(
+                $"GoodTillDate must be null when TimeInForce == {timeInForce} (only GTD carries an expiry).",
+                nameof(goodTillDate));
+
         ClOrdId = clOrdId;
         Owner = owner;
         Symbol = symbol;
@@ -109,6 +176,9 @@ public sealed class Order
         FirmId = firmId;
         ParentAlgoId = parentAlgoId;
         AlgoSliceSeq = algoSliceSeq;
+        TimeInForce = timeInForce;
+        StopPrice = stopPrice;
+        GoodTillDate = goodTillDate;
         LeavesQuantity = quantity;
         Status = OrderStatus.PendingNew;
     }
@@ -132,6 +202,32 @@ public sealed class Order
     /// </summary>
     public ulong? ParentAlgoId { get; }
     public int? AlgoSliceSeq { get; }
+
+    /// <summary>
+    /// Q1.1 (#253). Time-in-force for the order. Defaults to <see cref="TimeInForce.Day"/>
+    /// for legacy code paths that pre-date the field; persisted on
+    /// <c>OrderSubmittedEvent</c> and the snapshot.
+    /// </summary>
+    public TimeInForce TimeInForce { get; }
+
+    /// <summary>
+    /// Q1.1 (#253). Trigger price for <see cref="OrderType.StopLoss"/> /
+    /// <see cref="OrderType.StopLimit"/>. <c>null</c> for every other
+    /// <see cref="OrderType"/>; the constructor enforces that invariant
+    /// in both directions.
+    /// </summary>
+    public decimal? StopPrice { get; }
+
+    /// <summary>
+    /// Q1.1 (#253). Expiry timestamp for <see cref="TimeInForce.GTD"/>.
+    /// <c>null</c> for every other <see cref="TimeInForce"/>; the
+    /// constructor enforces that invariant in both directions. The
+    /// "must be in the future" check is the submit pipeline's job (see
+    /// <c>OrderSubmissionService</c>) — replay/hydration must accept
+    /// an already-elapsed timestamp so recovery is total.
+    /// </summary>
+    public DateTimeOffset? GoodTillDate { get; }
+
     public long LeavesQuantity { get; private set; }
     public long CumulativeQuantity { get; private set; }
     public OrderStatus Status { get; private set; }
@@ -304,9 +400,13 @@ public sealed class Order
         ulong clOrdId, EndClientId owner, string symbol, ulong securityId, OrderSide side, OrderType type,
         long quantity, decimal? price, long leaves, long cumQty, OrderStatus status, string firmId = "DEFAULT",
         ulong? parentAlgoId = null, int? algoSliceSeq = null,
-        bool isStale = false, string? staleReason = null, DateTimeOffset? staledAtUtc = null)
+        bool isStale = false, string? staleReason = null, DateTimeOffset? staledAtUtc = null,
+        TimeInForce timeInForce = TimeInForce.Day,
+        decimal? stopPrice = null,
+        DateTimeOffset? goodTillDate = null)
     {
-        var o = new Order(clOrdId, owner, symbol, securityId, side, type, quantity, price, firmId, parentAlgoId, algoSliceSeq);
+        var o = new Order(clOrdId, owner, symbol, securityId, side, type, quantity, price, firmId, parentAlgoId, algoSliceSeq,
+            timeInForce, stopPrice, goodTillDate);
         o.LeavesQuantity = leaves;
         o.CumulativeQuantity = cumQty;
         o.Status = status;
@@ -383,6 +483,12 @@ public sealed class Order
             status: status,
             firmId: original.FirmId,
             parentAlgoId: original.ParentAlgoId,
-            algoSliceSeq: original.AlgoSliceSeq);
+            algoSliceSeq: original.AlgoSliceSeq,
+            // Q1.1 (#253) — modify pipeline only mutates qty+price; TIF,
+            // StopPrice and GoodTillDate are inherited from the original
+            // so the replacement order keeps the same surface semantics.
+            timeInForce: original.TimeInForce,
+            stopPrice: original.StopPrice,
+            goodTillDate: original.GoodTillDate);
     }
 }
