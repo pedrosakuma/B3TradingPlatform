@@ -99,7 +99,7 @@ public sealed class ExecutionReportProcessor
     /// preserved so existing tests don't need rewiring.
     /// </para>
     /// </summary>
-    public void Apply(ulong clOrdId, ExecKind kind, long leaves, long cumQty, long lastQty, decimal lastPx, string? rejectReason, ulong origClOrdId = 0, Persistence.ExecutionFanOut? fanOut = null)
+    public void Apply(ulong clOrdId, ExecKind kind, long leaves, long cumQty, long lastQty, decimal lastPx, string? rejectReason, ulong origClOrdId = 0, Persistence.ExecutionFanOut? fanOut = null, bool isReplay = false)
     {
         // Slice 2 of #122: replace lifecycle early intercepts. Both
         // branches are gated on the registry having an intent recorded
@@ -245,14 +245,24 @@ public sealed class ExecutionReportProcessor
                     // FeeOptions snapshot, then dispatched as a
                     // standalone FeeAccruedEvent that lands AFTER the
                     // ER in the WAL — same dispatcher, same lock,
-                    // sequential Append. Replay path: fanOut is null
-                    // (EventReplayer + test paths bypass the dispatcher
-                    // and pass no writer), so we MUST NOT re-append on
-                    // replay; the replayed FeeAccruedEvent itself feeds
-                    // FeeKeeper directly via EventReplayer.Apply, and
-                    // FeeKeeper.Apply dedupes on ExecutionId so even a
-                    // bogus double would be a no-op.
-                    if (fanOut is not null
+                    // sequential Append. Replay path: caller passes
+                    // isReplay=true (EventReplayer) so we MUST NOT
+                    // re-append; the replayed FeeAccruedEvent itself
+                    // feeds FeeKeeper directly via EventReplayer.Apply,
+                    // and FeeKeeper.Apply dedupes on ExecutionId so
+                    // even a bogus double would be a no-op.
+                    //
+                    // The live backpressure fallback path (router
+                    // catches WalBackpressureException on the ER and
+                    // re-invokes Apply WITHOUT a fanOut) is NOT replay —
+                    // we still want to accrue fees there. So the gate
+                    // is `!isReplay`, not `fanOut != null`. If the
+                    // nested fee Dispatch itself throws backpressure we
+                    // swallow it (metric + log): same "log dropped,
+                    // state intact" tradeoff the router makes for the
+                    // ER itself, and bubbling here would skip
+                    // _margin.OnExecution + fan-out below.
+                    if (!isReplay
                         && _feeCalculator is not null
                         && _feeKeeper is not null
                         && _dispatcher is not null)
@@ -277,7 +287,23 @@ public sealed class ExecutionReportProcessor
                             TimestampUtc = nowUtc,
                         };
                         var keeper = _feeKeeper;
-                        _dispatcher.Dispatch(feeEvt, () => keeper.Apply(feeEvt));
+                        try
+                        {
+                            _dispatcher.Dispatch(feeEvt, () => keeper.Apply(feeEvt));
+                        }
+                        catch (Persistence.WalBackpressureException)
+                        {
+                            // Same tradeoff as the ER router's backpressure
+                            // fallback: state already mutated (order/position/
+                            // cash) — skipping the fee append keeps the
+                            // pipeline going so margin release + fan-out
+                            // still run. Surfaces as a backpressure metric.
+                            MetricsRegistry.WalBackpressure.Add(1,
+                                new KeyValuePair<string, object?>("call_site", "fees.dispatch"));
+                            _logger.LogWarning(
+                                "Dropping FeeAccruedEvent for {ClOrdId} on WAL backpressure; state intact, fee under-accrued.",
+                                lookupId);
+                        }
                     }
                     // Release reserved margin against the actual booked
                     // delta — not the wire lastQty — so a lost

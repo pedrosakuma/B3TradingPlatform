@@ -127,20 +127,48 @@ public class ExecutionReportProcessorFeeTests
     }
 
     [Fact]
-    public void TestPath_NoDispatcher_DoesNotAppendFeeEvent()
+    public void ReplayPath_IsReplayTrue_DoesNotAppendFeeEvent()
     {
-        // The legacy synchronous test path (no fanOut) must not append
-        // the fee event — replay relies on the same gate.
+        // EventReplayer invokes Apply with isReplay: true so the fee
+        // event is NOT re-appended (the replayed FeeAccruedEvent itself
+        // is fed to FeeKeeper directly via the replayer's switch case).
         var (proc, _, store, keeper, ownership, book, _, _) = Build();
         var owner = new EndClientId("alice");
         var order = new Order(2UL, owner, "PETR4", 1UL, OrderSide.Buy, OrderType.Limit, 100, 1_000m);
         book.TryAdd(order);
         ownership.Register(2UL, owner);
 
-        proc.Apply(2UL, ExecKind.Fill, leaves: 0, cumQty: 100, lastQty: 100, lastPx: 1_000m, rejectReason: null);
+        proc.Apply(2UL, ExecKind.Fill, leaves: 0, cumQty: 100, lastQty: 100, lastPx: 1_000m,
+            rejectReason: null, origClOrdId: 0, fanOut: null, isReplay: true);
 
         Assert.Empty(store.Recorded);
         Assert.Equal(0m, keeper.GetDayTotal("alice", DateOnly.FromDateTime(DateTime.UtcNow)));
+    }
+
+    [Fact]
+    public void LiveBackpressureFallbackPath_NoFanOutNoReplay_StillAppendsFeeEvent()
+    {
+        // P1 regression for #277 pass-1: the live ER router falls back
+        // to a fanOut-less direct Apply when WAL append for the ER
+        // itself hits backpressure (router's `catch
+        // (WalBackpressureException)` branch). That path is NOT replay,
+        // so fees MUST still be accrued — gate must be `!isReplay`,
+        // not `fanOut != null`.
+        var (proc, _, store, keeper, ownership, book, _, _) = Build();
+        var owner = new EndClientId("alice");
+        var order = new Order(4UL, owner, "PETR4", 1UL, OrderSide.Buy, OrderType.Limit, 100, 1_000m);
+        book.TryAdd(order);
+        ownership.Register(4UL, owner);
+
+        proc.Apply(4UL, ExecKind.Fill, leaves: 0, cumQty: 100, lastQty: 100, lastPx: 1_000m,
+            rejectReason: null, origClOrdId: 0, fanOut: null, isReplay: false);
+
+        var recorded = store.Recorded.ToArray();
+        var fae = Assert.IsType<FeeAccruedEvent>(Assert.Single(recorded.Select(r => r.Event).OfType<FeeAccruedEvent>()));
+        Assert.Equal(4UL, fae.ClOrdId);
+        Assert.True(fae.Total > 0m);
+        var day = DateOnly.FromDateTime(fae.TimestampUtc.UtcDateTime);
+        Assert.Equal(fae.Total, keeper.GetDayTotal("alice", day));
     }
 
     [Fact]
