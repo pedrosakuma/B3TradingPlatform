@@ -4,6 +4,7 @@
 import {
   getState, subscribe, isTerminalOrderStatus,
   getPhase, getAuctionState, isAuctionPhase, setAuctionPanelSymbol,
+  isStopOrderType, isGtdTif, ORDER_TYPE_CHIP,
 } from "./state.js";
 import { rulesFor } from "./validation.js";
 
@@ -407,8 +408,11 @@ function renderOrderDetailHeader(order, execs) {
     <div class="field"><span class="label">Symbol</span><span class="value">${escapeHtml(order.symbol)}${order.securityId != null ? ` <span class="muted-line">· ${escapeHtml(order.securityId)}</span>` : ""}</span></div>
     <div class="field"><span class="label">Side</span><span class="value">${escapeHtml(order.side)}</span></div>
     <div class="field"><span class="label">Type</span><span class="value">${escapeHtml(order.type)}</span></div>
+    <div class="field"><span class="label">TIF</span><span class="value">${escapeHtml(order.timeInForce ?? "—")}</span></div>
     <div class="field"><span class="label">Status</span><span class="value status-cell-${escapeHtml(order.status)}">${escapeHtml(order.status)}${staleBadge}</span></div>
     <div class="field"><span class="label">Price</span><span class="value">${price}</span></div>
+    ${order.stopPrice != null ? `<div class="field"><span class="label">Stop price</span><span class="value">${fmtPx(order.stopPrice)}</span></div>` : ""}
+    ${order.goodTillDate ? `<div class="field"><span class="label">Good-till-date</span><span class="value">${escapeHtml(fmtGtd(order.goodTillDate))}</span></div>` : ""}
     <div class="field"><span class="label">VWAP fills</span><span class="value">${vwap == null ? "—" : fmtPx(vwap)}</span></div>
     <div class="field field-wide">
       <span class="label">Qty / Cum / Leaves</span>
@@ -652,31 +656,67 @@ function renderCancelAllButton() {
 }
 
 export function bindUi() {
-  // Order ticket: enable/disable price field by type.
+  // Order ticket: enable/disable price field + show/hide stop-price +
+  // good-till-date inputs based on type / TIF (Q1.4 #256).
   const typeEl = $("ticket-type");
   const priceEl = $("ticket-price");
-  const syncPriceField = () => {
-    const isMarket = typeEl.value === "Market";
-    priceEl.disabled = isMarket;
-    priceEl.required = !isMarket;
-    if (isMarket) priceEl.value = "";
-  };
-  typeEl.addEventListener("change", syncPriceField);
-  syncPriceField();
+  const priceLabel = $("ticket-price-label");
+  const stopPriceEl = $("ticket-stop-price");
+  const stopPriceLabel = $("ticket-stop-price-label");
+  const gtdEl = $("ticket-good-till-date");
+  const gtdLabel = $("ticket-good-till-date-label");
+  const sideEl = $("ticket-side");
+  const qtyEl = $("ticket-qty");
+
+  // Visibility rules:
+  //   • Price: shown for Limit / StopLimit / MarketWithLeftover.
+  //   • StopPrice: shown for StopLoss / StopLimit.
+  //   • GoodTillDate: shown for TIF == GTD.
+  // Conditional fields use the `hidden` attribute (not display:none) so
+  // screen readers also skip them, mirroring the rest of the app.
+  function syncTicketConditionals() {
+    applyTicketConditionalVisibility({
+      type: typeEl.value,
+      tif:  $("ticket-tif")?.value ?? "Day",
+      priceEl, priceLabel,
+      stopPriceEl, stopPriceLabel,
+      gtdEl, gtdLabel,
+    });
+    refreshTicketValidation();
+  }
+  typeEl.addEventListener("change", syncTicketConditionals);
+  syncTicketConditionals();
+
+  // Re-validate on input for live feedback. Validation feeds the
+  // submit-disabled OR via dataset.validationFailed (see applySubmitDisabled).
+  for (const el of [priceEl, stopPriceEl, gtdEl, qtyEl, sideEl, typeEl].filter(Boolean)) {
+    el.addEventListener("input",  refreshTicketValidation);
+    el.addEventListener("change", refreshTicketValidation);
+  }
 
   $("ticket-form").addEventListener("submit", (e) => {
     e.preventDefault();
     const tifEl = $("ticket-tif");
+    const type  = typeEl.value;
+    const tif   = tifEl ? tifEl.value : "Day";
+    const stopHidden = !isStopOrderType(type);
+    const gtdHidden  = !isGtdTif(tif);
     const payload = {
       symbol: $("ticket-symbol").value.trim().toUpperCase(),
-      side:   $("ticket-side").value,
-      type:   $("ticket-type").value,
-      quantity: Number($("ticket-qty").value),
+      side:   sideEl.value,
+      type,
+      quantity: Number(qtyEl.value),
       price: priceEl.disabled || priceEl.value === "" ? null : Number(priceEl.value),
       // Q1.6 (#258). Backend defaults to Day when omitted, but we
       // always pass the visible value so what the trader sees on the
       // ticket is exactly what hits the venue.
-      timeInForce: tifEl ? tifEl.value : "Day",
+      timeInForce: tif,
+      // Q1.4 (#256). Hidden conditional inputs are submitted as null
+      // so the server canonicalises; a populated input that becomes
+      // hidden is also nulled here (syncTicketConditionals clears the
+      // value first, but we belt-and-braces here).
+      stopPrice:    stopHidden || !stopPriceEl || stopPriceEl.value === "" ? null : Number(stopPriceEl.value),
+      goodTillDate: gtdHidden  || !gtdEl       || gtdEl.value       === "" ? null : new Date(gtdEl.value).toISOString(),
     };
     onSubmitOrder(payload);
   });
@@ -688,6 +728,8 @@ export function bindUi() {
     tifEl.addEventListener("change", () => {
       tifEl.dataset.userPicked = "1";
       delete tifEl.dataset.autoPicked;
+      // Q1.4 (#256). TIF change toggles the GTD input visibility.
+      syncTicketConditionals();
       renderTicketPhaseCoupling();
     });
   }
@@ -1027,9 +1069,15 @@ export function setTicketFeedbackIfMatches(expected, replacement) {
 function applySubmitDisabled() {
   const el = $("ticket-submit");
   if (!el) return;
-  const inflight = el.dataset.submitInflight === "1";
-  const halted   = el.dataset.haltDisabled   === "1";
-  const disabled = inflight || halted;
+  const inflight        = el.dataset.submitInflight   === "1";
+  const halted          = el.dataset.haltDisabled     === "1";
+  // Q1.4 (#256). Client-side validation gates Submit alongside the
+  // existing in-flight + halt flags. Server remains authority — this
+  // is purely UX so the trader doesn't have to round-trip on errors
+  // we already know about (Stop without StopPrice, GTD in the past,
+  // IOC/FOK + MarketWithLeftover, etc.).
+  const validationFailed = el.dataset.validationFailed === "1";
+  const disabled = inflight || halted || validationFailed;
   el.disabled = disabled;
   if (disabled) {
     el.setAttribute("aria-disabled", "true");
@@ -1053,7 +1101,12 @@ export function clearTicket() {
   $("ticket-symbol").value = "";
   $("ticket-qty").value = "";
   $("ticket-price").value = "";
+  // Q1.4 (#256). Reset the conditional inputs too so a subsequent
+  // ticket starts clean.
+  const sp = $("ticket-stop-price");  if (sp) sp.value = "";
+  const gtd = $("ticket-good-till-date"); if (gtd) gtd.value = "";
   syncTicketRules();
+  refreshTicketValidation();
 }
 
 // T4 — reflect the per-symbol lot/tick on the qty/price inputs and
@@ -2004,7 +2057,8 @@ function orderRow(o, st) {
     <td><code>${escapeHtml(o.clOrdId)}</code></td>
     <td>${escapeHtml(o.symbol)}</td>
     <td>${escapeHtml(o.side)}</td>
-    <td>${escapeHtml(o.type)}</td>
+    <td>${typeChipHtml(o.type)}</td>
+    <td>${escapeHtml(o.timeInForce ?? "")}</td>
     <td class="num">${fmtQty(o.quantity)}</td>
     <td class="num">${fmtQty(o.leavesQuantity)}</td>
     <td class="num">${fmtQty(o.cumulativeQuantity)}</td>
@@ -2072,8 +2126,184 @@ function stpBadgeFor(e) {
   return "";
 }
 
+// Pure helper extracted from bindUi() so the visibility rules can be
+// unit tested without booting the entire UI. Mutates the supplied
+// elements in place.
+export function applyTicketConditionalVisibility({
+  type, tif,
+  priceEl, priceLabel,
+  stopPriceEl, stopPriceLabel,
+  gtdEl, gtdLabel,
+}) {
+  const showPrice = type === "Limit" || type === "StopLimit" || type === "MarketWithLeftover";
+  const showStop  = isStopOrderType(type);
+  const showGtd   = isGtdTif(tif);
+
+  if (priceLabel) priceLabel.hidden = !showPrice;
+  if (priceEl) {
+    priceEl.disabled = !showPrice;
+    priceEl.required = showPrice;
+    if (!showPrice) priceEl.value = "";
+  }
+
+  if (stopPriceLabel) stopPriceLabel.hidden = !showStop;
+  if (stopPriceEl) {
+    stopPriceEl.disabled = !showStop;
+    stopPriceEl.required = showStop;
+    if (!showStop) stopPriceEl.value = "";
+  }
+
+  if (gtdLabel) gtdLabel.hidden = !showGtd;
+  if (gtdEl) {
+    gtdEl.disabled = !showGtd;
+    gtdEl.required = showGtd;
+    if (!showGtd) gtdEl.value = "";
+  }
+}
+
 function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => (
     { "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c]
   ));
 }
+
+// ── Q1.4 (#256) helpers ────────────────────────────────────────────
+
+// Render the OrderType column in the working-orders table as a small
+// colored chip ("LIM" / "MKT" / "STP" / "STPL" / "MWL"). Unknown types
+// fall through to a plain escaped string so a future enum addition
+// stays visible while the chip table catches up.
+export function typeChipHtml(type) {
+  const meta = ORDER_TYPE_CHIP[type];
+  if (!meta) return escapeHtml(type ?? "");
+  return `<span class="type-chip ${meta.cls}" title="${escapeHtml(type)}">${meta.label}</span>`;
+}
+
+// Format an ISO timestamp for the order-detail GTD field. Returns "—"
+// for null/empty inputs so the renderer can call this unconditionally.
+export function fmtGtd(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return escapeHtml(iso);
+  // YYYY-MM-DD HH:mm UTC. Keeps the column compact and unambiguous —
+  // the trader sees the venue's wall clock, no locale surprises.
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`;
+}
+
+// Pure validator. Returns { valid, errors } where errors is a record
+// keyed by field name. Mirrors the backend Q1.1 risk pipeline subset
+// the trader benefits from knowing about pre-submit; the server is
+// still authoritative.
+//
+// Inputs are the visible form values plus the `hidden` flags so the
+// validator can suppress errors for fields that aren't relevant to
+// the current type/TIF combination.
+export function validateTicketState(formState) {
+  const {
+    type, side, tif,
+    price, stopPrice, goodTillDate,
+    priceHidden, stopPriceHidden, gtdHidden,
+    now,
+  } = formState ?? {};
+  const errors = {};
+
+  // Stop / StopLimit require StopPrice > 0.
+  if (!stopPriceHidden && isStopOrderType(type)) {
+    const sp = Number(stopPrice);
+    if (!Number.isFinite(sp) || sp <= 0) {
+      errors.stopPrice = "stop price required";
+    }
+  }
+
+  // StopLimit additionally requires Limit price; Buy ⇒ price ≥ stopPrice,
+  // Sell ⇒ price ≤ stopPrice (mirrors the backend trigger semantics).
+  if (type === "StopLimit") {
+    const px = Number(price);
+    if (!priceHidden && (!Number.isFinite(px) || px <= 0)) {
+      errors.price = "limit price required";
+    } else if (!stopPriceHidden && !errors.stopPrice && !errors.price) {
+      const sp = Number(stopPrice);
+      if (side === "Buy" && px < sp) {
+        errors.price = "Buy StopLimit: price must be ≥ stop price";
+      } else if (side === "Sell" && px > sp) {
+        errors.price = "Sell StopLimit: price must be ≤ stop price";
+      }
+    }
+  }
+
+  // GTD requires goodTillDate in (now, now + 30d).
+  if (!gtdHidden && isGtdTif(tif)) {
+    if (!goodTillDate) {
+      errors.goodTillDate = "good-till-date required";
+    } else {
+      const t  = Date.parse(goodTillDate);
+      const ts = typeof now === "number" ? now : Date.now();
+      const cap = ts + 30 * 24 * 60 * 60 * 1000;
+      if (!Number.isFinite(t) || t <= ts) {
+        errors.goodTillDate = "good-till-date must be in the future";
+      } else if (t > cap) {
+        errors.goodTillDate = "good-till-date must be within 30 days";
+      }
+    }
+  }
+
+  // IOC / FOK + MarketWithLeftover are mutually exclusive (the leftover
+  // semantics contradict the immediate-or-die intent).
+  if (type === "MarketWithLeftover" && (tif === "IOC" || tif === "FOK")) {
+    errors.tif = "MarketWithLeftover is incompatible with IOC/FOK";
+  }
+
+  return { valid: Object.keys(errors).length === 0, errors };
+}
+
+// Read the live ticket form, run validateTicketState, render the
+// inline aria-live error block, and toggle the submit-disabled flag.
+function refreshTicketValidation() {
+  const typeEl = $("ticket-type");
+  const tifEl  = $("ticket-tif");
+  const sideEl = $("ticket-side");
+  const priceEl = $("ticket-price");
+  const stopEl  = $("ticket-stop-price");
+  const gtdEl   = $("ticket-good-till-date");
+  const errEl   = $("ticket-validation");
+  const submitEl = $("ticket-submit");
+  if (!typeEl || !tifEl) return;
+
+  const priceLabel = $("ticket-price-label");
+  const stopLabel  = $("ticket-stop-price-label");
+  const gtdLabel   = $("ticket-good-till-date-label");
+
+  const result = validateTicketState({
+    type: typeEl.value,
+    side: sideEl?.value ?? "Buy",
+    tif:  tifEl.value,
+    price:        priceEl?.value ?? "",
+    stopPrice:    stopEl?.value ?? "",
+    goodTillDate: gtdEl?.value ?? "",
+    priceHidden:    priceLabel ? !!priceLabel.hidden : !!priceEl?.disabled,
+    stopPriceHidden: stopLabel ? !!stopLabel.hidden : !!stopEl?.disabled,
+    gtdHidden:       gtdLabel  ? !!gtdLabel.hidden  : !!gtdEl?.disabled,
+    now: Date.now(),
+  });
+
+  if (errEl) {
+    if (result.valid) {
+      errEl.hidden = true;
+      errEl.textContent = "";
+    } else {
+      errEl.hidden = false;
+      errEl.textContent = Object.values(result.errors).join(" · ");
+    }
+  }
+  if (submitEl) {
+    if (result.valid) {
+      delete submitEl.dataset.validationFailed;
+    } else {
+      submitEl.dataset.validationFailed = "1";
+    }
+    applySubmitDisabled();
+  }
+  return result;
+}
+export { refreshTicketValidation };

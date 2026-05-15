@@ -2,7 +2,33 @@
 // holds the source-of-truth Map and posts diff/replace messages; this
 // module just stores what arrives and notifies subscribers.
 
-const TERMINAL_ORDER_STATUSES = new Set(["Filled", "Cancelled", "Rejected", "Replaced"]);
+// Q1.4 (#256). `Expired` joins the terminal set so the GTD-expiry ER
+// (#255 backend) terminalises blotter rows the same way Cancelled does.
+const TERMINAL_ORDER_STATUSES = new Set(["Filled", "Cancelled", "Rejected", "Replaced", "Expired"]);
+
+// Q1.4 (#256). Mirrors of the backend OrderType / TimeInForce enums
+// expanded by Q1.1 (#253). The ticket UI exposes every value listed
+// here; the helpers below drive the conditional StopPrice + GTD inputs
+// and the client-side validation rules.
+export const ORDER_TYPES = ["Limit", "Market", "StopLoss", "StopLimit", "MarketWithLeftover"];
+export const TIME_IN_FORCES = ["Day", "IOC", "FOK", "GTC", "GTD", "AtClose", "GoodForAuction"];
+
+export function isStopOrderType(type) {
+  return type === "StopLoss" || type === "StopLimit";
+}
+
+export function isGtdTif(tif) {
+  return tif === "GTD";
+}
+
+// Type chip abbreviations used by the working-orders table.
+export const ORDER_TYPE_CHIP = {
+  Limit:               { label: "LIM",  cls: "chip-lim"  },
+  Market:              { label: "MKT",  cls: "chip-mkt"  },
+  StopLoss:            { label: "STP",  cls: "chip-stp"  },
+  StopLimit:           { label: "STPL", cls: "chip-stpl" },
+  MarketWithLeftover:  { label: "MWL",  cls: "chip-mwl"  },
+};
 
 const listeners = new Set();
 const state = {

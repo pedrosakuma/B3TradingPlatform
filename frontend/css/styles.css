@@ -357,6 +357,7 @@ tr.row-stale > td.row-stale-actions { opacity: 1; }
 .executions-log .Canceled    { color: var(--gray); }
 .executions-log .New         { color: var(--accent); }
 .executions-log .Replaced    { color: var(--gray); }
+.executions-log .Expired     { color: #888; }
 .executions-log .meta { color: var(--muted); }
 .executions-log .badge {
   display: inline-block;
@@ -369,6 +370,27 @@ tr.row-stale > td.row-stale-actions { opacity: 1; }
 }
 .executions-log .badge.stp-native { background: #5a3a14; color: #ffd28a; }
 .executions-log .badge.stp-local  { background: #2a3a5a; color: #b8d2ff; }
+
+/* ---------- Q1.4 (#256) Working-orders type chip ---------- */
+.type-chip {
+  display: inline-block;
+  padding: 0 .35em;
+  border-radius: .25em;
+  font-size: .7rem;
+  font-weight: 700;
+  letter-spacing: .03em;
+  vertical-align: baseline;
+  background: var(--panel-2, #20283a);
+  color: var(--text, #e6edf7);
+}
+.type-chip.chip-lim  { background: #1f3550; color: #b8d2ff; }
+.type-chip.chip-mkt  { background: #2a3f2a; color: #c8e6c9; }
+.type-chip.chip-stp  { background: #5a3a14; color: #ffd28a; }
+.type-chip.chip-stpl { background: #4a2455; color: #f0c8ff; }
+.type-chip.chip-mwl  { background: #145a4a; color: #8af0d4; }
+
+/* Status cell coloring for Expired, mirroring the executions log. */
+.status-cell-Expired { color: #888; }
 
 /* ---------- Responsive ---------- */
 @media (max-width: 1280px) {

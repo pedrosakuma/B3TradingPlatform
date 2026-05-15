@@ -54,7 +54,11 @@ export function validateOrder(payload, lastPrice) {
       message: `quantity must be a multiple of ${rules.lotSize} for ${payload.symbol}`,
     };
 
-  if (payload.type === "Limit") {
+  // Q1.4 (#256). Limit + StopLimit + MarketWithLeftover all carry a
+  // limit price that must clear the price/tick guards. Market /
+  // StopLoss have no limit price (StopLoss carries StopPrice instead,
+  // validated in the ticket UI's validateTicketState).
+  if (payload.type === "Limit" || payload.type === "StopLimit" || payload.type === "MarketWithLeftover") {
     const px = Number(payload.price);
     if (!Number.isFinite(px) || px <= 0)
       return { code: "price_required", message: "limit price required" };
