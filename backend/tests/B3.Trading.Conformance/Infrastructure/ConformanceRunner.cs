@@ -32,7 +32,7 @@ namespace B3.Trading.Conformance.Infrastructure;
 public sealed class ConformanceRunner : IAsyncDisposable
 {
     /// <summary>
-    /// Pass-1 review fix: after <see cref="CaptureExecutionsAsync"/>
+    /// Pass-1 review fix: after <see cref="CaptureExecutionsWhileAsync"/>
     /// reaches <c>expectedCount</c> ERs, keep the WS open for this long
     /// to make sure no extra ER for the same order arrives. A forbidden
     /// extra ER fails the call with a clear message instead of being
@@ -174,15 +174,30 @@ public sealed class ConformanceRunner : IAsyncDisposable
     }
 
     /// <summary>
-    /// Open <c>/ws</c> with a bearer (via <c>?access_token=</c>), subscribe
-    /// to <c>executions.me</c>, and accumulate ER frames whose
-    /// <c>clOrdId</c> matches the supplied id until either
+    /// Pass-2 review fix (#259, P1): subscribe-first capture.
+    /// Open <c>/ws</c> with a bearer (via <c>?access_token=</c>),
+    /// subscribe to <c>executions.me</c>, AWAIT the initial
+    /// <c>{type:"snapshot",channel:"executions.me"}</c> frame from the
+    /// server (proof the subscription is live in
+    /// <see cref="SubscriptionManager"/>), then invoke
+    /// <paramref name="driveErs"/> — typically the test's
+    /// <see cref="InjectErAsync"/> calls — and accumulate ER frames
+    /// whose <c>clOrdId</c> matches the supplied id until either
     /// <paramref name="expectedCount"/> ERs have arrived or
     /// <paramref name="timeout"/> elapses. Returns the captured ERs in
     /// arrival order.
+    ///
+    /// <para>Why subscribe-before-inject: <c>executions.me</c> has NO
+    /// historical replay (see <c>SubscriptionManager.SubscribeWithSnapshot</c>:
+    /// the snapshot for that channel is the empty array). If the test
+    /// injected ERs before the WS fan-out actually saw the
+    /// subscription, those ERs would be dropped on the floor and the
+    /// capture would time out (or — worse, in CI on a fast box — would
+    /// succeed by accident on most runs and flake intermittently).</para>
     /// </summary>
-    public async Task<List<JsonObject>> CaptureExecutionsAsync(
-        ulong clOrdId, int expectedCount, TimeSpan timeout, CancellationToken ct = default)
+    public async Task<List<JsonObject>> CaptureExecutionsWhileAsync(
+        ulong clOrdId, int expectedCount, TimeSpan timeout,
+        Func<Task> driveErs, CancellationToken ct = default)
     {
         if (_userBearerToken is null)
             throw new InvalidOperationException("must be logged in before capturing executions.");
@@ -200,9 +215,48 @@ public sealed class ConformanceRunner : IAsyncDisposable
         });
         await ws.SendAsync(subscribe, WebSocketMessageType.Text, endOfMessage: true, ct);
 
+        // Wait for the server's snapshot frame on executions.me as the
+        // subscribe ack. SubscriptionManager.SubscribeWithSnapshot
+        // enqueues a {type:"snapshot",channel:"executions.me",data:[]}
+        // frame atomically with the subscription registration, so once
+        // we have read it we KNOW any subsequent Publish() to this
+        // owner will fan out to us.
+        var buf = new byte[8 * 1024];
+        var ackDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (DateTime.UtcNow < ackDeadline)
+        {
+            using var ackCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            ackCts.CancelAfter(ackDeadline - DateTime.UtcNow);
+            var ackFrame = await ReadFrameAsync(ws, buf, ackCts.Token);
+            if (ackFrame is null)
+                throw new Xunit.Sdk.XunitException(
+                    "WS closed before executions.me subscribe-ack snapshot arrived.");
+            var t = ackFrame["type"]?.GetValue<string>();
+            var c = ackFrame["channel"]?.GetValue<string>();
+            if (string.Equals(t, "snapshot", StringComparison.Ordinal)
+                && string.Equals(c, "executions.me", StringComparison.Ordinal))
+            {
+                break;
+            }
+            if (string.Equals(t, "error", StringComparison.Ordinal))
+            {
+                throw new Xunit.Sdk.XunitException(
+                    $"WS subscribe to executions.me returned error: {ackFrame.ToJsonString()}");
+            }
+            // Any other frame (e.g. a stale public-channel snapshot) —
+            // keep reading until the executions.me snapshot lands.
+        }
+        if (DateTime.UtcNow >= ackDeadline)
+        {
+            throw new Xunit.Sdk.XunitException(
+                "Timed out (10s) awaiting executions.me subscribe-ack snapshot.");
+        }
+
+        // Drive the ERs ONLY after we have proof of subscription.
+        await driveErs();
+
         var captured = new List<JsonObject>();
         var deadline = DateTime.UtcNow + timeout;
-        var buf = new byte[8 * 1024];
         var closed = false;
         DateTime? quiescenceDeadline = null;
         try
@@ -233,20 +287,10 @@ public sealed class ConformanceRunner : IAsyncDisposable
                 }
                 recvCts.CancelAfter(remaining);
 
-                var sb = new StringBuilder();
-                WebSocketReceiveResult result;
+                JsonObject? frame;
                 try
                 {
-                    do
-                    {
-                        result = await ws.ReceiveAsync(buf, recvCts.Token);
-                        if (result.MessageType == WebSocketMessageType.Close)
-                        {
-                            closed = true;
-                            break;
-                        }
-                        sb.Append(Encoding.UTF8.GetString(buf, 0, result.Count));
-                    } while (!result.EndOfMessage);
+                    frame = await ReadFrameAsync(ws, buf, recvCts.Token);
                 }
                 catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                 {
@@ -256,15 +300,14 @@ public sealed class ConformanceRunner : IAsyncDisposable
                     // success signal — no extra ER arrived.
                     break;
                 }
-                if (closed) break;
-
-                var frame = JsonNode.Parse(sb.ToString())?.AsObject();
-                if (frame is null) continue;
+                if (frame is null) { closed = true; break; }
 
                 // Outbound envelope shape: {type,channel,seq,data,...}
                 var channel = frame["channel"]?.GetValue<string>();
                 if (!string.Equals(channel, "executions.me", StringComparison.Ordinal)) continue;
 
+                // Skip the ack snapshot's empty-data echo if the server
+                // emits any further snapshot frames (defensive).
                 if (frame["data"] is not JsonObject erData) continue;
                 var erClOrdId = erData["clOrdId"]?.GetValue<string>();
                 if (erClOrdId != clOrdId.ToString()) continue;
@@ -305,6 +348,20 @@ public sealed class ConformanceRunner : IAsyncDisposable
                 $"within {timeout.TotalSeconds:F1}s + {QuiescenceWindowMs}ms quiescence.");
         }
         return captured;
+    }
+
+    private static async Task<JsonObject?> ReadFrameAsync(
+        ClientWebSocket ws, byte[] buf, CancellationToken ct)
+    {
+        var sb = new StringBuilder();
+        WebSocketReceiveResult result;
+        do
+        {
+            result = await ws.ReceiveAsync(buf, ct);
+            if (result.MessageType == WebSocketMessageType.Close) return null;
+            sb.Append(Encoding.UTF8.GetString(buf, 0, result.Count));
+        } while (!result.EndOfMessage);
+        return JsonNode.Parse(sb.ToString())?.AsObject();
     }
 
     private static Uri BuildWsUri(Uri baseUrl, string token)

@@ -47,11 +47,14 @@ services:
   # defaults — see file header). Slot Users__4 to avoid colliding with
   # base (alice=0, bob=3) and demo (bot-clientA=1, bot-clientB=2).
   trading-host:
-    # Pass-1 review fix (#259, P1#5): override the base service's
+    # Pass-2 review fix (#259, P1): override the base service's
     # `ports:` to an empty list so trading-host is NOT published to the
-    # docker host while ER injection is active. Reachable inside the
-    # b3-net bridge by service name.
-    ports: []
+    # docker host while ER injection is active. Compose merges list
+    # fields by union by default; a bare `ports: []` would keep the
+    # parent's host mapping. The `!override` tag (Compose v2.20+)
+    # forces a replacement, dropping the published port. Reachable
+    # inside the b3-net bridge by service name.
+    ports: !override []
     environment:
       Trading__Auth__Users__4__Username: ${TRADING_ADMIN_USER:-carol}
       Trading__Auth__Users__4__PasswordHash: ${B3T_CONFORMANCE_ADMIN_PASSWORD_HASH:?Set B3T_CONFORMANCE_ADMIN_PASSWORD_HASH per-run (NEVER reuse the dev default — see file header)}

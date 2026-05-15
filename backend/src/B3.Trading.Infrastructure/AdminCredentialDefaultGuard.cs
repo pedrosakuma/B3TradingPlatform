@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+
 namespace B3.Trading.Infrastructure;
 
 /// <summary>
@@ -16,6 +18,19 @@ namespace B3.Trading.Infrastructure;
 /// <c>POST /admin/simulator/er</c> to anyone with a copy of this repo.
 /// The guard is pure-static so it can be unit-tested without spinning
 /// up the host.</para>
+///
+/// <para>Pass-2 review fix (#259, P1): the comparison is performed on
+/// the DECODED bytes (<see cref="Convert.FromBase64String"/>) of both
+/// the configured and dev-default hash/salt, using
+/// <see cref="CryptographicOperations.FixedTimeEquals(ReadOnlySpan{byte}, ReadOnlySpan{byte})"/>.
+/// <c>Convert.FromBase64String</c> ignores embedded whitespace, so
+/// <c>PasswordHasher</c> would happily accept
+/// <c>"ZDzDHANAHq8N\nDQK3BWk/YZjybKLCMKdRzw0z9Da5wic="</c> as the same
+/// secret — but a naive ordinal string compare would let it slip past
+/// this guard. Decoding both sides closes that bypass and applies the
+/// check to BOTH hash and salt fields. If a configured value is not
+/// valid Base64, it is treated as not-default (login-time validation
+/// will reject it on its own).</para>
 /// </summary>
 public static class AdminCredentialDefaultGuard
 {
@@ -31,6 +46,9 @@ public static class AdminCredentialDefaultGuard
     /// <c>docker/.env.example</c> (<c>TRADING_SEED_PASSWORD_SALT</c>).
     /// </summary>
     public const string DevDefaultPasswordSalt = "rXA+be7/gEYYZQrQDsUr2g==";
+
+    private static readonly byte[] DevDefaultPasswordHashBytes = Convert.FromBase64String(DevDefaultPasswordHash);
+    private static readonly byte[] DevDefaultPasswordSaltBytes = Convert.FromBase64String(DevDefaultPasswordSalt);
 
     /// <summary>
     /// Throws <see cref="InvalidOperationException"/> when ER injection is
@@ -49,8 +67,8 @@ public static class AdminCredentialDefaultGuard
         {
             if (string.IsNullOrEmpty(role) || string.Equals(role, "user", StringComparison.OrdinalIgnoreCase))
                 continue;
-            if (string.Equals(hash, DevDefaultPasswordHash, StringComparison.Ordinal)
-                && string.Equals(salt, DevDefaultPasswordSalt, StringComparison.Ordinal))
+            if (DecodedEquals(hash, DevDefaultPasswordHashBytes)
+                && DecodedEquals(salt, DevDefaultPasswordSaltBytes))
             {
                 throw new InvalidOperationException(
                     $"Trading:Exchange:AllowErInjection=true is enabled AND a seeded user with role='{role}' is " +
@@ -61,5 +79,28 @@ public static class AdminCredentialDefaultGuard
                     "generated PBKDF2 hash/salt pair before bringing up the conformance overlay.");
             }
         }
+    }
+
+    /// <summary>
+    /// Decode <paramref name="configured"/> as Base64 and compare the
+    /// resulting bytes to <paramref name="defaultBytes"/> with a
+    /// constant-time check. Returns <c>false</c> on null/empty input or
+    /// any <see cref="FormatException"/>: malformed Base64 in the
+    /// configured slot is left for login-time validation rather than
+    /// generating a false positive here.
+    /// </summary>
+    private static bool DecodedEquals(string? configured, byte[] defaultBytes)
+    {
+        if (string.IsNullOrEmpty(configured)) return false;
+        byte[] decoded;
+        try
+        {
+            decoded = Convert.FromBase64String(configured);
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+        return CryptographicOperations.FixedTimeEquals(decoded, defaultBytes);
     }
 }

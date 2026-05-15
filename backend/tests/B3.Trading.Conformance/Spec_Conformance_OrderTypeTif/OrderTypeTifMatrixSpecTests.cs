@@ -69,9 +69,12 @@ public class OrderTypeTifMatrixSpecTests
         var ctx = await CaptureObservedScenarioAsync(runner, clOrdId,
             expectedType: "Limit", expectedTif: "Day", expectedQty: 100, expectedPrice: 30m);
 
-        await runner.InjectErAsync(clOrdId, "New");
-
-        var ers = await runner.CaptureExecutionsAsync(clOrdId, expectedCount: 1, TimeSpan.FromSeconds(CaptureTimeoutSeconds));
+        var ers = await runner.CaptureExecutionsWhileAsync(
+            clOrdId, expectedCount: 1, TimeSpan.FromSeconds(CaptureTimeoutSeconds),
+            async () =>
+            {
+                await runner.InjectErAsync(clOrdId, "New");
+            });
         ConformanceRunner.AssertGoldenMatches(
             runner.Normalize(ers, ctx),
             "Q17_01_LimitDay_BaselineNewEr.json");
@@ -98,11 +101,14 @@ public class OrderTypeTifMatrixSpecTests
         var ctx = await CaptureObservedScenarioAsync(runner, clOrdId,
             expectedType: "Limit", expectedTif: "IOC", expectedQty: 100, expectedPrice: 30m);
 
-        await runner.InjectErAsync(clOrdId, "New");
-        await runner.InjectErAsync(clOrdId, "PartialFill", lastQty: 40, lastPx: 30m);
-        await runner.InjectErAsync(clOrdId, "Canceled");
-
-        var ers = await runner.CaptureExecutionsAsync(clOrdId, expectedCount: 3, TimeSpan.FromSeconds(CaptureTimeoutSeconds));
+        var ers = await runner.CaptureExecutionsWhileAsync(
+            clOrdId, expectedCount: 3, TimeSpan.FromSeconds(CaptureTimeoutSeconds),
+            async () =>
+            {
+                await runner.InjectErAsync(clOrdId, "New");
+                await runner.InjectErAsync(clOrdId, "PartialFill", lastQty: 40, lastPx: 30m);
+                await runner.InjectErAsync(clOrdId, "Canceled");
+            });
         ConformanceRunner.AssertGoldenMatches(
             runner.Normalize(ers, ctx),
             "Q17_02_LimitIoc_PartialFillThenCancel.json");
@@ -128,10 +134,13 @@ public class OrderTypeTifMatrixSpecTests
         var ctx = await CaptureObservedScenarioAsync(runner, clOrdId,
             expectedType: "Limit", expectedTif: "FOK", expectedQty: 100, expectedPrice: 30m);
 
-        await runner.InjectErAsync(clOrdId, "New");
-        await runner.InjectErAsync(clOrdId, "Fill", lastQty: 100, lastPx: 30m);
-
-        var ers = await runner.CaptureExecutionsAsync(clOrdId, expectedCount: 2, TimeSpan.FromSeconds(CaptureTimeoutSeconds));
+        var ers = await runner.CaptureExecutionsWhileAsync(
+            clOrdId, expectedCount: 2, TimeSpan.FromSeconds(CaptureTimeoutSeconds),
+            async () =>
+            {
+                await runner.InjectErAsync(clOrdId, "New");
+                await runner.InjectErAsync(clOrdId, "Fill", lastQty: 100, lastPx: 30m);
+            });
         ConformanceRunner.AssertGoldenMatches(
             runner.Normalize(ers, ctx),
             "Q17_03_LimitFok_FillAll.json");
@@ -158,9 +167,12 @@ public class OrderTypeTifMatrixSpecTests
         var ctx = await CaptureObservedScenarioAsync(runner, clOrdId,
             expectedType: "Limit", expectedTif: "GTC", expectedQty: 100, expectedPrice: 30m);
 
-        await runner.InjectErAsync(clOrdId, "New");
-
-        var ers = await runner.CaptureExecutionsAsync(clOrdId, expectedCount: 1, TimeSpan.FromSeconds(CaptureTimeoutSeconds));
+        var ers = await runner.CaptureExecutionsWhileAsync(
+            clOrdId, expectedCount: 1, TimeSpan.FromSeconds(CaptureTimeoutSeconds),
+            async () =>
+            {
+                await runner.InjectErAsync(clOrdId, "New");
+            });
         ConformanceRunner.AssertGoldenMatches(
             runner.Normalize(ers, ctx),
             "Q17_04_LimitGtc_RestsAndStaysLive.json");
@@ -199,10 +211,13 @@ public class OrderTypeTifMatrixSpecTests
             expectedType: "Limit", expectedTif: "GTD", expectedQty: 100, expectedPrice: 30m,
             expectedGoodTillDateSet: true);
 
-        await runner.InjectErAsync(clOrdId, "New");
-
         // Wait long enough for the scheduler tick + cancel pipeline.
-        var ers = await runner.CaptureExecutionsAsync(clOrdId, expectedCount: 3, TimeSpan.FromSeconds(15));
+        var ers = await runner.CaptureExecutionsWhileAsync(
+            clOrdId, expectedCount: 3, TimeSpan.FromSeconds(15),
+            async () =>
+            {
+                await runner.InjectErAsync(clOrdId, "New");
+            });
         ConformanceRunner.AssertGoldenMatches(
             runner.Normalize(ers, ctx),
             "Q17_05_LimitGtd_Expires.json");
@@ -229,11 +244,14 @@ public class OrderTypeTifMatrixSpecTests
         var ctx = await CaptureObservedScenarioAsync(runner, clOrdId,
             expectedType: "Market", expectedTif: "IOC", expectedQty: 100, expectedPrice: null);
 
-        await runner.InjectErAsync(clOrdId, "New");
-        await runner.InjectErAsync(clOrdId, "PartialFill", lastQty: 60, lastPx: 30m);
-        await runner.InjectErAsync(clOrdId, "Canceled");
-
-        var ers = await runner.CaptureExecutionsAsync(clOrdId, expectedCount: 3, TimeSpan.FromSeconds(CaptureTimeoutSeconds));
+        var ers = await runner.CaptureExecutionsWhileAsync(
+            clOrdId, expectedCount: 3, TimeSpan.FromSeconds(CaptureTimeoutSeconds),
+            async () =>
+            {
+                await runner.InjectErAsync(clOrdId, "New");
+                await runner.InjectErAsync(clOrdId, "PartialFill", lastQty: 60, lastPx: 30m);
+                await runner.InjectErAsync(clOrdId, "Canceled");
+            });
         ConformanceRunner.AssertGoldenMatches(
             runner.Normalize(ers, ctx),
             "Q17_06_MarketIoc_SweepThenCancel.json");
@@ -259,10 +277,13 @@ public class OrderTypeTifMatrixSpecTests
         var ctx = await CaptureObservedScenarioAsync(runner, clOrdId,
             expectedType: "Market", expectedTif: "FOK", expectedQty: 100, expectedPrice: null);
 
-        await runner.InjectErAsync(clOrdId, "New");
-        await runner.InjectErAsync(clOrdId, "Fill", lastQty: 100, lastPx: 30m);
-
-        var ers = await runner.CaptureExecutionsAsync(clOrdId, expectedCount: 2, TimeSpan.FromSeconds(CaptureTimeoutSeconds));
+        var ers = await runner.CaptureExecutionsWhileAsync(
+            clOrdId, expectedCount: 2, TimeSpan.FromSeconds(CaptureTimeoutSeconds),
+            async () =>
+            {
+                await runner.InjectErAsync(clOrdId, "New");
+                await runner.InjectErAsync(clOrdId, "Fill", lastQty: 100, lastPx: 30m);
+            });
         ConformanceRunner.AssertGoldenMatches(
             runner.Normalize(ers, ctx),
             "Q17_07_MarketFok_FillAll.json");
@@ -289,10 +310,13 @@ public class OrderTypeTifMatrixSpecTests
         var ctx = await CaptureObservedScenarioAsync(runner, clOrdId,
             expectedType: "MarketWithLeftover", expectedTif: "Day", expectedQty: 100, expectedPrice: 30m);
 
-        await runner.InjectErAsync(clOrdId, "New");
-        await runner.InjectErAsync(clOrdId, "PartialFill", lastQty: 40, lastPx: 30m);
-
-        var ers = await runner.CaptureExecutionsAsync(clOrdId, expectedCount: 2, TimeSpan.FromSeconds(CaptureTimeoutSeconds));
+        var ers = await runner.CaptureExecutionsWhileAsync(
+            clOrdId, expectedCount: 2, TimeSpan.FromSeconds(CaptureTimeoutSeconds),
+            async () =>
+            {
+                await runner.InjectErAsync(clOrdId, "New");
+                await runner.InjectErAsync(clOrdId, "PartialFill", lastQty: 40, lastPx: 30m);
+            });
         ConformanceRunner.AssertGoldenMatches(
             runner.Normalize(ers, ctx),
             "Q17_08_MarketWithLeftoverDay_SweepThenRest.json");
@@ -320,9 +344,12 @@ public class OrderTypeTifMatrixSpecTests
             expectedType: "StopLoss", expectedTif: "Day", expectedQty: 100,
             expectedPrice: null, expectedStopPrice: 28m);
 
-        await runner.InjectErAsync(clOrdId, "New");
-
-        var ers = await runner.CaptureExecutionsAsync(clOrdId, expectedCount: 1, TimeSpan.FromSeconds(CaptureTimeoutSeconds));
+        var ers = await runner.CaptureExecutionsWhileAsync(
+            clOrdId, expectedCount: 1, TimeSpan.FromSeconds(CaptureTimeoutSeconds),
+            async () =>
+            {
+                await runner.InjectErAsync(clOrdId, "New");
+            });
         ConformanceRunner.AssertGoldenMatches(
             runner.Normalize(ers, ctx),
             "Q17_09_StopLossDay_Rests.json");
@@ -350,9 +377,12 @@ public class OrderTypeTifMatrixSpecTests
             expectedType: "StopLimit", expectedTif: "Day", expectedQty: 100,
             expectedPrice: 27m, expectedStopPrice: 28m);
 
-        await runner.InjectErAsync(clOrdId, "New");
-
-        var ers = await runner.CaptureExecutionsAsync(clOrdId, expectedCount: 1, TimeSpan.FromSeconds(CaptureTimeoutSeconds));
+        var ers = await runner.CaptureExecutionsWhileAsync(
+            clOrdId, expectedCount: 1, TimeSpan.FromSeconds(CaptureTimeoutSeconds),
+            async () =>
+            {
+                await runner.InjectErAsync(clOrdId, "New");
+            });
         ConformanceRunner.AssertGoldenMatches(
             runner.Normalize(ers, ctx),
             "Q17_10_StopLimitDay_Rests.json");

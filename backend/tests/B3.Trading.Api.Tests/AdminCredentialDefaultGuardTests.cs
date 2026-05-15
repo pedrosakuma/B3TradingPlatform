@@ -85,4 +85,52 @@ public class AdminCredentialDefaultGuardTests
     {
         AdminCredentialDefaultGuard.Validate(allowErInjection: true, seededUsers: null!);
     }
+
+    // ----------------------------------------------------------------
+    // Pass-2 review fix (#259, P1) — whitespace-equivalent Base64
+    // bypass. PasswordHasher uses Convert.FromBase64String which silently
+    // ignores whitespace; the pre-fix guard's ordinal string compare let
+    // a whitespace-padded copy of the dev default through. The guard
+    // now decodes both sides and compares bytes.
+    // ----------------------------------------------------------------
+
+    [Fact]
+    public void Validate_AllowErInjectionTrue_DefaultHashWithEmbeddedNewline_StillTrips()
+    {
+        // Inject a CRLF + spaces in the middle of both base64 strings.
+        // Convert.FromBase64String happily decodes these to the SAME
+        // bytes as the unmodified defaults, so the auth layer would
+        // accept them as "wonderland" — the guard MUST too.
+        var hashWithWhitespace = DevHash[..10] + "\r\n  " + DevHash[10..];
+        var saltWithWhitespace = DevSalt[..6] + "\n\t" + DevSalt[6..];
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            AdminCredentialDefaultGuard.Validate(
+                allowErInjection: true,
+                seededUsers: new[] { ("admin", hashWithWhitespace, saltWithWhitespace) }));
+        Assert.Contains("dev-default", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_AllowErInjectionTrue_DifferentHashSameDecodedLength_DoesNotTrip()
+    {
+        // Distinct 32-byte hash and 16-byte salt — same shape as the
+        // PBKDF2 defaults but with different bytes. Must NOT trip.
+        var differentHash = Convert.ToBase64String(Enumerable.Range(0, 32).Select(i => (byte)(i + 1)).ToArray());
+        var differentSalt = Convert.ToBase64String(Enumerable.Range(0, 16).Select(i => (byte)(i + 100)).ToArray());
+
+        AdminCredentialDefaultGuard.Validate(
+            allowErInjection: true,
+            seededUsers: new[] { ("admin", differentHash, differentSalt) });
+    }
+
+    [Fact]
+    public void Validate_AllowErInjectionTrue_MalformedBase64_DoesNotTrip()
+    {
+        // Garbage that won't decode. Defer to login-time validation,
+        // don't throw a misleading "you're using the dev default!" here.
+        AdminCredentialDefaultGuard.Validate(
+            allowErInjection: true,
+            seededUsers: new[] { ("admin", "@@@not-base64!!!", "###also-not###") });
+    }
 }
