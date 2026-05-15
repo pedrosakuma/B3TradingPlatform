@@ -582,9 +582,21 @@ public static class HistoryEndpoints
         /// </summary>
         public void ApplyReplacedTerminal(long seq, ExecutionReportReceivedEvent er)
         {
-            Status = OrderStatus.Replaced;
+            // Mirror Order.MarkReplaced: a Replaced ack racing a real
+            // terminal (Filled/Rejected/Cancelled) — or a duplicated
+            // Replaced ER — must NOT regress the predecessor's status.
+            // Only flip non-terminal predecessors to Replaced.
+            if (Status is not (OrderStatus.Filled
+                or OrderStatus.Rejected
+                or OrderStatus.Cancelled
+                or OrderStatus.Replaced))
+            {
+                Status = OrderStatus.Replaced;
+            }
             // MarkReplaced clears any advisory stale (slice 1 of #132);
             // mirror that here so the projection matches the runtime.
+            // Applied unconditionally — runtime ClearStale runs after
+            // MarkReplaced regardless of whether status changed.
             IsStale = false;
             StaleReason = null;
             StaledAtUtc = null;

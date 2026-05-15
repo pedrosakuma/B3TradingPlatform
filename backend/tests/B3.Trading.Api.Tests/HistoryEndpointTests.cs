@@ -346,6 +346,202 @@ public class HistoryEndpointTests : IDisposable
         Assert.Equal(6L, replacement.GetProperty("leavesQuantity").GetInt64());
     }
 
+    [Fact]
+    public async Task OrdersHistory_ReplaceRacingFinalFill_OriginalStaysFilled()
+    {
+        // P1 regression for #275 pass-2 review: when the WAL ordering is
+        // [ReplaceRequested(A→B), Fill(A), Replaced(B,Orig=A)] the
+        // projector must mirror Order.MarkReplaced and leave A at Filled.
+        // The previous ApplyReplacedTerminal unconditionally overwrote
+        // status with Replaced, so /orders/history reported A=Replaced
+        // while the live runtime (which short-circuits the late Replaced
+        // ack via MarkReplaced's terminal-state guard) reported Filled.
+        using var f = TestAppFactory.WithOverrides(Overrides());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var origClOrdIdStr = await SubmitOrder(http, token, qty: 10, price: 30m);
+        var origClOrdId = ulong.Parse(origClOrdIdStr);
+        await InjectEr(http, adminToken, new { ClOrdId = origClOrdId, Type = "New" });
+
+        // Kick off a replace — A is still in the book, so the modify is
+        // accepted and a new ClOrdID B is registered.
+        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origClOrdIdStr}")
+        {
+            Content = JsonContent.Create(new { Quantity = 10L, Price = 31m }),
+        };
+        modifyReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var modifyResp = await http.SendAsync(modifyReq);
+        Assert.Equal(HttpStatusCode.Accepted, modifyResp.StatusCode);
+        var modifyBody = await modifyResp.Content.ReadFromJsonAsync<JsonElement>();
+        var newClOrdId = ulong.Parse(modifyBody.GetProperty("clOrdId").GetString()!);
+
+        // Fill A fully BEFORE the venue's Replaced ack lands. In the
+        // runtime this terminalises A=Filled; the late Replaced ER's
+        // MarkReplaced is then a no-op for A's status (margin transfer
+        // is aborted because A is no longer in the book).
+        await InjectEr(http, adminToken, new
+        {
+            ClOrdId = origClOrdId,
+            Type = "Fill",
+            LastQty = 10L,
+            LastPx = 30m,
+        });
+
+        var mock = (B3.Trading.Infrastructure.MockEntryPointClient)
+            f.Services.GetRequiredService<B3.Trading.Infrastructure.IEntryPointClient>();
+        mock.EmitExecutionReport(new B3.Trading.Infrastructure.ExecutionReportEnvelope(
+            ClOrdId: newClOrdId,
+            ExecType: B3.Trading.Infrastructure.EpExecType.Replaced,
+            LeavesQuantity: 10,
+            CumulativeQuantity: 0,
+            LastQuantity: 0,
+            LastPrice: 0m,
+            RejectReason: null,
+            OrigClOrdId: origClOrdId));
+
+        var page = await GetOrdersHistory(http, token);
+        var byId = page.Items.ToDictionary(
+            o => o.GetProperty("clOrdId").GetString()!,
+            o => o,
+            StringComparer.Ordinal);
+
+        Assert.True(byId.ContainsKey(origClOrdIdStr), "original order must appear in history");
+        var orig = byId[origClOrdIdStr];
+        Assert.Equal("Filled", orig.GetProperty("status").GetString());
+        Assert.Equal(10L, orig.GetProperty("cumulativeQuantity").GetInt64());
+    }
+
+    [Fact]
+    public async Task OrdersHistory_ReplaceRacingCancel_OriginalStaysCancelled()
+    {
+        // Edge of the same P1: WAL [ReplaceRequested(A→B), Cancel(A),
+        // Replaced(B,Orig=A)] must leave A=Cancelled. MarkReplaced
+        // preserves Cancelled the same way it preserves Filled.
+        using var f = TestAppFactory.WithOverrides(Overrides());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var origClOrdIdStr = await SubmitOrder(http, token, qty: 10, price: 30m);
+        var origClOrdId = ulong.Parse(origClOrdIdStr);
+        await InjectEr(http, adminToken, new { ClOrdId = origClOrdId, Type = "New" });
+
+        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origClOrdIdStr}")
+        {
+            Content = JsonContent.Create(new { Quantity = 10L, Price = 31m }),
+        };
+        modifyReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var modifyResp = await http.SendAsync(modifyReq);
+        Assert.Equal(HttpStatusCode.Accepted, modifyResp.StatusCode);
+        var modifyBody = await modifyResp.Content.ReadFromJsonAsync<JsonElement>();
+        var newClOrdId = ulong.Parse(modifyBody.GetProperty("clOrdId").GetString()!);
+
+        await InjectEr(http, adminToken, new { ClOrdId = origClOrdId, Type = "Canceled" });
+
+        var mock = (B3.Trading.Infrastructure.MockEntryPointClient)
+            f.Services.GetRequiredService<B3.Trading.Infrastructure.IEntryPointClient>();
+        mock.EmitExecutionReport(new B3.Trading.Infrastructure.ExecutionReportEnvelope(
+            ClOrdId: newClOrdId,
+            ExecType: B3.Trading.Infrastructure.EpExecType.Replaced,
+            LeavesQuantity: 10,
+            CumulativeQuantity: 0,
+            LastQuantity: 0,
+            LastPrice: 0m,
+            RejectReason: null,
+            OrigClOrdId: origClOrdId));
+
+        var page = await GetOrdersHistory(http, token);
+        var byId = page.Items.ToDictionary(
+            o => o.GetProperty("clOrdId").GetString()!,
+            o => o,
+            StringComparer.Ordinal);
+
+        var orig = byId[origClOrdIdStr];
+        Assert.Equal("Cancelled", orig.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task OrdersHistory_ChainedReplaceWithMidChainCancel_PreservesEachLink()
+    {
+        // P1 chained-edge: A→B→C with B cancelled mid-chain. Expected
+        // projection (matches runtime):
+        //   A = Replaced (terminalised by the first Replaced ER while
+        //       still non-terminal)
+        //   B = Cancelled (Cancel ER lands before the second Replaced
+        //       ER; the late Replaced(C,Orig=B) must NOT regress B)
+        //   C = Working   (hydrated from the second Replaced ER's
+        //       leaves/cum baseline)
+        using var f = TestAppFactory.WithOverrides(Overrides());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var aIdStr = await SubmitOrder(http, token, qty: 10, price: 30m);
+        var aId = ulong.Parse(aIdStr);
+        await InjectEr(http, adminToken, new { ClOrdId = aId, Type = "New" });
+
+        // First replace A→B.
+        var put1 = new HttpRequestMessage(HttpMethod.Put, $"/orders/{aIdStr}")
+        {
+            Content = JsonContent.Create(new { Quantity = 10L, Price = 31m }),
+        };
+        put1.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var put1Resp = await http.SendAsync(put1);
+        Assert.Equal(HttpStatusCode.Accepted, put1Resp.StatusCode);
+        var bId = ulong.Parse((await put1Resp.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("clOrdId").GetString()!);
+
+        var mock = (B3.Trading.Infrastructure.MockEntryPointClient)
+            f.Services.GetRequiredService<B3.Trading.Infrastructure.IEntryPointClient>();
+        // First Replaced ER terminalises A and hydrates B as Working.
+        mock.EmitExecutionReport(new B3.Trading.Infrastructure.ExecutionReportEnvelope(
+            ClOrdId: bId,
+            ExecType: B3.Trading.Infrastructure.EpExecType.Replaced,
+            LeavesQuantity: 10,
+            CumulativeQuantity: 0,
+            LastQuantity: 0,
+            LastPrice: 0m,
+            RejectReason: null,
+            OrigClOrdId: aId));
+
+        // Second replace B→C (B is now Working in the runtime book).
+        var put2 = new HttpRequestMessage(HttpMethod.Put, $"/orders/{bId}")
+        {
+            Content = JsonContent.Create(new { Quantity = 10L, Price = 32m }),
+        };
+        put2.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var put2Resp = await http.SendAsync(put2);
+        Assert.Equal(HttpStatusCode.Accepted, put2Resp.StatusCode);
+        var cId = ulong.Parse((await put2Resp.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("clOrdId").GetString()!);
+
+        // Cancel B before the second Replaced lands.
+        await InjectEr(http, adminToken, new { ClOrdId = bId, Type = "Canceled" });
+
+        // Late second Replaced ER: must NOT regress B from Cancelled.
+        mock.EmitExecutionReport(new B3.Trading.Infrastructure.ExecutionReportEnvelope(
+            ClOrdId: cId,
+            ExecType: B3.Trading.Infrastructure.EpExecType.Replaced,
+            LeavesQuantity: 10,
+            CumulativeQuantity: 0,
+            LastQuantity: 0,
+            LastPrice: 0m,
+            RejectReason: null,
+            OrigClOrdId: bId));
+
+        var page = await GetOrdersHistory(http, token);
+        var byId = page.Items.ToDictionary(
+            o => o.GetProperty("clOrdId").GetString()!,
+            o => o,
+            StringComparer.Ordinal);
+
+        Assert.Equal("Replaced", byId[aIdStr].GetProperty("status").GetString());
+        Assert.Equal("Cancelled", byId[bId.ToString()].GetProperty("status").GetString());
+        Assert.Equal("Working", byId[cId.ToString()].GetProperty("status").GetString());
+    }
+
     // -----------------------------------------------------------------
     // helpers
     // -----------------------------------------------------------------
