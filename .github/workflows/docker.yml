@@ -117,6 +117,15 @@ jobs:
           TRADING_AUTH_SIGNING_KEY: validate-only-placeholder-key-min-32-bytes-long-aaaaa
           TRADING_SEED_PASSWORD_HASH: ZDzDHANAHq8NDQK3BWk/YZjybKLCMKdRzw0z9Da5wic=
           TRADING_SEED_PASSWORD_SALT: rXA+be7/gEYYZQrQDsUr2g==
+          # The conformance overlay now requires a per-run admin PBKDF2
+          # triple via `${VAR:?}` interpolation (see
+          # docker/docker-compose.conformance.yml header). Mirror the
+          # placeholders the manual conformance workflow uses so the
+          # validate step can parse the merged file. Validate-only — never
+          # used to actually boot the host in this job.
+          B3T_CONFORMANCE_ADMIN_PASSWORD: ci-conformance-2024-do-not-use-in-prod
+          B3T_CONFORMANCE_ADMIN_PASSWORD_HASH: YPCvuCrUq4h6e8ebNKvxRAda8DWQdOf+0uakwAxar9E=
+          B3T_CONFORMANCE_ADMIN_PASSWORD_SALT: Q0lDb25mb3JtYW5jZTE2Qg==
         run: |
           docker compose -f docker/docker-compose.yml config --quiet
           docker compose -f docker/docker-compose.yml -f docker/docker-compose.unavailable.yml config --quiet

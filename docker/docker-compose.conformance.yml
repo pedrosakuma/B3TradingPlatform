@@ -107,3 +107,14 @@ services:
       B3T_ER_INJECTION: "true"
     networks:
       - b3-net
+
+  # Pass-3 review fix (#259, P1): the base stack publishes `frontend` on
+  # host port 8080, and frontend/nginx.conf proxies `~^/admin` →
+  # `trading-host:5000`. So even with trading-host itself unpublished
+  # (above), an attacker hitting http://<host>:8080/admin/simulator/er
+  # would still reach the ER-injection endpoint through the nginx
+  # reverse proxy — defeating the unpublish. Drop the frontend's host
+  # mapping in this overlay; conformance specs talk to trading-host
+  # directly over the b3-net bridge and don't need the UI.
+  frontend:
+    ports: !override []
