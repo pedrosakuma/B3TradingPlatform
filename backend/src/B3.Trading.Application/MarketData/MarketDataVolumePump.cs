@@ -43,15 +43,25 @@ public sealed class MarketDataVolumePump : IHostedService
     private readonly VolumeCurveEstimator _estimator;
     private readonly ILogger<MarketDataVolumePump>? _logger;
 
-    // Subscribed-symbol set, kept idempotent so repeated EnsureSubscribed
-    // calls (multiple VWAP parents on the same symbol, reactor re-evaluations)
-    // map to exactly one SDK Subscribe per process lifetime. We deliberately
-    // do NOT unsubscribe on parent terminal / cancel: subscriptions are
-    // cheap on the SDK side, and ref-counting across Iceberg/TWAP/VWAP
-    // parents sharing a symbol is a footgun we can defer until a concrete
-    // use case asks for it. Trade-off: idle symbols accumulate forever in
-    // long-running processes; acceptable for v0 given the small active set.
-    private readonly ConcurrentDictionary<string, byte> _subscribed =
+    // In-flight + completed subscribe tasks, keyed by symbol. Acts as both
+    // the dedup cache (a successfully-completed task short-circuits future
+    // calls) and the concurrent-first-call coalescer (two threads racing
+    // EnsureSubscribedAsync(sym) await the same Task). On failure the entry
+    // is removed so the next call retries — pass-3 review (#294) P1 fix.
+    //
+    // Lazy<Task> is the coalescer: ConcurrentDictionary.GetOrAdd does NOT
+    // guarantee single factory invocation under contention, but constructing
+    // a Lazy is side-effect-free; only the winning Lazy's Value getter runs
+    // the SubscribeAsync. ExecutionAndPublication ensures the inner factory
+    // runs exactly once per Lazy.
+    //
+    // We deliberately do NOT unsubscribe on parent terminal / cancel:
+    // subscriptions are cheap on the SDK side, and ref-counting across
+    // Iceberg/TWAP/VWAP parents sharing a symbol is a footgun we can defer
+    // until a concrete use case asks for it. Trade-off: idle symbols
+    // accumulate forever in long-running processes; acceptable for v0 given
+    // the small active set.
+    private readonly ConcurrentDictionary<string, Lazy<Task>> _subscribed =
         new(StringComparer.OrdinalIgnoreCase);
 
     public MarketDataVolumePump(
@@ -71,34 +81,63 @@ public sealed class MarketDataVolumePump : IHostedService
     /// <summary>
     /// Idempotently subscribes the underlying <see cref="IMarketDataSubscriber"/>
     /// to trade prints for <paramref name="symbol"/>. Safe to call from any
-    /// thread; the SDK call happens at most once per (symbol, process).
-    /// Must be invoked before a VWAP parent starts ticking — see
+    /// thread; the SDK call happens at most once per (symbol, process) on the
+    /// success path. Concurrent first calls for the same symbol are coalesced
+    /// into a single in-flight SDK Subscribe via the
+    /// <c>ConcurrentDictionary&lt;string, Task&gt;</c> cache. Must be invoked
+    /// before a VWAP parent starts ticking — see
     /// <c>AlgoEngine.OnCreatedAsync</c> for the wiring.
+    ///
+    /// <para>
+    /// Pass-3 review (#294) P1: a failed SDK Subscribe is NOT cached, so the
+    /// next caller (next <c>AlgoCreatedSignal</c> / reactor re-evaluation)
+    /// retries. Exceptions are swallowed (per existing policy) so the
+    /// creation flow isn't broken, but logged as warnings so operators see
+    /// the retry loop. Without this, a single SDK not-ready / quota / unknown-
+    /// symbol error at cold boot would poison the cache and the algo would
+    /// never receive trades.
+    /// </para>
     /// </summary>
     public async ValueTask EnsureSubscribedAsync(string symbol, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(symbol)) return;
         var key = symbol.Trim();
-        if (!_subscribed.TryAdd(key, 0)) return;
 
+        // Concurrent first-call race: GetOrAdd can invoke the value factory
+        // multiple times under contention but only one Lazy wins. Lazy
+        // (ExecutionAndPublication, the default) then ensures the inner
+        // SubscribeAsync runs exactly once. The first caller's CT is the
+        // one observed by the SDK call — subsequent awaiters just observe
+        // the shared task's outcome.
+        var lazy = _subscribed.GetOrAdd(key, k =>
+            new Lazy<Task>(() => SubscribeOnceAsync(k, ct)));
+        await lazy.Value.ConfigureAwait(false);
+    }
+
+    private async Task SubscribeOnceAsync(string key, CancellationToken ct)
+    {
         try
         {
             await _subscriber.SubscribeAsync(key, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            // Caller is shutting down; let it propagate but allow a later
-            // retry by clearing the dedup marker.
+            // Caller is shutting down. Drop the dedup entry so a later
+            // (post-shutdown-cancel) caller can retry. Propagate so the
+            // awaiter sees the cancel.
             _subscribed.TryRemove(key, out _);
             throw;
         }
         catch (Exception ex)
         {
-            // Keep the symbol marked subscribed so we don't hammer the SDK
-            // on every algo creation: the SDK's auto-resubscribe-on-reconnect
-            // will retry. Surface the failure so ops sees what happened.
+            // P1 fix: do NOT keep the symbol marked subscribed on failure.
+            // The next EnsureSubscribedAsync(key) call (e.g., next
+            // AlgoCreatedSignal or reactor re-evaluation) will retry.
+            // Swallow the exception so the creation flow stays intact,
+            // but log a warning so operators see the retry loop.
+            _subscribed.TryRemove(key, out _);
             _logger?.LogWarning(ex,
-                "MarketDataVolumePump SubscribeAsync failed for {Symbol}; SDK auto-resubscribe will retry on next reconnect.",
+                "MarketDataVolumePump SubscribeAsync failed for {Symbol}; entry cleared, next EnsureSubscribedAsync call will retry.",
                 key);
         }
     }

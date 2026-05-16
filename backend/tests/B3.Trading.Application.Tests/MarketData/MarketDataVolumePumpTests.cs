@@ -107,18 +107,68 @@ public class MarketDataVolumePumpTests
     }
 
     [Fact]
-    public async Task EnsureSubscribedAsync_SdkThrows_KeepsDedupAndDoesNotPropagate()
+    public async Task EnsureSubscribedAsync_SdkThrows_DoesNotPoisonCache_NextCallRetries()
     {
-        // SDK failures must not abort the VWAP creation path — the SDK's
-        // auto-resubscribe-on-reconnect will retry. The dedup marker is
-        // kept so we don't hammer the SDK on every reactor tick.
+        // Pass-3 review (#294) P1. A failed initial Subscribe used to mark
+        // the symbol in the dedup set BEFORE calling the SDK and swallow
+        // the exception — so a single not-ready / quota / unknown-symbol
+        // error at cold boot would permanently poison the cache and the
+        // algo would never receive trades. New contract: on failure the
+        // entry is cleared and the next EnsureSubscribedAsync(key) call
+        // retries the SDK call. Exceptions remain swallowed so the
+        // creation flow isn't broken.
         var subscriber = new FakeSubscriber { ThrowOnSubscribe = true };
         var pump = new MarketDataVolumePump(subscriber, new VolumeCurveEstimator());
 
         await pump.EnsureSubscribedAsync("PETR4");
         await pump.EnsureSubscribedAsync("PETR4");
+        await pump.EnsureSubscribedAsync("PETR4");
+
+        Assert.Equal(3, subscriber.SubscribeCallsFor("PETR4"));
+
+        // Once the SDK recovers, the next call succeeds and the dedup
+        // marker sticks — further calls short-circuit.
+        subscriber.ThrowOnSubscribe = false;
+        await pump.EnsureSubscribedAsync("PETR4");
+        await pump.EnsureSubscribedAsync("PETR4");
+
+        Assert.Equal(4, subscriber.SubscribeCallsFor("PETR4"));
+    }
+
+    [Fact]
+    public async Task EnsureSubscribedAsync_ConcurrentFirstCall_IssuesExactlyOneSdkCall()
+    {
+        // Pass-3 review (#294) P1. Two threads calling EnsureSubscribedAsync
+        // for the same not-yet-subscribed symbol must coalesce to exactly
+        // one SDK Subscribe — Lazy<Task> guarantees the inner factory
+        // (SubscribeOnceAsync) runs once even if GetOrAdd's value factory
+        // is invoked multiple times under contention.
+        var gate = new TaskCompletionSource();
+        var subscriber = new FakeSubscriber { SubscribeGate = gate.Task };
+        var pump = new MarketDataVolumePump(subscriber, new VolumeCurveEstimator());
+
+        const int racers = 32;
+        var tasks = new Task[racers];
+        using var startBarrier = new Barrier(racers);
+        for (var i = 0; i < racers; i++)
+        {
+            tasks[i] = Task.Run(async () =>
+            {
+                startBarrier.SignalAndWait();
+                await pump.EnsureSubscribedAsync("PETR4");
+            });
+        }
+
+        // Give racers a moment to all hit GetOrAdd before we let the SDK
+        // call complete. Without the gate the first racer might finish
+        // before the others arrive and the test would no longer exercise
+        // the coalescing path.
+        await Task.Delay(50);
+        gate.SetResult();
+        await Task.WhenAll(tasks);
 
         Assert.Equal(1, subscriber.SubscribeCallsFor("PETR4"));
+        Assert.Equal(1, subscriber.TotalSubscribeCalls);
     }
 
     private sealed class FakeSubscriber : IMarketDataSubscriber
@@ -126,7 +176,8 @@ public class MarketDataVolumePumpTests
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _subs =
             new(StringComparer.OrdinalIgnoreCase);
 
-        public bool ThrowOnSubscribe { get; init; }
+        public bool ThrowOnSubscribe { get; set; }
+        public Task? SubscribeGate { get; init; }
         public int TotalSubscribeCalls => _subs.Values.Sum();
         public int SubscribeCallsFor(string symbol) =>
             _subs.TryGetValue(symbol, out var n) ? n : 0;
@@ -145,12 +196,13 @@ public class MarketDataVolumePumpTests
 
         public void RaiseTrade(MarketTrade t) => Trade?.Invoke(t);
         public Task ConnectAsync(CancellationToken ct = default) => Task.CompletedTask;
-        public ValueTask SubscribeAsync(string symbol, CancellationToken ct = default)
+        public async ValueTask SubscribeAsync(string symbol, CancellationToken ct = default)
         {
             _subs.AddOrUpdate(symbol, 1, (_, n) => n + 1);
+            if (SubscribeGate is not null)
+                await SubscribeGate.ConfigureAwait(false);
             if (ThrowOnSubscribe)
                 throw new InvalidOperationException("simulated SDK Subscribe failure");
-            return ValueTask.CompletedTask;
         }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
