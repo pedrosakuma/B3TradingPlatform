@@ -5,6 +5,8 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using B3.Trading.Application;
+using B3.Trading.Application.Persistence;
+using B3.Trading.Domain;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace B3.Trading.Api.Tests;
@@ -352,6 +354,157 @@ public class StatementEndpointTests : IDisposable
         Assert.Equal(FillCount, finalFills.Count);
         var finalPos = Assert.Single(final.GetProperty("positions").EnumerateArray());
         Assert.Equal((long)FillCount, finalPos.GetProperty("netQty").GetInt64());
+    }
+
+    [Fact]
+    public async Task PastDayConcurrentDispatch_StatementRead_NeverProducesTornSnapshot()
+    {
+        // Pass-2 review (#279) P1 regression — past-day path. Near UTC
+        // day rollover a late ER timestamped for the requested "past"
+        // day can be in the middle of its dispatch chain (ER append +
+        // nested FeeAccrued + nested RealizedPnl, all under one
+        // dispatcher lock) while a reader caps the WAL for that past
+        // day. Before the fix the past-day path read store.CurrentSeq
+        // OUTSIDE the dispatcher lock so it could stop the WAL scan in
+        // between the ER and its nested fee/PnL, projecting a fill
+        // without its matching fees / realized PnL. With the fix the
+        // upper-bound capture runs under EventDispatcher.RunExclusive
+        // so the cap can only land on a quiescent point — either
+        // BEFORE the ER or AFTER its full nested chain.
+        //
+        // Per-fill we dispatch ER (yesterday) + nested FeeAccrued
+        // (brokerage=1m, yesterday) under a single Dispatch call so the
+        // append-order discipline mirrors production. Invariant: the
+        // brokerage total returned by the endpoint equals 1m * fills
+        // count for every observed response.
+        using var f = TestAppFactory.WithOverrides(Overrides());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+
+        var dispatcher = f.Services.GetRequiredService<EventDispatcher>();
+        var registry = f.Services.GetRequiredService<EndClientRegistry>();
+        var owner = registry.Register(TestAppFactory.TestUser);
+
+        var yesterday = DateOnly.FromDateTime(DateTimeOffset.UtcNow.UtcDateTime).AddDays(-1);
+        var yesterdayTs = new DateTimeOffset(yesterday.ToDateTime(new TimeOnly(10, 0)), TimeSpan.Zero);
+        var yesterdayKey = yesterday.ToString("yyyy-MM-dd");
+
+        const int FillCount = 40;
+        var clOrdIds = new List<ulong>(FillCount);
+        for (var i = 0; i < FillCount; i++)
+        {
+            var clOrdId = (ulong)(900_000UL + (uint)i);
+            clOrdIds.Add(clOrdId);
+            dispatcher.Dispatch(
+                new OrderSubmittedEvent
+                {
+                    ClOrdId = clOrdId,
+                    EndClientId = owner.Value,
+                    FirmId = "TEST",
+                    Symbol = "PETR4",
+                    SecurityId = 4321UL,
+                    Side = nameof(OrderSide.Buy),
+                    Type = nameof(OrderType.Limit),
+                    Quantity = 1,
+                    Price = 30m,
+                    TimestampUtc = yesterdayTs,
+                },
+                () => { });
+        }
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var tornObserved = false;
+        string? tornDetail = null;
+        var readerStopped = 0;
+
+        var readerTask = Task.Run(async () =>
+        {
+            try
+            {
+                while (!cts.IsCancellationRequested && Volatile.Read(ref readerStopped) == 0)
+                {
+                    JsonElement dto;
+                    try
+                    {
+                        dto = await GetStatement(http, token, yesterdayKey);
+                    }
+                    catch (OperationCanceledException) { break; }
+
+                    var fillsCount = dto.GetProperty("fills").GetArrayLength();
+                    decimal brokerage = 0m;
+                    foreach (var fee in dto.GetProperty("fees").EnumerateArray())
+                    {
+                        if (string.Equals(fee.GetProperty("feeType").GetString(), "brokerage", StringComparison.Ordinal))
+                            brokerage = fee.GetProperty("total").GetDecimal();
+                    }
+                    if (brokerage != fillsCount * 1m)
+                    {
+                        tornObserved = true;
+                        tornDetail = $"fills={fillsCount} brokerage={brokerage}";
+                        break;
+                    }
+                }
+            }
+            catch (OperationCanceledException) { /* expected on shutdown */ }
+        });
+
+        await Parallel.ForEachAsync(clOrdIds, new ParallelOptions { MaxDegreeOfParallelism = 8 },
+            async (clOrdId, _) =>
+            {
+                await Task.Yield();
+                dispatcher.Dispatch(
+                    new ExecutionReportReceivedEvent
+                    {
+                        ClOrdId = clOrdId,
+                        ExecKind = nameof(ExecKind.Fill),
+                        LeavesQuantity = 0,
+                        CumulativeQuantity = 1,
+                        LastQuantity = 1,
+                        LastPrice = 30m,
+                        Synthetic = true,
+                        TimestampUtc = yesterdayTs,
+                    },
+                    () =>
+                    {
+                        // Nested dispatch — reentrant on the dispatcher
+                        // lock — mirrors how ExecutionReportProcessor
+                        // emits FeeAccrued from inside the ER apply.
+                        dispatcher.Dispatch(
+                            new FeeAccruedEvent
+                            {
+                                ClOrdId = clOrdId,
+                                ExecutionId = $"{clOrdId}:1",
+                                EndClientId = owner.Value,
+                                Symbol = "PETR4",
+                                Side = nameof(OrderSide.Buy),
+                                FillQuantity = 1,
+                                FillPrice = 30m,
+                                Notional = 30m,
+                                Brokerage = 1m,
+                                Emolumentos = 0m,
+                                Liquidacao = 0m,
+                                Total = 1m,
+                                TimestampUtc = yesterdayTs,
+                            },
+                            () => { });
+                    });
+            });
+
+        await Task.Delay(200);
+        Interlocked.Exchange(ref readerStopped, 1);
+        await readerTask;
+
+        Assert.False(tornObserved, $"observed torn past-day statement snapshot: {tornDetail}");
+
+        var final = await GetStatement(http, token, yesterdayKey);
+        Assert.Equal(FillCount, final.GetProperty("fills").GetArrayLength());
+        decimal finalBrokerage = 0m;
+        foreach (var fee in final.GetProperty("fees").EnumerateArray())
+        {
+            if (string.Equals(fee.GetProperty("feeType").GetString(), "brokerage", StringComparison.Ordinal))
+                finalBrokerage = fee.GetProperty("total").GetDecimal();
+        }
+        Assert.Equal(FillCount * 1m, finalBrokerage);
     }
 
     [Fact]

@@ -84,57 +84,46 @@ public static class StatementEndpoints
         EventDispatcher dispatcher, CancellationToken ct)
     {
         var today = DateOnly.FromDateTime(DateTimeOffset.UtcNow.UtcDateTime);
-        long snapshotSeq;
-        IReadOnlyList<PositionRowDto>? livePositionsSnapshot;
+        var isToday = day == today;
 
-        if (day == today)
+        // Pass-2 review (#279) P1. Both today and past-day paths capture
+        // the WAL upper-bound under EventDispatcher.RunExclusive so a
+        // fill ER whose nested Fee/RealizedPnl dispatches are still
+        // mid-flight on another thread cannot split across the seq cap:
+        // the dispatcher lock guarantees the three appends land before
+        // RunExclusive's body observes CurrentSeq. Without it the past-
+        // day path could observe an ER without its matching fee/PnL —
+        // possible near UTC day rollover when a late ER timestamped
+        // "yesterday" is still being dispatched while the reader caps
+        // the WAL for yesterday's statement. Today's path additionally
+        // snapshots the live PositionKeeper rows under the same lock
+        // because the projection consumes them; past-day projection is
+        // pure WAL so we skip the keeper snapshot there. The exclusive
+        // section stays tiny — no I/O — and the WAL scan + projection
+        // run after we exit the lock.
+        long capturedSeq = 0;
+        IReadOnlyList<PositionRowDto>? capturedPositions = null;
+        dispatcher.RunExclusive(() =>
         {
-            // Pass-2 review (#279) P1. Today's statement reads three
-            // streams that the dispatcher mutates atomically per fill:
-            // the WAL (caps our scan), the PositionKeeper (live qty +
-            // avg price), and the fee/PnL events the dispatcher nests
-            // off the same fill. If we sampled them in sequence WITHOUT
-            // the dispatcher lock a new fill could land in
-            // PositionKeeper after we capped the WAL scan, producing a
-            // torn snapshot where the position reflects N+1 fills but
-            // the fills/fees/realized rows reflect only N. Capture the
-            // WAL upper-bound and the position rows under
-            // EventDispatcher.RunExclusive — the same serialisation
-            // discipline EntryPointExecutionReportRouter uses on the
-            // WAL-backpressure fallback — so the three views agree.
-            long capturedSeq = 0;
-            IReadOnlyList<PositionRowDto>? capturedPositions = null;
-            dispatcher.RunExclusive(() =>
+            capturedSeq = store.CurrentSeq;
+            if (!isToday) return;
+            var rows = new List<PositionRowDto>();
+            foreach (var p in positions.ForEndClient(owner))
             {
-                capturedSeq = store.CurrentSeq;
-                var rows = new List<PositionRowDto>();
-                foreach (var p in positions.ForEndClient(owner))
-                {
-                    if (p.NetQuantity == 0) continue;
-                    rows.Add(new PositionRowDto(p.Symbol, p.NetQuantity, p.AverageEntryPrice));
-                }
-                rows.Sort(static (a, b) => string.CompareOrdinal(a.Symbol, b.Symbol));
-                capturedPositions = rows;
-            });
-            snapshotSeq = capturedSeq;
-            livePositionsSnapshot = capturedPositions;
+                if (p.NetQuantity == 0) continue;
+                rows.Add(new PositionRowDto(p.Symbol, p.NetQuantity, p.AverageEntryPrice));
+            }
+            rows.Sort(static (a, b) => string.CompareOrdinal(a.Symbol, b.Symbol));
+            capturedPositions = rows;
+        });
+        var snapshotSeq = capturedSeq;
+        var livePositionsSnapshot = capturedPositions;
 
-            // Drain the writer AFTER taking the dispatcher snapshot so
-            // every entry with seq <= snapshotSeq is durable and
-            // visible to ReadFromAsync. FlushAsync runs outside the
-            // lock — we do not want async I/O while serialising new
-            // dispatches.
-            await store.FlushAsync(ct);
-        }
-        else
-        {
-            // Past-day statements are a pure WAL projection — the
-            // keepers have long since advanced past that snapshot, so
-            // there is no live state to capture and nothing to lock.
-            await store.FlushAsync(ct);
-            snapshotSeq = store.CurrentSeq;
-            livePositionsSnapshot = null;
-        }
+        // Drain the writer AFTER taking the dispatcher snapshot so
+        // every entry with seq <= snapshotSeq is durable and visible
+        // to ReadFromAsync. FlushAsync runs outside the lock — we do
+        // not want async I/O while serialising new dispatches.
+        await store.FlushAsync(ct);
 
         var wal = new List<(long Seq, WalEvent Event)>(capacity: 256);
         await foreach (var entry in store.ReadFromAsync(0, ct))
