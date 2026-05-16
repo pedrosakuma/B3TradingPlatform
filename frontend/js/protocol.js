@@ -188,13 +188,119 @@ export async function runEod(backend, token) {
   return jsonOrThrow(resp);
 }
 
-// ── User-bot credentials (sub-issue #169 of RFC user-bot-fixp-listener-v0).
+// ── Q2.6 (#273). History / P&L / Statement (read-side) ────────────
+// All four endpoints are JWT-scoped to the caller's `sub` claim. The
+// history endpoints accept ISO-8601 `from` / `to` plus an optional
+// `symbol` filter and return `{ items, nextCursor }`; nextCursor is
+// `null` when the server has no further pages. `cursor` is treated as
+// an opaque token — never parse it client-side. Limit is clamped
+// server-side (cap = 500), so the FE picks a friendlier default.
+
+function _appendHistoryQuery(url, { from, to, symbol, cursor, limit } = {}) {
+  if (from)   url.searchParams.set("from", from);
+  if (to)     url.searchParams.set("to", to);
+  if (symbol) url.searchParams.set("symbol", symbol);
+  if (cursor) url.searchParams.set("cursor", cursor);
+  if (limit)  url.searchParams.set("limit", String(limit));
+}
+
+export async function getOrdersHistory(backend, token, opts = {}) {
+  const url = new URL(`${backend}/orders/history`);
+  _appendHistoryQuery(url, opts);
+  const resp = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return jsonOrThrow(resp);
+}
+
+export async function getExecutionsHistory(backend, token, opts = {}) {
+  const url = new URL(`${backend}/executions/history`);
+  _appendHistoryQuery(url, opts);
+  const resp = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return jsonOrThrow(resp);
+}
+
+export async function getPnlToday(backend, token) {
+  const resp = await fetch(`${backend}/pnl/today`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return jsonOrThrow(resp);
+}
+
+// Q2.6 (#273). Statement JSON for a specific dayKey (YYYY-MM-DD), or
+// today when dayKey is null/empty. Backend serves /statement/{dayKey?}
+// — the trailing slash variant returns today.
+export async function getStatement(backend, token, dayKey) {
+  const path = dayKey ? `/statement/${encodeURIComponent(dayKey)}` : `/statement`;
+  const resp = await fetch(`${backend}${path}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return jsonOrThrow(resp);
+}
+
+// Q2.6 (#273). Parse the RFC-6266 / RFC-2616 Content-Disposition header
+// to extract the server-suggested filename. Exported so the FE download
+// path and its unit tests can share the exact same logic — the browser
+// applies the header automatically to anchor downloads, but here we
+// fetch into a blob and trigger via `URL.createObjectURL`, so we must
+// honor the header ourselves to avoid emitting a generic "download"
+// name. Returns null when the header is absent or unparseable.
+export function parseContentDispositionFilename(header) {
+  if (!header || typeof header !== "string") return null;
+  // Prefer RFC-5987 filename* (UTF-8 capable, used by ASP.NET when the
+  // filename contains non-ASCII or punctuation). Falls back to plain
+  // filename= when filename* is absent.
+  const star = /filename\*\s*=\s*(?:UTF-8|utf-8)''([^;]+)/i.exec(header);
+  if (star && star[1]) {
+    try { return decodeURIComponent(star[1].trim()); } catch { /* fall through */ }
+  }
+  const plain = /filename\s*=\s*("([^"]+)"|([^;]+))/i.exec(header);
+  if (plain) {
+    const v = (plain[2] ?? plain[3] ?? "").trim();
+    if (v) return v;
+  }
+  return null;
+}
+
+// Q2.6 (#273). CSV statement download. Returns `{ blob, filename }`
+// — the caller is responsible for wiring it through URL.createObjectURL
+// + a synthetic anchor click (kept here so unit tests can stub fetch
+// without dragging in the browser download plumbing).
+export async function downloadStatementCsv(backend, token, dayKey) {
+  if (!dayKey) throw new Error("dayKey is required for CSV download");
+  const url = `${backend}/statement/${encodeURIComponent(dayKey)}.csv`;
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!resp.ok) {
+    // Mirror jsonOrThrow's error surface so callers can branch on
+    // err.status (e.g. 401 → logout) without special-casing the CSV path.
+    let body = null;
+    try { body = await resp.text(); } catch { /* ignore */ }
+    const err = new Error(`HTTP ${resp.status}`);
+    err.status = resp.status;
+    err.body = body;
+    throw err;
+  }
+  const blob = await resp.blob();
+  const filename = parseContentDispositionFilename(resp.headers.get("Content-Disposition"))
+    || `statement-${dayKey}.csv`;
+  return { blob, filename };
+}
+
 // All operations act on the authenticated user's `sub` claim — the backend
 // scopes by JWT, so no user-id parameter is sent. Cross-user reads/writes
 // always 404, so the UI only ever sees its own caller's rows.
 
 // GET /api/user-bot-credentials -> [{ id, label, credShortId, createdAtUtc, revokedAt }]
 // Read-side DTO; never includes the bearer secret.
+//
+// ── User-bot credentials (sub-issue #169 of RFC user-bot-fixp-listener-v0).
+// All operations act on the authenticated user's `sub` claim — the backend
+// scopes by JWT, so no user-id parameter is sent. Cross-user reads/writes
+// always 404, so the UI only ever sees its own caller's rows.
 export async function listUserBotCredentials(backend, token) {
   const resp = await fetch(`${backend}/api/user-bot-credentials`, {
     headers: { Authorization: `Bearer ${token}` },

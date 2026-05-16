@@ -21,7 +21,12 @@ let attempt = 0;
 let reconnectTimer = null;
 let stopped = false;
 
-const CHANNELS = ["orders.me", "executions.me", "positions.me"];
+// Q2.6 (#273). pnl.me joins the static per-account channel set so the
+// P&L panel always sees a snapshot + every fill-driven delta without
+// the caller having to explicitly subscribe. Same shape as the other
+// account-scoped channels (snapshot at seq=0, deltas thereafter); the
+// delta payload carries the full re-projected PnlTodayDto.
+const CHANNELS = ["orders.me", "executions.me", "positions.me", "pnl.me"];
 
 // Q1.6 (#258). Wanted set of public per-symbol channels that should be
 // subscribed any time the WS is connected. Drives diff (un)subscribes
@@ -119,6 +124,12 @@ function handleFrame(frame) {
       break;
     case "executions.me":
       post({ type: frame.type === "snapshot" ? "executions.snapshot" : "executions.delta", data: frame.data });
+      break;
+    case "pnl.me":
+      // Q2.6 (#273). Both snapshot and delta payloads are the full
+      // PnlTodayDto — the main thread reducer treats them identically,
+      // so we forward a single event type per direction.
+      post({ type: frame.type === "snapshot" ? "pnl.snapshot" : "pnl.delta", data: frame.data });
       break;
     default:
       // Q1.6 (#258). Public per-symbol channels — phases.${symbol} and

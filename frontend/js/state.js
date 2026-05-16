@@ -152,6 +152,27 @@ const state = {
   // defaults (e.g. 30-day GTD cap) so a slow/failed fetch never
   // blocks the ticket. Shape: `{ maxGtdHorizonDays: number }`.
   riskPolicy: null,
+  // Q2.6 (#273). P&L panel slice. Mirrors the GET /pnl/today projection
+  // shape (parallel realized / unrealized arrays + the two totals).
+  // `pnl.me` WS frames (both snapshot and delta) carry the full DTO, so
+  // applyPnlSnapshot / applyPnlDelta both replace wholesale — no diff
+  // accounting client-side. `null` until the first fetch/frame lands;
+  // readers render a "no data yet" placeholder in the meantime.
+  pnl: null,                // PnlTodayDto | null
+  // Q2.6 (#273). History tab slices. Cursor-based pagination: each
+  // append() preserves accumulated items so "load more" feels stable.
+  // `nextCursor === null` means the server has no further pages.
+  // `loading` gates the load-more button so a slow page can't double-
+  // fire. `filters` is shared across both lists — the History tab UI
+  // renders a single date/symbol bar that drives both fetches.
+  historyOrders:     { items: [], nextCursor: null, loading: false },
+  historyExecutions: { items: [], nextCursor: null, loading: false },
+  historyFilters:    { from: "", to: "", symbol: "" },
+  // Q2.6 (#273). Statement download slice. `lastDownload` records the
+  // dayKey + filename of the last successful CSV download so the UI
+  // can surface a confirmation toast; `lastJson` holds the JSON
+  // projection while the "view JSON" modal is open (cleared on close).
+  statement: { lastDownload: null, lastJson: null, busy: false, error: null },
 };
 
 const EXECUTIONS_CAPACITY = 500;
@@ -268,6 +289,14 @@ export function clearAll() {
   // backend could resolve after the new session has loaded its own
   // policy and overwrite (or null out) the newer value.
   bumpRiskPolicyGeneration();
+  // Q2.6 (#273). P&L / history caches are per-session — drop on logout
+  // or trader-WS reconnect so the next session can't read the previous
+  // user's data while waiting for its own snapshot.
+  state.pnl = null;
+  state.historyOrders     = { items: [], nextCursor: null, loading: false };
+  state.historyExecutions = { items: [], nextCursor: null, loading: false };
+  state.historyFilters    = { from: "", to: "", symbol: "" };
+  state.statement = { lastDownload: null, lastJson: null, busy: false, error: null };
   notify("all");
 }
 
@@ -823,3 +852,125 @@ export function getAuctionState(symbol) {
 export function isAuctionPhase(phase) {
   return AUCTION_PHASES.has(phase);
 }
+
+// ── Q2.6 (#273). P&L panel slice ──────────────────────────────────
+// Both REST snapshot (GET /pnl/today) and WS `pnl.me` frames carry the
+// full PnlTodayDto, so snapshot+delta both replace wholesale. Reducer
+// is split into two names so call-sites read clearly, but the logic is
+// identical.
+
+function _normalizePnl(dto) {
+  if (!dto || typeof dto !== "object") return null;
+  return {
+    realized:        Array.isArray(dto.realized)   ? dto.realized.slice()   : [],
+    unrealized:      Array.isArray(dto.unrealized) ? dto.unrealized.slice() : [],
+    totalRealized:   Number(dto.totalRealized   ?? 0),
+    totalUnrealized: Number(dto.totalUnrealized ?? 0),
+    updatedAt:       Date.now(),
+  };
+}
+
+export function applyPnlSnapshot(dto) {
+  state.pnl = _normalizePnl(dto);
+  notify("pnl");
+}
+
+export function applyPnlDelta(dto) {
+  // pnl.me delta payloads carry the full snapshot — backend
+  // re-projects on every fill (see PnlRefPriceFanOut / sink).
+  state.pnl = _normalizePnl(dto);
+  notify("pnl");
+}
+
+export function clearPnl() {
+  if (state.pnl == null) return;
+  state.pnl = null;
+  notify("pnl");
+}
+
+// ── Q2.6 (#273). History tab slices ───────────────────────────────
+// Cursor-paginated. `reset: true` replaces the buffer (used by the
+// first fetch and by filter changes); subsequent pages append. The
+// reducer never deduplicates — the backend pagination contract
+// guarantees stable ordering with no overlap between pages (see
+// HistoryEndpoints.cs / ApplyCursorAndPage).
+
+function _applyHistoryPage(slice, { items, nextCursor, reset }) {
+  const base = reset ? [] : (slice.items ?? []);
+  const next = Array.isArray(items) ? items : [];
+  return {
+    items: reset ? next : base.concat(next),
+    nextCursor: nextCursor ?? null,
+    loading: false,
+  };
+}
+
+export function setHistoryOrdersLoading(loading) {
+  state.historyOrders = { ...state.historyOrders, loading: !!loading };
+  notify("history");
+}
+
+export function applyHistoryOrdersPage({ items, nextCursor, reset = false } = {}) {
+  state.historyOrders = _applyHistoryPage(state.historyOrders, { items, nextCursor, reset });
+  notify("history");
+}
+
+export function setHistoryExecutionsLoading(loading) {
+  state.historyExecutions = { ...state.historyExecutions, loading: !!loading };
+  notify("history");
+}
+
+export function applyHistoryExecutionsPage({ items, nextCursor, reset = false } = {}) {
+  state.historyExecutions = _applyHistoryPage(state.historyExecutions, { items, nextCursor, reset });
+  notify("history");
+}
+
+export function setHistoryFilters(filters) {
+  const next = filters && typeof filters === "object" ? filters : {};
+  state.historyFilters = {
+    from:   typeof next.from   === "string" ? next.from   : "",
+    to:     typeof next.to     === "string" ? next.to     : "",
+    symbol: typeof next.symbol === "string" ? next.symbol.trim().toUpperCase() : "",
+  };
+  notify("history");
+}
+
+export function resetHistory() {
+  state.historyOrders     = { items: [], nextCursor: null, loading: false };
+  state.historyExecutions = { items: [], nextCursor: null, loading: false };
+  notify("history");
+}
+
+// ── Q2.6 (#273). Statement slice ──────────────────────────────────
+
+export function setStatementBusy(busy) {
+  state.statement = { ...state.statement, busy: !!busy, error: busy ? null : state.statement.error };
+  notify("statement");
+}
+
+export function setStatementError(err) {
+  state.statement = { ...state.statement, busy: false, error: err ?? null };
+  notify("statement");
+}
+
+export function setStatementDownload({ dayKey, filename, bytes }) {
+  state.statement = {
+    ...state.statement,
+    busy: false,
+    error: null,
+    lastDownload: { dayKey, filename, bytes: bytes ?? null, at: Date.now() },
+  };
+  notify("statement");
+}
+
+export function setStatementJson(json) {
+  state.statement = { ...state.statement, busy: false, error: null, lastJson: json ?? null };
+  notify("statement");
+}
+
+export function clearStatementJson() {
+  if (state.statement.lastJson == null) return;
+  state.statement = { ...state.statement, lastJson: null };
+  notify("statement");
+}
+

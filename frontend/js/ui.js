@@ -65,6 +65,8 @@ export function showLogin() {
   $("admin-view").hidden = true;
   const cred = $("bot-credentials-view");
   if (cred) cred.hidden = true;
+  const hist = $("history-view");
+  if (hist) hist.hidden = true;
   // Default to the login card; a user that previously toggled to the
   // signup card and was bumped back to login (e.g. logout, expiry)
   // shouldn't land staring at the signup form.
@@ -81,6 +83,8 @@ export function showTrader() {
   $("admin-view").hidden = true;
   const cred = $("bot-credentials-view");
   if (cred) cred.hidden = true;
+  const hist = $("history-view");
+  if (hist) hist.hidden = true;
 }
 
 function setViewToggleVisible(visible, current) {
@@ -1178,17 +1182,20 @@ function applyCurrentView(view) {
   const trader = $("trader-view");
   const admin = $("admin-view");
   const credentials = $("bot-credentials-view");
+  const history = $("history-view");
   if (!trader || !admin) return;
   const showTraderView = view === "trader";
   const showAdminView = view === "admin";
   const showCredentialsView = view === "bot-credentials";
+  const showHistoryView = view === "history";
   trader.hidden = !showTraderView;
   admin.hidden = !showAdminView;
   if (credentials) credentials.hidden = !showCredentialsView;
-  // The trader/admin pill toggle stays hidden when the credentials
-  // view is up — it's a self-contained sub-page reached via the
-  // header link, not a sibling of trader/admin.
-  if (showCredentialsView) {
+  if (history)     history.hidden     = !showHistoryView;
+  // The trader/admin pill toggle stays hidden when the credentials /
+  // history views are up — they're self-contained sub-pages reached
+  // via the header link, not siblings of trader/admin.
+  if (showCredentialsView || showHistoryView) {
     setViewToggleVisible(false, view);
   } else {
     setViewToggleVisible(getState().user?.role === "admin", view);

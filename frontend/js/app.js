@@ -5,7 +5,9 @@ import { defaultBackend, defaultMarketDataUrl, login, signup, submitOrder, cance
          getKillStatus, killFirm, reviveFirm, killEndClient, reviveEndClient,
          getHaltStatus, haltSymbol, resumeSymbol,
          runEod,
-         listUserBotCredentials, createUserBotCredential, deleteUserBotCredential } from "./protocol.js";
+         listUserBotCredentials, createUserBotCredential, deleteUserBotCredential,
+         getOrdersHistory, getExecutionsHistory, getPnlToday,
+         getStatement, downloadStatementCsv } from "./protocol.js";
 import { claimsFromToken } from "./jwt.js";
 import { validateOrder, pretradeWarnings, payloadKey } from "./validation.js";
 import * as state from "./state.js";
@@ -13,6 +15,7 @@ import { isTerminalOrderStatus } from "./state.js";
 import * as ui from "./ui.js";
 import * as adminUi from "./adminUi.js";
 import * as botCredentialsUi from "./botCredentialsUi.js";
+import * as historyUi from "./historyUi.js";
 import { FLAGS } from "./mdProtocol.js";
 import { applyRiskPolicyFetch } from "./riskPolicy.js";
 
@@ -65,6 +68,7 @@ function init() {
   ui.bindUi();
   adminUi.bindAdminUi();
   botCredentialsUi.bindBotCredentialsUi();
+  historyUi.bindHistoryUi();
   ui.setHandlers({
     onSubmitOrder: handleSubmitOrder,
     onCancelOrder: handleCancelOrder,
@@ -96,6 +100,16 @@ function init() {
     onRefresh:  refreshBotCredentials,
     onCreate:   handleCreateBotCredential,
     onRevoke:   handleRevokeBotCredential,
+  });
+  historyUi.setHistoryHandlers({
+    onOpenView:       () => handleSwitchView("history"),
+    onBack:           () => handleSwitchView("trader"),
+    onRefresh:        refreshHistoryAll,
+    onApplyFilters:   handleHistoryApplyFilters,
+    onLoadMoreOrders: () => loadMoreHistoryOrders(false),
+    onLoadMoreExecs:  () => loadMoreHistoryExecutions(false),
+    onDownloadCsv:    handleStatementDownload,
+    onViewJson:       handleStatementViewJson,
   });
 
   // Q1.6 (#258). Whenever the watchlist or auctionPanelSymbol slice
@@ -530,6 +544,8 @@ function onWorkerMessage(msg) {
     case "positions.delta":     state.applyPositionsDelta(msg.data); break;
     case "executions.snapshot": state.applyExecutionsSnapshot(msg.data); break;
     case "executions.delta":    state.applyExecutionsDelta(msg.data); break;
+    case "pnl.snapshot":        state.applyPnlSnapshot(msg.data); break;
+    case "pnl.delta":           state.applyPnlDelta(msg.data); break;
     case "phases.frame":        state.applyPhaseFrame(msg.data); break;
     case "auction.frame":       state.applyAuctionFrame(msg.data); break;
     case "error":
@@ -936,6 +952,7 @@ function handleSwitchView(view) {
   state.setCurrentView(view);
   if (view === "admin") refreshAdminData();
   if (view === "bot-credentials") refreshBotCredentials();
+  if (view === "history") refreshHistoryAll();
 }
 
 async function refreshAdminData() {
@@ -1024,6 +1041,159 @@ async function handleRevokeBotCredential({ id, label }) {
       err?.message || "Failed to revoke credential.", "error");
   }
 }
+
+// ── Q2.6 (#273). History / P&L / Statement orchestration ──────────
+//
+// On entering the History view we:
+//   * seed the P&L panel via GET /pnl/today (the `pnl.me` WS channel
+//     also keeps the state slice live in the background — subscribed
+//     statically from the worker, so no per-view subscribe dance);
+//   * load the first page of orders + executions history under the
+//     current filters (default: today, all symbols).
+//
+// `Apply filters` resets both buffers and re-fetches page 1; `Load
+// more` pages forward by passing the slice's nextCursor.
+
+function _toIsoFrom(dateStr) {
+  // Date inputs surface YYYY-MM-DD; the history endpoints expect an
+  // ISO-8601 timestamp. Treat `from` as 00:00:00Z and `to` as 23:59:59Z
+  // so a calendar pick of "today" actually returns today's rows in
+  // both directions.
+  if (!dateStr) return undefined;
+  return `${dateStr}T00:00:00Z`;
+}
+
+function _toIsoTo(dateStr) {
+  if (!dateStr) return undefined;
+  return `${dateStr}T23:59:59Z`;
+}
+
+function _historyOpts({ withCursor = false, kind } = {}) {
+  const f = state.getState().historyFilters || {};
+  const opts = {
+    from:   _toIsoFrom(f.from),
+    to:     _toIsoTo(f.to),
+    symbol: f.symbol || undefined,
+    limit:  100,
+  };
+  if (withCursor) {
+    const slice = kind === "executions"
+      ? state.getState().historyExecutions
+      : state.getState().historyOrders;
+    if (slice?.nextCursor) opts.cursor = slice.nextCursor;
+  }
+  return opts;
+}
+
+async function refreshHistoryAll() {
+  if (!session) return;
+  // Fetch P&L (REST seed — WS keeps it live afterwards) in parallel
+  // with the first page of each history list.
+  await Promise.all([
+    refreshPnl(),
+    loadMoreHistoryOrders(true),
+    loadMoreHistoryExecutions(true),
+  ]);
+}
+
+async function refreshPnl() {
+  if (!session) return;
+  const captured = session;
+  try {
+    const dto = await getPnlToday(captured.backend, captured.token);
+    if (session !== captured) return;
+    state.applyPnlSnapshot(dto);
+  } catch (err) {
+    if (session !== captured) return;
+    if (err?.status === 401) { logout(); return; }
+    historyUi.setHistoryFeedback(err?.message || "Failed to load P&L.", "error");
+  }
+}
+
+function handleHistoryApplyFilters(filters) {
+  state.setHistoryFilters(filters || {});
+  loadMoreHistoryOrders(true);
+  loadMoreHistoryExecutions(true);
+}
+
+async function loadMoreHistoryOrders(reset) {
+  if (!session) return;
+  const captured = session;
+  const opts = _historyOpts({ withCursor: !reset, kind: "orders" });
+  state.setHistoryOrdersLoading(true);
+  try {
+    const page = await getOrdersHistory(captured.backend, captured.token, opts);
+    if (session !== captured) return;
+    state.applyHistoryOrdersPage({
+      items: page?.items ?? [],
+      nextCursor: page?.nextCursor ?? null,
+      reset: !!reset,
+    });
+  } catch (err) {
+    if (session !== captured) return;
+    state.setHistoryOrdersLoading(false);
+    if (err?.status === 401) { logout(); return; }
+    historyUi.setHistoryFeedback(err?.message || "Failed to load orders history.", "error");
+  }
+}
+
+async function loadMoreHistoryExecutions(reset) {
+  if (!session) return;
+  const captured = session;
+  const opts = _historyOpts({ withCursor: !reset, kind: "executions" });
+  state.setHistoryExecutionsLoading(true);
+  try {
+    const page = await getExecutionsHistory(captured.backend, captured.token, opts);
+    if (session !== captured) return;
+    state.applyHistoryExecutionsPage({
+      items: page?.items ?? [],
+      nextCursor: page?.nextCursor ?? null,
+      reset: !!reset,
+    });
+  } catch (err) {
+    if (session !== captured) return;
+    state.setHistoryExecutionsLoading(false);
+    if (err?.status === 401) { logout(); return; }
+    historyUi.setHistoryFeedback(err?.message || "Failed to load executions history.", "error");
+  }
+}
+
+async function handleStatementDownload(dayKey) {
+  if (!session) return;
+  const captured = session;
+  state.setStatementBusy(true);
+  historyUi.setHistoryFeedback(null);
+  try {
+    const { blob, filename } = await downloadStatementCsv(captured.backend, captured.token, dayKey);
+    if (session !== captured) return;
+    historyUi.triggerBlobDownload(blob, filename);
+    state.setStatementDownload({ dayKey, filename, bytes: blob?.size ?? null });
+    historyUi.setHistoryFeedback(`statement ${filename} downloaded`, "ok");
+  } catch (err) {
+    if (session !== captured) return;
+    if (err?.status === 401) { logout(); return; }
+    state.setStatementError(err?.message || "statement download failed");
+    historyUi.setHistoryFeedback(err?.message || "statement download failed", "error");
+  }
+}
+
+async function handleStatementViewJson(dayKey) {
+  if (!session) return;
+  const captured = session;
+  state.setStatementBusy(true);
+  try {
+    const json = await getStatement(captured.backend, captured.token, dayKey);
+    if (session !== captured) return;
+    state.setStatementJson(json);
+    historyUi.openStatementJsonModal(json);
+  } catch (err) {
+    if (session !== captured) return;
+    if (err?.status === 401) { logout(); return; }
+    state.setStatementError(err?.message || "failed to load statement");
+    historyUi.setHistoryFeedback(err?.message || "failed to load statement", "error");
+  }
+}
+
 
 async function withAdminCall(fn, okMessage) {
   try {

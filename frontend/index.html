@@ -93,6 +93,8 @@
         <span id="user-role" class="role-badge" hidden></span>
         <button id="bot-credentials-open" class="link-button" type="button"
                 aria-label="Bot credentials">Bot credentials</button>
+        <button id="history-open" class="link-button" type="button"
+                aria-label="History, P&amp;L and statement">History</button>
         <button id="logout" class="link-button" type="button" aria-label="Logout">Logout</button>
       </div>
     </header>
@@ -599,6 +601,141 @@
         <button type="submit" id="bot-credentials-secret-done">Done</button>
       </div>
     </form>
+  </div>
+
+  <!-- HISTORY / P&L / STATEMENT VIEW (Q2.6 #273) ---------------------
+       Consumes the read-side endpoints shipped by Q2.1 (#268),
+       Q2.4 (#271) and Q2.5 (#272): cursor-paginated orders/executions
+       history with shared date+symbol filters, a live P&L panel fed by
+       /pnl/today + the `pnl.me` WS channel, and a daily statement
+       downloader (CSV blob + JSON modal). Mirrors the bot-credentials
+       view layout — a sibling top-level <section> toggled via the
+       header link, not a child of the trader grid. -->
+  <section id="history-view" class="view history-view" hidden>
+    <header class="admin-subbar">
+      <h2>History · P&amp;L · Statement</h2>
+      <div class="admin-actions">
+        <button id="history-back" type="button" class="link-button">Back to trader</button>
+        <button id="history-refresh" type="button" class="link-button">Refresh</button>
+      </div>
+    </header>
+    <p id="history-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
+
+    <section class="panel admin-panel pnl-panel">
+      <h3>P&amp;L (today)</h3>
+      <div class="pnl-totals">
+        <div class="pnl-total">
+          <span class="pnl-total-label">Total realized</span>
+          <span id="pnl-total-realized" class="pnl-total-value">—</span>
+        </div>
+        <div class="pnl-total">
+          <span class="pnl-total-label">Total unrealized</span>
+          <span id="pnl-total-unrealized" class="pnl-total-value">—</span>
+        </div>
+        <span id="pnl-live" class="pnl-live" hidden>live</span>
+      </div>
+      <h4>Per-symbol</h4>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th class="num">Position</th>
+              <th class="num">Avg price</th>
+              <th class="num">Ref price</th>
+              <th class="num">Unrealized</th>
+              <th class="num">Realized today</th>
+            </tr>
+          </thead>
+          <tbody id="pnl-rows">
+            <tr><td colspan="6" class="muted">no P&amp;L data yet</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel admin-panel statement-panel">
+      <h3>Daily statement</h3>
+      <form id="statement-form" class="admin-inline-form">
+        <label>
+          <span>Date</span>
+          <input id="statement-date" type="date" />
+        </label>
+        <button type="submit" id="statement-download-btn">Download CSV</button>
+        <button type="button" id="statement-view-json-btn" class="link-button">View JSON</button>
+      </form>
+      <p id="statement-status" class="muted-line" hidden></p>
+    </section>
+
+    <section class="panel admin-panel history-panel">
+      <h3>History</h3>
+      <form id="history-filters" class="admin-inline-form history-filters">
+        <label>
+          <span>From</span>
+          <input id="history-from" type="date" />
+        </label>
+        <label>
+          <span>To</span>
+          <input id="history-to" type="date" />
+        </label>
+        <label>
+          <span>Symbol</span>
+          <input id="history-symbol" type="text" maxlength="16" placeholder="all" />
+        </label>
+        <button type="submit" id="history-apply">Apply</button>
+      </form>
+
+      <h4>Orders</h4>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th><th>ClOrdID</th><th>Symbol</th><th>Side</th><th>Type</th>
+              <th class="num">Qty</th><th class="num">CumQty</th><th class="num">Price</th>
+              <th>Status</th><th>TIF</th>
+            </tr>
+          </thead>
+          <tbody id="history-orders-body">
+            <tr><td colspan="10" class="muted">no orders loaded</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="history-more-row">
+        <button type="button" id="history-orders-more" class="link-button" hidden>Load more orders</button>
+      </div>
+
+      <h4>Executions</h4>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th><th>ClOrdID</th><th>Symbol</th><th>Side</th><th>Kind</th>
+              <th class="num">LastQty</th><th class="num">LastPx</th><th class="num">CumQty</th>
+              <th>Reject</th>
+            </tr>
+          </thead>
+          <tbody id="history-executions-body">
+            <tr><td colspan="9" class="muted">no executions loaded</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="history-more-row">
+        <button type="button" id="history-executions-more" class="link-button" hidden>Load more executions</button>
+      </div>
+    </section>
+  </section>
+
+  <!-- STATEMENT JSON MODAL (Q2.6 #273) ----------------------------- -->
+  <div id="statement-json-modal" class="modal-backdrop" hidden role="dialog"
+       aria-modal="true" aria-labelledby="statement-json-title">
+    <div class="modal-card statement-json-card">
+      <header class="order-detail-title-row">
+        <h2 id="statement-json-title">Statement (JSON)</h2>
+        <button type="button" id="statement-json-close" class="order-detail-close"
+                aria-label="Close statement JSON">×</button>
+      </header>
+      <pre id="statement-json-body" class="statement-json-body"></pre>
+    </div>
   </div>
 
   <script type="module" src="js/app.js"></script>
