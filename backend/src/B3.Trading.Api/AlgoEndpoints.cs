@@ -134,6 +134,38 @@ public static class AlgoEndpoints
                         childType, req.Twap.ChildPrice);
                     break;
 
+                case AlgoType.Vwap:
+                    // Q3.1 (#281). VWAP mirrors TWAP's surface conventions
+                    // — kept on the same POST /algo endpoint so the
+                    // discriminator-by-Type pattern stays consistent.
+                    if (req.Vwap is null)
+                        return Results.BadRequest(new { error = "vwap parameters are required for type=Vwap" });
+                    if (!Enum.TryParse<OrderType>(req.Vwap.ChildOrderType, ignoreCase: true, out var vwapChildType))
+                        return Results.BadRequest(new { error = $"invalid vwap.childOrderType '{req.Vwap.ChildOrderType}'" });
+                    if (vwapChildType is not (OrderType.Limit or OrderType.Market))
+                        return Results.BadRequest(new { error = "vwap.childOrderType must be Limit or Market" });
+                    if (req.Vwap.EndUtc <= req.Vwap.StartUtc)
+                        return Results.BadRequest(new { error = "vwap.endUtc must be greater than vwap.startUtc" });
+                    if (vwapChildType == OrderType.Limit && req.Vwap.ChildPrice is null)
+                        return Results.BadRequest(new { error = "vwap.childPrice is required when vwap.childOrderType is Limit" });
+                    var tickSeconds = req.Vwap.TickIntervalSeconds ?? 30d;
+                    if (tickSeconds <= 0)
+                        return Results.BadRequest(new { error = "vwap.tickIntervalSeconds must be positive" });
+                    if (req.Vwap.SliceMaxPct is { } smp && (smp <= 0 || smp > 1))
+                        return Results.BadRequest(new { error = "vwap.sliceMaxPct must be in (0, 1]" });
+                    if (req.Vwap.ParticipationCap is { } pc && (pc <= 0 || pc > 1))
+                        return Results.BadRequest(new { error = "vwap.participationCap must be in (0, 1]" });
+                    parameters = new VwapParameters(
+                        req.Vwap.StartUtc,
+                        req.Vwap.EndUtc,
+                        vwapChildType,
+                        req.Vwap.ChildPrice,
+                        TimeSpan.FromSeconds(tickSeconds),
+                        req.Vwap.SliceMaxPct,
+                        req.Vwap.PriceLimit,
+                        req.Vwap.ParticipationCap);
+                    break;
+
                 default:
                     return Results.BadRequest(new { error = $"unsupported algo type '{type}'" });
             }
@@ -166,6 +198,14 @@ public static class AlgoEndpoints
                         TwapSliceCount = (parameters as TwapParameters)?.SliceCount,
                         TwapChildOrderType = (parameters as TwapParameters)?.ChildOrderType.ToString(),
                         TwapChildPrice = (parameters as TwapParameters)?.ChildPrice,
+                        VwapStartUtc = (parameters as VwapParameters)?.StartUtc,
+                        VwapEndUtc = (parameters as VwapParameters)?.EndUtc,
+                        VwapChildOrderType = (parameters as VwapParameters)?.ChildOrderType.ToString(),
+                        VwapChildPrice = (parameters as VwapParameters)?.ChildPrice,
+                        VwapTickIntervalTicks = (parameters as VwapParameters)?.TickInterval.Ticks,
+                        VwapSliceMaxPct = (parameters as VwapParameters)?.SliceMaxPct,
+                        VwapPriceLimit = (parameters as VwapParameters)?.PriceLimit,
+                        VwapParticipationCap = (parameters as VwapParameters)?.ParticipationCap,
                     },
                     () => algos.TryAdd(algo));
             }
@@ -295,7 +335,8 @@ public sealed record CreateAlgoRequest(
     string Type,
     long TotalQuantity,
     CreateAlgoIcebergParams? Iceberg,
-    CreateAlgoTwapParams? Twap);
+    CreateAlgoTwapParams? Twap,
+    CreateAlgoVwapParams? Vwap = null);
 
 public sealed record CreateAlgoIcebergParams(long DisplayQuantity, decimal? LimitPrice);
 
@@ -305,3 +346,18 @@ public sealed record CreateAlgoTwapParams(
     int SliceCount,
     string ChildOrderType,
     decimal? ChildPrice);
+
+/// <summary>
+/// HTTP request shape for the VWAP parameter block (Q3.1 / #281).
+/// <see cref="TickIntervalSeconds"/> defaults to 30s when null — matches
+/// the issue spec default.
+/// </summary>
+public sealed record CreateAlgoVwapParams(
+    DateTimeOffset StartUtc,
+    DateTimeOffset EndUtc,
+    string ChildOrderType,
+    decimal? ChildPrice,
+    double? TickIntervalSeconds = null,
+    decimal? SliceMaxPct = null,
+    decimal? PriceLimit = null,
+    decimal? ParticipationCap = null);

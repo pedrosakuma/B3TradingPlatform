@@ -252,6 +252,28 @@ public static class MetricsRegistry
             "trading.algo.signal_queue_depth",
             description: "Estimated number of signals queued for the AlgoEngine consumer.");
 
+    // Q3.1 (#281) — VWAP slice scheduler observability. Mirrors the
+    // TWAP block above. SlicesEmitted is the count of child orders the
+    // engine actually placed (zero-quantity slots are skipped, not
+    // counted here). TargetVsActualDiff is the signed gap between the
+    // target cumulative curve and what has executed at the moment of
+    // slice emission (positive = engine is behind, negative = ahead /
+    // overfilled). Cancelled bumps for every VWAP parent reaching the
+    // <c>Cancelled</c> terminal state.
+    public static readonly Counter<long> AlgoVwapSlicesEmitted =
+        Meter.CreateCounter<long>(
+            "trading.algo.vwap.slices_emitted",
+            description: "Child orders submitted by the VWAP slice scheduler.");
+    public static readonly Histogram<long> AlgoVwapTargetVsActualDiff =
+        Meter.CreateHistogram<long>(
+            "trading.algo.vwap.target_vs_actual_diff",
+            unit: "shares",
+            description: "targetCumQty − executedCum at the moment a VWAP slice is evaluated.");
+    public static readonly Counter<long> AlgoVwapCancelled =
+        Meter.CreateCounter<long>(
+            "trading.algo.vwap.cancelled",
+            description: "VWAP parents reaching the Cancelled terminal state.");
+
     /// <summary>
     /// 1 when the host booted with <c>Trading:Exchange:AllowErInjection=true</c>
     /// (admin-gated <c>POST /admin/simulator/er</c> is mapped). Set once at

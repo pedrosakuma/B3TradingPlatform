@@ -146,7 +146,7 @@ public class AlgoEndpointsTests
         {
             Symbol = "PETR4",
             Side = "Buy",
-            Type = "Vwap", // not in v0 enum
+            Type = "Sniper", // not a valid algo type
             TotalQuantity = 100,
         });
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);

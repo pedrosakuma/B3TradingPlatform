@@ -147,46 +147,89 @@ public sealed class AlgoScheduler : BackgroundService
         var algos = _algos.EnumerateAll(includeTerminal: false);
         foreach (var algo in algos)
         {
-            if (algo.Type != AlgoType.Twap) continue;
             if (algo.IsTerminal) continue;
             if (algo.Status == AlgoStatus.Cancelling) continue;
-            if (algo.Parameters is not TwapParameters tp) continue;
 
-            // Window expiry is independent of slice progress: even if more
-            // slices are nominally scheduled, once endUtc has passed the
-            // engine must promote to Expired so the parent stops counting
-            // as "live work" everywhere.
-            if (now >= tp.EndUtc)
+            if (algo.Type == AlgoType.Twap && algo.Parameters is TwapParameters tp)
             {
-                Enqueue(algo);
+                TickTwap(algo, tp, now);
                 continue;
             }
 
-            // Determine "is there a live child?" and "what's the next
-            // slice we owe?" by scanning the order book — the scheduler
-            // intentionally does not share state with the engine to keep
-            // the threads decoupled (RFC §4.11 commitment 1).
-            int maxSeq = -1;
-            bool hasLiveChild = false;
-            foreach (var child in _orders.EnumerateChildrenOf(algo.FirmId, algo.AlgoId))
+            if (algo.Type == AlgoType.Vwap && algo.Parameters is VwapParameters vp)
             {
-                if (child.AlgoSliceSeq is { } seq && seq > maxSeq) maxSeq = seq;
-                if (!IsChildTerminal(child)) hasLiveChild = true;
+                TickVwap(algo, vp, now);
+                continue;
             }
-            if (hasLiveChild) continue;
-
-            var nextSeq = maxSeq + 1;
-            if (nextSeq >= tp.SliceCount) continue; // plan exhausted; wait for endUtc
-
-            var dueAt = TwapPlan.PlannedAtUtc(tp.StartUtc, tp.EndUtc, tp.SliceCount, nextSeq);
-            if (now < dueAt) continue;
-
-            // Slice fire: capture jitter as (now - plannedAtUtc) before
-            // the channel write so dropped signals still surface in the
-            // metric.
-            MetricsRegistry.AlgoTwapSliceFireJitter.Record((now - dueAt).TotalMilliseconds);
-            Enqueue(algo);
         }
+    }
+
+    private void TickTwap(Algo algo, TwapParameters tp, DateTimeOffset now)
+    {
+        // Window expiry is independent of slice progress: even if more
+        // slices are nominally scheduled, once endUtc has passed the
+        // engine must promote to Expired so the parent stops counting
+        // as "live work" everywhere.
+        if (now >= tp.EndUtc)
+        {
+            Enqueue(algo);
+            return;
+        }
+
+        // Determine "is there a live child?" and "what's the next
+        // slice we owe?" by scanning the order book — the scheduler
+        // intentionally does not share state with the engine to keep
+        // the threads decoupled (RFC §4.11 commitment 1).
+        int maxSeq = -1;
+        bool hasLiveChild = false;
+        foreach (var child in _orders.EnumerateChildrenOf(algo.FirmId, algo.AlgoId))
+        {
+            if (child.AlgoSliceSeq is { } seq && seq > maxSeq) maxSeq = seq;
+            if (!IsChildTerminal(child)) hasLiveChild = true;
+        }
+        if (hasLiveChild) return;
+
+        var nextSeq = maxSeq + 1;
+        if (nextSeq >= tp.SliceCount) return; // plan exhausted; wait for endUtc
+
+        var dueAt = TwapPlan.PlannedAtUtc(tp.StartUtc, tp.EndUtc, tp.SliceCount, nextSeq);
+        if (now < dueAt) return;
+
+        // Slice fire: capture jitter as (now - plannedAtUtc) before
+        // the channel write so dropped signals still surface in the
+        // metric.
+        MetricsRegistry.AlgoTwapSliceFireJitter.Record((now - dueAt).TotalMilliseconds);
+        Enqueue(algo);
+    }
+
+    private void TickVwap(Algo algo, VwapParameters vp, DateTimeOffset now)
+    {
+        // VWAP mirrors TWAP scheduling: window-expired parents need an
+        // engine pass to mark Expired; otherwise enqueue at most one
+        // Created signal per parent per tick so the engine evaluates
+        // the slice (it owns the catch-up loop for empty slots — see
+        // OnCreatedAsync).
+        if (now >= vp.EndUtc)
+        {
+            Enqueue(algo);
+            return;
+        }
+
+        int maxSeq = -1;
+        bool hasLiveChild = false;
+        foreach (var child in _orders.EnumerateChildrenOf(algo.FirmId, algo.AlgoId))
+        {
+            if (child.AlgoSliceSeq is { } seq && seq > maxSeq) maxSeq = seq;
+            if (!IsChildTerminal(child)) hasLiveChild = true;
+        }
+        if (hasLiveChild) return;
+
+        var nextSeq = maxSeq + 1;
+        var dueAt = VwapPlan.PlannedAtUtc(vp.StartUtc, vp.TickInterval, nextSeq);
+        if (now < dueAt) return;
+        if (dueAt >= vp.EndUtc) return; // window passed at the slot boundary
+
+        Enqueue(algo);
     }
 
     private void Enqueue(Algo algo)

@@ -743,6 +743,15 @@ public sealed class EventReplayer
                 ac.TwapSliceCount ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing TwapSliceCount."),
                 Enum.Parse<OrderType>(ac.TwapChildOrderType ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing TwapChildOrderType."), ignoreCase: true),
                 ac.TwapChildPrice),
+            AlgoType.Vwap => new VwapParameters(
+                ac.VwapStartUtc ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing VwapStartUtc."),
+                ac.VwapEndUtc ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing VwapEndUtc."),
+                Enum.Parse<OrderType>(ac.VwapChildOrderType ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing VwapChildOrderType."), ignoreCase: true),
+                ac.VwapChildPrice,
+                TimeSpan.FromTicks(ac.VwapTickIntervalTicks ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing VwapTickIntervalTicks.")),
+                ac.VwapSliceMaxPct,
+                ac.VwapPriceLimit,
+                ac.VwapParticipationCap),
             _ => throw new InvalidOperationException($"Unknown algo type: {ac.Type}"),
         };
         _algos.TryAdd(new Algo(ac.AlgoId, owner, ac.FirmId, ac.Symbol, ac.SecurityId,

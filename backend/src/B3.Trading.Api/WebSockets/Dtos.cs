@@ -160,7 +160,8 @@ public sealed record AlgoDto(
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset? TerminalAtUtc,
     IcebergParamsDto? Iceberg,
-    TwapParamsDto? Twap);
+    TwapParamsDto? Twap,
+    VwapParamsDto? Vwap = null);
 
 public sealed record IcebergParamsDto(long DisplayQuantity, decimal? LimitPrice);
 
@@ -170,6 +171,22 @@ public sealed record TwapParamsDto(
     int SliceCount,
     string ChildOrderType,
     decimal? ChildPrice);
+
+/// <summary>
+/// Wire shape for VWAP parameters (Q3.1 / #281). Tick interval is
+/// surfaced in seconds (the WAL persists ticks; this is a UX choice for
+/// the JSON wire) so dashboards and clients don't have to know the
+/// .NET tick unit.
+/// </summary>
+public sealed record VwapParamsDto(
+    DateTimeOffset StartUtc,
+    DateTimeOffset EndUtc,
+    string ChildOrderType,
+    decimal? ChildPrice,
+    double TickIntervalSeconds,
+    decimal? SliceMaxPct,
+    decimal? PriceLimit,
+    decimal? ParticipationCap);
 
 public static class DtoMappings
 {
@@ -195,6 +212,10 @@ public static class DtoMappings
         TwapParamsDto? twap = a.Parameters is TwapParameters tp
             ? new TwapParamsDto(tp.StartUtc, tp.EndUtc, tp.SliceCount, tp.ChildOrderType.ToString(), tp.ChildPrice)
             : null;
+        VwapParamsDto? vwap = a.Parameters is VwapParameters vp
+            ? new VwapParamsDto(vp.StartUtc, vp.EndUtc, vp.ChildOrderType.ToString(), vp.ChildPrice,
+                vp.TickInterval.TotalSeconds, vp.SliceMaxPct, vp.PriceLimit, vp.ParticipationCap)
+            : null;
         return new AlgoDto(
             a.AlgoId.ToString(),
             a.Symbol,
@@ -209,6 +230,7 @@ public static class DtoMappings
             a.CreatedAtUtc,
             a.TerminalAtUtc,
             iceberg,
-            twap);
+            twap,
+            vwap);
     }
 }

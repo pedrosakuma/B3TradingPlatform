@@ -12,6 +12,7 @@ public readonly record struct MarketTrade(
     string Symbol,
     ulong SecurityId,
     decimal Price,
+    long Qty,
     DateTimeOffset ReceivedUtc);
 
 /// <summary>

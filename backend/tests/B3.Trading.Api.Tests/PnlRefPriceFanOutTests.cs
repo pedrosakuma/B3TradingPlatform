@@ -41,7 +41,7 @@ public class PnlRefPriceFanOutTests
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
         public void RaiseTrade(string symbol, decimal price, DateTimeOffset ts) =>
-            Trade?.Invoke(new MarketTrade(symbol, 0UL, price, ts));
+            Trade?.Invoke(new MarketTrade(symbol, 0UL, price, 0L, ts));
     }
 
     [Fact]

@@ -95,6 +95,7 @@ internal sealed class SdkMarketDataSubscriber : IMarketDataSubscriber
             Symbol: ev.Symbol,
             SecurityId: ev.SecurityId,
             Price: ev.Price,
+            Qty: ev.Qty,
             ReceivedUtc: new DateTimeOffset(DateTime.SpecifyKind(ev.ReceivedUtc, DateTimeKind.Utc))));
     }
 

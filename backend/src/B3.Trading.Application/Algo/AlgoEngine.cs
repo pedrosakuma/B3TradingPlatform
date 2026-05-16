@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using B3.Trading.Application.MarketData;
 using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Domain;
@@ -76,6 +77,8 @@ public sealed class AlgoEngine : BackgroundService
     private readonly TimeProvider _clock;
     private readonly ILogger<AlgoEngine> _logger;
     private readonly OrderOwnershipMap _ownership;
+    private readonly VolumeCurveEstimator? _vwapCurve;
+    private readonly MarketDataVolumePump? _volumePump;
 
     // Per-parent runtime state. Owned by the consumer task; the
     // ConcurrentDictionary is only used because TryAdd/TryGetValue are
@@ -94,7 +97,9 @@ public sealed class AlgoEngine : BackgroundService
         EventDispatcher dispatcher,
         TimeProvider clock,
         ILogger<AlgoEngine> logger,
-        OrderOwnershipMap ownership)
+        OrderOwnershipMap ownership,
+        VolumeCurveEstimator? vwapCurve = null,
+        MarketDataVolumePump? volumePump = null)
     {
         _queue = queue;
         _algos = algos;
@@ -107,6 +112,8 @@ public sealed class AlgoEngine : BackgroundService
         _clock = clock;
         _logger = logger;
         _ownership = ownership;
+        _vwapCurve = vwapCurve;
+        _volumePump = volumePump;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -246,6 +253,18 @@ public sealed class AlgoEngine : BackgroundService
         if (algo.IsTerminal) return;
         if (algo.Status == AlgoStatus.Cancelling) return;
 
+        // Pass-1 review (#294) P1. VWAP needs the SDK subscribed to its
+        // symbol so the VolumeCurveEstimator receives trade prints; without
+        // a non-empty curve and ParticipationCap set, VwapPlan.SliceQty
+        // returns 0 until window expiry → silent no-op algo. The pump
+        // dedupes per symbol so repeated calls (reactor re-evaluation,
+        // multiple parents on the same symbol, WAL replay-driven
+        // reconciliation) collapse to one SDK Subscribe per process.
+        if (algo.Type == AlgoType.Vwap && _volumePump is not null)
+        {
+            await _volumePump.EnsureSubscribedAsync(algo.Symbol, ct).ConfigureAwait(false);
+        }
+
         if (rt.LiveChildClOrdId is { } existing)
         {
             // A child is already outstanding (steady-state or post-recovery).
@@ -300,6 +319,41 @@ public sealed class AlgoEngine : BackgroundService
                 // Not due yet — scheduler will re-fire when plannedAtUtc
                 // arrives. No-op (idempotent under tick storms).
                 return;
+            }
+        }
+        else if (algo.Type == AlgoType.Vwap && algo.Parameters is VwapParameters vp)
+        {
+            // VWAP: same shape as TWAP but the slice-quantity decision
+            // is driven by the live volume curve via ComputeNextSlice.
+            // Empty slots (gap <= 0) are skipped by advancing
+            // NextSliceSeq without submitting — keeps the slot index in
+            // step with the deterministic plannedAtUtc grid so recovery
+            // is unambiguous.
+            var now = _clock.GetUtcNow();
+            if (now >= vp.EndUtc)
+            {
+                await RecordTerminalAsync(algo, rt, AlgoStatus.Expired, AlgoTerminalReason.VwapWindowExpired).ConfigureAwait(false);
+                return;
+            }
+
+            // Skip any already-due empty slots up to the first one with
+            // qty > 0 (or the first one not yet due, whichever comes
+            // first). The scheduler ticks every 100ms so the catch-up
+            // loop runs at most until the volume curve produces a non-
+            // zero gap or we hit the future.
+            while (true)
+            {
+                var dueAt = VwapPlan.PlannedAtUtc(vp.StartUtc, vp.TickInterval, rt.NextSliceSeq);
+                if (now < dueAt) return;
+                if (dueAt >= vp.EndUtc)
+                {
+                    // No more in-window slots; let the window-expiry
+                    // path drive the terminal transition.
+                    return;
+                }
+                var (qty, _, _, _) = ComputeVwapSlice(algo, vp, dueAt);
+                if (qty > 0) break;
+                rt.NextSliceSeq++;
             }
         }
 
@@ -370,6 +424,17 @@ public sealed class AlgoEngine : BackgroundService
                     }
                     return;
                 }
+                if (algo.Type == AlgoType.Vwap && algo.Parameters is VwapParameters vpFilled)
+                {
+                    // VWAP child finished but residue remains. Mirror
+                    // TWAP: scheduler will re-fire at the next slot.
+                    // Window-expired-during-child-fill same handling.
+                    if (_clock.GetUtcNow() >= vpFilled.EndUtc)
+                    {
+                        await RecordTerminalAsync(algo, rt, AlgoStatus.Expired, AlgoTerminalReason.VwapWindowExpired).ConfigureAwait(false);
+                    }
+                    return;
+                }
                 await SubmitNextSliceAsync(algo, rt, ct).ConfigureAwait(false);
                 return;
 
@@ -392,6 +457,10 @@ public sealed class AlgoEngine : BackgroundService
                     // VenueCancelled.
                     await RecordTerminalAsync(algo, rt, AlgoStatus.Expired, AlgoTerminalReason.TwapWindowExpired).ConfigureAwait(false);
                 }
+                else if (IsVwapWindowExpired(algo))
+                {
+                    await RecordTerminalAsync(algo, rt, AlgoStatus.Expired, AlgoTerminalReason.VwapWindowExpired).ConfigureAwait(false);
+                }
                 else
                 {
                     // Venue cancelled the child without operator request
@@ -410,6 +479,11 @@ public sealed class AlgoEngine : BackgroundService
                     await RecordTerminalAsync(algo, rt, AlgoStatus.Expired, AlgoTerminalReason.TwapWindowExpired).ConfigureAwait(false);
                     return;
                 }
+                if (IsVwapWindowExpired(algo))
+                {
+                    await RecordTerminalAsync(algo, rt, AlgoStatus.Expired, AlgoTerminalReason.VwapWindowExpired).ConfigureAwait(false);
+                    return;
+                }
                 await RecordTerminalAsync(algo, rt, AlgoStatus.Suspended, AlgoTerminalReason.RiskRejected).ConfigureAwait(false);
                 return;
         }
@@ -419,6 +493,11 @@ public sealed class AlgoEngine : BackgroundService
         algo.Type == AlgoType.Twap
         && algo.Parameters is TwapParameters tp
         && _clock.GetUtcNow() >= tp.EndUtc;
+
+    private bool IsVwapWindowExpired(Algo algo) =>
+        algo.Type == AlgoType.Vwap
+        && algo.Parameters is VwapParameters vp
+        && _clock.GetUtcNow() >= vp.EndUtc;
 
     private async Task OnCancelRequestedAsync(Algo algo, AlgoParentRuntime rt, CancellationToken ct)
     {
@@ -474,6 +553,14 @@ public sealed class AlgoEngine : BackgroundService
         var (sliceQty, slicePrice) = ComputeNextSlice(algo);
         if (sliceQty <= 0)
         {
+            if (algo.Type == AlgoType.Vwap)
+            {
+                // VWAP: empty slot — the parent is ahead of the curve.
+                // Advance NextSliceSeq so the next scheduler tick
+                // evaluates the next slot. Do NOT mark terminal.
+                rt.NextSliceSeq++;
+                return;
+            }
             // Should be unreachable (RemainingQuantity == 0 is checked by
             // callers) — defensive log + complete.
             await RecordTerminalAsync(algo, rt, AlgoStatus.Completed, AlgoTerminalReason.None).ConfigureAwait(false);
@@ -485,8 +572,23 @@ public sealed class AlgoEngine : BackgroundService
         {
             IcebergParameters => OrderType.Limit,
             TwapParameters tp => tp.ChildOrderType,
+            VwapParameters vp => vp.ChildOrderType,
             _ => OrderType.Limit,
         };
+
+        // Capture VWAP audit envelope inputs BEFORE submit so we can WAL
+        // them once the venue accepts the child. Recompute is cheap and
+        // it keeps the envelope honest under retry loops.
+        long vwapTargetCum = 0, vwapExecutedCum = 0;
+        DateTimeOffset vwapPlannedAt = default;
+        if (algo.Parameters is VwapParameters vpForAudit)
+        {
+            vwapPlannedAt = VwapPlan.PlannedAtUtc(vpForAudit.StartUtc, vpForAudit.TickInterval, sliceSeq);
+            var (_, _, target, gap) = ComputeVwapSlice(algo, vpForAudit, vwapPlannedAt);
+            vwapTargetCum = target;
+            vwapExecutedCum = algo.FilledQuantity;
+            MetricsRegistry.AlgoVwapTargetVsActualDiff.Record(gap);
+        }
 
         for (var attempt = 0; attempt <= RetryDelays.Length; attempt++)
         {
@@ -527,6 +629,32 @@ public sealed class AlgoEngine : BackgroundService
                     rt.RetryAttempts = 0;
                     MetricsRegistry.AlgoChildrenSubmitted.Add(1,
                         new KeyValuePair<string, object?>("type", algo.Type.ToString().ToLowerInvariant()));
+                    if (algo.Type == AlgoType.Vwap)
+                    {
+                        MetricsRegistry.AlgoVwapSlicesEmitted.Add(1);
+                        // Best-effort audit envelope. WAL backpressure
+                        // here is non-fatal — recovery doesn't need it.
+                        try
+                        {
+                            _dispatcher.Dispatch(
+                                new AlgoVwapSlicedEvent
+                                {
+                                    AlgoId = algo.AlgoId,
+                                    FirmId = algo.FirmId,
+                                    SliceSeq = sliceSeq,
+                                    TargetCumQty = vwapTargetCum,
+                                    ExecutedCum = vwapExecutedCum,
+                                    SliceQty = sliceQty,
+                                    PlannedAtUtc = vwapPlannedAt,
+                                },
+                                static () => { });
+                        }
+                        catch (WalBackpressureException)
+                        {
+                            MetricsRegistry.WalBackpressure.Add(1,
+                                new KeyValuePair<string, object?>("call_site", "algo.vwap.sliced"));
+                        }
+                    }
                     _algoSink.PublishAlgoSnapshot(algo.Owner, algo.FirmId, algo.AlgoId);
                     return;
 
@@ -612,6 +740,10 @@ public sealed class AlgoEngine : BackgroundService
         }
 
         _algoSink.PublishAlgoSnapshot(algo.Owner, algo.FirmId, algo.AlgoId);
+        if (algo.Type == AlgoType.Vwap && status == AlgoStatus.Cancelled)
+        {
+            MetricsRegistry.AlgoVwapCancelled.Add(1);
+        }
         await Task.CompletedTask;
     }
 
@@ -641,9 +773,60 @@ public sealed class AlgoEngine : BackgroundService
                     var qty = Math.Min(planned, algo.RemainingQuantity);
                     return (qty, tp.ChildPrice);
                 }
+            case VwapParameters vp:
+                {
+                    var rt = _runtime[(algo.FirmId, algo.AlgoId)];
+                    var dueAt = VwapPlan.PlannedAtUtc(vp.StartUtc, vp.TickInterval, rt.NextSliceSeq);
+                    var (qty, price, _, _) = ComputeVwapSlice(algo, vp, dueAt);
+                    return (qty, price);
+                }
             default:
                 return (algo.RemainingQuantity, null);
         }
+    }
+
+    /// <summary>
+    /// VWAP slice computation: ask the curve for the CDF at the slot's
+    /// <c>plannedAtUtc</c>, derive the target cumulative qty, apply the
+    /// per-slice caps. Returns <c>(qty, price, targetCum, gap)</c> so the
+    /// emission path can record the audit envelope without recomputing.
+    /// </summary>
+    private (long Qty, decimal? Price, long TargetCum, long Gap) ComputeVwapSlice(
+        Algo algo, VwapParameters vp, DateTimeOffset evaluateAtUtc)
+    {
+        var cdf = _vwapCurve?.CdfAt(algo.Symbol, vp.StartUtc, vp.EndUtc, evaluateAtUtc)
+            ?? UniformCdf(vp.StartUtc, vp.EndUtc, evaluateAtUtc);
+        var targetCum = VwapPlan.TargetCumQty(algo.TotalQuantity, cdf);
+        long recentMarketVolume = 0;
+        if (vp.ParticipationCap is { } && _vwapCurve is not null)
+        {
+            // "Recent" volume window = one tick interval prior to now.
+            // Smaller windows over-react to micro-bursts; larger windows
+            // mute the cap. One tick interval matches the slice cadence.
+            var lookback = evaluateAtUtc - vp.TickInterval;
+            if (lookback < vp.StartUtc) lookback = vp.StartUtc;
+            recentMarketVolume = _vwapCurve.VolumeBetween(algo.Symbol, lookback, evaluateAtUtc);
+        }
+        var executedCum = algo.FilledQuantity;
+        var gap = targetCum - executedCum;
+        var qty = VwapPlan.SliceQty(
+            targetCum,
+            executedCum,
+            algo.RemainingQuantity,
+            algo.TotalQuantity,
+            vp.SliceMaxPct,
+            vp.ParticipationCap,
+            recentMarketVolume);
+        var price = VwapPlan.ClampPrice(vp.ChildPrice, vp.PriceLimit, algo.Side);
+        return (qty, price, targetCum, gap);
+    }
+
+    private static double UniformCdf(DateTimeOffset start, DateTimeOffset end, DateTimeOffset at)
+    {
+        if (end <= start) return 0;
+        if (at <= start) return 0;
+        if (at >= end) return 1;
+        return (at - start).TotalSeconds / (end - start).TotalSeconds;
     }
 
     private static bool IsChildTerminal(Order o) =>

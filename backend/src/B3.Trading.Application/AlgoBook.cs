@@ -137,6 +137,14 @@ public sealed class AlgoBook
         int? twapSliceCount = null;
         string? twapChildType = null;
         decimal? twapChildPrice = null;
+        DateTimeOffset? vwapStart = null;
+        DateTimeOffset? vwapEnd = null;
+        string? vwapChildType = null;
+        decimal? vwapChildPrice = null;
+        long? vwapTickIntervalTicks = null;
+        decimal? vwapSliceMaxPct = null;
+        decimal? vwapPriceLimit = null;
+        decimal? vwapParticipationCap = null;
 
         switch (a.Parameters)
         {
@@ -151,6 +159,16 @@ public sealed class AlgoBook
                 twapChildType = tp.ChildOrderType.ToString();
                 twapChildPrice = tp.ChildPrice;
                 break;
+            case VwapParameters vp:
+                vwapStart = vp.StartUtc;
+                vwapEnd = vp.EndUtc;
+                vwapChildType = vp.ChildOrderType.ToString();
+                vwapChildPrice = vp.ChildPrice;
+                vwapTickIntervalTicks = vp.TickInterval.Ticks;
+                vwapSliceMaxPct = vp.SliceMaxPct;
+                vwapPriceLimit = vp.PriceLimit;
+                vwapParticipationCap = vp.ParticipationCap;
+                break;
         }
 
         return new Persistence.AlgoSnapshot(
@@ -159,7 +177,9 @@ public sealed class AlgoBook
             r.Status.ToString(), r.Reason.ToString(),
             a.CreatedAtUtc, r.TerminalAtUtc,
             icebergDisplay, icebergLimit,
-            twapStart, twapEnd, twapSliceCount, twapChildType, twapChildPrice);
+            twapStart, twapEnd, twapSliceCount, twapChildType, twapChildPrice,
+            vwapStart, vwapEnd, vwapChildType, vwapChildPrice,
+            vwapTickIntervalTicks, vwapSliceMaxPct, vwapPriceLimit, vwapParticipationCap);
     }
 
     public void Restore(IEnumerable<Persistence.AlgoSnapshot> snaps)
@@ -189,6 +209,14 @@ public sealed class AlgoBook
         int? twapSliceCount = null;
         string? twapChildType = null;
         decimal? twapChildPrice = null;
+        DateTimeOffset? vwapStart = null;
+        DateTimeOffset? vwapEnd = null;
+        string? vwapChildType = null;
+        decimal? vwapChildPrice = null;
+        long? vwapTickIntervalTicks = null;
+        decimal? vwapSliceMaxPct = null;
+        decimal? vwapPriceLimit = null;
+        decimal? vwapParticipationCap = null;
 
         switch (a.Parameters)
         {
@@ -203,6 +231,16 @@ public sealed class AlgoBook
                 twapChildType = tp.ChildOrderType.ToString();
                 twapChildPrice = tp.ChildPrice;
                 break;
+            case VwapParameters vp:
+                vwapStart = vp.StartUtc;
+                vwapEnd = vp.EndUtc;
+                vwapChildType = vp.ChildOrderType.ToString();
+                vwapChildPrice = vp.ChildPrice;
+                vwapTickIntervalTicks = vp.TickInterval.Ticks;
+                vwapSliceMaxPct = vp.SliceMaxPct;
+                vwapPriceLimit = vp.PriceLimit;
+                vwapParticipationCap = vp.ParticipationCap;
+                break;
         }
 
         return new Persistence.AlgoSnapshot(
@@ -211,7 +249,9 @@ public sealed class AlgoBook
             a.Status.ToString(), a.TerminalReason.ToString(),
             a.CreatedAtUtc, a.TerminalAtUtc,
             icebergDisplay, icebergLimit,
-            twapStart, twapEnd, twapSliceCount, twapChildType, twapChildPrice);
+            twapStart, twapEnd, twapSliceCount, twapChildType, twapChildPrice,
+            vwapStart, vwapEnd, vwapChildType, vwapChildPrice,
+            vwapTickIntervalTicks, vwapSliceMaxPct, vwapPriceLimit, vwapParticipationCap);
     }
 
     internal static Algo FromSnapshot(Persistence.AlgoSnapshot s)
@@ -232,6 +272,15 @@ public sealed class AlgoBook
                 s.TwapSliceCount ?? throw new InvalidOperationException($"Algo {s.AlgoId} snapshot missing TwapSliceCount."),
                 Enum.Parse<OrderType>(s.TwapChildOrderType ?? throw new InvalidOperationException($"Algo {s.AlgoId} snapshot missing TwapChildOrderType.")),
                 s.TwapChildPrice),
+            AlgoType.Vwap => new VwapParameters(
+                s.VwapStartUtc ?? throw new InvalidOperationException($"Algo {s.AlgoId} snapshot missing VwapStartUtc."),
+                s.VwapEndUtc ?? throw new InvalidOperationException($"Algo {s.AlgoId} snapshot missing VwapEndUtc."),
+                Enum.Parse<OrderType>(s.VwapChildOrderType ?? throw new InvalidOperationException($"Algo {s.AlgoId} snapshot missing VwapChildOrderType.")),
+                s.VwapChildPrice,
+                TimeSpan.FromTicks(s.VwapTickIntervalTicks ?? throw new InvalidOperationException($"Algo {s.AlgoId} snapshot missing VwapTickIntervalTicks.")),
+                s.VwapSliceMaxPct,
+                s.VwapPriceLimit,
+                s.VwapParticipationCap),
             _ => throw new InvalidOperationException($"Unknown algo type: {s.Type}"),
         };
         return Algo.Hydrate(s.AlgoId, owner, s.FirmId, s.Symbol, s.SecurityId,
