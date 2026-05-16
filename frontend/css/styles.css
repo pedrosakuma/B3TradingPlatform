@@ -735,3 +735,41 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
 /* Ticket coupling: TIF hint colors (info vs. soft warning). */
 .field-hint.hint-info { color: var(--accent); }
 .field-hint.hint-warn { color: var(--warn); }
+
+/* ── Q2.6 (#273). History / P&L / Statement view ─────────────────── */
+.history-view { padding: 1rem 1.5rem; }
+.pnl-totals {
+  display: flex; gap: 2rem; align-items: baseline;
+  margin: .25rem 0 .75rem 0;
+}
+.pnl-total { display: flex; flex-direction: column; }
+.pnl-total-label {
+  font-size: .68rem; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .04em;
+}
+.pnl-total-value {
+  font-size: 1.25rem; font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.pnl-pos { color: var(--green); }
+.pnl-neg { color: var(--red); }
+.pnl-zero { color: var(--muted); }
+.pnl-live {
+  font-size: .68rem; color: var(--green);
+  text-transform: uppercase; letter-spacing: .08em;
+  border: 1px solid var(--green); border-radius: 3px;
+  padding: 0 .35rem; align-self: center;
+}
+.history-filters { flex-wrap: wrap; gap: .5rem; }
+.history-more-row { margin: .4rem 0 .75rem 0; }
+.statement-json-card {
+  max-width: 80vw; max-height: 80vh; display: flex; flex-direction: column;
+}
+.statement-json-body {
+  flex: 1; overflow: auto; padding: .75rem;
+  background: var(--surface-alt, #111); color: var(--fg, #eee);
+  border: 1px solid var(--border); border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .78rem; white-space: pre;
+  max-height: 60vh;
+}
