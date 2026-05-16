@@ -140,6 +140,17 @@ public static class MetricsRegistry
         Meter.CreateCounter<long>("trading.pnl.replay_synth");
     public static readonly Counter<long> PnlEndpointRequests =
         Meter.CreateCounter<long>("trading.pnl.endpoint_requests");
+
+    // Q2.5 (#272). Daily statement endpoint counters.
+    // statement.endpoint_requests is tagged with {format=json|csv} so
+    // operators can split JSON consumers from CSV exports. The
+    // day_trade_detected gauge increments per request that returned at
+    // least one IR day-trade row (informational only; not driving any
+    // tax collection on the platform).
+    public static readonly Counter<long> StatementEndpointRequests =
+        Meter.CreateCounter<long>("trading.statement.endpoint_requests");
+    public static readonly Counter<long> StatementDayTradeDetected =
+        Meter.CreateCounter<long>("trading.statement.day_trade_detected");
     // Pass-1 review (#278) P1#1. Bumped once per (endClient, symbol)
     // row when StateSnapshotter restores a legacy snapshot whose
     // PnlAvgCost block is empty but Positions has rows — the avg-cost
