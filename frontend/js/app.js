@@ -1113,9 +1113,14 @@ async function refreshHistoryAll() {
 async function refreshPnl() {
   if (!session) return;
   const captured = session;
-  // Capture the pnl epoch BEFORE awaiting so any WS delta that lands
-  // while the REST request is in-flight bumps the epoch and our
-  // resolution becomes a no-op — see applyPnlSnapshot's `ifEpoch` gate.
+  // Bump the pnl epoch BEFORE issuing the fetch so any earlier
+  // in-flight refreshPnl() call (which captured the previous epoch)
+  // sees an epoch mismatch on resolution and is dropped — guards
+  // against REST-vs-REST races where the slower (older) response
+  // could otherwise overwrite the newer one. Also covers the
+  // WS-delta-mid-flight case: any subsequent delta bumps the epoch
+  // again, and our own apply becomes a no-op.
+  state.bumpPnlEpoch();
   const epoch = state.getPnlEpoch();
   try {
     const dto = await getPnlToday(captured.backend, captured.token);

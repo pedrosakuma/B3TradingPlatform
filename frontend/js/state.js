@@ -297,6 +297,13 @@ export function clearAll() {
   state.historyExecutions = { items: [], nextCursor: null, loading: false };
   state.historyFilters    = { from: "", to: "", symbol: "" };
   state.statement = { lastDownload: null, lastJson: null, busy: false, error: null };
+  // Treat clearAll() as an authoritative generation/epoch advance —
+  // same semantics as a WS delta or filter change. Any in-flight REST
+  // P&L or history responses captured the previous epoch/generation
+  // and must resolve into a no-op, or they would repopulate stale
+  // rows under the now-clean state right after a WS reconnect.
+  _pnlEpoch += 1;
+  _historyGeneration += 1;
   notify("all");
 }
 
@@ -877,6 +884,12 @@ function _normalizePnl(dto) {
 // landed first with newer state and the REST result is dropped.
 let _pnlEpoch = 0;
 export function getPnlEpoch() { return _pnlEpoch; }
+// Bumped by refreshPnl() right before issuing its fetch so any
+// concurrent (older) REST call still in-flight sees an epoch mismatch
+// on resolution and is dropped — see refreshPnl() in app.js. Without
+// this, two REST refreshes in quick succession both capture the same
+// epoch, and the slower (older) response can clobber the newer one.
+export function bumpPnlEpoch() { _pnlEpoch += 1; }
 
 export function applyPnlSnapshot(dto, opts) {
   // REST seed (GET /pnl/today). Gated by `ifEpoch` to avoid clobbering
