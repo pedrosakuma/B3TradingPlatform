@@ -4,6 +4,7 @@ public enum AlgoType
 {
     Iceberg,
     Twap,
+    Vwap,
 }
 
 /// <summary>
@@ -38,6 +39,8 @@ public enum AlgoTerminalReason
     TwapWindowExpired,
     RetriesExhausted,
     Drained,
+    /// <summary>VWAP window expired (Q3.1 / #281). Mirrors <see cref="TwapWindowExpired"/>.</summary>
+    VwapWindowExpired,
 }
 
 /// <summary>
@@ -55,6 +58,43 @@ public sealed record TwapParameters(
     int SliceCount,
     OrderType ChildOrderType,
     decimal? ChildPrice) : AlgoParameters;
+
+/// <summary>
+/// VWAP (Volume-Weighted Average Price) parameters (Q3.1 / #281).
+///
+/// <para>
+/// Unlike <see cref="TwapParameters"/> the per-slice quantity is NOT
+/// deterministic from these fields alone — it depends on the live
+/// volume-curve estimate maintained by <c>VolumeCurveEstimator</c> plus
+/// the participation/slice caps below. The engine evaluates the gap
+/// between the target cumulative curve and what has actually filled at
+/// every scheduler tick (default 30s).
+/// </para>
+///
+/// <para>
+/// <b>TickInterval</b> controls how often the engine asks "do I owe more
+/// quantity now?". Defaults to 30s per the issue spec — small enough to
+/// react to curve drift, large enough that we don't blast the venue with
+/// micro-orders.
+/// </para>
+///
+/// <para><b>SliceMaxPct</b>: per-slice quantity cap as a fraction of
+/// <c>totalQty</c> (e.g. <c>0.10m</c> = 10%). Null = no cap.</para>
+/// <para><b>ParticipationCap</b>: per-slice quantity cap as a fraction of
+/// recently observed market volume (in the current bucket). Null = no cap.</para>
+/// <para><b>PriceLimit</b>: hard limit price for child LIMIT orders. The
+/// engine uses <see cref="ChildPrice"/> as the reference and never crosses
+/// past <c>PriceLimit</c>. Null = use <see cref="ChildPrice"/> only.</para>
+/// </summary>
+public sealed record VwapParameters(
+    DateTimeOffset StartUtc,
+    DateTimeOffset EndUtc,
+    OrderType ChildOrderType,
+    decimal? ChildPrice,
+    TimeSpan TickInterval,
+    decimal? SliceMaxPct = null,
+    decimal? PriceLimit = null,
+    decimal? ParticipationCap = null) : AlgoParameters;
 
 /// <summary>
 /// Parent algo aggregate, sibling to <see cref="Order"/>. v0 stores only
@@ -228,6 +268,7 @@ public sealed class Algo
         {
             AlgoType.Iceberg => parameters is IcebergParameters,
             AlgoType.Twap => parameters is TwapParameters,
+            AlgoType.Vwap => parameters is VwapParameters,
             _ => false,
         };
         if (!ok)

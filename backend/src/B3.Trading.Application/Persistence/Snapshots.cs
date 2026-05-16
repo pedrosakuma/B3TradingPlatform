@@ -301,7 +301,16 @@ public sealed record AlgoSnapshot(
     DateTimeOffset? TwapEndUtc = null,
     int? TwapSliceCount = null,
     string? TwapChildOrderType = null,
-    decimal? TwapChildPrice = null);
+    decimal? TwapChildPrice = null,
+    // Q3.1 (#281) — VWAP fields, mirror the TWAP block.
+    DateTimeOffset? VwapStartUtc = null,
+    DateTimeOffset? VwapEndUtc = null,
+    string? VwapChildOrderType = null,
+    decimal? VwapChildPrice = null,
+    long? VwapTickIntervalTicks = null,
+    decimal? VwapSliceMaxPct = null,
+    decimal? VwapPriceLimit = null,
+    decimal? VwapParticipationCap = null);
 
 public sealed record PositionSnapshot(
     string EndClientId,

@@ -26,6 +26,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(AlgoCreatedEvent), "algo.created")]
 [JsonDerivedType(typeof(AlgoCancelRequestedEvent), "algo.cancel-requested")]
 [JsonDerivedType(typeof(AlgoTerminalStateRecordedEvent), "algo.terminal")]
+[JsonDerivedType(typeof(AlgoVwapSlicedEvent), "algo.vwap.sliced")]
 [JsonDerivedType(typeof(OrderStaledEvent), "order.staled")]
 [JsonDerivedType(typeof(OrderStaleClearedEvent), "order.stale-cleared")]
 [JsonDerivedType(typeof(UserBotCredentialCreatedEvent), "userbot.cred.created")]
@@ -293,6 +294,18 @@ public sealed record AlgoCreatedEvent : WalEvent
     public int? TwapSliceCount { get; init; }
     public string? TwapChildOrderType { get; init; }   // "Limit" | "Market"
     public decimal? TwapChildPrice { get; init; }
+
+    // Q3.1 (#281) — VWAP fields. Mirror the TWAP block above; only the
+    // block matching <see cref="Type"/> = "Vwap" is populated. Additive
+    // — older replays / snapshots without these fields stay valid.
+    public DateTimeOffset? VwapStartUtc { get; init; }
+    public DateTimeOffset? VwapEndUtc { get; init; }
+    public string? VwapChildOrderType { get; init; }   // "Limit" | "Market"
+    public decimal? VwapChildPrice { get; init; }
+    public long? VwapTickIntervalTicks { get; init; }
+    public decimal? VwapSliceMaxPct { get; init; }
+    public decimal? VwapPriceLimit { get; init; }
+    public decimal? VwapParticipationCap { get; init; }
 }
 
 /// <summary>
@@ -321,6 +334,26 @@ public sealed record AlgoTerminalStateRecordedEvent : WalEvent
     public required string Status { get; init; }    // AlgoStatus enum name
     public required string Reason { get; init; }    // AlgoTerminalReason enum name
     public required DateTimeOffset AtUtc { get; init; }
+}
+
+/// <summary>
+/// Q3.1 (#281). Per-slice audit envelope for VWAP parents — captures the
+/// target/actual curve gap at slice-emit time. NOT replayed for state
+/// reconstruction (the slice itself is recorded via the child
+/// <see cref="OrderSubmittedEvent"/>, same as TWAP); the engine treats
+/// this event as observability-only so a future omission of the WAL
+/// write would not desynchronise recovery. Mirrors the <c>AlgoVwapSliced</c>
+/// label called out in the issue body.
+/// </summary>
+public sealed record AlgoVwapSlicedEvent : WalEvent
+{
+    public required ulong AlgoId { get; init; }
+    public required string FirmId { get; init; }
+    public required int SliceSeq { get; init; }
+    public required long TargetCumQty { get; init; }
+    public required long ExecutedCum { get; init; }
+    public required long SliceQty { get; init; }
+    public required DateTimeOffset PlannedAtUtc { get; init; }
 }
 
 /// <summary>
