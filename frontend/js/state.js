@@ -942,6 +942,14 @@ function _applyHistoryPage(slice, { items, nextCursor, reset }) {
 // from landing in the buffer of a freshly-applied filter.
 let _historyGeneration = 0;
 export function getHistoryGeneration() { return _historyGeneration; }
+// Bumped by refreshHistoryAll() right before issuing its fetches so any
+// concurrent (older) refresh / loadMore call still in-flight sees a
+// generation mismatch on resolution and is dropped — mirrors
+// bumpPnlEpoch(). Without this, two refreshes in quick succession with
+// the same filters both capture the same generation, and the slower
+// (older) response can clobber the newer one (overwrite on reset,
+// append on cursor page).
+export function bumpHistoryGeneration() { _historyGeneration += 1; }
 
 export function setHistoryOrdersLoading(loading) {
   state.historyOrders = { ...state.historyOrders, loading: !!loading };

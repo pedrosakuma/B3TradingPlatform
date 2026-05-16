@@ -148,3 +148,80 @@ test("REST-vs-REST race: older refreshPnl response is dropped when it resolves l
   assert.equal(p.unrealized.length, 1);
   assert.equal(p.unrealized[0].position, 100);
 });
+
+// P2 — REST-vs-REST race on history. refreshHistoryAll() bumps the
+// history generation BEFORE issuing its fetches and the inner loadMore
+// captures the NEW generation immediately, so two concurrent refreshes
+// own distinct generations. If the OLDER refresh's response races back
+// AFTER the newer one has applied, its apply sees a generation mismatch
+// and is dropped — for BOTH orders and executions, on reset pages.
+test("REST-vs-REST race: older refreshHistoryAll orders page is dropped when it resolves last", async () => {
+  const s = await freshState();
+
+  // Simulate refreshHistoryAll() call #1 (the older one): bump, capture.
+  s.bumpHistoryGeneration();
+  const gen1 = s.getHistoryGeneration();
+
+  // Simulate refreshHistoryAll() call #2 issued before #1 resolves.
+  s.bumpHistoryGeneration();
+  const gen2 = s.getHistoryGeneration();
+  assert.ok(gen2 > gen1, "second refreshHistoryAll must capture a strictly newer generation");
+
+  // Resolve OUT OF ORDER: call #2's response lands FIRST with the
+  // newer backend rows.
+  s.applyHistoryOrdersPage({
+    items: [{ clOrdId: "NEW-1", symbol: "PETR4" }],
+    nextCursor: null,
+    reset: true,
+    ifGeneration: gen2,
+  });
+  assert.equal(s.getState().historyOrders.items.length, 1);
+  assert.equal(s.getState().historyOrders.items[0].clOrdId, "NEW-1");
+
+  // Then call #1's response lands LAST with older backend rows.
+  // Without the per-refresh generation bump it would clobber #2's
+  // newer reset page.
+  s.applyHistoryOrdersPage({
+    items: [{ clOrdId: "OLD-1", symbol: "PETR4" }, { clOrdId: "OLD-2", symbol: "VALE3" }],
+    nextCursor: "cursor-old",
+    reset: true,
+    ifGeneration: gen1,
+  });
+
+  const orders = s.getState().historyOrders;
+  assert.equal(orders.items.length, 1, "older response must not overwrite newer reset page");
+  assert.equal(orders.items[0].clOrdId, "NEW-1");
+  assert.equal(orders.nextCursor, null);
+});
+
+test("REST-vs-REST race: older refreshHistoryAll executions page is dropped when it resolves last", async () => {
+  const s = await freshState();
+
+  s.bumpHistoryGeneration();
+  const gen1 = s.getHistoryGeneration();
+
+  s.bumpHistoryGeneration();
+  const gen2 = s.getHistoryGeneration();
+  assert.ok(gen2 > gen1);
+
+  s.applyHistoryExecutionsPage({
+    items: [{ execId: "NEW-EX-1", symbol: "PETR4" }],
+    nextCursor: null,
+    reset: true,
+    ifGeneration: gen2,
+  });
+  assert.equal(s.getState().historyExecutions.items.length, 1);
+  assert.equal(s.getState().historyExecutions.items[0].execId, "NEW-EX-1");
+
+  s.applyHistoryExecutionsPage({
+    items: [{ execId: "OLD-EX-1", symbol: "PETR4" }, { execId: "OLD-EX-2", symbol: "VALE3" }],
+    nextCursor: "cursor-old",
+    reset: true,
+    ifGeneration: gen1,
+  });
+
+  const execs = s.getState().historyExecutions;
+  assert.equal(execs.items.length, 1, "older response must not overwrite newer reset page");
+  assert.equal(execs.items[0].execId, "NEW-EX-1");
+  assert.equal(execs.nextCursor, null);
+});

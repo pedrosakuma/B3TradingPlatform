@@ -1101,6 +1101,15 @@ function _historyOpts({ withCursor = false, kind } = {}) {
 
 async function refreshHistoryAll() {
   if (!session) return;
+  // Bump the history generation BEFORE issuing the fetches so any
+  // earlier in-flight refreshHistoryAll / loadMoreHistory{Orders,
+  // Executions}(reset=true) call (which captured the previous
+  // generation) sees a generation mismatch on resolution and is
+  // dropped. Filter-change / clearAll already bump, but an explicit
+  // refresh with the same filters would otherwise share a generation
+  // with the previous refresh and let an older (slower) response
+  // clobber the newer one. Mirrors bumpPnlEpoch() in refreshPnl().
+  state.bumpHistoryGeneration();
   // Fetch P&L (REST seed — WS keeps it live afterwards) in parallel
   // with the first page of each history list.
   await Promise.all([
