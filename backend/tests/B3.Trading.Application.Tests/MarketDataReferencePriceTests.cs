@@ -233,7 +233,7 @@ internal sealed class FakeMarketDataSubscriber : IMarketDataSubscriber
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     public void RaiseTrade(string symbol, decimal price, DateTimeOffset ts) =>
-        Trade?.Invoke(new MarketTrade(symbol, 0UL, price, ts));
+        Trade?.Invoke(new MarketTrade(symbol, 0UL, price, 0L, ts));
 
     public void RaiseInfo(MarketInfoSnapshot s) => InfoSnapshot?.Invoke(s);
 

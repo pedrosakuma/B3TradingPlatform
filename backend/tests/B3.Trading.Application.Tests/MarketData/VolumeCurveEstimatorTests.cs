@@ -36,9 +36,14 @@ public class VolumeCurveEstimatorTests
     }
 
     [Fact]
-    public void CdfAt_UsesObservedVolume_WhenAvailable()
+    public void CdfAt_UsesObservedVolume_BlendedWithExtrapolation()
     {
-        // Concentrate volume in first half of window: cdf at midpoint > 0.5.
+        // Pass-1 review (#294) P1#1B: at any point inside the window
+        // the CDF denominator is observed[start..at] +
+        // extrapolated[at..end]. With all observed volume in the first
+        // half (run-rate identical to remainder extrapolation) the CDF
+        // at the midpoint is 0.5 — NOT 1.0 as the old normalisation
+        // would have wrongly returned.
         var sut = new VolumeCurveEstimator();
         var start = Day1Start.AddHours(9);
         var end = start.AddHours(1);
@@ -46,10 +51,31 @@ public class VolumeCurveEstimatorTests
 
         sut.RecordTrade(Sym, 1000, start.AddMinutes(5));
         sut.RecordTrade(Sym, 1000, start.AddMinutes(15));
-        sut.RecordTrade(Sym, 200, start.AddMinutes(45));
 
         var cdf = sut.CdfAt(Sym, start, end, mid);
-        Assert.True(cdf > 0.9, $"expected cdf > 0.9 at midpoint, got {cdf}");
+        Assert.Equal(0.5, cdf, 6);
+    }
+
+    [Fact]
+    public void CdfAt_DoesNotJumpToOne_AfterSingleObservedBucket()
+    {
+        // Pass-1 review (#294) P1#1B regression. Window is 1h; only the
+        // very first 5-min bucket has any volume. Evaluated 30min in,
+        // the *old* code returned 1.0 (observed/observed = 1) which made
+        // the VWAP scheduler think the day was done and over-slice. The
+        // blended denominator keeps the CDF well below 1.
+        var sut = new VolumeCurveEstimator();
+        var start = Day1Start.AddHours(9);
+        var end = start.AddHours(1);
+        var at = start.AddMinutes(30);
+
+        sut.RecordTrade(Sym, 500, start.AddMinutes(1)); // bucket 0 only
+
+        var cdf = sut.CdfAt(Sym, start, end, at);
+        Assert.True(cdf < 0.9, $"expected blended cdf < 0.9, got {cdf}");
+        // With 1 observed bucket out of 6 elapsed and 6 remaining, the
+        // run-rate extrapolation drops the cdf well below 0.5.
+        Assert.True(cdf > 0, $"expected positive cdf, got {cdf}");
     }
 
     [Fact]

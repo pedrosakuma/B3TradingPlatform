@@ -114,13 +114,15 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         // In slice 5a the consumer body was a no-op reactor; slice 5b plugged in the
         // Iceberg state machine; slice 6 adds the AlgoScheduler hosted service that
         // drives TWAP slice firing on a separate thread (RFC §4.11 commitment 1).
-        // Q3.1 (#281) wires the VWAP volume-curve estimator as a singleton so
-        // future market-data adapters can push live trade qty into it; the
-        // engine takes an optional ctor dependency on it and falls back to a
-        // uniform CDF when null.
+        // Q3.1 (#281) wires the VWAP volume-curve estimator as a singleton.
+        // The MarketDataVolumePump hosted service (#294 P1#1A) bridges
+        // IMarketDataSubscriber.Trade → VolumeCurveEstimator.RecordTrade so
+        // the engine sees the venue's live intraday volume; without the pump
+        // the estimator stays empty and the engine falls back to uniform CDF.
         services.AddSingleton<AlgoSignalQueue>();
         services.AddSingleton<IAlgoSignalQueue>(sp => sp.GetRequiredService<AlgoSignalQueue>());
         services.AddSingleton<B3.Trading.Application.MarketData.VolumeCurveEstimator>();
+        services.AddHostedService<B3.Trading.Application.MarketData.MarketDataVolumePump>();
         services.AddHostedService<AlgoEngine>();
         services.AddHostedService<AlgoScheduler>();
 

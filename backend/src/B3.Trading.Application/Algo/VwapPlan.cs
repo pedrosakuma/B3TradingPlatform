@@ -145,8 +145,19 @@ public static class VwapPlan
             capped = Math.Min(capped, maxSlice);
         }
 
-        if (participationCap is { } pcap && pcap > 0 && recentMarketVolume > 0)
+        if (participationCap is { } pcap && pcap > 0)
         {
+            if (recentMarketVolume <= 0)
+            {
+                // Pass-1 review (#294) P1#2 fix. If we have no recent
+                // market activity baseline, participation rate is
+                // undefined: we cannot guarantee we won't exceed the
+                // cap. Treat the cap as zero — emit NO slice this tick
+                // and let the next tick re-evaluate once trades arrive.
+                // Per RFC: a hard cap is hard; never guess past it.
+                return 0;
+            }
+
             var maxByMarket = (long)Math.Floor((decimal)recentMarketVolume * pcap);
             if (maxByMarket < 1) maxByMarket = 1;
             capped = Math.Min(capped, maxByMarket);

@@ -252,6 +252,59 @@ public class VwapAlgoEndpointTests
         Assert.Equal(31m, vwap.GetProperty("priceLimit").GetDecimal());
     }
 
+    // ───────────────────── Cancel-mid-flight (#294 P2) ─────────────────────
+
+    [Fact]
+    public async Task Vwap_CancelMidFlight_CancelsLiveChildAndTerminalEmittedOnce()
+    {
+        // Pass-1 review (#294) P2. After at least one slice is in-flight,
+        // DELETE drives the parent into Cancelling, the engine cancels
+        // the live child, and on the cancel-ack the parent reaches
+        // Cancelled. A second DELETE after terminal is a no-op (409,
+        // not another terminal); terminal state is recorded exactly
+        // once — re-reading /algo returns the same TerminalAtUtc.
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var userToken = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var now = DateTimeOffset.UtcNow;
+        var algoId = await PostAlgo(http, userToken,
+            VwapBody(total: 400, start: now.AddSeconds(-1), end: now.AddSeconds(10),
+                tickSeconds: 0.2));
+
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var inFlight = await WaitForAnyChild(book, algoId);
+
+        // Operator cancel.
+        var req = new HttpRequestMessage(HttpMethod.Delete, $"/algo/{algoId}");
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", userToken);
+        var del = await http.SendAsync(req);
+        Assert.Equal(HttpStatusCode.Accepted, del.StatusCode);
+
+        // The engine emits a cancel for the live child to the mock
+        // venue; ack it by injecting Canceled — that drives the parent
+        // from Cancelling to Cancelled.
+        await InjectEr(http, adminToken, inFlight.ClOrdId, "Canceled");
+
+        await WaitForAlgoStatus(http, userToken, algoId, "Cancelled");
+        var snap1 = await GetAlgo(http, userToken, algoId);
+        Assert.Equal("UserCancelled", snap1.GetProperty("terminalReason").GetString());
+        var terminalAt1 = snap1.GetProperty("terminalAtUtc").GetDateTimeOffset();
+
+        // Second DELETE after terminal: not Accepted, and crucially the
+        // terminal timestamp must not move (no second terminal event).
+        var req2 = new HttpRequestMessage(HttpMethod.Delete, $"/algo/{algoId}");
+        req2.Headers.Authorization = new AuthenticationHeaderValue("Bearer", userToken);
+        var del2 = await http.SendAsync(req2);
+        Assert.Equal(HttpStatusCode.Conflict, del2.StatusCode);
+
+        await Task.Delay(50); // give any (incorrect) re-emission a chance to land
+        var snap2 = await GetAlgo(http, userToken, algoId);
+        Assert.Equal("Cancelled", snap2.GetProperty("status").GetString());
+        Assert.Equal(terminalAt1, snap2.GetProperty("terminalAtUtc").GetDateTimeOffset());
+    }
+
     // ───────────────────────── helpers (parallel to AlgoTwapIntegrationTests) ─────────────────────────
 
     private static async Task<string> PostAlgo(HttpClient http, string token, object body)

@@ -168,10 +168,24 @@ public class VwapPlanTests
     }
 
     [Fact]
-    public void SliceQty_ParticipationIgnored_WhenNoRecentVolume()
+    public void SliceQty_ParticipationCapWithNoRecentVolume_EmitsNoSlice()
     {
-        // No recent volume → ignore the cap rather than going to 0.
-        Assert.Equal(300, VwapPlan.SliceQty(500, 200, 800, 1000, null, 0.20m, 0));
+        // Pass-1 review (#294) P1#2: when participationCap is set but
+        // recentMarketVolume is 0 we have no baseline to compute a safe
+        // size against. Treat the cap as a hard zero — emit NO slice
+        // this tick rather than ignoring the cap. Re-evaluation happens
+        // on the next tick once trades arrive.
+        Assert.Equal(0, VwapPlan.SliceQty(500, 200, 800, 1000, null, 0.20m, 0));
+    }
+
+    [Fact]
+    public void SliceQty_ParticipationCapHonoured_WhenRecentVolumeNonZero()
+    {
+        // Regression: positive recent volume still clamps to the cap
+        // (10% of 5000 = 500, gap=300 → take 300; cap doesn't bind here).
+        Assert.Equal(300, VwapPlan.SliceQty(500, 200, 800, 1000, null, 0.10m, 5000));
+        // And does bind when smaller than the gap.
+        Assert.Equal(200, VwapPlan.SliceQty(500, 200, 800, 1000, null, 0.10m, 2000));
     }
 
     [Fact]

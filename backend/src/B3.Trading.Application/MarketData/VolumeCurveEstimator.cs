@@ -22,12 +22,11 @@ namespace B3.Trading.Application.MarketData;
 /// </para>
 ///
 /// <para>
-/// <b>Data source.</b> v0 only consumes live intraday volume. The
-/// repo's <c>MarketTrade</c> shape currently lacks a quantity field
-/// (only price + timestamp), so the host wiring of "subscribe to
-/// marketdata.trades.${symbol}" is left as a TODO — the estimator is
-/// already API-stable so a future patch wiring qty-bearing trades is
-/// purely additive. Tests drive <see cref="RecordTrade"/> directly.
+/// <b>Data source.</b> Live intraday volume is pushed in by the
+/// <c>MarketDataVolumePump</c> hosted service, which subscribes to
+/// <c>IMarketDataSubscriber.Trade</c> and forwards <c>(symbol, qty,
+/// receivedUtc)</c> here. Tests drive <see cref="RecordTrade"/>
+/// directly.
 /// </para>
 ///
 /// <para>
@@ -89,11 +88,22 @@ public sealed class VolumeCurveEstimator
     }
 
     /// <summary>
-    /// CDF value in <c>[0, 1]</c> for the fraction of expected volume
-    /// that has accumulated between <paramref name="startUtc"/> and
-    /// <paramref name="atUtc"/>, normalised by the total volume in
-    /// <c>[startUtc, endUtc]</c>. Uniform fallback when the symbol has
-    /// no observed volume in <c>[startUtc, endUtc]</c>.
+    /// CDF value in <c>[0, 1]</c> for the fraction of expected window
+    /// volume that has accumulated between <paramref name="startUtc"/>
+    /// and <paramref name="atUtc"/>.
+    ///
+    /// <para>
+    /// <b>Blended denominator.</b> Pass-1 review (#294) P1#1B fix. The
+    /// denominator is NOT just the observed-so-far volume in
+    /// <c>[start, at)</c> — that would make the CDF jump to 1.0 the
+    /// moment the first bucket records any volume, causing the VWAP
+    /// scheduler to over-slice early in the day. Instead we estimate
+    /// the total window volume as
+    /// <c>observed[start..at] + extrapolation[at..end]</c>, where the
+    /// extrapolation projects the so-far run-rate forward to fill the
+    /// remaining bucket count. If we have no observed volume yet, fall
+    /// back to a uniform (TWAP-shaped) CDF.
+    /// </para>
     /// </summary>
     public double CdfAt(string symbol, DateTimeOffset startUtc, DateTimeOffset endUtc, DateTimeOffset atUtc)
     {
@@ -101,20 +111,45 @@ public sealed class VolumeCurveEstimator
         if (atUtc <= startUtc) return 0;
         if (atUtc >= endUtc) return 1;
 
-        var totalInWindow = VolumeBetween(symbol, startUtc, endUtc);
-        if (totalInWindow <= 0)
+        var observedToAt = VolumeBetween(symbol, startUtc, atUtc);
+        if (observedToAt <= 0)
         {
             // Uniform fallback. Mirrors a TWAP-shaped curve so the
             // engine still makes forward progress when the estimator
-            // hasn't seen anything yet.
+            // hasn't seen anything yet in [start, at).
             return (atUtc - startUtc).TotalSeconds / (endUtc - startUtc).TotalSeconds;
         }
 
-        var elapsed = VolumeBetween(symbol, startUtc, atUtc);
-        var cdf = (double)elapsed / totalInWindow;
+        // Blend with extrapolation for [at, end] so the denominator is
+        // a *predicted total*, not just observed-so-far. We work in
+        // bucket counts (not seconds) because RecordTrade quantises
+        // into buckets — using seconds here would let sub-bucket
+        // arithmetic skew the run-rate at low elapsed times.
+        var elapsedBuckets = Math.Max(1L, BucketsBetween(startUtc, atUtc));
+        var remainingBuckets = Math.Max(0L, BucketsBetween(atUtc, endUtc));
+        var runRatePerBucket = (double)observedToAt / elapsedBuckets;
+        var extrapolatedRemainder = runRatePerBucket * remainingBuckets;
+        var denominator = observedToAt + extrapolatedRemainder;
+        if (denominator <= 0) return 0;
+
+        var cdf = observedToAt / denominator;
         if (cdf < 0) return 0;
         if (cdf > 1) return 1;
         return cdf;
+    }
+
+    /// <summary>
+    /// Whole-bucket count between two instants, used by the CDF blend
+    /// so the run-rate maths is unit-consistent with how RecordTrade
+    /// quantises observations into buckets. Always returns at least 0.
+    /// </summary>
+    private long BucketsBetween(DateTimeOffset fromUtc, DateTimeOffset toUtc)
+    {
+        if (toUtc <= fromUtc) return 0;
+        var span = toUtc - fromUtc;
+        // ceil so a partial bucket at the boundary contributes one
+        // "evaluated" bucket — keeps the blend monotone.
+        return (span.Ticks + _bucketSize.Ticks - 1) / _bucketSize.Ticks;
     }
 
     /// <summary>
