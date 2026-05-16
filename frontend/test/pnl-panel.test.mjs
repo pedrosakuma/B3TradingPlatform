@@ -154,3 +154,56 @@ test("WS delta after initial REST snapshot updates state.pnl (simulated end-to-e
   assert.equal(p.totalUnrealized, 10);
   assert.equal(p.unrealized[0].position, 100);
 });
+
+// P1 regression. The REST /pnl/today refresh issues a request and
+// awaits; if a WS delta lands on the pnl.me channel BEFORE the REST
+// promise resolves, the (older) REST payload must NOT clobber the
+// (newer) WS state. Guarded by the monotonic pnl epoch — the REST
+// caller snapshots the epoch at request issue time and passes it as
+// `ifEpoch` to applyPnlSnapshot; if a delta bumped the epoch in the
+// meantime, the snapshot is dropped silently.
+test("REST snapshot is dropped when a WS delta arrived during the in-flight request", async () => {
+  const s = await freshState();
+  // Simulate the caller (refreshPnl) capturing the epoch at issue time.
+  const epochAtRequest = s.getPnlEpoch();
+  // WS delta arrives mid-flight with the newer state.
+  s.applyPnlDelta({
+    realized:   [{ symbol: "PETR4", value: 500 }],
+    unrealized: [{ symbol: "PETR4", value: 12, refPrice: 30.12, position: 100, avgPrice: 30.0 }],
+    totalRealized: 500,
+    totalUnrealized: 12,
+  });
+  // REST response now resolves with the stale snapshot.
+  s.applyPnlSnapshot({
+    realized: [], unrealized: [], totalRealized: 0, totalUnrealized: 0,
+  }, { ifEpoch: epochAtRequest });
+  // WS state must survive — the gated REST apply was a no-op.
+  const p = s.getState().pnl;
+  assert.equal(p.totalRealized, 500);
+  assert.equal(p.totalUnrealized, 12);
+  assert.equal(p.realized.length, 1);
+  assert.equal(p.unrealized[0].position, 100);
+});
+
+test("REST snapshot applies normally when no WS delta arrived mid-flight", async () => {
+  const s = await freshState();
+  const epoch = s.getPnlEpoch();
+  s.applyPnlSnapshot({
+    realized:   [{ symbol: "PETR4", value: 7 }],
+    unrealized: [],
+    totalRealized: 7,
+    totalUnrealized: 0,
+  }, { ifEpoch: epoch });
+  assert.equal(s.getState().pnl.totalRealized, 7);
+});
+
+test("applyPnlDelta bumps the pnl epoch; clearPnl bumps it too", async () => {
+  const s = await freshState();
+  const e0 = s.getPnlEpoch();
+  s.applyPnlDelta({ realized: [], unrealized: [], totalRealized: 0, totalUnrealized: 0 });
+  const e1 = s.getPnlEpoch();
+  assert.ok(e1 > e0, "delta bumps epoch");
+  s.clearPnl();
+  const e2 = s.getPnlEpoch();
+  assert.ok(e2 > e1, "clear bumps epoch");
+});

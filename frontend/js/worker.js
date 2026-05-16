@@ -21,12 +21,18 @@ let attempt = 0;
 let reconnectTimer = null;
 let stopped = false;
 
-// Q2.6 (#273). pnl.me joins the static per-account channel set so the
-// P&L panel always sees a snapshot + every fill-driven delta without
-// the caller having to explicitly subscribe. Same shape as the other
-// account-scoped channels (snapshot at seq=0, deltas thereafter); the
-// delta payload carries the full re-projected PnlTodayDto.
-const CHANNELS = ["orders.me", "executions.me", "positions.me", "pnl.me"];
+// Q2.6 (#273). Static per-account channels — always subscribed for
+// the session lifetime. pnl.me is NOT static: the per-fill fan-out is
+// only useful while the P&L panel is mounted, so the main thread
+// dynamically (un)subscribes via setPnlSubscribed when the user
+// enters / leaves the history view.
+const CHANNELS = ["orders.me", "executions.me", "positions.me"];
+
+// Q2.6 (#273). Tracks whether the main thread wants pnl.me subscribed
+// right now. Held across reconnects so a flap doesn't drop the
+// subscription mid-view; replayed on every onopen alongside the
+// public-channel set.
+let wantPnl = false;
 
 // Q1.6 (#258). Wanted set of public per-symbol channels that should be
 // subscribed any time the WS is connected. Drives diff (un)subscribes
@@ -82,6 +88,12 @@ function connect() {
     post({ type: "status", value: "connected" });
     post({ type: "reconnect.scheduled", nextAt: null });
     send({ type: "subscribe", channels: CHANNELS });
+    // Q2.6 (#273). Replay the pnl.me subscription if the main thread
+    // had it enabled before the flap (i.e., the trader is parked on
+    // the history view across the reconnect).
+    if (wantPnl) {
+      send({ type: "subscribe", channels: ["pnl.me"] });
+    }
     // Q1.6 (#258). Replay the public-channel set the main thread had
     // configured so the watchlist phase badges + auction panel keep
     // working across reconnects without a re-set from app.js.
@@ -166,6 +178,17 @@ function setPublicChannels(channels) {
   if (toRemove.length > 0) send({ type: "unsubscribe", channels: toRemove });
 }
 
+// Q2.6 (#273). Toggle the pnl.me subscription. Idempotent — no-ops
+// when the desired state matches the current one. Records the
+// desired state so a reconnect (onopen) re-applies it.
+function setPnlSubscribed(value) {
+  const next = !!value;
+  if (next === wantPnl) return;
+  wantPnl = next;
+  if (next) send({ type: "subscribe",   channels: ["pnl.me"] });
+  else      send({ type: "unsubscribe", channels: ["pnl.me"] });
+}
+
 self.onmessage = (ev) => {
   const msg = ev.data || {};
   switch (msg.type) {
@@ -185,9 +208,13 @@ self.onmessage = (ev) => {
       }
       ws = null;
       wantedPublic.clear();
+      wantPnl = false;
       break;
     case "setPublicChannels":
       setPublicChannels(msg.channels);
+      break;
+    case "setPnlSubscribed":
+      setPnlSubscribed(!!msg.value);
       break;
   }
 };

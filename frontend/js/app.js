@@ -544,7 +544,7 @@ function onWorkerMessage(msg) {
     case "positions.delta":     state.applyPositionsDelta(msg.data); break;
     case "executions.snapshot": state.applyExecutionsSnapshot(msg.data); break;
     case "executions.delta":    state.applyExecutionsDelta(msg.data); break;
-    case "pnl.snapshot":        state.applyPnlSnapshot(msg.data); break;
+    case "pnl.snapshot":        state.applyPnlDelta(msg.data); break;
     case "pnl.delta":           state.applyPnlDelta(msg.data); break;
     case "phases.frame":        state.applyPhaseFrame(msg.data); break;
     case "auction.frame":       state.applyAuctionFrame(msg.data); break;
@@ -950,9 +950,20 @@ async function pollGatewayOnce() {
 function handleSwitchView(view) {
   if (view === "admin" && session?.role !== "admin") return; // safety
   state.setCurrentView(view);
+  // Q2.6 (#273). Dynamic pnl.me subscription: only stay subscribed
+  // while the history view (which hosts the P&L panel) is mounted, so
+  // the per-fill fan-out doesn't run for traders parked on other views.
+  syncPnlSubscription(view);
   if (view === "admin") refreshAdminData();
   if (view === "bot-credentials") refreshBotCredentials();
   if (view === "history") refreshHistoryAll();
+}
+
+function syncPnlSubscription(view) {
+  if (!worker) return;
+  const want = view === "history";
+  try { worker.postMessage({ type: "setPnlSubscribed", value: want }); }
+  catch { /* worker not ready yet — replayed by next start */ }
 }
 
 async function refreshAdminData() {
@@ -1065,7 +1076,10 @@ function _toIsoFrom(dateStr) {
 
 function _toIsoTo(dateStr) {
   if (!dateStr) return undefined;
-  return `${dateStr}T23:59:59Z`;
+  // Use .999Z so the final-second events are included: the backend
+  // history endpoints filter with `> to` (HistoryEndpoints.cs), so a
+  // bare `23:59:59Z` would drop everything in the last second.
+  return `${dateStr}T23:59:59.999Z`;
 }
 
 function _historyOpts({ withCursor = false, kind } = {}) {
@@ -1099,10 +1113,14 @@ async function refreshHistoryAll() {
 async function refreshPnl() {
   if (!session) return;
   const captured = session;
+  // Capture the pnl epoch BEFORE awaiting so any WS delta that lands
+  // while the REST request is in-flight bumps the epoch and our
+  // resolution becomes a no-op — see applyPnlSnapshot's `ifEpoch` gate.
+  const epoch = state.getPnlEpoch();
   try {
     const dto = await getPnlToday(captured.backend, captured.token);
     if (session !== captured) return;
-    state.applyPnlSnapshot(dto);
+    state.applyPnlSnapshot(dto, { ifEpoch: epoch });
   } catch (err) {
     if (session !== captured) return;
     if (err?.status === 401) { logout(); return; }
@@ -1119,6 +1137,9 @@ function handleHistoryApplyFilters(filters) {
 async function loadMoreHistoryOrders(reset) {
   if (!session) return;
   const captured = session;
+  // Capture the history generation BEFORE awaiting so a filter change
+  // (or resetHistory) mid-flight invalidates this call's response.
+  const gen = state.getHistoryGeneration();
   const opts = _historyOpts({ withCursor: !reset, kind: "orders" });
   state.setHistoryOrdersLoading(true);
   try {
@@ -1128,6 +1149,7 @@ async function loadMoreHistoryOrders(reset) {
       items: page?.items ?? [],
       nextCursor: page?.nextCursor ?? null,
       reset: !!reset,
+      ifGeneration: gen,
     });
   } catch (err) {
     if (session !== captured) return;
@@ -1140,6 +1162,7 @@ async function loadMoreHistoryOrders(reset) {
 async function loadMoreHistoryExecutions(reset) {
   if (!session) return;
   const captured = session;
+  const gen = state.getHistoryGeneration();
   const opts = _historyOpts({ withCursor: !reset, kind: "executions" });
   state.setHistoryExecutionsLoading(true);
   try {
@@ -1149,6 +1172,7 @@ async function loadMoreHistoryExecutions(reset) {
       items: page?.items ?? [],
       nextCursor: page?.nextCursor ?? null,
       reset: !!reset,
+      ifGeneration: gen,
     });
   } catch (err) {
     if (session !== captured) return;

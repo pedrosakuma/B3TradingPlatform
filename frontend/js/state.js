@@ -870,19 +870,37 @@ function _normalizePnl(dto) {
   };
 }
 
-export function applyPnlSnapshot(dto) {
+// Monotonic epoch bumped by every authoritative WS-driven write
+// (applyPnlDelta + clearPnl). A REST refresh (GET /pnl/today) captures
+// the epoch BEFORE issuing its request and passes it as `ifEpoch` to
+// applyPnlSnapshot; if the epoch moved while in-flight, a WS delta
+// landed first with newer state and the REST result is dropped.
+let _pnlEpoch = 0;
+export function getPnlEpoch() { return _pnlEpoch; }
+
+export function applyPnlSnapshot(dto, opts) {
+  // REST seed (GET /pnl/today). Gated by `ifEpoch` to avoid clobbering
+  // a WS delta that arrived AFTER the request was issued but BEFORE it
+  // resolved — see refreshPnl() in app.js.
+  if (opts && opts.ifEpoch !== undefined && opts.ifEpoch !== _pnlEpoch) return;
   state.pnl = _normalizePnl(dto);
   notify("pnl");
 }
 
 export function applyPnlDelta(dto) {
   // pnl.me delta payloads carry the full snapshot — backend
-  // re-projects on every fill (see PnlRefPriceFanOut / sink).
+  // re-projects on every fill (see PnlRefPriceFanOut / sink). Bumps
+  // the epoch so any in-flight REST refresh resolves into a no-op.
+  _pnlEpoch += 1;
   state.pnl = _normalizePnl(dto);
   notify("pnl");
 }
 
 export function clearPnl() {
+  // Bump the epoch unconditionally — a clear is an authoritative
+  // boundary (logout / WS reconnect), and any in-flight REST refresh
+  // captured a stale epoch and must be discarded on resolution.
+  _pnlEpoch += 1;
   if (state.pnl == null) return;
   state.pnl = null;
   notify("pnl");
@@ -905,12 +923,20 @@ function _applyHistoryPage(slice, { items, nextCursor, reset }) {
   };
 }
 
+// Monotonic generation bumped on every filter change / reset. In-flight
+// list requests capture the generation at issue time and drop their
+// result on resolution if it moved on — prevents a stale-filter page
+// from landing in the buffer of a freshly-applied filter.
+let _historyGeneration = 0;
+export function getHistoryGeneration() { return _historyGeneration; }
+
 export function setHistoryOrdersLoading(loading) {
   state.historyOrders = { ...state.historyOrders, loading: !!loading };
   notify("history");
 }
 
-export function applyHistoryOrdersPage({ items, nextCursor, reset = false } = {}) {
+export function applyHistoryOrdersPage({ items, nextCursor, reset = false, ifGeneration } = {}) {
+  if (ifGeneration !== undefined && ifGeneration !== _historyGeneration) return;
   state.historyOrders = _applyHistoryPage(state.historyOrders, { items, nextCursor, reset });
   notify("history");
 }
@@ -920,7 +946,8 @@ export function setHistoryExecutionsLoading(loading) {
   notify("history");
 }
 
-export function applyHistoryExecutionsPage({ items, nextCursor, reset = false } = {}) {
+export function applyHistoryExecutionsPage({ items, nextCursor, reset = false, ifGeneration } = {}) {
+  if (ifGeneration !== undefined && ifGeneration !== _historyGeneration) return;
   state.historyExecutions = _applyHistoryPage(state.historyExecutions, { items, nextCursor, reset });
   notify("history");
 }
@@ -932,12 +959,14 @@ export function setHistoryFilters(filters) {
     to:     typeof next.to     === "string" ? next.to     : "",
     symbol: typeof next.symbol === "string" ? next.symbol.trim().toUpperCase() : "",
   };
+  _historyGeneration += 1;
   notify("history");
 }
 
 export function resetHistory() {
   state.historyOrders     = { items: [], nextCursor: null, loading: false };
   state.historyExecutions = { items: [], nextCursor: null, loading: false };
+  _historyGeneration += 1;
   notify("history");
 }
 

@@ -145,3 +145,61 @@ test("resetHistory clears both buffers", async () => {
   assert.equal(s.getState().historyOrders.nextCursor, null);
   assert.equal(s.getState().historyExecutions.nextCursor, null);
 });
+
+// P2 regression. An in-flight history-list request must NOT land in
+// the buffer of a freshly-changed filter (or a resetHistory). The
+// caller snapshots the historyGeneration at issue time and passes it
+// as `ifGeneration`; setHistoryFilters and resetHistory both bump the
+// counter, so a stale response is dropped silently.
+test("stale history page (filter changed mid-flight) is dropped via ifGeneration", async () => {
+  const s = await freshState();
+  // Caller captures the generation at request issue time.
+  const gen = s.getHistoryGeneration();
+  // Filter changes while the request is in-flight — bumps the generation.
+  s.setHistoryFilters({ from: "2025-01-01", to: "2025-01-31", symbol: "PETR4" });
+  // Stale response (old filter) tries to land — must be a no-op.
+  s.applyHistoryOrdersPage({
+    items: [{ clOrdId: "STALE-A" }, { clOrdId: "STALE-B" }],
+    nextCursor: "stale-cursor",
+    reset: true,
+    ifGeneration: gen,
+  });
+  const h = s.getState().historyOrders;
+  assert.equal(h.items.length, 0, "stale page must not populate the buffer");
+  assert.equal(h.nextCursor, null, "stale page must not seed the cursor");
+
+  // A fresh request under the new generation lands normally.
+  const newGen = s.getHistoryGeneration();
+  s.applyHistoryOrdersPage({
+    items: [{ clOrdId: "FRESH" }],
+    nextCursor: "next",
+    reset: true,
+    ifGeneration: newGen,
+  });
+  assert.equal(s.getState().historyOrders.items.length, 1);
+  assert.equal(s.getState().historyOrders.items[0].clOrdId, "FRESH");
+});
+
+test("stale history executions page is dropped after resetHistory bumps the generation", async () => {
+  const s = await freshState();
+  const gen = s.getHistoryGeneration();
+  s.resetHistory();
+  s.applyHistoryExecutionsPage({
+    items: [{ clOrdId: "STALE" }],
+    nextCursor: "x",
+    reset: true,
+    ifGeneration: gen,
+  });
+  assert.equal(s.getState().historyExecutions.items.length, 0);
+});
+
+test("setHistoryFilters and resetHistory bump the history generation", async () => {
+  const s = await freshState();
+  const g0 = s.getHistoryGeneration();
+  s.setHistoryFilters({ symbol: "PETR4" });
+  const g1 = s.getHistoryGeneration();
+  assert.ok(g1 > g0);
+  s.resetHistory();
+  const g2 = s.getHistoryGeneration();
+  assert.ok(g2 > g1);
+});
