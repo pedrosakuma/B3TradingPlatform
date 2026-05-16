@@ -122,7 +122,14 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         services.AddSingleton<AlgoSignalQueue>();
         services.AddSingleton<IAlgoSignalQueue>(sp => sp.GetRequiredService<AlgoSignalQueue>());
         services.AddSingleton<B3.Trading.Application.MarketData.VolumeCurveEstimator>();
-        services.AddHostedService<B3.Trading.Application.MarketData.MarketDataVolumePump>();
+        // Pump is registered as a concrete singleton AND wired into the
+        // hosted-service collection through the same instance so AlgoEngine
+        // can take an optional ctor dependency on it for the per-VWAP
+        // EnsureSubscribedAsync demand-subscribe (#294 pass-2 P1) without
+        // splitting startup ordering across two instances.
+        services.AddSingleton<B3.Trading.Application.MarketData.MarketDataVolumePump>();
+        services.AddHostedService(sp =>
+            sp.GetRequiredService<B3.Trading.Application.MarketData.MarketDataVolumePump>());
         services.AddHostedService<AlgoEngine>();
         services.AddHostedService<AlgoScheduler>();
 

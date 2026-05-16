@@ -5,6 +5,7 @@ using System.Text;
 using B3.Trading.Api.Auth;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 
 namespace B3.Trading.Api.Tests;
@@ -22,6 +23,7 @@ public class TestAppFactory : WebApplicationFactory<Program>
     public const int TestIterations = 10_000; // fast for tests
 
     private IDictionary<string, string?>? _configOverrides;
+    private Action<IServiceCollection>? _serviceOverrides;
 
     /// <summary>
     /// Builds a factory with extra config keys layered on top of the
@@ -31,13 +33,28 @@ public class TestAppFactory : WebApplicationFactory<Program>
     /// (not a public ctor) so xUnit's <c>IClassFixture</c> still binds.
     /// </summary>
     public static TestAppFactory WithOverrides(IDictionary<string, string?> configOverrides)
-        => new TestAppFactoryWithOverrides(configOverrides);
+        => new TestAppFactoryWithOverrides(configOverrides, services: null);
+
+    /// <summary>
+    /// Same as <see cref="WithOverrides(IDictionary{string, string?})"/> plus
+    /// a hook to mutate the DI container (replace registered services with
+    /// recording/fake doubles). Applied after the host's own ConfigureServices
+    /// pass via <c>ConfigureTestServices</c>, so it can <c>RemoveAll</c> a
+    /// service the host registered and re-register a stub in its place.
+    /// </summary>
+    public static TestAppFactory WithOverrides(
+        IDictionary<string, string?> configOverrides,
+        Action<IServiceCollection> services)
+        => new TestAppFactoryWithOverrides(configOverrides, services);
 
     private sealed class TestAppFactoryWithOverrides : TestAppFactory
     {
-        public TestAppFactoryWithOverrides(IDictionary<string, string?> overrides)
+        public TestAppFactoryWithOverrides(
+            IDictionary<string, string?> overrides,
+            Action<IServiceCollection>? services)
         {
             base._configOverrides = overrides;
+            base._serviceOverrides = services;
         }
     }
 
@@ -109,6 +126,12 @@ public class TestAppFactory : WebApplicationFactory<Program>
             if (_configOverrides is not null)
                 cb.AddInMemoryCollection(_configOverrides);
         });
+
+        if (_serviceOverrides is not null)
+        {
+            builder.ConfigureServices(s => _serviceOverrides!(s));
+        }
+
         return base.CreateHost(builder);
     }
 

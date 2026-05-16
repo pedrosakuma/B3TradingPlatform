@@ -5,6 +5,7 @@ using System.Text.Json;
 using B3.Trading.Application;
 using B3.Trading.Domain;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace B3.Trading.Api.Tests;
 
@@ -254,6 +255,45 @@ public class VwapAlgoEndpointTests
 
     // ───────────────────── Cancel-mid-flight (#294 P2) ─────────────────────
 
+    /// <summary>
+    /// Recording <see cref="IAlgoEventSink"/> used by the cancel-mid-flight
+    /// test (#294 pass-2 P2) to assert exactly-once terminal emission.
+    /// <c>PublishAlgoSnapshot</c> is invoked on every algo state transition
+    /// (PendingNew → Working → Cancelling → Cancelled), so we capture the
+    /// algo's status AT THE TIME of the publish and count only the ones
+    /// observed in a terminal state. A duplicate <c>RecordTerminalAsync</c>
+    /// would surface as two terminal publishes for the same algoId.
+    /// </summary>
+    private sealed class RecordingAlgoEventSink : IAlgoEventSink
+    {
+        private readonly AlgoBook _book;
+        private readonly object _gate = new();
+        private readonly List<(ulong AlgoId, AlgoStatus Status)> _publishes = new();
+
+        public RecordingAlgoEventSink(AlgoBook book) => _book = book;
+
+        public void PublishAlgoSnapshot(EndClientId owner, string firmId, ulong algoId)
+        {
+            if (!_book.TryGet(firmId, algoId, out var algo) || algo is null) return;
+            lock (_gate)
+            {
+                _publishes.Add((algoId, algo.Status));
+            }
+        }
+
+        public int TerminalPublishCount(ulong algoId)
+        {
+            lock (_gate)
+            {
+                return _publishes.Count(p => p.AlgoId == algoId && IsTerminal(p.Status));
+            }
+        }
+
+        private static bool IsTerminal(AlgoStatus s) =>
+            s is AlgoStatus.Cancelled or AlgoStatus.Completed
+              or AlgoStatus.Expired or AlgoStatus.Suspended;
+    }
+
     [Fact]
     public async Task Vwap_CancelMidFlight_CancelsLiveChildAndTerminalEmittedOnce()
     {
@@ -262,11 +302,30 @@ public class VwapAlgoEndpointTests
         // the live child, and on the cancel-ack the parent reaches
         // Cancelled. A second DELETE after terminal is a no-op (409,
         // not another terminal); terminal state is recorded exactly
-        // once — re-reading /algo returns the same TerminalAtUtc.
-        using var f = TestAppFactory.WithOverrides(Simulator());
+        // once.
+        //
+        // Pass-2 review (#294) P2: explicit count assertion via a
+        // recording IAlgoEventSink — verifies exactly one terminal
+        // publish for this algoId after both DELETEs. Without this
+        // a regression that emits a duplicate AlgoTerminalStateRecorded
+        // event would still leave TerminalAtUtc stable (the aggregate
+        // refuses to re-transition) yet flood downstream listeners with
+        // a phantom terminal — this assertion catches that.
+        RecordingAlgoEventSink? sink = null;
+        using var f = TestAppFactory.WithOverrides(Simulator(), services =>
+        {
+            services.RemoveAll<IAlgoEventSink>();
+            services.AddSingleton<IAlgoEventSink>(sp =>
+                sink = new RecordingAlgoEventSink(sp.GetRequiredService<AlgoBook>()));
+        });
         using var http = f.CreateClient();
         var userToken = await f.LoginAsync(http);
         var adminToken = await f.LoginAsync(http, "admin");
+
+        // Force resolution so the singleton is constructed and `sink`
+        // captures a non-null reference before the algo flow starts.
+        _ = f.Services.GetRequiredService<IAlgoEventSink>();
+        Assert.NotNull(sink);
 
         var now = DateTimeOffset.UtcNow;
         var algoId = await PostAlgo(http, userToken,
@@ -303,6 +362,10 @@ public class VwapAlgoEndpointTests
         var snap2 = await GetAlgo(http, userToken, algoId);
         Assert.Equal("Cancelled", snap2.GetProperty("status").GetString());
         Assert.Equal(terminalAt1, snap2.GetProperty("terminalAtUtc").GetDateTimeOffset());
+
+        // Pass-2 review (#294) P2. Exactly-one terminal publish.
+        var algoIdNum = ulong.Parse(algoId);
+        Assert.Equal(1, sink!.TerminalPublishCount(algoIdNum));
     }
 
     // ───────────────────────── helpers (parallel to AlgoTwapIntegrationTests) ─────────────────────────

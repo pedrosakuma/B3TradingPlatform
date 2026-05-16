@@ -78,6 +78,7 @@ public sealed class AlgoEngine : BackgroundService
     private readonly ILogger<AlgoEngine> _logger;
     private readonly OrderOwnershipMap _ownership;
     private readonly VolumeCurveEstimator? _vwapCurve;
+    private readonly MarketDataVolumePump? _volumePump;
 
     // Per-parent runtime state. Owned by the consumer task; the
     // ConcurrentDictionary is only used because TryAdd/TryGetValue are
@@ -97,7 +98,8 @@ public sealed class AlgoEngine : BackgroundService
         TimeProvider clock,
         ILogger<AlgoEngine> logger,
         OrderOwnershipMap ownership,
-        VolumeCurveEstimator? vwapCurve = null)
+        VolumeCurveEstimator? vwapCurve = null,
+        MarketDataVolumePump? volumePump = null)
     {
         _queue = queue;
         _algos = algos;
@@ -111,6 +113,7 @@ public sealed class AlgoEngine : BackgroundService
         _logger = logger;
         _ownership = ownership;
         _vwapCurve = vwapCurve;
+        _volumePump = volumePump;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -249,6 +252,18 @@ public sealed class AlgoEngine : BackgroundService
     {
         if (algo.IsTerminal) return;
         if (algo.Status == AlgoStatus.Cancelling) return;
+
+        // Pass-1 review (#294) P1. VWAP needs the SDK subscribed to its
+        // symbol so the VolumeCurveEstimator receives trade prints; without
+        // a non-empty curve and ParticipationCap set, VwapPlan.SliceQty
+        // returns 0 until window expiry → silent no-op algo. The pump
+        // dedupes per symbol so repeated calls (reactor re-evaluation,
+        // multiple parents on the same symbol, WAL replay-driven
+        // reconciliation) collapse to one SDK Subscribe per process.
+        if (algo.Type == AlgoType.Vwap && _volumePump is not null)
+        {
+            await _volumePump.EnsureSubscribedAsync(algo.Symbol, ct).ConfigureAwait(false);
+        }
 
         if (rt.LiveChildClOrdId is { } existing)
         {
