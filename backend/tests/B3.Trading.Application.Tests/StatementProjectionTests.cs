@@ -23,7 +23,7 @@ public class StatementProjectionTests
     {
         var wal = Array.Empty<(long Seq, WalEvent Event)>();
 
-        var dto = StatementProjection.Build(Alice, Day, wal, livePositions: null);
+        var dto = StatementProjection.Build(Alice, Day, wal, livePositionsSnapshot: null);
 
         Assert.Equal("2024-06-17", dto.DayKey);
         Assert.Empty(dto.Positions);
@@ -61,7 +61,7 @@ public class StatementProjectionTests
             (7, Realized(2UL, Alice, "PETR4", 100m, at: DayStart.AddHours(11))),
         };
 
-        var dto = StatementProjection.Build(Alice, Day, wal, livePositions: null);
+        var dto = StatementProjection.Build(Alice, Day, wal, livePositionsSnapshot: null);
 
         Assert.Equal(2, dto.Fills.Count);
         Assert.Contains(dto.Fills, f => f.Side == "Buy" && f.Quantity == 100);
@@ -99,7 +99,7 @@ public class StatementProjectionTests
             (4, Er(2UL, ExecKind.Fill, leaves: 0, cum: 100, last: 100, price: 32m, at: DayStart.AddHours(11))),
         };
 
-        var dto = StatementProjection.Build(Alice, Day, wal, livePositions: null);
+        var dto = StatementProjection.Build(Alice, Day, wal, livePositionsSnapshot: null);
 
         var ir = Assert.Single(dto.IrDayTrade.PerSymbol);
         Assert.Equal("PETR4", ir.Symbol);
@@ -123,7 +123,7 @@ public class StatementProjectionTests
             (2, Er(1UL, ExecKind.Fill, leaves: 0, cum: 100, last: 100, price: 30m, at: DayStart.AddHours(10))),
         };
 
-        var dto = StatementProjection.Build(Alice, Day, wal, livePositions: null);
+        var dto = StatementProjection.Build(Alice, Day, wal, livePositionsSnapshot: null);
 
         Assert.Empty(dto.IrDayTrade.PerSymbol);
         Assert.Equal(0m, dto.IrDayTrade.TotalTax);
@@ -145,7 +145,7 @@ public class StatementProjectionTests
             (4, Er(2UL, ExecKind.Fill, leaves: 0, cum: 100, last: 100, price: 28m, at: DayStart.AddHours(11))),
         };
 
-        var dto = StatementProjection.Build(Alice, Day, wal, livePositions: null);
+        var dto = StatementProjection.Build(Alice, Day, wal, livePositionsSnapshot: null);
 
         var ir = Assert.Single(dto.IrDayTrade.PerSymbol);
         Assert.Equal(-200m, ir.GrossProfit);
@@ -168,7 +168,7 @@ public class StatementProjectionTests
             (4, Er(2UL, ExecKind.Fill, leaves: 0, cum: 60, last: 60, price: 31m, at: DayStart.AddHours(11))),
         };
 
-        var dto = StatementProjection.Build(Alice, Day, wal, livePositions: null);
+        var dto = StatementProjection.Build(Alice, Day, wal, livePositionsSnapshot: null);
 
         var ir = Assert.Single(dto.IrDayTrade.PerSymbol);
         Assert.Equal(60, ir.QtyMatched);
@@ -197,7 +197,7 @@ public class StatementProjectionTests
             (7, Realized(2UL, Bob, "PETR4", 999m, at: DayStart.AddHours(11))),
         };
 
-        var aliceDto = StatementProjection.Build(Alice, Day, wal, livePositions: null);
+        var aliceDto = StatementProjection.Build(Alice, Day, wal, livePositionsSnapshot: null);
         Assert.Single(aliceDto.Fills);
         Assert.Equal(100, aliceDto.Fills[0].Quantity);
         Assert.Equal(1m, aliceDto.FeesTotal);
@@ -205,7 +205,7 @@ public class StatementProjectionTests
         var pos = Assert.Single(aliceDto.Positions);
         Assert.Equal(100, pos.NetQty);
 
-        var bobDto = StatementProjection.Build(Bob, Day, wal, livePositions: null);
+        var bobDto = StatementProjection.Build(Bob, Day, wal, livePositionsSnapshot: null);
         Assert.Single(bobDto.Fills);
         Assert.Equal(50, bobDto.Fills[0].Quantity);
         Assert.Equal(5m, bobDto.FeesTotal);
@@ -229,7 +229,7 @@ public class StatementProjectionTests
             (6, Er(3UL, ExecKind.Fill, 0, 30, 30, 32m, next)),
         };
 
-        var dto = StatementProjection.Build(Alice, Day, wal, livePositions: null);
+        var dto = StatementProjection.Build(Alice, Day, wal, livePositionsSnapshot: null);
         var fill = Assert.Single(dto.Fills);
         Assert.Equal(20, fill.Quantity);
         Assert.Equal(31m, fill.Price);
@@ -238,6 +238,70 @@ public class StatementProjectionTests
         // and Day's fill (20), excludes the Day+1 fill.
         var pos = Assert.Single(dto.Positions);
         Assert.Equal(30, pos.NetQty);
+    }
+
+    [Fact]
+    public void DayTradeMixedProfitAndLoss_NetsWithinSymbol()
+    {
+        // Pass-2 review (#279) P2 regression. Within the SAME end-client
+        // and SAME symbol on the SAME day FIFO can pair lots that
+        // produce both profits and losses; the projection must net
+        // them (per-symbol) before applying the 20% rate:
+        //   buy  100 @ 30  →  buy lot1 (100 @ 30)
+        //   buy  100 @ 35  →  buy lot2 (100 @ 35)
+        //   sell 100 @ 40  →  pairs FIFO against lot1 → +(40-30)*100 = +1000
+        //   sell 100 @ 31  →  pairs FIFO against lot2 → +(31-35)*100 =  -400
+        //   net per-symbol gross =  600  →  taxable 600 → tax 120.00
+        var wal = new List<(long Seq, WalEvent Event)>
+        {
+            (1, Submit(1UL, Alice, "PETR4", OrderSide.Buy, 100, 30m)),
+            (2, Er(1UL, ExecKind.Fill, 0, 100, 100, 30m, DayStart.AddHours(10))),
+            (3, Submit(2UL, Alice, "PETR4", OrderSide.Buy, 100, 35m)),
+            (4, Er(2UL, ExecKind.Fill, 0, 100, 100, 35m, DayStart.AddHours(11))),
+            (5, Submit(3UL, Alice, "PETR4", OrderSide.Sell, 100, 40m)),
+            (6, Er(3UL, ExecKind.Fill, 0, 100, 100, 40m, DayStart.AddHours(12))),
+            (7, Submit(4UL, Alice, "PETR4", OrderSide.Sell, 100, 31m)),
+            (8, Er(4UL, ExecKind.Fill, 0, 100, 100, 31m, DayStart.AddHours(13))),
+        };
+
+        var dto = StatementProjection.Build(Alice, Day, wal, livePositionsSnapshot: null);
+
+        var ir = Assert.Single(dto.IrDayTrade.PerSymbol);
+        Assert.Equal("PETR4", ir.Symbol);
+        Assert.Equal(200, ir.QtyMatched);
+        Assert.Equal(600m, ir.GrossProfit);
+        Assert.Equal(600m, ir.TaxableProfit);
+        Assert.Equal(120.00m, ir.TaxAmount);
+        Assert.Equal(120.00m, dto.IrDayTrade.TotalTax);
+    }
+
+    [Fact]
+    public void DayTradeMixedProfitAndLoss_NetLossYieldsZeroTaxWithNoCredit()
+    {
+        // Same shape as the profit case but the loss leg dominates:
+        //   buy  100 @ 30, buy 100 @ 35
+        //   sell 100 @ 32  → +(32-30)*100 = +200
+        //   sell 100 @ 25  → +(25-35)*100 = -1000
+        //   net gross = -800 → taxable = 0 → tax = 0 (no credit carried).
+        var wal = new List<(long Seq, WalEvent Event)>
+        {
+            (1, Submit(1UL, Alice, "PETR4", OrderSide.Buy, 100, 30m)),
+            (2, Er(1UL, ExecKind.Fill, 0, 100, 100, 30m, DayStart.AddHours(10))),
+            (3, Submit(2UL, Alice, "PETR4", OrderSide.Buy, 100, 35m)),
+            (4, Er(2UL, ExecKind.Fill, 0, 100, 100, 35m, DayStart.AddHours(11))),
+            (5, Submit(3UL, Alice, "PETR4", OrderSide.Sell, 100, 32m)),
+            (6, Er(3UL, ExecKind.Fill, 0, 100, 100, 32m, DayStart.AddHours(12))),
+            (7, Submit(4UL, Alice, "PETR4", OrderSide.Sell, 100, 25m)),
+            (8, Er(4UL, ExecKind.Fill, 0, 100, 100, 25m, DayStart.AddHours(13))),
+        };
+
+        var dto = StatementProjection.Build(Alice, Day, wal, livePositionsSnapshot: null);
+
+        var ir = Assert.Single(dto.IrDayTrade.PerSymbol);
+        Assert.Equal(-800m, ir.GrossProfit);
+        Assert.Equal(0m, ir.TaxableProfit);
+        Assert.Equal(0m, ir.TaxAmount);
+        Assert.Equal(0m, dto.IrDayTrade.TotalTax);
     }
 
     // -----------------------------------------------------------------

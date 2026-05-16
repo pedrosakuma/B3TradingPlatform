@@ -20,12 +20,16 @@ namespace B3.Trading.Application;
 /// </para>
 ///
 /// <para>
-/// <b>Positions snapshot.</b> Always derived from the live
-/// <see cref="PositionKeeper"/> when <paramref name="useLivePositions"/>
-/// is <c>true</c> (today, intraday); past days are projected from the
-/// WAL by replaying every fill ER from genesis up to the end of the
-/// requested day. This keeps the projection a pure function over the
-/// WAL slice the caller passes in.
+/// <b>Positions snapshot.</b> Always derived from a caller-provided
+/// immutable snapshot (<see cref="PositionRowDto"/> list) when one is
+/// supplied — the API layer captures that under
+/// <see cref="Persistence.EventDispatcher.RunExclusive(System.Action)"/>
+/// alongside the WAL upper-bound so today's statement cannot tear (a
+/// new fill cannot land in <see cref="PositionKeeper"/> after the WAL
+/// scan stopped). Past days are projected from the WAL by replaying
+/// every fill ER from genesis up to the end of the requested day. This
+/// keeps the projection a pure function over the WAL slice the caller
+/// passes in.
 /// </para>
 ///
 /// <para>
@@ -49,19 +53,22 @@ public static class StatementProjection
     /// <summary>
     /// Build the statement DTO for <paramref name="owner"/> on
     /// <paramref name="dayKey"/> from the WAL events in
-    /// <paramref name="walEvents"/> (already filtered to the day, but
+    /// <paramref name="walEventsAllTime"/> (already filtered to the day, but
     /// re-filtered defensively below). When
-    /// <paramref name="livePositions"/> is non-null its
-    /// <see cref="PositionKeeper.ForEndClient"/> output is used for the
-    /// positions snapshot (today, intraday); otherwise positions are
+    /// <paramref name="livePositionsSnapshot"/> is non-null it is used
+    /// verbatim as the positions snapshot (already sorted and
+    /// zero-quantity-filtered by the caller); otherwise positions are
     /// projected from <paramref name="walEventsAllTime"/> up to the end
-    /// of <paramref name="dayKey"/>.
+    /// of <paramref name="dayKey"/>. The caller is responsible for
+    /// capturing the snapshot atomically with the WAL upper-bound used
+    /// to bound <paramref name="walEventsAllTime"/> (today path takes
+    /// both under <see cref="Persistence.EventDispatcher.RunExclusive(System.Action)"/>).
     /// </summary>
     public static DailyStatementDto Build(
         EndClientId owner,
         DateOnly dayKey,
         IReadOnlyList<(long Seq, WalEvent Event)> walEventsAllTime,
-        PositionKeeper? livePositions)
+        IReadOnlyList<PositionRowDto>? livePositionsSnapshot)
     {
         ArgumentNullException.ThrowIfNull(walEventsAllTime);
 
@@ -140,16 +147,9 @@ public static class StatementProjection
 
         // ----------------- positions snapshot -----------------
         IReadOnlyList<PositionRowDto> positions;
-        if (livePositions is not null)
+        if (livePositionsSnapshot is not null)
         {
-            var live = new List<PositionRowDto>();
-            foreach (var p in livePositions.ForEndClient(owner))
-            {
-                if (p.NetQuantity == 0) continue;
-                live.Add(new PositionRowDto(p.Symbol, p.NetQuantity, p.AverageEntryPrice));
-            }
-            live.Sort(static (a, b) => string.CompareOrdinal(a.Symbol, b.Symbol));
-            positions = live;
+            positions = livePositionsSnapshot;
         }
         else
         {

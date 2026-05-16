@@ -39,6 +39,7 @@ public static class StatementEndpoints
             EndClientRegistry registry,
             IEventStore store,
             PositionKeeper positions,
+            EventDispatcher dispatcher,
             string? dayKey,
             CancellationToken ct) =>
         {
@@ -47,7 +48,7 @@ public static class StatementEndpoints
             var owner = ResolveOwner(ctx, registry);
             Application.Observability.MetricsRegistry.StatementEndpointRequests.Add(
                 1, new KeyValuePair<string, object?>("format", "json"));
-            var dto = await BuildAsync(owner, day, store, positions, ct);
+            var dto = await BuildAsync(owner, day, store, positions, dispatcher, ct);
             EmitDayTradeMetric(dto);
             return Results.Ok(dto);
         });
@@ -57,6 +58,7 @@ public static class StatementEndpoints
             EndClientRegistry registry,
             IEventStore store,
             PositionKeeper positions,
+            EventDispatcher dispatcher,
             string dayKey,
             CancellationToken ct) =>
         {
@@ -65,7 +67,7 @@ public static class StatementEndpoints
             var owner = ResolveOwner(ctx, registry);
             Application.Observability.MetricsRegistry.StatementEndpointRequests.Add(
                 1, new KeyValuePair<string, object?>("format", "csv"));
-            var dto = await BuildAsync(owner, day, store, positions, ct);
+            var dto = await BuildAsync(owner, day, store, positions, dispatcher, ct);
             EmitDayTradeMetric(dto);
             var bytes = RenderCsv(dto);
             return Results.File(
@@ -78,14 +80,62 @@ public static class StatementEndpoints
     }
 
     private static async Task<DailyStatementDto> BuildAsync(
-        EndClientId owner, DateOnly day, IEventStore store, PositionKeeper positions, CancellationToken ct)
+        EndClientId owner, DateOnly day, IEventStore store, PositionKeeper positions,
+        EventDispatcher dispatcher, CancellationToken ct)
     {
-        // Drain the writer so an event appended an instant ago is in
-        // the read view. Mirrors HistoryEndpoints' guarantee — the
-        // statement must reflect every fill the API has acknowledged.
-        await store.FlushAsync(ct);
+        var today = DateOnly.FromDateTime(DateTimeOffset.UtcNow.UtcDateTime);
+        long snapshotSeq;
+        IReadOnlyList<PositionRowDto>? livePositionsSnapshot;
 
-        var snapshotSeq = store.CurrentSeq;
+        if (day == today)
+        {
+            // Pass-2 review (#279) P1. Today's statement reads three
+            // streams that the dispatcher mutates atomically per fill:
+            // the WAL (caps our scan), the PositionKeeper (live qty +
+            // avg price), and the fee/PnL events the dispatcher nests
+            // off the same fill. If we sampled them in sequence WITHOUT
+            // the dispatcher lock a new fill could land in
+            // PositionKeeper after we capped the WAL scan, producing a
+            // torn snapshot where the position reflects N+1 fills but
+            // the fills/fees/realized rows reflect only N. Capture the
+            // WAL upper-bound and the position rows under
+            // EventDispatcher.RunExclusive — the same serialisation
+            // discipline EntryPointExecutionReportRouter uses on the
+            // WAL-backpressure fallback — so the three views agree.
+            long capturedSeq = 0;
+            IReadOnlyList<PositionRowDto>? capturedPositions = null;
+            dispatcher.RunExclusive(() =>
+            {
+                capturedSeq = store.CurrentSeq;
+                var rows = new List<PositionRowDto>();
+                foreach (var p in positions.ForEndClient(owner))
+                {
+                    if (p.NetQuantity == 0) continue;
+                    rows.Add(new PositionRowDto(p.Symbol, p.NetQuantity, p.AverageEntryPrice));
+                }
+                rows.Sort(static (a, b) => string.CompareOrdinal(a.Symbol, b.Symbol));
+                capturedPositions = rows;
+            });
+            snapshotSeq = capturedSeq;
+            livePositionsSnapshot = capturedPositions;
+
+            // Drain the writer AFTER taking the dispatcher snapshot so
+            // every entry with seq <= snapshotSeq is durable and
+            // visible to ReadFromAsync. FlushAsync runs outside the
+            // lock — we do not want async I/O while serialising new
+            // dispatches.
+            await store.FlushAsync(ct);
+        }
+        else
+        {
+            // Past-day statements are a pure WAL projection — the
+            // keepers have long since advanced past that snapshot, so
+            // there is no live state to capture and nothing to lock.
+            await store.FlushAsync(ct);
+            snapshotSeq = store.CurrentSeq;
+            livePositionsSnapshot = null;
+        }
+
         var wal = new List<(long Seq, WalEvent Event)>(capacity: 256);
         await foreach (var entry in store.ReadFromAsync(0, ct))
         {
@@ -93,12 +143,7 @@ public static class StatementEndpoints
             wal.Add(entry);
         }
 
-        var today = DateOnly.FromDateTime(DateTimeOffset.UtcNow.UtcDateTime);
-        // Live positions only count when the caller is asking about the
-        // CURRENT day — for past days we project positions from the WAL
-        // slice (the keeper has long since advanced past that snapshot).
-        var live = day == today ? positions : null;
-        return StatementProjection.Build(owner, day, wal, live);
+        return StatementProjection.Build(owner, day, wal, livePositionsSnapshot);
     }
 
     private static void EmitDayTradeMetric(DailyStatementDto dto)
@@ -142,7 +187,7 @@ public static class StatementEndpoints
 
     private static readonly byte[] Utf8Bom = new byte[] { 0xEF, 0xBB, 0xBF };
 
-    private static byte[] RenderCsv(DailyStatementDto dto)
+    internal static byte[] RenderCsv(DailyStatementDto dto)
     {
         var sb = new StringBuilder(1024);
 
@@ -212,7 +257,7 @@ public static class StatementEndpoints
     /// RFC4180-ish field escape: wrap in quotes when the value contains
     /// a comma, quote, CR, or LF; double up internal quotes.
     /// </summary>
-    private static string Csv(string v)
+    internal static string Csv(string v)
     {
         if (string.IsNullOrEmpty(v)) return string.Empty;
         var needsQuote = false;

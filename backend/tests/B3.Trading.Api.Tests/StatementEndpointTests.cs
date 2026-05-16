@@ -258,6 +258,195 @@ public class StatementEndpointTests : IDisposable
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
     }
 
+    [Fact]
+    public async Task ConcurrentFills_StatementRead_NeverProducesTornSnapshot()
+    {
+        // Pass-2 review (#279) P1 regression. Drive many fills
+        // concurrently with many statement reads on the SAME end-client
+        // for today (the path that mixes WAL projection with live
+        // PositionKeeper state). Every snapshot the endpoint hands back
+        // must be internally consistent:
+        //
+        //   sum(buy.fillQty - sell.fillQty)  ==  position.netQty
+        //
+        // for each symbol. Before the fix the endpoint sampled the WAL
+        // and the keeper in sequence WITHOUT the dispatcher lock, so a
+        // fill landing between the WAL cap and the keeper read would
+        // bump netQty above the sum-of-fills slice. With the fix both
+        // captures happen under EventDispatcher.RunExclusive, so the
+        // race cannot be observed.
+        using var f = TestAppFactory.WithOverrides(Overrides());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        const int FillCount = 40;
+        var clOrdIds = new List<ulong>(FillCount);
+        for (var i = 0; i < FillCount; i++)
+            clOrdIds.Add(ulong.Parse(await SubmitBuy(http, token, qty: 1, price: 30m)));
+
+        // Reader task: hammer GET /statement and assert consistency on
+        // every response. Runs until all fills have been injected and
+        // we have observed the final consistent state at least once.
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var tornObserved = false;
+        string? tornDetail = null;
+        var readerStopped = 0;
+
+        var readerTask = Task.Run(async () =>
+        {
+            try
+            {
+                while (!cts.IsCancellationRequested && Volatile.Read(ref readerStopped) == 0)
+                {
+                    JsonElement dto;
+                    try
+                    {
+                        dto = await GetStatement(http, token);
+                    }
+                    catch (OperationCanceledException) { break; }
+
+                    var fillsQty = 0L;
+                    foreach (var fill in dto.GetProperty("fills").EnumerateArray())
+                    {
+                        var side = fill.GetProperty("side").GetString();
+                        var qty = fill.GetProperty("quantity").GetInt64();
+                        fillsQty += string.Equals(side, "Buy", StringComparison.Ordinal) ? qty : -qty;
+                    }
+
+                    var netQty = 0L;
+                    foreach (var pos in dto.GetProperty("positions").EnumerateArray())
+                    {
+                        if (pos.GetProperty("symbol").GetString() == "PETR4")
+                            netQty = pos.GetProperty("netQty").GetInt64();
+                    }
+
+                    if (fillsQty != netQty)
+                    {
+                        tornObserved = true;
+                        tornDetail = $"fillsQty={fillsQty} netQty={netQty}";
+                        break;
+                    }
+                }
+            }
+            catch (OperationCanceledException) { /* expected on shutdown */ }
+        });
+
+        // Writer: inject fills concurrently in small batches so the
+        // reader actually sees state changing under it.
+        await Parallel.ForEachAsync(clOrdIds, new ParallelOptions { MaxDegreeOfParallelism = 8 },
+            async (clOrdId, _) => await InjectFill(http, adminToken, clOrdId, qty: 1, price: 30m));
+
+        // Give the reader a few more spins after the writes settle so
+        // it captures the post-write steady state.
+        await Task.Delay(200);
+        Interlocked.Exchange(ref readerStopped, 1);
+        await readerTask;
+
+        Assert.False(tornObserved, $"observed torn statement snapshot: {tornDetail}");
+
+        // Final sanity: after all writes complete the steady-state
+        // statement must report the full FillCount across both views.
+        var final = await GetStatement(http, token);
+        var finalFills = final.GetProperty("fills").EnumerateArray().ToList();
+        Assert.Equal(FillCount, finalFills.Count);
+        var finalPos = Assert.Single(final.GetProperty("positions").EnumerateArray());
+        Assert.Equal((long)FillCount, finalPos.GetProperty("netQty").GetInt64());
+    }
+
+    [Fact]
+    public void CsvWriter_RoundTripsFieldsWithCommasQuotesAndNewlines()
+    {
+        // Pass-2 review (#279) P2 regression. Build a DTO that pushes
+        // every RFC4180 escape rule through StatementEndpoints.Csv via
+        // RenderCsv, then re-parse with our RFC4180 reader and assert
+        // bit-for-bit equality of the field contents. Proves the CSV
+        // producer correctly:
+        //   - wraps fields containing commas,
+        //   - wraps fields containing double-quotes and doubles the
+        //     internal quotes,
+        //   - wraps fields containing CR / LF and preserves them.
+        var tricky = new[]
+        {
+            "comma,inside",
+            "quote\"inside",
+            "newline\ninside",
+            "crlf\r\ninside",
+            "all,three\"things\nhere",
+            "leading\"and,trailing",
+        };
+        var fills = tricky.Select((s, i) => new FillRowDto(
+            ExecutionId: s,
+            ClOrdId: (i + 1).ToString(CultureInfo.InvariantCulture),
+            OrderId: (i + 1).ToString(CultureInfo.InvariantCulture),
+            Symbol: s,
+            Side: "Buy",
+            Quantity: 1,
+            Price: 30m,
+            TimestampUtc: new DateTimeOffset(2024, 6, 17, 10, 0, 0, TimeSpan.Zero))).ToList();
+        var dto = new DailyStatementDto(
+            DayKey: "2024-06-17",
+            Positions: Array.Empty<PositionRowDto>(),
+            Fills: fills,
+            Fees: Array.Empty<FeeRowDto>(),
+            FeesTotal: 0m,
+            Pnl: new PnlSummaryDto(0m, 0m, 0m),
+            IrDayTrade: new IrDayTradeDto(true, true, 0.20m, Array.Empty<IrDayTradeRowDto>(), 0m));
+
+        var bytes = StatementEndpoints.RenderCsv(dto);
+        // Strip BOM, parse the whole document with the RFC4180 reader,
+        // then locate the fills section and round-trip every row.
+        var text = Encoding.UTF8.GetString(bytes, 3, bytes.Length - 3);
+        var allRows = ParseCsv(text);
+        // Walk rows: skip until we see `# fills`, then take the header
+        // and following rows until a blank row or the next `#`-prefixed
+        // section marker. ExtractSection's naive text split can't
+        // survive embedded CR/LF inside quoted fields — parsing first
+        // and walking rows can.
+        var startIdx = -1;
+        for (var i = 0; i < allRows.Count; i++)
+        {
+            if (allRows[i].Length >= 1 && allRows[i][0] == "# fills") { startIdx = i + 1; break; }
+        }
+        Assert.True(startIdx > 0, "fills section header not found in CSV output");
+        var rows = new List<string[]>();
+        for (var i = startIdx; i < allRows.Count; i++)
+        {
+            var r = allRows[i];
+            if (r.Length == 0 || (r.Length == 1 && r[0].Length == 0)) break;
+            if (r.Length >= 1 && r[0].StartsWith("# ", StringComparison.Ordinal)) break;
+            rows.Add(r);
+        }
+
+        // rows[0] is the header.
+        Assert.Equal("executionId", rows[0][0]);
+        Assert.Equal(fills.Count + 1, rows.Count);
+        for (var i = 0; i < fills.Count; i++)
+        {
+            var row = rows[i + 1];
+            Assert.Equal(fills[i].ExecutionId, row[0]);
+            Assert.Equal(fills[i].Symbol, row[3]);
+        }
+    }
+
+    [Fact]
+    public void CsvParser_HandlesQuotedCommasNewlinesAndEscapedQuotes()
+    {
+        // Direct parser unit-test: feeds the RFC4180 reader hand-crafted
+        // edge-case input (the exact shapes the StatementEndpoints
+        // writer can emit) and asserts the parsed cells. If this test
+        // and the writer-round-trip test are both green the producer is
+        // genuinely RFC4180-compliant, not just "looks right".
+        var csv = "a,b,c\r\n" +
+                  "\"x,y\",\"line1\r\nline2\",\"he said \"\"hi\"\"\"\r\n" +
+                  "plain,\"with,comma\",end\r\n";
+        var rows = ParseCsv(csv);
+        Assert.Equal(3, rows.Count);
+        Assert.Equal(new[] { "a", "b", "c" }, rows[0]);
+        Assert.Equal(new[] { "x,y", "line1\r\nline2", "he said \"hi\"" }, rows[1]);
+        Assert.Equal(new[] { "plain", "with,comma", "end" }, rows[2]);
+    }
+
     // -----------------------------------------------------------------
     // helpers
     // -----------------------------------------------------------------
@@ -339,32 +528,76 @@ public class StatementEndpointTests : IDisposable
 
     private static List<string[]> ParseCsv(string block)
     {
-        // RFC4180-lite: rows separated by CRLF, fields by comma,
-        // optional double-quote wrap with embedded "" escape. Returns
-        // the parsed rows so callers can assert on column shape.
+        // RFC4180-compliant parser:
+        //   - Fields separated by comma, records by CRLF (LF tolerated).
+        //   - Fields may be wrapped in double quotes.
+        //   - Inside a quoted field, "" escapes a literal quote and
+        //     embedded commas / CR / LF are preserved as data, so a
+        //     single record can span multiple physical lines.
+        // Used to round-trip the statement CSV (whose producer escapes
+        // commas, quotes, and newlines per the same rules) so the test
+        // proves the producer is genuinely RFC4180-clean rather than
+        // "looks right on tidy fixtures".
         var rows = new List<string[]>();
-        foreach (var line in block.Split(new[] { "\r\n" }, StringSplitOptions.None))
+        var fields = new List<string>();
+        var sb = new StringBuilder();
+        var inQuotes = false;
+        for (var i = 0; i < block.Length; i++)
         {
-            if (line.Length == 0) continue;
-            var fields = new List<string>();
-            var sb = new StringBuilder();
-            var inQuotes = false;
-            for (var i = 0; i < line.Length; i++)
+            var c = block[i];
+            if (inQuotes)
             {
-                var c = line[i];
-                if (inQuotes)
+                if (c == '"')
                 {
-                    if (c == '"' && i + 1 < line.Length && line[i + 1] == '"') { sb.Append('"'); i++; }
-                    else if (c == '"') inQuotes = false;
-                    else sb.Append(c);
+                    if (i + 1 < block.Length && block[i + 1] == '"')
+                    {
+                        sb.Append('"');
+                        i++;
+                    }
+                    else
+                    {
+                        inQuotes = false;
+                    }
                 }
                 else
                 {
-                    if (c == ',') { fields.Add(sb.ToString()); sb.Clear(); }
-                    else if (c == '"' && sb.Length == 0) inQuotes = true;
-                    else sb.Append(c);
+                    sb.Append(c);
                 }
             }
+            else
+            {
+                if (c == '"' && sb.Length == 0)
+                {
+                    inQuotes = true;
+                }
+                else if (c == ',')
+                {
+                    fields.Add(sb.ToString());
+                    sb.Clear();
+                }
+                else if (c == '\r')
+                {
+                    if (i + 1 < block.Length && block[i + 1] == '\n') i++;
+                    fields.Add(sb.ToString());
+                    sb.Clear();
+                    rows.Add(fields.ToArray());
+                    fields = new List<string>();
+                }
+                else if (c == '\n')
+                {
+                    fields.Add(sb.ToString());
+                    sb.Clear();
+                    rows.Add(fields.ToArray());
+                    fields = new List<string>();
+                }
+                else
+                {
+                    sb.Append(c);
+                }
+            }
+        }
+        if (sb.Length > 0 || fields.Count > 0)
+        {
             fields.Add(sb.ToString());
             rows.Add(fields.ToArray());
         }
