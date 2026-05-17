@@ -67,4 +67,41 @@ public class AlgoParentRuntimeTests
         for (ulong id = 1; id <= 4; id++)
             Assert.True(rt.ChildBookedCum.ContainsKey(id));
     }
+
+    [Fact]
+    public void RetireChildSlot_FirstEvictionFlipsLatchOnce()
+    {
+        // Pass-3 review (#299) P2. The one-shot warn latch flips on the
+        // FIRST eviction (transitions the queue from cap → cap+1) and
+        // stays latched on subsequent evictions so callers can emit a
+        // single warn per parent without log spam.
+        var rt = new AlgoParentRuntime();
+
+        // Fill the FIFO up to the cap (8 retired entries). The 9th
+        // enqueue is the first that pushes past cap and evicts.
+        for (ulong childId = 1; childId <= 8; childId++)
+        {
+            rt.ChildBookedCum[childId] = 0;
+            rt.RetireChildSlot(childId, out var first0);
+            Assert.False(first0);
+        }
+        Assert.False(rt.RetiredEvictionLogged);
+
+        // 9th retire: queue grows to 9, the eldest (id=1) is evicted
+        // → first eviction returns true exactly once.
+        rt.ChildBookedCum[9UL] = 0;
+        var evicted1 = rt.RetireChildSlot(9UL, out var firstOverflow);
+        Assert.Equal(1, evicted1);
+        Assert.True(firstOverflow);
+        Assert.True(rt.RetiredEvictionLogged);
+        Assert.False(rt.ChildBookedCum.ContainsKey(1UL));
+
+        // 10th retire: still overflowing — eviction happens but latch
+        // stays armed; the firstEviction out-param must NOT re-arm.
+        rt.ChildBookedCum[10UL] = 0;
+        var evicted2 = rt.RetireChildSlot(10UL, out var firstAgain);
+        Assert.Equal(1, evicted2);
+        Assert.False(firstAgain);
+        Assert.True(rt.RetiredEvictionLogged);
+    }
 }

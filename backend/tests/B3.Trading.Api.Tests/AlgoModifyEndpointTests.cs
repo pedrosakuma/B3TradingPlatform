@@ -484,6 +484,268 @@ public class AlgoModifyEndpointTests
         Assert.Equal(50L, algoAfter.GetProperty("remainingQuantity").GetInt64());
     }
 
+    // ───────────── Pass-3 review (#299) regressions ─────────────
+
+    [Fact]
+    public async Task Modify_BuyChildPastAvailableCash_RejectedByMargin_NoGatewayCall()
+    {
+        // Pass-3 review (#299) P1. The algo modify path must run the
+        // same pre-trade risk pipeline + margin Prepare gates the
+        // operator-driven plain-order modify pipeline applies. Before
+        // the fix the engine went straight from validation to gateway
+        // dispatch and CommitReplace on the venue ack only rebalanced
+        // — a Buy child could be price-modified past available cash
+        // with no rejection. After the fix: pre-Prepare reject → no
+        // CancelReplace on the wire, no AlgoChildModifiedEvent
+        // emitted, and algo.modify_rejected_total{reason=margin_rejected}
+        // bumps. (We assert the margin reason specifically — risk
+        // pipeline + margin coordinator are wired in order; an upsize
+        // past available cash trips the coordinator, not the pipeline.)
+        var overrides = new Dictionary<string, string?>(Simulator())
+        {
+            ["Trading:Risk:Margin:Enabled"] = "true",
+            // Exactly enough for the initial 100@30=3000 reservation;
+            // any upsize delta on a subsequent modify must trip the
+            // coordinator (delta > available=0).
+            [$"Trading:Risk:Margin:Initial:{TestAppFactory.TestUser}"] = "3000",
+            // Push other limits high so margin is the only gate that
+            // could plausibly reject the modify.
+            ["Trading:Risk:Default:MaxNotional"] = "999999999",
+        };
+        using var f = TestAppFactory.WithOverrides(overrides);
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+
+        long rejectedByMargin = 0;
+        long childModifies = 0;
+        using var listener = new System.Diagnostics.Metrics.MeterListener();
+        listener.InstrumentPublished = (instrument, ml) =>
+        {
+            if (instrument.Name == "trading.algo.modify_rejected_total"
+                || instrument.Name == "trading.algo.child_modifies_total")
+                ml.EnableMeasurementEvents(instrument);
+        };
+        listener.SetMeasurementEventCallback<long>((inst, measurement, tags, _) =>
+        {
+            if (inst.Name == "trading.algo.modify_rejected_total")
+            {
+                string? reason = null;
+                foreach (var t in tags)
+                    if (t.Key == "reason") reason = t.Value as string;
+                if (reason == "margin_rejected")
+                    Interlocked.Add(ref rejectedByMargin, measurement);
+            }
+            else if (inst.Name == "trading.algo.child_modifies_total")
+            {
+                Interlocked.Add(ref childModifies, measurement);
+            }
+        });
+        listener.Start();
+
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        Assert.Equal(30.0m, child.Price);
+
+        // Operator modify: bump price one tick up → upsize delta of
+        // 100 * 0.5 = 50 cash. Available is 0 (initial 3000 already
+        // reserved against the original child). Margin coordinator
+        // must reject; no CancelReplace must hit the wire.
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        var preReplaces = mock.SubmittedReplaces.Count;
+
+        var modReq = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
+        {
+            Content = JsonContent.Create(new { NewPrice = 30.5m }),
+        };
+        modReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var modResp = await http.SendAsync(modReq);
+        // Endpoint accepts (validation is per-engine async); engine
+        // rejects on the consumer task.
+        Assert.Equal(HttpStatusCode.Accepted, modResp.StatusCode);
+
+        await Task.Delay(300);
+
+        // No CancelReplace dispatched to the gateway for this child.
+        Assert.Equal(preReplaces, mock.SubmittedReplaces.Count);
+        Assert.DoesNotContain(mock.SubmittedReplaces,
+            r => r.OriginalClOrdId == child.ClOrdId);
+
+        // Margin-reason rejection observed; no child-modify success
+        // counter bump (which would have implied an
+        // AlgoChildModifiedEvent emit).
+        listener.RecordObservableInstruments();
+        Assert.True(Interlocked.Read(ref rejectedByMargin) >= 1,
+            "expected algo.modify_rejected_total{reason=margin_rejected} to bump at least once");
+        Assert.Equal(0, Interlocked.Read(ref childModifies));
+    }
+
+    [Fact]
+    public async Task Modify_WithinRisk_StillSucceeds_HappyPathRegression()
+    {
+        // Pass-3 review (#299) P1. The risk + margin gates added to
+        // the algo modify path must NOT regress the within-budget
+        // happy path: a modify that stays inside the operator's cash
+        // headroom and inside all risk limits must still produce a
+        // gateway CancelReplace and converge on the Replaced ER. This
+        // mirrors Modify_LiveChild_IssuesReplaceAndConverges but with
+        // margin explicitly enabled and a generous balance to prove
+        // the new gates pass on the green path.
+        var overrides = new Dictionary<string, string?>(Simulator())
+        {
+            ["Trading:Risk:Margin:Enabled"] = "true",
+            [$"Trading:Risk:Margin:Initial:{TestAppFactory.TestUser}"] = "1000000",
+            ["Trading:Risk:Default:MaxNotional"] = "999999999",
+        };
+        using var f = TestAppFactory.WithOverrides(overrides);
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var oldChild = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+
+        var modReq = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
+        {
+            Content = JsonContent.Create(new { NewPrice = 30.5m }),
+        };
+        modReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var modResp = await http.SendAsync(modReq);
+        Assert.Equal(HttpStatusCode.Accepted, modResp.StatusCode);
+
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        await WaitFor(
+            () => mock.SubmittedReplaces.Any(r => r.OriginalClOrdId == oldChild.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "engine never dispatched CancelReplace on within-budget modify");
+
+        var replace = mock.SubmittedReplaces.Single(r => r.OriginalClOrdId == oldChild.ClOrdId);
+        await InjectReplacedEr(http, adminToken,
+            newClOrdId: replace.NewClOrdId,
+            origClOrdId: replace.OriginalClOrdId,
+            leavesQuantity: replace.NewQuantity);
+
+        var newChild = await WaitForChildOtherThan(book, algoId, oldChild.ClOrdId,
+            TimeSpan.FromSeconds(3));
+        Assert.Equal(30.5m, newChild.Price);
+        Assert.Equal(replace.NewClOrdId, newChild.ClOrdId);
+    }
+
+    [Fact]
+    public async Task Modify_RepeatedAdoptions_OverflowRetiredFifo_BumpsEvictionCounter()
+    {
+        // Pass-3 review (#299) P2. Mirror PR #296's CancelledChildRing
+        // observability for the retired-child FIFO. The FIFO caps the
+        // per-parent ChildBookedCum bookkeeping at 8 retired entries
+        // (rationale lives on AlgoParentRuntime.RetiredChildSlotsCap);
+        // each adoption past the cap evicts the eldest entry and MUST
+        // bump trading.algo.modify_retired_child_evicted_total so
+        // dashboards see sustained churn. We drive 9 successive
+        // operator-modify-then-Replaced-ER cycles on the same parent
+        // — the 9th adoption is the first to push the queue past cap
+        // and trigger an eviction.
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        long evicted = 0;
+        string? evictedAlgoType = null;
+        using var listener = new System.Diagnostics.Metrics.MeterListener();
+        listener.InstrumentPublished = (instrument, ml) =>
+        {
+            if (instrument.Name == "trading.algo.modify_retired_child_evicted_total")
+                ml.EnableMeasurementEvents(instrument);
+        };
+        listener.SetMeasurementEventCallback<long>((_, measurement, tags, _) =>
+        {
+            foreach (var t in tags)
+                if (t.Key == "algoType") evictedAlgoType = t.Value as string;
+            Interlocked.Add(ref evicted, measurement);
+        });
+        listener.Start();
+
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var liveChild = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+
+        // Drive 9 modify→Replaced cycles. Bump NewQuantity to keep each
+        // modify operative without pushing past the default
+        // PriceCollarPercent=10 around the 30.0 reference price (which
+        // would only allow a few price ticks before tripping the
+        // collar — quantity-bump is the safe lever here).
+        for (int cycle = 0; cycle < 9; cycle++)
+        {
+            var newQty = 101 + cycle; // 101, 102, ..., 109
+            var preReplaceCount = mock.SubmittedReplaces.Count;
+            var modReq = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
+            {
+                Content = JsonContent.Create(new { NewQuantity = newQty }),
+            };
+            modReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            var modResp = await http.SendAsync(modReq);
+            Assert.Equal(HttpStatusCode.Accepted, modResp.StatusCode);
+
+            await WaitFor(
+                () => mock.SubmittedReplaces.Count > preReplaceCount
+                      && mock.SubmittedReplaces.Last().OriginalClOrdId == liveChild.ClOrdId,
+                TimeSpan.FromSeconds(3),
+                $"cycle {cycle}: engine did not dispatch CancelReplace for child {liveChild.ClOrdId}");
+            var replace = mock.SubmittedReplaces.Last();
+
+            await InjectReplacedEr(http, adminToken,
+                newClOrdId: replace.NewClOrdId,
+                origClOrdId: replace.OriginalClOrdId,
+                leavesQuantity: newQty);
+
+            // Wait for the new child to materialise in the book under
+            // the expected ClOrdID. The generic WaitForChildOtherThan
+            // would return any non-matching child (and prior cycles'
+            // Replaced-terminal children stay in the book), so we
+            // target the specific id from this cycle's replace
+            // intent to keep the loop deterministic across N>1 cycles.
+            var expectedNewId = replace.NewClOrdId;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            Order? hydrated = null;
+            while (sw.Elapsed < TimeSpan.FromSeconds(3))
+            {
+                if (book.TryGet(expectedNewId, out var maybe) && maybe is not null)
+                {
+                    hydrated = maybe;
+                    break;
+                }
+                await Task.Delay(10);
+            }
+            Assert.NotNull(hydrated);
+            liveChild = hydrated!;
+            // Allow the engine consumer task to process the
+            // ChildExecutionObservedSignal that ApplyReplaceAccepted
+            // fans out — that's where RetireChildSlot runs. Without
+            // this brief delay the next cycle's modify can race the
+            // adoption (still-in-flight intent for the OLD id).
+            await Task.Delay(50);
+        }
+
+        // 9 adoptions on the same parent = 9 retired-child enqueues;
+        // cap=8 ⇒ exactly 1 eviction; the algoType tag is the lowercased
+        // AlgoType enum value (matches the algo.modify_rejected_total
+        // taxonomy already in use).
+        listener.RecordObservableInstruments();
+        Assert.Equal(1L, Interlocked.Read(ref evicted));
+        Assert.Equal("pegged", evictedAlgoType);
+    }
+
     // ───────────────────────── Helpers ─────────────────────────
 
     private static async Task<JsonElement> GetAlgo(HttpClient http, string token, string algoId)

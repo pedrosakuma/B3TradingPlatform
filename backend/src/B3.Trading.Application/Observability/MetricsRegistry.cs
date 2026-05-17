@@ -380,6 +380,19 @@ public static class MetricsRegistry
             "trading.algo.modify_send_ambiguous_total",
             description: "Algo modify gateway dispatches that threw post-WAL but may have been accepted by the venue (intent preserved for late Replaced ER resolution).");
 
+    // Pass-3 review (#299) P2. Per-parent retired-child FIFO eviction
+    // counter. Mirrors PR #296's CancelledChildRing observability —
+    // each eviction means a row was forgotten from
+    // <c>AlgoParentRuntime.ChildBookedCum</c>, so a late stray ER for
+    // the evicted OLD child id would no longer find its prior booked
+    // cum and would re-book from a missing-key default of 0. Tagged by
+    // algoType so dashboards can spot sustained eviction churn on
+    // (e.g.) Pegged repegs vs. operator-driven modifies.
+    public static readonly Counter<long> AlgoModifyRetiredChildEvictedTotal =
+        Meter.CreateCounter<long>(
+            "trading.algo.modify_retired_child_evicted_total",
+            description: "Algo retired-child FIFO entries evicted when the per-parent ChildBookedCum bookkeeping cap is exceeded.");
+
     /// <summary>
     /// 1 when the host booted with <c>Trading:Exchange:AllowErInjection=true</c>
     /// (admin-gated <c>POST /admin/simulator/er</c> is mapped). Set once at

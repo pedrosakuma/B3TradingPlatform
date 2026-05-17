@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using B3.Trading.Application.MarketData;
 using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
+using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -115,6 +116,22 @@ public sealed class AlgoEngine : BackgroundService
     /// </summary>
     private readonly PendingReplacementRegistry? _replacements;
 
+    /// <summary>
+    /// Pass-3 review (#299) P1. Risk pipeline + replace-margin coordinator
+    /// for the engine-driven modify path. Mirrors
+    /// <see cref="OrderModifyService"/>'s pre-trade gates so an operator
+    /// or engine-driven cancel-replace that would push a Buy past
+    /// available cash (or trip any other pre-trade rule) is rejected
+    /// BEFORE the gateway dispatch — closing the bypass identified in
+    /// pass-3 where the algo modify path went straight from validation
+    /// to gateway with no risk check or margin reserve. Both are
+    /// optional only to keep test compositions (which don't wire the
+    /// full risk pipeline) buildable; production composition always
+    /// supplies them via DI alongside <see cref="_replacements"/>.
+    /// </summary>
+    private readonly RiskPipeline? _risk;
+    private readonly IReplaceMarginCoordinator? _replaceMargin;
+
     // Per-parent runtime state. Owned by the consumer task; the
     // ConcurrentDictionary is only used because TryAdd/TryGetValue are
     // convenient — no concurrent writers exist in v0.
@@ -139,7 +156,9 @@ public sealed class AlgoEngine : BackgroundService
         PegBookTopCache? pegBookTop = null,
         MarketDataPegBookPump? pegBookPump = null,
         PeggedRepegBook? peggedRepeg = null,
-        PendingReplacementRegistry? replacements = null)
+        PendingReplacementRegistry? replacements = null,
+        RiskPipeline? risk = null,
+        IReplaceMarginCoordinator? replaceMargin = null)
     {
         _queue = queue;
         _algos = algos;
@@ -159,6 +178,8 @@ public sealed class AlgoEngine : BackgroundService
         _pegBookPump = pegBookPump;
         _peggedRepeg = peggedRepeg;
         _replacements = replacements;
+        _risk = risk;
+        _replaceMargin = replaceMargin;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -677,7 +698,27 @@ public sealed class AlgoEngine : BackgroundService
         {
             rt.LiveChildClOrdId = child.ClOrdId;
             rt.ChildBookedCum[child.ClOrdId] = child.CumulativeQuantity;
-            rt.RetireChildSlot(oldLive);
+            var evicted = rt.RetireChildSlot(oldLive, out var firstRetiredEviction);
+            if (evicted > 0)
+            {
+                // Pass-3 review (#299) P2. Mirror PR #296's
+                // CancelledChildRing observability — silent FIFO
+                // eviction is a class of "you can't rely on this
+                // ChildBookedCum row being there if a late stray ER
+                // arrives for the OLD id". Always bump the counter so
+                // dashboards can spot sustained eviction churn; emit a
+                // single per-parent warn the first time to surface the
+                // condition without log spam thereafter.
+                var algoTypeEvictTag = algo.Type.ToString().ToLowerInvariant();
+                MetricsRegistry.AlgoModifyRetiredChildEvictedTotal.Add(evicted,
+                    new KeyValuePair<string, object?>("algoType", algoTypeEvictTag));
+                if (firstRetiredEviction)
+                {
+                    _logger.LogWarning(
+                        "AlgoEngine retired-child FIFO overflow on algo {Firm}/{AlgoId} (cap={Cap}): oldest ChildBookedCum row evicted. Late stray ERs for evicted child ids will fall through to a missing-key default of 0 booked cum.",
+                        algo.FirmId, algo.AlgoId, 8);
+                }
+            }
             // Fall through so any erCum > prior booked OLD cum that the
             // venue carried over (e.g. a fill landed at venue strictly
             // between our last OLD-child ER and the Replaced ack) is NOT
@@ -1036,17 +1077,21 @@ public sealed class AlgoEngine : BackgroundService
     /// venue, preserving book priority on B3 (priority-up keeps
     /// queue position on price-improving Sells / Buys; qty-down
     /// keeps it as well). Mirrors <see cref="OrderModifyService"/>'s
-    /// plumbing — allocates a new ClOrdID, registers the intent in
+    /// plumbing — allocates a new ClOrdID, runs the same pre-trade
+    /// risk pipeline + margin Prepare (delta-only reservation under
+    /// the new ClOrdID), registers the intent in
     /// <see cref="PendingReplacementRegistry"/> so the Replaced ack
     /// hydrates the new child into the book, writes the
     /// <see cref="OrderReplaceRequestedEvent"/> + audit
     /// <see cref="AlgoChildModifiedEvent"/>, then dispatches to the
-    /// gateway. The engine bypasses the risk / margin pipelines
-    /// (children were already risk-cleared at submit time; residue
-    /// shrinks only via fills, never via modify since we reject
-    /// newQty &lt;= cum above), keeping the algo retrofit path
-    /// behaviourally identical to the existing cancel + place path
-    /// it replaces.
+    /// gateway. Pass-3 review (#299) P1 added the risk + margin
+    /// gates: without them a Buy child could be price/qty-modified
+    /// beyond available cash (CommitReplace on the venue ack only
+    /// rebalances; it does not reject). The gates run BEFORE the
+    /// WAL append + gateway dispatch so a rejection emits no
+    /// <see cref="AlgoChildModifiedEvent"/> and no wire-call —
+    /// only the <c>algo.modify_rejected_total</c> counter with
+    /// reason=<c>risk_rejected</c> / <c>margin_rejected</c>.
     /// </summary>
     private async Task<bool> TryReplaceChildAsync(
         Algo algo, AlgoParentRuntime rt, Order child,
@@ -1074,6 +1119,72 @@ public sealed class AlgoEngine : BackgroundService
         }
 
         var newClOrdId = _clOrdIds.Generate(child.Owner);
+
+        // Pass-3 review (#299) P1. Run the same pre-trade gates the
+        // operator-driven plain-order modify pipeline applies in
+        // <see cref="OrderModifyService.ModifyAsync"/> — pre-trade
+        // risk evaluation (projecting the new qty/price under the
+        // replace context) followed by margin Prepare (delta-only
+        // reservation under the new ClOrdID). Without this, a Buy
+        // child could be price/qty-modified beyond available cash
+        // and the venue ack would land in CommitReplace which only
+        // re-balances; it does not reject. Inputs mirror the
+        // OrderModifyService block: ReplaceOriginalClOrdId set so
+        // NoNakedShortCheck projects the swap; EffectiveLeavesQty
+        // = newQty - cum (already validated > 0 by the caller); TIF
+        // / Stop / GTD are inherited from the original (the algo
+        // modify path does not surface them as overrides).
+        var effectiveLeaves = newQuantity - child.CumulativeQuantity;
+        if (_risk is not null)
+        {
+            var riskCtx = new RiskContext(
+                child.Owner, child.FirmId, child.Symbol, child.Side, child.Type,
+                newQuantity, newPrice,
+                ReplaceOriginalClOrdId: child.ClOrdId,
+                EffectiveLeavesQuantity: effectiveLeaves,
+                TimeInForce: child.TimeInForce,
+                StopPrice: child.StopPrice,
+                GoodTillDate: child.GoodTillDate);
+            var riskDecision = _risk.Evaluate(riskCtx);
+            if (!riskDecision.Approved)
+            {
+                MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
+                    new KeyValuePair<string, object?>("algoType", algoTypeTag),
+                    new KeyValuePair<string, object?>("reason", "risk_rejected"));
+                _logger.LogInformation(
+                    "AlgoEngine modify rejected by risk for algo {Firm}/{AlgoId} child {Child}: {Reason}",
+                    algo.FirmId, algo.AlgoId, child.ClOrdId, riskDecision.Reason);
+                return false;
+            }
+        }
+
+        // Margin Prepare: reserve only the upsize delta. The coordinator
+        // no-ops on sells / markets / non-positive notionals; the
+        // gating predicate mirrors OrderModifyService so the algo and
+        // plain-order modify paths agree on which orders consume cash.
+        var newRemainingNotional = (child.Side == OrderSide.Buy
+                                    && child.Type.IsMarginBearing()
+                                    && newPrice is { } px)
+            ? px * effectiveLeaves
+            : 0m;
+        var marginPrepared = false;
+        if (_replaceMargin is not null)
+        {
+            var marginDecision = await _replaceMargin.PrepareReplaceAsync(
+                child.ClOrdId, newClOrdId, child.Owner, newRemainingNotional, ct).ConfigureAwait(false);
+            if (!marginDecision.Approved)
+            {
+                MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
+                    new KeyValuePair<string, object?>("algoType", algoTypeTag),
+                    new KeyValuePair<string, object?>("reason", "margin_rejected"));
+                _logger.LogInformation(
+                    "AlgoEngine modify rejected by margin coordinator for algo {Firm}/{AlgoId} child {Child}: {Reason}",
+                    algo.FirmId, algo.AlgoId, child.ClOrdId, marginDecision.Reason);
+                return false;
+            }
+            marginPrepared = true;
+        }
+
         var intent = new OrderReplacementIntent(
             OriginalClOrdId: child.ClOrdId,
             NewClOrdId: newClOrdId,
@@ -1120,6 +1231,12 @@ public sealed class AlgoEngine : BackgroundService
             MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
                 new KeyValuePair<string, object?>("algoType", algoTypeTag),
                 new KeyValuePair<string, object?>("reason", "wal_backpressure"));
+            // Pass-3 review (#299) P1. Roll back the margin Prepare —
+            // the intent never made it to the registry, so a future
+            // ER cannot drive CommitReplace. Holding the reserve would
+            // leak permanently.
+            if (marginPrepared)
+                _replaceMargin!.AbortReplace(newClOrdId);
             return false;
         }
 
@@ -1156,6 +1273,21 @@ public sealed class AlgoEngine : BackgroundService
             _logger.LogWarning(ex,
                 "AlgoEngine modify gateway dispatch ambiguous for algo {Firm}/{AlgoId} child {Child}; intent retained for late Replaced ER.",
                 algo.FirmId, algo.AlgoId, child.ClOrdId);
+            // Pass-3 review (#299) P1. Release the upsize-delta margin
+            // reservation we prepared above. The PendingReplacementRegistry
+            // intent is deliberately KEPT (P1-B ambiguous-send window —
+            // venue may have already accepted), but holding the margin
+            // reserve indefinitely on a likely-failed send is the worse
+            // failure mode: if the venue did NOT accept the reserve
+            // leaks until the parent terminates. If the venue DID
+            // accept, CommitReplace will still run on the late Replaced
+            // ER and (with no Prepare-side transient entry) will adjust
+            // _reserved against the original's tracked notional; the
+            // accounting converges, only the upsize headroom safety
+            // check is temporarily relaxed for the in-flight window —
+            // an acceptable trade-off vs. permanently leaking the hold.
+            if (marginPrepared)
+                _replaceMargin!.AbortReplace(newClOrdId);
             return false;
         }
 
@@ -2111,15 +2243,55 @@ public sealed class AlgoEngine : BackgroundService
         private const int RetiredChildSlotsCap = 8;
         public Queue<ulong> RetiredChildSlots { get; } = new(RetiredChildSlotsCap);
 
-        public void RetireChildSlot(ulong oldChildClOrdId)
+        // Pass-3 review (#299) P2. One-shot warn latch mirroring the
+        // <see cref="CancelledChildRing"/> pattern from PR #296 pass-7
+        // / pass-8: emit a single warn on the FIRST eviction so an
+        // operator notices that ChildBookedCum rows are now being
+        // forgotten faster than late stray ERs may arrive, without
+        // spamming logs once we're past the cap. Set atomically by
+        // <see cref="RetireChildSlot"/> in the same step that drops the
+        // row, so a concurrent reader cannot observe the eviction
+        // without also observing <c>RetiredEvictionLogged=true</c>.
+        // AlgoParentRuntime is deliberately not snapshotted (recovery
+        // rebuilds it from the order book) so this latch resets on
+        // restart — acceptable: a post-restart warn just re-arms the
+        // operator's attention with no duplicate-spam risk because
+        // restarts are rare and the warn is per-parent.
+        public bool RetiredEvictionLogged;
+
+        /// <summary>
+        /// Enqueue <paramref name="oldChildClOrdId"/> into the retired
+        /// FIFO; if the cap is exceeded, dequeue the eldest, drop its
+        /// <see cref="ChildBookedCum"/> row, and set
+        /// <paramref name="firstEviction"/> to <c>true</c> iff this is
+        /// the FIRST eviction observed on this parent (latch flip).
+        /// Returns the count of rows evicted by this call (0 when
+        /// below cap, 1 in the steady-state overflow case).
+        /// </summary>
+        public int RetireChildSlot(ulong oldChildClOrdId, out bool firstEviction)
         {
+            firstEviction = false;
             RetiredChildSlots.Enqueue(oldChildClOrdId);
+            var evictedCount = 0;
             while (RetiredChildSlots.Count > RetiredChildSlotsCap)
             {
                 var evicted = RetiredChildSlots.Dequeue();
                 ChildBookedCum.Remove(evicted);
+                evictedCount++;
+                if (!RetiredEvictionLogged)
+                {
+                    RetiredEvictionLogged = true;
+                    firstEviction = true;
+                }
             }
+            return evictedCount;
         }
+
+        // Legacy signature retained for the AlgoParentRuntimeTests
+        // direct-construction surface — delegates to the two-arg
+        // variant and discards the eviction observability hooks.
+        public void RetireChildSlot(ulong oldChildClOrdId) =>
+            RetireChildSlot(oldChildClOrdId, out _);
 
         // Pass-1 review (#295) P1#1. POV scheduling state. Initialised
         // to (0, default) so the first tick treats StartUtc as the
