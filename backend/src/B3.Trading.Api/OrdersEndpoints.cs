@@ -42,6 +42,22 @@ public static class OrdersEndpoints
                 && !Enum.TryParse<TimeInForce>(req.TimeInForce, ignoreCase: true, out tif))
                 return Results.BadRequest(new { error = $"invalid timeInForce '{req.TimeInForce}'" });
 
+            // Q3.4 (#284). Parse the optional iceberg display-qty reset
+            // policy enum the same way as TIF (case-insensitive string)
+            // — the host does not register JsonStringEnumConverter so a
+            // numeric form would otherwise be required. Reject malformed
+            // before the submit pipeline so the bad request never enters
+            // the WAL. The DisplayQty risk check (0 < DisplayQty <= Quantity)
+            // is enforced by Domain.Order's ctor and surfaces as BadRequest
+            // from OrderSubmissionService.
+            DisplayResetPolicy? displayPolicy = null;
+            if (!string.IsNullOrWhiteSpace(req.DisplayResetPolicy))
+            {
+                if (!Enum.TryParse<DisplayResetPolicy>(req.DisplayResetPolicy, ignoreCase: true, out var parsedPolicy))
+                    return Results.BadRequest(new { error = $"invalid displayResetPolicy '{req.DisplayResetPolicy}'" });
+                displayPolicy = parsedPolicy;
+            }
+
             // SecurityId resolution: explicit non-zero in the payload
             // wins (preserves the conformance contract). Otherwise look
             // up the directory by symbol — that is the path the trader
@@ -59,7 +75,9 @@ public static class OrdersEndpoints
                 req.Quantity, req.Price, OrderSubmissionSource.Manual,
                 TimeInForce: tif,
                 StopPrice: req.StopPrice,
-                GoodTillDate: req.GoodTillDate), ct);
+                GoodTillDate: req.GoodTillDate,
+                DisplayQty: req.DisplayQty,
+                DisplayResetPolicy: displayPolicy), ct);
 
             return result.Kind switch
             {
@@ -210,7 +228,17 @@ public sealed record SubmitOrderRequest(
     /// <summary>Q1.1 (#253). Required for <c>StopLoss</c>/<c>StopLimit</c>.</summary>
     decimal? StopPrice = null,
     /// <summary>Q1.1 (#253). Required when <c>TimeInForce == "GTD"</c>.</summary>
-    DateTimeOffset? GoodTillDate = null);
+    DateTimeOffset? GoodTillDate = null,
+    /// <summary>Q3.4 (#284). Native iceberg / reserve display quantity. Null
+    /// = full disclosure. Validated as <c>0 &lt; DisplayQty &lt;= Quantity</c>
+    /// by the submit pipeline.</summary>
+    long? DisplayQty = null,
+    /// <summary>Q3.4 (#284). Refresh policy for the visible portion of an
+    /// iceberg order. Accepts case-insensitive <see cref="Domain.DisplayResetPolicy"/>
+    /// name (<c>"Always" | "OnPartialFill" | "Never"</c>). Defaults to <c>Always</c>
+    /// when <c>DisplayQty</c> is set and this field is null. Must be null when
+    /// <c>DisplayQty</c> is null.</summary>
+    string? DisplayResetPolicy = null);
 
 public sealed record ModifyOrderRequest(
     long Quantity,

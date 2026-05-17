@@ -158,6 +158,25 @@
             <span>Good-till-date</span>
             <input id="ticket-good-till-date" type="datetime-local" />
           </label>
+          <!-- Q3.4 (#284). Native iceberg / reserve display-qty. Leave
+               Display qty empty for full disclosure (no reserve). When
+               set, must satisfy 0 < Display qty <= Quantity; the
+               backend enforces this and returns 400 otherwise. The
+               Reset policy applies only when Display qty is set. -->
+          <div class="row-two">
+            <label>
+              <span>Display qty</span>
+              <input id="ticket-display-qty" type="number" min="1" step="1" placeholder="(no reserve)" />
+            </label>
+            <label>
+              <span>Reset policy</span>
+              <select id="ticket-display-reset-policy">
+                <option value="Always">Always</option>
+                <option value="OnPartialFill">OnPartialFill</option>
+                <option value="Never">Never</option>
+              </select>
+            </label>
+          </div>
           <p id="ticket-tif-hint" class="field-hint" role="status" aria-live="polite" hidden></p>
           <p id="ticket-rules-hint" class="field-hint" aria-live="polite">lot 100 · tick 0.01</p>
           <p id="ticket-validation" class="field-hint hint-warn" role="status" aria-live="polite" hidden></p>

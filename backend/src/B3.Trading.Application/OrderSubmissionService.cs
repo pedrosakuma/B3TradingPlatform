@@ -122,7 +122,8 @@ public sealed class OrderSubmissionService
                 clOrdId, req.Owner, req.Symbol, req.SecurityId, req.Side, req.Type,
                 req.Quantity, req.Price, req.FirmId,
                 parentAlgoId: req.ParentAlgoId, algoSliceSeq: req.AlgoSliceSeq,
-                timeInForce: req.TimeInForce, stopPrice: req.StopPrice, goodTillDate: req.GoodTillDate);
+                timeInForce: req.TimeInForce, stopPrice: req.StopPrice, goodTillDate: req.GoodTillDate,
+                displayQty: req.DisplayQty, displayResetPolicy: req.DisplayResetPolicy);
         }
         catch (ArgumentException ex)
         {
@@ -165,6 +166,8 @@ public sealed class OrderSubmissionService
                     TimeInForce = req.TimeInForce.ToString(),
                     StopPrice = req.StopPrice,
                     GoodTillDate = req.GoodTillDate,
+                    DisplayQty = order.DisplayQty,
+                    DisplayResetPolicy = order.DisplayResetPolicy?.ToString(),
                 },
                 () =>
                 {
@@ -316,7 +319,20 @@ public sealed record OrderSubmissionRequest(
     int? AlgoSliceSeq = null,
     TimeInForce TimeInForce = TimeInForce.Day,
     decimal? StopPrice = null,
-    DateTimeOffset? GoodTillDate = null)
+    DateTimeOffset? GoodTillDate = null,
+    /// <summary>
+    /// Q3.4 (#284). Native iceberg / reserve display quantity. Null
+    /// = full disclosure (no reserve). Validated by
+    /// <see cref="Order"/>'s constructor: <c>0 &lt; DisplayQty &lt;= Quantity</c>.
+    /// </summary>
+    long? DisplayQty = null,
+    /// <summary>
+    /// Q3.4 (#284). Refresh policy for the visible portion of an
+    /// iceberg order. Null iff <see cref="DisplayQty"/> is null;
+    /// otherwise defaults to
+    /// <see cref="Domain.DisplayResetPolicy.Always"/>.
+    /// </summary>
+    DisplayResetPolicy? DisplayResetPolicy = null)
 {
     /// <summary>
     /// Sub-issue #171 (E). When non-null, the request originates from

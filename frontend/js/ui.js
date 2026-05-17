@@ -731,6 +731,18 @@ export function bindUi() {
       stopPrice:    stopHidden || !stopPriceEl || stopPriceEl.value === "" ? null : Number(stopPriceEl.value),
       goodTillDate: gtdHidden  || !gtdEl       || gtdEl.value       === "" ? null : new Date(gtdEl.value).toISOString(),
     };
+    // Q3.4 (#284). Native iceberg / reserve display-qty. An empty
+    // Display qty input means full disclosure (no reserve) — we
+    // omit both display fields from the payload so the backend
+    // defaults kick in (null = no reserve). When the trader fills
+    // it in, send the policy too; the backend defaults to Always
+    // when the policy is omitted on a display-qty submit.
+    const displayQtyEl = $("ticket-display-qty");
+    const displayPolicyEl = $("ticket-display-reset-policy");
+    if (displayQtyEl && displayQtyEl.value !== "") {
+      payload.displayQty = Number(displayQtyEl.value);
+      payload.displayResetPolicy = displayPolicyEl ? displayPolicyEl.value : "Always";
+    }
     onSubmitOrder(payload);
   });
 
@@ -1118,6 +1130,11 @@ export function clearTicket() {
   // ticket starts clean.
   const sp = $("ticket-stop-price");  if (sp) sp.value = "";
   const gtd = $("ticket-good-till-date"); if (gtd) gtd.value = "";
+  // Q3.4 (#284). Reset the iceberg display-qty input; leave the
+  // reset-policy select on its default ("Always") since it's
+  // inert when display qty is empty.
+  const dq = $("ticket-display-qty"); if (dq) dq.value = "";
+  const dp = $("ticket-display-reset-policy"); if (dp) dp.value = "Always";
   syncTicketRules();
   refreshTicketValidation();
 }

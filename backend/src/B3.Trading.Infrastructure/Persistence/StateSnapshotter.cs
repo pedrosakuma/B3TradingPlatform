@@ -209,6 +209,8 @@ public sealed class StateSnapshotter
                 TimeInForce = o.TimeInForce.ToString(),
                 StopPrice = o.StopPrice,
                 GoodTillDate = o.GoodTillDate,
+                DisplayQty = o.DisplayQty,
+                DisplayResetPolicy = o.DisplayResetPolicy?.ToString(),
             });
         }
 
@@ -622,9 +624,16 @@ public sealed class EventReplayer
                 // the OrderSubmittedEvent record's init default, so a
                 // missing field round-trips through Enum.Parse cleanly.
                 var tif = Enum.Parse<TimeInForce>(o.TimeInForce, ignoreCase: true);
+                // Q3.4 (#284) — older WAL segments default DisplayQty /
+                // DisplayResetPolicy to null (no reserve), so a missing
+                // payload round-trips as a full-disclosure order.
+                DisplayResetPolicy? policy = o.DisplayResetPolicy is { } dpName
+                    ? Enum.Parse<DisplayResetPolicy>(dpName, ignoreCase: true)
+                    : (DisplayResetPolicy?)null;
                 _orders.TryAdd(new Order(o.ClOrdId, owner, o.Symbol, o.SecurityId, side, type,
                     o.Quantity, o.Price, o.FirmId, o.ParentAlgoId, o.AlgoSliceSeq,
-                    timeInForce: tif, stopPrice: o.StopPrice, goodTillDate: o.GoodTillDate));
+                    timeInForce: tif, stopPrice: o.StopPrice, goodTillDate: o.GoodTillDate,
+                    displayQty: o.DisplayQty, displayResetPolicy: policy));
                 _ownership.Register(o.ClOrdId, owner);
                 // #157: advance the ClOrdID registry watermark so the next
                 // live Generate(owner) cannot re-allocate this ID.

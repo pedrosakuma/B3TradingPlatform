@@ -210,6 +210,8 @@ public sealed class WorkingOrderBook
                 TimeInForce = o.TimeInForce.ToString(),
                 StopPrice = o.StopPrice,
                 GoodTillDate = o.GoodTillDate,
+                DisplayQty = o.DisplayQty,
+                DisplayResetPolicy = o.DisplayResetPolicy?.ToString(),
             };
         }
     }
@@ -257,11 +259,18 @@ public sealed class WorkingOrderBook
             // OrderSnapshot record's init default, so a missing field
             // round-trips through Enum.Parse cleanly.
             var tif = Enum.Parse<TimeInForce>(s.TimeInForce);
+            // Q3.4 (#284): older snapshots default both display fields
+            // to null (no reserve); new snapshots round-trip the enum
+            // name through Enum.Parse cleanly.
+            DisplayResetPolicy? policy = s.DisplayResetPolicy is { } dpName
+                ? Enum.Parse<DisplayResetPolicy>(dpName)
+                : (DisplayResetPolicy?)null;
             _orders[s.ClOrdId] = Order.Hydrate(s.ClOrdId, owner, s.Symbol, s.SecurityId, side, type,
                 s.Quantity, s.Price, s.LeavesQuantity, s.CumulativeQuantity, status, s.FirmId,
                 s.ParentAlgoId, s.AlgoSliceSeq,
                 isStale: s.IsStale, staleReason: s.StaleReason, staledAtUtc: s.StaledAtUtc,
-                timeInForce: tif, stopPrice: s.StopPrice, goodTillDate: s.GoodTillDate);
+                timeInForce: tif, stopPrice: s.StopPrice, goodTillDate: s.GoodTillDate,
+                displayQty: s.DisplayQty, displayResetPolicy: policy);
             var firmSet = _byFirm.GetOrAdd(s.FirmId, static _ => new ConcurrentDictionary<ulong, byte>());
             firmSet.TryAdd(s.ClOrdId, 0);
             var ownerSet = _byOwner.GetOrAdd(s.EndClientId, static _ => new ConcurrentDictionary<ulong, byte>());

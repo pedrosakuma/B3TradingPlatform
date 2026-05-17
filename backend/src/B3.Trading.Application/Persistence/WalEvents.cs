@@ -121,6 +121,25 @@ public sealed record OrderSubmittedEvent : WalEvent
     /// they carried.
     /// </summary>
     public DateTimeOffset? GoodTillDate { get; init; }
+
+    /// <summary>
+    /// Q3.4 (#284). Native iceberg / reserve display quantity. Null
+    /// = full disclosure (no reserve). Older WAL segments without
+    /// the field deserialise as <c>null</c>, matching the
+    /// no-reserve semantics they actually carried.
+    /// </summary>
+    public long? DisplayQty { get; init; }
+
+    /// <summary>
+    /// Q3.4 (#284). Refresh policy for the visible portion of an
+    /// iceberg order. Stored as the enum name to keep the wire
+    /// format stable across future renumberings of
+    /// <see cref="Domain.DisplayResetPolicy"/>. Null iff
+    /// <see cref="DisplayQty"/> is null; otherwise one of
+    /// <c>"Always" | "OnPartialFill" | "Never"</c>. Older WAL
+    /// segments without the field deserialise as <c>null</c>.
+    /// </summary>
+    public string? DisplayResetPolicy { get; init; }
 }
 
 /// <summary>

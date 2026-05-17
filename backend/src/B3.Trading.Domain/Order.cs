@@ -104,6 +104,32 @@ public enum SessionPhase
     AfterHours,
 }
 
+/// <summary>
+/// Q3.4 (#284). Policy that drives whether/how the venue refreshes
+/// the visible portion (display qty) of an iceberg/reserve order
+/// after a fill. Applies only when <see cref="Order.DisplayQty"/>
+/// is set (full-disclosure orders have no reserve to refresh).
+///
+/// <para>The B3 EntryPoint SDK 0.14.3 does not expose a refresh-policy
+/// flag on <c>NewOrderRequest</c> — only <c>MaxFloor</c> (the initial
+/// visible qty). Until the SDK plumbs a per-order policy, every
+/// iceberg submission inherits the venue's default refresh semantics
+/// (currently <see cref="Always"/> on B3). The enum is retained on
+/// the platform side so the trader's intent is recorded in the WAL /
+/// snapshot and surfaced through the REST/UI surface; the value is
+/// informational/local-only on the wire (see TODO in
+/// <c>B3EntryPointClientGateway.SubmitAsync</c>).</para>
+/// </summary>
+public enum DisplayResetPolicy
+{
+    /// <summary>Every fill refreshes display back to <see cref="Order.DisplayQty"/>. Most common iceberg semantics; matches the venue default.</summary>
+    Always,
+    /// <summary>Refresh only on partial fills; on full-display fills don't refresh and let the book consume the next slice naturally.</summary>
+    OnPartialFill,
+    /// <summary>No refresh; once visible qty is consumed it stays at 0 (one-shot peek into the reserve).</summary>
+    Never,
+}
+
 public enum OrderStatus
 {
     PendingNew,
@@ -153,7 +179,9 @@ public sealed class Order
         int? algoSliceSeq = null,
         TimeInForce timeInForce = TimeInForce.Day,
         decimal? stopPrice = null,
-        DateTimeOffset? goodTillDate = null)
+        DateTimeOffset? goodTillDate = null,
+        long? displayQty = null,
+        DisplayResetPolicy? displayResetPolicy = null)
     {
         if (clOrdId == 0)
             throw new ArgumentOutOfRangeException(nameof(clOrdId), "ClOrdID cannot be zero (reserved as null sentinel by EntryPoint).");
@@ -189,6 +217,34 @@ public sealed class Order
                 $"GoodTillDate must be null when TimeInForce == {timeInForce} (only GTD carries an expiry).",
                 nameof(goodTillDate));
 
+        // Q3.4 (#284). Iceberg / reserve display-qty invariants.
+        // displayQty=null → full disclosure (no reserve); a non-null
+        // value MUST be strictly positive and not exceed total order
+        // quantity (a "reserve" larger than the order is nonsensical;
+        // an equal value is identical to no reserve and is allowed
+        // only for symmetry with the validation message). Policy is
+        // null iff displayQty is null; when displayQty is set without
+        // an explicit policy we default to Always — the most common
+        // iceberg semantic and the venue default.
+        if (displayQty.HasValue)
+        {
+            if (displayQty.Value <= 0)
+                throw new ArgumentException(
+                    "DisplayQty must be positive when set (use null for full disclosure / no reserve).",
+                    nameof(displayQty));
+            if (displayQty.Value > quantity)
+                throw new ArgumentException(
+                    $"DisplayQty ({displayQty.Value}) must not exceed order Quantity ({quantity}).",
+                    nameof(displayQty));
+            displayResetPolicy ??= B3.Trading.Domain.DisplayResetPolicy.Always;
+        }
+        else if (displayResetPolicy.HasValue)
+        {
+            throw new ArgumentException(
+                "DisplayResetPolicy must be null when DisplayQty is null (full-disclosure orders have no reserve to refresh).",
+                nameof(displayResetPolicy));
+        }
+
         ClOrdId = clOrdId;
         Owner = owner;
         Symbol = symbol;
@@ -203,6 +259,8 @@ public sealed class Order
         TimeInForce = timeInForce;
         StopPrice = stopPrice;
         GoodTillDate = goodTillDate;
+        DisplayQty = displayQty;
+        DisplayResetPolicy = displayResetPolicy;
         LeavesQuantity = quantity;
         Status = OrderStatus.PendingNew;
     }
@@ -251,6 +309,34 @@ public sealed class Order
     /// an already-elapsed timestamp so recovery is total.
     /// </summary>
     public DateTimeOffset? GoodTillDate { get; }
+
+    /// <summary>
+    /// Q3.4 (#284). Native iceberg / reserve display quantity — the
+    /// visible portion the venue exposes on the public book on
+    /// submit. <c>null</c> = full disclosure (no reserve / no
+    /// iceberg behaviour). When set, must satisfy
+    /// <c>0 &lt; DisplayQty &lt;= Quantity</c> (enforced by the
+    /// constructor). Distinct from the client-emulated
+    /// <c>IcebergAlgo</c> / <c>IcebergParameters</c>, which slices
+    /// at the algo layer; this field rides on a plain
+    /// <see cref="Order"/> and is plumbed natively via the SDK's
+    /// <c>MaxFloor</c> field — the venue itself drains the hidden
+    /// reserve and refreshes the visible portion per
+    /// <see cref="DisplayResetPolicy"/>.
+    /// </summary>
+    public long? DisplayQty { get; }
+
+    /// <summary>
+    /// Q3.4 (#284). Refresh semantics for the visible portion of an
+    /// iceberg order. <c>null</c> iff <see cref="DisplayQty"/> is
+    /// <c>null</c>; otherwise defaults to
+    /// <see cref="B3.Trading.Domain.DisplayResetPolicy.Always"/>.
+    /// See the enum for the per-value semantics — and for why this
+    /// is currently informational/local-only on the SDK wire (the
+    /// B3 EntryPoint 0.14.3 <c>NewOrderRequest</c> does not expose
+    /// a refresh-policy flag; the venue defaults to <c>Always</c>).
+    /// </summary>
+    public DisplayResetPolicy? DisplayResetPolicy { get; }
 
     public long LeavesQuantity { get; private set; }
     public long CumulativeQuantity { get; private set; }
@@ -427,10 +513,12 @@ public sealed class Order
         bool isStale = false, string? staleReason = null, DateTimeOffset? staledAtUtc = null,
         TimeInForce timeInForce = TimeInForce.Day,
         decimal? stopPrice = null,
-        DateTimeOffset? goodTillDate = null)
+        DateTimeOffset? goodTillDate = null,
+        long? displayQty = null,
+        DisplayResetPolicy? displayResetPolicy = null)
     {
         var o = new Order(clOrdId, owner, symbol, securityId, side, type, quantity, price, firmId, parentAlgoId, algoSliceSeq,
-            timeInForce, stopPrice, goodTillDate);
+            timeInForce, stopPrice, goodTillDate, displayQty, displayResetPolicy);
         o.LeavesQuantity = leaves;
         o.CumulativeQuantity = cumQty;
         o.Status = status;
@@ -500,6 +588,18 @@ public sealed class Order
             ? OrderStatus.Filled
             : (erCumulative > 0 ? OrderStatus.PartiallyFilled : OrderStatus.Working);
 
+        // Q3.4 (#284). Iceberg display fields are inherited from the
+        // original on cancel-replace — the modify pipeline does not
+        // currently expose a way to alter DisplayQty / policy. If the
+        // operator shrinks the order quantity below the original
+        // visible portion, clamp DisplayQty to the new quantity so
+        // the ctor invariant (DisplayQty &lt;= Quantity) still holds.
+        // A future modify-pipeline slice can plumb explicit overrides.
+        long? effDisplayQty = original.DisplayQty;
+        DisplayResetPolicy? effPolicy = original.DisplayResetPolicy;
+        if (effDisplayQty.HasValue && effDisplayQty.Value > newQuantity)
+            effDisplayQty = newQuantity;
+
         return Hydrate(
             clOrdId: newClOrdId,
             owner: original.Owner,
@@ -522,7 +622,9 @@ public sealed class Order
             // always inherited from the original.
             timeInForce: effTif,
             stopPrice: effStop,
-            goodTillDate: effGtd);
+            goodTillDate: effGtd,
+            displayQty: effDisplayQty,
+            displayResetPolicy: effPolicy);
     }
 
     /// <summary>
