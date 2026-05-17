@@ -166,7 +166,7 @@ public sealed class StateSnapshotter
         PeggedRepegHistory = _peggedRepeg is null
             ? Array.Empty<PeggedRepegHistoryRaw>()
             : _peggedRepeg.SnapshotHistory()
-                .Select(t => new PeggedRepegHistoryRaw(t.FirmId, t.AlgoId, t.ChildClOrdIds.ToArray()))
+                .Select(t => new PeggedRepegHistoryRaw(t.FirmId, t.AlgoId, t.ChildClOrdIds.ToArray(), t.EvictionLogged))
                 .ToArray(),
     };
 
@@ -363,7 +363,7 @@ public sealed class StateSnapshotter
         {
             var h = raw.PeggedRepegHistory[i];
             peggedRepegHistory.Add(new PeggedRepegHistorySnapshot(
-                h.FirmId, h.AlgoId, new List<ulong>(h.ChildClOrdIds)));
+                h.FirmId, h.AlgoId, new List<ulong>(h.ChildClOrdIds), h.EvictionLogged));
         }
 
         return new PlatformSnapshot
@@ -478,7 +478,7 @@ public sealed class StateSnapshotter
                 (p.FirmId, p.AlgoId,
                     new PeggedRepegPending(p.CancelledChildClOrdId, p.TargetPrice, p.AtUtc))));
             _peggedRepeg.RestoreHistory(snap.PeggedRepegHistory.Select(h =>
-                (h.FirmId, h.AlgoId, (IReadOnlyList<ulong>)h.ChildClOrdIds)));
+                (h.FirmId, h.AlgoId, (IReadOnlyList<ulong>)h.ChildClOrdIds, h.EvictionLogged)));
         }
     }
 }

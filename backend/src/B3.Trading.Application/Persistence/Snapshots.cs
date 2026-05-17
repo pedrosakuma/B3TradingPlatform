@@ -417,11 +417,20 @@ public sealed record PeggedRepegPendingSnapshot(
 /// Pass-5 review (#296) P1. One row of the per-Pegged cancelled-child
 /// history — see <see cref="PlatformSnapshot.PeggedRepegHistory"/>.
 /// <see cref="ChildClOrdIds"/> is FIFO oldest→newest.
+/// <para>
+/// Pass-7 review (#296) P2. <see cref="EvictionLogged"/> persists the
+/// per-ring one-shot "we've already warn-logged about FIFO overflow on
+/// this parent" latch so a restart does not let the warn re-fire on
+/// the next eviction. Optional (default <c>false</c>); snapshots
+/// pre-dating the field round-trip to a fresh latch — at worst one
+/// extra warn post-upgrade.
+/// </para>
 /// </summary>
 public sealed record PeggedRepegHistorySnapshot(
     string FirmId,
     ulong AlgoId,
-    List<ulong> ChildClOrdIds);
+    List<ulong> ChildClOrdIds,
+    bool EvictionLogged = false);
 
 public sealed class ClOrdIdRegistrySnapshot
 {

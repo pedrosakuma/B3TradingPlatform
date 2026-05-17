@@ -162,7 +162,8 @@ public sealed record PeggedRepegPendingRaw(
 public sealed record PeggedRepegHistoryRaw(
     string FirmId,
     ulong AlgoId,
-    ulong[] ChildClOrdIds);
+    ulong[] ChildClOrdIds,
+    bool EvictionLogged = false);
 
 /// <summary>
 /// Pass-1 review (#295) P1#1. Raw POV scheduling-progress row.

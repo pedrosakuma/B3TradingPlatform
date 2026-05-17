@@ -161,22 +161,30 @@ public sealed class PeggedRepegBook
     }
 
     /// <summary>
-    /// Pass-5 review (#296) P1. Snapshot the cancelled-child history
-    /// rings so a restart between repeg cycles preserves the late-ER
-    /// dedup protection.
+    /// Pass-5 review (#296) P1, revised pass-7 (#296) P2. Snapshot the
+    /// cancelled-child history rings so a restart between repeg cycles
+    /// preserves the late-ER dedup protection. Also captures the
+    /// per-ring "one-shot eviction warn already emitted" latch so a
+    /// parent that has already warned does NOT warn again post-restart.
     /// </summary>
-    public IEnumerable<(string FirmId, ulong AlgoId, IReadOnlyList<ulong> ChildClOrdIds)> SnapshotHistory()
+    public IEnumerable<(string FirmId, ulong AlgoId, IReadOnlyList<ulong> ChildClOrdIds, bool EvictionLogged)> SnapshotHistory()
     {
         foreach (var kv in _history)
-            yield return (kv.Key.FirmId, kv.Key.AlgoId, kv.Value.Snapshot());
+        {
+            var (ids, logged) = kv.Value.SnapshotWithLatch();
+            yield return (kv.Key.FirmId, kv.Key.AlgoId, ids, logged);
+        }
     }
 
     /// <summary>
-    /// Pass-5 review (#296) P1. Restore cancelled-child history rings
-    /// from a snapshot. Order within each row is FIFO oldest→newest so
-    /// the cap-eviction order survives the round-trip.
+    /// Pass-5 review (#296) P1, revised pass-7 (#296) P2. Restore
+    /// cancelled-child history rings from a snapshot. Order within each
+    /// row is FIFO oldest→newest so the cap-eviction order survives the
+    /// round-trip. <paramref name="rows"/>' <c>EvictionLogged</c> flag
+    /// rehydrates the one-shot warn latch so a parent that had already
+    /// warned pre-restart stays silent post-restart.
     /// </summary>
-    public void RestoreHistory(IEnumerable<(string FirmId, ulong AlgoId, IReadOnlyList<ulong> ChildClOrdIds)> rows)
+    public void RestoreHistory(IEnumerable<(string FirmId, ulong AlgoId, IReadOnlyList<ulong> ChildClOrdIds, bool EvictionLogged)> rows)
     {
         ArgumentNullException.ThrowIfNull(rows);
         _history.Clear();
@@ -184,6 +192,7 @@ public sealed class PeggedRepegBook
         {
             var ring = new CancelledChildRing(CancelledHistoryCap);
             foreach (var id in r.ChildClOrdIds) ring.Add(id);
+            if (r.EvictionLogged) ring.MarkEvictionLogged();
             _history[(r.FirmId, r.AlgoId)] = ring;
         }
     }
@@ -258,6 +267,17 @@ internal sealed class CancelledChildRing
     public IReadOnlyList<ulong> Snapshot()
     {
         lock (_lock) return _order.ToArray();
+    }
+
+    /// <summary>
+    /// Pass-7 review (#296) P2. Atomic snapshot of the FIFO contents
+    /// AND the per-ring one-shot eviction-warn latch, so a restart
+    /// preserves both the dedup memory and the "we've already warned
+    /// for this parent" suppression.
+    /// </summary>
+    public (IReadOnlyList<ulong> Ids, bool EvictionLogged) SnapshotWithLatch()
+    {
+        lock (_lock) return (_order.ToArray(), _evictionLogged);
     }
 }
 
