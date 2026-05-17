@@ -647,6 +647,27 @@ public sealed class AlgoEngine : BackgroundService
         {
             case OrderStatus.Filled:
                 if (algo.IsTerminal) return; // redundant ER after we already terminal-ed
+                // Pass-4 review (#296) P1. Repeg-cancel ↔ Fill race. The
+                // engine issued (or has just issued) a cancel for this
+                // child as part of a repeg cycle, but a terminal Fill ER
+                // arrived before / instead of the cancel-ack — the venue
+                // filled the residue while our cancel was still in
+                // flight. Quantity is already booked above; route through
+                // ResolveRepegOnFillAsync so the cycle is wound down
+                // without spawning a replacement here (the existing child
+                // consumed the qty, and the next AlgoCreatedSignal tick
+                // owns submitting a fresh slice for any remaining qty).
+                // A later duplicate ER (e.g. a stale Cancelled wire that
+                // gets clamped to Filled by Order.MarkCancelled) re-
+                // enters this branch and is a clean no-op because
+                // rt.RepegPending is already false and the qty delta is
+                // zero.
+                if (algo.Type == AlgoType.Pegged
+                    && rt.LastRepegCancelledChildId == child.ClOrdId)
+                {
+                    await ResolveRepegOnFillAsync(algo, rt, child).ConfigureAwait(false);
+                    return;
+                }
                 if (algo.Status == AlgoStatus.Cancelling)
                 {
                     // Race: operator cancelled while the venue was filling
@@ -1257,6 +1278,115 @@ public sealed class AlgoEngine : BackgroundService
     }
 
     /// <summary>
+    /// Pass-4 review (#296) P1. Wind down a pegged repeg cycle when a
+    /// terminal Fill ER arrives for the child the engine had just
+    /// cancelled (or was cancelling) for repeg. The venue filled the
+    /// residue while our cancel was in flight; the qty was already
+    /// booked to the parent by the caller (delta accounting in
+    /// <see cref="OnChildErAsync"/>), so the cycle is complete from the
+    /// parent's POV and we MUST NOT submit a replacement here:
+    /// <list type="bullet">
+    ///   <item>The just-filled child consumed the qty the replacement
+    ///   would have targeted — placing a new slice now would over-buy
+    ///   (orphan duplicate working order).</item>
+    ///   <item>If parent qty remains, the next
+    ///   <see cref="AlgoCreatedSignal"/> scheduler tick lands in
+    ///   <see cref="OnCreatedAsync"/> with <c>LiveChildClOrdId=null</c>
+    ///   and submits the next slice through the canonical empty-slot
+    ///   path. That keeps the "submit new working slice" entry-point
+    ///   single — the repeg race never has its own.</item>
+    /// </list>
+    ///
+    /// <para>
+    /// Three timing windows are handled, all the same in-memory shape
+    /// (<c>RepegPending=true</c>, sticky
+    /// <c>LastRepegCancelledChildId=child.ClOrdId</c>) but with
+    /// different WAL state because the Started marker is persisted only
+    /// AFTER <c>CancelAsync</c> returns (pass-3 review #296 P1 approach
+    /// B):
+    /// <list type="number">
+    ///   <item><b>Window 1</b> — Fill processed before <c>CancelAsync</c>
+    ///   is even invoked. <c>PeggedRepegBook</c> is empty; clearing the
+    ///   in-memory flags is enough. The post-cancel guard in
+    ///   <see cref="EvaluatePeggedRepegAsync"/> then sees
+    ///   <c>RepegPending=false</c> and skips the Started dispatch so
+    ///   no orphan WAL marker is written.</item>
+    ///   <item><b>Window 2</b> — Fill processed after <c>CancelAsync</c>
+    ///   returned but before Started was persisted. Same shape as
+    ///   Window 1.</item>
+    ///   <item><b>Window 3</b> — Fill processed after Started was
+    ///   persisted (book has an entry). Dispatch the matching
+    ///   <see cref="AlgoPeggedRepegResolvedEvent"/> with
+    ///   <c>Aborted=false</c> + <c>Reason=FilledBeforeCancelAck</c>
+    ///   so the audit pair is balanced and replay clears the book.
+    ///   <c>Aborted</c> stays <c>false</c> because the cancel did
+    ///   reach the venue; the rollback bit is reserved for cancel
+    ///   wire-call failure (pass-2 #296 P1-A).</item>
+    /// </list>
+    /// </para>
+    ///
+    /// <para>
+    /// <c>LastRepegCancelledChildId</c> stays sticky — a follow-up
+    /// late Cancelled ER for the same child id (e.g. a venue
+    /// CancelReject converted to a stale Cancelled wire) flows back
+    /// into <see cref="OnChildErAsync"/>, hits the
+    /// <c>!RepegPending &amp;&amp; LastRepegCancelledChildId==child.ClOrdId</c>
+    /// dedup branch in the Cancelled case, and is a no-op rather than
+    /// flipping the parent to <c>Suspended/VenueCancelled</c>. A
+    /// duplicate Fill ER similarly re-enters this method but with
+    /// <c>RepegPending=false</c> and zero qty delta — no second
+    /// Resolved is emitted because the book entry is gone.
+    /// </para>
+    /// </summary>
+    private async Task ResolveRepegOnFillAsync(Algo algo, AlgoParentRuntime rt, Order child)
+    {
+        var wasPending = rt.RepegPending;
+        rt.RepegPending = false;
+        // Keep LastRepegCancelledChildId sticky for late-ER dedup; the
+        // marker is cleared only on parent terminal.
+
+        if (wasPending && _peggedRepeg?.TryGet(algo.FirmId, algo.AlgoId) is not null)
+        {
+            // Window 3: Started already in WAL + book. Emit the
+            // Resolved companion so the audit pair is balanced and
+            // replay drops the pending entry. Best-effort under WAL
+            // backpressure — Reconcile's orphan-prune covers a missed
+            // Resolved on the next restart.
+            try
+            {
+                var firmIdSnap = algo.FirmId;
+                var algoIdSnap = algo.AlgoId;
+                var book = _peggedRepeg;
+                _dispatcher.Dispatch(
+                    new AlgoPeggedRepegResolvedEvent
+                    {
+                        AlgoId = algo.AlgoId,
+                        FirmId = algo.FirmId,
+                        CancelledChildClOrdId = child.ClOrdId,
+                        AtUtc = _clock.GetUtcNow(),
+                        Aborted = false,
+                        Reason = "FilledBeforeCancelAck",
+                    },
+                    () => book?.Remove(firmIdSnap, algoIdSnap));
+            }
+            catch (WalBackpressureException)
+            {
+                MetricsRegistry.WalBackpressure.Add(1,
+                    new KeyValuePair<string, object?>("call_site", "algo.pegged.repeg-resolved"));
+            }
+        }
+
+        if (algo.RemainingQuantity <= 0)
+        {
+            await RecordTerminalAsync(algo, rt, AlgoStatus.Completed, AlgoTerminalReason.None).ConfigureAwait(false);
+        }
+        // Else: residue remains. Do NOT submit a replacement here —
+        // the next AlgoCreatedSignal tick re-enters OnCreatedAsync via
+        // the empty-slot path and prices a fresh slice at the current
+        // ref. This keeps "new working slice" submission single-sourced.
+    }
+
+    /// <summary>
     /// Q3.3 (#283). Repeg evaluation for a Pegged parent that already
     /// has a live working slice. The decision tree, in order:
     ///
@@ -1380,6 +1510,22 @@ public sealed class AlgoEngine : BackgroundService
         // Cancel reached the venue. Persist the Started marker so a
         // crash before the cancel-ack ER lands still gives recovery
         // enough trail to classify the post-restart ER as expected.
+        //
+        // Pass-4 review (#296) P1 — Windows 1+2. If a terminal Fill ER
+        // for `liveChildClOrdId` raced the cancel and was processed by
+        // OnChildErAsync during the CancelAsync await (or before this
+        // method was entered, e.g. an SDK that pumps ERs synchronously
+        // inside the cancel call), ResolveRepegOnFillAsync has already
+        // cleared rt.RepegPending and the qty was credited to the
+        // parent. Persisting a Started here would leave an orphan WAL
+        // marker that the next Reconcile / replay would have to self-
+        // heal. Bail before the dispatch — the post-fill state is
+        // already coherent.
+        if (!rt.RepegPending)
+        {
+            return;
+        }
+
         try
         {
             var firmIdSnap = algo.FirmId;

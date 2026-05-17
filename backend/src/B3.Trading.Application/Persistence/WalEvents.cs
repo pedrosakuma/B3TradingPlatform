@@ -510,6 +510,24 @@ public sealed record AlgoPeggedRepegResolvedEvent : WalEvent
     /// decode as <c>false</c>.
     /// </summary>
     public bool Aborted { get; init; }
+
+    /// <summary>
+    /// Pass-4 review (#296) P1. Audit-only annotation describing why
+    /// the cycle resolved. Null (default) for the steady-state cancel-
+    /// ack-then-replace path. Currently emitted values:
+    /// <list type="bullet">
+    ///   <item><c>FilledBeforeCancelAck</c> — a terminal Fill ER for
+    ///   the just-cancelled child reached the engine before (or
+    ///   instead of) the cancel-ack, so the quantity was consumed by
+    ///   the existing child and no replacement was submitted. The
+    ///   companion <see cref="Aborted"/> stays <c>false</c> because
+    ///   the cancel did reach the venue (only its ack didn't beat the
+    ///   fill); replay still just clears the
+    ///   <c>PeggedRepegBook</c> entry. Additive — pre-existing
+    ///   segments decode as <c>null</c>.</item>
+    /// </list>
+    /// </summary>
+    public string? Reason { get; init; }
 }
 
 /// <summary>

@@ -158,6 +158,100 @@ public class FileEventStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task ReadFromAsync_OperatorRecoveryFromMissingKind_TruncateBadRecordAndReplay()
+    {
+        // Pass-4 review (#296) P2. Documents the operator recovery
+        // pattern for a corrupted-WAL halt. When ReadFromAsync hits a
+        // record with no `kind` discriminator (torn write / external
+        // corruption / writer bug — see
+        // ReadFromAsync_WithMissingKindDiscriminator_ThrowsAndDoesNotSilentlySkip)
+        // replay throws InvalidDataException and refuses to skip past
+        // the corruption silently. The operator runbook is:
+        //
+        //   1. Inspect the segment at the offset reported in the
+        //      InvalidDataException + structured-logging context to
+        //      confirm the record is genuinely corrupt (vs a writer
+        //      bug we should fix in code first).
+        //   2. Truncate the segment to exclude the bad record. In
+        //      production this means stopping the host, copying the
+        //      .log file aside, rewriting it without the offending
+        //      bytes, regenerating the .idx, and restarting. Anything
+        //      written AFTER the bad record is also lost (we can't
+        //      trust offsets past a torn write); the corresponding
+        //      seq numbers will be re-issued on next append.
+        //   3. Restart — replay resumes from the truncated tail and
+        //      converges on a clean in-memory state from the snapshot
+        //      + the surviving WAL records.
+        //
+        // This test simulates step 2 by writing a fresh WAL that omits
+        // the bad record and asserting replay completes successfully
+        // with the surviving records yielded in seq order. Pinning the
+        // recovery flow as a test means a future refactor that breaks
+        // truncation-based recovery fails loudly here, not in
+        // production at 3am.
+        var opts = OptsForTest();
+        var walDir = Path.Combine(_root, "test", "wal", "2026-01-01");
+        Directory.CreateDirectory(walDir);
+        var logPath = Path.Combine(walDir, "000.log");
+        var idxPath = Path.Combine(walDir, "000.idx");
+
+        var known1 = JsonSerializer.SerializeToUtf8Bytes<WalEvent>(NewOrder(0), WalEventJsonContext.Default.WalEvent);
+        var missingKind = Encoding.UTF8.GetBytes(
+            """{"someField":"value","timestampUtc":"2026-01-01T10:00:00+00:00"}""");
+        var known3 = JsonSerializer.SerializeToUtf8Bytes<WalEvent>(NewOrder(2), WalEventJsonContext.Default.WalEvent);
+
+        // Step 0: write the corrupted segment exactly as the
+        // sibling MissingKind test does — [known, bad, known].
+        await using (var writer = new SegmentWriter(logPath, idxPath,
+            opts.IndexEveryNRecords, opts.IndexEveryNBytes, fsyncOnFlush: false))
+        {
+            writer.Append(1, known1, 0);
+            writer.Append(2, missingKind, 0);
+            writer.Append(3, known3, 0);
+            writer.Flush();
+        }
+
+        // Step 1: confirm replay halts at the bad record so the
+        // operator has a deterministic failure signal to act on.
+        await using (var brokenStore = new FileEventStore(opts, NullLogger<FileEventStore>.Instance))
+        {
+            await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            {
+                await foreach (var _ in brokenStore.ReadFromAsync(0)) { }
+            });
+        }
+
+        // Step 2: operator truncates the bad record. Test simulates by
+        // rewriting the segment without the missing-kind line; in
+        // production this is a manual offline edit. Anything written
+        // after the corruption is discarded — here that means seq=3
+        // is also dropped to mimic the realistic "we can't trust
+        // anything past a torn write" rule. The runbook accepts the
+        // data loss as the price of converging on a clean state.
+        File.Delete(logPath);
+        File.Delete(idxPath);
+        await using (var writer = new SegmentWriter(logPath, idxPath,
+            opts.IndexEveryNRecords, opts.IndexEveryNBytes, fsyncOnFlush: false))
+        {
+            writer.Append(1, known1, 0);
+            writer.Flush();
+        }
+
+        // Step 3: replay re-succeeds; the surviving record round-
+        // trips. No exception, no stuck recovery.
+        await using var recoveredStore = new FileEventStore(opts, NullLogger<FileEventStore>.Instance);
+        var seenSeqs = new List<long>();
+        var seenClOrdIds = new List<ulong>();
+        await foreach (var (seq, evt) in recoveredStore.ReadFromAsync(0))
+        {
+            seenSeqs.Add(seq);
+            seenClOrdIds.Add(Assert.IsType<OrderSubmittedEvent>(evt).ClOrdId);
+        }
+        Assert.Equal(new long[] { 1 }, seenSeqs.ToArray());
+        Assert.Equal(new ulong[] { 1 }, seenClOrdIds.ToArray());
+    }
+
+    [Fact]
     public async Task ReadFromAsync_WithEmptyKindString_TreatedAsMissing()
     {
         // Pass-3 review (#296) P2. An empty-string `kind` is

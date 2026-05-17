@@ -924,6 +924,219 @@ public class PeggedAlgoEndpointTests
         }
     }
 
+    // ──────────────── Pass-4 review (#296) regression tests ────────────────
+
+    [Fact]
+    public async Task Pegged_FillRacesRepegCancel_NoReplacementChildAndNoStall()
+    {
+        // Pass-4 review (#296) P1. The engine cancels child1 for a
+        // repeg; before the cancel-ack lands the venue fills child1
+        // (the cancel reached the venue too late — race the RFC
+        // explicitly calls out). The Fill ER must:
+        //
+        //   1. NOT spawn a replacement child from the Fill handler —
+        //      child1 already consumed the qty the replacement would
+        //      have targeted, so placing a new slice here would
+        //      over-buy (orphan duplicate working order).
+        //   2. NOT leave RepegPending=true (which would short-circuit
+        //      every future repeg eval and stall the algo).
+        //   3. Clear the PeggedRepegBook entry (Started + Resolved
+        //      audit pair balanced via AlgoPeggedRepegResolvedEvent
+        //      with Aborted=false + Reason=FilledBeforeCancelAck).
+        //   4. Transition the parent to Completed cleanly (no
+        //      Suspended, no stall).
+        //
+        // Pegged places the full RemainingQuantity on each working
+        // slice, so a full Fill of child1 also completes the parent —
+        // we assert both terminal transitions here.
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100, repegMs: 100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child1 = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        Assert.Equal(30.0m, child1.Price);
+
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        var repegBook = f.Services.GetRequiredService<PeggedRepegBook>();
+
+        // Drift the mid → engine cancels child1 for a repeg.
+        cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+        await WaitFor(() => mock.SubmittedCancels.Any(c => c.OrigClOrdId == child1.ClOrdId),
+            TimeSpan.FromSeconds(3), "engine did not emit the cancel after the mid drift");
+
+        // Wait for the Started marker to be persisted (Window 3 — the
+        // only window that occurs naturally with the current single-
+        // threaded reactor; Windows 1+2 are defensive code paths in
+        // the engine, see ResolveRepegOnFillAsync XML doc).
+        await WaitFor(() => repegBook.TryGet("default", ulong.Parse(algoId)) is not null,
+            TimeSpan.FromSeconds(3), "AlgoPeggedRepegStartedEvent did not populate the book");
+
+        // Inject a full Fill ER for the cancelled child instead of
+        // the Cancel-ack the engine is waiting for — the venue race
+        // the RFC describes.
+        await InjectEr(http, adminToken, child1.ClOrdId, "Fill", lastQty: 100);
+
+        // Parent transitions to Completed (Fill consumed total qty).
+        await WaitForAlgoStatus(http, token, algoId, "Completed");
+        var snap = await GetAlgo(http, token, algoId);
+        Assert.Equal(100, snap.GetProperty("filledQuantity").GetInt64());
+        Assert.Equal("None", snap.GetProperty("terminalReason").GetString());
+
+        // Cycle resolved: AlgoPeggedRepegResolvedEvent with
+        // Aborted=false + Reason=FilledBeforeCancelAck fires; replay
+        // handler removes the book entry. Terminal-transition cleanup
+        // would also remove it but the Resolved path wins the race.
+        await WaitFor(() => repegBook.TryGet("default", ulong.Parse(algoId)) is null,
+            TimeSpan.FromSeconds(3),
+            "PeggedRepegBook still has an entry after the fill race resolved");
+
+        // No replacement child spawned (no orphan working order). The
+        // Fill handler's no-replacement branch is what guarantees
+        // this — without it the post-Fill Pegged path would call
+        // SubmitNextSliceAsync and spawn a duplicate.
+        Assert.Single(mock.SubmittedCancels);
+        var allChildren = book.EnumerateChildrenOf("default", ulong.Parse(algoId)).ToList();
+        Assert.Single(allChildren);
+        Assert.Equal(child1.ClOrdId, allChildren[0].ClOrdId);
+    }
+
+    [Fact]
+    public async Task Pegged_FillRacesRepegCancel_BeforeStartedPersisted_NoOrphanInWal()
+    {
+        // Pass-4 review (#296) P1, Windows 1+2 (defensive). With the
+        // current single-threaded reactor a Fill ER cannot interleave
+        // between EvaluatePeggedRepegAsync's CancelAsync await and the
+        // following Started dispatch — both run in the same iteration.
+        // This test pins the OBSERVABLE outcome the windowed code paths
+        // guarantee: across the full race window (whichever sub-window
+        // actually fires), there is NEVER a Started marker in
+        // PeggedRepegBook without a matching Resolved by the time the
+        // Fill ER is fully processed. Combined with the previous test
+        // (Window 3 → Resolved emitted), this ensures the audit pair
+        // is always balanced and replay can't recover into a stuck
+        // state regardless of which window fired.
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100, repegMs: 50));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child1 = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        var repegBook = f.Services.GetRequiredService<PeggedRepegBook>();
+
+        // Drift → engine cancels child1.
+        cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+        await WaitFor(() => mock.SubmittedCancels.Any(c => c.OrigClOrdId == child1.ClOrdId),
+            TimeSpan.FromSeconds(3), "engine did not emit the cancel");
+
+        // Race the Fill ER in immediately — depending on scheduler
+        // interleaving this may land before OR after Started persists.
+        // Either way the post-condition (no lingering book entry,
+        // parent Completed, no replacement orphan) must hold.
+        await InjectEr(http, adminToken, child1.ClOrdId, "Fill", lastQty: 100);
+
+        await WaitForAlgoStatus(http, token, algoId, "Completed");
+
+        // Eventually the book settles to "no pending entry" — covers
+        // Windows 1+2 (entry never existed) AND Window 3 (entry was
+        // created then Resolved cleared it).
+        await WaitFor(() => repegBook.TryGet("default", ulong.Parse(algoId)) is null,
+            TimeSpan.FromSeconds(3),
+            "PeggedRepegBook still has an entry after the fill race");
+
+        // Exactly one cancel, no replacement child spawned from the
+        // Fill handler (no orphan working order).
+        Assert.Single(mock.SubmittedCancels);
+        var allChildren = book.EnumerateChildrenOf("default", ulong.Parse(algoId)).ToList();
+        Assert.Single(allChildren);
+    }
+
+    [Fact]
+    public async Task Pegged_LateCancelAckAfterFillResolution_IsNoOpNotDoubleReplacement()
+    {
+        // Pass-4 review (#296) P1, scenario 3. After the Fill-before-
+        // cancel-ack race resolves (Resolved dispatched, book cleared,
+        // RepegPending=false, parent Completed), a venue cancel-ack ER
+        // may still arrive for the same old child (the venue processed
+        // the cancel after the fill landed). That late Cancelled wire
+        // MUST be a no-op — NOT a second SubmitNextSliceAsync call
+        // (which would duplicate the replacement child and orphan a
+        // working order). The sticky LastRepegCancelledChildId marker
+        // + the parent-terminal short-circuit + the Filled-case
+        // dedup branch together keep the classification correct
+        // regardless of which guard catches it first.
+        //
+        // Because Pegged places the full RemainingQuantity on each
+        // working slice, a full Fill of child1 also completes the
+        // parent in this test; the parent-terminal short-circuit at
+        // the top of OnChildErAsync's Filled case is what absorbs the
+        // late ER in that path. For the non-terminal-parent path
+        // (e.g. iceberg child types in a future RFC) the sticky
+        // LastRepegCancelledChildId dedup is the safety net.
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100, repegMs: 100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child1 = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        var repegBook = f.Services.GetRequiredService<PeggedRepegBook>();
+
+        cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+        await WaitFor(() => mock.SubmittedCancels.Any(c => c.OrigClOrdId == child1.ClOrdId),
+            TimeSpan.FromSeconds(3), "engine did not emit the cancel");
+        await WaitFor(() => repegBook.TryGet("default", ulong.Parse(algoId)) is not null,
+            TimeSpan.FromSeconds(3), "Started marker did not land in book");
+
+        // Fill race resolves the cycle first.
+        await InjectEr(http, adminToken, child1.ClOrdId, "Fill", lastQty: 100);
+        await WaitForAlgoStatus(http, token, algoId, "Completed");
+        await WaitFor(() => repegBook.TryGet("default", ulong.Parse(algoId)) is null,
+            TimeSpan.FromSeconds(3), "Resolved did not clear the book");
+
+        var newOrdersBefore = mock.SubmittedNewOrders.Count;
+        var childrenBefore = book.EnumerateChildrenOf("default", ulong.Parse(algoId)).Count();
+
+        // Late cancel-ack for the already-filled child1. The order is
+        // Filled (Order.MarkCancelled is a no-op on Filled) so the ER
+        // hits the Filled case in OnChildErAsync; the parent is
+        // already terminal so the algo.IsTerminal short-circuit at
+        // the top of the case absorbs the ER. No Resolved
+        // re-dispatch, no SubmitNextSliceAsync, no extra child.
+        await InjectEr(http, adminToken, child1.ClOrdId, "Canceled");
+        await Task.Delay(200);
+
+        var snap = await GetAlgo(http, token, algoId);
+        Assert.Equal("Completed", snap.GetProperty("status").GetString());
+        Assert.Equal("None", snap.GetProperty("terminalReason").GetString());
+
+        Assert.Equal(newOrdersBefore, mock.SubmittedNewOrders.Count);
+        Assert.Equal(childrenBefore,
+            book.EnumerateChildrenOf("default", ulong.Parse(algoId)).Count());
+
+        // Also assert the book entry stays absent — a late ER must
+        // not resurrect a Started/Resolved cycle.
+        Assert.Null(repegBook.TryGet("default", ulong.Parse(algoId)));
+    }
+
     // ───────────────────────── helpers ─────────────────────────
 
     private static async Task<string> PostAlgo(HttpClient http, string token, object body)
