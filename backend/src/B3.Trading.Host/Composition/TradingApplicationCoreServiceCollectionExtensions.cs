@@ -135,6 +135,12 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         // POV does not under-slice while VolumeCurveEstimator's in-memory
         // buckets re-warm from post-restart prints.
         services.AddSingleton<PovProgressBook>();
+        // Pass-1 review (#296) P1-C. Per-Pegged in-flight repeg-cycle
+        // marker book — restores RepegPending + expected-cancel
+        // marker on restart so a post-restart cancel-ack ER does not
+        // suspend the parent (it routes through SubmitNextSliceAsync
+        // and places the replacement child instead).
+        services.AddSingleton<PeggedRepegBook>();
         // Q3.3 (#283). Pegged book-top cache + pump follow the
         // MarketDataVolumePump pattern: singleton + hosted service
         // resolving the same instance so the engine takes an optional

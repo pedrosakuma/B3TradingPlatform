@@ -450,6 +450,200 @@ public class PeggedAlgoEndpointTests
         }
     }
 
+    // ──────────────── Pass-1 review (#296) regression tests ────────────────
+
+    [Fact]
+    public async Task Pegged_RepegCancelAck_DoesNotSuspendParent()
+    {
+        // Pass-1 review (#296) P1-A. Repeg cancel-ack lands → engine
+        // submits replacement. A duplicate / late Cancelled ER for
+        // the SAME old child must NOT be routed through the
+        // VenueCancelled branch (which would suspend the parent and
+        // orphan the live replacement child).
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child1 = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        Assert.Equal(30.0m, child1.Price);
+
+        // Drift the mid → engine cancels child1.
+        cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        await WaitFor(() => mock.SubmittedCancels.Any(c => c.OrigClOrdId == child1.ClOrdId),
+            TimeSpan.FromSeconds(3), "engine never cancelled child1 after mid moved");
+
+        // First Cancelled ER → engine routes through SubmitNextSlice.
+        await InjectEr(http, adminToken, child1.ClOrdId, "Canceled");
+        var child2 = await WaitForChildOtherThan(book, algoId, child1.ClOrdId, TimeSpan.FromSeconds(3));
+        Assert.Equal(31.0m, child2.Price);
+
+        // Duplicate / late Cancelled ER for the SAME old child must
+        // be a no-op — parent stays Working, no terminal published.
+        await InjectEr(http, adminToken, child1.ClOrdId, "Canceled");
+        await Task.Delay(150);
+
+        var snap = await GetAlgo(http, token, algoId);
+        Assert.Equal("Working", snap.GetProperty("status").GetString());
+        Assert.Equal("None", snap.GetProperty("terminalReason").GetString());
+
+        // And the replacement child is still live in the book.
+        var stillThere = book.EnumerateChildrenOf("default", ulong.Parse(algoId))
+            .FirstOrDefault(c => c.ClOrdId == child2.ClOrdId);
+        Assert.NotNull(stillThere);
+    }
+
+    [Fact]
+    public async Task Pegged_RepegThrottle_SuppressesCancelStorm()
+    {
+        // Pass-1 review (#296) P1-B. Rapid mid moves while a cancel
+        // ack is delayed past RepegInterval must NOT spawn additional
+        // cancels for the same already-cancel-pending child. Only one
+        // cancel + one replacement should fire per repeg cycle.
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        // Tight RepegInterval so the throttle would normally fire
+        // many times in the burst window below.
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100, repegMs: 50));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child1 = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        Assert.Equal(30.0m, child1.Price);
+
+        // First mid move → first cancel (do NOT inject the ER yet).
+        cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        await WaitFor(() => mock.SubmittedCancels.Any(c => c.OrigClOrdId == child1.ClOrdId),
+            TimeSpan.FromSeconds(3), "engine did not emit the first cancel");
+
+        // Burst of further mid moves spanning well past RepegInterval.
+        // With the P1-B fix (RepegPending short-circuit) the engine
+        // must NOT enqueue another cancel for child1 while the ack
+        // is still outstanding. Keep the cumulative delta small so
+        // the eventual replacement child stays inside risk price
+        // bands (we're not exercising risk here).
+        for (int i = 0; i < 4; i++)
+        {
+            cache.UpdateBookTop("PETR4", 30.5m + i * 0.1m, 31.5m + i * 0.1m,
+                DateTimeOffset.UtcNow);
+            await Task.Delay(60);
+        }
+        Assert.Single(mock.SubmittedCancels);
+
+        // Now release the cycle: the cancel-ack lands and the engine
+        // submits exactly one replacement child.
+        await InjectEr(http, adminToken, child1.ClOrdId, "Canceled");
+        var child2 = await WaitForChildOtherThan(book, algoId, child1.ClOrdId, TimeSpan.FromSeconds(3));
+        Assert.NotNull(child2);
+
+        // The parent must remain Working — a duplicate / late ER for
+        // child1 must not flip it Suspended (the P1-A marker keeps
+        // the classification correct even after the cycle resolved).
+        var snapBefore = await GetAlgo(http, token, algoId);
+        var statusBefore = snapBefore.GetProperty("status").GetString();
+        await InjectEr(http, adminToken, child1.ClOrdId, "Canceled");
+        await Task.Delay(150);
+        var snap = await GetAlgo(http, token, algoId);
+        var statusAfter = snap.GetProperty("status").GetString();
+        Assert.Equal("Working", statusBefore);
+        Assert.Equal("Working", statusAfter);
+    }
+
+    [Fact]
+    public async Task Pegged_RecoveryPreservesRepegIntent()
+    {
+        // Pass-1 review (#296) P1-C. Engine emits the repeg cancel
+        // but crashes before the venue Cancelled ER lands. After
+        // snapshot+restart the cancel-ack ER must be classified as
+        // expected (matching the persisted pending marker) and route
+        // through SubmitNextSliceAsync — NOT into the VenueCancelled
+        // suspension branch.
+        var dataDir = Path.Combine(Environment.CurrentDirectory, "test-data",
+            "b3-pegged-repeg-recovery-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var overrides = PersistenceOverrides(dataDir);
+            ulong algoIdNum = 0;
+            ulong child1ClOrdId = 0;
+
+            using (var f = TestAppFactory.WithOverrides(overrides))
+            using (var http = f.CreateClient())
+            {
+                var token = await f.LoginAsync(http);
+                var cache = f.Services.GetRequiredService<PegBookTopCache>();
+                cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+                var algoIdStr = await PostAlgo(http, token,
+                    PeggedBody(total: 100, pegRef: "Mid", offsetTicks: 0,
+                        repegMs: 100, tickSize: 0.5m));
+                algoIdNum = ulong.Parse(algoIdStr);
+
+                var book = f.Services.GetRequiredService<WorkingOrderBook>();
+                var child1 = await WaitForAnyChild(book, algoIdStr, TimeSpan.FromSeconds(3));
+                child1ClOrdId = child1.ClOrdId;
+                Assert.Equal(30.0m, child1.Price);
+
+                // Drift the mid → engine cancels child1. DO NOT
+                // inject the Cancelled ER — we want the cancel to
+                // be in-flight at snapshot time.
+                cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+                var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+                await WaitFor(() => mock.SubmittedCancels.Any(c => c.OrigClOrdId == child1ClOrdId),
+                    TimeSpan.FromSeconds(3), "engine did not emit the cancel before snapshot");
+
+                // Capture the snapshot with the cancel still pending.
+                ResolveSnapshotService(f).TryTakeSnapshot();
+            }
+
+            // Cold restart — engine reconciles, sees the pending
+            // repeg entry, sets RepegPending=true +
+            // LastRepegCancelledChildId so the post-restart ER is
+            // expected.
+            using (var f2 = TestAppFactory.WithOverrides(overrides))
+            using (var http2 = f2.CreateClient())
+            {
+                var token = await f2.LoginAsync(http2);
+                var adminToken = await f2.LoginAsync(http2, "admin");
+
+                // Re-seed the cache so SubmitNextSlice can resolve a
+                // target for the replacement (cache is in-memory
+                // only and does not survive restart).
+                var cache2 = f2.Services.GetRequiredService<PegBookTopCache>();
+                cache2.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+
+                // Inject the cancel-ack the engine was waiting for.
+                await InjectEr(http2, adminToken, child1ClOrdId, "Canceled");
+
+                // Replacement child must appear and parent must NOT
+                // be Suspended (which is what the pre-fix code would
+                // have done via the VenueCancelled branch).
+                var book2 = f2.Services.GetRequiredService<WorkingOrderBook>();
+                var child2 = await WaitForChildOtherThan(book2, algoIdNum.ToString(), child1ClOrdId,
+                    TimeSpan.FromSeconds(5));
+                Assert.Equal(31.0m, child2.Price);
+
+                var snap = await GetAlgo(http2, token, algoIdNum.ToString());
+                Assert.Equal("Working", snap.GetProperty("status").GetString());
+                Assert.Equal("None", snap.GetProperty("terminalReason").GetString());
+            }
+        }
+        finally
+        {
+            try { if (Directory.Exists(dataDir)) Directory.Delete(dataDir, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
     // ───────────────────────── helpers ─────────────────────────
 
     private static async Task<string> PostAlgo(HttpClient http, string token, object body)

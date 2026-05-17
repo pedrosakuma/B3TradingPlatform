@@ -122,7 +122,27 @@ public sealed class RawPlatformSnapshot
     /// <c>PovProgressBook.Snapshot()</c>.
     /// </summary>
     public PovProgressRaw[] PovProgress { get; init; } = Array.Empty<PovProgressRaw>();
+
+    /// <summary>
+    /// Pass-1 review (#296) P1-C. Mirror of
+    /// <c>PlatformSnapshot.PeggedRepegPending</c> at the raw-capture
+    /// stage. Populated under the dispatcher lock from
+    /// <c>PeggedRepegBook.Snapshot()</c>. Empty on snapshots
+    /// pre-dating the field (additive).
+    /// </summary>
+    public PeggedRepegPendingRaw[] PeggedRepegPending { get; init; } = Array.Empty<PeggedRepegPendingRaw>();
 }
+
+/// <summary>
+/// Pass-1 review (#296) P1-C. Raw per-Pegged in-flight repeg-cycle
+/// row.
+/// </summary>
+public sealed record PeggedRepegPendingRaw(
+    string FirmId,
+    ulong AlgoId,
+    ulong CancelledChildClOrdId,
+    decimal TargetPrice,
+    DateTimeOffset AtUtc);
 
 /// <summary>
 /// Pass-1 review (#295) P1#1. Raw POV scheduling-progress row.

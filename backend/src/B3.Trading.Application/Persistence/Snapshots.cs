@@ -192,6 +192,17 @@ public sealed class PlatformSnapshot
     /// <c>StartUtc</c> on first tick — same as a fresh POV).
     /// </summary>
     public List<PovProgressSnapshot> PovProgress { get; init; } = new();
+
+    /// <summary>
+    /// Pass-1 review (#296) P1-C. In-flight Pegged repeg-cycle
+    /// markers — engine emitted the cancel for a drift-driven repeg
+    /// but had not yet observed the cancel-ack ER + submitted the
+    /// replacement at snapshot capture. Empty on snapshots
+    /// pre-dating the field (additive); the engine treats absence as
+    /// "no pending cycle" — same as a fresh Pegged parent. See
+    /// <see cref="B3.Trading.Application.PeggedRepegBook"/>.
+    /// </summary>
+    public List<PeggedRepegPendingSnapshot> PeggedRepegPending { get; init; } = new();
 }
 
 /// <summary>
@@ -380,6 +391,18 @@ public sealed record PovProgressSnapshot(
     ulong AlgoId,
     long MarketVolumeSeen,
     DateTimeOffset LastEvaluateAtUtc);
+
+/// <summary>
+/// Pass-1 review (#296) P1-C. One row of the per-Pegged in-flight
+/// repeg-cycle projection — see
+/// <see cref="PlatformSnapshot.PeggedRepegPending"/>.
+/// </summary>
+public sealed record PeggedRepegPendingSnapshot(
+    string FirmId,
+    ulong AlgoId,
+    ulong CancelledChildClOrdId,
+    decimal TargetPrice,
+    DateTimeOffset AtUtc);
 
 public sealed class ClOrdIdRegistrySnapshot
 {

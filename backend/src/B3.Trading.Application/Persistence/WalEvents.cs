@@ -29,6 +29,8 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(AlgoVwapSlicedEvent), "algo.vwap.sliced")]
 [JsonDerivedType(typeof(AlgoPovSlicedEvent), "algo.pov.sliced")]
 [JsonDerivedType(typeof(AlgoPeggedRepeggedEvent), "algo.pegged.repegged")]
+[JsonDerivedType(typeof(AlgoPeggedRepegStartedEvent), "algo.pegged.repeg-started")]
+[JsonDerivedType(typeof(AlgoPeggedRepegResolvedEvent), "algo.pegged.repeg-resolved")]
 [JsonDerivedType(typeof(OrderStaledEvent), "order.staled")]
 [JsonDerivedType(typeof(OrderStaleClearedEvent), "order.stale-cleared")]
 [JsonDerivedType(typeof(UserBotCredentialCreatedEvent), "userbot.cred.created")]
@@ -435,6 +437,50 @@ public sealed record AlgoPeggedRepeggedEvent : WalEvent
     public required decimal RefPrice { get; init; }
     public required decimal OldChildPrice { get; init; }
     public required decimal NewTargetPrice { get; init; }
+    public required DateTimeOffset AtUtc { get; init; }
+}
+
+/// <summary>
+/// Pass-1 review (#296) P1-C. Pre-cancel marker for a Pegged repeg
+/// cycle. Persisted BEFORE the engine issues the cancel wire-call so
+/// recovery can distinguish "engine-initiated cancel awaiting ack"
+/// from "venue-initiated cancel" (which suspends the parent).
+///
+/// <para>Replay populates <see cref="Algo.PeggedRepegBook"/> with
+/// <see cref="CancelledChildClOrdId"/> + audit fields; engine
+/// <c>Reconcile</c> reads the book to seed
+/// <c>AlgoParentRuntime.RepegPending</c> + the sticky
+/// <c>LastRepegCancelledChildId</c> marker so a post-restart
+/// cancel-ack ER routes through <c>SubmitNextSliceAsync</c> rather
+/// than the <c>VenueCancelled</c>-suspension path. Cleared by
+/// <see cref="AlgoPeggedRepegResolvedEvent"/> on cycle completion
+/// or by <see cref="AlgoTerminalStateRecordedEvent"/> on parent
+/// terminal. Additive: snapshots and WAL segments pre-dating the
+/// event deserialise as before.</para>
+/// </summary>
+public sealed record AlgoPeggedRepegStartedEvent : WalEvent
+{
+    public required ulong AlgoId { get; init; }
+    public required string FirmId { get; init; }
+    public required ulong CancelledChildClOrdId { get; init; }
+    public required ulong NewClOrdId { get; init; }
+    public required decimal TargetPrice { get; init; }
+    public required DateTimeOffset AtUtc { get; init; }
+}
+
+/// <summary>
+/// Pass-1 review (#296) P1-C. Companion to
+/// <see cref="AlgoPeggedRepegStartedEvent"/>: emitted when the engine
+/// has consumed the cancel-ack ER and successfully submitted the
+/// replacement child. Replay clears the pending entry from
+/// <c>PeggedRepegBook</c> so post-restart state matches the
+/// in-memory steady-state (no pending repeg). Additive.
+/// </summary>
+public sealed record AlgoPeggedRepegResolvedEvent : WalEvent
+{
+    public required ulong AlgoId { get; init; }
+    public required string FirmId { get; init; }
+    public required ulong CancelledChildClOrdId { get; init; }
     public required DateTimeOffset AtUtc { get; init; }
 }
 
