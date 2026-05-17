@@ -477,6 +477,27 @@ public sealed class ExecutionReportProcessor
                 }
                 order.MarkCancelled();
                 _margin.OnExecution(lookupId, kind, 0);
+                // Pass-4 review (#299) P1. If a pass-1 ambiguous-send
+                // left a still-held replace intent keyed by THIS orig
+                // (because the gateway dispatch threw post-Prepare),
+                // and the venue ultimately Canceled the orig (i.e.
+                // dropped both the orig and the never-acked
+                // replacement), we must release the held upsize-delta
+                // reservation NOW — otherwise it sits until the TTL
+                // sweep fires. Clearing the intent here also prevents
+                // a stray late ER (under the never-created new
+                // ClOrdID) from being misinterpreted as a replace
+                // confirmation. Safe to call regardless of whether
+                // an intent existed; no-op when none did.
+                if (_replacements is not null
+                    && _replacements.TryConsumeByOriginal(lookupId, out var canceledOrigIntent, out _)
+                    && canceledOrigIntent is not null)
+                {
+                    _replaceMargin?.AbortReplace(canceledOrigIntent.NewClOrdId);
+                    _logger.LogInformation(
+                        "event=order.replace.dropped_on_orig_cancel newClOrdId={NewClOrdId} origClOrdId={OrigClOrdId} owner={Owner} symbol={Symbol}; releasing held upsize-delta reservation.",
+                        canceledOrigIntent.NewClOrdId, canceledOrigIntent.OriginalClOrdId, canceledOrigIntent.Owner.Value, canceledOrigIntent.Symbol);
+                }
                 break;
             case ExecKind.Rejected:
                 if (order.Status is OrderStatus.Rejected or OrderStatus.Filled or OrderStatus.PartiallyFilled or OrderStatus.Cancelled or OrderStatus.Replaced)
@@ -707,11 +728,33 @@ public sealed class ExecutionReportProcessor
         //    them. The cum/leaves on the new Order exists so subsequent
         //    fill ERs (now arriving under newClOrdID) advance from the
         //    correct baseline.
+        //
+        // Pass-2 review (#299) P1. Translators default missing CumQty
+        // to 0 (B3EntryPointClientGateway OrderModified arm, simulator
+        // /admin/simulator/er Replaced arm). If the venue/sim sends a
+        // Replaced ER with stale or zero CumQty AFTER the original
+        // accumulated fills, hydrating the replacement with that low
+        // baseline causes the very next Fill ER for the new ClOrdID to
+        // be diffed against an under-seeded prevBooked in the algo
+        // engine and re-book the original's prior fills against the
+        // parent. Clamp the seed cum upward to the original's cum and
+        // adjust leaves down so the (cum + leaves == newQty) invariant
+        // holds across the seam.
+        var seedCum = erCum;
+        var seedLeaves = erLeaves;
+        if (seedCum < origOrder.CumulativeQuantity)
+        {
+            _logger.LogWarning(
+                "Replaced ER for new ClOrdID {NewClOrdId} carried stale CumQty={ErCum} below original CumQty={OrigCum}; clamping to original to avoid re-booking prior fills.",
+                newClOrdId, erCum, origOrder.CumulativeQuantity);
+            seedCum = origOrder.CumulativeQuantity;
+            seedLeaves = Math.Max(0L, intent.NewQuantity - seedCum);
+        }
         Order newOrder;
         try
         {
             newOrder = Order.HydrateReplacement(
-                origOrder, newClOrdId, intent.NewQuantity, intent.NewPrice, erLeaves, erCum,
+                origOrder, newClOrdId, intent.NewQuantity, intent.NewPrice, seedLeaves, seedCum,
                 intent.RequestedTimeInForce, intent.RequestedStopPrice, intent.RequestedGoodTillDate);
         }
         catch (Exception ex)
@@ -743,11 +786,15 @@ public sealed class ExecutionReportProcessor
         //    For Buy + margin-bearing type (Limit / StopLimit /
         //    MarketWithLeftover) + cash, that's intent.NewPrice * leaves;
         //    everything else is zero (the coordinator no-ops on 0).
+        //    Pass-2 review (#299) P1: use the clamped seedLeaves so the
+        //    margin reservation matches the order book's leaves after
+        //    the cum-stale clamp above (avoids over-reserving margin
+        //    for residue that has already filled at the venue).
         var confirmedRemaining = (intent.Side == OrderSide.Buy
                                   && intent.Type.IsMarginBearing()
                                   && intent.NewPrice is { } px
-                                  && erLeaves > 0)
-            ? px * erLeaves
+                                  && seedLeaves > 0)
+            ? px * seedLeaves
             : 0m;
         _replaceMargin?.CommitReplace(intent.OriginalClOrdId, newClOrdId, confirmedRemaining);
 

@@ -59,6 +59,21 @@ public sealed class StateSnapshotter
     /// Pegged.
     /// </summary>
     private readonly PeggedRepegBook? _peggedRepeg;
+    /// <summary>
+    /// Pass-6 review (#299) P1. Optional. When wired the snapshot
+    /// pipeline captures every <see cref="PendingReplacementRegistry"/>
+    /// entry (including the ambiguous-margin-held flag) so a
+    /// snapshot taken AFTER an <c>OrderReplaceAmbiguousMarginHeldEvent</c>
+    /// survives recovery whose WAL tail starts past that event. The
+    /// restore path additionally re-invokes
+    /// <see cref="IReplaceMarginCoordinator.PrepareReplaceAsync"/>
+    /// (when <see cref="_replaceMargin"/> is wired) for every restored
+    /// entry whose <c>AmbiguousMarginHeld</c> flag is set — mirroring
+    /// the WAL-replay branch added in pass-5 so the post-restart sweep
+    /// has both the registry entry and the held reservation.
+    /// </summary>
+    private readonly PendingReplacementRegistry? _replacements;
+    private readonly IReplaceMarginCoordinator? _replaceMargin;
 
     public StateSnapshotter(
         WorkingOrderBook orders,
@@ -79,7 +94,9 @@ public sealed class StateSnapshotter
         FeeKeeper? feeKeeper = null,
         PnlKeeper? pnlKeeper = null,
         PovProgressBook? povProgress = null,
-        PeggedRepegBook? peggedRepeg = null)
+        PeggedRepegBook? peggedRepeg = null,
+        PendingReplacementRegistry? replacements = null,
+        IReplaceMarginCoordinator? replaceMargin = null)
     {
         _orders = orders;
         _positions = positions;
@@ -100,6 +117,8 @@ public sealed class StateSnapshotter
         _gtdScheduler = gtdScheduler;
         _povProgress = povProgress;
         _peggedRepeg = peggedRepeg;
+        _replacements = replacements;
+        _replaceMargin = replaceMargin;
     }
 
     public PlatformSnapshot Capture(long seq) => Project(CaptureRaw(seq));
@@ -167,6 +186,30 @@ public sealed class StateSnapshotter
             ? Array.Empty<PeggedRepegHistoryRaw>()
             : _peggedRepeg.SnapshotHistory()
                 .Select(t => new PeggedRepegHistoryRaw(t.FirmId, t.AlgoId, t.ChildClOrdIds.ToArray(), t.EvictionLogged))
+                .ToArray(),
+        PendingReplacements = _replacements is null
+            ? Array.Empty<PendingReplacementRaw>()
+            : _replacements.Snapshot()
+                .Select(s => new PendingReplacementRaw(
+                    OriginalClOrdId: s.Intent.OriginalClOrdId,
+                    NewClOrdId: s.Intent.NewClOrdId,
+                    OwnerEndClientId: s.Intent.Owner.Value,
+                    Symbol: s.Intent.Symbol,
+                    SecurityId: s.Intent.SecurityId,
+                    Side: s.Intent.Side,
+                    Type: s.Intent.Type,
+                    NewQuantity: s.Intent.NewQuantity,
+                    NewPrice: s.Intent.NewPrice,
+                    FirmId: s.Intent.FirmId,
+                    ParentAlgoId: s.Intent.ParentAlgoId,
+                    AlgoSliceSeq: s.Intent.AlgoSliceSeq,
+                    RequestedTimeInForce: s.Intent.RequestedTimeInForce,
+                    RequestedStopPrice: s.Intent.RequestedStopPrice,
+                    RequestedGoodTillDate: s.Intent.RequestedGoodTillDate,
+                    CreatedAtUtc: s.CreatedAt,
+                    AmbiguousMarginHeld: s.AmbiguousMarginHeld,
+                    AmbiguousAtUtc: s.AmbiguousAt,
+                    NewRemainingNotional: s.NewRemainingNotional))
                 .ToArray(),
     };
 
@@ -368,6 +411,33 @@ public sealed class StateSnapshotter
                 h.FirmId, h.AlgoId, new List<ulong>(h.ChildClOrdIds), h.EvictionLogged));
         }
 
+        var pendingReplacements = new List<PendingReplacementSnapshot>(raw.PendingReplacements.Length);
+        for (var i = 0; i < raw.PendingReplacements.Length; i++)
+        {
+            var r = raw.PendingReplacements[i];
+            pendingReplacements.Add(new PendingReplacementSnapshot(
+                OriginalClOrdId: r.OriginalClOrdId,
+                NewClOrdId: r.NewClOrdId,
+                OwnerEndClientId: r.OwnerEndClientId,
+                Symbol: r.Symbol,
+                SecurityId: r.SecurityId,
+                Side: r.Side.ToString(),
+                Type: r.Type.ToString(),
+                NewQuantity: r.NewQuantity,
+                NewPrice: r.NewPrice,
+                FirmId: r.FirmId,
+                ParentAlgoId: r.ParentAlgoId,
+                AlgoSliceSeq: r.AlgoSliceSeq,
+                RequestedTimeInForce: r.RequestedTimeInForce?.ToString(),
+                RequestedStopPrice: r.RequestedStopPrice,
+                RequestedGoodTillDate: r.RequestedGoodTillDate,
+                CreatedAtUtc: r.CreatedAtUtc,
+                AmbiguousMarginHeld: r.AmbiguousMarginHeld,
+                AmbiguousAtUtc: r.AmbiguousAtUtc,
+                NewRemainingNotional: r.NewRemainingNotional));
+        }
+        pendingReplacements.Sort(static (a, b) => a.NewClOrdId.CompareTo(b.NewClOrdId));
+
         return new PlatformSnapshot
         {
             Seq = raw.Seq,
@@ -399,6 +469,7 @@ public sealed class StateSnapshotter
             PovProgress = povProgress,
             PeggedRepegPending = peggedRepeg,
             PeggedRepegHistory = peggedRepegHistory,
+            PendingReplacements = pendingReplacements,
         };
     }
 
@@ -482,6 +553,81 @@ public sealed class StateSnapshotter
             _peggedRepeg.RestoreHistory(snap.PeggedRepegHistory.Select(h =>
                 (h.FirmId, h.AlgoId, (IReadOnlyList<ulong>)h.ChildClOrdIds, h.EvictionLogged)));
         }
+        // Pass-6 review (#299) P1. Re-hydrate the in-flight cancel-
+        // replace registry from the persisted snapshot and — for
+        // every entry whose ambiguous-margin-held flag was set at
+        // capture time — re-invoke PrepareReplaceAsync to re-establish
+        // the held upsize-delta reservation the pre-crash dispatch
+        // left in place. Mirrors the WAL-replay branch added in
+        // pass-5 (OrderReplaceAmbiguousMarginHeldEvent) so a
+        // snapshot whose Seq is past the ambiguous mark recovers
+        // identically to a WAL-tail-only recovery. Also re-registers
+        // the ownership replace-link so a late Replaced/Rejected ER
+        // on the new ClOrdID resolves correctly through the
+        // processor's replace-side branch. Restore happens BEFORE
+        // WAL replay; replay's OrderReplaceRequestedEvent /
+        // OrderReplaceAmbiguousMarginHeldEvent branches are
+        // idempotent under TryAdd / Mark — duplicate replay (entry
+        // already in the snapshot) becomes a benign no-op.
+        if (_replacements is not null && snap.PendingReplacements is { Count: > 0 })
+        {
+            var entries = new List<PendingReplacementEntrySnapshot>(snap.PendingReplacements.Count);
+            foreach (var p in snap.PendingReplacements)
+            {
+                var intent = new OrderReplacementIntent(
+                    OriginalClOrdId: p.OriginalClOrdId,
+                    NewClOrdId: p.NewClOrdId,
+                    Owner: new EndClientId(p.OwnerEndClientId),
+                    Symbol: p.Symbol,
+                    SecurityId: p.SecurityId,
+                    Side: Enum.Parse<OrderSide>(p.Side, ignoreCase: true),
+                    Type: Enum.Parse<OrderType>(p.Type, ignoreCase: true),
+                    NewQuantity: p.NewQuantity,
+                    NewPrice: p.NewPrice,
+                    FirmId: p.FirmId,
+                    ParentAlgoId: p.ParentAlgoId,
+                    AlgoSliceSeq: p.AlgoSliceSeq,
+                    RequestedTimeInForce: p.RequestedTimeInForce is { } tif
+                        ? Enum.Parse<TimeInForce>(tif, ignoreCase: true)
+                        : (TimeInForce?)null,
+                    RequestedStopPrice: p.RequestedStopPrice,
+                    RequestedGoodTillDate: p.RequestedGoodTillDate);
+                entries.Add(new PendingReplacementEntrySnapshot(
+                    Intent: intent,
+                    CreatedAt: p.CreatedAtUtc,
+                    AmbiguousMarginHeld: p.AmbiguousMarginHeld,
+                    AmbiguousAt: p.AmbiguousAtUtc,
+                    NewRemainingNotional: p.NewRemainingNotional));
+            }
+            _replacements.Restore(entries);
+            foreach (var p in snap.PendingReplacements)
+            {
+                // Snapshot restore runs BEFORE WAL replay, but the
+                // ownership map was already restored above from
+                // snap.Ownership. The orig SHOULD be present
+                // (snapshot was taken while orig was working); if
+                // not (terminal ER landed in the same window and the
+                // orig was evicted from the ownership map by some
+                // future cleanup), the replace-link registration
+                // would throw — skip defensively, mirroring the
+                // WAL-replay branch's `TryResolve(...)` guard.
+                if (!_ownership.TryResolve(p.OriginalClOrdId, out _)) continue;
+                _ownership.RegisterReplaceLink(p.OriginalClOrdId, p.NewClOrdId);
+                if (p.AmbiguousMarginHeld && _replaceMargin is not null)
+                {
+                    // Synchronous under ReserveOnSubmitMarginProvider —
+                    // same GetAwaiter().GetResult() shape as the
+                    // EventReplayer's pass-5 branch.
+                    _replaceMargin.PrepareReplaceAsync(
+                        p.OriginalClOrdId,
+                        p.NewClOrdId,
+                        new EndClientId(p.OwnerEndClientId),
+                        p.NewRemainingNotional,
+                        CancellationToken.None)
+                        .GetAwaiter().GetResult();
+                }
+            }
+        }
     }
 }
 
@@ -504,6 +650,7 @@ public sealed class EventReplayer
     private readonly ClOrdIdPrefixRegistry _clOrdIds;
     private readonly AlgoIdRegistry _algoIds;
     private readonly PendingReplacementRegistry? _replacements;
+    private readonly IReplaceMarginCoordinator? _replaceMargin;
     private readonly InMemoryUserBotCredentialRegistry? _userBotCredentials;
     private readonly InMemoryUserBotSessionRegistry? _userBotSessions;
     private readonly IUserBotOrderMappingRegistry? _userBotMappings;
@@ -567,7 +714,17 @@ public sealed class EventReplayer
         IFeeCalculator? feeCalculator = null,
         PnlKeeper? pnlKeeper = null,
         PovProgressBook? povProgress = null,
-        PeggedRepegBook? peggedRepeg = null)
+        PeggedRepegBook? peggedRepeg = null,
+        // Pass-5 review (#299) P1. Optional. When wired, replay of
+        // <see cref="OrderReplaceAmbiguousMarginHeldEvent"/> re-calls
+        // <c>PrepareReplaceAsync</c> to re-establish the held upsize-
+        // delta reservation a pre-crash modify left in place after an
+        // ambiguous gateway dispatch. Without this hook, capacity
+        // would return on restart and a late Replaced ER would either
+        // double-add (if Prepare ran again) or land in the
+        // "neither side has owner" branch of <c>CommitReplace</c> —
+        // both break the over-allocation invariant.
+        IReplaceMarginCoordinator? replaceMargin = null)
     {
         _orders = orders;
         _ownership = ownership;
@@ -589,6 +746,7 @@ public sealed class EventReplayer
         _pnlKeeper = pnlKeeper;
         _povProgress = povProgress;
         _peggedRepeg = peggedRepeg;
+        _replaceMargin = replaceMargin;
     }
 
     /// <summary>
@@ -705,6 +863,35 @@ public sealed class EventReplayer
                 // must advance the watermark even if the replacement
                 // intent itself wasn't re-registered (orig already gone).
                 _clOrdIds.AdvanceCounterTo(new EndClientId(rr.EndClientId), rr.NewClOrdId);
+                break;
+            case OrderReplaceAmbiguousMarginHeldEvent amh:
+                // Pass-5 review (#299) P1. Re-establish the held
+                // margin reservation a pre-crash modify left in
+                // place after an ambiguous gateway dispatch, and
+                // re-mark the corresponding PendingReplacementRegistry
+                // entry so the AlgoScheduler's TTL sweep ages from
+                // the same wall-clock the pre-crash sweep would
+                // have observed. Both hooks are optional — legacy
+                // test compositions that omit the margin coordinator
+                // or the replacement registry simply skip the side
+                // they didn't wire (the other side still applies).
+                if (_replaceMargin is not null)
+                {
+                    // PrepareReplaceAsync's production implementation
+                    // (ReserveOnSubmitMarginProvider) is synchronous
+                    // under a lock and returns a completed task — the
+                    // GetAwaiter().GetResult() shape matches every
+                    // other sync replay site here and avoids forcing
+                    // the snapshotter call chain to be async.
+                    _replaceMargin.PrepareReplaceAsync(
+                        amh.OriginalClOrdId,
+                        amh.NewClOrdId,
+                        new EndClientId(amh.EndClientId),
+                        amh.NewRemainingNotional,
+                        CancellationToken.None)
+                        .GetAwaiter().GetResult();
+                }
+                _replacements?.MarkAmbiguousMarginHeld(amh.NewClOrdId, amh.HeldAtUtc, amh.NewRemainingNotional);
                 break;
             case ExecutionReportReceivedEvent er:
                 if (Enum.TryParse<ExecKind>(er.ExecKind, ignoreCase: true, out var kind))

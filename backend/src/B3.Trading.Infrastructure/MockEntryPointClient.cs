@@ -71,8 +71,26 @@ public sealed class MockEntryPointClient : IEntryPointClient
     public Task SubmitCancelReplaceAsync(OrderCancelReplaceRequest request, CancellationToken cancellationToken)
     {
         _replaces.Enqueue(request);
+        var injector = ReplaceFailureInjector;
+        if (injector is not null)
+        {
+            var ex = injector(request);
+            if (ex is not null) return Task.FromException(ex);
+        }
         return Task.CompletedTask;
     }
+
+    /// <summary>
+    /// Pass-1 review (#299) P1-B. Optional test hook: when non-null,
+    /// every <see cref="SubmitCancelReplaceAsync"/> invokes it after
+    /// recording the request and throws the returned exception (or
+    /// completes normally if it returns null). Mirrors
+    /// <see cref="CancelFailureInjector"/>; used by the algo-modify
+    /// send-failure regression test to simulate an ambiguous send
+    /// (the request was recorded — and may have been accepted by the
+    /// venue — but the SDK reports failure to the caller).
+    /// </summary>
+    public Func<OrderCancelReplaceRequest, Exception?>? ReplaceFailureInjector { get; set; }
 
     /// <summary>
     /// Test/host hook to push an ER through the exchange-side event.

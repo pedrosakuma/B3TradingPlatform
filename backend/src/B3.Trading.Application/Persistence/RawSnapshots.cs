@@ -141,6 +141,21 @@ public sealed class RawPlatformSnapshot
     /// freshly-started process.
     /// </summary>
     public PeggedRepegHistoryRaw[] PeggedRepegHistory { get; init; } = Array.Empty<PeggedRepegHistoryRaw>();
+
+    /// <summary>
+    /// Pass-6 review (#299) P1. Mirror of
+    /// <c>PlatformSnapshot.PendingReplacements</c> at the raw-capture
+    /// stage. Carries every <see cref="PendingReplacementRegistry"/>
+    /// entry — including its <see cref="PendingReplacementRaw.AmbiguousMarginHeld"/>
+    /// flag, <see cref="PendingReplacementRaw.AmbiguousAt"/>, and
+    /// <see cref="PendingReplacementRaw.NewRemainingNotional"/> — so a
+    /// snapshot taken AFTER an ambiguous mark survives recovery even
+    /// when the WAL tail starts past the matching
+    /// <c>OrderReplaceAmbiguousMarginHeldEvent</c>. Empty on snapshots
+    /// pre-dating the field (additive — legacy snapshots restore as a
+    /// no-op, matching pre-pass-6 behaviour).
+    /// </summary>
+    public PendingReplacementRaw[] PendingReplacements { get; init; } = Array.Empty<PendingReplacementRaw>();
 }
 
 /// <summary>
@@ -274,3 +289,31 @@ public readonly record struct ClOrdIdRegistryRaw(long NextPrefix, ClOrdIdCounter
     public static ClOrdIdRegistryRaw Empty { get; } =
         new(0L, Array.Empty<ClOrdIdCounterRaw>());
 }
+
+/// <summary>
+/// Pass-6 review (#299) P1. Raw lock-side capture of one
+/// <see cref="B3.Trading.Application.PendingReplacementRegistry"/>
+/// entry. Mirrors <see cref="B3.Trading.Application.PendingReplacementEntrySnapshot"/>
+/// 1:1 — the two layers are deliberately distinct so the raw-capture
+/// shape can evolve independently of the persisted DTO if needed.
+/// </summary>
+public readonly record struct PendingReplacementRaw(
+    ulong OriginalClOrdId,
+    ulong NewClOrdId,
+    string OwnerEndClientId,
+    string Symbol,
+    ulong SecurityId,
+    OrderSide Side,
+    OrderType Type,
+    long NewQuantity,
+    decimal? NewPrice,
+    string FirmId,
+    ulong? ParentAlgoId,
+    int? AlgoSliceSeq,
+    TimeInForce? RequestedTimeInForce,
+    decimal? RequestedStopPrice,
+    DateTimeOffset? RequestedGoodTillDate,
+    DateTimeOffset CreatedAtUtc,
+    bool AmbiguousMarginHeld,
+    DateTimeOffset? AmbiguousAtUtc,
+    decimal NewRemainingNotional);

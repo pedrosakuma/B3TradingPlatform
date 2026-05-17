@@ -20,6 +20,7 @@
     <InternalsVisibleTo Include="B3.Trading.Infrastructure" />
     <InternalsVisibleTo Include="B3.Trading.EntryPointListener" />
     <InternalsVisibleTo Include="B3.Trading.Application.Tests" />
+    <InternalsVisibleTo Include="B3.Trading.Api.Tests" />
     <InternalsVisibleTo Include="B3.Trading.EntryPointListener.Tests" />
     <InternalsVisibleTo Include="B3.Trading.Benchmarks" />
   </ItemGroup>

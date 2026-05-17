@@ -1,8 +1,10 @@
 using System.Diagnostics;
 using B3.Trading.Application.Observability;
+using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace B3.Trading.Application;
 
@@ -68,14 +70,26 @@ public sealed class AlgoScheduler : BackgroundService
     private readonly TimeProvider _clock;
     private readonly TimeSpan _tickInterval;
     private readonly ILogger<AlgoScheduler> _logger;
+    // Pass-4 review (#299) P1. Ambiguous-send replace reservation
+    // sweep dependencies. Both optional — test compositions that
+    // exercise the scheduler without the modify pipeline must
+    // continue to compile. Production composition always supplies
+    // both via DI alongside the registry itself.
+    private readonly PendingReplacementRegistry? _replacements;
+    private readonly IReplaceMarginCoordinator? _replaceMargin;
+    private readonly IOptionsMonitor<RiskOptions>? _riskOptions;
 
     public AlgoScheduler(
         AlgoBook algos,
         WorkingOrderBook orders,
         IAlgoSignalQueue signals,
         TimeProvider clock,
-        ILogger<AlgoScheduler> logger)
-        : this(algos, orders, signals, clock, DefaultTickInterval, logger)
+        ILogger<AlgoScheduler> logger,
+        PendingReplacementRegistry? replacements = null,
+        IReplaceMarginCoordinator? replaceMargin = null,
+        IOptionsMonitor<RiskOptions>? riskOptions = null)
+        : this(algos, orders, signals, clock, DefaultTickInterval, logger,
+               replacements, replaceMargin, riskOptions)
     {
     }
 
@@ -89,7 +103,10 @@ public sealed class AlgoScheduler : BackgroundService
         IAlgoSignalQueue signals,
         TimeProvider clock,
         TimeSpan tickInterval,
-        ILogger<AlgoScheduler> logger)
+        ILogger<AlgoScheduler> logger,
+        PendingReplacementRegistry? replacements = null,
+        IReplaceMarginCoordinator? replaceMargin = null,
+        IOptionsMonitor<RiskOptions>? riskOptions = null)
     {
         if (tickInterval <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(tickInterval));
@@ -99,6 +116,9 @@ public sealed class AlgoScheduler : BackgroundService
         _clock = clock;
         _tickInterval = tickInterval;
         _logger = logger;
+        _replacements = replacements;
+        _replaceMargin = replaceMargin;
+        _riskOptions = riskOptions;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -144,6 +164,13 @@ public sealed class AlgoScheduler : BackgroundService
     public void Tick()
     {
         var now = _clock.GetUtcNow();
+        // Pass-4 review (#299) P1. Reap any ambiguous-send replace
+        // intents whose held margin reservation has aged past TTL.
+        // Cheap no-op when no entries are in the ambiguous state
+        // (the common case): the sweep iterates the registry but
+        // only acts on entries explicitly flagged via
+        // MarkAmbiguousMarginHeld.
+        SweepAmbiguousReplaceIntents(now);
         var algos = _algos.EnumerateAll(includeTerminal: false);
         foreach (var algo in algos)
         {
@@ -299,6 +326,53 @@ public sealed class AlgoScheduler : BackgroundService
             _logger.LogWarning(
                 "AlgoScheduler dropped signal for {Firm}/{AlgoId} (queue full).",
                 algo.FirmId, algo.AlgoId);
+        }
+    }
+
+    /// <summary>
+    /// Pass-4 review (#299) P1. Release any margin reservation tied
+    /// to a replace intent that's been pending past
+    /// <see cref="MarginOptions.AmbiguousReplaceTtl"/> after the
+    /// AlgoEngine intentionally retained both intent + reserve on
+    /// an ambiguous gateway dispatch failure. Each released entry
+    /// bumps <c>algo.modify_ambiguous_intent_expired_total</c>
+    /// tagged with the parent's algoType (looked up by ParentAlgoId
+    /// + FirmId; falls back to "unknown" when the parent is no
+    /// longer in the book). Public for the unit test that drives
+    /// the sweep deterministically without spinning the timer.
+    /// </summary>
+    public void SweepAmbiguousReplaceIntents(DateTimeOffset now)
+    {
+        if (_replacements is null || _replaceMargin is null || _riskOptions is null)
+            return;
+        var ttl = _riskOptions.CurrentValue.Margin.AmbiguousReplaceTtl;
+        if (ttl <= TimeSpan.Zero) return;
+
+        var expired = _replacements.SweepExpiredAmbiguous(now, ttl);
+        if (expired.Count == 0) return;
+
+        foreach (var intent in expired)
+        {
+            _replaceMargin.AbortReplace(intent.NewClOrdId);
+
+            // Best-effort algoType tag: ParentAlgoId is null for
+            // operator-driven plain-order modifies (those don't
+            // currently flow through this AlgoEngine ambiguous path,
+            // but tolerate the absence anyway).
+            var algoType = "unknown";
+            if (intent.ParentAlgoId is { } parentId
+                && !string.IsNullOrEmpty(intent.FirmId)
+                && _algos.TryGet(intent.FirmId, parentId, out var parent)
+                && parent is not null)
+            {
+                algoType = parent.Type.ToString().ToLowerInvariant();
+            }
+            MetricsRegistry.AlgoModifyAmbiguousIntentExpiredTotal.Add(1,
+                new KeyValuePair<string, object?>("algoType", algoType));
+
+            _logger.LogWarning(
+                "AlgoScheduler released ambiguous-send replace reservation for new ClOrdID {NewClOrdId} (orig {OrigClOrdId}, owner {Owner}, algoType {AlgoType}); intent expired past TTL {TtlSeconds}s.",
+                intent.NewClOrdId, intent.OriginalClOrdId, intent.Owner.Value, algoType, ttl.TotalSeconds);
         }
     }
 

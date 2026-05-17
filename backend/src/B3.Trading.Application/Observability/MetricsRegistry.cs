@@ -353,6 +353,61 @@ public static class MetricsRegistry
             "trading.algo.pegged.repeg_dedup_ring_evicted_total",
             description: "FIFO evictions in PeggedRepegBook's per-parent cancelled-child dedup ring.");
 
+    // Q3.5 (#285). Algo modify (cancel-replace) API. Tagged by
+    // algoType so we can distinguish operator-driven Pegged repegs
+    // from VWAP/POV price-nudges (when those algos retrofit). Reason
+    // is the human-readable driver — "operator" (POST /algo/{id}/modify)
+    // or "pegged_repeg" (internal Pegged price-drift retrofit).
+    public static readonly Counter<long> AlgoChildModifiesTotal =
+        Meter.CreateCounter<long>(
+            "trading.algo.child_modifies_total",
+            description: "Algo child cancel-replace (modify) cycles dispatched to the gateway.");
+    public static readonly Counter<long> AlgoModifyRejectedTotal =
+        Meter.CreateCounter<long>(
+            "trading.algo.modify_rejected_total",
+            description: "Algo modify requests rejected before reaching the gateway (terminal algo, terminal child, invalid qty, …).");
+
+    // Pass-1 review (#299) P1-B. The gateway dispatch for an algo modify
+    // raised an exception, but the venue may have already accepted the
+    // cancel-replace (network jitter / ambiguous send). The engine
+    // intentionally keeps the PendingReplacementRegistry intent in place
+    // so a late Replaced ER still resolves correctly; this counter makes
+    // the ambiguity observable so operators can correlate with the
+    // dashboards and confirm convergence (or absence of) via the eventual
+    // ER. Tagged by algoType only — reason is never user-supplied here.
+    public static readonly Counter<long> AlgoModifySendAmbiguous =
+        Meter.CreateCounter<long>(
+            "trading.algo.modify_send_ambiguous_total",
+            description: "Algo modify gateway dispatches that threw post-WAL but may have been accepted by the venue (intent preserved for late Replaced ER resolution).");
+
+    // Pass-3 review (#299) P2. Per-parent retired-child FIFO eviction
+    // counter. Mirrors PR #296's CancelledChildRing observability —
+    // each eviction means a row was forgotten from
+    // <c>AlgoParentRuntime.ChildBookedCum</c>, so a late stray ER for
+    // the evicted OLD child id would no longer find its prior booked
+    // cum and would re-book from a missing-key default of 0. Tagged by
+    // algoType so dashboards can spot sustained eviction churn on
+    // (e.g.) Pegged repegs vs. operator-driven modifies.
+    public static readonly Counter<long> AlgoModifyRetiredChildEvictedTotal =
+        Meter.CreateCounter<long>(
+            "trading.algo.modify_retired_child_evicted_total",
+            description: "Algo retired-child FIFO entries evicted when the per-parent ChildBookedCum bookkeeping cap is exceeded.");
+
+    // Pass-4 review (#299) P1. The AlgoScheduler sweep released an
+    // ambiguous-send replace reservation whose intent had been
+    // pending past <c>RiskOptions.Margin.AmbiguousReplaceTtl</c>
+    // without a Replaced/Rejected ER. Each bump corresponds to one
+    // upsize-delta reservation reclaimed back into the owner's
+    // available cash — i.e. a trader temporarily lost (then
+    // recovered) access to that headroom. Tagged by algoType so
+    // dashboards distinguish operator-driven Pegged repegs from
+    // VWAP/POV nudges (or "unknown" when the algo is no longer in
+    // the book at sweep time).
+    public static readonly Counter<long> AlgoModifyAmbiguousIntentExpiredTotal =
+        Meter.CreateCounter<long>(
+            "trading.algo.modify_ambiguous_intent_expired_total",
+            description: "Ambiguous-send replace intents expired by the AlgoScheduler TTL sweep; held margin reservation released.");
+
     /// <summary>
     /// 1 when the host booted with <c>Trading:Exchange:AllowErInjection=true</c>
     /// (admin-gated <c>POST /admin/simulator/er</c> is mapped). Set once at

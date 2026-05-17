@@ -1183,4 +1183,281 @@ public class OrderModifyMarginAndProcessorTests
 
         Assert.Equal(600m, margin.ReservedForTesting("alice"));
     }
+
+    // ───── Pass-4 review (#299) P1 — Canceled ER for orig clears ambiguous intent ─────
+
+    [Fact]
+    public async Task Processor_CancelledOrigWithPendingReplaceIntent_ReleasesHeldReservationAndClearsIntent()
+    {
+        // Pass-4 review (#299) P1. Scenario: AlgoEngine modify
+        // dispatched ambiguous (gateway threw), so the engine KEEPS
+        // both the PendingReplacementRegistry intent AND the held
+        // upsize-delta margin reservation. The venue ultimately
+        // emits a Cancelled ER for the ORIG (i.e. the venue
+        // accepted the cancel half of the cancel-replace but
+        // dropped the replacement — or never registered the
+        // replacement at all). The ER processor must now release
+        // the still-held upsize delta + clear the pending intent
+        // so a stray late ER under the never-created new ClOrdID
+        // is not misinterpreted as a replace confirmation.
+        var (proc, ownership, book, reg, margin, _) = BuildProcessor();
+        var owner = new EndClientId("alice");
+        var orig = new Order(1UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m, "FIRM");
+        book.TryAdd(orig);
+        orig.MarkWorking();
+        ownership.Register(1UL, owner);
+        Assert.True((await margin.TryReserveAsync(1UL, BuyCtx("alice", 30m, 100), default)).Approved);
+        Assert.Equal(3000m, margin.ReservedForTesting("alice"));
+
+        // Pass-1 ambiguous-send state: intent in the registry +
+        // Prepare-held upsize delta + AmbiguousMarginHeld marker.
+        Assert.True(reg.TryAdd(BuyLimitIntent(1UL, 2UL, "alice", 100, 30.5m), DateTimeOffset.UtcNow));
+        Assert.True((await ((IReplaceMarginCoordinator)margin).PrepareReplaceAsync(
+            1UL, 2UL, owner, 3050m, default)).Approved);
+        Assert.True(reg.MarkAmbiguousMarginHeld(2UL));
+        Assert.Equal(3050m, margin.ReservedForTesting("alice"));
+
+        // Venue Cancelled the orig — the cancel-replace's "replace"
+        // half never materialised. Drive a Canceled ER for the orig.
+        proc.Apply(1UL, ExecKind.Canceled, leaves: 0, cumQty: 0,
+                   lastQty: 0, lastPx: 0m, rejectReason: null);
+
+        // Original transitioned + upsize delta released back to 0.
+        Assert.Equal(OrderStatus.Cancelled, orig.Status);
+        Assert.Equal(0m, margin.ReservedForTesting("alice"));
+        // Intent cleared from both the new-ClOrdID and orig indexes,
+        // so neither a stray ER nor a follow-up modify on the same
+        // orig is blocked by phantom in-flight state.
+        Assert.False(reg.TryGet(2UL, out _));
+        Assert.False(reg.IsOriginalInFlight(1UL));
+    }
+
+    // ─────────── Pass-5 review (#299) P1 — restart re-establishes held reservation ───────────
+
+    [Fact]
+    public async Task EventReplayer_AmbiguousMarginHeldEvent_ReEstablishesReservation_BlocksCompetingOrderPostRestart()
+    {
+        // Pass-5 review (#299) P1. The pass-4 fix kept the upsize-
+        // delta margin reservation tied to the in-memory ambiguous-
+        // held flag so a late Replaced ER could converge without
+        // breaking the over-allocation invariant. But the flag lived
+        // ONLY in memory: a crash between the OrderReplaceRequestedEvent
+        // append and the next periodic snapshot lost it, replay re-
+        // added the intent without the flag (so the TTL sweep never
+        // reaped it), and capacity returned post-restart while the
+        // venue might still send Replaced — at which point
+        // CommitReplace landed in the "neither side has owner" branch
+        // and dropped the reservation entirely, or (after Prepare ran
+        // again) double-added it.
+        //
+        // Pass-5 fixes the durability hole with a dedicated WAL event
+        // that the EventReplayer translates back into both the
+        // PrepareReplaceAsync re-reservation and the in-memory flag
+        // mark. This test exercises the replay path directly and
+        // asserts that a competing order placed POST-replay cannot
+        // consume the held capacity — i.e. the over-allocation
+        // invariant is preserved across the crash.
+        //
+        // Owner cap = 3050 (matches the pass-4 endpoint test); held
+        // delta = full new notional of 3050 because the original's
+        // pre-crash reservation is NOT replayed (per the documented
+        // "reservations are not durable across restart" semantics of
+        // OrderSubmittedEvent — only the held ambiguous slot is).
+        var (_, ownership, book, reg, margin, _) = BuildProcessor(initial: 3050m);
+        var processor = new ExecutionReportProcessor(
+            ownership, book, new PositionKeeper(), new CaptureSink(), margin,
+            NullLogger<ExecutionReportProcessor>.Instance,
+            algoSignals: null, cash: null,
+            replacements: reg, replaceMargin: margin);
+
+        // POST-RESTART world: nothing reserved yet. The intent has
+        // been re-registered by replay of the OrderReplaceRequestedEvent
+        // (mirror that shape here directly).
+        var heldAt = new DateTimeOffset(2026, 1, 1, 9, 0, 0, TimeSpan.Zero);
+        Assert.True(reg.TryAdd(BuyLimitIntent(1UL, 2UL, "alice", 100, 30.5m), heldAt));
+        Assert.Equal(0m, margin.ReservedForTesting("alice"));
+
+        var replayer = new EventReplayer(book, ownership,
+            new KillSwitchService(), new SymbolHaltService(), new SessionPhaseService(),
+            processor, new AlgoBook(),
+            new ClOrdIdPrefixRegistry(), new AlgoIdRegistry(),
+            replacements: reg,
+            replaceMargin: margin);
+
+        // Replay the durable ambiguous-held event.
+        replayer.Apply(new OrderReplaceAmbiguousMarginHeldEvent
+        {
+            NewClOrdId = 2UL,
+            OriginalClOrdId = 1UL,
+            EndClientId = "alice",
+            NewRemainingNotional = 3050m,
+            HeldAtUtc = heldAt,
+        });
+
+        // Reservation re-established to the full held delta (3050) —
+        // exactly the value that would have been held pre-crash.
+        Assert.Equal(3050m, margin.ReservedForTesting("alice"));
+
+        // A competing order trying to grab the freed capacity MUST
+        // be rejected: only 0 of the 3050 cap is available.
+        var owner = new EndClientId("alice");
+        var competing = await margin.TryReserveAsync(
+            clOrdId: 99UL,
+            new RiskContext(owner, "FIRM", "PETR4",
+                OrderSide.Buy, OrderType.Limit, 1, 30.0m),
+            CancellationToken.None);
+        Assert.False(competing.Approved);
+
+        // The intent is back in the ambiguous-held state so the
+        // post-restart TTL sweep can converge on the same deadline
+        // the pre-crash sweep would have observed.
+        Assert.Equal(1, reg.AmbiguousCountForTesting);
+
+        // Sanity: if the persistence is REMOVED (i.e. the replay
+        // case branch goes away, simulating pre-pass-5 behaviour),
+        // this assertion flips — competing would be approved
+        // because reserved stayed at 0. That's the regression the
+        // test guards against.
+    }
+
+    // ─────────── Pass-6 review (#299) P1 — snapshot capture/restore re-establishes held reservation ───────────
+
+    [Fact]
+    public async Task StateSnapshotter_CaptureRestore_AmbiguousMarginHeldEntry_ReEstablishesReservation_BlocksCompetingOrderPostRestart()
+    {
+        // Pass-6 review (#299) P1. The pass-5 fix made the held
+        // reservation durable via OrderReplaceAmbiguousMarginHeldEvent
+        // so a snapshot-less / WAL-tail-only recovery could re-call
+        // PrepareReplaceAsync. But CaptureRaw never projected the
+        // PendingReplacementRegistry into the persisted snapshot:
+        // when the periodic snapshotter ran AFTER the ambiguous mark
+        // its Seq advanced past the OrderReplaceAmbiguousMarginHeldEvent,
+        // recovery loaded the snapshot and started its WAL read past
+        // that event, the snapshot didn't carry the entry, and so the
+        // post-restart sweep had no ambiguous entry at all — a late
+        // Replaced/Rejected ER missed the registry path and the
+        // reservation leaked (or worse, was returned to free capacity
+        // by a competing order winning the race).
+        //
+        // The pass-6 fix persists every PendingReplacementRegistry
+        // entry — including the AmbiguousMarginHeld flag + HeldAtUtc +
+        // NewRemainingNotional — in the snapshot, AND re-invokes
+        // PrepareReplaceAsync on restore for every ambiguous-flagged
+        // entry. This test exercises the snapshot path end-to-end
+        // (no WAL replay) and asserts the same over-allocation
+        // invariant the pass-5 WAL-replay test guards.
+        //
+        // Owner cap = 3050; original Buy 100 @ 30 (3000); modify
+        // requests 100 @ 30.5 → new notional 3050 (upsize delta 50).
+        // After the ambiguous send, the upsize delta is held under
+        // the new ClOrdID alongside the still-reserved original
+        // 3000 — total 3050 = full cap. Post-restart we only model
+        // the held NEW-side reservation (the original reservation,
+        // like every plain OrderSubmittedEvent reservation, is NOT
+        // durable across restart per the documented semantics —
+        // only the ambiguous-held slot is). So the new-side
+        // re-reservation alone must consume 3050 of the 3050 cap.
+
+        // ── Pre-crash world ──
+        var pre = new TestWorld(initial: 3050m);
+        var owner = new EndClientId("alice");
+        var orig = new Order(1UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m, "FIRM");
+        pre.Book.TryAdd(orig);
+        orig.MarkWorking();
+        pre.Ownership.Register(1UL, owner);
+        Assert.True((await pre.Margin.TryReserveAsync(1UL, BuyCtx("alice", 30m, 100), default)).Approved);
+        Assert.True(pre.Replacements.TryAdd(BuyLimitIntent(1UL, 2UL, "alice", 100, 30.5m),
+            createdAt: new DateTimeOffset(2026, 1, 1, 8, 59, 0, TimeSpan.Zero)));
+        Assert.True((await ((IReplaceMarginCoordinator)pre.Margin).PrepareReplaceAsync(
+            1UL, 2UL, owner, 3050m, default)).Approved);
+        var heldAt = new DateTimeOffset(2026, 1, 1, 9, 0, 0, TimeSpan.Zero);
+        Assert.True(pre.Replacements.MarkAmbiguousMarginHeld(2UL, heldAt, newRemainingNotional: 3050m));
+
+        // Periodic snapshot captured AFTER the ambiguous mark.
+        var snap = pre.Snapshotter.Capture(seq: 42L);
+
+        // Sanity: snapshot carries the entry (the bug pre-pass-6 was
+        // exactly that this list was empty).
+        Assert.Single(snap.PendingReplacements);
+        var persisted = snap.PendingReplacements[0];
+        Assert.Equal(2UL, persisted.NewClOrdId);
+        Assert.True(persisted.AmbiguousMarginHeld);
+        Assert.Equal(heldAt, persisted.AmbiguousAtUtc);
+        Assert.Equal(3050m, persisted.NewRemainingNotional);
+
+        // ── Crash + restart ── fresh world (clean ownership map,
+        // empty book, zero-reservation margin provider, empty
+        // registry). No WAL tail; recovery is snapshot-only.
+        var post = new TestWorld(initial: 3050m);
+        Assert.Equal(0m, post.Margin.ReservedForTesting("alice"));
+        post.Snapshotter.Restore(snap);
+
+        // Reservation re-established to the full held delta — exactly
+        // what the pre-crash dispatch had reserved under the new
+        // ClOrdID — and the registry entry is back in the ambiguous
+        // state so the post-restart TTL sweep ages from the same
+        // wall-clock the pre-crash sweep would have observed.
+        Assert.Equal(3050m, post.Margin.ReservedForTesting("alice"));
+        Assert.Equal(1, post.Replacements.AmbiguousCountForTesting);
+        Assert.True(post.Replacements.TryGet(2UL, out var rehydrated));
+        Assert.NotNull(rehydrated);
+        Assert.Equal(1UL, rehydrated!.OriginalClOrdId);
+
+        // A competing order trying to grab the (would-be-free)
+        // capacity MUST be rejected.
+        var competing = await post.Margin.TryReserveAsync(
+            clOrdId: 99UL,
+            new RiskContext(owner, "FIRM", "PETR4",
+                OrderSide.Buy, OrderType.Limit, 1, 30.0m),
+            CancellationToken.None);
+        Assert.False(competing.Approved);
+
+        // Late Replaced ER under the new ClOrdID converges through
+        // the registry path: CommitReplace finalises the reservation
+        // at the venue-confirmed leaves (100 @ 30.5 = 3050) so the
+        // owner stays fully reserved. Without the snapshot
+        // re-hydration above this branch would land in the
+        // "no intent" fallback and silently drop the held delta.
+        var processor = new ExecutionReportProcessor(
+            post.Ownership, post.Book, new PositionKeeper(), new CaptureSink(), post.Margin,
+            NullLogger<ExecutionReportProcessor>.Instance,
+            algoSignals: null, cash: null,
+            replacements: post.Replacements, replaceMargin: post.Margin);
+        processor.Apply(2UL, ExecKind.Replaced, leaves: 100, cumQty: 0, lastQty: 0,
+                        lastPx: 0m, rejectReason: null, origClOrdId: 1UL);
+        Assert.Equal(3050m, post.Margin.ReservedForTesting("alice"));
+        Assert.False(post.Replacements.TryGet(2UL, out _));
+
+        // Regression guard: if the snapshot capture or the restore
+        // re-hydration is removed (the pre-pass-6 bug), the snapshot
+        // would carry no entry, post.Restore would no-op, reserved
+        // would stay at 0, competing would be Approved, and the
+        // Replaced ER would land outside the registry path. Every
+        // assertion above flips — exactly the snapshot-tail
+        // recovery hole pass-6 closes.
+    }
+
+    private sealed class TestWorld
+    {
+        public OrderOwnershipMap Ownership { get; } = new();
+        public WorkingOrderBook Book { get; } = new();
+        public PositionKeeper Positions { get; } = new();
+        public ReserveOnSubmitMarginProvider Margin { get; }
+        public PendingReplacementRegistry Replacements { get; } = new();
+        public StateSnapshotter Snapshotter { get; }
+
+        public TestWorld(decimal initial)
+        {
+            var opts = new RiskOptions();
+            opts.Margin.Enabled = true;
+            opts.Margin.Initial["alice"] = initial;
+            var monitor = new StaticOptionsMonitor<RiskOptions>(opts);
+            Margin = new ReserveOnSubmitMarginProvider(monitor, NullLogger<ReserveOnSubmitMarginProvider>.Instance);
+            Snapshotter = new StateSnapshotter(
+                Book, Positions, new KillSwitchService(), new SymbolHaltService(), new SessionPhaseService(),
+                new ClOrdIdPrefixRegistry(), Ownership, new AlgoBook(), new AlgoIdRegistry(), new CashLedger(),
+                replacements: Replacements,
+                replaceMargin: Margin);
+        }
+    }
 }
