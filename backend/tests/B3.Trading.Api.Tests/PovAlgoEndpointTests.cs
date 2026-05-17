@@ -166,21 +166,25 @@ public class PovAlgoEndpointTests
 
         var book = f.Services.GetRequiredService<WorkingOrderBook>();
 
-        // No prints fed in yet, but the engine may still emit work as
-        // trades land via the mock venue's own market chatter (in this
-        // configuration there is none). Pump a trade volume directly via
-        // the volume curve estimator to drive the next slice.
+        // Pump a trade volume directly via the volume curve estimator
+        // to drive the next slice. Pass-1 review (#295) P1#2 made
+        // VolumeBetween pro-rate boundary buckets by elapsed-time
+        // fraction, so a single qty must be large enough that the
+        // POV's sub-bucket integration window (200ms of a 5-min
+        // bucket = 1/1500) still leaves meaningful share. 1_500_000 →
+        // 200ms-pro-rated ≈ 1000 → 20% participation slice = 200.
         var curve = f.Services.GetRequiredService<B3.Trading.Application.MarketData.VolumeCurveEstimator>();
-        curve.RecordTrade("PETR4", 1000, now.AddSeconds(-1).AddMilliseconds(50));
+        curve.RecordTrade("PETR4", 1_500_000, now.AddSeconds(-1).AddMilliseconds(50));
 
         var first = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
-        // 20% of 1000 = 200; clamped by remaining (400) → 200.
+        // Pro-rated bucket fraction → ~1000 cum mv → 20% → 200; clamped by remaining (400) → 200.
         Assert.True(first.Quantity > 0);
         await InjectEr(http, adminToken, first.ClOrdId, "Fill", lastQty: first.Quantity);
 
         // Push more volume so a second slice can fire and the parent
-        // completes (or expires) within the window.
-        curve.RecordTrade("PETR4", 2000, now.AddSeconds(-1).AddMilliseconds(200));
+        // completes (or expires) within the window. Same 1500x scaling
+        // applies (sub-bucket window).
+        curve.RecordTrade("PETR4", 3_000_000, now.AddSeconds(-1).AddMilliseconds(200));
 
         var seenSeqs = new HashSet<int> { first.AlgoSliceSeq!.Value };
         long filled = first.Quantity;
@@ -320,9 +324,11 @@ public class PovAlgoEndpointTests
             PovBody(total: 400, start: now.AddSeconds(-1), end: now.AddSeconds(10),
                 tickSeconds: 0.2, participationRate: 0.20m));
 
-        // Drive the engine to slice by injecting market volume.
+        // Drive the engine to slice by injecting market volume. Pass-1
+        // review (#295) P1#2 — see Pov_SlicesAfterMarketTrades for the
+        // pro-rate sizing rationale.
         var curve = f.Services.GetRequiredService<B3.Trading.Application.MarketData.VolumeCurveEstimator>();
-        curve.RecordTrade("PETR4", 1000, now.AddSeconds(-1).AddMilliseconds(50));
+        curve.RecordTrade("PETR4", 1_500_000, now.AddSeconds(-1).AddMilliseconds(50));
 
         var book = f.Services.GetRequiredService<WorkingOrderBook>();
         var inFlight = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(5));

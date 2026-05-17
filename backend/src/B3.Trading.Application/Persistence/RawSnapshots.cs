@@ -114,7 +114,24 @@ public sealed class RawPlatformSnapshot
     /// <c>GtdExpirationScheduler.SnapshotAuditedExpiredIds()</c>.
     /// </summary>
     public ulong[] AuditedExpiredIds { get; init; } = Array.Empty<ulong>();
+
+    /// <summary>
+    /// Pass-1 review (#295) P1#1. Mirror of
+    /// <c>PlatformSnapshot.PovProgress</c> at the raw-capture stage.
+    /// Populated under the dispatcher lock from
+    /// <c>PovProgressBook.Snapshot()</c>.
+    /// </summary>
+    public PovProgressRaw[] PovProgress { get; init; } = Array.Empty<PovProgressRaw>();
 }
+
+/// <summary>
+/// Pass-1 review (#295) P1#1. Raw POV scheduling-progress row.
+/// </summary>
+public sealed record PovProgressRaw(
+    string FirmId,
+    ulong AlgoId,
+    long MarketVolumeSeen,
+    DateTimeOffset LastEvaluateAtUtc);
 
 /// <summary>
 /// Captured Order. Mutable scalars (<see cref="Status"/>,

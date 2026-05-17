@@ -405,6 +405,250 @@ public class AlgoRecoveryTests : IDisposable
     }
 
     [Fact]
+    public async Task PovAlgo_ReplayRestoresProgressBook()
+    {
+        // Pass-1 review (#295) P1#1 — replay of two AlgoPovSlicedEvents
+        // must hydrate PovProgressBook so restart resumes integration
+        // from the correct (marketVolumeSeen, lastEvaluateAtUtc) baseline.
+        var createdAt = new DateTimeOffset(2026, 7, 1, 13, 0, 0, TimeSpan.Zero);
+        var povStart = createdAt;
+        var tick = TimeSpan.FromSeconds(5);
+        var tick1At = povStart + tick;
+        var tick2At = povStart + tick + tick;
+
+        await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
+        {
+            var (book, ownership, killSwitch, processor, algos, dispatcher) = Build(store);
+            dispatcher.Dispatch(
+                new AlgoCreatedEvent
+                {
+                    AlgoId = 410UL,
+                    EndClientId = "eve",
+                    FirmId = "TEST",
+                    Symbol = "PETR4",
+                    SecurityId = 4321UL,
+                    Side = "Buy",
+                    Type = "Pov",
+                    TotalQuantity = 5000,
+                    CreatedAtUtc = createdAt,
+                    PovStartUtc = povStart,
+                    PovEndUtc = povStart.AddMinutes(30),
+                    PovChildOrderType = "Limit",
+                    PovChildPrice = 30m,
+                    PovParticipationRate = 0.20m,
+                    PovTickIntervalTicks = tick.Ticks,
+                },
+                () => algos.TryAdd(new Algo(410UL, new EndClientId("eve"), "TEST", "PETR4", 4321UL,
+                    OrderSide.Buy, AlgoType.Pov, 5000,
+                    new PovParameters(povStart, povStart.AddMinutes(30), OrderType.Limit, 30m, 0.20m, tick), createdAt)));
+
+            dispatcher.Dispatch(
+                new AlgoPovSlicedEvent
+                {
+                    AlgoId = 410UL,
+                    FirmId = "TEST",
+                    SliceSeq = 0,
+                    CumMarketVolume = 1000,
+                    ExecutedCum = 0,
+                    SliceQty = 200,
+                    PlannedAtUtc = tick1At,
+                    MarketVolumeSeen = 1000,
+                    LastEvaluateAtUtc = tick1At,
+                },
+                () => { });
+
+            dispatcher.Dispatch(
+                new AlgoPovSlicedEvent
+                {
+                    AlgoId = 410UL,
+                    FirmId = "TEST",
+                    SliceSeq = 1,
+                    CumMarketVolume = 2500,
+                    ExecutedCum = 200,
+                    SliceQty = 300,
+                    PlannedAtUtc = tick2At,
+                    MarketVolumeSeen = 2500,
+                    LastEvaluateAtUtc = tick2At,
+                },
+                () => { });
+        }
+
+        await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
+        {
+            var (book, ownership, killSwitch, processor, algos, _) = Build(store);
+            var algoIds = new AlgoIdRegistry();
+            var povProgress = new PovProgressBook();
+            var snapshotter = new StateSnapshotter(book, new PositionKeeper(), killSwitch, new SymbolHaltService(), new SessionPhaseService(), new ClOrdIdPrefixRegistry(), ownership, algos, algoIds, new CashLedger(), povProgress: povProgress);
+            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), new SessionPhaseService(), processor, algos, new ClOrdIdPrefixRegistry(), new AlgoIdRegistry(), povProgress: povProgress);
+            var recovery = new PersistenceRecovery(store, snapshotter, replayer,
+                new SnapshotStore(_root, "test"), NullLogger<PersistenceRecovery>.Instance);
+            await recovery.RunAsync();
+
+            var p = povProgress.TryGet("TEST", 410UL);
+            Assert.NotNull(p);
+            Assert.Equal(2500L, p!.Value.MarketVolumeSeen);
+            Assert.Equal(tick2At, p.Value.LastEvaluateAtUtc);
+        }
+    }
+
+    [Fact]
+    public async Task PovAlgo_ReplayIsIdempotent()
+    {
+        // Pass-1 review (#295) P1#1 — replaying the same WAL twice
+        // must produce the same PovProgressBook state (last-write-wins,
+        // single entry, latest values).
+        var createdAt = new DateTimeOffset(2026, 7, 2, 13, 0, 0, TimeSpan.Zero);
+        var povStart = createdAt;
+        var tick = TimeSpan.FromSeconds(5);
+        var lastTickAt = povStart + tick;
+
+        await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
+        {
+            var (book, ownership, killSwitch, processor, algos, dispatcher) = Build(store);
+            dispatcher.Dispatch(
+                new AlgoCreatedEvent
+                {
+                    AlgoId = 420UL,
+                    EndClientId = "frank",
+                    FirmId = "TEST",
+                    Symbol = "PETR4",
+                    SecurityId = 4321UL,
+                    Side = "Buy",
+                    Type = "Pov",
+                    TotalQuantity = 5000,
+                    CreatedAtUtc = createdAt,
+                    PovStartUtc = povStart,
+                    PovEndUtc = povStart.AddMinutes(30),
+                    PovChildOrderType = "Limit",
+                    PovChildPrice = 30m,
+                    PovParticipationRate = 0.10m,
+                    PovTickIntervalTicks = tick.Ticks,
+                },
+                () => algos.TryAdd(new Algo(420UL, new EndClientId("frank"), "TEST", "PETR4", 4321UL,
+                    OrderSide.Buy, AlgoType.Pov, 5000,
+                    new PovParameters(povStart, povStart.AddMinutes(30), OrderType.Limit, 30m, 0.10m, tick), createdAt)));
+
+            dispatcher.Dispatch(
+                new AlgoPovSlicedEvent
+                {
+                    AlgoId = 420UL,
+                    FirmId = "TEST",
+                    SliceSeq = 0,
+                    CumMarketVolume = 5000,
+                    ExecutedCum = 0,
+                    SliceQty = 500,
+                    PlannedAtUtc = lastTickAt,
+                    MarketVolumeSeen = 5000,
+                    LastEvaluateAtUtc = lastTickAt,
+                },
+                () => { });
+        }
+
+        async Task<PovProgress?> ReplayOnce()
+        {
+            await using var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance);
+            var (book, ownership, killSwitch, processor, algos, _) = Build(store);
+            var povProgress = new PovProgressBook();
+            var snapshotter = new StateSnapshotter(book, new PositionKeeper(), killSwitch, new SymbolHaltService(), new SessionPhaseService(), new ClOrdIdPrefixRegistry(), ownership, algos, new AlgoIdRegistry(), new CashLedger(), povProgress: povProgress);
+            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), new SessionPhaseService(), processor, algos, new ClOrdIdPrefixRegistry(), new AlgoIdRegistry(), povProgress: povProgress);
+            var recovery = new PersistenceRecovery(store, snapshotter, replayer,
+                new SnapshotStore(_root, "test-idem-" + Guid.NewGuid().ToString("N")), NullLogger<PersistenceRecovery>.Instance);
+            await recovery.RunAsync();
+            return povProgress.TryGet("TEST", 420UL);
+        }
+
+        var first = await ReplayOnce();
+        var second = await ReplayOnce();
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+        Assert.Equal(first!.Value.MarketVolumeSeen, second!.Value.MarketVolumeSeen);
+        Assert.Equal(first.Value.LastEvaluateAtUtc, second.Value.LastEvaluateAtUtc);
+        Assert.Equal(5000L, second.Value.MarketVolumeSeen);
+    }
+
+    [Fact]
+    public async Task PovAlgo_RestartMidFlight_ResumesFromPersistedBaseline()
+    {
+        // Pass-1 review (#295) P1#1 — after restart with a persisted
+        // PovProgressBook entry, the engine must continue from the
+        // recorded baseline rather than re-integrating from zero.
+        var createdAt = new DateTimeOffset(2026, 7, 3, 13, 0, 0, TimeSpan.Zero);
+        var povStart = createdAt;
+        var tick = TimeSpan.FromSeconds(5);
+        var lastTickAt = povStart + tick;
+
+        await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
+        {
+            var (book, ownership, killSwitch, processor, algos, dispatcher) = Build(store);
+            dispatcher.Dispatch(
+                new AlgoCreatedEvent
+                {
+                    AlgoId = 430UL,
+                    EndClientId = "gina",
+                    FirmId = "TEST",
+                    Symbol = "PETR4",
+                    SecurityId = 4321UL,
+                    Side = "Buy",
+                    Type = "Pov",
+                    TotalQuantity = 10_000,
+                    CreatedAtUtc = createdAt,
+                    PovStartUtc = povStart,
+                    PovEndUtc = povStart.AddMinutes(30),
+                    PovChildOrderType = "Limit",
+                    PovChildPrice = 30m,
+                    PovParticipationRate = 0.20m,
+                    PovTickIntervalTicks = tick.Ticks,
+                },
+                () => algos.TryAdd(new Algo(430UL, new EndClientId("gina"), "TEST", "PETR4", 4321UL,
+                    OrderSide.Buy, AlgoType.Pov, 10_000,
+                    new PovParameters(povStart, povStart.AddMinutes(30), OrderType.Limit, 30m, 0.20m, tick), createdAt)));
+
+            dispatcher.Dispatch(
+                new AlgoPovSlicedEvent
+                {
+                    AlgoId = 430UL,
+                    FirmId = "TEST",
+                    SliceSeq = 0,
+                    CumMarketVolume = 4_000,
+                    ExecutedCum = 0,
+                    SliceQty = 800,
+                    PlannedAtUtc = lastTickAt,
+                    MarketVolumeSeen = 4_000,
+                    LastEvaluateAtUtc = lastTickAt,
+                },
+                () => { });
+        }
+
+        await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
+        {
+            var (book, ownership, killSwitch, processor, algos, _) = Build(store);
+            var povProgress = new PovProgressBook();
+            var snapshotter = new StateSnapshotter(book, new PositionKeeper(), killSwitch, new SymbolHaltService(), new SessionPhaseService(), new ClOrdIdPrefixRegistry(), ownership, algos, new AlgoIdRegistry(), new CashLedger(), povProgress: povProgress);
+            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), new SessionPhaseService(), processor, algos, new ClOrdIdPrefixRegistry(), new AlgoIdRegistry(), povProgress: povProgress);
+            var recovery = new PersistenceRecovery(store, snapshotter, replayer,
+                new SnapshotStore(_root, "test-restart"), NullLogger<PersistenceRecovery>.Instance);
+            await recovery.RunAsync();
+
+            // Baseline restored.
+            var baseline = povProgress.TryGet("TEST", 430UL);
+            Assert.NotNull(baseline);
+            Assert.Equal(4_000L, baseline!.Value.MarketVolumeSeen);
+            Assert.Equal(lastTickAt, baseline.Value.LastEvaluateAtUtc);
+
+            // Simulate the engine recording a subsequent tick: only
+            // the incremental market volume between the last persisted
+            // tick and the new one should add to the baseline.
+            var newTickAt = lastTickAt + tick;
+            povProgress.Set("TEST", 430UL,
+                baseline.Value.MarketVolumeSeen + 1_500,
+                newTickAt);
+            var updated = povProgress.TryGet("TEST", 430UL);
+            Assert.Equal(5_500L, updated!.Value.MarketVolumeSeen);
+            Assert.Equal(newTickAt, updated.Value.LastEvaluateAtUtc);
+        }
+    }
+
+    [Fact]
     public void AlgoBook_EnumerateForOwner_ExcludesTerminalByDefault()
     {
         var algos = new AlgoBook();

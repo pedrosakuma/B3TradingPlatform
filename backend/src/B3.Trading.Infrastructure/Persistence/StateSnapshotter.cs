@@ -42,6 +42,13 @@ public sealed class StateSnapshotter
     /// but the order was still working in the snapshot.
     /// </summary>
     private readonly GtdExpirationScheduler? _gtdScheduler;
+    /// <summary>
+    /// Pass-1 review (#295) P1#1. Optional — when wired the snapshot
+    /// pipeline captures per-POV scheduling progress so a restart can
+    /// restore the cumulative-market-volume baseline. Null-tolerant for
+    /// legacy test compositions that don't exercise POV.
+    /// </summary>
+    private readonly PovProgressBook? _povProgress;
 
     public StateSnapshotter(
         WorkingOrderBook orders,
@@ -60,7 +67,8 @@ public sealed class StateSnapshotter
         GtdExpirationScheduler? gtdScheduler = null,
         CashKeeper? cashKeeper = null,
         FeeKeeper? feeKeeper = null,
-        PnlKeeper? pnlKeeper = null)
+        PnlKeeper? pnlKeeper = null,
+        PovProgressBook? povProgress = null)
     {
         _orders = orders;
         _positions = positions;
@@ -79,6 +87,7 @@ public sealed class StateSnapshotter
         _userBotSessions = userBotSessions;
         _userBotMappings = userBotMappings;
         _gtdScheduler = gtdScheduler;
+        _povProgress = povProgress;
     }
 
     public PlatformSnapshot Capture(long seq) => Project(CaptureRaw(seq));
@@ -131,6 +140,11 @@ public sealed class StateSnapshotter
         BotOrderMappings = _userBotMappings?.RawSnapshotOrders() ?? Array.Empty<BotOrderMappingRaw>(),
         BotCancelMappings = _userBotMappings?.RawSnapshotCancels() ?? Array.Empty<BotCancelMappingRaw>(),
         AuditedExpiredIds = _gtdScheduler?.SnapshotAuditedExpiredIds() ?? Array.Empty<ulong>(),
+        PovProgress = _povProgress is null
+            ? Array.Empty<PovProgressRaw>()
+            : _povProgress.Snapshot()
+                .Select(t => new PovProgressRaw(t.FirmId, t.AlgoId, t.Progress.MarketVolumeSeen, t.Progress.LastEvaluateAtUtc))
+                .ToArray(),
     };
 
     /// <summary>
@@ -306,6 +320,13 @@ public sealed class StateSnapshotter
         }
         botCancelMaps.Sort(static (a, b) => a.CancelInternalClOrdId.CompareTo(b.CancelInternalClOrdId));
 
+        var povProgress = new List<PovProgressSnapshot>(raw.PovProgress.Length);
+        for (var i = 0; i < raw.PovProgress.Length; i++)
+        {
+            var p = raw.PovProgress[i];
+            povProgress.Add(new PovProgressSnapshot(p.FirmId, p.AlgoId, p.MarketVolumeSeen, p.LastEvaluateAtUtc));
+        }
+
         return new PlatformSnapshot
         {
             Seq = raw.Seq,
@@ -334,6 +355,7 @@ public sealed class StateSnapshotter
             BotOrderMappings = botOrderMaps,
             BotCancelMappings = botCancelMaps,
             AuditedExpiredIds = raw.AuditedExpiredIds,
+            PovProgress = povProgress,
         };
     }
 
@@ -404,6 +426,11 @@ public sealed class StateSnapshotter
             foreach (var id in snap.AuditedExpiredIds)
                 _gtdScheduler.MarkExpiredAuditAppended(id);
         }
+        if (_povProgress is not null)
+        {
+            _povProgress.Restore(snap.PovProgress.Select(p =>
+                (p.FirmId, p.AlgoId, new PovProgress(p.MarketVolumeSeen, p.LastEvaluateAtUtc))));
+        }
     }
 }
 
@@ -448,6 +475,14 @@ public sealed class EventReplayer
     private readonly FeeKeeper? _feeKeeper;
     private readonly PnlKeeper? _pnlKeeper;
     private readonly IFeeCalculator? _feeCalculator;
+    /// <summary>
+    /// Pass-1 review (#295) P1#1. Optional. When wired, replay folds
+    /// <see cref="AlgoPovSlicedEvent.MarketVolumeSeen"/> +
+    /// <see cref="AlgoPovSlicedEvent.LastEvaluateAtUtc"/> into the
+    /// per-POV progress book so a snapshot+tail recovery converges on
+    /// the same scheduling baseline as a snapshot-only restore.
+    /// </summary>
+    private readonly PovProgressBook? _povProgress;
 
     public EventReplayer(
         WorkingOrderBook orders,
@@ -467,7 +502,8 @@ public sealed class EventReplayer
         CashKeeper? cashKeeper = null,
         FeeKeeper? feeKeeper = null,
         IFeeCalculator? feeCalculator = null,
-        PnlKeeper? pnlKeeper = null)
+        PnlKeeper? pnlKeeper = null,
+        PovProgressBook? povProgress = null)
     {
         _orders = orders;
         _ownership = ownership;
@@ -487,6 +523,7 @@ public sealed class EventReplayer
         _feeKeeper = feeKeeper;
         _feeCalculator = feeCalculator;
         _pnlKeeper = pnlKeeper;
+        _povProgress = povProgress;
     }
 
     /// <summary>
@@ -664,6 +701,15 @@ public sealed class EventReplayer
                     var reason = Enum.Parse<AlgoTerminalReason>(at.Reason, ignoreCase: true);
                     algo.RecordTerminal(status, reason, at.AtUtc);
                 }
+                break;
+            case AlgoPovSlicedEvent ps:
+                // Pass-1 review (#295) P1#1. Restore the POV scheduling
+                // baseline so the post-restart engine slices off the
+                // PRE-restart cumulative-market-volume baseline, not zero.
+                // Last-write-wins: events are replayed in seq order so
+                // the final state matches the most recently persisted
+                // slice. Idempotent under double-replay.
+                _povProgress?.Set(ps.FirmId, ps.AlgoId, ps.MarketVolumeSeen, ps.LastEvaluateAtUtc);
                 break;
             case OrderStaledEvent os:
                 if (_orders.TryGet(os.ClOrdId, out var staleOrd) && staleOrd is not null)

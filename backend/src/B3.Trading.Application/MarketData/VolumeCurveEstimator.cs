@@ -157,12 +157,30 @@ public sealed class VolumeCurveEstimator
     /// <paramref name="symbol"/>. Spans day boundaries by walking the
     /// per-day bucket arrays. Public for tests + for the participation
     /// cap (engine asks "how much has traded recently?").
+    ///
+    /// <para>
+    /// Pass-1 review (#295) P1#2. The first/last bucket overlapping
+    /// the range are pro-rated by elapsed-time fraction so a partial
+    /// bucket at either boundary does not over-count whole-bucket
+    /// trades that fall outside the range. This is a <b>linear
+    /// approximation</b>: it assumes uniform within-bucket trade
+    /// distribution. A bucket that recorded all of its volume at the
+    /// edge furthest from the range will be under/over-counted by up
+    /// to <c>(1 - overlap/bucketSize) * bucketTotal</c>. At the
+    /// default 5-minute bucket size this is bounded to a fraction of
+    /// one bucket which is acceptable for both the VWAP participation
+    /// cap (engine-recent lookback) and the POV incremental-volume
+    /// integrator (tick-aligned cadence). A precise alternative
+    /// (per-trade ring buffer) is tracked as follow-up work and not
+    /// needed for the windows the live algos operate over.
+    /// </para>
     /// </summary>
     public long VolumeBetween(string symbol, DateTimeOffset fromUtc, DateTimeOffset toUtc)
     {
         if (toUtc <= fromUtc) return 0;
         long total = 0;
         var bucketsPerDay = BucketsPerDay;
+        var bucketTicks = _bucketSize.Ticks;
         var day = DateOnly.FromDateTime(fromUtc.UtcDateTime);
         var endDay = DateOnly.FromDateTime(toUtc.UtcDateTime);
         while (day <= endDay)
@@ -178,7 +196,28 @@ public sealed class VolumeCurveEstimator
                     // Inclusive lower bound, exclusive upper bound.
                     var lastBucket = BucketIndex(rangeEnd.AddTicks(-1));
                     for (var b = firstBucket; b <= lastBucket && b < bucketsPerDay; b++)
-                        total += Interlocked.Read(ref arr[b]);
+                    {
+                        var qty = Interlocked.Read(ref arr[b]);
+                        if (qty == 0) continue;
+                        var bucketStart = dayStart.AddTicks(bucketTicks * b);
+                        var bucketEnd = bucketStart.AddTicks(bucketTicks);
+                        var overlapStart = rangeStart > bucketStart ? rangeStart : bucketStart;
+                        var overlapEnd = rangeEnd < bucketEnd ? rangeEnd : bucketEnd;
+                        var overlapTicks = (overlapEnd - overlapStart).Ticks;
+                        if (overlapTicks >= bucketTicks)
+                        {
+                            total += qty;
+                        }
+                        else if (overlapTicks > 0)
+                        {
+                            // Linear pro-rate of the boundary bucket.
+                            // Rounding mode: integer floor of qty * frac
+                            // — matches RecordTrade's whole-share grain
+                            // and keeps callers' integer-arithmetic
+                            // expectations (no fractional share leakage).
+                            total += (long)((decimal)qty * overlapTicks / bucketTicks);
+                        }
+                    }
                 }
             }
             day = day.AddDays(1);

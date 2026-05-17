@@ -178,6 +178,20 @@ public sealed class PlatformSnapshot
     /// </para>
     /// </summary>
     public IReadOnlyCollection<ulong> AuditedExpiredIds { get; init; } = Array.Empty<ulong>();
+
+    /// <summary>
+    /// Pass-1 review (#295) P1#1. Persisted per-POV scheduling progress
+    /// — <c>(firmId, algoId) → (marketVolumeSeen, lastEvaluateAtUtc)</c>.
+    /// Without this baseline a restart would have <see cref="B3.Trading.Application.Algo"/>'s
+    /// POV path re-derive the cumulative market volume from
+    /// <c>VolumeCurveEstimator</c>'s in-memory buckets, which lost
+    /// the pre-crash trade history; the parent would then under-slice
+    /// until post-restart volume catches up to the already-executed
+    /// cumulative. Empty on snapshots pre-dating the field, which
+    /// collapses to the pre-fix behaviour (engine seeds progress from
+    /// <c>StartUtc</c> on first tick — same as a fresh POV).
+    /// </summary>
+    public List<PovProgressSnapshot> PovProgress { get; init; } = new();
 }
 
 /// <summary>
@@ -349,6 +363,16 @@ public sealed record PnlUnknownBasisSnapshot(
     string EndClientId,
     string Symbol,
     long NetQuantity);
+
+/// <summary>
+/// Pass-1 review (#295) P1#1. One row of the per-POV scheduling-progress
+/// projection — see <see cref="PlatformSnapshot.PovProgress"/>.
+/// </summary>
+public sealed record PovProgressSnapshot(
+    string FirmId,
+    ulong AlgoId,
+    long MarketVolumeSeen,
+    DateTimeOffset LastEvaluateAtUtc);
 
 public sealed class ClOrdIdRegistrySnapshot
 {

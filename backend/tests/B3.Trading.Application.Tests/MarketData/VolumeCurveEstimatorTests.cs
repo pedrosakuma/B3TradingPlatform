@@ -129,7 +129,60 @@ public class VolumeCurveEstimatorTests
         sut.RecordTrade(Sym, 100, preMidnight);
         sut.RecordTrade(Sym, 200, postMidnight);
 
-        Assert.Equal(300, sut.VolumeBetween(Sym, preMidnight.AddMinutes(-1), postMidnight.AddMinutes(1)));
+        // Pass-1 review (#295) P1#2. VolumeBetween pro-rates the
+        // boundary buckets, so the day-spanning range only captures
+        // the FULL pre-midnight bucket (100) plus 1/5 of the
+        // post-midnight bucket (200 * 1min/5min = 40).
+        Assert.Equal(140, sut.VolumeBetween(Sym, preMidnight.AddMinutes(-1), postMidnight.AddMinutes(1)));
+    }
+
+    [Fact]
+    public void VolumeBetween_ProRatesFirstBucket()
+    {
+        // Pass-1 review (#295) P1#2. Range starts mid-bucket: only
+        // the elapsed-time fraction of the bucket's volume is
+        // counted, so trades that arrived before the range start
+        // do not leak in. Linear approximation assumes uniform
+        // within-bucket distribution — see VolumeBetween's xmldoc.
+        var sut = new VolumeCurveEstimator();
+        var start = Day1Start.AddHours(9);
+        sut.RecordTrade(Sym, 500, start.AddMinutes(1));  // bucket [0, 5min) qty=500
+        sut.RecordTrade(Sym, 200, start.AddMinutes(6));  // bucket [5, 10min) qty=200
+
+        // Range [start+3min, start+10min):
+        //   - bucket [0,5): overlap [3,5) = 2/5 * 500 = 200
+        //   - bucket [5,10): full = 200
+        Assert.Equal(400, sut.VolumeBetween(Sym, start.AddMinutes(3), start.AddMinutes(10)));
+    }
+
+    [Fact]
+    public void VolumeBetween_ProRatesLastBucket()
+    {
+        // Pass-1 review (#295) P1#2. Mirror: range ends mid-bucket
+        // so post-end trades in the last bucket are not over-counted.
+        var sut = new VolumeCurveEstimator();
+        var start = Day1Start.AddHours(9);
+        sut.RecordTrade(Sym, 500, start.AddMinutes(1));  // bucket [0, 5min) qty=500
+        sut.RecordTrade(Sym, 200, start.AddMinutes(6));  // bucket [5, 10min) qty=200
+
+        // Range [start, start+8min):
+        //   - bucket [0,5): full = 500
+        //   - bucket [5,10): overlap [5,8) = 3/5 * 200 = 120
+        Assert.Equal(620, sut.VolumeBetween(Sym, start, start.AddMinutes(8)));
+    }
+
+    [Fact]
+    public void VolumeBetween_RangeWithinSingleBucket()
+    {
+        // Pass-1 review (#295) P1#2. Edge case — range begins AND
+        // ends inside the same bucket. The pro-rate fraction collapses
+        // to the range's share of the bucket's total span.
+        var sut = new VolumeCurveEstimator();
+        var start = Day1Start.AddHours(9);
+        sut.RecordTrade(Sym, 500, start.AddMinutes(2));  // bucket [0, 5min) qty=500
+
+        // Range [start+1min, start+3min): 2/5 * 500 = 200
+        Assert.Equal(200, sut.VolumeBetween(Sym, start.AddMinutes(1), start.AddMinutes(3)));
     }
 
     [Fact]

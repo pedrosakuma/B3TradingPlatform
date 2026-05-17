@@ -372,11 +372,18 @@ public sealed record AlgoVwapSlicedEvent : WalEvent
 /// <summary>
 /// Q3.2 (#282). Per-slice audit envelope for POV parents — captures the
 /// market-volume baseline and the resulting share at slice-emit time.
-/// NOT replayed for state reconstruction (the slice itself is recorded
-/// via the child <see cref="OrderSubmittedEvent"/>, same as VWAP); the
-/// engine treats this event as observability-only so a future omission
-/// of the WAL write would not desynchronise recovery. Mirrors
-/// <see cref="AlgoVwapSlicedEvent"/>.
+///
+/// <para>
+/// Pass-1 review (#295) P1#1. Unlike <see cref="AlgoVwapSlicedEvent"/>,
+/// this event IS replayed: the additive <see cref="MarketVolumeSeen"/>
+/// and <see cref="LastEvaluateAtUtc"/> fields restore the per-POV
+/// scheduling baseline so a restart does not under-slice waiting for
+/// the in-memory <see cref="MarketData.VolumeCurveEstimator"/> buckets
+/// to re-observe the pre-crash cumulative market volume. The slice
+/// itself is still recorded via the child <see cref="OrderSubmittedEvent"/>
+/// — replay of this event mutates only <see cref="PovProgressBook"/>,
+/// never the parent's <c>FilledQuantity</c>.
+/// </para>
 /// </summary>
 public sealed record AlgoPovSlicedEvent : WalEvent
 {
@@ -387,6 +394,15 @@ public sealed record AlgoPovSlicedEvent : WalEvent
     public required long ExecutedCum { get; init; }
     public required long SliceQty { get; init; }
     public required DateTimeOffset PlannedAtUtc { get; init; }
+
+    // Pass-1 review (#295) P1#1. Persisted POV progress so a restart
+    // does NOT under-slice waiting for VolumeCurveEstimator's in-memory
+    // buckets to catch up to the pre-crash cumulative market volume.
+    // Additive — older WAL segments deserialise with default values
+    // (0 / default(DateTimeOffset)); engine recovery treats a default
+    // LastEvaluateAtUtc as "no prior progress; seed from StartUtc".
+    public long MarketVolumeSeen { get; init; }
+    public DateTimeOffset LastEvaluateAtUtc { get; init; }
 }
 
 /// <summary>

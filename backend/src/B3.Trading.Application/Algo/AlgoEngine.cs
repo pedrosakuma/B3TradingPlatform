@@ -79,6 +79,15 @@ public sealed class AlgoEngine : BackgroundService
     private readonly OrderOwnershipMap _ownership;
     private readonly VolumeCurveEstimator? _vwapCurve;
     private readonly MarketDataVolumePump? _volumePump;
+    /// <summary>
+    /// Pass-1 review (#295) P1#1. Per-POV scheduling progress
+    /// (cumulative market volume + last-evaluate timestamp). Persisted
+    /// via <see cref="Persistence.AlgoPovSlicedEvent"/> on slice emit
+    /// + via the platform snapshot, restored on engine boot in
+    /// <see cref="Reconcile"/>. Null-tolerant for legacy test
+    /// compositions that don't exercise POV.
+    /// </summary>
+    private readonly PovProgressBook? _povProgress;
 
     // Per-parent runtime state. Owned by the consumer task; the
     // ConcurrentDictionary is only used because TryAdd/TryGetValue are
@@ -99,7 +108,8 @@ public sealed class AlgoEngine : BackgroundService
         ILogger<AlgoEngine> logger,
         OrderOwnershipMap ownership,
         VolumeCurveEstimator? vwapCurve = null,
-        MarketDataVolumePump? volumePump = null)
+        MarketDataVolumePump? volumePump = null,
+        PovProgressBook? povProgress = null)
     {
         _queue = queue;
         _algos = algos;
@@ -114,6 +124,7 @@ public sealed class AlgoEngine : BackgroundService
         _ownership = ownership;
         _vwapCurve = vwapCurve;
         _volumePump = volumePump;
+        _povProgress = povProgress;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -196,6 +207,27 @@ public sealed class AlgoEngine : BackgroundService
             algo.RehydrateProgress(totalCum);
             rt.NextSliceSeq = maxSeq + 1;
             rt.LiveChildClOrdId = liveChild;
+
+            // Pass-1 review (#295) P1#1. Restore POV scheduling baseline
+            // so a post-restart tick targets the pre-restart cumulative
+            // market volume * rate (NOT post-restart-only volume * rate,
+            // which would under-slice until the in-memory estimator
+            // caught up to FilledQuantity). Falls back to (0, StartUtc)
+            // on a fresh POV — same as a from-cold start.
+            if (algo.Type == AlgoType.Pov && algo.Parameters is PovParameters ppRec)
+            {
+                var progress = _povProgress?.TryGet(algo.FirmId, algo.AlgoId);
+                if (progress is { } p && p.LastEvaluateAtUtc != default)
+                {
+                    rt.PovMarketVolumeSeen = p.MarketVolumeSeen;
+                    rt.PovLastEvaluateAtUtc = p.LastEvaluateAtUtc;
+                }
+                else
+                {
+                    rt.PovMarketVolumeSeen = 0;
+                    rt.PovLastEvaluateAtUtc = ppRec.StartUtc;
+                }
+            }
 
             // Re-arm the reactor regardless: even if a live child exists,
             // the reactor may need to react if the child has since become
@@ -373,7 +405,7 @@ public sealed class AlgoEngine : BackgroundService
                 var dueAt = PovPlan.PlannedAtUtc(pp.StartUtc, pp.TickInterval, rt.NextSliceSeq);
                 if (now < dueAt) return;
                 if (dueAt >= pp.EndUtc) return;
-                var (qty, _, _) = ComputePovSlice(algo, pp, dueAt);
+                var (qty, _, _) = ComputePovSlice(algo, pp, rt, dueAt);
                 if (qty > 0) break;
                 rt.NextSliceSeq++;
             }
@@ -638,12 +670,19 @@ public sealed class AlgoEngine : BackgroundService
         }
         long povCumMarketVolume = 0, povExecutedCum = 0;
         DateTimeOffset povPlannedAt = default;
+        DateTimeOffset povLastEvaluateAtUtc = default;
         if (algo.Parameters is PovParameters ppForAudit)
         {
             povPlannedAt = PovPlan.PlannedAtUtc(ppForAudit.StartUtc, ppForAudit.TickInterval, sliceSeq);
-            var (_, _, cumMv) = ComputePovSlice(algo, ppForAudit, povPlannedAt);
+            var (_, _, cumMv) = ComputePovSlice(algo, ppForAudit, rt, povPlannedAt);
             povCumMarketVolume = cumMv;
             povExecutedCum = algo.FilledQuantity;
+            // Pass-1 review (#295) P1#1. Persisted alongside the slice
+            // so a restart restores BOTH the baseline and the wall-clock
+            // anchor: post-restart catch-up integrates VolumeBetween
+            // from this instant, not from StartUtc (which would double-
+            // count buckets already accumulated into MarketVolumeSeen).
+            povLastEvaluateAtUtc = rt.PovLastEvaluateAtUtc;
             if (cumMv > 0)
             {
                 MetricsRegistry.AlgoPovActualParticipationRate.Record((double)povExecutedCum / cumMv);
@@ -720,6 +759,18 @@ public sealed class AlgoEngine : BackgroundService
                         MetricsRegistry.AlgoPovSlicesEmitted.Add(1);
                         try
                         {
+                            // Pass-1 review (#295) P1#1. Persist the
+                            // running POV baseline so a restart resumes
+                            // off the pre-crash cumulative-market-volume
+                            // total (NOT zero, which would under-slice).
+                            // PovProgressBook.Set runs inside the
+                            // dispatcher action so live + replay paths
+                            // converge on identical book state.
+                            var firmId = algo.FirmId;
+                            var algoId = algo.AlgoId;
+                            var marketVolumeSeenSnapshot = povCumMarketVolume;
+                            var lastEvaluateAtUtcSnapshot = povLastEvaluateAtUtc;
+                            var povBook = _povProgress;
                             _dispatcher.Dispatch(
                                 new AlgoPovSlicedEvent
                                 {
@@ -730,8 +781,10 @@ public sealed class AlgoEngine : BackgroundService
                                     ExecutedCum = povExecutedCum,
                                     SliceQty = sliceQty,
                                     PlannedAtUtc = povPlannedAt,
+                                    MarketVolumeSeen = povCumMarketVolume,
+                                    LastEvaluateAtUtc = povLastEvaluateAtUtc,
                                 },
-                                static () => { });
+                                () => povBook?.Set(firmId, algoId, marketVolumeSeenSnapshot, lastEvaluateAtUtcSnapshot));
                         }
                         catch (WalBackpressureException)
                         {
@@ -872,7 +925,7 @@ public sealed class AlgoEngine : BackgroundService
                 {
                     var rt = _runtime[(algo.FirmId, algo.AlgoId)];
                     var dueAt = PovPlan.PlannedAtUtc(pp.StartUtc, pp.TickInterval, rt.NextSliceSeq);
-                    var (qty, price, _) = ComputePovSlice(algo, pp, dueAt);
+                    var (qty, price, _) = ComputePovSlice(algo, pp, rt, dueAt);
                     return (qty, price);
                 }
             default:
@@ -917,27 +970,59 @@ public sealed class AlgoEngine : BackgroundService
     }
 
     /// <summary>
-    /// POV slice computation: ask the live volume estimator for the
-    /// cumulative market volume in <c>[startUtc, evaluateAtUtc)</c>,
-    /// derive the target executed cum, return the gap to fill.
-    /// Returns <c>(qty, price, cumMarketVolume)</c> so the emission
-    /// path can record the audit envelope without recomputing. Reuses
-    /// <see cref="VolumeCurveEstimator"/> so POV doesn't need a sibling
-    /// estimator — the bucket granularity (5 min default) is fine for
-    /// the issue's example windows (~1h).
+    /// POV slice computation — restart-resilient (pass-1 review #295 P1#1).
+    ///
+    /// <para>
+    /// The slice target is derived from the parent's OWN running
+    /// cumulative-market-volume baseline (<see cref="AlgoParentRuntime.PovMarketVolumeSeen"/>)
+    /// rather than from <c>VolumeCurveEstimator.VolumeBetween(StartUtc, now)</c>.
+    /// The estimator only carries in-memory buckets so it cannot
+    /// reconstruct pre-restart trade volume; under the old formulation
+    /// a restarted live POV would under-slice until post-restart volume
+    /// "caught up" to the already-executed cumulative. Here we instead
+    /// accumulate <c>VolumeBetween(lastEvaluateAtUtc, now)</c> on every
+    /// tick and persist the running total via
+    /// <see cref="Persistence.AlgoPovSlicedEvent"/>; replay restores
+    /// the baseline before the engine resumes.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Side-effecting:</b> updates <paramref name="rt"/>'s
+    /// <c>PovMarketVolumeSeen</c> and <c>PovLastEvaluateAtUtc</c>. The
+    /// caller must invoke this exactly once per scheduler tick (emit or
+    /// skip) so the persisted snapshot on the next emit reflects every
+    /// observed bucket. Returns <c>(qty, price, marketVolumeSeen)</c>
+    /// — <c>marketVolumeSeen</c> is the just-updated baseline that the
+    /// caller should record on the emitted WAL event.
+    /// </para>
     /// </summary>
-    private (long Qty, decimal? Price, long CumMarketVolume) ComputePovSlice(
-        Algo algo, PovParameters pp, DateTimeOffset evaluateAtUtc)
+    private (long Qty, decimal? Price, long MarketVolumeSeen) ComputePovSlice(
+        Algo algo, PovParameters pp, AlgoParentRuntime rt, DateTimeOffset evaluateAtUtc)
     {
-        long cumMv = _vwapCurve?.VolumeBetween(algo.Symbol, pp.StartUtc, evaluateAtUtc) ?? 0L;
+        // First evaluation for a freshly-created POV (no Reconcile path
+        // touched this runtime): seed the baseline at StartUtc so the
+        // initial integration covers [StartUtc, evaluateAtUtc) — same
+        // window as the pre-fix formulation, preserving the cold-start
+        // semantics that the issue's #294 acceptance baseline measured.
+        if (rt.PovLastEvaluateAtUtc == default)
+        {
+            rt.PovLastEvaluateAtUtc = pp.StartUtc;
+        }
+        if (evaluateAtUtc > rt.PovLastEvaluateAtUtc && _vwapCurve is not null)
+        {
+            var incremental = _vwapCurve.VolumeBetween(algo.Symbol, rt.PovLastEvaluateAtUtc, evaluateAtUtc);
+            if (incremental > 0)
+                rt.PovMarketVolumeSeen += incremental;
+            rt.PovLastEvaluateAtUtc = evaluateAtUtc;
+        }
         var qty = PovPlan.SliceQty(
-            cumMv,
+            rt.PovMarketVolumeSeen,
             algo.FilledQuantity,
             algo.RemainingQuantity,
             pp.ParticipationRate,
             pp.MinSliceQty);
         var price = PovPlan.ClampPrice(pp.ChildPrice, pp.PriceLimit, algo.Side);
-        return (qty, price, cumMv);
+        return (qty, price, rt.PovMarketVolumeSeen);
     }
 
     private static double UniformCdf(DateTimeOffset start, DateTimeOffset end, DateTimeOffset at)
@@ -978,5 +1063,14 @@ public sealed class AlgoEngine : BackgroundService
         public int NextSliceSeq;
         public int RetryAttempts;
         public Dictionary<ulong, long> ChildBookedCum { get; } = new();
+
+        // Pass-1 review (#295) P1#1. POV scheduling state. Initialised
+        // to (0, default) so the first tick treats StartUtc as the
+        // baseline and integrates volume from there; the engine seeds
+        // these from PovProgressBook on Reconcile so a restart resumes
+        // from the most recently persisted slice instead of re-scanning
+        // an empty estimator.
+        public long PovMarketVolumeSeen;
+        public DateTimeOffset PovLastEvaluateAtUtc;
     }
 }
