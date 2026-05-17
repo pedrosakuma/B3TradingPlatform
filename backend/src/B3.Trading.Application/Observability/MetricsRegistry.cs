@@ -115,6 +115,19 @@ public static class MetricsRegistry
     public static readonly Counter<long> WalUnknownKindSkipped =
         Meter.CreateCounter<long>("trading.wal.unknown_kind_skipped");
 
+    /// <summary>
+    /// Pass-3 review (#296) P2. Distinct from
+    /// <see cref="WalUnknownKindSkipped"/>: counts WAL records whose
+    /// <c>kind</c> discriminator is missing or unextractable (the
+    /// JSON object lacks the field entirely, or is malformed enough
+    /// that the tokenizer can't reach it). Non-zero means torn write,
+    /// external corruption, or a writer bug — replay halts on the
+    /// first such record so the operator notices, but the counter is
+    /// still bumped first to feed alerting and per-day forensics.
+    /// </summary>
+    public static readonly Counter<long> WalMissingKindCorruption =
+        Meter.CreateCounter<long>("trading.wal.missing_kind_corruption");
+
     // Snapshots / recovery
     public static readonly Counter<long> SnapshotsTaken =
         Meter.CreateCounter<long>("trading.snapshots.taken");

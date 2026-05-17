@@ -746,6 +746,184 @@ public class PeggedAlgoEndpointTests
         }
     }
 
+    // ──────────────── Pass-3 review (#296) regression tests ────────────────
+
+    [Fact]
+    public async Task Pegged_RepegCancelFails_DoesNotPersistOrphanStartedAndRetriesNextTick()
+    {
+        // Pass-3 review (#296) P1 — approach B. Simulate the gateway
+        // CancelAsync wire-call failing (venue unreachable / transient
+        // I/O fault). The repeg must:
+        //
+        //   1. NOT leave a poison AlgoPeggedRepegStartedEvent in the
+        //      WAL nor a PeggedRepegBook entry — both would otherwise
+        //      stall the algo on a post-restart Reconcile (book
+        //      entry + still-live child => RepegPending=true with no
+        //      ack ever coming).
+        //   2. Clear the in-memory RepegPending marker so the next
+        //      scheduler tick can re-attempt the repeg cycle.
+        //   3. Actually re-attempt and succeed once the injected
+        //      fault is removed.
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        // First cancel attempt fails; subsequent ones succeed.
+        var failedCount = 0;
+        mock.CancelFailureInjector = _ =>
+        {
+            if (Interlocked.Increment(ref failedCount) == 1)
+            {
+                return new InvalidOperationException("simulated gateway cancel failure");
+            }
+            return null;
+        };
+
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100, repegMs: 100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child1 = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        Assert.Equal(30.0m, child1.Price);
+
+        // Drift the mid → engine tries to cancel child1 and the
+        // gateway rejects. With approach B, no Started event was
+        // persisted, so there is nothing in the WAL to replay.
+        cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+        await WaitFor(() => failedCount >= 1,
+            TimeSpan.FromSeconds(3), "engine did not attempt the first cancel");
+
+        // The PeggedRepegBook MUST be empty for this algo — the
+        // failed cancel path under approach B never persists a
+        // Started event nor populates the book.
+        var repegBook = f.Services.GetRequiredService<PeggedRepegBook>();
+        Assert.Null(repegBook.TryGet("default", ulong.Parse(algoId)));
+
+        // The parent must remain Working — the failure rolled back
+        // the in-memory marker, no Suspended transition occurred.
+        var snapAfterFailure = await GetAlgo(http, token, algoId);
+        Assert.Equal("Working", snapAfterFailure.GetProperty("status").GetString());
+
+        // The next scheduler tick must re-attempt the repeg cycle
+        // (in-memory state was cleared cleanly). Drive it forward
+        // until a second cancel goes out — this time the injector
+        // returns null and the cancel succeeds.
+        await WaitFor(() => mock.SubmittedCancels.Count >= 2,
+            TimeSpan.FromSeconds(5),
+            "engine did not retry the cancel after the simulated failure");
+
+        // Releasing the cancel-ack drives the replacement child —
+        // proves the algo is not stalled.
+        await InjectEr(http, adminToken, child1.ClOrdId, "Canceled");
+        var child2 = await WaitForChildOtherThan(book, algoId, child1.ClOrdId,
+            TimeSpan.FromSeconds(5));
+        Assert.Equal(31.0m, child2.Price);
+
+        var snap = await GetAlgo(http, token, algoId);
+        Assert.Equal("Working", snap.GetProperty("status").GetString());
+        Assert.Equal("None", snap.GetProperty("terminalReason").GetString());
+    }
+
+    [Fact]
+    public async Task Pegged_RecoverySelfHealsOrphanRepegEntry_NoStallOnReconcile()
+    {
+        // Pass-3 review (#296) P1 — approach C (defensive guard).
+        // Historical WALs written by pre-Pass-3 binaries may have
+        // persisted an AlgoPeggedRepegStartedEvent for a cancel that
+        // never reached the venue (the old code persisted Started
+        // BEFORE CancelAsync). After snapshot+restart that orphan
+        // can survive into the rehydrated PeggedRepegBook. The
+        // Reconcile pass MUST self-heal: if the cancelled child id
+        // is no longer present as a live (non-terminal) order, the
+        // book entry is dropped and RepegPending stays false so the
+        // algo can continue slicing instead of stalling forever on
+        // an ack that will never arrive.
+        //
+        // We construct the orphan shape end-to-end by:
+        //   1. Driving a real repeg → Started lands in WAL + book.
+        //   2. Injecting the cancel-ack so child1 goes terminal and
+        //      child2 (the replacement) becomes the live child.
+        //   3. Manually re-inserting an orphan book entry pointing
+        //      at child1's now-terminal ClOrdId — simulating exactly
+        //      the post-replay state an old-binary WAL would leave
+        //      (Started without matching Resolved + child terminal).
+        //   4. Snapshot + restart.
+        //   5. Assert the book entry is gone after Reconcile and the
+        //      algo is still Working.
+        var dataDir = Path.Combine(Environment.CurrentDirectory, "test-data",
+            "b3-pegged-repeg-self-heal-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var overrides = PersistenceOverrides(dataDir);
+            ulong algoIdNum = 0;
+            ulong child1ClOrdId = 0;
+
+            using (var f = TestAppFactory.WithOverrides(overrides))
+            using (var http = f.CreateClient())
+            {
+                var token = await f.LoginAsync(http);
+                var adminToken = await f.LoginAsync(http, "admin");
+                var cache = f.Services.GetRequiredService<PegBookTopCache>();
+                cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+                var algoIdStr = await PostAlgo(http, token,
+                    PeggedBody(total: 100, pegRef: "Mid", offsetTicks: 0,
+                        repegMs: 100, tickSize: 0.5m));
+                algoIdNum = ulong.Parse(algoIdStr);
+
+                var book = f.Services.GetRequiredService<WorkingOrderBook>();
+                var child1 = await WaitForAnyChild(book, algoIdStr, TimeSpan.FromSeconds(3));
+                child1ClOrdId = child1.ClOrdId;
+
+                cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+                var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+                await WaitFor(() => mock.SubmittedCancels.Any(c => c.OrigClOrdId == child1ClOrdId),
+                    TimeSpan.FromSeconds(3), "engine did not emit the cancel");
+
+                // Drain the cycle normally so child1 goes terminal +
+                // child2 becomes the live working slice. After this
+                // point the engine's Reconcile path is the only thing
+                // the orphan entry will encounter on restart.
+                await InjectEr(http, adminToken, child1ClOrdId, "Canceled");
+                _ = await WaitForChildOtherThan(book, algoIdStr, child1ClOrdId,
+                    TimeSpan.FromSeconds(5));
+
+                // Re-inject the orphan: an entry that points at the
+                // now-terminal child1, exactly as an old-binary WAL
+                // would have left after a backpressured Resolved.
+                var repegBook = f.Services.GetRequiredService<PeggedRepegBook>();
+                repegBook.Set("default", algoIdNum, child1ClOrdId, 31.0m, DateTimeOffset.UtcNow);
+
+                ResolveSnapshotService(f).TryTakeSnapshot();
+            }
+
+            using (var f2 = TestAppFactory.WithOverrides(overrides))
+            using (var http2 = f2.CreateClient())
+            {
+                var token = await f2.LoginAsync(http2);
+
+                // The Reconcile self-heal pass must have dropped the
+                // orphan entry (cancelled child id is no longer live).
+                var repegBook2 = f2.Services.GetRequiredService<PeggedRepegBook>();
+                await WaitFor(() => repegBook2.TryGet("default", algoIdNum) is null,
+                    TimeSpan.FromSeconds(3),
+                    "Reconcile did not self-heal the orphan PeggedRepegBook entry");
+
+                // And the algo did not get stuck in a stalled state.
+                var snap = await GetAlgo(http2, token, algoIdNum.ToString());
+                Assert.Equal("Working", snap.GetProperty("status").GetString());
+                Assert.Equal("None", snap.GetProperty("terminalReason").GetString());
+            }
+        }
+        finally
+        {
+            try { if (Directory.Exists(dataDir)) Directory.Delete(dataDir, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
     // ───────────────────────── helpers ─────────────────────────
 
     private static async Task<string> PostAlgo(HttpClient http, string token, object body)

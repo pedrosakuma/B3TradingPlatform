@@ -17,6 +17,15 @@ public sealed class MockEntryPointClient : IEntryPointClient
     public IReadOnlyCollection<OrderCancelRequest> SubmittedCancels => _cancels;
     public IReadOnlyCollection<OrderCancelReplaceRequest> SubmittedReplaces => _replaces;
 
+    /// <summary>
+    /// Optional test hook: when non-null, every
+    /// <see cref="SubmitCancelAsync"/> invokes it after recording the
+    /// request and throws the returned exception (or completes
+    /// normally if it returns null). Used by repeg-cancel-failure
+    /// regression tests; left null in production composition.
+    /// </summary>
+    public Func<OrderCancelRequest, Exception?>? CancelFailureInjector { get; set; }
+
     public event Action<ExecutionReportEnvelope>? ExecutionReportReceived;
 
     public Task SubmitNewOrderAsync(NewOrderSingle request, CancellationToken cancellationToken)
@@ -28,6 +37,12 @@ public sealed class MockEntryPointClient : IEntryPointClient
     public Task SubmitCancelAsync(OrderCancelRequest request, CancellationToken cancellationToken)
     {
         _cancels.Enqueue(request);
+        var injector = CancelFailureInjector;
+        if (injector is not null)
+        {
+            var ex = injector(request);
+            if (ex is not null) return Task.FromException(ex);
+        }
         return Task.CompletedTask;
     }
 

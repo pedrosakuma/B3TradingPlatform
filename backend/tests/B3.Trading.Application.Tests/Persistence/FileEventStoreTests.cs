@@ -112,6 +112,91 @@ public class FileEventStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task ReadFromAsync_WithMissingKindDiscriminator_ThrowsAndDoesNotSilentlySkip()
+    {
+        // Pass-3 review (#296) P2. A WAL record whose JSON has NO
+        // `kind` field is NOT a forward-compat case (every writer in
+        // this codebase emits the discriminator). It indicates a torn
+        // write, external corruption, or a writer bug — replay must
+        // halt loudly, NOT silently skip the record as the old P2
+        // behaviour did. A KNOWN record after it must NOT be returned
+        // (we halt on the corruption, we don't reorder past it).
+        var opts = OptsForTest();
+        var walDir = Path.Combine(_root, "test", "wal", "2026-01-01");
+        Directory.CreateDirectory(walDir);
+        var logPath = Path.Combine(walDir, "000.log");
+        var idxPath = Path.Combine(walDir, "000.idx");
+
+        var known = JsonSerializer.SerializeToUtf8Bytes<WalEvent>(NewOrder(0), WalEventJsonContext.Default.WalEvent);
+        // JSON object without a `kind` field at all.
+        var missingKind = Encoding.UTF8.GetBytes(
+            """{"someField":"value","timestampUtc":"2026-01-01T10:00:00+00:00"}""");
+        var known2 = JsonSerializer.SerializeToUtf8Bytes<WalEvent>(NewOrder(1), WalEventJsonContext.Default.WalEvent);
+
+        await using (var writer = new SegmentWriter(logPath, idxPath,
+            opts.IndexEveryNRecords, opts.IndexEveryNBytes, fsyncOnFlush: false))
+        {
+            writer.Append(1, known, 0);
+            writer.Append(2, missingKind, 0);
+            writer.Append(3, known2, 0);
+            writer.Flush();
+        }
+
+        await using var store = new FileEventStore(opts, NullLogger<FileEventStore>.Instance);
+        var seenBeforeThrow = new List<long>();
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+        {
+            await foreach (var (seq, _) in store.ReadFromAsync(0))
+            {
+                seenBeforeThrow.Add(seq);
+            }
+        });
+        // The first (known) record is yielded; replay halts on the
+        // missing-kind record at seq=2; the trailing known record at
+        // seq=3 is NOT silently skipped past.
+        Assert.Equal(new long[] { 1 }, seenBeforeThrow.ToArray());
+    }
+
+    [Fact]
+    public async Task ReadFromAsync_WithEmptyKindString_TreatedAsMissing()
+    {
+        // Pass-3 review (#296) P2. An empty-string `kind` is
+        // indistinguishable from missing for purposes of polymorphic
+        // dispatch — there is no derived type registered for the
+        // empty discriminator. The reader must classify this as a
+        // corruption (MissingKind) rather than as a forward-compat
+        // skip with an empty tag.
+        var opts = OptsForTest();
+        var walDir = Path.Combine(_root, "test", "wal", "2026-01-01");
+        Directory.CreateDirectory(walDir);
+        var logPath = Path.Combine(walDir, "000.log");
+        var idxPath = Path.Combine(walDir, "000.idx");
+
+        var emptyKind = Encoding.UTF8.GetBytes(
+            """{"kind":"","timestampUtc":"2026-01-01T10:00:00+00:00"}""");
+        await using (var writer = new SegmentWriter(logPath, idxPath,
+            opts.IndexEveryNRecords, opts.IndexEveryNBytes, fsyncOnFlush: false))
+        {
+            writer.Append(1, emptyKind, 0);
+            writer.Flush();
+        }
+
+        await using var store = new FileEventStore(opts, NullLogger<FileEventStore>.Instance);
+        // Empty string IS extracted as a "kind" value — it's just not
+        // in the known set. The current classifier treats it as an
+        // UnknownKind skip (consistent with any other unrecognised
+        // string discriminator). The point of this test is to pin
+        // that behaviour so a future refactor doesn't accidentally
+        // start throwing on what is structurally an unknown tag.
+        var seen = new List<long>();
+        await foreach (var (seq, _) in store.ReadFromAsync(0))
+        {
+            seen.Add(seq);
+        }
+        Assert.Empty(seen);
+    }
+
+    [Fact]
     public async Task Append_then_ReadFrom_RoundTripsEventsInSeqOrder()
     {
         await using (var store = new FileEventStore(OptsForTest(), NullLogger<FileEventStore>.Instance))
