@@ -1300,7 +1300,43 @@ public sealed class AlgoEngine : BackgroundService
             // reservation. The cash invariant is preserved either
             // way.
             if (marginPrepared)
-                _replacements.MarkAmbiguousMarginHeld(newClOrdId);
+            {
+                // Pass-5 review (#299) P1. Persist the ambiguous-held
+                // state via a dedicated WAL event so a crash between
+                // here and the next snapshot cannot lose the flag.
+                // Replay re-calls PrepareReplaceAsync to re-establish
+                // the held reservation and re-marks the registry entry
+                // with the same HeldAtUtc stamp the pre-crash sweep
+                // would have aged from. On success the in-memory mark
+                // also runs (inside the apply callback) so steady-state
+                // behaviour is unchanged. WAL backpressure here is
+                // best-effort logged — if the event cannot be appended
+                // we fall back to the pre-pass-5 in-memory-only mark so
+                // the live TTL sweep still bounds the leak.
+                var heldAt = _clock.GetUtcNow();
+                try
+                {
+                    _dispatcher.Dispatch(
+                        new OrderReplaceAmbiguousMarginHeldEvent
+                        {
+                            NewClOrdId = newClOrdId,
+                            OriginalClOrdId = child.ClOrdId,
+                            EndClientId = child.Owner.Value,
+                            NewRemainingNotional = newRemainingNotional,
+                            HeldAtUtc = heldAt,
+                        },
+                        () => _replacements.MarkAmbiguousMarginHeld(newClOrdId, heldAt));
+                }
+                catch (WalBackpressureException walEx)
+                {
+                    MetricsRegistry.WalBackpressure.Add(1,
+                        new KeyValuePair<string, object?>("call_site", "algo.modify.ambiguous-held"));
+                    _logger.LogWarning(walEx,
+                        "AlgoEngine could not persist ambiguous-margin-held event for new ClOrdID {NewClOrdId}; live in-memory mark still applied (post-restart recovery would not re-establish this reservation).",
+                        newClOrdId);
+                    _replacements.MarkAmbiguousMarginHeld(newClOrdId, heldAt);
+                }
+            }
             return false;
         }
 

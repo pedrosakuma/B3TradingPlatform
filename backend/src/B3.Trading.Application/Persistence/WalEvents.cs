@@ -26,6 +26,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "kind")]
 [JsonDerivedType(typeof(OrderSubmittedEvent), "order.submitted")]
 [JsonDerivedType(typeof(OrderReplaceRequestedEvent), "order.replace-requested")]
+[JsonDerivedType(typeof(OrderReplaceAmbiguousMarginHeldEvent), "order.replace-ambiguous-margin-held")]
 [JsonDerivedType(typeof(ExecutionReportReceivedEvent), "er.received")]
 [JsonDerivedType(typeof(KillSwitchToggledEvent), "killswitch.toggled")]
 [JsonDerivedType(typeof(SymbolHaltToggledEvent), "symbol-halt.toggled")]
@@ -220,6 +221,63 @@ public sealed record OrderReplaceRequestedEvent : WalEvent
     public string? RequestedTimeInForce { get; init; }
     public decimal? RequestedStopPrice { get; init; }
     public DateTimeOffset? RequestedGoodTillDate { get; init; }
+}
+
+/// <summary>
+/// Pass-5 review (#299) P1. Recorded the moment the modify pipeline
+/// observes an AMBIGUOUS gateway dispatch failure (an exception
+/// thrown by <c>IEntryPointClient.CancelReplaceAsync</c> after the
+/// margin coordinator's <c>PrepareReplaceAsync</c> succeeded AND the
+/// intent was registered). The transient margin reservation under
+/// <see cref="NewClOrdId"/> is intentionally KEPT — the venue may
+/// still send a Replaced ER, in which case <c>CommitReplace</c>
+/// converges without re-checking capacity. The
+/// <see cref="PendingReplacementRegistry"/> entry is flagged so the
+/// AlgoScheduler's TTL sweep can bound the leak if no terminal ER
+/// ever arrives.
+///
+/// <para>
+/// <b>Why a WAL event (vs. snapshot-only).</b> The held flag must be
+/// durable across a crash that lands BETWEEN the intent's matching
+/// <see cref="OrderReplaceRequestedEvent"/> and the next periodic
+/// snapshot, otherwise replay re-hydrates the intent without the
+/// flag, the TTL sweep never reaps it, and a late Replaced ER drives
+/// <c>CommitReplace</c> against a freed-on-restart reservation —
+/// breaking the over-allocation invariant. <see cref="EventReplayer"/>
+/// re-calls <c>PrepareReplaceAsync</c> on this event to re-establish
+/// the transient reservation, and re-marks the registry entry with
+/// the persisted <see cref="HeldAtUtc"/> so the post-restart sweep
+/// converges on the same TTL deadline the pre-crash sweep would
+/// have observed.
+/// </para>
+///
+/// <para>
+/// <b>Additive payload.</b> Older binaries skip unknown discriminators
+/// with a structured warning (see <see cref="WalEvent"/>'s schema
+/// evolution rule), so segments produced with this event remain
+/// safely readable by pre-pass-5 readers.
+/// </para>
+/// </summary>
+public sealed record OrderReplaceAmbiguousMarginHeldEvent : WalEvent
+{
+    public required ulong NewClOrdId { get; init; }
+    public required ulong OriginalClOrdId { get; init; }
+    public required string EndClientId { get; init; }
+    /// <summary>
+    /// The upsize-delta-bearing remaining notional the modify
+    /// pipeline passed to <c>PrepareReplaceAsync</c>. Replay
+    /// re-invokes the coordinator with the same value to re-establish
+    /// the held reservation; zero/negative implies a downsize or
+    /// non-margin-bearing order (replay still re-runs Prepare so the
+    /// transient entry is recreated for a future Commit/Abort).
+    /// </summary>
+    public required decimal NewRemainingNotional { get; init; }
+    /// <summary>
+    /// Wall-clock at which the engine observed the ambiguous send.
+    /// The TTL sweep ages from this stamp post-restart so a crash
+    /// inside the TTL window doesn't reset the deadline.
+    /// </summary>
+    public required DateTimeOffset HeldAtUtc { get; init; }
 }
 
 /// <summary>

@@ -301,4 +301,94 @@ public class AlgoSchedulerTests
         // falls back to "unknown" (covered by the lookup branch).
         Assert.Equal("unknown", expiredAlgoType);
     }
+
+    // ───────── Pass-5 review (#299) P2 — sweep iterates ambiguous-only index ─────────
+
+    [Fact]
+    public void SweepExpiredAmbiguous_OnlyInspectsAmbiguousEntries_NotEntireRegistry()
+    {
+        // Pass-5 review (#299) P2. The pre-pass-5 sweep enumerated
+        // ConcurrentDictionary<ulong, Entry> in full every 100ms
+        // tick, even though virtually every entry was a normal in-
+        // flight modify (AmbiguousMarginHeld=false). Pass-5 indexes
+        // the ambiguous-flagged subset separately so the sweep is
+        // O(ambiguous) — typically zero — instead of O(all pending
+        // modifies). This test asserts the inspection count tracked
+        // by the registry never exceeds the ambiguous subset, no
+        // matter how many normal entries coexist.
+        var reg = new PendingReplacementRegistry();
+        var now = new DateTimeOffset(2026, 1, 1, 9, 0, 0, TimeSpan.Zero);
+
+        // 1000 normal in-flight modifies; the sweep MUST NOT enumerate any.
+        for (ulong i = 1; i <= 1000; i++)
+        {
+            var intent = new OrderReplacementIntent(
+                OriginalClOrdId: i, NewClOrdId: 100_000 + i,
+                Owner: new EndClientId("alice"),
+                Symbol: "PETR4", SecurityId: 4321UL,
+                Side: OrderSide.Buy, Type: OrderType.Limit,
+                NewQuantity: 10, NewPrice: 30m, FirmId: Firm,
+                ParentAlgoId: null, AlgoSliceSeq: null);
+            Assert.True(reg.TryAdd(intent, now));
+        }
+
+        // 3 ambiguous entries, all already past TTL.
+        var ambiguousIds = new ulong[] { 200_001, 200_002, 200_003 };
+        for (var i = 0; i < ambiguousIds.Length; i++)
+        {
+            var ambiguousNew = ambiguousIds[i];
+            var intent = new OrderReplacementIntent(
+                OriginalClOrdId: 9_000UL + (ulong)i, NewClOrdId: ambiguousNew,
+                Owner: new EndClientId("alice"),
+                Symbol: "PETR4", SecurityId: 4321UL,
+                Side: OrderSide.Buy, Type: OrderType.Limit,
+                NewQuantity: 10, NewPrice: 30m, FirmId: Firm,
+                ParentAlgoId: null, AlgoSliceSeq: null);
+            Assert.True(reg.TryAdd(intent, now));
+            Assert.True(reg.MarkAmbiguousMarginHeld(ambiguousNew, now));
+        }
+
+        Assert.Equal(1003, reg.CountForTesting);
+        Assert.Equal(3, reg.AmbiguousCountForTesting);
+
+        var expired = reg.SweepExpiredAmbiguous(now.AddMinutes(5), TimeSpan.FromMinutes(1));
+
+        // Sweep must have inspected ONLY the 3 ambiguous entries —
+        // not the 1000 normal ones. If a future refactor reverts to
+        // iterating _byNewClOrdId, this count jumps to 1003 and the
+        // assertion fails. Mirrors the pass-2/pass-3 lesson: the
+        // test must FAIL if the optimisation is removed.
+        Assert.Equal(3L, reg.LastSweepInspectedCountForTesting);
+        Assert.Equal(3, expired.Count);
+        // The 1000 normal entries are NOT consumed by the sweep —
+        // they remain in the registry as long-lived legitimate
+        // in-flight modifies.
+        Assert.Equal(1000, reg.CountForTesting);
+        Assert.Equal(0, reg.AmbiguousCountForTesting);
+    }
+
+    [Fact]
+    public void SweepExpiredAmbiguous_EmptyAmbiguousIndex_IsZeroCostNoOp()
+    {
+        // No ambiguous entries, even if many normal entries: sweep
+        // exits immediately and inspects zero entries.
+        var reg = new PendingReplacementRegistry();
+        var now = new DateTimeOffset(2026, 1, 1, 9, 0, 0, TimeSpan.Zero);
+        for (ulong i = 1; i <= 500; i++)
+        {
+            var intent = new OrderReplacementIntent(
+                OriginalClOrdId: i, NewClOrdId: 100_000 + i,
+                Owner: new EndClientId("alice"),
+                Symbol: "PETR4", SecurityId: 4321UL,
+                Side: OrderSide.Buy, Type: OrderType.Limit,
+                NewQuantity: 10, NewPrice: 30m, FirmId: Firm,
+                ParentAlgoId: null, AlgoSliceSeq: null);
+            Assert.True(reg.TryAdd(intent, now));
+        }
+
+        var expired = reg.SweepExpiredAmbiguous(now.AddMinutes(5), TimeSpan.FromMinutes(1));
+
+        Assert.Empty(expired);
+        Assert.Equal(0L, reg.LastSweepInspectedCountForTesting);
+    }
 }

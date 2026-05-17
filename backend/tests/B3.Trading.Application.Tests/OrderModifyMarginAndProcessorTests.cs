@@ -1231,4 +1231,92 @@ public class OrderModifyMarginAndProcessorTests
         Assert.False(reg.TryGet(2UL, out _));
         Assert.False(reg.IsOriginalInFlight(1UL));
     }
+
+    // ─────────── Pass-5 review (#299) P1 — restart re-establishes held reservation ───────────
+
+    [Fact]
+    public async Task EventReplayer_AmbiguousMarginHeldEvent_ReEstablishesReservation_BlocksCompetingOrderPostRestart()
+    {
+        // Pass-5 review (#299) P1. The pass-4 fix kept the upsize-
+        // delta margin reservation tied to the in-memory ambiguous-
+        // held flag so a late Replaced ER could converge without
+        // breaking the over-allocation invariant. But the flag lived
+        // ONLY in memory: a crash between the OrderReplaceRequestedEvent
+        // append and the next periodic snapshot lost it, replay re-
+        // added the intent without the flag (so the TTL sweep never
+        // reaped it), and capacity returned post-restart while the
+        // venue might still send Replaced — at which point
+        // CommitReplace landed in the "neither side has owner" branch
+        // and dropped the reservation entirely, or (after Prepare ran
+        // again) double-added it.
+        //
+        // Pass-5 fixes the durability hole with a dedicated WAL event
+        // that the EventReplayer translates back into both the
+        // PrepareReplaceAsync re-reservation and the in-memory flag
+        // mark. This test exercises the replay path directly and
+        // asserts that a competing order placed POST-replay cannot
+        // consume the held capacity — i.e. the over-allocation
+        // invariant is preserved across the crash.
+        //
+        // Owner cap = 3050 (matches the pass-4 endpoint test); held
+        // delta = full new notional of 3050 because the original's
+        // pre-crash reservation is NOT replayed (per the documented
+        // "reservations are not durable across restart" semantics of
+        // OrderSubmittedEvent — only the held ambiguous slot is).
+        var (_, ownership, book, reg, margin, _) = BuildProcessor(initial: 3050m);
+        var processor = new ExecutionReportProcessor(
+            ownership, book, new PositionKeeper(), new CaptureSink(), margin,
+            NullLogger<ExecutionReportProcessor>.Instance,
+            algoSignals: null, cash: null,
+            replacements: reg, replaceMargin: margin);
+
+        // POST-RESTART world: nothing reserved yet. The intent has
+        // been re-registered by replay of the OrderReplaceRequestedEvent
+        // (mirror that shape here directly).
+        var heldAt = new DateTimeOffset(2026, 1, 1, 9, 0, 0, TimeSpan.Zero);
+        Assert.True(reg.TryAdd(BuyLimitIntent(1UL, 2UL, "alice", 100, 30.5m), heldAt));
+        Assert.Equal(0m, margin.ReservedForTesting("alice"));
+
+        var replayer = new EventReplayer(book, ownership,
+            new KillSwitchService(), new SymbolHaltService(), new SessionPhaseService(),
+            processor, new AlgoBook(),
+            new ClOrdIdPrefixRegistry(), new AlgoIdRegistry(),
+            replacements: reg,
+            replaceMargin: margin);
+
+        // Replay the durable ambiguous-held event.
+        replayer.Apply(new OrderReplaceAmbiguousMarginHeldEvent
+        {
+            NewClOrdId = 2UL,
+            OriginalClOrdId = 1UL,
+            EndClientId = "alice",
+            NewRemainingNotional = 3050m,
+            HeldAtUtc = heldAt,
+        });
+
+        // Reservation re-established to the full held delta (3050) —
+        // exactly the value that would have been held pre-crash.
+        Assert.Equal(3050m, margin.ReservedForTesting("alice"));
+
+        // A competing order trying to grab the freed capacity MUST
+        // be rejected: only 0 of the 3050 cap is available.
+        var owner = new EndClientId("alice");
+        var competing = await margin.TryReserveAsync(
+            clOrdId: 99UL,
+            new RiskContext(owner, "FIRM", "PETR4",
+                OrderSide.Buy, OrderType.Limit, 1, 30.0m),
+            CancellationToken.None);
+        Assert.False(competing.Approved);
+
+        // The intent is back in the ambiguous-held state so the
+        // post-restart TTL sweep can converge on the same deadline
+        // the pre-crash sweep would have observed.
+        Assert.Equal(1, reg.AmbiguousCountForTesting);
+
+        // Sanity: if the persistence is REMOVED (i.e. the replay
+        // case branch goes away, simulating pre-pass-5 behaviour),
+        // this assertion flips — competing would be approved
+        // because reserved stayed at 0. That's the regression the
+        // test guards against.
+    }
 }

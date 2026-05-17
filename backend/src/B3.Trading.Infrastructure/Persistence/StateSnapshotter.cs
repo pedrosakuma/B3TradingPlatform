@@ -504,6 +504,7 @@ public sealed class EventReplayer
     private readonly ClOrdIdPrefixRegistry _clOrdIds;
     private readonly AlgoIdRegistry _algoIds;
     private readonly PendingReplacementRegistry? _replacements;
+    private readonly IReplaceMarginCoordinator? _replaceMargin;
     private readonly InMemoryUserBotCredentialRegistry? _userBotCredentials;
     private readonly InMemoryUserBotSessionRegistry? _userBotSessions;
     private readonly IUserBotOrderMappingRegistry? _userBotMappings;
@@ -567,7 +568,17 @@ public sealed class EventReplayer
         IFeeCalculator? feeCalculator = null,
         PnlKeeper? pnlKeeper = null,
         PovProgressBook? povProgress = null,
-        PeggedRepegBook? peggedRepeg = null)
+        PeggedRepegBook? peggedRepeg = null,
+        // Pass-5 review (#299) P1. Optional. When wired, replay of
+        // <see cref="OrderReplaceAmbiguousMarginHeldEvent"/> re-calls
+        // <c>PrepareReplaceAsync</c> to re-establish the held upsize-
+        // delta reservation a pre-crash modify left in place after an
+        // ambiguous gateway dispatch. Without this hook, capacity
+        // would return on restart and a late Replaced ER would either
+        // double-add (if Prepare ran again) or land in the
+        // "neither side has owner" branch of <c>CommitReplace</c> —
+        // both break the over-allocation invariant.
+        IReplaceMarginCoordinator? replaceMargin = null)
     {
         _orders = orders;
         _ownership = ownership;
@@ -589,6 +600,7 @@ public sealed class EventReplayer
         _pnlKeeper = pnlKeeper;
         _povProgress = povProgress;
         _peggedRepeg = peggedRepeg;
+        _replaceMargin = replaceMargin;
     }
 
     /// <summary>
@@ -705,6 +717,35 @@ public sealed class EventReplayer
                 // must advance the watermark even if the replacement
                 // intent itself wasn't re-registered (orig already gone).
                 _clOrdIds.AdvanceCounterTo(new EndClientId(rr.EndClientId), rr.NewClOrdId);
+                break;
+            case OrderReplaceAmbiguousMarginHeldEvent amh:
+                // Pass-5 review (#299) P1. Re-establish the held
+                // margin reservation a pre-crash modify left in
+                // place after an ambiguous gateway dispatch, and
+                // re-mark the corresponding PendingReplacementRegistry
+                // entry so the AlgoScheduler's TTL sweep ages from
+                // the same wall-clock the pre-crash sweep would
+                // have observed. Both hooks are optional — legacy
+                // test compositions that omit the margin coordinator
+                // or the replacement registry simply skip the side
+                // they didn't wire (the other side still applies).
+                if (_replaceMargin is not null)
+                {
+                    // PrepareReplaceAsync's production implementation
+                    // (ReserveOnSubmitMarginProvider) is synchronous
+                    // under a lock and returns a completed task — the
+                    // GetAwaiter().GetResult() shape matches every
+                    // other sync replay site here and avoids forcing
+                    // the snapshotter call chain to be async.
+                    _replaceMargin.PrepareReplaceAsync(
+                        amh.OriginalClOrdId,
+                        amh.NewClOrdId,
+                        new EndClientId(amh.EndClientId),
+                        amh.NewRemainingNotional,
+                        CancellationToken.None)
+                        .GetAwaiter().GetResult();
+                }
+                _replacements?.MarkAmbiguousMarginHeld(amh.NewClOrdId, amh.HeldAtUtc);
                 break;
             case ExecutionReportReceivedEvent er:
                 if (Enum.TryParse<ExecKind>(er.ExecKind, ignoreCase: true, out var kind))
