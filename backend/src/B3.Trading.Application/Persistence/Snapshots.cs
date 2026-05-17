@@ -212,6 +212,23 @@ public sealed class PlatformSnapshot
     /// <see cref="B3.Trading.Application.PeggedRepegBook.MarkCancelledChild"/>.
     /// </summary>
     public List<PeggedRepegHistorySnapshot> PeggedRepegHistory { get; init; } = new();
+
+    /// <summary>
+    /// Pass-6 review (#299) P1. Persisted in-flight cancel-replace
+    /// registry — every <see cref="B3.Trading.Application.PendingReplacementRegistry"/>
+    /// entry, including the ambiguous-margin-held flag,
+    /// <c>HeldAtUtc</c>, and <c>NewRemainingNotional</c>. Required so a
+    /// periodic snapshot taken AFTER an
+    /// <see cref="OrderReplaceAmbiguousMarginHeldEvent"/> survives
+    /// recovery whose WAL tail starts past that event — without this,
+    /// the post-restart sweep would have no ambiguous entry and a late
+    /// Replaced/Rejected ER would miss the registry path entirely
+    /// (over-allocation invariant break). Empty on snapshots
+    /// pre-dating the field (additive); the restore path treats
+    /// absence as "no in-flight modifies — same as a freshly-started
+    /// process".
+    /// </summary>
+    public List<PendingReplacementSnapshot> PendingReplacements { get; init; } = new();
 }
 
 /// <summary>
@@ -446,6 +463,37 @@ public sealed record PeggedRepegHistorySnapshot(
     ulong AlgoId,
     List<ulong> ChildClOrdIds,
     bool EvictionLogged = false);
+
+/// <summary>
+/// Pass-6 review (#299) P1. Persisted shape of one
+/// <see cref="B3.Trading.Application.PendingReplacementRegistry"/>
+/// entry — see <see cref="PlatformSnapshot.PendingReplacements"/>.
+/// Carries every field the restore path needs to re-hydrate the
+/// in-flight intent AND (when <see cref="AmbiguousMarginHeld"/> is
+/// <c>true</c>) re-invoke
+/// <c>IReplaceMarginCoordinator.PrepareReplaceAsync</c> with the
+/// same value the pre-crash dispatch used.
+/// </summary>
+public sealed record PendingReplacementSnapshot(
+    ulong OriginalClOrdId,
+    ulong NewClOrdId,
+    string OwnerEndClientId,
+    string Symbol,
+    ulong SecurityId,
+    string Side,
+    string Type,
+    long NewQuantity,
+    decimal? NewPrice,
+    string FirmId,
+    ulong? ParentAlgoId,
+    int? AlgoSliceSeq,
+    string? RequestedTimeInForce,
+    decimal? RequestedStopPrice,
+    DateTimeOffset? RequestedGoodTillDate,
+    DateTimeOffset CreatedAtUtc,
+    bool AmbiguousMarginHeld,
+    DateTimeOffset? AmbiguousAtUtc,
+    decimal NewRemainingNotional);
 
 public sealed class ClOrdIdRegistrySnapshot
 {

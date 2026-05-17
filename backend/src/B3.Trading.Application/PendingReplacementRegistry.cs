@@ -55,6 +55,15 @@ public sealed class PendingReplacementRegistry
         // so post-restart replay rebuilds the same TTL deadline the
         // pre-crash sweep would have observed.
         public DateTimeOffset? AmbiguousAt { get; set; }
+        // Pass-6 review (#299) P1. Captured from the AlgoEngine modify
+        // path when the entry is flagged ambiguous; persisted in the
+        // <c>OrderReplaceAmbiguousMarginHeldEvent</c> AND in
+        // <c>RawPlatformSnapshot.PendingReplacements</c> so post-restart
+        // recovery — whether driven by WAL tail or by a snapshot whose
+        // Seq is past the ambiguous mark — can re-invoke
+        // <see cref="Risk.IReplaceMarginCoordinator.PrepareReplaceAsync"/>
+        // with the same value the pre-crash dispatch used.
+        public decimal NewRemainingNotional { get; set; }
         public Entry(OrderReplacementIntent intent, DateTimeOffset createdAt)
         {
             Intent = intent;
@@ -209,11 +218,24 @@ public sealed class PendingReplacementRegistry
     /// </para>
     /// </summary>
     public bool MarkAmbiguousMarginHeld(ulong newClOrdId, DateTimeOffset ambiguousAt)
+        => MarkAmbiguousMarginHeld(newClOrdId, ambiguousAt, newRemainingNotional: 0m);
+
+    /// <summary>
+    /// Pass-6 review (#299) P1 overload. Captures the upsize-delta-
+    /// bearing new remaining notional alongside the ambiguous flag so
+    /// a snapshot taken after the ambiguous mark can be projected into
+    /// <c>RawPlatformSnapshot.PendingReplacements</c> AND a restore can
+    /// re-invoke <c>PrepareReplaceAsync</c> with the same value the
+    /// pre-crash dispatch used.
+    /// </summary>
+    public bool MarkAmbiguousMarginHeld(
+        ulong newClOrdId, DateTimeOffset ambiguousAt, decimal newRemainingNotional)
     {
         if (_byNewClOrdId.TryGetValue(newClOrdId, out var found))
         {
             found.AmbiguousMarginHeld = true;
             found.AmbiguousAt = ambiguousAt;
+            found.NewRemainingNotional = newRemainingNotional;
             // Pass-5 review (#299) P2. Add to the ambiguous-only
             // index that the sweep enumerates. TryAdd is idempotent
             // — a second mark on the same entry is a no-op here.
@@ -295,6 +317,68 @@ public sealed class PendingReplacementRegistry
     internal int CountForTesting => _byNewClOrdId.Count;
 
     /// <summary>
+    /// Pass-6 review (#299) P1. Lock-side snapshot of every in-flight
+    /// entry — both plain in-flight and ambiguous-margin-held — for
+    /// projection into <c>RawPlatformSnapshot.PendingReplacements</c>.
+    /// The returned tuples carry every piece of state the post-restart
+    /// <c>StateSnapshotter.Restore</c> needs to re-hydrate the entry
+    /// AND (for ambiguous-flagged entries) re-invoke
+    /// <c>IReplaceMarginCoordinator.PrepareReplaceAsync</c>.
+    /// </summary>
+    public IReadOnlyList<PendingReplacementEntrySnapshot> Snapshot()
+    {
+        var pairs = _byNewClOrdId.ToArray();
+        if (pairs.Length == 0) return Array.Empty<PendingReplacementEntrySnapshot>();
+        var snaps = new PendingReplacementEntrySnapshot[pairs.Length];
+        for (var i = 0; i < pairs.Length; i++)
+        {
+            var e = pairs[i].Value;
+            snaps[i] = new PendingReplacementEntrySnapshot(
+                Intent: e.Intent,
+                CreatedAt: e.CreatedAt,
+                AmbiguousMarginHeld: e.AmbiguousMarginHeld,
+                AmbiguousAt: e.AmbiguousAt,
+                NewRemainingNotional: e.NewRemainingNotional);
+        }
+        return snaps;
+    }
+
+    /// <summary>
+    /// Pass-6 review (#299) P1. Restores the registry from a
+    /// snapshot. Wipes any prior state — restore happens before the
+    /// WAL tail replay, which itself only re-adds entries the
+    /// snapshot didn't carry. Caller is responsible for re-invoking
+    /// <c>IReplaceMarginCoordinator.PrepareReplaceAsync</c> for every
+    /// restored entry whose <see cref="PendingReplacementEntrySnapshot.AmbiguousMarginHeld"/>
+    /// is set — see <c>StateSnapshotter.Restore</c>.
+    /// </summary>
+    public void Restore(IEnumerable<PendingReplacementEntrySnapshot> entries)
+    {
+        ArgumentNullException.ThrowIfNull(entries);
+        _byNewClOrdId.Clear();
+        _byOriginalClOrdId.Clear();
+        _ambiguous.Clear();
+        foreach (var s in entries)
+        {
+            var entry = new Entry(s.Intent, s.CreatedAt)
+            {
+                AmbiguousMarginHeld = s.AmbiguousMarginHeld,
+                AmbiguousAt = s.AmbiguousAt,
+                NewRemainingNotional = s.NewRemainingNotional,
+            };
+            if (!_byOriginalClOrdId.TryAdd(s.Intent.OriginalClOrdId, s.Intent.NewClOrdId))
+                continue;
+            if (!_byNewClOrdId.TryAdd(s.Intent.NewClOrdId, entry))
+            {
+                _byOriginalClOrdId.TryRemove(s.Intent.OriginalClOrdId, out _);
+                continue;
+            }
+            if (s.AmbiguousMarginHeld)
+                _ambiguous.TryAdd(s.Intent.NewClOrdId, 0);
+        }
+    }
+
+    /// <summary>
     /// Pass-5 review (#299) P2 test hook. Number of registry entries
     /// the most recent <see cref="SweepExpiredAmbiguous"/> invocation
     /// inspected. Used by the unit test that asserts the sweep cost
@@ -338,3 +422,19 @@ public sealed record OrderReplacementIntent(
     TimeInForce? RequestedTimeInForce = null,
     decimal? RequestedStopPrice = null,
     DateTimeOffset? RequestedGoodTillDate = null);
+
+/// <summary>
+/// Pass-6 review (#299) P1. Lock-side projection of one
+/// <see cref="PendingReplacementRegistry"/> entry — both plain in-flight
+/// and ambiguous-margin-held entries are captured. Travels via
+/// <c>RawPlatformSnapshot.PendingReplacements</c> →
+/// <c>PlatformSnapshot.PendingReplacements</c> so a snapshot taken
+/// AFTER an ambiguous mark survives recovery even when the WAL tail
+/// starts past the matching <c>OrderReplaceAmbiguousMarginHeldEvent</c>.
+/// </summary>
+public sealed record PendingReplacementEntrySnapshot(
+    OrderReplacementIntent Intent,
+    DateTimeOffset CreatedAt,
+    bool AmbiguousMarginHeld,
+    DateTimeOffset? AmbiguousAt,
+    decimal NewRemainingNotional);

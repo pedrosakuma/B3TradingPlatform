@@ -1325,7 +1325,7 @@ public sealed class AlgoEngine : BackgroundService
                             NewRemainingNotional = newRemainingNotional,
                             HeldAtUtc = heldAt,
                         },
-                        () => _replacements.MarkAmbiguousMarginHeld(newClOrdId, heldAt));
+                        () => _replacements.MarkAmbiguousMarginHeld(newClOrdId, heldAt, newRemainingNotional));
                 }
                 catch (WalBackpressureException walEx)
                 {
@@ -1334,7 +1334,7 @@ public sealed class AlgoEngine : BackgroundService
                     _logger.LogWarning(walEx,
                         "AlgoEngine could not persist ambiguous-margin-held event for new ClOrdID {NewClOrdId}; live in-memory mark still applied (post-restart recovery would not re-establish this reservation).",
                         newClOrdId);
-                    _replacements.MarkAmbiguousMarginHeld(newClOrdId, heldAt);
+                    _replacements.MarkAmbiguousMarginHeld(newClOrdId, heldAt, newRemainingNotional);
                 }
             }
             return false;
