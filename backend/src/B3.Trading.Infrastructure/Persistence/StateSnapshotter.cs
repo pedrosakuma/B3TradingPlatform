@@ -49,6 +49,16 @@ public sealed class StateSnapshotter
     /// legacy test compositions that don't exercise POV.
     /// </summary>
     private readonly PovProgressBook? _povProgress;
+    /// <summary>
+    /// Pass-1 review (#296) P1-C. Optional — when wired the snapshot
+    /// pipeline captures per-Pegged in-flight repeg-cycle markers so
+    /// a restart can rebuild <c>AlgoParentRuntime.RepegPending</c> +
+    /// the expected-cancel marker, preventing a post-restart
+    /// cancel-ack from being misread as a venue-cancel.
+    /// Null-tolerant for legacy test compositions that don't exercise
+    /// Pegged.
+    /// </summary>
+    private readonly PeggedRepegBook? _peggedRepeg;
 
     public StateSnapshotter(
         WorkingOrderBook orders,
@@ -68,7 +78,8 @@ public sealed class StateSnapshotter
         CashKeeper? cashKeeper = null,
         FeeKeeper? feeKeeper = null,
         PnlKeeper? pnlKeeper = null,
-        PovProgressBook? povProgress = null)
+        PovProgressBook? povProgress = null,
+        PeggedRepegBook? peggedRepeg = null)
     {
         _orders = orders;
         _positions = positions;
@@ -88,6 +99,7 @@ public sealed class StateSnapshotter
         _userBotMappings = userBotMappings;
         _gtdScheduler = gtdScheduler;
         _povProgress = povProgress;
+        _peggedRepeg = peggedRepeg;
     }
 
     public PlatformSnapshot Capture(long seq) => Project(CaptureRaw(seq));
@@ -144,6 +156,17 @@ public sealed class StateSnapshotter
             ? Array.Empty<PovProgressRaw>()
             : _povProgress.Snapshot()
                 .Select(t => new PovProgressRaw(t.FirmId, t.AlgoId, t.Progress.MarketVolumeSeen, t.Progress.LastEvaluateAtUtc))
+                .ToArray(),
+        PeggedRepegPending = _peggedRepeg is null
+            ? Array.Empty<PeggedRepegPendingRaw>()
+            : _peggedRepeg.Snapshot()
+                .Select(t => new PeggedRepegPendingRaw(t.FirmId, t.AlgoId,
+                    t.Pending.CancelledChildClOrdId, t.Pending.TargetPrice, t.Pending.AtUtc))
+                .ToArray(),
+        PeggedRepegHistory = _peggedRepeg is null
+            ? Array.Empty<PeggedRepegHistoryRaw>()
+            : _peggedRepeg.SnapshotHistory()
+                .Select(t => new PeggedRepegHistoryRaw(t.FirmId, t.AlgoId, t.ChildClOrdIds.ToArray(), t.EvictionLogged))
                 .ToArray(),
     };
 
@@ -327,6 +350,22 @@ public sealed class StateSnapshotter
             povProgress.Add(new PovProgressSnapshot(p.FirmId, p.AlgoId, p.MarketVolumeSeen, p.LastEvaluateAtUtc));
         }
 
+        var peggedRepeg = new List<PeggedRepegPendingSnapshot>(raw.PeggedRepegPending.Length);
+        for (var i = 0; i < raw.PeggedRepegPending.Length; i++)
+        {
+            var p = raw.PeggedRepegPending[i];
+            peggedRepeg.Add(new PeggedRepegPendingSnapshot(
+                p.FirmId, p.AlgoId, p.CancelledChildClOrdId, p.TargetPrice, p.AtUtc));
+        }
+
+        var peggedRepegHistory = new List<PeggedRepegHistorySnapshot>(raw.PeggedRepegHistory.Length);
+        for (var i = 0; i < raw.PeggedRepegHistory.Length; i++)
+        {
+            var h = raw.PeggedRepegHistory[i];
+            peggedRepegHistory.Add(new PeggedRepegHistorySnapshot(
+                h.FirmId, h.AlgoId, new List<ulong>(h.ChildClOrdIds), h.EvictionLogged));
+        }
+
         return new PlatformSnapshot
         {
             Seq = raw.Seq,
@@ -356,6 +395,8 @@ public sealed class StateSnapshotter
             BotCancelMappings = botCancelMaps,
             AuditedExpiredIds = raw.AuditedExpiredIds,
             PovProgress = povProgress,
+            PeggedRepegPending = peggedRepeg,
+            PeggedRepegHistory = peggedRepegHistory,
         };
     }
 
@@ -431,6 +472,14 @@ public sealed class StateSnapshotter
             _povProgress.Restore(snap.PovProgress.Select(p =>
                 (p.FirmId, p.AlgoId, new PovProgress(p.MarketVolumeSeen, p.LastEvaluateAtUtc))));
         }
+        if (_peggedRepeg is not null)
+        {
+            _peggedRepeg.Restore(snap.PeggedRepegPending.Select(p =>
+                (p.FirmId, p.AlgoId,
+                    new PeggedRepegPending(p.CancelledChildClOrdId, p.TargetPrice, p.AtUtc))));
+            _peggedRepeg.RestoreHistory(snap.PeggedRepegHistory.Select(h =>
+                (h.FirmId, h.AlgoId, (IReadOnlyList<ulong>)h.ChildClOrdIds, h.EvictionLogged)));
+        }
     }
 }
 
@@ -483,6 +532,18 @@ public sealed class EventReplayer
     /// the same scheduling baseline as a snapshot-only restore.
     /// </summary>
     private readonly PovProgressBook? _povProgress;
+    /// <summary>
+    /// Pass-1 review (#296) P1-C. Optional. When wired, replay of
+    /// <see cref="AlgoPeggedRepegStartedEvent"/> sets the pending
+    /// entry and replay of <see cref="AlgoPeggedRepegResolvedEvent"/>
+    /// (or any <see cref="AlgoTerminalStateRecordedEvent"/>) clears
+    /// it. The engine's <c>Reconcile</c> reads the resulting book to
+    /// seed <c>AlgoParentRuntime.RepegPending</c> + expected-cancel
+    /// marker so a post-restart cancel-ack ER routes through
+    /// SubmitNextSliceAsync rather than the venue-cancel suspension
+    /// path.
+    /// </summary>
+    private readonly PeggedRepegBook? _peggedRepeg;
 
     public EventReplayer(
         WorkingOrderBook orders,
@@ -503,7 +564,8 @@ public sealed class EventReplayer
         FeeKeeper? feeKeeper = null,
         IFeeCalculator? feeCalculator = null,
         PnlKeeper? pnlKeeper = null,
-        PovProgressBook? povProgress = null)
+        PovProgressBook? povProgress = null,
+        PeggedRepegBook? peggedRepeg = null)
     {
         _orders = orders;
         _ownership = ownership;
@@ -524,6 +586,7 @@ public sealed class EventReplayer
         _feeCalculator = feeCalculator;
         _pnlKeeper = pnlKeeper;
         _povProgress = povProgress;
+        _peggedRepeg = peggedRepeg;
     }
 
     /// <summary>
@@ -701,6 +764,15 @@ public sealed class EventReplayer
                     var reason = Enum.Parse<AlgoTerminalReason>(at.Reason, ignoreCase: true);
                     algo.RecordTerminal(status, reason, at.AtUtc);
                 }
+                // Pass-1 review (#296) P1-C. Drop any in-flight repeg
+                // marker on parent terminal so the book stays bounded
+                // and a future snapshot doesn't carry stale state.
+                //
+                // Pass-5 review (#296) P1. Also drop the cancelled-
+                // child history ring — once the parent is terminal no
+                // further late ERs can affect routing, so the dedup
+                // memory is dead weight.
+                _peggedRepeg?.RemoveAll(at.FirmId, at.AlgoId);
                 break;
             case AlgoPovSlicedEvent ps:
                 // Pass-1 review (#295) P1#1. Restore the POV scheduling
@@ -710,6 +782,33 @@ public sealed class EventReplayer
                 // the final state matches the most recently persisted
                 // slice. Idempotent under double-replay.
                 _povProgress?.Set(ps.FirmId, ps.AlgoId, ps.MarketVolumeSeen, ps.LastEvaluateAtUtc);
+                break;
+            case AlgoPeggedRepegStartedEvent pgs:
+                // Pass-1 review (#296) P1-C. Record the pending repeg
+                // cycle so the engine's Reconcile pass can rebuild
+                // AlgoParentRuntime.RepegPending + the expected-cancel
+                // marker post-restart. Last-write-wins under replay.
+                _peggedRepeg?.Set(pgs.FirmId, pgs.AlgoId,
+                    pgs.CancelledChildClOrdId, pgs.TargetPrice, pgs.AtUtc);
+                // Pass-5 review (#296) P1. Add the cancelled child id
+                // to the per-parent dedup history ring so a late
+                // terminal ER for THIS cancel survives across:
+                //   * subsequent repeg cycles (the single-slot
+                //     LastRepegCancelledChildId would have moved on);
+                //   * a snapshot+replay round-trip (the ring is
+                //     additively snapshotted alongside the pending
+                //     entry, so even post-snapshot WAL replay rebuilds
+                //     historic cycles deterministically).
+                // Cap-bounded FIFO so memory stays O(cycles_in_window).
+                _peggedRepeg?.MarkCancelledChild(pgs.FirmId, pgs.AlgoId, pgs.CancelledChildClOrdId);
+                break;
+            case AlgoPeggedRepegResolvedEvent pgr:
+                // Pass-1 review (#296) P1-C. Cancel-ack was consumed
+                // and the replacement was submitted; clear the
+                // pending marker so a snapshot+tail recovery converges
+                // on the same in-memory state as a snapshot-only
+                // restore.
+                _peggedRepeg?.Remove(pgr.FirmId, pgr.AlgoId);
                 break;
             case OrderStaledEvent os:
                 if (_orders.TryGet(os.ClOrdId, out var staleOrd) && staleOrd is not null)
@@ -807,6 +906,13 @@ public sealed class EventReplayer
                 TimeSpan.FromTicks(ac.PovTickIntervalTicks ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing PovTickIntervalTicks.")),
                 ac.PovPriceLimit,
                 ac.PovMinSliceQty ?? 1L),
+            AlgoType.Pegged => new PeggedParameters(
+                Enum.Parse<PegRef>(ac.PeggedRef ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing PeggedRef."), ignoreCase: true),
+                ac.PeggedOffsetTicks ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing PeggedOffsetTicks."),
+                TimeSpan.FromTicks(ac.PeggedRepegIntervalTicks ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing PeggedRepegIntervalTicks.")),
+                ac.PeggedTickSize ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing PeggedTickSize."),
+                Enum.Parse<OrderType>(ac.PeggedChildOrderType ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing PeggedChildOrderType."), ignoreCase: true),
+                ac.PeggedPriceLimit),
             _ => throw new InvalidOperationException($"Unknown algo type: {ac.Type}"),
         };
         _algos.TryAdd(new Algo(ac.AlgoId, owner, ac.FirmId, ac.Symbol, ac.SecurityId,

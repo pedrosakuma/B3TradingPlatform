@@ -56,7 +56,23 @@ public sealed class EodMaterialiser : IEodMaterialiser
             {
                 report.RecordCount++;
                 sha.TransformBlock(payload, 0, payload.Length, null, 0);
-                var evt = JsonSerializer.Deserialize(payload, WalEventJsonContext.Default.WalEvent);
+                if (FileEventStore.TryDeserialize(payload, out var evt, out _) != FileEventStore.DeserializeOutcome.Ok)
+                {
+                    // Pass-2 review (#296) P1-B. Either an unknown
+                    // discriminator (newer engine wrote this WAL) or
+                    // a missing/unextractable `kind` (corruption). EOD
+                    // counts the record + SHA bytes — both are
+                    // kind-agnostic — but doesn't classify the record
+                    // into any per-kind bucket. Unlike replay
+                    // (FileEventStore.ReadFromAsync) we do not throw
+                    // on missing-kind here: EOD is an offline audit
+                    // that should produce a report whose RecordCount
+                    // accurately reflects every WAL record present on
+                    // disk, including any pathological ones; the
+                    // counter increment on the replay path is the
+                    // alerting signal.
+                    continue;
+                }
                 switch (evt)
                 {
                     case OrderSubmittedEvent: report.OrderSubmittedCount++; break;

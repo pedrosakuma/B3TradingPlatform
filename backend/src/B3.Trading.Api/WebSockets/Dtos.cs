@@ -162,7 +162,8 @@ public sealed record AlgoDto(
     IcebergParamsDto? Iceberg,
     TwapParamsDto? Twap,
     VwapParamsDto? Vwap = null,
-    PovParamsDto? Pov = null);
+    PovParamsDto? Pov = null,
+    PeggedParamsDto? Pegged = null);
 
 public sealed record IcebergParamsDto(long DisplayQuantity, decimal? LimitPrice);
 
@@ -204,6 +205,20 @@ public sealed record PovParamsDto(
     decimal? PriceLimit,
     long MinSliceQty);
 
+/// <summary>
+/// Wire shape for Pegged parameters (Q3.3 / #283). RepegInterval is
+/// surfaced in milliseconds (sub-second cadence is the common case)
+/// while VWAP/POV use seconds — kept separate so each algo's wire
+/// matches its operational time scale.
+/// </summary>
+public sealed record PeggedParamsDto(
+    string Ref,
+    int OffsetTicks,
+    int RepegIntervalMs,
+    decimal TickSize,
+    string ChildOrderType,
+    decimal? PriceLimit);
+
 public static class DtoMappings
 {
     public static OrderDto ToDto(this Order o) => new(
@@ -236,6 +251,11 @@ public static class DtoMappings
             ? new PovParamsDto(pp.StartUtc, pp.EndUtc, pp.ChildOrderType.ToString(), pp.ChildPrice,
                 pp.ParticipationRate, pp.TickInterval.TotalSeconds, pp.PriceLimit, pp.MinSliceQty)
             : null;
+        PeggedParamsDto? pegged = a.Parameters is PeggedParameters pgp
+            ? new PeggedParamsDto(pgp.Ref.ToString(), pgp.OffsetTicks,
+                (int)pgp.RepegInterval.TotalMilliseconds, pgp.TickSize,
+                pgp.ChildOrderType.ToString(), pgp.PriceLimit)
+            : null;
         return new AlgoDto(
             a.AlgoId.ToString(),
             a.Symbol,
@@ -252,6 +272,7 @@ public static class DtoMappings
             iceberg,
             twap,
             vwap,
-            pov);
+            pov,
+            pegged);
     }
 }

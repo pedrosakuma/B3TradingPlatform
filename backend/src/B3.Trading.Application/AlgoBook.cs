@@ -153,6 +153,12 @@ public sealed class AlgoBook
         long? povTickIntervalTicks = null;
         decimal? povPriceLimit = null;
         long? povMinSliceQty = null;
+        string? peggedRef = null;
+        int? peggedOffsetTicks = null;
+        long? peggedRepegIntervalTicks = null;
+        decimal? peggedTickSize = null;
+        string? peggedChildType = null;
+        decimal? peggedPriceLimit = null;
 
         switch (a.Parameters)
         {
@@ -187,6 +193,14 @@ public sealed class AlgoBook
                 povPriceLimit = pp.PriceLimit;
                 povMinSliceQty = pp.MinSliceQty;
                 break;
+            case PeggedParameters pgp:
+                peggedRef = pgp.Ref.ToString();
+                peggedOffsetTicks = pgp.OffsetTicks;
+                peggedRepegIntervalTicks = pgp.RepegInterval.Ticks;
+                peggedTickSize = pgp.TickSize;
+                peggedChildType = pgp.ChildOrderType.ToString();
+                peggedPriceLimit = pgp.PriceLimit;
+                break;
         }
 
         return new Persistence.AlgoSnapshot(
@@ -199,7 +213,9 @@ public sealed class AlgoBook
             vwapStart, vwapEnd, vwapChildType, vwapChildPrice,
             vwapTickIntervalTicks, vwapSliceMaxPct, vwapPriceLimit, vwapParticipationCap,
             povStart, povEnd, povChildType, povChildPrice,
-            povParticipationRate, povTickIntervalTicks, povPriceLimit, povMinSliceQty);
+            povParticipationRate, povTickIntervalTicks, povPriceLimit, povMinSliceQty,
+            peggedRef, peggedOffsetTicks, peggedRepegIntervalTicks, peggedTickSize,
+            peggedChildType, peggedPriceLimit);
     }
 
     public void Restore(IEnumerable<Persistence.AlgoSnapshot> snaps)
@@ -245,6 +261,12 @@ public sealed class AlgoBook
         long? povTickIntervalTicks = null;
         decimal? povPriceLimit = null;
         long? povMinSliceQty = null;
+        string? peggedRef = null;
+        int? peggedOffsetTicks = null;
+        long? peggedRepegIntervalTicks = null;
+        decimal? peggedTickSize = null;
+        string? peggedChildType = null;
+        decimal? peggedPriceLimit = null;
 
         switch (a.Parameters)
         {
@@ -279,6 +301,14 @@ public sealed class AlgoBook
                 povPriceLimit = pp.PriceLimit;
                 povMinSliceQty = pp.MinSliceQty;
                 break;
+            case PeggedParameters pgp:
+                peggedRef = pgp.Ref.ToString();
+                peggedOffsetTicks = pgp.OffsetTicks;
+                peggedRepegIntervalTicks = pgp.RepegInterval.Ticks;
+                peggedTickSize = pgp.TickSize;
+                peggedChildType = pgp.ChildOrderType.ToString();
+                peggedPriceLimit = pgp.PriceLimit;
+                break;
         }
 
         return new Persistence.AlgoSnapshot(
@@ -291,7 +321,9 @@ public sealed class AlgoBook
             vwapStart, vwapEnd, vwapChildType, vwapChildPrice,
             vwapTickIntervalTicks, vwapSliceMaxPct, vwapPriceLimit, vwapParticipationCap,
             povStart, povEnd, povChildType, povChildPrice,
-            povParticipationRate, povTickIntervalTicks, povPriceLimit, povMinSliceQty);
+            povParticipationRate, povTickIntervalTicks, povPriceLimit, povMinSliceQty,
+            peggedRef, peggedOffsetTicks, peggedRepegIntervalTicks, peggedTickSize,
+            peggedChildType, peggedPriceLimit);
     }
 
     internal static Algo FromSnapshot(Persistence.AlgoSnapshot s)
@@ -330,6 +362,13 @@ public sealed class AlgoBook
                 TimeSpan.FromTicks(s.PovTickIntervalTicks ?? throw new InvalidOperationException($"Algo {s.AlgoId} snapshot missing PovTickIntervalTicks.")),
                 s.PovPriceLimit,
                 s.PovMinSliceQty ?? 1L),
+            AlgoType.Pegged => new PeggedParameters(
+                Enum.Parse<PegRef>(s.PeggedRef ?? throw new InvalidOperationException($"Algo {s.AlgoId} snapshot missing PeggedRef.")),
+                s.PeggedOffsetTicks ?? throw new InvalidOperationException($"Algo {s.AlgoId} snapshot missing PeggedOffsetTicks."),
+                TimeSpan.FromTicks(s.PeggedRepegIntervalTicks ?? throw new InvalidOperationException($"Algo {s.AlgoId} snapshot missing PeggedRepegIntervalTicks.")),
+                s.PeggedTickSize ?? throw new InvalidOperationException($"Algo {s.AlgoId} snapshot missing PeggedTickSize."),
+                Enum.Parse<OrderType>(s.PeggedChildOrderType ?? throw new InvalidOperationException($"Algo {s.AlgoId} snapshot missing PeggedChildOrderType.")),
+                s.PeggedPriceLimit),
             _ => throw new InvalidOperationException($"Unknown algo type: {s.Type}"),
         };
         return Algo.Hydrate(s.AlgoId, owner, s.FirmId, s.Symbol, s.SecurityId,

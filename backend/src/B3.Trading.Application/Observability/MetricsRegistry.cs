@@ -103,6 +103,30 @@ public static class MetricsRegistry
         Meter.CreateCounter<long>("trading.wal.backpressure");
     public static readonly Counter<long> WalSegmentsRotated =
         Meter.CreateCounter<long>("trading.wal.segments_rotated");
+    /// <summary>
+    /// Pass-2 review (#296) P1-B. Forward-compat skip counter: bumped
+    /// once per WAL record whose <c>kind</c> discriminator is not in
+    /// the reader's <c>JsonDerivedType</c> set. Non-zero means an
+    /// older binary is reading a WAL written by a newer engine — an
+    /// expected condition during rolling deploys, an alert condition
+    /// outside one. Tag <c>kind</c> carries the unknown discriminator
+    /// for forensic triage.
+    /// </summary>
+    public static readonly Counter<long> WalUnknownKindSkipped =
+        Meter.CreateCounter<long>("trading.wal.unknown_kind_skipped");
+
+    /// <summary>
+    /// Pass-3 review (#296) P2. Distinct from
+    /// <see cref="WalUnknownKindSkipped"/>: counts WAL records whose
+    /// <c>kind</c> discriminator is missing or unextractable (the
+    /// JSON object lacks the field entirely, or is malformed enough
+    /// that the tokenizer can't reach it). Non-zero means torn write,
+    /// external corruption, or a writer bug — replay halts on the
+    /// first such record so the operator notices, but the counter is
+    /// still bumped first to feed alerting and per-day forensics.
+    /// </summary>
+    public static readonly Counter<long> WalMissingKindCorruption =
+        Meter.CreateCounter<long>("trading.wal.missing_kind_corruption");
 
     // Snapshots / recovery
     public static readonly Counter<long> SnapshotsTaken =
@@ -295,6 +319,39 @@ public static class MetricsRegistry
         Meter.CreateCounter<long>(
             "trading.algo.pov.cancelled",
             description: "POV parents reaching the Cancelled terminal state.");
+
+    // Q3.3 (#283) — Pegged repeg observability. RepegsTotal counts every
+    // successful cancel+place cycle the engine performed for a Pegged
+    // parent (no-op evaluations are NOT counted). RepegFailed counts
+    // cycles where the cancel side threw (gateway transient, child
+    // already terminal in a race, …) so the engine deferred the repeg
+    // to the next tick.
+    public static readonly Counter<long> AlgoPeggedRepegsTotal =
+        Meter.CreateCounter<long>(
+            "trading.algo.pegged.repegs_total",
+            description: "Repeg cycles (cancel + place at new target) performed by the Pegged scheduler.");
+    public static readonly Counter<long> AlgoPeggedRepegFailed =
+        Meter.CreateCounter<long>(
+            "trading.algo.pegged.repeg_failed",
+            description: "Repeg attempts that aborted on the cancel leg; the engine retries on the next tick.");
+    public static readonly Counter<long> AlgoPeggedCancelled =
+        Meter.CreateCounter<long>(
+            "trading.algo.pegged.cancelled",
+            description: "Pegged parents reaching the Cancelled terminal state.");
+
+    // Pass-6 review (#296) P2. Bumped when PeggedRepegBook's per-parent
+    // cancelled-child FIFO ring evicts its oldest entry to admit a new
+    // one. Each eviction shrinks the window in which late terminal ERs
+    // for engine-cancelled children are recognised as dedup hits (vs.
+    // falling through to VenueCancelled and suspending the parent), so
+    // sustained increments are an operational signal that the cap is
+    // too tight for the venue tail-Fill latency in production. Labelless
+    // to keep cardinality flat; correlate with the warn log in
+    // PeggedRepegBook.MarkCancelledChild for the offending firm / algo.
+    public static readonly Counter<long> AlgoPeggedRepegDedupRingEvicted =
+        Meter.CreateCounter<long>(
+            "trading.algo.pegged.repeg_dedup_ring_evicted_total",
+            description: "FIFO evictions in PeggedRepegBook's per-parent cancelled-child dedup ring.");
 
     /// <summary>
     /// 1 when the host booted with <c>Trading:Exchange:AllowErInjection=true</c>

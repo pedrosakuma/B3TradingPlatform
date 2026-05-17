@@ -122,7 +122,48 @@ public sealed class RawPlatformSnapshot
     /// <c>PovProgressBook.Snapshot()</c>.
     /// </summary>
     public PovProgressRaw[] PovProgress { get; init; } = Array.Empty<PovProgressRaw>();
+
+    /// <summary>
+    /// Pass-1 review (#296) P1-C. Mirror of
+    /// <c>PlatformSnapshot.PeggedRepegPending</c> at the raw-capture
+    /// stage. Populated under the dispatcher lock from
+    /// <c>PeggedRepegBook.Snapshot()</c>. Empty on snapshots
+    /// pre-dating the field (additive).
+    /// </summary>
+    public PeggedRepegPendingRaw[] PeggedRepegPending { get; init; } = Array.Empty<PeggedRepegPendingRaw>();
+
+    /// <summary>
+    /// Pass-5 review (#296) P1. Per-Pegged-parent FIFO of recently
+    /// engine-cancelled child clOrdIds, used by the late-ER dedup
+    /// guards in <see cref="B3.Trading.Application.AlgoEngine"/>.
+    /// Empty on snapshots pre-dating the field (additive); engine
+    /// treats absence as "no remembered cancels" — equivalent to a
+    /// freshly-started process.
+    /// </summary>
+    public PeggedRepegHistoryRaw[] PeggedRepegHistory { get; init; } = Array.Empty<PeggedRepegHistoryRaw>();
 }
+
+/// <summary>
+/// Pass-1 review (#296) P1-C. Raw per-Pegged in-flight repeg-cycle
+/// row.
+/// </summary>
+public sealed record PeggedRepegPendingRaw(
+    string FirmId,
+    ulong AlgoId,
+    ulong CancelledChildClOrdId,
+    decimal TargetPrice,
+    DateTimeOffset AtUtc);
+
+/// <summary>
+/// Pass-5 review (#296) P1. Raw per-Pegged cancelled-child history
+/// row. <see cref="ChildClOrdIds"/> is FIFO oldest→newest so the
+/// FIFO cap-eviction order survives a snapshot round-trip.
+/// </summary>
+public sealed record PeggedRepegHistoryRaw(
+    string FirmId,
+    ulong AlgoId,
+    ulong[] ChildClOrdIds,
+    bool EvictionLogged = false);
 
 /// <summary>
 /// Pass-1 review (#295) P1#1. Raw POV scheduling-progress row.

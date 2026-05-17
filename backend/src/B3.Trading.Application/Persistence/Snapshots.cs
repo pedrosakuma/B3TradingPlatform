@@ -192,6 +192,26 @@ public sealed class PlatformSnapshot
     /// <c>StartUtc</c> on first tick — same as a fresh POV).
     /// </summary>
     public List<PovProgressSnapshot> PovProgress { get; init; } = new();
+
+    /// <summary>
+    /// Pass-1 review (#296) P1-C. In-flight Pegged repeg-cycle
+    /// markers — engine emitted the cancel for a drift-driven repeg
+    /// but had not yet observed the cancel-ack ER + submitted the
+    /// replacement at snapshot capture. Empty on snapshots
+    /// pre-dating the field (additive); the engine treats absence as
+    /// "no pending cycle" — same as a fresh Pegged parent. See
+    /// <see cref="B3.Trading.Application.PeggedRepegBook"/>.
+    /// </summary>
+    public List<PeggedRepegPendingSnapshot> PeggedRepegPending { get; init; } = new();
+
+    /// <summary>
+    /// Pass-5 review (#296) P1. Per-Pegged-parent FIFO of recently
+    /// engine-cancelled child clOrdIds — late-ER dedup memory. Empty
+    /// on snapshots pre-dating the field (additive); the engine
+    /// treats absence the same as a freshly-started process. See
+    /// <see cref="B3.Trading.Application.PeggedRepegBook.MarkCancelledChild"/>.
+    /// </summary>
+    public List<PeggedRepegHistorySnapshot> PeggedRepegHistory { get; init; } = new();
 }
 
 /// <summary>
@@ -333,7 +353,14 @@ public sealed record AlgoSnapshot(
     decimal? PovParticipationRate = null,
     long? PovTickIntervalTicks = null,
     decimal? PovPriceLimit = null,
-    long? PovMinSliceQty = null);
+    long? PovMinSliceQty = null,
+    // Q3.3 (#283) — Pegged fields, mirror the POV block.
+    string? PeggedRef = null,
+    int? PeggedOffsetTicks = null,
+    long? PeggedRepegIntervalTicks = null,
+    decimal? PeggedTickSize = null,
+    string? PeggedChildOrderType = null,
+    decimal? PeggedPriceLimit = null);
 
 public sealed record PositionSnapshot(
     string EndClientId,
@@ -373,6 +400,37 @@ public sealed record PovProgressSnapshot(
     ulong AlgoId,
     long MarketVolumeSeen,
     DateTimeOffset LastEvaluateAtUtc);
+
+/// <summary>
+/// Pass-1 review (#296) P1-C. One row of the per-Pegged in-flight
+/// repeg-cycle projection — see
+/// <see cref="PlatformSnapshot.PeggedRepegPending"/>.
+/// </summary>
+public sealed record PeggedRepegPendingSnapshot(
+    string FirmId,
+    ulong AlgoId,
+    ulong CancelledChildClOrdId,
+    decimal TargetPrice,
+    DateTimeOffset AtUtc);
+
+/// <summary>
+/// Pass-5 review (#296) P1. One row of the per-Pegged cancelled-child
+/// history — see <see cref="PlatformSnapshot.PeggedRepegHistory"/>.
+/// <see cref="ChildClOrdIds"/> is FIFO oldest→newest.
+/// <para>
+/// Pass-7 review (#296) P2. <see cref="EvictionLogged"/> persists the
+/// per-ring one-shot "we've already warn-logged about FIFO overflow on
+/// this parent" latch so a restart does not let the warn re-fire on
+/// the next eviction. Optional (default <c>false</c>); snapshots
+/// pre-dating the field round-trip to a fresh latch — at worst one
+/// extra warn post-upgrade.
+/// </para>
+/// </summary>
+public sealed record PeggedRepegHistorySnapshot(
+    string FirmId,
+    ulong AlgoId,
+    List<ulong> ChildClOrdIds,
+    bool EvictionLogged = false);
 
 public sealed class ClOrdIdRegistrySnapshot
 {

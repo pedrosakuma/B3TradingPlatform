@@ -6,9 +6,16 @@ namespace B3.Trading.Application.Persistence;
 /// <summary>
 /// Base type for every event written to the WAL. Each derived record is
 /// serialised as a single JSON object inside a length+CRC framed record on
-/// disk. The <see cref="JsonPolymorphicAttribute"/> discriminator keeps the
-/// schema explicit and forward-compatible: unknown subtypes are rejected
-/// loudly during recovery rather than silently mis-applied.
+/// disk. The <see cref="JsonPolymorphicAttribute"/> discriminator keeps
+/// the schema explicit and forward-compatible: an unknown subtype is
+/// <i>skipped with a structured warning</i> during recovery rather than
+/// crashing the reader — older binaries can therefore traverse WAL
+/// segments produced by newer engines (rolling deploys, downgrade paths,
+/// EOD materialisation of mixed-version days). See
+/// <see cref="B3.Trading.Infrastructure.Persistence.FileEventStore.ReadFromAsync"/>
+/// for the skip site. Genuine corruption (malformed JSON for a
+/// <i>known</i> kind, missing required fields, etc.) still surfaces as
+/// an exception — only the polymorphic discriminator is treated leniently.
 ///
 /// <para>
 /// Schema evolution rule: never rename fields, only add new optional ones.
@@ -28,6 +35,9 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(AlgoTerminalStateRecordedEvent), "algo.terminal")]
 [JsonDerivedType(typeof(AlgoVwapSlicedEvent), "algo.vwap.sliced")]
 [JsonDerivedType(typeof(AlgoPovSlicedEvent), "algo.pov.sliced")]
+[JsonDerivedType(typeof(AlgoPeggedRepeggedEvent), "algo.pegged.repegged")]
+[JsonDerivedType(typeof(AlgoPeggedRepegStartedEvent), "algo.pegged.repeg-started")]
+[JsonDerivedType(typeof(AlgoPeggedRepegResolvedEvent), "algo.pegged.repeg-resolved")]
 [JsonDerivedType(typeof(OrderStaledEvent), "order.staled")]
 [JsonDerivedType(typeof(OrderStaleClearedEvent), "order.stale-cleared")]
 [JsonDerivedType(typeof(UserBotCredentialCreatedEvent), "userbot.cred.created")]
@@ -279,7 +289,7 @@ public sealed record AlgoCreatedEvent : WalEvent
     public required string Symbol { get; init; }
     public required ulong SecurityId { get; init; }
     public required string Side { get; init; }
-    public required string Type { get; init; }   // "Iceberg" | "Twap" | "Vwap" | "Pov"
+    public required string Type { get; init; }   // "Iceberg" | "Twap" | "Vwap" | "Pov" | "Pegged"
     public required long TotalQuantity { get; init; }
     public required DateTimeOffset CreatedAtUtc { get; init; }
     /// <summary>
@@ -319,6 +329,16 @@ public sealed record AlgoCreatedEvent : WalEvent
     public long? PovTickIntervalTicks { get; init; }
     public decimal? PovPriceLimit { get; init; }
     public long? PovMinSliceQty { get; init; }
+
+    // Q3.3 (#283) — Pegged fields. Mirror the POV block above; only the
+    // block matching <see cref="Type"/> = "Pegged" is populated. Additive
+    // — older replays / snapshots without these fields stay valid.
+    public string? PeggedRef { get; init; }                 // PegRef enum name
+    public int? PeggedOffsetTicks { get; init; }
+    public long? PeggedRepegIntervalTicks { get; init; }
+    public decimal? PeggedTickSize { get; init; }
+    public string? PeggedChildOrderType { get; init; }      // "Limit" | "Market"
+    public decimal? PeggedPriceLimit { get; init; }
 }
 
 /// <summary>
@@ -403,6 +423,111 @@ public sealed record AlgoPovSlicedEvent : WalEvent
     // LastEvaluateAtUtc as "no prior progress; seed from StartUtc".
     public long MarketVolumeSeen { get; init; }
     public DateTimeOffset LastEvaluateAtUtc { get; init; }
+}
+
+/// <summary>
+/// Q3.3 (#283). Per-repeg audit envelope for Pegged parents — captures
+/// the live reference price, the old child price (cancelled) and the
+/// new target price the engine is placing at. NOT replayed for state
+/// reconstruction (the cancel + new child are already on the WAL via
+/// <see cref="OrderCancelRequestedEvent"/> + <see cref="OrderSubmittedEvent"/>);
+/// the engine treats this event as observability-only so a future
+/// omission of the WAL write would not desynchronise recovery. Mirrors
+/// the <c>AlgoVwapSliced</c> shape called out in the issue body.
+/// </summary>
+public sealed record AlgoPeggedRepeggedEvent : WalEvent
+{
+    public required ulong AlgoId { get; init; }
+    public required string FirmId { get; init; }
+    public required int SliceSeq { get; init; }
+    public required string RefKind { get; init; }     // PegRef enum name
+    public required decimal RefPrice { get; init; }
+    public required decimal OldChildPrice { get; init; }
+    public required decimal NewTargetPrice { get; init; }
+    public required DateTimeOffset AtUtc { get; init; }
+}
+
+/// <summary>
+/// Pass-1 review (#296) P1-C. Pre-cancel marker for a Pegged repeg
+/// cycle. Persisted BEFORE the engine issues the cancel wire-call so
+/// recovery can distinguish "engine-initiated cancel awaiting ack"
+/// from "venue-initiated cancel" (which suspends the parent).
+///
+/// <para>Replay populates <see cref="Algo.PeggedRepegBook"/> with
+/// <see cref="CancelledChildClOrdId"/> + audit fields; engine
+/// <c>Reconcile</c> reads the book to seed
+/// <c>AlgoParentRuntime.RepegPending</c> + the sticky
+/// <c>LastRepegCancelledChildId</c> marker so a post-restart
+/// cancel-ack ER routes through <c>SubmitNextSliceAsync</c> rather
+/// than the <c>VenueCancelled</c>-suspension path. Cleared by
+/// <see cref="AlgoPeggedRepegResolvedEvent"/> on cycle completion
+/// or by <see cref="AlgoTerminalStateRecordedEvent"/> on parent
+/// terminal. Additive: snapshots and WAL segments pre-dating the
+/// event deserialise as before.</para>
+/// </summary>
+public sealed record AlgoPeggedRepegStartedEvent : WalEvent
+{
+    public required ulong AlgoId { get; init; }
+    public required string FirmId { get; init; }
+    public required ulong CancelledChildClOrdId { get; init; }
+    public required ulong NewClOrdId { get; init; }
+    public required decimal TargetPrice { get; init; }
+    public required DateTimeOffset AtUtc { get; init; }
+}
+
+/// <summary>
+/// Pass-1 review (#296) P1-C. Companion to
+/// <see cref="AlgoPeggedRepegStartedEvent"/>: emitted when the engine
+/// has consumed the cancel-ack ER and successfully submitted the
+/// replacement child. Replay clears the pending entry from
+/// <c>PeggedRepegBook</c> so post-restart state matches the
+/// in-memory steady-state (no pending repeg). Additive.
+///
+/// <para>Pass-2 review (#296) P1-A. <see cref="Aborted"/> distinguishes
+/// the normal cycle-completion path (<c>false</c>) from a roll-back
+/// caused by a failed gateway cancel mid-cycle (<c>true</c>): the
+/// engine had already persisted the Started marker and called
+/// <c>PeggedRepegBook.Set</c> but the wire-call to the venue
+/// failed, so no replacement child will be submitted. Replay
+/// handling is identical (clear the book entry) — the flag is
+/// audit-only so EOD / forensic tooling can tell apart "cycle
+/// succeeded" from "cycle aborted; engine will retry next tick".
+/// Field is optional: pre-existing Resolved events deserialise as
+/// <c>false</c>.</para>
+/// </summary>
+public sealed record AlgoPeggedRepegResolvedEvent : WalEvent
+{
+    public required ulong AlgoId { get; init; }
+    public required string FirmId { get; init; }
+    public required ulong CancelledChildClOrdId { get; init; }
+    public required DateTimeOffset AtUtc { get; init; }
+
+    /// <summary>
+    /// Pass-2 review (#296) P1-A. <c>true</c> when the cycle was
+    /// rolled back because the gateway cancel call failed after the
+    /// Started marker was persisted; <c>false</c> (default) for the
+    /// normal cancel-ack-then-replace flow. Additive — old segments
+    /// decode as <c>false</c>.
+    /// </summary>
+    public bool Aborted { get; init; }
+
+    /// <summary>
+    /// Pass-4 review (#296) P1. Audit-only annotation describing why
+    /// the cycle resolved. Null (default) for the steady-state cancel-
+    /// ack-then-replace path. Currently emitted values:
+    /// <list type="bullet">
+    ///   <item><c>FilledBeforeCancelAck</c> — a terminal Fill ER for
+    ///   the just-cancelled child reached the engine before (or
+    ///   instead of) the cancel-ack, so the quantity was consumed by
+    ///   the existing child and no replacement was submitted. The
+    ///   companion <see cref="Aborted"/> stays <c>false</c> because
+    ///   the cancel did reach the venue (only its ack didn't beat the
+    ///   fill); replay still just clears the
+    ///   <c>PeggedRepegBook</c> entry. Additive — pre-existing
+    ///   segments decode as <c>null</c>.</item>
+    /// </list>
+    /// </summary>
+    public string? Reason { get; init; }
 }
 
 /// <summary>
