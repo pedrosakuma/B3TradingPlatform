@@ -927,28 +927,36 @@ public class PeggedAlgoEndpointTests
     // ──────────────── Pass-4 review (#296) regression tests ────────────────
 
     [Fact]
-    public async Task Pegged_FillRacesRepegCancel_NoReplacementChildAndNoStall()
+    public async Task Pegged_FillRacesRepegCancel_DelayInjectedFill_NoReplacementChildAndAuditPairBalanced()
     {
-        // Pass-4 review (#296) P1. The engine cancels child1 for a
-        // repeg; before the cancel-ack lands the venue fills child1
-        // (the cancel reached the venue too late — race the RFC
-        // explicitly calls out). The Fill ER must:
+        // Pass-4 review (#296) P1, Window 3 (the only race actually
+        // reachable under the single-consumer signal queue — see Pass-5
+        // P2 note further down).
         //
-        //   1. NOT spawn a replacement child from the Fill handler —
-        //      child1 already consumed the qty the replacement would
-        //      have targeted, so placing a new slice here would
-        //      over-buy (orphan duplicate working order).
-        //   2. NOT leave RepegPending=true (which would short-circuit
-        //      every future repeg eval and stall the algo).
-        //   3. Clear the PeggedRepegBook entry (Started + Resolved
-        //      audit pair balanced via AlgoPeggedRepegResolvedEvent
-        //      with Aborted=false + Reason=FilledBeforeCancelAck).
-        //   4. Transition the parent to Completed cleanly (no
-        //      Suspended, no stall).
+        // Pass-5 review (#296) P2. Deterministic gating via the new
+        // MockEntryPointClient.CancelDelayInjector: the engine's
+        // CancelAsync await is held by the test, the Fill ER is
+        // injected while the cancel is in-flight, then the cancel is
+        // released. The engine then drains the resulting
+        // ChildExecutionObservedSignal AFTER the Started event has been
+        // dispatched (single-consumer reactor) — so this exercises the
+        // post-Started recovery path:
         //
-        // Pegged places the full RemainingQuantity on each working
-        // slice, so a full Fill of child1 also completes the parent —
-        // we assert both terminal transitions here.
+        //   * Filled-case Pegged dedup at OnChildErAsync (the
+        //     IsCancelledChild guard) → ResolveRepegOnFillAsync runs
+        //     instead of the normal Fill-then-resubmit path.
+        //   * ResolveRepegOnFillAsync emits
+        //     AlgoPeggedRepegResolvedEvent{Aborted=false,
+        //     Reason="FilledBeforeCancelAck"} so the audit pair is
+        //     balanced and the PeggedRepegBook entry is cleared by
+        //     replay convergence.
+        //
+        // **Guard pinned**: removing the IsCancelledChild check in the
+        // Filled case (AlgoEngine line ~666) causes the Fill ER to
+        // fall through to SubmitNextSliceAsync — a SECOND child gets
+        // submitted (orphan replacement) and Assert.Single(allChildren)
+        // below fails. Verified by mental simulation against the
+        // current control flow.
         using var f = TestAppFactory.WithOverrides(Simulator());
         using var http = f.CreateClient();
         var token = await f.LoginAsync(http);
@@ -965,22 +973,30 @@ public class PeggedAlgoEndpointTests
         var mock = f.Services.GetRequiredService<MockEntryPointClient>();
         var repegBook = f.Services.GetRequiredService<PeggedRepegBook>();
 
-        // Drift the mid → engine cancels child1 for a repeg.
+        // Hold the engine's CancelAsync await via a TCS so we have a
+        // deterministic window to race the Fill ER against.
+        var cancelGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        mock.CancelDelayInjector = _ => cancelGate.Task;
+
+        // Drift the mid → engine cancels child1; CancelAsync now parks
+        // on the gate.
         cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
         await WaitFor(() => mock.SubmittedCancels.Any(c => c.OrigClOrdId == child1.ClOrdId),
-            TimeSpan.FromSeconds(3), "engine did not emit the cancel after the mid drift");
+            TimeSpan.FromSeconds(3), "engine did not invoke CancelAsync after the mid drift");
 
-        // Wait for the Started marker to be persisted (Window 3 — the
-        // only window that occurs naturally with the current single-
-        // threaded reactor; Windows 1+2 are defensive code paths in
-        // the engine, see ResolveRepegOnFillAsync XML doc).
-        await WaitFor(() => repegBook.TryGet("default", ulong.Parse(algoId)) is not null,
-            TimeSpan.FromSeconds(3), "AlgoPeggedRepegStartedEvent did not populate the book");
-
-        // Inject a full Fill ER for the cancelled child instead of
-        // the Cancel-ack the engine is waiting for — the venue race
-        // the RFC describes.
+        // While CancelAsync is held, inject the racing Fill ER. The
+        // ExecutionReportProcessor runs synchronously on the caller
+        // thread → order goes Filled / qty booked → child_er signal
+        // enqueued. The signal sits in the channel because the engine
+        // consumer is parked on CancelAsync.
         await InjectEr(http, adminToken, child1.ClOrdId, "Fill", lastQty: 100);
+
+        // Release CancelAsync → engine resumes, persists Started
+        // (in-memory rt.RepegPending is still true because the queued
+        // ER hasn't been dispatched yet), then dequeues the Fill ER on
+        // the next loop iteration and routes through the
+        // IsCancelledChild dedup → ResolveRepegOnFillAsync.
+        cancelGate.SetResult();
 
         // Parent transitions to Completed (Fill consumed total qty).
         await WaitForAlgoStatus(http, token, algoId, "Completed");
@@ -988,18 +1004,15 @@ public class PeggedAlgoEndpointTests
         Assert.Equal(100, snap.GetProperty("filledQuantity").GetInt64());
         Assert.Equal("None", snap.GetProperty("terminalReason").GetString());
 
-        // Cycle resolved: AlgoPeggedRepegResolvedEvent with
-        // Aborted=false + Reason=FilledBeforeCancelAck fires; replay
-        // handler removes the book entry. Terminal-transition cleanup
-        // would also remove it but the Resolved path wins the race.
+        // AlgoPeggedRepegResolvedEvent dispatched → book cleared. (The
+        // RecordTerminalAsync.RemoveAll also clears it as a safety
+        // net; this WaitFor doesn't distinguish.)
         await WaitFor(() => repegBook.TryGet("default", ulong.Parse(algoId)) is null,
             TimeSpan.FromSeconds(3),
             "PeggedRepegBook still has an entry after the fill race resolved");
 
-        // No replacement child spawned (no orphan working order). The
-        // Fill handler's no-replacement branch is what guarantees
-        // this — without it the post-Fill Pegged path would call
-        // SubmitNextSliceAsync and spawn a duplicate.
+        // Exactly one cancel, no replacement child spawned from the
+        // Fill handler.
         Assert.Single(mock.SubmittedCancels);
         var allChildren = book.EnumerateChildrenOf("default", ulong.Parse(algoId)).ToList();
         Assert.Single(allChildren);
@@ -1007,20 +1020,46 @@ public class PeggedAlgoEndpointTests
     }
 
     [Fact]
-    public async Task Pegged_FillRacesRepegCancel_BeforeStartedPersisted_NoOrphanInWal()
+    public async Task Pegged_FillRacesRepegCancel_DocumentsWindows1and2DefensiveGuard()
     {
-        // Pass-4 review (#296) P1, Windows 1+2 (defensive). With the
-        // current single-threaded reactor a Fill ER cannot interleave
-        // between EvaluatePeggedRepegAsync's CancelAsync await and the
-        // following Started dispatch — both run in the same iteration.
-        // This test pins the OBSERVABLE outcome the windowed code paths
-        // guarantee: across the full race window (whichever sub-window
-        // actually fires), there is NEVER a Started marker in
-        // PeggedRepegBook without a matching Resolved by the time the
-        // Fill ER is fully processed. Combined with the previous test
-        // (Window 3 → Resolved emitted), this ensures the audit pair
-        // is always balanced and replay can't recover into a stuck
-        // state regardless of which window fired.
+        // Pass-4 review (#296) P1, Windows 1 + 2 (defensive). Windows
+        // 1 (Fill processed before CancelAsync is invoked) and 2 (Fill
+        // processed after CancelAsync returns but before Started is
+        // persisted) are NOT naturally reachable in the current
+        // single-consumer reactor: the engine awaits CancelAsync
+        // inside its own consumer task, so a ChildExecutionObservedSignal
+        // racing the cancel can only be dequeued AFTER CancelAsync
+        // returns AND the post-cancel Started dispatch runs in the
+        // same iteration (which is always Window 3).
+        //
+        // Pass-5 review (#296) P2. We tried to construct the race
+        // with the new CancelDelayInjector — emit the Fill ER while
+        // the cancel is held, release the cancel — but the engine
+        // does not observe rt.RepegPending=false until its consumer
+        // loop runs OnChildErAsync, which happens AFTER the Started
+        // dispatch completes. The "if (!rt.RepegPending) return;"
+        // guard at the top of the post-cancel block (AlgoEngine line
+        // ~1524) is therefore defensive code that a future multi-
+        // consumer reactor (or an SDK that pumps ERs synchronously
+        // inside the cancel wire-call) would actually trigger.
+        //
+        // This test pins the OBSERVABLE invariant that holds across
+        // every window: regardless of which sub-window the race
+        // resolves in, the engine ends with (a) the parent in a
+        // coherent terminal/working state, (b) no orphan replacement
+        // child, and (c) no lingering Started without a matching
+        // Resolved (a future replay must converge on the same in-
+        // memory state). Combined with the Window 3 test above this
+        // covers the full race surface to the granularity that's
+        // observable today.
+        //
+        // **Guard pinned**: the post-Cancelled `IsCancelledChild`
+        // dedup at AlgoEngine line ~788 — removing it would let a
+        // late Cancelled-status ER (the cancel-ack arriving after the
+        // fill resolved the cycle) fall through to the VenueCancelled
+        // branch and Suspend the parent. The cycle-resolved
+        // RepegPending=false assertion below catches that regression
+        // (Suspended ≠ Completed).
         using var f = TestAppFactory.WithOverrides(Simulator());
         using var http = f.CreateClient();
         var token = await f.LoginAsync(http);
@@ -1041,23 +1080,16 @@ public class PeggedAlgoEndpointTests
         await WaitFor(() => mock.SubmittedCancels.Any(c => c.OrigClOrdId == child1.ClOrdId),
             TimeSpan.FromSeconds(3), "engine did not emit the cancel");
 
-        // Race the Fill ER in immediately — depending on scheduler
-        // interleaving this may land before OR after Started persists.
-        // Either way the post-condition (no lingering book entry,
-        // parent Completed, no replacement orphan) must hold.
+        // Race the Fill ER in immediately. Settled outcome is what we
+        // verify; the exact internal window the race resolves in is
+        // intentionally not pinned.
         await InjectEr(http, adminToken, child1.ClOrdId, "Fill", lastQty: 100);
-
         await WaitForAlgoStatus(http, token, algoId, "Completed");
 
-        // Eventually the book settles to "no pending entry" — covers
-        // Windows 1+2 (entry never existed) AND Window 3 (entry was
-        // created then Resolved cleared it).
         await WaitFor(() => repegBook.TryGet("default", ulong.Parse(algoId)) is null,
             TimeSpan.FromSeconds(3),
             "PeggedRepegBook still has an entry after the fill race");
 
-        // Exactly one cancel, no replacement child spawned from the
-        // Fill handler (no orphan working order).
         Assert.Single(mock.SubmittedCancels);
         var allChildren = book.EnumerateChildrenOf("default", ulong.Parse(algoId)).ToList();
         Assert.Single(allChildren);
@@ -1073,18 +1105,15 @@ public class PeggedAlgoEndpointTests
         // the cancel after the fill landed). That late Cancelled wire
         // MUST be a no-op — NOT a second SubmitNextSliceAsync call
         // (which would duplicate the replacement child and orphan a
-        // working order). The sticky LastRepegCancelledChildId marker
-        // + the parent-terminal short-circuit + the Filled-case
-        // dedup branch together keep the classification correct
-        // regardless of which guard catches it first.
+        // working order).
         //
         // Because Pegged places the full RemainingQuantity on each
         // working slice, a full Fill of child1 also completes the
         // parent in this test; the parent-terminal short-circuit at
         // the top of OnChildErAsync's Filled case is what absorbs the
-        // late ER in that path. For the non-terminal-parent path
-        // (e.g. iceberg child types in a future RFC) the sticky
-        // LastRepegCancelledChildId dedup is the safety net.
+        // late ER in that path. The non-terminal-parent case
+        // (subsequent-repeg dedup) is covered separately by
+        // Pegged_LateFillAfterSubsequentRepeg_DedupViaHistoryRing.
         using var f = TestAppFactory.WithOverrides(Simulator());
         using var http = f.CreateClient();
         var token = await f.LoginAsync(http);
@@ -1115,12 +1144,6 @@ public class PeggedAlgoEndpointTests
         var newOrdersBefore = mock.SubmittedNewOrders.Count;
         var childrenBefore = book.EnumerateChildrenOf("default", ulong.Parse(algoId)).Count();
 
-        // Late cancel-ack for the already-filled child1. The order is
-        // Filled (Order.MarkCancelled is a no-op on Filled) so the ER
-        // hits the Filled case in OnChildErAsync; the parent is
-        // already terminal so the algo.IsTerminal short-circuit at
-        // the top of the case absorbs the ER. No Resolved
-        // re-dispatch, no SubmitNextSliceAsync, no extra child.
         await InjectEr(http, adminToken, child1.ClOrdId, "Canceled");
         await Task.Delay(200);
 
@@ -1132,9 +1155,213 @@ public class PeggedAlgoEndpointTests
         Assert.Equal(childrenBefore,
             book.EnumerateChildrenOf("default", ulong.Parse(algoId)).Count());
 
-        // Also assert the book entry stays absent — a late ER must
-        // not resurrect a Started/Resolved cycle.
         Assert.Null(repegBook.TryGet("default", ulong.Parse(algoId)));
+    }
+
+    // ──────────────── Pass-5 review (#296) P1 regression tests ────────────────
+
+    [Fact]
+    public async Task Pegged_LateFillAfterSubsequentRepeg_DedupViaHistoryRing()
+    {
+        // Pass-5 review (#296) P1. Reproduces the single-slot dedup
+        // gap that pass-4's LastRepegCancelledChildId left open:
+        //
+        //   1. Repeg A: engine cancels child1, cancel-ack lands,
+        //      child2 is placed. After this point the single-slot
+        //      marker has rotated to child2 (the LATEST cycle's
+        //      cancelled child id).
+        //   2. Repeg B: engine cancels child2; cancel-ack pending.
+        //   3. LATE Fill ER for child1 arrives (delayed venue/
+        //      simulator reporting). With the single-slot marker
+        //      pointing at child2, child1 != marker → the dedup
+        //      branches in OnChildErAsync (Filled-case at line ~666
+        //      AND Cancelled-case at line ~788) were both MISSED →
+        //      the late ER fell through to either a spurious
+        //      replacement child or the VenueCancelled-suspension
+        //      branch, depending on the order's preserved terminal
+        //      status.
+        //
+        // The fix is the bounded FIFO history ring
+        // (PeggedRepegBook.IsCancelledChild) that remembers EVERY
+        // recently engine-cancelled child id, not just the latest.
+        //
+        // **Guard pinned**: replace IsCancelledChild with
+        // `rt.LastRepegCancelledChildId == child.ClOrdId` at the
+        // Cancelled-case dedup (line ~788) and this test fails: the
+        // late Fill ER's signal lands the engine on the
+        // VenueCancelled fallthrough → parent transitions to
+        // Suspended, the final Assert.Equal("Working", ...) below
+        // catches it.
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        // total=200 so a partial Fill on child1 doesn't terminal the
+        // parent — keeps us on the non-terminal-parent path that
+        // exercises the dedup branch (rather than the algo.IsTerminal
+        // short-circuit at the top of the Filled case).
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 200, repegMs: 100));
+        var algoIdNum = ulong.Parse(algoId);
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child1 = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        Assert.Equal(30.0m, child1.Price);
+
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+
+        // Cycle A: drift → cancel child1, then ack so child2 lands.
+        cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+        await WaitFor(() => mock.SubmittedCancels.Any(c => c.OrigClOrdId == child1.ClOrdId),
+            TimeSpan.FromSeconds(3), "engine did not emit cancel A");
+        await InjectEr(http, adminToken, child1.ClOrdId, "Canceled");
+        var child2 = await WaitForChildOtherThan(book, algoId, child1.ClOrdId,
+            TimeSpan.FromSeconds(3));
+        Assert.Equal(31.0m, child2.Price);
+
+        // Cycle B: drift → cancel child2. Do NOT ack — leaves
+        // RepegPending=true and the single-slot marker pointing at
+        // child2 (so child1 is no longer "the" sticky cancelled id).
+        cache.UpdateBookTop("PETR4", 31.5m, 32.5m, DateTimeOffset.UtcNow);
+        await WaitFor(() => mock.SubmittedCancels.Any(c => c.OrigClOrdId == child2.ClOrdId),
+            TimeSpan.FromSeconds(3), "engine did not emit cancel B");
+
+        var newOrdersBeforeLateEr = mock.SubmittedNewOrders.Count;
+
+        // Late Fill ER for child1 (already-Cancelled). The processor
+        // preserves the terminal status (Order.ApplyCumulativeFill
+        // line ~367) but enqueues the signal because cumQty advanced.
+        // The engine then sees child1.Status==Cancelled and routes
+        // into the Cancelled-case; without the history-ring dedup
+        // the parent would be Suspended/VenueCancelled.
+        await InjectEr(http, adminToken, child1.ClOrdId, "Fill", lastQty: 10);
+
+        // Give the consumer loop time to drain the late ER signal.
+        await Task.Delay(200);
+
+        var snap = await GetAlgo(http, token, algoId);
+        Assert.Equal("Working", snap.GetProperty("status").GetString());
+        Assert.Equal("None", snap.GetProperty("terminalReason").GetString());
+
+        // No new replacement child spawned from the late ER — only
+        // the two cycles' children (child1 terminal + child2 still
+        // working) are in the book.
+        Assert.Equal(newOrdersBeforeLateEr, mock.SubmittedNewOrders.Count);
+        var liveChildren = book.EnumerateChildrenOf("default", algoIdNum)
+            .Where(c => c.Status is OrderStatus.PendingNew or OrderStatus.Working or OrderStatus.PartiallyFilled)
+            .ToList();
+        Assert.Single(liveChildren);
+        Assert.Equal(child2.ClOrdId, liveChildren[0].ClOrdId);
+    }
+
+    [Fact]
+    public async Task Pegged_RestartThenLateFillForOldChild_DedupSurvivesSnapshotRestart()
+    {
+        // Pass-5 review (#296) P1. Cross-restart durability of the
+        // cancelled-child history ring. Without the snapshot field
+        // (PeggedRepegHistory) a restart between the original repeg
+        // and the late ER would lose the dedup memory and let the
+        // late Fill ER suspend the parent on the post-restart
+        // VenueCancelled fallthrough.
+        //
+        // Sequence:
+        //   1. Pre-restart: drive repeg A (cancel + ack child1 →
+        //      child2 placed) so child1 is in the history ring but
+        //      NOT in PeggedRepegPending (cycle is resolved).
+        //   2. Drive repeg B (cancel child2, no ack) so the pending
+        //      entry exists. Take a snapshot.
+        //   3. Cold restart. Snapshot.Restore re-hydrates BOTH the
+        //      pending entry AND the history ring.
+        //   4. Inject a late Fill for child1. The engine's history-
+        //      ring lookup hits, dedup fires, parent stays Working.
+        //
+        // **Guard pinned**: remove the PeggedRepegHistory snapshot
+        // capture (or the RestoreHistory call in StateSnapshotter)
+        // and this test fails — child1 is not in the post-restart
+        // ring → late Fill falls through to Suspended.
+        var dataDir = Path.Combine(Environment.CurrentDirectory, "test-data",
+            "b3-pegged-history-restart-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var overrides = PersistenceOverrides(dataDir);
+            ulong algoIdNum = 0;
+            ulong child1ClOrdId = 0;
+            ulong child2ClOrdId = 0;
+
+            using (var f = TestAppFactory.WithOverrides(overrides))
+            using (var http = f.CreateClient())
+            {
+                var token = await f.LoginAsync(http);
+                var adminToken = await f.LoginAsync(http, "admin");
+                var cache = f.Services.GetRequiredService<PegBookTopCache>();
+                cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+                var algoIdStr = await PostAlgo(http, token,
+                    PeggedBody(total: 200, pegRef: "Mid", offsetTicks: 0,
+                        repegMs: 100, tickSize: 0.5m));
+                algoIdNum = ulong.Parse(algoIdStr);
+
+                var book = f.Services.GetRequiredService<WorkingOrderBook>();
+                var child1 = await WaitForAnyChild(book, algoIdStr, TimeSpan.FromSeconds(3));
+                child1ClOrdId = child1.ClOrdId;
+
+                var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+
+                // Cycle A: cancel + ack → child2 placed. child1 ends
+                // up in the history ring; the PeggedRepegBook pending
+                // entry is cleared by the Resolved event.
+                cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+                await WaitFor(() => mock.SubmittedCancels.Any(c => c.OrigClOrdId == child1ClOrdId),
+                    TimeSpan.FromSeconds(3), "engine did not emit cancel A pre-restart");
+                await InjectEr(http, adminToken, child1ClOrdId, "Canceled");
+                var child2 = await WaitForChildOtherThan(book, algoIdStr, child1ClOrdId,
+                    TimeSpan.FromSeconds(3));
+                child2ClOrdId = child2.ClOrdId;
+
+                // Cycle B: cancel child2, no ack. The pending entry
+                // now references child2; child1 lives only in the
+                // history ring.
+                cache.UpdateBookTop("PETR4", 31.5m, 32.5m, DateTimeOffset.UtcNow);
+                await WaitFor(() => mock.SubmittedCancels.Any(c => c.OrigClOrdId == child2ClOrdId),
+                    TimeSpan.FromSeconds(3), "engine did not emit cancel B pre-restart");
+
+                // Snapshot under the dispatcher lock — must capture
+                // both the pending entry (for child2) and the history
+                // ring (containing child1 + child2).
+                ResolveSnapshotService(f).TryTakeSnapshot();
+            }
+
+            using (var f2 = TestAppFactory.WithOverrides(overrides))
+            using (var http2 = f2.CreateClient())
+            {
+                var token = await f2.LoginAsync(http2);
+                var adminToken = await f2.LoginAsync(http2, "admin");
+
+                // Sanity: snapshot restore populated the history ring.
+                var repegBook2 = f2.Services.GetRequiredService<PeggedRepegBook>();
+                Assert.True(repegBook2.IsCancelledChild("default", algoIdNum, child1ClOrdId),
+                    "Snapshot restore did not rehydrate child1 in the history ring");
+                Assert.True(repegBook2.IsCancelledChild("default", algoIdNum, child2ClOrdId),
+                    "Snapshot restore did not rehydrate child2 in the history ring");
+
+                // Late Fill for child1 (already-Cancelled in the
+                // restored order book). Without the snapshotted
+                // history ring the post-restart Cancelled-case dedup
+                // would miss and Suspend the parent.
+                await InjectEr(http2, adminToken, child1ClOrdId, "Fill", lastQty: 10);
+                await Task.Delay(200);
+
+                var snap = await GetAlgo(http2, token, algoIdNum.ToString());
+                Assert.Equal("Working", snap.GetProperty("status").GetString());
+                Assert.Equal("None", snap.GetProperty("terminalReason").GetString());
+            }
+        }
+        finally
+        {
+            try { if (Directory.Exists(dataDir)) Directory.Delete(dataDir, recursive: true); } catch { /* best-effort */ }
+        }
     }
 
     // ───────────────────────── helpers ─────────────────────────

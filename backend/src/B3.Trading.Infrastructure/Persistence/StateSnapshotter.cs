@@ -163,6 +163,11 @@ public sealed class StateSnapshotter
                 .Select(t => new PeggedRepegPendingRaw(t.FirmId, t.AlgoId,
                     t.Pending.CancelledChildClOrdId, t.Pending.TargetPrice, t.Pending.AtUtc))
                 .ToArray(),
+        PeggedRepegHistory = _peggedRepeg is null
+            ? Array.Empty<PeggedRepegHistoryRaw>()
+            : _peggedRepeg.SnapshotHistory()
+                .Select(t => new PeggedRepegHistoryRaw(t.FirmId, t.AlgoId, t.ChildClOrdIds.ToArray()))
+                .ToArray(),
     };
 
     /// <summary>
@@ -353,6 +358,14 @@ public sealed class StateSnapshotter
                 p.FirmId, p.AlgoId, p.CancelledChildClOrdId, p.TargetPrice, p.AtUtc));
         }
 
+        var peggedRepegHistory = new List<PeggedRepegHistorySnapshot>(raw.PeggedRepegHistory.Length);
+        for (var i = 0; i < raw.PeggedRepegHistory.Length; i++)
+        {
+            var h = raw.PeggedRepegHistory[i];
+            peggedRepegHistory.Add(new PeggedRepegHistorySnapshot(
+                h.FirmId, h.AlgoId, new List<ulong>(h.ChildClOrdIds)));
+        }
+
         return new PlatformSnapshot
         {
             Seq = raw.Seq,
@@ -383,6 +396,7 @@ public sealed class StateSnapshotter
             AuditedExpiredIds = raw.AuditedExpiredIds,
             PovProgress = povProgress,
             PeggedRepegPending = peggedRepeg,
+            PeggedRepegHistory = peggedRepegHistory,
         };
     }
 
@@ -463,6 +477,8 @@ public sealed class StateSnapshotter
             _peggedRepeg.Restore(snap.PeggedRepegPending.Select(p =>
                 (p.FirmId, p.AlgoId,
                     new PeggedRepegPending(p.CancelledChildClOrdId, p.TargetPrice, p.AtUtc))));
+            _peggedRepeg.RestoreHistory(snap.PeggedRepegHistory.Select(h =>
+                (h.FirmId, h.AlgoId, (IReadOnlyList<ulong>)h.ChildClOrdIds)));
         }
     }
 }
@@ -751,7 +767,12 @@ public sealed class EventReplayer
                 // Pass-1 review (#296) P1-C. Drop any in-flight repeg
                 // marker on parent terminal so the book stays bounded
                 // and a future snapshot doesn't carry stale state.
-                _peggedRepeg?.Remove(at.FirmId, at.AlgoId);
+                //
+                // Pass-5 review (#296) P1. Also drop the cancelled-
+                // child history ring — once the parent is terminal no
+                // further late ERs can affect routing, so the dedup
+                // memory is dead weight.
+                _peggedRepeg?.RemoveAll(at.FirmId, at.AlgoId);
                 break;
             case AlgoPovSlicedEvent ps:
                 // Pass-1 review (#295) P1#1. Restore the POV scheduling
@@ -769,6 +790,17 @@ public sealed class EventReplayer
                 // marker post-restart. Last-write-wins under replay.
                 _peggedRepeg?.Set(pgs.FirmId, pgs.AlgoId,
                     pgs.CancelledChildClOrdId, pgs.TargetPrice, pgs.AtUtc);
+                // Pass-5 review (#296) P1. Add the cancelled child id
+                // to the per-parent dedup history ring so a late
+                // terminal ER for THIS cancel survives across:
+                //   * subsequent repeg cycles (the single-slot
+                //     LastRepegCancelledChildId would have moved on);
+                //   * a snapshot+replay round-trip (the ring is
+                //     additively snapshotted alongside the pending
+                //     entry, so even post-snapshot WAL replay rebuilds
+                //     historic cycles deterministically).
+                // Cap-bounded FIFO so memory stays O(cycles_in_window).
+                _peggedRepeg?.MarkCancelledChild(pgs.FirmId, pgs.AlgoId, pgs.CancelledChildClOrdId);
                 break;
             case AlgoPeggedRepegResolvedEvent pgr:
                 // Pass-1 review (#296) P1-C. Cancel-ack was consumed

@@ -131,6 +131,16 @@ public sealed class RawPlatformSnapshot
     /// pre-dating the field (additive).
     /// </summary>
     public PeggedRepegPendingRaw[] PeggedRepegPending { get; init; } = Array.Empty<PeggedRepegPendingRaw>();
+
+    /// <summary>
+    /// Pass-5 review (#296) P1. Per-Pegged-parent FIFO of recently
+    /// engine-cancelled child clOrdIds, used by the late-ER dedup
+    /// guards in <see cref="B3.Trading.Application.AlgoEngine"/>.
+    /// Empty on snapshots pre-dating the field (additive); engine
+    /// treats absence as "no remembered cancels" — equivalent to a
+    /// freshly-started process.
+    /// </summary>
+    public PeggedRepegHistoryRaw[] PeggedRepegHistory { get; init; } = Array.Empty<PeggedRepegHistoryRaw>();
 }
 
 /// <summary>
@@ -143,6 +153,16 @@ public sealed record PeggedRepegPendingRaw(
     ulong CancelledChildClOrdId,
     decimal TargetPrice,
     DateTimeOffset AtUtc);
+
+/// <summary>
+/// Pass-5 review (#296) P1. Raw per-Pegged cancelled-child history
+/// row. <see cref="ChildClOrdIds"/> is FIFO oldest→newest so the
+/// FIFO cap-eviction order survives a snapshot round-trip.
+/// </summary>
+public sealed record PeggedRepegHistoryRaw(
+    string FirmId,
+    ulong AlgoId,
+    ulong[] ChildClOrdIds);
 
 /// <summary>
 /// Pass-1 review (#295) P1#1. Raw POV scheduling-progress row.

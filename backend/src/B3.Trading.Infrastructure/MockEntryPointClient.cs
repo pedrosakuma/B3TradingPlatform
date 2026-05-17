@@ -26,6 +26,20 @@ public sealed class MockEntryPointClient : IEntryPointClient
     /// </summary>
     public Func<OrderCancelRequest, Exception?>? CancelFailureInjector { get; set; }
 
+    /// <summary>
+    /// Pass-5 review (#296) P2. Optional test hook: when non-null,
+    /// every <see cref="SubmitCancelAsync"/> awaits the
+    /// <see cref="Task"/> returned by the injector AFTER recording
+    /// the request but BEFORE returning to the caller. Used by the
+    /// Pegged fill-races-cancel regression tests to deterministically
+    /// gate the engine's <c>CancelAsync</c> await: the test injects
+    /// a Fill ER while the cancel is held, then releases the gate
+    /// and asserts the post-condition the in-engine guard guarantees
+    /// (no orphan replacement child, audit pair balanced, no stuck
+    /// state). Left null in production composition.
+    /// </summary>
+    public Func<OrderCancelRequest, Task>? CancelDelayInjector { get; set; }
+
     public event Action<ExecutionReportEnvelope>? ExecutionReportReceived;
 
     public Task SubmitNewOrderAsync(NewOrderSingle request, CancellationToken cancellationToken)
@@ -42,6 +56,14 @@ public sealed class MockEntryPointClient : IEntryPointClient
         {
             var ex = injector(request);
             if (ex is not null) return Task.FromException(ex);
+        }
+        var delay = CancelDelayInjector;
+        if (delay is not null)
+        {
+            // Defer to the test-supplied gate; surface the gate's
+            // task to the engine's await so the caller pauses inside
+            // CancelAsync until the test releases the TCS.
+            return delay(request);
         }
         return Task.CompletedTask;
     }

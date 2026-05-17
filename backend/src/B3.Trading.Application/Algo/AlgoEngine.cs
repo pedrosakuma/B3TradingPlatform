@@ -292,6 +292,14 @@ public sealed class AlgoEngine : BackgroundService
                 if (pending is { } pgd)
                 {
                     rt.LastRepegCancelledChildId = pgd.CancelledChildClOrdId;
+                    // Pass-5 review (#296) P1. Defensive: make sure
+                    // the cancelled child id is in the dedup history
+                    // ring. RestoreHistory + EventReplayer normally
+                    // populate it, but a snapshot taken by a pre-
+                    // pass-5 binary carries a pending entry without
+                    // any history rows — seed from the pending entry
+                    // so the post-restart late-ER dedup still works.
+                    _peggedRepeg.MarkCancelledChild(algo.FirmId, algo.AlgoId, pgd.CancelledChildClOrdId);
                     var stillLive = _orders.TryGet(pgd.CancelledChildClOrdId, out var oldChild)
                                     && oldChild is not null
                                     && !IsChildTerminal(oldChild);
@@ -662,8 +670,22 @@ public sealed class AlgoEngine : BackgroundService
                 // enters this branch and is a clean no-op because
                 // rt.RepegPending is already false and the qty delta is
                 // zero.
+                //
+                // Pass-5 review (#296) P1. Match against
+                // PeggedRepegBook.IsCancelledChild (a bounded FIFO ring
+                // of every child id we've engine-cancelled for this
+                // parent) instead of the single-slot
+                // LastRepegCancelledChildId. The single slot only
+                // pinpoints the LATEST cycle and is overwritten on
+                // every subsequent repeg, so a late Fill ER for an
+                // OLDER cancelled child (e.g. cycle A cancelled, cycle
+                // B started, then the venue belatedly reports cycle
+                // A's terminal) used to slip past this dedup and fall
+                // through to either the normal Fill-then-resubmit
+                // path (orphan replacement) or the VenueCancelled
+                // branch (spurious Suspended).
                 if (algo.Type == AlgoType.Pegged
-                    && rt.LastRepegCancelledChildId == child.ClOrdId)
+                    && (_peggedRepeg?.IsCancelledChild(algo.FirmId, algo.AlgoId, child.ClOrdId) ?? false))
                 {
                     await ResolveRepegOnFillAsync(algo, rt, child).ConfigureAwait(false);
                     return;
@@ -785,14 +807,23 @@ public sealed class AlgoEngine : BackgroundService
                     await SubmitNextSliceAsync(algo, rt, ct).ConfigureAwait(false);
                 }
                 else if (algo.Type == AlgoType.Pegged
-                         && rt.LastRepegCancelledChildId == child.ClOrdId)
+                         && (_peggedRepeg?.IsCancelledChild(algo.FirmId, algo.AlgoId, child.ClOrdId) ?? false))
                 {
                     // Pass-1 review (#296) P1-A. Duplicate / late
                     // Cancelled ER for a child we already cancelled
-                    // for a repeg (the marker is sticky across the
-                    // RepegPending flag clear). Treat as a no-op so
-                    // the parent does NOT fall through to the
-                    // VenueCancelled branch and get suspended.
+                    // for a repeg. Treat as a no-op so the parent
+                    // does NOT fall through to the VenueCancelled
+                    // branch and get suspended.
+                    //
+                    // Pass-5 review (#296) P1. Match against the
+                    // PeggedRepegBook history ring (bounded FIFO of
+                    // every recently engine-cancelled child id)
+                    // instead of the single-slot
+                    // LastRepegCancelledChildId. The single slot only
+                    // identifies the LATEST cycle; once a subsequent
+                    // repeg overwrites it a late Cancelled ER for an
+                    // older cycle's child used to escape this guard
+                    // and reach the VenueCancelled-suspension path.
                     return;
                 }
                 else if (IsTwapWindowExpired(algo))
@@ -1195,9 +1226,14 @@ public sealed class AlgoEngine : BackgroundService
         // Pass-1 review (#296) P1-C. Drop any in-flight repeg marker
         // for a Pegged parent on terminal so the book stays bounded
         // and the next snapshot doesn't carry stale state.
+        //
+        // Pass-5 review (#296) P1. Also drop the cancelled-child
+        // history ring (RemoveAll) — once the parent is terminal no
+        // further late ERs can affect routing, so the dedup memory
+        // is dead weight.
         if (algo.Type == AlgoType.Pegged)
         {
-            _peggedRepeg?.Remove(algo.FirmId, algo.AlgoId);
+            _peggedRepeg?.RemoveAll(algo.FirmId, algo.AlgoId);
         }
         await Task.CompletedTask;
     }
@@ -1480,6 +1516,16 @@ public sealed class AlgoEngine : BackgroundService
         // the next tick re-derives it from current drift.
         rt.RepegPending = true;
         rt.LastRepegCancelledChildId = liveChildClOrdId;
+        // Pass-5 review (#296) P1. Add to the cancelled-child history
+        // ring BEFORE the wire-call so the late-ER dedup at
+        // OnChildErAsync line ~666/~788 covers ERs that race the
+        // cancel (the ring is in-memory only here; the WAL Started
+        // event below carries the same id so EventReplayer rebuilds
+        // the ring on restart). Persisting via dispatch-action would
+        // be wrong: this id must be remembered even when CancelAsync
+        // fails (no Started gets persisted), because a venue may
+        // still ack the cancel from a previous in-flight attempt.
+        _peggedRepeg?.MarkCancelledChild(algo.FirmId, algo.AlgoId, liveChildClOrdId);
         rt.PeggedLastEvalUtc = now;
         var oldChildPrice = currentPrice;
         var refForAudit = _pegBookTop?.TryGet(algo.Symbol)?.RefPrice(pgp.Ref, algo.Side) ?? 0m;

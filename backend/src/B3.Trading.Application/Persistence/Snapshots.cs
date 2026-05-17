@@ -203,6 +203,15 @@ public sealed class PlatformSnapshot
     /// <see cref="B3.Trading.Application.PeggedRepegBook"/>.
     /// </summary>
     public List<PeggedRepegPendingSnapshot> PeggedRepegPending { get; init; } = new();
+
+    /// <summary>
+    /// Pass-5 review (#296) P1. Per-Pegged-parent FIFO of recently
+    /// engine-cancelled child clOrdIds — late-ER dedup memory. Empty
+    /// on snapshots pre-dating the field (additive); the engine
+    /// treats absence the same as a freshly-started process. See
+    /// <see cref="B3.Trading.Application.PeggedRepegBook.MarkCancelledChild"/>.
+    /// </summary>
+    public List<PeggedRepegHistorySnapshot> PeggedRepegHistory { get; init; } = new();
 }
 
 /// <summary>
@@ -403,6 +412,16 @@ public sealed record PeggedRepegPendingSnapshot(
     ulong CancelledChildClOrdId,
     decimal TargetPrice,
     DateTimeOffset AtUtc);
+
+/// <summary>
+/// Pass-5 review (#296) P1. One row of the per-Pegged cancelled-child
+/// history — see <see cref="PlatformSnapshot.PeggedRepegHistory"/>.
+/// <see cref="ChildClOrdIds"/> is FIFO oldest→newest.
+/// </summary>
+public sealed record PeggedRepegHistorySnapshot(
+    string FirmId,
+    ulong AlgoId,
+    List<ulong> ChildClOrdIds);
 
 public sealed class ClOrdIdRegistrySnapshot
 {
