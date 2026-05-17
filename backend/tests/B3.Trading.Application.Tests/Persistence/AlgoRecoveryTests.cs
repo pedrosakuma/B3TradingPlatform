@@ -683,142 +683,18 @@ public class AlgoRecoveryTests : IDisposable
         Assert.False(book.Remove("TEST", 500UL));
     }
 
-    [Fact]
-    public async Task PovAlgo_SkipPathProgress_PreservedAcrossSnapshotRestart()
-    {
-        // Pass-2 review (#295) P1 — the engine writes PovProgressBook
-        // on EVERY tick (emit OR skip). When the skip path advances
-        // marketVolumeSeen without emitting an AlgoPovSlicedEvent the
-        // snapshotter is the only persistence; this test asserts the
-        // snapshot/restore round-trip carries that state through.
-        var createdAt = new DateTimeOffset(2026, 8, 2, 13, 0, 0, TimeSpan.Zero);
-        var povStart = createdAt;
-        var tick = TimeSpan.FromSeconds(5);
-        var skipTickAt = povStart + tick;
-
-        await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
-        {
-            var (book, ownership, killSwitch, processor, algos, dispatcher) = Build(store);
-            dispatcher.Dispatch(
-                new AlgoCreatedEvent
-                {
-                    AlgoId = 510UL,
-                    EndClientId = "hank",
-                    FirmId = "TEST",
-                    Symbol = "PETR4",
-                    SecurityId = 4321UL,
-                    Side = "Buy",
-                    Type = "Pov",
-                    TotalQuantity = 5000,
-                    CreatedAtUtc = createdAt,
-                    PovStartUtc = povStart,
-                    PovEndUtc = povStart.AddMinutes(30),
-                    PovChildOrderType = "Limit",
-                    PovChildPrice = 30m,
-                    PovParticipationRate = 0.10m,
-                    PovTickIntervalTicks = tick.Ticks,
-                    PovMinSliceQty = 10_000, // Forces the skip path: no slice ever fires.
-                },
-                () => algos.TryAdd(new Algo(510UL, new EndClientId("hank"), "TEST", "PETR4", 4321UL,
-                    OrderSide.Buy, AlgoType.Pov, 5000,
-                    new PovParameters(povStart, povStart.AddMinutes(30), OrderType.Limit, 30m, 0.10m, tick, null, 10_000), createdAt)));
-        }
-
-        // Engine session 1: simulate a skip-path tick (no AlgoPovSlicedEvent)
-        // by directly updating PovProgressBook the way ComputePovSlice does.
-        // Snapshot must capture this even though no WAL event references it.
-        var snapshotDir = "skip-path-" + Guid.NewGuid().ToString("N");
-        long skipMarketVolume = 4_200;
-        await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
-        {
-            var (book, ownership, killSwitch, processor, algos, _) = Build(store);
-            var povProgress = new PovProgressBook();
-            var snapshotter = new StateSnapshotter(book, new PositionKeeper(), killSwitch,
-                new SymbolHaltService(), new SessionPhaseService(), new ClOrdIdPrefixRegistry(),
-                ownership, algos, new AlgoIdRegistry(), new CashLedger(), povProgress: povProgress);
-            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(),
-                new SessionPhaseService(), processor, algos, new ClOrdIdPrefixRegistry(),
-                new AlgoIdRegistry(), povProgress: povProgress);
-            var snapStore = new SnapshotStore(_root, snapshotDir);
-            var recovery = new PersistenceRecovery(store, snapshotter, replayer, snapStore,
-                NullLogger<PersistenceRecovery>.Instance);
-            await recovery.RunAsync();
-
-            // Skip-path engine state update (qty == 0, no WAL emit).
-            povProgress.Set("TEST", 510UL, skipMarketVolume, skipTickAt);
-
-            // Persist snapshot (the only place the skip-path state survives).
-            snapStore.Write(snapshotter.Capture(seq: 1));
-        }
-
-        // Engine session 2: cold start consumes the snapshot. PovProgressBook
-        // must have the skip-tick baseline so subsequent slicing resumes from
-        // marketVolumeSeen = 4_200, NOT zero.
-        await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
-        {
-            var (book, ownership, killSwitch, processor, algos, _) = Build(store);
-            var povProgress = new PovProgressBook();
-            var snapshotter = new StateSnapshotter(book, new PositionKeeper(), killSwitch,
-                new SymbolHaltService(), new SessionPhaseService(), new ClOrdIdPrefixRegistry(),
-                ownership, algos, new AlgoIdRegistry(), new CashLedger(), povProgress: povProgress);
-            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(),
-                new SessionPhaseService(), processor, algos, new ClOrdIdPrefixRegistry(),
-                new AlgoIdRegistry(), povProgress: povProgress);
-            var recovery = new PersistenceRecovery(store, snapshotter, replayer,
-                new SnapshotStore(_root, snapshotDir), NullLogger<PersistenceRecovery>.Instance);
-            await recovery.RunAsync();
-
-            var restored = povProgress.TryGet("TEST", 510UL);
-            Assert.NotNull(restored);
-            Assert.Equal(skipMarketVolume, restored!.Value.MarketVolumeSeen);
-            Assert.Equal(skipTickAt, restored.Value.LastEvaluateAtUtc);
-        }
-    }
-
-    [Fact]
-    public async Task PovAlgo_RemovedProgress_ExcludedFromSnapshot()
-    {
-        // Pass-2 review (#295) P2 — after termination the engine calls
-        // PovProgressBook.Remove(); the next snapshot must omit the
-        // entry so a downstream restart doesn't re-hydrate stale state.
-        var atUtc = new DateTimeOffset(2026, 8, 3, 13, 0, 0, TimeSpan.Zero);
-
-        var snapshotDir = "removed-" + Guid.NewGuid().ToString("N");
-        await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
-        {
-            var (book, ownership, killSwitch, processor, algos, _) = Build(store);
-            var povProgress = new PovProgressBook();
-            povProgress.Set("TEST", 520UL, 9_999L, atUtc);
-            povProgress.Set("TEST", 521UL, 1_111L, atUtc);
-            povProgress.Remove("TEST", 520UL);
-
-            var snapshotter = new StateSnapshotter(book, new PositionKeeper(), killSwitch,
-                new SymbolHaltService(), new SessionPhaseService(), new ClOrdIdPrefixRegistry(),
-                ownership, algos, new AlgoIdRegistry(), new CashLedger(), povProgress: povProgress);
-            var snapStore = new SnapshotStore(_root, snapshotDir);
-            snapStore.Write(snapshotter.Capture(seq: 1));
-        }
-
-        await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
-        {
-            var (book, ownership, killSwitch, processor, algos, _) = Build(store);
-            var povProgress = new PovProgressBook();
-            var snapshotter = new StateSnapshotter(book, new PositionKeeper(), killSwitch,
-                new SymbolHaltService(), new SessionPhaseService(), new ClOrdIdPrefixRegistry(),
-                ownership, algos, new AlgoIdRegistry(), new CashLedger(), povProgress: povProgress);
-            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(),
-                new SessionPhaseService(), processor, algos, new ClOrdIdPrefixRegistry(),
-                new AlgoIdRegistry(), povProgress: povProgress);
-            var recovery = new PersistenceRecovery(store, snapshotter, replayer,
-                new SnapshotStore(_root, snapshotDir), NullLogger<PersistenceRecovery>.Instance);
-            await recovery.RunAsync();
-
-            Assert.Null(povProgress.TryGet("TEST", 520UL));
-            var sibling = povProgress.TryGet("TEST", 521UL);
-            Assert.NotNull(sibling);
-            Assert.Equal(1_111L, sibling!.Value.MarketVolumeSeen);
-        }
-    }
+    // Pass-2 review (#295) P2 — the original two pass-2 regression tests
+    // (PovAlgo_SkipPathProgress_PreservedAcrossSnapshotRestart and
+    // PovAlgo_RemovedProgress_ExcludedFromSnapshot) used to live here.
+    // They stubbed the engine entirely (manual povProgress.Set / Remove
+    // calls) so they would still pass if AlgoEngine.ComputePovSlice
+    // stopped writing on the skip path, or if RecordTerminalAsync stopped
+    // calling Remove on terminal. The pass-2 follow-up moved both
+    // assertions into PovAlgoEndpointTests.cs where the production engine
+    // is driven end-to-end via the API + simulator, so the regression bar
+    // is genuine ("did the engine do the right thing?") instead of
+    // tautological ("did the test stub call the side-effect we then
+    // assert on?").
 
     private static (WorkingOrderBook, OrderOwnershipMap, KillSwitchService, ExecutionReportProcessor, AlgoBook, EventDispatcher) Build(IEventStore store)
     {

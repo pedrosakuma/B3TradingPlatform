@@ -358,6 +358,239 @@ public class PovAlgoEndpointTests
         Assert.Equal(1, sink!.TerminalPublishCount(ulong.Parse(algoId)));
     }
 
+    // ──────────── PovProgressBook persistence regressions (#295 pass-2) ────────────
+
+    // These three tests replace two earlier AlgoRecoveryTests cases that
+    // stubbed PovProgressBook directly (manual Set / Remove). The stubbed
+    // versions would still pass if AlgoEngine.ComputePovSlice stopped
+    // writing povProgress on the skip path, or if RecordTerminalAsync
+    // stopped pruning on terminal — both regressions the reviewer flagged
+    // as P2 because the test asserts on a side-effect that the test itself
+    // produced. The replacements below boot the production host, drive
+    // the real engine through the API + simulator, and only then assert
+    // on PovProgressBook state and snapshot/restart durability.
+
+    private static IDictionary<string, string?> PersistenceOverrides(string dataDir)
+    {
+        var d = new Dictionary<string, string?>(Simulator())
+        {
+            ["Trading:Persistence:Enabled"] = "true",
+            ["Trading:Persistence:DataDirectory"] = dataDir,
+            ["Trading:Persistence:FirmId"] = "default",
+            // Long interval so the periodic snap doesn't race the test's
+            // own explicit TryTakeSnapshot. The test forces the snapshot
+            // boundary it cares about.
+            ["Trading:Persistence:SnapshotInterval"] = "00:10:00",
+        };
+        return d;
+    }
+
+    private static B3.Trading.Infrastructure.Persistence.SnapshotService ResolveSnapshotService(TestAppFactory f) =>
+        f.Services.GetServices<Microsoft.Extensions.Hosting.IHostedService>()
+            .OfType<B3.Trading.Infrastructure.Persistence.SnapshotService>()
+            .Single();
+
+    [Fact]
+    public async Task Pov_SkipTickProgress_PersistedAcrossSnapshotRestart()
+    {
+        // Drive the real engine: MinSliceQty > integrated cum-mv * rate so
+        // ComputePovSlice returns 0 (skip). The engine still must call
+        // _povProgress.Set on every tick — otherwise a restart between
+        // snapshots loses the observed market volume. The original stubbed
+        // test set povProgress by hand; this version exercises the engine.
+        var dataDir = Path.Combine(Path.GetTempPath(), "b3-pov-skip-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var overrides = PersistenceOverrides(dataDir);
+            ulong algoIdNum = 0;
+            long observedMv = 0;
+
+            using (var f = TestAppFactory.WithOverrides(overrides))
+            using (var http = f.CreateClient())
+            {
+                var token = await f.LoginAsync(http);
+                var now = DateTimeOffset.UtcNow;
+
+                // 200ms-pro-rated bucket of 1.5M ≈ 1000 cum-mv → 20% rate
+                // → 200 target. MinSliceQty=1_000_000 forces qty=0 on every
+                // tick, so no child is ever submitted — pure skip path.
+                var algoIdStr = await PostAlgo(http, token,
+                    PovBody(total: 100, start: now.AddSeconds(-1), end: now.AddSeconds(8),
+                        tickSeconds: 0.2, participationRate: 0.20m, minSliceQty: 1_000_000));
+                algoIdNum = ulong.Parse(algoIdStr);
+
+                var curve = f.Services.GetRequiredService<B3.Trading.Application.MarketData.VolumeCurveEstimator>();
+                curve.RecordTrade("PETR4", 1_500_000, now.AddSeconds(-1).AddMilliseconds(50));
+
+                var povBook = f.Services.GetRequiredService<PovProgressBook>();
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                PovProgress? entry = null;
+                while (sw.Elapsed < TimeSpan.FromSeconds(5))
+                {
+                    entry = povBook.TryGet("default", algoIdNum);
+                    if (entry is { MarketVolumeSeen: > 0 }) break;
+                    await Task.Delay(20);
+                }
+                Assert.NotNull(entry);
+                Assert.True(entry!.Value.MarketVolumeSeen > 0,
+                    $"engine did not advance PovProgressBook on skip tick (mv={entry.Value.MarketVolumeSeen})");
+                observedMv = entry.Value.MarketVolumeSeen;
+
+                // Skip path: no child should have been emitted.
+                var book = f.Services.GetRequiredService<WorkingOrderBook>();
+                Assert.Empty(book.EnumerateChildrenOf("default", algoIdNum));
+
+                // Force the snapshot boundary explicitly.
+                ResolveSnapshotService(f).TryTakeSnapshot();
+            }
+
+            // Cold restart with the same data dir: recovery loads the
+            // snapshot and PovProgressBook re-hydrates with the skip-tick
+            // baseline.
+            using (var f2 = TestAppFactory.WithOverrides(overrides))
+            {
+                _ = f2.CreateClient(); // boot the host so PersistenceRecovery runs
+                var povBook2 = f2.Services.GetRequiredService<PovProgressBook>();
+                var restored = povBook2.TryGet("default", algoIdNum);
+                Assert.NotNull(restored);
+                Assert.Equal(observedMv, restored!.Value.MarketVolumeSeen);
+            }
+        }
+        finally
+        {
+            try { if (Directory.Exists(dataDir)) Directory.Delete(dataDir, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
+    [Fact]
+    public async Task Pov_CancelledTerminal_PrunesPovProgress_AndStaysPrunedAcrossRestart()
+    {
+        // Drive the real engine to terminal/Cancelled and verify
+        // RecordTerminalAsync pruned the PovProgressBook entry. Restart
+        // must observe the same: snapshot taken AFTER the prune carries
+        // no row for the dead algo.
+        var dataDir = Path.Combine(Path.GetTempPath(), "b3-pov-cancel-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var overrides = PersistenceOverrides(dataDir);
+            ulong algoIdNum = 0;
+
+            using (var f = TestAppFactory.WithOverrides(overrides))
+            using (var http = f.CreateClient())
+            {
+                var userToken = await f.LoginAsync(http);
+                var adminToken = await f.LoginAsync(http, "admin");
+                var now = DateTimeOffset.UtcNow;
+
+                var algoIdStr = await PostAlgo(http, userToken,
+                    PovBody(total: 400, start: now.AddSeconds(-1), end: now.AddSeconds(30),
+                        tickSeconds: 0.2, participationRate: 0.20m));
+                algoIdNum = ulong.Parse(algoIdStr);
+
+                var curve = f.Services.GetRequiredService<B3.Trading.Application.MarketData.VolumeCurveEstimator>();
+                curve.RecordTrade("PETR4", 1_500_000, now.AddSeconds(-1).AddMilliseconds(50));
+
+                var book = f.Services.GetRequiredService<WorkingOrderBook>();
+                var inFlight = await WaitForAnyChild(book, algoIdStr, TimeSpan.FromSeconds(5));
+
+                // Pre-cancel sanity: the engine populated PovProgressBook
+                // for the slice that fired.
+                var povBook = f.Services.GetRequiredService<PovProgressBook>();
+                Assert.NotNull(povBook.TryGet("default", algoIdNum));
+
+                var del = new HttpRequestMessage(HttpMethod.Delete, $"/algo/{algoIdStr}");
+                del.Headers.Authorization = new AuthenticationHeaderValue("Bearer", userToken);
+                var delResp = await http.SendAsync(del);
+                Assert.Equal(HttpStatusCode.Accepted, delResp.StatusCode);
+
+                await InjectEr(http, adminToken, inFlight.ClOrdId, "Canceled");
+                await WaitForAlgoStatus(http, userToken, algoIdStr, "Cancelled");
+
+                // RecordTerminalAsync runs after the dispatcher round-trip;
+                // poll briefly for the prune to be observable.
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                while (povBook.TryGet("default", algoIdNum) is not null && sw.Elapsed < TimeSpan.FromSeconds(2))
+                    await Task.Delay(20);
+                Assert.Null(povBook.TryGet("default", algoIdNum));
+
+                ResolveSnapshotService(f).TryTakeSnapshot();
+            }
+
+            using (var f2 = TestAppFactory.WithOverrides(overrides))
+            {
+                _ = f2.CreateClient();
+                var povBook2 = f2.Services.GetRequiredService<PovProgressBook>();
+                Assert.Null(povBook2.TryGet("default", algoIdNum));
+            }
+        }
+        finally
+        {
+            try { if (Directory.Exists(dataDir)) Directory.Delete(dataDir, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
+    [Fact]
+    public async Task Pov_CompletedTerminal_PrunesPovProgress_AndStaysPrunedAcrossRestart()
+    {
+        // Sibling of the Cancelled variant: drive the engine to
+        // terminal/Completed (filledQty == totalQty) and verify the same
+        // prune+snapshot+restart invariant. Reviewer asked for both
+        // terminal kinds.
+        var dataDir = Path.Combine(Path.GetTempPath(), "b3-pov-complete-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var overrides = PersistenceOverrides(dataDir);
+            ulong algoIdNum = 0;
+
+            using (var f = TestAppFactory.WithOverrides(overrides))
+            using (var http = f.CreateClient())
+            {
+                var userToken = await f.LoginAsync(http);
+                var adminToken = await f.LoginAsync(http, "admin");
+                var now = DateTimeOffset.UtcNow;
+
+                // Tiny total so a single slice can fill the parent —
+                // 200ms-pro-rated bucket of 1.5M ≈ 1000 cum-mv → 20% →
+                // 200 target, clamped by remaining (100) → 100. Single
+                // Fill ER takes the parent to Completed.
+                var algoIdStr = await PostAlgo(http, userToken,
+                    PovBody(total: 100, start: now.AddSeconds(-1), end: now.AddSeconds(30),
+                        tickSeconds: 0.2, participationRate: 0.20m));
+                algoIdNum = ulong.Parse(algoIdStr);
+
+                var curve = f.Services.GetRequiredService<B3.Trading.Application.MarketData.VolumeCurveEstimator>();
+                curve.RecordTrade("PETR4", 1_500_000, now.AddSeconds(-1).AddMilliseconds(50));
+
+                var book = f.Services.GetRequiredService<WorkingOrderBook>();
+                var child = await WaitForAnyChild(book, algoIdStr, TimeSpan.FromSeconds(5));
+
+                var povBook = f.Services.GetRequiredService<PovProgressBook>();
+                Assert.NotNull(povBook.TryGet("default", algoIdNum));
+
+                await InjectEr(http, adminToken, child.ClOrdId, "Fill", lastQty: child.Quantity);
+                await WaitForAlgoStatus(http, userToken, algoIdStr, "Completed");
+
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                while (povBook.TryGet("default", algoIdNum) is not null && sw.Elapsed < TimeSpan.FromSeconds(2))
+                    await Task.Delay(20);
+                Assert.Null(povBook.TryGet("default", algoIdNum));
+
+                ResolveSnapshotService(f).TryTakeSnapshot();
+            }
+
+            using (var f2 = TestAppFactory.WithOverrides(overrides))
+            {
+                _ = f2.CreateClient();
+                var povBook2 = f2.Services.GetRequiredService<PovProgressBook>();
+                Assert.Null(povBook2.TryGet("default", algoIdNum));
+            }
+        }
+        finally
+        {
+            try { if (Directory.Exists(dataDir)) Directory.Delete(dataDir, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
     // ───────────────────────── helpers ─────────────────────────
 
     private static async Task<string> PostAlgo(HttpClient http, string token, object body)
