@@ -310,7 +310,16 @@ public sealed record AlgoSnapshot(
     long? VwapTickIntervalTicks = null,
     decimal? VwapSliceMaxPct = null,
     decimal? VwapPriceLimit = null,
-    decimal? VwapParticipationCap = null);
+    decimal? VwapParticipationCap = null,
+    // Q3.2 (#282) — POV fields, mirror the VWAP block.
+    DateTimeOffset? PovStartUtc = null,
+    DateTimeOffset? PovEndUtc = null,
+    string? PovChildOrderType = null,
+    decimal? PovChildPrice = null,
+    decimal? PovParticipationRate = null,
+    long? PovTickIntervalTicks = null,
+    decimal? PovPriceLimit = null,
+    long? PovMinSliceQty = null);
 
 public sealed record PositionSnapshot(
     string EndClientId,

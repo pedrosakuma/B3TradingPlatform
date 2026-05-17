@@ -27,6 +27,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(AlgoCancelRequestedEvent), "algo.cancel-requested")]
 [JsonDerivedType(typeof(AlgoTerminalStateRecordedEvent), "algo.terminal")]
 [JsonDerivedType(typeof(AlgoVwapSlicedEvent), "algo.vwap.sliced")]
+[JsonDerivedType(typeof(AlgoPovSlicedEvent), "algo.pov.sliced")]
 [JsonDerivedType(typeof(OrderStaledEvent), "order.staled")]
 [JsonDerivedType(typeof(OrderStaleClearedEvent), "order.stale-cleared")]
 [JsonDerivedType(typeof(UserBotCredentialCreatedEvent), "userbot.cred.created")]
@@ -278,7 +279,7 @@ public sealed record AlgoCreatedEvent : WalEvent
     public required string Symbol { get; init; }
     public required ulong SecurityId { get; init; }
     public required string Side { get; init; }
-    public required string Type { get; init; }   // "Iceberg" | "Twap"
+    public required string Type { get; init; }   // "Iceberg" | "Twap" | "Vwap" | "Pov"
     public required long TotalQuantity { get; init; }
     public required DateTimeOffset CreatedAtUtc { get; init; }
     /// <summary>
@@ -306,6 +307,18 @@ public sealed record AlgoCreatedEvent : WalEvent
     public decimal? VwapSliceMaxPct { get; init; }
     public decimal? VwapPriceLimit { get; init; }
     public decimal? VwapParticipationCap { get; init; }
+
+    // Q3.2 (#282) — POV fields. Mirror the VWAP block above; only the
+    // block matching <see cref="Type"/> = "Pov" is populated. Additive —
+    // older replays / snapshots without these fields stay valid.
+    public DateTimeOffset? PovStartUtc { get; init; }
+    public DateTimeOffset? PovEndUtc { get; init; }
+    public string? PovChildOrderType { get; init; }   // "Limit" | "Market"
+    public decimal? PovChildPrice { get; init; }
+    public decimal? PovParticipationRate { get; init; }
+    public long? PovTickIntervalTicks { get; init; }
+    public decimal? PovPriceLimit { get; init; }
+    public long? PovMinSliceQty { get; init; }
 }
 
 /// <summary>
@@ -351,6 +364,26 @@ public sealed record AlgoVwapSlicedEvent : WalEvent
     public required string FirmId { get; init; }
     public required int SliceSeq { get; init; }
     public required long TargetCumQty { get; init; }
+    public required long ExecutedCum { get; init; }
+    public required long SliceQty { get; init; }
+    public required DateTimeOffset PlannedAtUtc { get; init; }
+}
+
+/// <summary>
+/// Q3.2 (#282). Per-slice audit envelope for POV parents — captures the
+/// market-volume baseline and the resulting share at slice-emit time.
+/// NOT replayed for state reconstruction (the slice itself is recorded
+/// via the child <see cref="OrderSubmittedEvent"/>, same as VWAP); the
+/// engine treats this event as observability-only so a future omission
+/// of the WAL write would not desynchronise recovery. Mirrors
+/// <see cref="AlgoVwapSlicedEvent"/>.
+/// </summary>
+public sealed record AlgoPovSlicedEvent : WalEvent
+{
+    public required ulong AlgoId { get; init; }
+    public required string FirmId { get; init; }
+    public required int SliceSeq { get; init; }
+    public required long CumMarketVolume { get; init; }
     public required long ExecutedCum { get; init; }
     public required long SliceQty { get; init; }
     public required DateTimeOffset PlannedAtUtc { get; init; }

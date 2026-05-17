@@ -752,6 +752,15 @@ public sealed class EventReplayer
                 ac.VwapSliceMaxPct,
                 ac.VwapPriceLimit,
                 ac.VwapParticipationCap),
+            AlgoType.Pov => new PovParameters(
+                ac.PovStartUtc ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing PovStartUtc."),
+                ac.PovEndUtc ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing PovEndUtc."),
+                Enum.Parse<OrderType>(ac.PovChildOrderType ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing PovChildOrderType."), ignoreCase: true),
+                ac.PovChildPrice,
+                ac.PovParticipationRate ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing PovParticipationRate."),
+                TimeSpan.FromTicks(ac.PovTickIntervalTicks ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing PovTickIntervalTicks.")),
+                ac.PovPriceLimit,
+                ac.PovMinSliceQty ?? 1L),
             _ => throw new InvalidOperationException($"Unknown algo type: {ac.Type}"),
         };
         _algos.TryAdd(new Algo(ac.AlgoId, owner, ac.FirmId, ac.Symbol, ac.SecurityId,

@@ -304,6 +304,107 @@ public class AlgoRecoveryTests : IDisposable
     }
 
     [Fact]
+    public async Task PovAlgo_ReplayedFromWal_ReproduceParentAggregate()
+    {
+        // Mirrors VwapAlgo_ReplayedFromWal_ReproduceParentAggregate for
+        // POV (Q3.2 / #282): the AlgoCreatedEvent POV block + the parent
+        // cancel + terminal events round-trip through a cold-boot WAL
+        // replay back into an AlgoBook with the same shape. Also exercises
+        // the new <see cref="AlgoPovSlicedEvent"/> observability envelope.
+        var createdAt = new DateTimeOffset(2026, 6, 7, 13, 0, 0, TimeSpan.Zero);
+        var povStart = createdAt;
+        var povEnd = createdAt.AddMinutes(30);
+        var terminalAt = createdAt.AddSeconds(5);
+        var tick = TimeSpan.FromSeconds(5);
+
+        await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
+        {
+            var (book, ownership, killSwitch, processor, algos, dispatcher) = Build(store);
+
+            dispatcher.Dispatch(
+                new AlgoCreatedEvent
+                {
+                    AlgoId = 400UL,
+                    EndClientId = "dave",
+                    FirmId = "TEST",
+                    Symbol = "PETR4",
+                    SecurityId = 4321UL,
+                    Side = "Buy",
+                    Type = "Pov",
+                    TotalQuantity = 5000,
+                    CreatedAtUtc = createdAt,
+                    PovStartUtc = povStart,
+                    PovEndUtc = povEnd,
+                    PovChildOrderType = "Limit",
+                    PovChildPrice = 30m,
+                    PovParticipationRate = 0.15m,
+                    PovTickIntervalTicks = tick.Ticks,
+                    PovPriceLimit = 31m,
+                    PovMinSliceQty = 10,
+                },
+                () => algos.TryAdd(new Algo(400UL, new EndClientId("dave"), "TEST", "PETR4", 4321UL,
+                    OrderSide.Buy, AlgoType.Pov, 5000,
+                    new PovParameters(povStart, povEnd, OrderType.Limit, 30m, 0.15m, tick, 31m, 10), createdAt)));
+
+            dispatcher.Dispatch(
+                new AlgoPovSlicedEvent
+                {
+                    AlgoId = 400UL,
+                    FirmId = "TEST",
+                    SliceSeq = 0,
+                    CumMarketVolume = 1000,
+                    ExecutedCum = 0,
+                    SliceQty = 150,
+                    PlannedAtUtc = povStart,
+                },
+                () => { /* observability-only: no aggregate mutation */ });
+
+            dispatcher.Dispatch(
+                new AlgoCancelRequestedEvent { AlgoId = 400UL, FirmId = "TEST", ActorUserId = "ops" },
+                () => algos.TryGet("TEST", 400UL, out var a).Then(() => a!.RequestCancel()));
+
+            dispatcher.Dispatch(
+                new AlgoTerminalStateRecordedEvent
+                {
+                    AlgoId = 400UL,
+                    FirmId = "TEST",
+                    Status = "Cancelled",
+                    Reason = "UserCancelled",
+                    AtUtc = terminalAt,
+                },
+                () => algos.TryGet("TEST", 400UL, out var a).Then(() =>
+                    a!.RecordTerminal(AlgoStatus.Cancelled, AlgoTerminalReason.UserCancelled, terminalAt)));
+        }
+
+        // Cold-boot replay.
+        await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
+        {
+            var (book, ownership, killSwitch, processor, algos, _) = Build(store);
+            var algoIds = new AlgoIdRegistry();
+            var snapshotter = new StateSnapshotter(book, new PositionKeeper(), killSwitch, new SymbolHaltService(), new SessionPhaseService(), new ClOrdIdPrefixRegistry(), ownership, algos, algoIds, new CashLedger());
+            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(), new SessionPhaseService(), processor, algos, new ClOrdIdPrefixRegistry(), new AlgoIdRegistry());
+            var recovery = new PersistenceRecovery(store, snapshotter, replayer,
+                new SnapshotStore(_root, "test"), NullLogger<PersistenceRecovery>.Instance);
+            await recovery.RunAsync();
+
+            Assert.True(algos.TryGet("TEST", 400UL, out var algo) && algo is not null);
+            Assert.Equal(AlgoStatus.Cancelled, algo!.Status);
+            Assert.Equal(AlgoTerminalReason.UserCancelled, algo.TerminalReason);
+            Assert.Equal(terminalAt, algo.TerminalAtUtc);
+            Assert.Equal(AlgoType.Pov, algo.Type);
+            var pp = Assert.IsType<PovParameters>(algo.Parameters);
+            Assert.Equal(povStart, pp.StartUtc);
+            Assert.Equal(povEnd, pp.EndUtc);
+            Assert.Equal(OrderType.Limit, pp.ChildOrderType);
+            Assert.Equal(30m, pp.ChildPrice);
+            Assert.Equal(0.15m, pp.ParticipationRate);
+            Assert.Equal(tick, pp.TickInterval);
+            Assert.Equal(31m, pp.PriceLimit);
+            Assert.Equal(10L, pp.MinSliceQty);
+        }
+    }
+
+    [Fact]
     public void AlgoBook_EnumerateForOwner_ExcludesTerminalByDefault()
     {
         var algos = new AlgoBook();

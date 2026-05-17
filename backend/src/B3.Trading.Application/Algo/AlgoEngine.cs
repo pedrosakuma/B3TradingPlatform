@@ -260,7 +260,7 @@ public sealed class AlgoEngine : BackgroundService
         // dedupes per symbol so repeated calls (reactor re-evaluation,
         // multiple parents on the same symbol, WAL replay-driven
         // reconciliation) collapse to one SDK Subscribe per process.
-        if (algo.Type == AlgoType.Vwap && _volumePump is not null)
+        if ((algo.Type == AlgoType.Vwap || algo.Type == AlgoType.Pov) && _volumePump is not null)
         {
             await _volumePump.EnsureSubscribedAsync(algo.Symbol, ct).ConfigureAwait(false);
         }
@@ -356,6 +356,28 @@ public sealed class AlgoEngine : BackgroundService
                 rt.NextSliceSeq++;
             }
         }
+        else if (algo.Type == AlgoType.Pov && algo.Parameters is PovParameters pp)
+        {
+            // POV: mirrors VWAP — the engine is driven by periodic
+            // scheduler ticks, and the per-slot decision is purely
+            // reactive to observed cumulative market volume. Empty
+            // slots advance NextSliceSeq so recovery is unambiguous.
+            var now = _clock.GetUtcNow();
+            if (now >= pp.EndUtc)
+            {
+                await RecordTerminalAsync(algo, rt, AlgoStatus.Expired, AlgoTerminalReason.PovWindowExpired).ConfigureAwait(false);
+                return;
+            }
+            while (true)
+            {
+                var dueAt = PovPlan.PlannedAtUtc(pp.StartUtc, pp.TickInterval, rt.NextSliceSeq);
+                if (now < dueAt) return;
+                if (dueAt >= pp.EndUtc) return;
+                var (qty, _, _) = ComputePovSlice(algo, pp, dueAt);
+                if (qty > 0) break;
+                rt.NextSliceSeq++;
+            }
+        }
 
         await SubmitNextSliceAsync(algo, rt, ct).ConfigureAwait(false);
     }
@@ -435,6 +457,15 @@ public sealed class AlgoEngine : BackgroundService
                     }
                     return;
                 }
+                if (algo.Type == AlgoType.Pov && algo.Parameters is PovParameters ppFilled)
+                {
+                    // POV: mirror VWAP — opportunistic, scheduler-driven.
+                    if (_clock.GetUtcNow() >= ppFilled.EndUtc)
+                    {
+                        await RecordTerminalAsync(algo, rt, AlgoStatus.Expired, AlgoTerminalReason.PovWindowExpired).ConfigureAwait(false);
+                    }
+                    return;
+                }
                 await SubmitNextSliceAsync(algo, rt, ct).ConfigureAwait(false);
                 return;
 
@@ -461,6 +492,10 @@ public sealed class AlgoEngine : BackgroundService
                 {
                     await RecordTerminalAsync(algo, rt, AlgoStatus.Expired, AlgoTerminalReason.VwapWindowExpired).ConfigureAwait(false);
                 }
+                else if (IsPovWindowExpired(algo))
+                {
+                    await RecordTerminalAsync(algo, rt, AlgoStatus.Expired, AlgoTerminalReason.PovWindowExpired).ConfigureAwait(false);
+                }
                 else
                 {
                     // Venue cancelled the child without operator request
@@ -484,6 +519,11 @@ public sealed class AlgoEngine : BackgroundService
                     await RecordTerminalAsync(algo, rt, AlgoStatus.Expired, AlgoTerminalReason.VwapWindowExpired).ConfigureAwait(false);
                     return;
                 }
+                if (IsPovWindowExpired(algo))
+                {
+                    await RecordTerminalAsync(algo, rt, AlgoStatus.Expired, AlgoTerminalReason.PovWindowExpired).ConfigureAwait(false);
+                    return;
+                }
                 await RecordTerminalAsync(algo, rt, AlgoStatus.Suspended, AlgoTerminalReason.RiskRejected).ConfigureAwait(false);
                 return;
         }
@@ -498,6 +538,11 @@ public sealed class AlgoEngine : BackgroundService
         algo.Type == AlgoType.Vwap
         && algo.Parameters is VwapParameters vp
         && _clock.GetUtcNow() >= vp.EndUtc;
+
+    private bool IsPovWindowExpired(Algo algo) =>
+        algo.Type == AlgoType.Pov
+        && algo.Parameters is PovParameters pp
+        && _clock.GetUtcNow() >= pp.EndUtc;
 
     private async Task OnCancelRequestedAsync(Algo algo, AlgoParentRuntime rt, CancellationToken ct)
     {
@@ -553,11 +598,12 @@ public sealed class AlgoEngine : BackgroundService
         var (sliceQty, slicePrice) = ComputeNextSlice(algo);
         if (sliceQty <= 0)
         {
-            if (algo.Type == AlgoType.Vwap)
+            if (algo.Type == AlgoType.Vwap || algo.Type == AlgoType.Pov)
             {
-                // VWAP: empty slot — the parent is ahead of the curve.
-                // Advance NextSliceSeq so the next scheduler tick
-                // evaluates the next slot. Do NOT mark terminal.
+                // VWAP/POV: empty slot — the parent is ahead of the
+                // curve (VWAP) or there is insufficient market volume
+                // yet (POV). Advance NextSliceSeq so the next scheduler
+                // tick evaluates the next slot. Do NOT mark terminal.
                 rt.NextSliceSeq++;
                 return;
             }
@@ -573,6 +619,7 @@ public sealed class AlgoEngine : BackgroundService
             IcebergParameters => OrderType.Limit,
             TwapParameters tp => tp.ChildOrderType,
             VwapParameters vp => vp.ChildOrderType,
+            PovParameters pp => pp.ChildOrderType,
             _ => OrderType.Limit,
         };
 
@@ -588,6 +635,19 @@ public sealed class AlgoEngine : BackgroundService
             vwapTargetCum = target;
             vwapExecutedCum = algo.FilledQuantity;
             MetricsRegistry.AlgoVwapTargetVsActualDiff.Record(gap);
+        }
+        long povCumMarketVolume = 0, povExecutedCum = 0;
+        DateTimeOffset povPlannedAt = default;
+        if (algo.Parameters is PovParameters ppForAudit)
+        {
+            povPlannedAt = PovPlan.PlannedAtUtc(ppForAudit.StartUtc, ppForAudit.TickInterval, sliceSeq);
+            var (_, _, cumMv) = ComputePovSlice(algo, ppForAudit, povPlannedAt);
+            povCumMarketVolume = cumMv;
+            povExecutedCum = algo.FilledQuantity;
+            if (cumMv > 0)
+            {
+                MetricsRegistry.AlgoPovActualParticipationRate.Record((double)povExecutedCum / cumMv);
+            }
         }
 
         for (var attempt = 0; attempt <= RetryDelays.Length; attempt++)
@@ -653,6 +713,30 @@ public sealed class AlgoEngine : BackgroundService
                         {
                             MetricsRegistry.WalBackpressure.Add(1,
                                 new KeyValuePair<string, object?>("call_site", "algo.vwap.sliced"));
+                        }
+                    }
+                    else if (algo.Type == AlgoType.Pov)
+                    {
+                        MetricsRegistry.AlgoPovSlicesEmitted.Add(1);
+                        try
+                        {
+                            _dispatcher.Dispatch(
+                                new AlgoPovSlicedEvent
+                                {
+                                    AlgoId = algo.AlgoId,
+                                    FirmId = algo.FirmId,
+                                    SliceSeq = sliceSeq,
+                                    CumMarketVolume = povCumMarketVolume,
+                                    ExecutedCum = povExecutedCum,
+                                    SliceQty = sliceQty,
+                                    PlannedAtUtc = povPlannedAt,
+                                },
+                                static () => { });
+                        }
+                        catch (WalBackpressureException)
+                        {
+                            MetricsRegistry.WalBackpressure.Add(1,
+                                new KeyValuePair<string, object?>("call_site", "algo.pov.sliced"));
                         }
                     }
                     _algoSink.PublishAlgoSnapshot(algo.Owner, algo.FirmId, algo.AlgoId);
@@ -744,6 +828,10 @@ public sealed class AlgoEngine : BackgroundService
         {
             MetricsRegistry.AlgoVwapCancelled.Add(1);
         }
+        else if (algo.Type == AlgoType.Pov && status == AlgoStatus.Cancelled)
+        {
+            MetricsRegistry.AlgoPovCancelled.Add(1);
+        }
         await Task.CompletedTask;
     }
 
@@ -778,6 +866,13 @@ public sealed class AlgoEngine : BackgroundService
                     var rt = _runtime[(algo.FirmId, algo.AlgoId)];
                     var dueAt = VwapPlan.PlannedAtUtc(vp.StartUtc, vp.TickInterval, rt.NextSliceSeq);
                     var (qty, price, _, _) = ComputeVwapSlice(algo, vp, dueAt);
+                    return (qty, price);
+                }
+            case PovParameters pp:
+                {
+                    var rt = _runtime[(algo.FirmId, algo.AlgoId)];
+                    var dueAt = PovPlan.PlannedAtUtc(pp.StartUtc, pp.TickInterval, rt.NextSliceSeq);
+                    var (qty, price, _) = ComputePovSlice(algo, pp, dueAt);
                     return (qty, price);
                 }
             default:
@@ -819,6 +914,30 @@ public sealed class AlgoEngine : BackgroundService
             recentMarketVolume);
         var price = VwapPlan.ClampPrice(vp.ChildPrice, vp.PriceLimit, algo.Side);
         return (qty, price, targetCum, gap);
+    }
+
+    /// <summary>
+    /// POV slice computation: ask the live volume estimator for the
+    /// cumulative market volume in <c>[startUtc, evaluateAtUtc)</c>,
+    /// derive the target executed cum, return the gap to fill.
+    /// Returns <c>(qty, price, cumMarketVolume)</c> so the emission
+    /// path can record the audit envelope without recomputing. Reuses
+    /// <see cref="VolumeCurveEstimator"/> so POV doesn't need a sibling
+    /// estimator — the bucket granularity (5 min default) is fine for
+    /// the issue's example windows (~1h).
+    /// </summary>
+    private (long Qty, decimal? Price, long CumMarketVolume) ComputePovSlice(
+        Algo algo, PovParameters pp, DateTimeOffset evaluateAtUtc)
+    {
+        long cumMv = _vwapCurve?.VolumeBetween(algo.Symbol, pp.StartUtc, evaluateAtUtc) ?? 0L;
+        var qty = PovPlan.SliceQty(
+            cumMv,
+            algo.FilledQuantity,
+            algo.RemainingQuantity,
+            pp.ParticipationRate,
+            pp.MinSliceQty);
+        var price = PovPlan.ClampPrice(pp.ChildPrice, pp.PriceLimit, algo.Side);
+        return (qty, price, cumMv);
     }
 
     private static double UniformCdf(DateTimeOffset start, DateTimeOffset end, DateTimeOffset at)
