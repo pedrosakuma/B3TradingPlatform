@@ -156,10 +156,115 @@ public sealed class FileEventStore : IEventStore
         {
             if (ct.IsCancellationRequested) yield break;
             if (seq <= sinceSeqExclusive) continue;
-            var evt = JsonSerializer.Deserialize(payload, JsonContext.WalEvent);
+            if (!TryDeserialize(payload, out var evt, out var unknownKind))
+            {
+                // Pass-2 review (#296) P1-B. Unknown discriminator
+                // (an event-kind added by a newer engine version that
+                // hasn't been taught to this binary yet). Skip with a
+                // structured warning so an older reader can still
+                // traverse a WAL written by a newer engine — the
+                // forward-compat contract documented on
+                // <see cref="WalEvent"/>. Genuine corruption for a
+                // KNOWN kind still surfaces as an exception below.
+                MetricsRegistry.WalUnknownKindSkipped.Add(1,
+                    new KeyValuePair<string, object?>("kind", unknownKind ?? "<missing>"));
+                _logger.LogWarning(
+                    "FileEventStore: skipping WAL record at seq={Seq} with unknown discriminator kind={Kind}; reader is older than the writer.",
+                    seq, unknownKind ?? "<missing>");
+                continue;
+            }
             if (evt is not null) yield return (seq, evt);
         }
         await Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Pass-2 review (#296) P1-B. Polymorphic deserialise that
+    /// distinguishes "unknown discriminator (forward-compat skip)"
+    /// from "JSON malformed for a known kind (replay-blocking
+    /// corruption)". Returns <c>true</c> when the payload was
+    /// successfully bound (<paramref name="evt"/> may still be null
+    /// if the source-gen converter chose to return null, in which
+    /// case the caller skips silently); returns <c>false</c> only
+    /// when the failure was a missing/unknown <c>kind</c> discriminator
+    /// in the JSON. Every other JsonException is rethrown so torn
+    /// segments and schema drift remain loud.
+    /// </summary>
+    internal static bool TryDeserialize(ReadOnlySpan<byte> payload, out WalEvent? evt, out string? unknownKind)
+    {
+        evt = null;
+        unknownKind = null;
+        try
+        {
+            evt = JsonSerializer.Deserialize(payload, JsonContext.WalEvent);
+            return true;
+        }
+        catch (JsonException)
+        {
+            // Inspect the raw JSON for the discriminator: if it's
+            // either missing or not in the known set, classify as
+            // forward-compat skip. Any other JsonException (a real
+            // schema/format problem on a known kind) re-throws.
+            if (TryExtractKind(payload, out var kind) && kind is not null && !KnownDiscriminators.Contains(kind))
+            {
+                unknownKind = kind;
+                return false;
+            }
+            if (kind is null)
+            {
+                unknownKind = null;
+                return false;
+            }
+            throw;
+        }
+    }
+
+    private static bool TryExtractKind(ReadOnlySpan<byte> payload, out string? kind)
+    {
+        kind = null;
+        try
+        {
+            var reader = new Utf8JsonReader(payload);
+            if (!reader.Read() || reader.TokenType != JsonTokenType.StartObject) return false;
+            while (reader.Read())
+            {
+                if (reader.TokenType == JsonTokenType.EndObject) return false;
+                if (reader.TokenType != JsonTokenType.PropertyName) continue;
+                var isKind = reader.ValueTextEquals("kind");
+                if (!reader.Read()) return false;
+                if (isKind && reader.TokenType == JsonTokenType.String)
+                {
+                    kind = reader.GetString();
+                    return true;
+                }
+                reader.Skip();
+            }
+        }
+        catch (JsonException)
+        {
+            // Malformed JSON — let the caller's re-throw path handle.
+        }
+        return false;
+    }
+
+    private static readonly HashSet<string> KnownDiscriminators = BuildKnownDiscriminators();
+
+    private static HashSet<string> BuildKnownDiscriminators()
+    {
+        // Derived from the JsonDerivedType attribute set on WalEvent.
+        // Reflection happens exactly once at first access — keeps the
+        // discriminator list in lock-step with the type declarations
+        // (no second source-of-truth that can drift).
+        var set = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var attr in typeof(WalEvent).GetCustomAttributes(typeof(System.Text.Json.Serialization.JsonDerivedTypeAttribute), inherit: false))
+        {
+            if (attr is System.Text.Json.Serialization.JsonDerivedTypeAttribute jda
+                && jda.TypeDiscriminator is string s)
+            {
+                set.Add(s);
+            }
+        }
+        return set;
     }
 
     /// <summary>

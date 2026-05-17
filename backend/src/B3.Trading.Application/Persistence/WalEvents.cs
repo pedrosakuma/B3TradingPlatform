@@ -6,9 +6,16 @@ namespace B3.Trading.Application.Persistence;
 /// <summary>
 /// Base type for every event written to the WAL. Each derived record is
 /// serialised as a single JSON object inside a length+CRC framed record on
-/// disk. The <see cref="JsonPolymorphicAttribute"/> discriminator keeps the
-/// schema explicit and forward-compatible: unknown subtypes are rejected
-/// loudly during recovery rather than silently mis-applied.
+/// disk. The <see cref="JsonPolymorphicAttribute"/> discriminator keeps
+/// the schema explicit and forward-compatible: an unknown subtype is
+/// <i>skipped with a structured warning</i> during recovery rather than
+/// crashing the reader — older binaries can therefore traverse WAL
+/// segments produced by newer engines (rolling deploys, downgrade paths,
+/// EOD materialisation of mixed-version days). See
+/// <see cref="B3.Trading.Infrastructure.Persistence.FileEventStore.ReadFromAsync"/>
+/// for the skip site. Genuine corruption (malformed JSON for a
+/// <i>known</i> kind, missing required fields, etc.) still surfaces as
+/// an exception — only the polymorphic discriminator is treated leniently.
 ///
 /// <para>
 /// Schema evolution rule: never rename fields, only add new optional ones.
@@ -475,6 +482,18 @@ public sealed record AlgoPeggedRepegStartedEvent : WalEvent
 /// replacement child. Replay clears the pending entry from
 /// <c>PeggedRepegBook</c> so post-restart state matches the
 /// in-memory steady-state (no pending repeg). Additive.
+///
+/// <para>Pass-2 review (#296) P1-A. <see cref="Aborted"/> distinguishes
+/// the normal cycle-completion path (<c>false</c>) from a roll-back
+/// caused by a failed gateway cancel mid-cycle (<c>true</c>): the
+/// engine had already persisted the Started marker and called
+/// <c>PeggedRepegBook.Set</c> but the wire-call to the venue
+/// failed, so no replacement child will be submitted. Replay
+/// handling is identical (clear the book entry) — the flag is
+/// audit-only so EOD / forensic tooling can tell apart "cycle
+/// succeeded" from "cycle aborted; engine will retry next tick".
+/// Field is optional: pre-existing Resolved events deserialise as
+/// <c>false</c>.</para>
 /// </summary>
 public sealed record AlgoPeggedRepegResolvedEvent : WalEvent
 {
@@ -482,6 +501,15 @@ public sealed record AlgoPeggedRepegResolvedEvent : WalEvent
     public required string FirmId { get; init; }
     public required ulong CancelledChildClOrdId { get; init; }
     public required DateTimeOffset AtUtc { get; init; }
+
+    /// <summary>
+    /// Pass-2 review (#296) P1-A. <c>true</c> when the cycle was
+    /// rolled back because the gateway cancel call failed after the
+    /// Started marker was persisted; <c>false</c> (default) for the
+    /// normal cancel-ack-then-replace flow. Additive — old segments
+    /// decode as <c>false</c>.
+    /// </summary>
+    public bool Aborted { get; init; }
 }
 
 /// <summary>

@@ -103,6 +103,17 @@ public static class MetricsRegistry
         Meter.CreateCounter<long>("trading.wal.backpressure");
     public static readonly Counter<long> WalSegmentsRotated =
         Meter.CreateCounter<long>("trading.wal.segments_rotated");
+    /// <summary>
+    /// Pass-2 review (#296) P1-B. Forward-compat skip counter: bumped
+    /// once per WAL record whose <c>kind</c> discriminator is not in
+    /// the reader's <c>JsonDerivedType</c> set. Non-zero means an
+    /// older binary is reading a WAL written by a newer engine — an
+    /// expected condition during rolling deploys, an alert condition
+    /// outside one. Tag <c>kind</c> carries the unknown discriminator
+    /// for forensic triage.
+    /// </summary>
+    public static readonly Counter<long> WalUnknownKindSkipped =
+        Meter.CreateCounter<long>("trading.wal.unknown_kind_skipped");
 
     // Snapshots / recovery
     public static readonly Counter<long> SnapshotsTaken =

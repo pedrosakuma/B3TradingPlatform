@@ -644,6 +644,108 @@ public class PeggedAlgoEndpointTests
         }
     }
 
+    [Fact]
+    public async Task Pegged_RecoveryReplaysRepegStartedEventFromWalTail()
+    {
+        // Pass-2 review (#296) P2-D. Sibling of Pegged_RecoveryPreservesRepegIntent
+        // that pins the WAL-tail replay path specifically. The original
+        // test snapshots AFTER AlgoPeggedRepegStartedEvent fires, so
+        // post-restart state comes from the snapshot's
+        // PeggedRepegBook — the AlgoPeggedRepegStartedEvent replay
+        // handler in StateSnapshotter.Apply is never exercised.
+        //
+        // Here we capture the snapshot BEFORE drifting the mid so the
+        // snapshot contains only the algo + child1 (no pending repeg
+        // entry). The drift then causes the engine to emit the cancel +
+        // AlgoPeggedRepegStartedEvent which lands ONLY in the WAL tail
+        // past snapshot.seq. Cold restart → snapshot restores the algo
+        // and the live child1; ReadFromAsync replays the
+        // AlgoPeggedRepegStartedEvent which writes into
+        // PeggedRepegBook; Reconcile then sees the still-live child
+        // and hydrates RepegPending + the sticky cancel-id marker.
+        // The post-restart Cancelled ER must route through
+        // SubmitNextSliceAsync, not VenueCancelled-suspension.
+        var dataDir = Path.Combine(Environment.CurrentDirectory, "test-data",
+            "b3-pegged-repeg-wal-tail-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var overrides = PersistenceOverrides(dataDir);
+            ulong algoIdNum = 0;
+            ulong child1ClOrdId = 0;
+
+            using (var f = TestAppFactory.WithOverrides(overrides))
+            using (var http = f.CreateClient())
+            {
+                var token = await f.LoginAsync(http);
+                var cache = f.Services.GetRequiredService<PegBookTopCache>();
+                cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+                var algoIdStr = await PostAlgo(http, token,
+                    PeggedBody(total: 100, pegRef: "Mid", offsetTicks: 0,
+                        repegMs: 100, tickSize: 0.5m));
+                algoIdNum = ulong.Parse(algoIdStr);
+
+                var book = f.Services.GetRequiredService<WorkingOrderBook>();
+                var child1 = await WaitForAnyChild(book, algoIdStr, TimeSpan.FromSeconds(3));
+                child1ClOrdId = child1.ClOrdId;
+                Assert.Equal(30.0m, child1.Price);
+
+                // Capture the snapshot BEFORE the repeg cycle starts so
+                // PeggedRepegBook is empty in the snapshot. Repeg
+                // intent is therefore only recoverable via WAL tail.
+                ResolveSnapshotService(f).TryTakeSnapshot();
+
+                // Now drift the mid → engine cancels child1 + persists
+                // AlgoPeggedRepegStartedEvent (post-snapshot WAL tail).
+                cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+                var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+                await WaitFor(() => mock.SubmittedCancels.Any(c => c.OrigClOrdId == child1ClOrdId),
+                    TimeSpan.FromSeconds(3), "engine did not emit the cancel after the drift");
+
+                // Do NOT inject the Cancelled ER, do NOT take another
+                // snapshot — the Started event must survive on the WAL
+                // tail alone.
+            }
+
+            using (var f2 = TestAppFactory.WithOverrides(overrides))
+            using (var http2 = f2.CreateClient())
+            {
+                var token = await f2.LoginAsync(http2);
+                var adminToken = await f2.LoginAsync(http2, "admin");
+
+                // The PeggedRepegBook entry must have been rebuilt by
+                // the WAL replay (not the snapshot). Sanity-check the
+                // book directly so a regression that drops the replay
+                // handler fails loudly here, not through the more
+                // indirect "parent gets suspended" path below.
+                var repegBook = f2.Services.GetRequiredService<PeggedRepegBook>();
+                var pending = repegBook.TryGet("default", algoIdNum);
+                Assert.NotNull(pending);
+                Assert.Equal(child1ClOrdId, pending!.Value.CancelledChildClOrdId);
+
+                // Re-seed cache so SubmitNextSlice can price the
+                // replacement (cache is volatile across restart).
+                var cache2 = f2.Services.GetRequiredService<PegBookTopCache>();
+                cache2.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+
+                await InjectEr(http2, adminToken, child1ClOrdId, "Canceled");
+
+                var book2 = f2.Services.GetRequiredService<WorkingOrderBook>();
+                var child2 = await WaitForChildOtherThan(book2, algoIdNum.ToString(), child1ClOrdId,
+                    TimeSpan.FromSeconds(5));
+                Assert.Equal(31.0m, child2.Price);
+
+                var snap = await GetAlgo(http2, token, algoIdNum.ToString());
+                Assert.Equal("Working", snap.GetProperty("status").GetString());
+                Assert.Equal("None", snap.GetProperty("terminalReason").GetString());
+            }
+        }
+        finally
+        {
+            try { if (Directory.Exists(dataDir)) Directory.Delete(dataDir, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
     // ───────────────────────── helpers ─────────────────────────
 
     private static async Task<string> PostAlgo(HttpClient http, string token, object body)

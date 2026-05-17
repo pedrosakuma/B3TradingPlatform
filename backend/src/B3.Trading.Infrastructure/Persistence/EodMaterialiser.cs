@@ -56,7 +56,14 @@ public sealed class EodMaterialiser : IEodMaterialiser
             {
                 report.RecordCount++;
                 sha.TransformBlock(payload, 0, payload.Length, null, 0);
-                var evt = JsonSerializer.Deserialize(payload, WalEventJsonContext.Default.WalEvent);
+                if (!FileEventStore.TryDeserialize(payload, out var evt, out _))
+                {
+                    // Pass-2 review (#296) P1-B. Unknown discriminator
+                    // (newer engine wrote this WAL). EOD counts the
+                    // record + SHA bytes — both are kind-agnostic —
+                    // but doesn't classify it into any per-kind bucket.
+                    continue;
+                }
                 switch (evt)
                 {
                     case OrderSubmittedEvent: report.OrderSubmittedCount++; break;

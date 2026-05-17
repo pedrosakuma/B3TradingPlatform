@@ -42,6 +42,76 @@ public class FileEventStoreTests : IDisposable
     };
 
     [Fact]
+    public async Task ReadFromAsync_WithUnknownDiscriminator_SkipsAndContinues()
+    {
+        // Pass-2 review (#296) P1-B. An older binary reading a WAL
+        // written by a newer engine must skip records whose `kind`
+        // discriminator the reader does not recognise, log a warning,
+        // and continue — not throw and abort recovery. Records with
+        // KNOWN kinds before and after the unknown one must round-trip.
+        var opts = OptsForTest();
+        var walDir = Path.Combine(_root, "test", "wal", "2026-01-01");
+        Directory.CreateDirectory(walDir);
+        var logPath = Path.Combine(walDir, "000.log");
+        var idxPath = Path.Combine(walDir, "000.idx");
+
+        var known1 = JsonSerializer.SerializeToUtf8Bytes<WalEvent>(NewOrder(0), WalEventJsonContext.Default.WalEvent);
+        var unknown = Encoding.UTF8.GetBytes(
+            """{"kind":"algo.future.event-from-tomorrow","newField":"hello","timestampUtc":"2026-01-01T10:00:00+00:00"}""");
+        var known3 = JsonSerializer.SerializeToUtf8Bytes<WalEvent>(NewOrder(2), WalEventJsonContext.Default.WalEvent);
+
+        await using (var writer = new SegmentWriter(logPath, idxPath,
+            opts.IndexEveryNRecords, opts.IndexEveryNBytes, fsyncOnFlush: false))
+        {
+            writer.Append(1, known1, 0);
+            writer.Append(2, unknown, 0);
+            writer.Append(3, known3, 0);
+            writer.Flush();
+        }
+
+        await using var store = new FileEventStore(opts, NullLogger<FileEventStore>.Instance);
+        var seenSeqs = new List<long>();
+        var seenClOrdIds = new List<ulong>();
+        await foreach (var (seq, evt) in store.ReadFromAsync(0))
+        {
+            seenSeqs.Add(seq);
+            seenClOrdIds.Add(Assert.IsType<OrderSubmittedEvent>(evt).ClOrdId);
+        }
+        Assert.Equal(new long[] { 1, 3 }, seenSeqs.ToArray());
+        Assert.Equal(new ulong[] { 1, 3 }, seenClOrdIds.ToArray());
+    }
+
+    [Fact]
+    public async Task ReadFromAsync_WithMalformedKnownKind_StillThrows()
+    {
+        // Pass-2 review (#296) P1-B. Forward-compat skip applies ONLY
+        // to unknown discriminators. A malformed payload for a KNOWN
+        // kind (here: required `endClientId` missing on an
+        // order.submitted) must continue to fail loudly — silent skip
+        // would mask real schema drift / corruption.
+        var opts = OptsForTest();
+        var walDir = Path.Combine(_root, "test", "wal", "2026-01-01");
+        Directory.CreateDirectory(walDir);
+        var logPath = Path.Combine(walDir, "000.log");
+        var idxPath = Path.Combine(walDir, "000.idx");
+
+        var malformed = Encoding.UTF8.GetBytes(
+            """{"kind":"order.submitted","timestampUtc":"2026-01-01T10:00:00+00:00"}""");
+        await using (var writer = new SegmentWriter(logPath, idxPath,
+            opts.IndexEveryNRecords, opts.IndexEveryNBytes, fsyncOnFlush: false))
+        {
+            writer.Append(1, malformed, 0);
+            writer.Flush();
+        }
+
+        await using var store = new FileEventStore(opts, NullLogger<FileEventStore>.Instance);
+        await Assert.ThrowsAnyAsync<JsonException>(async () =>
+        {
+            await foreach (var _ in store.ReadFromAsync(0)) { }
+        });
+    }
+
+    [Fact]
     public async Task Append_then_ReadFrom_RoundTripsEventsInSeqOrder()
     {
         await using (var store = new FileEventStore(OptsForTest(), NullLogger<FileEventStore>.Instance))

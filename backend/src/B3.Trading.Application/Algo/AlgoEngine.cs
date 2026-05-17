@@ -212,6 +212,7 @@ public sealed class AlgoEngine : BackgroundService
             // entries restored from a snapshot written by an older
             // engine version that didn't remove on terminal.
             PruneOrphanPovProgress(algos);
+            PrunePeggedRepegBookOrphans(algos);
             return;
         }
 
@@ -316,6 +317,37 @@ public sealed class AlgoEngine : BackgroundService
 
         _logger.LogInformation("AlgoEngine reconciliation enqueued {Count} non-terminal parents.", algos.Count);
         PruneOrphanPovProgress(algos);
+        PrunePeggedRepegBookOrphans(algos);
+    }
+
+    /// <summary>
+    /// Pass-2 review (#296) P2-C — mirror of
+    /// <see cref="PruneOrphanPovProgress"/> for Pegged. Iterate every
+    /// entry in <see cref="PeggedRepegBook"/> and drop those whose
+    /// parent algo is absent from the non-terminal live set. Covers
+    /// (a) entries persisted by a previous engine version that didn't
+    /// <c>Remove</c> on terminal, (b) entries whose parent was
+    /// concurrently terminated/expired between snapshot capture and
+    /// restart, and (c) entries left behind by the cancel-fail
+    /// roll-back path (P1-A) if the Resolved event hit WAL
+    /// backpressure. Idempotent and cheap (one pass over a small
+    /// map).
+    /// </summary>
+    private void PrunePeggedRepegBookOrphans(IReadOnlyCollection<Algo> liveAlgos)
+    {
+        if (_peggedRepeg is null) return;
+        var live = new HashSet<(string FirmId, ulong AlgoId)>(liveAlgos.Count);
+        foreach (var a in liveAlgos)
+        {
+            live.Add((a.FirmId, a.AlgoId));
+        }
+        foreach (var (firmId, algoId, _) in _peggedRepeg.Snapshot().ToList())
+        {
+            if (!live.Contains((firmId, algoId)))
+            {
+                _peggedRepeg.Remove(firmId, algoId);
+            }
+        }
     }
 
     /// <summary>
@@ -1295,7 +1327,14 @@ public sealed class AlgoEngine : BackgroundService
         {
             MetricsRegistry.WalBackpressure.Add(1,
                 new KeyValuePair<string, object?>("call_site", "algo.pegged.repeg-started"));
+            // Pass-2 review (#296) P1-A. Started never made it into the
+            // WAL → the dispatch apply (PeggedRepegBook.Set) never ran
+            // either, so the only state to roll back is the in-memory
+            // marker/throttle pair we set above. PeggedLastEvalUtc stays
+            // at `now` so the next tick honours the RepegInterval rather
+            // than hammering a backpressured WAL.
             rt.RepegPending = false;
+            rt.LastRepegCancelledChildId = null;
             return;
         }
 
@@ -1334,12 +1373,55 @@ public sealed class AlgoEngine : BackgroundService
         }
         catch (Exception ex)
         {
-            // Cancel failed — clear the pending flag and bump the
-            // failure counter; the next scheduler tick will retry.
+            // Pass-2 review (#296) P1-A. Cancel failed AFTER we persisted
+            // the Started marker + populated PeggedRepegBook. If we only
+            // cleared RepegPending here (the old behaviour) the sticky
+            // LastRepegCancelledChildId + book entry would persist and a
+            // future GENUINE venue cancel for this child id would be
+            // mis-classified as "expected" by OnChildErAsync — swallowed
+            // instead of suspending the parent. Roll back atomically:
+            //
+            //   1. Emit a Resolved(Aborted=true) event so WAL replay
+            //      clears the book entry on a post-restart recovery
+            //      (in-memory clear is not enough — a snapshot taken
+            //      before the failure would otherwise restore the
+            //      orphan).
+            //   2. Clear in-memory marker + book entry regardless of
+            //      whether the Resolved event made it to the WAL — the
+            //      no-future-false-positive invariant trumps replay
+            //      convergence in this corner case, and Reconcile's
+            //      orphan-prune pass (P2-C) catches any drift on the
+            //      next restart anyway.
             rt.RepegPending = false;
+            try
+            {
+                var firmIdSnap = algo.FirmId;
+                var algoIdSnap = algo.AlgoId;
+                var cancelledIdSnap = liveChildClOrdId;
+                var book = _peggedRepeg;
+                _dispatcher.Dispatch(
+                    new AlgoPeggedRepegResolvedEvent
+                    {
+                        AlgoId = algo.AlgoId,
+                        FirmId = algo.FirmId,
+                        CancelledChildClOrdId = liveChildClOrdId,
+                        AtUtc = _clock.GetUtcNow(),
+                        Aborted = true,
+                    },
+                    () => book?.Remove(firmIdSnap, algoIdSnap));
+            }
+            catch (WalBackpressureException)
+            {
+                MetricsRegistry.WalBackpressure.Add(1,
+                    new KeyValuePair<string, object?>("call_site", "algo.pegged.repeg-resolved-aborted"));
+                // Dispatch apply (book.Remove) never ran — fall through
+                // to the unconditional in-memory cleanup below.
+                _peggedRepeg?.Remove(algo.FirmId, algo.AlgoId);
+            }
+            rt.LastRepegCancelledChildId = null;
             MetricsRegistry.AlgoPeggedRepegFailed.Add(1);
             _logger.LogWarning(ex,
-                "AlgoEngine pegged repeg cancel failed for algo {Firm}/{AlgoId} child {Child}; will retry next tick.",
+                "AlgoEngine pegged repeg cancel failed for algo {Firm}/{AlgoId} child {Child}; rolled back marker, will retry next tick.",
                 algo.FirmId, algo.AlgoId, liveChildClOrdId);
         }
     }
