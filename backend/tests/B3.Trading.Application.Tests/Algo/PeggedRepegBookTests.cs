@@ -157,6 +157,98 @@ public class PeggedRepegBookTests
         Assert.Equal(1, logger.WarningCount);
     }
 
+    /// <summary>
+    /// Pass-8 review (#296) P2. The eviction and the per-ring
+    /// "one-shot warn already emitted" latch MUST flip as a single
+    /// atomic step under the ring's lock. Otherwise a
+    /// <see cref="PeggedRepegBook.SnapshotHistory"/> call interleaved
+    /// between <c>ring.Add</c> and an external <c>MarkEvictionLogged</c>
+    /// could capture <c>EvictionLogged=false</c> for a ring whose
+    /// eviction had already happened — causing a duplicate warn
+    /// after a restart that re-hydrated the snapshot.
+    ///
+    /// <para>
+    /// Exercises the invariant directly on
+    /// <see cref="CancelledChildRing"/>: fill to the cap, push one
+    /// more entry to trigger the eviction, then immediately call
+    /// <see cref="CancelledChildRing.SnapshotWithLatch"/> WITHOUT any
+    /// external <see cref="CancelledChildRing.MarkEvictionLogged"/>
+    /// call. The snapshot must already report
+    /// <c>EvictionLogged=true</c> — proving the latch flip is
+    /// encapsulated inside <c>Add</c> rather than left to a
+    /// separately-scheduled caller step.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void Add_FlipsEvictionLatchAtomicallyWithEviction_NoExternalMarkRequired()
+    {
+        var cap = PeggedRepegBook.CancelledHistoryCap;
+        var ring = new CancelledChildRing(cap);
+
+        for (ulong i = 1; i <= (ulong)cap; i++)
+        {
+            Assert.False(ring.Add(i, out var firstEviction),
+                "Adds at or below the cap must not evict.");
+            Assert.False(firstEviction);
+        }
+
+        // Snapshot BEFORE the first eviction: latch must still be false.
+        var preSnap = ring.SnapshotWithLatch();
+        Assert.False(preSnap.EvictionLogged);
+        Assert.Equal(cap, preSnap.Ids.Count);
+
+        // Trigger eviction. The latch MUST flip inside this Add call.
+        Assert.True(ring.Add((ulong)cap + 1, out var firstEvictionOnOverflow),
+            "Adding past the cap must report eviction.");
+        Assert.True(firstEvictionOnOverflow,
+            "The first eviction on a ring MUST report firstEviction=true so callers can emit the one-shot warn.");
+
+        // Critical assertion: snapshot WITHOUT any external
+        // MarkEvictionLogged() call must already see latch=true.
+        var postSnap = ring.SnapshotWithLatch();
+        Assert.True(postSnap.EvictionLogged,
+            "EvictionLogged MUST be observable as true immediately after the evicting Add returns, with no external latch flip required.");
+        Assert.Equal(cap, postSnap.Ids.Count);
+
+        // Subsequent evictions still report `true` for the evicted
+        // bool but firstEviction MUST stay false (latch already set).
+        Assert.True(ring.Add((ulong)cap + 2, out var firstEvictionOnSecond));
+        Assert.False(firstEvictionOnSecond,
+            "Only the first eviction may report firstEviction=true; subsequent ones suppress the warn.");
+    }
+
+    /// <summary>
+    /// Pass-8 review (#296) P2. End-to-end variant on
+    /// <see cref="PeggedRepegBook"/>: after the public
+    /// <see cref="PeggedRepegBook.MarkCancelledChild"/> call that
+    /// causes the first eviction returns, the very next
+    /// <see cref="PeggedRepegBook.SnapshotHistory"/> MUST observe
+    /// <c>EvictionLogged=true</c>. This pins the book-level wiring
+    /// (the per-parent ring's latch is what
+    /// <c>SnapshotHistory</c> reads) so a future refactor that
+    /// re-introduces an external latch-flip step is caught.
+    /// </summary>
+    [Fact]
+    public void MarkCancelledChild_SnapshotImmediatelyAfterEvictionSeesLatchedFlag()
+    {
+        const string firm = "TEST";
+        const ulong algoId = 13UL;
+        var cap = PeggedRepegBook.CancelledHistoryCap;
+        var book = new PeggedRepegBook();
+
+        for (ulong i = 1; i <= (ulong)cap; i++) book.MarkCancelledChild(firm, algoId, i);
+
+        // Pre-eviction snapshot: latch must be false.
+        Assert.False(book.SnapshotHistory().Single().EvictionLogged);
+
+        // First eviction.
+        book.MarkCancelledChild(firm, algoId, (ulong)cap + 1);
+
+        // Without any intervening "mark logged" call, the snapshot
+        // must already see the latch.
+        Assert.True(book.SnapshotHistory().Single().EvictionLogged);
+    }
+
     private sealed class CountingLogger<T> : ILogger<T>
     {
         private int _warnings;

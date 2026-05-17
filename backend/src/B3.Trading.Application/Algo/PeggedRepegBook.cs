@@ -114,7 +114,7 @@ public sealed class PeggedRepegBook
     public void MarkCancelledChild(string firmId, ulong algoId, ulong childClOrdId)
     {
         var ring = _history.GetOrAdd((firmId, algoId), static _ => new CancelledChildRing(CancelledHistoryCap));
-        if (ring.Add(childClOrdId))
+        if (ring.Add(childClOrdId, out var firstEviction))
         {
             // Pass-6 review (#296) P2. Ring eviction is silent w.r.t.
             // the engine: the oldest child id falls out and any
@@ -123,8 +123,18 @@ public sealed class PeggedRepegBook
             // it observable with a counter, and emit a single warn
             // per parent to surface the situation without spamming
             // logs once we're past the cap.
+            //
+            // Pass-8 review (#296) P2. The latch flip happens INSIDE
+            // <see cref="CancelledChildRing.Add"/> under the ring's
+            // own lock so that any concurrent
+            // <see cref="CancelledChildRing.SnapshotWithLatch"/>
+            // observes the eviction and the EvictionLogged=true latch
+            // as a single atomic step — eliminating the window where
+            // a snapshot captured EvictionLogged=false despite the
+            // eviction having already happened (which would cause a
+            // duplicate warn after a restart).
             MetricsRegistry.AlgoPeggedRepegDedupRingEvicted.Add(1);
-            if (!ring.MarkEvictionLogged())
+            if (firstEviction)
             {
                 _logger?.LogWarning(
                     "PeggedRepegBook dedup ring overflow on firm {FirmId} algo {AlgoId}: oldest cancelled-child id evicted from {Cap}-entry FIFO. Late terminal ERs for evicted children will fall through to VenueCancelled; consider raising CancelledHistoryCap if this is sustained.",
@@ -191,7 +201,7 @@ public sealed class PeggedRepegBook
         foreach (var r in rows)
         {
             var ring = new CancelledChildRing(CancelledHistoryCap);
-            foreach (var id in r.ChildClOrdIds) ring.Add(id);
+            foreach (var id in r.ChildClOrdIds) ring.Add(id, out _);
             if (r.EvictionLogged) ring.MarkEvictionLogged();
             _history[(r.FirmId, r.AlgoId)] = ring;
         }
@@ -225,11 +235,27 @@ internal sealed class CancelledChildRing
     /// the insert caused at least one older entry to be evicted to
     /// honour the cap (so callers can surface eviction via metrics /
     /// logs). Duplicates and no-op inserts return <c>false</c>.
+    ///
+    /// <para>
+    /// Pass-8 review (#296) P2. <paramref name="firstEviction"/> is
+    /// set to <c>true</c> iff this call BOTH evicted at least one
+    /// entry AND was the first call on this ring to do so — i.e.
+    /// the per-ring one-shot eviction-warn latch was flipped from
+    /// <c>false</c> to <c>true</c> as part of this same lock
+    /// acquisition. Callers MUST gate their one-shot warn log on
+    /// <paramref name="firstEviction"/> rather than calling
+    /// <see cref="MarkEvictionLogged"/> separately, so that any
+    /// concurrent <see cref="SnapshotWithLatch"/> sees the eviction
+    /// and the latched flag atomically (avoids capturing
+    /// <c>EvictionLogged=false</c> after an eviction, which would
+    /// re-emit the warn post-restart).
+    /// </para>
     /// </summary>
-    public bool Add(ulong id)
+    public bool Add(ulong id, out bool firstEviction)
     {
         lock (_lock)
         {
+            firstEviction = false;
             if (!_set.Add(id)) return false;
             _order.Enqueue(id);
             var evicted = false;
@@ -239,15 +265,24 @@ internal sealed class CancelledChildRing
                 _set.Remove(dropped);
                 evicted = true;
             }
+            if (evicted && !_evictionLogged)
+            {
+                _evictionLogged = true;
+                firstEviction = true;
+            }
             return evicted;
         }
     }
 
     /// <summary>
-    /// Atomically flips the per-ring "we've already warn-logged about
-    /// eviction on this parent" flag. Returns the PREVIOUS value:
-    /// <c>false</c> on the first call (caller should log),
-    /// <c>true</c> on every subsequent call (caller should suppress).
+    /// Flips the per-ring one-shot eviction-warn latch unconditionally
+    /// and returns the previous value. Reserved for restore paths
+    /// (<see cref="PeggedRepegBook.RestoreHistory"/>) that need to
+    /// rehydrate a pre-restart latched state without going through
+    /// <see cref="Add"/>. Steady-state callers must use the
+    /// <c>firstEviction</c> out-parameter on <see cref="Add"/> so the
+    /// latch flip and the eviction are observed atomically by
+    /// <see cref="SnapshotWithLatch"/>.
     /// </summary>
     public bool MarkEvictionLogged()
     {
