@@ -79,6 +79,15 @@ public sealed class AlgoEngine : BackgroundService
     private readonly OrderOwnershipMap _ownership;
     private readonly VolumeCurveEstimator? _vwapCurve;
     private readonly MarketDataVolumePump? _volumePump;
+    /// <summary>
+    /// Pass-1 review (#295) P1#1. Per-POV scheduling progress
+    /// (cumulative market volume + last-evaluate timestamp). Persisted
+    /// via <see cref="Persistence.AlgoPovSlicedEvent"/> on slice emit
+    /// + via the platform snapshot, restored on engine boot in
+    /// <see cref="Reconcile"/>. Null-tolerant for legacy test
+    /// compositions that don't exercise POV.
+    /// </summary>
+    private readonly PovProgressBook? _povProgress;
 
     // Per-parent runtime state. Owned by the consumer task; the
     // ConcurrentDictionary is only used because TryAdd/TryGetValue are
@@ -99,7 +108,8 @@ public sealed class AlgoEngine : BackgroundService
         ILogger<AlgoEngine> logger,
         OrderOwnershipMap ownership,
         VolumeCurveEstimator? vwapCurve = null,
-        MarketDataVolumePump? volumePump = null)
+        MarketDataVolumePump? volumePump = null,
+        PovProgressBook? povProgress = null)
     {
         _queue = queue;
         _algos = algos;
@@ -114,6 +124,7 @@ public sealed class AlgoEngine : BackgroundService
         _ownership = ownership;
         _vwapCurve = vwapCurve;
         _volumePump = volumePump;
+        _povProgress = povProgress;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -175,7 +186,14 @@ public sealed class AlgoEngine : BackgroundService
     private void Reconcile()
     {
         var algos = _algos.EnumerateAll(includeTerminal: false);
-        if (algos.Count == 0) return;
+        if (algos.Count == 0)
+        {
+            // Even with no live algos, prune any orphan POV progress
+            // entries restored from a snapshot written by an older
+            // engine version that didn't remove on terminal.
+            PruneOrphanPovProgress(algos);
+            return;
+        }
 
         foreach (var algo in algos)
         {
@@ -197,6 +215,27 @@ public sealed class AlgoEngine : BackgroundService
             rt.NextSliceSeq = maxSeq + 1;
             rt.LiveChildClOrdId = liveChild;
 
+            // Pass-1 review (#295) P1#1. Restore POV scheduling baseline
+            // so a post-restart tick targets the pre-restart cumulative
+            // market volume * rate (NOT post-restart-only volume * rate,
+            // which would under-slice until the in-memory estimator
+            // caught up to FilledQuantity). Falls back to (0, StartUtc)
+            // on a fresh POV — same as a from-cold start.
+            if (algo.Type == AlgoType.Pov && algo.Parameters is PovParameters ppRec)
+            {
+                var progress = _povProgress?.TryGet(algo.FirmId, algo.AlgoId);
+                if (progress is { } p && p.LastEvaluateAtUtc != default)
+                {
+                    rt.PovMarketVolumeSeen = p.MarketVolumeSeen;
+                    rt.PovLastEvaluateAtUtc = p.LastEvaluateAtUtc;
+                }
+                else
+                {
+                    rt.PovMarketVolumeSeen = 0;
+                    rt.PovLastEvaluateAtUtc = ppRec.StartUtc;
+                }
+            }
+
             // Re-arm the reactor regardless: even if a live child exists,
             // the reactor may need to react if the child has since become
             // terminal between snapshot capture and recovery.
@@ -211,6 +250,33 @@ public sealed class AlgoEngine : BackgroundService
         }
 
         _logger.LogInformation("AlgoEngine reconciliation enqueued {Count} non-terminal parents.", algos.Count);
+        PruneOrphanPovProgress(algos);
+    }
+
+    /// <summary>
+    /// Pass-2 review (#295) P2 — defensive. Iterate every entry in
+    /// <see cref="PovProgressBook"/> and drop those whose parent algo
+    /// is absent from the non-terminal live set. Covers (a) entries
+    /// persisted by a previous engine version that didn't
+    /// <c>Remove</c> on terminal, and (b) entries whose parent was
+    /// concurrently terminated/expired between snapshot capture and
+    /// restart. Idempotent and cheap (one pass over a small map).
+    /// </summary>
+    private void PruneOrphanPovProgress(IReadOnlyCollection<Algo> liveAlgos)
+    {
+        if (_povProgress is null) return;
+        var live = new HashSet<(string FirmId, ulong AlgoId)>(liveAlgos.Count);
+        foreach (var a in liveAlgos)
+        {
+            live.Add((a.FirmId, a.AlgoId));
+        }
+        foreach (var (firmId, algoId, _) in _povProgress.Snapshot().ToList())
+        {
+            if (!live.Contains((firmId, algoId)))
+            {
+                _povProgress.Remove(firmId, algoId);
+            }
+        }
     }
 
     private async Task ReactAsync(AlgoSignal signal, CancellationToken ct)
@@ -260,7 +326,7 @@ public sealed class AlgoEngine : BackgroundService
         // dedupes per symbol so repeated calls (reactor re-evaluation,
         // multiple parents on the same symbol, WAL replay-driven
         // reconciliation) collapse to one SDK Subscribe per process.
-        if (algo.Type == AlgoType.Vwap && _volumePump is not null)
+        if ((algo.Type == AlgoType.Vwap || algo.Type == AlgoType.Pov) && _volumePump is not null)
         {
             await _volumePump.EnsureSubscribedAsync(algo.Symbol, ct).ConfigureAwait(false);
         }
@@ -356,6 +422,28 @@ public sealed class AlgoEngine : BackgroundService
                 rt.NextSliceSeq++;
             }
         }
+        else if (algo.Type == AlgoType.Pov && algo.Parameters is PovParameters pp)
+        {
+            // POV: mirrors VWAP — the engine is driven by periodic
+            // scheduler ticks, and the per-slot decision is purely
+            // reactive to observed cumulative market volume. Empty
+            // slots advance NextSliceSeq so recovery is unambiguous.
+            var now = _clock.GetUtcNow();
+            if (now >= pp.EndUtc)
+            {
+                await RecordTerminalAsync(algo, rt, AlgoStatus.Expired, AlgoTerminalReason.PovWindowExpired).ConfigureAwait(false);
+                return;
+            }
+            while (true)
+            {
+                var dueAt = PovPlan.PlannedAtUtc(pp.StartUtc, pp.TickInterval, rt.NextSliceSeq);
+                if (now < dueAt) return;
+                if (dueAt >= pp.EndUtc) return;
+                var (qty, _, _) = ComputePovSlice(algo, pp, rt, dueAt);
+                if (qty > 0) break;
+                rt.NextSliceSeq++;
+            }
+        }
 
         await SubmitNextSliceAsync(algo, rt, ct).ConfigureAwait(false);
     }
@@ -435,6 +523,15 @@ public sealed class AlgoEngine : BackgroundService
                     }
                     return;
                 }
+                if (algo.Type == AlgoType.Pov && algo.Parameters is PovParameters ppFilled)
+                {
+                    // POV: mirror VWAP — opportunistic, scheduler-driven.
+                    if (_clock.GetUtcNow() >= ppFilled.EndUtc)
+                    {
+                        await RecordTerminalAsync(algo, rt, AlgoStatus.Expired, AlgoTerminalReason.PovWindowExpired).ConfigureAwait(false);
+                    }
+                    return;
+                }
                 await SubmitNextSliceAsync(algo, rt, ct).ConfigureAwait(false);
                 return;
 
@@ -461,6 +558,10 @@ public sealed class AlgoEngine : BackgroundService
                 {
                     await RecordTerminalAsync(algo, rt, AlgoStatus.Expired, AlgoTerminalReason.VwapWindowExpired).ConfigureAwait(false);
                 }
+                else if (IsPovWindowExpired(algo))
+                {
+                    await RecordTerminalAsync(algo, rt, AlgoStatus.Expired, AlgoTerminalReason.PovWindowExpired).ConfigureAwait(false);
+                }
                 else
                 {
                     // Venue cancelled the child without operator request
@@ -484,6 +585,11 @@ public sealed class AlgoEngine : BackgroundService
                     await RecordTerminalAsync(algo, rt, AlgoStatus.Expired, AlgoTerminalReason.VwapWindowExpired).ConfigureAwait(false);
                     return;
                 }
+                if (IsPovWindowExpired(algo))
+                {
+                    await RecordTerminalAsync(algo, rt, AlgoStatus.Expired, AlgoTerminalReason.PovWindowExpired).ConfigureAwait(false);
+                    return;
+                }
                 await RecordTerminalAsync(algo, rt, AlgoStatus.Suspended, AlgoTerminalReason.RiskRejected).ConfigureAwait(false);
                 return;
         }
@@ -498,6 +604,11 @@ public sealed class AlgoEngine : BackgroundService
         algo.Type == AlgoType.Vwap
         && algo.Parameters is VwapParameters vp
         && _clock.GetUtcNow() >= vp.EndUtc;
+
+    private bool IsPovWindowExpired(Algo algo) =>
+        algo.Type == AlgoType.Pov
+        && algo.Parameters is PovParameters pp
+        && _clock.GetUtcNow() >= pp.EndUtc;
 
     private async Task OnCancelRequestedAsync(Algo algo, AlgoParentRuntime rt, CancellationToken ct)
     {
@@ -553,11 +664,12 @@ public sealed class AlgoEngine : BackgroundService
         var (sliceQty, slicePrice) = ComputeNextSlice(algo);
         if (sliceQty <= 0)
         {
-            if (algo.Type == AlgoType.Vwap)
+            if (algo.Type == AlgoType.Vwap || algo.Type == AlgoType.Pov)
             {
-                // VWAP: empty slot — the parent is ahead of the curve.
-                // Advance NextSliceSeq so the next scheduler tick
-                // evaluates the next slot. Do NOT mark terminal.
+                // VWAP/POV: empty slot — the parent is ahead of the
+                // curve (VWAP) or there is insufficient market volume
+                // yet (POV). Advance NextSliceSeq so the next scheduler
+                // tick evaluates the next slot. Do NOT mark terminal.
                 rt.NextSliceSeq++;
                 return;
             }
@@ -573,6 +685,7 @@ public sealed class AlgoEngine : BackgroundService
             IcebergParameters => OrderType.Limit,
             TwapParameters tp => tp.ChildOrderType,
             VwapParameters vp => vp.ChildOrderType,
+            PovParameters pp => pp.ChildOrderType,
             _ => OrderType.Limit,
         };
 
@@ -588,6 +701,26 @@ public sealed class AlgoEngine : BackgroundService
             vwapTargetCum = target;
             vwapExecutedCum = algo.FilledQuantity;
             MetricsRegistry.AlgoVwapTargetVsActualDiff.Record(gap);
+        }
+        long povCumMarketVolume = 0, povExecutedCum = 0;
+        DateTimeOffset povPlannedAt = default;
+        DateTimeOffset povLastEvaluateAtUtc = default;
+        if (algo.Parameters is PovParameters ppForAudit)
+        {
+            povPlannedAt = PovPlan.PlannedAtUtc(ppForAudit.StartUtc, ppForAudit.TickInterval, sliceSeq);
+            var (_, _, cumMv) = ComputePovSlice(algo, ppForAudit, rt, povPlannedAt);
+            povCumMarketVolume = cumMv;
+            povExecutedCum = algo.FilledQuantity;
+            // Pass-1 review (#295) P1#1. Persisted alongside the slice
+            // so a restart restores BOTH the baseline and the wall-clock
+            // anchor: post-restart catch-up integrates VolumeBetween
+            // from this instant, not from StartUtc (which would double-
+            // count buckets already accumulated into MarketVolumeSeen).
+            povLastEvaluateAtUtc = rt.PovLastEvaluateAtUtc;
+            if (cumMv > 0)
+            {
+                MetricsRegistry.AlgoPovActualParticipationRate.Record((double)povExecutedCum / cumMv);
+            }
         }
 
         for (var attempt = 0; attempt <= RetryDelays.Length; attempt++)
@@ -653,6 +786,44 @@ public sealed class AlgoEngine : BackgroundService
                         {
                             MetricsRegistry.WalBackpressure.Add(1,
                                 new KeyValuePair<string, object?>("call_site", "algo.vwap.sliced"));
+                        }
+                    }
+                    else if (algo.Type == AlgoType.Pov)
+                    {
+                        MetricsRegistry.AlgoPovSlicesEmitted.Add(1);
+                        try
+                        {
+                            // Pass-1 review (#295) P1#1. Persist the
+                            // running POV baseline so a restart resumes
+                            // off the pre-crash cumulative-market-volume
+                            // total (NOT zero, which would under-slice).
+                            // PovProgressBook.Set runs inside the
+                            // dispatcher action so live + replay paths
+                            // converge on identical book state.
+                            var firmId = algo.FirmId;
+                            var algoId = algo.AlgoId;
+                            var marketVolumeSeenSnapshot = povCumMarketVolume;
+                            var lastEvaluateAtUtcSnapshot = povLastEvaluateAtUtc;
+                            var povBook = _povProgress;
+                            _dispatcher.Dispatch(
+                                new AlgoPovSlicedEvent
+                                {
+                                    AlgoId = algo.AlgoId,
+                                    FirmId = algo.FirmId,
+                                    SliceSeq = sliceSeq,
+                                    CumMarketVolume = povCumMarketVolume,
+                                    ExecutedCum = povExecutedCum,
+                                    SliceQty = sliceQty,
+                                    PlannedAtUtc = povPlannedAt,
+                                    MarketVolumeSeen = povCumMarketVolume,
+                                    LastEvaluateAtUtc = povLastEvaluateAtUtc,
+                                },
+                                () => povBook?.Set(firmId, algoId, marketVolumeSeenSnapshot, lastEvaluateAtUtcSnapshot));
+                        }
+                        catch (WalBackpressureException)
+                        {
+                            MetricsRegistry.WalBackpressure.Add(1,
+                                new KeyValuePair<string, object?>("call_site", "algo.pov.sliced"));
                         }
                     }
                     _algoSink.PublishAlgoSnapshot(algo.Owner, algo.FirmId, algo.AlgoId);
@@ -744,6 +915,19 @@ public sealed class AlgoEngine : BackgroundService
         {
             MetricsRegistry.AlgoVwapCancelled.Add(1);
         }
+        else if (algo.Type == AlgoType.Pov && status == AlgoStatus.Cancelled)
+        {
+            MetricsRegistry.AlgoPovCancelled.Add(1);
+        }
+        // Pass-2 review (#295) P2. Drop the per-POV progress entry on
+        // every terminal transition so PovProgressBook stays bounded
+        // and the next snapshot doesn't carry stale state for a dead
+        // parent. Safe to call for non-POV parents (no-op when no
+        // entry exists).
+        if (algo.Type == AlgoType.Pov)
+        {
+            _povProgress?.Remove(algo.FirmId, algo.AlgoId);
+        }
         await Task.CompletedTask;
     }
 
@@ -778,6 +962,13 @@ public sealed class AlgoEngine : BackgroundService
                     var rt = _runtime[(algo.FirmId, algo.AlgoId)];
                     var dueAt = VwapPlan.PlannedAtUtc(vp.StartUtc, vp.TickInterval, rt.NextSliceSeq);
                     var (qty, price, _, _) = ComputeVwapSlice(algo, vp, dueAt);
+                    return (qty, price);
+                }
+            case PovParameters pp:
+                {
+                    var rt = _runtime[(algo.FirmId, algo.AlgoId)];
+                    var dueAt = PovPlan.PlannedAtUtc(pp.StartUtc, pp.TickInterval, rt.NextSliceSeq);
+                    var (qty, price, _) = ComputePovSlice(algo, pp, rt, dueAt);
                     return (qty, price);
                 }
             default:
@@ -821,6 +1012,72 @@ public sealed class AlgoEngine : BackgroundService
         return (qty, price, targetCum, gap);
     }
 
+    /// <summary>
+    /// POV slice computation — restart-resilient (pass-1 review #295 P1#1).
+    ///
+    /// <para>
+    /// The slice target is derived from the parent's OWN running
+    /// cumulative-market-volume baseline (<see cref="AlgoParentRuntime.PovMarketVolumeSeen"/>)
+    /// rather than from <c>VolumeCurveEstimator.VolumeBetween(StartUtc, now)</c>.
+    /// The estimator only carries in-memory buckets so it cannot
+    /// reconstruct pre-restart trade volume; under the old formulation
+    /// a restarted live POV would under-slice until post-restart volume
+    /// "caught up" to the already-executed cumulative. Here we instead
+    /// accumulate <c>VolumeBetween(lastEvaluateAtUtc, now)</c> on every
+    /// tick and persist the running total via
+    /// <see cref="Persistence.AlgoPovSlicedEvent"/>; replay restores
+    /// the baseline before the engine resumes.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Side-effecting:</b> updates <paramref name="rt"/>'s
+    /// <c>PovMarketVolumeSeen</c> and <c>PovLastEvaluateAtUtc</c>. The
+    /// caller must invoke this exactly once per scheduler tick (emit or
+    /// skip) so the persisted snapshot on the next emit reflects every
+    /// observed bucket. Returns <c>(qty, price, marketVolumeSeen)</c>
+    /// — <c>marketVolumeSeen</c> is the just-updated baseline that the
+    /// caller should record on the emitted WAL event.
+    /// </para>
+    /// </summary>
+    private (long Qty, decimal? Price, long MarketVolumeSeen) ComputePovSlice(
+        Algo algo, PovParameters pp, AlgoParentRuntime rt, DateTimeOffset evaluateAtUtc)
+    {
+        // First evaluation for a freshly-created POV (no Reconcile path
+        // touched this runtime): seed the baseline at StartUtc so the
+        // initial integration covers [StartUtc, evaluateAtUtc) — same
+        // window as the pre-fix formulation, preserving the cold-start
+        // semantics that the issue's #294 acceptance baseline measured.
+        if (rt.PovLastEvaluateAtUtc == default)
+        {
+            rt.PovLastEvaluateAtUtc = pp.StartUtc;
+        }
+        if (evaluateAtUtc > rt.PovLastEvaluateAtUtc && _vwapCurve is not null)
+        {
+            var incremental = _vwapCurve.VolumeBetween(algo.Symbol, rt.PovLastEvaluateAtUtc, evaluateAtUtc);
+            if (incremental > 0)
+                rt.PovMarketVolumeSeen += incremental;
+            rt.PovLastEvaluateAtUtc = evaluateAtUtc;
+        }
+        // Pass-2 review (#295) P1. Persist the just-advanced baseline
+        // into PovProgressBook on EVERY tick (emit OR skip). On the
+        // emit path the dispatcher action at SubmitNextSliceAsync will
+        // re-Set the same values (idempotent, last-write-wins). On the
+        // skip path the snapshotter is the only persistence — without
+        // this update a restart between snapshots loses the observed
+        // market volume and the algo under-slices until post-restart
+        // volume catches up. The trader's loss is bounded by snapshot
+        // cadence (no per-tick WAL event is emitted on skip).
+        _povProgress?.Set(algo.FirmId, algo.AlgoId, rt.PovMarketVolumeSeen, rt.PovLastEvaluateAtUtc);
+        var qty = PovPlan.SliceQty(
+            rt.PovMarketVolumeSeen,
+            algo.FilledQuantity,
+            algo.RemainingQuantity,
+            pp.ParticipationRate,
+            pp.MinSliceQty);
+        var price = PovPlan.ClampPrice(pp.ChildPrice, pp.PriceLimit, algo.Side);
+        return (qty, price, rt.PovMarketVolumeSeen);
+    }
+
     private static double UniformCdf(DateTimeOffset start, DateTimeOffset end, DateTimeOffset at)
     {
         if (end <= start) return 0;
@@ -859,5 +1116,14 @@ public sealed class AlgoEngine : BackgroundService
         public int NextSliceSeq;
         public int RetryAttempts;
         public Dictionary<ulong, long> ChildBookedCum { get; } = new();
+
+        // Pass-1 review (#295) P1#1. POV scheduling state. Initialised
+        // to (0, default) so the first tick treats StartUtc as the
+        // baseline and integrates volume from there; the engine seeds
+        // these from PovProgressBook on Reconcile so a restart resumes
+        // from the most recently persisted slice instead of re-scanning
+        // an empty estimator.
+        public long PovMarketVolumeSeen;
+        public DateTimeOffset PovLastEvaluateAtUtc;
     }
 }

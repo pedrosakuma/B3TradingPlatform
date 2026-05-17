@@ -145,6 +145,14 @@ public sealed class AlgoBook
         decimal? vwapSliceMaxPct = null;
         decimal? vwapPriceLimit = null;
         decimal? vwapParticipationCap = null;
+        DateTimeOffset? povStart = null;
+        DateTimeOffset? povEnd = null;
+        string? povChildType = null;
+        decimal? povChildPrice = null;
+        decimal? povParticipationRate = null;
+        long? povTickIntervalTicks = null;
+        decimal? povPriceLimit = null;
+        long? povMinSliceQty = null;
 
         switch (a.Parameters)
         {
@@ -169,6 +177,16 @@ public sealed class AlgoBook
                 vwapPriceLimit = vp.PriceLimit;
                 vwapParticipationCap = vp.ParticipationCap;
                 break;
+            case PovParameters pp:
+                povStart = pp.StartUtc;
+                povEnd = pp.EndUtc;
+                povChildType = pp.ChildOrderType.ToString();
+                povChildPrice = pp.ChildPrice;
+                povParticipationRate = pp.ParticipationRate;
+                povTickIntervalTicks = pp.TickInterval.Ticks;
+                povPriceLimit = pp.PriceLimit;
+                povMinSliceQty = pp.MinSliceQty;
+                break;
         }
 
         return new Persistence.AlgoSnapshot(
@@ -179,7 +197,9 @@ public sealed class AlgoBook
             icebergDisplay, icebergLimit,
             twapStart, twapEnd, twapSliceCount, twapChildType, twapChildPrice,
             vwapStart, vwapEnd, vwapChildType, vwapChildPrice,
-            vwapTickIntervalTicks, vwapSliceMaxPct, vwapPriceLimit, vwapParticipationCap);
+            vwapTickIntervalTicks, vwapSliceMaxPct, vwapPriceLimit, vwapParticipationCap,
+            povStart, povEnd, povChildType, povChildPrice,
+            povParticipationRate, povTickIntervalTicks, povPriceLimit, povMinSliceQty);
     }
 
     public void Restore(IEnumerable<Persistence.AlgoSnapshot> snaps)
@@ -217,6 +237,14 @@ public sealed class AlgoBook
         decimal? vwapSliceMaxPct = null;
         decimal? vwapPriceLimit = null;
         decimal? vwapParticipationCap = null;
+        DateTimeOffset? povStart = null;
+        DateTimeOffset? povEnd = null;
+        string? povChildType = null;
+        decimal? povChildPrice = null;
+        decimal? povParticipationRate = null;
+        long? povTickIntervalTicks = null;
+        decimal? povPriceLimit = null;
+        long? povMinSliceQty = null;
 
         switch (a.Parameters)
         {
@@ -241,6 +269,16 @@ public sealed class AlgoBook
                 vwapPriceLimit = vp.PriceLimit;
                 vwapParticipationCap = vp.ParticipationCap;
                 break;
+            case PovParameters pp:
+                povStart = pp.StartUtc;
+                povEnd = pp.EndUtc;
+                povChildType = pp.ChildOrderType.ToString();
+                povChildPrice = pp.ChildPrice;
+                povParticipationRate = pp.ParticipationRate;
+                povTickIntervalTicks = pp.TickInterval.Ticks;
+                povPriceLimit = pp.PriceLimit;
+                povMinSliceQty = pp.MinSliceQty;
+                break;
         }
 
         return new Persistence.AlgoSnapshot(
@@ -251,7 +289,9 @@ public sealed class AlgoBook
             icebergDisplay, icebergLimit,
             twapStart, twapEnd, twapSliceCount, twapChildType, twapChildPrice,
             vwapStart, vwapEnd, vwapChildType, vwapChildPrice,
-            vwapTickIntervalTicks, vwapSliceMaxPct, vwapPriceLimit, vwapParticipationCap);
+            vwapTickIntervalTicks, vwapSliceMaxPct, vwapPriceLimit, vwapParticipationCap,
+            povStart, povEnd, povChildType, povChildPrice,
+            povParticipationRate, povTickIntervalTicks, povPriceLimit, povMinSliceQty);
     }
 
     internal static Algo FromSnapshot(Persistence.AlgoSnapshot s)
@@ -281,6 +321,15 @@ public sealed class AlgoBook
                 s.VwapSliceMaxPct,
                 s.VwapPriceLimit,
                 s.VwapParticipationCap),
+            AlgoType.Pov => new PovParameters(
+                s.PovStartUtc ?? throw new InvalidOperationException($"Algo {s.AlgoId} snapshot missing PovStartUtc."),
+                s.PovEndUtc ?? throw new InvalidOperationException($"Algo {s.AlgoId} snapshot missing PovEndUtc."),
+                Enum.Parse<OrderType>(s.PovChildOrderType ?? throw new InvalidOperationException($"Algo {s.AlgoId} snapshot missing PovChildOrderType.")),
+                s.PovChildPrice,
+                s.PovParticipationRate ?? throw new InvalidOperationException($"Algo {s.AlgoId} snapshot missing PovParticipationRate."),
+                TimeSpan.FromTicks(s.PovTickIntervalTicks ?? throw new InvalidOperationException($"Algo {s.AlgoId} snapshot missing PovTickIntervalTicks.")),
+                s.PovPriceLimit,
+                s.PovMinSliceQty ?? 1L),
             _ => throw new InvalidOperationException($"Unknown algo type: {s.Type}"),
         };
         return Algo.Hydrate(s.AlgoId, owner, s.FirmId, s.Symbol, s.SecurityId,

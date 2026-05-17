@@ -161,6 +161,12 @@ public sealed class AlgoScheduler : BackgroundService
                 TickVwap(algo, vp, now);
                 continue;
             }
+
+            if (algo.Type == AlgoType.Pov && algo.Parameters is PovParameters pp)
+            {
+                TickPov(algo, pp, now);
+                continue;
+            }
         }
     }
 
@@ -228,6 +234,36 @@ public sealed class AlgoScheduler : BackgroundService
         var dueAt = VwapPlan.PlannedAtUtc(vp.StartUtc, vp.TickInterval, nextSeq);
         if (now < dueAt) return;
         if (dueAt >= vp.EndUtc) return; // window passed at the slot boundary
+
+        Enqueue(algo);
+    }
+
+    private void TickPov(Algo algo, PovParameters pp, DateTimeOffset now)
+    {
+        // POV mirrors VWAP scheduling: enqueue at most one Created
+        // signal per parent per tick so the engine evaluates the slice
+        // (it owns the empty-slot catch-up loop in OnCreatedAsync). The
+        // engine takes the "is there market volume to share?" decision
+        // — the scheduler only gates on time + live-child presence.
+        if (now >= pp.EndUtc)
+        {
+            Enqueue(algo);
+            return;
+        }
+
+        int maxSeq = -1;
+        bool hasLiveChild = false;
+        foreach (var child in _orders.EnumerateChildrenOf(algo.FirmId, algo.AlgoId))
+        {
+            if (child.AlgoSliceSeq is { } seq && seq > maxSeq) maxSeq = seq;
+            if (!IsChildTerminal(child)) hasLiveChild = true;
+        }
+        if (hasLiveChild) return;
+
+        var nextSeq = maxSeq + 1;
+        var dueAt = PovPlan.PlannedAtUtc(pp.StartUtc, pp.TickInterval, nextSeq);
+        if (now < dueAt) return;
+        if (dueAt >= pp.EndUtc) return;
 
         Enqueue(algo);
     }

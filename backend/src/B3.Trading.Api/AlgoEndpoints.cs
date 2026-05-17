@@ -166,6 +166,39 @@ public static class AlgoEndpoints
                         req.Vwap.ParticipationCap);
                     break;
 
+                case AlgoType.Pov:
+                    // Q3.2 (#282). POV mirrors VWAP's surface conventions
+                    // — same POST /algo endpoint, discriminator-by-Type
+                    // pattern.
+                    if (req.Pov is null)
+                        return Results.BadRequest(new { error = "pov parameters are required for type=Pov" });
+                    if (!Enum.TryParse<OrderType>(req.Pov.ChildOrderType, ignoreCase: true, out var povChildType))
+                        return Results.BadRequest(new { error = $"invalid pov.childOrderType '{req.Pov.ChildOrderType}'" });
+                    if (povChildType is not (OrderType.Limit or OrderType.Market))
+                        return Results.BadRequest(new { error = "pov.childOrderType must be Limit or Market" });
+                    if (req.Pov.EndUtc <= req.Pov.StartUtc)
+                        return Results.BadRequest(new { error = "pov.endUtc must be greater than pov.startUtc" });
+                    if (povChildType == OrderType.Limit && req.Pov.ChildPrice is null)
+                        return Results.BadRequest(new { error = "pov.childPrice is required when pov.childOrderType is Limit" });
+                    if (req.Pov.ParticipationRate <= 0m || req.Pov.ParticipationRate > 1m)
+                        return Results.BadRequest(new { error = "pov.participationRate must be in (0, 1]" });
+                    var povTickSeconds = req.Pov.TickIntervalSeconds ?? 5d;
+                    if (povTickSeconds <= 0)
+                        return Results.BadRequest(new { error = "pov.tickIntervalSeconds must be positive" });
+                    var povMinSlice = req.Pov.MinSliceQty ?? 1L;
+                    if (povMinSlice < 1)
+                        return Results.BadRequest(new { error = "pov.minSliceQty must be >= 1" });
+                    parameters = new PovParameters(
+                        req.Pov.StartUtc,
+                        req.Pov.EndUtc,
+                        povChildType,
+                        req.Pov.ChildPrice,
+                        req.Pov.ParticipationRate,
+                        TimeSpan.FromSeconds(povTickSeconds),
+                        req.Pov.PriceLimit,
+                        povMinSlice);
+                    break;
+
                 default:
                     return Results.BadRequest(new { error = $"unsupported algo type '{type}'" });
             }
@@ -206,6 +239,14 @@ public static class AlgoEndpoints
                         VwapSliceMaxPct = (parameters as VwapParameters)?.SliceMaxPct,
                         VwapPriceLimit = (parameters as VwapParameters)?.PriceLimit,
                         VwapParticipationCap = (parameters as VwapParameters)?.ParticipationCap,
+                        PovStartUtc = (parameters as PovParameters)?.StartUtc,
+                        PovEndUtc = (parameters as PovParameters)?.EndUtc,
+                        PovChildOrderType = (parameters as PovParameters)?.ChildOrderType.ToString(),
+                        PovChildPrice = (parameters as PovParameters)?.ChildPrice,
+                        PovParticipationRate = (parameters as PovParameters)?.ParticipationRate,
+                        PovTickIntervalTicks = (parameters as PovParameters)?.TickInterval.Ticks,
+                        PovPriceLimit = (parameters as PovParameters)?.PriceLimit,
+                        PovMinSliceQty = (parameters as PovParameters)?.MinSliceQty,
                     },
                     () => algos.TryAdd(algo));
             }
@@ -336,7 +377,8 @@ public sealed record CreateAlgoRequest(
     long TotalQuantity,
     CreateAlgoIcebergParams? Iceberg,
     CreateAlgoTwapParams? Twap,
-    CreateAlgoVwapParams? Vwap = null);
+    CreateAlgoVwapParams? Vwap = null,
+    CreateAlgoPovParams? Pov = null);
 
 public sealed record CreateAlgoIcebergParams(long DisplayQuantity, decimal? LimitPrice);
 
@@ -361,3 +403,19 @@ public sealed record CreateAlgoVwapParams(
     decimal? SliceMaxPct = null,
     decimal? PriceLimit = null,
     decimal? ParticipationCap = null);
+
+/// <summary>
+/// HTTP request shape for the POV parameter block (Q3.2 / #282).
+/// <see cref="TickIntervalSeconds"/> defaults to 5s when null (issue
+/// spec: short bucket for reactivity). <see cref="MinSliceQty"/>
+/// defaults to 1.
+/// </summary>
+public sealed record CreateAlgoPovParams(
+    DateTimeOffset StartUtc,
+    DateTimeOffset EndUtc,
+    string ChildOrderType,
+    decimal? ChildPrice,
+    decimal ParticipationRate,
+    double? TickIntervalSeconds = null,
+    decimal? PriceLimit = null,
+    long? MinSliceQty = null);

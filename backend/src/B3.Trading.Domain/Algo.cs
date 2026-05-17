@@ -5,6 +5,7 @@ public enum AlgoType
     Iceberg,
     Twap,
     Vwap,
+    Pov,
 }
 
 /// <summary>
@@ -41,6 +42,8 @@ public enum AlgoTerminalReason
     Drained,
     /// <summary>VWAP window expired (Q3.1 / #281). Mirrors <see cref="TwapWindowExpired"/>.</summary>
     VwapWindowExpired,
+    /// <summary>POV window expired with residue (Q3.2 / #282). Mirrors <see cref="VwapWindowExpired"/>.</summary>
+    PovWindowExpired,
 }
 
 /// <summary>
@@ -95,6 +98,48 @@ public sealed record VwapParameters(
     decimal? SliceMaxPct = null,
     decimal? PriceLimit = null,
     decimal? ParticipationCap = null) : AlgoParameters;
+
+/// <summary>
+/// POV (Percentage of Volume) parameters (Q3.2 / #282).
+///
+/// <para>
+/// POV tracks live market trades for <c>Symbol</c> and keeps the parent's
+/// executed cumulative quantity at <c>ParticipationRate</c> of the cumulative
+/// market volume since <c>StartUtc</c>. Unlike VWAP — which targets a
+/// historically-shaped curve — POV is purely reactive: it slices only
+/// when the market actually trades.
+/// </para>
+///
+/// <para>
+/// <b>Slice formula.</b> At every <c>TickInterval</c> the engine asks:
+/// <c>pending = floor(cumMarketVolume * participationRate) - cumExecuted</c>.
+/// If <c>pending &gt;= MinSliceQty</c> a LIMIT child for <c>pending</c>
+/// shares is submitted (clamped to <c>TotalQty - cumExecuted</c>).
+/// Otherwise the slot is skipped and the next tick re-evaluates.
+/// </para>
+///
+/// <para>
+/// <b>End-of-window.</b> POV is opportunistic by definition: any leftover
+/// quantity at <c>EndUtc</c> is NOT force-filled — the parent reaches
+/// <see cref="AlgoStatus.Expired"/> with <see cref="AlgoTerminalReason.PovWindowExpired"/>.
+/// </para>
+///
+/// <para>
+/// <b>Defaults.</b> <see cref="TickInterval"/> defaults to 5s (issue
+/// spec: short bucket for reactivity). <see cref="MinSliceQty"/>
+/// defaults to 1 — the smallest meaningful slice; lifting this filters
+/// micro-bursts.
+/// </para>
+/// </summary>
+public sealed record PovParameters(
+    DateTimeOffset StartUtc,
+    DateTimeOffset EndUtc,
+    OrderType ChildOrderType,
+    decimal? ChildPrice,
+    decimal ParticipationRate,
+    TimeSpan TickInterval,
+    decimal? PriceLimit = null,
+    long MinSliceQty = 1) : AlgoParameters;
 
 /// <summary>
 /// Parent algo aggregate, sibling to <see cref="Order"/>. v0 stores only
@@ -269,6 +314,7 @@ public sealed class Algo
             AlgoType.Iceberg => parameters is IcebergParameters,
             AlgoType.Twap => parameters is TwapParameters,
             AlgoType.Vwap => parameters is VwapParameters,
+            AlgoType.Pov => parameters is PovParameters,
             _ => false,
         };
         if (!ok)

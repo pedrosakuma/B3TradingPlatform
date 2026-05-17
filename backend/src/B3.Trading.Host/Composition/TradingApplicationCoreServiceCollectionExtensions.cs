@@ -130,6 +130,11 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         services.AddSingleton<B3.Trading.Application.MarketData.MarketDataVolumePump>();
         services.AddHostedService(sp =>
             sp.GetRequiredService<B3.Trading.Application.MarketData.MarketDataVolumePump>());
+        // Pass-1 review (#295) P1#1. Per-POV scheduling progress book
+        // — restores cumulative-market-volume baseline on restart so
+        // POV does not under-slice while VolumeCurveEstimator's in-memory
+        // buckets re-warm from post-restart prints.
+        services.AddSingleton<PovProgressBook>();
         services.AddHostedService<AlgoEngine>();
         services.AddHostedService<AlgoScheduler>();
 

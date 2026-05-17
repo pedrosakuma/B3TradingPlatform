@@ -38,6 +38,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonSerializable(typeof(AlgoCancelRequestedEvent))]
 [JsonSerializable(typeof(AlgoTerminalStateRecordedEvent))]
 [JsonSerializable(typeof(AlgoVwapSlicedEvent))]
+[JsonSerializable(typeof(AlgoPovSlicedEvent))]
 [JsonSerializable(typeof(OrderStaledEvent))]
 [JsonSerializable(typeof(OrderStaleClearedEvent))]
 [JsonSerializable(typeof(UserBotCredentialCreatedEvent))]

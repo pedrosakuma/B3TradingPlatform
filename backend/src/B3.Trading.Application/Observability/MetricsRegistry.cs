@@ -274,6 +274,28 @@ public static class MetricsRegistry
             "trading.algo.vwap.cancelled",
             description: "VWAP parents reaching the Cancelled terminal state.");
 
+    // Q3.2 (#282) — POV slice scheduler observability. Mirrors the
+    // VWAP block above. SlicesEmitted counts child orders the engine
+    // actually placed (zero-quantity slots are skipped, not counted).
+    // ActualParticipationRate is a rolling gauge of
+    // <c>cumExecuted / cumMarketVolume</c> sampled at each slice
+    // evaluation — surfaces how closely the algo is tracking its
+    // target rate. Cancelled bumps for every POV parent reaching the
+    // <c>Cancelled</c> terminal state.
+    public static readonly Counter<long> AlgoPovSlicesEmitted =
+        Meter.CreateCounter<long>(
+            "trading.algo.pov.slices_emitted",
+            description: "Child orders submitted by the POV slice scheduler.");
+    public static readonly Histogram<double> AlgoPovActualParticipationRate =
+        Meter.CreateHistogram<double>(
+            "trading.algo.pov.actual_participation_rate",
+            unit: "ratio",
+            description: "cumExecuted / cumMarketVolume sampled at each POV slice evaluation.");
+    public static readonly Counter<long> AlgoPovCancelled =
+        Meter.CreateCounter<long>(
+            "trading.algo.pov.cancelled",
+            description: "POV parents reaching the Cancelled terminal state.");
+
     /// <summary>
     /// 1 when the host booted with <c>Trading:Exchange:AllowErInjection=true</c>
     /// (admin-gated <c>POST /admin/simulator/er</c> is mapped). Set once at
