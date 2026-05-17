@@ -199,6 +199,43 @@ public static class AlgoEndpoints
                         povMinSlice);
                     break;
 
+                case AlgoType.Pegged:
+                    // Q3.3 (#283). Pegged shares the POST /algo surface
+                    // with the other algos via the type discriminator.
+                    // Tick size has no per-symbol provider yet (open
+                    // TODO across the repo), so the API accepts an
+                    // explicit override and falls back to 0.01 (BRL
+                    // equity default) — documented in the PR notes.
+                    if (req.Pegged is null)
+                        return Results.BadRequest(new { error = "pegged parameters are required for type=Pegged" });
+                    if (!Enum.TryParse<PegRef>(req.Pegged.Ref, ignoreCase: true, out var peggedRef))
+                        return Results.BadRequest(new { error = $"invalid pegged.ref '{req.Pegged.Ref}'; expected Mid|Best|Last" });
+                    var peggedRepegMs = req.Pegged.RepegIntervalMs ?? 500;
+                    if (peggedRepegMs <= 0)
+                        return Results.BadRequest(new { error = "pegged.repegIntervalMs must be positive" });
+                    var peggedTickSize = req.Pegged.TickSize ?? 0.01m;
+                    if (peggedTickSize <= 0m)
+                        return Results.BadRequest(new { error = "pegged.tickSize must be positive" });
+                    var peggedChildType = OrderType.Limit;
+                    if (!string.IsNullOrWhiteSpace(req.Pegged.ChildOrderType))
+                    {
+                        if (!Enum.TryParse<OrderType>(req.Pegged.ChildOrderType, ignoreCase: true, out peggedChildType))
+                            return Results.BadRequest(new { error = $"invalid pegged.childOrderType '{req.Pegged.ChildOrderType}'" });
+                        // Market orders defeat the whole point of pegging
+                        // (the venue picks the price). Reject explicitly
+                        // rather than letting it silently slip through.
+                        if (peggedChildType != OrderType.Limit)
+                            return Results.BadRequest(new { error = "pegged.childOrderType must be Limit" });
+                    }
+                    parameters = new PeggedParameters(
+                        peggedRef,
+                        req.Pegged.OffsetTicks,
+                        TimeSpan.FromMilliseconds(peggedRepegMs),
+                        peggedTickSize,
+                        peggedChildType,
+                        req.Pegged.PriceLimit);
+                    break;
+
                 default:
                     return Results.BadRequest(new { error = $"unsupported algo type '{type}'" });
             }
@@ -247,6 +284,12 @@ public static class AlgoEndpoints
                         PovTickIntervalTicks = (parameters as PovParameters)?.TickInterval.Ticks,
                         PovPriceLimit = (parameters as PovParameters)?.PriceLimit,
                         PovMinSliceQty = (parameters as PovParameters)?.MinSliceQty,
+                        PeggedRef = (parameters as PeggedParameters)?.Ref.ToString(),
+                        PeggedOffsetTicks = (parameters as PeggedParameters)?.OffsetTicks,
+                        PeggedRepegIntervalTicks = (parameters as PeggedParameters)?.RepegInterval.Ticks,
+                        PeggedTickSize = (parameters as PeggedParameters)?.TickSize,
+                        PeggedChildOrderType = (parameters as PeggedParameters)?.ChildOrderType.ToString(),
+                        PeggedPriceLimit = (parameters as PeggedParameters)?.PriceLimit,
                     },
                     () => algos.TryAdd(algo));
             }
@@ -378,7 +421,8 @@ public sealed record CreateAlgoRequest(
     CreateAlgoIcebergParams? Iceberg,
     CreateAlgoTwapParams? Twap,
     CreateAlgoVwapParams? Vwap = null,
-    CreateAlgoPovParams? Pov = null);
+    CreateAlgoPovParams? Pov = null,
+    CreateAlgoPeggedParams? Pegged = null);
 
 public sealed record CreateAlgoIcebergParams(long DisplayQuantity, decimal? LimitPrice);
 
@@ -419,3 +463,22 @@ public sealed record CreateAlgoPovParams(
     double? TickIntervalSeconds = null,
     decimal? PriceLimit = null,
     long? MinSliceQty = null);
+
+/// <summary>
+/// HTTP request shape for the Pegged parameter block (Q3.3 / #283).
+/// <para>
+/// <b>Defaults.</b> <see cref="RepegIntervalMs"/> defaults to 500ms,
+/// <see cref="TickSize"/> defaults to <c>0.01</c> (BRL equity floor;
+/// per-symbol provider TODO), <see cref="ChildOrderType"/> defaults
+/// to <c>Limit</c> (the only legal value — Market would defeat the
+/// peg). <see cref="OffsetTicks"/> is required and may be negative
+/// for passive pegs (Buy below the bid, Sell above the ask).
+/// </para>
+/// </summary>
+public sealed record CreateAlgoPeggedParams(
+    string Ref,
+    int OffsetTicks,
+    int? RepegIntervalMs = null,
+    decimal? TickSize = null,
+    string? ChildOrderType = null,
+    decimal? PriceLimit = null);

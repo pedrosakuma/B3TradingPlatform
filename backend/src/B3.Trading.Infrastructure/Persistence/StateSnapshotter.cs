@@ -807,6 +807,13 @@ public sealed class EventReplayer
                 TimeSpan.FromTicks(ac.PovTickIntervalTicks ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing PovTickIntervalTicks.")),
                 ac.PovPriceLimit,
                 ac.PovMinSliceQty ?? 1L),
+            AlgoType.Pegged => new PeggedParameters(
+                Enum.Parse<PegRef>(ac.PeggedRef ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing PeggedRef."), ignoreCase: true),
+                ac.PeggedOffsetTicks ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing PeggedOffsetTicks."),
+                TimeSpan.FromTicks(ac.PeggedRepegIntervalTicks ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing PeggedRepegIntervalTicks.")),
+                ac.PeggedTickSize ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing PeggedTickSize."),
+                Enum.Parse<OrderType>(ac.PeggedChildOrderType ?? throw new InvalidOperationException($"AlgoCreatedEvent {ac.AlgoId} missing PeggedChildOrderType."), ignoreCase: true),
+                ac.PeggedPriceLimit),
             _ => throw new InvalidOperationException($"Unknown algo type: {ac.Type}"),
         };
         _algos.TryAdd(new Algo(ac.AlgoId, owner, ac.FirmId, ac.Symbol, ac.SecurityId,

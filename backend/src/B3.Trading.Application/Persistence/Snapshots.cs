@@ -333,7 +333,14 @@ public sealed record AlgoSnapshot(
     decimal? PovParticipationRate = null,
     long? PovTickIntervalTicks = null,
     decimal? PovPriceLimit = null,
-    long? PovMinSliceQty = null);
+    long? PovMinSliceQty = null,
+    // Q3.3 (#283) — Pegged fields, mirror the POV block.
+    string? PeggedRef = null,
+    int? PeggedOffsetTicks = null,
+    long? PeggedRepegIntervalTicks = null,
+    decimal? PeggedTickSize = null,
+    string? PeggedChildOrderType = null,
+    decimal? PeggedPriceLimit = null);
 
 public sealed record PositionSnapshot(
     string EndClientId,

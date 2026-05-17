@@ -167,7 +167,29 @@ public sealed class AlgoScheduler : BackgroundService
                 TickPov(algo, pp, now);
                 continue;
             }
+
+            if (algo.Type == AlgoType.Pegged && algo.Parameters is PeggedParameters pgp)
+            {
+                TickPegged(algo, pgp, now);
+                continue;
+            }
         }
+    }
+
+    /// <summary>
+    /// Q3.3 (#283). Pegged tick: enqueue an <see cref="AlgoCreatedSignal"/>
+    /// unconditionally so the engine re-evaluates the live reference
+    /// price. No window/expiry gate (Pegged runs until Filled or DELETE);
+    /// no live-child gate (the engine has to evaluate exactly when there
+    /// IS a live child — that's the repeg path); no per-slice gate
+    /// (single working slice). All throttling lives in the engine via
+    /// <c>PeggedLastEvalUtc</c> + <c>RepegInterval</c> for symmetry with
+    /// VWAP/POV which also catch up in the engine.
+    /// </summary>
+    private void TickPegged(Algo algo, PeggedParameters pgp, DateTimeOffset now)
+    {
+        _ = pgp; _ = now;
+        Enqueue(algo);
     }
 
     private void TickTwap(Algo algo, TwapParameters tp, DateTimeOffset now)

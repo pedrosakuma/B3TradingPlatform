@@ -6,6 +6,25 @@ public enum AlgoType
     Twap,
     Vwap,
     Pov,
+    /// <summary>Q3.3 (#283). Client-side Pegged orders — one working
+    /// slice that re-prices itself off a live reference (mid / best /
+    /// last) at a fixed cadence.</summary>
+    Pegged,
+}
+
+/// <summary>
+/// Q3.3 (#283). Reference-price source for a Pegged parent. <c>Mid</c>
+/// uses <c>(bestBid+bestAsk)/2</c>; <c>Best</c> uses the same-side best
+/// (best bid for buys, best ask for sells); <c>Last</c> uses the last
+/// trade print. When the SDK does not surface BBO frames the engine
+/// transparently falls back to last for <c>Mid</c>/<c>Best</c> — see
+/// <c>PegBookTopCache</c>.
+/// </summary>
+public enum PegRef
+{
+    Mid,
+    Best,
+    Last,
 }
 
 /// <summary>
@@ -140,6 +159,47 @@ public sealed record PovParameters(
     TimeSpan TickInterval,
     decimal? PriceLimit = null,
     long MinSliceQty = 1) : AlgoParameters;
+
+/// <summary>
+/// Q3.3 (#283). Client-side Pegged orders parameters.
+///
+/// <para>
+/// Pegged maintains a SINGLE working slice for the full
+/// <c>TotalQuantity</c> and re-prices it off a live reference at
+/// <c>RepegInterval</c> cadence: <c>target = ref + offsetTicks*tickSize</c>.
+/// When <c>|currentChildPrice - target| &gt;= tickSize</c> the engine
+/// cancels the live child and places a new one at <c>target</c>. Unlike
+/// VWAP/POV there is no scheduled window — Pegged runs until filled or
+/// explicitly cancelled (DELETE /algo/{id}).
+/// </para>
+///
+/// <para><b>Ref</b>: <see cref="PegRef.Mid"/>, <see cref="PegRef.Best"/>,
+/// or <see cref="PegRef.Last"/>. When the upstream feed cannot supply
+/// BBO (current SDK gap), <c>Mid</c>/<c>Best</c> transparently fall back
+/// to last-trade.</para>
+/// <para><b>OffsetTicks</b>: signed offset applied to <c>ref</c>;
+/// positive favours the passive side (less aggressive), negative crosses
+/// the spread.</para>
+/// <para><b>RepegInterval</b>: minimum wall-clock spacing between repeg
+/// evaluations. The scheduler may enqueue evaluations more frequently;
+/// the engine throttles to this interval.</para>
+/// <para><b>TickSize</b>: instrument tick. Used both for the target
+/// computation and the "needs repeg" tolerance (<c>&gt;= 1 tick</c>).
+/// Static for v0 — when a <c>TickSizeProvider</c> lands the engine will
+/// look it up per-symbol instead.</para>
+/// <para><b>PriceLimit</b>: hard limit the engine never crosses past;
+/// when the computed target would cross it, the target is clamped (same
+/// semantics as VWAP/POV <c>PriceLimit</c>). When the clamped target
+/// equals the current child price the engine skips the repeg
+/// altogether.</para>
+/// </summary>
+public sealed record PeggedParameters(
+    PegRef Ref,
+    int OffsetTicks,
+    TimeSpan RepegInterval,
+    decimal TickSize,
+    OrderType ChildOrderType = OrderType.Limit,
+    decimal? PriceLimit = null) : AlgoParameters;
 
 /// <summary>
 /// Parent algo aggregate, sibling to <see cref="Order"/>. v0 stores only
@@ -315,6 +375,7 @@ public sealed class Algo
             AlgoType.Twap => parameters is TwapParameters,
             AlgoType.Vwap => parameters is VwapParameters,
             AlgoType.Pov => parameters is PovParameters,
+            AlgoType.Pegged => parameters is PeggedParameters,
             _ => false,
         };
         if (!ok)

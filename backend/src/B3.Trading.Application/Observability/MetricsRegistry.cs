@@ -296,6 +296,25 @@ public static class MetricsRegistry
             "trading.algo.pov.cancelled",
             description: "POV parents reaching the Cancelled terminal state.");
 
+    // Q3.3 (#283) — Pegged repeg observability. RepegsTotal counts every
+    // successful cancel+place cycle the engine performed for a Pegged
+    // parent (no-op evaluations are NOT counted). RepegFailed counts
+    // cycles where the cancel side threw (gateway transient, child
+    // already terminal in a race, …) so the engine deferred the repeg
+    // to the next tick.
+    public static readonly Counter<long> AlgoPeggedRepegsTotal =
+        Meter.CreateCounter<long>(
+            "trading.algo.pegged.repegs_total",
+            description: "Repeg cycles (cancel + place at new target) performed by the Pegged scheduler.");
+    public static readonly Counter<long> AlgoPeggedRepegFailed =
+        Meter.CreateCounter<long>(
+            "trading.algo.pegged.repeg_failed",
+            description: "Repeg attempts that aborted on the cancel leg; the engine retries on the next tick.");
+    public static readonly Counter<long> AlgoPeggedCancelled =
+        Meter.CreateCounter<long>(
+            "trading.algo.pegged.cancelled",
+            description: "Pegged parents reaching the Cancelled terminal state.");
+
     /// <summary>
     /// 1 when the host booted with <c>Trading:Exchange:AllowErInjection=true</c>
     /// (admin-gated <c>POST /admin/simulator/er</c> is mapped). Set once at

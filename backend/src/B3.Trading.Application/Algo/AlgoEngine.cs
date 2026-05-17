@@ -79,6 +79,8 @@ public sealed class AlgoEngine : BackgroundService
     private readonly OrderOwnershipMap _ownership;
     private readonly VolumeCurveEstimator? _vwapCurve;
     private readonly MarketDataVolumePump? _volumePump;
+    private readonly PegBookTopCache? _pegBookTop;
+    private readonly MarketDataPegBookPump? _pegBookPump;
     /// <summary>
     /// Pass-1 review (#295) P1#1. Per-POV scheduling progress
     /// (cumulative market volume + last-evaluate timestamp). Persisted
@@ -109,7 +111,9 @@ public sealed class AlgoEngine : BackgroundService
         OrderOwnershipMap ownership,
         VolumeCurveEstimator? vwapCurve = null,
         MarketDataVolumePump? volumePump = null,
-        PovProgressBook? povProgress = null)
+        PovProgressBook? povProgress = null,
+        PegBookTopCache? pegBookTop = null,
+        MarketDataPegBookPump? pegBookPump = null)
     {
         _queue = queue;
         _algos = algos;
@@ -125,6 +129,8 @@ public sealed class AlgoEngine : BackgroundService
         _vwapCurve = vwapCurve;
         _volumePump = volumePump;
         _povProgress = povProgress;
+        _pegBookTop = pegBookTop;
+        _pegBookPump = pegBookPump;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -330,13 +336,29 @@ public sealed class AlgoEngine : BackgroundService
         {
             await _volumePump.EnsureSubscribedAsync(algo.Symbol, ct).ConfigureAwait(false);
         }
+        // Q3.3 (#283). Pegged needs the SDK subscribed to its symbol so
+        // PegBookTopCache receives prints; without that the engine has
+        // no live reference and every repeg eval is a no-op (silent
+        // do-nothing algo).
+        if (algo.Type == AlgoType.Pegged && _pegBookPump is not null)
+        {
+            await _pegBookPump.EnsureSubscribedAsync(algo.Symbol, ct).ConfigureAwait(false);
+        }
 
         if (rt.LiveChildClOrdId is { } existing)
         {
             // A child is already outstanding (steady-state or post-recovery).
-            // Idempotent no-op — when the child reaches terminal we'll
-            // refill (Iceberg) or wait for the next scheduled tick (TWAP)
-            // via OnChildErAsync.
+            // Pegged is the only algo where a live child can trigger
+            // engine-driven action: evaluate "has the live ref drifted
+            // far enough to repeg?" and cancel the child if so. Iceberg
+            // refills on terminal (OnChildErAsync), TWAP/VWAP/POV wait
+            // for the scheduler tick — for those it's an idempotent no-op
+            // here.
+            if (algo.Type == AlgoType.Pegged && algo.Parameters is PeggedParameters pgEval)
+            {
+                await EvaluatePeggedRepegAsync(algo, rt, pgEval, existing, ct).ConfigureAwait(false);
+                return;
+            }
             _logger.LogDebug(
                 "AlgoEngine OnCreated: algo {Firm}/{AlgoId} already has live child {Child}; no resubmit.",
                 algo.FirmId, algo.AlgoId, existing);
@@ -544,6 +566,21 @@ public sealed class AlgoEngine : BackgroundService
                     // landed before the cancel-ack.
                     await RecordTerminalAsync(algo, rt, AlgoStatus.Cancelled, AlgoTerminalReason.UserCancelled).ConfigureAwait(false);
                 }
+                else if (rt.RepegPending && algo.Type == AlgoType.Pegged)
+                {
+                    // Q3.3 (#283). Engine-initiated cancel for a repeg —
+                    // the cancel-ack is the signal to place the new
+                    // child at the fresh target. Clear the flag first
+                    // so a second cancel-ack (shouldn't happen but is
+                    // cheap to defend) doesn't loop into a double-place.
+                    rt.RepegPending = false;
+                    if (algo.RemainingQuantity <= 0)
+                    {
+                        await RecordTerminalAsync(algo, rt, AlgoStatus.Completed, AlgoTerminalReason.None).ConfigureAwait(false);
+                        return;
+                    }
+                    await SubmitNextSliceAsync(algo, rt, ct).ConfigureAwait(false);
+                }
                 else if (IsTwapWindowExpired(algo))
                 {
                     // RFC §4.6 "window passed during downtime AND child was
@@ -673,6 +710,14 @@ public sealed class AlgoEngine : BackgroundService
                 rt.NextSliceSeq++;
                 return;
             }
+            if (algo.Type == AlgoType.Pegged)
+            {
+                // Pegged: no live reference price yet (cache empty —
+                // SDK hasn't delivered any prints for the symbol). The
+                // scheduler will fire another AlgoCreatedSignal at the
+                // next tick; we just no-op until the cache warms.
+                return;
+            }
             // Should be unreachable (RemainingQuantity == 0 is checked by
             // callers) — defensive log + complete.
             await RecordTerminalAsync(algo, rt, AlgoStatus.Completed, AlgoTerminalReason.None).ConfigureAwait(false);
@@ -686,6 +731,7 @@ public sealed class AlgoEngine : BackgroundService
             TwapParameters tp => tp.ChildOrderType,
             VwapParameters vp => vp.ChildOrderType,
             PovParameters pp => pp.ChildOrderType,
+            PeggedParameters pgp => pgp.ChildOrderType,
             _ => OrderType.Limit,
         };
 
@@ -919,6 +965,10 @@ public sealed class AlgoEngine : BackgroundService
         {
             MetricsRegistry.AlgoPovCancelled.Add(1);
         }
+        else if (algo.Type == AlgoType.Pegged && status == AlgoStatus.Cancelled)
+        {
+            MetricsRegistry.AlgoPeggedCancelled.Add(1);
+        }
         // Pass-2 review (#295) P2. Drop the per-POV progress entry on
         // every terminal transition so PovProgressBook stays bounded
         // and the next snapshot doesn't carry stale state for a dead
@@ -971,8 +1021,157 @@ public sealed class AlgoEngine : BackgroundService
                     var (qty, price, _) = ComputePovSlice(algo, pp, rt, dueAt);
                     return (qty, price);
                 }
+            case PeggedParameters pgp:
+                {
+                    // Pegged: single working slice covers the full
+                    // residue. Target = clamped(ref + offsetTicks*tick).
+                    // When the cache has no live reference yet, qty=0
+                    // signals "defer" — SubmitNextSliceAsync recognises
+                    // the Pegged-empty case and no-ops without marking
+                    // terminal (see the special case above).
+                    var target = ResolvePeggedTarget(algo, pgp);
+                    if (target is null) return (0, null);
+                    return (algo.RemainingQuantity, target);
+                }
             default:
                 return (algo.RemainingQuantity, null);
+        }
+    }
+
+    /// <summary>
+    /// Q3.3 (#283). Resolves the (possibly clamped) target price for a
+    /// Pegged parent off the live <see cref="PegBookTopCache"/>.
+    /// Returns <c>null</c> when the cache has not been seeded yet for
+    /// the symbol — the caller must defer (no-op) and let the next
+    /// scheduler tick re-evaluate.
+    /// </summary>
+    private decimal? ResolvePeggedTarget(Algo algo, PeggedParameters pgp)
+    {
+        var book = _pegBookTop?.TryGet(algo.Symbol);
+        if (book is null) return null;
+        var refPrice = book.Value.RefPrice(pgp.Ref, algo.Side);
+        if (refPrice is null) return null;
+        var rawTarget = PeggedPlan.ComputeTarget(refPrice, pgp.OffsetTicks, pgp.TickSize);
+        if (rawTarget is null) return null;
+        return PeggedPlan.ClampToLimit(rawTarget.Value, pgp.PriceLimit, algo.Side);
+    }
+
+    /// <summary>
+    /// Q3.3 (#283). Repeg evaluation for a Pegged parent that already
+    /// has a live working slice. The decision tree, in order:
+    ///
+    /// <list type="number">
+    /// <item><b>Throttle</b>: if &lt; <c>RepegInterval</c> has elapsed
+    /// since the last eval, no-op. Bounds the cancel-replace churn
+    /// against an overactive scheduler tick.</item>
+    /// <item><b>Resolve target</b>: if the cache has no live ref yet,
+    /// no-op (don't touch the live child without a fresh reference —
+    /// pulling it would expose the parent to "no order" risk for free).</item>
+    /// <item><b>Compare</b>: if <c>|child.Price - target| &lt; 1 tick</c>,
+    /// no-op and bump <c>PeggedLastEvalUtc</c> so the throttle is
+    /// honoured.</item>
+    /// <item><b>PriceLimit clamp</b>: target is already clamped by
+    /// <see cref="ResolvePeggedTarget"/>; if the clamped target equals
+    /// the child price the comparison above already returned no-op.
+    /// This means a target that would otherwise cross the limit gets
+    /// quietly absorbed and the live child stays put — matches the
+    /// issue spec "Never cross spread beyond priceLimit".</item>
+    /// <item><b>Cancel + flag</b>: cancel the live child via the
+    /// gateway, set <c>rt.RepegPending</c> so
+    /// <see cref="OnChildErAsync"/> re-submits at a fresh target when
+    /// the cancel-ack lands (rather than treating the cancel as a
+    /// venue-cancel suspension).</item>
+    /// </list>
+    /// </summary>
+    private async Task EvaluatePeggedRepegAsync(
+        Algo algo, AlgoParentRuntime rt, PeggedParameters pgp,
+        ulong liveChildClOrdId, CancellationToken ct)
+    {
+        var now = _clock.GetUtcNow();
+        if (rt.PeggedLastEvalUtc != default
+            && (now - rt.PeggedLastEvalUtc) < pgp.RepegInterval)
+        {
+            return;
+        }
+
+        var target = ResolvePeggedTarget(algo, pgp);
+        if (target is null)
+        {
+            // No live ref yet — don't disturb the working slice; next
+            // tick may have a price.
+            return;
+        }
+
+        if (!_orders.TryGet(liveChildClOrdId, out var child) || child is null
+            || IsChildTerminal(child))
+        {
+            // Child reference went stale (rare race with ER pipeline);
+            // clear and let the next tick re-evaluate from the empty
+            // slot path.
+            rt.LiveChildClOrdId = null;
+            return;
+        }
+
+        var currentPrice = child.Price ?? 0m;
+        if (currentPrice <= 0m
+            || !PeggedPlan.IsRepegNeeded(currentPrice, target.Value, pgp.TickSize))
+        {
+            // No drift — record eval-at so the throttle holds.
+            rt.PeggedLastEvalUtc = now;
+            return;
+        }
+
+        // Cancel the live child. Mark RepegPending BEFORE the cancel
+        // wire-call so the cancel-ack ER (which may arrive on a
+        // different consumer-loop iteration) doesn't race the flag
+        // and route through the VenueCancelled-suspension path.
+        rt.RepegPending = true;
+        rt.PeggedLastEvalUtc = now;
+        var oldChildPrice = currentPrice;
+        var refForAudit = _pegBookTop?.TryGet(algo.Symbol)?.RefPrice(pgp.Ref, algo.Side) ?? 0m;
+        var newClOrdId = _clOrdIds.Generate(child.Owner);
+        try
+        {
+            _ownership.RegisterCancelLink(newClOrdId, child.ClOrdId);
+            await _gateway.CancelAsync(child, newClOrdId, ct).ConfigureAwait(false);
+
+            // Best-effort audit envelope; WAL backpressure is non-fatal
+            // because the next OrderSubmittedEvent already records the
+            // new child price.
+            try
+            {
+                var sliceSeq = rt.NextSliceSeq;
+                _dispatcher.Dispatch(
+                    new AlgoPeggedRepeggedEvent
+                    {
+                        AlgoId = algo.AlgoId,
+                        FirmId = algo.FirmId,
+                        SliceSeq = sliceSeq,
+                        RefKind = pgp.Ref.ToString(),
+                        RefPrice = refForAudit,
+                        OldChildPrice = oldChildPrice,
+                        NewTargetPrice = target.Value,
+                        AtUtc = now,
+                    },
+                    static () => { });
+            }
+            catch (WalBackpressureException)
+            {
+                MetricsRegistry.WalBackpressure.Add(1,
+                    new KeyValuePair<string, object?>("call_site", "algo.pegged.repegged"));
+            }
+
+            MetricsRegistry.AlgoPeggedRepegsTotal.Add(1);
+        }
+        catch (Exception ex)
+        {
+            // Cancel failed — clear the pending flag and bump the
+            // failure counter; the next scheduler tick will retry.
+            rt.RepegPending = false;
+            MetricsRegistry.AlgoPeggedRepegFailed.Add(1);
+            _logger.LogWarning(ex,
+                "AlgoEngine pegged repeg cancel failed for algo {Firm}/{AlgoId} child {Child}; will retry next tick.",
+                algo.FirmId, algo.AlgoId, liveChildClOrdId);
         }
     }
 
@@ -1125,5 +1324,14 @@ public sealed class AlgoEngine : BackgroundService
         // an empty estimator.
         public long PovMarketVolumeSeen;
         public DateTimeOffset PovLastEvaluateAtUtc;
+
+        // Q3.3 (#283) — Pegged scheduling state. PeggedLastEvalUtc
+        // anchors the RepegInterval throttle (next eval allowed at
+        // last + interval). RepegPending signals the cancel-ack ER
+        // that the engine itself initiated the cancel for a repeg —
+        // OnChildErAsync uses it to route through SubmitNextSlice
+        // (place new) rather than the VenueCancelled-suspension path.
+        public DateTimeOffset PeggedLastEvalUtc;
+        public bool RepegPending;
     }
 }

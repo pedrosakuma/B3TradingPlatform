@@ -28,6 +28,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(AlgoTerminalStateRecordedEvent), "algo.terminal")]
 [JsonDerivedType(typeof(AlgoVwapSlicedEvent), "algo.vwap.sliced")]
 [JsonDerivedType(typeof(AlgoPovSlicedEvent), "algo.pov.sliced")]
+[JsonDerivedType(typeof(AlgoPeggedRepeggedEvent), "algo.pegged.repegged")]
 [JsonDerivedType(typeof(OrderStaledEvent), "order.staled")]
 [JsonDerivedType(typeof(OrderStaleClearedEvent), "order.stale-cleared")]
 [JsonDerivedType(typeof(UserBotCredentialCreatedEvent), "userbot.cred.created")]
@@ -279,7 +280,7 @@ public sealed record AlgoCreatedEvent : WalEvent
     public required string Symbol { get; init; }
     public required ulong SecurityId { get; init; }
     public required string Side { get; init; }
-    public required string Type { get; init; }   // "Iceberg" | "Twap" | "Vwap" | "Pov"
+    public required string Type { get; init; }   // "Iceberg" | "Twap" | "Vwap" | "Pov" | "Pegged"
     public required long TotalQuantity { get; init; }
     public required DateTimeOffset CreatedAtUtc { get; init; }
     /// <summary>
@@ -319,6 +320,16 @@ public sealed record AlgoCreatedEvent : WalEvent
     public long? PovTickIntervalTicks { get; init; }
     public decimal? PovPriceLimit { get; init; }
     public long? PovMinSliceQty { get; init; }
+
+    // Q3.3 (#283) — Pegged fields. Mirror the POV block above; only the
+    // block matching <see cref="Type"/> = "Pegged" is populated. Additive
+    // — older replays / snapshots without these fields stay valid.
+    public string? PeggedRef { get; init; }                 // PegRef enum name
+    public int? PeggedOffsetTicks { get; init; }
+    public long? PeggedRepegIntervalTicks { get; init; }
+    public decimal? PeggedTickSize { get; init; }
+    public string? PeggedChildOrderType { get; init; }      // "Limit" | "Market"
+    public decimal? PeggedPriceLimit { get; init; }
 }
 
 /// <summary>
@@ -403,6 +414,28 @@ public sealed record AlgoPovSlicedEvent : WalEvent
     // LastEvaluateAtUtc as "no prior progress; seed from StartUtc".
     public long MarketVolumeSeen { get; init; }
     public DateTimeOffset LastEvaluateAtUtc { get; init; }
+}
+
+/// <summary>
+/// Q3.3 (#283). Per-repeg audit envelope for Pegged parents — captures
+/// the live reference price, the old child price (cancelled) and the
+/// new target price the engine is placing at. NOT replayed for state
+/// reconstruction (the cancel + new child are already on the WAL via
+/// <see cref="OrderCancelRequestedEvent"/> + <see cref="OrderSubmittedEvent"/>);
+/// the engine treats this event as observability-only so a future
+/// omission of the WAL write would not desynchronise recovery. Mirrors
+/// the <c>AlgoVwapSliced</c> shape called out in the issue body.
+/// </summary>
+public sealed record AlgoPeggedRepeggedEvent : WalEvent
+{
+    public required ulong AlgoId { get; init; }
+    public required string FirmId { get; init; }
+    public required int SliceSeq { get; init; }
+    public required string RefKind { get; init; }     // PegRef enum name
+    public required decimal RefPrice { get; init; }
+    public required decimal OldChildPrice { get; init; }
+    public required decimal NewTargetPrice { get; init; }
+    public required DateTimeOffset AtUtc { get; init; }
 }
 
 /// <summary>
