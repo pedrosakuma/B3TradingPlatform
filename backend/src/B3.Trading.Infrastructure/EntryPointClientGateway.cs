@@ -37,7 +37,12 @@ public sealed class EntryPointClientGateway : IExchangeGateway
             order.Type == OrderType.Limit ? EpOrderType.Limit : EpOrderType.Market,
             order.Quantity,
             order.Price,
-            _firmId);
+            _firmId,
+            // Q3.4 (#284). Plumb DisplayQty as MaxFloor through the
+            // mock seam so tests can pin wire mapping. The real SDK
+            // path in B3EntryPointClientGateway maps the same field
+            // to UpModels.NewOrderRequest.MaxFloor.
+            MaxFloor: order.DisplayQty);
 
         return _client.SubmitNewOrderAsync(req, cancellationToken);
     }
@@ -70,7 +75,14 @@ public sealed class EntryPointClientGateway : IExchangeGateway
             new OrderCancelReplaceRequest(
                 original.ClOrdId, newClOrdId, original.SecurityId,
                 original.Side == OrderSide.Buy ? EpSide.Buy : EpSide.Sell,
-                newQuantity, newPrice, _firmId),
+                newQuantity, newPrice, _firmId,
+                // Q3.4 (#284). Replace inherits the original's visible
+                // portion (clamped to newQuantity when the new order qty
+                // would otherwise be < DisplayQty), mirroring the real
+                // SDK path in B3EntryPointClientGateway.CancelReplaceAsync.
+                MaxFloor: original.DisplayQty is { } odq
+                    ? Math.Min(odq, newQuantity)
+                    : (long?)null),
             cancellationToken);
     }
 }

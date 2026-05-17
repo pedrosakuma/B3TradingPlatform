@@ -1399,6 +1399,137 @@ public class HistoryEndpointTests : IDisposable
         return new HistoryPage(items, nextCursor);
     }
 
+    [Fact]
+    public async Task OrdersHistory_IcebergOrder_SurfacesDisplayFieldsOnInitialAndReplaceRows()
+    {
+        // Pass-2 review (#297) P2 regression. Before the fix, OrderProjection
+        // / OrderHistoryItemDto carried no DisplayQty or DisplayResetPolicy,
+        // so /orders/history made iceberg orders indistinguishable from
+        // full-disclosure orders. Live GET /orders + WS were fixed in
+        // pass-1; this test guards the historical projection path.
+        //
+        // Flow exercised:
+        //   1. POST /orders with DisplayQty=25, Policy=Always (qty=100)
+        //   2. Drive to Working + partial fill (4@30)
+        //   3. PUT /orders/{id} shrinking quantity to 15 → replacement
+        //      ClOrdID inherits DisplayQty but it MUST be clamped to 15
+        //      (mirroring Order.HydrateReplacement's clamp semantics so
+        //      the projection matches what the venue actually sees via
+        //      the gateway's MaxFloor send on cancel-replace).
+        //   4. GET /orders/history exposes DisplayQty + Policy on the
+        //      original row AND the replacement row.
+        using var f = TestAppFactory.WithOverrides(Overrides());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var origClOrdIdStr = await SubmitIcebergOrder(
+            http, token, qty: 100, price: 30m, displayQty: 25, policy: "Always");
+        var origClOrdId = ulong.Parse(origClOrdIdStr);
+
+        // New ack so the modify pipeline accepts the subsequent replace.
+        await InjectEr(http, adminToken, new
+        {
+            ClOrdId = origClOrdId,
+            Type = "New",
+        });
+
+        // Optional partial fill (mirrors the spec's "optional partial fill"
+        // step) — proves the projection still carries the iceberg fields
+        // through ApplyEr accumulation, not just the initial FromSubmit.
+        await InjectEr(http, adminToken, new
+        {
+            ClOrdId = origClOrdId,
+            Type = "PartialFill",
+            LastQty = 4L,
+            LastPx = 30m,
+        });
+
+        // Quantity-shrink replace down to 15. The clamp branch in
+        // OrderProjection.FromReplace must drop DisplayQty 25 → 15.
+        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origClOrdIdStr}")
+        {
+            Content = JsonContent.Create(new { Quantity = 15L, Price = 30m }),
+        };
+        modifyReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var modifyResp = await http.SendAsync(modifyReq);
+        Assert.Equal(HttpStatusCode.Accepted, modifyResp.StatusCode);
+        var modifyBody = await modifyResp.Content.ReadFromJsonAsync<JsonElement>();
+        var newClOrdId = ulong.Parse(modifyBody.GetProperty("clOrdId").GetString()!);
+
+        var mock = (B3.Trading.Infrastructure.MockEntryPointClient)
+            f.Services.GetRequiredService<B3.Trading.Infrastructure.IEntryPointClient>();
+        mock.EmitExecutionReport(new B3.Trading.Infrastructure.ExecutionReportEnvelope(
+            ClOrdId: newClOrdId,
+            ExecType: B3.Trading.Infrastructure.EpExecType.Replaced,
+            LeavesQuantity: 15,
+            CumulativeQuantity: 0,
+            LastQuantity: 0,
+            LastPrice: 0m,
+            RejectReason: null,
+            OrigClOrdId: origClOrdId));
+
+        var page = await GetOrdersHistory(http, token);
+        var byId = page.Items.ToDictionary(
+            o => o.GetProperty("clOrdId").GetString()!,
+            o => o,
+            StringComparer.Ordinal);
+
+        var orig = byId[origClOrdIdStr];
+        Assert.Equal(25L, orig.GetProperty("displayQty").GetInt64());
+        Assert.Equal("Always", orig.GetProperty("displayResetPolicy").GetString());
+
+        var replacement = byId[newClOrdId.ToString()];
+        // Inherited + clamped: original DisplayQty=25 > NewQuantity=15
+        // → projection must report 15 to match the venue-side MaxFloor.
+        Assert.Equal(15L, replacement.GetProperty("displayQty").GetInt64());
+        Assert.Equal("Always", replacement.GetProperty("displayResetPolicy").GetString());
+    }
+
+    [Fact]
+    public async Task OrdersHistory_NonIcebergOrder_LeavesDisplayFieldsNull()
+    {
+        // Forward-compat / negative case: a plain limit order (no
+        // DisplayQty on submit, no DisplayQty on legacy WAL replays)
+        // must surface null for both display fields. Guards against a
+        // future regression that defaults DisplayQty to e.g. order.Quantity.
+        using var f = TestAppFactory.WithOverrides(Overrides());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+
+        var clOrdId = await SubmitOrder(http, token, qty: 10, price: 30m);
+
+        var page = await GetOrdersHistory(http, token);
+        var item = page.Items.Single(o => o.GetProperty("clOrdId").GetString() == clOrdId);
+        Assert.Equal(JsonValueKind.Null, item.GetProperty("displayQty").ValueKind);
+        Assert.Equal(JsonValueKind.Null, item.GetProperty("displayResetPolicy").ValueKind);
+    }
+
+    private static async Task<string> SubmitIcebergOrder(
+        HttpClient http, string token, int qty, decimal price,
+        long displayQty, string policy, string symbol = "PETR4")
+    {
+        var req = new HttpRequestMessage(HttpMethod.Post, "/orders")
+        {
+            Content = JsonContent.Create(new
+            {
+                Symbol = symbol,
+                SecurityId = 4321UL,
+                Side = "Buy",
+                Type = "Limit",
+                Quantity = qty,
+                Price = price,
+                DisplayQty = displayQty,
+                DisplayResetPolicy = policy,
+            }),
+        };
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var resp = await http.SendAsync(req);
+        Assert.Equal(HttpStatusCode.Accepted, resp.StatusCode);
+        var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        return body.GetProperty("clOrdId").GetString()!;
+    }
+
     private static async Task<string> SubmitOrder(
         HttpClient http, string token, int qty, decimal price, string symbol = "PETR4")
     {

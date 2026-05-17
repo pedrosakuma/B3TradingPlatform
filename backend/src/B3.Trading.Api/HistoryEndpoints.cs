@@ -700,6 +700,15 @@ public static class HistoryEndpoints
         public long LastSeq;
         public DateTimeOffset LastTs;
 
+        // Q3.4 (#284) — native iceberg / reserve display fields, mirrored
+        // onto the projection so /orders/history is not blind to the
+        // distinction between iceberg and full-disclosure orders. Null on
+        // legacy WAL rows that pre-date the additive fields on
+        // OrderSubmittedEvent — matches the no-reserve semantics those
+        // submissions actually carried (forward-compat with replay).
+        public long? DisplayQty;
+        public string? DisplayResetPolicy;
+
         public static OrderProjection FromSubmit(long seq, OrderSubmittedEvent o) => new()
         {
             ClOrdId = o.ClOrdId,
@@ -712,6 +721,8 @@ public static class HistoryEndpoints
             TimeInForce = o.TimeInForce,
             StopPrice = o.StopPrice,
             GoodTillDate = o.GoodTillDate,
+            DisplayQty = o.DisplayQty,
+            DisplayResetPolicy = o.DisplayResetPolicy,
             LeavesQuantity = o.Quantity,
             CumulativeQuantity = 0,
             Status = OrderStatus.PendingNew,
@@ -754,6 +765,22 @@ public static class HistoryEndpoints
                 ? (rr.RequestedGoodTillDate ?? original?.GoodTillDate)
                 : null;
 
+            // Q3.4 (#284). Iceberg display fields are inherited from the
+            // ORIGINAL projection on cancel-replace — the modify pipeline
+            // does not (yet) expose a way to alter DisplayQty / policy,
+            // so OrderReplaceRequestedEvent currently carries no explicit
+            // override. Mirror Order.HydrateReplacement's clamp semantics
+            // so the projection reflects what the venue actually sees:
+            // if the operator shrinks the order quantity below the
+            // visible portion, clamp DisplayQty down to NewQuantity.
+            // (When a future modify-pipeline slice adds explicit overrides
+            // on OrderReplaceRequestedEvent, prefer those here; today
+            // there is no source other than the original projection.)
+            long? effDisplayQty = original?.DisplayQty;
+            string? effDisplayPolicy = original?.DisplayResetPolicy;
+            if (effDisplayQty.HasValue && effDisplayQty.Value > rr.NewQuantity)
+                effDisplayQty = rr.NewQuantity;
+
             return new OrderProjection
             {
                 ClOrdId = rr.NewClOrdId,
@@ -766,6 +793,8 @@ public static class HistoryEndpoints
                 TimeInForce = effTif,
                 StopPrice = effStop,
                 GoodTillDate = effGtd,
+                DisplayQty = effDisplayQty,
+                DisplayResetPolicy = effDisplayPolicy,
                 LeavesQuantity = rr.NewQuantity,
                 CumulativeQuantity = 0,
                 Status = OrderStatus.PendingNew,
@@ -1028,7 +1057,9 @@ public static class HistoryEndpoints
             StaleReason,
             StaledAtUtc,
             CreatedAtUtc,
-            LastTs);
+            LastTs,
+            DisplayQty,
+            DisplayResetPolicy);
     }
 
     private sealed record ExecutionProjection(
@@ -1108,7 +1139,18 @@ public sealed record OrderHistoryItemDto(
     string? StaleReason,
     DateTimeOffset? StaledAtUtc,
     DateTimeOffset CreatedAtUtc,
-    DateTimeOffset LastUpdatedAtUtc);
+    DateTimeOffset LastUpdatedAtUtc,
+    /// <summary>Q3.4 (#284). Native iceberg / reserve display quantity at
+    /// submit (or, on a cancel-replace row, inherited from the predecessor
+    /// and clamped to NewQuantity per Order.HydrateReplacement). Null =
+    /// full disclosure / no reserve, including legacy WAL rows that
+    /// pre-date the additive WAL field.</summary>
+    long? DisplayQty = null,
+    /// <summary>Q3.4 (#284). Refresh policy enum name (<c>"Always" |
+    /// "OnPartialFill" | "Never"</c>); null iff <see cref="DisplayQty"/>
+    /// is null. Today only <c>"Always"</c> is accepted at intake (SDK
+    /// limitation — see #298).</summary>
+    string? DisplayResetPolicy = null);
 
 /// <summary>Q2.1 (#268). Wire shape for one row of <c>GET /executions/history</c>.</summary>
 public sealed record ExecutionHistoryItemDto(

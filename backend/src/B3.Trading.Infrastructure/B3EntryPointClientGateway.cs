@@ -162,7 +162,23 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         if (order.Quantity < 0)
             throw new ArgumentOutOfRangeException(nameof(order), "Quantity cannot be negative when submitted upstream.");
 
-        var req = new UpModels.NewOrderRequest
+        var req = BuildNewOrderRequest(order);
+
+        return SendAsync(req.ClOrdID.Value, OrderEntryLatencyProbe.OpSubmit,
+            ct => _client.SubmitAsync(req, ct), cancellationToken);
+    }
+
+    /// <summary>
+    /// Q3.4 (#284). Extracted from <see cref="SubmitAsync"/> so the
+    /// outbound <c>NewOrderRequest</c> mapping can be pinned by unit
+    /// tests without standing up a real <c>EntryPointClient</c>. Pure
+    /// function: every field is read from the domain
+    /// <see cref="Order"/> exactly once and there are no side effects.
+    /// </summary>
+    internal static UpModels.NewOrderRequest BuildNewOrderRequest(Order order)
+    {
+        ArgumentNullException.ThrowIfNull(order);
+        return new UpModels.NewOrderRequest
         {
             ClOrdID = new UpModels.ClOrdID(order.ClOrdId),
             SecurityId = order.SecurityId,
@@ -173,10 +189,23 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             OrderQty = (ulong)order.Quantity,
             TimeInForce = MapTimeInForce(order.TimeInForce),
             ExpireDate = order.GoodTillDate,
+            // Q3.4 (#284). Native iceberg / reserve display qty maps
+            // straight to the SDK's MaxFloor (FIX standard for "max
+            // visible qty"). Domain.Order's ctor already validated
+            // 0 < DisplayQty <= Quantity, so the cast is safe.
+            // TODO(#298): DisplayResetPolicy is NOT plumbed to the SDK —
+            // B3.EntryPoint.Client 0.14.3 NewOrderRequest exposes no
+            // refresh-policy flag. To avoid the venue silently defaulting
+            // to Always (which would break the OnPartialFill / Never
+            // contracts), the REST + risk validation boundary REJECTS
+            // any policy other than Always (see #297 pass-1 fix).
+            // Therefore only Always-policy icebergs can reach this point,
+            // so MaxFloor alone faithfully expresses the trader's intent.
+            // When B3.EntryPoint.Client exposes a refresh-policy field,
+            // wire order.DisplayResetPolicy here and drop the validation
+            // guard in OrdersEndpoints.cs + OrderSubmissionService.cs.
+            MaxFloor = order.DisplayQty is { } dq ? (ulong)dq : (ulong?)null,
         };
-
-        return SendAsync(req.ClOrdID.Value, OrderEntryLatencyProbe.OpSubmit,
-            ct => _client.SubmitAsync(req, ct), cancellationToken);
     }
 
     public Task CancelAsync(Order order, ulong newClOrdId, CancellationToken cancellationToken)
@@ -237,6 +266,18 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             OrderQty = (ulong)newQuantity,
             TimeInForce = MapTimeInForce(effTif),
             ExpireDate = effGtd,
+            // Q3.4 (#284). The modify pipeline does not currently
+            // expose a way to alter the iceberg DisplayQty / policy,
+            // so the replace inherits the original's visible portion
+            // (clamped to newQuantity by HydrateReplacement when the
+            // new order qty would otherwise be < DisplayQty). Same
+            // SDK caveat as SubmitAsync: only MaxFloor is wired;
+            // DisplayResetPolicy ride-along is gated behind the
+            // REST/risk validation that only accepts Always today
+            // (see #298), so passing MaxFloor alone is faithful.
+            MaxFloor = original.DisplayQty is { } odq
+                ? (ulong)Math.Min(odq, newQuantity)
+                : (ulong?)null,
         };
 
         return SendAsync(newClOrdId, OrderEntryLatencyProbe.OpReplace,

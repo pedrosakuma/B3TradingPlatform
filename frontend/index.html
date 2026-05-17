@@ -158,6 +158,28 @@
             <span>Good-till-date</span>
             <input id="ticket-good-till-date" type="datetime-local" />
           </label>
+          <!-- Q3.4 (#284). Native iceberg / reserve display-qty. Leave
+               Display qty empty for full disclosure (no reserve). When
+               set, must satisfy 0 < Display qty <= Quantity; the
+               backend enforces this and returns 400 otherwise.
+               Pass-1 review (#297) follow-up #298: the entrypoint SDK
+               does not yet expose a refresh-policy field, so today only
+               "Always" is accepted at intake — OnPartialFill / Never
+               would be rejected with 400. The dropdown is kept so the
+               UI shape is forward-compatible; extra options can be
+               re-added when #298 lands. -->
+          <div class="row-two">
+            <label>
+              <span>Display qty</span>
+              <input id="ticket-display-qty" type="number" min="1" step="1" placeholder="(no reserve)" />
+            </label>
+            <label>
+              <span>Reset policy</span>
+              <select id="ticket-display-reset-policy">
+                <option value="Always">Always</option>
+              </select>
+            </label>
+          </div>
           <p id="ticket-tif-hint" class="field-hint" role="status" aria-live="polite" hidden></p>
           <p id="ticket-rules-hint" class="field-hint" aria-live="polite">lot 100 · tick 0.01</p>
           <p id="ticket-validation" class="field-hint hint-warn" role="status" aria-live="polite" hidden></p>

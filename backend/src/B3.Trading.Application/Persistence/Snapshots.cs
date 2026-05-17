@@ -307,6 +307,21 @@ public sealed record OrderSnapshot(
     /// Older snapshots default to <c>null</c>.
     /// </summary>
     public DateTimeOffset? GoodTillDate { get; init; }
+
+    /// <summary>
+    /// Q3.4 (#284). Native iceberg / reserve display quantity at
+    /// submit time. Null = full disclosure. Older snapshots default
+    /// to <c>null</c>.
+    /// </summary>
+    public long? DisplayQty { get; init; }
+
+    /// <summary>
+    /// Q3.4 (#284). Refresh policy for the visible portion of an
+    /// iceberg order, stored as the enum name. Null iff
+    /// <see cref="DisplayQty"/> is null. Older snapshots default
+    /// to <c>null</c>.
+    /// </summary>
+    public string? DisplayResetPolicy { get; init; }
 }
 
 /// <summary>
