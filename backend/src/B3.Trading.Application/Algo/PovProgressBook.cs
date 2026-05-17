@@ -53,6 +53,17 @@ public sealed class PovProgressBook
     public void Set(string firmId, ulong algoId, long marketVolumeSeen, DateTimeOffset lastEvaluateAtUtc) =>
         _progress[(firmId, algoId)] = new PovProgress(marketVolumeSeen, lastEvaluateAtUtc);
 
+    /// <summary>
+    /// Drop the per-POV entry for a terminated parent. Called from
+    /// <c>AlgoEngine.RecordTerminalAsync</c> on every POV terminal
+    /// (Completed/Cancelled/Expired/Suspended) and defensively from
+    /// engine reconciliation for any orphan entries whose parent is
+    /// missing or already terminal. Keeps <see cref="Snapshot"/> bounded
+    /// and prevents stale entries from being restored across restarts.
+    /// </summary>
+    public bool Remove(string firmId, ulong algoId) =>
+        _progress.TryRemove((firmId, algoId), out _);
+
     public IEnumerable<(string FirmId, ulong AlgoId, PovProgress Progress)> Snapshot()
     {
         foreach (var kv in _progress)

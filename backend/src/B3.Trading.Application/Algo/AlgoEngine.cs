@@ -186,7 +186,14 @@ public sealed class AlgoEngine : BackgroundService
     private void Reconcile()
     {
         var algos = _algos.EnumerateAll(includeTerminal: false);
-        if (algos.Count == 0) return;
+        if (algos.Count == 0)
+        {
+            // Even with no live algos, prune any orphan POV progress
+            // entries restored from a snapshot written by an older
+            // engine version that didn't remove on terminal.
+            PruneOrphanPovProgress(algos);
+            return;
+        }
 
         foreach (var algo in algos)
         {
@@ -243,6 +250,33 @@ public sealed class AlgoEngine : BackgroundService
         }
 
         _logger.LogInformation("AlgoEngine reconciliation enqueued {Count} non-terminal parents.", algos.Count);
+        PruneOrphanPovProgress(algos);
+    }
+
+    /// <summary>
+    /// Pass-2 review (#295) P2 — defensive. Iterate every entry in
+    /// <see cref="PovProgressBook"/> and drop those whose parent algo
+    /// is absent from the non-terminal live set. Covers (a) entries
+    /// persisted by a previous engine version that didn't
+    /// <c>Remove</c> on terminal, and (b) entries whose parent was
+    /// concurrently terminated/expired between snapshot capture and
+    /// restart. Idempotent and cheap (one pass over a small map).
+    /// </summary>
+    private void PruneOrphanPovProgress(IReadOnlyCollection<Algo> liveAlgos)
+    {
+        if (_povProgress is null) return;
+        var live = new HashSet<(string FirmId, ulong AlgoId)>(liveAlgos.Count);
+        foreach (var a in liveAlgos)
+        {
+            live.Add((a.FirmId, a.AlgoId));
+        }
+        foreach (var (firmId, algoId, _) in _povProgress.Snapshot().ToList())
+        {
+            if (!live.Contains((firmId, algoId)))
+            {
+                _povProgress.Remove(firmId, algoId);
+            }
+        }
     }
 
     private async Task ReactAsync(AlgoSignal signal, CancellationToken ct)
@@ -885,6 +919,15 @@ public sealed class AlgoEngine : BackgroundService
         {
             MetricsRegistry.AlgoPovCancelled.Add(1);
         }
+        // Pass-2 review (#295) P2. Drop the per-POV progress entry on
+        // every terminal transition so PovProgressBook stays bounded
+        // and the next snapshot doesn't carry stale state for a dead
+        // parent. Safe to call for non-POV parents (no-op when no
+        // entry exists).
+        if (algo.Type == AlgoType.Pov)
+        {
+            _povProgress?.Remove(algo.FirmId, algo.AlgoId);
+        }
         await Task.CompletedTask;
     }
 
@@ -1015,6 +1058,16 @@ public sealed class AlgoEngine : BackgroundService
                 rt.PovMarketVolumeSeen += incremental;
             rt.PovLastEvaluateAtUtc = evaluateAtUtc;
         }
+        // Pass-2 review (#295) P1. Persist the just-advanced baseline
+        // into PovProgressBook on EVERY tick (emit OR skip). On the
+        // emit path the dispatcher action at SubmitNextSliceAsync will
+        // re-Set the same values (idempotent, last-write-wins). On the
+        // skip path the snapshotter is the only persistence — without
+        // this update a restart between snapshots loses the observed
+        // market volume and the algo under-slices until post-restart
+        // volume catches up. The trader's loss is bounded by snapshot
+        // cadence (no per-tick WAL event is emitted on skip).
+        _povProgress?.Set(algo.FirmId, algo.AlgoId, rt.PovMarketVolumeSeen, rt.PovLastEvaluateAtUtc);
         var qty = PovPlan.SliceQty(
             rt.PovMarketVolumeSeen,
             algo.FilledQuantity,
