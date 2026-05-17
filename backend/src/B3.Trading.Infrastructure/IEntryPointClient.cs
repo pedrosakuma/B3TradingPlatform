@@ -54,7 +54,15 @@ public sealed record NewOrderSingle(
     EpOrderType Type,
     long Quantity,
     decimal? Price,
-    string FirmId);
+    string FirmId,
+    /// <summary>Q3.4 (#284). Native iceberg / reserve display qty (FIX MaxFloor).
+    /// Null means full disclosure (no reserve). Set by
+    /// <see cref="EntryPointClientGateway"/> from the domain order's
+    /// <c>DisplayQty</c>. The real SDK path (<c>B3EntryPointClientGateway</c>)
+    /// already wires MaxFloor on the upstream <c>NewOrderRequest</c>; this
+    /// field plumbs the same intent through the mock seam so tests can
+    /// assert wire mapping without standing up the real client.</summary>
+    long? MaxFloor = null);
 
 public sealed record OrderCancelRequest(
     ulong ClOrdId,
@@ -70,7 +78,12 @@ public sealed record OrderCancelReplaceRequest(
     EpSide Side,
     long NewQuantity,
     decimal? NewPrice,
-    string FirmId);
+    string FirmId,
+    /// <summary>Q3.4 (#284). Native iceberg / reserve display qty (FIX MaxFloor)
+    /// inherited from the original order, clamped to <c>NewQuantity</c> when the
+    /// replace shrinks the order below the original visible portion. Null when
+    /// the original was a full-disclosure order.</summary>
+    long? MaxFloor = null);
 
 /// <summary>
 /// ExecutionReport surfaced by the wire to the platform. <see cref="OrigClOrdId"/>

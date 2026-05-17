@@ -193,16 +193,17 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             // straight to the SDK's MaxFloor (FIX standard for "max
             // visible qty"). Domain.Order's ctor already validated
             // 0 < DisplayQty <= Quantity, so the cast is safe.
-            // TODO(#284): DisplayResetPolicy is NOT plumbed to the SDK —
+            // TODO(#298): DisplayResetPolicy is NOT plumbed to the SDK —
             // B3.EntryPoint.Client 0.14.3 NewOrderRequest exposes no
-            // refresh-policy flag, so every iceberg currently inherits
-            // the venue default (Always). When the SDK exposes the
-            // field, set it here from order.DisplayResetPolicy and
-            // extend the mapping test. Until then the policy is
-            // informational/local-only (recorded on the WAL +
-            // snapshot + REST/UI surface so the trader's intent is
-            // preserved) and a venue that only supports Always will
-            // silently behave as Always for OnPartialFill / Never.
+            // refresh-policy flag. To avoid the venue silently defaulting
+            // to Always (which would break the OnPartialFill / Never
+            // contracts), the REST + risk validation boundary REJECTS
+            // any policy other than Always (see #297 pass-1 fix).
+            // Therefore only Always-policy icebergs can reach this point,
+            // so MaxFloor alone faithfully expresses the trader's intent.
+            // When B3.EntryPoint.Client exposes a refresh-policy field,
+            // wire order.DisplayResetPolicy here and drop the validation
+            // guard in OrdersEndpoints.cs + OrderSubmissionService.cs.
             MaxFloor = order.DisplayQty is { } dq ? (ulong)dq : (ulong?)null,
         };
     }
@@ -271,8 +272,9 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             // (clamped to newQuantity by HydrateReplacement when the
             // new order qty would otherwise be < DisplayQty). Same
             // SDK caveat as SubmitAsync: only MaxFloor is wired;
-            // DisplayResetPolicy is local-only until the SDK plumbs
-            // it.
+            // DisplayResetPolicy ride-along is gated behind the
+            // REST/risk validation that only accepts Always today
+            // (see #298), so passing MaxFloor alone is faithful.
             MaxFloor = original.DisplayQty is { } odq
                 ? (ulong)Math.Min(odq, newQuantity)
                 : (ulong?)null,

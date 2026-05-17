@@ -94,6 +94,19 @@ public sealed class OrderSubmissionService
         if (string.IsNullOrWhiteSpace(req.Symbol))
             return OrderSubmissionResult.BadRequest("symbol is required");
 
+        // Q3.4 (#284) — pass-1 review (#297) follow-up #298. Defensive
+        // gate covering non-REST callers (algo engine, FIXP bot intake):
+        // the B3.EntryPoint.Client SDK 0.14.3 has no refresh-policy
+        // field, so any iceberg whose policy is not Always would be
+        // silently downgraded to Always on the wire. Reject here so the
+        // semantic discrepancy never enters the WAL. The Domain enum
+        // (DisplayResetPolicy.Always/OnPartialFill/Never) is retained
+        // so this guard can be lifted once the SDK exposes the field.
+        if (req.DisplayResetPolicy is { } drp && drp != Domain.DisplayResetPolicy.Always)
+            return OrderSubmissionResult.BadRequest(
+                $"displayResetPolicy={drp} is not supported by the current entrypoint SDK; " +
+                "supported: Always. Track issue #298.");
+
         var clOrdId = _clOrdIds.Generate(req.Owner);
         // #108 — DuplicateClOrdID defensive guard. The registry's
         // per-end-client counter is allocated atomically, so two

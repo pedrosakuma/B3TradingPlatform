@@ -111,7 +111,13 @@ public sealed record OrderDto(
     /// <summary>Q1.1 (#253). Trigger price for StopLoss/StopLimit; null otherwise.</summary>
     decimal? StopPrice = null,
     /// <summary>Q1.1 (#253). Expiry timestamp for GTD; null otherwise.</summary>
-    DateTimeOffset? GoodTillDate = null);
+    DateTimeOffset? GoodTillDate = null,
+    /// <summary>Q3.4 (#284). Native iceberg / reserve display quantity; null for full disclosure.</summary>
+    long? DisplayQty = null,
+    /// <summary>Q3.4 (#284). Refresh policy for the visible portion of an iceberg order;
+    /// null iff <see cref="DisplayQty"/> is null. Today only <c>"Always"</c> is accepted
+    /// at intake (SDK limitation — see #298).</summary>
+    string? DisplayResetPolicy = null);
 
 public sealed record PositionDto(
     string Symbol,
@@ -226,7 +232,8 @@ public static class DtoMappings
         o.Quantity, o.LeavesQuantity, o.CumulativeQuantity, o.Price, o.Status.ToString(),
         o.ParentAlgoId?.ToString(), o.AlgoSliceSeq,
         o.IsStale, o.StaleReason, o.StaledAtUtc,
-        o.TimeInForce.ToString(), o.StopPrice, o.GoodTillDate);
+        o.TimeInForce.ToString(), o.StopPrice, o.GoodTillDate,
+        o.DisplayQty, o.DisplayResetPolicy?.ToString());
 
     public static PositionDto ToDto(this Position p) => new(p.Symbol, p.NetQuantity, p.AverageEntryPrice);
 

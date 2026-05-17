@@ -69,29 +69,33 @@ public class IcebergDisplayQtySubmitTests
         Assert.Equal(10L, order.DisplayQty);
     }
 
-    [Fact]
-    public async Task SubmitIceberg_NeverPolicy_StillRoundTripsToGateway()
+    [Theory]
+    [InlineData(DisplayResetPolicy.OnPartialFill)]
+    [InlineData(DisplayResetPolicy.Never)]
+    public async Task SubmitIceberg_UnsupportedPolicy_RejectedBeforeWal(DisplayResetPolicy unsupported)
     {
-        // SDK-limitation note (see TODO in B3EntryPointClientGateway):
-        // the SDK does not currently plumb the refresh policy, so on
-        // the wire `Never` collapses to the venue default (Always).
-        // What the platform CAN guarantee end-to-end is that the
-        // trader's chosen policy is preserved on the domain Order,
-        // recorded on the WAL (Application.Tests.Persistence
-        // .OrderDisplayQtyBackCompatTests), and visible to operators
-        // via the REST/UI surface.
+        // Pass-1 review (#297, follow-up #298). B3.EntryPoint.Client
+        // 0.14.3 has no refresh-policy field, so any policy other than
+        // Always would silently downgrade at the venue and break the
+        // Never contract entirely. The submit pipeline must reject
+        // (defensive — same guard is also in OrdersEndpoints) so
+        // non-REST callers (algo engine, FIXP bot intake) cannot
+        // sneak the unsupported value past the WAL append either.
         var h = new Harness();
         var req = new OrderSubmissionRequest(
             Alice, "FIRM-A", "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit,
             Quantity: 50, Price: 30m,
             DisplayQty: 5,
-            DisplayResetPolicy: DisplayResetPolicy.Never);
+            DisplayResetPolicy: unsupported);
 
         var result = await h.Submitter.SubmitAsync(req, CancellationToken.None);
 
-        Assert.Equal(OrderSubmissionResultKind.Accepted, result.Kind);
-        var submitted = Assert.Single(h.Gateway.SubmittedOrders);
-        Assert.Equal(DisplayResetPolicy.Never, submitted.DisplayResetPolicy);
+        Assert.Equal(OrderSubmissionResultKind.BadRequest, result.Kind);
+        Assert.NotNull(result.Reason);
+        Assert.Contains("not supported by the current entrypoint SDK", result.Reason);
+        Assert.Contains("Always", result.Reason);
+        Assert.Contains("#298", result.Reason);
+        Assert.Empty(h.Gateway.SubmittedOrders);
     }
 
     [Theory]
@@ -128,7 +132,7 @@ public class IcebergDisplayQtySubmitTests
             Alice, "FIRM-A", "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit,
             Quantity: 100, Price: 30m,
             DisplayQty: 10,
-            DisplayResetPolicy: DisplayResetPolicy.OnPartialFill);
+            DisplayResetPolicy: DisplayResetPolicy.Always);
         var submitResult = await h.Submitter.SubmitAsync(req, CancellationToken.None);
 
         // Advance fills 30/100 so the snapshot captures non-trivial
@@ -143,7 +147,7 @@ public class IcebergDisplayQtySubmitTests
         Assert.True(fresh.TryGet(submitResult.ClOrdId, out var restored));
         Assert.NotNull(restored);
         Assert.Equal(10L, restored!.DisplayQty);
-        Assert.Equal(DisplayResetPolicy.OnPartialFill, restored.DisplayResetPolicy);
+        Assert.Equal(DisplayResetPolicy.Always, restored.DisplayResetPolicy);
         Assert.Equal(70, restored.LeavesQuantity);
         Assert.Equal(30, restored.CumulativeQuantity);
         Assert.Equal(OrderStatus.PartiallyFilled, restored.Status);

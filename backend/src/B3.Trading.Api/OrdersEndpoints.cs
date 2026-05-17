@@ -50,11 +50,29 @@ public static class OrdersEndpoints
             // the WAL. The DisplayQty risk check (0 < DisplayQty <= Quantity)
             // is enforced by Domain.Order's ctor and surfaces as BadRequest
             // from OrderSubmissionService.
+            //
+            // Pass-1 review (#297, follow-up #298). The B3.EntryPoint.Client
+            // SDK 0.14.3 exposes only MaxFloor on NewOrderRequest — there is
+            // no refresh-policy field — so any policy other than Always
+            // would silently default to Always at the venue, breaking the
+            // Never contract entirely. Reject OnPartialFill / Never at the
+            // REST boundary (and again in OrderSubmissionService as a
+            // defensive risk check covering non-REST callers) until the SDK
+            // exposes the field. The Domain enum + WAL/snapshot fields are
+            // intentionally retained so this gate can be lifted with a
+            // one-line gateway change later (see #298).
             DisplayResetPolicy? displayPolicy = null;
             if (!string.IsNullOrWhiteSpace(req.DisplayResetPolicy))
             {
                 if (!Enum.TryParse<DisplayResetPolicy>(req.DisplayResetPolicy, ignoreCase: true, out var parsedPolicy))
                     return Results.BadRequest(new { error = $"invalid displayResetPolicy '{req.DisplayResetPolicy}'" });
+                if (parsedPolicy != DisplayResetPolicy.Always)
+                    return Results.BadRequest(new
+                    {
+                        error =
+                            $"displayResetPolicy={parsedPolicy} is not supported by the current entrypoint SDK; " +
+                            "supported: Always. Track issue #298.",
+                    });
                 displayPolicy = parsedPolicy;
             }
 
