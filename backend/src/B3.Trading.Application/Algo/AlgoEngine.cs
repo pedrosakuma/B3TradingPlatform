@@ -659,9 +659,14 @@ public sealed class AlgoEngine : BackgroundService
         // and seed the new child's booked-cum baseline from the venue's
         // echoed cum so the next Fill ER for the new child computes a
         // correct delta. The OLD child has already been MarkReplaced'd
-        // by the processor (Replaced ⇒ terminal) and its
-        // ChildBookedCum entry is left in place — Reconcile rebuilds it
-        // from the order book, and it's bounded per-parent.
+        // by the processor (Replaced ⇒ terminal); its ChildBookedCum
+        // entry is NOT pruned synchronously — a late stray ER for OLD
+        // could still arrive and we must keep the prior booked-cum so
+        // its delta computation yields 0 (rather than re-booking the
+        // OLD cum from a missing-key default of 0). Pass-2 review
+        // (#299) P2 caps that bookkeeping by enqueueing OLD into a
+        // bounded FIFO; once the FIFO overflows (cap=8) the eldest
+        // retired slot is evicted from ChildBookedCum.
         if (_replacements is not null
             && rt.LiveChildClOrdId is { } oldLive
             && oldLive != child.ClOrdId
@@ -672,6 +677,7 @@ public sealed class AlgoEngine : BackgroundService
         {
             rt.LiveChildClOrdId = child.ClOrdId;
             rt.ChildBookedCum[child.ClOrdId] = child.CumulativeQuantity;
+            rt.RetireChildSlot(oldLive);
             // Fall through so any erCum > prior booked OLD cum that the
             // venue carried over (e.g. a fill landed at venue strictly
             // between our last OLD-child ER and the Replaced ack) is NOT
@@ -2084,12 +2090,36 @@ public sealed class AlgoEngine : BackgroundService
     /// snapshotted) — recovery rebuilds it from the order book on engine
     /// start. Not thread-safe; only the single consumer task touches it.
     /// </summary>
-    private sealed class AlgoParentRuntime
+    internal sealed class AlgoParentRuntime
     {
         public ulong? LiveChildClOrdId;
         public int NextSliceSeq;
         public int RetryAttempts;
         public Dictionary<ulong, long> ChildBookedCum { get; } = new();
+
+        // Pass-2 review (#299) P2. Bounded FIFO of retired (replaced)
+        // child ClOrdIds for this parent. On adoption of a replacement
+        // child via OnChildErAsync, the OLD child id is enqueued here;
+        // when the queue overflows <see cref="RetiredChildSlotsCap"/>,
+        // the eldest id is dequeued AND its row removed from
+        // <see cref="ChildBookedCum"/>. We keep the booked-cum row for
+        // recently-retired slots so a late stray ER for that OLD id
+        // (e.g. a duplicate Cancelled ack the venue emits post-replace)
+        // computes delta = childCum - prevBooked == 0 instead of being
+        // re-booked from a missing-key default of 0. Cap mirrors the
+        // <c>CancelledChildRing</c> sizing pattern from PR #296.
+        private const int RetiredChildSlotsCap = 8;
+        public Queue<ulong> RetiredChildSlots { get; } = new(RetiredChildSlotsCap);
+
+        public void RetireChildSlot(ulong oldChildClOrdId)
+        {
+            RetiredChildSlots.Enqueue(oldChildClOrdId);
+            while (RetiredChildSlots.Count > RetiredChildSlotsCap)
+            {
+                var evicted = RetiredChildSlots.Dequeue();
+                ChildBookedCum.Remove(evicted);
+            }
+        }
 
         // Pass-1 review (#295) P1#1. POV scheduling state. Initialised
         // to (0, default) so the first tick treats StartUtc as the

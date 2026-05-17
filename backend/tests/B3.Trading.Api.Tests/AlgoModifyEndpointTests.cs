@@ -403,6 +403,87 @@ public class AlgoModifyEndpointTests
         Assert.Equal(replace.NewClOrdId, newChild.ClOrdId);
     }
 
+    [Fact]
+    public async Task Modify_ReplacedErWithStaleZeroCum_ClampsBaselineToOriginal()
+    {
+        // Pass-2 review (#299) P1. Translators in
+        // B3EntryPointClientGateway (OrderModified arm) and
+        // SimulatorEndpoint (/admin/simulator/er Replaced arm) default
+        // missing CumQty to 0. If the OLD child had prior fills (e.g.
+        // partial fill of 30) and the venue / simulator drives a
+        // Replaced ER with erCum=0, hydrating the replacement with
+        // baseline cum=0 caused the next Fill ER for the NEW child id
+        // to compute its delta against an under-seeded prevBooked,
+        // re-booking the OLD child's 30 against the parent.
+        //
+        // Fix: ExecutionReportProcessor.ApplyReplaceAccepted clamps
+        // seedCum upward to origOrder.CumulativeQuantity (and adjusts
+        // seedLeaves) before HydrateReplacement, so the engine adopts
+        // the new child at the correct cum baseline and subsequent
+        // Fill ERs advance from there.
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var oldChild = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+
+        // Partial fill of 30 on the OLD child BEFORE the modify dispatch.
+        await InjectEr(http, adminToken, oldChild.ClOrdId, "PartialFill",
+            lastQty: 30, lastPx: 30.0m);
+        await Task.Delay(150);
+        var algoBefore = await GetAlgo(http, token, algoId);
+        Assert.Equal(30L, algoBefore.GetProperty("filledQuantity").GetInt64());
+
+        // Operator modify: keep quantity unchanged (100) but bump price.
+        var modReq = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
+        {
+            Content = JsonContent.Create(new { NewPrice = 30.5m }),
+        };
+        modReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var modResp = await http.SendAsync(modReq);
+        Assert.Equal(HttpStatusCode.Accepted, modResp.StatusCode);
+
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        await WaitFor(
+            () => mock.SubmittedReplaces.Any(r => r.OriginalClOrdId == oldChild.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "engine never dispatched CancelReplace");
+        var replace = mock.SubmittedReplaces.Single(r => r.OriginalClOrdId == oldChild.ClOrdId);
+
+        // Venue Replaced ER with the legacy stale CumQty=0 default.
+        // Without the clamp this would seed the new child at cum=0 and
+        // the next Fill ER (cum=50) would book delta=50 on the parent
+        // on top of the already-booked 30 (parent.FilledQuantity=80).
+        // With the clamp the new child is seeded at cum=30, leaves=70,
+        // so the Fill ER's cum=50 books delta=20 → parent cum=50.
+        await InjectReplacedEr(http, adminToken,
+            newClOrdId: replace.NewClOrdId,
+            origClOrdId: replace.OriginalClOrdId,
+            leavesQuantity: replace.NewQuantity,
+            cumQty: 0);
+
+        var newChild = await WaitForChildOtherThan(book, algoId, oldChild.ClOrdId,
+            TimeSpan.FromSeconds(3));
+        Assert.Equal(replace.NewClOrdId, newChild.ClOrdId);
+        Assert.Equal(30L, newChild.CumulativeQuantity);
+        Assert.Equal(70L, newChild.LeavesQuantity);
+
+        // Drive a Fill ER for the NEW child taking total cum to 50.
+        await InjectEr(http, adminToken, newChild.ClOrdId, "PartialFill",
+            lastQty: 20, lastPx: 30.5m);
+        await Task.Delay(150);
+
+        var algoAfter = await GetAlgo(http, token, algoId);
+        Assert.Equal(50L, algoAfter.GetProperty("filledQuantity").GetInt64());
+        Assert.Equal(50L, algoAfter.GetProperty("remainingQuantity").GetInt64());
+    }
+
     // ───────────────────────── Helpers ─────────────────────────
 
     private static async Task<JsonElement> GetAlgo(HttpClient http, string token, string algoId)
