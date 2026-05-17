@@ -393,6 +393,21 @@ public static class MetricsRegistry
             "trading.algo.modify_retired_child_evicted_total",
             description: "Algo retired-child FIFO entries evicted when the per-parent ChildBookedCum bookkeeping cap is exceeded.");
 
+    // Pass-4 review (#299) P1. The AlgoScheduler sweep released an
+    // ambiguous-send replace reservation whose intent had been
+    // pending past <c>RiskOptions.Margin.AmbiguousReplaceTtl</c>
+    // without a Replaced/Rejected ER. Each bump corresponds to one
+    // upsize-delta reservation reclaimed back into the owner's
+    // available cash — i.e. a trader temporarily lost (then
+    // recovered) access to that headroom. Tagged by algoType so
+    // dashboards distinguish operator-driven Pegged repegs from
+    // VWAP/POV nudges (or "unknown" when the algo is no longer in
+    // the book at sweep time).
+    public static readonly Counter<long> AlgoModifyAmbiguousIntentExpiredTotal =
+        Meter.CreateCounter<long>(
+            "trading.algo.modify_ambiguous_intent_expired_total",
+            description: "Ambiguous-send replace intents expired by the AlgoScheduler TTL sweep; held margin reservation released.");
+
     /// <summary>
     /// 1 when the host booted with <c>Trading:Exchange:AllowErInjection=true</c>
     /// (admin-gated <c>POST /admin/simulator/er</c> is mapped). Set once at

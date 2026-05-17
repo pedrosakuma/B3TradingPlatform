@@ -26,7 +26,36 @@ namespace B3.Trading.Application;
 /// </summary>
 public sealed class PendingReplacementRegistry
 {
-    private readonly ConcurrentDictionary<ulong, OrderReplacementIntent> _byNewClOrdId = new();
+    // Internal entry wrapper: carries the public intent plus
+    // bookkeeping metadata needed by the pass-4 (#299) P1 ambiguous-
+    // send margin convergence path (see SweepExpiredAmbiguous +
+    // MarkAmbiguousMarginHeld below). The public OrderReplacementIntent
+    // record is intentionally NOT extended — its shape is captured
+    // verbatim into OrderReplaceRequestedEvent for WAL replay and
+    // existing tests construct it positionally; widening the record
+    // would ripple unnecessarily.
+    private sealed class Entry
+    {
+        public OrderReplacementIntent Intent { get; }
+        public DateTimeOffset CreatedAt { get; }
+        // Pass-4 review (#299) P1. Set when the gateway dispatch
+        // threw AFTER the margin coordinator's PrepareReplace
+        // succeeded AND the intent was registered. The reservation
+        // under <see cref="OrderReplacementIntent.NewClOrdId"/> is
+        // left in place (rather than aborted) so a late Replaced ER
+        // can converge through CommitReplace without re-checking
+        // capacity — but it must be released by the sweep if no ER
+        // arrives within the configured TTL, otherwise the upsize
+        // delta leaks until the parent terminates.
+        public bool AmbiguousMarginHeld { get; set; }
+        public Entry(OrderReplacementIntent intent, DateTimeOffset createdAt)
+        {
+            Intent = intent;
+            CreatedAt = createdAt;
+        }
+    }
+
+    private readonly ConcurrentDictionary<ulong, Entry> _byNewClOrdId = new();
     // Secondary index: original ClOrdID → new ClOrdID. Enforces the
     // "one in-flight modify per original" guard (slice 4).
     private readonly ConcurrentDictionary<ulong, ulong> _byOriginalClOrdId = new();
@@ -39,7 +68,16 @@ public sealed class PendingReplacementRegistry
     /// (the slice-4 guard) — exactly one pending modify per original
     /// order at any time.
     /// </summary>
-    public bool TryAdd(OrderReplacementIntent intent)
+    public bool TryAdd(OrderReplacementIntent intent) => TryAdd(intent, default);
+
+    /// <summary>
+    /// Pass-4 review (#299) P1 overload. Same as <see cref="TryAdd(OrderReplacementIntent)"/>
+    /// but stamps <paramref name="createdAt"/> on the entry so the
+    /// ambiguous-margin sweep (<see cref="SweepExpiredAmbiguous"/>)
+    /// can release reservations whose intent has been pending too
+    /// long without a Replaced/Rejected ER.
+    /// </summary>
+    public bool TryAdd(OrderReplacementIntent intent, DateTimeOffset createdAt)
     {
         ArgumentNullException.ThrowIfNull(intent);
         // Reserve the orig slot first; if successful, claim the new
@@ -48,7 +86,7 @@ public sealed class PendingReplacementRegistry
         // back the orig reservation.
         if (!_byOriginalClOrdId.TryAdd(intent.OriginalClOrdId, intent.NewClOrdId))
             return false;
-        if (!_byNewClOrdId.TryAdd(intent.NewClOrdId, intent))
+        if (!_byNewClOrdId.TryAdd(intent.NewClOrdId, new Entry(intent, createdAt)))
         {
             _byOriginalClOrdId.TryRemove(intent.OriginalClOrdId, out _);
             return false;
@@ -65,11 +103,36 @@ public sealed class PendingReplacementRegistry
     {
         if (_byNewClOrdId.TryRemove(newClOrdId, out var found))
         {
-            _byOriginalClOrdId.TryRemove(found.OriginalClOrdId, out _);
-            intent = found;
+            _byOriginalClOrdId.TryRemove(found.Intent.OriginalClOrdId, out _);
+            intent = found.Intent;
             return true;
         }
         intent = null;
+        return false;
+    }
+
+    /// <summary>
+    /// Pass-4 review (#299) P1. Consume the pending intent (if any)
+    /// keyed by <paramref name="originalClOrdId"/>. Returns the
+    /// intent on success along with <paramref name="ambiguousMarginHeld"/>
+    /// so the caller (ER processor on a Canceled ER for the orig)
+    /// can release the still-held margin reservation when the venue
+    /// effectively dropped the cancel-replace.
+    /// </summary>
+    public bool TryConsumeByOriginal(
+        ulong originalClOrdId,
+        out OrderReplacementIntent? intent,
+        out bool ambiguousMarginHeld)
+    {
+        if (_byOriginalClOrdId.TryRemove(originalClOrdId, out var newId)
+            && _byNewClOrdId.TryRemove(newId, out var found))
+        {
+            intent = found.Intent;
+            ambiguousMarginHeld = found.AmbiguousMarginHeld;
+            return true;
+        }
+        intent = null;
+        ambiguousMarginHeld = false;
         return false;
     }
 
@@ -82,7 +145,7 @@ public sealed class PendingReplacementRegistry
     {
         if (_byNewClOrdId.TryGetValue(newClOrdId, out var found))
         {
-            intent = found;
+            intent = found.Intent;
             return true;
         }
         intent = null;
@@ -98,6 +161,62 @@ public sealed class PendingReplacementRegistry
     /// </summary>
     public bool IsOriginalInFlight(ulong originalClOrdId) =>
         _byOriginalClOrdId.ContainsKey(originalClOrdId);
+
+    /// <summary>
+    /// Pass-4 review (#299) P1. Mark the entry under
+    /// <paramref name="newClOrdId"/> as having a still-held margin
+    /// reservation. Called by the AlgoEngine modify path AFTER an
+    /// ambiguous gateway dispatch failure — the intent is kept in
+    /// place so a late Replaced ER can converge, but the reservation
+    /// will leak indefinitely if no ER ever arrives. The sweep below
+    /// uses this flag to bound the leak via TTL. Returns <c>false</c>
+    /// when no entry exists (e.g. the intent was already consumed
+    /// by a racing ER between dispatch failure and this call).
+    /// </summary>
+    public bool MarkAmbiguousMarginHeld(ulong newClOrdId)
+    {
+        if (_byNewClOrdId.TryGetValue(newClOrdId, out var found))
+        {
+            found.AmbiguousMarginHeld = true;
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Pass-4 review (#299) P1. Remove + return every entry whose
+    /// <see cref="Entry.AmbiguousMarginHeld"/> flag is set AND whose
+    /// <see cref="Entry.CreatedAt"/> is older than
+    /// <paramref name="now"/> minus <paramref name="ttl"/>. Caller
+    /// (the AlgoScheduler sweep) is responsible for calling
+    /// <see cref="Risk.IReplaceMarginCoordinator.AbortReplace"/> for
+    /// each returned intent and bumping the expired-counter metric.
+    /// Entries without the ambiguous flag (the normal in-flight state)
+    /// are NEVER reaped — a long-lived modify on a slow venue is
+    /// legitimate.
+    /// </summary>
+    public IReadOnlyList<OrderReplacementIntent> SweepExpiredAmbiguous(
+        DateTimeOffset now, TimeSpan ttl)
+    {
+        if (ttl <= TimeSpan.Zero) return Array.Empty<OrderReplacementIntent>();
+        List<OrderReplacementIntent>? expired = null;
+        var cutoff = now - ttl;
+        foreach (var kvp in _byNewClOrdId)
+        {
+            var entry = kvp.Value;
+            if (!entry.AmbiguousMarginHeld) continue;
+            if (entry.CreatedAt > cutoff) continue;
+            // Atomic remove guarded by the secondary index so a
+            // racing TryConsume(newClOrdId) wins cleanly (only one
+            // side will observe the entry as removable).
+            if (_byNewClOrdId.TryRemove(kvp.Key, out var found))
+            {
+                _byOriginalClOrdId.TryRemove(found.Intent.OriginalClOrdId, out _);
+                (expired ??= new List<OrderReplacementIntent>()).Add(found.Intent);
+            }
+        }
+        return (IReadOnlyList<OrderReplacementIntent>?)expired ?? Array.Empty<OrderReplacementIntent>();
+    }
 
     /// <summary>Test/observability helper.</summary>
     internal int CountForTesting => _byNewClOrdId.Count;

@@ -477,6 +477,27 @@ public sealed class ExecutionReportProcessor
                 }
                 order.MarkCancelled();
                 _margin.OnExecution(lookupId, kind, 0);
+                // Pass-4 review (#299) P1. If a pass-1 ambiguous-send
+                // left a still-held replace intent keyed by THIS orig
+                // (because the gateway dispatch threw post-Prepare),
+                // and the venue ultimately Canceled the orig (i.e.
+                // dropped both the orig and the never-acked
+                // replacement), we must release the held upsize-delta
+                // reservation NOW — otherwise it sits until the TTL
+                // sweep fires. Clearing the intent here also prevents
+                // a stray late ER (under the never-created new
+                // ClOrdID) from being misinterpreted as a replace
+                // confirmation. Safe to call regardless of whether
+                // an intent existed; no-op when none did.
+                if (_replacements is not null
+                    && _replacements.TryConsumeByOriginal(lookupId, out var canceledOrigIntent, out _)
+                    && canceledOrigIntent is not null)
+                {
+                    _replaceMargin?.AbortReplace(canceledOrigIntent.NewClOrdId);
+                    _logger.LogInformation(
+                        "event=order.replace.dropped_on_orig_cancel newClOrdId={NewClOrdId} origClOrdId={OrigClOrdId} owner={Owner} symbol={Symbol}; releasing held upsize-delta reservation.",
+                        canceledOrigIntent.NewClOrdId, canceledOrigIntent.OriginalClOrdId, canceledOrigIntent.Owner.Value, canceledOrigIntent.Symbol);
+                }
                 break;
             case ExecKind.Rejected:
                 if (order.Status is OrderStatus.Rejected or OrderStatus.Filled or OrderStatus.PartiallyFilled or OrderStatus.Cancelled or OrderStatus.Replaced)

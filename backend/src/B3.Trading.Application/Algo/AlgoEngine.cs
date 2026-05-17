@@ -1220,7 +1220,10 @@ public sealed class AlgoEngine : BackgroundService
                 },
                 () =>
                 {
-                    _replacements.TryAdd(intent);
+                    // Pass-4 review (#299) P1. Stamp the registry entry
+                    // with the current clock so the AlgoScheduler TTL
+                    // sweep can bound any ambiguous-send leak below.
+                    _replacements.TryAdd(intent, _clock.GetUtcNow());
                     _ownership.RegisterReplaceLink(child.ClOrdId, newClOrdId);
                 });
         }
@@ -1273,21 +1276,31 @@ public sealed class AlgoEngine : BackgroundService
             _logger.LogWarning(ex,
                 "AlgoEngine modify gateway dispatch ambiguous for algo {Firm}/{AlgoId} child {Child}; intent retained for late Replaced ER.",
                 algo.FirmId, algo.AlgoId, child.ClOrdId);
-            // Pass-3 review (#299) P1. Release the upsize-delta margin
-            // reservation we prepared above. The PendingReplacementRegistry
-            // intent is deliberately KEPT (P1-B ambiguous-send window —
-            // venue may have already accepted), but holding the margin
-            // reserve indefinitely on a likely-failed send is the worse
-            // failure mode: if the venue did NOT accept the reserve
-            // leaks until the parent terminates. If the venue DID
-            // accept, CommitReplace will still run on the late Replaced
-            // ER and (with no Prepare-side transient entry) will adjust
-            // _reserved against the original's tracked notional; the
-            // accounting converges, only the upsize headroom safety
-            // check is temporarily relaxed for the in-flight window —
-            // an acceptable trade-off vs. permanently leaking the hold.
+            // Pass-4 review (#299) P1. KEEP the margin reservation —
+            // do NOT call AbortReplace. Pass-3 freed the upsize delta
+            // here on the theory that holding it indefinitely was the
+            // worse failure mode; that left a window in which another
+            // order could consume the freed headroom before a late
+            // Replaced ER arrived, then CommitReplace would silently
+            // re-add the delta on top, pushing reserved exposure above
+            // the owner's cash cap. The pass-4 fix instead tags the
+            // intent as "ambiguous margin held" so the AlgoScheduler
+            // TTL sweep (see <see cref="AlgoScheduler.SweepAmbiguousReplaceIntents"/>)
+            // bounds the leak: if no Replaced/Rejected/Canceled ER
+            // arrives within
+            // <c>RiskOptions.Margin.AmbiguousReplaceTtl</c>, the
+            // reservation is released and the
+            // <c>algo.modify_ambiguous_intent_expired_total</c>
+            // counter bumps so operators can correlate with the
+            // dashboards. CommitReplace on a late Replaced ER stays
+            // a no-op for the upsize delta (the transient entry is
+            // still present), and a Canceled ER for the orig (venue
+            // dropped the replace) routes through the ER processor's
+            // new TryConsumeByOriginal arm which also releases the
+            // reservation. The cash invariant is preserved either
+            // way.
             if (marginPrepared)
-                _replaceMargin!.AbortReplace(newClOrdId);
+                _replacements.MarkAmbiguousMarginHeld(newClOrdId);
             return false;
         }
 

@@ -1,7 +1,9 @@
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using B3.Trading.Application;
 using B3.Trading.Application.Persistence;
+using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
@@ -192,5 +194,111 @@ public class AlgoSchedulerTests
         algos.TryAdd(NewTwap(1, sliceCount: 4));
         scheduler.Tick();
         Assert.Single(Drain(queue));
+    }
+
+    // ───────── Pass-4 review (#299) P1 — ambiguous-send TTL sweep ─────────
+
+    [Fact]
+    public async Task SweepAmbiguousReplaceIntents_ExpiredEntry_ReleasesReservationAndBumpsMetric()
+    {
+        // Pass-4 review (#299) P1. Approach A+TTL convergence: an
+        // AlgoEngine modify whose gateway dispatch threw post-Prepare
+        // intentionally KEEPS the upsize-delta reservation +
+        // PendingReplacementRegistry intent so a late Replaced ER can
+        // converge without re-checking capacity. If no terminal ER
+        // arrives within RiskOptions.Margin.AmbiguousReplaceTtl, the
+        // AlgoScheduler sweep MUST release the reservation (or it
+        // leaks until the parent terminates) and bump
+        // algo.modify_ambiguous_intent_expired_total.
+        var algos = new AlgoBook();
+        var orders = new WorkingOrderBook();
+        var queue = new AlgoSignalQueue();
+        var clock = new MutableClock(Start);
+
+        // Owner with a known cash baseline; original 100 @ 30 = 3000
+        // reserved on submit; modify upsizes price to 30.5 = 3050,
+        // delta = 50 reserved at Prepare and held thereafter.
+        var risk = new RiskOptions();
+        risk.Margin.Enabled = true;
+        risk.Margin.AmbiguousReplaceTtl = TimeSpan.FromSeconds(30);
+#pragma warning disable CS0618 // Initial is the transition fallback used by the unit-test composition.
+        risk.Margin.Initial["alice"] = 10_000m;
+#pragma warning restore CS0618
+        var monitor = new StaticOptionsMonitor<RiskOptions>(risk);
+        var margin = new ReserveOnSubmitMarginProvider(monitor,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<ReserveOnSubmitMarginProvider>.Instance);
+        var reg = new PendingReplacementRegistry();
+
+        // Seed the original reservation as the submit path would have done.
+        var bought = await margin.TryReserveAsync(
+            clOrdId: 100UL,
+            new RiskContext(new EndClientId("alice"), Firm, "PETR4",
+                OrderSide.Buy, OrderType.Limit, 100, 30m),
+            CancellationToken.None);
+        Assert.True(bought.Approved);
+        Assert.Equal(3000m, margin.ReservedForTesting("alice"));
+
+        // Prepare a replace upsize to 30.5 (delta = 50). The transient
+        // entry under newClOrdId=200 holds the delta; _reserved=3050.
+        var prep = await ((IReplaceMarginCoordinator)margin).PrepareReplaceAsync(
+            originalClOrdId: 100UL, newClOrdId: 200UL,
+            owner: new EndClientId("alice"),
+            newRemainingNotional: 3050m,
+            CancellationToken.None);
+        Assert.True(prep.Approved);
+        Assert.Equal(3050m, margin.ReservedForTesting("alice"));
+
+        // Simulate the pass-1 ambiguous-send: intent registered with
+        // a known CreatedAt, then the gateway dispatch threw and the
+        // engine marked the entry as still holding margin.
+        var intent = new OrderReplacementIntent(
+            OriginalClOrdId: 100UL, NewClOrdId: 200UL,
+            Owner: new EndClientId("alice"),
+            Symbol: "PETR4", SecurityId: 4321UL,
+            Side: OrderSide.Buy, Type: OrderType.Limit,
+            NewQuantity: 100, NewPrice: 30.5m, FirmId: Firm,
+            ParentAlgoId: null, AlgoSliceSeq: null);
+        Assert.True(reg.TryAdd(intent, clock.GetUtcNow()));
+        Assert.True(reg.MarkAmbiguousMarginHeld(200UL));
+
+        var scheduler = new AlgoScheduler(algos, orders, queue, clock,
+            AlgoScheduler.DefaultTickInterval,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<AlgoScheduler>.Instance,
+            replacements: reg,
+            replaceMargin: margin,
+            riskOptions: monitor);
+
+        // Within TTL: sweep does nothing.
+        scheduler.SweepAmbiguousReplaceIntents(clock.GetUtcNow().AddSeconds(10));
+        Assert.True(reg.IsOriginalInFlight(100UL));
+        Assert.Equal(3050m, margin.ReservedForTesting("alice"));
+
+        // Past TTL: sweep releases the reservation + clears the intent.
+        long expiredCount = 0;
+        string? expiredAlgoType = null;
+        using var listener = new System.Diagnostics.Metrics.MeterListener();
+        listener.InstrumentPublished = (inst, ml) =>
+        {
+            if (inst.Name == "trading.algo.modify_ambiguous_intent_expired_total")
+                ml.EnableMeasurementEvents(inst);
+        };
+        listener.SetMeasurementEventCallback<long>((_, m, tags, _) =>
+        {
+            foreach (var t in tags)
+                if (t.Key == "algoType") expiredAlgoType = t.Value as string;
+            Interlocked.Add(ref expiredCount, m);
+        });
+        listener.Start();
+
+        scheduler.SweepAmbiguousReplaceIntents(clock.GetUtcNow().AddSeconds(31));
+
+        Assert.False(reg.IsOriginalInFlight(100UL));
+        // Released: _reserved drops back to the original 3000m.
+        Assert.Equal(3000m, margin.ReservedForTesting("alice"));
+        listener.RecordObservableInstruments();
+        Assert.Equal(1, Interlocked.Read(ref expiredCount));
+        // ParentAlgoId is null in this synthetic test, so the tag
+        // falls back to "unknown" (covered by the lookup branch).
+        Assert.Equal("unknown", expiredAlgoType);
     }
 }

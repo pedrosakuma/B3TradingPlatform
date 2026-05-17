@@ -746,6 +746,138 @@ public class AlgoModifyEndpointTests
         Assert.Equal("pegged", evictedAlgoType);
     }
 
+    // ───── Pass-4 review (#299) P1 — ambiguous-send margin convergence ─────
+
+    [Fact]
+    public async Task Modify_GatewayThrowsButMarginEnabled_HoldsReservation_LateReplacedConvergesWithoutDoubleAdd_AndCompetingOrderRejectedForMargin()
+    {
+        // Pass-4 review (#299) P1. The pass-3 fix freed the upsize
+        // delta on an ambiguous gateway dispatch failure under the
+        // theory that holding it indefinitely was worse than the
+        // accounting drift. That created a window in which a
+        // competing order could consume the freed headroom; then a
+        // late Replaced ER would land in CommitReplace which adds
+        // the delta back on top of the already-reserved competing
+        // notional, pushing reserved exposure above the owner's
+        // cash cap.
+        //
+        // The pass-4 fix keeps the reservation tied to the intent:
+        //   - on ambiguous send, mark the entry as
+        //     AmbiguousMarginHeld but DO NOT call AbortReplace;
+        //   - on a late Replaced ER, CommitReplace converges
+        //     against the existing transient entry (no double-add);
+        //   - a competing order placed in the window between
+        //     ambiguous send and late ER must be rejected for
+        //     margin because the held delta is still counted.
+        //
+        // This test exercises all three.
+        var overrides = new Dictionary<string, string?>(Simulator())
+        {
+            ["Trading:Risk:Margin:Enabled"] = "true",
+            // Initial 100 @ 30 = 3000 reserved; modify to 30.5 needs
+            // delta = 50; cap of 3050 leaves NO headroom for the
+            // competing order's 1 @ 30 = 30 below.
+            [$"Trading:Risk:Margin:Initial:{TestAppFactory.TestUser}"] = "3050",
+            ["Trading:Risk:Default:MaxNotional"] = "999999999",
+        };
+        using var f = TestAppFactory.WithOverrides(overrides);
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        mock.ReplaceFailureInjector = _ => new InvalidOperationException("simulated SDK ambiguous send");
+
+        var algoId = await PostAlgo(http, token, PeggedBody(100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var oldChild = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+
+        // Snapshot the reserved figure on the original alone (3000).
+        // The submit path reserves margin BEFORE dispatching the New
+        // event, so by the time the child is in the book + Working
+        // the reservation is normally in place — but the algo-engine
+        // consumer that originated the submit runs on a separate
+        // task, so the visible-in-book vs. visible-in-ledger orderings
+        // can briefly lag in either direction under CI load. Wait
+        // for convergence before asserting the baseline.
+        var margin = (B3.Trading.Application.Risk.ReserveOnSubmitMarginProvider)
+            f.Services.GetRequiredService<B3.Trading.Application.Risk.IReplaceMarginCoordinator>();
+        await WaitFor(
+            () => margin.ReservedForTesting(TestAppFactory.TestUser) == 3000m,
+            TimeSpan.FromSeconds(3),
+            $"expected reserved=3000m baseline, got {margin.ReservedForTesting(TestAppFactory.TestUser)}");
+
+        var modReq = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
+        {
+            Content = JsonContent.Create(new { NewPrice = 30.5m }),
+        };
+        modReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var modResp = await http.SendAsync(modReq);
+        Assert.Equal(HttpStatusCode.Accepted, modResp.StatusCode);
+
+        await WaitFor(
+            () => mock.SubmittedReplaces.Any(r => r.OriginalClOrdId == oldChild.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "engine never dispatched CancelReplace");
+        var replace = mock.SubmittedReplaces.Single(r => r.OriginalClOrdId == oldChild.ClOrdId);
+        mock.ReplaceFailureInjector = null;
+
+        // Reservation MUST still hold the upsize delta of 50 (the
+        // pass-3 behaviour would have released it back to 3000).
+        // Give the engine consumer a beat to finish processing the
+        // ambiguous-failure arm.
+        await WaitFor(
+            () => margin.ReservedForTesting(TestAppFactory.TestUser) == 3050m,
+            TimeSpan.FromSeconds(3),
+            $"expected reserved=3050m post-ambiguous, got {margin.ReservedForTesting(TestAppFactory.TestUser)}");
+
+        // A competing order trying to consume the freed delta MUST
+        // be rejected for margin. /orders accepts the request with
+        // 202 and validates asynchronously (mirrors the existing
+        // pass-3 test's posture), so we assert on the ledger side:
+        // reserved must NOT increase above 3050 after the submission
+        // attempt — if margin had been freed back to 3000 by an
+        // erroneous AbortReplace, the 30-notional competing order
+        // would slot into the headroom and bump reserved to 3030.
+        var orderReq = new HttpRequestMessage(HttpMethod.Post, "/orders/")
+        {
+            Content = JsonContent.Create(new
+            {
+                Symbol = "PETR4",
+                Side = "Buy",
+                Type = "Limit",
+                Quantity = 1,
+                Price = 30.0m,
+            }),
+        };
+        orderReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        await http.SendAsync(orderReq);
+        // Give the submit pipeline a beat to attempt the reservation.
+        await Task.Delay(200);
+        Assert.Equal(3050m, margin.ReservedForTesting(TestAppFactory.TestUser));
+
+        // Now drive the late Replaced ER. CommitReplace must consume
+        // the existing transient delta — no double-add: reserved
+        // stays at 3050 (newRemainingNotional = 30.5 * 100 = 3050).
+        await InjectReplacedEr(http, adminToken,
+            newClOrdId: replace.NewClOrdId,
+            origClOrdId: replace.OriginalClOrdId,
+            leavesQuantity: replace.NewQuantity);
+
+        var newChild = await WaitForChildOtherThan(book, algoId, oldChild.ClOrdId,
+            TimeSpan.FromSeconds(3));
+        Assert.Equal(replace.NewClOrdId, newChild.ClOrdId);
+        Assert.Equal(30.5m, newChild.Price);
+
+        await WaitFor(
+            () => margin.ReservedForTesting(TestAppFactory.TestUser) == 3050m,
+            TimeSpan.FromSeconds(3),
+            $"expected reserved=3050m post-Replaced (no double-add), got {margin.ReservedForTesting(TestAppFactory.TestUser)}");
+    }
+
     // ───────────────────────── Helpers ─────────────────────────
 
     private static async Task<JsonElement> GetAlgo(HttpClient http, string token, string algoId)

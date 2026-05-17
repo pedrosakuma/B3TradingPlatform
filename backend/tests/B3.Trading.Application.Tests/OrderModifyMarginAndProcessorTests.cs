@@ -1183,4 +1183,52 @@ public class OrderModifyMarginAndProcessorTests
 
         Assert.Equal(600m, margin.ReservedForTesting("alice"));
     }
+
+    // ───── Pass-4 review (#299) P1 — Canceled ER for orig clears ambiguous intent ─────
+
+    [Fact]
+    public async Task Processor_CancelledOrigWithPendingReplaceIntent_ReleasesHeldReservationAndClearsIntent()
+    {
+        // Pass-4 review (#299) P1. Scenario: AlgoEngine modify
+        // dispatched ambiguous (gateway threw), so the engine KEEPS
+        // both the PendingReplacementRegistry intent AND the held
+        // upsize-delta margin reservation. The venue ultimately
+        // emits a Cancelled ER for the ORIG (i.e. the venue
+        // accepted the cancel half of the cancel-replace but
+        // dropped the replacement — or never registered the
+        // replacement at all). The ER processor must now release
+        // the still-held upsize delta + clear the pending intent
+        // so a stray late ER under the never-created new ClOrdID
+        // is not misinterpreted as a replace confirmation.
+        var (proc, ownership, book, reg, margin, _) = BuildProcessor();
+        var owner = new EndClientId("alice");
+        var orig = new Order(1UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m, "FIRM");
+        book.TryAdd(orig);
+        orig.MarkWorking();
+        ownership.Register(1UL, owner);
+        Assert.True((await margin.TryReserveAsync(1UL, BuyCtx("alice", 30m, 100), default)).Approved);
+        Assert.Equal(3000m, margin.ReservedForTesting("alice"));
+
+        // Pass-1 ambiguous-send state: intent in the registry +
+        // Prepare-held upsize delta + AmbiguousMarginHeld marker.
+        Assert.True(reg.TryAdd(BuyLimitIntent(1UL, 2UL, "alice", 100, 30.5m), DateTimeOffset.UtcNow));
+        Assert.True((await ((IReplaceMarginCoordinator)margin).PrepareReplaceAsync(
+            1UL, 2UL, owner, 3050m, default)).Approved);
+        Assert.True(reg.MarkAmbiguousMarginHeld(2UL));
+        Assert.Equal(3050m, margin.ReservedForTesting("alice"));
+
+        // Venue Cancelled the orig — the cancel-replace's "replace"
+        // half never materialised. Drive a Canceled ER for the orig.
+        proc.Apply(1UL, ExecKind.Canceled, leaves: 0, cumQty: 0,
+                   lastQty: 0, lastPx: 0m, rejectReason: null);
+
+        // Original transitioned + upsize delta released back to 0.
+        Assert.Equal(OrderStatus.Cancelled, orig.Status);
+        Assert.Equal(0m, margin.ReservedForTesting("alice"));
+        // Intent cleared from both the new-ClOrdID and orig indexes,
+        // so neither a stray ER nor a follow-up modify on the same
+        // orig is blocked by phantom in-flight state.
+        Assert.False(reg.TryGet(2UL, out _));
+        Assert.False(reg.IsOriginalInFlight(1UL));
+    }
 }

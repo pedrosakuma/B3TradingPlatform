@@ -115,6 +115,26 @@ public sealed class MarginOptions
     public bool Enabled { get; set; }
 
     /// <summary>
+    /// Pass-4 review (#299) P1. Bounded TTL for ambiguous-send
+    /// replace reservations held under a
+    /// <see cref="B3.Trading.Application.PendingReplacementRegistry"/>
+    /// entry whose gateway dispatch threw post-Prepare. The intent
+    /// is intentionally kept so a late Replaced ER can converge
+    /// through <see cref="IReplaceMarginCoordinator.CommitReplace"/>
+    /// without re-checking capacity (the upsize delta is already
+    /// reserved). If no terminal ER arrives within this window, the
+    /// reservation must be released or it leaks until the parent
+    /// order terminates — and any concurrent order can NOT consume
+    /// the held headroom in the meantime, so the cap is preserved
+    /// strictly but the trader temporarily loses access to the
+    /// upsize delta. 30s matches the typical venue ER round-trip
+    /// upper bound on B3 (single-digit seconds is normal; a 30s
+    /// silence indicates a real loss, not a slow ack). Tuneable via
+    /// <c>Trading:Risk:Margin:AmbiguousReplaceTtl</c>.
+    /// </summary>
+    public TimeSpan AmbiguousReplaceTtl { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
     /// Per-end-client opening balance (in the single accounting
     /// currency v2 assumes). Missing entries are treated as zero, so
     /// unrecognized end-clients cannot place buy orders when margin
