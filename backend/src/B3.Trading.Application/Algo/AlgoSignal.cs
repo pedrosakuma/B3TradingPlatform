@@ -44,3 +44,30 @@ public sealed record ChildExecutionObservedSignal : AlgoSignal
     public required ulong AlgoId { get; init; }
     public required ulong ChildClOrdId { get; init; }
 }
+
+/// <summary>
+/// Q3.5 (#285). An operator (or, in the future, an in-engine
+/// scheduler) requested a cancel-replace of a live child of the
+/// algo. The signal carries the requested overrides only — the
+/// engine resolves the actual target child by the parent's
+/// <c>LiveChildClOrdId</c> when <see cref="TargetChildClOrdId"/>
+/// is null, validates terminal/qty invariants on the consumer
+/// thread, and dispatches via <c>IExchangeGateway.CancelReplaceAsync</c>.
+/// At least one of <see cref="NewQuantity"/> / <see cref="NewPrice"/>
+/// must be set; the engine inherits the omitted side from the
+/// live child.
+/// </summary>
+public sealed record AlgoModifyRequestedSignal : AlgoSignal
+{
+    public required ulong AlgoId { get; init; }
+    public ulong? TargetChildClOrdId { get; init; }
+    public long? NewQuantity { get; init; }
+    public decimal? NewPrice { get; init; }
+
+    /// <summary>
+    /// Human-readable driver — surfaces as a metric tag and as the
+    /// <c>reason</c> field on <see cref="Persistence.AlgoChildModifiedEvent"/>.
+    /// Use short lowercase identifiers (<c>operator</c>, <c>pegged_repeg</c>).
+    /// </summary>
+    public required string Reason { get; init; }
+}

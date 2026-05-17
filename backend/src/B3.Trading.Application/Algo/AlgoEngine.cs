@@ -103,6 +103,18 @@ public sealed class AlgoEngine : BackgroundService
     /// </summary>
     private readonly PeggedRepegBook? _peggedRepeg;
 
+    /// <summary>
+    /// Q3.5 (#285). In-flight cancel-replace intents for child orders
+    /// the engine has modified. Same registry the manual modify
+    /// pipeline (<see cref="OrderModifyService"/>) populates — the
+    /// ER processor consumes from it on the Replaced ack to hydrate
+    /// the new child Order in the book. Optional only to keep the
+    /// test composition (which builds the engine without the full
+    /// modify pipeline) buildable; production composition always
+    /// supplies it.
+    /// </summary>
+    private readonly PendingReplacementRegistry? _replacements;
+
     // Per-parent runtime state. Owned by the consumer task; the
     // ConcurrentDictionary is only used because TryAdd/TryGetValue are
     // convenient — no concurrent writers exist in v0.
@@ -126,7 +138,8 @@ public sealed class AlgoEngine : BackgroundService
         PovProgressBook? povProgress = null,
         PegBookTopCache? pegBookTop = null,
         MarketDataPegBookPump? pegBookPump = null,
-        PeggedRepegBook? peggedRepeg = null)
+        PeggedRepegBook? peggedRepeg = null,
+        PendingReplacementRegistry? replacements = null)
     {
         _queue = queue;
         _algos = algos;
@@ -145,6 +158,7 @@ public sealed class AlgoEngine : BackgroundService
         _pegBookTop = pegBookTop;
         _pegBookPump = pegBookPump;
         _peggedRepeg = peggedRepeg;
+        _replacements = replacements;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -466,6 +480,9 @@ public sealed class AlgoEngine : BackgroundService
                 break;
             case AlgoCancelRequestedSignal:
                 await OnCancelRequestedAsync(algo, rt, ct).ConfigureAwait(false);
+                break;
+            case AlgoModifyRequestedSignal mod:
+                await OnModifyRequestedAsync(algo, rt, mod, ct).ConfigureAwait(false);
                 break;
             default:
                 _logger.LogWarning("AlgoEngine ignoring unknown signal type {Type}.", signal.GetType().Name);
@@ -891,6 +908,256 @@ public sealed class AlgoEngine : BackgroundService
         algo.Type == AlgoType.Pov
         && algo.Parameters is PovParameters pp
         && _clock.GetUtcNow() >= pp.EndUtc;
+
+    /// <summary>
+    /// Q3.5 (#285). Operator-driven cancel-replace of an algo child.
+    /// Resolves the target child (explicit id from the signal, else
+    /// the parent's <c>LiveChildClOrdId</c>), validates terminal /
+    /// modify-below-filled invariants on the consumer thread, then
+    /// delegates the wire-call + WAL plumbing to
+    /// <see cref="TryReplaceChildAsync"/>. Race semantics: if the
+    /// target child has reached terminal between API accept and
+    /// reactor pick-up the modify is rejected gracefully (metric +
+    /// log) and the operator can retry — never applied to the
+    /// replacement that the engine may have already submitted in a
+    /// subsequent Pegged repeg cycle.
+    /// </summary>
+    private async Task OnModifyRequestedAsync(
+        Algo algo, AlgoParentRuntime rt, AlgoModifyRequestedSignal sig, CancellationToken ct)
+    {
+        var algoTypeTag = algo.Type.ToString().ToLowerInvariant();
+        if (algo.IsTerminal)
+        {
+            MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
+                new KeyValuePair<string, object?>("algoType", algoTypeTag),
+                new KeyValuePair<string, object?>("reason", "algo_terminal"));
+            _logger.LogDebug(
+                "AlgoEngine modify rejected: algo {Firm}/{AlgoId} is terminal ({Status}).",
+                algo.FirmId, algo.AlgoId, algo.Status);
+            return;
+        }
+        if (algo.Status == AlgoStatus.Cancelling)
+        {
+            MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
+                new KeyValuePair<string, object?>("algoType", algoTypeTag),
+                new KeyValuePair<string, object?>("reason", "algo_cancelling"));
+            return;
+        }
+
+        var targetChildClOrdId = sig.TargetChildClOrdId ?? rt.LiveChildClOrdId;
+        if (targetChildClOrdId is not { } childClOrdId || childClOrdId == 0)
+        {
+            MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
+                new KeyValuePair<string, object?>("algoType", algoTypeTag),
+                new KeyValuePair<string, object?>("reason", "no_live_child"));
+            return;
+        }
+
+        if (!_orders.TryGet(childClOrdId, out var child) || child is null)
+        {
+            MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
+                new KeyValuePair<string, object?>("algoType", algoTypeTag),
+                new KeyValuePair<string, object?>("reason", "child_not_found"));
+            return;
+        }
+        if (child.ParentAlgoId != algo.AlgoId)
+        {
+            MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
+                new KeyValuePair<string, object?>("algoType", algoTypeTag),
+                new KeyValuePair<string, object?>("reason", "child_not_owned"));
+            return;
+        }
+        if (IsChildTerminal(child))
+        {
+            MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
+                new KeyValuePair<string, object?>("algoType", algoTypeTag),
+                new KeyValuePair<string, object?>("reason", "child_terminal"));
+            return;
+        }
+
+        var newQty = sig.NewQuantity ?? child.Quantity;
+        var newPrice = sig.NewPrice ?? child.Price;
+        if (newQty <= child.CumulativeQuantity)
+        {
+            // Modify-to-invalid: residue would go non-positive. Surface
+            // as a metric — the API layer can't reject this cleanly
+            // because the cum is observed on the consumer thread.
+            MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
+                new KeyValuePair<string, object?>("algoType", algoTypeTag),
+                new KeyValuePair<string, object?>("reason", "qty_below_filled"));
+            return;
+        }
+
+        await TryReplaceChildAsync(algo, rt, child, newQty, newPrice, sig.Reason, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Q3.5 (#285). Shared helper: turn a "modify this live child"
+    /// intent into a gateway cancel-replace dispatched against the
+    /// venue, preserving book priority on B3 (priority-up keeps
+    /// queue position on price-improving Sells / Buys; qty-down
+    /// keeps it as well). Mirrors <see cref="OrderModifyService"/>'s
+    /// plumbing — allocates a new ClOrdID, registers the intent in
+    /// <see cref="PendingReplacementRegistry"/> so the Replaced ack
+    /// hydrates the new child into the book, writes the
+    /// <see cref="OrderReplaceRequestedEvent"/> + audit
+    /// <see cref="AlgoChildModifiedEvent"/>, then dispatches to the
+    /// gateway. The engine bypasses the risk / margin pipelines
+    /// (children were already risk-cleared at submit time; residue
+    /// shrinks only via fills, never via modify since we reject
+    /// newQty &lt;= cum above), keeping the algo retrofit path
+    /// behaviourally identical to the existing cancel + place path
+    /// it replaces.
+    /// </summary>
+    private async Task<bool> TryReplaceChildAsync(
+        Algo algo, AlgoParentRuntime rt, Order child,
+        long newQuantity, decimal? newPrice, string reason, CancellationToken ct)
+    {
+        var algoTypeTag = algo.Type.ToString().ToLowerInvariant();
+        if (_replacements is null)
+        {
+            // Defensive: the test composition that omits the registry
+            // also omits the modify path. Surface as a metric so a
+            // misconfigured composition is observable instead of silently
+            // skipping the retrofit.
+            MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
+                new KeyValuePair<string, object?>("algoType", algoTypeTag),
+                new KeyValuePair<string, object?>("reason", "registry_unavailable"));
+            return false;
+        }
+
+        if (_replacements.IsOriginalInFlight(child.ClOrdId))
+        {
+            MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
+                new KeyValuePair<string, object?>("algoType", algoTypeTag),
+                new KeyValuePair<string, object?>("reason", "already_in_flight"));
+            return false;
+        }
+
+        var newClOrdId = _clOrdIds.Generate(child.Owner);
+        var intent = new OrderReplacementIntent(
+            OriginalClOrdId: child.ClOrdId,
+            NewClOrdId: newClOrdId,
+            Owner: child.Owner,
+            Symbol: child.Symbol,
+            SecurityId: child.SecurityId,
+            Side: child.Side,
+            Type: child.Type,
+            NewQuantity: newQuantity,
+            NewPrice: newPrice,
+            FirmId: child.FirmId,
+            ParentAlgoId: child.ParentAlgoId,
+            AlgoSliceSeq: child.AlgoSliceSeq);
+
+        var atUtc = _clock.GetUtcNow();
+        try
+        {
+            _dispatcher.Dispatch(
+                new OrderReplaceRequestedEvent
+                {
+                    OriginalClOrdId = child.ClOrdId,
+                    NewClOrdId = newClOrdId,
+                    EndClientId = child.Owner.Value,
+                    FirmId = child.FirmId,
+                    Symbol = child.Symbol,
+                    SecurityId = child.SecurityId,
+                    Side = child.Side.ToString(),
+                    Type = child.Type.ToString(),
+                    NewQuantity = newQuantity,
+                    NewPrice = newPrice,
+                    ParentAlgoId = child.ParentAlgoId,
+                    AlgoSliceSeq = child.AlgoSliceSeq,
+                },
+                () =>
+                {
+                    _replacements.TryAdd(intent);
+                    _ownership.RegisterReplaceLink(child.ClOrdId, newClOrdId);
+                });
+        }
+        catch (WalBackpressureException)
+        {
+            MetricsRegistry.WalBackpressure.Add(1,
+                new KeyValuePair<string, object?>("call_site", "algo.modify"));
+            MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
+                new KeyValuePair<string, object?>("algoType", algoTypeTag),
+                new KeyValuePair<string, object?>("reason", "wal_backpressure"));
+            return false;
+        }
+
+        try
+        {
+            await _gateway.CancelReplaceAsync(
+                child, newClOrdId, newQuantity, newPrice,
+                requestedTimeInForce: null, requestedStopPrice: null, requestedGoodTillDate: null,
+                ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // Roll back: drop the intent + log. Original child stays
+            // live; the operator can retry. No synthetic Rejected ER is
+            // emitted (the algo engine is not the order-event source —
+            // OrderModifyService does that for human-driven modifies
+            // because it owns the response semantics; the engine path
+            // surfaces the failure via the metric below + log).
+            _replacements.TryConsume(newClOrdId, out _);
+            MetricsRegistry.OrdersGatewayFailed.Add(1,
+                new KeyValuePair<string, object?>("path", "algo.modify"));
+            MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
+                new KeyValuePair<string, object?>("algoType", algoTypeTag),
+                new KeyValuePair<string, object?>("reason", "gateway_failed"));
+            _logger.LogWarning(ex,
+                "AlgoEngine modify gateway dispatch failed for algo {Firm}/{AlgoId} child {Child}; rolled back.",
+                algo.FirmId, algo.AlgoId, child.ClOrdId);
+            return false;
+        }
+
+        // Best-effort audit envelope — observability-only, not
+        // replayed (the OrderReplaceRequestedEvent above is the
+        // durable record). WAL backpressure here is non-fatal.
+        try
+        {
+            var algoIdSnap = algo.AlgoId;
+            var firmIdSnap = algo.FirmId;
+            var oldIdSnap = child.ClOrdId;
+            var newIdSnap = newClOrdId;
+            var atUtcSnap = atUtc;
+            var reasonSnap = reason;
+            var qtySnap = newQuantity;
+            var priceSnap = newPrice;
+            _dispatcher.Dispatch(
+                new AlgoChildModifiedEvent
+                {
+                    AlgoId = algoIdSnap,
+                    FirmId = firmIdSnap,
+                    OldChildClOrdId = oldIdSnap,
+                    NewChildClOrdId = newIdSnap,
+                    NewQuantity = qtySnap,
+                    NewPrice = priceSnap,
+                    Reason = reasonSnap,
+                    AtUtc = atUtcSnap,
+                },
+                static () => { });
+        }
+        catch (WalBackpressureException)
+        {
+            MetricsRegistry.WalBackpressure.Add(1,
+                new KeyValuePair<string, object?>("call_site", "algo.child.modified"));
+        }
+
+        MetricsRegistry.AlgoChildModifiesTotal.Add(1,
+            new KeyValuePair<string, object?>("algoType", algoTypeTag),
+            new KeyValuePair<string, object?>("reason", reason));
+
+        // Re-target the live-child slot to the replacement id. The
+        // ER processor's Replaced ack will hydrate the new Order in
+        // the book under newClOrdId and fan out a
+        // ChildExecutionObservedSignal — by then rt.LiveChildClOrdId
+        // already matches, so OnChildErAsync's non-terminal early-
+        // return path runs as expected.
+        rt.LiveChildClOrdId = newClOrdId;
+        rt.ChildBookedCum[newClOrdId] = child.CumulativeQuantity;
+        return true;
+    }
 
     private async Task OnCancelRequestedAsync(Algo algo, AlgoParentRuntime rt, CancellationToken ct)
     {
@@ -1753,6 +2020,7 @@ public sealed class AlgoEngine : BackgroundService
         AlgoCreatedSignal => "created",
         AlgoCancelRequestedSignal => "cancel_requested",
         ChildExecutionObservedSignal => "child_er",
+        AlgoModifyRequestedSignal => "modify_requested",
         _ => "unknown",
     };
 
@@ -1761,6 +2029,7 @@ public sealed class AlgoEngine : BackgroundService
         AlgoCreatedSignal c => c.AlgoId,
         AlgoCancelRequestedSignal c => c.AlgoId,
         ChildExecutionObservedSignal c => c.AlgoId,
+        AlgoModifyRequestedSignal c => c.AlgoId,
         _ => 0,
     };
 

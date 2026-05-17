@@ -31,7 +31,15 @@ public static class SimulatorEndpoint
         string Type,
         long? LastQty,
         decimal? LastPx,
-        string? RejectReason);
+        string? RejectReason,
+        // Q3.5 (#285). Required when Type==Replaced — the engine's
+        // cancel-replace flow allocates a brand-new ClOrdID for the
+        // replacement and the venue echoes the original as OrigClOrdID
+        // on the Replaced ack. The processor's PendingReplacementRegistry
+        // lookup is keyed on the new ClOrdID, but the new Order is
+        // hydrated under that new id only if OrigClOrdID resolves to an
+        // existing original — caller must supply it.
+        ulong? OrigClOrdId = null);
 
     /// <summary>
     /// Maps <c>POST /admin/simulator/er</c> under the admin authorization
@@ -63,8 +71,38 @@ public static class SimulatorEndpoint
         if (!Enum.TryParse<EpExecType>(req.Type, ignoreCase: true, out var execType))
             return Results.BadRequest(new { error = "invalid_type", detail = $"unknown ExecType '{req.Type}'" });
 
+        // Q3.5 (#285). Replaced ER lookup is keyed on the NEW
+        // ClOrdID via PendingReplacementRegistry; the new order is
+        // not in WorkingOrderBook yet (it's hydrated by
+        // ApplyReplaceAccepted from the intent). Skip the
+        // pre-flight book lookup for this exec type — leaves / cum
+        // come from the request body (the venue echoes them on the
+        // wire) and we rely on the processor to validate against
+        // the intent and the original order.
         if (execType == EpExecType.Replaced)
-            return Results.BadRequest(new { error = "unsupported_type", detail = "Replaced is out of v0 scope; future RFC will define semantics." });
+        {
+            if ((req.OrigClOrdId ?? 0UL) == 0UL)
+                return Results.BadRequest(new { error = "missing_origClOrdId", detail = "origClOrdId is required for type=Replaced." });
+            var leavesR = req.LastQty ?? 0L;
+            var cumR = 0L;
+            var envR = new ExecutionReportEnvelope(
+                ClOrdId: req.ClOrdId,
+                ExecType: EpExecType.Replaced,
+                LeavesQuantity: leavesR,
+                CumulativeQuantity: cumR,
+                LastQuantity: 0,
+                LastPrice: 0m,
+                RejectReason: null,
+                OrigClOrdId: req.OrigClOrdId!.Value);
+            mock.EmitExecutionReport(envR);
+            return Results.Accepted(value: new
+            {
+                clOrdId = req.ClOrdId,
+                execType = EpExecType.Replaced.ToString(),
+                origClOrdId = req.OrigClOrdId.Value,
+                leavesQuantity = leavesR,
+            });
+        }
 
         if (!book.TryGet(req.ClOrdId, out var order) || order is null)
             return Results.NotFound(new { error = "unknown_clOrdId", clOrdId = req.ClOrdId });

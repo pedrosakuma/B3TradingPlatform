@@ -317,6 +317,86 @@ public static class AlgoEndpoints
             });
         });
 
+        // Q3.5 (#285). Operator-driven cancel-replace (modify) of a
+        // live algo child. Mirrors the cancel endpoint's auth /
+        // ownership / drain semantics; the modify intent is enqueued
+        // on the engine signal queue and applied on the consumer
+        // thread so per-parent serialisation is preserved (the same
+        // reactor that submits new slices also dispatches modifies,
+        // so an in-flight repeg and an operator modify can't race
+        // each other into a double cancel-replace).
+        group.MapPost("/{algoId}/modify", (
+            string algoId,
+            ModifyAlgoRequest? req,
+            HttpContext ctx,
+            EndClientRegistry registry,
+            AlgoBook algos,
+            DrainState drain,
+            IAlgoSignalQueue signals) =>
+        {
+            if (drain.IsDraining)
+            {
+                MetricsRegistry.DrainRejections.Add(1,
+                    new KeyValuePair<string, object?>("route", "POST /algo/modify"));
+                return Results.Json(
+                    new { error = "service draining" },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            if (!ulong.TryParse(algoId, out var id) || id == 0)
+                return Results.NotFound();
+            if (req is null)
+                return Results.BadRequest(new { error = "request body required" });
+            if (req.NewQuantity is null && req.NewPrice is null)
+                return Results.BadRequest(new { error = "at least one of newQuantity or newPrice must be set" });
+            if (req.NewQuantity is { } q && q <= 0)
+                return Results.BadRequest(new { error = "newQuantity must be positive" });
+
+            var owner = ResolveOwner(ctx, registry);
+            var firm = ResolveFirm(ctx);
+            if (!algos.TryGet(firm, id, out var algo) || algo is null || algo.Owner != owner)
+                return Results.NotFound();
+            if (algo.IsTerminal)
+            {
+                MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
+                    new KeyValuePair<string, object?>("algoType", algo.Type.ToString().ToLowerInvariant()),
+                    new KeyValuePair<string, object?>("reason", "algo_terminal"));
+                return Results.Conflict(new { error = $"algo {id} is already terminal in {algo.Status}" });
+            }
+            if (algo.Status == AlgoStatus.Cancelling)
+            {
+                MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
+                    new KeyValuePair<string, object?>("algoType", algo.Type.ToString().ToLowerInvariant()),
+                    new KeyValuePair<string, object?>("reason", "algo_cancelling"));
+                return Results.Conflict(new { error = $"algo {id} is cancelling" });
+            }
+
+            var reason = string.IsNullOrWhiteSpace(req.Reason) ? "operator" : req.Reason.Trim();
+            if (!signals.TryEnqueue(new AlgoModifyRequestedSignal
+            {
+                FirmId = firm,
+                AlgoId = id,
+                TargetChildClOrdId = req.ChildClOrdId,
+                NewQuantity = req.NewQuantity,
+                NewPrice = req.NewPrice,
+                Reason = reason,
+            }))
+            {
+                MetricsRegistry.AlgoSignalsDropped.Add(1,
+                    new KeyValuePair<string, object?>("kind", "modify_requested"));
+                return Results.Json(
+                    new { error = "engine busy (signal queue full)" },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            return Results.Accepted($"/algo/{id}", new
+            {
+                AlgoId = id.ToString(),
+                Status = algo.Status.ToString(),
+                Reason = reason,
+            });
+        });
+
         group.MapDelete("/{algoId}", (
             string algoId,
             HttpContext ctx,
@@ -482,3 +562,19 @@ public sealed record CreateAlgoPeggedParams(
     decimal? TickSize = null,
     string? ChildOrderType = null,
     decimal? PriceLimit = null);
+
+/// <summary>
+/// Q3.5 (#285). Body for <c>POST /algo/{id}/modify</c>. At least one
+/// of <see cref="NewQuantity"/> / <see cref="NewPrice"/> must be set;
+/// the engine inherits the omitted side from the live child.
+/// <see cref="ChildClOrdId"/> is optional — when null the engine
+/// targets the parent's current live child (the common case).
+/// <see cref="Reason"/> is folded into metrics + the
+/// <c>AlgoChildModifiedEvent</c> audit envelope; defaults to
+/// <c>operator</c> when omitted.
+/// </summary>
+public sealed record ModifyAlgoRequest(
+    long? NewQuantity = null,
+    decimal? NewPrice = null,
+    ulong? ChildClOrdId = null,
+    string? Reason = null);

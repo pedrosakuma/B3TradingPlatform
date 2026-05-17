@@ -353,6 +353,20 @@ public static class MetricsRegistry
             "trading.algo.pegged.repeg_dedup_ring_evicted_total",
             description: "FIFO evictions in PeggedRepegBook's per-parent cancelled-child dedup ring.");
 
+    // Q3.5 (#285). Algo modify (cancel-replace) API. Tagged by
+    // algoType so we can distinguish operator-driven Pegged repegs
+    // from VWAP/POV price-nudges (when those algos retrofit). Reason
+    // is the human-readable driver — "operator" (POST /algo/{id}/modify)
+    // or "pegged_repeg" (internal Pegged price-drift retrofit).
+    public static readonly Counter<long> AlgoChildModifiesTotal =
+        Meter.CreateCounter<long>(
+            "trading.algo.child_modifies_total",
+            description: "Algo child cancel-replace (modify) cycles dispatched to the gateway.");
+    public static readonly Counter<long> AlgoModifyRejectedTotal =
+        Meter.CreateCounter<long>(
+            "trading.algo.modify_rejected_total",
+            description: "Algo modify requests rejected before reaching the gateway (terminal algo, terminal child, invalid qty, …).");
+
     /// <summary>
     /// 1 when the host booted with <c>Trading:Exchange:AllowErInjection=true</c>
     /// (admin-gated <c>POST /admin/simulator/er</c> is mapped). Set once at

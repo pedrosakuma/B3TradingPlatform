@@ -38,6 +38,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(AlgoPeggedRepeggedEvent), "algo.pegged.repegged")]
 [JsonDerivedType(typeof(AlgoPeggedRepegStartedEvent), "algo.pegged.repeg-started")]
 [JsonDerivedType(typeof(AlgoPeggedRepegResolvedEvent), "algo.pegged.repeg-resolved")]
+[JsonDerivedType(typeof(AlgoChildModifiedEvent), "algo.child.modified")]
 [JsonDerivedType(typeof(OrderStaledEvent), "order.staled")]
 [JsonDerivedType(typeof(OrderStaleClearedEvent), "order.stale-cleared")]
 [JsonDerivedType(typeof(UserBotCredentialCreatedEvent), "userbot.cred.created")]
@@ -547,6 +548,29 @@ public sealed record AlgoPeggedRepegResolvedEvent : WalEvent
     /// </list>
     /// </summary>
     public string? Reason { get; init; }
+}
+
+/// <summary>
+/// Q3.5 (#285). Audit envelope for an algo child cancel-replace
+/// (modify) — captures the old and new ClOrdIDs plus the requested
+/// quantity/price overrides and the human-readable reason
+/// (<c>operator</c>, <c>pegged_repeg</c>, …). NOT replayed for state
+/// reconstruction: the actual cancel-replace is already on the WAL
+/// via the companion <see cref="OrderReplaceRequestedEvent"/>; this
+/// event exists so EOD / forensic tooling can correlate "engine
+/// modified a child" back to the algo that drove it without joining
+/// across multiple events.
+/// </summary>
+public sealed record AlgoChildModifiedEvent : WalEvent
+{
+    public required ulong AlgoId { get; init; }
+    public required string FirmId { get; init; }
+    public required ulong OldChildClOrdId { get; init; }
+    public required ulong NewChildClOrdId { get; init; }
+    public long? NewQuantity { get; init; }
+    public decimal? NewPrice { get; init; }
+    public required string Reason { get; init; }
+    public required DateTimeOffset AtUtc { get; init; }
 }
 
 /// <summary>

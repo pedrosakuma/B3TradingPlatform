@@ -1,0 +1,353 @@
+using System.Net;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
+using System.Text.Json;
+using B3.Trading.Application;
+using B3.Trading.Application.MarketData;
+using B3.Trading.Domain;
+using B3.Trading.Infrastructure;
+using Microsoft.Extensions.DependencyInjection;
+
+namespace B3.Trading.Api.Tests;
+
+/// <summary>
+/// Q3.5 (#285). End-to-end coverage for the operator algo modify
+/// (cancel-replace) endpoint. The endpoint enqueues an
+/// <c>AlgoModifyRequestedSignal</c> onto the engine reactor; the engine
+/// resolves the live child, validates qty/price against the current
+/// cumulative fills, dispatches <c>OrderReplaceRequestedEvent</c>, and
+/// then issues <c>IExchangeGateway.CancelReplaceAsync</c>. The mock
+/// records the wire request in <c>SubmittedReplaces</c>; tests inject a
+/// <c>Replaced</c> ER through the simulator to drive the convergence
+/// path in <c>ExecutionReportProcessor.ApplyReplaceAccepted</c>.
+/// </summary>
+public class AlgoModifyEndpointTests
+{
+    private static IDictionary<string, string?> Simulator() =>
+        new Dictionary<string, string?>
+        {
+            ["Trading:Exchange:Mode"] = "Mock",
+            ["Trading:Exchange:AllowErInjection"] = "true",
+            ["Trading:SymbolDirectory:SecurityIds:PETR4"] = "4321",
+        };
+
+    private static object PeggedBody(long total) => new
+    {
+        Symbol = "PETR4",
+        Side = "Buy",
+        Type = "Pegged",
+        TotalQuantity = total,
+        Pegged = new
+        {
+            Ref = "Mid",
+            OffsetTicks = 0,
+            RepegIntervalMs = 100,
+            TickSize = 0.5m,
+        },
+    };
+
+    // ───────────────────────── Validation ─────────────────────────
+
+    [Fact]
+    public async Task Modify_UnknownAlgo_Returns404()
+    {
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+
+        var req = new HttpRequestMessage(HttpMethod.Post, "/algo/9999999/modify")
+        {
+            Content = JsonContent.Create(new { NewPrice = 30.0m }),
+        };
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var resp = await http.SendAsync(req);
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Modify_MissingBothFields_Returns400()
+    {
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+
+        // Use a real algoId so we hit the validator before the ownership
+        // / not-found short circuit. The pegged book-top seed lets the
+        // POST succeed deterministically.
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+        var algoId = await PostAlgo(http, token, PeggedBody(100));
+
+        var req = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
+        {
+            Content = JsonContent.Create(new { Reason = "no-op" }),
+        };
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var resp = await http.SendAsync(req);
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Modify_NonPositiveQuantity_Returns400()
+    {
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+        var algoId = await PostAlgo(http, token, PeggedBody(100));
+
+        var req = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
+        {
+            Content = JsonContent.Create(new { NewQuantity = 0 }),
+        };
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var resp = await http.SendAsync(req);
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Modify_TerminalAlgo_Returns409()
+    {
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+        var algoId = await PostAlgo(http, token, PeggedBody(100));
+
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+
+        // Drive the algo to Filled (terminal) so the modify is rejected.
+        await InjectEr(http, adminToken, child.ClOrdId, "Fill", lastQty: 100);
+        await WaitForAlgoStatus(http, token, algoId, "Completed", "Filled");
+
+        var req = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
+        {
+            Content = JsonContent.Create(new { NewPrice = 31.0m }),
+        };
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var resp = await http.SendAsync(req);
+        Assert.Equal(HttpStatusCode.Conflict, resp.StatusCode);
+    }
+
+    // ───────────────────────── Happy path ─────────────────────────
+
+    [Fact]
+    public async Task Modify_LiveChild_IssuesReplaceAndConverges()
+    {
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child1 = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        Assert.Equal(30.0m, child1.Price);
+
+        // Operator modify: bump the limit one tick up. Quantity stays.
+        var req = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
+        {
+            Content = JsonContent.Create(new { NewPrice = 30.5m, Reason = "test-op" }),
+        };
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var resp = await http.SendAsync(req);
+        Assert.Equal(HttpStatusCode.Accepted, resp.StatusCode);
+
+        // Engine must have issued exactly one cancel-replace targeting
+        // the live child (not a plain CancelAsync — that's the whole
+        // point of Q3.5).
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        await WaitFor(
+            () => mock.SubmittedReplaces.Any(r =>
+                r.OriginalClOrdId == child1.ClOrdId
+                && r.NewPrice == 30.5m
+                && r.NewQuantity == child1.Quantity),
+            TimeSpan.FromSeconds(3),
+            "engine never issued CancelReplace for the operator modify");
+
+        var replace = mock.SubmittedReplaces.Single(r =>
+            r.OriginalClOrdId == child1.ClOrdId);
+
+        // Drive the venue ack — Replaced ER for the new ClOrdID with
+        // OrigClOrdID echoing the original. The processor will hydrate
+        // the new child into the book and re-emit
+        // ChildExecutionObservedSignal so the engine retargets cleanly.
+        await InjectReplacedEr(http, adminToken,
+            newClOrdId: replace.NewClOrdId,
+            origClOrdId: replace.OriginalClOrdId,
+            leavesQuantity: replace.NewQuantity);
+
+        var newChild = await WaitForChildOtherThan(book, algoId, child1.ClOrdId,
+            TimeSpan.FromSeconds(3));
+        Assert.Equal(30.5m, newChild.Price);
+        Assert.Equal(100, newChild.Quantity);
+        Assert.Equal(replace.NewClOrdId, newChild.ClOrdId);
+    }
+
+    [Fact]
+    public async Task Modify_QuantityBelowFilled_Rejected()
+    {
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(200));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+
+        // Partial fill: cum=120, leaves=80.
+        await InjectEr(http, adminToken, child.ClOrdId, "PartialFill",
+            lastQty: 120, lastPx: 30.0m);
+
+        // Wait until the engine has consumed the partial-fill ER so
+        // RecomputeCumQty has propagated; the easiest signal is the
+        // child Quantity reflecting the unchanged total (cum is on
+        // the parent runtime, not the child Quantity, so just sleep
+        // briefly to let the consumer loop drain).
+        await Task.Delay(150);
+
+        var req = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
+        {
+            // newQty=100 is below cum=120 → engine rejects.
+            Content = JsonContent.Create(new { NewQuantity = 100 }),
+        };
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var resp = await http.SendAsync(req);
+        // Endpoint accepts (validation is per-engine); engine rejects
+        // asynchronously and bumps the rejected counter. Either way
+        // no CancelReplace is issued to the wire.
+        Assert.Equal(HttpStatusCode.Accepted, resp.StatusCode);
+
+        await Task.Delay(300);
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        Assert.DoesNotContain(mock.SubmittedReplaces,
+            r => r.OriginalClOrdId == child.ClOrdId);
+    }
+
+    // ───────────────────────── Helpers ─────────────────────────
+
+    private static async Task<string> PostAlgo(HttpClient http, string token, object body)
+    {
+        var req = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        {
+            Content = JsonContent.Create(body),
+        };
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var resp = await http.SendAsync(req);
+        Assert.Equal(HttpStatusCode.Accepted, resp.StatusCode);
+        var posted = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        return posted.GetProperty("algoId").GetString()!;
+    }
+
+    private static async Task<HttpResponseMessage> InjectEr(
+        HttpClient http, string adminToken, ulong childClOrdId,
+        string type, long? lastQty = null, decimal lastPx = 30m)
+    {
+        var req = new HttpRequestMessage(HttpMethod.Post, "/admin/simulator/er")
+        {
+            Content = JsonContent.Create(new
+            {
+                ClOrdId = childClOrdId,
+                Type = type,
+                LastQty = lastQty,
+                LastPx = lastQty.HasValue ? lastPx : (decimal?)null,
+            }),
+        };
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", adminToken);
+        var resp = await http.SendAsync(req);
+        Assert.Equal(HttpStatusCode.Accepted, resp.StatusCode);
+        return resp;
+    }
+
+    private static async Task<HttpResponseMessage> InjectReplacedEr(
+        HttpClient http, string adminToken, ulong newClOrdId, ulong origClOrdId, long leavesQuantity)
+    {
+        var req = new HttpRequestMessage(HttpMethod.Post, "/admin/simulator/er")
+        {
+            Content = JsonContent.Create(new
+            {
+                ClOrdId = newClOrdId,
+                Type = "Replaced",
+                // LastQty is repurposed as "leavesQuantity" hint for the
+                // Replaced injector arm (no Last fill on a replace ack).
+                LastQty = leavesQuantity,
+                OrigClOrdId = origClOrdId,
+            }),
+        };
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", adminToken);
+        var resp = await http.SendAsync(req);
+        Assert.Equal(HttpStatusCode.Accepted, resp.StatusCode);
+        return resp;
+    }
+
+    private static async Task<Order> WaitForAnyChild(WorkingOrderBook book, string algoIdStr, TimeSpan timeout)
+    {
+        var algoId = ulong.Parse(algoIdStr);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.Elapsed < timeout)
+        {
+            var match = book.EnumerateChildrenOf("default", algoId).FirstOrDefault();
+            if (match is not null) return match;
+            await Task.Delay(10);
+        }
+        throw new TimeoutException($"No child for algo {algoIdStr} within {timeout.TotalSeconds}s.");
+    }
+
+    private static async Task<Order> WaitForChildOtherThan(
+        WorkingOrderBook book, string algoIdStr, ulong excludeClOrdId, TimeSpan timeout)
+    {
+        var algoId = ulong.Parse(algoIdStr);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.Elapsed < timeout)
+        {
+            var match = book.EnumerateChildrenOf("default", algoId)
+                .FirstOrDefault(c => c.ClOrdId != excludeClOrdId);
+            if (match is not null) return match;
+            await Task.Delay(10);
+        }
+        throw new TimeoutException(
+            $"No new child (other than {excludeClOrdId}) for algo {algoIdStr} within {timeout.TotalSeconds}s.");
+    }
+
+    private static async Task WaitFor(Func<bool> predicate, TimeSpan timeout, string failMessage)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.Elapsed < timeout)
+        {
+            if (predicate()) return;
+            await Task.Delay(20);
+        }
+        throw new TimeoutException(failMessage + $" (waited {timeout.TotalSeconds}s)");
+    }
+
+    private static async Task WaitForAlgoStatus(HttpClient http, string token, string algoId, params string[] anyOf)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        string? last = null;
+        while (sw.Elapsed < TimeSpan.FromSeconds(5))
+        {
+            var req = new HttpRequestMessage(HttpMethod.Get, $"/algo/{algoId}");
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            var resp = await http.SendAsync(req);
+            resp.EnsureSuccessStatusCode();
+            var algo = await resp.Content.ReadFromJsonAsync<JsonElement>();
+            last = algo.GetProperty("status").GetString();
+            if (anyOf.Contains(last)) return;
+            await Task.Delay(20);
+        }
+        throw new TimeoutException($"Algo {algoId} did not reach any of [{string.Join(",", anyOf)}] within 5s; last={last}");
+    }
+}
