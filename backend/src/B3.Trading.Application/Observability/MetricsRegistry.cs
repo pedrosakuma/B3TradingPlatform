@@ -339,6 +339,20 @@ public static class MetricsRegistry
             "trading.algo.pegged.cancelled",
             description: "Pegged parents reaching the Cancelled terminal state.");
 
+    // Pass-6 review (#296) P2. Bumped when PeggedRepegBook's per-parent
+    // cancelled-child FIFO ring evicts its oldest entry to admit a new
+    // one. Each eviction shrinks the window in which late terminal ERs
+    // for engine-cancelled children are recognised as dedup hits (vs.
+    // falling through to VenueCancelled and suspending the parent), so
+    // sustained increments are an operational signal that the cap is
+    // too tight for the venue tail-Fill latency in production. Labelless
+    // to keep cardinality flat; correlate with the warn log in
+    // PeggedRepegBook.MarkCancelledChild for the offending firm / algo.
+    public static readonly Counter<long> AlgoPeggedRepegDedupRingEvicted =
+        Meter.CreateCounter<long>(
+            "trading.algo.pegged.repeg_dedup_ring_evicted_total",
+            description: "FIFO evictions in PeggedRepegBook's per-parent cancelled-child dedup ring.");
+
     /// <summary>
     /// 1 when the host booted with <c>Trading:Exchange:AllowErInjection=true</c>
     /// (admin-gated <c>POST /admin/simulator/er</c> is mapped). Set once at

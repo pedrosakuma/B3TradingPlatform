@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using B3.Trading.Application.Observability;
+using Microsoft.Extensions.Logging;
 
 namespace B3.Trading.Application;
 
@@ -37,16 +39,38 @@ namespace B3.Trading.Application;
 public sealed class PeggedRepegBook
 {
     /// <summary>
-    /// Pass-5 review (#296) P1. FIFO cap on the per-parent set of
-    /// recently engine-cancelled child clOrdIds. Bounds the late-ER
-    /// dedup memory; the venue is not expected to deliver ERs for
-    /// children older than this many repeg cycles back. Tuned at 32
-    /// (~32 repegs ≈ several seconds of drift on a 100 ms throttle).
+    /// Pass-5 review (#296) P1, revised pass-6 (#296) P2. FIFO cap on
+    /// the per-parent set of recently engine-cancelled child clOrdIds.
+    /// Bounds the late-ER dedup memory.
+    ///
+    /// <para>
+    /// <b>Cap vs venue-tail-latency trade-off.</b> The Pegged scheduler
+    /// runs on a 100 ms cadence, so the cap × 100 ms is roughly the
+    /// upper bound on how long after engine-issued cancel a venue may
+    /// still deliver a terminal ER for the cancelled child and have it
+    /// be recognised as "expected terminal" (vs. falling through to
+    /// the <c>VenueCancelled</c> branch and suspending the parent).
+    /// 32 (the pass-5 value) only covered ~3.2 s of tail; 256 covers
+    /// ~25 s which comfortably absorbs the typical venue-side ER tail
+    /// while staying bounded in memory (a per-parent
+    /// <see cref="HashSet{T}"/> + <see cref="Queue{T}"/> of ulongs).
+    /// Overflow beyond this window is observable via
+    /// <see cref="MetricsRegistry.AlgoPeggedRepegDedupRingEvicted"/>
+    /// (counter) and a one-shot warn log per parent — operators
+    /// should treat sustained eviction as a signal the cap needs
+    /// bumping further.
+    /// </para>
     /// </summary>
-    public const int CancelledHistoryCap = 32;
+    public const int CancelledHistoryCap = 256;
 
+    private readonly ILogger<PeggedRepegBook>? _logger;
     private readonly ConcurrentDictionary<(string FirmId, ulong AlgoId), PeggedRepegPending> _entries = new();
     private readonly ConcurrentDictionary<(string FirmId, ulong AlgoId), CancelledChildRing> _history = new();
+
+    public PeggedRepegBook(ILogger<PeggedRepegBook>? logger = null)
+    {
+        _logger = logger;
+    }
 
     public PeggedRepegPending? TryGet(string firmId, ulong algoId) =>
         _entries.TryGetValue((firmId, algoId), out var e) ? e : null;
@@ -90,7 +114,25 @@ public sealed class PeggedRepegBook
     public void MarkCancelledChild(string firmId, ulong algoId, ulong childClOrdId)
     {
         var ring = _history.GetOrAdd((firmId, algoId), static _ => new CancelledChildRing(CancelledHistoryCap));
-        ring.Add(childClOrdId);
+        if (ring.Add(childClOrdId))
+        {
+            // Pass-6 review (#296) P2. Ring eviction is silent w.r.t.
+            // the engine: the oldest child id falls out and any
+            // subsequent late terminal ER for it will no longer
+            // dedup (parent gets suspended via VenueCancelled). Make
+            // it observable with a counter, and emit a single warn
+            // per parent to surface the situation without spamming
+            // logs once we're past the cap.
+            MetricsRegistry.AlgoPeggedRepegDedupRingEvicted.Add(1);
+            if (!ring.MarkEvictionLogged())
+            {
+                _logger?.LogWarning(
+                    "PeggedRepegBook dedup ring overflow on firm {FirmId} algo {AlgoId}: oldest cancelled-child id evicted from {Cap}-entry FIFO. Late terminal ERs for evicted children will fall through to VenueCancelled; consider raising CancelledHistoryCap if this is sustained.",
+                    firmId,
+                    algoId,
+                    CancelledHistoryCap);
+            }
+        }
     }
 
     /// <summary>
@@ -160,6 +202,7 @@ internal sealed class CancelledChildRing
     private readonly Queue<ulong> _order;
     private readonly HashSet<ulong> _set;
     private readonly object _lock = new();
+    private bool _evictionLogged;
 
     public CancelledChildRing(int cap)
     {
@@ -168,17 +211,42 @@ internal sealed class CancelledChildRing
         _set = new HashSet<ulong>(cap);
     }
 
-    public void Add(ulong id)
+    /// <summary>
+    /// Adds <paramref name="id"/> to the FIFO. Returns <c>true</c> iff
+    /// the insert caused at least one older entry to be evicted to
+    /// honour the cap (so callers can surface eviction via metrics /
+    /// logs). Duplicates and no-op inserts return <c>false</c>.
+    /// </summary>
+    public bool Add(ulong id)
     {
         lock (_lock)
         {
-            if (!_set.Add(id)) return;
+            if (!_set.Add(id)) return false;
             _order.Enqueue(id);
+            var evicted = false;
             while (_order.Count > _cap)
             {
-                var evicted = _order.Dequeue();
-                _set.Remove(evicted);
+                var dropped = _order.Dequeue();
+                _set.Remove(dropped);
+                evicted = true;
             }
+            return evicted;
+        }
+    }
+
+    /// <summary>
+    /// Atomically flips the per-ring "we've already warn-logged about
+    /// eviction on this parent" flag. Returns the PREVIOUS value:
+    /// <c>false</c> on the first call (caller should log),
+    /// <c>true</c> on every subsequent call (caller should suppress).
+    /// </summary>
+    public bool MarkEvictionLogged()
+    {
+        lock (_lock)
+        {
+            var prev = _evictionLogged;
+            _evictionLogged = true;
+            return prev;
         }
     }
 
