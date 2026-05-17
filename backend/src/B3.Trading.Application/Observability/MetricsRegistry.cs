@@ -367,6 +367,19 @@ public static class MetricsRegistry
             "trading.algo.modify_rejected_total",
             description: "Algo modify requests rejected before reaching the gateway (terminal algo, terminal child, invalid qty, …).");
 
+    // Pass-1 review (#299) P1-B. The gateway dispatch for an algo modify
+    // raised an exception, but the venue may have already accepted the
+    // cancel-replace (network jitter / ambiguous send). The engine
+    // intentionally keeps the PendingReplacementRegistry intent in place
+    // so a late Replaced ER still resolves correctly; this counter makes
+    // the ambiguity observable so operators can correlate with the
+    // dashboards and confirm convergence (or absence of) via the eventual
+    // ER. Tagged by algoType only — reason is never user-supplied here.
+    public static readonly Counter<long> AlgoModifySendAmbiguous =
+        Meter.CreateCounter<long>(
+            "trading.algo.modify_send_ambiguous_total",
+            description: "Algo modify gateway dispatches that threw post-WAL but may have been accepted by the venue (intent preserved for late Replaced ER resolution).");
+
     /// <summary>
     /// 1 when the host booted with <c>Trading:Exchange:AllowErInjection=true</c>
     /// (admin-gated <c>POST /admin/simulator/er</c> is mapped). Set once at

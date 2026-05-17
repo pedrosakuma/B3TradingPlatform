@@ -156,7 +156,7 @@ public class AlgoModifyEndpointTests
         // Operator modify: bump the limit one tick up. Quantity stays.
         var req = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
         {
-            Content = JsonContent.Create(new { NewPrice = 30.5m, Reason = "test-op" }),
+            Content = JsonContent.Create(new { NewPrice = 30.5m, Reason = "OperatorModify" }),
         };
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         var resp = await http.SendAsync(req);
@@ -237,7 +237,182 @@ public class AlgoModifyEndpointTests
             r => r.OriginalClOrdId == child.ClOrdId);
     }
 
+    [Fact]
+    public async Task Modify_InvalidReason_Returns400()
+    {
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+        var algoId = await PostAlgo(http, token, PeggedBody(100));
+
+        var req = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
+        {
+            // Pass-1 review (#299) P2-A. Reason becomes a metric tag, so
+            // only the closed allowlist is accepted. An arbitrary
+            // operator string must be rejected at validation time.
+            Content = JsonContent.Create(new { NewPrice = 30.5m, Reason = "free-form-reason" }),
+        };
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var resp = await http.SendAsync(req);
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+    }
+
+    // ────────────── Pass-1 review (#299) regressions ──────────────
+
+    [Fact]
+    public async Task Modify_FillOnOldChildBeforeReplacedEr_NoDoubleCounting()
+    {
+        // Pass-1 review (#299) P1-A. With the pre-fix code the engine
+        // re-targeted rt.LiveChildClOrdId to the new ClOrdID at
+        // dispatch time AND seeded ChildBookedCum[new] = old.Cum, so a
+        // Fill ER for the OLD child landing in the in-flight window
+        // booked the fill twice on the parent (once via the OLD child
+        // delta, once via the replacement's seeded cum carry-over on
+        // the next ER for the new child). The fix defers adoption to
+        // the actual Replaced-ER observation; parent.FilledQuantity
+        // must reflect exactly one fill.
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var oldChild = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+
+        // Operator modify in flight — engine writes WAL + registers
+        // intent + dispatches CancelReplace, but does NOT yet move
+        // rt.LiveChildClOrdId off the OLD child.
+        var modReq = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
+        {
+            Content = JsonContent.Create(new { NewPrice = 30.5m }),
+        };
+        modReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var modResp = await http.SendAsync(modReq);
+        Assert.Equal(HttpStatusCode.Accepted, modResp.StatusCode);
+
+        // Wait for the CancelReplace wire-call so the intent is
+        // registered before we drive the Replaced ER. The fill MUST
+        // land for the OLD child id BEFORE the Replaced ER hydrates
+        // the replacement — that is the race we're regression-testing.
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        await WaitFor(
+            () => mock.SubmittedReplaces.Any(r => r.OriginalClOrdId == oldChild.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "engine never dispatched CancelReplace");
+        var replace = mock.SubmittedReplaces.Single(r => r.OriginalClOrdId == oldChild.ClOrdId);
+
+        // Partial fill of 30 on the OLD child while the replace is
+        // still in flight. The engine's child-ER path books delta=30
+        // against the OLD child slot (parent.FilledQuantity=30).
+        await InjectEr(http, adminToken, oldChild.ClOrdId, "PartialFill",
+            lastQty: 30, lastPx: 30.0m);
+        await Task.Delay(150);
+        var algoMid = await GetAlgo(http, token, algoId);
+        Assert.Equal(30L, algoMid.GetProperty("filledQuantity").GetInt64());
+
+        // Venue Replaced ER, carrying erCum=30 (venue echoes the OLD
+        // child's cum). Processor hydrates the new child with
+        // CumulativeQuantity=30, leaves=70, and fans out a
+        // ChildExecutionObservedSignal for the new ClOrdID; the engine
+        // adopts the replacement and seeds its booked-cum baseline so
+        // the carry-over is NOT re-booked.
+        await InjectReplacedEr(http, adminToken,
+            newClOrdId: replace.NewClOrdId,
+            origClOrdId: replace.OriginalClOrdId,
+            leavesQuantity: 70,
+            cumQty: 30);
+
+        var newChild = await WaitForChildOtherThan(book, algoId, oldChild.ClOrdId,
+            TimeSpan.FromSeconds(3));
+        Assert.Equal(replace.NewClOrdId, newChild.ClOrdId);
+        Assert.Equal(30L, newChild.CumulativeQuantity);
+
+        // Settle, then assert parent cum still equals the single
+        // observed fill — no double-counting.
+        await Task.Delay(150);
+        var algoAfter = await GetAlgo(http, token, algoId);
+        Assert.Equal(30L, algoAfter.GetProperty("filledQuantity").GetInt64());
+        Assert.Equal(70L, algoAfter.GetProperty("remainingQuantity").GetInt64());
+    }
+
+    [Fact]
+    public async Task Modify_GatewayThrowsButVenueAccepted_LateReplacedErIsHonoured()
+    {
+        // Pass-1 review (#299) P1-B. CancelReplaceAsync exception is
+        // semantically AMBIGUOUS — the venue may already have accepted
+        // the request. The fix keeps the PendingReplacementRegistry
+        // intent + ownership link in place so a late Replaced ER still
+        // resolves correctly through the early intercept; previously
+        // the intent was rolled back, the Replaced ER bypassed the
+        // registry and the new child was silently dropped.
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        // Arm the mock to throw on the cancel-replace dispatch BUT
+        // still enqueue the request first (mirrors a real ambiguous
+        // send — wire write succeeded, ack timed out / errored).
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        mock.ReplaceFailureInjector = _ => new InvalidOperationException("simulated SDK ambiguous send");
+
+        var algoId = await PostAlgo(http, token, PeggedBody(100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var oldChild = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+
+        var modReq = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
+        {
+            Content = JsonContent.Create(new { NewPrice = 30.5m }),
+        };
+        modReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var modResp = await http.SendAsync(modReq);
+        Assert.Equal(HttpStatusCode.Accepted, modResp.StatusCode);
+
+        await WaitFor(
+            () => mock.SubmittedReplaces.Any(r => r.OriginalClOrdId == oldChild.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "engine never dispatched CancelReplace");
+        var replace = mock.SubmittedReplaces.Single(r => r.OriginalClOrdId == oldChild.ClOrdId);
+
+        // Disarm so any further dispatches don't trip the injector.
+        mock.ReplaceFailureInjector = null;
+
+        // Drive the late Replaced ER (venue had actually accepted the
+        // request before timing out). With the fix the intent is still
+        // registered, so the processor's early intercept fires, the
+        // new child is hydrated, and the engine adopts it as the live
+        // slot on the resulting ChildExecutionObservedSignal.
+        await InjectReplacedEr(http, adminToken,
+            newClOrdId: replace.NewClOrdId,
+            origClOrdId: replace.OriginalClOrdId,
+            leavesQuantity: replace.NewQuantity);
+
+        var newChild = await WaitForChildOtherThan(book, algoId, oldChild.ClOrdId,
+            TimeSpan.FromSeconds(3));
+        Assert.Equal(30.5m, newChild.Price);
+        Assert.Equal(replace.NewClOrdId, newChild.ClOrdId);
+    }
+
     // ───────────────────────── Helpers ─────────────────────────
+
+    private static async Task<JsonElement> GetAlgo(HttpClient http, string token, string algoId)
+    {
+        var req = new HttpRequestMessage(HttpMethod.Get, $"/algo/{algoId}");
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var resp = await http.SendAsync(req);
+        resp.EnsureSuccessStatusCode();
+        return await resp.Content.ReadFromJsonAsync<JsonElement>();
+    }
 
     private static async Task<string> PostAlgo(HttpClient http, string token, object body)
     {
@@ -273,7 +448,8 @@ public class AlgoModifyEndpointTests
     }
 
     private static async Task<HttpResponseMessage> InjectReplacedEr(
-        HttpClient http, string adminToken, ulong newClOrdId, ulong origClOrdId, long leavesQuantity)
+        HttpClient http, string adminToken, ulong newClOrdId, ulong origClOrdId, long leavesQuantity,
+        long? cumQty = null)
     {
         var req = new HttpRequestMessage(HttpMethod.Post, "/admin/simulator/er")
         {
@@ -285,6 +461,7 @@ public class AlgoModifyEndpointTests
                 // Replaced injector arm (no Last fill on a replace ack).
                 LastQty = leavesQuantity,
                 OrigClOrdId = origClOrdId,
+                CumQty = cumQty,
             }),
         };
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", adminToken);

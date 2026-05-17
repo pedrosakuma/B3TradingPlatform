@@ -371,7 +371,15 @@ public static class AlgoEndpoints
                 return Results.Conflict(new { error = $"algo {id} is cancelling" });
             }
 
-            var reason = string.IsNullOrWhiteSpace(req.Reason) ? "operator" : req.Reason.Trim();
+            var reason = ModifyAlgoRequest.NormalizeReason(req.Reason);
+            if (reason is null)
+            {
+                return Results.BadRequest(new
+                {
+                    error = "invalid_reason",
+                    detail = $"reason must be one of: {string.Join(", ", ModifyAlgoRequest.AllowedReasons)}",
+                });
+            }
             if (!signals.TryEnqueue(new AlgoModifyRequestedSignal
             {
                 FirmId = firm,
@@ -577,4 +585,36 @@ public sealed record ModifyAlgoRequest(
     long? NewQuantity = null,
     decimal? NewPrice = null,
     ulong? ChildClOrdId = null,
-    string? Reason = null);
+    string? Reason = null)
+{
+    // Pass-1 review (#299) P2-A. Reason flows into a metric tag, so it
+    // MUST be a closed enum to avoid unbounded cardinality from
+    // arbitrary operator strings. Audit (AlgoChildModifiedEvent) still
+    // records the normalised value verbatim — same identifier, just
+    // constrained. Defaults to OperatorModify when omitted; anything
+    // outside this allowlist is rejected at the endpoint with 400.
+    public static readonly IReadOnlyList<string> AllowedReasons = new[]
+    {
+        "OperatorModify",
+        "AlgoInternal",
+        "Reconciliation",
+    };
+
+    /// <summary>
+    /// Trims and case-insensitively matches <paramref name="raw"/> against
+    /// <see cref="AllowedReasons"/>. Returns the canonical-cased value on
+    /// match, the default (<c>OperatorModify</c>) on null/whitespace, or
+    /// <c>null</c> when the input does not match any allowed reason.
+    /// </summary>
+    public static string? NormalizeReason(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return AllowedReasons[0];
+        var trimmed = raw.Trim();
+        foreach (var allowed in AllowedReasons)
+        {
+            if (string.Equals(trimmed, allowed, StringComparison.OrdinalIgnoreCase))
+                return allowed;
+        }
+        return null;
+    }
+}

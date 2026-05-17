@@ -648,6 +648,39 @@ public sealed class AlgoEngine : BackgroundService
             return;
         }
 
+        // Pass-1 review (#299) P1-A. First observation of a replacement
+        // child — adopt it here (NOT eagerly at modify-dispatch time) so
+        // any Fill ER for the OLD child that arrived between dispatch and
+        // the Replaced ack got booked against the OLD child's slot above
+        // without re-targeting the parent. The Replaced ER's
+        // ApplyReplaceAccepted has just hydrated `child` under the new
+        // ClOrdID (status Working / PartiallyFilled / Filled depending on
+        // erCum vs newQty) and dispatched this signal; we re-target now
+        // and seed the new child's booked-cum baseline from the venue's
+        // echoed cum so the next Fill ER for the new child computes a
+        // correct delta. The OLD child has already been MarkReplaced'd
+        // by the processor (Replaced ⇒ terminal) and its
+        // ChildBookedCum entry is left in place — Reconcile rebuilds it
+        // from the order book, and it's bounded per-parent.
+        if (_replacements is not null
+            && rt.LiveChildClOrdId is { } oldLive
+            && oldLive != child.ClOrdId
+            && child.ParentAlgoId == algo.AlgoId
+            && !rt.ChildBookedCum.ContainsKey(child.ClOrdId)
+            && _ownership.TryResolveOrig(child.ClOrdId, out var origOfNew)
+            && origOfNew == oldLive)
+        {
+            rt.LiveChildClOrdId = child.ClOrdId;
+            rt.ChildBookedCum[child.ClOrdId] = child.CumulativeQuantity;
+            // Fall through so any erCum > prior booked OLD cum that the
+            // venue carried over (e.g. a fill landed at venue strictly
+            // between our last OLD-child ER and the Replaced ack) is NOT
+            // double-booked: the seed above made delta == 0 in the
+            // accounting block below. Any later Fill ER for the new
+            // ClOrdID advances cum monotonically against this seeded
+            // baseline.
+        }
+
         // Book the cum-quantity delta. Child orders deliver fills via
         // ApplyCumulativeFill so child.CumulativeQuantity is monotonic;
         // we just diff against the last value we credited to the parent.
@@ -1093,20 +1126,29 @@ public sealed class AlgoEngine : BackgroundService
         }
         catch (Exception ex)
         {
-            // Roll back: drop the intent + log. Original child stays
-            // live; the operator can retry. No synthetic Rejected ER is
-            // emitted (the algo engine is not the order-event source —
-            // OrderModifyService does that for human-driven modifies
-            // because it owns the response semantics; the engine path
-            // surfaces the failure via the metric below + log).
-            _replacements.TryConsume(newClOrdId, out _);
+            // Pass-1 review (#299) P1-B. Send-failure is AMBIGUOUS: the
+            // venue may have already accepted the cancel-replace (network
+            // jitter, write succeeded but ack timed out). If we drop the
+            // intent here and a Replaced ER arrives later, it bypasses
+            // the PendingReplacementRegistry intercept and is silently
+            // ignored — the new ClOrdID never appears in the book and
+            // the parent's child pointer stays on the OLD child forever.
+            //
+            // Instead: KEEP the intent and ownership link in place so a
+            // late Replaced ER still resolves correctly. The parent
+            // pointer was deliberately NOT re-targeted yet (see P1-A
+            // adoption-on-Replaced), so the OLD child remains the live
+            // slot and any in-flight fills on it are booked normally.
+            // Operator surfaces this through the dedicated
+            // modify_send_ambiguous counter; the algo-rejected counter
+            // is NOT incremented because we cannot tell yet whether the
+            // modify will eventually succeed.
             MetricsRegistry.OrdersGatewayFailed.Add(1,
                 new KeyValuePair<string, object?>("path", "algo.modify"));
-            MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
-                new KeyValuePair<string, object?>("algoType", algoTypeTag),
-                new KeyValuePair<string, object?>("reason", "gateway_failed"));
+            MetricsRegistry.AlgoModifySendAmbiguous.Add(1,
+                new KeyValuePair<string, object?>("algoType", algoTypeTag));
             _logger.LogWarning(ex,
-                "AlgoEngine modify gateway dispatch failed for algo {Firm}/{AlgoId} child {Child}; rolled back.",
+                "AlgoEngine modify gateway dispatch ambiguous for algo {Firm}/{AlgoId} child {Child}; intent retained for late Replaced ER.",
                 algo.FirmId, algo.AlgoId, child.ClOrdId);
             return false;
         }
@@ -1148,14 +1190,18 @@ public sealed class AlgoEngine : BackgroundService
             new KeyValuePair<string, object?>("algoType", algoTypeTag),
             new KeyValuePair<string, object?>("reason", reason));
 
-        // Re-target the live-child slot to the replacement id. The
-        // ER processor's Replaced ack will hydrate the new Order in
-        // the book under newClOrdId and fan out a
-        // ChildExecutionObservedSignal — by then rt.LiveChildClOrdId
-        // already matches, so OnChildErAsync's non-terminal early-
-        // return path runs as expected.
-        rt.LiveChildClOrdId = newClOrdId;
-        rt.ChildBookedCum[newClOrdId] = child.CumulativeQuantity;
+        // Pass-1 review (#299) P1-A. Do NOT re-target rt.LiveChildClOrdId
+        // here — the venue has not yet acknowledged the cancel-replace.
+        // Re-targeting before the Replaced ER arrives creates a window in
+        // which a Fill ER for the OLD child would book against an
+        // already-rebound parent slot AND when the Replaced ER finally
+        // arrived the replacement's seeded cum would re-book the same
+        // fill, double-counting it on the parent. The adoption now
+        // happens in OnChildErAsync the first time the engine observes
+        // the new ClOrdID (i.e. on the ChildExecutionObservedSignal
+        // emitted by ApplyReplaceAccepted), at which point the new
+        // child's CumulativeQuantity is the venue's authoritative carry-
+        // over baseline.
         return true;
     }
 

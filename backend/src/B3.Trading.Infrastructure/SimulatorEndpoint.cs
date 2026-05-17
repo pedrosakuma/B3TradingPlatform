@@ -39,7 +39,15 @@ public static class SimulatorEndpoint
         // lookup is keyed on the new ClOrdID, but the new Order is
         // hydrated under that new id only if OrigClOrdID resolves to an
         // existing original — caller must supply it.
-        ulong? OrigClOrdId = null);
+        ulong? OrigClOrdId = null,
+        // Pass-1 review (#299) P1-A. Optional cumulative-quantity echo
+        // for Type==Replaced — the venue's view of how much of the
+        // original order had been filled at replace-acceptance time. The
+        // processor seeds the replacement Order's CumulativeQuantity
+        // from this value so subsequent fills advance from the correct
+        // baseline. Defaults to 0 (no carry-over) for back-compat with
+        // tests that exercise the "modify before any fill" path.
+        long? CumQty = null);
 
     /// <summary>
     /// Maps <c>POST /admin/simulator/er</c> under the admin authorization
@@ -84,7 +92,7 @@ public static class SimulatorEndpoint
             if ((req.OrigClOrdId ?? 0UL) == 0UL)
                 return Results.BadRequest(new { error = "missing_origClOrdId", detail = "origClOrdId is required for type=Replaced." });
             var leavesR = req.LastQty ?? 0L;
-            var cumR = 0L;
+            var cumR = req.CumQty ?? 0L;
             var envR = new ExecutionReportEnvelope(
                 ClOrdId: req.ClOrdId,
                 ExecType: EpExecType.Replaced,
