@@ -327,6 +327,16 @@ public sealed record ExecutionReportReceivedEvent : WalEvent
     /// (counted on <c>trading.er.firm_mismatch_total</c>).
     /// </summary>
     public string? FirmId { get; init; }
+
+    /// <summary>
+    /// Q4.7 (#307). Top-of-book snapshot captured at the moment a
+    /// Fill / PartialFill ER landed at the host. Populated only for
+    /// <c>ExecKind=Fill</c> / <c>PartialFill</c>; all other kinds
+    /// persist <c>null</c>. Additive (nullable, no <c>required</c>) so
+    /// older WAL segments without the field hydrate as <c>null</c> and
+    /// downstream consumers treat them as "no touch captured".
+    /// </summary>
+    public MarketData.BookTouchSnapshot? BookTouch { get; init; }
 }
 
 /// <summary>

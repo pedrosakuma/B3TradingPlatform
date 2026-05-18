@@ -1,3 +1,4 @@
+using B3.Trading.Application.MarketData;
 using B3.Trading.Domain;
 
 namespace B3.Trading.Application;
@@ -32,7 +33,15 @@ public sealed record ExecutionEvent(
     string? RejectReason,
     DateTimeOffset TimestampUtc,
     bool IsNativeStp = false,
-    string? FirmId = null);
+    string? FirmId = null,
+    /// <summary>
+    /// Q4.7 (#307). Top-of-book snapshot captured at the moment a
+    /// Fill / PartialFill was observed. Always <c>null</c> for non-fill
+    /// kinds (New / Replaced / Cancelled / Rejected). Additive: older
+    /// callers that do not pass it still get the legacy
+    /// <c>BookTouch = null</c> shape.
+    /// </summary>
+    BookTouchSnapshot? BookTouch = null);
 
 public sealed class NoOpExecutionEventSink : IExecutionEventSink
 {

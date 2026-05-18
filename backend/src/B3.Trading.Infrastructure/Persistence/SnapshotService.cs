@@ -1,7 +1,9 @@
 using System.Diagnostics;
+using B3.Trading.Application;
 using B3.Trading.Application.Audit;
 using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
+using B3.Trading.Domain;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -28,6 +30,15 @@ public sealed class PersistenceRecovery
     // (which starts at snapshot.Seq+1) cannot see. Cost is O(N) where
     // N is total WAL events; the keeper's bounded ring caps memory.
     private readonly AuditLogKeeper? _auditKeeper;
+    // Q4.7 (#307). Optional. When wired AND a snapshot is loaded,
+    // recovery does a pre-pass over the WAL filtered to
+    // ExecutionReportReceivedEvent for seq <= snapshot.Seq so the
+    // in-memory FillProjection rehydrates the pre-snapshot history
+    // that the main replay (which starts at snapshot.Seq+1) cannot
+    // see. Mirrors the AuditLogKeeper rehydration design.
+    private readonly FillProjection? _fillProjection;
+    private readonly WorkingOrderBook? _orders;
+    private readonly OrderOwnershipMap? _ownership;
 
     public PersistenceRecovery(
         IEventStore store,
@@ -35,7 +46,10 @@ public sealed class PersistenceRecovery
         EventReplayer replayer,
         SnapshotStore snapshots,
         ILogger<PersistenceRecovery> logger,
-        AuditLogKeeper? auditKeeper = null)
+        AuditLogKeeper? auditKeeper = null,
+        FillProjection? fillProjection = null,
+        WorkingOrderBook? orders = null,
+        OrderOwnershipMap? ownership = null)
     {
         _store = store;
         _snapshotter = snapshotter;
@@ -43,6 +57,9 @@ public sealed class PersistenceRecovery
         _snapshots = snapshots;
         _logger = logger;
         _auditKeeper = auditKeeper;
+        _fillProjection = fillProjection;
+        _orders = orders;
+        _ownership = ownership;
     }
 
     public async Task RunAsync(CancellationToken ct = default)
@@ -78,6 +95,46 @@ public sealed class PersistenceRecovery
                 }
                 _logger.LogInformation("Persistence recovery: rehydrated {Count} audit envelopes from pre-snapshot WAL prefix (cap={Cap}).",
                     rehydrated, _auditKeeper.Capacity);
+            }
+
+            // Q4.7 (#307). Fill-projection pre-pass for seq <= snapshot.Seq.
+            // The main replay below starts at since+1 and the projection
+            // is not part of the snapshot envelope (the WAL is the source
+            // of truth — same design as the audit ring), so without this
+            // pre-pass every Fill / PartialFill captured before the
+            // snapshot would be invisible to GET /fills/{id}/touch after
+            // restart. Resolves Symbol / Side / FirmId from the restored
+            // WorkingOrderBook and Owner from OrderOwnershipMap — both
+            // are restored above. We deliberately do NOT re-run the full
+            // processor (that would double-apply positions / fees / PnL);
+            // we only repopulate the projection.
+            if (_fillProjection is not null && _orders is not null && _ownership is not null && since > 0)
+            {
+                var rehydratedFills = 0;
+                await foreach (var (seq, evt) in _store.ReadFromAsync(0, ct).ConfigureAwait(false))
+                {
+                    if (seq > since) break;
+                    if (evt is not ExecutionReportReceivedEvent er) continue;
+                    if (!Enum.TryParse<ExecKind>(er.ExecKind, ignoreCase: true, out var k)) continue;
+                    if (k is not ExecKind.Fill and not ExecKind.PartialFill) continue;
+                    if (er.LastQuantity <= 0) continue;
+                    var lookupId = er.OrigClOrdId != 0 ? er.OrigClOrdId : er.ClOrdId;
+                    if (!_orders.TryGet(lookupId, out var order) || order is null) continue;
+                    _fillProjection.Record(
+                        clOrdId: lookupId,
+                        cumulativeQuantityAfterFill: er.CumulativeQuantity,
+                        owner: order.Owner,
+                        firmId: order.FirmId,
+                        symbol: order.Symbol,
+                        side: order.Side,
+                        lastQuantity: er.LastQuantity,
+                        lastPrice: er.LastPrice,
+                        timestampUtc: er.TimestampUtc,
+                        bookTouch: er.BookTouch);
+                    rehydratedFills++;
+                }
+                _logger.LogInformation("Persistence recovery: rehydrated {Count} fill touch records from pre-snapshot WAL prefix.",
+                    rehydratedFills);
             }
         }
         else

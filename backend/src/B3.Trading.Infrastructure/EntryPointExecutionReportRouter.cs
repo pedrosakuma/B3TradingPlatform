@@ -1,4 +1,5 @@
 using B3.Trading.Application;
+using B3.Trading.Application.MarketData;
 using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
 
@@ -18,15 +19,33 @@ public sealed class EntryPointExecutionReportRouter : IDisposable
     private readonly ExecutionReportProcessor _processor;
     private readonly EventDispatcher _dispatcher;
     private readonly Action<ExecutionReportEnvelope> _handler;
+    // Q4.7 (#307). Both optional so the legacy two-arg test ctor keeps
+    // working. When wired, the router captures a top-of-book snapshot
+    // for every Fill / PartialFill and threads it through both the WAL
+    // ER event (for replay) and the processor (for the live ExecutionEvent).
+    private readonly WorkingOrderBook? _orders;
+    private readonly PegBookTopCache? _bookTop;
 
     public EntryPointExecutionReportRouter(
         IEntryPointClient client,
         ExecutionReportProcessor processor,
         EventDispatcher dispatcher)
+        : this(client, processor, dispatcher, orders: null, bookTop: null)
+    {
+    }
+
+    public EntryPointExecutionReportRouter(
+        IEntryPointClient client,
+        ExecutionReportProcessor processor,
+        EventDispatcher dispatcher,
+        WorkingOrderBook? orders,
+        PegBookTopCache? bookTop)
     {
         _client = client;
         _processor = processor;
         _dispatcher = dispatcher;
+        _orders = orders;
+        _bookTop = bookTop;
         _handler = OnExecutionReport;
         _client.ExecutionReportReceived += _handler;
     }
@@ -48,6 +67,27 @@ public sealed class EntryPointExecutionReportRouter : IDisposable
             EpExecType.Rejected => ExecKind.Rejected,
             _ => throw new ArgumentOutOfRangeException(nameof(er.ExecType)),
         };
+
+        // Q4.7 (#307). Capture the top-of-book at the instant a fill
+        // ER is observed. The snapshot is attached to BOTH the WAL ER
+        // event (so replay re-folds the same BookTouch into
+        // FillProjection) and the live ExecutionEvent constructed by
+        // the processor (so /fills + fills.me + drop-copy can read it
+        // without a second cache lookup). Capture happens BEFORE the
+        // dispatcher lock so the cache lookup is not on the hot path.
+        BookTouchSnapshot? bookTouch = null;
+        if (kind is ExecKind.Fill or ExecKind.PartialFill && _bookTop is not null)
+        {
+            string? symbol = null;
+            if (_orders is not null)
+            {
+                var lookupId = er.OrigClOrdId != 0 ? er.OrigClOrdId : er.ClOrdId;
+                if (_orders.TryGet(lookupId, out var order) && order is not null)
+                    symbol = order.Symbol;
+            }
+            if (symbol is not null)
+                bookTouch = BookTouchSnapshot.Capture(_bookTop, symbol, DateTimeOffset.UtcNow);
+        }
 
         try
         {
@@ -73,9 +113,10 @@ public sealed class EntryPointExecutionReportRouter : IDisposable
                     Synthetic = false,
                     OrigClOrdId = er.OrigClOrdId,
                     FirmId = er.FirmId,
+                    BookTouch = bookTouch,
                 },
                 fanOut => _processor.Apply(er.ClOrdId, kind, er.LeavesQuantity, er.CumulativeQuantity,
-                    er.LastQuantity, er.LastPrice, er.RejectReason, er.OrigClOrdId, fanOut, envelopeFirmId: er.FirmId));
+                    er.LastQuantity, er.LastPrice, er.RejectReason, er.OrigClOrdId, fanOut, envelopeFirmId: er.FirmId, bookTouch: bookTouch));
         }
         catch (WalBackpressureException)
         {
@@ -99,7 +140,7 @@ public sealed class EntryPointExecutionReportRouter : IDisposable
             // so holding the dispatcher lock involves no I/O.
             _dispatcher.RunExclusive(() =>
                 _processor.Apply(er.ClOrdId, kind, er.LeavesQuantity, er.CumulativeQuantity,
-                    er.LastQuantity, er.LastPrice, er.RejectReason, er.OrigClOrdId, envelopeFirmId: er.FirmId));
+                    er.LastQuantity, er.LastPrice, er.RejectReason, er.OrigClOrdId, envelopeFirmId: er.FirmId, bookTouch: bookTouch));
         }
     }
 }
