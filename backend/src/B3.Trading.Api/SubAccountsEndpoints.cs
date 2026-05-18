@@ -55,16 +55,13 @@ public static class SubAccountsEndpoints
             var actor = ctx.User.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
             try
             {
-                dispatcher.Dispatch(
-                    new SubAccountCreatedEvent
-                    {
-                        FirmId = firm,
-                        Id = id.Value,
-                        DisplayName = req.DisplayName,
-                        ActorUserId = actor,
-                    },
-                    () => registry.ApplyCreated(firm, id.Value, req.DisplayName));
-                audit.Log(new AuditLogEvent
+                // Pass-1 review (#322) P1.2. Audit-first ordering —
+                // emit the operator's sub-account create intent
+                // BEFORE the WAL business event so a backpressured
+                // audit append refuses the registry mutation with
+                // 503 rather than committing a sub-account
+                // un-audited.
+                audit.LogOrFail(new AuditLogEvent
                 {
                     EventType = AuditEventTypes.AdminSubAccountCreate,
                     Outcome = AuditOutcomes.Success,
@@ -81,6 +78,15 @@ public static class SubAccountsEndpoints
                         ["display_name"] = req.DisplayName ?? "",
                     },
                 });
+                dispatcher.Dispatch(
+                    new SubAccountCreatedEvent
+                    {
+                        FirmId = firm,
+                        Id = id.Value,
+                        DisplayName = req.DisplayName,
+                        ActorUserId = actor,
+                    },
+                    () => registry.ApplyCreated(firm, id.Value, req.DisplayName));
                 return Results.Created($"/sub-accounts/{id.Value}",
                     new SubAccountDto(id.Value, req.DisplayName, Active: true));
             }
@@ -111,15 +117,9 @@ public static class SubAccountsEndpoints
             var actor = ctx.User.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
             try
             {
-                dispatcher.Dispatch(
-                    new SubAccountDeactivatedEvent
-                    {
-                        FirmId = firm,
-                        Id = sub.Value,
-                        ActorUserId = actor,
-                    },
-                    () => registry.ApplyDeactivated(firm, sub.Value));
-                audit.Log(new AuditLogEvent
+                // Pass-1 review (#322) P1.2. Audit-first ordering —
+                // see create handler above.
+                audit.LogOrFail(new AuditLogEvent
                 {
                     EventType = AuditEventTypes.AdminSubAccountDeactivate,
                     Outcome = AuditOutcomes.Success,
@@ -135,6 +135,14 @@ public static class SubAccountsEndpoints
                         ["sub_account_id"] = sub.Value,
                     },
                 });
+                dispatcher.Dispatch(
+                    new SubAccountDeactivatedEvent
+                    {
+                        FirmId = firm,
+                        Id = sub.Value,
+                        ActorUserId = actor,
+                    },
+                    () => registry.ApplyDeactivated(firm, sub.Value));
                 return Results.NoContent();
             }
             catch (WalBackpressureException ex)

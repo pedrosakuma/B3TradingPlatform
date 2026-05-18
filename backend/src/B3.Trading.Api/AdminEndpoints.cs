@@ -98,20 +98,22 @@ public static class AdminEndpoints
                 var actor = ctx.User.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
                 try
                 {
-                    var result = svc.MarkStale(firmId, clOrdIdU, reason, DateTimeOffset.UtcNow, actor);
-                    var outcome = result switch
-                    {
-                        MarkStaleResult.Marked or MarkStaleResult.AlreadyStale => AuditOutcomes.Success,
-                        MarkStaleResult.NotEligible => AuditOutcomes.Denied,
-                        _ => AuditOutcomes.Failure,
-                    };
-                    EmitAdminConfigChange(audit, ctx, "/admin/orders/mark-stale", outcome, new()
+                    // Pass-1 review (#322) P1.2. Audit-first ordering —
+                    // emit the operator's stale-mark intent before the
+                    // service call so a WAL-backpressured audit append
+                    // refuses the mutation with 503 rather than letting
+                    // the OrderStalenessService dispatch its own WAL
+                    // event un-audited. The actual mark result
+                    // (Marked/AlreadyStale/NotEligible/NotFound) is
+                    // communicated by the HTTP response below; the
+                    // audit envelope records the attempt.
+                    EmitAdminConfigChange(audit, ctx, "/admin/orders/mark-stale", AuditOutcomes.Success, new()
                     {
                         ["firm"] = firmId,
                         ["cl_ord_id"] = clOrdId,
-                        ["result"] = result.ToString(),
                         ["reason"] = reason,
-                    });
+                    }, failClosed: true);
+                    var result = svc.MarkStale(firmId, clOrdIdU, reason, DateTimeOffset.UtcNow, actor);
                     return result switch
                     {
                         MarkStaleResult.Marked => Results.NoContent(),
@@ -140,18 +142,14 @@ public static class AdminEndpoints
                 var actor = ctx.User.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
                 try
                 {
-                    var result = svc.ClearStale(firmId, clOrdIdU, actor);
-                    var outcome = result switch
-                    {
-                        ClearStaleResult.Cleared or ClearStaleResult.NotStale => AuditOutcomes.Success,
-                        _ => AuditOutcomes.Failure,
-                    };
-                    EmitAdminConfigChange(audit, ctx, "/admin/orders/clear-stale", outcome, new()
+                    // Pass-1 review (#322) P1.2. Audit-first ordering —
+                    // see mark-stale above.
+                    EmitAdminConfigChange(audit, ctx, "/admin/orders/clear-stale", AuditOutcomes.Success, new()
                     {
                         ["firm"] = firmId,
                         ["cl_ord_id"] = clOrdId,
-                        ["result"] = result.ToString(),
-                    });
+                    }, failClosed: true);
+                    var result = svc.ClearStale(firmId, clOrdIdU, actor);
                     return result switch
                     {
                         ClearStaleResult.Cleared => Results.NoContent(),
@@ -177,17 +175,36 @@ public static class AdminEndpoints
             // is a no-op (and arguably misleading) when persistence is
             // disabled. Surface that as 409 rather than silently producing
             // an empty report.
-            if (!eod.IsAvailable)
+            try
             {
-                EmitAdminConfigChange(audit, ctx, "/admin/eod", AuditOutcomes.Denied, new()
+                if (!eod.IsAvailable)
                 {
-                    ["reason"] = "persistence_disabled",
-                });
-                return Results.Conflict(new { error = "persistence_disabled" });
+                    // Pass-1 review (#322) P1.2. Up-front denial: audit
+                    // the denied outcome with the precise reason and
+                    // surface 409 — no business work to perform, so the
+                    // single audit record carries the full picture.
+                    EmitAdminConfigChange(audit, ctx, "/admin/eod", AuditOutcomes.Denied, new()
+                    {
+                        ["reason"] = "persistence_disabled",
+                    }, failClosed: true);
+                    return Results.Conflict(new { error = "persistence_disabled" });
+                }
+                // Audit-first ordering — record the operator's EOD
+                // trigger before the (potentially expensive)
+                // materialisation runs so a WAL-backpressured audit
+                // append refuses the run with 503.
+                EmitAdminConfigChange(audit, ctx, "/admin/eod", AuditOutcomes.Success, failClosed: true);
+                var report = eod.Materialise(DateOnly.FromDateTime(DateTime.UtcNow));
+                return Results.Ok(report);
             }
-            var report = eod.Materialise(DateOnly.FromDateTime(DateTime.UtcNow));
-            EmitAdminConfigChange(audit, ctx, "/admin/eod", AuditOutcomes.Success);
-            return Results.Ok(report);
+            catch (WalBackpressureException ex)
+            {
+                MetricsRegistry.WalBackpressure.Add(1,
+                    new KeyValuePair<string, object?>("call_site", "admin.eod"));
+                return Results.Json(
+                    new { error = "system busy (WAL backpressure)", detail = ex.Message },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
         });
 
         // Per-firm operator visibility. In Real mode the response folds in
@@ -248,13 +265,30 @@ public static class AdminEndpoints
         // immediately re-query /admin/risk/limits to verify.
         group.MapPost("/risk/reload", (IServiceProvider sp, HttpContext ctx, IAuditLogger audit) =>
         {
-            var reloader = sp.GetService<IRiskOptionsReloader>();
-            reloader?.Reload();
-            EmitAdminConfigChange(audit, ctx, "/admin/risk/reload", AuditOutcomes.Success, new()
+            try
             {
-                ["reloader_present"] = reloader is null ? "false" : "true",
-            });
-            return Results.NoContent();
+                // Pass-1 review (#322) P1.2. Audit-first ordering for
+                // a risk-config reload: a backpressured audit append
+                // refuses the reload with 503 rather than reloading
+                // silently un-audited (this endpoint can flip
+                // resolver behaviour platform-wide once a custom
+                // provider is wired).
+                EmitAdminConfigChange(audit, ctx, "/admin/risk/reload", AuditOutcomes.Success, new()
+                {
+                    ["reloader_present"] = sp.GetService<IRiskOptionsReloader>() is null ? "false" : "true",
+                }, failClosed: true);
+                var reloader = sp.GetService<IRiskOptionsReloader>();
+                reloader?.Reload();
+                return Results.NoContent();
+            }
+            catch (WalBackpressureException ex)
+            {
+                MetricsRegistry.WalBackpressure.Add(1,
+                    new KeyValuePair<string, object?>("call_site", "admin.risk.reload"));
+                return Results.Json(
+                    new { error = "system busy (WAL backpressure)", detail = ex.Message },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
         });
 
         // GET /admin/marketdata/reference-prices?symbols=ITUB4,VALE3
@@ -401,6 +435,25 @@ public static class AdminEndpoints
 
         try
         {
+            // Pass-1 review (#322) P1.2. Audit-first ordering — emit
+            // the operator's cash-ledger intent BEFORE the dispatch
+            // so a WAL-backpressured audit append refuses the
+            // (cash-affecting) mutation with 503 rather than
+            // committing it un-audited. For withdrawals the dispatch
+            // below uses DispatchWithPreApply (atomic under the
+            // snapshot lock) and may still be denied at runtime
+            // (insufficient_funds); that downstream denial is
+            // surfaced by the HTTP response and the cash counter —
+            // the audit envelope records the attempt.
+            EmitAdminConfigChange(audit, ctx, "/admin/cash", AuditOutcomes.Success, new()
+            {
+                ["endclient"] = req.Endclient!,
+                ["kind"] = kind,
+                ["amount"] = req.Amount.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["currency"] = currency,
+                ["reference"] = req.Reference ?? "",
+            }, failClosed: true);
+
             // Q2.2 (#269) P1 fix: debit + WAL append must be atomic with
             // respect to the snapshot lock. The previous flow ran
             // TryWithdraw OUTSIDE the dispatcher lock; a snapshot could
@@ -427,14 +480,6 @@ public static class AdminEndpoints
 
                 if (!outcome.Applied)
                 {
-                    EmitAdminConfigChange(audit, ctx, "/admin/cash", AuditOutcomes.Denied, new()
-                    {
-                        ["endclient"] = req.Endclient!,
-                        ["kind"] = kind,
-                        ["amount"] = req.Amount.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                        ["currency"] = currency,
-                        ["reason"] = "insufficient_funds",
-                    }, reasonCode: "insufficient_funds");
                     return Results.UnprocessableEntity(new
                     {
                         error = "insufficient_funds",
@@ -458,14 +503,6 @@ public static class AdminEndpoints
                     () => keeper.ApplyDeposit(owner, req.Amount));
             }
 
-            EmitAdminConfigChange(audit, ctx, "/admin/cash", AuditOutcomes.Success, new()
-            {
-                ["endclient"] = req.Endclient!,
-                ["kind"] = kind,
-                ["amount"] = req.Amount.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                ["currency"] = currency,
-                ["reference"] = req.Reference ?? "",
-            });
             return Results.Ok(new
             {
                 endclient = req.Endclient,
@@ -495,8 +532,22 @@ public static class AdminEndpoints
         Action mutate)
     {
         var actor = ctx.User.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+        // Pass-1 review (#322) P1.2. Audit-first: emit the audit
+        // envelope BEFORE the business dispatch so a WAL-backpressured
+        // audit append refuses the mutation with 503 rather than
+        // silently committing the kill-switch toggle un-audited. The
+        // catch below converts the audit-site backpressure into a
+        // structured 503; the inner dispatch's own backpressure is
+        // converted by the same handler (the audit record then
+        // documents the operator's attempt regardless).
         try
         {
+            EmitAdminConfigChange(audit, ctx, "/admin/kill", AuditOutcomes.Success, new()
+            {
+                ["scope"] = scope,
+                ["target"] = target,
+                ["killed"] = killed ? "true" : "false",
+            }, failClosed: true);
             dispatcher.Dispatch(
                 new KillSwitchToggledEvent
                 {
@@ -509,12 +560,6 @@ public static class AdminEndpoints
             MetricsRegistry.KillSwitchToggled.Add(1,
                 new KeyValuePair<string, object?>("scope", scope),
                 new KeyValuePair<string, object?>("killed", killed));
-            EmitAdminConfigChange(audit, ctx, "/admin/kill", AuditOutcomes.Success, new()
-            {
-                ["scope"] = scope,
-                ["target"] = target,
-                ["killed"] = killed ? "true" : "false",
-            });
             return Results.NoContent();
         }
         catch (WalBackpressureException ex)
@@ -538,6 +583,13 @@ public static class AdminEndpoints
         var actor = ctx.User.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
         try
         {
+            // Pass-1 review (#322) P1.2. Audit-first ordering — see
+            // ToggleKill for the rationale.
+            EmitAdminConfigChange(audit, ctx, "/admin/halts", AuditOutcomes.Success, new()
+            {
+                ["symbol"] = symbol,
+                ["halted"] = halted ? "true" : "false",
+            }, failClosed: true);
             dispatcher.Dispatch(
                 new SymbolHaltToggledEvent
                 {
@@ -548,11 +600,6 @@ public static class AdminEndpoints
                 mutate);
             MetricsRegistry.SymbolHaltToggled.Add(1,
                 new KeyValuePair<string, object?>("halted", halted));
-            EmitAdminConfigChange(audit, ctx, "/admin/halts", AuditOutcomes.Success, new()
-            {
-                ["symbol"] = symbol,
-                ["halted"] = halted ? "true" : "false",
-            });
             return Results.NoContent();
         }
         catch (WalBackpressureException ex)
@@ -584,6 +631,17 @@ public static class AdminEndpoints
         var actor = ctx.User.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
         try
         {
+            // Pass-1 review (#322) P1.2. Audit-first — emit the
+            // operator's intent before the business dispatch so a
+            // WAL-backpressured audit append refuses the phase change
+            // with 503 rather than silently committing it un-audited.
+            EmitAdminConfigChange(audit, ctx, "/admin/session-phase", AuditOutcomes.Success, new()
+            {
+                ["scope"] = string.IsNullOrWhiteSpace(symbol) ? "default" : "symbol",
+                ["symbol"] = symbol ?? "",
+                ["cleared"] = cleared ? "true" : "false",
+                ["phase"] = cleared ? "cleared" : parsed.ToString(),
+            }, failClosed: true);
             dispatcher.Dispatch(
                 new SessionPhaseChangedEvent
                 {
@@ -596,13 +654,6 @@ public static class AdminEndpoints
             MetricsRegistry.SessionPhaseChanged.Add(1,
                 new KeyValuePair<string, object?>("scope", string.IsNullOrWhiteSpace(symbol) ? "default" : "symbol"),
                 new KeyValuePair<string, object?>("phase", cleared ? "cleared" : parsed.ToString()));
-            EmitAdminConfigChange(audit, ctx, "/admin/session-phase", AuditOutcomes.Success, new()
-            {
-                ["scope"] = string.IsNullOrWhiteSpace(symbol) ? "default" : "symbol",
-                ["symbol"] = symbol ?? "",
-                ["cleared"] = cleared ? "true" : "false",
-                ["phase"] = cleared ? "cleared" : parsed.ToString(),
-            });
             return Results.NoContent();
         }
         catch (WalBackpressureException ex)
@@ -622,6 +673,17 @@ public static class AdminEndpoints
     /// place. The caller is responsible for the
     /// <paramref name="details"/> map's call-site-specific keys
     /// (target id, before/after value, etc.).
+    ///
+    /// <para>Pass-1 review (#322) P1.2. When
+    /// <paramref name="failClosed"/> is <c>true</c> the call routes
+    /// through <see cref="IAuditLogger.LogOrFail"/> so a
+    /// WAL-backpressured audit append propagates a
+    /// <see cref="WalBackpressureException"/> the endpoint can
+    /// convert to HTTP 503; callers MUST emit BEFORE the business
+    /// dispatch when using this mode (audit-first ordering). The
+    /// default best-effort mode is retained for tail-audit emits on
+    /// paths where the operator decision has already been
+    /// communicated (e.g. denial branches).</para>
     /// </summary>
     internal static void EmitAdminConfigChange(
         IAuditLogger audit,
@@ -630,9 +692,10 @@ public static class AdminEndpoints
         string outcome,
         Dictionary<string, string>? details = null,
         string eventType = AuditEventTypes.AdminConfigChange,
-        string? reasonCode = null)
+        string? reasonCode = null,
+        bool failClosed = false)
     {
-        audit.Log(new AuditLogEvent
+        var evt = new AuditLogEvent
         {
             EventType = eventType,
             Outcome = outcome,
@@ -644,7 +707,11 @@ public static class AdminEndpoints
             ResourcePath = resourcePath,
             ReasonCode = reasonCode,
             Details = details,
-        });
+        };
+        if (failClosed)
+            audit.LogOrFail(evt);
+        else
+            audit.Log(evt);
     }
 }
 
