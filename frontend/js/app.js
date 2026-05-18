@@ -21,6 +21,7 @@ import * as historyUi from "./historyUi.js";
 import * as complianceUi from "./complianceUi.js";
 import { tabsForRole, defaultViewForRole } from "./complianceUi.js";
 import { FLAGS } from "./mdProtocol.js";
+import { renderQrInto, clearQr } from "./qrRender.js";
 import { applyRiskPolicyFetch } from "./riskPolicy.js";
 
 const SESSION_KEY = "b3tp.session";
@@ -300,6 +301,8 @@ function closeSecurityPanel() {
   if (ack) ack.checked = false;
   const confirm = document.getElementById("security-confirm");
   if (confirm) confirm.disabled = true;
+  // #320: drop the rendered QR too — it encodes the otpauth secret.
+  clearQr(document.getElementById("security-qr"));
   pendingEnrollSecret = null;
 }
 
@@ -321,6 +324,8 @@ async function onSecurityEnrollBegin() {
     document.getElementById("security-otpauth-uri").value = resp.otpauthUri;
     document.getElementById("security-secret").value = resp.secret;
     document.getElementById("security-recovery-codes").textContent = resp.recoveryCodes.join("\n");
+    // #320: render the otpauth URI as a scannable QR.
+    renderQrInto(document.getElementById("security-qr"), resp.otpauthUri);
     document.getElementById("security-enroll-start").hidden = true;
     document.getElementById("security-enroll-show").hidden = false;
     document.getElementById("security-recovery-ack").checked = false;
@@ -339,6 +344,8 @@ async function onSecurityEnrollConfirm() {
     await verifyTotp(session.backend, { code, token: session.token });
     document.getElementById("security-status").textContent = "2FA enrollment confirmed. Recovery codes are no longer recoverable — keep your saved copy.";
     document.getElementById("security-enroll-show").hidden = true;
+    // #320: secret was committed — drop the QR (encodes the seed).
+    clearQr(document.getElementById("security-qr"));
     pendingEnrollSecret = null;
   } catch (err) {
     setSecurityError(err.message || "Verification failed");

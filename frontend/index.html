@@ -799,8 +799,13 @@
         </div>
 
         <div id="security-enroll-show" hidden>
-          <p>Scan this URI in your authenticator app (Google Authenticator,
-             1Password, Authy…) or paste the secret manually:</p>
+          <p>Scan the QR code below with your authenticator app
+             (Google Authenticator, 1Password, Authy…), or paste the
+             URI / secret manually if you prefer:</p>
+          <!-- #320: client-side QR rendering. Populated by app.js
+               via qrRender.renderQrInto(). Inline SVG so it stays
+               under default-src 'self' without needing img-src data:. -->
+          <div id="security-qr" class="qr-badge" hidden aria-label="TOTP enrollment QR code"></div>
           <label>
             <span>otpauth URI</span>
             <input id="security-otpauth-uri" type="text" readonly />
