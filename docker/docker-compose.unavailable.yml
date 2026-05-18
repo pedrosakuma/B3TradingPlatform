@@ -54,6 +54,14 @@ services:
       # before any gateway routing.
       Trading__Auth__Users__0__Firm: default
       Trading__Auth__Users__5__Firm: default
+      # PR #316 P2: when the user firm reverts to "default" the position
+      # seeds must follow, otherwise the FIRM01-tagged seeds from the
+      # base compose file are invisible to the now-default users and
+      # the naked-short gate blocks every Sell.
+      Trading__Positions__Seeds__0__Firm: default
+      Trading__Positions__Seeds__1__Firm: default
+      Trading__Positions__Seeds__2__Firm: default
+      Trading__Positions__Seeds__3__Firm: default
       # Live ref-prices are unreachable without marketdata; kill the
       # subscriber so it doesn't churn reconnect attempts in logs.
       # Static fallback Trading:Risk:ReferencePrices map (still set by

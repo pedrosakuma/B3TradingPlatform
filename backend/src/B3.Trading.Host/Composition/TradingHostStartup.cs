@@ -133,6 +133,37 @@ internal static class TradingHostStartup
         {
             var keeper = scope.ServiceProvider.GetRequiredService<PositionKeeper>();
             var seedLogger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("PositionSeeder");
+
+            // PR #316 P2: real-mode users are namespaced under FIRM01 /
+            // FIRM02 etc., but legacy PositionSeed entries land in
+            // PositionKeeper.DefaultFirmId (a sentinel no real user is
+            // ever authenticated under). When the operator has wired
+            // more than one firm AND any seed still lacks an explicit
+            // Firm value, log a loud one-shot warning so the silent
+            // "naked-short rejects on first Sell" symptom does not
+            // recur. The warning is informational; the seed is still
+            // applied to whatever firm the seed itself names (explicit
+            // > default).
+            var authOpts = scope.ServiceProvider.GetRequiredService<IOptions<B3.Trading.Api.Auth.AuthOptions>>().Value;
+            var configuredFirms = authOpts.Users
+                .Select(u => string.IsNullOrWhiteSpace(u.Firm) ? "default" : u.Firm)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            var unfirmedSeed = seedOpts.Seeds.Any(s => string.IsNullOrWhiteSpace(s.Firm));
+            if (unfirmedSeed && configuredFirms.Length > 1)
+            {
+                seedLogger.LogWarning(
+                    "PositionSeeder: {Count} seed(s) without an explicit Firm will land in "
+                    + "PositionKeeper.DefaultFirmId, but {FirmCount} firms are configured under "
+                    + "Trading:Auth:Users ([{Firms}]). Real-mode users authenticated under a firm "
+                    + "will NOT see those positions — set Trading:Positions:Seeds[N]:Firm to the "
+                    + "user's firm (typically FIRM01) so the naked-short gate does not block their "
+                    + "first Sell.",
+                    seedOpts.Seeds.Count(s => string.IsNullOrWhiteSpace(s.Firm)),
+                    configuredFirms.Length,
+                    string.Join(", ", configuredFirms));
+            }
+
             var applied = 0;
             var skipped = 0;
             foreach (var seed in seedOpts.Seeds)
@@ -144,19 +175,20 @@ internal static class TradingHostStartup
                     continue;
                 }
                 var owner = new EndClientId(seed.EndClientId);
-                if (keeper.SeedIfAbsent(owner, seed.Symbol, seed.Quantity, seed.AverageEntryPrice))
+                var firm = string.IsNullOrWhiteSpace(seed.Firm) ? PositionKeeper.DefaultFirmId : seed.Firm;
+                if (keeper.SeedIfAbsent(firm, owner, seed.Symbol, seed.Quantity, seed.AverageEntryPrice))
                 {
                     applied++;
                     seedLogger.LogInformation(
-                        "Seeded opening position {Owner}/{Symbol} = {Qty} @ {AvgPx}.",
-                        seed.EndClientId, seed.Symbol, seed.Quantity, seed.AverageEntryPrice);
+                        "Seeded opening position {Firm}/{Owner}/{Symbol} = {Qty} @ {AvgPx}.",
+                        firm, seed.EndClientId, seed.Symbol, seed.Quantity, seed.AverageEntryPrice);
                 }
                 else
                 {
                     skipped++;
                     seedLogger.LogInformation(
-                        "Skipped seed for {Owner}/{Symbol}: position already present from recovery.",
-                        seed.EndClientId, seed.Symbol);
+                        "Skipped seed for {Firm}/{Owner}/{Symbol}: position already present from recovery.",
+                        firm, seed.EndClientId, seed.Symbol);
                 }
             }
             seedLogger.LogInformation("PositionSeeder finished: {Applied} applied, {Skipped} skipped.", applied, skipped);

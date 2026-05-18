@@ -23,7 +23,7 @@ public class StatementProjectionTests
     {
         var wal = Array.Empty<(long Seq, WalEvent Event)>();
 
-        var dto = StatementProjection.Build(Alice, Day, wal, livePositionsSnapshot: null);
+        var dto = StatementProjection.Build(Alice, Day, "TEST", wal, livePositionsSnapshot: null);
 
         Assert.Equal("2024-06-17", dto.DayKey);
         Assert.Empty(dto.Positions);
@@ -61,7 +61,7 @@ public class StatementProjectionTests
             (7, Realized(2UL, Alice, "PETR4", 100m, at: DayStart.AddHours(11))),
         };
 
-        var dto = StatementProjection.Build(Alice, Day, wal, livePositionsSnapshot: null);
+        var dto = StatementProjection.Build(Alice, Day, "TEST", wal, livePositionsSnapshot: null);
 
         Assert.Equal(2, dto.Fills.Count);
         Assert.Contains(dto.Fills, f => f.Side == "Buy" && f.Quantity == 100);
@@ -99,7 +99,7 @@ public class StatementProjectionTests
             (4, Er(2UL, ExecKind.Fill, leaves: 0, cum: 100, last: 100, price: 32m, at: DayStart.AddHours(11))),
         };
 
-        var dto = StatementProjection.Build(Alice, Day, wal, livePositionsSnapshot: null);
+        var dto = StatementProjection.Build(Alice, Day, "TEST", wal, livePositionsSnapshot: null);
 
         var ir = Assert.Single(dto.IrDayTrade.PerSymbol);
         Assert.Equal("PETR4", ir.Symbol);
@@ -123,7 +123,7 @@ public class StatementProjectionTests
             (2, Er(1UL, ExecKind.Fill, leaves: 0, cum: 100, last: 100, price: 30m, at: DayStart.AddHours(10))),
         };
 
-        var dto = StatementProjection.Build(Alice, Day, wal, livePositionsSnapshot: null);
+        var dto = StatementProjection.Build(Alice, Day, "TEST", wal, livePositionsSnapshot: null);
 
         Assert.Empty(dto.IrDayTrade.PerSymbol);
         Assert.Equal(0m, dto.IrDayTrade.TotalTax);
@@ -145,7 +145,7 @@ public class StatementProjectionTests
             (4, Er(2UL, ExecKind.Fill, leaves: 0, cum: 100, last: 100, price: 28m, at: DayStart.AddHours(11))),
         };
 
-        var dto = StatementProjection.Build(Alice, Day, wal, livePositionsSnapshot: null);
+        var dto = StatementProjection.Build(Alice, Day, "TEST", wal, livePositionsSnapshot: null);
 
         var ir = Assert.Single(dto.IrDayTrade.PerSymbol);
         Assert.Equal(-200m, ir.GrossProfit);
@@ -168,7 +168,7 @@ public class StatementProjectionTests
             (4, Er(2UL, ExecKind.Fill, leaves: 0, cum: 60, last: 60, price: 31m, at: DayStart.AddHours(11))),
         };
 
-        var dto = StatementProjection.Build(Alice, Day, wal, livePositionsSnapshot: null);
+        var dto = StatementProjection.Build(Alice, Day, "TEST", wal, livePositionsSnapshot: null);
 
         var ir = Assert.Single(dto.IrDayTrade.PerSymbol);
         Assert.Equal(60, ir.QtyMatched);
@@ -197,7 +197,7 @@ public class StatementProjectionTests
             (7, Realized(2UL, Bob, "PETR4", 999m, at: DayStart.AddHours(11))),
         };
 
-        var aliceDto = StatementProjection.Build(Alice, Day, wal, livePositionsSnapshot: null);
+        var aliceDto = StatementProjection.Build(Alice, Day, "TEST", wal, livePositionsSnapshot: null);
         Assert.Single(aliceDto.Fills);
         Assert.Equal(100, aliceDto.Fills[0].Quantity);
         Assert.Equal(1m, aliceDto.FeesTotal);
@@ -205,7 +205,7 @@ public class StatementProjectionTests
         var pos = Assert.Single(aliceDto.Positions);
         Assert.Equal(100, pos.NetQty);
 
-        var bobDto = StatementProjection.Build(Bob, Day, wal, livePositionsSnapshot: null);
+        var bobDto = StatementProjection.Build(Bob, Day, "TEST", wal, livePositionsSnapshot: null);
         Assert.Single(bobDto.Fills);
         Assert.Equal(50, bobDto.Fills[0].Quantity);
         Assert.Equal(5m, bobDto.FeesTotal);
@@ -229,7 +229,7 @@ public class StatementProjectionTests
             (6, Er(3UL, ExecKind.Fill, 0, 30, 30, 32m, next)),
         };
 
-        var dto = StatementProjection.Build(Alice, Day, wal, livePositionsSnapshot: null);
+        var dto = StatementProjection.Build(Alice, Day, "TEST", wal, livePositionsSnapshot: null);
         var fill = Assert.Single(dto.Fills);
         Assert.Equal(20, fill.Quantity);
         Assert.Equal(31m, fill.Price);
@@ -264,7 +264,7 @@ public class StatementProjectionTests
             (8, Er(4UL, ExecKind.Fill, 0, 100, 100, 31m, DayStart.AddHours(13))),
         };
 
-        var dto = StatementProjection.Build(Alice, Day, wal, livePositionsSnapshot: null);
+        var dto = StatementProjection.Build(Alice, Day, "TEST", wal, livePositionsSnapshot: null);
 
         var ir = Assert.Single(dto.IrDayTrade.PerSymbol);
         Assert.Equal("PETR4", ir.Symbol);
@@ -295,7 +295,7 @@ public class StatementProjectionTests
             (8, Er(4UL, ExecKind.Fill, 0, 100, 100, 25m, DayStart.AddHours(13))),
         };
 
-        var dto = StatementProjection.Build(Alice, Day, wal, livePositionsSnapshot: null);
+        var dto = StatementProjection.Build(Alice, Day, "TEST", wal, livePositionsSnapshot: null);
 
         var ir = Assert.Single(dto.IrDayTrade.PerSymbol);
         Assert.Equal(-800m, ir.GrossProfit);
@@ -367,6 +367,79 @@ public class StatementProjectionTests
             ClOrdId = clOrdId,
             ExecutionId = $"{clOrdId}:r",
             EndClientId = owner.Value,
+            Symbol = symbol,
+            DayKey = DateOnly.FromDateTime(at.UtcDateTime),
+            DeltaRealized = delta,
+            RunningTotal = delta,
+            TimestampUtc = at,
+        };
+
+    [Fact]
+    public void ScopeIsolation_ProjectionFiltersOutOtherFirms_SameOwner()
+    {
+        // PR #316 P2.1. Same JWT sub trades in FIRM01 and FIRM02 on
+        // day D. A statement requested as FIRM01 must include only the
+        // FIRM01 fills, fees, realized PnL and projected positions —
+        // no leakage from the FIRM02 slice of the same owner login.
+        var wal = new List<(long Seq, WalEvent Event)>
+        {
+            // FIRM01 leg: buy 100 PETR4 @ 30.
+            (1, SubmitWithFirm(1UL, Alice, "FIRM01", "PETR4", OrderSide.Buy, 100, 30m)),
+            (2, Er(1UL, ExecKind.Fill, leaves: 0, cum: 100, last: 100, price: 30m, at: DayStart.AddHours(10))),
+            (3, Fee(1UL, Alice, "PETR4", OrderSide.Buy, 100, 30m,
+                brokerage: 1m, emolumentos: 0, liquidacao: 0, at: DayStart.AddHours(10))),
+            (4, RealizedWithFirm(1UL, Alice, "FIRM01", "PETR4", 111m, at: DayStart.AddHours(10))),
+
+            // FIRM02 leg: same owner, different firm — must not leak.
+            (5, SubmitWithFirm(2UL, Alice, "FIRM02", "VALE3", OrderSide.Buy, 50, 60m)),
+            (6, Er(2UL, ExecKind.Fill, leaves: 0, cum: 50, last: 50, price: 60m, at: DayStart.AddHours(11))),
+            (7, Fee(2UL, Alice, "VALE3", OrderSide.Buy, 50, 60m,
+                brokerage: 9m, emolumentos: 0, liquidacao: 0, at: DayStart.AddHours(11))),
+            (8, RealizedWithFirm(2UL, Alice, "FIRM02", "VALE3", 999m, at: DayStart.AddHours(11))),
+        };
+
+        var firm01 = StatementProjection.Build(Alice, Day, "FIRM01", wal, livePositionsSnapshot: null);
+        var fill01 = Assert.Single(firm01.Fills);
+        Assert.Equal("PETR4", fill01.Symbol);
+        Assert.Equal(100, fill01.Quantity);
+        Assert.Equal(1m, firm01.FeesTotal);
+        Assert.Equal(111m, firm01.Pnl.RealizedGross);
+        var pos01 = Assert.Single(firm01.Positions);
+        Assert.Equal("PETR4", pos01.Symbol);
+        Assert.Equal(100, pos01.NetQty);
+
+        // Sanity: the FIRM02 view sees only its own slice.
+        var firm02 = StatementProjection.Build(Alice, Day, "FIRM02", wal, livePositionsSnapshot: null);
+        var fill02 = Assert.Single(firm02.Fills);
+        Assert.Equal("VALE3", fill02.Symbol);
+        Assert.Equal(9m, firm02.FeesTotal);
+        Assert.Equal(999m, firm02.Pnl.RealizedGross);
+    }
+
+    private static OrderSubmittedEvent SubmitWithFirm(
+        ulong clOrdId, EndClientId owner, string firmId, string symbol, OrderSide side, long qty, decimal price) =>
+        new()
+        {
+            ClOrdId = clOrdId,
+            EndClientId = owner.Value,
+            FirmId = firmId,
+            Symbol = symbol,
+            SecurityId = 4321UL,
+            Side = side.ToString(),
+            Type = "Limit",
+            Quantity = qty,
+            Price = price,
+            TimestampUtc = DayStart.AddHours(9),
+        };
+
+    private static RealizedPnlEvent RealizedWithFirm(
+        ulong clOrdId, EndClientId owner, string firmId, string symbol, decimal delta, DateTimeOffset at) =>
+        new()
+        {
+            ClOrdId = clOrdId,
+            ExecutionId = $"{clOrdId}:r",
+            EndClientId = owner.Value,
+            FirmId = firmId,
             Symbol = symbol,
             DayKey = DateOnly.FromDateTime(at.UtcDateTime),
             DeltaRealized = delta,

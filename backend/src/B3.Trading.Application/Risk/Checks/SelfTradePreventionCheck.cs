@@ -90,7 +90,13 @@ public sealed class SelfTradePreventionCheck : IRiskCheck
         if (allow == true) return RiskDecision.Approve;
 
         var oppositeSide = ctx.Side == OrderSide.Buy ? OrderSide.Sell : OrderSide.Buy;
-        foreach (var existing in _orders.ForEndClient(ctx.Owner))
+        // PR #316 P2: scope the contra-order scan to the caller's firm
+        // so an opposite-side working order in FIRM02 cannot reject a
+        // FIRM01 order from the same JWT sub. Self-trading is a venue-
+        // session concern (the matching engine groups orders by firm
+        // session, not by end-client), so cross-firm pairs of the same
+        // owner can never wash-trade through this platform.
+        foreach (var existing in _orders.ForEndClientAndFirm(ctx.FirmId, ctx.Owner))
         {
             if (existing.Side != oppositeSide) continue;
             if (!string.Equals(existing.Symbol, ctx.Symbol, StringComparison.Ordinal)) continue;

@@ -31,6 +31,17 @@ public sealed class PositionSeed
     public string Symbol { get; set; } = string.Empty;
 
     /// <summary>
+    /// PR #316 P2. Optional firm bucket. When unset (legacy config) the
+    /// seed lands in <see cref="PositionKeeper.DefaultFirmId"/>, which
+    /// is invisible to real-mode users authenticated under FIRM01 / FIRM02
+    /// — every multi-firm deployment must populate this explicitly. The
+    /// startup seeder logs a one-shot warning if any seed lacks
+    /// <see cref="Firm"/> while more than one firm is configured under
+    /// <c>Trading:Auth:Users</c>.
+    /// </summary>
+    public string? Firm { get; set; }
+
+    /// <summary>
     /// Net quantity. Positive = long (the only useful seed today, since
     /// the naked-short gate cares about the long side); negative values
     /// are accepted by <see cref="PositionKeeper"/> but no current risk

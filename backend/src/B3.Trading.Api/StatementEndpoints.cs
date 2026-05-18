@@ -134,7 +134,7 @@ public static class StatementEndpoints
             wal.Add(entry);
         }
 
-        return StatementProjection.Build(owner, day, wal, livePositionsSnapshot);
+        return StatementProjection.Build(owner, day, firmId, wal, livePositionsSnapshot);
     }
 
     private static void EmitDayTradeMetric(DailyStatementDto dto)
