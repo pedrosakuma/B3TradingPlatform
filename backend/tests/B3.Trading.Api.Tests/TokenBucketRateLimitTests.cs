@@ -124,6 +124,50 @@ public class TokenBucketRateLimitTests
         Assert.Equal(0, limiter.BucketCount);
     }
 
+    [Fact]
+    public void TryAcquire_RaceWithSweep_DoesNotAdmitDoubleBurst()
+    {
+        // Reproduces the bug fixed in P2.2 on PR #321: the sweeper
+        // could evict a bucket between a request's GetOrAdd and its
+        // lock-and-acquire; a concurrent request would then create a
+        // fresh full bucket. Without the Evicted-flag retry both
+        // requests grant tokens — up to 2× the configured burst.
+        var clock = new DateTime(2025, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var limiter = new TokenBucketRateLimiter(() => clock, startSweeper: false);
+
+        const int burst = 5;
+        const double refill = 5;
+
+        // Prime bucket B1.
+        Assert.True(limiter.TryAcquire("u", "/orders", burst, refill, out _));
+
+        // On the NEXT TryAcquire, after GetOrAdd returns the existing
+        // bucket but before the lock is taken, simulate the race:
+        // advance the clock past IdleTtl, sweep (which sets Evicted
+        // and removes B1), and then drain a brand-new replacement
+        // bucket B2 from inside the hook. When the outer call finally
+        // takes B1's lock, the fix must observe Evicted=true, retry
+        // GetOrAdd → B2 (now empty), and DENY.
+        var fired = 0;
+        limiter.OnBucketAcquiredForTest = () =>
+        {
+            if (Interlocked.Increment(ref fired) != 1) return;
+            clock = clock.AddHours(2);
+            limiter.SweepIdleBucketsForTest();
+            for (var i = 0; i < burst; i++)
+                Assert.True(limiter.TryAcquire("u", "/orders", burst, refill, out _));
+        };
+
+        var granted = limiter.TryAcquire("u", "/orders", burst, refill, out _);
+        Assert.False(granted);
+
+        // Sanity: total tokens consumed = 1 (prime) + 5 (nested) = 6;
+        // the outer attempt that lost the race against the sweep must
+        // not push that over 6 (i.e. burst+1 across two generations).
+        var nextOk = limiter.TryAcquire("u", "/orders", burst, refill, out _);
+        Assert.False(nextOk);
+    }
+
     // ---- HTTP integration tests via WebApplicationFactory. ----
 
     [Fact]
@@ -213,12 +257,13 @@ public class TokenBucketRateLimitTests
     }
 
     [Fact]
-    public async Task Rejection_IncrementsMetric_WithPathAndUserTags()
+    public async Task Rejection_IncrementsMetric_WithPathAndPrincipalKindTags()
     {
         await using var factory = TestAppFactory.WithOverrides(EnableLimiterDeterministic());
 
         var observedPath = (string?)null;
-        var observedUser = (string?)null;
+        var observedPrincipalKind = (string?)null;
+        var userTagSeen = false;
         var total = 0L;
         using var listener = new MeterListener();
         listener.InstrumentPublished = (instr, l) =>
@@ -234,7 +279,11 @@ public class TokenBucketRateLimitTests
             foreach (var tag in tags)
             {
                 if (tag.Key == "path" && tag.Value is string p) observedPath = p;
-                if (tag.Key == "user" && tag.Value is string u) observedUser = u;
+                if (tag.Key == "principal_kind" && tag.Value is string k) observedPrincipalKind = k;
+                // P2.1 fix on PR #321: `user` must NOT be a metric tag
+                // — under an IP-spray attack the unbounded set of
+                // RemoteIpAddress values would explode cardinality.
+                if (tag.Key == "user") userTagSeen = true;
             }
             Interlocked.Add(ref total, value);
         });
@@ -247,7 +296,10 @@ public class TokenBucketRateLimitTests
 
         Assert.True(total >= 1);
         Assert.Equal("/orders", observedPath);
-        Assert.Equal(TestAppFactory.TestUser, observedUser);
+        Assert.Equal("user", observedPrincipalKind);
+        Assert.False(userTagSeen,
+            "The `user` tag must be dropped to keep the metric cardinality bounded; "
+            + "the throttled identity is logged on the rejection log line instead.");
     }
 
     [Fact]

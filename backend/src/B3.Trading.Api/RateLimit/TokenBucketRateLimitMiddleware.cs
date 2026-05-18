@@ -26,7 +26,11 @@ namespace B3.Trading.Api.RateLimit;
 /// body of <c>{"error":"rate_limited","retryAfterSeconds":N}</c>. The
 /// metric <c>trading.ratelimit.rejected_total</c> increments with low-
 /// cardinality tags <c>path</c> (matched rule pattern, not raw path)
-/// and <c>user</c> (sub-claim or IP).
+/// and <c>principal_kind</c> (one of <c>user</c>, <c>ip</c>,
+/// <c>anonymous</c>). The throttled identity itself (sub-claim or
+/// remote IP) is intentionally NOT a metric tag — under an IP-spray
+/// attack that would explode the time series cardinality — but it IS
+/// emitted on the rejection log line for forensics.
 /// </para>
 /// </remarks>
 public sealed class TokenBucketRateLimitMiddleware
@@ -76,7 +80,7 @@ public sealed class TokenBucketRateLimitMiddleware
             return;
         }
 
-        var userKey = ResolveUserKey(context);
+        var (userKey, principalKind) = ResolveUserKey(context);
         var endpointKey = rule.PathPattern;
 
         if (_limiter.TryAcquire(userKey, endpointKey, rule.Burst, rule.RefillPerSecond, out var retryAfterSeconds))
@@ -87,13 +91,18 @@ public sealed class TokenBucketRateLimitMiddleware
 
         var retryAfter = Math.Max(1, (int)Math.Ceiling(retryAfterSeconds));
 
+        // Tags are intentionally bounded: `path` is the rule pattern
+        // (a short, operator-defined list) and `principal_kind` is one
+        // of three string constants. The user/IP identity is captured
+        // on the log line below so operators can still attribute a
+        // spike to a specific actor.
         MetricsRegistry.RateLimitRejected.Add(1,
             new KeyValuePair<string, object?>("path", endpointKey),
-            new KeyValuePair<string, object?>("user", userKey));
+            new KeyValuePair<string, object?>("principal_kind", principalKind));
 
-        _logger.LogWarning(
-            "ratelimit.rejected path={Path} user={User} retryAfterSeconds={RetryAfter}",
-            endpointKey, userKey, retryAfter);
+        _logger.LogInformation(
+            "ratelimit.rejected path={Path} principalKind={PrincipalKind} user={User} retryAfterSeconds={RetryAfter}",
+            endpointKey, principalKind, userKey, retryAfter);
 
         context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
         context.Response.Headers.RetryAfter = retryAfter.ToString(CultureInfo.InvariantCulture);
@@ -112,15 +121,18 @@ public sealed class TokenBucketRateLimitMiddleware
         return false;
     }
 
-    private static string ResolveUserKey(HttpContext ctx)
+    private static (string Key, string Kind) ResolveUserKey(HttpContext ctx)
     {
         // Prefer the JWT sub-claim (set as User.Identity.Name via
         // NameClaimType = sub in the bearer configuration). Pre-auth
         // requests fall back to the connection peer IP — see class
-        // remarks for why X-Forwarded-For is not consulted here.
+        // remarks for why X-Forwarded-For is not consulted here. The
+        // returned Kind is a low-cardinality category used as a metric
+        // tag; the Key remains the bucket identity and is logged but
+        // never exported as a tag.
         var name = ctx.User?.Identity?.Name;
-        if (!string.IsNullOrWhiteSpace(name)) return name;
+        if (!string.IsNullOrWhiteSpace(name)) return (name, "user");
         var ip = ctx.Connection.RemoteIpAddress;
-        return ip is null ? "anonymous" : ip.ToString();
+        return ip is null ? ("anonymous", "anonymous") : (ip.ToString(), "ip");
     }
 }

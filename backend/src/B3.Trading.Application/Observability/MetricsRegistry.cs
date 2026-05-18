@@ -809,10 +809,12 @@ public static class MetricsRegistry
     /// Q4.4 (#304). Count of requests rejected by the per-user × endpoint
     /// token-bucket rate limiter. Tags: <c>path</c> = the matched bucket
     /// key (rule's PathPattern, NOT the raw URL — keeps cardinality
-    /// bounded), <c>user</c> = the JWT sub or client IP that was
-    /// throttled. User cardinality is acceptable here since the user
-    /// base is finite and the metric is the primary signal for spotting
-    /// individual abuse.
+    /// bounded), <c>principal_kind</c> ∈ {<c>user</c>, <c>ip</c>,
+    /// <c>anonymous</c>} — also bounded. The throttled identity (sub-
+    /// claim or remote IP) is NOT a tag because an IP-spray attack
+    /// would create an unbounded number of series; for per-actor
+    /// attribution see the corresponding <c>ratelimit.rejected</c>
+    /// log line emitted by the middleware.
     /// </summary>
     public static readonly Counter<long> RateLimitRejected =
         Meter.CreateCounter<long>("trading.ratelimit.rejected_total");

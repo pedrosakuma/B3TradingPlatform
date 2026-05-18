@@ -72,32 +72,62 @@ public sealed class TokenBucketRateLimiter : IRateLimiter, IDisposable
         }
 
         var key = new BucketKey(userKey, endpointKey);
-        var bucket = _buckets.GetOrAdd(key, _ => new Bucket(burst, _utcNow()));
 
-        lock (bucket.Gate)
+        // Outer loop handles the sweeper-vs-acquire race: the sweeper
+        // may evict our bucket AFTER GetOrAdd returns it but BEFORE we
+        // take its lock. The Evicted flag, set under the bucket lock
+        // by the sweeper, lets us detect that and retry against the
+        // (fresh) replacement bucket. Two iterations is the worst case:
+        // by the second pass the sweeper would have to evict a bucket
+        // we just inserted, which requires it to also pass the IdleTtl
+        // check — impossible without time travel.
+        for (var attempt = 0; attempt < 2; attempt++)
         {
-            var now = _utcNow();
-            var elapsed = (now - bucket.LastRefillUtc).TotalSeconds;
-            if (elapsed > 0)
-            {
-                bucket.Tokens = Math.Min(burst, bucket.Tokens + elapsed * refillPerSecond);
-                bucket.LastRefillUtc = now;
-            }
+            var bucket = _buckets.GetOrAdd(key, _ => new Bucket(burst, _utcNow()));
+            OnBucketAcquiredForTest?.Invoke();
 
-            if (bucket.Tokens >= 1.0)
+            lock (bucket.Gate)
             {
-                bucket.Tokens -= 1.0;
-                retryAfterSeconds = 0;
-                return true;
-            }
+                if (bucket.Evicted)
+                {
+                    // The sweeper removed `bucket` from the dictionary
+                    // between our GetOrAdd and this lock. Any tokens we
+                    // hand out from this orphan would be in addition to
+                    // those that the replacement bucket will hand out —
+                    // i.e. up to 2× burst across two requests racing
+                    // the sweep. Drop the lock and try again.
+                    continue;
+                }
 
-            // tokens shortfall / refillPerSecond → seconds until the
-            // next whole token is available. Ceiling to a friendly
-            // integer second below in the middleware.
-            var needed = 1.0 - bucket.Tokens;
-            retryAfterSeconds = needed / refillPerSecond;
-            return false;
+                var now = _utcNow();
+                var elapsed = (now - bucket.LastRefillUtc).TotalSeconds;
+                if (elapsed > 0)
+                {
+                    bucket.Tokens = Math.Min(burst, bucket.Tokens + elapsed * refillPerSecond);
+                    bucket.LastRefillUtc = now;
+                }
+
+                if (bucket.Tokens >= 1.0)
+                {
+                    bucket.Tokens -= 1.0;
+                    retryAfterSeconds = 0;
+                    return true;
+                }
+
+                // tokens shortfall / refillPerSecond → seconds until the
+                // next whole token is available. Ceiling to a friendly
+                // integer second below in the middleware.
+                var needed = 1.0 - bucket.Tokens;
+                retryAfterSeconds = needed / refillPerSecond;
+                return false;
+            }
         }
+
+        // Defensive: if we somehow lost the race twice in a row, deny
+        // rather than loop forever. In practice this branch is
+        // unreachable — see the comment on the for loop above.
+        retryAfterSeconds = 1.0 / refillPerSecond;
+        return false;
     }
 
     /// <summary>
@@ -110,19 +140,34 @@ public sealed class TokenBucketRateLimiter : IRateLimiter, IDisposable
     /// </summary>
     internal void SweepIdleBucketsForTest() => SweepIdleBuckets();
 
+    /// <summary>
+    /// Test hook fired between <c>GetOrAdd</c> and the per-bucket lock
+    /// in <see cref="TryAcquire"/>. Used to deterministically reproduce
+    /// the sweeper-vs-acquire race; never set in production.
+    /// </summary>
+    internal Action? OnBucketAcquiredForTest { get; set; }
+
     private void SweepIdleBuckets()
     {
         var cutoff = _utcNow() - IdleTtl;
         foreach (var kvp in _buckets)
         {
-            // Read under the bucket's own lock so we don't race a
-            // TryAcquire that is in the middle of advancing
-            // LastRefillUtc.
-            DateTime lastRefill;
-            lock (kvp.Value.Gate) lastRefill = kvp.Value.LastRefillUtc;
-            if (lastRefill < cutoff)
+            // Take the bucket's own lock so we don't race a TryAcquire
+            // that is in the middle of advancing LastRefillUtc, and so
+            // any TryAcquire that has already obtained a reference to
+            // this bucket but is still waiting on the lock sees the
+            // Evicted flag we set below and retries.
+            lock (kvp.Value.Gate)
             {
-                _buckets.TryRemove(kvp.Key, out _);
+                if (kvp.Value.LastRefillUtc >= cutoff) continue;
+                kvp.Value.Evicted = true;
+                // Atomic compare-and-remove: only drop the entry if it
+                // STILL maps to the same bucket instance. Belt-and-
+                // braces — the Evicted flag is already authoritative,
+                // but this avoids accidentally removing a replacement
+                // bucket inserted by a concurrent retry.
+                ((ICollection<KeyValuePair<BucketKey, Bucket>>)_buckets)
+                    .Remove(kvp);
             }
         }
     }
@@ -136,6 +181,13 @@ public sealed class TokenBucketRateLimiter : IRateLimiter, IDisposable
         public readonly object Gate = new();
         public double Tokens;
         public DateTime LastRefillUtc;
+        // Set by the sweeper under Gate when the bucket is removed
+        // from the dictionary. TryAcquire checks this after taking
+        // Gate and retries the outer GetOrAdd loop if true — without
+        // it, a request that captured this bucket reference before
+        // eviction would happily decrement tokens while a concurrent
+        // request hands out a full fresh burst on the replacement.
+        public bool Evicted;
 
         public Bucket(int burst, DateTime nowUtc)
         {
