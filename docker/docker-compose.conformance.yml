@@ -29,6 +29,14 @@ services:
       Trading__Auth__Users__4__Iterations: "600000"
       Trading__Auth__Users__4__Role: admin
       Trading__Auth__Users__4__Firm: default
+      # Q4.4 (#304). The conformance suite authenticates from a single
+      # container IP and issues many logins in rapid succession across
+      # specs. With the default per-IP auth bucket (burst=3, 1/s refill)
+      # that legitimate volume trips the limiter and fails specs that
+      # are not exercising rate-limit behaviour. The suite does not
+      # itself cover rate-limit semantics, so disable the limiter for
+      # the conformance overlay only — production hosts keep it on.
+      Trading__RateLimit__Enabled: "false"
 
   conformance:
     build:

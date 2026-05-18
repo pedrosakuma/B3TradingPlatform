@@ -804,4 +804,18 @@ public static class MetricsRegistry
             description: "Configured Trading:Persistence:GroupCommitMaxRecords. Build-info-style gauge sourced from IOptionsMonitor; reflects config reloads.");
     public static void RegisterGroupCommitMaxRecordsSource(Func<int> source) =>
         _groupCommitMaxRecordsSource = source;
+
+    /// <summary>
+    /// Q4.4 (#304). Count of requests rejected by the per-user × endpoint
+    /// token-bucket rate limiter. Tags: <c>path</c> = the matched bucket
+    /// key (rule's PathPattern, NOT the raw URL — keeps cardinality
+    /// bounded), <c>principal_kind</c> ∈ {<c>user</c>, <c>ip</c>,
+    /// <c>anonymous</c>} — also bounded. The throttled identity (sub-
+    /// claim or remote IP) is NOT a tag because an IP-spray attack
+    /// would create an unbounded number of series; for per-actor
+    /// attribution see the corresponding <c>ratelimit.rejected</c>
+    /// log line emitted by the middleware.
+    /// </summary>
+    public static readonly Counter<long> RateLimitRejected =
+        Meter.CreateCounter<long>("trading.ratelimit.rejected_total");
 }

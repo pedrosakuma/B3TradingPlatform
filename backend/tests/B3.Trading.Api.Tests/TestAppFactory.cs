@@ -121,6 +121,12 @@ public class TestAppFactory : WebApplicationFactory<Program>
                 // hammering /auth/login with bad creds don't trip the
                 // gate. Lockout-specific tests opt in via WithOverrides.
                 ["Trading:Auth:LoginLockout:Enabled"] = "false",
+                // Q4.4 (#304). Per-user × endpoint token-bucket disabled
+                // by default in tests so the broad suite hammering
+                // /orders, /algo, /auth etc. doesn't trip the buckets.
+                // Tests in TokenBucketRateLimitTests opt in explicitly
+                // via WithOverrides.
+                ["Trading:RateLimit:Enabled"] = "false",
             });
 
             if (_configOverrides is not null)
