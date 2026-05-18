@@ -33,10 +33,17 @@ public sealed class DropCopyManager
         public static readonly IReadOnlyList<string> All = new[] { Orders, Fills, Cancels };
     }
 
+    // Pass-8 review (#323) P1: align firm-keyed dictionaries to
+    // StringComparer.Ordinal to match WorkingOrderBook and the rest of
+    // the firm-scoped state. Using OrdinalIgnoreCase here would let a
+    // subscriber registered for "firm01" receive deltas for "FIRM01"
+    // while the order-book snapshot for "firm01" returns nothing
+    // (Ordinal lookup) — cross-firm leakage hidden behind a casing
+    // mismatch. Firm IDs are platform-issued (JWT claim) or admin-
+    // validated [A-Za-z0-9_-]; we keep the same exact-match semantics
+    // everywhere they appear.
     private readonly ConcurrentDictionary<string, ImmutableHashSet<DropCopyClient>> _byFirm =
-        new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, object> _firmLocks =
-        new(StringComparer.OrdinalIgnoreCase);
+        new(StringComparer.Ordinal);
 
     // Pass-6 review (#323) — per-firm armed gate, NOT global.
     // Coalesces overflow drops: itemDropped fires per dropped event
@@ -54,8 +61,25 @@ public sealed class DropCopyManager
     // Volatile.Read per drop after the first; the per-firm lock is the
     // same one Publish takes, so we trade against (already-backpressured)
     // publish throughput, not against unrelated firms.
+    // Pass-8 review (#323) P2: bound _firmLocks memory to a fixed-size
+    // stripe pool regardless of admin firmId cardinality. The prior
+    // per-firm-key ConcurrentDictionary grew for every distinct admin
+    // firmId override and could not be safely reclaimed without losing
+    // monitor identity for concurrent Add()s. 64 stripes is plenty for
+    // drop-copy (compliance feed traffic is light; the only contention
+    // path is Publish vs Add vs DisconnectAllForResync on the same
+    // firm). Collisions across unrelated firms serialize harmlessly.
+    private const int LockStripeCount = 64;
+    private readonly object[] _firmLockStripes = CreateLockStripes(LockStripeCount);
+    private static object[] CreateLockStripes(int n)
+    {
+        var stripes = new object[n];
+        for (var i = 0; i < n; i++) stripes[i] = new object();
+        return stripes;
+    }
+
     private readonly ConcurrentDictionary<string, int> _firmResyncArmed =
-        new(StringComparer.OrdinalIgnoreCase);
+        new(StringComparer.Ordinal);
 
     private readonly WorkingOrderBook _orders;
 
@@ -65,7 +89,7 @@ public sealed class DropCopyManager
     }
 
     private object LockFor(string firmId) =>
-        _firmLocks.GetOrAdd(firmId, _ => new object());
+        _firmLockStripes[(int)((uint)StringComparer.Ordinal.GetHashCode(firmId) % LockStripeCount)];
 
     /// <summary>
     /// Atomically registers <paramref name="client"/> for every drop-copy
@@ -119,18 +143,12 @@ public sealed class DropCopyManager
             set = set.Remove(client);
             if (set.IsEmpty)
             {
-                // Pass-7 review (#323) P2: with admin firmId override
-                // accepting arbitrary tenant strings, leaving an empty
-                // bucket per ever-seen firmId is a process-lifetime
-                // dictionary growth vector. Clean up _byFirm and
-                // _firmResyncArmed when the last subscriber leaves.
-                // _firmLocks intentionally retained — removing it would
-                // race concurrent Add()s that already captured the lock
-                // reference and could end up serializing on different
-                // monitors. The monitor object itself is ~24 bytes and
-                // bounded growth is acceptable for the rare admin
-                // override path (also gated by firmId validation in the
-                // hub).
+                // Pass-7 review (#323) P2: clean up _byFirm and
+                // _firmResyncArmed when the last subscriber leaves so
+                // process-lifetime memory stays bounded under repeated
+                // admin firmId overrides. The lock pool is striped
+                // (fixed size) so no per-firm lock entry exists to
+                // reclaim (pass-8).
                 _byFirm.TryRemove(firmId, out _);
                 _firmResyncArmed.TryRemove(firmId, out _);
             }
