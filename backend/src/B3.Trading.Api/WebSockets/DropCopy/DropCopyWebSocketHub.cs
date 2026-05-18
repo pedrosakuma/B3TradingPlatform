@@ -91,8 +91,17 @@ public static class DropCopyWebSocketHub
             if (isAdmin && ctx.Request.Query.TryGetValue("firmId", out var qFirm))
             {
                 var requested = qFirm.ToString();
-                if (!string.IsNullOrWhiteSpace(requested))
+                // Pass-7 review (#323) P2: bound the admin firmId space
+                // to prevent process-lifetime growth in DropCopyManager
+                // dictionaries. Require non-empty, ≤32 chars, ASCII
+                // alphanumeric + dash/underscore (matches the format
+                // used by Firm claims throughout the platform).
+                if (!string.IsNullOrWhiteSpace(requested)
+                    && requested.Length <= 32
+                    && IsValidFirmId(requested))
+                {
                     effectiveFirm = requested;
+                }
             }
 
             using var ws = await ctx.WebSockets.AcceptWebSocketAsync();
@@ -278,5 +287,16 @@ public static class DropCopyWebSocketHub
             ResourcePath = "/ws/dropcopy",
             Details = details,
         });
+    }
+
+    private static bool IsValidFirmId(string s)
+    {
+        foreach (var ch in s)
+        {
+            if (!((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')
+                || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_'))
+                return false;
+        }
+        return true;
     }
 }

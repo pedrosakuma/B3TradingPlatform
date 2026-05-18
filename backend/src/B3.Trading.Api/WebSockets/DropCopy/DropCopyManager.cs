@@ -114,10 +114,30 @@ public sealed class DropCopyManager
         var firmId = client.FirmId;
         lock (LockFor(firmId))
         {
-            _byFirm.AddOrUpdate(
-                firmId,
-                _ => ImmutableHashSet<DropCopyClient>.Empty,
-                (_, set) => set.Remove(client));
+            if (!_byFirm.TryGetValue(firmId, out var set))
+                return;
+            set = set.Remove(client);
+            if (set.IsEmpty)
+            {
+                // Pass-7 review (#323) P2: with admin firmId override
+                // accepting arbitrary tenant strings, leaving an empty
+                // bucket per ever-seen firmId is a process-lifetime
+                // dictionary growth vector. Clean up _byFirm and
+                // _firmResyncArmed when the last subscriber leaves.
+                // _firmLocks intentionally retained — removing it would
+                // race concurrent Add()s that already captured the lock
+                // reference and could end up serializing on different
+                // monitors. The monitor object itself is ~24 bytes and
+                // bounded growth is acceptable for the rare admin
+                // override path (also gated by firmId validation in the
+                // hub).
+                _byFirm.TryRemove(firmId, out _);
+                _firmResyncArmed.TryRemove(firmId, out _);
+            }
+            else
+            {
+                _byFirm[firmId] = set;
+            }
         }
     }
 
@@ -179,22 +199,17 @@ public sealed class DropCopyManager
     /// </summary>
     public void DisconnectAllForResync(string reason)
     {
-        // Coalesce per-firm: only the first drop in a per-firm burst
-        // pays for walking that firm's subscribers. The gate is armed
-        // by Add() under the SAME per-firm lock used here to consume
-        // it, so the visibility/arm/consume sequence is atomic and a
-        // newly registered client can never be missed (see _firmResyncArmed).
+        // Per-firm coalesce: arm is set under LockFor(firmId) by Add,
+        // and we consume it under the SAME lock here. NO unlocked
+        // fast-path: a stale armed==0 read outside the lock could race
+        // a registration-in-progress and skip the firm entirely (pass-7
+        // P1). The firm count is bounded by tenant cardinality so the
+        // per-drop O(firms) lock acquisition is acceptable.
         foreach (var firmId in _firmResyncArmed.Keys)
         {
-            // Fast path: if no Add has armed since the last walk, skip
-            // the lock acquisition entirely.
-            if (!_firmResyncArmed.TryGetValue(firmId, out var armed) || armed == 0)
-                continue;
-
             lock (LockFor(firmId))
             {
-                // Re-check under the lock and atomically consume.
-                if (!_firmResyncArmed.TryGetValue(firmId, out armed) || armed == 0)
+                if (!_firmResyncArmed.TryGetValue(firmId, out var armed) || armed == 0)
                     continue;
                 _firmResyncArmed[firmId] = 0;
 
