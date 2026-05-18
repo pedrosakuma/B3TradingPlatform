@@ -95,14 +95,23 @@ public sealed record AuditEntry(
 public sealed class AuditLogKeeper
 {
     private readonly object _lock = new();
-    private readonly List<AuditEntry> _ring;
+    // True circular buffer. `_ring` is lazily grown up to `_capacity`,
+    // then becomes a fixed-size wrap-around array indexed by `_head`
+    // (the next write slot). Pass-2 review (#322) P2: an earlier
+    // List<T>+RemoveAt(0) eviction was O(capacity) per evicted entry,
+    // turning the recovery pre-pass into O(N · capacity) once N
+    // exceeded the cap. The head-indexed ring evicts in O(1) and keeps
+    // both append and recovery linear in N.
+    private AuditEntry?[] _ring;
+    private int _head;
+    private int _count;
     private readonly int _capacity;
 
     public AuditLogKeeper(IOptions<AuditLogOptions> options)
     {
         var opts = options?.Value ?? new AuditLogOptions();
         _capacity = opts.Capacity > 0 ? opts.Capacity : 100_000;
-        _ring = new List<AuditEntry>(Math.Min(_capacity, 1024));
+        _ring = new AuditEntry?[Math.Min(_capacity, 1024)];
     }
 
     /// <summary>
@@ -111,7 +120,7 @@ public sealed class AuditLogKeeper
     /// </summary>
     public int Count
     {
-        get { lock (_lock) return _ring.Count; }
+        get { lock (_lock) return _count; }
     }
 
     public int Capacity => _capacity;
@@ -142,14 +151,28 @@ public sealed class AuditLogKeeper
 
         lock (_lock)
         {
-            _ring.Add(entry);
-            if (_ring.Count > _capacity)
+            if (_count < _capacity)
             {
-                // Drop the oldest. RemoveAt(0) is O(n) but the cap is
-                // small (100k by default) and admin reads dwarf the
-                // append rate; the simple shape avoids a custom ring
-                // index for what is essentially a forensic surface.
-                _ring.RemoveAt(0);
+                // Pre-cap: grow the backing array geometrically up to
+                // the cap so initial sparse usage doesn't allocate the
+                // full bound. `_head` equals `_count` until we wrap.
+                if (_count == _ring.Length)
+                {
+                    var newLen = Math.Min(_capacity, Math.Max(_ring.Length * 2, 16));
+                    var grown = new AuditEntry?[newLen];
+                    Array.Copy(_ring, grown, _count);
+                    _ring = grown;
+                }
+                _ring[_head] = entry;
+                _head = (_head + 1) % _ring.Length;
+                _count++;
+            }
+            else
+            {
+                // Steady-state wrap: overwrite the oldest slot (the one
+                // `_head` currently points at) in O(1) and advance head.
+                _ring[_head] = entry;
+                _head = (_head + 1) % _capacity;
             }
         }
     }
@@ -185,10 +208,13 @@ public sealed class AuditLogKeeper
         var matches = new List<AuditEntry>(Math.Min(limit, 64));
         lock (_lock)
         {
-            // Walk newest-first.
-            for (var i = _ring.Count - 1; i >= 0; i--)
+            // Walk newest-first. Newest entry is at (_head - 1) mod
+            // ring length; walk backwards `_count` slots.
+            var ringLen = _ring.Length;
+            var idx = (_head - 1 + ringLen) % ringLen;
+            for (var n = 0; n < _count; n++, idx = (idx - 1 + ringLen) % ringLen)
             {
-                var e = _ring[i];
+                var e = _ring[idx]!;
                 if (cursorSeq is long c && e.Seq >= c) continue;
                 if (e.TimestampUtc < since || e.TimestampUtc > until) continue;
                 if (!string.IsNullOrEmpty(outcome) && !string.Equals(e.Outcome, outcome, StringComparison.OrdinalIgnoreCase))
