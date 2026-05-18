@@ -207,6 +207,12 @@ public sealed class OrderModifyService
             // surface as BadRequest (400) before any WAL append.
             return OrderModifyResult.BadRequest(ex.Message);
         }
+        // PR #316 P1. Forward the original's SubAccountId (the
+        // replacement inherits it — see Order.cs ctor) so
+        // SubAccountLimitsCheck enforces per-(firm, sub-account)
+        // position/notional/open-order caps AND rejects modifies
+        // targeting a deactivated sub-account. Without this the
+        // check no-ops on null and the sub-account gate is bypassed.
         var riskCtx = new RiskContext(
             req.Owner, orig.FirmId, orig.Symbol, orig.Side, orig.Type,
             req.NewQuantity, req.NewPrice,
@@ -214,7 +220,8 @@ public sealed class OrderModifyService
             EffectiveLeavesQuantity: effectiveLeaves,
             TimeInForce: effTif,
             StopPrice: effStop,
-            GoodTillDate: effGtd);
+            GoodTillDate: effGtd,
+            SubAccountId: orig.SubAccountId);
 
         var decision = _risk.Evaluate(riskCtx);
         if (!decision.Approved)

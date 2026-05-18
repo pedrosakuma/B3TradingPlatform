@@ -126,17 +126,21 @@ public static class StatementEndpoints
         // existing snapshot fast-path.
         long capturedSeq = 0;
         IReadOnlyList<PositionRowDto>? capturedPositions = null;
+        IReadOnlyList<PositionRowDto>? capturedSeedFallback = null;
         dispatcher.RunExclusive(() =>
         {
             capturedSeq = store.CurrentSeq;
             if (!isToday) return;
             if (subAccountFilter is not null) return;
-            // Only take the master snapshot when the owner has no
-            // per-sub-account positions in this firm; otherwise we fall
-            // through to WAL replay which can bucket correctly.
-            var anySub = false;
-            foreach (var _ in subPositions.EnumerateForOwner(firmId, owner)) { anySub = true; break; }
-            if (anySub) return;
+            // Snapshot the live master keeper rows. If the owner has
+            // no per-sub-account positions in this firm we use the
+            // snapshot verbatim (fast pre-#301 path). Otherwise we
+            // pass it as a seed-fallback so the WAL-replay path can
+            // re-inject any startup-seeded master positions (per
+            // PR #316 P2 — TradingHostStartup applies seeds straight
+            // to PositionKeeper, never via WAL, so plain WAL replay
+            // would silently drop them whenever a sub-account row
+            // forces us off the snapshot fast-path).
             var rows = new List<PositionRowDto>();
             foreach (var p in positions.ForEndClientAndFirm(firmId, owner))
             {
@@ -144,10 +148,17 @@ public static class StatementEndpoints
                 rows.Add(new PositionRowDto(p.Symbol, p.NetQuantity, p.AverageEntryPrice));
             }
             rows.Sort(static (a, b) => string.CompareOrdinal(a.Symbol, b.Symbol));
-            capturedPositions = rows;
+
+            var anySub = false;
+            foreach (var _ in subPositions.EnumerateForOwner(firmId, owner)) { anySub = true; break; }
+            if (anySub)
+                capturedSeedFallback = rows;
+            else
+                capturedPositions = rows;
         });
         var snapshotSeq = capturedSeq;
         var livePositionsSnapshot = capturedPositions;
+        var liveMasterSeedFallback = capturedSeedFallback;
 
         // Drain the writer AFTER taking the dispatcher snapshot so
         // every entry with seq <= snapshotSeq is durable and visible
@@ -162,7 +173,7 @@ public static class StatementEndpoints
             wal.Add(entry);
         }
 
-        return StatementProjection.Build(owner, day, firmId, wal, livePositionsSnapshot, subAccountFilter);
+        return StatementProjection.Build(owner, day, firmId, wal, livePositionsSnapshot, subAccountFilter, liveMasterSeedFallback);
     }
 
     private static bool TryResolveSubAccount(

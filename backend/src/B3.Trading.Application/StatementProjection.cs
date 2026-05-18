@@ -74,7 +74,8 @@ public static class StatementProjection
         string firmId,
         IReadOnlyList<(long Seq, WalEvent Event)> walEventsAllTime,
         IReadOnlyList<PositionRowDto>? livePositionsSnapshot,
-        string? subAccountFilter = null)
+        string? subAccountFilter = null,
+        IReadOnlyList<PositionRowDto>? liveMasterSeedFallback = null)
     {
         ArgumentNullException.ThrowIfNull(walEventsAllTime);
         ArgumentException.ThrowIfNullOrEmpty(firmId);
@@ -217,6 +218,48 @@ public static class StatementProjection
         else
         {
             positions = ProjectPositionsFromWal(owner, normFirm, dayEnd, walEventsAllTime, ownerByClOrdId, subAccountFilter);
+
+            // PR #316 P2. Today's unfiltered statement falls into this
+            // WAL-replay branch the moment any sub-account row exists
+            // for (firm, owner) — the live master snapshot would
+            // double-count, so we cannot reuse it verbatim. But WAL
+            // replay misses any positions seeded directly into
+            // PositionKeeper at host startup (TradingHostStartup applies
+            // seeds straight to the keeper, never via WAL). To recover
+            // them, the caller passes the live master snapshot through
+            // <paramref name="liveMasterSeedFallback"/>: for every
+            // symbol present there but absent from the WAL-projected
+            // master bucket we inject the live row as a master-bucket
+            // entry (SubAccountId=null). Symbols already projected from
+            // WAL keep their WAL-derived qty/avg untouched (so today's
+            // master fills are not overwritten by the seed). Only used
+            // for unfiltered queries — a sub-account-scoped statement
+            // must never see master-bucket seeds.
+            if (liveMasterSeedFallback is not null && subAccountFilter is null && liveMasterSeedFallback.Count > 0)
+            {
+                var masterPresent = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var p in positions)
+                    if (p.SubAccountId is null) masterPresent.Add(p.Symbol);
+
+                List<PositionRowDto>? merged = null;
+                foreach (var seed in liveMasterSeedFallback)
+                {
+                    if (seed.NetQty == 0) continue;
+                    if (masterPresent.Contains(seed.Symbol)) continue;
+                    merged ??= new List<PositionRowDto>(positions);
+                    merged.Add(new PositionRowDto(seed.Symbol, seed.NetQty, seed.AvgPrice, null));
+                }
+                if (merged is not null)
+                {
+                    merged.Sort(static (a, b) =>
+                    {
+                        var bySym = string.CompareOrdinal(a.Symbol, b.Symbol);
+                        if (bySym != 0) return bySym;
+                        return string.CompareOrdinal(a.SubAccountId ?? "", b.SubAccountId ?? "");
+                    });
+                    positions = merged;
+                }
+            }
         }
 
         // ----------------- IR day-trade pre-calc -----------------
