@@ -223,6 +223,7 @@ public sealed class StateSnapshotter
         SubAccounts = _subAccounts?.Snapshot() ?? Array.Empty<SubAccountSnapshot>(),
         SubAccountPositions = _subAccountPositions?.Snapshot() ?? Array.Empty<SubAccountPositionSnapshot>(),
         SubAccountPnl = _subAccountPnl?.Snapshot() ?? Array.Empty<SubAccountPnlSnapshot>(),
+        SubAccountPnlBasis = _subAccountPnl?.SnapshotBasis() ?? Array.Empty<SubAccountPnlBasisSnapshot>(),
     };
 
     /// <summary>
@@ -486,6 +487,7 @@ public sealed class StateSnapshotter
             SubAccounts = raw.SubAccounts.ToList(),
             SubAccountPositions = raw.SubAccountPositions.ToList(),
             SubAccountPnl = raw.SubAccountPnl.ToList(),
+            SubAccountPnlBasis = raw.SubAccountPnlBasis.ToList(),
         };
     }
 
@@ -654,7 +656,7 @@ public sealed class StateSnapshotter
         // legacy snapshots collapse to the no-sub-account world.
         _subAccounts?.Restore(snap.SubAccounts);
         _subAccountPositions?.Restore(snap.SubAccountPositions);
-        _subAccountPnl?.Restore(snap.SubAccountPnl);
+        _subAccountPnl?.Restore(snap.SubAccountPnl, snap.SubAccountPnlBasis);
     }
 }
 

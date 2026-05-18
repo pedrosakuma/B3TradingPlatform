@@ -253,6 +253,14 @@ public sealed class PlatformSnapshot
     /// pre-dating the field.
     /// </summary>
     public List<SubAccountPnlSnapshot> SubAccountPnl { get; init; } = new();
+
+    /// <summary>
+    /// PR #316 P2. Per-bucket avg-cost basis rows powering
+    /// <see cref="B3.Trading.Application.SubAccountPnlKeeper.ApplyBucketFill"/>.
+    /// Empty on snapshots predating the field — legacy hydrates to an
+    /// empty basis map (best-effort, see record doc).
+    /// </summary>
+    public List<SubAccountPnlBasisSnapshot> SubAccountPnlBasis { get; init; } = new();
 }
 
 /// <summary>
@@ -613,3 +621,24 @@ public sealed record SubAccountPnlSnapshot(
     string Symbol,
     DateOnly Day,
     decimal RealizedTotal);
+
+/// <summary>
+/// PR #316 P2. One row of the per-bucket avg-cost basis projected
+/// by <see cref="B3.Trading.Application.SubAccountPnlKeeper"/>.
+/// <see cref="SubAccountId"/> is
+/// <see cref="B3.Trading.Application.SubAccountPnlKeeper.MasterBucketKey"/>
+/// (empty string) for the MASTER bucket (fills with no sub-account
+/// tag) and a real sub-account id otherwise. Persisted alongside
+/// <see cref="SubAccountPnlSnapshot"/> so a snapshot+tail recovery
+/// preserves bucket-level basis. Additive on snapshots predating
+/// the field; legacy hydrates to an empty basis map (best-effort
+/// recovery — see <c>SubAccountPnlKeeper.SnapshotBasis</c> for the
+/// recovery semantics).
+/// </summary>
+public sealed record SubAccountPnlBasisSnapshot(
+    string FirmId,
+    string EndClientId,
+    string SubAccountId,
+    string Symbol,
+    long NetQuantity,
+    decimal AvgPrice);

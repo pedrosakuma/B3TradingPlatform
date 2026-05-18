@@ -177,6 +177,13 @@ public sealed class RawPlatformSnapshot
     /// </summary>
     public IReadOnlyList<SubAccountPnlSnapshot> SubAccountPnl { get; init; } =
         Array.Empty<SubAccountPnlSnapshot>();
+
+    /// <summary>
+    /// PR #316 P2. Per-bucket avg-cost basis rows from
+    /// <see cref="B3.Trading.Application.SubAccountPnlKeeper"/>.
+    /// </summary>
+    public IReadOnlyList<SubAccountPnlBasisSnapshot> SubAccountPnlBasis { get; init; } =
+        Array.Empty<SubAccountPnlBasisSnapshot>();
 }
 
 /// <summary>

@@ -245,14 +245,28 @@ public sealed class ExecutionReportProcessor
                     }
                     // Q2.4 (#271). Capture the pre-fill avg-cost basis
                     // BEFORE _positions.ApplyFill mutates it — realized
-                    // delta is computed off the pre-fill state. We read
-                    // off PnlKeeper's parallel basis tracker (kept in
-                    // lockstep with PositionKeeper via
-                    // ApplyFillToAvgCost below) so the snapshot/restore
-                    // path is independent of PositionKeeper.
+                    // delta is computed off the pre-fill state.
+                    //
+                    // PR #316 P2. The basis we read here must be the
+                    // BUCKET-of-the-fill's basis (master when
+                    // SubAccountId is null, else the sub-bucket), NOT
+                    // the aggregate _pnlKeeper basis — otherwise a
+                    // sub-account fill that offsets a position held in
+                    // the master bucket realises against the master's
+                    // avg cost and the spec's "P&L segregated" contract
+                    // is broken. Falls back to the aggregate keeper
+                    // only when _subAccountPnl is not wired (test
+                    // contexts that haven't been migrated), which
+                    // collapses to the original aggregate behaviour
+                    // for the no-sub-account case.
                     long preFillQty = 0;
                     decimal preFillAvg = 0m;
-                    if (_pnlKeeper is not null)
+                    if (_subAccountPnl is not null)
+                    {
+                        var bucket = _subAccountPnl.GetBucketAvgCost(order.FirmId, owner.Value, order.SubAccountId, order.Symbol);
+                        if (bucket is not null) { preFillQty = bucket.NetQuantity; preFillAvg = bucket.AvgPrice; }
+                    }
+                    else if (_pnlKeeper is not null)
                     {
                         var avg = _pnlKeeper.GetAvgCost(order.FirmId, owner.Value, order.Symbol);
                         if (avg is not null) { preFillQty = avg.NetQuantity; preFillAvg = avg.AvgPrice; }
@@ -403,6 +417,17 @@ public sealed class ExecutionReportProcessor
                             // mode, so they have nothing to reconcile
                             // — registering them would only inflate
                             // the FinalizeReplay materialisation count.
+                            //
+                            // PR #316 P2. (preFillQty, preFillAvg) is
+                            // the BUCKET-of-the-fill's pre-fill state
+                            // (master vs sub), so the would-realize
+                            // gate and synth payload match what live
+                            // would emit. The synth materialises into
+                            // the aggregate keeper only; the
+                            // sub-bucket realized total is rebuilt
+                            // when the durable RealizedPnlEvent is
+                            // replayed (EventReplayer routes it via
+                            // _subAccountPnl.Add).
                             var wouldRealize = PnlKeeper.ComputeRealizedDelta(preFillQty, preFillAvg, order.Side, delta, lastPx);
                             if (wouldRealize != 0m)
                             {
@@ -414,7 +439,13 @@ public sealed class ExecutionReportProcessor
                             // — the durable event Apply path uses
                             // RunningTotal directly, so basis is purely
                             // in-memory state used for live computation.
+                            // PR #316 P2. Aggregate basis stays in
+                            // lockstep with PositionKeeper; bucket
+                            // basis is advanced separately so a future
+                            // live close after replay uses the right
+                            // segregated basis.
                             _pnlKeeper.ApplyFillToAvgCost(order.FirmId, owner.Value, order.Symbol, order.Side, delta, lastPx);
+                            _subAccountPnl?.ApplyBucketFill(order.FirmId, owner.Value, order.SubAccountId, order.Symbol, order.Side, delta, lastPx);
                         }
                         else
                         {
@@ -445,7 +476,29 @@ public sealed class ExecutionReportProcessor
                             // serialisation is sufficient because all
                             // live ER processing flows through it.
                             var dayKey = DateOnly.FromDateTime(nowUtcPnl.UtcDateTime);
-                            var realized = _pnlKeeper.ApplyFillToAvgCost(order.FirmId, owner.Value, order.Symbol, order.Side, delta, lastPx);
+                            // PR #316 P2. The aggregate keeper still
+                            // advances its basis (consumed by legacy
+                            // statement paths, the live snapshot
+                            // mirror, and the no-sub-account fallback
+                            // pre-fill read above), but its returned
+                            // delta is NOT the event source. The
+                            // authoritative realized delta is computed
+                            // against the bucket-of-the-fill's own
+                            // basis via the sub-account keeper — so a
+                            // sub-bucket close against an aggregate
+                            // position dominated by the master bucket
+                            // realises against the SUB's basis, not
+                            // the master's, satisfying the
+                            // "fill in sub-account A increments only
+                            // A's P&L" contract. When _subAccountPnl
+                            // is not wired (legacy test contexts) we
+                            // fall back to the aggregate delta so
+                            // pre-#316 ER processor tests keep
+                            // passing unchanged.
+                            var aggregateRealized = _pnlKeeper.ApplyFillToAvgCost(order.FirmId, owner.Value, order.Symbol, order.Side, delta, lastPx);
+                            var realized = _subAccountPnl is not null
+                                ? _subAccountPnl.ApplyBucketFill(order.FirmId, owner.Value, order.SubAccountId, order.Symbol, order.Side, delta, lastPx)
+                                : aggregateRealized;
                             if (realized != 0m)
                             {
                                 var prevTotal = _pnlKeeper.GetDayRealized(order.FirmId, owner.Value, order.Symbol, dayKey);
