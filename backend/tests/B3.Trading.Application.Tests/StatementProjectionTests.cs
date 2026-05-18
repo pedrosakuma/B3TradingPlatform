@@ -597,13 +597,18 @@ public class StatementProjectionTests
     }
 
     [Fact]
-    public void TodayUnfiltered_SeedFallback_DoesNotOverwriteWalProjectedMasterRow()
+    public void TodayUnfiltered_SeedFallback_MasterRow_ReflectsLiveAggregateMinusSubBuckets()
     {
-        // Defensive: if the WAL already projected a master-bucket
-        // position for a symbol the live keeper also reports, the
-        // WAL row wins (it reflects the day's master fills; the live
-        // keeper aggregates seed + today's fills and would double
-        // count if merged on top).
+        // PR #316 P2 — approach (b). The live master keeper
+        // aggregates seed + ALL fills (master and sub). The WAL
+        // projects per-bucket. The master row we surface is
+        //   masterQty = liveAggregate - sumOfWalSubBucketQty
+        // so the seed contribution is preserved without double-
+        // counting sub-bucket fills.
+        //
+        // Scenario: master-bucket buy 100 PETR4 today; live
+        // aggregate is 300 (seed 200 + today 100). With no sub-
+        // bucket activity, masterQty = 300 - 0 = 300.
         var wal = new List<(long Seq, WalEvent Event)>
         {
             (1, SubmitWithSubAccount(1UL, Alice, "FIRM01", null, "PETR4", OrderSide.Buy, 100, 30m)),
@@ -611,7 +616,7 @@ public class StatementProjectionTests
         };
         var seedFallback = new List<PositionRowDto>
         {
-            new("PETR4", 300, 28m, null), // seed (200) + today (100) aggregated
+            new("PETR4", 300, 28m, null),
         };
 
         var dto = StatementProjection.Build(
@@ -623,8 +628,98 @@ public class StatementProjectionTests
         var petr4 = Assert.Single(dto.Positions);
         Assert.Equal("PETR4", petr4.Symbol);
         Assert.Null(petr4.SubAccountId);
-        // WAL-projected row preserved; seed not merged on top.
-        Assert.Equal(100, petr4.NetQty);
-        Assert.Equal(30m, petr4.AvgPrice);
+        Assert.Equal(300, petr4.NetQty);
+        Assert.Equal(28m, petr4.AvgPrice);
+    }
+
+    [Fact]
+    public void TodayUnfiltered_SeedOnly_NoActivity_StillEmitsMasterRow()
+    {
+        // PR #316 P2 — approach (b). Seed PETR4=200, no fills today.
+        // We still fall into the WAL-replay branch (caller passes a
+        // seed fallback); the master row must come back at 200.
+        var wal = new List<(long Seq, WalEvent Event)>();
+        var seedFallback = new List<PositionRowDto>
+        {
+            new("PETR4", 200, 28m, null),
+        };
+
+        var dto = StatementProjection.Build(
+            Alice, Day, "FIRM01", wal,
+            livePositionsSnapshot: null,
+            subAccountFilter: null,
+            liveMasterSeedFallback: seedFallback);
+
+        var petr4 = Assert.Single(dto.Positions);
+        Assert.Equal("PETR4", petr4.Symbol);
+        Assert.Null(petr4.SubAccountId);
+        Assert.Equal(200, petr4.NetQty);
+        Assert.Equal(28m, petr4.AvgPrice);
+    }
+
+    [Fact]
+    public void TodayUnfiltered_SeedPlusSubAccountFill_NoDoubleCount()
+    {
+        // PR #316 P2 — primary regression. Seed PETR4=200; sub-account
+        // X buys PETR4=50 today. The live master keeper aggregates
+        // both → liveAggregate = 250. Previously the merge would
+        // inject the full 250 alongside the sub row (50), giving
+        // master 250 + sub 50 = 300 total exposure. The correct
+        // output is master 200 + sub 50.
+        var wal = new List<(long Seq, WalEvent Event)>
+        {
+            (1, SubmitWithSubAccount(1UL, Alice, "FIRM01", "X", "PETR4", OrderSide.Buy, 50, 32m)),
+            (2, Er(1UL, ExecKind.Fill, leaves: 0, cum: 50, last: 50, price: 32m, at: DayStart.AddHours(10))),
+        };
+        var seedFallback = new List<PositionRowDto>
+        {
+            // Master keeper sees seed 200 + sub-X fill 50 = 250.
+            new("PETR4", 250, 28m, null),
+        };
+
+        var dto = StatementProjection.Build(
+            Alice, Day, "FIRM01", wal,
+            livePositionsSnapshot: null,
+            subAccountFilter: null,
+            liveMasterSeedFallback: seedFallback);
+
+        Assert.Equal(2, dto.Positions.Count);
+        var master = Assert.Single(dto.Positions, p => p.SubAccountId is null);
+        Assert.Equal("PETR4", master.Symbol);
+        Assert.Equal(200, master.NetQty);
+        var subX = Assert.Single(dto.Positions, p => p.SubAccountId == "X");
+        Assert.Equal("PETR4", subX.Symbol);
+        Assert.Equal(50, subX.NetQty);
+    }
+
+    [Fact]
+    public void TodayUnfiltered_SeedPlusMasterSell_NoDoubleSeedRow()
+    {
+        // PR #316 P2. Seed PETR4=200; master bucket sells PETR4=30
+        // today. Live aggregate = 170. WAL projects master bucket
+        // at -30 (zero-based). With approach (b) the surfaced
+        // master row reflects the live aggregate (170) — no
+        // separate seed row, no -30 ghost row.
+        var wal = new List<(long Seq, WalEvent Event)>
+        {
+            (1, SubmitWithSubAccount(1UL, Alice, "FIRM01", null, "PETR4", OrderSide.Sell, 30, 32m)),
+            (2, Er(1UL, ExecKind.Fill, leaves: 0, cum: 30, last: 30, price: 32m, at: DayStart.AddHours(10))),
+        };
+        var seedFallback = new List<PositionRowDto>
+        {
+            new("PETR4", 170, 28m, null),
+        };
+
+        var dto = StatementProjection.Build(
+            Alice, Day, "FIRM01", wal,
+            livePositionsSnapshot: null,
+            subAccountFilter: null,
+            liveMasterSeedFallback: seedFallback);
+
+        var petr4 = Assert.Single(dto.Positions);
+        Assert.Equal("PETR4", petr4.Symbol);
+        Assert.Null(petr4.SubAccountId);
+        Assert.Equal(170, petr4.NetQty);
+        Assert.Equal(28m, petr4.AvgPrice);
     }
 }

@@ -219,46 +219,35 @@ public static class StatementProjection
         {
             positions = ProjectPositionsFromWal(owner, normFirm, dayEnd, walEventsAllTime, ownerByClOrdId, subAccountFilter);
 
-            // PR #316 P2. Today's unfiltered statement falls into this
-            // WAL-replay branch the moment any sub-account row exists
-            // for (firm, owner) — the live master snapshot would
-            // double-count, so we cannot reuse it verbatim. But WAL
-            // replay misses any positions seeded directly into
-            // PositionKeeper at host startup (TradingHostStartup applies
-            // seeds straight to the keeper, never via WAL). To recover
-            // them, the caller passes the live master snapshot through
-            // <paramref name="liveMasterSeedFallback"/>: for every
-            // symbol present there but absent from the WAL-projected
-            // master bucket we inject the live row as a master-bucket
-            // entry (SubAccountId=null). Symbols already projected from
-            // WAL keep their WAL-derived qty/avg untouched (so today's
-            // master fills are not overwritten by the seed). Only used
-            // for unfiltered queries — a sub-account-scoped statement
-            // must never see master-bucket seeds.
-            if (liveMasterSeedFallback is not null && subAccountFilter is null && liveMasterSeedFallback.Count > 0)
+            // PR #316 P2. Today's unfiltered statement falls into
+            // this WAL-replay branch the moment any sub-account row
+            // exists for (firm, owner) — the live master snapshot
+            // would double-count, so we cannot reuse it verbatim.
+            // But the WAL replay misses positions seeded directly
+            // into PositionKeeper at host startup (TradingHostStartup
+            // applies seeds straight to the keeper, never via WAL).
+            //
+            // The live master keeper aggregates everything:
+            //   liveAggregate(sym) = seedOpening + sumOfAllFills(sym)
+            // where sumOfAllFills includes BOTH master-bucket and
+            // sub-bucket fills (each fill touches the master keeper
+            // AND the sub-account keeper). The WAL replay above
+            // projects per-bucket positions (master + each sub),
+            // each starting from zero. So:
+            //   masterLogicalQty(sym) = liveAggregate(sym)
+            //                         - sum_subBuckets(walProjected(sym))
+            // This is the seed's contribution PLUS any same-day
+            // master-bucket fills, with sub-bucket activity removed.
+            // We replace any WAL-projected master row for the symbol
+            // with this corrected row, while keeping all sub-bucket
+            // rows from the WAL projection untouched. Symbols whose
+            // master-logical quantity is zero are dropped.
+            //
+            // Only applied for unfiltered queries — a sub-account-
+            // scoped statement must never see the master bucket.
+            if (liveMasterSeedFallback is not null && subAccountFilter is null)
             {
-                var masterPresent = new HashSet<string>(StringComparer.Ordinal);
-                foreach (var p in positions)
-                    if (p.SubAccountId is null) masterPresent.Add(p.Symbol);
-
-                List<PositionRowDto>? merged = null;
-                foreach (var seed in liveMasterSeedFallback)
-                {
-                    if (seed.NetQty == 0) continue;
-                    if (masterPresent.Contains(seed.Symbol)) continue;
-                    merged ??= new List<PositionRowDto>(positions);
-                    merged.Add(new PositionRowDto(seed.Symbol, seed.NetQty, seed.AvgPrice, null));
-                }
-                if (merged is not null)
-                {
-                    merged.Sort(static (a, b) =>
-                    {
-                        var bySym = string.CompareOrdinal(a.Symbol, b.Symbol);
-                        if (bySym != 0) return bySym;
-                        return string.CompareOrdinal(a.SubAccountId ?? "", b.SubAccountId ?? "");
-                    });
-                    positions = merged;
-                }
+                positions = MergeMasterWithSeedFallback(positions, liveMasterSeedFallback);
             }
         }
 
@@ -357,6 +346,88 @@ public static class StatementProjection
             return string.CompareOrdinal(a.SubAccountId ?? "", b.SubAccountId ?? "");
         });
         return rows;
+    }
+
+    /// <summary>
+    /// PR #316 P2 — approach (b). Replace the WAL-projected master
+    /// rows with rows derived from the live master keeper snapshot
+    /// minus the sum of WAL-projected sub-bucket quantities for the
+    /// same symbol. This preserves the seeded opening position while
+    /// avoiding the double-count that would occur from naively
+    /// merging the aggregate seed alongside sub-bucket WAL rows
+    /// (the seed already includes every sub-bucket fill because
+    /// fills update BOTH the per-sub keeper AND the master keeper).
+    ///
+    /// <para>
+    /// Algorithm:
+    /// </para>
+    /// <list type="number">
+    ///   <item>Sum WAL sub-bucket NetQty per symbol.</item>
+    ///   <item>Carry every WAL sub-bucket row through unchanged.</item>
+    ///   <item>For every symbol present in the live snapshot, emit a
+    ///   master row with
+    ///   <c>masterQty = liveAggregate - sumSubBucketWalQty</c> and
+    ///   <c>avgPrice = liveAggregate avg</c>. Drop when masterQty is
+    ///   zero.</item>
+    ///   <item>For symbols with a WAL master row but absent from the
+    ///   live snapshot (live aggregate netted to zero), keep the
+    ///   WAL master row as-is so non-trivial intra-day master
+    ///   positions are still visible.</item>
+    /// </list>
+    /// </summary>
+    private static IReadOnlyList<PositionRowDto> MergeMasterWithSeedFallback(
+        IReadOnlyList<PositionRowDto> walRows,
+        IReadOnlyList<PositionRowDto> liveMasterSeedFallback)
+    {
+        var subSumBySymbol = new Dictionary<string, long>(StringComparer.Ordinal);
+        var subRows = new List<PositionRowDto>();
+        var walMasterBySymbol = new Dictionary<string, PositionRowDto>(StringComparer.Ordinal);
+        foreach (var row in walRows)
+        {
+            if (row.SubAccountId is null)
+            {
+                walMasterBySymbol[row.Symbol] = row;
+            }
+            else
+            {
+                subRows.Add(row);
+                subSumBySymbol[row.Symbol] = subSumBySymbol.TryGetValue(row.Symbol, out var prior)
+                    ? prior + row.NetQty
+                    : row.NetQty;
+            }
+        }
+
+        var merged = new List<PositionRowDto>(subRows.Count + liveMasterSeedFallback.Count);
+        merged.AddRange(subRows);
+
+        var liveSymbols = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var live in liveMasterSeedFallback)
+        {
+            if (live.SubAccountId is not null) continue; // defensive: snapshot is master-only
+            liveSymbols.Add(live.Symbol);
+            var subSum = subSumBySymbol.TryGetValue(live.Symbol, out var s) ? s : 0;
+            var masterQty = live.NetQty - subSum;
+            if (masterQty == 0) continue;
+            merged.Add(new PositionRowDto(live.Symbol, masterQty, live.AvgPrice, null));
+        }
+
+        // Preserve WAL master rows for symbols whose live aggregate
+        // netted to zero (and thus dropped out of the snapshot). The
+        // formula above cannot reconstruct them without the live
+        // anchor, but their WAL projection is self-consistent.
+        foreach (var kv in walMasterBySymbol)
+        {
+            if (liveSymbols.Contains(kv.Key)) continue;
+            merged.Add(kv.Value);
+        }
+
+        merged.Sort(static (a, b) =>
+        {
+            var bySym = string.CompareOrdinal(a.Symbol, b.Symbol);
+            if (bySym != 0) return bySym;
+            return string.CompareOrdinal(a.SubAccountId ?? "", b.SubAccountId ?? "");
+        });
+        return merged;
     }
 
     /// <summary>

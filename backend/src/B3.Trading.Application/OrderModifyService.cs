@@ -110,6 +110,13 @@ public sealed class OrderModifyService
         if (orig.Owner != req.Owner)
             return OrderModifyResult.NotFound; // do not leak existence cross-owner
 
+        // PR #316 P1. Reject cross-firm modifies — a JWT sub
+        // registered in two firms knowing a ClOrdId from another
+        // firm must not be able to mutate it. Treated as NotFound
+        // (same as cross-owner) so existence is not leaked.
+        if (req.FirmId is not null && !string.Equals(orig.FirmId, req.FirmId, StringComparison.Ordinal))
+            return OrderModifyResult.NotFound;
+
         if (orig.Status is OrderStatus.Filled or OrderStatus.Cancelled
             or OrderStatus.Rejected or OrderStatus.Replaced)
         {
@@ -365,7 +372,17 @@ public sealed record OrderModifyRequest(
     decimal? NewPrice,
     TimeInForce? NewTimeInForce = null,
     decimal? NewStopPrice = null,
-    DateTimeOffset? NewGoodTillDate = null);
+    DateTimeOffset? NewGoodTillDate = null,
+    /// <summary>
+    /// PR #316 P1. Caller's firm scope. When non-null, the service
+    /// rejects (as NotFound) modifies whose original order belongs
+    /// to a different firm — same isolation guard as
+    /// <c>OrdersEndpoints</c>' GET path. Optional for back-compat
+    /// with internal callers (algo engine, GTD scheduler) that
+    /// already operate on a known order; user-facing transports
+    /// (REST, FIXP) must populate it.
+    /// </summary>
+    string? FirmId = null);
 
 /// <summary>
 /// Outcome of <see cref="OrderModifyService.ModifyAsync"/>. The

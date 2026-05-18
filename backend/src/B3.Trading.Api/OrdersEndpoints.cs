@@ -192,10 +192,12 @@ public static class OrdersEndpoints
             }
 
             var owner = ResolveOwner(ctx, registry);
+            var firm = ResolveFirm(ctx);
             var result = await modifier.ModifyAsync(
                 new OrderModifyRequest(
                     owner, clOrdIdU, req.Quantity, req.Price,
-                    tif, req.StopPrice, req.GoodTillDate),
+                    tif, req.StopPrice, req.GoodTillDate,
+                    FirmId: firm),
                 ct);
 
             return result.Kind switch
@@ -241,10 +243,14 @@ public static class OrdersEndpoints
                 return Results.NotFound();
 
             var owner = ResolveOwner(ctx, registry);
+            var firm = ResolveFirm(ctx);
             // Sub-issue #171 (E): REST cancels now go through the WAL-
             // durable OrderCancelRequestedEvent path (RFC §4.6 / §4.8).
             // botOrigin is null — REST is not a bot session.
-            var result = await canceller.CancelAsync(owner, clOrdIdU, ct);
+            // PR #316 P1 — pass firm so the service rejects (as
+            // NotFound) cancels that target an order owned by a
+            // different firm, matching GET /orders scoping.
+            var result = await canceller.CancelAsync(owner, clOrdIdU, ct, firmId: firm);
             return result.Kind switch
             {
                 OrderCancelResultKind.Accepted => Results.NoContent(),
