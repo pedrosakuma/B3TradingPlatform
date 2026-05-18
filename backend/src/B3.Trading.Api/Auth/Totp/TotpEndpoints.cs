@@ -1,5 +1,7 @@
 using System.Security.Claims;
 using B3.Trading.Application;
+using B3.Trading.Application.Audit;
+using B3.Trading.Application.Persistence;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -32,7 +34,8 @@ public static class TotpEndpoints
             ITotpChallengeStore challenges,
             ITotpService totp,
             ITotpSecretProtector protector,
-            IOptions<TotpOptions> opts) =>
+            IOptions<TotpOptions> opts,
+            IAuditLogger audit) =>
         {
             // Two auth modes:
             //   (a) JWT bearer — normal self-service enrollment.
@@ -71,6 +74,21 @@ public static class TotpEndpoints
             if (enrollmentToken is not null)
                 challenges.Invalidate(enrollmentToken);
 
+            audit.Log(new AuditLogEvent
+            {
+                EventType = AuditEventTypes.AuthTwoFactorEnrollStart,
+                Outcome = AuditOutcomes.Success,
+                ActorUserId = user.Username,
+                ActorUsername = user.Username,
+                ActorFirm = user.Firm,
+                ActorRole = user.Role,
+                SourceIp = http.Connection.RemoteIpAddress?.ToString(),
+                ResourcePath = "/auth/2fa/enroll",
+                Details = enrollmentToken is null
+                    ? null
+                    : new Dictionary<string, string> { ["mode"] = "force_enroll_token" },
+            });
+
             return Results.Ok(new EnrollResponse(
                 Secret: secret,
                 OtpauthUri: uri,
@@ -87,7 +105,8 @@ public static class TotpEndpoints
             ITotpAttemptTracker lockout,
             ITotpService totp,
             ITotpSecretProtector protector,
-            EndClientRegistry registry) =>
+            EndClientRegistry registry,
+            IAuditLogger audit) =>
         {
             if (req is null || string.IsNullOrWhiteSpace(req.Code))
                 return Results.BadRequest(new { error = "code required" });
@@ -168,6 +187,18 @@ public static class TotpEndpoints
                     // alternative lets attackers brute-force lockout.
                     if (!recoveryAlreadyConsumed)
                         lockout.RecordFailure(ch.Username);
+                    audit.Log(new AuditLogEvent
+                    {
+                        EventType = AuditEventTypes.AuthTwoFactorVerifyFailure,
+                        Outcome = AuditOutcomes.Failure,
+                        ActorUserId = user.Username,
+                        ActorUsername = user.Username,
+                        ActorFirm = user.Firm,
+                        ActorRole = user.Role,
+                        SourceIp = http.Connection.RemoteIpAddress?.ToString(),
+                        ResourcePath = "/auth/2fa/verify",
+                        ReasonCode = recoveryAlreadyConsumed ? "recovery_code_replayed" : "2fa_wrong_code",
+                    });
                     return Results.Json(new { error = "invalid code" },
                         statusCode: StatusCodes.Status401Unauthorized);
                 }
@@ -177,6 +208,19 @@ public static class TotpEndpoints
 
                 registry.Register(user.Username);
                 var (jwt, expires) = issuer.Issue(user.Username, user.Role, user.Firm);
+                audit.Log(new AuditLogEvent
+                {
+                    EventType = recoveryOk
+                        ? AuditEventTypes.AuthTwoFactorRecoveryCodeConsumed
+                        : AuditEventTypes.AuthTwoFactorVerifySuccess,
+                    Outcome = AuditOutcomes.Success,
+                    ActorUserId = user.Username,
+                    ActorUsername = user.Username,
+                    ActorFirm = user.Firm,
+                    ActorRole = user.Role,
+                    SourceIp = http.Connection.RemoteIpAddress?.ToString(),
+                    ResourcePath = "/auth/2fa/verify",
+                });
                 return Results.Ok(new LoginResponse(jwt, expires));
             }
 
@@ -220,6 +264,17 @@ public static class TotpEndpoints
                 LastUsedTimeStep = enrollStep,
             };
             users.TryUpdate(jwtUser);
+            audit.Log(new AuditLogEvent
+            {
+                EventType = AuditEventTypes.AuthTwoFactorEnrollConfirm,
+                Outcome = AuditOutcomes.Success,
+                ActorUserId = jwtUser.Username,
+                ActorUsername = jwtUser.Username,
+                ActorFirm = jwtUser.Firm,
+                ActorRole = jwtUser.Role,
+                SourceIp = http.Connection.RemoteIpAddress?.ToString(),
+                ResourcePath = "/auth/2fa/verify",
+            });
             return Results.Ok(new { enrolled = true });
         });
 
@@ -230,7 +285,8 @@ public static class TotpEndpoints
             IPendingTotpEnrollmentStore pending,
             ITotpAttemptTracker lockout,
             ITotpService totp,
-            ITotpSecretProtector protector) =>
+            ITotpSecretProtector protector,
+            IAuditLogger audit) =>
         {
             if (req is null || string.IsNullOrWhiteSpace(req.Code))
                 return Results.BadRequest(new { error = "current TOTP code required" });
@@ -285,6 +341,17 @@ public static class TotpEndpoints
             user.Totp = null;
             users.TryUpdate(user);
             pending.Remove(user.Username);
+            audit.Log(new AuditLogEvent
+            {
+                EventType = AuditEventTypes.AuthTwoFactorDisable,
+                Outcome = AuditOutcomes.Success,
+                ActorUserId = user.Username,
+                ActorUsername = user.Username,
+                ActorFirm = user.Firm,
+                ActorRole = user.Role,
+                SourceIp = http.Connection.RemoteIpAddress?.ToString(),
+                ResourcePath = "/auth/2fa/disable",
+            });
             return Results.Ok(new { disabled = true });
         }).RequireAuthorization();
 

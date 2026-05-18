@@ -54,9 +54,8 @@ public sealed class PersistenceRecovery
         var replayed = 0;
         await foreach (var (seq, evt) in _store.ReadFromAsync(since, ct).ConfigureAwait(false))
         {
-            _replayer.Apply(evt);
+            _replayer.Apply(seq, evt);
             replayed++;
-            _ = seq;
         }
         // Q2.3 (#270) pass-3. After draining the WAL, materialise any
         // ER-fill fee synths that were not superseded by a durable

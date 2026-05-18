@@ -1,3 +1,5 @@
+using System.Security.Claims;
+using B3.Trading.Application.Audit;
 using B3.Trading.Application.UserBots;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -46,6 +48,11 @@ public static class AdminFixpEndpoints
             var sessions = ctx.RequestServices.GetService<IUserBotSessionRegistry>();
             if (sessions is null) return Results.NotFound();
             var newVer = await sessions.BumpVersionAsync(credentialId, "operator", ct);
+            EmitAuditIfWired(ctx, "/admin/fixp/sessions/bump", AuditOutcomes.Success, new()
+            {
+                ["credential_id"] = credentialId.ToString(),
+                ["new_version"] = newVer.ToString(),
+            });
             return Results.Ok(new { credentialId, newVersion = newVer });
         });
 
@@ -54,6 +61,9 @@ public static class AdminFixpEndpoints
             var dir = ctx.RequestServices.GetService<BotSessionConnectionDirectory>();
             if (dir is null) return Results.NotFound();
             var terminated = dir.TryForceTerminate(credentialId);
+            EmitAuditIfWired(ctx, "/admin/fixp/sessions/terminate",
+                terminated ? AuditOutcomes.Success : AuditOutcomes.Failure,
+                new() { ["credential_id"] = credentialId.ToString(), ["terminated"] = terminated ? "true" : "false" });
             return terminated ? Results.Ok(new { credentialId, terminated = true })
                              : Results.NotFound();
         });
@@ -71,5 +81,23 @@ public static class AdminFixpEndpoints
         });
 
         return app;
+    }
+
+    private static void EmitAuditIfWired(HttpContext ctx, string resourcePath, string outcome, Dictionary<string, string>? details = null)
+    {
+        var audit = ctx.RequestServices.GetService<IAuditLogger>();
+        if (audit is null) return;
+        audit.Log(new B3.Trading.Application.Persistence.AuditLogEvent
+        {
+            EventType = AuditEventTypes.AdminConfigChange,
+            Outcome = outcome,
+            ActorUserId = ctx.User.FindFirstValue("sub"),
+            ActorUsername = ctx.User.FindFirstValue("sub"),
+            ActorFirm = ctx.User.FindFirstValue("firm"),
+            ActorRole = ctx.User.FindFirstValue("role"),
+            SourceIp = ctx.Connection.RemoteIpAddress?.ToString(),
+            ResourcePath = resourcePath,
+            Details = details,
+        });
     }
 }

@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using B3.Trading.Api.Auth;
 using B3.Trading.Application;
+using B3.Trading.Application.Audit;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Domain;
 using Microsoft.AspNetCore.Builder;
@@ -40,7 +41,8 @@ public static class SubAccountsEndpoints
             SubAccountCreateRequest? req,
             HttpContext ctx,
             SubAccountsRegistry registry,
-            EventDispatcher dispatcher) =>
+            EventDispatcher dispatcher,
+            IAuditLogger audit) =>
         {
             if (req is null) return Results.BadRequest(new { error = "missing body" });
             SubAccountId id;
@@ -62,6 +64,23 @@ public static class SubAccountsEndpoints
                         ActorUserId = actor,
                     },
                     () => registry.ApplyCreated(firm, id.Value, req.DisplayName));
+                audit.Log(new AuditLogEvent
+                {
+                    EventType = AuditEventTypes.AdminSubAccountCreate,
+                    Outcome = AuditOutcomes.Success,
+                    ActorUserId = actor,
+                    ActorUsername = actor,
+                    ActorFirm = firm,
+                    ActorRole = ctx.User.FindFirstValue(JwtIssuer.RoleClaim),
+                    SourceIp = ctx.Connection.RemoteIpAddress?.ToString(),
+                    ResourcePath = "/sub-accounts",
+                    Details = new Dictionary<string, string>
+                    {
+                        ["firm"] = firm,
+                        ["sub_account_id"] = id.Value,
+                        ["display_name"] = req.DisplayName ?? "",
+                    },
+                });
                 return Results.Created($"/sub-accounts/{id.Value}",
                     new SubAccountDto(id.Value, req.DisplayName, Active: true));
             }
@@ -77,7 +96,8 @@ public static class SubAccountsEndpoints
             string id,
             HttpContext ctx,
             SubAccountsRegistry registry,
-            EventDispatcher dispatcher) =>
+            EventDispatcher dispatcher,
+            IAuditLogger audit) =>
         {
             SubAccountId sub;
             try { sub = new SubAccountId(id); }
@@ -99,6 +119,22 @@ public static class SubAccountsEndpoints
                         ActorUserId = actor,
                     },
                     () => registry.ApplyDeactivated(firm, sub.Value));
+                audit.Log(new AuditLogEvent
+                {
+                    EventType = AuditEventTypes.AdminSubAccountDeactivate,
+                    Outcome = AuditOutcomes.Success,
+                    ActorUserId = actor,
+                    ActorUsername = actor,
+                    ActorFirm = firm,
+                    ActorRole = ctx.User.FindFirstValue(JwtIssuer.RoleClaim),
+                    SourceIp = ctx.Connection.RemoteIpAddress?.ToString(),
+                    ResourcePath = $"/sub-accounts/{sub.Value}",
+                    Details = new Dictionary<string, string>
+                    {
+                        ["firm"] = firm,
+                        ["sub_account_id"] = sub.Value,
+                    },
+                });
                 return Results.NoContent();
             }
             catch (WalBackpressureException ex)

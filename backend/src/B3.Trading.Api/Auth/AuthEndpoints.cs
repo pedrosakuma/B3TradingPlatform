@@ -1,5 +1,7 @@
 using B3.Trading.Api.Auth.Totp;
 using B3.Trading.Application;
+using B3.Trading.Application.Audit;
+using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
 using Microsoft.AspNetCore.Builder;
@@ -31,15 +33,29 @@ public static class AuthEndpoints
     public static IEndpointRouteBuilder MapAuth(this IEndpointRouteBuilder app)
     {
         app.MapPost("/auth/login", (
+            HttpContext http,
             LoginRequest req,
             IUserStore users,
             JwtIssuer issuer,
             EndClientRegistry registry,
             ILoginAttemptTracker lockout,
-            ITotpChallengeStore totpChallenges) =>
+            ITotpChallengeStore totpChallenges,
+            IAuditLogger audit) =>
         {
+            var sourceIp = http.Connection.RemoteIpAddress?.ToString();
             if (req is null || string.IsNullOrWhiteSpace(req.Username) || string.IsNullOrWhiteSpace(req.Password))
+            {
+                audit.Log(new AuditLogEvent
+                {
+                    EventType = AuditEventTypes.AuthLoginFailure,
+                    Outcome = AuditOutcomes.Failure,
+                    ActorUsername = req?.Username,
+                    SourceIp = sourceIp,
+                    ResourcePath = "/auth/login",
+                    ReasonCode = "missing_credentials",
+                });
                 return Results.BadRequest(new { error = "username and password required" });
+            }
 
             // Lockout check uses the trimmed username so "alice " and
             // "alice" share the same bucket. Response is intentionally
@@ -48,7 +64,18 @@ public static class AuthEndpoints
             // usernames exist.
             var loginUsername = req.Username.Trim();
             if (lockout.IsLocked(loginUsername))
+            {
+                audit.Log(new AuditLogEvent
+                {
+                    EventType = AuditEventTypes.AuthLoginFailure,
+                    Outcome = AuditOutcomes.Failure,
+                    ActorUsername = loginUsername,
+                    SourceIp = sourceIp,
+                    ResourcePath = "/auth/login",
+                    ReasonCode = "locked",
+                });
                 return Results.Json(new { error = "invalid credentials" }, statusCode: StatusCodes.Status401Unauthorized);
+            }
 
             if (!users.TryGet(loginUsername, out var user) || user is null
                 || !PasswordHasher.Verify(req.Password, user.PasswordHash, user.Salt, user.Iterations))
@@ -58,6 +85,15 @@ public static class AuthEndpoints
                 // intentional — otherwise an attacker can probe which
                 // usernames exist by observing whether lockouts engage.
                 lockout.RecordFailure(loginUsername);
+                audit.Log(new AuditLogEvent
+                {
+                    EventType = AuditEventTypes.AuthLoginFailure,
+                    Outcome = AuditOutcomes.Failure,
+                    ActorUsername = loginUsername,
+                    SourceIp = sourceIp,
+                    ResourcePath = "/auth/login",
+                    ReasonCode = user is null ? "unknown_user" : "bad_password",
+                });
                 return Results.Json(new { error = "invalid credentials" }, statusCode: StatusCodes.Status401Unauthorized);
             }
 
@@ -71,6 +107,18 @@ public static class AuthEndpoints
             if (user.Totp is { EnrolledAt: not null, SharedSecret.Length: > 0 })
             {
                 var token = totpChallenges.Issue(user.Username, TotpChallengeKind.Verify);
+                audit.Log(new AuditLogEvent
+                {
+                    EventType = AuditEventTypes.AuthLoginFailure,
+                    Outcome = AuditOutcomes.Failure,
+                    ActorUserId = user.Username,
+                    ActorUsername = user.Username,
+                    ActorFirm = user.Firm,
+                    ActorRole = user.Role,
+                    SourceIp = sourceIp,
+                    ResourcePath = "/auth/login",
+                    ReasonCode = "2fa_required",
+                });
                 return Results.Ok(new LoginTwoFactorRequiredResponse(
                     Requires2fa: true,
                     TotpChallengeToken: token));
@@ -82,6 +130,18 @@ public static class AuthEndpoints
             if (user.Require2FA)
             {
                 var token = totpChallenges.Issue(user.Username, TotpChallengeKind.ForceEnroll);
+                audit.Log(new AuditLogEvent
+                {
+                    EventType = AuditEventTypes.AuthLoginFailure,
+                    Outcome = AuditOutcomes.Failure,
+                    ActorUserId = user.Username,
+                    ActorUsername = user.Username,
+                    ActorFirm = user.Firm,
+                    ActorRole = user.Role,
+                    SourceIp = sourceIp,
+                    ResourcePath = "/auth/login",
+                    ReasonCode = "2fa_required_but_missing",
+                });
                 return Results.Ok(new LoginEnrollmentRequiredResponse(
                     Requires2faEnrollment: true,
                     EnrollmentToken: token));
@@ -92,6 +152,17 @@ public static class AuthEndpoints
             registry.Register(user.Username);
 
             var (jwt, expires) = issuer.Issue(user.Username, user.Role, user.Firm);
+            audit.Log(new AuditLogEvent
+            {
+                EventType = AuditEventTypes.AuthLoginSuccess,
+                Outcome = AuditOutcomes.Success,
+                ActorUserId = user.Username,
+                ActorUsername = user.Username,
+                ActorFirm = user.Firm,
+                ActorRole = user.Role,
+                SourceIp = sourceIp,
+                ResourcePath = "/auth/login",
+            });
             return Results.Ok(new LoginResponse(jwt, expires));
         });
 

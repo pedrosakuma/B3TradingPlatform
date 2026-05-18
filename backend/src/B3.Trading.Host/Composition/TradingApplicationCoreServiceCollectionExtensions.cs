@@ -50,6 +50,17 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         services.AddSingleton<SubAccountsRegistry>();
         services.AddSingleton<SubAccountPositionKeeper>();
         services.AddSingleton<SubAccountPnlKeeper>();
+        // Q4.5 (#305). Audit log keeper + dispatcher-backed logger.
+        // Both singletons so the live-dispatch path, recovery replay
+        // and admin read endpoint all share the same in-memory ring
+        // buffer. AuditLogger has a hard dep on EventDispatcher which
+        // is registered in AddTradingPersistence; Program.cs orders
+        // ApplicationCore → Persistence, so resolution at first use
+        // (HTTP handlers) sees both wired.
+        services.Configure<B3.Trading.Application.Audit.AuditLogOptions>(
+            configuration.GetSection(B3.Trading.Application.Audit.AuditLogOptions.SectionName));
+        services.AddSingleton<B3.Trading.Application.Audit.AuditLogKeeper>();
+        services.AddSingleton<B3.Trading.Application.Audit.IAuditLogger, B3.Trading.Application.Audit.AuditLogger>();
         services.AddSingleton<InMemoryUserBotCredentialRegistry>();
         services.AddSingleton<IUserBotCredentialRegistry>(sp =>
             sp.GetRequiredService<InMemoryUserBotCredentialRegistry>());

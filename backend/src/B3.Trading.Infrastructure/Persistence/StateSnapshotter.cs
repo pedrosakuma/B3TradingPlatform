@@ -1,4 +1,5 @@
 using B3.Trading.Application;
+using B3.Trading.Application.Audit;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.Scheduling;
@@ -736,6 +737,14 @@ public sealed class EventReplayer
     private readonly SubAccountPnlKeeper? _subAccountPnl;
     private readonly IFeeCalculator? _feeCalculator;
     /// <summary>
+    /// Q4.5 (#305). Optional. When wired, replay folds every
+    /// <see cref="AuditLogEvent"/> into the in-memory ring-buffer
+    /// keeper that backs <c>GET /admin/audit</c>, so post-restart
+    /// reads converge with steady state (bounded by the keeper's
+    /// configured capacity).
+    /// </summary>
+    private readonly AuditLogKeeper? _auditKeeper;
+    /// <summary>
     /// Pass-1 review (#295) P1#1. Optional. When wired, replay folds
     /// <see cref="AlgoPovSlicedEvent.MarketVolumeSeen"/> +
     /// <see cref="AlgoPovSlicedEvent.LastEvaluateAtUtc"/> into the
@@ -789,7 +798,11 @@ public sealed class EventReplayer
         IReplaceMarginCoordinator? replaceMargin = null,
         SubAccountsRegistry? subAccounts = null,
         SubAccountPositionKeeper? subAccountPositions = null,
-        SubAccountPnlKeeper? subAccountPnl = null)
+        SubAccountPnlKeeper? subAccountPnl = null,
+        // Q4.5 (#305). Optional. When wired, replay of
+        // <see cref="AuditLogEvent"/> folds the envelope into the
+        // in-memory ring-buffer keeper that backs GET /admin/audit.
+        AuditLogKeeper? auditKeeper = null)
     {
         _orders = orders;
         _ownership = ownership;
@@ -815,6 +828,26 @@ public sealed class EventReplayer
         _subAccounts = subAccounts;
         _subAccountPositions = subAccountPositions;
         _subAccountPnl = subAccountPnl;
+        _auditKeeper = auditKeeper;
+    }
+
+    /// <summary>
+    /// Q4.5 (#305). Overload that carries the WAL seq so an
+    /// <see cref="AuditLogEvent"/> can be folded into
+    /// <see cref="AuditLogKeeper"/> with the canonical
+    /// monotonic id used by the read-path cursor. Every non-audit
+    /// event routes through the legacy <see cref="Apply(WalEvent)"/>
+    /// path unchanged so existing callers (tests that don't track
+    /// seq) keep working.
+    /// </summary>
+    public void Apply(long seq, WalEvent evt)
+    {
+        if (evt is AuditLogEvent ae)
+        {
+            _auditKeeper?.Apply(seq, ae);
+            return;
+        }
+        Apply(evt);
     }
 
     /// <summary>
