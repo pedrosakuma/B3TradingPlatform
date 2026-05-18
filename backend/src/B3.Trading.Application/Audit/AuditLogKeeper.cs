@@ -155,13 +155,23 @@ public sealed class AuditLogKeeper
             {
                 // Pre-cap: grow the backing array geometrically up to
                 // the cap so initial sparse usage doesn't allocate the
-                // full bound. `_head` equals `_count` until we wrap.
+                // full bound. `_head` may already have wrapped to 0 by
+                // the time we reach the grow trigger (head advances
+                // modulo ring length, so a sequential 0..len-1 fill
+                // leaves head==0). After Array.Copy the entries occupy
+                // physical slots 0.._count-1 in logical order, so the
+                // next append must go to slot _count. Pass-3 review
+                // (#322) caught the missing reset: without it the new
+                // entry overwrites slot 0 and slots _count..len-1
+                // stay null, crashing Query with NRE at the first
+                // walk past the original ring length.
                 if (_count == _ring.Length)
                 {
                     var newLen = Math.Min(_capacity, Math.Max(_ring.Length * 2, 16));
                     var grown = new AuditEntry?[newLen];
                     Array.Copy(_ring, grown, _count);
                     _ring = grown;
+                    _head = _count;
                 }
                 _ring[_head] = entry;
                 _head = (_head + 1) % _ring.Length;

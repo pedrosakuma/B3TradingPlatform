@@ -63,4 +63,43 @@ public class AuditLogKeeperEvictionTests
         var page = keeper.Query(baseUtc.AddYears(-1), baseUtc.AddYears(1), null, null, null, 100, null);
         Assert.Equal(new long[] { 9, 8, 7 }, page.Entries.Select(e => e.Seq).ToArray());
     }
+
+    /// <summary>
+    /// Pass-3 review (#322): pre-cap geometric growth must reset
+    /// <c>_head</c> after the underlying array doubles. The previous
+    /// implementation left <c>_head</c> at its wrapped value (0) after
+    /// the first growth at <c>len=1024</c>, so the 1025th append
+    /// overwrote slot 0 and left slots <c>1024..len-1</c> null —
+    /// <see cref="AuditLogKeeper.Query"/> then dereferenced a null
+    /// entry and crashed with NRE. Capacity 2048 forces at least one
+    /// growth from the initial 1024-slot ring while staying well
+    /// below the cap.
+    /// </summary>
+    [Fact]
+    public void GeometricGrowthPastInitialRingLength_DoesNotLoseEntriesOrCrashQuery()
+    {
+        var keeper = new AuditLogKeeper(Options.Create(new AuditLogOptions { Capacity = 2048 }));
+        var baseUtc = new DateTimeOffset(2026, 5, 18, 0, 0, 0, TimeSpan.Zero);
+
+        const int total = 1100;
+        for (long seq = 1; seq <= total; seq++)
+        {
+            keeper.Apply(seq, new AuditLogEvent
+            {
+                EventType = AuditEventTypes.AuthLoginSuccess,
+                Outcome = AuditOutcomes.Success,
+                TimestampUtc = baseUtc.AddSeconds(seq),
+            });
+        }
+
+        Assert.Equal(total, keeper.Count);
+
+        var page = keeper.Query(baseUtc.AddYears(-1), baseUtc.AddYears(1), null, null, null, limit: 500, cursorSeq: null);
+        Assert.Equal(500, page.Entries.Count);
+        // Newest-first; no NRE; no gaps.
+        for (var i = 0; i < page.Entries.Count; i++)
+        {
+            Assert.Equal(total - i, page.Entries[i].Seq);
+        }
+    }
 }
