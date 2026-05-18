@@ -33,9 +33,11 @@ internal sealed class SegmentWriter : IAsyncDisposable
 {
     public const int RecordHeaderBytes = 8; // length(4) + crc32(4)
     public const int IndexRecordBytes = 24; // seq(8) + offset(8) + ts(8)
+    public const string FirstSeqSidecarSuffix = ".firstseq";
 
     private readonly FileStream _log;
     private readonly FileStream _idx;
+    private readonly string _logPath;
     private readonly int _indexEveryNRecords;
     private readonly int _indexEveryNBytes;
     private readonly bool _fsyncOnFlush;
@@ -44,6 +46,7 @@ internal sealed class SegmentWriter : IAsyncDisposable
     private int _recordsSinceIndex;
     private bool _indexDirty;
     private bool _disposed;
+    private bool _firstSeqWritten;
 
     // Test seam: internal counters of how many times we've actually issued
     // a Flush(_fsyncOnFlush) on the underlying log/idx streams. Used by
@@ -59,16 +62,39 @@ internal sealed class SegmentWriter : IAsyncDisposable
         _log.Seek(0, SeekOrigin.End);
         _idx = new FileStream(idxPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.Read, bufferSize: 4096);
         _idx.Seek(0, SeekOrigin.End);
+        _logPath = logPath;
         _indexEveryNRecords = indexEveryNRecords;
         _indexEveryNBytes = indexEveryNBytes;
         _fsyncOnFlush = fsyncOnFlush;
         _bytesAtLastIndex = _log.Length;
+        // If the segment is being reopened mid-write (recovery / second
+        // pass within the same day-dir) and a sidecar already exists,
+        // treat it as already-written so we don't overwrite it.
+        _firstSeqWritten = File.Exists(logPath + FirstSeqSidecarSuffix) || _log.Length > 0;
     }
 
     public long BytesWritten => _log.Length;
 
     public void Append(long seq, ReadOnlySpan<byte> payload, long timestampMs)
     {
+        // Pass-1 fix (#328). On the very first append of a fresh
+        // segment, persist its starting seq into a sidecar file
+        // (<base>.log.firstseq) so the reader can sort segments in
+        // strict seq order across day directories. Without this, day
+        // directories partitioned by event-timestamp (e.g. late ER
+        // arriving with yesterday's timestamp after UTC rollover, or
+        // any backdated replay) made EnumerateAllRecords assign
+        // synthetic seqs in directory-alphabetical order, diverging
+        // from the in-memory _seq — and any reader that capped by
+        // CurrentSeq (e.g. StatementEndpoints.BuildAsync past-day
+        // path) would slice between an ER and its nested FeeAccrued,
+        // producing a torn snapshot.
+        if (!_firstSeqWritten)
+        {
+            WriteFirstSeqSidecar(seq);
+            _firstSeqWritten = true;
+        }
+
         Span<byte> header = stackalloc byte[RecordHeaderBytes];
         BinaryPrimitives.WriteUInt32LittleEndian(header, (uint)payload.Length);
         BinaryPrimitives.WriteUInt32LittleEndian(header[4..], Crc32.HashToUInt32(payload));
@@ -84,6 +110,25 @@ internal sealed class SegmentWriter : IAsyncDisposable
             _recordsSinceIndex = 0;
             _bytesAtLastIndex = _log.Position;
         }
+    }
+
+    private void WriteFirstSeqSidecar(long firstSeq)
+    {
+        // Atomic-ish: write to a temp file then move into place. The
+        // sidecar is only ever read by EnumerateAllRecords for
+        // segment ordering — a missing sidecar falls back to the
+        // legacy count-based path, so a torn write here can't make
+        // the WAL unreadable, only fall back to legacy ordering.
+        var sidecar = _logPath + FirstSeqSidecarSuffix;
+        var tmp = sidecar + ".tmp";
+        Span<byte> bytes = stackalloc byte[8];
+        BinaryPrimitives.WriteInt64LittleEndian(bytes, firstSeq);
+        using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 8))
+        {
+            fs.Write(bytes);
+            if (_fsyncOnFlush) fs.Flush(flushToDisk: true);
+        }
+        File.Move(tmp, sidecar, overwrite: true);
     }
 
     private void WriteIndexEntry(long seq, long offset, long timestampMs)
