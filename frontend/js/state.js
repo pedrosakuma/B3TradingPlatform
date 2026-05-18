@@ -97,7 +97,14 @@ const state = {
   killStatus: null,        // { endClients: [], firms: [], fetchedAt } | null — admin-only
   haltStatus: null,        // { symbols: [], fetchedAt } | null — admin-only
   eodReport: null,         // { ranAt, report } | null — last EOD response in this session
-  currentView: "trader",   // "trader" | "admin" | "bot-credentials" — which view is mounted
+  currentView: "trader",   // "trader" | "admin" | "bot-credentials" | "compliance" — which view is mounted
+  // Q4.14 (#314). Rolling drop-copy feed surfaced on the compliance
+  // view. The buffer is capped at COMPLIANCE_FEED_CAP so the table
+  // can render every entry without virtualising. `paused` halts
+  // appends (incoming frames are dropped on the floor) but does not
+  // close the underlying WebSocket — the compliance user can resume
+  // and not miss the tail-end of a high-volume burst.
+  complianceFeed: { paused: false, entries: [] },
   // Blotter UX (section 3 of #30).
   blotterFilter: { text: "", status: "" }, // { text: substring, status: "" | <OrderStatus> }
   // Per-ClOrdID monotonic arrival sequence. Newly-seen orders get the
@@ -277,6 +284,10 @@ export function clearAll() {
   state.phaseBySymbol.clear();
   state.phaseAtBySymbol.clear();
   state.auctionBySymbol.clear();
+  // Q4.14 (#314). Drop-copy feed is per-session — drop it on logout
+  // so the next user doesn't inherit the previous compliance
+  // operator's tail.
+  state.complianceFeed = { paused: false, entries: [] };
   // Q1.4 (#256). Risk policy is per-session — the cap is sourced from
   // the backend via `GET /policy/risk` on session start. Carrying a
   // previous session's value across logout/reconnect risks validating
@@ -713,6 +724,37 @@ export function setCurrentView(view) {
   if (state.currentView === view) return;
   state.currentView = view;
   notify("currentView");
+}
+
+// ── Q4.14 (#314). Compliance drop-copy feed slice ──────────────────
+
+export const COMPLIANCE_FEED_CAP = 200;
+
+export function appendComplianceFeed(entry) {
+  if (!entry || typeof entry !== "object") return;
+  const feed = state.complianceFeed;
+  if (feed.paused) return;
+  // Mutate in place + reassign array so subscribers using shallow
+  // equality see a change. Cap to the configured ring length —
+  // drop the oldest entries (head) so the table renders the most
+  // recent traffic.
+  const next = feed.entries.length >= COMPLIANCE_FEED_CAP
+    ? feed.entries.slice(feed.entries.length - COMPLIANCE_FEED_CAP + 1)
+    : feed.entries.slice();
+  next.push(entry);
+  state.complianceFeed = { paused: feed.paused, entries: next };
+  notify("complianceFeed");
+}
+
+export function setComplianceFeedPaused(paused) {
+  if (state.complianceFeed.paused === !!paused) return;
+  state.complianceFeed = { paused: !!paused, entries: state.complianceFeed.entries };
+  notify("complianceFeed");
+}
+
+export function clearComplianceFeed() {
+  state.complianceFeed = { paused: state.complianceFeed.paused, entries: [] };
+  notify("complianceFeed");
 }
 
 // ── Blotter UX slices (section 3 of #30) ───────────────────────────

@@ -8,6 +8,7 @@ import { defaultBackend, defaultMarketDataUrl, login, signup, submitOrder, cance
          listUserBotCredentials, createUserBotCredential, deleteUserBotCredential,
          getOrdersHistory, getExecutionsHistory, getPnlToday,
          getStatement, downloadStatementCsv,
+         searchAuditLog, getFillTouch, downloadCvmReport, buildDropCopyWebSocketUrl,
          verifyTotp, enrollTotp, disableTotp } from "./protocol.js";
 import { claimsFromToken } from "./jwt.js";
 import { validateOrder, pretradeWarnings, payloadKey } from "./validation.js";
@@ -17,6 +18,8 @@ import * as ui from "./ui.js";
 import * as adminUi from "./adminUi.js";
 import * as botCredentialsUi from "./botCredentialsUi.js";
 import * as historyUi from "./historyUi.js";
+import * as complianceUi from "./complianceUi.js";
+import { tabsForRole, defaultViewForRole } from "./complianceUi.js";
 import { FLAGS } from "./mdProtocol.js";
 import { applyRiskPolicyFetch } from "./riskPolicy.js";
 
@@ -87,6 +90,7 @@ function init() {
   adminUi.bindAdminUi();
   botCredentialsUi.bindBotCredentialsUi();
   historyUi.bindHistoryUi();
+  complianceUi.bindComplianceUi();
   ui.setHandlers({
     onSubmitOrder: handleSubmitOrder,
     onCancelOrder: handleCancelOrder,
@@ -128,6 +132,12 @@ function init() {
     onLoadMoreExecs:  () => loadMoreHistoryExecutions(false),
     onDownloadCsv:    handleStatementDownload,
     onViewJson:       handleStatementViewJson,
+  });
+  complianceUi.setComplianceHandlers({
+    onAuditSearch:     handleAuditSearch,
+    onAuditNext:       handleAuditSearch,
+    onFillTouchLookup: handleFillTouchLookup,
+    onCvmDownload:     handleCvmDownload,
   });
 
   // Q1.6 (#258). Whenever the watchlist or auctionPanelSymbol slice
@@ -440,8 +450,19 @@ function startSession(next) {
   state.setKillStatus(null);
   state.setHaltStatus(null);
   state.setEodReport(null);
-  state.setCurrentView("trader");
+  // Hide login + neighbouring sub-views; applyCurrentView (subscribed
+  // to setCurrentView below) then toggles the right view-section
+  // visible. showTrader() runs first so the brief flash is the
+  // trader scaffold, never login-into-compliance.
   ui.showTrader();
+  const initialView = defaultViewForRole(next.role);
+  state.setCurrentView(initialView);
+  if (initialView === "compliance") {
+    // Compliance users land directly on the compliance console — no
+    // trader view, no admin polls. Open the drop-copy socket so the
+    // live feed has data the moment the panel renders.
+    openComplianceDropCopy();
+  }
 
   startWorker();
   startMdWorker();
@@ -1004,6 +1025,7 @@ function logout() {
   mbpEnabled = false;
   session = null;
   mdConfig = null;
+  closeComplianceDropCopy();
   clearSession();
   clearMdConfig();
   state.setUser(null);
@@ -1127,8 +1149,20 @@ async function pollGatewayOnce() {
 // ── Admin view + actions ───────────────────────────────────────────
 
 function handleSwitchView(view) {
-  if (view === "admin" && session?.role !== "admin") return; // safety
+  if (!session) return;
+  // Role-gate the target view. Plain users can only see trader /
+  // bot-credentials / history. Admin sees everything. Compliance is
+  // pinned to its own console.
+  const allowed = tabsForRole(session.role);
+  // history is reachable from every role via the header link — keep it
+  // available even though it doesn't appear in the nav tabs list.
+  if (view !== "history" && !allowed.includes(view)) return;
   state.setCurrentView(view);
+  // Drop-copy WS lifecycle: open on enter, close on leave. Cheap to
+  // re-open; we don't pay the cost of holding the socket while the
+  // user is parked on a different view.
+  if (view === "compliance") openComplianceDropCopy();
+  else closeComplianceDropCopy();
   // Q2.6 (#273). Dynamic pnl.me subscription: only stay subscribed
   // while the history view (which hosts the P&L panel) is mounted, so
   // the per-fill fan-out doesn't run for traders parked on other views.
@@ -1520,6 +1554,100 @@ function writeSession(s) {
 function clearSession() {
   try { localStorage.removeItem(SESSION_KEY); } catch { /* swallow */ }
   try { sessionStorage.removeItem(SESSION_KEY); } catch { /* swallow */ }
+}
+
+// ── Q4.14 (#314). Compliance handlers ──────────────────────────────
+
+function openComplianceDropCopy() {
+  if (!session?.token || !session?.backend) return;
+  try {
+    const url = buildDropCopyWebSocketUrl(session.backend, session.token);
+    complianceUi.openDropCopyFeed(url);
+  } catch (err) {
+    console.warn("[compliance/dropcopy] url build failed", err);
+  }
+}
+
+function closeComplianceDropCopy() {
+  complianceUi.closeDropCopyFeed();
+}
+
+async function handleAuditSearch(opts) {
+  if (!session) return;
+  const captured = session;
+  complianceUi.setAuditFeedback(null);
+  try {
+    const page = await searchAuditLog(captured.backend, captured.token, opts);
+    if (session !== captured) return;
+    complianceUi.setAuditResults(page);
+  } catch (err) {
+    if (err.status === 401) { logout(); return; }
+    if (err.status === 403) {
+      complianceUi.setAuditFeedback("forbidden — role lost?", "error");
+      return;
+    }
+    complianceUi.setAuditFeedback(err.message || "audit search failed", "error");
+  }
+}
+
+async function handleFillTouchLookup(id) {
+  if (!session) return;
+  const captured = session;
+  complianceUi.setTouchFeedback(null);
+  complianceUi.setTouchResult(null, null);
+  try {
+    const dto = await getFillTouch(captured.backend, captured.token, id);
+    if (session !== captured) return;
+    complianceUi.setTouchResult(id, dto);
+  } catch (err) {
+    if (err.status === 401) { logout(); return; }
+    if (err.status === 404) {
+      complianceUi.setTouchFeedback(`No fill ${id} in your firm.`, "error");
+      return;
+    }
+    complianceUi.setTouchFeedback(err.message || "lookup failed", "error");
+  }
+}
+
+async function handleCvmDownload({ model, date }) {
+  if (!session) return;
+  const captured = session;
+  complianceUi.setCvmFeedback(`Downloading model ${model} for ${date}…`);
+  try {
+    const { blob, filename } = await downloadCvmReport(captured.backend, captured.token, model, date);
+    if (session !== captured) return;
+    triggerBlobDownload(blob, filename);
+    complianceUi.setCvmFeedback(`Saved ${filename}.`, "ok");
+  } catch (err) {
+    if (err.status === 401) { logout(); return; }
+    if (err.status === 404) {
+      complianceUi.setCvmFeedback("No rows for that date.", "error");
+      return;
+    }
+    if (err.status === 429) {
+      complianceUi.setCvmFeedback("Rate-limited — retry shortly.", "error");
+      return;
+    }
+    if (err.status === 503) {
+      complianceUi.setCvmFeedback("WAL backpressure — retry shortly.", "error");
+      return;
+    }
+    complianceUi.setCvmFeedback(err.message || "download failed", "error");
+  }
+}
+
+function triggerBlobDownload(blob, filename) {
+  if (typeof URL === "undefined" || typeof document === "undefined") return;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  // Revoke on the next tick so Safari has a chance to start the
+  // download before the URL is invalidated.
+  setTimeout(() => { try { URL.revokeObjectURL(url); } catch { /* noop */ } }, 0);
 }
 
 init();
