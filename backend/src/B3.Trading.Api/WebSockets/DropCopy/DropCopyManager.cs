@@ -38,6 +38,20 @@ public sealed class DropCopyManager
     private readonly ConcurrentDictionary<string, object> _firmLocks =
         new(StringComparer.OrdinalIgnoreCase);
 
+    // Pass-5 review (#323) coalesce: itemDropped in the sink fires on
+    // every dropped event under EventDispatcher's global dispatch lock.
+    // To avoid an O(drops × firms × subscribers) walk-storm without the
+    // sink-side flag race (which had a TOCTOU between drain-empty and
+    // reset), we coalesce here: the disconnect walk is a single-shot
+    // "armed" gate. A drop "consumes" the gate (Exchange→0) so only the
+    // first drop in a burst walks. The gate is re-armed by Add() AFTER
+    // a fresh subscriber is registered, so any later burst that could
+    // affect the new subscriber re-triggers the walk. Subscribers added
+    // before the drop are disconnected by that drop's walk; subscribers
+    // added after see a clean snapshot at subscribe-time and don't need
+    // a retroactive resync for events they were never registered for.
+    private int _resyncArmed;
+
     private readonly WorkingOrderBook _orders;
 
     public DropCopyManager(WorkingOrderBook orders)
@@ -77,6 +91,11 @@ public sealed class DropCopyManager
             if (client.Subscribe(DropCopyChannels.Cancels))
                 client.Enqueue(new OutboundMessage("snapshot", DropCopyChannels.Cancels, 0, Array.Empty<ExecutionDto>()));
         }
+
+        // Arm AFTER the client is in _byFirm so that a subsequent drop's
+        // walk will see and disconnect it. The opposite order would let
+        // the walk miss the new subscriber.
+        Interlocked.Exchange(ref _resyncArmed, 1);
     }
 
     public void Remove(DropCopyClient client)
@@ -149,6 +168,13 @@ public sealed class DropCopyManager
     /// </summary>
     public void DisconnectAllForResync(string reason)
     {
+        // Coalesce: only the first overflow drop in a burst pays for the
+        // per-firm lock walk. The gate is re-armed by Add() once a new
+        // subscriber appears, so any later burst that COULD affect the
+        // new subscriber re-triggers a walk. See _resyncArmed XML doc.
+        if (Interlocked.Exchange(ref _resyncArmed, 0) == 0)
+            return;
+
         foreach (var firmId in _byFirm.Keys)
         {
             lock (LockFor(firmId))

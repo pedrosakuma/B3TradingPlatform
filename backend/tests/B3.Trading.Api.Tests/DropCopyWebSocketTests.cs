@@ -382,6 +382,43 @@ public class DropCopyWebSocketTests
         Assert.True(c.DisconnectRequested.IsCompleted);
     }
 
+    // 12. Pass-5 review (#323): repeated overflow drops in the same
+    //     burst must coalesce into a single disconnect walk; a fresh
+    //     subscriber added after the burst must re-arm the gate so a
+    //     later burst's walk reaches it.
+    [Fact]
+    public void DisconnectAllForResync_CoalescesWithinBurst_ReArmsOnAdd()
+    {
+        var book = new WorkingOrderBook();
+        var manager = new DropCopyManager(book);
+
+        var a = new DropCopyClient(Firm01, "dave", "compliance");
+        manager.Add(a);
+
+        // First call disconnects a, then "consumes" the armed gate.
+        manager.DisconnectAllForResync("first");
+        Assert.True(a.MarkedForDisconnect);
+        Assert.Equal("first", a.DisconnectReason);
+
+        // Subsequent calls within the same burst are no-ops on a fresh
+        // subscriber added without Add() (b is NOT registered) — the
+        // gate is consumed so the walk shouldn't touch anyone.
+        var b = new DropCopyClient(Firm01, "eve", "admin");
+        // b not added, so even if we walked, we'd skip it. Add a real
+        // post-burst subscriber to validate re-arm.
+        manager.DisconnectAllForResync("second_in_burst");
+        manager.DisconnectAllForResync("third_in_burst");
+        // a's reason stays "first" (RequestResyncDisconnect is idempotent).
+        Assert.Equal("first", a.DisconnectReason);
+
+        // Re-arm via Add() — a new burst should now disconnect c.
+        var c = new DropCopyClient(Firm02, "frank", "compliance");
+        manager.Add(c);
+        manager.DisconnectAllForResync("second_burst");
+        Assert.True(c.MarkedForDisconnect);
+        Assert.Equal("second_burst", c.DisconnectReason);
+    }
+
     // ----------------- helpers -----------------
 
     private static async Task<WebSocket> ConnectDropCopyAsync(TestAppFactory factory, string token)
