@@ -45,6 +45,7 @@ internal sealed class InMemoryPendingTotpEnrollmentStore : IPendingTotpEnrollmen
     public void Put(string username, PendingTotpEnrollment enrollment)
     {
         if (string.IsNullOrEmpty(username)) return;
+        PurgeExpired();
         _entries[username] = enrollment;
     }
 
@@ -52,6 +53,7 @@ internal sealed class InMemoryPendingTotpEnrollmentStore : IPendingTotpEnrollmen
     {
         enrollment = null;
         if (string.IsNullOrEmpty(username)) return false;
+        PurgeExpired();
         if (!_entries.TryRemove(username, out var found)) return false;
         if (_clock.GetUtcNow() - found.CreatedAt > _options.CurrentValue.PendingEnrollmentTtl)
             return false;
@@ -62,7 +64,24 @@ internal sealed class InMemoryPendingTotpEnrollmentStore : IPendingTotpEnrollmen
     public void Remove(string username)
     {
         if (string.IsNullOrEmpty(username)) return;
+        PurgeExpired();
         _entries.TryRemove(username, out _);
+    }
+
+    // Opportunistic sweep: every mutating call drops expired entries.
+    // Single-host in-memory store + low-frequency call site (enrollment
+    // is rare) makes a background timer overkill; piggy-backing on the
+    // normal traffic keeps _entries from growing unbounded for users
+    // who Put once and never Consume.
+    private void PurgeExpired()
+    {
+        var ttl = _options.CurrentValue.PendingEnrollmentTtl;
+        var now = _clock.GetUtcNow();
+        foreach (var kvp in _entries)
+        {
+            if (now - kvp.Value.CreatedAt > ttl)
+                _entries.TryRemove(kvp.Key, out _);
+        }
     }
 }
 

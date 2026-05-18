@@ -105,4 +105,14 @@ public sealed class UserTotpConfig
     /// on use (removed from the list).
     /// </summary>
     public List<string> RecoveryCodes { get; set; } = new();
+
+    /// <summary>
+    /// Most recent successfully-consumed TOTP time step (RFC 6238 T,
+    /// i.e. seconds-since-epoch / period). Used to block replay of a
+    /// valid code within the same 30s window via a fresh challenge
+    /// token. Nullable so users persisted before this field existed
+    /// (legacy / on-disk envelopes) default cleanly to "no prior step
+    /// recorded" — the first verify after restart simply seeds it.
+    /// </summary>
+    public long? LastUsedTimeStep { get; set; }
 }

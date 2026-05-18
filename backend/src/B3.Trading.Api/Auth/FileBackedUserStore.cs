@@ -165,6 +165,98 @@ public sealed class FileBackedUserStore : IUserStore
         }
     }
 
+    public bool TryRecordTotpUse(string username, long matchedStep, out UserConfig? updatedUser)
+    {
+        updatedUser = null;
+        if (string.IsNullOrWhiteSpace(username)) return false;
+
+        lock (_writeGate)
+        {
+            if (!TryGet(username, out var user) || user is null || user.Totp is null
+                || user.Totp.EnrolledAt is null)
+                return false;
+
+            if (user.Totp.LastUsedTimeStep is { } prev && matchedStep <= prev)
+                return false;
+
+            var previous = user.Totp.LastUsedTimeStep;
+            user.Totp.LastUsedTimeStep = matchedStep;
+
+            // Env-seeded users are mutated in place only — no disk
+            // write (config is authoritative on restart).
+            if (_seeded.ContainsKey(username))
+            {
+                updatedUser = user;
+                return true;
+            }
+
+            try
+            {
+                PersistRuntimeUsersLocked();
+            }
+            catch (Exception ex)
+            {
+                user.Totp.LastUsedTimeStep = previous;
+                _logger.LogError(ex,
+                    "FileBackedUserStore: failed to persist TOTP time step for {Username} to {Path}; " +
+                    "in-memory update rolled back.",
+                    username, _filePath);
+                throw;
+            }
+
+            updatedUser = user;
+            return true;
+        }
+    }
+
+    public bool TryConsumeRecoveryCode(string username, string codeHash, out UserConfig? updatedUser)
+    {
+        updatedUser = null;
+        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrEmpty(codeHash)) return false;
+
+        lock (_writeGate)
+        {
+            if (!TryGet(username, out var user) || user is null || user.Totp is null)
+                return false;
+
+            // Constant-time-ish scan; full pass so timing reveals
+            // nothing about which slot matched.
+            var idx = -1;
+            for (var i = 0; i < user.Totp.RecoveryCodes.Count; i++)
+            {
+                if (string.Equals(user.Totp.RecoveryCodes[i], codeHash, StringComparison.Ordinal))
+                    idx = i;
+            }
+            if (idx < 0) return false;
+
+            var removed = user.Totp.RecoveryCodes[idx];
+            user.Totp.RecoveryCodes.RemoveAt(idx);
+
+            if (_seeded.ContainsKey(username))
+            {
+                updatedUser = user;
+                return true;
+            }
+
+            try
+            {
+                PersistRuntimeUsersLocked();
+            }
+            catch (Exception ex)
+            {
+                user.Totp.RecoveryCodes.Insert(idx, removed);
+                _logger.LogError(ex,
+                    "FileBackedUserStore: failed to persist recovery-code consumption for {Username} to {Path}; " +
+                    "in-memory update rolled back.",
+                    username, _filePath);
+                throw;
+            }
+
+            updatedUser = user;
+            return true;
+        }
+    }
+
     private void LoadRuntimeUsers()
     {
         if (!File.Exists(_filePath))

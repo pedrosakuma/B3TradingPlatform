@@ -24,8 +24,10 @@ public interface ITotpService
     /// Verifies <paramref name="code"/> against <paramref name="base32Secret"/>.
     /// Accepts the previous + current + next step (±1 window) so a code
     /// generated at second 29 is still valid when received at second 30.
+    /// Returns the matched RFC 6238 time step on success so callers can
+    /// persist it and reject same-step replays.
     /// </summary>
-    bool Verify(string base32Secret, string code);
+    (bool Valid, long MatchedStep) Verify(string base32Secret, string code);
 
     /// <summary>Generate <paramref name="count"/> human-friendly recovery codes.</summary>
     IReadOnlyList<string> GenerateRecoveryCodes(int count);
@@ -55,22 +57,23 @@ internal sealed class TotpService : ITotpService
         return $"otpauth://totp/{encIssuer}:{encUser}?secret={base32Secret}&issuer={encIssuer}&algorithm=SHA1&digits=6&period=30";
     }
 
-    public bool Verify(string base32Secret, string code)
+    public (bool Valid, long MatchedStep) Verify(string base32Secret, string code)
     {
         if (string.IsNullOrWhiteSpace(base32Secret) || string.IsNullOrWhiteSpace(code))
-            return false;
+            return (false, 0);
 
         // Strip whitespace so users pasting "123 456" from authenticator
         // apps don't get a needless rejection.
         var trimmed = new string(code.Where(c => !char.IsWhiteSpace(c)).ToArray());
-        if (trimmed.Length != 6 || !trimmed.All(char.IsDigit)) return false;
+        if (trimmed.Length != 6 || !trimmed.All(char.IsDigit)) return (false, 0);
 
         byte[] secret;
         try { secret = Base32Encoding.ToBytes(base32Secret); }
-        catch (ArgumentException) { return false; }
+        catch (ArgumentException) { return (false, 0); }
 
         var totp = new OtpNet.Totp(secret);
-        return totp.VerifyTotp(trimmed, out _, new VerificationWindow(previous: 1, future: 1));
+        var ok = totp.VerifyTotp(trimmed, out var matchedStep, new VerificationWindow(previous: 1, future: 1));
+        return (ok, matchedStep);
     }
 
     public IReadOnlyList<string> GenerateRecoveryCodes(int count)

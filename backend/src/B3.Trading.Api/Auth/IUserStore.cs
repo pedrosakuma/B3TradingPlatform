@@ -32,4 +32,29 @@ public interface IUserStore
     /// authoritative on restart for credential fields. Thread-safe.
     /// </summary>
     bool TryUpdate(UserConfig user);
+
+    /// <summary>
+    /// Atomically validates that <paramref name="matchedStep"/> is
+    /// strictly greater than the user's persisted
+    /// <see cref="UserTotpConfig.LastUsedTimeStep"/> and, if so,
+    /// persists it. Returns <c>false</c> when the user is unknown, has
+    /// no enrolled TOTP, or the step would be a same-window replay.
+    /// On success, <paramref name="updatedUser"/> is the post-write
+    /// snapshot. Implementations must serialize the read-modify-write
+    /// under a per-user lock so two concurrent verifies racing on the
+    /// same time step cannot both succeed.
+    /// </summary>
+    bool TryRecordTotpUse(string username, long matchedStep, out UserConfig? updatedUser);
+
+    /// <summary>
+    /// Atomically removes a single recovery-code hash from the user's
+    /// <see cref="UserTotpConfig.RecoveryCodes"/> list. Returns
+    /// <c>false</c> when the user is unknown, has no enrolled TOTP, or
+    /// the hash is not present (already consumed by a racing request,
+    /// or simply wrong). On success, <paramref name="updatedUser"/> is
+    /// the post-write snapshot. Implementations must serialize the
+    /// scan-remove-persist under a per-user lock so two concurrent
+    /// verifies presenting the SAME recovery code cannot both succeed.
+    /// </summary>
+    bool TryConsumeRecoveryCode(string username, string codeHash, out UserConfig? updatedUser);
 }

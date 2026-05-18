@@ -126,11 +126,27 @@ public static class TotpEndpoints
                     statusCode: StatusCodes.Status401Unauthorized);
                 }
 
-                var totpOk = totp.Verify(base32, req.Code);
+                var (totpOk, matchedStep) = totp.Verify(base32, req.Code);
+                if (totpOk)
+                {
+                    // Atomic replay guard: persist matchedStep only if it
+                    // is strictly greater than the prior step. Two
+                    // concurrent verifies presenting the same valid code
+                    // race here; exactly one wins, the loser is treated
+                    // as an invalid-code attempt (lockout counter ticks).
+                    if (!users.TryRecordTotpUse(ch.Username, matchedStep, out _))
+                    {
+                        lockout.RecordFailure(ch.Username);
+                        return Results.Json(new { error = "invalid code" },
+                            statusCode: StatusCodes.Status401Unauthorized);
+                    }
+                }
+
                 var recoveryOk = false;
                 if (!totpOk)
                 {
-                    recoveryOk = TryConsumeRecoveryCode(user, req.Code, totp, users);
+                    recoveryOk = users.TryConsumeRecoveryCode(
+                        user.Username, totp.HashRecoveryCode(req.Code), out _);
                 }
 
                 if (!totpOk && !recoveryOk)
@@ -162,7 +178,8 @@ public static class TotpEndpoints
             if (!pending.TryConsume(jwtUser.Username, out var enrollment) || enrollment is null)
                 return Results.BadRequest(new { error = "no pending enrollment (expired or never started)" });
 
-            if (!totp.Verify(enrollment.Base32Secret, req.Code))
+            var (enrollOk, enrollStep) = totp.Verify(enrollment.Base32Secret, req.Code);
+            if (!enrollOk)
             {
                 // Re-stash the pending enrollment so the user gets
                 // another shot inside the same 5-min window — typing
@@ -179,6 +196,12 @@ public static class TotpEndpoints
                 SharedSecret = protector.Protect(enrollment.Base32Secret),
                 EnrolledAt = TimeProviderFor(http).GetUtcNow(),
                 RecoveryCodes = enrollment.RecoveryCodeHashes.ToList(),
+                // Seed LastUsedTimeStep with the enrollment-confirm step
+                // so the same code cannot be replayed at login during
+                // the same 30s window (defense-in-depth — the pending
+                // store is single-use, but the property cannot rely on
+                // that).
+                LastUsedTimeStep = enrollStep,
             };
             users.TryUpdate(jwtUser);
             return Results.Ok(new { enrolled = true });
@@ -210,13 +233,25 @@ public static class TotpEndpoints
             try { base32 = protector.Unprotect(user.Totp.SharedSecret); }
             catch { return Results.BadRequest(new { error = "2fa not enrolled" }); }
 
-            var ok = totp.Verify(base32, req.Code);
-            if (!ok)
+            var (ok, disableStep) = totp.Verify(base32, req.Code);
+            if (ok)
+            {
+                // Replay guard: even on the disable path, a same-window
+                // reuse must be rejected so a captured code cannot
+                // disable + JWT-issue back-to-back.
+                if (!users.TryRecordTotpUse(subject, disableStep, out _))
+                {
+                    lockout.RecordFailure(subject);
+                    return Results.Json(new { error = "invalid code" }, statusCode: StatusCodes.Status401Unauthorized);
+                }
+            }
+            else
             {
                 // Recovery codes can also satisfy disable so a user
                 // who lost their device but kept the codes isn't
                 // stuck.
-                ok = TryConsumeRecoveryCode(user, req.Code, totp, users);
+                ok = users.TryConsumeRecoveryCode(
+                    user.Username, totp.HashRecoveryCode(req.Code), out _);
             }
             if (!ok)
             {
@@ -262,28 +297,6 @@ public static class TotpEndpoints
         return true;
     }
 
-    private static bool TryConsumeRecoveryCode(UserConfig user, string code, ITotpService totp, IUserStore users)
-    {
-        if (user.Totp is null) return false;
-        var hash = totp.HashRecoveryCode(code);
-        // Constant-time-ish scan: comparing hex strings of equal length
-        // through SequenceEqual + a full pass avoids leaking which
-        // index matched. For 10 codes this is microseconds.
-        var idx = -1;
-        for (var i = 0; i < user.Totp.RecoveryCodes.Count; i++)
-        {
-            if (string.Equals(user.Totp.RecoveryCodes[i], hash, StringComparison.Ordinal))
-            {
-                idx = i;
-                // intentionally do NOT break — full scan keeps timing
-                // independent of code position.
-            }
-        }
-        if (idx < 0) return false;
-        user.Totp.RecoveryCodes.RemoveAt(idx);
-        users.TryUpdate(user);
-        return true;
-    }
 
     private static TimeProvider TimeProviderFor(HttpContext http)
         => http.RequestServices.GetService(typeof(TimeProvider)) as TimeProvider ?? TimeProvider.System;

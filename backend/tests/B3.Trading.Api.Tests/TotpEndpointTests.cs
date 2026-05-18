@@ -17,10 +17,15 @@ namespace B3.Trading.Api.Tests;
 /// </summary>
 public class TotpEndpointTests
 {
-    private static string ComputeCode(string base32)
+    private static string ComputeCode(string base32, int stepOffset = 0)
     {
         var totp = new OtpNet.Totp(Base32Encoding.ToBytes(base32));
-        return totp.ComputeTotp();
+        // OtpNet computes against the supplied DateTime (UTC). Offset
+        // by N * 30s to produce a code one or more RFC 6238 steps in
+        // the future — used by tests that need a distinct step from a
+        // prior verify (the server now rejects same-step replays).
+        var when = DateTime.UtcNow.AddSeconds(stepOffset * 30.0);
+        return totp.ComputeTotp(when);
     }
 
     private sealed record EnrollResponseDto(string Secret, string OtpauthUri, List<string> RecoveryCodes);
@@ -66,7 +71,9 @@ public class TotpEndpointTests
         Assert.False(string.IsNullOrEmpty(challenge));
 
         // Now /auth/2fa/verify with the challenge + a fresh code → real JWT.
-        var freshCode = ComputeCode(enroll.Secret);
+        // Use step offset = 1 to advance past the step consumed during
+        // enrollment confirm (server seeds LastUsedTimeStep there).
+        var freshCode = ComputeCode(enroll.Secret, stepOffset: 1);
         var second = await plainClient.PostAsJsonAsync("/auth/2fa/verify",
             new { code = freshCode, totpChallengeToken = challenge });
         Assert.Equal(HttpStatusCode.OK, second.StatusCode);
@@ -149,8 +156,10 @@ public class TotpEndpointTests
         var bad = await http.PostAsJsonAsync("/auth/2fa/disable", new { code = "000000" });
         Assert.Equal(HttpStatusCode.Unauthorized, bad.StatusCode);
 
-        // Correct code: disables.
-        var ok = await http.PostAsJsonAsync("/auth/2fa/disable", new { code = ComputeCode(enroll.Secret) });
+        // Correct code: disables. Offset by one step so we don't trip
+        // the same-window replay guard against the enrollment-confirm
+        // step.
+        var ok = await http.PostAsJsonAsync("/auth/2fa/disable", new { code = ComputeCode(enroll.Secret, stepOffset: 1) });
         Assert.Equal(HttpStatusCode.OK, ok.StatusCode);
 
         // Re-enroll works (no 409 because disabled cleared the prior state).
@@ -227,6 +236,168 @@ public class TotpEndpointTests
         {
             try { Directory.Delete(dir, recursive: true); } catch { }
         }
+    }
+
+    [Fact]
+    public async Task TotpCode_ReusedWithinSameStep_RejectedAndIncrementsLockout()
+    {
+        // Same valid TOTP code presented twice through two distinct
+        // challenge tokens must be accepted exactly once. Second use
+        // looks like an invalid-code attempt (401 + lockout tick).
+        await using var factory = TestAppFactory.WithOverrides(new Dictionary<string, string?>
+        {
+            ["Trading:Auth:TotpLockout:Enabled"] = "true",
+            ["Trading:Auth:TotpLockout:MaxFailedAttempts"] = "5",
+            ["Trading:Auth:TotpLockout:Window"] = "00:05:00",
+            ["Trading:Auth:TotpLockout:LockoutDuration"] = "00:05:00",
+        });
+        var http = await factory.CreateAuthedClientAsync();
+        var enroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll", new { }))
+            .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
+        await http.PostAsJsonAsync("/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
+
+        var plain = factory.CreateClient();
+        // Offset by 1 so the test code is NOT the one consumed during
+        // enrollment confirm (which already seeded LastUsedTimeStep).
+        var code = ComputeCode(enroll.Secret, stepOffset: 1);
+
+        // First login: code accepted, JWT issued.
+        var login1 = (await (await plain.PostAsJsonAsync("/auth/login",
+            new { username = "alice", password = "wonderland" }))
+            .Content.ReadFromJsonAsync<LoginRequiresDto>())!;
+        var ok1 = await plain.PostAsJsonAsync("/auth/2fa/verify",
+            new { code, totpChallengeToken = login1.TotpChallengeToken });
+        Assert.Equal(HttpStatusCode.OK, ok1.StatusCode);
+        Assert.False(string.IsNullOrEmpty(
+            (await ok1.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("token").GetString()));
+
+        // Second login with SAME code via a fresh challenge: rejected
+        // with the same shape as a wrong code (401 + {"error":"invalid code"}).
+        var login2 = (await (await plain.PostAsJsonAsync("/auth/login",
+            new { username = "alice", password = "wonderland" }))
+            .Content.ReadFromJsonAsync<LoginRequiresDto>())!;
+        var bad = await plain.PostAsJsonAsync("/auth/2fa/verify",
+            new { code, totpChallengeToken = login2.TotpChallengeToken });
+        Assert.Equal(HttpStatusCode.Unauthorized, bad.StatusCode);
+        var badBody = await bad.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("invalid code", badBody.GetProperty("error").GetString());
+
+        // Lockout counter ticked: 4 more wrong attempts should trip 429.
+        for (var i = 0; i < 4; i++)
+        {
+            var login = (await (await plain.PostAsJsonAsync("/auth/login",
+                new { username = "alice", password = "wonderland" }))
+                .Content.ReadFromJsonAsync<LoginRequiresDto>())!;
+            await plain.PostAsJsonAsync("/auth/2fa/verify",
+                new { code = "000000", totpChallengeToken = login.TotpChallengeToken });
+        }
+        var lockedLogin = (await (await plain.PostAsJsonAsync("/auth/login",
+            new { username = "alice", password = "wonderland" }))
+            .Content.ReadFromJsonAsync<LoginRequiresDto>())!;
+        var locked = await plain.PostAsJsonAsync("/auth/2fa/verify",
+            new { code = "000000", totpChallengeToken = lockedLogin.TotpChallengeToken });
+        Assert.Equal(HttpStatusCode.TooManyRequests, locked.StatusCode);
+    }
+
+    [Fact]
+    public async Task RecoveryCode_ConcurrentVerifies_OnlyOneSucceeds()
+    {
+        // 10 racing verify requests presenting the SAME recovery code
+        // must result in exactly one 200 — the store consumes
+        // atomically.
+        await using var factory = TestAppFactory.WithOverrides(new Dictionary<string, string?>
+        {
+            // Lockout off so the 9 losers don't trip 429 and mask the
+            // 401 the test is actually checking for.
+            ["Trading:Auth:TotpLockout:Enabled"] = "false",
+        });
+        var http = await factory.CreateAuthedClientAsync();
+        var enroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll", new { }))
+            .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
+        await http.PostAsJsonAsync("/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
+        var recovery = enroll.RecoveryCodes[0];
+
+        const int N = 10;
+        // Mint N distinct challenge tokens via N login calls so each
+        // verify request is independently authorized.
+        var challenges = new string[N];
+        var clients = new HttpClient[N];
+        for (var i = 0; i < N; i++)
+        {
+            clients[i] = factory.CreateClient();
+            var login = (await (await clients[i].PostAsJsonAsync("/auth/login",
+                new { username = "alice", password = "wonderland" }))
+                .Content.ReadFromJsonAsync<LoginRequiresDto>())!;
+            challenges[i] = login.TotpChallengeToken;
+        }
+
+        using var barrier = new Barrier(N);
+        var responses = await Task.WhenAll(Enumerable.Range(0, N).Select(i => Task.Run(async () =>
+        {
+            barrier.SignalAndWait();
+            return await clients[i].PostAsJsonAsync("/auth/2fa/verify",
+                new { code = recovery, totpChallengeToken = challenges[i] });
+        })));
+
+        var successes = responses.Count(r => r.StatusCode == HttpStatusCode.OK);
+        var failures = responses.Count(r => r.StatusCode == HttpStatusCode.Unauthorized);
+        Assert.Equal(1, successes);
+        Assert.Equal(N - 1, failures);
+
+        foreach (var c in clients) c.Dispose();
+    }
+
+    [Fact]
+    public void PendingTotpEnrollmentStore_PutPurgesExpiredEntries()
+    {
+        // Opportunistic sweep: pre-seed an entry with an old
+        // CreatedUtc, then Put a different user — the stale entry
+        // must be dropped even though TryConsume was never called for
+        // its username.
+        var clock = new FakeClock(DateTimeOffset.UnixEpoch);
+        var opts = new TestOptionsMonitor<TotpOptions>(new TotpOptions
+        {
+            PendingEnrollmentTtl = TimeSpan.FromMinutes(5),
+        });
+        var store = new InMemoryPendingTotpEnrollmentStore(opts, clock);
+
+        store.Put("ghost", new PendingTotpEnrollment(
+            Base32Secret: "JBSWY3DPEHPK3PXP",
+            RecoveryCodes: Array.Empty<string>(),
+            RecoveryCodeHashes: Array.Empty<string>(),
+            CreatedAt: clock.GetUtcNow()));
+
+        // Advance past TTL.
+        clock.Advance(TimeSpan.FromMinutes(10));
+
+        store.Put("alive", new PendingTotpEnrollment(
+            Base32Secret: "JBSWY3DPEHPK3PXP",
+            RecoveryCodes: Array.Empty<string>(),
+            RecoveryCodeHashes: Array.Empty<string>(),
+            CreatedAt: clock.GetUtcNow()));
+
+        // "ghost" must have been purged.
+        Assert.False(store.TryConsume("ghost", out _));
+        // "alive" still consumable.
+        Assert.True(store.TryConsume("alive", out var found));
+        Assert.NotNull(found);
+    }
+
+    private sealed class FakeClock : TimeProvider
+    {
+        private DateTimeOffset _now;
+        public FakeClock(DateTimeOffset start) { _now = start; }
+        public override DateTimeOffset GetUtcNow() => _now;
+        public void Advance(TimeSpan delta) { _now += delta; }
+    }
+
+    private sealed class TestOptionsMonitor<T> : Microsoft.Extensions.Options.IOptionsMonitor<T>
+    {
+        public TestOptionsMonitor(T value) { CurrentValue = value; }
+        public T CurrentValue { get; }
+        public T Get(string? name) => CurrentValue;
+        public IDisposable OnChange(Action<T, string?> listener) => new Noop();
+        private sealed class Noop : IDisposable { public void Dispose() { } }
     }
 
     [Fact]

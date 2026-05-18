@@ -16,6 +16,8 @@ public sealed class InMemoryUserStore : IUserStore
     private readonly Dictionary<string, UserConfig> _seeded;
     private readonly ConcurrentDictionary<string, UserConfig> _runtime =
         new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, object> _userLocks =
+        new(StringComparer.OrdinalIgnoreCase);
 
     public InMemoryUserStore(IOptions<AuthOptions> options)
     {
@@ -59,19 +61,71 @@ public sealed class InMemoryUserStore : IUserStore
         ArgumentNullException.ThrowIfNull(user);
         if (string.IsNullOrWhiteSpace(user.Username)) return false;
 
-        // Env-seeded users: mutate the existing UserConfig in place so
-        // TOTP overlays persist for the lifetime of the process. They
-        // are intentionally NOT persisted (config is authoritative);
-        // operator-controlled accounts re-enroll if the host restarts.
-        if (_seeded.TryGetValue(user.Username, out var seeded))
+        lock (LockFor(user.Username))
         {
-            seeded.Totp = user.Totp;
-            seeded.Require2FA = user.Require2FA;
+            // Env-seeded users: mutate the existing UserConfig in place so
+            // TOTP overlays persist for the lifetime of the process. They
+            // are intentionally NOT persisted (config is authoritative);
+            // operator-controlled accounts re-enroll if the host restarts.
+            if (_seeded.TryGetValue(user.Username, out var seeded))
+            {
+                seeded.Totp = user.Totp;
+                seeded.Require2FA = user.Require2FA;
+                return true;
+            }
+
+            if (!_runtime.ContainsKey(user.Username)) return false;
+            _runtime[user.Username] = user;
             return true;
         }
-
-        if (!_runtime.ContainsKey(user.Username)) return false;
-        _runtime[user.Username] = user;
-        return true;
     }
+
+    public bool TryRecordTotpUse(string username, long matchedStep, out UserConfig? updatedUser)
+    {
+        updatedUser = null;
+        if (string.IsNullOrWhiteSpace(username)) return false;
+
+        lock (LockFor(username))
+        {
+            if (!TryGet(username, out var user) || user is null || user.Totp is null
+                || user.Totp.EnrolledAt is null)
+                return false;
+
+            if (user.Totp.LastUsedTimeStep is { } prev && matchedStep <= prev)
+                return false;
+
+            user.Totp.LastUsedTimeStep = matchedStep;
+            updatedUser = user;
+            return true;
+        }
+    }
+
+    public bool TryConsumeRecoveryCode(string username, string codeHash, out UserConfig? updatedUser)
+    {
+        updatedUser = null;
+        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrEmpty(codeHash)) return false;
+
+        lock (LockFor(username))
+        {
+            if (!TryGet(username, out var user) || user is null || user.Totp is null)
+                return false;
+
+            // Constant-time-ish scan: full pass without early-out so
+            // timing leaks no information about which index matched.
+            var idx = -1;
+            for (var i = 0; i < user.Totp.RecoveryCodes.Count; i++)
+            {
+                if (string.Equals(user.Totp.RecoveryCodes[i], codeHash, StringComparison.Ordinal))
+                    idx = i;
+            }
+            if (idx < 0) return false;
+
+            user.Totp.RecoveryCodes.RemoveAt(idx);
+            updatedUser = user;
+            return true;
+        }
+    }
+
+    private object LockFor(string username)
+        => _userLocks.GetOrAdd(username, _ => new object());
 }
