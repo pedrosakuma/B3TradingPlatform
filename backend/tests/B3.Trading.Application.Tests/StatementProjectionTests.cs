@@ -446,4 +446,109 @@ public class StatementProjectionTests
             RunningTotal = delta,
             TimestampUtc = at,
         };
+
+    private static OrderSubmittedEvent SubmitWithSubAccount(
+        ulong clOrdId, EndClientId owner, string firmId, string? subAccount,
+        string symbol, OrderSide side, long qty, decimal price) =>
+        new()
+        {
+            ClOrdId = clOrdId,
+            EndClientId = owner.Value,
+            FirmId = firmId,
+            Symbol = symbol,
+            SecurityId = 4321UL,
+            Side = side.ToString(),
+            Type = "Limit",
+            Quantity = qty,
+            Price = price,
+            TimestampUtc = DayStart.AddHours(9),
+            SubAccountId = subAccount,
+        };
+
+    private static FeeAccruedEvent FeeWithSubAccount(
+        ulong clOrdId, EndClientId owner, string? subAccount, string symbol, OrderSide side, long qty, decimal price,
+        decimal brokerage, decimal emolumentos, decimal liquidacao, DateTimeOffset at) =>
+        new()
+        {
+            ClOrdId = clOrdId,
+            ExecutionId = $"{clOrdId}:{qty}",
+            EndClientId = owner.Value,
+            Symbol = symbol,
+            Side = side.ToString(),
+            FillQuantity = qty,
+            FillPrice = price,
+            Notional = qty * price,
+            Brokerage = brokerage,
+            Emolumentos = emolumentos,
+            Liquidacao = liquidacao,
+            Total = brokerage + emolumentos + liquidacao,
+            TimestampUtc = at,
+            SubAccountId = subAccount,
+        };
+
+    private static RealizedPnlEvent RealizedWithSubAccount(
+        ulong clOrdId, EndClientId owner, string firmId, string? subAccount, string symbol,
+        decimal delta, DateTimeOffset at) =>
+        new()
+        {
+            ClOrdId = clOrdId,
+            ExecutionId = $"{clOrdId}:r",
+            EndClientId = owner.Value,
+            FirmId = firmId,
+            Symbol = symbol,
+            DayKey = DateOnly.FromDateTime(at.UtcDateTime),
+            DeltaRealized = delta,
+            RunningTotal = delta,
+            TimestampUtc = at,
+            SubAccountId = subAccount,
+        };
+
+    [Fact]
+    public void SubAccountProjection_TagsRowsAndFiltersWhenRequested()
+    {
+        // PR #316 P2.2. Same owner+firm with two sub-accounts (A & B)
+        // trading on the same day. The default unfiltered statement
+        // tags every row with its originating sub-account (avg-cost is
+        // per-bucket, so positions show one row per (symbol, sub)).
+        // The ?subAccount=A filter drops every B row.
+        var wal = new List<(long Seq, WalEvent Event)>
+        {
+            // Sub-account A: 100 PETR4 @ 30
+            (1, SubmitWithSubAccount(1UL, Alice, "FIRM01", "A", "PETR4", OrderSide.Buy, 100, 30m)),
+            (2, Er(1UL, ExecKind.Fill, leaves: 0, cum: 100, last: 100, price: 30m, at: DayStart.AddHours(10))),
+            (3, FeeWithSubAccount(1UL, Alice, "A", "PETR4", OrderSide.Buy, 100, 30m,
+                brokerage: 1m, emolumentos: 0, liquidacao: 0, at: DayStart.AddHours(10))),
+            (4, RealizedWithSubAccount(1UL, Alice, "FIRM01", "A", "PETR4", 11m, at: DayStart.AddHours(10))),
+
+            // Sub-account B: 50 VALE3 @ 60
+            (5, SubmitWithSubAccount(2UL, Alice, "FIRM01", "B", "VALE3", OrderSide.Buy, 50, 60m)),
+            (6, Er(2UL, ExecKind.Fill, leaves: 0, cum: 50, last: 50, price: 60m, at: DayStart.AddHours(11))),
+            (7, FeeWithSubAccount(2UL, Alice, "B", "VALE3", OrderSide.Buy, 50, 60m,
+                brokerage: 7m, emolumentos: 0, liquidacao: 0, at: DayStart.AddHours(11))),
+            (8, RealizedWithSubAccount(2UL, Alice, "FIRM01", "B", "VALE3", 77m, at: DayStart.AddHours(11))),
+        };
+
+        // Unfiltered: rows are tagged per-sub-account, both buckets visible.
+        var all = StatementProjection.Build(Alice, Day, "FIRM01", wal, livePositionsSnapshot: null);
+        Assert.Equal(2, all.Fills.Count);
+        Assert.Contains(all.Fills, f => f.Symbol == "PETR4" && f.SubAccountId == "A");
+        Assert.Contains(all.Fills, f => f.Symbol == "VALE3" && f.SubAccountId == "B");
+        Assert.Equal(2, all.Positions.Count);
+        Assert.Contains(all.Positions, p => p.Symbol == "PETR4" && p.SubAccountId == "A" && p.NetQty == 100);
+        Assert.Contains(all.Positions, p => p.Symbol == "VALE3" && p.SubAccountId == "B" && p.NetQty == 50);
+        Assert.Equal(8m, all.FeesTotal); // 1 + 7
+        Assert.Equal(88m, all.Pnl.RealizedGross); // 11 + 77
+
+        // Filter to sub-account A.
+        var onlyA = StatementProjection.Build(Alice, Day, "FIRM01", wal,
+            livePositionsSnapshot: null, subAccountFilter: "A");
+        var fillA = Assert.Single(onlyA.Fills);
+        Assert.Equal("PETR4", fillA.Symbol);
+        Assert.Equal("A", fillA.SubAccountId);
+        var posA = Assert.Single(onlyA.Positions);
+        Assert.Equal("PETR4", posA.Symbol);
+        Assert.Equal("A", posA.SubAccountId);
+        Assert.Equal(1m, onlyA.FeesTotal);
+        Assert.Equal(11m, onlyA.Pnl.RealizedGross);
+    }
 }

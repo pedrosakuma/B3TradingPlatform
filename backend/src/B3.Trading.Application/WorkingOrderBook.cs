@@ -84,6 +84,32 @@ public sealed class WorkingOrderBook
     }
 
     /// <summary>
+    /// PR #316 P2.1. Firm-scoped variant of
+    /// <see cref="CountOpenForOwner"/>. Restricts the count to the
+    /// owner's non-terminal orders tagged with <paramref name="firmId"/>
+    /// so the same JWT <c>sub</c> active in multiple firms does not
+    /// consume another firm's max-open-orders quota. Used by
+    /// <see cref="Risk.Checks.MaxOpenOrdersCheck"/> — that cap is
+    /// resolved per-(firm, end-client) by <see cref="Risk.RiskLimitsResolver"/>,
+    /// so the counter must also be firm-scoped.
+    /// </summary>
+    public int CountOpenForOwnerAndFirm(string firmId, EndClientId owner)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        if (!_byOwner.TryGetValue(owner.Value, out var set)) return 0;
+        var count = 0;
+        foreach (var clOrdId in set.Keys)
+        {
+            if (!_orders.TryGetValue(clOrdId, out var order)) continue;
+            if (IsTerminal(order.Status)) continue;
+            if (order.IsStale) continue;
+            if (!string.Equals(order.FirmId, firmId, StringComparison.Ordinal)) continue;
+            count++;
+        }
+        return count;
+    }
+
+    /// <summary>
     /// Q4.1 (#301). Counts an owner's non-terminal orders restricted to
     /// the given <c>(firm, sub-account)</c> bucket. Orders without a
     /// sub-account tag are NOT included (they live in the master bucket

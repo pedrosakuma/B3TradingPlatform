@@ -73,7 +73,8 @@ public static class StatementProjection
         DateOnly dayKey,
         string firmId,
         IReadOnlyList<(long Seq, WalEvent Event)> walEventsAllTime,
-        IReadOnlyList<PositionRowDto>? livePositionsSnapshot)
+        IReadOnlyList<PositionRowDto>? livePositionsSnapshot,
+        string? subAccountFilter = null)
     {
         ArgumentNullException.ThrowIfNull(walEventsAllTime);
         ArgumentException.ThrowIfNullOrEmpty(firmId);
@@ -91,8 +92,14 @@ public static class StatementProjection
         // for owner X under FIRM01 leaks rows from the same owner login
         // active under FIRM02. Legacy WAL rows without a firm tag are
         // treated as PositionKeeper.DefaultFirmId, matching the
-        // back-compat convention used elsewhere.
-        var ownerByClOrdId = new Dictionary<ulong, (string Owner, string Symbol, string Side, string FirmId)>();
+        // back-compat convention used elsewhere. PR #316 P2.2: the
+        // metadata also carries the originating SubAccountId so the
+        // projection can tag fills/positions per-bucket and so the
+        // optional <paramref name="subAccountFilter"/> can be enforced
+        // on fees / realized PnL (FeeAccruedEvent has no SubAccountId
+        // discriminator beyond the originating submit — same hop the
+        // FirmId filter takes).
+        var ownerByClOrdId = new Dictionary<ulong, (string Owner, string Symbol, string Side, string FirmId, string? SubAccountId)>();
         var fills = new List<FillRowDto>();
         var feesByType = new Dictionary<string, decimal>(StringComparer.Ordinal);
         decimal realizedGross = 0m;
@@ -103,16 +110,21 @@ public static class StatementProjection
             {
                 case OrderSubmittedEvent o:
                     ownerByClOrdId[o.ClOrdId] = (o.EndClientId, o.Symbol, o.Side,
-                        PositionKeeper.NormalizeFirmId(o.FirmId));
+                        PositionKeeper.NormalizeFirmId(o.FirmId), o.SubAccountId);
                     break;
 
                 case OrderReplaceRequestedEvent rr:
                     // A replace creates a brand-new ClOrdID that becomes
                     // its own working order; subsequent fill ERs arrive
                     // under it, so register ownership for the new ID
-                    // too.
+                    // too. Inherit SubAccountId from the original
+                    // submit (OrderReplaceRequestedEvent does not carry
+                    // it — Order.HydrateReplacement does the same).
+                    var inheritedSub = ownerByClOrdId.TryGetValue(rr.OriginalClOrdId, out var origMeta)
+                        ? origMeta.SubAccountId
+                        : null;
                     ownerByClOrdId[rr.NewClOrdId] = (rr.EndClientId, rr.Symbol, rr.Side,
-                        PositionKeeper.NormalizeFirmId(rr.FirmId));
+                        PositionKeeper.NormalizeFirmId(rr.FirmId), inheritedSub);
                     break;
 
                 case ExecutionReportReceivedEvent er:
@@ -122,6 +134,8 @@ public static class StatementProjection
                     if (!ownerByClOrdId.TryGetValue(er.ClOrdId, out var meta)) break;
                     if (!string.Equals(meta.Owner, owner.Value, StringComparison.Ordinal)) break;
                     if (!string.Equals(meta.FirmId, normFirm, StringComparison.Ordinal)) break;
+                    if (subAccountFilter is not null &&
+                        !string.Equals(meta.SubAccountId, subAccountFilter, StringComparison.Ordinal)) break;
                     fills.Add(new FillRowDto(
                         ExecutionId: $"{er.ClOrdId}:{er.CumulativeQuantity}",
                         ClOrdId: er.ClOrdId.ToString(),
@@ -130,7 +144,8 @@ public static class StatementProjection
                         Side: meta.Side,
                         Quantity: er.LastQuantity,
                         Price: er.LastPrice,
-                        TimestampUtc: er.TimestampUtc));
+                        TimestampUtc: er.TimestampUtc,
+                        SubAccountId: meta.SubAccountId));
                     break;
 
                 case FeeAccruedEvent fee:
@@ -141,6 +156,16 @@ public static class StatementProjection
                     // whose originating Submit pre-dates this map fall
                     // back to DefaultFirmId.
                     if (!ResolveFirm(ownerByClOrdId, fee.ClOrdId, normFirm)) break;
+                    // PR #316 P2.2. Sub-account filter is resolved via
+                    // the same ownership map (FeeAccruedEvent carries
+                    // SubAccountId since #301; fall back to the map for
+                    // legacy rows).
+                    if (subAccountFilter is not null)
+                    {
+                        var feeSub = fee.SubAccountId
+                            ?? (ownerByClOrdId.TryGetValue(fee.ClOrdId, out var feeMeta) ? feeMeta.SubAccountId : null);
+                        if (!string.Equals(feeSub, subAccountFilter, StringComparison.Ordinal)) break;
+                    }
                     AddFee(feesByType, "brokerage", fee.Brokerage);
                     AddFee(feesByType, "emolumentos", fee.Emolumentos);
                     AddFee(feesByType, "liquidacao", fee.Liquidacao);
@@ -160,6 +185,12 @@ public static class StatementProjection
                             : PositionKeeper.DefaultFirmId)
                         : PositionKeeper.NormalizeFirmId(pnl.FirmId);
                     if (!string.Equals(pnlFirm, normFirm, StringComparison.Ordinal)) break;
+                    if (subAccountFilter is not null)
+                    {
+                        var pnlSub = pnl.SubAccountId
+                            ?? (ownerByClOrdId.TryGetValue(pnl.ClOrdId, out var pnlMeta2) ? pnlMeta2.SubAccountId : null);
+                        if (!string.Equals(pnlSub, subAccountFilter, StringComparison.Ordinal)) break;
+                    }
                     realizedGross += pnl.DeltaRealized;
                     break;
             }
@@ -177,11 +208,15 @@ public static class StatementProjection
         IReadOnlyList<PositionRowDto> positions;
         if (livePositionsSnapshot is not null)
         {
-            positions = livePositionsSnapshot;
+            positions = subAccountFilter is null
+                ? livePositionsSnapshot
+                : livePositionsSnapshot
+                    .Where(p => string.Equals(p.SubAccountId, subAccountFilter, StringComparison.Ordinal))
+                    .ToList();
         }
         else
         {
-            positions = ProjectPositionsFromWal(owner, normFirm, dayEnd, walEventsAllTime, ownerByClOrdId);
+            positions = ProjectPositionsFromWal(owner, normFirm, dayEnd, walEventsAllTime, ownerByClOrdId, subAccountFilter);
         }
 
         // ----------------- IR day-trade pre-calc -----------------
@@ -204,7 +239,7 @@ public static class StatementProjection
     }
 
     private static bool ResolveFirm(
-        IReadOnlyDictionary<ulong, (string Owner, string Symbol, string Side, string FirmId)> map,
+        IReadOnlyDictionary<ulong, (string Owner, string Symbol, string Side, string FirmId, string? SubAccountId)> map,
         ulong clOrdId,
         string targetFirm)
     {
@@ -217,7 +252,8 @@ public static class StatementProjection
         string firmId,
         DateTimeOffset dayEnd,
         IReadOnlyList<(long Seq, WalEvent Event)> wal,
-        IReadOnlyDictionary<ulong, (string Owner, string Symbol, string Side, string FirmId)> ownerByClOrdId)
+        IReadOnlyDictionary<ulong, (string Owner, string Symbol, string Side, string FirmId, string? SubAccountId)> ownerByClOrdId,
+        string? subAccountFilter)
     {
         // Replay every fill ER from genesis up to (but not including)
         // dayEnd. Cumulative net qty + avg price is computed via a
@@ -225,8 +261,18 @@ public static class StatementProjection
         // semantics (including the flip-past-zero reset). PR #316 P2:
         // replay is firm-scoped so the historical positions read back
         // through ForEndClientAndFirm match what the live keeper would
-        // return for the same (owner, firm) bucket.
-        var keeper = new PositionKeeper();
+        // return for the same (owner, firm) bucket. PR #316 P2.2:
+        // bucket by SubAccountId (string?) so each sub-account
+        // (including the null "master" bucket) gets its own avg-cost
+        // computation; rows are then emitted tagged. When
+        // <paramref name="subAccountFilter"/> is set we only project
+        // the matching bucket — every other fill is skipped at
+        // ingestion so a sub-account A statement never sees
+        // sub-account B's lots.
+        // Use a sentinel for the null/master bucket so we can use a
+        // non-nullable string key.
+        const string MasterBucketKey = "\0master";
+        var keepers = new Dictionary<string, PositionKeeper>(StringComparer.Ordinal);
         foreach (var (_, evt) in wal)
         {
             if (evt is not ExecutionReportReceivedEvent er) continue;
@@ -236,18 +282,37 @@ public static class StatementProjection
             if (!ownerByClOrdId.TryGetValue(er.ClOrdId, out var meta)) continue;
             if (!string.Equals(meta.Owner, owner.Value, StringComparison.Ordinal)) continue;
             if (!string.Equals(meta.FirmId, firmId, StringComparison.Ordinal)) continue;
+            if (subAccountFilter is not null &&
+                !string.Equals(meta.SubAccountId, subAccountFilter, StringComparison.Ordinal)) continue;
             if (!Enum.TryParse<OrderSide>(meta.Side, ignoreCase: true, out var side)) continue;
             if (er.LastQuantity <= 0) continue;
+            var bucketKey = meta.SubAccountId ?? MasterBucketKey;
+            if (!keepers.TryGetValue(bucketKey, out var keeper))
+            {
+                keeper = new PositionKeeper();
+                keepers[bucketKey] = keeper;
+            }
             keeper.ApplyFill(firmId, owner, meta.Symbol, side, er.LastQuantity, er.LastPrice);
         }
 
         var rows = new List<PositionRowDto>();
-        foreach (var p in keeper.ForEndClientAndFirm(firmId, owner))
+        foreach (var bucket in keepers)
         {
-            if (p.NetQuantity == 0) continue;
-            rows.Add(new PositionRowDto(p.Symbol, p.NetQuantity, p.AverageEntryPrice));
+            var subTag = bucket.Key == MasterBucketKey ? null : bucket.Key;
+            foreach (var p in bucket.Value.ForEndClientAndFirm(firmId, owner))
+            {
+                if (p.NetQuantity == 0) continue;
+                rows.Add(new PositionRowDto(p.Symbol, p.NetQuantity, p.AverageEntryPrice, subTag));
+            }
         }
-        rows.Sort(static (a, b) => string.CompareOrdinal(a.Symbol, b.Symbol));
+        // Stable order: by symbol, then by sub-account (null bucket
+        // first to match the legacy single-row shape).
+        rows.Sort(static (a, b) =>
+        {
+            var bySym = string.CompareOrdinal(a.Symbol, b.Symbol);
+            if (bySym != 0) return bySym;
+            return string.CompareOrdinal(a.SubAccountId ?? "", b.SubAccountId ?? "");
+        });
         return rows;
     }
 
@@ -356,7 +421,7 @@ public sealed record DailyStatementDto(
     PnlSummaryDto Pnl,
     IrDayTradeDto IrDayTrade);
 
-public sealed record PositionRowDto(string Symbol, long NetQty, decimal AvgPrice);
+public sealed record PositionRowDto(string Symbol, long NetQty, decimal AvgPrice, string? SubAccountId = null);
 
 public sealed record FillRowDto(
     string ExecutionId,
@@ -366,7 +431,8 @@ public sealed record FillRowDto(
     string Side,
     long Quantity,
     decimal Price,
-    DateTimeOffset TimestampUtc);
+    DateTimeOffset TimestampUtc,
+    string? SubAccountId = null);
 
 public sealed record FeeRowDto(string FeeType, decimal Total);
 

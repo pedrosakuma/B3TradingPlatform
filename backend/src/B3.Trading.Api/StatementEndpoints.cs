@@ -39,17 +39,22 @@ public static class StatementEndpoints
             EndClientRegistry registry,
             IEventStore store,
             PositionKeeper positions,
+            SubAccountPositionKeeper subPositions,
+            SubAccountsRegistry subAccounts,
             EventDispatcher dispatcher,
             string? dayKey,
+            string? subAccount,
             CancellationToken ct) =>
         {
             if (!TryResolveDay(dayKey, out var day, out var error))
                 return error!;
             var owner = ResolveOwner(ctx, registry);
             var firm = ctx.User.FindFirstValue(Auth.JwtIssuer.FirmClaim) ?? "default";
+            if (!TryResolveSubAccount(subAccount, firm, subAccounts, out var subFilter, out var subError))
+                return subError!;
             Application.Observability.MetricsRegistry.StatementEndpointRequests.Add(
                 1, new KeyValuePair<string, object?>("format", "json"));
-            var dto = await BuildAsync(owner, firm, day, store, positions, dispatcher, ct);
+            var dto = await BuildAsync(owner, firm, day, store, positions, subPositions, dispatcher, subFilter, ct);
             EmitDayTradeMetric(dto);
             return Results.Ok(dto);
         });
@@ -59,17 +64,22 @@ public static class StatementEndpoints
             EndClientRegistry registry,
             IEventStore store,
             PositionKeeper positions,
+            SubAccountPositionKeeper subPositions,
+            SubAccountsRegistry subAccounts,
             EventDispatcher dispatcher,
             string dayKey,
+            string? subAccount,
             CancellationToken ct) =>
         {
             if (!TryResolveDay(dayKey, out var day, out var error))
                 return error!;
             var owner = ResolveOwner(ctx, registry);
             var firm = ctx.User.FindFirstValue(Auth.JwtIssuer.FirmClaim) ?? "default";
+            if (!TryResolveSubAccount(subAccount, firm, subAccounts, out var subFilter, out var subError))
+                return subError!;
             Application.Observability.MetricsRegistry.StatementEndpointRequests.Add(
                 1, new KeyValuePair<string, object?>("format", "csv"));
-            var dto = await BuildAsync(owner, firm, day, store, positions, dispatcher, ct);
+            var dto = await BuildAsync(owner, firm, day, store, positions, subPositions, dispatcher, subFilter, ct);
             EmitDayTradeMetric(dto);
             var bytes = RenderCsv(dto);
             return Results.File(
@@ -83,7 +93,7 @@ public static class StatementEndpoints
 
     private static async Task<DailyStatementDto> BuildAsync(
         EndClientId owner, string firmId, DateOnly day, IEventStore store, PositionKeeper positions,
-        EventDispatcher dispatcher, CancellationToken ct)
+        SubAccountPositionKeeper subPositions, EventDispatcher dispatcher, string? subAccountFilter, CancellationToken ct)
     {
         var today = DateOnly.FromDateTime(DateTimeOffset.UtcNow.UtcDateTime);
         var isToday = day == today;
@@ -103,12 +113,30 @@ public static class StatementEndpoints
         // pure WAL so we skip the keeper snapshot there. The exclusive
         // section stays tiny — no I/O — and the WAL scan + projection
         // run after we exit the lock.
+        //
+        // PR #316 P2.2. When the caller requested a per-sub-account
+        // view (or when any per-sub-account rows exist for this
+        // owner+firm), we cannot reuse the master-aggregate live
+        // snapshot — it would either double-count (master == sum of
+        // sub-buckets + null bucket) or be missing the per-bucket
+        // breakdown the projection needs. The projection then derives
+        // positions from the WAL replay (already firm- and bucket-
+        // scoped), which is correct but slower; the common pre-#301
+        // path (no sub-accounts in play, no filter) keeps the
+        // existing snapshot fast-path.
         long capturedSeq = 0;
         IReadOnlyList<PositionRowDto>? capturedPositions = null;
         dispatcher.RunExclusive(() =>
         {
             capturedSeq = store.CurrentSeq;
             if (!isToday) return;
+            if (subAccountFilter is not null) return;
+            // Only take the master snapshot when the owner has no
+            // per-sub-account positions in this firm; otherwise we fall
+            // through to WAL replay which can bucket correctly.
+            var anySub = false;
+            foreach (var _ in subPositions.EnumerateForOwner(firmId, owner)) { anySub = true; break; }
+            if (anySub) return;
             var rows = new List<PositionRowDto>();
             foreach (var p in positions.ForEndClientAndFirm(firmId, owner))
             {
@@ -134,7 +162,30 @@ public static class StatementEndpoints
             wal.Add(entry);
         }
 
-        return StatementProjection.Build(owner, day, firmId, wal, livePositionsSnapshot);
+        return StatementProjection.Build(owner, day, firmId, wal, livePositionsSnapshot, subAccountFilter);
+    }
+
+    private static bool TryResolveSubAccount(
+        string? raw, string firmId, SubAccountsRegistry subAccounts,
+        out string? subAccountFilter, out IResult? error)
+    {
+        error = null;
+        subAccountFilter = null;
+        if (string.IsNullOrWhiteSpace(raw)) return true;
+        SubAccountId saId;
+        try { saId = new SubAccountId(raw); }
+        catch (ArgumentException ex)
+        {
+            error = Results.BadRequest(new { error = $"invalid subAccount: {ex.Message}" });
+            return false;
+        }
+        if (!subAccounts.TryGet(firmId, saId.Value, out _))
+        {
+            error = Results.BadRequest(new { error = $"sub-account '{saId.Value}' is not registered for firm" });
+            return false;
+        }
+        subAccountFilter = saId.Value;
+        return true;
     }
 
     private static void EmitDayTradeMetric(DailyStatementDto dto)
@@ -183,13 +234,14 @@ public static class StatementEndpoints
         var sb = new StringBuilder(1024);
 
         WriteSectionHeader(sb, "positions");
-        sb.Append("symbol,netQty,avgPrice\r\n");
+        sb.Append("symbol,netQty,avgPrice,subAccount\r\n");
         foreach (var p in dto.Positions)
-            sb.Append(Csv(p.Symbol)).Append(',').Append(Num(p.NetQty)).Append(',').Append(Num(p.AvgPrice)).Append("\r\n");
+            sb.Append(Csv(p.Symbol)).Append(',').Append(Num(p.NetQty)).Append(',').Append(Num(p.AvgPrice))
+              .Append(',').Append(Csv(p.SubAccountId ?? string.Empty)).Append("\r\n");
         sb.Append("\r\n");
 
         WriteSectionHeader(sb, "fills");
-        sb.Append("executionId,clOrdId,orderId,symbol,side,quantity,price,timestampUtc\r\n");
+        sb.Append("executionId,clOrdId,orderId,symbol,side,quantity,price,timestampUtc,subAccount\r\n");
         foreach (var f in dto.Fills)
         {
             sb.Append(Csv(f.ExecutionId)).Append(',')
@@ -199,7 +251,8 @@ public static class StatementEndpoints
               .Append(Csv(f.Side)).Append(',')
               .Append(Num(f.Quantity)).Append(',')
               .Append(Num(f.Price)).Append(',')
-              .Append(f.TimestampUtc.ToString("O", CultureInfo.InvariantCulture))
+              .Append(f.TimestampUtc.ToString("O", CultureInfo.InvariantCulture)).Append(',')
+              .Append(Csv(f.SubAccountId ?? string.Empty))
               .Append("\r\n");
         }
         sb.Append("\r\n");
