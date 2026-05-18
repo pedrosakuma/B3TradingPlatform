@@ -419,6 +419,43 @@ public class DropCopyWebSocketTests
         Assert.Equal("second_burst", c.DisconnectReason);
     }
 
+    // 13. Pass-6 review (#323): registration + per-firm arm must be
+    //     atomic with the disconnect walk's consume. Stress test:
+    //     interleave Add() with concurrent DisconnectAllForResync()
+    //     and assert no client added at time T can survive a drop at
+    //     time T'>T without being marked for disconnect.
+    [Fact]
+    public async Task ConcurrentAddAndDisconnectAllForResync_NeverLeavesClientUnmarked()
+    {
+        var book = new WorkingOrderBook();
+        var manager = new DropCopyManager(book);
+        var clients = new List<DropCopyClient>(capacity: 500);
+        var cts = new CancellationTokenSource();
+
+        var dropWalker = Task.Run(() =>
+        {
+            while (!cts.IsCancellationRequested)
+                manager.DisconnectAllForResync("race_drop");
+        });
+
+        for (int i = 0; i < 500; i++)
+        {
+            var c = new DropCopyClient($"FIRM{i % 5:00}", $"user{i}", "compliance");
+            clients.Add(c);
+            manager.Add(c);
+        }
+        // Let the walker observe one more burst after the last Add.
+        manager.DisconnectAllForResync("final");
+        await Task.Delay(50);
+        cts.Cancel();
+        await dropWalker;
+        // Final pass to drain anything armed after Cancel.
+        manager.DisconnectAllForResync("post_cancel_drain");
+
+        foreach (var c in clients)
+            Assert.True(c.MarkedForDisconnect, $"client {c.Username} for firm {c.FirmId} was not marked");
+    }
+
     // ----------------- helpers -----------------
 
     private static async Task<WebSocket> ConnectDropCopyAsync(TestAppFactory factory, string token)
