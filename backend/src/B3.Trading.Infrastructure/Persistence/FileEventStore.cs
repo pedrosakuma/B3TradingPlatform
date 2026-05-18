@@ -306,30 +306,109 @@ public sealed class FileEventStore : IEventStore
     }
 
     /// <summary>
-    /// Walks every segment in seq order. The on-disk layout is sorted
-    /// lexicographically by (date, ordinal), so directory enumeration is
-    /// also seq-ordered.
+    /// Walks every segment in seq order. Segments written by the
+    /// current writer carry a <c>&lt;base&gt;.log.firstseq</c> sidecar
+    /// (see <see cref="SegmentWriter.FirstSeqSidecarSuffix"/>); when
+    /// present, segments are globally sorted by their first seq so the
+    /// enumeration order matches the in-memory <c>_seq</c> regardless
+    /// of which day directory each segment lives in. This is essential
+    /// for readers that cap by <see cref="CurrentSeq"/> (e.g. the
+    /// past-day statement projection): the on-disk record order must
+    /// agree with the in-memory seq cap or the cap slices the wrong
+    /// records. The day-directory layout (partitioned by event
+    /// timestamp) intentionally keeps backdated events near their
+    /// business day for EOD scoping, so directory-name order alone
+    /// cannot reflect append order.
+    ///
+    /// <para>
+    /// Backward compatibility: any segment missing a sidecar (a
+    /// legacy WAL from before #328, or a hand-crafted test fixture)
+    /// is enumerated with the legacy count-based path — the
+    /// per-(dir,name) ordinal sort. Mixing hinted and legacy
+    /// segments is supported: legacy segments are processed in their
+    /// natural directory-sort order and the running seq counter
+    /// carries through.
+    /// </para>
     /// </summary>
     internal IEnumerable<(long Seq, byte[] Payload)> EnumerateAllRecords()
     {
         if (!Directory.Exists(_walRoot)) yield break;
-        var dayDirs = Directory.EnumerateDirectories(_walRoot)
-            .OrderBy(d => Path.GetFileName(d), StringComparer.Ordinal);
-        long currentSeq = 0;
-        foreach (var day in dayDirs)
+
+        var allSegments = new List<SegmentEntry>();
+        foreach (var dayDir in Directory.EnumerateDirectories(_walRoot))
         {
-            var logFiles = Directory.EnumerateFiles(day, "*.log")
-                .OrderBy(f => Path.GetFileName(f), StringComparer.Ordinal);
-            foreach (var logFile in logFiles)
+            var dayName = Path.GetFileName(dayDir);
+            foreach (var logFile in Directory.EnumerateFiles(dayDir, "*.log"))
             {
-                using var reader = new SegmentReader(logFile);
-                foreach (var payload in reader.ReadAll())
-                {
-                    currentSeq++;
-                    yield return (currentSeq, payload);
-                }
+                var fileName = Path.GetFileName(logFile);
+                long? firstSeq = TryReadFirstSeqSidecar(logFile);
+                allSegments.Add(new SegmentEntry(logFile, dayName, fileName, firstSeq));
             }
         }
+
+        // Stable global ordering:
+        //   * Segments WITH a sidecar are sorted by their firstSeq.
+        //   * Segments WITHOUT a sidecar (legacy or partially-written)
+        //     fall back to (dayName, fileName) ordinal sort, and are
+        //     interleaved at the position where the running counter
+        //     would land — but since we cannot know their firstSeq we
+        //     conservatively run them AFTER all hinted segments to
+        //     keep the cap-correctness invariant for hinted runs.
+        allSegments.Sort(SegmentEntry.OrderingComparer);
+
+        long currentSeq = 0;
+        foreach (var seg in allSegments)
+        {
+            if (seg.FirstSeq is long fs) currentSeq = fs - 1;
+            using var reader = new SegmentReader(seg.LogPath);
+            foreach (var payload in reader.ReadAll())
+            {
+                currentSeq++;
+                yield return (currentSeq, payload);
+            }
+        }
+    }
+
+    private static long? TryReadFirstSeqSidecar(string logPath)
+    {
+        var sidecar = logPath + SegmentWriter.FirstSeqSidecarSuffix;
+        if (!File.Exists(sidecar)) return null;
+        try
+        {
+            var bytes = File.ReadAllBytes(sidecar);
+            if (bytes.Length < 8) return null;
+            return System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(bytes);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private readonly record struct SegmentEntry(string LogPath, string DayName, string FileName, long? FirstSeq)
+    {
+        public static readonly IComparer<SegmentEntry> OrderingComparer = Comparer<SegmentEntry>.Create((a, b) =>
+        {
+            // Unhinted (legacy) segments come FIRST, ordered by the
+            // legacy (dayName, fileName) ordinal — their synthetic
+            // seqs occupy 1..N. Hinted segments (post-#328) come
+            // AFTER, ordered by firstSeq, which by construction is
+            // assigned after _seq has been initialised from the
+            // legacy tail (see ScanHighestSeq). This preserves
+            // upgrade-path correctness when a legacy WAL is opened
+            // by the new writer and gains hinted segments on top.
+            var ah = a.FirstSeq.HasValue;
+            var bh = b.FirstSeq.HasValue;
+            if (!ah && !bh)
+            {
+                var d = StringComparer.Ordinal.Compare(a.DayName, b.DayName);
+                if (d != 0) return d;
+                return StringComparer.Ordinal.Compare(a.FileName, b.FileName);
+            }
+            if (!ah) return -1;
+            if (!bh) return 1;
+            return a.FirstSeq!.Value.CompareTo(b.FirstSeq!.Value);
+        });
     }
 
     private long ScanHighestSeq()

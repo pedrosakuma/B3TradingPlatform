@@ -544,6 +544,175 @@ public class FileEventStoreTests : IDisposable
         Assert.True(second.IsCompletedSuccessfully, "second FlushAsync must complete.");
     }
 
+    [Fact]
+    public async Task EnumerateAllRecords_AcrossDayDirs_OrdersBySeqNotDirectoryName()
+    {
+        // #328 regression. Day directories are partitioned by
+        // evt.TimestampUtc. When events with different business days
+        // are interleaved in append order (e.g. UTC-rollover ER
+        // timestamped "yesterday" arriving after a fresh "today"
+        // event has already been appended), the on-disk layout looks
+        // like: <yesterday>/<seg> AND <today>/<seg>, but the global
+        // seq order is (today=1, yesterday=2, today=3, yesterday=4).
+        // Pre-fix, EnumerateAllRecords sorted by directory name
+        // (yesterday < today alphabetically) and assigned synthetic
+        // seqs in that order, which let a CurrentSeq cap slice
+        // through a logical (ER + nested Fee) chain — torn snapshot.
+        // Post-fix, the per-segment .firstseq sidecar lets the
+        // enumerator restore real seq order across day directories.
+        var opts = OptsForTest();
+        await using var store = new FileEventStore(opts, NullLogger<FileEventStore>.Instance);
+
+        var today = new DateTimeOffset(2026, 1, 5, 10, 0, 0, TimeSpan.Zero);
+        var yesterday = today.AddDays(-1);
+
+        // Interleave to force the writer to roll between day dirs:
+        //   seq 1 -> today, seq 2 -> yesterday, seq 3 -> today,
+        //   seq 4 -> yesterday. Each event lives in a fresh segment
+        //   in its own day-dir.
+        var stamps = new[] { today, yesterday, today, yesterday };
+        var assigned = new List<long>();
+        for (var i = 0; i < stamps.Length; i++)
+        {
+            var e = new OrderSubmittedEvent
+            {
+                ClOrdId = (ulong)(i + 1),
+                EndClientId = "alice",
+                FirmId = "TEST",
+                Symbol = "PETR4",
+                SecurityId = 4321UL,
+                Side = "Buy",
+                Type = "Limit",
+                Quantity = 100,
+                Price = 30m,
+                TimestampUtc = stamps[i],
+            };
+            var payload = JsonSerializer.SerializeToUtf8Bytes<WalEvent>(e, WalEventJsonContext.Default.WalEvent);
+            assigned.Add(store.Append(e, payload));
+        }
+        await store.FlushAsync();
+
+        // Sanity: writer produced segments in BOTH day directories.
+        var walRoot = Path.Combine(_root, "test", "wal");
+        var dayDirs = Directory.EnumerateDirectories(walRoot).Select(Path.GetFileName).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+        Assert.Contains("2026-01-04", dayDirs);
+        Assert.Contains("2026-01-05", dayDirs);
+
+        // Enumeration must yield (seq, clOrdId) pairs in the order
+        // they were appended — NOT in directory-alphabetical order.
+        var seqOrder = new List<(long Seq, ulong ClOrdId)>();
+        await foreach (var (seq, evt) in store.ReadFromAsync(0))
+        {
+            if (evt is OrderSubmittedEvent os) seqOrder.Add((seq, os.ClOrdId));
+        }
+        Assert.Equal(new[] { (1L, 1UL), (2L, 2UL), (3L, 3UL), (4L, 4UL) }, seqOrder);
+
+        // Capping at seq=1 must return ONLY clOrdId=1 (the today
+        // segment's sole record), even though yesterday's dir sorts
+        // alphabetically first.
+        var capped = new List<ulong>();
+        await foreach (var (seq, evt) in store.ReadFromAsync(0))
+        {
+            if (seq > 1) break;
+            if (evt is OrderSubmittedEvent os) capped.Add(os.ClOrdId);
+        }
+        Assert.Equal(new[] { 1UL }, capped);
+    }
+
+    [Fact]
+    public async Task EnumerateAllRecords_LegacySegmentWithoutSidecar_StillReadable()
+    {
+        // Backward compat for #328. A WAL segment created without a
+        // .firstseq sidecar (legacy on-disk format, or a hand-crafted
+        // test fixture) must still be enumerated — falling back to
+        // directory-ordinal ordering. Verifies the missing-sidecar
+        // path doesn't drop records on the floor.
+        var opts = OptsForTest();
+        var walDir = Path.Combine(_root, "test", "wal", "2025-01-01");
+        Directory.CreateDirectory(walDir);
+        var logPath = Path.Combine(walDir, "000.log");
+        var idxPath = Path.Combine(walDir, "000.idx");
+        // SegmentWriter writes a sidecar on first Append; suppress by
+        // pre-creating the sidecar marker as if it had already been
+        // written (we delete it after to simulate true legacy data).
+        await using (var w = new SegmentWriter(logPath, idxPath, opts.IndexEveryNRecords, opts.IndexEveryNBytes, opts.FsyncOnFlush))
+        {
+            var payload = JsonSerializer.SerializeToUtf8Bytes<WalEvent>(NewOrder(0), WalEventJsonContext.Default.WalEvent);
+            w.Append(1, payload, 0);
+            w.Flush();
+        }
+        // Remove the sidecar to simulate a legacy segment.
+        File.Delete(logPath + SegmentWriter.FirstSeqSidecarSuffix);
+
+        await using var store = new FileEventStore(opts, NullLogger<FileEventStore>.Instance);
+        var seqs = new List<long>();
+        await foreach (var (seq, _) in store.ReadFromAsync(0)) seqs.Add(seq);
+        Assert.Equal(new[] { 1L }, seqs);
+    }
+
+    [Fact]
+    public async Task EnumerateAllRecords_LegacySegmentsThenHintedSegments_PreservesAppendOrder()
+    {
+        // #328 upgrade-path regression. When a binary that writes
+        // .firstseq sidecars opens a WAL produced by an older binary
+        // that didn't, the legacy segments hold synthetic seqs 1..N
+        // and the new hinted segments start at N+1. Enumeration must
+        // therefore yield ALL legacy records first (in their original
+        // directory-ordinal order) and only then the hinted records,
+        // otherwise ScanHighestSeq inflates _seq on reopen and every
+        // subsequent cap is off.
+        var opts = OptsForTest();
+        var walDir = Path.Combine(_root, "test", "wal", "2025-01-01");
+        Directory.CreateDirectory(walDir);
+
+        // Forge two legacy segments (no sidecar) holding seqs 1..3
+        // and 4..5 respectively. We have to choose seqs that match
+        // the legacy count-based assignment for the reopened store
+        // to ScanHighestSeq them back to the same numbers.
+        for (var segIdx = 0; segIdx < 2; segIdx++)
+        {
+            var logPath = Path.Combine(walDir, $"{segIdx:D3}.log");
+            var idxPath = Path.Combine(walDir, $"{segIdx:D3}.idx");
+            var records = segIdx == 0 ? 3 : 2;
+            await using (var w = new SegmentWriter(logPath, idxPath, opts.IndexEveryNRecords, opts.IndexEveryNBytes, opts.FsyncOnFlush))
+            {
+                for (var r = 0; r < records; r++)
+                {
+                    var payload = JsonSerializer.SerializeToUtf8Bytes<WalEvent>(NewOrder(segIdx * 10 + r), WalEventJsonContext.Default.WalEvent);
+                    w.Append(0, payload, 0); // seq arg is for the sidecar only; legacy fallback re-numbers via count
+                }
+                w.Flush();
+            }
+            File.Delete(logPath + SegmentWriter.FirstSeqSidecarSuffix);
+        }
+
+        // Open the new-format store; it must ScanHighestSeq the
+        // legacy segments to 5, then append starting at 6.
+        long[] newSeqs;
+        await using (var store = new FileEventStore(opts, NullLogger<FileEventStore>.Instance))
+        {
+            newSeqs = new[]
+            {
+                store.Append(NewOrder(100)),
+                store.Append(NewOrder(101)),
+            };
+            await store.FlushAsync();
+        }
+        Assert.Equal(new[] { 6L, 7L }, newSeqs);
+
+        // Reopen and enumerate: legacy 1..5 must come before hinted 6..7.
+        await using var reopened = new FileEventStore(opts, NullLogger<FileEventStore>.Instance);
+        var seqs = new List<long>();
+        var ids = new List<ulong>();
+        await foreach (var (seq, evt) in reopened.ReadFromAsync(0))
+        {
+            seqs.Add(seq);
+            if (evt is OrderSubmittedEvent os) ids.Add(os.ClOrdId);
+        }
+        Assert.Equal(new[] { 1L, 2L, 3L, 4L, 5L, 6L, 7L }, seqs);
+        Assert.Equal(new ulong[] { 1, 2, 3, 11, 12, 101, 102 }, ids);
+    }
+
     private static OrderSubmittedEvent NewOrder(int i) => new()
     {
         ClOrdId = (ulong)(i + 1),
