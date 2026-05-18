@@ -48,9 +48,9 @@ EOF
     exit 3
 }
 
-log() { printf '%s [chaos] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
-banner_start() { printf '\n===== START scenario: %s =====\n' "$1"; }
-banner_end() { printf '===== END   scenario: %s — %s =====\n\n' "$1" "$2"; }
+log() { printf '%s [chaos] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
+banner_start() { printf '\n===== START scenario: %s =====\n' "$1" >&2; }
+banner_end() { printf '===== END   scenario: %s — %s =====\n\n' "$1" "$2" >&2; }
 
 require_cmd() {
     command -v "$1" >/dev/null 2>&1 || {

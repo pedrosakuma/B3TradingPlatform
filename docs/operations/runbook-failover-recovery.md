@@ -503,11 +503,13 @@ analysis, or restoring to a clean host).
    ```bash
    echo -n 12345 > data/{firm}/snapshots/latest.txt
    ```
-   Important: `SnapshotStore.LoadLatest` picks the highest-seq
-   `snap-*.json` file regardless of `latest.txt` (the pointer is just
-   a hint; on parse failure it falls back to `files[^1]`). If you
-   shipped multiple snapshots, **delete the unwanted ones** rather
-   than relying on the pointer alone.
+   Important: `SnapshotStore.LoadLatest` selects the file whose
+   filename ends with the seq encoded in `latest.txt` (the canonical
+   path); it **only** falls back to the highest-seq `snap-*.json` on
+   disk when `latest.txt` is missing, unparseable, or points at a seq
+   with no matching file. To be belt-and-braces during restore, both
+   write `latest.txt` AND delete any snapshot files you do not want
+   loaded.
 4. Ensure `data/{firm}/wal/` is empty (or contains only seq <= N
    events that have already been folded into the snapshot).
 5. Start the host.
@@ -601,11 +603,13 @@ external editing or disk corruption).
    file and either rewrite `snapshots/latest.txt` to point at an older
    surviving seq (the file is a **plain ASCII integer**, e.g. `12345`
    — written by `SnapshotStore.Write` as `snapshot.Seq.ToString(...)`,
-   **not** JSON) or delete `latest.txt` entirely so the host cold-replays
-   from `seq=1`. Note: `SnapshotStore.LoadLatest` actually picks the
-   highest-seq snapshot file on disk regardless of `latest.txt`, so the
-   snapshot files themselves are the authoritative source — delete the
-   bad files, not just the pointer.
+   **not** JSON) or delete `latest.txt` entirely so `LoadLatest`
+   selects whatever surviving snapshot is highest. Note:
+   `SnapshotStore.LoadLatest` honours `latest.txt` when it parses to a
+   seq that matches a file on disk, and only falls back to the
+   highest-seq `snap-*.json` when the pointer is missing, unparseable,
+   or unmatched — so during repair you must **both** update the
+   pointer **and** delete any files newer than your truncation point.
 8. **Restart.** B3 will replay the gap on FIXP `Establish`.
 9. **Document** the truncation byte-offset, last-good-seq, and the
    chain of segments / snapshots dropped, in the incident record.
