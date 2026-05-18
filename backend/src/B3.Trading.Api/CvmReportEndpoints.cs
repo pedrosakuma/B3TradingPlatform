@@ -92,8 +92,22 @@ public static class CvmReportEndpoints
             // admin crosses firm boundaries via the override).
             if (!isAdmin && !string.Equals(requested, callerFirm, StringComparison.Ordinal))
             {
-                EmitAudit(audit, ctx, reportType, requested, date, rowCount: 0,
-                    outcome: AuditOutcomes.Denied, reasonCode: "cross_firm_denied", actorUserId);
+                // Pass-2 review (#325) P2. WAL-backpressured audit must
+                // surface as a structured 503 (matches AdminEndpoints),
+                // not an unhandled 500.
+                try
+                {
+                    EmitAudit(audit, ctx, reportType, requested, date, rowCount: 0,
+                        outcome: AuditOutcomes.Denied, reasonCode: "cross_firm_denied", actorUserId);
+                }
+                catch (WalBackpressureException ex)
+                {
+                    MetricsRegistry.WalBackpressure.Add(1,
+                        new KeyValuePair<string, object?>("call_site", "reports.cvm.audit.cross_firm_denied"));
+                    return Results.Json(
+                        new { error = "system busy (WAL backpressure)", detail = ex.Message },
+                        statusCode: StatusCodes.Status503ServiceUnavailable);
+                }
                 return Results.Forbid();
             }
             targetFirm = requested;
