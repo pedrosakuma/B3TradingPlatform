@@ -79,27 +79,36 @@ capture_state() {
         health='{"error":"health endpoint unreachable"}'
     fi
     local wal_seq
-    wal_seq="$(read_wal_seq || echo null)"
-    printf '{"label":%q,"scenario":%q,"ts":%q,"health":%s,"wal_latest_seq":%s}\n' \
+    wal_seq="$(read_wal_seq || echo '{"snapshot_seq":null,"wal_bytes":null}')"
+    printf '{"label":"%s","scenario":"%s","ts":"%s","health":%s,"wal":%s}\n' \
         "$label" "$scenario" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$health" "$wal_seq" >"$out"
     log "captured ${label} state → ${out}"
     echo "$out"
 }
 
 read_wal_seq() {
-    # Read the latest snapshot pointer's seq directly from the trading-host
-    # container's data volume. This is the same `latest.txt` that
-    # PersistenceRecovery reads on startup. Returns the JSON-numeric seq,
-    # or `null` when the file does not exist (cold dir).
-    local data_dir firm latest
+    # Pass-1 review (#326) P1 fix. `latest.txt` is a PLAIN integer
+    # (see SnapshotStore.Write — `snapshot.Seq.ToString(...)`), not
+    # JSON; the previous regex always returned null. We now also
+    # compute a WAL footprint proxy (total .log byte count across
+    # day directories) so the monotonic assertion still has a
+    # signal even before the first snapshot tick. Emits a JSON
+    # object with both fields; the caller pulls whichever is
+    # appropriate. Returns null fields when nothing is on disk yet.
+    local data_dir firm root snap_path snap_seq wal_bytes
     data_dir="$(docker exec "$TRADING_CONTAINER" sh -c 'echo "${Trading__Persistence__DataDirectory:-/var/lib/b3trading}"' 2>/dev/null || echo /var/lib/b3trading)"
     firm="$(docker exec "$TRADING_CONTAINER" sh -c 'echo "${Trading__Persistence__FirmId:-default}"' 2>/dev/null || echo default)"
-    latest="${data_dir}/${firm}/snapshots/latest.txt"
-    docker exec "$TRADING_CONTAINER" sh -c "test -f '$latest' && cat '$latest' || echo '{}'" 2>/dev/null \
-        | { grep -oE '"seq"[[:space:]]*:[[:space:]]*[0-9]+' || true; } \
-        | head -n1 \
-        | grep -oE '[0-9]+$' \
-        || echo null
+    root="${data_dir}/${firm}"
+    snap_path="${root}/snapshots/latest.txt"
+    snap_seq="$(docker exec "$TRADING_CONTAINER" sh -c "test -f '$snap_path' && cat '$snap_path' 2>/dev/null || true" 2>/dev/null | tr -d '[:space:]')"
+    if ! [[ "$snap_seq" =~ ^[0-9]+$ ]]; then
+        snap_seq=null
+    fi
+    wal_bytes="$(docker exec "$TRADING_CONTAINER" sh -c "test -d '${root}/wal' && find '${root}/wal' -type f -name '*.log' -printf '%s\n' 2>/dev/null | awk 'BEGIN{s=0}{s+=\$1}END{print s}' || echo ''" 2>/dev/null | tr -d '[:space:]')"
+    if ! [[ "$wal_bytes" =~ ^[0-9]+$ ]]; then
+        wal_bytes=null
+    fi
+    printf '{"snapshot_seq":%s,"wal_bytes":%s}\n' "$snap_seq" "$wal_bytes"
 }
 
 wait_for_ready() {
@@ -124,8 +133,19 @@ extract_firm() {
 
 extract_wal_seq() {
     local file="$1"
-    grep -oE '"wal_latest_seq"[[:space:]]*:[[:space:]]*(null|[0-9]+)' "$file" | head -n1 \
-        | sed -E 's/.*"wal_latest_seq"[[:space:]]*:[[:space:]]*//'
+    # Pass-1 review (#326) P1. The captured JSON now exposes both
+    # the snapshot pointer and a WAL bytes proxy under a `wal`
+    # object. We expose two extractors: snapshot_seq (the snapshot
+    # cursor `latest.txt`, plain integer) and wal_bytes (sum of
+    # *.log file sizes).
+    grep -oE '"snapshot_seq"[[:space:]]*:[[:space:]]*(null|[0-9]+)' "$file" | head -n1 \
+        | sed -E 's/.*"snapshot_seq"[[:space:]]*:[[:space:]]*//'
+}
+
+extract_wal_bytes() {
+    local file="$1"
+    grep -oE '"wal_bytes"[[:space:]]*:[[:space:]]*(null|[0-9]+)' "$file" | head -n1 \
+        | sed -E 's/.*"wal_bytes"[[:space:]]*:[[:space:]]*//'
 }
 
 assert_health_block() {
@@ -149,26 +169,36 @@ assert_health_block() {
 
 assert_wal_seq_monotonic() {
     local pre="$1" post="$2"
-    local pre_seq post_seq
+    local pre_seq post_seq pre_bytes post_bytes
     pre_seq="$(extract_wal_seq "$pre" || echo null)"
     post_seq="$(extract_wal_seq "$post" || echo null)"
-    if [[ "$pre_seq" == "null" && "$post_seq" == "null" ]]; then
-        log "NOTE: both pre and post WAL seqs are null (no snapshot taken yet). Treating as PASS."
-        return 0
-    fi
-    if [[ "$post_seq" == "null" ]]; then
-        log "FAIL: post-drill WAL seq is null but pre was '${pre_seq}' (snapshot pointer lost?)"
+    pre_bytes="$(extract_wal_bytes "$pre" || echo null)"
+    post_bytes="$(extract_wal_bytes "$post" || echo null)"
+    # Pass-1 review (#326) P1. When BOTH proxies are null on both
+    # sides, the chaos drill is running against an effectively empty
+    # data dir — silently treating this as PASS hides bugs in the
+    # very recovery path the drill is supposed to exercise. Fail it
+    # so the operator either pre-seeds load OR moves to a
+    # scenario-specific assertion (see network-partition for the
+    # duplicate-fill check).
+    if [[ "$pre_seq" == "null" && "$post_seq" == "null"
+       && "$pre_bytes" == "null" && "$post_bytes" == "null" ]]; then
+        log "FAIL: data dir is empty on both sides of the drill (no snapshot + no WAL bytes). Pre-seed load before running this scenario."
         return 1
     fi
-    if [[ "$pre_seq" == "null" ]]; then
-        log "NOTE: pre WAL seq null, post='${post_seq}'. Treating as PASS (first snapshot wrote during drill)."
-        return 0
-    fi
-    if (( post_seq < pre_seq )); then
-        log "FAIL: WAL seq regressed (pre=${pre_seq}, post=${post_seq})"
+    if [[ "$post_seq" == "null" && "$pre_seq" != "null" ]]; then
+        log "FAIL: post-drill snapshot pointer is null but pre was '${pre_seq}' (snapshot pointer lost)"
         return 1
     fi
-    log "WAL seq pre=${pre_seq}, post=${post_seq} (monotonic ✓)"
+    if [[ "$pre_seq" != "null" && "$post_seq" != "null" ]] && (( post_seq < pre_seq )); then
+        log "FAIL: snapshot seq regressed (pre=${pre_seq}, post=${post_seq})"
+        return 1
+    fi
+    if [[ "$pre_bytes" != "null" && "$post_bytes" != "null" ]] && (( post_bytes < pre_bytes )); then
+        log "FAIL: WAL footprint shrank across drill (pre=${pre_bytes}B, post=${post_bytes}B) — possible data loss"
+        return 1
+    fi
+    log "WAL monotonic check ✓ (snapshot pre=${pre_seq}, post=${post_seq}; WAL bytes pre=${pre_bytes}, post=${post_bytes})"
     return 0
 }
 
@@ -276,6 +306,25 @@ scenario_network_partition() {
     if ! assert_wal_seq_monotonic "$pre" "$post"; then
         banner_end "$scenario" "FAIL"
         return 1
+    fi
+    # Pass-1 review (#326) P2. End-to-end "no duplicate fills in
+    # projection" requires authenticated /orders submission against
+    # a seed user + observation of `/fills/{id}/touch` and is
+    # environment-specific (seed credentials, listed symbols).
+    # Drive that flow externally and feed the pre/post snapshots via
+    # CHAOS_PRE_FILL_TOUCH / CHAOS_POST_FILL_TOUCH; when both are
+    # set we assert the touch payload is bit-identical, which is the
+    # canonical "no replay clobbering" invariant from Q4.7 (#307).
+    if [[ -n "${CHAOS_PRE_FILL_TOUCH:-}" && -n "${CHAOS_POST_FILL_TOUCH:-}" ]]; then
+        if ! diff -u <(curl -fsS --max-time 5 "${TRADING_BASE_URL}${CHAOS_PRE_FILL_TOUCH}") \
+                    <(curl -fsS --max-time 5 "${TRADING_BASE_URL}${CHAOS_POST_FILL_TOUCH}"); then
+            log "FAIL: fill touch payload diverged across partition (replay clobber?)"
+            banner_end "$scenario" "FAIL"
+            return 1
+        fi
+        log "fill touch payload identical across partition ✓"
+    else
+        log "NOTE: CHAOS_PRE_FILL_TOUCH/CHAOS_POST_FILL_TOUCH not set — skipping bit-identical fill-touch assertion (run with these env vars for full coverage)."
     fi
     banner_end "$scenario" "PASS"
     return 0

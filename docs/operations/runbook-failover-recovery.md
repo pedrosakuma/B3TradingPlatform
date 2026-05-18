@@ -524,11 +524,20 @@ With snapshot-only recovery, expect `GET /fills/{id}/touch` to return
 **Automatic torn-tail handling.** On every open, `FileEventStore`
 constructs a `SegmentReader` per segment which iterates records,
 verifying each `[u32 length][u32 crc32][payload]` frame. The first
-record whose length runs past EOF, whose CRC fails, or whose payload
-lacks a `kind` discriminator triggers `SegmentReader.LastValidEnd` —
-the byte offset of the last valid record. `CurrentSeq` becomes that
-record's seq. **No truncation is performed automatically**; the bytes
-past `LastValidEnd` are simply not read.
+record whose length runs past EOF or whose CRC fails triggers
+`SegmentReader.LastValidEnd` — the byte offset of the last valid
+framed record. The bytes past `LastValidEnd` are simply not read; **no
+truncation is performed automatically**.
+
+Note that **`SegmentReader` validates framing and CRC only** — it does
+**not** look inside the payload. A frame with a complete `[length][crc][payload]`
+that the JSON deserializer later rejects (e.g. missing `kind`
+discriminator) passes `LastValidEnd` and surfaces later in
+`FileEventStore.ReadFromAsync` as a hard exception, **not** as a
+silent truncation. Those errors are corruption, not a torn tail, and
+fall under the manual procedure below. `CurrentSeq` is incremented
+per-record as the framed payloads are enumerated, so it reflects only
+the records `SegmentReader` accepted *and* JSON-parsed successfully.
 
 This handles the common case: a clean torn-tail after `kill -9` or
 power loss. Tested by
@@ -574,9 +583,15 @@ external editing or disk corruption).
    boot, defeating the entire CRC discipline.
 7. **Drop snapshots strictly newer than the surviving tail.** A
    snapshot at `seq=N` requires every event `<= N` to be readable; if
-   N is past your truncation point, delete it and update
-   `latest.txt` (or drop it entirely — the host will cold-replay from
-   `seq=1`).
+   N is past your truncation point, delete the `snap-<NNNNNNNNNNNN>.json`
+   file and either rewrite `snapshots/latest.txt` to point at an older
+   surviving seq (the file is a **plain ASCII integer**, e.g. `12345`
+   — written by `SnapshotStore.Write` as `snapshot.Seq.ToString(...)`,
+   **not** JSON) or delete `latest.txt` entirely so the host cold-replays
+   from `seq=1`. Note: `SnapshotStore.LoadLatest` actually picks the
+   highest-seq snapshot file on disk regardless of `latest.txt`, so the
+   snapshot files themselves are the authoritative source — delete the
+   bad files, not just the pointer.
 8. **Restart.** B3 will replay the gap on FIXP `Establish`.
 9. **Document** the truncation byte-offset, last-good-seq, and the
    chain of segments / snapshots dropped, in the incident record.
