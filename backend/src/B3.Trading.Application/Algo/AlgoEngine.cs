@@ -229,6 +229,29 @@ public sealed class AlgoEngine : BackgroundService
     }
 
     /// <summary>
+    /// Test-only deterministic adoption probe (#329 fix). Returns the
+    /// parent's currently-adopted child ClOrdID — i.e. the value the
+    /// modify path will read from <c>rt.LiveChildClOrdId</c> when the
+    /// next operator-modify signal is dispatched. The book carrying
+    /// the new child does NOT guarantee adoption has happened: the
+    /// ER processor first hydrates the child (visible in the book)
+    /// then enqueues a <see cref="ChildExecutionObservedSignal"/>;
+    /// the engine consumer task processes that signal asynchronously
+    /// and only then updates <c>LiveChildClOrdId</c>. Tests that drive
+    /// successive modify cycles MUST poll this before issuing the
+    /// next modify, otherwise the engine still sees the prior child
+    /// and dispatches a replace with the wrong OriginalClOrdId.
+    /// Returns null when the parent runtime hasn't been created yet
+    /// or has no live child (e.g. mid-terminal transition).
+    /// </summary>
+    internal ulong? TryGetLiveChildClOrdId(string firmId, ulong algoId)
+    {
+        return _runtime.TryGetValue((firmId, algoId), out var rt)
+            ? rt.LiveChildClOrdId
+            : null;
+    }
+
+    /// <summary>
     /// Boot-time pass over every non-terminal parent. Builds the runtime
     /// state from the order book (live child + cumulative-fill baseline +
     /// next slice seq) and re-enqueues an <see cref="AlgoCreatedSignal"/>
@@ -1985,12 +2008,47 @@ public sealed class AlgoEngine : BackgroundService
         if (!_orders.TryGet(liveChildClOrdId, out var child) || child is null
             || IsChildTerminal(child))
         {
-            // Child reference went stale (rare race with ER pipeline);
-            // clear and let the next tick re-evaluate from the empty
-            // slot path.
+            // #329: When the child is terminal with status Replaced, an
+            // adoption signal is normally in flight from the ER processor
+            // (ApplyReplaceAccepted enqueues ChildExecutionObservedSignal
+            // for the NEW child AFTER MarkReplaced flips the OLD to
+            // Replaced). The adoption block in OnChildErAsync requires
+            // `rt.LiveChildClOrdId is { } oldLive` — if we null it here
+            // first, adoption is skipped and the parent ends up orphaned
+            // with no live child until the next scheduler tick spawns a
+            // fresh slice (which leaks a clOrdID and skips the retired-
+            // child FIFO accounting that powers AlgoModifyRetiredChildEvictedTotal).
+            // Leave the slot pointing at OLD so the imminent adoption
+            // signal can transition it atomically.
+            //
+            // Safety valve: the adoption signal can be dropped if the
+            // bounded AlgoSignalQueue is full when ApplyReplaceAccepted
+            // tries to enqueue (TryEnqueue returns false and bumps
+            // AlgoSignalsDropped). Without a fallback the parent would
+            // be wedged on the terminal OLD child until process restart.
+            // After PeggedReplacedHoldMaxTicks consecutive evaluations
+            // where we still see OLD as Replaced, give up on the
+            // adoption signal, clear the slot, and let the next tick
+            // resubmit from the empty path. The threshold is generous
+            // (≈1 second @ 100ms scheduler tick) so the normal in-order
+            // case always lands before fallback kicks in.
+            if (child is not null && child.Status == OrderStatus.Replaced)
+            {
+                rt.PeggedReplacedHoldTicks++;
+                if (rt.PeggedReplacedHoldTicks < AlgoParentRuntime.PeggedReplacedHoldMaxTicks)
+                    return;
+                _logger.LogWarning(
+                    "AlgoEngine Pegged repeg: live child {Child} on {Firm}/{AlgoId} observed terminal=Replaced for {Ticks} ticks; adoption signal appears dropped — clearing slot and resubmitting on next tick.",
+                    liveChildClOrdId, algo.FirmId, algo.AlgoId, rt.PeggedReplacedHoldTicks);
+            }
+            rt.PeggedReplacedHoldTicks = 0;
             rt.LiveChildClOrdId = null;
             return;
         }
+
+        // Non-terminal child observed — clear the dropped-adoption
+        // watchdog so a future Replaced does not inherit a stale count.
+        rt.PeggedReplacedHoldTicks = 0;
 
         var currentPrice = child.Price ?? 0m;
         if (currentPrice <= 0m
@@ -2371,5 +2429,18 @@ public sealed class AlgoEngine : BackgroundService
         // "expected cancel" (so duplicate or post-restart-delayed
         // ERs do not flip the parent to Suspended/VenueCancelled).
         public ulong? LastRepegCancelledChildId;
+
+        // #329. Watchdog for the adoption-signal-dropped recovery in
+        // EvaluatePeggedRepegAsync. Counts consecutive scheduler-tick
+        // observations where the live child is terminal with status
+        // Replaced (i.e. an adoption signal is expected but hasn't been
+        // processed yet). Cleared on any non-Replaced observation OR
+        // when the watchdog fires. The threshold is generous so the
+        // normal in-order case (signal queued, consumer picks it up
+        // within one tick) never triggers it; only a genuinely dropped
+        // signal due to a full bounded queue lets the count reach the
+        // ceiling and force a fallback resubmit.
+        public int PeggedReplacedHoldTicks;
+        public const int PeggedReplacedHoldMaxTicks = 10;
     }
 }
