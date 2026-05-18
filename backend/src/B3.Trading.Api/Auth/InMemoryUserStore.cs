@@ -100,15 +100,16 @@ public sealed class InMemoryUserStore : IUserStore
         }
     }
 
-    public bool TryConsumeRecoveryCode(string username, string codeHash, out UserConfig? updatedUser)
+    public RecoveryCodeConsumeResult TryConsumeRecoveryCode(string username, string codeHash, out UserConfig? updatedUser)
     {
         updatedUser = null;
-        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrEmpty(codeHash)) return false;
+        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrEmpty(codeHash))
+            return RecoveryCodeConsumeResult.NotFound;
 
         lock (LockFor(username))
         {
             if (!TryGet(username, out var user) || user is null || user.Totp is null)
-                return false;
+                return RecoveryCodeConsumeResult.NotFound;
 
             // Constant-time-ish scan: full pass without early-out so
             // timing leaks no information about which index matched.
@@ -118,12 +119,34 @@ public sealed class InMemoryUserStore : IUserStore
                 if (string.Equals(user.Totp.RecoveryCodes[i], codeHash, StringComparison.Ordinal))
                     idx = i;
             }
-            if (idx < 0) return false;
+            if (idx < 0)
+            {
+                // Distinguish race-loser / replay from a wrong code so
+                // the endpoint can skip the lockout counter increment.
+                for (var i = 0; i < user.Totp.ConsumedRecoveryCodes.Count; i++)
+                {
+                    if (string.Equals(user.Totp.ConsumedRecoveryCodes[i], codeHash, StringComparison.Ordinal))
+                        return RecoveryCodeConsumeResult.AlreadyConsumed;
+                }
+                return RecoveryCodeConsumeResult.NotFound;
+            }
 
             user.Totp.RecoveryCodes.RemoveAt(idx);
+            AppendConsumed(user.Totp, codeHash);
             updatedUser = user;
-            return true;
+            return RecoveryCodeConsumeResult.Consumed;
         }
+    }
+
+    private static void AppendConsumed(UserTotpConfig totp, string codeHash)
+    {
+        // FIFO eviction: drop oldest entries until we're under the
+        // cap. The cap is sized for many enrollments' worth of churn,
+        // so eviction is rare; the loop tolerates a cap reduced via
+        // future config without unbounded growth.
+        while (totp.ConsumedRecoveryCodes.Count >= UserTotpConfig.ConsumedRecoveryCodesCap)
+            totp.ConsumedRecoveryCodes.RemoveAt(0);
+        totp.ConsumedRecoveryCodes.Add(codeHash);
     }
 
     private object LockFor(string username)

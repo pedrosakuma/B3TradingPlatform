@@ -143,15 +143,31 @@ public static class TotpEndpoints
                 }
 
                 var recoveryOk = false;
+                var recoveryAlreadyConsumed = false;
                 if (!totpOk)
                 {
-                    recoveryOk = users.TryConsumeRecoveryCode(
+                    var consumeResult = users.TryConsumeRecoveryCode(
                         user.Username, totp.HashRecoveryCode(req.Code), out _);
+                    recoveryOk = consumeResult == RecoveryCodeConsumeResult.Consumed;
+                    recoveryAlreadyConsumed = consumeResult == RecoveryCodeConsumeResult.AlreadyConsumed;
                 }
 
                 if (!totpOk && !recoveryOk)
                 {
-                    lockout.RecordFailure(ch.Username);
+                    // Race-loser / replay-after-success: the hash WAS a
+                    // real recovery code for this user, just not anymore.
+                    // Reject with the same generic 401 (no info leak —
+                    // identical body to wrong-code) but skip the lockout
+                    // counter so a 10-way concurrent burst presenting
+                    // ONE valid code doesn't auto-lock the user out.
+                    // Trade-off documented on
+                    // UserTotpConfig.ConsumedRecoveryCodes: an attacker
+                    // who already knows a USED code can spam without
+                    // lockout, but that knowledge is strictly weaker
+                    // than the JWT the code produced, and the
+                    // alternative lets attackers brute-force lockout.
+                    if (!recoveryAlreadyConsumed)
+                        lockout.RecordFailure(ch.Username);
                     return Results.Json(new { error = "invalid code" },
                         statusCode: StatusCodes.Status401Unauthorized);
                 }
@@ -234,6 +250,7 @@ public static class TotpEndpoints
             catch { return Results.BadRequest(new { error = "2fa not enrolled" }); }
 
             var (ok, disableStep) = totp.Verify(base32, req.Code);
+            var recoveryAlreadyConsumed = false;
             if (ok)
             {
                 // Replay guard: even on the disable path, a same-window
@@ -250,12 +267,17 @@ public static class TotpEndpoints
                 // Recovery codes can also satisfy disable so a user
                 // who lost their device but kept the codes isn't
                 // stuck.
-                ok = users.TryConsumeRecoveryCode(
+                var consumeResult = users.TryConsumeRecoveryCode(
                     user.Username, totp.HashRecoveryCode(req.Code), out _);
+                ok = consumeResult == RecoveryCodeConsumeResult.Consumed;
+                recoveryAlreadyConsumed = consumeResult == RecoveryCodeConsumeResult.AlreadyConsumed;
             }
             if (!ok)
             {
-                lockout.RecordFailure(subject);
+                // Mirror the verify path: AlreadyConsumed is a benign
+                // replay / race-loser and must not tick lockout.
+                if (!recoveryAlreadyConsumed)
+                    lockout.RecordFailure(subject);
                 return Results.Json(new { error = "invalid code" }, statusCode: StatusCodes.Status401Unauthorized);
             }
 

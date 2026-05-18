@@ -304,12 +304,16 @@ public class TotpEndpointTests
     {
         // 10 racing verify requests presenting the SAME recovery code
         // must result in exactly one 200 — the store consumes
-        // atomically.
+        // atomically. The 9 race-losers must NOT tick the TOTP lockout
+        // counter (they presented a real code; only the race lost), so
+        // even with the default MaxFailedAttempts=5 a 10-way race must
+        // leave the account fully unlocked.
         await using var factory = TestAppFactory.WithOverrides(new Dictionary<string, string?>
         {
-            // Lockout off so the 9 losers don't trip 429 and mask the
-            // 401 the test is actually checking for.
-            ["Trading:Auth:TotpLockout:Enabled"] = "false",
+            ["Trading:Auth:TotpLockout:Enabled"] = "true",
+            ["Trading:Auth:TotpLockout:MaxFailedAttempts"] = "5",
+            ["Trading:Auth:TotpLockout:Window"] = "00:05:00",
+            ["Trading:Auth:TotpLockout:LockoutDuration"] = "00:05:00",
         });
         var http = await factory.CreateAuthedClientAsync();
         var enroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll", new { }))
@@ -344,7 +348,119 @@ public class TotpEndpointTests
         Assert.Equal(1, successes);
         Assert.Equal(N - 1, failures);
 
+        // Lockout counter must still be 0: walk to MaxFailedAttempts
+        // truly-wrong codes and observe the FIRST 5 return 401 then
+        // the 6th trips 429 (the 5th call ticks the counter to 5 and
+        // sets LockedUntil, but the IsLocked check runs at the TOP of
+        // the next request). If race-losers had ticked the counter,
+        // the very first wrong code below would already be 429.
+        var plain = factory.CreateClient();
+        for (var i = 0; i < 5; i++)
+        {
+            var login = (await (await plain.PostAsJsonAsync("/auth/login",
+                new { username = "alice", password = "wonderland" }))
+                .Content.ReadFromJsonAsync<LoginRequiresDto>())!;
+            var wrong = await plain.PostAsJsonAsync("/auth/2fa/verify",
+                new { code = "wrong-recovery-code-xyz", totpChallengeToken = login.TotpChallengeToken });
+            Assert.Equal(HttpStatusCode.Unauthorized, wrong.StatusCode);
+        }
+        var sixthLogin = (await (await plain.PostAsJsonAsync("/auth/login",
+            new { username = "alice", password = "wonderland" }))
+            .Content.ReadFromJsonAsync<LoginRequiresDto>())!;
+        var locked = await plain.PostAsJsonAsync("/auth/2fa/verify",
+            new { code = "wrong-recovery-code-xyz", totpChallengeToken = sixthLogin.TotpChallengeToken });
+        Assert.Equal(HttpStatusCode.TooManyRequests, locked.StatusCode);
+
         foreach (var c in clients) c.Dispose();
+        plain.Dispose();
+    }
+
+    [Fact]
+    public async Task RecoveryCode_ReplayAfterSuccess_RejectedButDoesNotIncrementLockout()
+    {
+        // A client that successfully used a recovery code and then —
+        // due to retry, page reload, or replay attempt — submits the
+        // same code again must get 401 (same as wrong) but the
+        // lockout counter must NOT tick. Otherwise a single replayed
+        // success could chew up a sizeable chunk of the lockout
+        // budget for no security gain.
+        await using var factory = TestAppFactory.WithOverrides(new Dictionary<string, string?>
+        {
+            ["Trading:Auth:TotpLockout:Enabled"] = "true",
+            ["Trading:Auth:TotpLockout:MaxFailedAttempts"] = "5",
+            ["Trading:Auth:TotpLockout:Window"] = "00:05:00",
+            ["Trading:Auth:TotpLockout:LockoutDuration"] = "00:05:00",
+        });
+        var http = await factory.CreateAuthedClientAsync();
+        var enroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll", new { }))
+            .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
+        await http.PostAsJsonAsync("/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
+        var recovery = enroll.RecoveryCodes[0];
+
+        var plain = factory.CreateClient();
+        var login1 = (await (await plain.PostAsJsonAsync("/auth/login",
+            new { username = "alice", password = "wonderland" }))
+            .Content.ReadFromJsonAsync<LoginRequiresDto>())!;
+        var ok = await plain.PostAsJsonAsync("/auth/2fa/verify",
+            new { code = recovery, totpChallengeToken = login1.TotpChallengeToken });
+        Assert.Equal(HttpStatusCode.OK, ok.StatusCode);
+
+        // Replay the SAME recovery code (simulating the 5-minutes-later
+        // retry the spec calls out — wall-clock here is irrelevant
+        // because consumed status is permanent within the user record).
+        for (var i = 0; i < 6; i++)
+        {
+            var loginR = (await (await plain.PostAsJsonAsync("/auth/login",
+                new { username = "alice", password = "wonderland" }))
+                .Content.ReadFromJsonAsync<LoginRequiresDto>())!;
+            var replay = await plain.PostAsJsonAsync("/auth/2fa/verify",
+                new { code = recovery, totpChallengeToken = loginR.TotpChallengeToken });
+            // Always 401 (no info leak vs wrong code), never 429 —
+            // proves lockout counter never moved off 0.
+            Assert.Equal(HttpStatusCode.Unauthorized, replay.StatusCode);
+        }
+
+        plain.Dispose();
+    }
+
+    [Fact]
+    public async Task RecoveryCode_TrulyWrongCodes_StillEngageLockout()
+    {
+        // Sanity check that the AlreadyConsumed silent-path didn't
+        // accidentally disarm the wrong-code path: 5 genuinely wrong
+        // codes (never enrolled for this user) MUST lock the account.
+        await using var factory = TestAppFactory.WithOverrides(new Dictionary<string, string?>
+        {
+            ["Trading:Auth:TotpLockout:Enabled"] = "true",
+            ["Trading:Auth:TotpLockout:MaxFailedAttempts"] = "5",
+            ["Trading:Auth:TotpLockout:Window"] = "00:05:00",
+            ["Trading:Auth:TotpLockout:LockoutDuration"] = "00:05:00",
+        });
+        var http = await factory.CreateAuthedClientAsync();
+        var enroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll", new { }))
+            .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
+        await http.PostAsJsonAsync("/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
+
+        var plain = factory.CreateClient();
+        // First 5 wrong → 401 (the 5th call ticks the counter to 5 and
+        // engages the lock), 6th request hits the IsLocked check → 429.
+        for (var i = 0; i < 5; i++)
+        {
+            var login = (await (await plain.PostAsJsonAsync("/auth/login",
+                new { username = "alice", password = "wonderland" }))
+                .Content.ReadFromJsonAsync<LoginRequiresDto>())!;
+            var wrong = await plain.PostAsJsonAsync("/auth/2fa/verify",
+                new { code = $"never-issued-{i}", totpChallengeToken = login.TotpChallengeToken });
+            Assert.Equal(HttpStatusCode.Unauthorized, wrong.StatusCode);
+        }
+        var lastLogin = (await (await plain.PostAsJsonAsync("/auth/login",
+            new { username = "alice", password = "wonderland" }))
+            .Content.ReadFromJsonAsync<LoginRequiresDto>())!;
+        var locked = await plain.PostAsJsonAsync("/auth/2fa/verify",
+            new { code = "never-issued-final", totpChallengeToken = lastLogin.TotpChallengeToken });
+        Assert.Equal(HttpStatusCode.TooManyRequests, locked.StatusCode);
+
+        plain.Dispose();
     }
 
     [Fact]

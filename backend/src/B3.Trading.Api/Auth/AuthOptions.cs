@@ -107,6 +107,34 @@ public sealed class UserTotpConfig
     public List<string> RecoveryCodes { get; set; } = new();
 
     /// <summary>
+    /// FIFO-bounded ring of recently-consumed recovery-code hashes.
+    /// Used to distinguish a wrong-code attempt from a previously-valid
+    /// code (concurrent race loser or replay-after-success) so the TOTP
+    /// lockout counter is not incremented in the latter case. Capped at
+    /// <see cref="ConsumedRecoveryCodesCap"/> entries with FIFO
+    /// eviction — generous enough to cover realistic re-enrollment
+    /// churn (defaults: 10 codes per enrollment) while keeping the
+    /// persisted footprint small.
+    /// <para>
+    /// Trade-off: an attacker who learns a hash that has already been
+    /// consumed can hit /auth/2fa/verify forever without tripping
+    /// lockout. That is acceptable — knowing a consumed code is no
+    /// stronger than knowing the JWT the code originally produced, and
+    /// the alternative (counting consumed-list hits as failures) would
+    /// let any attacker brute-force-lock the legitimate user.
+    /// </para>
+    /// </summary>
+    public List<string> ConsumedRecoveryCodes { get; set; } = new();
+
+    /// <summary>
+    /// Maximum size of <see cref="ConsumedRecoveryCodes"/>. Set well
+    /// above a single enrollment's <see cref="Totp.TotpOptions.RecoveryCodeCount"/>
+    /// (default 10) so multiple re-enrollments fit before FIFO
+    /// eviction; small enough to keep the persisted user record bounded.
+    /// </summary>
+    public const int ConsumedRecoveryCodesCap = 64;
+
+    /// <summary>
     /// Most recent successfully-consumed TOTP time step (RFC 6238 T,
     /// i.e. seconds-since-epoch / period). Used to block replay of a
     /// valid code within the same 30s window via a fresh challenge
