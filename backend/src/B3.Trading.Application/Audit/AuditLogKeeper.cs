@@ -37,6 +37,12 @@ public static class AuditEventTypes
     public const string AdminSubAccountCreate = "admin.subaccount.create";
     public const string AdminSubAccountDeactivate = "admin.subaccount.deactivate";
 
+    /// <summary>Q4.6 (#306). Drop-copy WS session opened by a compliance / admin principal.</summary>
+    public const string DropCopyConnect = "audit.dropcopy.connect";
+
+    /// <summary>Q4.6 (#306). Drop-copy WS session closed (clean or peer-gone).</summary>
+    public const string DropCopyDisconnect = "audit.dropcopy.disconnect";
+
     // Prefix helpers used by the read-path filter for type=auth.* style globs.
     public const string AuthPrefix = "auth.";
     public const string AdminPrefix = "admin.";

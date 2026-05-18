@@ -97,6 +97,17 @@ public class TestAppFactory : WebApplicationFactory<Program>
                 ["Trading:Auth:Users:2:Salt"] = salt,
                 ["Trading:Auth:Users:2:Iterations"] = TestIterations.ToString(),
                 ["Trading:Auth:Users:2:Role"] = "admin",
+                // Q4.6 (#306). Compliance principal for drop-copy WS tests.
+                // Issued against FIRM01 by default so drop-copy fan-out
+                // tests can submit orders under FIRM01 (alice's default
+                // firm via JwtIssuer's "default" firm fallback) and see
+                // them surface on dave's compliance socket.
+                ["Trading:Auth:Users:3:Username"] = "dave",
+                ["Trading:Auth:Users:3:PasswordHash"] = hash,
+                ["Trading:Auth:Users:3:Salt"] = salt,
+                ["Trading:Auth:Users:3:Iterations"] = TestIterations.ToString(),
+                ["Trading:Auth:Users:3:Role"] = "compliance",
+                ["Trading:Auth:Users:3:Firm"] = "FIRM01",
                 ["Trading:Exchange:UseStubGateway"] = "false",
                 ["Trading:Exchange:Firms:0:FirmId"] = "TEST",
                 ["Trading:Risk:Default:MaxQuantity"] = "1000",

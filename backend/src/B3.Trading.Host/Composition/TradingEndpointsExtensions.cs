@@ -3,6 +3,7 @@ using B3.Trading.Api.Auth;
 using B3.Trading.Api.Auth.Totp;
 using B3.Trading.Api.Lifecycle;
 using B3.Trading.Api.WebSockets;
+using B3.Trading.Api.WebSockets.DropCopy;
 using B3.Trading.Application;
 using B3.Trading.EntryPointListener;
 using B3.Trading.EntryPointListener.Hosting.Admin;
@@ -55,6 +56,7 @@ public static class TradingEndpointsExtensions
         }
         app.MapUserBotCredentials();
         app.MapWebSocketHub();
+        app.MapDropCopyWebSocket();
 
         return app;
     }

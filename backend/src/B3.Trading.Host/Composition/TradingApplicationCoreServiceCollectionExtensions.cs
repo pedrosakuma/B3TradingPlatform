@@ -81,10 +81,36 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         // same per-sink channel — see the type doc-comment for ordering
         // semantics.
         services.AddSingleton<WebSocketExecutionEventSink>();
-        services.AddSingleton<IExecutionEventSink>(sp => sp.GetRequiredService<WebSocketExecutionEventSink>());
         services.AddSingleton<IExecutionFanOutSink>(sp => sp.GetRequiredService<WebSocketExecutionEventSink>());
         services.AddHostedService(sp => sp.GetRequiredService<WebSocketExecutionEventSink>());
         services.AddSingleton<IAlgoEventSink, WebSocketAlgoEventSink>();
+
+        // Q4.6 (#306). Compliance drop-copy fan-out: a parallel WS sink
+        // that fans every captured ExecutionEvent out to firm-scoped
+        // drop-copy subscribers (orders / fills / cancels). Registered
+        // as an IExecutionFanOutSink (dispatcher main path,
+        // target=DropCopy); synthetic publishes from
+        // OrderStalenessService / WAL-backpressure fallback also reach
+        // it via the composite IExecutionEventSink wired below.
+        services.AddSingleton<B3.Trading.Api.WebSockets.DropCopy.DropCopyManager>();
+        services.AddSingleton<B3.Trading.Api.WebSockets.DropCopy.DropCopyExecutionEventSink>();
+        services.AddSingleton<IExecutionFanOutSink>(sp =>
+            sp.GetRequiredService<B3.Trading.Api.WebSockets.DropCopy.DropCopyExecutionEventSink>());
+        services.AddHostedService(sp =>
+            sp.GetRequiredService<B3.Trading.Api.WebSockets.DropCopy.DropCopyExecutionEventSink>());
+
+        // Composite IExecutionEventSink. The single IExecutionEventSink
+        // dependency on OrderStalenessService (and the
+        // EntryPointExecutionReportRouter WAL-backpressure fallback) is
+        // wrapped so synthetic Publish() calls reach BOTH the per-user
+        // WS hub AND the drop-copy fan-out — without it, a
+        // suspect-stale flag or a WAL-backpressured ER would surface on
+        // orders.me but go unseen by compliance, which would defeat
+        // the "all traffic" guarantee of the drop-copy feed.
+        services.AddSingleton<IExecutionEventSink>(sp =>
+            new CompositeExecutionEventSink(
+                sp.GetRequiredService<WebSocketExecutionEventSink>(),
+                sp.GetRequiredService<B3.Trading.Api.WebSockets.DropCopy.DropCopyExecutionEventSink>()));
 
         // Q1.5 (#257). Auction state-store + public WS channels
         // (phases.${symbol} / auction.${symbol}). The store is wired
