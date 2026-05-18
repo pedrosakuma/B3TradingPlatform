@@ -47,7 +47,10 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         // Q4.7 (#307). Fill projection — keyed by {ClOrdId}:{cumQty}.
         // Singleton so the live ExecutionReportProcessor fold, WAL
         // replay (same processor path), and REST/WS reads all share
-        // the same in-memory dictionary.
+        // the same in-memory dictionary. Bounded FIFO eviction via
+        // FillProjectionOptions.Capacity keeps memory in check.
+        services.Configure<FillProjectionOptions>(
+            configuration.GetSection(FillProjectionOptions.SectionName));
         services.AddSingleton<FillProjection>();
         // Q4.1 (#301). Sub-account model — registry + per-sub-account
         // position and P&L keepers. All singletons so live folds, WAL

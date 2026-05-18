@@ -228,6 +228,86 @@ public class BookTouchCaptureTests
         Assert.Null(evt.BookTouch);
     }
 
+    [Fact]
+    public void EventReplayer_PreservesBookTouch_OnFullWalReplay()
+    {
+        // Pass-1 P1 regression: post-snapshot tail and no-snapshot WAL
+        // replay paths must thread the additive BookTouch field. Prior
+        // to the fix, EventReplayer.Apply(ExecutionReportReceivedEvent)
+        // dropped er.BookTouch on the floor, leaving FillProjection
+        // with a null touch even though the WAL carried one.
+        var book = new WorkingOrderBook();
+        var ownership = new OrderOwnershipMap();
+        var positions = new PositionKeeper();
+        var sink = new NullSink();
+        var fills = new FillProjection();
+        var processor = new ExecutionReportProcessor(
+            ownership, book, positions, sink, new NoOpMarginProvider(),
+            NullLogger<ExecutionReportProcessor>.Instance,
+            fillProjection: fills);
+        var owner = new EndClientId("alice");
+        book.TryAdd(new Order(42UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m));
+        ownership.Register(42UL, owner);
+
+        var replayer = new EventReplayer(
+            book, ownership, new Risk.KillSwitchService(), new Risk.SymbolHaltService(),
+            new Risk.SessionPhaseService(), processor, new AlgoBook(),
+            new ClOrdIdPrefixRegistry(), new AlgoIdRegistry());
+
+        var touch = new BookTouchSnapshot
+        {
+            BestBid = 29.95m,
+            BestAsk = 30.05m,
+            MidPrice = 30.00m,
+            LastTradePrice = 30.00m,
+            CapturedAtUtc = FillNow,
+            Stale = false,
+        };
+        replayer.Apply(new ExecutionReportReceivedEvent
+        {
+            TimestampUtc = FillNow,
+            ClOrdId = 42UL,
+            ExecKind = "Fill",
+            LeavesQuantity = 0,
+            CumulativeQuantity = 100,
+            LastQuantity = 100,
+            LastPrice = 30m,
+            Synthetic = false,
+            BookTouch = touch,
+        });
+
+        Assert.True(fills.TryGet(FillProjection.BuildId(42UL, 100), out var rec));
+        Assert.NotNull(rec.BookTouch);
+        Assert.Equal(29.95m, rec.BookTouch!.BestBid);
+        Assert.Equal(30.05m, rec.BookTouch.BestAsk);
+        Assert.False(rec.BookTouch.Stale);
+    }
+
+    [Fact]
+    public void FillProjection_EvictsOldestPastCapacity()
+    {
+        // Pass-1 P2 regression: in-memory projection must not grow
+        // unbounded. FillProjectionOptions.Capacity caps the dictionary
+        // size; once exceeded, the oldest insertion is evicted FIFO so
+        // memory stays bounded regardless of WAL retention.
+        var opts = Microsoft.Extensions.Options.Options.Create(
+            new FillProjectionOptions { Capacity = 3 });
+        var fills = new FillProjection(opts);
+        var owner = new EndClientId("alice");
+
+        for (ulong i = 1; i <= 5; i++)
+        {
+            fills.Record(i, 10, owner, "FIRM01", "PETR4", OrderSide.Buy, 10, 30m, FillNow, bookTouch: null);
+        }
+
+        Assert.Equal(3, fills.Count);
+        Assert.False(fills.TryGet(FillProjection.BuildId(1UL, 10), out _));
+        Assert.False(fills.TryGet(FillProjection.BuildId(2UL, 10), out _));
+        Assert.True(fills.TryGet(FillProjection.BuildId(3UL, 10), out _));
+        Assert.True(fills.TryGet(FillProjection.BuildId(4UL, 10), out _));
+        Assert.True(fills.TryGet(FillProjection.BuildId(5UL, 10), out _));
+    }
+
     private sealed class NullSink : IExecutionEventSink
     {
         public void Publish(ExecutionEvent ev) { }

@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using B3.Trading.Application.MarketData;
 using B3.Trading.Domain;
+using Microsoft.Extensions.Options;
 
 namespace B3.Trading.Application;
 
@@ -34,9 +35,32 @@ public sealed class FillProjection
 {
     private readonly ConcurrentDictionary<string, FillRecord> _byId =
         new(StringComparer.Ordinal);
+    // Insertion-order queue used to drive FIFO eviction once Capacity
+    // is hit. Held outside the dictionary to keep TryGet lock-free.
+    private readonly ConcurrentQueue<string> _insertionOrder = new();
+    private readonly int _capacity;
+    private readonly object _evictionGate = new();
+
+    public FillProjection()
+        : this(new FillProjectionOptions())
+    {
+    }
+
+    public FillProjection(IOptions<FillProjectionOptions> options)
+        : this(options?.Value ?? new FillProjectionOptions())
+    {
+    }
+
+    private FillProjection(FillProjectionOptions options)
+    {
+        _capacity = options.Capacity > 0 ? options.Capacity : 1_000_000;
+    }
 
     /// <summary>Total fills currently retained. Used by tests and by the recovery driver's log line.</summary>
     public int Count => _byId.Count;
+
+    /// <summary>Configured cap; oldest insertions evict once this is hit. Exposed for tests + diagnostics.</summary>
+    public int Capacity => _capacity;
 
     /// <summary>
     /// Canonical fill id used as the dictionary key and exposed on
@@ -80,7 +104,30 @@ public sealed class FillProjection
         // Idempotency: a replayed ER overwrites with the same payload;
         // a later partial-fill collision would only happen if cumulative
         // quantity collides, which by construction it does not.
+        var isNew = !_byId.ContainsKey(id);
         _byId[id] = record;
+        if (isNew)
+        {
+            _insertionOrder.Enqueue(id);
+            // Bounded FIFO eviction: a single writer wins the gate and
+            // trims the queue until Count <= Capacity. Other writers
+            // skip the trim — the queue may transiently overshoot by a
+            // few entries, which is acceptable for a soft cap.
+            if (_byId.Count > _capacity && Monitor.TryEnter(_evictionGate))
+            {
+                try
+                {
+                    while (_byId.Count > _capacity && _insertionOrder.TryDequeue(out var victim))
+                    {
+                        _byId.TryRemove(victim, out _);
+                    }
+                }
+                finally
+                {
+                    Monitor.Exit(_evictionGate);
+                }
+            }
+        }
         return record;
     }
 
