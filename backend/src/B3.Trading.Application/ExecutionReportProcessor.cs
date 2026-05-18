@@ -749,7 +749,12 @@ public sealed class ExecutionReportProcessor
             lastQty,
             lastPx,
             rejectReason,
-            DateTimeOffset.UtcNow,
+            // Pass-2 P2 (#324). Honour the durable WAL timestamp on
+            // replay so legacy fills (no BookTouch, capturedAt falls
+            // back to record.TimestampUtc on the REST surface) keep
+            // their original execution time across restart. Live
+            // dispatch passes null → UtcNow as before.
+            eventTimestampUtc ?? DateTimeOffset.UtcNow,
             isNativeStp,
             order.FirmId,
             // Q4.7 (#307). Only fills carry a book-touch snapshot —

@@ -131,6 +131,35 @@ public sealed class FillProjection
         return record;
     }
 
+    /// <summary>
+    /// Same as <see cref="Record"/> but a no-op when an entry with the
+    /// same id already exists. Used by the recovery pre-pass so a
+    /// duplicate / retransmit ER persisted later in the WAL cannot
+    /// clobber the original fill's <see cref="BookTouchSnapshot"/>
+    /// (which was captured at the moment the real execution arrived,
+    /// not at retransmit time). The live dispatch path uses
+    /// <see cref="Record"/> directly because
+    /// <see cref="ExecutionReportProcessor"/> already suppresses
+    /// duplicate fills before reaching the projection.
+    /// </summary>
+    public FillRecord? RecordIfAbsent(
+        ulong clOrdId,
+        long cumulativeQuantityAfterFill,
+        EndClientId owner,
+        string? firmId,
+        string symbol,
+        OrderSide side,
+        long lastQuantity,
+        decimal lastPrice,
+        DateTimeOffset timestampUtc,
+        BookTouchSnapshot? bookTouch)
+    {
+        var id = BuildId(clOrdId, cumulativeQuantityAfterFill);
+        if (_byId.ContainsKey(id)) return null;
+        return Record(clOrdId, cumulativeQuantityAfterFill, owner, firmId, symbol,
+            side, lastQuantity, lastPrice, timestampUtc, bookTouch);
+    }
+
     public bool TryGet(string fillId, out FillRecord record)
     {
         if (string.IsNullOrEmpty(fillId))

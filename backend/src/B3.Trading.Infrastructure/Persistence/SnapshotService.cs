@@ -120,7 +120,7 @@ public sealed class PersistenceRecovery
                     if (er.LastQuantity <= 0) continue;
                     var lookupId = er.OrigClOrdId != 0 ? er.OrigClOrdId : er.ClOrdId;
                     if (!_orders.TryGet(lookupId, out var order) || order is null) continue;
-                    _fillProjection.Record(
+                    _fillProjection.RecordIfAbsent(
                         clOrdId: lookupId,
                         cumulativeQuantityAfterFill: er.CumulativeQuantity,
                         owner: order.Owner,

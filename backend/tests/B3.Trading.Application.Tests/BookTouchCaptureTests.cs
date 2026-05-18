@@ -308,6 +308,88 @@ public class BookTouchCaptureTests
         Assert.True(fills.TryGet(FillProjection.BuildId(5UL, 10), out _));
     }
 
+    [Fact]
+    public void FillProjection_RecordIfAbsent_PreservesOriginalTouch()
+    {
+        // Pass-2 P1 regression: SnapshotService pre-pass rehydrates
+        // every historical Fill ER directly into FillProjection,
+        // bypassing the ExecutionReportProcessor duplicate-fill
+        // suppression. A duplicate / retransmit ER persisted later in
+        // the WAL must NOT overwrite the original touch evidence.
+        var fills = new FillProjection();
+        var owner = new EndClientId("alice");
+        var original = new BookTouchSnapshot
+        {
+            BestBid = 29.95m,
+            BestAsk = 30.05m,
+            CapturedAtUtc = FillNow,
+            Stale = false,
+        };
+        var retransmit = new BookTouchSnapshot
+        {
+            BestBid = 31.00m,
+            BestAsk = 31.10m,
+            CapturedAtUtc = FillNow.AddMinutes(5),
+            Stale = false,
+        };
+
+        fills.RecordIfAbsent(7UL, 100, owner, "FIRM01", "PETR4", OrderSide.Buy,
+            100, 30m, FillNow, bookTouch: original);
+        var second = fills.RecordIfAbsent(7UL, 100, owner, "FIRM01", "PETR4", OrderSide.Buy,
+            100, 30m, FillNow.AddMinutes(5), bookTouch: retransmit);
+
+        Assert.Null(second);
+        Assert.True(fills.TryGet(FillProjection.BuildId(7UL, 100), out var rec));
+        Assert.Equal(29.95m, rec.BookTouch!.BestBid);
+        Assert.Equal(FillNow, rec.TimestampUtc);
+    }
+
+    [Fact]
+    public void EventReplayer_HonoursDurableTimestamp_OnLegacyNullTouchFill()
+    {
+        // Pass-2 P2 regression: ExecutionEvent.TimestampUtc must come
+        // from the durable WAL timestamp on replay, not UtcNow, so a
+        // legacy ER (no BookTouch) projected via the live processor's
+        // FillProjection.Record call retains its original execution
+        // time. The REST surface falls back to record.TimestampUtc as
+        // capturedAtUtc when bookTouch is null.
+        var book = new WorkingOrderBook();
+        var ownership = new OrderOwnershipMap();
+        var positions = new PositionKeeper();
+        var sink = new NullSink();
+        var fills = new FillProjection();
+        var processor = new ExecutionReportProcessor(
+            ownership, book, positions, sink, new NoOpMarginProvider(),
+            NullLogger<ExecutionReportProcessor>.Instance,
+            fillProjection: fills);
+        var owner = new EndClientId("alice");
+        book.TryAdd(new Order(99UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 50, 30m));
+        ownership.Register(99UL, owner);
+
+        var replayer = new EventReplayer(
+            book, ownership, new Risk.KillSwitchService(), new Risk.SymbolHaltService(),
+            new Risk.SessionPhaseService(), processor, new AlgoBook(),
+            new ClOrdIdPrefixRegistry(), new AlgoIdRegistry());
+
+        var execTime = FillNow.AddHours(-3);
+        replayer.Apply(new ExecutionReportReceivedEvent
+        {
+            TimestampUtc = execTime,
+            ClOrdId = 99UL,
+            ExecKind = "Fill",
+            LeavesQuantity = 0,
+            CumulativeQuantity = 50,
+            LastQuantity = 50,
+            LastPrice = 30m,
+            Synthetic = false,
+            BookTouch = null,
+        });
+
+        Assert.True(fills.TryGet(FillProjection.BuildId(99UL, 50), out var rec));
+        Assert.Equal(execTime, rec.TimestampUtc);
+        Assert.Null(rec.BookTouch);
+    }
+
     private sealed class NullSink : IExecutionEventSink
     {
         public void Publish(ExecutionEvent ev) { }
