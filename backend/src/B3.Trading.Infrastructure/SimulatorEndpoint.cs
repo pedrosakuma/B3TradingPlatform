@@ -1,4 +1,7 @@
+using System.Security.Claims;
 using B3.Trading.Application;
+using B3.Trading.Application.Audit;
+using B3.Trading.Application.Persistence;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -50,6 +53,15 @@ public static class SimulatorEndpoint
         long? CumQty = null);
 
     /// <summary>
+    /// Q4.5 (#305) — canonical event type for simulator ER injection
+    /// audit envelopes. Picked as a sub-namespace of
+    /// <c>admin.config.change</c> so existing <c>admin.*</c> read
+    /// filters surface these too, but distinct enough that ops
+    /// dashboards can split them out.
+    /// </summary>
+    public const string SimulatorErEventType = "admin.simulator.er_inject";
+
+    /// <summary>
     /// Maps <c>POST /admin/simulator/er</c> under the admin authorization
     /// policy. URL kept stable for conformance-contract compatibility
     /// (#163) — callers must check <c>ExchangeOptions.ResolveMode()==Mock
@@ -67,17 +79,29 @@ public static class SimulatorEndpoint
     public static IResult Inject(
         [FromBody] InjectRequest req,
         WorkingOrderBook book,
-        MockEntryPointClient mock)
+        MockEntryPointClient mock,
+        HttpContext ctx,
+        IAuditLogger audit)
     {
+        // Pass-1 review (#322) P2. The simulator endpoint is gated on
+        // Mock + AllowErInjection (dev/test-only) and is intentionally
+        // routed through the best-effort audit mode — operator
+        // visibility of every accepted/rejected injection is the
+        // goal; fail-closed gating against a backpressured WAL would
+        // be the wrong default for a dev surface. Both happy-path
+        // and validation-failure branches funnel through EmitAudit
+        // so the audit trail records what the operator attempted
+        // regardless of the outcome.
         if (req is null)
-            return Results.BadRequest(new { error = "missing_body" });
+            return RejectWithAudit(audit, ctx, req: null, AuditOutcomes.Failure, "missing_body", new { error = "missing_body" });
         if (req.ClOrdId == 0)
-            return Results.BadRequest(new { error = "missing_clOrdId" });
+            return RejectWithAudit(audit, ctx, req, AuditOutcomes.Failure, "missing_clOrdId", new { error = "missing_clOrdId" });
         if (string.IsNullOrWhiteSpace(req.Type))
-            return Results.BadRequest(new { error = "missing_type" });
+            return RejectWithAudit(audit, ctx, req, AuditOutcomes.Failure, "missing_type", new { error = "missing_type" });
 
         if (!Enum.TryParse<EpExecType>(req.Type, ignoreCase: true, out var execType))
-            return Results.BadRequest(new { error = "invalid_type", detail = $"unknown ExecType '{req.Type}'" });
+            return RejectWithAudit(audit, ctx, req, AuditOutcomes.Failure, "invalid_type",
+                new { error = "invalid_type", detail = $"unknown ExecType '{req.Type}'" });
 
         // Q3.5 (#285). Replaced ER lookup is keyed on the NEW
         // ClOrdID via PendingReplacementRegistry; the new order is
@@ -90,7 +114,8 @@ public static class SimulatorEndpoint
         if (execType == EpExecType.Replaced)
         {
             if ((req.OrigClOrdId ?? 0UL) == 0UL)
-                return Results.BadRequest(new { error = "missing_origClOrdId", detail = "origClOrdId is required for type=Replaced." });
+                return RejectWithAudit(audit, ctx, req, AuditOutcomes.Failure, "missing_origClOrdId",
+                    new { error = "missing_origClOrdId", detail = "origClOrdId is required for type=Replaced." });
             var leavesR = req.LastQty ?? 0L;
             var cumR = req.CumQty ?? 0L;
             var envR = new ExecutionReportEnvelope(
@@ -103,6 +128,7 @@ public static class SimulatorEndpoint
                 RejectReason: null,
                 OrigClOrdId: req.OrigClOrdId!.Value);
             mock.EmitExecutionReport(envR);
+            EmitAudit(audit, ctx, req, execType, AuditOutcomes.Success, reasonCode: null);
             return Results.Accepted(value: new
             {
                 clOrdId = req.ClOrdId,
@@ -113,7 +139,8 @@ public static class SimulatorEndpoint
         }
 
         if (!book.TryGet(req.ClOrdId, out var order) || order is null)
-            return Results.NotFound(new { error = "unknown_clOrdId", clOrdId = req.ClOrdId });
+            return RejectWithAudit(audit, ctx, req, AuditOutcomes.Failure, "unknown_clOrdId",
+                new { error = "unknown_clOrdId", clOrdId = req.ClOrdId }, execType: execType, status: StatusCodes.Status404NotFound);
 
         long leaves;
         long cum;
@@ -133,13 +160,16 @@ public static class SimulatorEndpoint
             case EpExecType.PartialFill:
             case EpExecType.Fill:
                 if (lastQty <= 0)
-                    return Results.BadRequest(new { error = "missing_lastQty", detail = "lastQty must be > 0 for Fill/PartialFill." });
+                    return RejectWithAudit(audit, ctx, req, AuditOutcomes.Failure, "missing_lastQty",
+                        new { error = "missing_lastQty", detail = "lastQty must be > 0 for Fill/PartialFill." }, execType: execType);
                 cum = order.CumulativeQuantity + lastQty;
                 if (cum > order.Quantity)
-                    return Results.BadRequest(new { error = "overfill", detail = $"cum {cum} would exceed order quantity {order.Quantity}." });
+                    return RejectWithAudit(audit, ctx, req, AuditOutcomes.Failure, "overfill",
+                        new { error = "overfill", detail = $"cum {cum} would exceed order quantity {order.Quantity}." }, execType: execType);
                 leaves = order.Quantity - cum;
                 if (execType == EpExecType.PartialFill && leaves == 0)
-                    return Results.BadRequest(new { error = "partial_consumes_full", detail = "PartialFill would zero leaves; use type=Fill instead." });
+                    return RejectWithAudit(audit, ctx, req, AuditOutcomes.Failure, "partial_consumes_full",
+                        new { error = "partial_consumes_full", detail = "PartialFill would zero leaves; use type=Fill instead." }, execType: execType);
                 break;
 
             case EpExecType.Canceled:
@@ -151,7 +181,8 @@ public static class SimulatorEndpoint
 
             case EpExecType.Rejected:
                 if (string.IsNullOrWhiteSpace(rejectReason))
-                    return Results.BadRequest(new { error = "missing_rejectReason", detail = "rejectReason is required for type=Rejected." });
+                    return RejectWithAudit(audit, ctx, req, AuditOutcomes.Failure, "missing_rejectReason",
+                        new { error = "missing_rejectReason", detail = "rejectReason is required for type=Rejected." }, execType: execType);
                 leaves = order.LeavesQuantity;
                 cum = order.CumulativeQuantity;
                 lastQty = 0;
@@ -159,7 +190,8 @@ public static class SimulatorEndpoint
                 break;
 
             default:
-                return Results.BadRequest(new { error = "invalid_type", detail = $"ExecType '{execType}' not supported." });
+                return RejectWithAudit(audit, ctx, req, AuditOutcomes.Failure, "invalid_type",
+                    new { error = "invalid_type", detail = $"ExecType '{execType}' not supported." }, execType: execType);
         }
 
         var envelope = new ExecutionReportEnvelope(
@@ -173,6 +205,7 @@ public static class SimulatorEndpoint
             FirmId: order.FirmId);
 
         mock.EmitExecutionReport(envelope);
+        EmitAudit(audit, ctx, req, execType, AuditOutcomes.Success, reasonCode: null);
 
         return Results.Accepted(value: new
         {
@@ -180,6 +213,59 @@ public static class SimulatorEndpoint
             execType = execType.ToString(),
             leavesQuantity = leaves,
             cumulativeQuantity = cum,
+        });
+    }
+
+    private static IResult RejectWithAudit(
+        IAuditLogger audit,
+        HttpContext ctx,
+        InjectRequest? req,
+        string outcome,
+        string reasonCode,
+        object body,
+        EpExecType? execType = null,
+        int status = StatusCodes.Status400BadRequest)
+    {
+        EmitAudit(audit, ctx, req, execType, outcome, reasonCode);
+        return status == StatusCodes.Status404NotFound
+            ? Results.NotFound(body)
+            : Results.BadRequest(body);
+    }
+
+    private static void EmitAudit(
+        IAuditLogger audit,
+        HttpContext ctx,
+        InjectRequest? req,
+        EpExecType? execType,
+        string outcome,
+        string? reasonCode)
+    {
+        // Pass-1 review (#322) P2. Best-effort capture — see Inject
+        // doc for the LogOrFail/Log rationale.
+        var details = new Dictionary<string, string>();
+        if (req is not null)
+        {
+            details["cl_ord_id"] = req.ClOrdId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (!string.IsNullOrEmpty(req.Type)) details["type"] = req.Type;
+            if (execType is not null) details["exec_type"] = execType.Value.ToString();
+            if (req.LastQty is long lq) details["last_qty"] = lq.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (req.LastPx is decimal lp) details["last_px"] = lp.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (req.OrigClOrdId is ulong oc && oc != 0UL) details["orig_cl_ord_id"] = oc.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (req.CumQty is long cq) details["cum_qty"] = cq.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (!string.IsNullOrEmpty(req.RejectReason)) details["reject_reason"] = req.RejectReason;
+        }
+        audit.Log(new AuditLogEvent
+        {
+            EventType = SimulatorErEventType,
+            Outcome = outcome,
+            ActorUserId = ctx.User.FindFirstValue("sub"),
+            ActorUsername = ctx.User.FindFirstValue("sub"),
+            ActorFirm = ctx.User.FindFirstValue("firm"),
+            ActorRole = ctx.User.FindFirstValue("role"),
+            SourceIp = ctx.Connection.RemoteIpAddress?.ToString(),
+            ResourcePath = "/admin/simulator/er",
+            ReasonCode = reasonCode,
+            Details = details.Count == 0 ? null : details,
         });
     }
 }
