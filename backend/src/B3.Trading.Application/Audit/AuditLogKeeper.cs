@@ -43,6 +43,9 @@ public static class AuditEventTypes
     /// <summary>Q4.6 (#306). Drop-copy WS session closed (clean or peer-gone).</summary>
     public const string DropCopyDisconnect = "audit.dropcopy.disconnect";
 
+    /// <summary>Q4.8 (#308). CVM 35/505 transaction report downloaded by a compliance/admin principal.</summary>
+    public const string ReportCvmDownload = "report.cvm.download";
+
     // Prefix helpers used by the read-path filter for type=auth.* style globs.
     public const string AuthPrefix = "auth.";
     public const string AdminPrefix = "admin.";

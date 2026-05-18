@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Q4.8 (#308). B3-realistic stand-in schema for the CVM 35/505
+  transaction-reporting XML emitted by CvmReportWriter. The real
+  CVM 35 (negociações) and CVM 505 (fundos) wire formats are
+  proprietary and are not freely available; the compliance team
+  will swap this XSD when the official one lands. The element
+  shape was chosen so that swap is element-name remapping only,
+  not a structural rewrite. The same XSD validates both 35 and
+  505 reports — the only difference is the optional <Fund>
+  element on each <Transaction>, present in 505 reports as a
+  placeholder until an order-level fund-classification field is
+  added (tracked as TODO in CvmReportWriter.WriteTransaction).
+-->
+<xs:schema
+    xmlns="urn:b3:cvm:35:v1"
+    xmlns:xs="http://www.w3.org/2001/XMLSchema"
+    targetNamespace="urn:b3:cvm:35:v1"
+    elementFormDefault="qualified">
+
+  <xs:element name="CvmReport">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="Header" type="HeaderType"/>
+        <xs:element name="Transactions" type="TransactionsType"/>
+      </xs:sequence>
+      <xs:attribute name="reportType" use="required">
+        <xs:simpleType>
+          <xs:restriction base="xs:string">
+            <xs:enumeration value="35"/>
+            <xs:enumeration value="505"/>
+          </xs:restriction>
+        </xs:simpleType>
+      </xs:attribute>
+      <xs:attribute name="firmId" type="xs:string" use="required"/>
+      <xs:attribute name="reportDate" type="xs:date" use="required"/>
+      <xs:attribute name="generatedAtUtc" type="xs:dateTime" use="required"/>
+      <xs:attribute name="version" type="xs:string" use="required"/>
+    </xs:complexType>
+  </xs:element>
+
+  <xs:complexType name="HeaderType">
+    <xs:sequence>
+      <xs:element name="FirmId" type="xs:string"/>
+      <xs:element name="ReportingDate" type="xs:date"/>
+      <xs:element name="FillCount" type="xs:nonNegativeInteger"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="TransactionsType">
+    <xs:sequence>
+      <xs:element name="Transaction" type="TransactionType" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="TransactionType">
+    <xs:sequence>
+      <xs:element name="FillId" type="xs:string"/>
+      <xs:element name="ClOrdId" type="xs:string"/>
+      <xs:element name="OrigClOrdId" type="xs:string" minOccurs="0"/>
+      <xs:element name="Owner" type="xs:string"/>
+      <xs:element name="SubAccount" type="xs:string" minOccurs="0"/>
+      <xs:element name="Symbol" type="xs:string"/>
+      <xs:element name="Side">
+        <xs:simpleType>
+          <xs:restriction base="xs:string">
+            <xs:enumeration value="Buy"/>
+            <xs:enumeration value="Sell"/>
+            <xs:enumeration value="UNKNOWN"/>
+          </xs:restriction>
+        </xs:simpleType>
+      </xs:element>
+      <xs:element name="Quantity" type="xs:nonNegativeInteger"/>
+      <xs:element name="Price" type="xs:decimal"/>
+      <xs:element name="ExecutedAtUtc" type="xs:dateTime"/>
+      <xs:element name="Counterparty" type="xs:string"/>
+      <xs:element name="Fund" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+</xs:schema>
