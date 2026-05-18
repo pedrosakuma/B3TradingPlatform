@@ -353,6 +353,35 @@ public class DropCopyWebSocketTests
         Assert.Equal(0, manager.SubscriberCount(Firm01));
     }
 
+    // 11. Pass-3 review (#323): sink overflow must fail-closed by
+    //     disconnecting every active subscriber so they re-snapshot.
+    [Fact]
+    public void DisconnectAllForResync_MarksEverySubscriberForReconnect()
+    {
+        var book = new WorkingOrderBook();
+        var manager = new DropCopyManager(book);
+
+        var a = new DropCopyClient(Firm01, "dave", "compliance");
+        var b = new DropCopyClient(Firm01, "eve", "admin");
+        var c = new DropCopyClient(Firm02, "frank", "compliance");
+        manager.Add(a);
+        manager.Add(b);
+        manager.Add(c);
+
+        manager.DisconnectAllForResync("drop_copy_sink_overflow_resync_required");
+
+        Assert.True(a.MarkedForDisconnect);
+        Assert.True(b.MarkedForDisconnect);
+        Assert.True(c.MarkedForDisconnect);
+        Assert.Equal("drop_copy_sink_overflow_resync_required", a.DisconnectReason);
+        Assert.Equal("drop_copy_sink_overflow_resync_required", b.DisconnectReason);
+        Assert.Equal("drop_copy_sink_overflow_resync_required", c.DisconnectReason);
+        // Signal trips so hub teardown observes it.
+        Assert.True(a.DisconnectRequested.IsCompleted);
+        Assert.True(b.DisconnectRequested.IsCompleted);
+        Assert.True(c.DisconnectRequested.IsCompleted);
+    }
+
     // ----------------- helpers -----------------
 
     private static async Task<WebSocket> ConnectDropCopyAsync(TestAppFactory factory, string token)

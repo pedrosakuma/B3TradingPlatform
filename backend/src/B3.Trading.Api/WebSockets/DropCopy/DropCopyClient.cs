@@ -117,6 +117,24 @@ public sealed class DropCopyClient
         }
     }
 
+    /// <summary>
+    /// Forces this client into the disconnect path with
+    /// <paramref name="reason"/>. Used by the fan-out sink when an
+    /// upstream drop event would cause an undetectable gap in this
+    /// session's stream (pass-3 review #323): we fail-closed and let
+    /// the client reconnect-and-resnapshot rather than silently
+    /// continue with contiguous per-client seqs that hide the loss.
+    /// Idempotent and thread-safe.
+    /// </summary>
+    public void RequestResyncDisconnect(string reason)
+    {
+        if (MarkedForDisconnect) return;
+        MarkedForDisconnect = true;
+        DisconnectReason = reason;
+        _outbound.Writer.TryComplete();
+        _disconnectRequested.TrySetResult();
+    }
+
     public void Complete()
     {
         _outbound.Writer.TryComplete();

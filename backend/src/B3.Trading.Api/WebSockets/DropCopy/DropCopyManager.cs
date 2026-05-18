@@ -133,4 +133,31 @@ public sealed class DropCopyManager
     /// </summary>
     public int SubscriberCount(string firmId) =>
         _byFirm.TryGetValue(firmId, out var set) ? set.Count : 0;
+
+    /// <summary>
+    /// Fail-closed when an upstream component (e.g. the bounded
+    /// fan-out sink) detects an event drop that would otherwise be
+    /// invisible to subscribers. Marks every currently-registered
+    /// drop-copy session — across ALL firms — for resync disconnect
+    /// with <paramref name="reason"/>. The hub teardown observes the
+    /// per-client signal and runs the standard cleanup; clients then
+    /// reconnect, receive a fresh snapshot, and resume from a known
+    /// state. Pass-3 review (#323): fills/cancels snapshots are
+    /// empty by design, so a silent <c>DropOldest</c> on the sink
+    /// channel would lose an event forever even though per-client
+    /// seqs stayed contiguous.
+    /// </summary>
+    public void DisconnectAllForResync(string reason)
+    {
+        foreach (var firmId in _byFirm.Keys)
+        {
+            lock (LockFor(firmId))
+            {
+                if (!_byFirm.TryGetValue(firmId, out var clients) || clients.IsEmpty)
+                    continue;
+                foreach (var c in clients)
+                    c.RequestResyncDisconnect(reason);
+            }
+        }
+    }
 }

@@ -68,7 +68,19 @@ public sealed class DropCopyExecutionEventSink : IExecutionFanOutSink, IExecutio
                 SingleWriter = false,
                 FullMode = BoundedChannelFullMode.DropOldest,
             },
-            itemDropped: static _ => MetricsRegistry.WsHubFanOutDropped.Add(1));
+            itemDropped: _ =>
+            {
+                // Pass-3 review (#323) P1: DropOldest hides the loss
+                // from drop-copy subscribers because per-client seqs
+                // are assigned downstream (after the sink) and snapshots
+                // for fills/cancels are empty by design — a silent
+                // discard would be unrecoverable. Fail-closed: mark
+                // every active subscriber for resync. Clients reconnect
+                // and pick up a fresh snapshot from a known state.
+                MetricsRegistry.WsHubFanOutDropped.Add(1);
+                try { _manager.DisconnectAllForResync("drop_copy_sink_overflow_resync_required"); }
+                catch (Exception ex) { _logger?.LogWarning(ex, "drop-copy resync-disconnect on sink overflow failed"); }
+            });
     }
 
     /// <inheritdoc />
