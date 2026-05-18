@@ -117,6 +117,14 @@ public static class TradingAuthServiceCollectionExtensions
         services.AddAuthorization(options =>
         {
             options.AddPolicy("admin", policy => policy.RequireRole("admin"));
+            // Q4.8 (#308). CVM 35/505 transaction-report export — open
+            // to both admin and compliance principals (compliance is
+            // the firm-scoped, read-only role added in Q4.6).
+            options.AddPolicy(
+                B3.Trading.Api.CvmReportEndpoints.PolicyName,
+                policy => policy.RequireRole(
+                    B3.Trading.Api.Auth.Roles.Admin,
+                    B3.Trading.Api.Auth.Roles.Compliance));
         });
 
         return services;

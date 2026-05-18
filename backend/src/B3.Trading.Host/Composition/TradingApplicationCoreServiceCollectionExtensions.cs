@@ -69,6 +69,17 @@ public static class TradingApplicationCoreServiceCollectionExtensions
             configuration.GetSection(B3.Trading.Application.Audit.AuditLogOptions.SectionName));
         services.AddSingleton<B3.Trading.Application.Audit.AuditLogKeeper>();
         services.AddSingleton<B3.Trading.Application.Audit.IAuditLogger, B3.Trading.Application.Audit.AuditLogger>();
+        // Q4.8 (#308). CVM 35/505 transaction-report export. The
+        // source enumerator + writer are stateless singletons — they
+        // own no per-request state and the writer's per-firm-day LGPD
+        // hash seed comes from CvmReportOptions, so a singleton lets
+        // the endpoint resolve them without per-request allocation.
+        // Nothing is persisted; both depend only on IEventStore +
+        // OrderOwnershipMap which are already wired above.
+        services.Configure<B3.Trading.Application.Reports.Cvm.CvmReportOptions>(
+            configuration.GetSection(B3.Trading.Application.Reports.Cvm.CvmReportOptions.SectionName));
+        services.AddSingleton<B3.Trading.Application.Reports.Cvm.CvmReportSource>();
+        services.AddSingleton<B3.Trading.Application.Reports.Cvm.CvmReportWriter>();
         services.AddSingleton<InMemoryUserBotCredentialRegistry>();
         services.AddSingleton<IUserBotCredentialRegistry>(sp =>
             sp.GetRequiredService<InMemoryUserBotCredentialRegistry>());
