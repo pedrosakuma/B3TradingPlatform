@@ -78,7 +78,19 @@ public sealed record AuditEntry(
 /// platform snapshot: audit history is naturally append-only and
 /// time-bounded, the WAL is the source of truth, and a snapshot
 /// field would just duplicate it. On restart the keeper rehydrates
-/// from the WAL tail driven through <c>EventReplayer.Apply</c>.</para>
+/// from the <b>full WAL</b> driven by
+/// <see cref="Infrastructure.Persistence.PersistenceRecovery"/> —
+/// not just the post-snapshot tail. Pass-1 review (#322) P1.1: an
+/// older design replayed only from <c>snapshot.Seq</c>, which
+/// silently dropped every audit event captured before the latest
+/// snapshot on cold restart. The recovery driver now does two
+/// passes against <see cref="Application.Persistence.IEventStore.ReadFromAsync"/>:
+/// an audit-only pre-pass for <c>seq &lt;= snapshot.Seq</c> that
+/// folds historic audit envelopes into this keeper, then the main
+/// snapshot+tail replay. Cost is O(N) where N is total WAL events
+/// — the bounded ring (default <see cref="AuditLogOptions.Capacity"/>
+/// = 100k) caps in-memory occupancy; older entries silently fall
+/// off the head as the pre-pass scans forward.</para>
 /// </summary>
 public sealed class AuditLogKeeper
 {
