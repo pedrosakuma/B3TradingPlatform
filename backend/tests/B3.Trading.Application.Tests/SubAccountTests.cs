@@ -125,11 +125,11 @@ public class SubAccountPositionKeeperTests
         var k = new SubAccountPositionKeeper();
         var owner = new EndClientId("trader-1");
 
-        k.ApplyFill(owner, new SubAccountId("td"), "PETR4", OrderSide.Buy, 100, 30m);
-        k.ApplyFill(owner, new SubAccountId("prop"), "PETR4", OrderSide.Buy, 50, 32m);
+        k.ApplyFill("FIRM01", owner, new SubAccountId("td"), "PETR4", OrderSide.Buy, 100, 30m);
+        k.ApplyFill("FIRM01", owner, new SubAccountId("prop"), "PETR4", OrderSide.Buy, 50, 32m);
 
-        var td = k.ForSubAccount(owner, new SubAccountId("td")).Single();
-        var prop = k.ForSubAccount(owner, new SubAccountId("prop")).Single();
+        var td = k.ForSubAccount("FIRM01", owner, new SubAccountId("td")).Single();
+        var prop = k.ForSubAccount("FIRM01", owner, new SubAccountId("prop")).Single();
 
         Assert.Equal(100, td.NetQuantity);
         Assert.Equal(30m, td.AverageEntryPrice);
@@ -142,17 +142,47 @@ public class SubAccountPositionKeeperTests
     {
         var k = new SubAccountPositionKeeper();
         var owner = new EndClientId("trader-1");
-        k.ApplyFill(owner, new SubAccountId("td"), "PETR4", OrderSide.Buy, 100, 30m);
-        k.ApplyFill(owner, new SubAccountId("td"), "VALE3", OrderSide.Sell, 20, 60m);
+        k.ApplyFill("FIRM01", owner, new SubAccountId("td"), "PETR4", OrderSide.Buy, 100, 30m);
+        k.ApplyFill("FIRM01", owner, new SubAccountId("td"), "VALE3", OrderSide.Sell, 20, 60m);
 
         var snap = k.Snapshot();
         var k2 = new SubAccountPositionKeeper();
         k2.Restore(snap);
 
-        var rows = k2.ForSubAccount(owner, new SubAccountId("td")).ToList();
+        var rows = k2.ForSubAccount("FIRM01", owner, new SubAccountId("td")).ToList();
         Assert.Equal(2, rows.Count);
         Assert.Equal(100, rows.Single(p => p.Symbol == "PETR4").NetQuantity);
         Assert.Equal(-20, rows.Single(p => p.Symbol == "VALE3").NetQuantity);
+    }
+
+    /// <summary>
+    /// PR review #301 P1 — multi-firm segregation. Same login under
+    /// FIRM01 and FIRM02 with the same <c>SubAccountId</c> MUST NOT
+    /// share position state; the keeper key includes FirmId so the
+    /// rows live in disjoint buckets.
+    /// </summary>
+    [Fact]
+    public void ApplyFill_SegregatesByFirm_SameOwnerSameSubAccount()
+    {
+        var k = new SubAccountPositionKeeper();
+        var owner = new EndClientId("alice");
+        var sub = new SubAccountId("tradingdesk");
+
+        k.ApplyFill("FIRM01", owner, sub, "PETR4", OrderSide.Buy, 100, 30m);
+        k.ApplyFill("FIRM02", owner, sub, "PETR4", OrderSide.Buy, 25, 32m);
+
+        var f1 = k.ForSubAccount("FIRM01", owner, sub).Single();
+        var f2 = k.ForSubAccount("FIRM02", owner, sub).Single();
+        Assert.Equal(100, f1.NetQuantity);
+        Assert.Equal(25, f2.NetQuantity);
+
+        // Round-trip preserves the firm split.
+        var k2 = new SubAccountPositionKeeper();
+        k2.Restore(k.Snapshot());
+        Assert.Equal(100, k2.ForSubAccount("FIRM01", owner, sub).Single().NetQuantity);
+        Assert.Equal(25, k2.ForSubAccount("FIRM02", owner, sub).Single().NetQuantity);
+        // Cross-firm peek returns nothing.
+        Assert.Empty(k2.ForSubAccount("FIRM03", owner, sub));
     }
 }
 
@@ -163,11 +193,11 @@ public class SubAccountPnlKeeperTests
     {
         var k = new SubAccountPnlKeeper();
         var day = DateOnly.FromDateTime(DateTimeOffset.UtcNow.UtcDateTime);
-        k.Add("trader-1", new SubAccountId("td"), "PETR4", day, 100m);
-        k.Add("trader-1", new SubAccountId("prop"), "PETR4", day, 50m);
+        k.Add("FIRM01", "trader-1", new SubAccountId("td"), "PETR4", day, 100m);
+        k.Add("FIRM01", "trader-1", new SubAccountId("prop"), "PETR4", day, 50m);
 
-        Assert.Equal(100m, k.GetDayRealized("trader-1", new SubAccountId("td"), "PETR4", day));
-        Assert.Equal(50m, k.GetDayRealized("trader-1", new SubAccountId("prop"), "PETR4", day));
+        Assert.Equal(100m, k.GetDayRealized("FIRM01", "trader-1", new SubAccountId("td"), "PETR4", day));
+        Assert.Equal(50m, k.GetDayRealized("FIRM01", "trader-1", new SubAccountId("prop"), "PETR4", day));
     }
 
     [Fact]
@@ -175,12 +205,38 @@ public class SubAccountPnlKeeperTests
     {
         var k = new SubAccountPnlKeeper();
         var day = DateOnly.FromDateTime(DateTimeOffset.UtcNow.UtcDateTime);
-        k.Add("o", new SubAccountId("td"), "S", day, 7m);
+        k.Add("FIRM01", "o", new SubAccountId("td"), "S", day, 7m);
 
         var snap = k.Snapshot();
         var k2 = new SubAccountPnlKeeper();
         k2.Restore(snap);
 
-        Assert.Equal(7m, k2.GetDayRealized("o", new SubAccountId("td"), "S", day));
+        Assert.Equal(7m, k2.GetDayRealized("FIRM01", "o", new SubAccountId("td"), "S", day));
+    }
+
+    /// <summary>
+    /// PR review #301 P1 — multi-firm segregation. Same login under
+    /// FIRM01 and FIRM02 with the same <c>SubAccountId</c> MUST NOT
+    /// share realized P&amp;L.
+    /// </summary>
+    [Fact]
+    public void Add_SegregatesByFirm_SameOwnerSameSubAccount()
+    {
+        var k = new SubAccountPnlKeeper();
+        var day = DateOnly.FromDateTime(DateTimeOffset.UtcNow.UtcDateTime);
+        var owner = "alice";
+        var sub = new SubAccountId("tradingdesk");
+
+        k.Add("FIRM01", owner, sub, "PETR4", day, 100m);
+        k.Add("FIRM02", owner, sub, "PETR4", day, 25m);
+
+        Assert.Equal(100m, k.GetDayRealized("FIRM01", owner, sub, "PETR4", day));
+        Assert.Equal(25m, k.GetDayRealized("FIRM02", owner, sub, "PETR4", day));
+        Assert.Equal(0m, k.GetDayRealized("FIRM03", owner, sub, "PETR4", day));
+
+        var rows1 = k.ForSubAccountDay("FIRM01", owner, sub, day).ToList();
+        var rows2 = k.ForSubAccountDay("FIRM02", owner, sub, day).ToList();
+        Assert.Equal(100m, rows1.Single().Realized);
+        Assert.Equal(25m, rows2.Single().Realized);
     }
 }

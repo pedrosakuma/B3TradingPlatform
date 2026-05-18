@@ -76,7 +76,7 @@ public static class PnlEndpoints
                 var day = DateOnly.FromDateTime(DateTimeOffset.UtcNow.UtcDateTime);
                 var realized = new List<PnlRealizedEntry>();
                 decimal total = 0m;
-                foreach (var (symbol, value) in subPnl.ForSubAccountDay(owner.Value, saId, day))
+                foreach (var (symbol, value) in subPnl.ForSubAccountDay(firm, owner.Value, saId, day))
                 {
                     if (value == 0m) continue;
                     realized.Add(new PnlRealizedEntry(symbol, value));

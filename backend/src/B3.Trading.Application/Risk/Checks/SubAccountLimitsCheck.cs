@@ -49,13 +49,25 @@ public sealed class SubAccountLimitsCheck : IRiskCheck
     public int Order => 175;
     public string Name => "sub_account_limits";
 
+    /// <summary>
+    /// Q4.1 (#301). Distinct reason emitted when the targeted
+    /// sub-account is registered-then-deactivated. Kept separate
+    /// from <c>sub_account_limit_exceeded</c> (actual cap breach)
+    /// so observability / client UX can differentiate "you're hard
+    /// stopped" from "your knob is too tight". The REST surface
+    /// mirrors the same string in its structured error
+    /// (<see cref="B3.Trading.Api"/>).
+    /// </summary>
+    public const string DeactivatedReason = "sub_account_deactivated";
+    public const string LimitExceededPrefix = "sub_account_limit_exceeded";
+
     public RiskDecision Check(RiskContext ctx)
     {
         if (ctx.SubAccountId is not { } sub) return RiskDecision.Approve;
 
         if (_registry.TryGet(ctx.FirmId, sub.Value, out var entry) && !entry.Active)
             return RiskDecision.Reject(
-                $"sub_account_limit_exceeded: sub-account {ctx.FirmId}:{sub.Value} is deactivated");
+                $"{DeactivatedReason}: sub-account {ctx.FirmId}:{sub.Value} is deactivated");
 
         var limits = _options.CurrentValue.Resolve(ctx.FirmId, sub.Value);
         if (limits is null) return RiskDecision.Approve;
@@ -64,15 +76,15 @@ public sealed class SubAccountLimitsCheck : IRiskCheck
         {
             // The current order is already in the book by the time
             // risk runs — match the MaxOpenOrdersCheck convention.
-            var openIncludingSelf = _book.CountOpenForOwnerAndSubAccount(ctx.Owner, sub);
+            var openIncludingSelf = _book.CountOpenForOwnerAndSubAccount(ctx.FirmId, ctx.Owner, sub);
             if (openIncludingSelf > maxOpen)
                 return RiskDecision.Reject(
-                    $"sub_account_limit_exceeded: open orders {openIncludingSelf - 1} would exceed sub-account cap {maxOpen} for {ctx.FirmId}:{sub.Value}");
+                    $"{LimitExceededPrefix}: open orders {openIncludingSelf - 1} would exceed sub-account cap {maxOpen} for {ctx.FirmId}:{sub.Value}");
         }
 
         if (limits.PositionLimit is { } posCap)
         {
-            var pos = _positions.GetOrCreate(ctx.Owner, sub, ctx.Symbol);
+            var pos = _positions.GetOrCreate(ctx.FirmId, ctx.Owner, sub, ctx.Symbol);
             long projectedNet;
             lock (pos)
             {
@@ -82,7 +94,7 @@ public sealed class SubAccountLimitsCheck : IRiskCheck
             }
             if (Math.Abs(projectedNet) > posCap)
                 return RiskDecision.Reject(
-                    $"sub_account_limit_exceeded: projected position {projectedNet} would exceed sub-account cap ±{posCap} for {ctx.FirmId}:{sub.Value} on {ctx.Symbol}");
+                    $"{LimitExceededPrefix}: projected position {projectedNet} would exceed sub-account cap ±{posCap} for {ctx.FirmId}:{sub.Value} on {ctx.Symbol}");
         }
 
         if (limits.MaxNotional is { } notCap && ctx.Type == OrderType.Limit && ctx.Price is { } price)
@@ -90,7 +102,7 @@ public sealed class SubAccountLimitsCheck : IRiskCheck
             var notional = price * ctx.Quantity;
             if (notional > notCap)
                 return RiskDecision.Reject(
-                    $"sub_account_limit_exceeded: notional {notional} would exceed sub-account cap {notCap} for {ctx.FirmId}:{sub.Value}");
+                    $"{LimitExceededPrefix}: notional {notional} would exceed sub-account cap {notCap} for {ctx.FirmId}:{sub.Value}");
         }
 
         return RiskDecision.Approve;

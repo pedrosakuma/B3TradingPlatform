@@ -83,6 +83,15 @@ public static class OrdersEndpoints
             // caller's firm. Active-status is checked again inside
             // SubAccountLimitsCheck under the dispatcher lock — this
             // is a fast-fail before any WAL write happens.
+            //
+            // PR review #301 P2: distinguish the two rejection cases
+            // with structured reasons so clients and metrics can tell
+            // "unknown id" apart from "operator-disabled".
+            //   * sub_account_not_registered — never seen this id
+            //     for this firm (or it was created under a different
+            //     firm and the caller's claim mismatches);
+            //   * sub_account_deactivated   — registered but soft-
+            //     deleted via DELETE /sub-accounts.
             SubAccountId? subAccount = null;
             if (!string.IsNullOrWhiteSpace(req.SubAccountId))
             {
@@ -91,10 +100,18 @@ public static class OrdersEndpoints
                 {
                     return Results.BadRequest(new { error = $"invalid subAccountId: {ex.Message}" });
                 }
-                if (!subAccounts.IsActive(ResolveFirm(ctx), subAccount.Value))
+                var firmForLookup = ResolveFirm(ctx);
+                if (!subAccounts.TryGet(firmForLookup, subAccount.Value, out var entry))
                     return Results.BadRequest(new
                     {
-                        error = $"sub-account '{subAccount.Value}' is not registered or has been deactivated for firm",
+                        error = $"sub-account '{subAccount.Value}' is not registered for firm",
+                        reason = "sub_account_not_registered",
+                    });
+                if (!entry.Active)
+                    return Results.BadRequest(new
+                    {
+                        error = $"sub-account '{subAccount.Value}' has been deactivated for firm",
+                        reason = "sub_account_deactivated",
                     });
             }
 
@@ -283,9 +300,10 @@ public sealed record SubmitOrderRequest(
     /// <summary>Q4.1 (#301). Optional sub-account bucket the order is
     /// booked against. Must satisfy <see cref="B3.Trading.Domain.SubAccountId"/>
     /// validation (1-64 chars, alphanumerics + <c>._-</c>); rejected with
-    /// HTTP 400 if invalid, with HTTP 422 (<c>sub_account_limit_exceeded</c>)
-    /// if the sub-account exists but is deactivated. <c>null</c> retains
-    /// pre-#301 master-only behaviour.</summary>
+    /// HTTP 400 if invalid (<c>reason: "sub_account_not_registered"</c>
+    /// when unknown, <c>reason: "sub_account_deactivated"</c> when
+    /// soft-deleted). <c>null</c> retains pre-#301 master-only
+    /// behaviour.</summary>
     string? SubAccountId = null);
 
 public sealed record ModifyOrderRequest(

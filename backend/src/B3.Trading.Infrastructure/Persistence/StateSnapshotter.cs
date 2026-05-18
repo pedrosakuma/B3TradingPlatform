@@ -1103,8 +1103,18 @@ public sealed class EventReplayer
                 // Q4.1 (#301). Sub-account-tagged realized rows also
                 // flow into the per-sub-account keeper. Legacy events
                 // pre-dating the field carry null and short-circuit.
+                // The fan-out is firm-scoped: FirmId is emitted
+                // alongside SubAccountId at append time (PR review
+                // #301 P1). For belt-and-braces parity with WAL
+                // segments written between the original #301 merge
+                // and this fix — where SubAccountId may be set but
+                // FirmId is missing — fall back to "default", which
+                // is the same sentinel the API uses when no firm
+                // claim is present.
                 if (rpe.SubAccountId is { } subPnlId)
-                    _subAccountPnl?.Add(rpe.EndClientId, new SubAccountId(subPnlId),
+                    _subAccountPnl?.Add(
+                        rpe.FirmId ?? "default",
+                        rpe.EndClientId, new SubAccountId(subPnlId),
                         rpe.Symbol, rpe.DayKey, rpe.DeltaRealized);
                 break;
             case SubAccountCreatedEvent sac:

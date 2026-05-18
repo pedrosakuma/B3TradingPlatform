@@ -565,11 +565,18 @@ public sealed record SessionPhaseOverrideSnapshot(string Symbol, string Phase);
 public sealed record SubAccountSnapshot(string FirmId, string Id, string? DisplayName, bool Active);
 
 /// <summary>
-/// Q4.1 (#301). One <c>(EndClientId, SubAccountId, Symbol) → net
-/// quantity + avg price</c> row from
+/// Q4.1 (#301). One <c>(FirmId, EndClientId, SubAccountId, Symbol) →
+/// net quantity + avg price</c> row from
 /// <see cref="B3.Trading.Application.SubAccountPositionKeeper"/>.
+///
+/// <para>
+/// <b>Migration note.</b> <see cref="FirmId"/> is additive and
+/// non-nullable. The DTO type is new in Q4.1 (#301) — no production
+/// snapshots predate it, so there are no legacy records to migrate.
+/// </para>
 /// </summary>
 public sealed record SubAccountPositionSnapshot(
+    string FirmId,
     string EndClientId,
     string SubAccountId,
     string Symbol,
@@ -577,11 +584,19 @@ public sealed record SubAccountPositionSnapshot(
     decimal AverageEntryPrice);
 
 /// <summary>
-/// Q4.1 (#301). One <c>(EndClientId, SubAccountId, Symbol, Day) →
-/// realized total</c> row from
+/// Q4.1 (#301). One <c>(FirmId, EndClientId, SubAccountId, Symbol,
+/// Day) → realized total</c> row from
 /// <see cref="B3.Trading.Application.SubAccountPnlKeeper"/>.
+///
+/// <para>
+/// <b>Migration note.</b> Same shape concern as
+/// <see cref="SubAccountPositionSnapshot"/>: <see cref="FirmId"/> is
+/// additive non-nullable on a type new in Q4.1, no pre-merge data
+/// exists.
+/// </para>
 /// </summary>
 public sealed record SubAccountPnlSnapshot(
+    string FirmId,
     string EndClientId,
     string SubAccountId,
     string Symbol,

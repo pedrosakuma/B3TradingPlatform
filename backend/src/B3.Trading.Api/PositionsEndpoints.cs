@@ -39,7 +39,7 @@ public static class PositionsEndpoints
                 var firm = ctx.User.FindFirstValue(Auth.JwtIssuer.FirmClaim) ?? "default";
                 if (!subAccounts.TryGet(firm, saId.Value, out _))
                     return Results.BadRequest(new { error = $"sub-account '{saId.Value}' is not registered for firm" });
-                var view = subPositions.ForSubAccount(owner, saId)
+                var view = subPositions.ForSubAccount(firm, owner, saId)
                     .Where(p => p.NetQuantity != 0)
                     .Select(p => p.ToDto(saId));
                 return Results.Ok(view);

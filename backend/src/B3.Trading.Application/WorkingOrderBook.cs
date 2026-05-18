@@ -85,14 +85,17 @@ public sealed class WorkingOrderBook
 
     /// <summary>
     /// Q4.1 (#301). Counts an owner's non-terminal orders restricted to
-    /// the given sub-account bucket. Orders without a sub-account tag
-    /// are NOT included (they live in the master bucket and are
-    /// counted by <see cref="CountOpenForOwner"/>). Used by
-    /// <c>SubAccountLimitsCheck</c> to apply per-sub-account
+    /// the given <c>(firm, sub-account)</c> bucket. Orders without a
+    /// sub-account tag are NOT included (they live in the master bucket
+    /// and are counted by <see cref="CountOpenForOwner"/>), and orders
+    /// from a different firm are excluded so the same login under two
+    /// firms with the same sub-account id does not share the cap.
+    /// Used by <c>SubAccountLimitsCheck</c> to apply per-sub-account
     /// max-open-orders caps without re-scanning the whole book.
     /// </summary>
-    public int CountOpenForOwnerAndSubAccount(EndClientId owner, SubAccountId subAccount)
+    public int CountOpenForOwnerAndSubAccount(string firmId, EndClientId owner, SubAccountId subAccount)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
         ArgumentNullException.ThrowIfNull(subAccount);
         if (!_byOwner.TryGetValue(owner.Value, out var set)) return 0;
         var count = 0;
@@ -101,6 +104,7 @@ public sealed class WorkingOrderBook
             if (!_orders.TryGetValue(clOrdId, out var order)) continue;
             if (IsTerminal(order.Status)) continue;
             if (order.IsStale) continue;
+            if (!string.Equals(order.FirmId, firmId, StringComparison.Ordinal)) continue;
             if (order.SubAccountId is not { } sa) continue;
             if (sa != subAccount) continue;
             count++;

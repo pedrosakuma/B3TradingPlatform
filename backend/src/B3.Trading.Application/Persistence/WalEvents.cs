@@ -972,6 +972,19 @@ public sealed record RealizedPnlEvent : WalEvent
     /// from the originating order. Legacy rows hydrate as <c>null</c>
     /// (master).</summary>
     public string? SubAccountId { get; init; }
+
+    /// <summary>
+    /// Q4.1 (#301). Firm namespace for sub-account fan-out. Required
+    /// whenever <see cref="SubAccountId"/> is set so the replayer can
+    /// route the delta into the firm-scoped
+    /// <see cref="B3.Trading.Application.SubAccountPnlKeeper"/> without
+    /// depending on the <see cref="B3.Trading.Application.WorkingOrderBook"/>
+    /// having been restored first. Pre-#301 WAL segments and
+    /// post-#301 master-bucket rows (no <c>SubAccountId</c>) hydrate
+    /// this as <c>null</c>; the fan-out is short-circuited in those
+    /// cases.
+    /// </summary>
+    public string? FirmId { get; init; }
 }
 
 /// <summary>

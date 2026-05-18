@@ -264,8 +264,11 @@ public sealed class ExecutionReportProcessor
                     // a segregated row. The master keeper above sees
                     // every fill (sub-account-null + sub-account-tagged)
                     // so the aggregate view is naturally preserved.
+                    // FirmId is forwarded so the same login under two
+                    // firms with the same sub-account id stays
+                    // segregated (PR review #301 P1).
                     if (order.SubAccountId is { } sa)
-                        _subAccountPositions?.ApplyFill(owner, sa, order.Symbol, order.Side, delta, lastPx);
+                        _subAccountPositions?.ApplyFill(order.FirmId, owner, sa, order.Symbol, order.Side, delta, lastPx);
                     // Book the cash leg of the fill on the same delta as
                     // the position. Buys debit, Sells credit; T+0 settle.
                     // Null when the host hasn't wired CashLedger yet
@@ -461,19 +464,24 @@ public sealed class ExecutionReportProcessor
                                     // the order's sub-account so replay
                                     // can fan out to SubAccountPnlKeeper
                                     // without depending on the WorkingOrderBook
-                                    // having been restored first.
+                                    // having been restored first. FirmId
+                                    // is carried alongside so the
+                                    // fan-out is firm-scoped (PR review
+                                    // #301 P1).
                                     SubAccountId = order.SubAccountId?.Value,
+                                    FirmId = order.SubAccountId is null ? null : order.FirmId,
                                 };
                                 var keeperPnl = _pnlKeeper;
                                 var subPnl = _subAccountPnl;
                                 var subTag = order.SubAccountId;
+                                var firmTag = order.FirmId;
                                 try
                                 {
                                     _dispatcher.Dispatch(pnlEvt, () =>
                                     {
                                         keeperPnl.Apply(pnlEvt);
                                         if (subTag is { } saInner)
-                                            subPnl?.Add(owner.Value, saInner, order.Symbol, dayKey, realized);
+                                            subPnl?.Add(firmTag, owner.Value, saInner, order.Symbol, dayKey, realized);
                                     });
                                     MetricsRegistry.PnlRealizedAppended.Add(1);
                                 }
@@ -486,7 +494,7 @@ public sealed class ExecutionReportProcessor
                                         lookupId);
                                     keeperPnl.Apply(pnlEvt);
                                     if (subTag is { } saInner2)
-                                        subPnl?.Add(owner.Value, saInner2, order.Symbol, dayKey, realized);
+                                        subPnl?.Add(firmTag, owner.Value, saInner2, order.Symbol, dayKey, realized);
                                 }
                             }
                         }

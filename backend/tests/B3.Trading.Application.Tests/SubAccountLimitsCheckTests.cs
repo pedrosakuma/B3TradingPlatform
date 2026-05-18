@@ -41,12 +41,16 @@ public class SubAccountLimitsCheckTests
     }
 
     [Fact]
-    public void DeactivatedSubAccount_Rejects()
+    public void DeactivatedSubAccount_Rejects_WithDistinctReason()
     {
         var (check, _, _, _) = Build(new SubAccountRiskOptions(), registerSub: true, active: false);
         var d = check.Check(Ctx(new SubAccountId(Sub)));
         Assert.False(d.Approved);
-        Assert.StartsWith("sub_account_limit_exceeded", d.Reason);
+        // PR review #301 P2 — distinct reason for deactivation. Must
+        // NOT alias the limit-exceeded prefix (clients/metrics need
+        // to distinguish operator-disabled from cap breach).
+        Assert.StartsWith("sub_account_deactivated", d.Reason);
+        Assert.DoesNotContain("sub_account_limit_exceeded", d.Reason);
         Assert.Contains("deactivated", d.Reason);
     }
 
@@ -93,7 +97,7 @@ public class SubAccountLimitsCheckTests
         };
         var (check, _, _, pos) = Build(opts);
         // existing 30 net buy + new 25 buy = 55 > 50
-        pos.ApplyFill(new EndClientId(Owner), new SubAccountId(Sub), Symbol, OrderSide.Buy, 30, 10m);
+        pos.ApplyFill(Firm, new EndClientId(Owner), new SubAccountId(Sub), Symbol, OrderSide.Buy, 30, 10m);
         var d = check.Check(Ctx(new SubAccountId(Sub), qty: 25));
         Assert.False(d.Approved);
         Assert.Contains("position", d.Reason);
@@ -115,5 +119,57 @@ public class SubAccountLimitsCheckTests
         var (check, _, _, _) = Build(opts);
         var d = check.Check(Ctx(new SubAccountId(Sub)));
         Assert.False(d.Approved);
+    }
+
+    /// <summary>
+    /// PR review #301 P1 — multi-firm segregation of risk-limit
+    /// consumption. The same login/sub-account under two firms must
+    /// see independent open-order counts and position caps; the
+    /// FIRM01 ceiling must not be tripped by FIRM02 activity.
+    /// </summary>
+    [Fact]
+    public void RiskCaps_AreFirmSegregated_ForSameOwnerAndSubAccount()
+    {
+        const string firm1 = "FIRM01";
+        const string firm2 = "FIRM02";
+        var opts = new SubAccountRiskOptions
+        {
+            PerFirm = new()
+            {
+                [firm1] = new FirmSubAccountRiskOptions
+                {
+                    PerSubAccount = new() { [Sub] = new SubAccountRiskLimits { PositionLimit = 50 } },
+                },
+                [firm2] = new FirmSubAccountRiskOptions
+                {
+                    PerSubAccount = new() { [Sub] = new SubAccountRiskLimits { PositionLimit = 50 } },
+                },
+            },
+        };
+        var book = new WorkingOrderBook();
+        var pos = new SubAccountPositionKeeper();
+        var reg = new SubAccountsRegistry();
+        reg.ApplyCreated(firm1, Sub, null);
+        reg.ApplyCreated(firm2, Sub, null);
+        var check = new SubAccountLimitsCheck(
+            new StaticOptionsMonitor<SubAccountRiskOptions>(opts), book, pos, reg);
+
+        // Saturate the FIRM02 bucket — would breach the cap there but
+        // must not consume FIRM01's budget.
+        pos.ApplyFill(firm2, new EndClientId(Owner), new SubAccountId(Sub), Symbol, OrderSide.Buy, 50, 10m);
+
+        var ctxFirm1 = new RiskContext(
+            new EndClientId(Owner), firm1, Symbol, OrderSide.Buy, OrderType.Limit, 25, 10m,
+            SubAccountId: new SubAccountId(Sub));
+        var ctxFirm2 = new RiskContext(
+            new EndClientId(Owner), firm2, Symbol, OrderSide.Buy, OrderType.Limit, 25, 10m,
+            SubAccountId: new SubAccountId(Sub));
+
+        // FIRM01 sees a fresh book: 0 + 25 = 25 ≤ 50 → approve.
+        Assert.True(check.Check(ctxFirm1).Approved);
+        // FIRM02 already at 50 + 25 = 75 > 50 → reject.
+        var f2 = check.Check(ctxFirm2);
+        Assert.False(f2.Approved);
+        Assert.Contains("position", f2.Reason);
     }
 }
