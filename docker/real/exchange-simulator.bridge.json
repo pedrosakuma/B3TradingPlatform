@@ -35,14 +35,26 @@
     "devMode": true
   },
   "firms": [
-    { "id": "FIRM01", "name": "Alpha Corretora", "enteringFirmCode": 100 }
+    { "id": "FIRM01", "name": "Alpha Corretora", "enteringFirmCode": 100 },
+    // Q4.2 (#302). FIRM02 / FIRM03 added so the compose default can wire
+    // three independent firm gateways out of trading-host and prove the
+    // multi-firm isolation surface end-to-end (no order/position/PnL/WAL
+    // leakage across the firm boundary). Distinct enteringFirmCodes so
+    // each appears under its own clearing identity on outbound orders.
+    { "id": "FIRM02", "name": "Beta Corretora", "enteringFirmCode": 200 },
+    { "id": "FIRM03", "name": "Gamma Corretora", "enteringFirmCode": 300 }
   ],
   "sessions": [
     { "sessionId": "10101", "firmId": "FIRM01", "accessKey": "dev-key-1" },
     // Reserved for the external simulator bot (issue #134). Lets the
     // bot connect to matching-platform on its own FIXP session without
     // colliding with trading-host's 10101.
-    { "sessionId": "10102", "firmId": "FIRM01", "accessKey": "dev-key-2" }
+    { "sessionId": "10102", "firmId": "FIRM01", "accessKey": "dev-key-2" },
+    // Q4.2 (#302). One trading-host FIXP session per additional firm.
+    // SessionIds are picked from the 1010x range so they stay grouped
+    // with FIRM01's sessions in matching's session table.
+    { "sessionId": "10103", "firmId": "FIRM02", "accessKey": "dev-key-3" },
+    { "sessionId": "10104", "firmId": "FIRM03", "accessKey": "dev-key-4" }
   ],
   "http": {
     "listen": "0.0.0.0:8080",

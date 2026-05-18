@@ -540,12 +540,14 @@ public sealed class ExecutionReportProcessor
                                         if (subTag is { } saInner)
                                             subPnl?.Add(firmTag, owner.Value, saInner, order.Symbol, dayKey, realized);
                                     });
-                                    MetricsRegistry.PnlRealizedAppended.Add(1);
+                                    MetricsRegistry.PnlRealizedAppended.Add(1,
+                                        new KeyValuePair<string, object?>("firmId", firmTag));
                                 }
                                 catch (Persistence.WalBackpressureException)
                                 {
                                     MetricsRegistry.WalBackpressure.Add(1,
-                                        new KeyValuePair<string, object?>("call_site", "pnl.dispatch"));
+                                        new KeyValuePair<string, object?>("call_site", "pnl.dispatch"),
+                                        new KeyValuePair<string, object?>("firmId", firmTag));
                                     _logger.LogWarning(
                                         "Dropping RealizedPnlEvent for {ClOrdId} on WAL backpressure; applying realized pnl directly to keeper.",
                                         lookupId);

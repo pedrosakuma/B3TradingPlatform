@@ -174,6 +174,25 @@ services:
       Trading__Auth__Users__5__Iterations: "600000"
       Trading__Auth__Users__5__Role: user
       Trading__Auth__Users__5__Firm: FIRM01
+      # Q4.2 (#302). Two extra seed users namespaced under FIRM02 and
+      # FIRM03 respectively, so the multi-firm isolation surface is
+      # exercised out of the box (alongside FIRM01 above). The same
+      # PBKDF2 hash/salt produces a valid login for the same shared
+      # password — each user just lives in a different firm namespace.
+      # No PositionSeed is wired for these firms intentionally: they
+      # start flat so the naked-short gate is exercised honestly.
+      Trading__Auth__Users__6__Username: ${TRADING_SEED_USER_FIRM02:-bob-firm02}
+      Trading__Auth__Users__6__PasswordHash: ${TRADING_SEED_PASSWORD_HASH}
+      Trading__Auth__Users__6__Salt: ${TRADING_SEED_PASSWORD_SALT}
+      Trading__Auth__Users__6__Iterations: "600000"
+      Trading__Auth__Users__6__Role: user
+      Trading__Auth__Users__6__Firm: FIRM02
+      Trading__Auth__Users__7__Username: ${TRADING_SEED_USER_FIRM03:-charlie-firm03}
+      Trading__Auth__Users__7__PasswordHash: ${TRADING_SEED_PASSWORD_HASH}
+      Trading__Auth__Users__7__Salt: ${TRADING_SEED_PASSWORD_SALT}
+      Trading__Auth__Users__7__Iterations: "600000"
+      Trading__Auth__Users__7__Role: user
+      Trading__Auth__Users__7__Firm: FIRM03
       # CORS list from origin of nginx frontend. Same-origin via nginx proxy
       # means this is mostly redundant, but cheap insurance for direct curls.
       Trading__Cors__AllowedOrigins__0: http://localhost:${FRONTEND_PORT:-8080}
@@ -200,6 +219,29 @@ services:
       Trading__Exchange__Firms__0__AccessKey: '{"auth_type":"basic","username":"10101","access_key":"dev-key-1"}'
       Trading__Exchange__Firms__0__SenderLocation: SP
       Trading__Exchange__Firms__0__EnteringTrader: ALICE
+      # Q4.2 (#302). FIRM02 / FIRM03 wired on their own FIXP sessions
+      # against matching's extended bridge config (10103 / 10104 with
+      # enteringFirm 200 / 300; see docker/real/exchange-simulator.bridge.json).
+      # FirmGatewayConnector cold-starts these in parallel; a failed
+      # Negotiate falls back to background retry so a partial matching
+      # config never blocks host boot. Endpoints + SenderLocation reuse
+      # FIRM01's values — they are wire-only metadata.
+      Trading__Exchange__Firms__1__FirmId: FIRM02
+      Trading__Exchange__Firms__1__Endpoint: matching-platform:9876
+      Trading__Exchange__Firms__1__SessionId: "10103"
+      Trading__Exchange__Firms__1__SessionVerId: "1"
+      Trading__Exchange__Firms__1__EnteringFirm: "200"
+      Trading__Exchange__Firms__1__AccessKey: '{"auth_type":"basic","username":"10103","access_key":"dev-key-3"}'
+      Trading__Exchange__Firms__1__SenderLocation: SP
+      Trading__Exchange__Firms__1__EnteringTrader: BOB02
+      Trading__Exchange__Firms__2__FirmId: FIRM03
+      Trading__Exchange__Firms__2__Endpoint: matching-platform:9876
+      Trading__Exchange__Firms__2__SessionId: "10104"
+      Trading__Exchange__Firms__2__SessionVerId: "1"
+      Trading__Exchange__Firms__2__EnteringFirm: "300"
+      Trading__Exchange__Firms__2__AccessKey: '{"auth_type":"basic","username":"10104","access_key":"dev-key-4"}'
+      Trading__Exchange__Firms__2__SenderLocation: SP
+      Trading__Exchange__Firms__2__EnteringTrader: CARL3
       # Map the conformance-driven symbols onto the SecurityIds matching
       # advertises in instruments-eqt.json so /orders submissions for
       # PETR4/VALE3/ITUB4 hit a real instrument and can print trades.
