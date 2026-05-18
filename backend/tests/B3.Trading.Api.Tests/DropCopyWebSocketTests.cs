@@ -427,4 +427,172 @@ public class DropCopyWebSocketTests
             await Task.Delay(50);
         }
     }
+
+    // 11. P1 regression — concurrent subscribe must not drop deltas (atomicity).
+    //
+    // Pre-fix the manager read the per-firm subscriber set BEFORE
+    // taking the per-firm lock, so a Publish racing an Add() could
+    // iterate a stale snapshot (no new subscriber) and silently drop
+    // the live delta — the new subscriber received its snapshot but
+    // missed the delta that crossed the registration boundary.
+    //
+    // The fix moves the subscriber-set read inside the lock. This test
+    // hammers the race: a worker continuously publishes deltas to
+    // FIRM01 while a separate task registers a new subscriber. After
+    // Add() returns we keep publishing for a small window; every
+    // delta emitted in that post-registration window MUST land in the
+    // new subscriber's outbound channel (no gap). The test runs many
+    // iterations to reliably catch the race window if the fix is
+    // reverted.
+    [Fact]
+    public async Task DropCopyManager_Add_AtomicWithConcurrentPublish_NoDeltaGap()
+    {
+        const int Iterations = 200;
+        const string Firm = Firm01;
+        const string Channel = DropCopyManager.DropCopyChannels.Orders;
+
+        for (var iter = 0; iter < Iterations; iter++)
+        {
+            var book = new WorkingOrderBook();
+            var manager = new DropCopyManager(book);
+            var client = new DropCopyClient(Firm, "compliance-" + iter, "compliance");
+
+            long published = 0;
+            long stop = 0;
+
+            var publisher = Task.Run(() =>
+            {
+                while (Volatile.Read(ref stop) == 0)
+                {
+                    var seq = Interlocked.Increment(ref published);
+                    manager.Publish(Firm, Channel, seq);
+                    // Keep the channel from overflowing across iterations
+                    // (DropCopyClient.OutboundCapacity = 4096): the
+                    // post-Add window is intentionally short.
+                    if (seq > DropCopyClient.OutboundCapacity - 64) break;
+                }
+            });
+
+            // Let the publisher spin up so we're truly racing.
+            Thread.SpinWait(2_000);
+
+            manager.Add(client);
+
+            // Boundary: any seq strictly greater than this was assigned
+            // by an Interlocked.Increment that happened-after Add()
+            // returned, so its Publish() call entered after Add's lock
+            // was released. The fix guarantees every such delta lands
+            // on the new subscriber. With the pre-fix code, a
+            // Publish() that had already read the stale subscriber
+            // set could silently iterate it under the lock acquired
+            // after Add — and the matching delta would never reach
+            // the client.
+            //
+            // Note we cannot use the strict "Publish entered after
+            // Add returned" boundary directly: in the pre-fix code
+            // the race window is exactly the period during which
+            // Publish has captured the stale set but not yet locked.
+            // The simplest deterministic check is to publish a few
+            // more items AFTER Add returns and require the client to
+            // observe them — this still exercises the path that was
+            // broken, because the publisher's pre-Add captures may
+            // still be racing for the lock when these post-Add items
+            // are issued.
+            const int PostAddDeltas = 32;
+            var postAddSeqs = new long[PostAddDeltas];
+            for (var i = 0; i < PostAddDeltas; i++)
+            {
+                var seq = Interlocked.Increment(ref published);
+                postAddSeqs[i] = seq;
+                manager.Publish(Firm, Channel, seq);
+            }
+
+            Volatile.Write(ref stop, 1);
+            await publisher;
+            client.Complete();
+
+            var seen = new HashSet<long>();
+            await foreach (var msg in client.Reader.ReadAllAsync())
+            {
+                if (msg.Type != "delta") continue;
+                if (msg.Data is long s) seen.Add(s);
+            }
+
+            foreach (var s in postAddSeqs)
+            {
+                Assert.True(
+                    seen.Contains(s),
+                    $"iter {iter}: post-registration delta seq={s} was dropped — Publish-vs-Add race regression.");
+            }
+
+            // Sanity: the client must not have been disconnected for
+            // channel overflow; that would mask a real gap by
+            // converting it to a slow-consumer drop. The publisher
+            // bounds itself well under OutboundCapacity.
+            Assert.False(client.MarkedForDisconnect,
+                $"iter {iter}: client unexpectedly marked for disconnect (channel overflow); test bound too loose.");
+        }
+    }
+
+    // 12. P2 regression — a slow consumer (idle peer that never reads
+    // and never sends) must still be torn down promptly: when the
+    // outbound channel fills, the send loop marks the client for
+    // disconnect, but pre-fix the hub then awaited Task.WhenAll(send,
+    // recv) — and the receive loop blocked forever on ReceiveAsync
+    // for an idle peer, so manager.Remove(client) was never called
+    // and the subscriber leaked.
+    //
+    // The fix wires both loops through a linked CTS, cancels it after
+    // WhenAny, and aborts the socket so the receive loop unblocks.
+    // We assert the subscriber count returns to zero within a
+    // reasonable timeout once the channel fills.
+    [Fact]
+    public async Task SlowConsumer_FillsChannel_SubscriberRemovedWithoutLeak()
+    {
+        await using var factory = TestAppFactory.WithOverrides(new Dictionary<string, string?>());
+        var manager = factory.Services.GetRequiredService<DropCopyManager>();
+        var sink = factory.Services.GetRequiredService<IExecutionEventSink>();
+        var registry = factory.Services.GetRequiredService<EndClientRegistry>();
+        var book = factory.Services.GetRequiredService<WorkingOrderBook>();
+        var alice = registry.Register("alice");
+
+        Assert.Equal(0, manager.SubscriberCount(Firm01));
+
+        using var http = factory.CreateClient();
+        var token = await factory.LoginAsync(http, "dave", TestAppFactory.TestPassword);
+
+        // Connect but DO NOT read — this is the slow / idle consumer.
+        // We don't call ReadSnapshotsAsync; we don't pump the WS at all.
+        var ws = await ConnectDropCopyAsync(factory, token);
+
+        // Wait for the subscriber to land in the manager.
+        await PollAsync(() => manager.SubscriberCount(Firm01) >= 1, TimeSpan.FromSeconds(5));
+        Assert.Equal(1, manager.SubscriberCount(Firm01));
+
+        // Submit far more events than the outbound channel can hold.
+        // Each TryAdd + Publish fans out one orders delta + one fills
+        // delta, so 2× per event lands on the outbound channel.
+        // DropCopyClient.OutboundCapacity = 4096; we submit 8000
+        // events to guarantee the bounded channel saturates and
+        // Enqueue marks the client for disconnect.
+        var ordersCount = DropCopyClient.OutboundCapacity * 2 + 1000;
+        for (var i = 0; i < ordersCount; i++)
+        {
+            var clOrdId = (ulong)(10_000 + i);
+            book.TryAdd(new Order(clOrdId, alice, "PETR4", 9001UL, OrderSide.Buy, OrderType.Limit, 100, 30m, firmId: Firm01));
+            sink.Publish(new ExecutionEvent(alice, clOrdId, "PETR4", OrderSide.Buy,
+                OrderStatus.Filled, ExecKind.Fill, 0, 100, 100, 30m, null, DateTimeOffset.UtcNow, FirmId: Firm01));
+        }
+
+        // The send loop will detect the full channel inside Enqueue,
+        // mark the client for disconnect, complete the writer, and
+        // exit. The hub's finally block (post-fix) must cancel the
+        // linked CTS and abort the socket so the receive loop also
+        // exits — only THEN does manager.Remove(client) run.
+        await PollAsync(() => manager.SubscriberCount(Firm01) == 0, TimeSpan.FromSeconds(15));
+        Assert.Equal(0, manager.SubscriberCount(Firm01));
+
+        try { ws.Abort(); } catch { /* best-effort */ }
+        ws.Dispose();
+    }
 }

@@ -100,11 +100,21 @@ public sealed class DropCopyManager
     public void Publish(string firmId, string channel, object payload)
     {
         if (string.IsNullOrEmpty(firmId)) return;
-        if (!_byFirm.TryGetValue(firmId, out var clients) || clients.IsEmpty)
-            return;
 
+        // Atomicity contract (Q4.6 / RFC §4.3): the per-firm lock is the
+        // single serialization point between subscriber registration
+        // (Add) and delta fan-out. We must take the lock BEFORE reading
+        // _byFirm — otherwise a concurrent Add() could register a new
+        // subscriber + enqueue its snapshot frame while we are still
+        // holding a stale subscriber set, causing the racing delta to
+        // be silently lost for the new subscriber. The empty-set
+        // early-out happens INSIDE the lock so it remains cheap when
+        // no compliance session is active (the common case).
         lock (LockFor(firmId))
         {
+            if (!_byFirm.TryGetValue(firmId, out var clients) || clients.IsEmpty)
+                return;
+
             foreach (var client in clients)
             {
                 if (client.MarkedForDisconnect) continue;

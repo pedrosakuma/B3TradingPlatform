@@ -107,29 +107,80 @@ public static class DropCopyWebSocketHub
             manager.Add(client);
             MetricsRegistry.WsConnectionsActive.Add(1);
 
+            // Use a linked CTS so that when either loop exits (slow
+            // consumer disconnect, peer-close, or request-aborted), we
+            // cancel the OTHER loop too. Without this, an idle peer
+            // (no inbound frames) keeps ReceiveLoopAsync blocked
+            // forever after the send loop has already exited — and the
+            // finally block below (which runs manager.Remove) never
+            // executes, leaking the subscriber + channel + metrics
+            // counter. See Q4.6 P2 / RFC §5.2 slow-consumer note.
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted);
+            var sendTask = SendLoopAsync(ws, client, cts.Token);
+            var recvTask = ReceiveLoopAsync(ws, cts.Token);
             try
             {
-                var sendTask = SendLoopAsync(ws, client, ctx.RequestAborted);
-                var recvTask = ReceiveLoopAsync(ws, ctx.RequestAborted);
                 await Task.WhenAny(sendTask, recvTask);
-                client.Complete();
-                await Task.WhenAll(SafeAwait(sendTask), SafeAwait(recvTask));
             }
             finally
             {
+                // Tear down in order:
+                //  1. Cancel the linked token so the still-running loop
+                //     (typically ReceiveLoopAsync on an idle peer)
+                //     observes cancellation immediately.
+                //  2. Best-effort graceful close while the socket is
+                //     still Open — surfaces a clean close frame to the
+                //     peer if it ever resumes reading.
+                //  3. Abort to forcibly unblock any in-flight
+                //     ReceiveAsync that ignored the cancellation token
+                //     (peer that never sends; TestHost in particular).
+                //  4. Complete the outbound channel so SendLoopAsync
+                //     exits if it was still draining.
+                //  5. Await both loops (swallow expected cancellation)
+                //     before the subscriber-removal step so we don't
+                //     race the manager bookkeeping against a stray
+                //     send.
+                //  6. Finally, deregister + metrics + audit.
+                cts.Cancel();
+
+                var reason = client.DisconnectReason ?? "drop-copy closing";
+                if (ws.State == WebSocketState.Open)
+                {
+                    // Bounded graceful close: ws.CloseAsync awaits the
+                    // peer's reciprocal Close frame, which an aborted
+                    // / disappeared peer will never send — and not
+                    // every WebSocket implementation (notably TestHost)
+                    // honours the cancellation token here. We give the
+                    // peer a short window to ack, then fall through
+                    // to the unconditional Abort below which forcibly
+                    // tears the socket down — exactly the leak P2 is
+                    // meant to fix.
+                    try
+                    {
+                        var closeTask = ws.CloseAsync(WebSocketCloseStatus.NormalClosure, reason, CancellationToken.None);
+                        await Task.WhenAny(closeTask, Task.Delay(TimeSpan.FromMilliseconds(500)));
+                    }
+                    catch (WebSocketException) { /* best-effort */ }
+                    catch (OperationCanceledException) { /* peer gone / timed out */ }
+                }
+                try { ws.Abort(); } catch { /* best-effort */ }
+
+                client.Complete();
+                // Bounded join on the loops. The Abort() above should
+                // have unblocked any pending ReceiveAsync, but a
+                // hostile WS implementation that ignores both
+                // cancellation and Abort must not be allowed to pin
+                // the subscriber in the manager forever.
+                try
+                {
+                    var both = Task.WhenAll(sendTask, recvTask);
+                    await Task.WhenAny(both, Task.Delay(TimeSpan.FromSeconds(2)));
+                }
+                catch { /* loops already log / swallow their own exits */ }
+
                 manager.Remove(client);
                 MetricsRegistry.WsConnectionsActive.Add(-1);
                 EmitAuditIfWired(ctx, AuditEventTypes.DropCopyDisconnect, AuditOutcomes.Success, effectiveFirm, sub, role!);
-
-                if (ws.State == WebSocketState.Open)
-                {
-                    var reason = client.DisconnectReason ?? "closing";
-                    try
-                    {
-                        await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, reason, CancellationToken.None);
-                    }
-                    catch (WebSocketException) { /* best-effort */ }
-                }
             }
 
             return Results.Empty;
@@ -187,11 +238,6 @@ public static class DropCopyWebSocketHub
         }
         catch (OperationCanceledException) { /* shutdown */ }
         catch (WebSocketException) { /* peer gone */ }
-    }
-
-    private static async Task SafeAwait(Task t)
-    {
-        try { await t; } catch { /* already-handled in loop */ }
     }
 
     private static void EmitAuditIfWired(

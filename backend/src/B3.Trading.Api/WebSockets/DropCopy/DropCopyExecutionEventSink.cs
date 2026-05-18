@@ -130,7 +130,14 @@ public sealed class DropCopyExecutionEventSink : IExecutionFanOutSink, IExecutio
         // No firm => no fan-out (legacy / pre-multi-firm events default-cased through tests).
         var firmId = ev.FirmId;
         if (string.IsNullOrEmpty(firmId)) return;
-        if (_manager.SubscriberCount(firmId) == 0) return;
+
+        // No out-of-lock SubscriberCount fast-path here: the per-firm
+        // empty-set check happens INSIDE DropCopyManager.Publish (under
+        // the per-firm lock). Reading _byFirm here without the lock
+        // would re-introduce the Publish-vs-Add race (Q4.6 RFC §4.3):
+        // a concurrent Add() could register a subscriber whose snapshot
+        // has been enqueued but whose first live delta would then be
+        // dropped because the unlocked fast-path saw zero subscribers.
 
         // orders.* — current order state after mutation (skip if the
         // order is no longer in the book, same fall-through as orders.me).
