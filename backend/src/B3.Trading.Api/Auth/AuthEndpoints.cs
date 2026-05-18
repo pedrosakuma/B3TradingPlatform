@@ -1,3 +1,4 @@
+using B3.Trading.Api.Auth.Totp;
 using B3.Trading.Application;
 using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
@@ -34,7 +35,8 @@ public static class AuthEndpoints
             IUserStore users,
             JwtIssuer issuer,
             EndClientRegistry registry,
-            ILoginAttemptTracker lockout) =>
+            ILoginAttemptTracker lockout,
+            ITotpChallengeStore totpChallenges) =>
         {
             if (req is null || string.IsNullOrWhiteSpace(req.Username) || string.IsNullOrWhiteSpace(req.Password))
                 return Results.BadRequest(new { error = "username and password required" });
@@ -59,15 +61,38 @@ public static class AuthEndpoints
                 return Results.Json(new { error = "invalid credentials" }, statusCode: StatusCodes.Status401Unauthorized);
             }
 
-            // Successful auth wipes the failure counter for this user.
+            // Password ok. Clear the password-side failure counter
+            // before deciding the second-factor path so a repeated
+            // 2FA-pending login doesn't pile up password failures.
             lockout.RecordSuccess(user.Username);
+
+            // 2FA branch #1: user has an active TOTP enrollment. Mint a
+            // short-lived challenge token and bail before issuing a JWT.
+            if (user.Totp is { EnrolledAt: not null, SharedSecret.Length: > 0 })
+            {
+                var token = totpChallenges.Issue(user.Username, TotpChallengeKind.Verify);
+                return Results.Ok(new LoginTwoFactorRequiredResponse(
+                    Requires2fa: true,
+                    TotpChallengeToken: token));
+            }
+
+            // 2FA branch #2: user is REQUIRED to enroll (admin-forced)
+            // but hasn't yet. Mint a ForceEnroll token; the client
+            // calls /auth/2fa/enroll with that token instead of a JWT.
+            if (user.Require2FA)
+            {
+                var token = totpChallenges.Issue(user.Username, TotpChallengeKind.ForceEnroll);
+                return Results.Ok(new LoginEnrollmentRequiredResponse(
+                    Requires2faEnrollment: true,
+                    EnrollmentToken: token));
+            }
 
             // Pre-register so subsequent ER routing / WS subscribe work
             // immediately even before the first business call.
             registry.Register(user.Username);
 
-            var (token, expires) = issuer.Issue(user.Username, user.Role, user.Firm);
-            return Results.Ok(new LoginResponse(token, expires));
+            var (jwt, expires) = issuer.Issue(user.Username, user.Role, user.Firm);
+            return Results.Ok(new LoginResponse(jwt, expires));
         });
 
         app.MapPost("/auth/signup", (
@@ -222,3 +247,18 @@ public static class AuthEndpoints
 public sealed record LoginRequest(string Username, string Password);
 public sealed record LoginResponse(string Token, DateTimeOffset ExpiresAt);
 public sealed record SignupRequest(string Username, string Password);
+
+/// <summary>
+/// Returned by <c>/auth/login</c> when the user has an active TOTP
+/// enrollment. The client must POST <c>{ totpChallengeToken, code }</c>
+/// to <c>/auth/2fa/verify</c> to receive the real JWT. (#303)
+/// </summary>
+public sealed record LoginTwoFactorRequiredResponse(bool Requires2fa, string TotpChallengeToken);
+
+/// <summary>
+/// Returned by <c>/auth/login</c> when the user has
+/// <c>Require2FA=true</c> but no active enrollment. The client must
+/// POST <c>{ enrollmentToken }</c> as <c>X-Enrollment-Token</c> (or
+/// body field) to <c>/auth/2fa/enroll</c> to bootstrap. (#303)
+/// </summary>
+public sealed record LoginEnrollmentRequiredResponse(bool Requires2faEnrollment, string EnrollmentToken);

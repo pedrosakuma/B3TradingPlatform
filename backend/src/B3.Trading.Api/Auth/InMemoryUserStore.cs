@@ -53,4 +53,25 @@ public sealed class InMemoryUserStore : IUserStore
         if (_seeded.ContainsKey(user.Username)) return false;
         return _runtime.TryAdd(user.Username, user);
     }
+
+    public bool TryUpdate(UserConfig user)
+    {
+        ArgumentNullException.ThrowIfNull(user);
+        if (string.IsNullOrWhiteSpace(user.Username)) return false;
+
+        // Env-seeded users: mutate the existing UserConfig in place so
+        // TOTP overlays persist for the lifetime of the process. They
+        // are intentionally NOT persisted (config is authoritative);
+        // operator-controlled accounts re-enroll if the host restarts.
+        if (_seeded.TryGetValue(user.Username, out var seeded))
+        {
+            seeded.Totp = user.Totp;
+            seeded.Require2FA = user.Require2FA;
+            return true;
+        }
+
+        if (!_runtime.ContainsKey(user.Username)) return false;
+        _runtime[user.Username] = user;
+        return true;
+    }
 }

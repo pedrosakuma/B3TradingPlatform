@@ -39,6 +39,24 @@
       </p>
     </form>
 
+    <!-- #303. Second-factor step. Hidden until /auth/login returns
+         requires2fa=true. Distinct card so the password fields aren't
+         posted with the TOTP code. -->
+    <form id="totp-form" class="login-card" hidden>
+      <h1>Two-factor authentication</h1>
+      <p class="subtitle">Enter the 6-digit code from your authenticator app.</p>
+      <label>
+        <span>Code or recovery code</span>
+        <input id="totp-code" type="text" inputmode="numeric" autocomplete="one-time-code"
+               required autofocus maxlength="32" />
+      </label>
+      <button type="submit" id="totp-submit">Verify</button>
+      <p id="totp-error" class="error" role="alert" hidden></p>
+      <p class="login-switch">
+        <button type="button" id="totp-cancel" class="link-button">Back to sign in</button>
+      </p>
+    </form>
+
     <form id="signup-form" class="login-card" hidden>
       <h1>Criar conta</h1>
       <p class="subtitle">Self-service · FIRM01</p>
@@ -93,6 +111,8 @@
         <span id="user-role" class="role-badge" hidden></span>
         <button id="bot-credentials-open" class="link-button" type="button"
                 aria-label="Bot credentials">Bot credentials</button>
+        <button id="security-open" class="link-button" type="button"
+                aria-label="Security (two-factor authentication)">Security</button>
         <button id="history-open" class="link-button" type="button"
                 aria-label="History, P&amp;L and statement">History</button>
         <button id="logout" class="link-button" type="button" aria-label="Logout">Logout</button>
@@ -757,6 +777,64 @@
                 aria-label="Close statement JSON">×</button>
       </header>
       <pre id="statement-json-body" class="statement-json-body"></pre>
+    </div>
+  </div>
+
+  <!-- SECURITY (2FA) MODAL (#303) ------------------------------------ -->
+  <div id="security-modal" class="modal-backdrop" hidden role="dialog"
+       aria-modal="true" aria-labelledby="security-title">
+    <div class="modal-card">
+      <header class="order-detail-title-row">
+        <h2 id="security-title">Two-factor authentication</h2>
+        <button type="button" id="security-close" class="order-detail-close"
+                aria-label="Close security panel">×</button>
+      </header>
+      <div id="security-body">
+        <p id="security-status" class="subtitle"></p>
+
+        <div id="security-enroll-start" hidden>
+          <p>2FA is not enrolled on this account. Click below to begin.</p>
+          <button type="button" id="security-enroll-begin">Enroll TOTP</button>
+        </div>
+
+        <div id="security-enroll-show" hidden>
+          <p>Scan this URI in your authenticator app (Google Authenticator,
+             1Password, Authy…) or paste the secret manually:</p>
+          <label>
+            <span>otpauth URI</span>
+            <input id="security-otpauth-uri" type="text" readonly />
+          </label>
+          <label>
+            <span>Secret (base32)</span>
+            <input id="security-secret" type="text" readonly />
+          </label>
+          <p><strong>Recovery codes — save them now. They are shown ONCE.</strong></p>
+          <pre id="security-recovery-codes"></pre>
+          <label class="row">
+            <input id="security-recovery-ack" type="checkbox" />
+            <span>I've saved my recovery codes</span>
+          </label>
+          <label>
+            <span>Enter a 6-digit code from your app to activate</span>
+            <input id="security-confirm-code" type="text" inputmode="numeric"
+                   autocomplete="one-time-code" maxlength="8" />
+          </label>
+          <button type="button" id="security-confirm" disabled>Activate 2FA</button>
+        </div>
+
+        <div id="security-enrolled" hidden>
+          <p>2FA is enrolled. To disable, enter a current 6-digit code (or
+             a recovery code).</p>
+          <label>
+            <span>Code</span>
+            <input id="security-disable-code" type="text" inputmode="numeric"
+                   autocomplete="one-time-code" maxlength="32" />
+          </label>
+          <button type="button" id="security-disable">Disable 2FA</button>
+        </div>
+
+        <p id="security-error" class="error" role="alert" hidden></p>
+      </div>
     </div>
   </div>
 

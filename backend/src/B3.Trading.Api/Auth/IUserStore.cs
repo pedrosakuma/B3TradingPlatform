@@ -22,4 +22,14 @@ public interface IUserStore
     /// Thread-safe.
     /// </summary>
     bool TryAdd(UserConfig user);
+
+    /// <summary>
+    /// Persist mutations to an existing user (e.g. TOTP enrollment
+    /// state). Returns <c>false</c> when the username is not known.
+    /// Updates apply to both env-seeded and runtime users; for
+    /// env-seeded users only the runtime-mutable fields (currently
+    /// <see cref="UserConfig.Totp"/>) survive — config remains
+    /// authoritative on restart for credential fields. Thread-safe.
+    /// </summary>
+    bool TryUpdate(UserConfig user);
 }

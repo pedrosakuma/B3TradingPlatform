@@ -124,6 +124,47 @@ public sealed class FileBackedUserStore : IUserStore
         }
     }
 
+    public bool TryUpdate(UserConfig user)
+    {
+        ArgumentNullException.ThrowIfNull(user);
+        if (string.IsNullOrWhiteSpace(user.Username)) return false;
+
+        lock (_writeGate)
+        {
+            // Env-seeded users: mutate in place (config remains
+            // authoritative for credentials; TOTP overlay survives only
+            // process lifetime — matches InMemoryUserStore).
+            if (_seeded.TryGetValue(user.Username, out var seeded))
+            {
+                seeded.Totp = user.Totp;
+                seeded.Require2FA = user.Require2FA;
+                return true;
+            }
+
+            if (!_runtime.ContainsKey(user.Username)) return false;
+            var previous = _runtime[user.Username];
+            _runtime[user.Username] = user;
+
+            try
+            {
+                PersistRuntimeUsersLocked();
+            }
+            catch (Exception ex)
+            {
+                // Roll the in-memory state back to the prior snapshot
+                // so we don't expose an unpersisted TOTP secret.
+                _runtime[user.Username] = previous;
+                _logger.LogError(ex,
+                    "FileBackedUserStore: failed to persist updated user {Username} to {Path}; " +
+                    "in-memory update rolled back.",
+                    user.Username, _filePath);
+                throw;
+            }
+
+            return true;
+        }
+    }
+
     private void LoadRuntimeUsers()
     {
         if (!File.Exists(_filePath))

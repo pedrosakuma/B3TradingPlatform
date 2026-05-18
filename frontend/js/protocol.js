@@ -47,6 +47,47 @@ export async function login(backend, username, password) {
   return jsonOrThrow(resp);
 }
 
+// #303. Submits a 2FA verification: either a TOTP code or a recovery
+// code (server detects via length/shape). When `totpChallengeToken` is
+// supplied this finishes the login flow and returns `{ token, expiresAt }`;
+// when omitted, the request must be authenticated and confirms a pending
+// enrollment.
+export async function verifyTotp(backend, { code, totpChallengeToken, token }) {
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const body = totpChallengeToken ? { code, totpChallengeToken } : { code };
+  const resp = await fetch(`${backend}/auth/2fa/verify`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  });
+  return jsonOrThrow(resp);
+}
+
+// Begin TOTP enrollment. Returns `{ secret, otpauthUri, recoveryCodes }`.
+// Recovery codes are shown ONCE — store them client-side until the user
+// acknowledges, then discard.
+export async function enrollTotp(backend, token, enrollmentToken) {
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetch(`${backend}/auth/2fa/enroll`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(enrollmentToken ? { enrollmentToken } : {}),
+  });
+  return jsonOrThrow(resp);
+}
+
+// Disable TOTP. Requires a currently-valid TOTP code (or recovery code).
+export async function disableTotp(backend, token, code) {
+  const resp = await fetch(`${backend}/auth/2fa/disable`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ code }),
+  });
+  return jsonOrThrow(resp);
+}
+
 // Self-service signup. Returns the same shape as /auth/login (token +
 // expiresAt) so the caller can drop the new user straight into the
 // trader view without a follow-up login round-trip. v0 is FIRM01-only,

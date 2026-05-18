@@ -1,5 +1,6 @@
 using B3.Trading.Api;
 using B3.Trading.Api.Auth;
+using B3.Trading.Api.Auth.Totp;
 using B3.Trading.Api.Lifecycle;
 using B3.Trading.Api.WebSockets;
 using B3.Trading.Application;
@@ -25,6 +26,7 @@ public static class TradingEndpointsExtensions
         app.MapHealth();
 
         app.MapAuth();
+        app.MapTotp();
         app.MapOrders();
         app.MapHistory();
         app.MapAlgo();

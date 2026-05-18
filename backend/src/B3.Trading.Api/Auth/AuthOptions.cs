@@ -67,4 +67,42 @@ public sealed class UserConfig
     public int Iterations { get; set; } = 600_000;
     public string Role { get; set; } = "user";
     public string Firm { get; set; } = "default";
+
+    /// <summary>
+    /// TOTP 2FA configuration (issue #303). Null when the user has not
+    /// enrolled. <see cref="UserTotpConfig.SharedSecret"/> is the
+    /// Data-Protection-encrypted base32 secret — never plaintext on
+    /// disk.
+    /// </summary>
+    public UserTotpConfig? Totp { get; set; }
+
+    /// <summary>
+    /// When true, the user MUST enroll a TOTP factor; login returns
+    /// <c>requires2faEnrollment=true</c> with a short-lived enrollment
+    /// token instead of a JWT. Defaults to false.
+    /// </summary>
+    public bool Require2FA { get; set; }
+}
+
+/// <summary>
+/// Per-user TOTP state (#303). Persisted as part of <see cref="UserConfig"/>.
+/// </summary>
+public sealed class UserTotpConfig
+{
+    /// <summary>
+    /// Base32 TOTP shared secret, encrypted at rest via ASP.NET Core
+    /// Data Protection (<see cref="Auth.Totp.ITotpSecretProtector"/>).
+    /// The wire format is the protector's opaque ciphertext; do NOT
+    /// assume it is base32 itself.
+    /// </summary>
+    public string SharedSecret { get; set; } = string.Empty;
+
+    /// <summary>When the user completed enrollment (verify step).</summary>
+    public DateTimeOffset? EnrolledAt { get; set; }
+
+    /// <summary>
+    /// SHA-256 hashes of unused recovery codes. Each entry is consumed
+    /// on use (removed from the list).
+    /// </summary>
+    public List<string> RecoveryCodes { get; set; } = new();
 }

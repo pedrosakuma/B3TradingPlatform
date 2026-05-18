@@ -1,4 +1,5 @@
 using B3.Trading.Api.Auth;
+using B3.Trading.Api.Auth.Totp;
 using B3.Trading.Application;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Extensions.Configuration;
@@ -30,7 +31,16 @@ public static class TradingAuthServiceCollectionExtensions
             configuration.GetSection(UserStoreOptions.SectionName));
         services.Configure<LoginLockoutOptions>(
             configuration.GetSection(LoginLockoutOptions.SectionName));
+        services.Configure<TotpOptions>(
+            configuration.GetSection(TotpOptions.SectionName));
+        services.Configure<TotpLockoutOptions>(
+            configuration.GetSection(TotpLockoutOptions.SectionName));
         services.AddSingleton<ILoginAttemptTracker, InMemoryLoginAttemptTracker>();
+        services.AddSingleton<ITotpAttemptTracker, InMemoryTotpAttemptTracker>();
+        services.AddSingleton<ITotpService, TotpService>();
+        services.AddSingleton<ITotpSecretProtector, TotpSecretProtector>();
+        services.AddSingleton<IPendingTotpEnrollmentStore, InMemoryPendingTotpEnrollmentStore>();
+        services.AddSingleton<ITotpChallengeStore, InMemoryTotpChallengeStore>();
         services.AddAuthRateLimiter();
 
         // Slice 3 of #97: when Trading:Auth:UserStore:Enabled is true (the
