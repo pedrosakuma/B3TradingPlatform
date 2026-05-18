@@ -721,6 +721,29 @@ public sealed class AlgoEngine : BackgroundService
         {
             rt.LiveChildClOrdId = child.ClOrdId;
             rt.ChildBookedCum[child.ClOrdId] = child.CumulativeQuantity;
+
+            // #300 retrofit. Discriminate operator-modify adoption vs
+            // engine-driven Pegged repeg adoption via the
+            // PeggedRepegBook pending entry: a pending row whose
+            // CancelledChildClOrdId matches `oldLive` means
+            // EvaluatePeggedRepegAsync issued this cancel-replace as
+            // part of a repeg cycle, so the adoption signal IS the
+            // cycle-resolved trigger (replacing the pre-#300
+            // Cancelled-on-OLD ack as the trigger). Approach (b) from
+            // the design note: cheap synchronous lookup, no schema
+            // change on OrderReplacementIntent or the WAL.
+            //
+            // The engine consumer is single-threaded so the Set
+            // inside EvaluatePeggedRepegAsync (executed earlier on
+            // the same task) is guaranteed visible here before any
+            // ChildExecutionObservedSignal for the replacement child
+            // can be processed.
+            var peggedRepegAdoption =
+                algo.Type == AlgoType.Pegged
+                && rt.RepegPending
+                && _peggedRepeg?.TryGet(algo.FirmId, algo.AlgoId) is { } pendingCycle
+                && pendingCycle.CancelledChildClOrdId == oldLive;
+
             var evicted = rt.RetireChildSlot(oldLive, out var firstRetiredEviction);
             if (evicted > 0)
             {
@@ -749,6 +772,45 @@ public sealed class AlgoEngine : BackgroundService
             // accounting block below. Any later Fill ER for the new
             // ClOrdID advances cum monotonically against this seeded
             // baseline.
+
+            // #300 retrofit. Pegged-repeg cycle resolution now happens
+            // HERE (on the Replaced-ER-driven adoption signal) instead
+            // of on the Cancelled-on-OLD ack the pre-#300 code waited
+            // for. Clear RepegPending so the next scheduler tick can
+            // evaluate a fresh drift, reset the dropped-adoption
+            // watchdog (the signal we were waiting for has now landed),
+            // and dispatch the audit-pair Resolved event so a future
+            // WAL replay drops the pending entry.
+            if (peggedRepegAdoption)
+            {
+                rt.RepegPending = false;
+                rt.PeggedReplacedHoldTicks = 0;
+                try
+                {
+                    var firmIdSnap = algo.FirmId;
+                    var algoIdSnap = algo.AlgoId;
+                    var oldIdSnap = oldLive;
+                    var book = _peggedRepeg;
+                    _dispatcher.Dispatch(
+                        new AlgoPeggedRepegResolvedEvent
+                        {
+                            AlgoId = algo.AlgoId,
+                            FirmId = algo.FirmId,
+                            CancelledChildClOrdId = oldLive,
+                            AtUtc = _clock.GetUtcNow(),
+                        },
+                        () => book?.Remove(firmIdSnap, algoIdSnap));
+                }
+                catch (WalBackpressureException)
+                {
+                    // Best-effort under WAL backpressure: leave the
+                    // book entry in place; Reconcile's orphan prune
+                    // (PrunePeggedRepegBookOrphans) and the parent-
+                    // terminal RemoveAll both converge state later.
+                    MetricsRegistry.WalBackpressure.Add(1,
+                        new KeyValuePair<string, object?>("call_site", "algo.pegged.repeg-resolved"));
+                }
+            }
         }
 
         // Book the cum-quantity delta. Child orders deliver fills via
@@ -877,54 +939,43 @@ public sealed class AlgoEngine : BackgroundService
                 else if (rt.RepegPending && algo.Type == AlgoType.Pegged
                          && rt.LastRepegCancelledChildId == child.ClOrdId)
                 {
-                    // Q3.3 (#283). Engine-initiated cancel for a repeg —
-                    // the cancel-ack is the signal to place the new
-                    // child at the fresh target. Clear the flag first
-                    // so a second cancel-ack (shouldn't happen but is
-                    // cheap to defend) doesn't loop into a double-place.
-                    //
-                    // Pass-1 review (#296) P1-A. Match strictly on the
-                    // cancelled child id so a Cancelled ER that arrives
-                    // for some OTHER live child (operator race,
-                    // venue-initiated cancel for a different slice) is
-                    // still routed through the VenueCancelled branch.
-                    rt.RepegPending = false;
-
-                    // Persist the resolution: clears the pending entry
-                    // in PeggedRepegBook (recovery convergence) +
-                    // serves as an audit pair to the Started event.
-                    // Best-effort: WAL backpressure here leaves the
-                    // book entry in place; the next Reconcile will
-                    // observe the old child terminal and drop it
-                    // defensively.
-                    try
-                    {
-                        var firmIdSnap = algo.FirmId;
-                        var algoIdSnap = algo.AlgoId;
-                        var cancelledIdSnap = child.ClOrdId;
-                        var book = _peggedRepeg;
-                        _dispatcher.Dispatch(
-                            new AlgoPeggedRepegResolvedEvent
-                            {
-                                AlgoId = algo.AlgoId,
-                                FirmId = algo.FirmId,
-                                CancelledChildClOrdId = child.ClOrdId,
-                                AtUtc = _clock.GetUtcNow(),
-                            },
-                            () => book?.Remove(firmIdSnap, algoIdSnap));
-                    }
-                    catch (WalBackpressureException)
-                    {
-                        MetricsRegistry.WalBackpressure.Add(1,
-                            new KeyValuePair<string, object?>("call_site", "algo.pegged.repeg-resolved"));
-                    }
-
-                    if (algo.RemainingQuantity <= 0)
-                    {
-                        await RecordTerminalAsync(algo, rt, AlgoStatus.Completed, AlgoTerminalReason.None).ConfigureAwait(false);
-                        return;
-                    }
-                    await SubmitNextSliceAsync(algo, rt, ct).ConfigureAwait(false);
+                    // #300 retrofit. Pre-#300 this branch consumed the
+                    // Cancelled-on-OLD ack as the "cycle resolved,
+                    // place fresh slice" trigger. Post-#300 the engine
+                    // dispatches CancelReplace (TryReplaceChildAsync)
+                    // instead of a bare cancel, so the venue's
+                    // response is a Replaced ER which adoption-block
+                    // (~line 714) drains. A Cancelled ER reaching
+                    // here while RepegPending is still true means
+                    // the venue rejected the modify and emitted a
+                    // bare cancel on the original (or the venue
+                    // hand-split cancel-replace into cancel+place
+                    // and the cancel landed first). Strict no-op:
+                    //   * Do NOT SubmitNextSliceAsync — the
+                    //     PendingReplacementRegistry intent is still
+                    //     in flight; if the Replaced ER eventually
+                    //     lands it will adopt the new child via the
+                    //     normal path; if not, the AlgoScheduler
+                    //     ambiguous-replace TTL sweep releases the
+                    //     held margin and the #329 watchdog clears
+                    //     the wedged slot on the next tick.
+                    //   * Do NOT dispatch Resolved — adoption will
+                    //     dispatch it; if adoption never fires the
+                    //     watchdog + Reconcile orphan prune converge
+                    //     state on the next restart.
+                    //   * Do NOT clear RepegPending — the throttle
+                    //     guard keeps the engine from racing another
+                    //     repeg against the still-live replace
+                    //     intent.
+                    // The bounded IsCancelledChild dedup branch below
+                    // catches this same condition for replay safety
+                    // (older WAL segments persisted with pre-#300
+                    // cancel-only semantics); we leave that branch in
+                    // place per the issue.
+                    _logger.LogDebug(
+                        "AlgoEngine pegged repeg: stray Cancelled-on-OLD ER for {Firm}/{AlgoId} child {Child} while replace is in flight; no-op (Replaced ER adoption drives resolution).",
+                        algo.FirmId, algo.AlgoId, child.ClOrdId);
+                    return;
                 }
                 else if (algo.Type == AlgoType.Pegged
                          && (_peggedRepeg?.IsCancelledChild(algo.FirmId, algo.AlgoId, child.ClOrdId) ?? false))
@@ -944,6 +995,16 @@ public sealed class AlgoEngine : BackgroundService
                     // repeg overwrites it a late Cancelled ER for an
                     // older cycle's child used to escape this guard
                     // and reach the VenueCancelled-suspension path.
+                    //
+                    // #300 retrofit. The ring now serves a dual
+                    // purpose: (1) defensive dedup of late Cancelled
+                    // ERs that may still arrive on the live cancel-
+                    // replace path (rare/spurious — venue shouldn't
+                    // emit Cancelled when the modify succeeded), AND
+                    // (2) replay safety for older WAL segments that
+                    // recorded a bare cancel (pre-#300 semantics)
+                    // whose Cancelled ER is being replayed against a
+                    // post-#300 engine. Both arms fall here.
                     return;
                 }
                 else if (IsTwapWindowExpired(algo))
@@ -1905,6 +1966,36 @@ public sealed class AlgoEngine : BackgroundService
         // Keep LastRepegCancelledChildId sticky for late-ER dedup; the
         // marker is cleared only on parent terminal.
 
+        // #300 retrofit. Pre-#300 the in-flight cycle was a bare
+        // cancel — nothing to clean up beyond the in-memory marker.
+        // Post-#300 the cycle is a cancel-replace whose intent +
+        // (possibly) held margin live in PendingReplacementRegistry.
+        // A Fill on the OLD child has already settled the cycle from
+        // the parent's POV, so the replace is now meaningless: if the
+        // venue eventually emits a Replaced ER the adoption block
+        // will pick up a residue-zero new child and orphan it.
+        // Consume the intent here so the registry + margin reserve
+        // are released; the late Replaced ER will then bypass
+        // PendingReplacementRegistry's intercept and the synthetic
+        // child is silently dropped.
+        if (wasPending && _replacements is not null)
+        {
+            if (_replacements.TryConsumeByOriginal(child.ClOrdId, out var intent, out var ambiguousHeld))
+            {
+                MetricsRegistry.AlgoPeggedRepegFailed.Add(1);
+                if (ambiguousHeld && _replaceMargin is not null && intent is not null)
+                {
+                    try { _replaceMargin.AbortReplace(intent.NewClOrdId); }
+                    catch (Exception abortEx)
+                    {
+                        _logger.LogWarning(abortEx,
+                            "AlgoEngine pegged repeg fill-race: AbortReplace failed for new ClOrdID {NewClOrdId}.",
+                            intent.NewClOrdId);
+                    }
+                }
+            }
+        }
+
         if (wasPending && _peggedRepeg?.TryGet(algo.FirmId, algo.AlgoId) is not null)
         {
             // Window 3: Started already in WAL + book. Emit the
@@ -2059,73 +2150,109 @@ public sealed class AlgoEngine : BackgroundService
             return;
         }
 
-        // Pass-3 review (#296) P1 — approach B. Set the in-memory
-        // RepegPending + sticky LastRepegCancelledChildId BEFORE the
-        // cancel wire-call so the cancel-ack ER (which can arrive on a
-        // different consumer-loop iteration while CancelAsync is still
-        // awaiting) is classified as expected by OnChildErAsync and
-        // does NOT route through the VenueCancelled-suspension path.
-        // The WAL Started marker + PeggedRepegBook.Set are deferred
-        // until AFTER CancelAsync returns successfully (below): if the
-        // cancel never reached the venue there is nothing to recover
-        // on restart, so persisting the "intent" prematurely would
-        // leave a poison Started without a matching Resolved that
-        // would stall the algo on replay. Pegged repeg is idempotent
-        // — losing the pre-cancel intent record is harmless because
-        // the next tick re-derives it from current drift.
+        // #300 retrofit. Pre-#300 set RepegPending + sticky cancel-id
+        // BEFORE the wire-call so a racing cancel-ack ER on a
+        // different consumer-loop iteration was classified as
+        // expected. With cancel-replace (TryReplaceChildAsync below)
+        // there is no Cancelled-on-OLD ack to race — the OLD child's
+        // terminal transition is the Replaced ER, handled by the
+        // adoption block at OnChildErAsync (~line 714). We still set
+        // these markers before dispatch so:
+        //   * RepegPending throttles a second EvaluatePeggedRepegAsync
+        //     re-entry on the same algo while the replace is in
+        //     flight (single-consumer reactor: an in-flight modify
+        //     can span the consumer awaiting the gateway).
+        //   * LastRepegCancelledChildId + MarkCancelledChild populate
+        //     the dedup ring so a defensive Cancelled-on-OLD ER
+        //     (rare/spurious — venue shouldn't emit) and any
+        //     pre-#300 replay-time Cancelled ER both no-op through
+        //     the IsCancelledChild branch in OnChildErAsync.
+        // PeggedRepegBook.Set + the WAL Started marker still defer
+        // until AFTER the wire-call succeeds (mirrors the pre-#300
+        // approach-B ordering, now anchored on
+        // TryReplaceChildAsync's return value): an ambiguous-send
+        // failure must NOT leave a Started without a Resolved.
         rt.RepegPending = true;
         rt.LastRepegCancelledChildId = liveChildClOrdId;
-        // Pass-5 review (#296) P1. Add to the cancelled-child history
-        // ring BEFORE the wire-call so the late-ER dedup at
-        // OnChildErAsync line ~666/~788 covers ERs that race the
-        // cancel (the ring is in-memory only here; the WAL Started
-        // event below carries the same id so EventReplayer rebuilds
-        // the ring on restart). Persisting via dispatch-action would
-        // be wrong: this id must be remembered even when CancelAsync
-        // fails (no Started gets persisted), because a venue may
-        // still ack the cancel from a previous in-flight attempt.
         _peggedRepeg?.MarkCancelledChild(algo.FirmId, algo.AlgoId, liveChildClOrdId);
         rt.PeggedLastEvalUtc = now;
         var oldChildPrice = currentPrice;
         var refForAudit = _pegBookTop?.TryGet(algo.Symbol)?.RefPrice(pgp.Ref, algo.Side) ?? 0m;
-        var newClOrdId = _clOrdIds.Generate(child.Owner);
 
+        // #300 retrofit. Replace bare CancelAsync with the Q3.5
+        // cancel-replace plumbing introduced in #299 so venue book
+        // priority is preserved across the repeg. Reason="AlgoInternal"
+        // is already in ModifyAlgoRequest.AllowedReasons and bounds
+        // the metric label cardinality. TryReplaceChildAsync handles:
+        //   * pre-trade risk + margin Prepare gates;
+        //   * new-ClOrdID allocation + PendingReplacementRegistry
+        //     intent registration via OrderReplaceRequestedEvent
+        //     dispatch (durable);
+        //   * AlgoChildModifiedEvent audit envelope;
+        //   * AlgoChildModifiesTotal metric (algoType=pegged,
+        //     reason=AlgoInternal);
+        //   * ambiguous-send retention of the intent (and held
+        //     margin) so a late Replaced ER still resolves.
+        // On false-return we don't know whether the venue accepted —
+        // we MUST NOT persist Started (else dangling without
+        // Resolved). The next scheduler tick re-evaluates drift; if
+        // it was an ambiguous send the #329 watchdog +
+        // AlgoScheduler.SweepAmbiguousReplaceIntents bound recovery.
+        bool replaced;
         try
         {
-            _ownership.RegisterCancelLink(newClOrdId, child.ClOrdId);
-            await _gateway.CancelAsync(child, newClOrdId, ct).ConfigureAwait(false);
+            replaced = await TryReplaceChildAsync(
+                algo, rt, child, child.Quantity, target.Value,
+                reason: "AlgoInternal", ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            // Pass-3 review (#296) P1 — approach B. Cancel never made
-            // it to the venue. Because we no longer persist
-            // AlgoPeggedRepegStartedEvent BEFORE the wire-call, there
-            // is nothing in the WAL or the PeggedRepegBook to roll
-            // back. Clear in-memory state so the next tick re-evaluates
-            // drift from a clean slate and can retry the repeg.
+            // TryReplaceChildAsync swallows gateway/WAL exceptions
+            // internally; any escape here is a programmer error
+            // surface (e.g. a synchronous throw from the risk
+            // pipeline). Clear in-memory state so the next tick can
+            // retry from a clean slate, mirroring the pre-#300
+            // cancel-failure rollback.
             rt.RepegPending = false;
             rt.LastRepegCancelledChildId = null;
             MetricsRegistry.AlgoPeggedRepegFailed.Add(1);
             _logger.LogWarning(ex,
-                "AlgoEngine pegged repeg cancel failed for algo {Firm}/{AlgoId} child {Child}; cleared marker, will retry next tick.",
+                "AlgoEngine pegged repeg cancel-replace failed for algo {Firm}/{AlgoId} child {Child}; cleared marker, will retry next tick.",
                 algo.FirmId, algo.AlgoId, liveChildClOrdId);
             return;
         }
 
-        // Cancel reached the venue. Persist the Started marker so a
-        // crash before the cancel-ack ER lands still gives recovery
-        // enough trail to classify the post-restart ER as expected.
-        //
-        // Pass-4 review (#296) P1 — Windows 1+2. If a terminal Fill ER
-        // for `liveChildClOrdId` raced the cancel and was processed by
-        // OnChildErAsync during the CancelAsync await (or before this
-        // method was entered, e.g. an SDK that pumps ERs synchronously
-        // inside the cancel call), ResolveRepegOnFillAsync has already
-        // cleared rt.RepegPending and the qty was credited to the
-        // parent. Persisting a Started here would leave an orphan WAL
-        // marker that the next Reconcile / replay would have to self-
-        // heal. Bail before the dispatch — the post-fill state is
-        // already coherent.
+        if (!replaced)
+        {
+            // Replace was rejected (risk/margin) or its send was
+            // ambiguous. In the rejection case the intent was rolled
+            // back inside TryReplaceChildAsync — clear in-memory
+            // markers so the next tick retries. In the ambiguous-
+            // send case TryReplaceChildAsync deliberately RETAINS
+            // the intent + margin reservation; we still clear our
+            // in-memory markers because we are NOT going to dispatch
+            // a Started (no audit pair to balance) — if the venue
+            // had accepted, the Replaced ER will adopt through the
+            // normal operator-modify path (no Resolved emitted; OK
+            // because no Started either). The held intent leaks are
+            // bounded by AlgoScheduler.SweepAmbiguousReplaceIntents.
+            // The throttle is intentionally NOT advanced: the next
+            // tick should be allowed to try again if drift persists.
+            rt.RepegPending = false;
+            rt.LastRepegCancelledChildId = null;
+            MetricsRegistry.AlgoPeggedRepegFailed.Add(1);
+            return;
+        }
+
+        // #300 retrofit. Same Window 1/2 guard as pre-#300: if a
+        // racing terminal Fill ER for `liveChildClOrdId` was
+        // processed by OnChildErAsync between TryReplaceChildAsync
+        // returning and here (only reachable if the gateway awaited
+        // a Replaced ER synchronously inside CancelReplaceAsync,
+        // unusual but defensive), ResolveRepegOnFillAsync has
+        // already cleared rt.RepegPending and we MUST NOT persist
+        // Started here — adoption won't fire (parent terminal) and
+        // the audit pair would dangle.
         if (!rt.RepegPending)
         {
             return;
@@ -2145,7 +2272,15 @@ public sealed class AlgoEngine : BackgroundService
                     AlgoId = algo.AlgoId,
                     FirmId = algo.FirmId,
                     CancelledChildClOrdId = liveChildClOrdId,
-                    NewClOrdId = newClOrdId,
+                    // #300 retrofit. NewClOrdId is no longer
+                    // surfaced from TryReplaceChildAsync's caller
+                    // because the replacement is observability-only
+                    // here (the durable record is the
+                    // OrderReplaceRequestedEvent the helper already
+                    // dispatched). Carry 0 as a sentinel — the
+                    // replayer keys only on CancelledChildClOrdId
+                    // and the field is audit-only.
+                    NewClOrdId = 0UL,
                     TargetPrice = target.Value,
                     AtUtc = now,
                 },
@@ -2155,13 +2290,13 @@ public sealed class AlgoEngine : BackgroundService
         {
             MetricsRegistry.WalBackpressure.Add(1,
                 new KeyValuePair<string, object?>("call_site", "algo.pegged.repeg-started"));
-            // WAL backpressure after a successful cancel: the dispatch
-            // apply (book.Set) never ran. Mirror it manually so the
-            // current process still routes the cancel-ack ER through
-            // the expected path via rt.LastRepegCancelledChildId +
-            // the book lookup. Recovery for this specific cycle is
-            // best-effort; Reconcile's orphan-prune (P2-C) /
-            // self-heal (P1-C) covers any drift on the next restart.
+            // WAL backpressure after a successful replace: the
+            // dispatch apply (book.Set) never ran. Mirror it
+            // manually so the in-process adoption block can still
+            // discriminate Pegged-repeg vs operator-modify (the
+            // book lookup is the discriminator under approach (b)).
+            // Recovery for this specific cycle is best-effort;
+            // Reconcile's orphan-prune covers any drift on restart.
             _peggedRepeg?.Set(algo.FirmId, algo.AlgoId, liveChildClOrdId, target.Value, now);
         }
 

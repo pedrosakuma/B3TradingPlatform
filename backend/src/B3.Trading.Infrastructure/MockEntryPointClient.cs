@@ -77,6 +77,11 @@ public sealed class MockEntryPointClient : IEntryPointClient
             var ex = injector(request);
             if (ex is not null) return Task.FromException(ex);
         }
+        var delay = ReplaceDelayInjector;
+        if (delay is not null)
+        {
+            return delay(request);
+        }
         return Task.CompletedTask;
     }
 
@@ -91,6 +96,21 @@ public sealed class MockEntryPointClient : IEntryPointClient
     /// venue — but the SDK reports failure to the caller).
     /// </summary>
     public Func<OrderCancelReplaceRequest, Exception?>? ReplaceFailureInjector { get; set; }
+
+    /// <summary>
+    /// #300 retrofit. Mirror of <see cref="CancelDelayInjector"/> for
+    /// the cancel-replace path: when non-null, the gateway awaits the
+    /// supplied <see cref="Task"/> AFTER enqueueing the request and
+    /// AFTER the failure-injector check, BEFORE returning to the
+    /// caller. Used by the Pegged fill-races-replace regression test
+    /// to deterministically gate the engine's
+    /// <c>CancelReplaceAsync</c> await: the test injects a Fill ER on
+    /// the OLD child while the replace is held, then releases the
+    /// gate and asserts the post-condition (no orphan replacement
+    /// child, audit pair balanced, replacement intent + margin
+    /// reservation released). Left null in production composition.
+    /// </summary>
+    public Func<OrderCancelReplaceRequest, Task>? ReplaceDelayInjector { get; set; }
 
     /// <summary>
     /// Test/host hook to push an ER through the exchange-side event.
