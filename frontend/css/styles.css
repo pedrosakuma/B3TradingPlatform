@@ -773,3 +773,20 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
   font-size: .78rem; white-space: pre;
   max-height: 60vh;
 }
+
+/* ─── Q4.14 (#314). Compliance view ───────────────────────────── */
+.compliance-view { padding: 1rem; display: flex; flex-direction: column; gap: 1rem; }
+.compliance-view .admin-subbar { margin-bottom: .5rem; }
+.compliance-feed-controls,
+.compliance-cvm-controls {
+  display: flex; gap: .5rem; align-items: center; margin-bottom: .6rem; flex-wrap: wrap;
+}
+.compliance-audit-form {
+  display: flex; gap: .5rem; flex-wrap: wrap; align-items: flex-end; margin-bottom: .6rem;
+}
+.compliance-audit-form label { display: flex; flex-direction: column; font-size: .75rem; color: var(--muted); }
+.compliance-audit-form input,
+.compliance-audit-form select {
+  font-family: inherit; padding: .25rem .4rem; min-width: 9rem;
+}
+.compliance-feed table tbody tr td { font-size: .8rem; }

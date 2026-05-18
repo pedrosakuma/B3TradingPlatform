@@ -216,7 +216,9 @@ public sealed class AuditLogKeeper
         string? typePattern,
         string? outcome,
         int limit,
-        long? cursorSeq)
+        long? cursorSeq,
+        string? firmFilter = null,
+        bool restrictUserToFirm = false)
     {
         if (limit <= 0) limit = 100;
         if (limit > 500) limit = 500;
@@ -236,6 +238,24 @@ public sealed class AuditLogKeeper
                 var e = _ring[idx]!;
                 if (cursorSeq is long c && e.Seq >= c) continue;
                 if (e.TimestampUtc < since || e.TimestampUtc > until) continue;
+                // Q4.14 (#314). Optional firm-scope filter. When non-null,
+                // an entry survives if it touches the firm — either the
+                // actor was in that firm OR the action targeted that firm
+                // (a well-known Details key carries the target firm id).
+                // Used to restrict compliance principals to their own firm
+                // at /admin/audit; never trusted from the query string.
+                //
+                // Pass-1 review (#327) P1.1: previously matched only on
+                // ActorFirm, which (a) leaked cross-firm targets when an
+                // admin in the compliance user's firm operated on another
+                // firm, and (b) hid the audit trail of cross-firm admin
+                // actions against the compliance user's own firm. Matching
+                // on target-firm details closes both gaps. The endpoint
+                // applies an additional redaction pass over the surviving
+                // entries before serializing.
+                if (!string.IsNullOrEmpty(firmFilter)
+                    && !FirmTouchesEntry(e, firmFilter))
+                    continue;
                 if (!string.IsNullOrEmpty(outcome) && !string.Equals(e.Outcome, outcome, StringComparison.OrdinalIgnoreCase))
                     continue;
                 if (typePattern is not null)
@@ -251,8 +271,20 @@ public sealed class AuditLogKeeper
                 }
                 if (!string.IsNullOrEmpty(user))
                 {
-                    var actorMatch = string.Equals(e.ActorUsername, user, StringComparison.OrdinalIgnoreCase)
-                                   || string.Equals(e.ActorUserId, user, StringComparison.OrdinalIgnoreCase);
+                    // Pass-3 (#327): when restrictUserToFirm is set
+                    // (compliance scope), only probe actor identity on
+                    // entries actually authored within the caller's
+                    // firm. Otherwise a compliance caller could guess
+                    // foreign usernames via ?user= and learn whether
+                    // they performed any action touching this firm,
+                    // even though the surfaced entry would later have
+                    // ActorUsername/ActorUserId redacted.
+                    var actorEligible = !restrictUserToFirm
+                        || (firmFilter is not null
+                            && string.Equals(e.ActorFirm, firmFilter, StringComparison.OrdinalIgnoreCase));
+                    var actorMatch = actorEligible
+                                   && (string.Equals(e.ActorUsername, user, StringComparison.OrdinalIgnoreCase)
+                                       || string.Equals(e.ActorUserId, user, StringComparison.OrdinalIgnoreCase));
                     var targetMatch = e.Details is not null
                         && e.Details.TryGetValue("target_user", out var tu)
                         && string.Equals(tu, user, StringComparison.OrdinalIgnoreCase);
@@ -266,6 +298,35 @@ public sealed class AuditLogKeeper
 
         long? next = matches.Count == limit ? matches[^1].Seq : (long?)null;
         return new AuditQueryResult(matches, next);
+    }
+
+    /// <summary>
+    /// Q4.14 (#314). Well-known Details keys that carry a firm
+    /// identifier — used by the compliance scope to admit entries
+    /// where the actor was in another firm but the action targeted
+    /// the compliance caller's firm (and, dually, by the endpoint
+    /// to redact other-firm names from surviving entries).
+    ///
+    /// <para>Pass-2 review (#327): every new audit emission site that
+    /// stores a firm id in Details MUST use one of these keys (rather
+    /// than inventing a new one) so the compliance audit projection
+    /// stays leak-tight. <c>firmIdViewed</c> was added for the
+    /// admin-overridden drop-copy WebSocket open/close pair.</para>
+    /// </summary>
+    public static readonly string[] FirmDetailKeys = new[] { "firm", "firmId", "firm_id", "target_firm", "firmIdViewed" };
+
+    private static bool FirmTouchesEntry(AuditEntry e, string firm)
+    {
+        if (string.Equals(e.ActorFirm, firm, StringComparison.OrdinalIgnoreCase))
+            return true;
+        if (e.Details is null) return false;
+        foreach (var key in FirmDetailKeys)
+        {
+            if (e.Details.TryGetValue(key, out var v)
+                && string.Equals(v, firm, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
     }
 }
 

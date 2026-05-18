@@ -96,6 +96,7 @@
         <span id="view-toggle" class="view-toggle" role="tablist" aria-label="View" hidden>
           <button type="button" data-view="trader" class="active" role="tab" aria-selected="true">Trader</button>
           <button type="button" data-view="admin" role="tab" aria-selected="false">Admin</button>
+          <button type="button" data-view="compliance" role="tab" aria-selected="false" hidden>Compliance</button>
         </span>
         <label class="symbol-select" for="selected-symbol">
           Symbol
@@ -837,6 +838,109 @@
       </div>
     </div>
   </div>
+
+  <!-- COMPLIANCE VIEW (Q4.14 #314) -----------------------------------
+       Four-panel read-only console for the `compliance` role (also
+       reachable by `admin`). Sibling top-level <section>, hidden
+       unless currentView === "compliance". The drop-copy feed
+       attaches to /ws/dropcopy on view-enter and closes on leave;
+       all other panels are pure REST. -->
+  <section id="compliance-view" class="view compliance-view" hidden>
+    <header class="admin-subbar">
+      <h2>Compliance console</h2>
+      <div class="admin-actions"></div>
+    </header>
+
+    <section class="panel admin-panel compliance-feed">
+      <h3>Drop-copy live feed</h3>
+      <div class="compliance-feed-controls">
+        <button id="compliance-feed-pause" type="button">Pause</button>
+        <button id="compliance-feed-clear" type="button">Clear</button>
+        <span id="compliance-feed-status" class="muted-line">0/200 entries</span>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th><th>Type</th><th>User</th>
+              <th>Symbol</th><th>Side</th>
+              <th class="num">Qty</th><th class="num">Px</th>
+              <th>ClOrdId</th>
+            </tr>
+          </thead>
+          <tbody id="compliance-feed-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel admin-panel">
+      <h3>Audit-log search</h3>
+      <form id="compliance-audit-form" class="compliance-audit-form">
+        <label>
+          <span>Since</span>
+          <input id="compliance-audit-since" type="datetime-local" />
+        </label>
+        <label>
+          <span>Until</span>
+          <input id="compliance-audit-until" type="datetime-local" />
+        </label>
+        <label>
+          <span>User</span>
+          <input id="compliance-audit-user" type="text" maxlength="64" autocomplete="off" />
+        </label>
+        <label>
+          <span>Type (or prefix.*)</span>
+          <input id="compliance-audit-type" type="text" maxlength="64" autocomplete="off" />
+        </label>
+        <label>
+          <span>Outcome</span>
+          <select id="compliance-audit-outcome">
+            <option value="any">any</option>
+            <option value="success">success</option>
+            <option value="failure">failure</option>
+            <option value="denied">denied</option>
+          </select>
+        </label>
+        <button type="submit">Search</button>
+      </form>
+      <p id="compliance-audit-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Timestamp (UTC)</th><th>Event</th><th>Outcome</th>
+              <th>Actor</th><th>Firm</th><th>Reason</th>
+            </tr>
+          </thead>
+          <tbody id="compliance-audit-body"></tbody>
+        </table>
+      </div>
+      <button id="compliance-audit-next" type="button" class="link-button" hidden>Next page</button>
+    </section>
+
+    <section class="panel admin-panel">
+      <h3>Best-execution evidence (book touch)</h3>
+      <form id="compliance-touch-form" class="admin-inline-form">
+        <input id="compliance-touch-id" type="text" placeholder="fill id (ClOrdId:cumQty)" maxlength="128" autocomplete="off" required />
+        <button type="submit">Lookup</button>
+      </form>
+      <p id="compliance-touch-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
+      <pre id="compliance-touch-output" class="admin-eod-output" hidden></pre>
+    </section>
+
+    <section class="panel admin-panel">
+      <h3>CVM report download</h3>
+      <div class="compliance-cvm-controls">
+        <label>
+          <span>Trade date</span>
+          <input id="compliance-cvm-date" type="date" />
+        </label>
+        <button id="compliance-cvm-35" type="button">Download model 35</button>
+        <button id="compliance-cvm-505" type="button">Download model 505</button>
+      </div>
+      <p id="compliance-cvm-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
+    </section>
+  </section>
 
   <script type="module" src="js/app.js"></script>
 </body>

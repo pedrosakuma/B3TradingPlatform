@@ -224,8 +224,14 @@ public static class CvmReportEndpoints
             ["date"] = date.ToString("yyyy-MM-dd"),
             ["rowCount"] = rowCount.ToString(CultureInfo.InvariantCulture),
         };
-        if (actorUserId is not null)
-            details["actorUserId"] = actorUserId;
+        // Q4.14 (#314) pass-3: do NOT duplicate actor id into Details.
+        // The top-level ActorUserId/ActorUsername fields are the
+        // canonical actor identity and are redacted by
+        // AdminAuditEndpoints.ProjectForCompliance when surfacing a
+        // cross-firm action to the target firm. A second copy under
+        // Details["actorUserId"] would bypass that redaction because
+        // ProjectForCompliance only strips foreign-firm values from
+        // FirmDetailKeys, not actor identity keys.
 
         audit.LogOrFail(new AuditLogEvent
         {

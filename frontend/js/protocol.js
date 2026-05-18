@@ -376,3 +376,84 @@ export async function deleteUserBotCredential(backend, token, id) {
   if (resp.status === 204 || resp.status === 404) return null;
   return jsonOrThrow(resp);
 }
+
+// ── Q4.14 (#314). Compliance role surfaces ─────────────────────────
+// Audit-log query, best-execution touch lookup, CVM report download,
+// and the drop-copy WebSocket URL helper. All four are read-only;
+// none accept POST/PUT/DELETE on the compliance side.
+
+// GET /admin/audit — admin or compliance. Compliance is firm-scoped
+// server-side (the caller's JWT firm forces a filter; ?firmId= is
+// ignored for compliance). Filters are all optional; omitted entries
+// are not sent so the server applies its defaults (last 24h, limit
+// 100). Returns `{ entries, nextCursor }`.
+export async function searchAuditLog(backend, token, opts = {}) {
+  const url = new URL(`${backend}/admin/audit`);
+  if (opts.since)    url.searchParams.set("since",   opts.since);
+  if (opts.until)    url.searchParams.set("until",   opts.until);
+  if (opts.user)     url.searchParams.set("user",    opts.user);
+  if (opts.type)     url.searchParams.set("type",    opts.type);
+  if (opts.outcome)  url.searchParams.set("outcome", opts.outcome);
+  if (opts.limit)    url.searchParams.set("limit",   String(opts.limit));
+  if (opts.cursor)   url.searchParams.set("cursor",  opts.cursor);
+  const resp = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return jsonOrThrow(resp);
+}
+
+// GET /fills/{id}/touch — best-execution book-touch snapshot for a
+// specific fill, keyed by the canonical id `{ClOrdId}:{cumQty}`.
+// Returns `{ BestBid, BestAsk, MidPrice, LastTradePrice,
+// CapturedAtUtc, Stale }`. 404 when the fill is unknown OR belongs
+// to a different firm (no existence leak).
+export async function getFillTouch(backend, token, id) {
+  if (!id) throw new Error("fill id is required");
+  const resp = await fetch(
+    `${backend}/fills/${encodeURIComponent(id)}/touch`,
+    { headers: { Authorization: `Bearer ${token}` } });
+  return jsonOrThrow(resp);
+}
+
+// GET /reports/cvm/{model}/{yyyy-MM-dd} — streams an XML body.
+// Returns `{ blob, filename }`. The caller wires it through
+// URL.createObjectURL + a synthetic anchor click (kept here so unit
+// tests can stub fetch without touching the browser download
+// plumbing — same shape as downloadStatementCsv). Throws with
+// `err.status` on 4xx/5xx so the caller can branch on 404
+// (no rows) / 429 (rate-limited) / 503 (WAL backpressure).
+export async function downloadCvmReport(backend, token, model, dayKey) {
+  if (model !== 35 && model !== 505 && model !== "35" && model !== "505")
+    throw new Error("model must be 35 or 505");
+  if (!dayKey) throw new Error("dayKey is required");
+  const url = `${backend}/reports/cvm/${model}/${encodeURIComponent(dayKey)}`;
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!resp.ok) {
+    let body = null;
+    try { body = await resp.text(); } catch { /* ignore */ }
+    const err = new Error(`HTTP ${resp.status}`);
+    err.status = resp.status;
+    err.body = body;
+    throw err;
+  }
+  const blob = await resp.blob();
+  const compact = String(dayKey).replace(/-/g, "");
+  const filename = parseContentDispositionFilename(resp.headers.get("Content-Disposition"))
+    || `cvm_${model}_${compact}.xml`;
+  return { blob, filename };
+}
+
+// Build the WebSocket URL for the drop-copy feed. Browsers cannot
+// set Authorization on a WS handshake; the JWT travels as
+// ?access_token= (per the host's JwtBearerEvents convention for
+// /ws/*). Operators must redact this query parameter from access
+// logs. Pure builder so unit tests can verify the resulting URL.
+export function buildDropCopyWebSocketUrl(backend, token) {
+  if (!token) throw new Error("token is required for drop-copy websocket");
+  const u = new URL("/ws/dropcopy", backend);
+  u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
+  u.searchParams.set("access_token", token);
+  return u.toString();
+}

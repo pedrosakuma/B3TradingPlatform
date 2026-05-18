@@ -67,6 +67,8 @@ export function showLogin() {
   if (cred) cred.hidden = true;
   const hist = $("history-view");
   if (hist) hist.hidden = true;
+  const compliance = $("compliance-view");
+  if (compliance) compliance.hidden = true;
   // Default to the login card; a user that previously toggled to the
   // signup card and was bumped back to login (e.g. logout, expiry)
   // shouldn't land staring at the signup form.
@@ -85,12 +87,22 @@ export function showTrader() {
   if (cred) cred.hidden = true;
   const hist = $("history-view");
   if (hist) hist.hidden = true;
+  const compliance = $("compliance-view");
+  if (compliance) compliance.hidden = true;
 }
 
 function setViewToggleVisible(visible, current) {
   const wrap = $("view-toggle");
   if (!wrap) return;
   wrap.hidden = !visible;
+  // Q4.14 (#314). The Compliance tab is gated independently — show
+  // it for admin (who sees every tab) and hide it otherwise. The
+  // wider toggle row is itself driven by the caller (admin-only
+  // today, since compliance lands directly on the compliance view
+  // with no sibling tabs to switch to).
+  const role = getState().user?.role;
+  const complianceTab = wrap.querySelector('button[data-view="compliance"]');
+  if (complianceTab) complianceTab.hidden = !(role === "admin");
   for (const btn of wrap.querySelectorAll("button[data-view]")) {
     btn.classList.toggle("active", btn.dataset.view === current);
     btn.setAttribute("aria-selected", btn.dataset.view === current ? "true" : "false");
@@ -1200,22 +1212,29 @@ function applyCurrentView(view) {
   const admin = $("admin-view");
   const credentials = $("bot-credentials-view");
   const history = $("history-view");
+  const compliance = $("compliance-view");
   if (!trader || !admin) return;
   const showTraderView = view === "trader";
   const showAdminView = view === "admin";
   const showCredentialsView = view === "bot-credentials";
   const showHistoryView = view === "history";
+  const showComplianceView = view === "compliance";
   trader.hidden = !showTraderView;
   admin.hidden = !showAdminView;
   if (credentials) credentials.hidden = !showCredentialsView;
   if (history)     history.hidden     = !showHistoryView;
+  if (compliance)  compliance.hidden  = !showComplianceView;
   // The trader/admin pill toggle stays hidden when the credentials /
   // history views are up — they're self-contained sub-pages reached
-  // via the header link, not siblings of trader/admin.
+  // via the header link, not siblings of trader/admin. For compliance
+  // the toggle stays visible (admin can hop between admin / trader /
+  // compliance via the tabs); a pure-compliance principal has no
+  // sibling tabs so the toggle hides itself via the visible flag.
   if (showCredentialsView || showHistoryView) {
     setViewToggleVisible(false, view);
   } else {
-    setViewToggleVisible(getState().user?.role === "admin", view);
+    const role = getState().user?.role;
+    setViewToggleVisible(role === "admin", view);
   }
 }
 
