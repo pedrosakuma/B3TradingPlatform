@@ -138,7 +138,8 @@ public sealed class OrderCancelService
             return OrderCancelResult.GatewayFailed(cancelClOrdId, ex);
         }
 
-        MetricsRegistry.OrdersCancelRequested.Add(1);
+        MetricsRegistry.OrdersCancelRequested.Add(1,
+            new KeyValuePair<string, object?>("firmId", order.FirmId));
         return OrderCancelResult.Accepted(cancelClOrdId);
     }
 }

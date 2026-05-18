@@ -108,8 +108,82 @@ public sealed class ExecutionReportProcessor
     /// preserved so existing tests don't need rewiring.
     /// </para>
     /// </summary>
-    public void Apply(ulong clOrdId, ExecKind kind, long leaves, long cumQty, long lastQty, decimal lastPx, string? rejectReason, ulong origClOrdId = 0, Persistence.ExecutionFanOut? fanOut = null, bool isReplay = false, DateTimeOffset? eventTimestampUtc = null)
+    public void Apply(ulong clOrdId, ExecKind kind, long leaves, long cumQty, long lastQty, decimal lastPx, string? rejectReason, ulong origClOrdId = 0, Persistence.ExecutionFanOut? fanOut = null, bool isReplay = false, DateTimeOffset? eventTimestampUtc = null, string? envelopeFirmId = null)
     {
+        // PR #317 P1. Cross-firm guard hoisted ABOVE the replace
+        // intercept block so a misrouted ER cannot consume the pending
+        // replacement intent (Rejected / Replaced / cancel-as-replace
+        // Canceled all run TryConsume before any order lookup, and the
+        // post-intercept check below at the main path would never fire
+        // for the replace lifecycle). Two authoritative sources of the
+        // expected FirmId, in priority order:
+        //
+        //   1. A pending replacement intent keyed by this ER's ClOrdID
+        //      (only for replace-shaped kinds). The intent was stamped
+        //      with the originating firm at modify-endpoint time.
+        //   2. The order in the book, resolved via the same orig/link
+        //      logic the main path uses below. NewOrderSingle stamps
+        //      Order.FirmId at construction time.
+        //
+        // Legacy WAL events (envelopeFirmId == null, pre-#317) bypass
+        // the check — historical segments hydrate identically. A
+        // populated envelope FirmId that disagrees with either source
+        // results in: log + counter + return without consuming intent
+        // or mutating state. On the replay path a mismatch escalates
+        // to log.error since it implies WAL corruption or a developer
+        // mistake (live wire ERs always go through a per-firm gateway).
+        if (envelopeFirmId is not null)
+        {
+            string? expectedFirmId = null;
+            if (_replacements is not null
+                && kind is ExecKind.Rejected or ExecKind.Replaced or ExecKind.Canceled
+                && _replacements.TryGet(clOrdId, out var pendingIntent)
+                && pendingIntent is not null)
+            {
+                expectedFirmId = pendingIntent.FirmId;
+            }
+            else
+            {
+                // Mirror the main-path resolution (origClOrdId fallback
+                // via the cancel-link map for cancel/replace acks that
+                // dropped OrigClOrdID). When the order is not in the
+                // book, expectedFirmId stays null and the main path
+                // below handles the unknown-ClOrdID drop with its own
+                // log + metric.
+                var earlyResolvedOrig = origClOrdId;
+                if ((kind is ExecKind.Canceled or ExecKind.Replaced) && earlyResolvedOrig == 0
+                    && _ownership.TryResolveOrig(clOrdId, out var earlyLinked))
+                {
+                    earlyResolvedOrig = earlyLinked;
+                }
+                var earlyLookupId = (kind is ExecKind.Canceled or ExecKind.Replaced) && earlyResolvedOrig != 0
+                    ? earlyResolvedOrig
+                    : clOrdId;
+                if (_orders.TryGet(earlyLookupId, out var earlyOrder) && earlyOrder is not null)
+                    expectedFirmId = earlyOrder.FirmId;
+            }
+
+            if (expectedFirmId is not null
+                && !string.Equals(envelopeFirmId, expectedFirmId, StringComparison.Ordinal))
+            {
+                MetricsRegistry.ExecutionReportFirmMismatch.Add(1,
+                    new KeyValuePair<string, object?>("exec_type", kind.ToString()));
+                if (isReplay)
+                {
+                    _logger.LogError(
+                        "ER firm mismatch on REPLAY for {ClOrdId} (orig={Orig}): envelope firm={EnvelopeFirm}, expected firm={ExpectedFirm}; suspected WAL corruption — refusing to mutate.",
+                        clOrdId, origClOrdId, envelopeFirmId, expectedFirmId);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "ER firm mismatch for {ClOrdId} (orig={Orig}): envelope firm={EnvelopeFirm}, expected firm={ExpectedFirm}; rejecting without state mutation.",
+                        clOrdId, origClOrdId, envelopeFirmId, expectedFirmId);
+                }
+                return;
+            }
+        }
+
         // Slice 2 of #122: replace lifecycle early intercepts. Both
         // branches are gated on the registry having an intent recorded
         // for this ClOrdID — outside of that, the original switch
@@ -195,6 +269,12 @@ public sealed class ExecutionReportProcessor
             _logger.LogError("ER for known owner {Owner} but missing order {ClOrdId} (orig={Orig}); dropping.", owner, clOrdId, origClOrdId);
             return;
         }
+
+        // PR #317 P1. Cross-firm guard runs at the top of Apply now
+        // (see hoisted block above the replace intercepts). The post-
+        // intercept path here intentionally has no duplicate check —
+        // the hoisted guard already resolved the same expected FirmId
+        // (intent or order) using the same orig/link logic as below.
 
         switch (kind)
         {
@@ -540,12 +620,14 @@ public sealed class ExecutionReportProcessor
                                         if (subTag is { } saInner)
                                             subPnl?.Add(firmTag, owner.Value, saInner, order.Symbol, dayKey, realized);
                                     });
-                                    MetricsRegistry.PnlRealizedAppended.Add(1);
+                                    MetricsRegistry.PnlRealizedAppended.Add(1,
+                                        new KeyValuePair<string, object?>("firmId", firmTag));
                                 }
                                 catch (Persistence.WalBackpressureException)
                                 {
                                     MetricsRegistry.WalBackpressure.Add(1,
-                                        new KeyValuePair<string, object?>("call_site", "pnl.dispatch"));
+                                        new KeyValuePair<string, object?>("call_site", "pnl.dispatch"),
+                                        new KeyValuePair<string, object?>("firmId", firmTag));
                                     _logger.LogWarning(
                                         "Dropping RealizedPnlEvent for {ClOrdId} on WAL backpressure; applying realized pnl directly to keeper.",
                                         lookupId);

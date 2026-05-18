@@ -69,6 +69,16 @@ public static class MetricsRegistry
     public static readonly Counter<long> ExecutionReportsDroppedKnownOwnerMissingOrder =
         Meter.CreateCounter<long>("trading.execution_reports.dropped_known_owner_missing_order");
 
+    // PR #317 P1. An ER arrived (live wire) carrying a FirmId that does
+    // not match the resolved order's FirmId — usually a routing bug or
+    // a misconfigured per-firm gateway delivering to the wrong sink.
+    // Rejected without mutating any state. Tagged by exec_type so a
+    // burst on a single ExecKind is alertable (a fill mismatch is far
+    // more serious than a cancel-ack one). Legacy WAL replay paths
+    // (envelope FirmId == null) bypass the check and do NOT increment.
+    public static readonly Counter<long> ExecutionReportFirmMismatch =
+        Meter.CreateCounter<long>("trading.er.firm_mismatch_total");
+
     // Issue #247: CommitReplace landed on the reservation ledger but
     // neither the original nor the transient (Prepare-side) entry was
     // present, so the venue-confirmed remaining notional could not be

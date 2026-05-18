@@ -235,7 +235,8 @@ public sealed class OrderModifyService
         {
             MetricsRegistry.OrdersRejectedByRisk.Add(1,
                 new KeyValuePair<string, object?>("reason", decision.Reason ?? "risk_rejected"),
-                new KeyValuePair<string, object?>("path", "modify"));
+                new KeyValuePair<string, object?>("path", "modify"),
+                new KeyValuePair<string, object?>("firmId", orig.FirmId));
             return OrderModifyResult.RiskRejected(decision.Reason ?? "risk_rejected");
         }
 
@@ -252,7 +253,8 @@ public sealed class OrderModifyService
         {
             MetricsRegistry.OrdersRejectedByRisk.Add(1,
                 new KeyValuePair<string, object?>("reason", marginDecision.Reason ?? "margin_rejected"),
-                new KeyValuePair<string, object?>("path", "modify"));
+                new KeyValuePair<string, object?>("path", "modify"),
+                new KeyValuePair<string, object?>("firmId", orig.FirmId));
             return OrderModifyResult.RiskRejected(marginDecision.Reason ?? "margin_rejected");
         }
 
@@ -306,7 +308,8 @@ public sealed class OrderModifyService
             // nor the ownership link was populated.
             _replaceMargin.AbortReplace(newClOrdId);
             MetricsRegistry.WalBackpressure.Add(1,
-                new KeyValuePair<string, object?>("call_site", "orders.modify"));
+                new KeyValuePair<string, object?>("call_site", "orders.modify"),
+                new KeyValuePair<string, object?>("firmId", orig.FirmId));
             return OrderModifyResult.WalBackpressure(ex.Message);
         }
 
@@ -319,7 +322,8 @@ public sealed class OrderModifyService
         catch (Exception ex)
         {
             MetricsRegistry.OrdersGatewayFailed.Add(1,
-                new KeyValuePair<string, object?>("path", "modify"));
+                new KeyValuePair<string, object?>("path", "modify"),
+                new KeyValuePair<string, object?>("firmId", orig.FirmId));
             _logger.LogError(ex,
                 "Gateway CancelReplaceAsync failed for orig {OrigClOrdId} new {NewClOrdId}; rolling back.",
                 req.OriginalClOrdId, newClOrdId);
@@ -343,7 +347,8 @@ public sealed class OrderModifyService
 
         MetricsRegistry.OrdersModifyRequested.Add(1,
             new KeyValuePair<string, object?>("symbol", orig.Symbol),
-            new KeyValuePair<string, object?>("side", orig.Side.ToString()));
+            new KeyValuePair<string, object?>("side", orig.Side.ToString()),
+            new KeyValuePair<string, object?>("firmId", orig.FirmId));
 
         return OrderModifyResult.Accepted(newClOrdId);
     }

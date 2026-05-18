@@ -48,12 +48,38 @@ services:
       Trading__Exchange__Firms__0__AccessKey: ""
       Trading__Exchange__Firms__0__SenderLocation: ""
       Trading__Exchange__Firms__0__EnteringTrader: ""
+      # Q4.2 (#302). Same clear-out for the FIRM02 / FIRM03 slots
+      # introduced in the base compose. Empty FirmId makes
+      # ExchangeOptionsValidator drop the slot before Mode=Unavailable
+      # is evaluated; otherwise a half-populated entry would trip the
+      # "Firms[] must be empty in Unavailable" gate.
+      Trading__Exchange__Firms__1__FirmId: ""
+      Trading__Exchange__Firms__1__Endpoint: ""
+      Trading__Exchange__Firms__1__SessionId: ""
+      Trading__Exchange__Firms__1__SessionVerId: ""
+      Trading__Exchange__Firms__1__EnteringFirm: ""
+      Trading__Exchange__Firms__1__AccessKey: ""
+      Trading__Exchange__Firms__1__SenderLocation: ""
+      Trading__Exchange__Firms__1__EnteringTrader: ""
+      Trading__Exchange__Firms__2__FirmId: ""
+      Trading__Exchange__Firms__2__Endpoint: ""
+      Trading__Exchange__Firms__2__SessionId: ""
+      Trading__Exchange__Firms__2__SessionVerId: ""
+      Trading__Exchange__Firms__2__EnteringFirm: ""
+      Trading__Exchange__Firms__2__AccessKey: ""
+      Trading__Exchange__Firms__2__SenderLocation: ""
+      Trading__Exchange__Firms__2__EnteringTrader: ""
       # Revert alice + bob to "default" firm. With no FirmGateway
       # registered (Mode=Unavailable), the JWT firm claim is informational
       # and order submissions short-circuit at the EntryPointMode gate
       # before any gateway routing.
       Trading__Auth__Users__0__Firm: default
       Trading__Auth__Users__5__Firm: default
+      # Q4.2 (#302). bob-firm02 / charlie-firm03 follow the same revert
+      # so the Unavailable overlay does not leave them stranded under a
+      # firm that has no gateway registered.
+      Trading__Auth__Users__6__Firm: default
+      Trading__Auth__Users__7__Firm: default
       # PR #316 P2: when the user firm reverts to "default" the position
       # seeds must follow, otherwise the FIRM01-tagged seeds from the
       # base compose file are invisible to the now-default users and

@@ -390,7 +390,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 ExecutionReportEnvelope? envelope;
                 try
                 {
-                    envelope = Translate(ev);
+                    envelope = Translate(ev, _firmId);
                 }
                 catch (Exception ex)
                 {
@@ -433,8 +433,20 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// envelope. Returns <c>null</c> when the event has no in-domain
     /// representation (e.g. <c>BusinessReject</c>, which lacks a ClOrdID and
     /// is handled via metrics + log only).
+    ///
+    /// <para>
+    /// PR #317 P1. <paramref name="firmId"/> is stamped onto the resulting
+    /// <see cref="ExecutionReportEnvelope.FirmId"/> so the downstream
+    /// processor can detect (and reject) an ER that arrived on the wrong
+    /// firm gateway. The gateway calls the firm-aware overload from its
+    /// event loop; the parameterless overload (kept for pure translation
+    /// tests) yields a null <c>FirmId</c> and skips the cross-firm check,
+    /// matching pre-#317 behaviour.
+    /// </para>
     /// </summary>
-    internal static ExecutionReportEnvelope? Translate(UpModels.EntryPointEvent ev) => ev switch
+    internal static ExecutionReportEnvelope? Translate(UpModels.EntryPointEvent ev) => Translate(ev, firmId: null);
+
+    internal static ExecutionReportEnvelope? Translate(UpModels.EntryPointEvent ev, string? firmId) => ev switch
     {
         UpModels.OrderAccepted a => new ExecutionReportEnvelope(
             ClOrdId: a.ClOrdID.Value,
@@ -443,7 +455,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             CumulativeQuantity: (long)(a.CumQty ?? 0UL),
             LastQuantity: 0,
             LastPrice: 0m,
-            RejectReason: null),
+            RejectReason: null,
+            FirmId: firmId),
 
         UpModels.OrderTrade t => new ExecutionReportEnvelope(
             ClOrdId: t.ClOrdID.Value,
@@ -452,7 +465,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             CumulativeQuantity: (long)(t.CumQty ?? 0UL),
             LastQuantity: (long)t.LastQty,
             LastPrice: t.LastPx,
-            RejectReason: null),
+            RejectReason: null,
+            FirmId: firmId),
 
         UpModels.OrderCancelled c => new ExecutionReportEnvelope(
             ClOrdId: c.ClOrdID.Value,
@@ -462,7 +476,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             LastQuantity: 0,
             LastPrice: 0m,
             RejectReason: c.RestatementReason?.ToString(),
-            OrigClOrdId: c.OrigClOrdID?.Value ?? 0UL),
+            OrigClOrdId: c.OrigClOrdID?.Value ?? 0UL,
+            FirmId: firmId),
 
         UpModels.OrderModified m => new ExecutionReportEnvelope(
             ClOrdId: m.ClOrdID.Value,
@@ -478,7 +493,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             // as "missing" and falls back to OrderOwnershipMap's
             // new→orig link populated by RegisterReplaceLink (slice 1
             // of #122).
-            OrigClOrdId: m.OrigClOrdID.Value),
+            OrigClOrdId: m.OrigClOrdID.Value,
+            FirmId: firmId),
 
         UpModels.OrderRejected r => new ExecutionReportEnvelope(
             ClOrdId: r.ClOrdID.Value,
@@ -487,7 +503,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             CumulativeQuantity: 0,
             LastQuantity: 0,
             LastPrice: 0m,
-            RejectReason: r.Reason ?? $"reject_code={r.RejectCode}"),
+            RejectReason: r.Reason ?? $"reject_code={r.RejectCode}",
+            FirmId: firmId),
 
         UpModels.BusinessReject br => null, // surfaced as metric only — no ClOrdID to anchor an envelope to
         _ => null,

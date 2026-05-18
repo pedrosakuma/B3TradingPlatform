@@ -5,6 +5,33 @@ namespace B3.Trading.Application.Persistence;
 /// snapshot file. All collections are materialised lists (snapshot is a
 /// point-in-time photograph) rather than lazy enumerables, so the captured
 /// state is independent of subsequent mutations.
+///
+/// <para>
+/// Q4.2 (#302). <b>Multi-firm snapshot shape</b>: the platform takes a
+/// SINGLE global snapshot per host with <c>FirmId</c> carried as a
+/// dimension on every owner-keyed entry (orders, positions, P&amp;L
+/// basis, ownership, sub-accounts, algos…), rather than emitting one
+/// file per firm. Rationale:
+/// <list type="bullet">
+///   <item>One <c>dispatcher.WithSnapshotLock</c> capture gives a
+///         consistent cut across every firm at the same Seq —
+///         splitting per firm would either need N independent locks
+///         (consistency hole) or N reads of the same global lock
+///         (no win).</item>
+///   <item>WAL is a single global stream by design (#137 / #260).
+///         Snapshot+tail recovery only works if snapshot and WAL share
+///         the same Seq boundary; one snapshot per firm would have to
+///         tail-replay the SAME WAL N times.</item>
+///   <item>Sub-account (#316) already chose this shape; multi-firm
+///         (#302) follows the established convention so the operator
+///         doesn't carry two mental models.</item>
+/// </list>
+/// Firm-scoped reads (REST, WS, recovery filters) project the slice
+/// they need from the global structure — see e.g.
+/// <c>PositionKeeper.ForEndClientAndFirm</c>,
+/// <c>WorkingOrderBook.ForEndClientAndFirm</c>,
+/// <c>PnlProjection.Build(owner, firmId, …)</c>.
+/// </para>
 /// </summary>
 public sealed class PlatformSnapshot
 {

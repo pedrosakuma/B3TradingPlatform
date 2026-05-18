@@ -216,7 +216,8 @@ public sealed class OrderSubmissionService
         {
             MetricsRegistry.WalBackpressure.Add(1,
                 new KeyValuePair<string, object?>("call_site",
-                    req.Source == OrderSubmissionSource.Algo ? "algo.submit" : "orders.submit"));
+                    req.Source == OrderSubmissionSource.Algo ? "algo.submit" : "orders.submit"),
+                new KeyValuePair<string, object?>("firmId", req.FirmId));
             return OrderSubmissionResult.WalBackpressure(ex.Message);
         }
 
@@ -224,7 +225,8 @@ public sealed class OrderSubmissionService
             new KeyValuePair<string, object?>("symbol", req.Symbol),
             new KeyValuePair<string, object?>("side", req.Side.ToString()),
             new KeyValuePair<string, object?>("source",
-                req.Source == OrderSubmissionSource.Algo ? "algo" : "manual"));
+                req.Source == OrderSubmissionSource.Algo ? "algo" : "manual"),
+            new KeyValuePair<string, object?>("firmId", req.FirmId));
 
         var riskCtx = new RiskContext(
             req.Owner, req.FirmId, req.Symbol, req.Side, req.Type, req.Quantity, req.Price,
@@ -243,7 +245,8 @@ public sealed class OrderSubmissionService
         if (!decision.Approved)
         {
             MetricsRegistry.OrdersRejectedByRisk.Add(1,
-                new KeyValuePair<string, object?>("reason", decision.Reason ?? "risk_rejected"));
+                new KeyValuePair<string, object?>("reason", decision.Reason ?? "risk_rejected"),
+                new KeyValuePair<string, object?>("firmId", req.FirmId));
             PublishSyntheticRejection(order, decision.Reason ?? "risk_rejected");
             return OrderSubmissionResult.Rejected(clOrdId, decision.Reason ?? "risk_rejected");
         }
@@ -256,7 +259,8 @@ public sealed class OrderSubmissionService
         }
         catch (Exception ex)
         {
-            MetricsRegistry.OrdersGatewayFailed.Add(1);
+            MetricsRegistry.OrdersGatewayFailed.Add(1,
+                new KeyValuePair<string, object?>("firmId", req.FirmId));
             _logger.LogError(ex, "Gateway submit failed for {ClOrdId}; synthesizing rejection.", clOrdId);
             if (marginReserved) _margin.ReleaseReservation(clOrdId);
             PublishSyntheticRejection(order, "gateway_unavailable");

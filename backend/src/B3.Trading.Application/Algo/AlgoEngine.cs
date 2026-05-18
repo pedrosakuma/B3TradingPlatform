@@ -1270,7 +1270,8 @@ public sealed class AlgoEngine : BackgroundService
             // is NOT incremented because we cannot tell yet whether the
             // modify will eventually succeed.
             MetricsRegistry.OrdersGatewayFailed.Add(1,
-                new KeyValuePair<string, object?>("path", "algo.modify"));
+                new KeyValuePair<string, object?>("path", "algo.modify"),
+                new KeyValuePair<string, object?>("firmId", algo.FirmId));
             MetricsRegistry.AlgoModifySendAmbiguous.Add(1,
                 new KeyValuePair<string, object?>("algoType", algoTypeTag));
             _logger.LogWarning(ex,
