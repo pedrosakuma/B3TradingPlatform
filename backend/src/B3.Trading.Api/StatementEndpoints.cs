@@ -46,9 +46,10 @@ public static class StatementEndpoints
             if (!TryResolveDay(dayKey, out var day, out var error))
                 return error!;
             var owner = ResolveOwner(ctx, registry);
+            var firm = ctx.User.FindFirstValue(Auth.JwtIssuer.FirmClaim) ?? "default";
             Application.Observability.MetricsRegistry.StatementEndpointRequests.Add(
                 1, new KeyValuePair<string, object?>("format", "json"));
-            var dto = await BuildAsync(owner, day, store, positions, dispatcher, ct);
+            var dto = await BuildAsync(owner, firm, day, store, positions, dispatcher, ct);
             EmitDayTradeMetric(dto);
             return Results.Ok(dto);
         });
@@ -65,9 +66,10 @@ public static class StatementEndpoints
             if (!TryResolveDay(dayKey, out var day, out var error))
                 return error!;
             var owner = ResolveOwner(ctx, registry);
+            var firm = ctx.User.FindFirstValue(Auth.JwtIssuer.FirmClaim) ?? "default";
             Application.Observability.MetricsRegistry.StatementEndpointRequests.Add(
                 1, new KeyValuePair<string, object?>("format", "csv"));
-            var dto = await BuildAsync(owner, day, store, positions, dispatcher, ct);
+            var dto = await BuildAsync(owner, firm, day, store, positions, dispatcher, ct);
             EmitDayTradeMetric(dto);
             var bytes = RenderCsv(dto);
             return Results.File(
@@ -80,7 +82,7 @@ public static class StatementEndpoints
     }
 
     private static async Task<DailyStatementDto> BuildAsync(
-        EndClientId owner, DateOnly day, IEventStore store, PositionKeeper positions,
+        EndClientId owner, string firmId, DateOnly day, IEventStore store, PositionKeeper positions,
         EventDispatcher dispatcher, CancellationToken ct)
     {
         var today = DateOnly.FromDateTime(DateTimeOffset.UtcNow.UtcDateTime);
@@ -108,7 +110,7 @@ public static class StatementEndpoints
             capturedSeq = store.CurrentSeq;
             if (!isToday) return;
             var rows = new List<PositionRowDto>();
-            foreach (var p in positions.ForEndClient(owner))
+            foreach (var p in positions.ForEndClientAndFirm(firmId, owner))
             {
                 if (p.NetQuantity == 0) continue;
                 rows.Add(new PositionRowDto(p.Symbol, p.NetQuantity, p.AverageEntryPrice));

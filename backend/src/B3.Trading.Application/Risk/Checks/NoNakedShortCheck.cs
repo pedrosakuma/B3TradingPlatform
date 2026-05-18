@@ -61,8 +61,8 @@ public sealed class NoNakedShortCheck : IRiskCheck
             opts, ctx.Owner.Value, ctx.FirmId, ctx.Symbol, l => l.AllowShortSell);
         if (allow == true) return RiskDecision.Approve;
 
-        var currentLong = _positions.GetOrCreate(ctx.Owner, ctx.Symbol).NetQuantity;
-        var openSellLeaves = _orders.SumOpenSellLeavesForSymbol(ctx.Owner, ctx.Symbol);
+        var currentLong = _positions.GetOrCreate(ctx.FirmId, ctx.Owner, ctx.Symbol).NetQuantity;
+        var openSellLeaves = _orders.SumOpenSellLeavesForSymbolAndFirm(ctx.FirmId, ctx.Owner, ctx.Symbol);
 
         // Modify (cancel-replace) projection — slice 3 of #122. The
         // original order is still in the book until the venue's

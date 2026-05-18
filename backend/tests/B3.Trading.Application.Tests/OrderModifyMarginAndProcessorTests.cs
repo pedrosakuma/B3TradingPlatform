@@ -778,7 +778,7 @@ public class OrderModifyMarginAndProcessorTests
         Assert.Equal(0, newOrder.LeavesQuantity);
         Assert.Equal(100, newOrder.CumulativeQuantity);
         // Position booked.
-        var pos = positions.GetOrCreate(bob, "PETR4");
+        var pos = positions.GetOrCreate("FIRM", bob, "PETR4");
         Assert.Equal(100, pos.NetQuantity);
         Assert.Equal(32.50m, pos.AverageEntryPrice);
         // Cash debited (Buy: available drops by notional).

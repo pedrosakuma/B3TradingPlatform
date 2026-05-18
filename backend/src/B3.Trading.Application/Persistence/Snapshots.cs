@@ -430,7 +430,12 @@ public sealed record PositionSnapshot(
     string EndClientId,
     string Symbol,
     long NetQuantity,
-    decimal AverageEntryPrice);
+    decimal AverageEntryPrice,
+    // PR #316 P1. Firm dimension on owner-keyed state. Defaults to
+    // "default" so older snapshots and test-only call sites that
+    // construct PositionSnapshot positionally still round-trip; the
+    // firm-aware code paths overwrite this with the real firm.
+    string FirmId = "DEFAULT");
 
 public sealed record CashBalanceSnapshot(
     string EndClientId,
@@ -444,7 +449,10 @@ public sealed record PnlAvgCostSnapshot(
     string EndClientId,
     string Symbol,
     long NetQuantity,
-    decimal AvgPrice);
+    decimal AvgPrice,
+    // PR #316 P1. Firm dimension on owner-keyed state. Defaults to
+    // "default" so older snapshots hydrate as a single legacy bucket.
+    string FirmId = "DEFAULT");
 
 /// <summary>
 /// Pass-3 review (#278) P1. Persisted "unknown basis" qty row —
@@ -453,7 +461,10 @@ public sealed record PnlAvgCostSnapshot(
 public sealed record PnlUnknownBasisSnapshot(
     string EndClientId,
     string Symbol,
-    long NetQuantity);
+    long NetQuantity,
+    // PR #316 P1. Firm dimension on owner-keyed state. Defaults to
+    // "default" so older snapshots hydrate as a single legacy bucket.
+    string FirmId = "DEFAULT");
 
 /// <summary>
 /// Pass-1 review (#295) P1#1. One row of the per-POV scheduling-progress

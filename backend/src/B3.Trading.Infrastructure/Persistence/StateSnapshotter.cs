@@ -278,7 +278,7 @@ public sealed class StateSnapshotter
         for (var i = 0; i < raw.Positions.Length; i++)
         {
             var p = raw.Positions[i];
-            positions.Add(new PositionSnapshot(p.EndClientId, p.Symbol, p.NetQuantity, p.AverageEntryPrice));
+            positions.Add(new PositionSnapshot(p.EndClientId, p.Symbol, p.NetQuantity, p.AverageEntryPrice, p.FirmId));
         }
 
         var ownership = new List<OwnershipMappingSnapshot>(raw.Ownership.Length);
@@ -320,19 +320,19 @@ public sealed class StateSnapshotter
         for (var i = 0; i < raw.PnlRealizedByEndclientSymbolDay.Length; i++)
         {
             var p = raw.PnlRealizedByEndclientSymbolDay[i];
-            pnlRealized[PnlKeeper.FormatRealizedKey(p.EndClientId, p.Symbol, p.Day)] = p.Realized;
+            pnlRealized[PnlKeeper.FormatRealizedKey(p.FirmId, p.EndClientId, p.Symbol, p.Day)] = p.Realized;
         }
         var pnlAvgCost = new List<PnlAvgCostSnapshot>(raw.PnlAvgCost.Length);
         for (var i = 0; i < raw.PnlAvgCost.Length; i++)
         {
             var a = raw.PnlAvgCost[i];
-            pnlAvgCost.Add(new PnlAvgCostSnapshot(a.EndClientId, a.Symbol, a.NetQuantity, a.AvgPrice));
+            pnlAvgCost.Add(new PnlAvgCostSnapshot(a.EndClientId, a.Symbol, a.NetQuantity, a.AvgPrice, a.FirmId));
         }
         var pnlUnknownBasis = new List<PnlUnknownBasisSnapshot>(raw.PnlUnknownBasis.Length);
         for (var i = 0; i < raw.PnlUnknownBasis.Length; i++)
         {
             var u = raw.PnlUnknownBasis[i];
-            pnlUnknownBasis.Add(new PnlUnknownBasisSnapshot(u.EndClientId, u.Symbol, u.NetQuantity));
+            pnlUnknownBasis.Add(new PnlUnknownBasisSnapshot(u.EndClientId, u.Symbol, u.NetQuantity, u.FirmId));
         }
         var pnlSeen = new List<string>(raw.PnlSeenExecutionIds.Length);
         for (var i = 0; i < raw.PnlSeenExecutionIds.Length; i++)

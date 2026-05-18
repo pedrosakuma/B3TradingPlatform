@@ -207,7 +207,8 @@ public sealed class OrderStalenessService
                 LastQuantity: 0,
                 LastPrice: 0m,
                 RejectReason: reason,
-                TimestampUtc: atUtc));
+                TimestampUtc: atUtc,
+                FirmId: order.FirmId));
         }
         catch
         {

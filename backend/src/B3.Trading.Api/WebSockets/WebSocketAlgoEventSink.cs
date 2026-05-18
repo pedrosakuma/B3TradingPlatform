@@ -26,6 +26,6 @@ public sealed class WebSocketAlgoEventSink : IAlgoEventSink
             return;
         if (!_algos.TryGet(firmId, algoId, out var algo) || algo is null)
             return;
-        _subs.Publish(owner, Channels.AlgoMe, algo.ToDto());
+        _subs.Publish(owner, firmId, Channels.AlgoMe, algo.ToDto());
     }
 }

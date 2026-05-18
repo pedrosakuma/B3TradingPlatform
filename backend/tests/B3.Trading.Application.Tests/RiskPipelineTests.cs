@@ -492,7 +492,7 @@ public class RiskPipelineTests
     public void PositionLimit_RejectsWhenProjectedExceeds()
     {
         var positions = new PositionKeeper();
-        positions.ApplyFill(new EndClientId("alice"), "PETR4", OrderSide.Buy, 400, 30m);
+        positions.ApplyFill("default", new EndClientId("alice"), "PETR4", OrderSide.Buy, 400, 30m);
         var opts = Wrap(new RiskOptions { Default = new RiskLimits { PositionLimit = 500 } });
         var check = new PositionLimitCheck(opts, positions);
         Assert.True(check.Check(Ctx(qty: 100, side: OrderSide.Buy)).Approved);   // 400+100=500

@@ -322,7 +322,8 @@ public sealed class OrderModifyService
                 LeavesQuantity: 0, CumulativeQuantity: 0,
                 LastQuantity: 0, LastPrice: 0m,
                 RejectReason: "gateway_unavailable",
-                TimestampUtc: DateTimeOffset.UtcNow));
+                TimestampUtc: DateTimeOffset.UtcNow,
+                FirmId: orig.FirmId));
             return OrderModifyResult.GatewayFailed(newClOrdId, ex);
         }
 

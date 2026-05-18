@@ -156,6 +156,53 @@ public sealed class WorkingOrderBook
     }
 
     /// <summary>
+    /// PR #316 P1. Firm-scoped variant of <see cref="ForEndClient"/>.
+    /// Filters the owner's orders to those tagged with
+    /// <paramref name="firmId"/> so the same JWT <c>sub</c> registered
+    /// in multiple firms sees only the orders that belong to the firm
+    /// it is currently authenticated under. Used by
+    /// <c>GET /orders</c> + <c>orders.me</c> snapshot.
+    /// </summary>
+    public IReadOnlyCollection<Order> ForEndClientAndFirm(string firmId, EndClientId owner)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        var list = new List<Order>();
+        foreach (var kv in _orders)
+        {
+            if (kv.Value.Owner != owner) continue;
+            if (!string.Equals(kv.Value.FirmId, firmId, StringComparison.Ordinal)) continue;
+            list.Add(kv.Value);
+        }
+        return list;
+    }
+
+    /// <summary>
+    /// PR #316 P1. Firm-scoped variant of
+    /// <see cref="SumOpenSellLeavesForSymbol"/>. Used by the naked-short
+    /// gate so that open Sell leaves of the same JWT <c>sub</c> in a
+    /// different firm don't restrict sellable inventory in the current
+    /// firm bucket.
+    /// </summary>
+    public long SumOpenSellLeavesForSymbolAndFirm(string firmId, EndClientId owner, string symbol)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(symbol);
+        if (!_byOwner.TryGetValue(owner.Value, out var set)) return 0;
+        long total = 0;
+        foreach (var clOrdId in set.Keys)
+        {
+            if (!_orders.TryGetValue(clOrdId, out var order)) continue;
+            if (order.Side != OrderSide.Sell) continue;
+            if (!string.Equals(order.Symbol, symbol, StringComparison.Ordinal)) continue;
+            if (!string.Equals(order.FirmId, firmId, StringComparison.Ordinal)) continue;
+            if (IsTerminal(order.Status)) continue;
+            if (order.IsStale) continue;
+            total += order.LeavesQuantity;
+        }
+        return total;
+    }
+
+    /// <summary>
     /// Snapshots the orders associated with <paramref name="firmId"/>. By default
     /// only non-terminal orders are returned (PendingNew / Working / PartiallyFilled),
     /// which matches the FIXP "outstanding orders" semantics used to reconcile

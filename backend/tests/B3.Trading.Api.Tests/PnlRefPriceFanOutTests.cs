@@ -63,7 +63,7 @@ public class PnlRefPriceFanOutTests
             NullLogger<MarketDataReferencePrice>.Instance);
 
         var subs = new SubscriptionManager(new WorkingOrderBook(), positions, new AlgoBook(), pnl, refPrice);
-        var client = new SubscribedClient(owner, "TEST");
+        var client = new SubscribedClient(owner, "DEFAULT");
         subs.Add(client);
         subs.SubscribeWithSnapshot(client, Channels.PnlMe);
         // Drain the snapshot frame so we only observe the delta.

@@ -18,7 +18,10 @@ public static class OrdersEndpoints
         group.MapGet("/", (HttpContext ctx, WorkingOrderBook book, EndClientRegistry registry) =>
         {
             var owner = ResolveOwner(ctx, registry);
-            var orders = book.ForEndClient(owner).Select(o => o.ToDto());
+            var firm = ResolveFirm(ctx);
+            // PR #316 P1. Scope by firm so the same JWT sub registered
+            // in two firms doesn't see the other firm's orders.
+            var orders = book.ForEndClientAndFirm(firm, owner).Select(o => o.ToDto());
             return Results.Ok(orders);
         });
 

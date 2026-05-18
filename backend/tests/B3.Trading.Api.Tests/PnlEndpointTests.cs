@@ -144,4 +144,70 @@ public class PnlEndpointTests : IClassFixture<TestAppFactory>
         public StubAllPrices(decimal px) => _px = px;
         public bool TryGet(string symbol, out decimal price) { price = _px; return true; }
     }
+
+    [Fact]
+    public async Task GetPnlToday_ScopedByFirm_DoesNotLeakAcrossFirms()
+    {
+        // PR #316 P1. /pnl/today must scope realized + unrealized by
+        // firm so a JWT sub registered under two firms never sees the
+        // other firm's pnl bucket.
+        await using var factory = TestAppFactory.WithOverrides(new Dictionary<string, string?>());
+
+        var registry = factory.Services.GetRequiredService<EndClientRegistry>();
+        var positions = factory.Services.GetRequiredService<PositionKeeper>();
+        var pnl = factory.Services.GetRequiredService<PnlKeeper>();
+        var owner = registry.Register(TestAppFactory.TestUser);
+        var day = DateOnly.FromDateTime(DateTimeOffset.UtcNow.UtcDateTime);
+
+        positions.ApplyFill("FIRM01", owner, "PETR4", OrderSide.Buy, 100, 30m);
+        pnl.ApplyFillToAvgCost("FIRM01", owner.Value, "PETR4", OrderSide.Buy, 100, 30m);
+        pnl.Apply(new Application.Persistence.RealizedPnlEvent
+        {
+            ClOrdId = 10,
+            ExecutionId = "10:1",
+            EndClientId = owner.Value,
+            FirmId = "FIRM01",
+            Symbol = "PETR4",
+            DayKey = day,
+            DeltaRealized = 111m,
+            RunningTotal = 111m,
+            TimestampUtc = DateTimeOffset.UtcNow,
+        });
+
+        positions.ApplyFill("FIRM02", owner, "VALE3", OrderSide.Buy, 50, 60m);
+        pnl.ApplyFillToAvgCost("FIRM02", owner.Value, "VALE3", OrderSide.Buy, 50, 60m);
+        pnl.Apply(new Application.Persistence.RealizedPnlEvent
+        {
+            ClOrdId = 20,
+            ExecutionId = "20:1",
+            EndClientId = owner.Value,
+            FirmId = "FIRM02",
+            Symbol = "VALE3",
+            DayKey = day,
+            DeltaRealized = 222m,
+            RunningTotal = 222m,
+            TimestampUtc = DateTimeOffset.UtcNow,
+        });
+
+        var issuer = factory.Services.GetRequiredService<Auth.JwtIssuer>();
+        var http = factory.CreateClient();
+
+        var (t1, _) = issuer.Issue(TestAppFactory.TestUser, "user", "FIRM01");
+        http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", t1);
+        var body1 = await http.GetFromJsonAsync<PnlTodayDto>("/pnl/today");
+        Assert.NotNull(body1);
+        Assert.Equal(111m, body1!.TotalRealized);
+        Assert.Single(body1.Realized, r => r.Symbol == "PETR4");
+        Assert.DoesNotContain(body1.Realized, r => r.Symbol == "VALE3");
+        Assert.DoesNotContain(body1.Unrealized, r => r.Symbol == "VALE3");
+
+        var (t2, _) = issuer.Issue(TestAppFactory.TestUser, "user", "FIRM02");
+        http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", t2);
+        var body2 = await http.GetFromJsonAsync<PnlTodayDto>("/pnl/today");
+        Assert.NotNull(body2);
+        Assert.Equal(222m, body2!.TotalRealized);
+        Assert.Single(body2.Realized, r => r.Symbol == "VALE3");
+        Assert.DoesNotContain(body2.Realized, r => r.Symbol == "PETR4");
+        Assert.DoesNotContain(body2.Unrealized, r => r.Symbol == "PETR4");
+    }
 }

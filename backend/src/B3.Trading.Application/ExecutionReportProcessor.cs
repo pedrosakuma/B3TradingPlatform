@@ -254,10 +254,10 @@ public sealed class ExecutionReportProcessor
                     decimal preFillAvg = 0m;
                     if (_pnlKeeper is not null)
                     {
-                        var avg = _pnlKeeper.GetAvgCost(owner.Value, order.Symbol);
+                        var avg = _pnlKeeper.GetAvgCost(order.FirmId, owner.Value, order.Symbol);
                         if (avg is not null) { preFillQty = avg.NetQuantity; preFillAvg = avg.AvgPrice; }
                     }
-                    _positions.ApplyFill(owner, order.Symbol, order.Side, delta, lastPx);
+                    _positions.ApplyFill(order.FirmId, owner, order.Symbol, order.Side, delta, lastPx);
                     // Q4.1 (#301). Sub-account-tagged fills are also
                     // booked into the parallel sub-account keeper so a
                     // ?subAccount=X filter on GET /positions can read
@@ -407,14 +407,14 @@ public sealed class ExecutionReportProcessor
                             if (wouldRealize != 0m)
                             {
                                 _pnlKeeper.RegisterPendingReplaySynth(
-                                    executionIdPnl, owner.Value, order.Symbol, order.Side,
+                                    order.FirmId, executionIdPnl, owner.Value, order.Symbol, order.Side,
                                     delta, lastPx, nowUtcPnl, preFillQty, preFillAvg);
                             }
                             // Still advance the basis tracker on replay
                             // — the durable event Apply path uses
                             // RunningTotal directly, so basis is purely
                             // in-memory state used for live computation.
-                            _pnlKeeper.ApplyFillToAvgCost(owner.Value, order.Symbol, order.Side, delta, lastPx);
+                            _pnlKeeper.ApplyFillToAvgCost(order.FirmId, owner.Value, order.Symbol, order.Side, delta, lastPx);
                         }
                         else
                         {
@@ -445,10 +445,10 @@ public sealed class ExecutionReportProcessor
                             // serialisation is sufficient because all
                             // live ER processing flows through it.
                             var dayKey = DateOnly.FromDateTime(nowUtcPnl.UtcDateTime);
-                            var realized = _pnlKeeper.ApplyFillToAvgCost(owner.Value, order.Symbol, order.Side, delta, lastPx);
+                            var realized = _pnlKeeper.ApplyFillToAvgCost(order.FirmId, owner.Value, order.Symbol, order.Side, delta, lastPx);
                             if (realized != 0m)
                             {
-                                var prevTotal = _pnlKeeper.GetDayRealized(owner.Value, order.Symbol, dayKey);
+                                var prevTotal = _pnlKeeper.GetDayRealized(order.FirmId, owner.Value, order.Symbol, dayKey);
                                 var running = prevTotal + realized;
                                 var pnlEvt = new Persistence.RealizedPnlEvent
                                 {
@@ -460,16 +460,16 @@ public sealed class ExecutionReportProcessor
                                     DeltaRealized = realized,
                                     RunningTotal = running,
                                     TimestampUtc = nowUtcPnl,
-                                    // Q4.1 (#301). Tag the WAL event with
-                                    // the order's sub-account so replay
-                                    // can fan out to SubAccountPnlKeeper
-                                    // without depending on the WorkingOrderBook
-                                    // having been restored first. FirmId
-                                    // is carried alongside so the
-                                    // fan-out is firm-scoped (PR review
-                                    // #301 P1).
+                                    // PR #316 P1. Firm namespace for owner-keyed
+                                    // PnL fan-out. Always populated from the order
+                                    // (no longer conditional on SubAccountId) so a
+                                    // snapshot+tail recovery routes the realized
+                                    // delta into the correct firm bucket — required
+                                    // so the same JWT sub registered in two firms
+                                    // doesn't see cross-firm realized leaking on
+                                    // GET /pnl/today or pnl.me.
                                     SubAccountId = order.SubAccountId?.Value,
-                                    FirmId = order.SubAccountId is null ? null : order.FirmId,
+                                    FirmId = order.FirmId,
                                 };
                                 var keeperPnl = _pnlKeeper;
                                 var subPnl = _subAccountPnl;
@@ -608,7 +608,8 @@ public sealed class ExecutionReportProcessor
             lastPx,
             rejectReason,
             DateTimeOffset.UtcNow,
-            isNativeStp);
+            isNativeStp,
+            order.FirmId);
         // RFC §5.2 (F2). Capture-then-fan-out path: the dispatcher walks
         // the writer and TryWrites into every per-sink channel while still
         // under the dispatcher lock so subscribers observe events in WAL
@@ -685,7 +686,8 @@ public sealed class ExecutionReportProcessor
             LastPrice: 0m,
             RejectReason: rejectReason,
             TimestampUtc: DateTimeOffset.UtcNow,
-            IsNativeStp: false);
+            IsNativeStp: false,
+            FirmId: intent.FirmId);
         if (fanOut is not null)
         {
             fanOut.Add(rejectedEv, Persistence.ExecutionFanOutTargets.BotRouter);
@@ -746,7 +748,8 @@ public sealed class ExecutionReportProcessor
             0m,
             null,
             DateTimeOffset.UtcNow,
-            false);
+            false,
+            intent.FirmId);
         if (fanOut is not null)
         {
             fanOut.Add(origEv);
@@ -850,7 +853,8 @@ public sealed class ExecutionReportProcessor
             erLastPx,
             null,
             DateTimeOffset.UtcNow,
-            false);
+            false,
+            intent.FirmId);
         if (fanOut is not null)
         {
             fanOut.Add(newEv);

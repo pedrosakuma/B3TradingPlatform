@@ -174,19 +174,24 @@ public sealed class PnlRefPriceFanOut : IHostedService, IAsyncDisposable
             }
         }
 
-        var holders = _positions.ForSymbol(symbol);
+        var holders = _positions.ForSymbolWithFirm(symbol);
         if (holders.Count == 0) return;
 
-        // Distinct owners (a symbol position is per-(owner, symbol) so
-        // already distinct per row, but we set-deduplicate defensively).
-        var seenOwners = new HashSet<EndClientId>();
+        // PR #316 P1. Snapshot is firm-scoped; ForSymbolWithFirm yields
+        // one row per (firmId, position) so a JWT sub registered in
+        // two firms gets one publish per firm with the matching
+        // bucket's basis + realized totals — and the firm-aware
+        // Publish overload filters delivery to the WS sessions that
+        // actually authenticated under that firm.
+        var seenOwnerFirms = new HashSet<(string FirmId, EndClientId Owner)>();
         var publishCount = 0;
-        foreach (var p in holders)
+        foreach (var (firmId, p) in holders)
         {
-            if (!seenOwners.Add(p.Owner)) continue;
+            var key = (firmId, p.Owner);
+            if (!seenOwnerFirms.Add(key)) continue;
             if (_subs.CountFor(p.Owner) == 0) continue;
-            var snap = PnlProjection.Build(p.Owner, _pnl, _positions, _refPriceLookup);
-            _subs.Publish(p.Owner, Channels.PnlMe, snap);
+            var snap = PnlProjection.Build(p.Owner, firmId, _pnl, _positions, _refPriceLookup);
+            _subs.Publish(p.Owner, firmId, Channels.PnlMe, snap);
             publishCount++;
         }
 

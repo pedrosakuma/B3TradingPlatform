@@ -301,7 +301,7 @@ public sealed class OrderSubmissionService
                     _sink.Publish(new ExecutionEvent(
                         order.Owner, order.ClOrdId, order.Symbol, order.Side, order.Status, ExecKind.Rejected,
                         order.LeavesQuantity, order.CumulativeQuantity, 0, 0m,
-                        reason, DateTimeOffset.UtcNow));
+                        reason, DateTimeOffset.UtcNow, IsNativeStp: false, FirmId: order.FirmId));
                 });
         }
         catch (WalBackpressureException)
@@ -310,7 +310,7 @@ public sealed class OrderSubmissionService
             _sink.Publish(new ExecutionEvent(
                 order.Owner, order.ClOrdId, order.Symbol, order.Side, order.Status, ExecKind.Rejected,
                 order.LeavesQuantity, order.CumulativeQuantity, 0, 0m,
-                reason, DateTimeOffset.UtcNow));
+                reason, DateTimeOffset.UtcNow, IsNativeStp: false, FirmId: order.FirmId));
         }
     }
 }

@@ -37,77 +37,115 @@ namespace B3.Trading.Application;
 /// </summary>
 public sealed class PnlKeeper
 {
-    /// <summary>Per-(end-client, symbol, day) cumulative realized total.</summary>
-    private readonly ConcurrentDictionary<(string EndClient, string Symbol, DateOnly Day), decimal> _realizedByDay = new();
+    /// <summary>
+    /// PR #316 P1. Sentinel firm id used when a call site has not yet
+    /// been migrated to the firm-aware API (legacy overloads, snapshots
+    /// pre-dating the firm dimension on owner-keyed state).
+    /// </summary>
+    /// <summary>
+    /// Sentinel firm bucket. Matches <see cref="PositionKeeper.DefaultFirmId"/>
+    /// (PR #316 P1) so legacy WAL events and snapshot DTOs lacking a
+    /// firm tag converge on the same bucket as the master keepers.
+    /// </summary>
+    public const string DefaultFirmId = "DEFAULT";
 
     /// <summary>
-    /// Per-(end-client, symbol) avg-cost basis: tracked here in PARALLEL
+    /// PR #316 P1. Case-insensitive normalisation at the keeper boundary
+    /// (see <see cref="PositionKeeper.NormalizeFirmId"/> for rationale).
+    /// </summary>
+    internal static string Norm(string firmId) =>
+        string.IsNullOrEmpty(firmId) ? DefaultFirmId : firmId.ToUpperInvariant();
+
+    /// <summary>Per-(firm, end-client, symbol, day) cumulative realized total.</summary>
+    private readonly ConcurrentDictionary<(string FirmId, string EndClient, string Symbol, DateOnly Day), decimal> _realizedByDay = new();
+
+    /// <summary>
+    /// Per-(firm, end-client, symbol) avg-cost basis: tracked here in PARALLEL
     /// to <see cref="PositionKeeper"/> so a P&amp;L-only snapshot+restore
     /// path (no <see cref="PositionKeeper"/> rehydration) round-trips. In
     /// production both keepers receive every fill and stay in lockstep;
     /// the parallel track defends against a future refactor that splits
     /// the snapshots.
     /// </summary>
-    private readonly ConcurrentDictionary<(string EndClient, string Symbol), AvgCostState> _avgCost = new();
+    private readonly ConcurrentDictionary<(string FirmId, string EndClient, string Symbol), AvgCostState> _avgCost = new();
 
     /// <summary>
-    /// Pass-3 review (#278) P1. Per-(end-client, symbol) net quantity
+    /// Pass-3 review (#278) P1. Per-(firm, end-client, symbol) net quantity
     /// for positions whose basis is UNKNOWN — i.e. seeded from a legacy
     /// <see cref="PositionSnapshot"/> row whose <c>AverageEntryPrice</c>
     /// was zero (pre-#271 snapshot format). Keys here are mutually
     /// exclusive with <see cref="_avgCost"/>: a key in this set has no
-    /// usable avg-price, so <see cref="ApplyFillToAvgCost"/> realises
-    /// 0 for any fill against it (no phantom P&amp;L from an invented
-    /// basis); fills only adjust the unknown qty until the position
-    /// goes flat (entry removed → next fresh fill establishes a real
-    /// basis via the normal opening path) or flips through zero (the
-    /// closing portion realises 0; the residual opens fresh at the
-    /// fill price as a real basis — matching the standard avg-cost
+    /// usable avg-price, so <see cref="ApplyFillToAvgCost(string, string, string, OrderSide, long, decimal)"/>
+    /// realises 0 for any fill against it (no phantom P&amp;L from an
+    /// invented basis); fills only adjust the unknown qty until the
+    /// position goes flat (entry removed → next fresh fill establishes
+    /// a real basis via the normal opening path) or flips through zero
+    /// (the closing portion realises 0; the residual opens fresh at
+    /// the fill price as a real basis — matching the standard avg-cost
     /// convention for sign flips on a known basis).
     /// </summary>
-    private readonly ConcurrentDictionary<(string EndClient, string Symbol), long> _unknownBasisQty = new();
+    private readonly ConcurrentDictionary<(string FirmId, string EndClient, string Symbol), long> _unknownBasisQty = new();
 
     private readonly ConcurrentDictionary<string, byte> _seenExecutionIds = new();
     private readonly ConcurrentDictionary<string, PendingReplaySynth> _pendingReplaySynths = new();
 
     private readonly record struct PendingReplaySynth(
-        string EndClientId, string Symbol, OrderSide Side,
+        string FirmId, string EndClientId, string Symbol, OrderSide Side,
         long FillQuantity, decimal FillPrice, DateTimeOffset TimestampUtc,
         long PreFillQuantity, decimal PreFillAvgPrice);
 
     public sealed record AvgCostState(long NetQuantity, decimal AvgPrice);
 
-    public decimal GetDayRealized(string endClient, string symbol, DateOnly day) =>
-        _realizedByDay.TryGetValue((endClient, symbol, day), out var v) ? v : 0m;
+    // --- Firm-aware public surface (PR #316 P1) ----------------------
 
-    /// <summary>Sum of realized totals across every (symbol, day) for the end-client on the given day.</summary>
-    public decimal GetDayRealizedTotal(string endClient, DateOnly day)
+    public decimal GetDayRealized(string firmId, string endClient, string symbol, DateOnly day) =>
+        _realizedByDay.TryGetValue((Norm(firmId), endClient, symbol, day), out var v) ? v : 0m;
+
+    /// <summary>Sum of realized totals across every (symbol, day) for the (firm, end-client) on the given day.</summary>
+    public decimal GetDayRealizedTotal(string firmId, string endClient, DateOnly day)
     {
+        var norm = Norm(firmId);
         var sum = 0m;
         foreach (var kv in _realizedByDay)
-            if (kv.Key.EndClient == endClient && kv.Key.Day == day) sum += kv.Value;
+            if (kv.Key.EndClient == endClient && kv.Key.Day == day
+                && string.Equals(kv.Key.FirmId, norm, StringComparison.Ordinal))
+                sum += kv.Value;
         return sum;
     }
 
-    public IEnumerable<(string Symbol, decimal Realized)> ForEndClientDay(string endClient, DateOnly day)
+    public IEnumerable<(string Symbol, decimal Realized)> ForEndClientDay(string firmId, string endClient, DateOnly day)
     {
+        var norm = Norm(firmId);
         foreach (var kv in _realizedByDay)
-            if (kv.Key.EndClient == endClient && kv.Key.Day == day)
+            if (kv.Key.EndClient == endClient && kv.Key.Day == day
+                && string.Equals(kv.Key.FirmId, norm, StringComparison.Ordinal))
                 yield return (kv.Key.Symbol, kv.Value);
     }
 
-    public AvgCostState? GetAvgCost(string endClient, string symbol) =>
-        _avgCost.TryGetValue((endClient, symbol), out var s) ? s : null;
+    public AvgCostState? GetAvgCost(string firmId, string endClient, string symbol) =>
+        _avgCost.TryGetValue((Norm(firmId), endClient, symbol), out var s) ? s : null;
 
-    /// <summary>
-    /// Pass-3 review (#278) P1. Returns the net quantity carried as
-    /// "unknown basis" for the given key, or 0 when the key has either
-    /// a known basis or no position at all. Exposed for tests and for
-    /// observability — production code paths route through
-    /// <see cref="ApplyFillToAvgCost"/>.
-    /// </summary>
+    public long GetUnknownBasisQty(string firmId, string endClient, string symbol) =>
+        _unknownBasisQty.TryGetValue((Norm(firmId), endClient, symbol), out var q) ? q : 0;
+
+    // --- Legacy (no-firm) overloads — delegate to DefaultFirmId.
+    // Preserves test-host compatibility and any call site we haven't
+    // migrated yet. Owner-scoped REST/WS read paths MUST use the
+    // firm-aware variants above to avoid cross-firm leaks.
+    public decimal GetDayRealized(string endClient, string symbol, DateOnly day) =>
+        GetDayRealized(DefaultFirmId, endClient, symbol, day);
+
+    public decimal GetDayRealizedTotal(string endClient, DateOnly day) =>
+        GetDayRealizedTotal(DefaultFirmId, endClient, day);
+
+    public IEnumerable<(string Symbol, decimal Realized)> ForEndClientDay(string endClient, DateOnly day) =>
+        ForEndClientDay(DefaultFirmId, endClient, day);
+
+    public AvgCostState? GetAvgCost(string endClient, string symbol) =>
+        GetAvgCost(DefaultFirmId, endClient, symbol);
+
     public long GetUnknownBasisQty(string endClient, string symbol) =>
-        _unknownBasisQty.TryGetValue((endClient, symbol), out var q) ? q : 0;
+        GetUnknownBasisQty(DefaultFirmId, endClient, symbol);
 
     /// <summary>
     /// Pure avg-cost realized-delta calculator. Public so the ER processor
@@ -152,7 +190,12 @@ public sealed class PnlKeeper
                 new KeyValuePair<string, object?>("reconciled", true));
         }
         if (!_seenExecutionIds.TryAdd(evt.ExecutionId, 0)) return false;
-        var key = (evt.EndClientId, evt.Symbol, evt.DayKey);
+        // PR #316 P1. Legacy WAL events (pre-firm-dimension) carry a
+        // null FirmId — they hydrate into the DefaultFirmId bucket so
+        // a snapshot+tail recovery built off old segments lands in the
+        // same legacy slice the no-firm Restore path produces.
+        var firmId = Norm(evt.FirmId ?? DefaultFirmId);
+        var key = (firmId, evt.EndClientId, evt.Symbol, evt.DayKey);
         // Use the persisted RunningTotal as authoritative — see record
         // doc-comment. A re-projection from the in-memory delta would
         // race a snapshot+tail recovery whose snapshot already baked in
@@ -186,10 +229,14 @@ public sealed class PnlKeeper
     /// processing flows through it.
     /// </para>
     /// </summary>
-    public decimal ApplyFillToAvgCost(string endClient, string symbol, OrderSide side, long fillQuantity, decimal fillPrice)
+    public decimal ApplyFillToAvgCost(string endClient, string symbol, OrderSide side, long fillQuantity, decimal fillPrice) =>
+        ApplyFillToAvgCost(DefaultFirmId, endClient, symbol, side, fillQuantity, fillPrice);
+
+    public decimal ApplyFillToAvgCost(string firmId, string endClient, string symbol, OrderSide side, long fillQuantity, decimal fillPrice)
     {
         if (fillQuantity <= 0) return 0m;
-        var key = (endClient, symbol);
+        var normFirm = Norm(firmId);
+        var key = (normFirm, endClient, symbol);
 
         // Pass-3 review (#278) P1. Unknown-basis path: legacy snapshot
         // seeded a quantity but no usable avg price, so we cannot
@@ -292,12 +339,19 @@ public sealed class PnlKeeper
     public void RegisterPendingReplaySynth(
         string executionId, string endClientId, string symbol,
         OrderSide side, long fillQuantity, decimal fillPrice,
+        DateTimeOffset timestampUtc, long preFillQuantity, decimal preFillAvgPrice) =>
+        RegisterPendingReplaySynth(DefaultFirmId, executionId, endClientId, symbol,
+            side, fillQuantity, fillPrice, timestampUtc, preFillQuantity, preFillAvgPrice);
+
+    public void RegisterPendingReplaySynth(
+        string firmId, string executionId, string endClientId, string symbol,
+        OrderSide side, long fillQuantity, decimal fillPrice,
         DateTimeOffset timestampUtc, long preFillQuantity, decimal preFillAvgPrice)
     {
         ArgumentNullException.ThrowIfNull(executionId);
         if (_seenExecutionIds.ContainsKey(executionId)) return;
         _pendingReplaySynths.TryAdd(executionId,
-            new PendingReplaySynth(endClientId, symbol, side, fillQuantity, fillPrice,
+            new PendingReplaySynth(Norm(firmId), endClientId, symbol, side, fillQuantity, fillPrice,
                 timestampUtc, preFillQuantity, preFillAvgPrice));
     }
 
@@ -321,7 +375,7 @@ public sealed class PnlKeeper
             if (delta != 0m)
             {
                 var day = DateOnly.FromDateTime(p.TimestampUtc.UtcDateTime);
-                var key = (p.EndClientId, p.Symbol, day);
+                var key = (p.FirmId, p.EndClientId, p.Symbol, day);
                 _realizedByDay.AddOrUpdate(key, delta, (_, current) => current + delta);
             }
             Observability.MetricsRegistry.PnlReplaySynth.Add(1,
@@ -343,7 +397,7 @@ public sealed class PnlKeeper
         for (var i = 0; i < pairs.Length; i++)
         {
             if (pairs[i].Value == 0m) continue;
-            buf[n++] = new PnlRealizedRaw(pairs[i].Key.EndClient, pairs[i].Key.Symbol, pairs[i].Key.Day, pairs[i].Value);
+            buf[n++] = new PnlRealizedRaw(pairs[i].Key.EndClient, pairs[i].Key.Symbol, pairs[i].Key.Day, pairs[i].Value, pairs[i].Key.FirmId);
         }
         if (n == buf.Length) return buf;
         var trimmed = new PnlRealizedRaw[n];
@@ -362,7 +416,7 @@ public sealed class PnlKeeper
         {
             var v = pairs[i].Value;
             if (v.NetQuantity == 0) continue;
-            buf[n++] = new PnlAvgCostRaw(pairs[i].Key.EndClient, pairs[i].Key.Symbol, v.NetQuantity, v.AvgPrice);
+            buf[n++] = new PnlAvgCostRaw(pairs[i].Key.EndClient, pairs[i].Key.Symbol, v.NetQuantity, v.AvgPrice, pairs[i].Key.FirmId);
         }
         if (n == buf.Length) return buf;
         var trimmed = new PnlAvgCostRaw[n];
@@ -386,7 +440,7 @@ public sealed class PnlKeeper
         for (var i = 0; i < pairs.Length; i++)
         {
             if (pairs[i].Value == 0) continue;
-            buf[n++] = new PnlUnknownBasisRaw(pairs[i].Key.EndClient, pairs[i].Key.Symbol, pairs[i].Value);
+            buf[n++] = new PnlUnknownBasisRaw(pairs[i].Key.EndClient, pairs[i].Key.Symbol, pairs[i].Value, pairs[i].Key.FirmId);
         }
         if (n == buf.Length) return buf;
         var trimmed = new PnlUnknownBasisRaw[n];
@@ -423,15 +477,21 @@ public sealed class PnlKeeper
         _seenExecutionIds.Clear();
         foreach (var kv in realizedByKey)
         {
-            if (!TryParseRealizedKey(kv.Key, out var ec, out var sym, out var day)) continue;
-            _realizedByDay[(ec, sym, day)] = kv.Value;
+            if (!TryParseRealizedKey(kv.Key, out var firmId, out var ec, out var sym, out var day)) continue;
+            _realizedByDay[(Norm(firmId), ec, sym, day)] = kv.Value;
         }
         foreach (var row in avgCostRows)
-            _avgCost[(row.EndClientId, row.Symbol)] = new AvgCostState(row.NetQuantity, row.AvgPrice);
+        {
+            var firmId = Norm(row.FirmId);
+            _avgCost[(firmId, row.EndClientId, row.Symbol)] = new AvgCostState(row.NetQuantity, row.AvgPrice);
+        }
         if (unknownBasisRows is not null)
             foreach (var row in unknownBasisRows)
                 if (row.NetQuantity != 0)
-                    _unknownBasisQty[(row.EndClientId, row.Symbol)] = row.NetQuantity;
+                {
+                    var firmId = Norm(row.FirmId);
+                    _unknownBasisQty[(firmId, row.EndClientId, row.Symbol)] = row.NetQuantity;
+                }
         // Pass-4 review (#278) P2#3. Enforce mutual exclusivity
         // between _avgCost and _unknownBasisQty after restore. The
         // live keeper holds these collections strictly disjoint by
@@ -512,12 +572,14 @@ public sealed class PnlKeeper
             if (p.AverageEntryPrice <= 0m)
             {
                 Observability.MetricsRegistry.PnlLegacySnapshotBasisSkippedZero.Add(1);
-                var unknownKey = (p.EndClientId, p.Symbol);
+                var firmId = Norm(p.FirmId);
+                var unknownKey = (firmId, p.EndClientId, p.Symbol);
                 if (!_avgCost.ContainsKey(unknownKey))
                     _unknownBasisQty.TryAdd(unknownKey, p.NetQuantity);
                 continue;
             }
-            var key = (p.EndClientId, p.Symbol);
+            var keyFirmId = Norm(p.FirmId);
+            var key = (keyFirmId, p.EndClientId, p.Symbol);
             if (_avgCost.ContainsKey(key)) continue;
             if (_avgCost.TryAdd(key, new AvgCostState(p.NetQuantity, p.AverageEntryPrice)))
             {
@@ -530,25 +592,48 @@ public sealed class PnlKeeper
 
     /// <summary>
     /// Composite key serialisation for the snapshot's
-    /// <c>Dictionary&lt;string, decimal&gt;</c> shape. Format:
-    /// <c>{endClient}|{symbol}|{yyyy-MM-dd}</c>.
+    /// <c>Dictionary&lt;string, decimal&gt;</c> shape. New format:
+    /// <c>{firmId}|{endClient}|{symbol}|{yyyy-MM-dd}</c>. The legacy
+    /// 3-segment format (<c>{endClient}|{symbol}|{yyyy-MM-dd}</c>) is
+    /// still accepted by <see cref="TryParseRealizedKey(string, out string, out string, out string, out DateOnly)"/>
+    /// and parses as <see cref="DefaultFirmId"/>.
     /// </summary>
-    public static string FormatRealizedKey(string endClient, string symbol, DateOnly day) =>
-        endClient + "|" + symbol + "|" + day.ToString("yyyy-MM-dd");
+    public static string FormatRealizedKey(string firmId, string endClient, string symbol, DateOnly day) =>
+        Norm(firmId) + "|" + endClient + "|" + symbol + "|" + day.ToString("yyyy-MM-dd");
 
-    public static bool TryParseRealizedKey(string key, out string endClient, out string symbol, out DateOnly day)
+    /// <summary>Legacy helper — formats as the default-firm bucket.</summary>
+    public static string FormatRealizedKey(string endClient, string symbol, DateOnly day) =>
+        FormatRealizedKey(DefaultFirmId, endClient, symbol, day);
+
+    public static bool TryParseRealizedKey(string key, out string firmId, out string endClient, out string symbol, out DateOnly day)
     {
+        firmId = DefaultFirmId;
         endClient = string.Empty;
         symbol = string.Empty;
         day = default;
         if (string.IsNullOrEmpty(key)) return false;
-        var lastPipe = key.LastIndexOf('|');
-        if (lastPipe <= 0 || lastPipe == key.Length - 1) return false;
-        if (!DateOnly.TryParseExact(key.AsSpan(lastPipe + 1), "yyyy-MM-dd", out day)) return false;
-        var firstPipe = key.IndexOf('|');
-        if (firstPipe <= 0 || firstPipe == lastPipe) return false;
-        endClient = key.Substring(0, firstPipe);
-        symbol = key.Substring(firstPipe + 1, lastPipe - firstPipe - 1);
-        return true;
+        var parts = key.Split('|');
+        if (parts.Length == 3)
+        {
+            // Legacy (pre-PR #316) format. Hydrates as DefaultFirmId.
+            if (!DateOnly.TryParseExact(parts[2], "yyyy-MM-dd", out day)) return false;
+            if (parts[0].Length == 0 || parts[1].Length == 0) return false;
+            endClient = parts[0];
+            symbol = parts[1];
+            return true;
+        }
+        if (parts.Length == 4)
+        {
+            if (!DateOnly.TryParseExact(parts[3], "yyyy-MM-dd", out day)) return false;
+            if (parts[0].Length == 0 || parts[1].Length == 0 || parts[2].Length == 0) return false;
+            firmId = parts[0];
+            endClient = parts[1];
+            symbol = parts[2];
+            return true;
+        }
+        return false;
     }
+
+    public static bool TryParseRealizedKey(string key, out string endClient, out string symbol, out DateOnly day) =>
+        TryParseRealizedKey(key, out _, out endClient, out symbol, out day);
 }

@@ -112,6 +112,17 @@ public static class AuthEndpoints
             // when known (so P&L doesn't show a fake gain/loss); zero is
             // a fine fallback (matches the dogfood overlay's choice for
             // symbols without a configured ref price).
+            //
+            // PR #316 P1. Signup seeds intentionally land in
+            // <see cref="PositionKeeper.DefaultFirmId"/> because
+            // <see cref="PositionSeedOptions"/> has no firm field (signup
+            // is firm-agnostic — the seed is the "every user starts here"
+            // overlay, not a per-firm prefund). A signup that races a
+            // firm-scoped fill on the same JWT sub stays partitioned:
+            // the fill lands in the user's actual firm bucket, the seed
+            // sits in default and surfaces only to clients that
+            // authenticate without a firm claim. Adding a per-firm seed
+            // config is tracked as a follow-up (out of scope here).
             foreach (var (symbol, qty) in SignupSeedPositions)
             {
                 refPrice.TryGet(symbol, out var avgPx);

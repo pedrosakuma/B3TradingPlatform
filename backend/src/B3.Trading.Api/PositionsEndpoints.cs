@@ -44,7 +44,12 @@ public static class PositionsEndpoints
                     .Select(p => p.ToDto(saId));
                 return Results.Ok(view);
             }
-            var legacy = positions.ForEndClient(owner).Select(p => p.ToDto());
+            var legacyFirm = ctx.User.FindFirstValue(Auth.JwtIssuer.FirmClaim) ?? "default";
+            // PR #316 P1. Firm-scope the unfiltered view so the same
+            // JWT sub registered in two firms doesn't see the other
+            // firm's positions (the master keeper bucket is keyed by
+            // firmId since #316).
+            var legacy = positions.ForEndClientAndFirm(legacyFirm, owner).Select(p => p.ToDto());
             return Results.Ok(legacy);
         });
 
