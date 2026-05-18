@@ -138,8 +138,26 @@ public class AdminAuditComplianceTests : IClassFixture<TestAppFactory>
         var page = await QueryAuditAsync(admin, "?firmId=FIRM01&limit=200");
 
         Assert.NotEmpty(page.Entries);
+        // Admin's ?firmId= narrows on the same firm-touch matcher used
+        // by compliance: an entry surfaces if it's either authored in
+        // FIRM01 OR carries FIRM01 in a well-known firm-detail key
+        // (target_firm, firmIdViewed, etc.). Admin gets unredacted
+        // entries — verify both code paths surface, but no actor outside
+        // {default-actor-targeting-FIRM01, FIRM01-actor} leaks through.
         Assert.All(page.Entries, e =>
-            Assert.Equal("FIRM01", e.ActorFirm, ignoreCase: true));
+        {
+            var actorIsFirm01 = string.Equals(e.ActorFirm, "FIRM01", StringComparison.OrdinalIgnoreCase);
+            var touchesFirm01 = e.Details is not null
+                && (e.Details.GetValueOrDefault("firm") == "FIRM01"
+                    || e.Details.GetValueOrDefault("firmId") == "FIRM01"
+                    || e.Details.GetValueOrDefault("firm_id") == "FIRM01"
+                    || e.Details.GetValueOrDefault("target_firm") == "FIRM01"
+                    || e.Details.GetValueOrDefault("firmIdViewed") == "FIRM01");
+            Assert.True(actorIsFirm01 || touchesFirm01,
+                $"entry surfaced by ?firmId=FIRM01 without touching the firm: actor={e.ActorFirm}");
+        });
+        // At least one true FIRM01-actor entry — the dave login above.
+        Assert.Contains(page.Entries, e => string.Equals(e.ActorFirm, "FIRM01", StringComparison.OrdinalIgnoreCase));
     }
 
     // Pass-1 review (#327) P1.2 — Compliance responses must NOT
@@ -281,5 +299,83 @@ public class AdminAuditComplianceTests : IClassFixture<TestAppFactory>
         Assert.NotNull(hit.Details);
         Assert.False(hit.Details!.ContainsKey("firm"));
         Assert.Equal("ORD123", hit.Details!["cl_ord_id"]);
+    }
+
+    // Pass-2 review (#327) P1 — firm-scope kill switch toggles emit
+    // the target firm under the `firm` key (not `target`), so cross-
+    // firm kill events surface to the target firm's compliance view
+    // and are properly redacted in the actor firm's view.
+    [Theory]
+    [InlineData("firm", "FIRM01")]
+    public async Task Compliance_TargetFirm_SeesKillSwitchAgainstOwnFirm(string scope, string target)
+    {
+        // Synthesize the audit emission shape AdminEndpoints.ToggleKill
+        // produces for scope=="firm" after the pass-2 fix. We don't go
+        // through the real /admin/kill endpoint because that requires
+        // an admin client and side-effects we don't want here.
+        var audit = _factory.Services.GetRequiredService<Application.Audit.IAuditLogger>();
+        audit.Log(new Application.Persistence.AuditLogEvent
+        {
+            EventType = "admin.config.changed",
+            Outcome = Application.Audit.AuditOutcomes.Success,
+            ActorUserId = "admin",
+            ActorUsername = "admin",
+            ActorFirm = "default",
+            ActorRole = "admin",
+            SourceIp = "10.0.0.1",
+            ResourcePath = "/admin/kill",
+            Details = new Dictionary<string, string>
+            {
+                ["scope"] = scope,
+                ["firm"] = target,
+                ["killed"] = "true",
+            },
+        });
+
+        using var compliance = ClientFor("dave", Roles.Compliance, target);
+        var page = await QueryAuditAsync(compliance, "?limit=200&type=admin.config.changed");
+
+        // The target firm's compliance officer must see the kill-
+        // switch toggle taken against their firm.
+        var hit = Assert.Single(page.Entries, e => e.ResourcePath == "/admin/kill");
+        Assert.Null(hit.ActorFirm);
+        Assert.Equal("(other firm)", hit.ActorUsername);
+        Assert.NotNull(hit.Details);
+        // The `firm` value IS the caller's firm — kept as confirmation.
+        Assert.Equal(target, hit.Details!["firm"]);
+    }
+
+    // Pass-2 review (#327) P1 — drop-copy admin overrides emit
+    // Details["firmIdViewed"] which is now in FirmDetailKeys, so the
+    // viewed firm's compliance officer sees admin's drop-copy connect
+    // against their firm and the actor firm's compliance view has the
+    // viewed firm redacted.
+    [Fact]
+    public async Task Compliance_ViewedFirm_SeesDropCopyAdminOverride()
+    {
+        var audit = _factory.Services.GetRequiredService<Application.Audit.IAuditLogger>();
+        audit.Log(new Application.Persistence.AuditLogEvent
+        {
+            EventType = "drop_copy.connect",
+            Outcome = Application.Audit.AuditOutcomes.Success,
+            ActorUserId = "admin",
+            ActorUsername = "admin",
+            ActorFirm = "default",
+            ActorRole = "admin",
+            SourceIp = "10.0.0.1",
+            ResourcePath = "/ws/dropcopy",
+            Details = new Dictionary<string, string>
+            {
+                ["firmIdViewed"] = "FIRM01",
+                ["firmIdOverride"] = "true",
+            },
+        });
+
+        using var compliance = ClientFor("dave", Roles.Compliance, "FIRM01");
+        var page = await QueryAuditAsync(compliance, "?limit=200&type=drop_copy.connect");
+        var hit = Assert.Single(page.Entries);
+        Assert.Null(hit.ActorFirm);
+        Assert.Equal("(other firm)", hit.ActorUsername);
+        Assert.Equal("FIRM01", hit.Details!["firmIdViewed"]);
     }
 }

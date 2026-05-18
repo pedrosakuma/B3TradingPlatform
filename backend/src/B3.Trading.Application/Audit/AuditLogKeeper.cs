@@ -293,8 +293,14 @@ public sealed class AuditLogKeeper
     /// where the actor was in another firm but the action targeted
     /// the compliance caller's firm (and, dually, by the endpoint
     /// to redact other-firm names from surviving entries).
+    ///
+    /// <para>Pass-2 review (#327): every new audit emission site that
+    /// stores a firm id in Details MUST use one of these keys (rather
+    /// than inventing a new one) so the compliance audit projection
+    /// stays leak-tight. <c>firmIdViewed</c> was added for the
+    /// admin-overridden drop-copy WebSocket open/close pair.</para>
     /// </summary>
-    public static readonly string[] FirmDetailKeys = new[] { "firm", "firmId", "firm_id", "target_firm" };
+    public static readonly string[] FirmDetailKeys = new[] { "firm", "firmId", "firm_id", "target_firm", "firmIdViewed" };
 
     private static bool FirmTouchesEntry(AuditEntry e, string firm)
     {

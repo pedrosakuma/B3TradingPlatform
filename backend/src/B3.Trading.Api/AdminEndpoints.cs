@@ -542,12 +542,22 @@ public static class AdminEndpoints
         // documents the operator's attempt regardless).
         try
         {
-            EmitAdminConfigChange(audit, ctx, "/admin/kill", AuditOutcomes.Success, new()
+            // Pass-2 review (#327) P1 — when scope=="firm" the
+            // `target` slot carries another firm's id; emit it under
+            // the `firm` key instead so compliance audit firm-touch
+            // matching + cross-firm redaction (which only know about
+            // FirmDetailKeys) covers kill-switch toggles. Non-firm
+            // scopes (currently `endclient`) stay on `target`.
+            var killDetails = new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["scope"] = scope,
-                ["target"] = target,
                 ["killed"] = killed ? "true" : "false",
-            }, failClosed: true);
+            };
+            if (string.Equals(scope, "firm", StringComparison.OrdinalIgnoreCase))
+                killDetails["firm"] = target;
+            else
+                killDetails["target"] = target;
+            EmitAdminConfigChange(audit, ctx, "/admin/kill", AuditOutcomes.Success, killDetails, failClosed: true);
             dispatcher.Dispatch(
                 new KillSwitchToggledEvent
                 {
