@@ -679,6 +679,8 @@ public class AlgoModifyEndpointTests
         var book = f.Services.GetRequiredService<WorkingOrderBook>();
         var liveChild = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
         var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        var engine = f.Services.GetRequiredService<AlgoEngine>();
+        var algoIdNum = ulong.Parse(algoId);
 
         // Drive 9 modify→Replaced cycles. Bump NewQuantity to keep each
         // modify operative without pushing past the default
@@ -687,6 +689,23 @@ public class AlgoModifyEndpointTests
         // collar — quantity-bump is the safe lever here).
         for (int cycle = 0; cycle < 9; cycle++)
         {
+            // #329: each cycle must observe the previous cycle's
+            // adoption committed in the engine runtime — NOT just the
+            // book — before sending the next modify. The ER processor
+            // hydrates the new child in the book and THEN enqueues
+            // ChildExecutionObservedSignal; the engine consumer task
+            // processes that signal asynchronously and only there does
+            // rt.LiveChildClOrdId flip to the new id. Polling the book
+            // (cycle 0 below) or sleeping a fixed delay (the previous
+            // approach) races the signal under CI load: the next
+            // modify reads the stale LiveChildClOrdId and dispatches a
+            // replace with the wrong OriginalClOrdId, making the
+            // WaitFor predicate below permanently false → 3s timeout.
+            await WaitFor(
+                () => engine.TryGetLiveChildClOrdId("default", algoIdNum) == liveChild.ClOrdId,
+                TimeSpan.FromSeconds(3),
+                () => $"cycle {cycle}: engine did not adopt child {liveChild.ClOrdId} (current LiveChild={engine.TryGetLiveChildClOrdId("default", algoIdNum)?.ToString() ?? "null"})");
+
             var newQty = 101 + cycle; // 101, 102, ..., 109
             var preReplaceCount = mock.SubmittedReplaces.Count;
             var modReq = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
@@ -729,18 +748,27 @@ public class AlgoModifyEndpointTests
             }
             Assert.NotNull(hydrated);
             liveChild = hydrated!;
-            // Allow the engine consumer task to process the
-            // ChildExecutionObservedSignal that ApplyReplaceAccepted
-            // fans out — that's where RetireChildSlot runs. Without
-            // this brief delay the next cycle's modify can race the
-            // adoption (still-in-flight intent for the OLD id).
-            await Task.Delay(50);
+            // Adoption is awaited deterministically at the top of the
+            // next iteration via engine.TryGetLiveChildClOrdId — no
+            // arbitrary delay needed here.
         }
 
         // 9 adoptions on the same parent = 9 retired-child enqueues;
         // cap=8 ⇒ exactly 1 eviction; the algoType tag is the lowercased
         // AlgoType enum value (matches the algo.modify_rejected_total
         // taxonomy already in use).
+        //
+        // #329: the engine flips rt.LiveChildClOrdId BEFORE calling
+        // RetireChildSlot + Counter.Add inside OnChildErAsync, so an
+        // engine-state-based gate (TryGetLiveChildClOrdId) races the
+        // metric emission under fast CPUs. Wait on the observable side
+        // effect directly so the assertion runs strictly after the
+        // eviction counter has been published.
+        await WaitFor(
+            () => Interlocked.Read(ref evicted) >= 1L,
+            TimeSpan.FromSeconds(3),
+            () => $"eviction counter never reached 1 (current={Interlocked.Read(ref evicted)}, finalLive={engine.TryGetLiveChildClOrdId("default", algoIdNum)?.ToString() ?? "null"}, replaces={mock.SubmittedReplaces.Count})");
+
         listener.RecordObservableInstruments();
         Assert.Equal(1L, Interlocked.Read(ref evicted));
         Assert.Equal("pegged", evictedAlgoType);
@@ -975,6 +1003,9 @@ public class AlgoModifyEndpointTests
     }
 
     private static async Task WaitFor(Func<bool> predicate, TimeSpan timeout, string failMessage)
+        => await WaitFor(predicate, timeout, () => failMessage);
+
+    private static async Task WaitFor(Func<bool> predicate, TimeSpan timeout, Func<string> failMessageFactory)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
         while (sw.Elapsed < timeout)
@@ -982,7 +1013,7 @@ public class AlgoModifyEndpointTests
             if (predicate()) return;
             await Task.Delay(20);
         }
-        throw new TimeoutException(failMessage + $" (waited {timeout.TotalSeconds}s)");
+        throw new TimeoutException(failMessageFactory() + $" (waited {timeout.TotalSeconds}s)");
     }
 
     private static async Task WaitForAlgoStatus(HttpClient http, string token, string algoId, params string[] anyOf)

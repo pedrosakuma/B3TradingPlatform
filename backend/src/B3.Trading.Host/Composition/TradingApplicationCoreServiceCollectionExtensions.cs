@@ -212,7 +212,8 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         services.AddSingleton<B3.Trading.Application.MarketData.MarketDataPegBookPump>();
         services.AddHostedService(sp =>
             sp.GetRequiredService<B3.Trading.Application.MarketData.MarketDataPegBookPump>());
-        services.AddHostedService<AlgoEngine>();
+        services.AddSingleton<AlgoEngine>();
+        services.AddHostedService(sp => sp.GetRequiredService<AlgoEngine>());
         services.AddHostedService<AlgoScheduler>();
 
         // Lifecycle: drain flag flipped on SIGTERM /

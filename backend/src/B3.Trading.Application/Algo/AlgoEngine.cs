@@ -229,6 +229,29 @@ public sealed class AlgoEngine : BackgroundService
     }
 
     /// <summary>
+    /// Test-only deterministic adoption probe (#329 fix). Returns the
+    /// parent's currently-adopted child ClOrdID — i.e. the value the
+    /// modify path will read from <c>rt.LiveChildClOrdId</c> when the
+    /// next operator-modify signal is dispatched. The book carrying
+    /// the new child does NOT guarantee adoption has happened: the
+    /// ER processor first hydrates the child (visible in the book)
+    /// then enqueues a <see cref="ChildExecutionObservedSignal"/>;
+    /// the engine consumer task processes that signal asynchronously
+    /// and only then updates <c>LiveChildClOrdId</c>. Tests that drive
+    /// successive modify cycles MUST poll this before issuing the
+    /// next modify, otherwise the engine still sees the prior child
+    /// and dispatches a replace with the wrong OriginalClOrdId.
+    /// Returns null when the parent runtime hasn't been created yet
+    /// or has no live child (e.g. mid-terminal transition).
+    /// </summary>
+    internal ulong? TryGetLiveChildClOrdId(string firmId, ulong algoId)
+    {
+        return _runtime.TryGetValue((firmId, algoId), out var rt)
+            ? rt.LiveChildClOrdId
+            : null;
+    }
+
+    /// <summary>
     /// Boot-time pass over every non-terminal parent. Builds the runtime
     /// state from the order book (live child + cumulative-fill baseline +
     /// next slice seq) and re-enqueues an <see cref="AlgoCreatedSignal"/>
@@ -1985,9 +2008,24 @@ public sealed class AlgoEngine : BackgroundService
         if (!_orders.TryGet(liveChildClOrdId, out var child) || child is null
             || IsChildTerminal(child))
         {
-            // Child reference went stale (rare race with ER pipeline);
-            // clear and let the next tick re-evaluate from the empty
-            // slot path.
+            // #329: When the child is terminal with status Replaced, an
+            // adoption signal is already in flight from the ER processor
+            // (ApplyReplaceAccepted enqueues ChildExecutionObservedSignal
+            // for the NEW child AFTER MarkReplaced flips the OLD to
+            // Replaced). The adoption block in OnChildErAsync requires
+            // `rt.LiveChildClOrdId is { } oldLive` — if we null it here
+            // first, adoption is skipped and the parent ends up orphaned
+            // with no live child until the next scheduler tick spawns a
+            // fresh slice (which leaks a clOrdID and skips the retired-
+            // child FIFO accounting that powers AlgoModifyRetiredChildEvictedTotal).
+            // Leave the slot pointing at OLD so the imminent adoption
+            // signal can transition it atomically; the scheduler will
+            // re-tick in a few milliseconds either way. For other
+            // terminal statuses (Filled / Cancelled / Rejected) no
+            // adoption is coming, so the historical null-and-let-reactor-
+            // resubmit behavior is correct.
+            if (child is not null && child.Status == OrderStatus.Replaced)
+                return;
             rt.LiveChildClOrdId = null;
             return;
         }
