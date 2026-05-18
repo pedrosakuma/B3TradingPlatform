@@ -1,3 +1,4 @@
+using System.Linq;
 using B3.Trading.Application;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Domain;
@@ -576,8 +577,11 @@ public class StatementProjectionTests
 
         var seedFallback = new List<PositionRowDto>
         {
-            // Master-bucket seed only — no SubAccountId tag.
+            // Master-bucket seed plus the live master aggregate of
+            // the sub-X fill (the live master keeper mirrors every
+            // sub-bucket fill alongside its own).
             new("PETR4", 200, 28m, null),
+            new("PETR3", 50, 25m, null),
         };
 
         var dto = StatementProjection.Build(
@@ -721,5 +725,83 @@ public class StatementProjectionTests
         Assert.Null(petr4.SubAccountId);
         Assert.Equal(170, petr4.NetQty);
         Assert.Equal(28m, petr4.AvgPrice);
+    }
+
+    [Fact]
+    public void TodayUnfiltered_SeedNetZeroAggregate_WithSubBucketActivity_SynthesizesMasterFromInvariant()
+    {
+        // PR #316 P2 follow-up. Live aggregate nets to exactly zero
+        // (so the symbol is omitted from the live snapshot) but WAL
+        // has sub-bucket activity. The invariant
+        //   master = liveAggregate - sumSub
+        // must still hold, treating liveAggregate as 0. The raw
+        // WAL master row must NOT be preserved (that would double-
+        // count the seed already cancelled inside the live zero).
+        //
+        // Scenario: seed PETR4=200; master sell 250 today; sub-A
+        // buy 50 today. Live master aggregate = 200 - 250 + 50 = 0
+        // (omitted). Expected: master = -50, sub-A = +50, no
+        // spurious raw WAL master row.
+        var wal = new List<(long Seq, WalEvent Event)>
+        {
+            (1, SubmitWithSubAccount(1UL, Alice, "FIRM01", null, "PETR4", OrderSide.Sell, 250, 32m)),
+            (2, Er(1UL, ExecKind.Fill, leaves: 0, cum: 250, last: 250, price: 32m, at: DayStart.AddHours(10))),
+            (3, SubmitWithSubAccount(2UL, Alice, "FIRM01", "A", "PETR4", OrderSide.Buy, 50, 31m)),
+            (4, Er(2UL, ExecKind.Fill, leaves: 0, cum: 50, last: 50, price: 31m, at: DayStart.AddHours(11))),
+        };
+        // Live aggregate netted to zero → PETR4 omitted from snapshot.
+        var seedFallback = new List<PositionRowDto>();
+
+        var dto = StatementProjection.Build(
+            Alice, Day, "FIRM01", wal,
+            livePositionsSnapshot: null,
+            subAccountFilter: null,
+            liveMasterSeedFallback: seedFallback);
+
+        Assert.Equal(2, dto.Positions.Count);
+        var master = Assert.Single(dto.Positions, p => p.SubAccountId is null);
+        Assert.Equal("PETR4", master.Symbol);
+        Assert.Equal(-50, master.NetQty);
+        // Synthesized row — no live anchor available, avg-price zeroed.
+        Assert.Equal(0m, master.AvgPrice);
+        var subA = Assert.Single(dto.Positions, p => p.SubAccountId == "A");
+        Assert.Equal("PETR4", subA.Symbol);
+        Assert.Equal(50, subA.NetQty);
+        // Aggregate reconciles to 0 (the live aggregate).
+        Assert.Equal(0, dto.Positions.Sum(p => p.NetQty));
+    }
+
+    [Fact]
+    public void TodayUnfiltered_SubOnlyOnZeroedMasterSymbol_MasterRowDropped()
+    {
+        // PR #316 P2 follow-up. Master fills cancel out (qty 0 in
+        // the WAL master keeper → no master row produced) but a
+        // sub-bucket has activity. Live aggregate = sub qty (30),
+        // so the symbol IS present in the live snapshot. Expected:
+        // master row dropped (qty = 30 - 30 = 0), sub-A = +30.
+        var wal = new List<(long Seq, WalEvent Event)>
+        {
+            (1, SubmitWithSubAccount(1UL, Alice, "FIRM01", null, "PETR4", OrderSide.Buy, 100, 30m)),
+            (2, Er(1UL, ExecKind.Fill, leaves: 0, cum: 100, last: 100, price: 30m, at: DayStart.AddHours(10))),
+            (3, SubmitWithSubAccount(2UL, Alice, "FIRM01", null, "PETR4", OrderSide.Sell, 100, 31m)),
+            (4, Er(2UL, ExecKind.Fill, leaves: 0, cum: 100, last: 100, price: 31m, at: DayStart.AddHours(11))),
+            (5, SubmitWithSubAccount(3UL, Alice, "FIRM01", "A", "PETR4", OrderSide.Buy, 30, 32m)),
+            (6, Er(3UL, ExecKind.Fill, leaves: 0, cum: 30, last: 30, price: 32m, at: DayStart.AddHours(12))),
+        };
+        var seedFallback = new List<PositionRowDto>
+        {
+            new("PETR4", 30, 32m, null),
+        };
+
+        var dto = StatementProjection.Build(
+            Alice, Day, "FIRM01", wal,
+            livePositionsSnapshot: null,
+            subAccountFilter: null,
+            liveMasterSeedFallback: seedFallback);
+
+        var subA = Assert.Single(dto.Positions);
+        Assert.Equal("PETR4", subA.Symbol);
+        Assert.Equal("A", subA.SubAccountId);
+        Assert.Equal(30, subA.NetQty);
     }
 }
