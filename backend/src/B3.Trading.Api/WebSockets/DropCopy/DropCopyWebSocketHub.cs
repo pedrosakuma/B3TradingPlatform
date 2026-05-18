@@ -120,7 +120,15 @@ public static class DropCopyWebSocketHub
             var recvTask = ReceiveLoopAsync(ws, cts.Token);
             try
             {
-                await Task.WhenAny(sendTask, recvTask);
+                // Wait for ANY of: send/receive loop exit, OR the
+                // client's slow-consumer disconnect signal. The signal
+                // is critical for the case where SendLoopAsync is
+                // blocked inside ws.SendAsync (peer's TCP recv window
+                // full because it never reads) — completing the
+                // outbound channel does not unblock SendAsync, so
+                // without an external trigger the WhenAny on just the
+                // two loops never fires. Pass-2 review (#323) P1.
+                await Task.WhenAny(sendTask, recvTask, client.DisconnectRequested);
             }
             finally
             {
