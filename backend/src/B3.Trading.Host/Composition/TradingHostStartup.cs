@@ -132,6 +132,17 @@ internal static class TradingHostStartup
         if (seedOpts.Seeds.Count > 0)
         {
             var keeper = scope.ServiceProvider.GetRequiredService<PositionKeeper>();
+            // PR #316 P1.1. Mirror the seed into the bucket-aware
+            // realised-PnL store so the master bucket's avg-cost basis
+            // is anchored to the seed BEFORE the first fill mutates
+            // the aggregate keeper. Without this, a sub-account fill
+            // would silently pollute the master statement-row avg
+            // (the only other source of master avg was
+            // PositionKeeper.AverageEntryPrice, which mixes master +
+            // sub fills) and a master close after a seed would skip
+            // RealizedPnlEvent emission entirely (bucket basis
+            // empty → ApplyBucketFill returns 0).
+            var subAccountPnl = scope.ServiceProvider.GetService<SubAccountPnlKeeper>();
             var seedLogger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("PositionSeeder");
 
             // PR #316 P2: real-mode users are namespaced under FIRM01 /
@@ -182,6 +193,8 @@ internal static class TradingHostStartup
                     seedLogger.LogInformation(
                         "Seeded opening position {Firm}/{Owner}/{Symbol} = {Qty} @ {AvgPx}.",
                         firm, seed.EndClientId, seed.Symbol, seed.Quantity, seed.AverageEntryPrice);
+                    subAccountPnl?.SeedMasterBucketBasisIfAbsent(
+                        firm, owner.Value, seed.Symbol, seed.Quantity, seed.AverageEntryPrice);
                 }
                 else
                 {

@@ -804,7 +804,11 @@ public sealed class EventReplayer
         if (_feeKeeper is not null && _feeCalculator is not null)
             n += _feeKeeper.FinalizeReplay(_feeCalculator);
         if (_pnlKeeper is not null)
-            n += _pnlKeeper.FinalizeReplay();
+            // PR #316 P1.2. Route bucket-tagged synthesized deltas into
+            // SubAccountPnlKeeper so sub-bucket realised totals don't
+            // diverge from the live path when the durable
+            // RealizedPnlEvent did not survive the ER-then-crash window.
+            n += _pnlKeeper.FinalizeReplay(_subAccountPnl);
         return n;
     }
 

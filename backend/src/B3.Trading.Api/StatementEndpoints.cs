@@ -40,6 +40,7 @@ public static class StatementEndpoints
             IEventStore store,
             PositionKeeper positions,
             SubAccountPositionKeeper subPositions,
+            SubAccountPnlKeeper subAccountPnl,
             SubAccountsRegistry subAccounts,
             EventDispatcher dispatcher,
             string? dayKey,
@@ -54,7 +55,7 @@ public static class StatementEndpoints
                 return subError!;
             Application.Observability.MetricsRegistry.StatementEndpointRequests.Add(
                 1, new KeyValuePair<string, object?>("format", "json"));
-            var dto = await BuildAsync(owner, firm, day, store, positions, subPositions, dispatcher, subFilter, ct);
+            var dto = await BuildAsync(owner, firm, day, store, positions, subPositions, subAccountPnl, dispatcher, subFilter, ct);
             EmitDayTradeMetric(dto);
             return Results.Ok(dto);
         });
@@ -65,6 +66,7 @@ public static class StatementEndpoints
             IEventStore store,
             PositionKeeper positions,
             SubAccountPositionKeeper subPositions,
+            SubAccountPnlKeeper subAccountPnl,
             SubAccountsRegistry subAccounts,
             EventDispatcher dispatcher,
             string dayKey,
@@ -79,7 +81,7 @@ public static class StatementEndpoints
                 return subError!;
             Application.Observability.MetricsRegistry.StatementEndpointRequests.Add(
                 1, new KeyValuePair<string, object?>("format", "csv"));
-            var dto = await BuildAsync(owner, firm, day, store, positions, subPositions, dispatcher, subFilter, ct);
+            var dto = await BuildAsync(owner, firm, day, store, positions, subPositions, subAccountPnl, dispatcher, subFilter, ct);
             EmitDayTradeMetric(dto);
             var bytes = RenderCsv(dto);
             return Results.File(
@@ -93,7 +95,8 @@ public static class StatementEndpoints
 
     private static async Task<DailyStatementDto> BuildAsync(
         EndClientId owner, string firmId, DateOnly day, IEventStore store, PositionKeeper positions,
-        SubAccountPositionKeeper subPositions, EventDispatcher dispatcher, string? subAccountFilter, CancellationToken ct)
+        SubAccountPositionKeeper subPositions, SubAccountPnlKeeper subAccountPnl,
+        EventDispatcher dispatcher, string? subAccountFilter, CancellationToken ct)
     {
         var today = DateOnly.FromDateTime(DateTimeOffset.UtcNow.UtcDateTime);
         var isToday = day == today;
@@ -114,16 +117,16 @@ public static class StatementEndpoints
         // section stays tiny — no I/O — and the WAL scan + projection
         // run after we exit the lock.
         //
-        // PR #316 P2.2. When the caller requested a per-sub-account
+        // PR #316 P2.2 / P1.1. When the caller requested a per-sub-account
         // view (or when any per-sub-account rows exist for this
         // owner+firm), we cannot reuse the master-aggregate live
-        // snapshot — it would either double-count (master == sum of
-        // sub-buckets + null bucket) or be missing the per-bucket
-        // breakdown the projection needs. The projection then derives
-        // positions from the WAL replay (already firm- and bucket-
-        // scoped), which is correct but slower; the common pre-#301
-        // path (no sub-accounts in play, no filter) keeps the
-        // existing snapshot fast-path.
+        // snapshot — it would double-count (master == sum of
+        // sub-buckets + null bucket) and its avg-cost is polluted by
+        // sub-bucket fills. The projection derives sub-bucket rows
+        // from the WAL replay (already firm- and bucket-scoped); we
+        // pass a master-bucket-only snapshot built from the bucket
+        // store (qty = aggregate − sumSub, avg = bucket basis) so
+        // the master row reflects ONLY master-bucket history.
         long capturedSeq = 0;
         IReadOnlyList<PositionRowDto>? capturedPositions = null;
         IReadOnlyList<PositionRowDto>? capturedSeedFallback = null;
@@ -132,29 +135,76 @@ public static class StatementEndpoints
             capturedSeq = store.CurrentSeq;
             if (!isToday) return;
             if (subAccountFilter is not null) return;
-            // Snapshot the live master keeper rows. If the owner has
-            // no per-sub-account positions in this firm we use the
-            // snapshot verbatim (fast pre-#301 path). Otherwise we
-            // pass it as a seed-fallback so the WAL-replay path can
-            // re-inject any startup-seeded master positions (per
-            // PR #316 P2 — TradingHostStartup applies seeds straight
-            // to PositionKeeper, never via WAL, so plain WAL replay
-            // would silently drop them whenever a sub-account row
-            // forces us off the snapshot fast-path).
-            var rows = new List<PositionRowDto>();
+
+            var anySub = false;
+            // Aggregate (qty, avg) keyed by symbol from the master
+            // keeper — used as the avg-cost fallback when the bucket
+            // store has no master-bucket basis (pure no-sub-account
+            // case, or pre-#316 host with seeds applied without a
+            // SubAccountPnlKeeper wire).
+            var aggregateBySymbol = new Dictionary<string, (long Qty, decimal Avg)>(StringComparer.Ordinal);
             foreach (var p in positions.ForEndClientAndFirm(firmId, owner))
             {
                 if (p.NetQuantity == 0) continue;
-                rows.Add(new PositionRowDto(p.Symbol, p.NetQuantity, p.AverageEntryPrice));
+                aggregateBySymbol[p.Symbol] = (p.NetQuantity, p.AverageEntryPrice);
             }
-            rows.Sort(static (a, b) => string.CompareOrdinal(a.Symbol, b.Symbol));
 
-            var anySub = false;
-            foreach (var _ in subPositions.EnumerateForOwner(firmId, owner)) { anySub = true; break; }
-            if (anySub)
-                capturedSeedFallback = rows;
-            else
+            // Sum sub-bucket quantities per symbol. Doubles as the
+            // anySub probe — non-empty enumeration means we cannot
+            // use the master-aggregate snapshot fast-path.
+            var subSumBySymbol = new Dictionary<string, long>(StringComparer.Ordinal);
+            foreach (var (_, position) in subPositions.EnumerateForOwner(firmId, owner))
+            {
+                if (position.NetQuantity == 0) continue;
+                anySub = true;
+                subSumBySymbol[position.Symbol] = subSumBySymbol.TryGetValue(position.Symbol, out var prior)
+                    ? prior + position.NetQuantity
+                    : position.NetQuantity;
+            }
+
+            if (!anySub)
+            {
+                var rows = new List<PositionRowDto>(aggregateBySymbol.Count);
+                foreach (var kv in aggregateBySymbol)
+                    rows.Add(new PositionRowDto(kv.Key, kv.Value.Qty, kv.Value.Avg));
+                rows.Sort(static (a, b) => string.CompareOrdinal(a.Symbol, b.Symbol));
                 capturedPositions = rows;
+                return;
+            }
+
+            // PR #316 P1.1. Build the live MASTER-bucket snapshot:
+            //   qty = aggregate − sumSub  (invariant tracked by the
+            //         bucket store under per-bucket basis)
+            //   avg = bucket-store master basis when present (the
+            //         authoritative master-only avg cost — set on
+            //         seed at host startup and advanced by every
+            //         master fill); aggregate avg only as a last
+            //         resort for legacy hosts that pre-date the
+            //         bucket-basis seed (no sub activity could have
+            //         polluted the aggregate avg in that case
+            //         because we already know anySub is true ⇒
+            //         degraded mode, but the row still has SOME avg
+            //         so downstream renderers don't NaN). Symbols
+            //         only present in sub-buckets but not in the
+            //         aggregate snapshot can't happen (every sub
+            //         fill mirrors into the master keeper).
+            var symbols = new HashSet<string>(aggregateBySymbol.Keys, StringComparer.Ordinal);
+            foreach (var sym in subSumBySymbol.Keys) symbols.Add(sym);
+            var masterRows = new List<PositionRowDto>(symbols.Count);
+            foreach (var symbol in symbols)
+            {
+                var aggQty = aggregateBySymbol.TryGetValue(symbol, out var agg) ? agg.Qty : 0;
+                var subSum = subSumBySymbol.TryGetValue(symbol, out var s) ? s : 0;
+                var masterQty = aggQty - subSum;
+                if (masterQty == 0) continue;
+                var bucket = subAccountPnl.GetBucketAvgCost(firmId, owner.Value, subAccount: null, symbol);
+                var masterAvg = bucket is not null && bucket.NetQuantity == masterQty
+                    ? bucket.AvgPrice
+                    : agg.Avg;
+                masterRows.Add(new PositionRowDto(symbol, masterQty, masterAvg, null));
+            }
+            masterRows.Sort(static (a, b) => string.CompareOrdinal(a.Symbol, b.Symbol));
+            capturedSeedFallback = masterRows;
         });
         var snapshotSeq = capturedSeq;
         var livePositionsSnapshot = capturedPositions;

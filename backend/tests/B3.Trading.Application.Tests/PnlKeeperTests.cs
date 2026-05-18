@@ -218,6 +218,64 @@ public class PnlKeeperTests
     }
 
     [Fact]
+    public void FinalizeReplay_RoutesSubAccountDelta_IntoBucketKeeper()
+    {
+        // PR #316 P1.2 regression. ER for a sub-account A fill was
+        // processed in-memory on replay (RegisterPendingReplaySynth)
+        // but the RealizedPnlEvent didn't survive the ER-then-crash
+        // window. FinalizeReplay must materialise the delta into
+        // BOTH the aggregate keeper AND the per-bucket realised
+        // total in SubAccountPnlKeeper so a sub-account-filtered
+        // statement matches the live path.
+        var k = new PnlKeeper();
+        var sub = new SubAccountPnlKeeper();
+        // Pre-fill bucket state: sub-A long 100 @ 30. Replay synth
+        // closes 50 @ 31 ⇒ realized delta = (31 − 30)·50 = 50.
+        k.RegisterPendingReplaySynth(
+            firmId: "FIRM01",
+            executionId: "9:50",
+            endClientId: "alice",
+            symbol: "PETR4",
+            side: OrderSide.Sell,
+            fillQuantity: 50,
+            fillPrice: 31m,
+            timestampUtc: Ts,
+            preFillQuantity: 100,
+            preFillAvgPrice: 30m,
+            subAccountId: "A");
+
+        Assert.Equal(1, k.FinalizeReplay(sub));
+
+        // Aggregate keeper folded the delta (existing behaviour).
+        Assert.Equal(50m, k.GetDayRealized("FIRM01", "alice", "PETR4", Day));
+        // Per-bucket keeper received the same delta tagged for
+        // sub-account A — the new contract.
+        Assert.Equal(50m, sub.GetDayRealized("FIRM01", "alice", new SubAccountId("A"), "PETR4", Day));
+    }
+
+    [Fact]
+    public void FinalizeReplay_NoSubAccountKeeper_AggregateOnly_StillMaterialises()
+    {
+        // Backwards-compat: existing callers that pass no
+        // SubAccountPnlKeeper still get the aggregate fold-in.
+        var k = new PnlKeeper();
+        k.RegisterPendingReplaySynth(
+            firmId: "FIRM01",
+            executionId: "9:50",
+            endClientId: "alice",
+            symbol: "PETR4",
+            side: OrderSide.Sell,
+            fillQuantity: 50,
+            fillPrice: 31m,
+            timestampUtc: Ts,
+            preFillQuantity: 100,
+            preFillAvgPrice: 30m,
+            subAccountId: "A");
+        Assert.Equal(1, k.FinalizeReplay());
+        Assert.Equal(50m, k.GetDayRealized("FIRM01", "alice", "PETR4", Day));
+    }
+
+    [Fact]
     public void SeedAvgCostFromLegacyPositions_FillsBasis_WhenPnlAvgCostEmpty()
     {
         // Pass-1 review (#278) P1#1. Legacy snapshot scenario:

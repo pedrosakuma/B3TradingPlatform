@@ -418,22 +418,26 @@ public sealed class ExecutionReportProcessor
                             // — registering them would only inflate
                             // the FinalizeReplay materialisation count.
                             //
-                            // PR #316 P2. (preFillQty, preFillAvg) is
+                            // PR #316 P1.2. (preFillQty, preFillAvg) is
                             // the BUCKET-of-the-fill's pre-fill state
                             // (master vs sub), so the would-realize
                             // gate and synth payload match what live
-                            // would emit. The synth materialises into
-                            // the aggregate keeper only; the
-                            // sub-bucket realized total is rebuilt
-                            // when the durable RealizedPnlEvent is
-                            // replayed (EventReplayer routes it via
-                            // _subAccountPnl.Add).
+                            // would emit. The synth carries the
+                            // originating SubAccountId so FinalizeReplay
+                            // can fold the materialised delta into the
+                            // per-bucket realised total in
+                            // SubAccountPnlKeeper as well — without
+                            // this, a sub-bucket realised delta whose
+                            // RealizedPnlEvent did not survive the
+                            // ER-then-crash window would leak into the
+                            // aggregate keeper only.
                             var wouldRealize = PnlKeeper.ComputeRealizedDelta(preFillQty, preFillAvg, order.Side, delta, lastPx);
                             if (wouldRealize != 0m)
                             {
                                 _pnlKeeper.RegisterPendingReplaySynth(
                                     order.FirmId, executionIdPnl, owner.Value, order.Symbol, order.Side,
-                                    delta, lastPx, nowUtcPnl, preFillQty, preFillAvg);
+                                    delta, lastPx, nowUtcPnl, preFillQty, preFillAvg,
+                                    order.SubAccountId?.Value);
                             }
                             // Still advance the basis tracker on replay
                             // — the durable event Apply path uses

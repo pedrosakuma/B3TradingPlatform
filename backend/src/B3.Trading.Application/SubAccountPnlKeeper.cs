@@ -111,6 +111,31 @@ public sealed class SubAccountPnlKeeper
     /// non-zero return.
     /// </para>
     /// </summary>
+    /// <summary>
+    /// PR #316 P1.1. Seed the master-bucket avg-cost basis from a
+    /// host-startup <see cref="PositionKeeper.SeedIfAbsent"/> entry
+    /// so subsequent realised-PnL math on master fills, AND the
+    /// daily-statement master-row avg-price, can read the seed
+    /// directly from the bucket store rather than falling back to
+    /// the aggregate avg (which gets polluted the moment a
+    /// sub-account fill mirrors into the aggregate
+    /// <see cref="PositionKeeper"/>). No-op when a basis already
+    /// exists for the master bucket: mirrors
+    /// <see cref="PositionKeeper.SeedIfAbsent"/>'s "warm restart
+    /// preserves recovered state" rule (snapshots restore bucket
+    /// basis BEFORE seeding runs).
+    /// </summary>
+    public bool SeedMasterBucketBasisIfAbsent(
+        string firmId, string endClient, string symbol, long signedQuantity, decimal avgPrice)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(endClient);
+        ArgumentException.ThrowIfNullOrWhiteSpace(symbol);
+        if (signedQuantity == 0) return false;
+        var key = (firmId, endClient, MasterBucketKey, symbol);
+        return _bucketAvgCost.TryAdd(key, new PnlKeeper.AvgCostState(signedQuantity, avgPrice));
+    }
+
     public decimal ApplyBucketFill(
         string firmId, string endClient, SubAccountId? subAccount, string symbol,
         OrderSide side, long fillQuantity, decimal fillPrice)

@@ -92,7 +92,7 @@ public sealed class PnlKeeper
     private readonly record struct PendingReplaySynth(
         string FirmId, string EndClientId, string Symbol, OrderSide Side,
         long FillQuantity, decimal FillPrice, DateTimeOffset TimestampUtc,
-        long PreFillQuantity, decimal PreFillAvgPrice);
+        long PreFillQuantity, decimal PreFillAvgPrice, string? SubAccountId);
 
     public sealed record AvgCostState(long NetQuantity, decimal AvgPrice);
 
@@ -341,18 +341,37 @@ public sealed class PnlKeeper
         OrderSide side, long fillQuantity, decimal fillPrice,
         DateTimeOffset timestampUtc, long preFillQuantity, decimal preFillAvgPrice) =>
         RegisterPendingReplaySynth(DefaultFirmId, executionId, endClientId, symbol,
-            side, fillQuantity, fillPrice, timestampUtc, preFillQuantity, preFillAvgPrice);
+            side, fillQuantity, fillPrice, timestampUtc, preFillQuantity, preFillAvgPrice, subAccountId: null);
 
     public void RegisterPendingReplaySynth(
         string firmId, string executionId, string endClientId, string symbol,
         OrderSide side, long fillQuantity, decimal fillPrice,
-        DateTimeOffset timestampUtc, long preFillQuantity, decimal preFillAvgPrice)
+        DateTimeOffset timestampUtc, long preFillQuantity, decimal preFillAvgPrice) =>
+        RegisterPendingReplaySynth(firmId, executionId, endClientId, symbol,
+            side, fillQuantity, fillPrice, timestampUtc, preFillQuantity, preFillAvgPrice, subAccountId: null);
+
+    /// <summary>
+    /// PR #316 P1.2. Overload that carries the originating
+    /// <see cref="SubAccountId"/> through to <see cref="FinalizeReplay"/>
+    /// so the materialised delta can be folded into the per-bucket
+    /// realised total in <see cref="SubAccountPnlKeeper"/>. Without
+    /// this, a sub-account fill whose <see cref="RealizedPnlEvent"/>
+    /// did not survive the ER-then-crash window would leak its realised
+    /// delta into the aggregate keeper only — the per-bucket total
+    /// (which is what <c>?subAccount=A</c> reads) would silently drift
+    /// from the live path.
+    /// </summary>
+    public void RegisterPendingReplaySynth(
+        string firmId, string executionId, string endClientId, string symbol,
+        OrderSide side, long fillQuantity, decimal fillPrice,
+        DateTimeOffset timestampUtc, long preFillQuantity, decimal preFillAvgPrice,
+        string? subAccountId)
     {
         ArgumentNullException.ThrowIfNull(executionId);
         if (_seenExecutionIds.ContainsKey(executionId)) return;
         _pendingReplaySynths.TryAdd(executionId,
             new PendingReplaySynth(Norm(firmId), endClientId, symbol, side, fillQuantity, fillPrice,
-                timestampUtc, preFillQuantity, preFillAvgPrice));
+                timestampUtc, preFillQuantity, preFillAvgPrice, subAccountId));
     }
 
     /// <summary>
@@ -362,8 +381,19 @@ public sealed class PnlKeeper
     /// using the pre-fill snapshot captured at registration time so the
     /// outcome is deterministic from position state. Increments
     /// <c>pnl.replay_synth{reconciled=false}</c> per materialised row.
+    ///
+    /// <para>
+    /// PR #316 P1.2. When <paramref name="subAccountPnl"/> is wired,
+    /// each materialised delta whose <see cref="PendingReplaySynth.SubAccountId"/>
+    /// is non-null is ALSO folded into the per-bucket realised total
+    /// so the sub-account view matches the live path. Aggregate-only
+    /// callers (test fixtures using the no-argument overload below)
+    /// retain the original behaviour.
+    /// </para>
     /// </summary>
-    public int FinalizeReplay()
+    public int FinalizeReplay() => FinalizeReplay(subAccountPnl: null);
+
+    public int FinalizeReplay(SubAccountPnlKeeper? subAccountPnl)
     {
         if (_pendingReplaySynths.IsEmpty) return 0;
         var materialised = 0;
@@ -377,6 +407,8 @@ public sealed class PnlKeeper
                 var day = DateOnly.FromDateTime(p.TimestampUtc.UtcDateTime);
                 var key = (p.FirmId, p.EndClientId, p.Symbol, day);
                 _realizedByDay.AddOrUpdate(key, delta, (_, current) => current + delta);
+                if (subAccountPnl is not null && p.SubAccountId is { } sa)
+                    subAccountPnl.Add(p.FirmId, p.EndClientId, new SubAccountId(sa), p.Symbol, day, delta);
             }
             Observability.MetricsRegistry.PnlReplaySynth.Add(1,
                 new KeyValuePair<string, object?>("reconciled", false));

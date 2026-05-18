@@ -219,29 +219,19 @@ public static class StatementProjection
         {
             positions = ProjectPositionsFromWal(owner, normFirm, dayEnd, walEventsAllTime, ownerByClOrdId, subAccountFilter);
 
-            // PR #316 P2. Today's unfiltered statement falls into
+            // PR #316 P1.1. Today's unfiltered statement falls into
             // this WAL-replay branch the moment any sub-account row
-            // exists for (firm, owner) — the live master snapshot
-            // would double-count, so we cannot reuse it verbatim.
-            // But the WAL replay misses positions seeded directly
-            // into PositionKeeper at host startup (TradingHostStartup
-            // applies seeds straight to the keeper, never via WAL).
-            //
-            // The live master keeper aggregates everything:
-            //   liveAggregate(sym) = seedOpening + sumOfAllFills(sym)
-            // where sumOfAllFills includes BOTH master-bucket and
-            // sub-bucket fills (each fill touches the master keeper
-            // AND the sub-account keeper). The WAL replay above
-            // projects per-bucket positions (master + each sub),
-            // each starting from zero. So:
-            //   masterLogicalQty(sym) = liveAggregate(sym)
-            //                         - sum_subBuckets(walProjected(sym))
-            // This is the seed's contribution PLUS any same-day
-            // master-bucket fills, with sub-bucket activity removed.
-            // We replace any WAL-projected master row for the symbol
-            // with this corrected row, while keeping all sub-bucket
-            // rows from the WAL projection untouched. Symbols whose
-            // master-logical quantity is zero are dropped.
+            // exists for (firm, owner) — the live master-aggregate
+            // snapshot would double-count and its avg-cost would be
+            // polluted by sub fills. The caller now passes the live
+            // MASTER-bucket snapshot (qty + avg sourced from the
+            // bucket-aware store: qty = aggregate − sumSub,
+            // avg = bucket-store master basis), so the merge below
+            // can drop any WAL master row (the snapshot supersedes
+            // it) and just emit (sub rows from WAL) ∪ (master rows
+            // from snapshot). Under per-bucket basis the invariant
+            // master = aggregate − sumSub is tracked exactly by the
+            // bucket store, so no subtraction in the merge.
             //
             // Only applied for unfiltered queries — a sub-account-
             // scoped statement must never see the master bucket.
@@ -349,107 +339,35 @@ public static class StatementProjection
     }
 
     /// <summary>
-    /// PR #316 P2 — approach (b). Replace the WAL-projected master
-    /// rows with rows derived from the live master keeper snapshot
-    /// minus the sum of WAL-projected sub-bucket quantities for the
-    /// same symbol. This preserves the seeded opening position while
-    /// avoiding the double-count that would occur from naively
-    /// merging the aggregate seed alongside sub-bucket WAL rows
-    /// (the seed already includes every sub-bucket fill because
-    /// fills update BOTH the per-sub keeper AND the master keeper).
-    ///
-    /// <para>
-    /// Algorithm:
-    /// </para>
-    /// <list type="number">
-    ///   <item>Sum WAL sub-bucket NetQty per symbol.</item>
-    ///   <item>Carry every WAL sub-bucket row through unchanged.</item>
-    ///   <item>For every symbol present in the live snapshot, emit a
-    ///   master row with
-    ///   <c>masterQty = liveAggregate - sumSubBucketWalQty</c> and
-    ///   <c>avgPrice = liveAggregate avg</c>. Drop when masterQty is
-    ///   zero.</item>
-    ///   <item>For symbols ABSENT from the live snapshot but with
-    ///   WAL sub-bucket activity, the live aggregate has netted to
-    ///   exactly zero. The invariant
-    ///   <c>master = liveAggregate - sumSub</c> still applies with
-    ///   <c>liveAggregate = 0</c>, so we synthesize a master row at
-    ///   <c>-sumSub</c> (dropping any raw WAL master row for the
-    ///   same symbol — it would double-count). Average price is
-    ///   set to <c>0m</c> because we no longer have a live anchor
-    ///   to reconstruct it and the raw WAL master avg only reflects
-    ///   today's master fills (not the seed contribution baked into
-    ///   <c>-sumSub</c>); surfacing it would be misleading.</item>
-    ///   <item>For symbols with a WAL master row but absent from the
-    ///   live snapshot AND no sub-bucket activity, keep the WAL
-    ///   master row as-is — its avg-cost is meaningful and the
-    ///   invariant degenerates to <c>master = walMaster</c>.</item>
-    /// </list>
+    /// PR #316 P1.1. Merge WAL-projected per-bucket position rows with
+    /// the caller's live MASTER-bucket snapshot. Under per-bucket
+    /// avg-cost basis (#316 P2) the invariant
+    /// <c>master = aggregate - sumSub</c> is exactly tracked by the
+    /// bucket store; the caller pre-computes it (qty + avg) and we
+    /// just emit those master rows alongside every WAL sub-bucket row.
+    /// WAL master rows are dropped — the live master snapshot is the
+    /// single source of truth for the master bucket because (a) it
+    /// already includes any host-startup seed (TradingHostStartup
+    /// applies seeds straight to PositionKeeper + the bucket basis,
+    /// never via WAL) and (b) its avg-cost was sourced from the
+    /// bucket-aware store and so is not polluted by sub-bucket fills.
     /// </summary>
     private static IReadOnlyList<PositionRowDto> MergeMasterWithSeedFallback(
         IReadOnlyList<PositionRowDto> walRows,
         IReadOnlyList<PositionRowDto> liveMasterSeedFallback)
     {
-        var subSumBySymbol = new Dictionary<string, long>(StringComparer.Ordinal);
-        var subRows = new List<PositionRowDto>();
-        var walMasterBySymbol = new Dictionary<string, PositionRowDto>(StringComparer.Ordinal);
+        var merged = new List<PositionRowDto>(walRows.Count + liveMasterSeedFallback.Count);
         foreach (var row in walRows)
         {
-            if (row.SubAccountId is null)
-            {
-                walMasterBySymbol[row.Symbol] = row;
-            }
-            else
-            {
-                subRows.Add(row);
-                subSumBySymbol[row.Symbol] = subSumBySymbol.TryGetValue(row.Symbol, out var prior)
-                    ? prior + row.NetQty
-                    : row.NetQty;
-            }
+            if (row.SubAccountId is null) continue;
+            merged.Add(row);
         }
 
-        var merged = new List<PositionRowDto>(subRows.Count + liveMasterSeedFallback.Count);
-        merged.AddRange(subRows);
-
-        var liveSymbols = new HashSet<string>(StringComparer.Ordinal);
         foreach (var live in liveMasterSeedFallback)
         {
             if (live.SubAccountId is not null) continue; // defensive: snapshot is master-only
-            liveSymbols.Add(live.Symbol);
-            var subSum = subSumBySymbol.TryGetValue(live.Symbol, out var s) ? s : 0;
-            var masterQty = live.NetQty - subSum;
-            if (masterQty == 0) continue;
-            merged.Add(new PositionRowDto(live.Symbol, masterQty, live.AvgPrice, null));
-        }
-
-        // For symbols absent from the live snapshot, the live
-        // aggregate netted to zero. Two sub-cases:
-        //   (a) Sub-bucket WAL activity exists → the invariant
-        //       master = liveAggregate - sumSub still holds with
-        //       liveAggregate = 0, so synthesize master = -sumSub.
-        //       Any raw WAL master row for the same symbol is
-        //       dropped — adding it would double-count the seed
-        //       that already cancelled inside the live aggregate.
-        //       AvgPrice is zeroed: we have no live anchor to
-        //       reconstruct it, and the WAL master avg only
-        //       describes today's master fills (omits the seed),
-        //       so surfacing it would mislead.
-        //   (b) No sub activity → preserve the raw WAL master row
-        //       (its avg-cost is self-consistent and the formula
-        //       degenerates to master = walMaster).
-        foreach (var kv in subSumBySymbol)
-        {
-            if (liveSymbols.Contains(kv.Key)) continue;
-            var masterQty = -kv.Value;
-            if (masterQty == 0) continue;
-            merged.Add(new PositionRowDto(kv.Key, masterQty, 0m, null));
-        }
-
-        foreach (var kv in walMasterBySymbol)
-        {
-            if (liveSymbols.Contains(kv.Key)) continue;
-            if (subSumBySymbol.ContainsKey(kv.Key)) continue;
-            merged.Add(kv.Value);
+            if (live.NetQty == 0) continue;
+            merged.Add(new PositionRowDto(live.Symbol, live.NetQty, live.AvgPrice, null));
         }
 
         merged.Sort(static (a, b) =>
