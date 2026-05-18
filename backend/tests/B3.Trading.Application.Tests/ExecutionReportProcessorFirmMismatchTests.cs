@@ -124,4 +124,153 @@ public class ExecutionReportProcessorFirmMismatchTests
         Assert.Equal(OrderStatus.Filled, order.Status);
         Assert.Equal(100, positions.GetOrCreate("FIRM01", owner, "PETR4").NetQuantity);
     }
+
+    // ---------------- PR #317 P1: replace-lifecycle bypass guard ----------------
+
+    private static OrderReplacementIntent BuildIntent(ulong origId, ulong newId, string owner, string firmId, long newQty = 200, decimal newPrice = 30m) =>
+        new(
+            OriginalClOrdId: origId,
+            NewClOrdId: newId,
+            Owner: new EndClientId(owner),
+            Symbol: "PETR4",
+            SecurityId: 4321UL,
+            Side: OrderSide.Buy,
+            Type: OrderType.Limit,
+            NewQuantity: newQty,
+            NewPrice: newPrice,
+            FirmId: firmId,
+            ParentAlgoId: null,
+            AlgoSliceSeq: null);
+
+    private static (ExecutionReportProcessor proc, OrderOwnershipMap own, WorkingOrderBook book,
+                    PendingReplacementRegistry reg, CapturingSink sink) BuildProcWithReg()
+    {
+        var ownership = new OrderOwnershipMap();
+        var book = new WorkingOrderBook();
+        var positions = new PositionKeeper();
+        var sink = new CapturingSink();
+        var reg = new PendingReplacementRegistry();
+        var proc = new ExecutionReportProcessor(
+            ownership, book, positions, sink,
+            new NoOpMarginProvider(), NullLogger<ExecutionReportProcessor>.Instance,
+            replacements: reg);
+        return (proc, ownership, book, reg, sink);
+    }
+
+    private static (MeterListener listener, Func<long> read) ListenMismatch()
+    {
+        long count = 0;
+        var listener = new MeterListener();
+        listener.InstrumentPublished = (inst, l) =>
+        {
+            if (inst.Meter.Name == "B3.Trading" && inst.Name == "trading.er.firm_mismatch_total")
+                l.EnableMeasurementEvents(inst);
+        };
+        listener.SetMeasurementEventCallback<long>((_, value, _, _) => Interlocked.Add(ref count, value));
+        listener.Start();
+        return (listener, () => Interlocked.Read(ref count));
+    }
+
+    [Fact]
+    public void Rejected_forPendingReplacement_withMismatchingFirm_doesNotConsumeIntent_orMutateOriginal()
+    {
+        // ER_Rejected for the new ClOrdID of an in-flight modify
+        // normally drives the replace-reject branch via TryConsume.
+        // With a cross-firm envelope, the hoisted guard must short-
+        // circuit BEFORE the consume so the intent stays parked and
+        // the still-Working original is left untouched.
+        var (proc, ownership, book, reg, sink) = BuildProcWithReg();
+        var owner = new EndClientId("alice");
+        var orig = new Order(1UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 10m, firmId: "FIRM01");
+        book.TryAdd(orig);
+        ownership.Register(1UL, owner);
+        Assert.True(reg.TryAdd(BuildIntent(1UL, 2UL, "alice", "FIRM01")));
+
+        var (listener, read) = ListenMismatch();
+        proc.Apply(2UL, ExecKind.Rejected, leaves: 0, cumQty: 0, lastQty: 0, lastPx: 0m,
+            rejectReason: "wrong-firm", envelopeFirmId: "FIRM02");
+        listener.Dispose();
+
+        Assert.Equal(1, read());
+        // Intent untouched — second consume still succeeds.
+        Assert.True(reg.TryConsume(2UL, out var stillThere));
+        Assert.NotNull(stillThere);
+        Assert.Equal(OrderStatus.PendingNew, orig.Status);
+        Assert.Empty(sink.Events);
+    }
+
+    [Fact]
+    public void Replaced_forPendingReplacement_withMismatchingFirm_doesNotConsumeIntent_orHydrateNew()
+    {
+        var (proc, ownership, book, reg, sink) = BuildProcWithReg();
+        var owner = new EndClientId("alice");
+        var orig = new Order(10UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 10m, firmId: "FIRM01");
+        book.TryAdd(orig);
+        ownership.Register(10UL, owner);
+        Assert.True(reg.TryAdd(BuildIntent(10UL, 11UL, "alice", "FIRM01")));
+
+        var (listener, read) = ListenMismatch();
+        proc.Apply(11UL, ExecKind.Replaced, leaves: 200, cumQty: 0, lastQty: 0, lastPx: 0m,
+            rejectReason: null, origClOrdId: 10UL, envelopeFirmId: "FIRM02");
+        listener.Dispose();
+
+        Assert.Equal(1, read());
+        // Intent NOT consumed.
+        Assert.True(reg.TryConsume(11UL, out var stillThere));
+        Assert.NotNull(stillThere);
+        // Original NOT terminalised.
+        Assert.Equal(OrderStatus.PendingNew, orig.Status);
+        // Replacement NOT booked.
+        Assert.False(book.TryGet(11UL, out _));
+        Assert.Empty(sink.Events);
+    }
+
+    [Fact]
+    public void CancelAsReplace_withMismatchingFirm_doesNotConsumeIntent_orMutateOriginal()
+    {
+        // Issue #241 priority-lost: venue sends Canceled under the new
+        // ClOrdID; processor would normally funnel through
+        // ApplyReplaceAccepted via the third intercept. Cross-firm
+        // envelope must short-circuit BEFORE TryConsume.
+        var (proc, ownership, book, reg, sink) = BuildProcWithReg();
+        var owner = new EndClientId("alice");
+        var orig = new Order(777UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 10m, firmId: "FIRM01");
+        book.TryAdd(orig);
+        ownership.Register(777UL, owner);
+        Assert.True(reg.TryAdd(BuildIntent(777UL, 778UL, "alice", "FIRM01", newQty: 150)));
+
+        var (listener, read) = ListenMismatch();
+        proc.Apply(778UL, ExecKind.Canceled, leaves: 0, cumQty: 0, lastQty: 0, lastPx: 0m,
+            rejectReason: null, origClOrdId: 777UL, envelopeFirmId: "FIRM02");
+        listener.Dispose();
+
+        Assert.Equal(1, read());
+        Assert.True(reg.TryConsume(778UL, out var stillThere));
+        Assert.NotNull(stillThere);
+        Assert.Equal(OrderStatus.PendingNew, orig.Status);
+        Assert.False(book.TryGet(778UL, out _));
+        Assert.Empty(sink.Events);
+    }
+
+    [Fact]
+    public void Rejected_forPendingReplacement_withMatchingFirm_stillFlowsThroughReplaceReject()
+    {
+        // Happy-path regression: matching FirmId on a Rejected ER for
+        // an in-flight modify still consumes the intent and routes to
+        // ApplyReplaceRejected. Confirms the hoisted guard is permissive
+        // when the firms agree.
+        var (proc, ownership, book, reg, sink) = BuildProcWithReg();
+        var owner = new EndClientId("alice");
+        var orig = new Order(20UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 10m, firmId: "FIRM01");
+        book.TryAdd(orig);
+        ownership.Register(20UL, owner);
+        Assert.True(reg.TryAdd(BuildIntent(20UL, 21UL, "alice", "FIRM01")));
+
+        proc.Apply(21UL, ExecKind.Rejected, leaves: 0, cumQty: 0, lastQty: 0, lastPx: 0m,
+            rejectReason: "tick-out-of-range", envelopeFirmId: "FIRM01");
+
+        // Intent consumed by the replace-reject branch.
+        Assert.False(reg.TryGet(21UL, out _));
+        Assert.Equal(OrderStatus.PendingNew, orig.Status);
+    }
 }
