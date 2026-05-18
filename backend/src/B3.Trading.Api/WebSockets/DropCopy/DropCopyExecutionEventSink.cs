@@ -52,6 +52,15 @@ public sealed class DropCopyExecutionEventSink : IExecutionFanOutSink, IExecutio
     private readonly CancellationTokenSource _cts = new();
     private Task? _drainTask;
     private int _stopped;
+    // Pass-4 review (#323) P2: itemDropped fires from inside
+    // IExecutionFanOutSink.Enqueue, which the dispatcher invokes UNDER
+    // its global dispatch lock. A sustained overflow burst would otherwise
+    // synchronously re-walk every firm + subscriber per dropped item and
+    // stall unrelated execution dispatch. Coalesce: only the first drop in
+    // each overflow burst triggers DisconnectAllForResync. The drain loop
+    // resets the flag after draining the backlog so a later, distinct
+    // overflow re-triggers the disconnect for fresh subscribers.
+    private int _overflowSignaled;
 
     public DropCopyExecutionEventSink(
         DropCopyManager manager,
@@ -78,6 +87,7 @@ public sealed class DropCopyExecutionEventSink : IExecutionFanOutSink, IExecutio
                 // every active subscriber for resync. Clients reconnect
                 // and pick up a fresh snapshot from a known state.
                 MetricsRegistry.WsHubFanOutDropped.Add(1);
+                if (Interlocked.Exchange(ref _overflowSignaled, 1) != 0) return;
                 try { _manager.DisconnectAllForResync("drop_copy_sink_overflow_resync_required"); }
                 catch (Exception ex) { _logger?.LogWarning(ex, "drop-copy resync-disconnect on sink overflow failed"); }
             });
@@ -132,6 +142,9 @@ public sealed class DropCopyExecutionEventSink : IExecutionFanOutSink, IExecutio
                             ev.FirmId, ev.ClOrdId);
                     }
                 }
+                // Backlog cleared — arm the overflow signal for any
+                // subsequent (independent) burst with fresh subscribers.
+                Interlocked.Exchange(ref _overflowSignaled, 0);
             }
         }
         catch (OperationCanceledException) { /* shutdown */ }
