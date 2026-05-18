@@ -143,17 +143,43 @@ public static class CvmReportEndpoints
             // No fills for the requested date — emit a denied-style
             // audit so an attacker probing dates can be spotted, and
             // 404 (consistent with the rest of the firm-scoped read
-            // surface).
-            EmitAudit(audit, ctx, reportType, targetFirm, date, rowCount: 0,
-                outcome: AuditOutcomes.Denied, reasonCode: "no_rows", actorUserId);
+            // surface). Pass-1 review (#325) P2: wrap audit emit so a
+            // WAL-backpressured audit surfaces as HTTP 503 instead of
+            // an unhandled 500 (mirrors AdminEndpoints pattern).
+            try
+            {
+                EmitAudit(audit, ctx, reportType, targetFirm, date, rowCount: 0,
+                    outcome: AuditOutcomes.Denied, reasonCode: "no_rows", actorUserId);
+            }
+            catch (WalBackpressureException ex)
+            {
+                MetricsRegistry.WalBackpressure.Add(1,
+                    new KeyValuePair<string, object?>("call_site", "reports.cvm.audit.no_rows"));
+                return Results.Json(
+                    new { error = "system busy (WAL backpressure)", detail = ex.Message },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
             return Results.NotFound();
         }
 
         // Audit-first ordering: emit BEFORE streaming the body so a
-        // WAL-backpressured audit (HTTP 503 via LogOrFail's exception
-        // propagation) cannot leave a downloaded report unaudited.
-        EmitAudit(audit, ctx, reportType, targetFirm, date, rowCount,
-            outcome: AuditOutcomes.Success, reasonCode: null, actorUserId);
+        // WAL-backpressured audit (HTTP 503) cannot leave a
+        // downloaded report unaudited. Pass-1 review (#325) P2:
+        // translate WalBackpressureException → 503 so the contract
+        // holds across audit and download paths.
+        try
+        {
+            EmitAudit(audit, ctx, reportType, targetFirm, date, rowCount,
+                outcome: AuditOutcomes.Success, reasonCode: null, actorUserId);
+        }
+        catch (WalBackpressureException ex)
+        {
+            MetricsRegistry.WalBackpressure.Add(1,
+                new KeyValuePair<string, object?>("call_site", "reports.cvm.audit.success"));
+            return Results.Json(
+                new { error = "system busy (WAL backpressure)", detail = ex.Message },
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
 
         MetricsRegistry.CvmReportsGenerated.Add(1,
             new KeyValuePair<string, object?>("type", reportType.WireCode()),

@@ -57,14 +57,18 @@ public sealed class CvmReportWriter
 
     private readonly CvmReportOptions _options;
 
-    public CvmReportWriter() : this(new CvmReportOptions()) { }
+    public CvmReportWriter() : this(new CvmReportOptions { OwnerHashSalt = CvmReportOptions.TestOnlySalt }) { }
 
     public CvmReportWriter(IOptions<CvmReportOptions> options)
-        : this(options?.Value ?? new CvmReportOptions()) { }
+        : this(options?.Value ?? new CvmReportOptions { OwnerHashSalt = CvmReportOptions.TestOnlySalt }) { }
 
     public CvmReportWriter(CvmReportOptions options)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
+        if (string.IsNullOrEmpty(_options.OwnerHashSalt))
+            throw new ArgumentException(
+                "CvmReportOptions.OwnerHashSalt must be set (use CvmReportOptions.TestOnlySalt in tests).",
+                nameof(options));
     }
 
     /// <summary>

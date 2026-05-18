@@ -138,6 +138,11 @@ public class TestAppFactory : WebApplicationFactory<Program>
                 // Tests in TokenBucketRateLimitTests opt in explicitly
                 // via WithOverrides.
                 ["Trading:RateLimit:Enabled"] = "false",
+                // Q4.8 (#308) pass-2. CVM 35/505 LGPD opacification salt is
+                // required at startup (Pass-1 P1 fix). Tests bind the
+                // TestOnly sentinel; production hosts MUST configure a
+                // real secret — see CvmReportOptions.Validate.
+                ["Trading:Reports:Cvm:OwnerHashSalt"] = B3.Trading.Application.Reports.Cvm.CvmReportOptions.TestOnlySalt,
             });
 
             if (_configOverrides is not null)

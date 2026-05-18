@@ -115,6 +115,20 @@ public sealed class TokenBucketRateLimitOptions
             Burst = 10,
             RefillPerSecond = 5,
         },
+        // Q4.8 (#308) pass-2. CVM 35/505 reports do a full WAL scan
+        // per request (segment-level date filtering is a TODO). A
+        // compliance/admin caller running many concurrent requests
+        // could pin a worker thread + memory on year-long historical
+        // scans, so cap the per-user rate well below the generic
+        // /reports default. Real-world cadence is at most one
+        // download per report-date per day per firm.
+        new TokenBucketRule
+        {
+            PathPattern = "/reports/cvm/",
+            Methods = new() { "GET", "HEAD" },
+            Burst = 3,
+            RefillPerSecond = 1,
+        },
         // Generic write/read fall-through. Catch-all patterns kick in
         // when no explicit rule matched the request. Read defaults
         // are deliberately generous since they are typically polling

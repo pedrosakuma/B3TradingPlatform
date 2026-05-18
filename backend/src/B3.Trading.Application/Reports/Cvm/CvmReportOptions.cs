@@ -14,6 +14,14 @@ public sealed class CvmReportOptions
     public const string SectionName = "Trading:Reports:Cvm";
 
     /// <summary>
+    /// Sentinel value used by tests / dev. <see cref="Validate"/>
+    /// rejects this in non-Test environments so a missing operator
+    /// configuration fails fast at startup rather than shipping an
+    /// effectively-unsalted hash to the regulator-facing XML.
+    /// </summary>
+    public const string TestOnlySalt = "test-only-cvm-salt-DO-NOT-USE-IN-PRODUCTION";
+
+    /// <summary>
     /// Per-process salt mixed into the SHA-256 hash that opacifies
     /// every <c>EndClientId</c> before it lands in the exported XML
     /// (LGPD §11 — pseudonymisation of personal data). The salt is
@@ -23,13 +31,41 @@ public sealed class CvmReportOptions
     /// firms or days — which prevents trivial cross-report
     /// correlation by an adversary that obtained two reports.
     ///
-    /// <para>Defaults to a build-time constant. Operators MAY (and in
-    /// production SHOULD) override via configuration with a long,
-    /// random secret to harden the opacification — the default is
-    /// adequate for tests and is documented here so the failure
-    /// mode is obvious (a leaked default reveals nothing the
-    /// regulator-facing XML didn't already expose, but rotating it
-    /// invalidates cross-day owner linkability).</para>
+    /// <para>Pass-1 review (#325) P1. No default — operators MUST set
+    /// a long, random secret via <c>Trading:Reports:Cvm:OwnerHashSalt</c>
+    /// (file/env/secret-store). <see cref="Validate"/> is invoked at
+    /// startup outside Test environments and fails the host if this
+    /// is missing, empty, or equal to <see cref="TestOnlySalt"/>.
+    /// Tests bind <see cref="TestOnlySalt"/> explicitly so the unit
+    /// path stays deterministic without weakening production.</para>
     /// </summary>
-    public string OwnerHashSalt { get; set; } = "b3-trading-platform/cvm-35-505/v1";
+    public string OwnerHashSalt { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Validates the bound options. Call from composition once the
+    /// host environment is known. Mirrors <c>AuthSigningKeyValidator</c>:
+    /// the salt is required in every environment (empty fails fast,
+    /// even in Development, so the failure mode is obvious during the
+    /// dev loop), and the <see cref="TestOnlySalt"/> sentinel is only
+    /// accepted in Development (where the integration test host
+    /// boots). Throws <see cref="InvalidOperationException"/> with a
+    /// clear remediation message on either failure.
+    /// </summary>
+    public void Validate(string environmentName)
+    {
+        if (string.IsNullOrWhiteSpace(OwnerHashSalt))
+        {
+            throw new InvalidOperationException(
+                "Trading:Reports:Cvm:OwnerHashSalt is required. Configure a long, random secret " +
+                "via environment/secret-store (e.g. Trading__Reports__Cvm__OwnerHashSalt). " +
+                "Tests may use CvmReportOptions.TestOnlySalt explicitly.");
+        }
+        var isDev = string.Equals(environmentName, "Development", StringComparison.OrdinalIgnoreCase);
+        if (!isDev && string.Equals(OwnerHashSalt, TestOnlySalt, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "Trading:Reports:Cvm:OwnerHashSalt is set to the TestOnlySalt sentinel outside Development. " +
+                "Configure a real secret before starting the host.");
+        }
+    }
 }

@@ -103,6 +103,14 @@ internal static class TradingHostStartup
         var listenerWarning = EntryPointListenerBootGuard.BuildWarning(app.Environment.EnvironmentName, listenerOpts);
         if (listenerWarning is not null)
             app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("EntryPointListener").LogWarning("{Warning}", listenerWarning);
+
+        // Pass-1 review (#325) P1. CVM 35/505 LGPD opacification salt is
+        // required everywhere; the TestOnly sentinel is only accepted in
+        // Development (mirrors AuthSigningKeyValidator). Fail fast so an
+        // unconfigured production host never ships effectively-unsalted
+        // owner hashes in the regulator-facing XML.
+        var cvmOpts = app.Services.GetRequiredService<IOptions<B3.Trading.Application.Reports.Cvm.CvmReportOptions>>().Value;
+        cvmOpts.Validate(app.Environment.EnvironmentName);
     }
 
     /// <summary>

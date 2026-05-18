@@ -94,6 +94,14 @@ public sealed class CvmReportSource
         if (string.IsNullOrWhiteSpace(firmId))
             throw new ArgumentException("firmId must be non-empty", nameof(firmId));
 
+        // Pass-1 review (#325) P1. CVM daily reports are anchored to
+        // the São Paulo business day (UTC-3 / UTC-2 during DST). A
+        // naive UTC-date filter would split BRT trading-day fills
+        // across the midnight UTC boundary. Resolve the [start, end)
+        // UTC window for the requested calendar date in BRT exactly
+        // once and filter by half-open interval.
+        var (windowStartUtc, windowEndUtc) = SaoPauloBusinessDayUtcWindow(date);
+
         // First pass: build a ClOrdId → submit-event map so we can
         // resolve owner + firm + symbol for every fill that lands
         // later in the WAL (or on the same day before the ER, though
@@ -116,7 +124,8 @@ public sealed class CvmReportSource
                 case ExecutionReportReceivedEvent er
                     when er.LastQuantity > 0
                          && (er.ExecKind == "Fill" || er.ExecKind == "PartialFill")
-                         && DateOnly.FromDateTime(er.TimestampUtc.UtcDateTime) == date:
+                         && er.TimestampUtc >= windowStartUtc
+                         && er.TimestampUtc < windowEndUtc:
                     fills.Add((seq, er));
                     break;
             }
@@ -174,5 +183,37 @@ public sealed class CvmReportSource
                 ExecutedAtUtc: er.TimestampUtc,
                 SubAccountId: submit.SubAccountId);
         }
+    }
+
+    /// <summary>
+    /// Pass-1 review (#325) P1. CVM reports use the São Paulo
+    /// business day, which is UTC-3 year-round (Brazil abolished DST
+    /// in 2019). Returns the half-open <c>[start, end)</c> UTC window
+    /// for a single SP calendar day so the WAL scan filters by
+    /// timestamp comparison without per-event timezone arithmetic.
+    /// Falls back to a fixed -03:00 offset if the IANA database is
+    /// unavailable on the host (e.g. minimal containers without
+    /// tzdata) so the report never silently mis-attributes fills.
+    /// </summary>
+    internal static (DateTimeOffset StartUtc, DateTimeOffset EndUtc) SaoPauloBusinessDayUtcWindow(DateOnly date)
+    {
+        TimeZoneInfo? tz = null;
+        foreach (var id in new[] { "America/Sao_Paulo", "E. South America Standard Time" })
+        {
+            try { tz = TimeZoneInfo.FindSystemTimeZoneById(id); break; }
+            catch (TimeZoneNotFoundException) { }
+            catch (InvalidTimeZoneException) { }
+        }
+        var startLocal = new DateTime(date.Year, date.Month, date.Day, 0, 0, 0, DateTimeKind.Unspecified);
+        var endLocal = startLocal.AddDays(1);
+        if (tz is not null)
+        {
+            var startUtc = TimeZoneInfo.ConvertTimeToUtc(startLocal, tz);
+            var endUtc = TimeZoneInfo.ConvertTimeToUtc(endLocal, tz);
+            return (new DateTimeOffset(startUtc, TimeSpan.Zero), new DateTimeOffset(endUtc, TimeSpan.Zero));
+        }
+        var sp = TimeSpan.FromHours(-3);
+        return (new DateTimeOffset(startLocal, sp).ToUniversalTime(),
+                new DateTimeOffset(endLocal, sp).ToUniversalTime());
     }
 }

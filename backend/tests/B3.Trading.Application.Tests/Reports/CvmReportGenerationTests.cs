@@ -247,8 +247,8 @@ public class CvmReportGenerationTests
         var day = new DateOnly(2026, 5, 18);
         var t0 = new DateTimeOffset(2026, 5, 18, 12, 0, 0, TimeSpan.Zero);
         store.Append(Submit(501UL, Firm01, "alice", "PETR4", "Buy", 10, 30m, t0));
-        store.Append(Fill(501UL, "Fill", 10, 10, 30m, Firm01, new DateTimeOffset(2026, 5, 17, 23, 0, 0, TimeSpan.Zero))); // day - 1
-        store.Append(Fill(501UL, "Fill", 10, 20, 30m, Firm01, new DateTimeOffset(2026, 5, 19, 1, 0, 0, TimeSpan.Zero))); // day + 1
+        store.Append(Fill(501UL, "Fill", 10, 10, 30m, Firm01, new DateTimeOffset(2026, 5, 18, 2, 0, 0, TimeSpan.Zero))); // 23:00 BRT day - 1
+        store.Append(Fill(501UL, "Fill", 10, 20, 30m, Firm01, new DateTimeOffset(2026, 5, 19, 4, 0, 0, TimeSpan.Zero))); // 01:00 BRT day + 1
 
         var doc = await GenerateAsync(writer, source, CvmReportType.Cvm35, Firm01, day, t0.AddHours(1));
         XNamespace ns = CvmReportWriter.Namespace;
@@ -307,5 +307,46 @@ public class CvmReportGenerationTests
         Assert.Single(tx);
         Assert.Equal("Fill", "Fill"); // documented: ExecKind not in XML; we just assert the single transaction is the real fill
         Assert.Equal("601:10", tx[0].Element(ns + "FillId")!.Value);
+    }
+
+    [Fact]
+    public async Task ReportDay_FiltersOnSaoPauloBusinessDay_NotUtcDay()
+    {
+        // Pass-1 review (#325) P1. CVM days are São Paulo (UTC-3).
+        // A fill at 23:30 BRT on 2026-05-18 lands at 02:30 UTC on
+        // 2026-05-19; it MUST appear in the 2026-05-18 report. A fill
+        // at 02:30 UTC on 2026-05-18 (= 23:30 BRT on 2026-05-17) must
+        // NOT appear in the 2026-05-18 report.
+        var (source, writer, store) = BuildFixture();
+        var day = new DateOnly(2026, 5, 18);
+        var submitTs = new DateTimeOffset(2026, 5, 18, 0, 0, 0, TimeSpan.Zero);
+
+        store.Append(Submit(700UL, Firm01, "alice", "PETR4", "Buy", 10, 30m, submitTs));
+        store.Append(Submit(701UL, Firm01, "alice", "PETR4", "Buy", 10, 30m, submitTs));
+
+        // 700 fills late-BRT on the requested day (02:30 UTC on day+1).
+        store.Append(Fill(700UL, "Fill", 10, 10, 30m, Firm01,
+            new DateTimeOffset(2026, 5, 19, 2, 30, 0, TimeSpan.Zero)));
+        // 701 fills late-BRT on the PREVIOUS day (02:30 UTC of requested day).
+        store.Append(Fill(701UL, "Fill", 10, 10, 31m, Firm01,
+            new DateTimeOffset(2026, 5, 18, 2, 30, 0, TimeSpan.Zero)));
+
+        var doc = await GenerateAsync(writer, source, CvmReportType.Cvm35, Firm01, day,
+            new DateTimeOffset(2026, 5, 19, 12, 0, 0, TimeSpan.Zero));
+        XNamespace ns = CvmReportWriter.Namespace;
+        var tx = doc.Root!.Element(ns + "Transactions")!.Elements(ns + "Transaction").ToList();
+        Assert.Single(tx);
+        Assert.Equal("700:10", tx[0].Element(ns + "FillId")!.Value);
+    }
+
+    [Fact]
+    public void SaoPauloBusinessDayUtcWindow_IsUtcMinus3()
+    {
+        // Brazil abolished DST in 2019, so the offset is fixed UTC-3
+        // year-round. Window must be [day 03:00Z, (day+1) 03:00Z).
+        var date = new DateOnly(2026, 5, 18);
+        var (startUtc, endUtc) = CvmReportSource.SaoPauloBusinessDayUtcWindow(date);
+        Assert.Equal(new DateTimeOffset(2026, 5, 18, 3, 0, 0, TimeSpan.Zero), startUtc);
+        Assert.Equal(new DateTimeOffset(2026, 5, 19, 3, 0, 0, TimeSpan.Zero), endUtc);
     }
 }
