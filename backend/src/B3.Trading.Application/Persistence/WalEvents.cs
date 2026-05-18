@@ -315,6 +315,17 @@ public sealed record ExecutionReportReceivedEvent : WalEvent
     /// ClOrdID (which has no in-memory order).
     /// </summary>
     public ulong OrigClOrdId { get; init; }
+    /// <summary>
+    /// PR #317 P1. Firm the ER arrived on at the wire (populated by
+    /// <c>B3EntryPointClientGateway</c> / <c>MockEntryPointClient</c>).
+    /// Nullable + non-required for back-compat with legacy WAL events
+    /// written before #317 — a null value on replay means "skip the
+    /// cross-firm sanity check" so existing logs hydrate unchanged.
+    /// On the live path, <c>ExecutionReportProcessor.Apply</c> rejects
+    /// an ER whose <c>FirmId</c> mismatches the resolved order's firm
+    /// (counted on <c>trading.er.firm_mismatch_total</c>).
+    /// </summary>
+    public string? FirmId { get; init; }
 }
 
 /// <summary>

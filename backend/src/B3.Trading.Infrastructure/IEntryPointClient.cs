@@ -99,4 +99,17 @@ public sealed record ExecutionReportEnvelope(
     long LastQuantity,
     decimal LastPrice,
     string? RejectReason,
-    ulong OrigClOrdId = 0);
+    ulong OrigClOrdId = 0,
+    /// <summary>
+    /// PR #317 P1. Source firm the ER arrived on — populated by the
+    /// inbound wire path (<see cref="B3EntryPointClientGateway"/>'s
+    /// translation + <see cref="MockEntryPointClient"/> / simulator).
+    /// Carried end-to-end through the WAL
+    /// (<c>ExecutionReportReceivedEvent.FirmId</c>) and verified by
+    /// <c>ExecutionReportProcessor.Apply</c> against the resolved
+    /// order's <c>FirmId</c>: a mismatch is rejected (no state
+    /// mutation) + counted on <c>trading.er.firm_mismatch_total</c>.
+    /// Nullable so legacy WAL events written before #317 replay
+    /// unchanged — a null envelope FirmId skips the cross-firm check.
+    /// </summary>
+    string? FirmId = null);

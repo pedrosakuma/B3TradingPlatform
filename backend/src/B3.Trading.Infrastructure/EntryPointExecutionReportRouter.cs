@@ -72,9 +72,10 @@ public sealed class EntryPointExecutionReportRouter : IDisposable
                     RejectReason = er.RejectReason,
                     Synthetic = false,
                     OrigClOrdId = er.OrigClOrdId,
+                    FirmId = er.FirmId,
                 },
                 fanOut => _processor.Apply(er.ClOrdId, kind, er.LeavesQuantity, er.CumulativeQuantity,
-                    er.LastQuantity, er.LastPrice, er.RejectReason, er.OrigClOrdId, fanOut));
+                    er.LastQuantity, er.LastPrice, er.RejectReason, er.OrigClOrdId, fanOut, envelopeFirmId: er.FirmId));
         }
         catch (WalBackpressureException)
         {
@@ -98,7 +99,7 @@ public sealed class EntryPointExecutionReportRouter : IDisposable
             // so holding the dispatcher lock involves no I/O.
             _dispatcher.RunExclusive(() =>
                 _processor.Apply(er.ClOrdId, kind, er.LeavesQuantity, er.CumulativeQuantity,
-                    er.LastQuantity, er.LastPrice, er.RejectReason, er.OrigClOrdId));
+                    er.LastQuantity, er.LastPrice, er.RejectReason, er.OrigClOrdId, envelopeFirmId: er.FirmId));
         }
     }
 }

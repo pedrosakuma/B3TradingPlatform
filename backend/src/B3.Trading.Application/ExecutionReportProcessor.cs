@@ -108,7 +108,7 @@ public sealed class ExecutionReportProcessor
     /// preserved so existing tests don't need rewiring.
     /// </para>
     /// </summary>
-    public void Apply(ulong clOrdId, ExecKind kind, long leaves, long cumQty, long lastQty, decimal lastPx, string? rejectReason, ulong origClOrdId = 0, Persistence.ExecutionFanOut? fanOut = null, bool isReplay = false, DateTimeOffset? eventTimestampUtc = null)
+    public void Apply(ulong clOrdId, ExecKind kind, long leaves, long cumQty, long lastQty, decimal lastPx, string? rejectReason, ulong origClOrdId = 0, Persistence.ExecutionFanOut? fanOut = null, bool isReplay = false, DateTimeOffset? eventTimestampUtc = null, string? envelopeFirmId = null)
     {
         // Slice 2 of #122: replace lifecycle early intercepts. Both
         // branches are gated on the registry having an intent recorded
@@ -193,6 +193,27 @@ public sealed class ExecutionReportProcessor
             // intercept (e.g. registry not wired or already consumed).
             MetricsRegistry.ExecutionReportsDroppedKnownOwnerMissingOrder.Add(1, KindTag(kind));
             _logger.LogError("ER for known owner {Owner} but missing order {ClOrdId} (orig={Orig}); dropping.", owner, clOrdId, origClOrdId);
+            return;
+        }
+
+        // PR #317 P1. Cross-firm guard: an ER arriving on the wrong
+        // firm gateway must not mutate this order's state. The
+        // envelope's FirmId is stamped by the inbound wire path
+        // (B3EntryPointClientGateway / MockEntryPointClient / the
+        // simulator endpoint) and carried verbatim into the WAL. We
+        // gate strictly on a non-null envelope value — legacy WAL
+        // events written before #317 (envelopeFirmId == null) replay
+        // unchanged so existing logs hydrate identically. Live wire
+        // ERs always carry a FirmId because every gateway is
+        // constructed per-firm.
+        if (envelopeFirmId is not null
+            && !string.Equals(envelopeFirmId, order.FirmId, StringComparison.Ordinal))
+        {
+            MetricsRegistry.ExecutionReportFirmMismatch.Add(1,
+                new KeyValuePair<string, object?>("exec_type", kind.ToString()));
+            _logger.LogWarning(
+                "ER firm mismatch for {ClOrdId} (orig={Orig}): envelope firm={EnvelopeFirm}, order firm={OrderFirm}; rejecting without state mutation.",
+                clOrdId, origClOrdId, envelopeFirmId, order.FirmId);
             return;
         }
 

@@ -169,7 +169,8 @@ public static class SimulatorEndpoint
             CumulativeQuantity: cum,
             LastQuantity: lastQty,
             LastPrice: lastPx,
-            RejectReason: rejectReason);
+            RejectReason: rejectReason,
+            FirmId: order.FirmId);
 
         mock.EmitExecutionReport(envelope);
 
