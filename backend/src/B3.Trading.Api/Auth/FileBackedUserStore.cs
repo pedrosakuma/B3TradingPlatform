@@ -124,6 +124,162 @@ public sealed class FileBackedUserStore : IUserStore
         }
     }
 
+    public bool TryUpdate(UserConfig user)
+    {
+        ArgumentNullException.ThrowIfNull(user);
+        if (string.IsNullOrWhiteSpace(user.Username)) return false;
+
+        lock (_writeGate)
+        {
+            // Env-seeded users: mutate in place (config remains
+            // authoritative for credentials; TOTP overlay survives only
+            // process lifetime — matches InMemoryUserStore).
+            if (_seeded.TryGetValue(user.Username, out var seeded))
+            {
+                seeded.Totp = user.Totp;
+                seeded.Require2FA = user.Require2FA;
+                return true;
+            }
+
+            if (!_runtime.ContainsKey(user.Username)) return false;
+            var previous = _runtime[user.Username];
+            _runtime[user.Username] = user;
+
+            try
+            {
+                PersistRuntimeUsersLocked();
+            }
+            catch (Exception ex)
+            {
+                // Roll the in-memory state back to the prior snapshot
+                // so we don't expose an unpersisted TOTP secret.
+                _runtime[user.Username] = previous;
+                _logger.LogError(ex,
+                    "FileBackedUserStore: failed to persist updated user {Username} to {Path}; " +
+                    "in-memory update rolled back.",
+                    user.Username, _filePath);
+                throw;
+            }
+
+            return true;
+        }
+    }
+
+    public bool TryRecordTotpUse(string username, long matchedStep, out UserConfig? updatedUser)
+    {
+        updatedUser = null;
+        if (string.IsNullOrWhiteSpace(username)) return false;
+
+        lock (_writeGate)
+        {
+            if (!TryGet(username, out var user) || user is null || user.Totp is null
+                || user.Totp.EnrolledAt is null)
+                return false;
+
+            if (user.Totp.LastUsedTimeStep is { } prev && matchedStep <= prev)
+                return false;
+
+            var previous = user.Totp.LastUsedTimeStep;
+            user.Totp.LastUsedTimeStep = matchedStep;
+
+            // Env-seeded users are mutated in place only — no disk
+            // write (config is authoritative on restart).
+            if (_seeded.ContainsKey(username))
+            {
+                updatedUser = user;
+                return true;
+            }
+
+            try
+            {
+                PersistRuntimeUsersLocked();
+            }
+            catch (Exception ex)
+            {
+                user.Totp.LastUsedTimeStep = previous;
+                _logger.LogError(ex,
+                    "FileBackedUserStore: failed to persist TOTP time step for {Username} to {Path}; " +
+                    "in-memory update rolled back.",
+                    username, _filePath);
+                throw;
+            }
+
+            updatedUser = user;
+            return true;
+        }
+    }
+
+    public RecoveryCodeConsumeResult TryConsumeRecoveryCode(string username, string codeHash, out UserConfig? updatedUser)
+    {
+        updatedUser = null;
+        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrEmpty(codeHash))
+            return RecoveryCodeConsumeResult.NotFound;
+
+        lock (_writeGate)
+        {
+            if (!TryGet(username, out var user) || user is null || user.Totp is null)
+                return RecoveryCodeConsumeResult.NotFound;
+
+            // Constant-time-ish scan; full pass so timing reveals
+            // nothing about which slot matched.
+            var idx = -1;
+            for (var i = 0; i < user.Totp.RecoveryCodes.Count; i++)
+            {
+                if (string.Equals(user.Totp.RecoveryCodes[i], codeHash, StringComparison.Ordinal))
+                    idx = i;
+            }
+            if (idx < 0)
+            {
+                for (var i = 0; i < user.Totp.ConsumedRecoveryCodes.Count; i++)
+                {
+                    if (string.Equals(user.Totp.ConsumedRecoveryCodes[i], codeHash, StringComparison.Ordinal))
+                        return RecoveryCodeConsumeResult.AlreadyConsumed;
+                }
+                return RecoveryCodeConsumeResult.NotFound;
+            }
+
+            var removed = user.Totp.RecoveryCodes[idx];
+            user.Totp.RecoveryCodes.RemoveAt(idx);
+
+            // Snapshot the consumed list so we can roll back atomically
+            // alongside the removal on a failed disk write.
+            var consumedBefore = new List<string>(user.Totp.ConsumedRecoveryCodes);
+            AppendConsumed(user.Totp, codeHash);
+
+            if (_seeded.ContainsKey(username))
+            {
+                updatedUser = user;
+                return RecoveryCodeConsumeResult.Consumed;
+            }
+
+            try
+            {
+                PersistRuntimeUsersLocked();
+            }
+            catch (Exception ex)
+            {
+                user.Totp.RecoveryCodes.Insert(idx, removed);
+                user.Totp.ConsumedRecoveryCodes.Clear();
+                user.Totp.ConsumedRecoveryCodes.AddRange(consumedBefore);
+                _logger.LogError(ex,
+                    "FileBackedUserStore: failed to persist recovery-code consumption for {Username} to {Path}; " +
+                    "in-memory update rolled back.",
+                    username, _filePath);
+                throw;
+            }
+
+            updatedUser = user;
+            return RecoveryCodeConsumeResult.Consumed;
+        }
+    }
+
+    private static void AppendConsumed(UserTotpConfig totp, string codeHash)
+    {
+        while (totp.ConsumedRecoveryCodes.Count >= UserTotpConfig.ConsumedRecoveryCodesCap)
+            totp.ConsumedRecoveryCodes.RemoveAt(0);
+        totp.ConsumedRecoveryCodes.Add(codeHash);
+    }
+
     private void LoadRuntimeUsers()
     {
         if (!File.Exists(_filePath))

@@ -7,7 +7,8 @@ import { defaultBackend, defaultMarketDataUrl, login, signup, submitOrder, cance
          runEod,
          listUserBotCredentials, createUserBotCredential, deleteUserBotCredential,
          getOrdersHistory, getExecutionsHistory, getPnlToday,
-         getStatement, downloadStatementCsv } from "./protocol.js";
+         getStatement, downloadStatementCsv,
+         verifyTotp, enrollTotp, disableTotp } from "./protocol.js";
 import { claimsFromToken } from "./jwt.js";
 import { validateOrder, pretradeWarnings, payloadKey } from "./validation.js";
 import * as state from "./state.js";
@@ -55,6 +56,9 @@ let expiryTimer = null;
 let warningTimer = null;
 let firmsPollTimer = null;
 let gatewayPollTimer = null;
+// #303. State for the in-flight 2FA challenge between /auth/login and
+// /auth/2fa/verify. Cleared on success / cancel / refresh.
+let pendingTotp = null; // { backend, username, remember, totpChallengeToken }
 
 function init() {
   document.getElementById("login-backend").placeholder = defaultBackend();
@@ -65,6 +69,20 @@ function init() {
   if (signupForm) signupForm.addEventListener("submit", onSignup);
   document.getElementById("login-go-signup")?.addEventListener("click", () => showSignupCard(true));
   document.getElementById("signup-go-login")?.addEventListener("click", () => showSignupCard(false));
+  // #303. 2FA second-factor step + Security panel.
+  document.getElementById("totp-form")?.addEventListener("submit", onTotpSubmit);
+  document.getElementById("totp-cancel")?.addEventListener("click", () => {
+    pendingTotp = null;
+    showTotpCard(false);
+  });
+  document.getElementById("security-open")?.addEventListener("click", openSecurityPanel);
+  document.getElementById("security-close")?.addEventListener("click", closeSecurityPanel);
+  document.getElementById("security-enroll-begin")?.addEventListener("click", onSecurityEnrollBegin);
+  document.getElementById("security-recovery-ack")?.addEventListener("change", (e) => {
+    document.getElementById("security-confirm").disabled = !e.target.checked;
+  });
+  document.getElementById("security-confirm")?.addEventListener("click", onSecurityEnrollConfirm);
+  document.getElementById("security-disable")?.addEventListener("click", onSecurityDisable);
   ui.bindUi();
   adminUi.bindAdminUi();
   botCredentialsUi.bindBotCredentialsUi();
@@ -166,23 +184,184 @@ async function onLogin(e) {
   ui.setLoginSubmitting(true);
   try {
     const resp = await login(backend, username, password);
-    const claims = claimsFromToken(resp.token);
-    const next = {
-      token: resp.token,
-      expiresAt: resp.expiresAt,
-      username,
-      backend,
-      role: claims.role,
-      firm: claims.firm,
-      remember,
-    };
-    sessionStore = remember ? localStorage : sessionStorage;
-    writeSession(next);
-    startSession(next);
+    // #303. Server may demand a TOTP code or a forced first-time
+    // enrollment before issuing a JWT. Stash context and switch cards.
+    if (resp && resp.requires2fa && resp.totpChallengeToken) {
+      pendingTotp = { backend, username, remember, totpChallengeToken: resp.totpChallengeToken };
+      showTotpCard(true);
+      return;
+    }
+    if (resp && resp.requires2faEnrollment && resp.enrollmentToken) {
+      // Force-enroll path: open enrollment immediately. We don't have a
+      // JWT yet, so we pass the enrollment token through to /auth/2fa/enroll.
+      pendingTotp = { backend, username, remember, enrollmentToken: resp.enrollmentToken };
+      await beginForcedEnrollment();
+      return;
+    }
+    finishLoginWithToken(resp, { backend, username, remember });
   } catch (err) {
     ui.setLoginError(err.message || "Login failed");
   } finally {
     ui.setLoginSubmitting(false);
+  }
+}
+
+function finishLoginWithToken(resp, { backend, username, remember }) {
+  const claims = claimsFromToken(resp.token);
+  const next = {
+    token: resp.token,
+    expiresAt: resp.expiresAt,
+    username,
+    backend,
+    role: claims.role,
+    firm: claims.firm,
+    remember,
+  };
+  sessionStore = remember ? localStorage : sessionStorage;
+  writeSession(next);
+  startSession(next);
+}
+
+function showTotpCard(show) {
+  const loginCard = document.getElementById("login-form");
+  const signupCard = document.getElementById("signup-form");
+  const totpCard = document.getElementById("totp-form");
+  if (!totpCard) return;
+  if (loginCard) loginCard.hidden = !!show;
+  if (signupCard) signupCard.hidden = true;
+  totpCard.hidden = !show;
+  const errEl = document.getElementById("totp-error");
+  if (errEl) { errEl.hidden = true; errEl.textContent = ""; }
+  if (show) document.getElementById("totp-code")?.focus();
+  else {
+    const codeEl = document.getElementById("totp-code");
+    if (codeEl) codeEl.value = "";
+  }
+}
+
+async function onTotpSubmit(e) {
+  e.preventDefault();
+  if (!pendingTotp || !pendingTotp.totpChallengeToken) return;
+  const code = document.getElementById("totp-code").value.trim();
+  const errEl = document.getElementById("totp-error");
+  if (errEl) { errEl.hidden = true; errEl.textContent = ""; }
+  const submitBtn = document.getElementById("totp-submit");
+  if (submitBtn) submitBtn.disabled = true;
+  try {
+    const resp = await verifyTotp(pendingTotp.backend, {
+      code,
+      totpChallengeToken: pendingTotp.totpChallengeToken,
+    });
+    const ctx = pendingTotp;
+    pendingTotp = null;
+    showTotpCard(false);
+    finishLoginWithToken(resp, { backend: ctx.backend, username: ctx.username, remember: ctx.remember });
+  } catch (err) {
+    if (errEl) { errEl.hidden = false; errEl.textContent = err.message || "Invalid code"; }
+  } finally {
+    if (submitBtn) submitBtn.disabled = false;
+  }
+}
+
+// ── Security panel (TOTP enrollment / disable) — #303 ───────────────
+function openSecurityPanel() {
+  const modal = document.getElementById("security-modal");
+  if (!modal || !session) return;
+  modal.hidden = false;
+  setSecurityError(null);
+  // We can't distinguish "enrolled" vs "not enrolled" without a probe
+  // endpoint, so show both controls and let the user choose: enrolling
+  // when already enrolled returns 409 (caught + surfaced); disabling
+  // when not enrolled returns 400. Keeps the FE thin.
+  document.getElementById("security-enroll-start").hidden = false;
+  document.getElementById("security-enroll-show").hidden = true;
+  document.getElementById("security-enrolled").hidden = false;
+  document.getElementById("security-status").textContent =
+    "Enroll to add a second factor, or disable an existing enrollment.";
+}
+
+function closeSecurityPanel() {
+  const modal = document.getElementById("security-modal");
+  if (modal) modal.hidden = true;
+  // Wipe the recovery codes from the DOM as soon as the user dismisses.
+  const pre = document.getElementById("security-recovery-codes");
+  if (pre) pre.textContent = "";
+  const ack = document.getElementById("security-recovery-ack");
+  if (ack) ack.checked = false;
+  const confirm = document.getElementById("security-confirm");
+  if (confirm) confirm.disabled = true;
+  pendingEnrollSecret = null;
+}
+
+function setSecurityError(msg) {
+  const el = document.getElementById("security-error");
+  if (!el) return;
+  if (!msg) { el.hidden = true; el.textContent = ""; return; }
+  el.hidden = false; el.textContent = msg;
+}
+
+let pendingEnrollSecret = null; // base32, only kept until confirm/cancel
+
+async function onSecurityEnrollBegin() {
+  if (!session) return;
+  setSecurityError(null);
+  try {
+    const resp = await enrollTotp(session.backend, session.token);
+    pendingEnrollSecret = resp.secret;
+    document.getElementById("security-otpauth-uri").value = resp.otpauthUri;
+    document.getElementById("security-secret").value = resp.secret;
+    document.getElementById("security-recovery-codes").textContent = resp.recoveryCodes.join("\n");
+    document.getElementById("security-enroll-start").hidden = true;
+    document.getElementById("security-enroll-show").hidden = false;
+    document.getElementById("security-recovery-ack").checked = false;
+    document.getElementById("security-confirm").disabled = true;
+  } catch (err) {
+    setSecurityError(err.message || "Enrollment failed");
+  }
+}
+
+async function onSecurityEnrollConfirm() {
+  if (!session) return;
+  const code = document.getElementById("security-confirm-code").value.trim();
+  if (!code) { setSecurityError("Code required"); return; }
+  setSecurityError(null);
+  try {
+    await verifyTotp(session.backend, { code, token: session.token });
+    document.getElementById("security-status").textContent = "2FA enrollment confirmed. Recovery codes are no longer recoverable — keep your saved copy.";
+    document.getElementById("security-enroll-show").hidden = true;
+    pendingEnrollSecret = null;
+  } catch (err) {
+    setSecurityError(err.message || "Verification failed");
+  }
+}
+
+async function onSecurityDisable() {
+  if (!session) return;
+  const code = document.getElementById("security-disable-code").value.trim();
+  if (!code) { setSecurityError("Code required"); return; }
+  setSecurityError(null);
+  try {
+    await disableTotp(session.backend, session.token, code);
+    document.getElementById("security-status").textContent = "2FA disabled.";
+  } catch (err) {
+    setSecurityError(err.message || "Disable failed");
+  }
+}
+
+async function beginForcedEnrollment() {
+  if (!pendingTotp || !pendingTotp.enrollmentToken) return;
+  try {
+    const resp = await enrollTotp(pendingTotp.backend, null, pendingTotp.enrollmentToken);
+    alert(
+      "Two-factor authentication is required on this account.\n\n" +
+      "Set up your authenticator with this URI:\n" + resp.otpauthUri + "\n\n" +
+      "Recovery codes (save now — shown ONCE):\n" + resp.recoveryCodes.join("\n") + "\n\n" +
+      "Then sign in again — you'll be asked for a 6-digit code."
+    );
+    pendingTotp = null;
+    showTotpCard(false);
+  } catch (err) {
+    ui.setLoginError(err.message || "Forced enrollment failed");
   }
 }
 
