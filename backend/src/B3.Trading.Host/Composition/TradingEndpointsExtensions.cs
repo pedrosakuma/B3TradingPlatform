@@ -37,6 +37,7 @@ public static class TradingEndpointsExtensions
         app.MapStatement();
         app.MapPolicy();
         app.MapAdmin();
+        app.MapAdminAudit();
         {
             // #188: simulator/er moved to Infrastructure (it's the only consumer
             // of MockEntryPointClient + ExecutionReportEnvelope). Mounted here

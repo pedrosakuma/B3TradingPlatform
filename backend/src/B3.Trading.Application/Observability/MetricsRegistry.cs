@@ -93,6 +93,19 @@ public static class MetricsRegistry
     public static readonly Counter<long> KillSwitchToggled =
         Meter.CreateCounter<long>("trading.kill_switch.toggled");
 
+    /// <summary>
+    /// Q4.5 (#305). Counts every audit envelope emitted via
+    /// <c>IAuditLogger</c>. Tags are bounded by design:
+    /// <c>event_type</c> is the canonical hierarchical string
+    /// (<c>auth.login.success</c>, <c>admin.config.change</c>, …),
+    /// <c>outcome</c> is one of <c>success|failure|denied</c>. NO
+    /// per-user / per-firm / per-IP tag — those are high-cardinality
+    /// dimensions that belong on the read side
+    /// (<c>/admin/audit</c>), not on a Prometheus counter.
+    /// </summary>
+    public static readonly Counter<long> AuditEventsTotal =
+        Meter.CreateCounter<long>("trading.audit.events_total");
+
     public static readonly Counter<long> SymbolHaltToggled =
         Meter.CreateCounter<long>("trading.symbol_halt.toggled");
 

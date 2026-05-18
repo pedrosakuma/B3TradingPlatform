@@ -54,6 +54,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(RealizedPnlEvent), "pnl.realized")]
 [JsonDerivedType(typeof(SubAccountCreatedEvent), "sub-account.created")]
 [JsonDerivedType(typeof(SubAccountDeactivatedEvent), "sub-account.deactivated")]
+[JsonDerivedType(typeof(AuditLogEvent), "audit.log")]
 public abstract record WalEvent
 {
     public DateTimeOffset TimestampUtc { get; init; } = DateTimeOffset.UtcNow;
@@ -1027,4 +1028,60 @@ public sealed record SubAccountDeactivatedEvent : WalEvent
     public required string FirmId { get; init; }
     public required string Id { get; init; }
     public string? ActorUserId { get; init; }
+}
+
+/// <summary>
+/// Q4.5 (#305). Single envelope for every operationally-significant
+/// audit event the trading host emits — login attempts, 2FA
+/// lifecycle, admin role/config mutations. Persisted on the WAL so
+/// the audit surface survives crash + restart and is reconstructible
+/// from segments alone (forensic replay). Additive type — older
+/// readers that don't know <c>"audit.log"</c> skip the record with
+/// a structured warning (see <see cref="WalEvent"/> remarks),
+/// preserving forward-compat.
+///
+/// <para>The <see cref="EventType"/> field is a hierarchical string
+/// (e.g. <c>"auth.login.success"</c>, <c>"admin.config.change"</c>)
+/// so the read-path filter supports both exact match and prefix
+/// glob (<c>"auth.*"</c>) without an enum bound on the WAL.
+/// <see cref="Details"/> carries call-site-specific context
+/// (endpoint path, target user, before/after summary) as a flat
+/// string map so the on-disk schema is stable as new capture sites
+/// land. Audit replay folds these into an in-memory ring-buffer
+/// keeper — see <c>AuditLogKeeper</c> — which is the source of
+/// truth for <c>GET /admin/audit</c>; no snapshot field is
+/// reserved (the keeper rehydrates from a WAL tail on recovery,
+/// bounded by its configured retention cap).</para>
+/// </summary>
+public sealed record AuditLogEvent : WalEvent
+{
+    /// <summary>Hierarchical event type, e.g. <c>auth.login.success</c>.</summary>
+    public required string EventType { get; init; }
+
+    /// <summary>Outcome class: <c>success</c>, <c>failure</c>, or <c>denied</c>.</summary>
+    public required string Outcome { get; init; }
+
+    /// <summary>Acting user's JWT subject when authenticated; null for anonymous capture sites (e.g. failed login of an unknown user).</summary>
+    public string? ActorUserId { get; init; }
+
+    /// <summary>Username the client presented at the capture site. May differ from <see cref="ActorUserId"/> on failed-login paths.</summary>
+    public string? ActorUsername { get; init; }
+
+    /// <summary>Firm assigned at the capture site (success branch) or the actor's firm claim. Null when not resolvable.</summary>
+    public string? ActorFirm { get; init; }
+
+    /// <summary>Role claim at the capture site. Null when not resolvable.</summary>
+    public string? ActorRole { get; init; }
+
+    /// <summary>Source IP from <c>HttpContext.Connection.RemoteIpAddress</c>, normalised to its string form. Null for non-HTTP capture sites.</summary>
+    public string? SourceIp { get; init; }
+
+    /// <summary>HTTP path being exercised at the capture site (e.g. <c>/auth/login</c>, <c>/admin/cash</c>). Null for non-HTTP capture sites.</summary>
+    public string? ResourcePath { get; init; }
+
+    /// <summary>Machine-readable reason code, especially for failure / denied outcomes (<c>unknown_user</c>, <c>bad_password</c>, <c>locked</c>, <c>2fa_wrong_code</c>, …).</summary>
+    public string? ReasonCode { get; init; }
+
+    /// <summary>Free-form per-capture-site context — endpoint args, before/after summaries, target user, etc. Bounded to small string values by convention so the WAL record stays compact.</summary>
+    public Dictionary<string, string>? Details { get; init; }
 }

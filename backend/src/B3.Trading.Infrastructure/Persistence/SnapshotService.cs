@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using B3.Trading.Application.Audit;
 using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
 using Microsoft.Extensions.Logging;
@@ -20,19 +21,28 @@ public sealed class PersistenceRecovery
     private readonly EventReplayer _replayer;
     private readonly SnapshotStore _snapshots;
     private readonly ILogger<PersistenceRecovery> _logger;
+    // Pass-1 review (#322) P1.1. Optional. When wired AND a snapshot
+    // is loaded, recovery does a pre-pass over the WAL filtered to
+    // AuditLogEvent for seq <= snapshot.Seq so the in-memory audit
+    // ring rehydrates the pre-snapshot history that the main replay
+    // (which starts at snapshot.Seq+1) cannot see. Cost is O(N) where
+    // N is total WAL events; the keeper's bounded ring caps memory.
+    private readonly AuditLogKeeper? _auditKeeper;
 
     public PersistenceRecovery(
         IEventStore store,
         StateSnapshotter snapshotter,
         EventReplayer replayer,
         SnapshotStore snapshots,
-        ILogger<PersistenceRecovery> logger)
+        ILogger<PersistenceRecovery> logger,
+        AuditLogKeeper? auditKeeper = null)
     {
         _store = store;
         _snapshotter = snapshotter;
         _replayer = replayer;
         _snapshots = snapshots;
         _logger = logger;
+        _auditKeeper = auditKeeper;
     }
 
     public async Task RunAsync(CancellationToken ct = default)
@@ -45,6 +55,30 @@ public sealed class PersistenceRecovery
             since = snap.Seq;
             _logger.LogInformation("Persistence recovery: restored snapshot at seq={Seq} ({Orders} orders, {Positions} positions).",
                 snap.Seq, snap.WorkingOrders.Count, snap.Positions.Count);
+
+            // Pass-1 review (#322) P1.1. Audit-only pre-pass for
+            // seq <= snapshot.Seq. The main replay below starts at
+            // since+1 and would otherwise leave the audit ring empty
+            // of pre-snapshot history (the keeper is not part of the
+            // snapshot envelope by design — see AuditLogKeeper doc).
+            // The ring is bounded so streaming the full prefix is
+            // safe; oldest entries silently fall off the head as the
+            // pre-pass scans forward.
+            if (_auditKeeper is not null && since > 0)
+            {
+                var rehydrated = 0;
+                await foreach (var (seq, evt) in _store.ReadFromAsync(0, ct).ConfigureAwait(false))
+                {
+                    if (seq > since) break;
+                    if (evt is AuditLogEvent ae)
+                    {
+                        _auditKeeper.Apply(seq, ae);
+                        rehydrated++;
+                    }
+                }
+                _logger.LogInformation("Persistence recovery: rehydrated {Count} audit envelopes from pre-snapshot WAL prefix (cap={Cap}).",
+                    rehydrated, _auditKeeper.Capacity);
+            }
         }
         else
         {
@@ -54,9 +88,8 @@ public sealed class PersistenceRecovery
         var replayed = 0;
         await foreach (var (seq, evt) in _store.ReadFromAsync(since, ct).ConfigureAwait(false))
         {
-            _replayer.Apply(evt);
+            _replayer.Apply(seq, evt);
             replayed++;
-            _ = seq;
         }
         // Q2.3 (#270) pass-3. After draining the WAL, materialise any
         // ER-fill fee synths that were not superseded by a durable

@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using B3.Trading.Api.Auth;
 using B3.Trading.Application;
+using B3.Trading.Application.Audit;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Domain;
 using Microsoft.AspNetCore.Builder;
@@ -40,7 +41,8 @@ public static class SubAccountsEndpoints
             SubAccountCreateRequest? req,
             HttpContext ctx,
             SubAccountsRegistry registry,
-            EventDispatcher dispatcher) =>
+            EventDispatcher dispatcher,
+            IAuditLogger audit) =>
         {
             if (req is null) return Results.BadRequest(new { error = "missing body" });
             SubAccountId id;
@@ -53,6 +55,29 @@ public static class SubAccountsEndpoints
             var actor = ctx.User.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
             try
             {
+                // Pass-1 review (#322) P1.2. Audit-first ordering —
+                // emit the operator's sub-account create intent
+                // BEFORE the WAL business event so a backpressured
+                // audit append refuses the registry mutation with
+                // 503 rather than committing a sub-account
+                // un-audited.
+                audit.LogOrFail(new AuditLogEvent
+                {
+                    EventType = AuditEventTypes.AdminSubAccountCreate,
+                    Outcome = AuditOutcomes.Success,
+                    ActorUserId = actor,
+                    ActorUsername = actor,
+                    ActorFirm = firm,
+                    ActorRole = ctx.User.FindFirstValue(JwtIssuer.RoleClaim),
+                    SourceIp = ctx.Connection.RemoteIpAddress?.ToString(),
+                    ResourcePath = "/sub-accounts",
+                    Details = new Dictionary<string, string>
+                    {
+                        ["firm"] = firm,
+                        ["sub_account_id"] = id.Value,
+                        ["display_name"] = req.DisplayName ?? "",
+                    },
+                });
                 dispatcher.Dispatch(
                     new SubAccountCreatedEvent
                     {
@@ -77,7 +102,8 @@ public static class SubAccountsEndpoints
             string id,
             HttpContext ctx,
             SubAccountsRegistry registry,
-            EventDispatcher dispatcher) =>
+            EventDispatcher dispatcher,
+            IAuditLogger audit) =>
         {
             SubAccountId sub;
             try { sub = new SubAccountId(id); }
@@ -91,6 +117,24 @@ public static class SubAccountsEndpoints
             var actor = ctx.User.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
             try
             {
+                // Pass-1 review (#322) P1.2. Audit-first ordering —
+                // see create handler above.
+                audit.LogOrFail(new AuditLogEvent
+                {
+                    EventType = AuditEventTypes.AdminSubAccountDeactivate,
+                    Outcome = AuditOutcomes.Success,
+                    ActorUserId = actor,
+                    ActorUsername = actor,
+                    ActorFirm = firm,
+                    ActorRole = ctx.User.FindFirstValue(JwtIssuer.RoleClaim),
+                    SourceIp = ctx.Connection.RemoteIpAddress?.ToString(),
+                    ResourcePath = $"/sub-accounts/{sub.Value}",
+                    Details = new Dictionary<string, string>
+                    {
+                        ["firm"] = firm,
+                        ["sub_account_id"] = sub.Value,
+                    },
+                });
                 dispatcher.Dispatch(
                     new SubAccountDeactivatedEvent
                     {
