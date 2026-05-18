@@ -47,12 +47,44 @@ public static class PnlEndpoints
             EndClientRegistry registry,
             PnlKeeper pnl,
             PositionKeeper positions,
-            IReferencePrice refPrice) =>
+            SubAccountPnlKeeper subPnl,
+            SubAccountsRegistry subAccounts,
+            IReferencePrice refPrice,
+            string? subAccount) =>
         {
             var sub = ctx.User.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)
                       ?? throw new InvalidOperationException("Authenticated request missing sub claim.");
             var owner = registry.Register(sub);
             Application.Observability.MetricsRegistry.PnlEndpointRequests.Add(1);
+            // Q4.1 (#301). With ?subAccount=X the response is restricted
+            // to the per-sub-account realized totals; the unrealized
+            // side is intentionally empty because per-sub-account
+            // avg-cost basis is not tracked in this slice (see PR
+            // body — deferred to a follow-up). Without the filter the
+            // legacy master-aggregate projection is returned.
+            if (!string.IsNullOrWhiteSpace(subAccount))
+            {
+                SubAccountId saId;
+                try { saId = new SubAccountId(subAccount); }
+                catch (ArgumentException ex)
+                {
+                    return Results.BadRequest(new { error = $"invalid subAccount: {ex.Message}" });
+                }
+                var firm = ctx.User.FindFirstValue(Auth.JwtIssuer.FirmClaim) ?? "default";
+                if (!subAccounts.TryGet(firm, saId.Value, out _))
+                    return Results.BadRequest(new { error = $"sub-account '{saId.Value}' is not registered for firm" });
+                var day = DateOnly.FromDateTime(DateTimeOffset.UtcNow.UtcDateTime);
+                var realized = new List<PnlRealizedEntry>();
+                decimal total = 0m;
+                foreach (var (symbol, value) in subPnl.ForSubAccountDay(owner.Value, saId, day))
+                {
+                    if (value == 0m) continue;
+                    realized.Add(new PnlRealizedEntry(symbol, value));
+                    total += value;
+                }
+                return Results.Ok(new PnlTodayDto(realized,
+                    Array.Empty<PnlUnrealizedEntry>(), total, 0m));
+            }
             var snap = PnlProjection.Build(owner, pnl, positions, refPrice);
             return Results.Ok(snap);
         });

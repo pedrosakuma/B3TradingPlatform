@@ -39,6 +39,8 @@ public sealed class ExecutionReportProcessor
     private readonly IFeeCalculator? _feeCalculator;
     private readonly FeeKeeper? _feeKeeper;
     private readonly PnlKeeper? _pnlKeeper;
+    private readonly SubAccountPositionKeeper? _subAccountPositions;
+    private readonly SubAccountPnlKeeper? _subAccountPnl;
     private readonly Persistence.EventDispatcher? _dispatcher;
     private readonly PendingReplacementRegistry? _replacements;
     private readonly Risk.IReplaceMarginCoordinator? _replaceMargin;
@@ -61,7 +63,9 @@ public sealed class ExecutionReportProcessor
         IFeeCalculator? feeCalculator = null,
         FeeKeeper? feeKeeper = null,
         Persistence.EventDispatcher? dispatcher = null,
-        PnlKeeper? pnlKeeper = null)
+        PnlKeeper? pnlKeeper = null,
+        SubAccountPositionKeeper? subAccountPositions = null,
+        SubAccountPnlKeeper? subAccountPnl = null)
     {
         _ownership = ownership;
         _orders = orders;
@@ -79,6 +83,8 @@ public sealed class ExecutionReportProcessor
         _feeKeeper = feeKeeper;
         _dispatcher = dispatcher;
         _pnlKeeper = pnlKeeper;
+        _subAccountPositions = subAccountPositions;
+        _subAccountPnl = subAccountPnl;
     }
 
     /// <summary>
@@ -252,6 +258,14 @@ public sealed class ExecutionReportProcessor
                         if (avg is not null) { preFillQty = avg.NetQuantity; preFillAvg = avg.AvgPrice; }
                     }
                     _positions.ApplyFill(owner, order.Symbol, order.Side, delta, lastPx);
+                    // Q4.1 (#301). Sub-account-tagged fills are also
+                    // booked into the parallel sub-account keeper so a
+                    // ?subAccount=X filter on GET /positions can read
+                    // a segregated row. The master keeper above sees
+                    // every fill (sub-account-null + sub-account-tagged)
+                    // so the aggregate view is naturally preserved.
+                    if (order.SubAccountId is { } sa)
+                        _subAccountPositions?.ApplyFill(owner, sa, order.Symbol, order.Side, delta, lastPx);
                     // Book the cash leg of the fill on the same delta as
                     // the position. Buys debit, Sells credit; T+0 settle.
                     // Null when the host hasn't wired CashLedger yet
@@ -443,11 +457,24 @@ public sealed class ExecutionReportProcessor
                                     DeltaRealized = realized,
                                     RunningTotal = running,
                                     TimestampUtc = nowUtcPnl,
+                                    // Q4.1 (#301). Tag the WAL event with
+                                    // the order's sub-account so replay
+                                    // can fan out to SubAccountPnlKeeper
+                                    // without depending on the WorkingOrderBook
+                                    // having been restored first.
+                                    SubAccountId = order.SubAccountId?.Value,
                                 };
                                 var keeperPnl = _pnlKeeper;
+                                var subPnl = _subAccountPnl;
+                                var subTag = order.SubAccountId;
                                 try
                                 {
-                                    _dispatcher.Dispatch(pnlEvt, () => keeperPnl.Apply(pnlEvt));
+                                    _dispatcher.Dispatch(pnlEvt, () =>
+                                    {
+                                        keeperPnl.Apply(pnlEvt);
+                                        if (subTag is { } saInner)
+                                            subPnl?.Add(owner.Value, saInner, order.Symbol, dayKey, realized);
+                                    });
                                     MetricsRegistry.PnlRealizedAppended.Add(1);
                                 }
                                 catch (Persistence.WalBackpressureException)
@@ -458,6 +485,8 @@ public sealed class ExecutionReportProcessor
                                         "Dropping RealizedPnlEvent for {ClOrdId} on WAL backpressure; applying realized pnl directly to keeper.",
                                         lookupId);
                                     keeperPnl.Apply(pnlEvt);
+                                    if (subTag is { } saInner2)
+                                        subPnl?.Add(owner.Value, saInner2, order.Symbol, dayKey, realized);
                                 }
                             }
                         }

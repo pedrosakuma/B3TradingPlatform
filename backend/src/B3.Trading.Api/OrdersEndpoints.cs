@@ -28,6 +28,7 @@ public static class OrdersEndpoints
             EndClientRegistry registry,
             OrderSubmissionService submitter,
             SymbolDirectory symbols,
+            SubAccountsRegistry subAccounts,
             CancellationToken ct) =>
         {
             if (!Enum.TryParse<OrderSide>(req.Side, ignoreCase: true, out var side))
@@ -76,6 +77,27 @@ public static class OrdersEndpoints
                 displayPolicy = parsedPolicy;
             }
 
+            // Q4.1 (#301). Parse the optional sub-account hint, validate
+            // the id (1-64 chars, alphanumerics + ._-) via the value-type
+            // constructor, and confirm it exists and is active for the
+            // caller's firm. Active-status is checked again inside
+            // SubAccountLimitsCheck under the dispatcher lock — this
+            // is a fast-fail before any WAL write happens.
+            SubAccountId? subAccount = null;
+            if (!string.IsNullOrWhiteSpace(req.SubAccountId))
+            {
+                try { subAccount = new SubAccountId(req.SubAccountId); }
+                catch (ArgumentException ex)
+                {
+                    return Results.BadRequest(new { error = $"invalid subAccountId: {ex.Message}" });
+                }
+                if (!subAccounts.IsActive(ResolveFirm(ctx), subAccount.Value))
+                    return Results.BadRequest(new
+                    {
+                        error = $"sub-account '{subAccount.Value}' is not registered or has been deactivated for firm",
+                    });
+            }
+
             // SecurityId resolution: explicit non-zero in the payload
             // wins (preserves the conformance contract). Otherwise look
             // up the directory by symbol — that is the path the trader
@@ -95,7 +117,8 @@ public static class OrdersEndpoints
                 StopPrice: req.StopPrice,
                 GoodTillDate: req.GoodTillDate,
                 DisplayQty: req.DisplayQty,
-                DisplayResetPolicy: displayPolicy), ct);
+                DisplayResetPolicy: displayPolicy,
+                SubAccountId: subAccount), ct);
 
             return result.Kind switch
             {
@@ -256,7 +279,14 @@ public sealed record SubmitOrderRequest(
     /// name (<c>"Always" | "OnPartialFill" | "Never"</c>). Defaults to <c>Always</c>
     /// when <c>DisplayQty</c> is set and this field is null. Must be null when
     /// <c>DisplayQty</c> is null.</summary>
-    string? DisplayResetPolicy = null);
+    string? DisplayResetPolicy = null,
+    /// <summary>Q4.1 (#301). Optional sub-account bucket the order is
+    /// booked against. Must satisfy <see cref="B3.Trading.Domain.SubAccountId"/>
+    /// validation (1-64 chars, alphanumerics + <c>._-</c>); rejected with
+    /// HTTP 400 if invalid, with HTTP 422 (<c>sub_account_limit_exceeded</c>)
+    /// if the sub-account exists but is deactivated. <c>null</c> retains
+    /// pre-#301 master-only behaviour.</summary>
+    string? SubAccountId = null);
 
 public sealed record ModifyOrderRequest(
     long Quantity,

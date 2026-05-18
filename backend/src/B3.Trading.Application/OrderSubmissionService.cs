@@ -136,7 +136,8 @@ public sealed class OrderSubmissionService
                 req.Quantity, req.Price, req.FirmId,
                 parentAlgoId: req.ParentAlgoId, algoSliceSeq: req.AlgoSliceSeq,
                 timeInForce: req.TimeInForce, stopPrice: req.StopPrice, goodTillDate: req.GoodTillDate,
-                displayQty: req.DisplayQty, displayResetPolicy: req.DisplayResetPolicy);
+                displayQty: req.DisplayQty, displayResetPolicy: req.DisplayResetPolicy,
+                subAccountId: req.SubAccountId);
         }
         catch (ArgumentException ex)
         {
@@ -181,6 +182,7 @@ public sealed class OrderSubmissionService
                     GoodTillDate = req.GoodTillDate,
                     DisplayQty = order.DisplayQty,
                     DisplayResetPolicy = order.DisplayResetPolicy?.ToString(),
+                    SubAccountId = order.SubAccountId?.Value,
                 },
                 () =>
                 {
@@ -228,7 +230,8 @@ public sealed class OrderSubmissionService
             req.Owner, req.FirmId, req.Symbol, req.Side, req.Type, req.Quantity, req.Price,
             TimeInForce: req.TimeInForce,
             StopPrice: req.StopPrice,
-            GoodTillDate: req.GoodTillDate);
+            GoodTillDate: req.GoodTillDate,
+            SubAccountId: req.SubAccountId);
         var decision = _risk.Evaluate(riskCtx);
         var marginReserved = false;
         if (decision.Approved)
@@ -345,7 +348,16 @@ public sealed record OrderSubmissionRequest(
     /// otherwise defaults to
     /// <see cref="Domain.DisplayResetPolicy.Always"/>.
     /// </summary>
-    DisplayResetPolicy? DisplayResetPolicy = null)
+    DisplayResetPolicy? DisplayResetPolicy = null,
+    /// <summary>
+    /// Q4.1 (#301). Optional sub-account bucket the order is booked
+    /// against. <c>null</c> = master bucket (every legacy caller).
+    /// When non-null, the submit pipeline records the id on the WAL,
+    /// the order, the per-sub-account position keeper, and runs the
+    /// per-sub-account risk gates ON TOP OF the existing master ones
+    /// — reject-on-either-fail (see <c>SubAccountLimitsCheck</c>).
+    /// </summary>
+    SubAccountId? SubAccountId = null)
 {
     /// <summary>
     /// Sub-issue #171 (E). When non-null, the request originates from

@@ -74,6 +74,9 @@ public sealed class StateSnapshotter
     /// </summary>
     private readonly PendingReplacementRegistry? _replacements;
     private readonly IReplaceMarginCoordinator? _replaceMargin;
+    private readonly SubAccountsRegistry? _subAccounts;
+    private readonly SubAccountPositionKeeper? _subAccountPositions;
+    private readonly SubAccountPnlKeeper? _subAccountPnl;
 
     public StateSnapshotter(
         WorkingOrderBook orders,
@@ -96,7 +99,10 @@ public sealed class StateSnapshotter
         PovProgressBook? povProgress = null,
         PeggedRepegBook? peggedRepeg = null,
         PendingReplacementRegistry? replacements = null,
-        IReplaceMarginCoordinator? replaceMargin = null)
+        IReplaceMarginCoordinator? replaceMargin = null,
+        SubAccountsRegistry? subAccounts = null,
+        SubAccountPositionKeeper? subAccountPositions = null,
+        SubAccountPnlKeeper? subAccountPnl = null)
     {
         _orders = orders;
         _positions = positions;
@@ -119,6 +125,9 @@ public sealed class StateSnapshotter
         _peggedRepeg = peggedRepeg;
         _replacements = replacements;
         _replaceMargin = replaceMargin;
+        _subAccounts = subAccounts;
+        _subAccountPositions = subAccountPositions;
+        _subAccountPnl = subAccountPnl;
     }
 
     public PlatformSnapshot Capture(long seq) => Project(CaptureRaw(seq));
@@ -211,6 +220,9 @@ public sealed class StateSnapshotter
                     AmbiguousAtUtc: s.AmbiguousAt,
                     NewRemainingNotional: s.NewRemainingNotional))
                 .ToArray(),
+        SubAccounts = _subAccounts?.Snapshot() ?? Array.Empty<SubAccountSnapshot>(),
+        SubAccountPositions = _subAccountPositions?.Snapshot() ?? Array.Empty<SubAccountPositionSnapshot>(),
+        SubAccountPnl = _subAccountPnl?.Snapshot() ?? Array.Empty<SubAccountPnlSnapshot>(),
     };
 
     /// <summary>
@@ -254,6 +266,7 @@ public sealed class StateSnapshotter
                 GoodTillDate = o.GoodTillDate,
                 DisplayQty = o.DisplayQty,
                 DisplayResetPolicy = o.DisplayResetPolicy?.ToString(),
+                SubAccountId = o.SubAccountId?.Value,
             });
         }
 
@@ -470,6 +483,9 @@ public sealed class StateSnapshotter
             PeggedRepegPending = peggedRepeg,
             PeggedRepegHistory = peggedRepegHistory,
             PendingReplacements = pendingReplacements,
+            SubAccounts = raw.SubAccounts.ToList(),
+            SubAccountPositions = raw.SubAccountPositions.ToList(),
+            SubAccountPnl = raw.SubAccountPnl.ToList(),
         };
     }
 
@@ -628,6 +644,17 @@ public sealed class StateSnapshotter
                 }
             }
         }
+        // Q4.1 (#301). Restore the sub-account registry + parallel
+        // keepers BEFORE WAL replay starts. EventReplayer's
+        // SubAccountCreated/Deactivated branches and the
+        // SubAccountId-tagged RealizedPnlEvent fan-out are then
+        // applied on top of the snapshot baseline — idempotent for
+        // the registry (last-write-wins on Active) and additive for
+        // the per-sub-account P&L bucket (delta-add). Empty lists on
+        // legacy snapshots collapse to the no-sub-account world.
+        _subAccounts?.Restore(snap.SubAccounts);
+        _subAccountPositions?.Restore(snap.SubAccountPositions);
+        _subAccountPnl?.Restore(snap.SubAccountPnl);
     }
 }
 
@@ -672,6 +699,9 @@ public sealed class EventReplayer
     private readonly CashKeeper? _cashKeeper;
     private readonly FeeKeeper? _feeKeeper;
     private readonly PnlKeeper? _pnlKeeper;
+    private readonly SubAccountsRegistry? _subAccounts;
+    private readonly SubAccountPositionKeeper? _subAccountPositions;
+    private readonly SubAccountPnlKeeper? _subAccountPnl;
     private readonly IFeeCalculator? _feeCalculator;
     /// <summary>
     /// Pass-1 review (#295) P1#1. Optional. When wired, replay folds
@@ -724,7 +754,10 @@ public sealed class EventReplayer
         // double-add (if Prepare ran again) or land in the
         // "neither side has owner" branch of <c>CommitReplace</c> —
         // both break the over-allocation invariant.
-        IReplaceMarginCoordinator? replaceMargin = null)
+        IReplaceMarginCoordinator? replaceMargin = null,
+        SubAccountsRegistry? subAccounts = null,
+        SubAccountPositionKeeper? subAccountPositions = null,
+        SubAccountPnlKeeper? subAccountPnl = null)
     {
         _orders = orders;
         _ownership = ownership;
@@ -747,6 +780,9 @@ public sealed class EventReplayer
         _povProgress = povProgress;
         _peggedRepeg = peggedRepeg;
         _replaceMargin = replaceMargin;
+        _subAccounts = subAccounts;
+        _subAccountPositions = subAccountPositions;
+        _subAccountPnl = subAccountPnl;
     }
 
     /// <summary>
@@ -791,7 +827,8 @@ public sealed class EventReplayer
                 _orders.TryAdd(new Order(o.ClOrdId, owner, o.Symbol, o.SecurityId, side, type,
                     o.Quantity, o.Price, o.FirmId, o.ParentAlgoId, o.AlgoSliceSeq,
                     timeInForce: tif, stopPrice: o.StopPrice, goodTillDate: o.GoodTillDate,
-                    displayQty: o.DisplayQty, displayResetPolicy: policy));
+                    displayQty: o.DisplayQty, displayResetPolicy: policy,
+                    subAccountId: SubAccountId.FromNullableString(o.SubAccountId)));
                 _ownership.Register(o.ClOrdId, owner);
                 // #157: advance the ClOrdID registry watermark so the next
                 // live Generate(owner) cannot re-allocate this ID.
@@ -1063,6 +1100,25 @@ public sealed class EventReplayer
                 // recovery converges on the persisted value even if the
                 // basis tracker projection drifts.
                 _pnlKeeper?.Apply(rpe);
+                // Q4.1 (#301). Sub-account-tagged realized rows also
+                // flow into the per-sub-account keeper. Legacy events
+                // pre-dating the field carry null and short-circuit.
+                if (rpe.SubAccountId is { } subPnlId)
+                    _subAccountPnl?.Add(rpe.EndClientId, new SubAccountId(subPnlId),
+                        rpe.Symbol, rpe.DayKey, rpe.DeltaRealized);
+                break;
+            case SubAccountCreatedEvent sac:
+                // Q4.1 (#301). Seeds / revives the registry row. The
+                // submit pipeline gate reads IsActive directly off this
+                // map; deactivated entries that get re-created here
+                // flip back to active.
+                _subAccounts?.ApplyCreated(sac.FirmId, sac.Id, sac.DisplayName);
+                break;
+            case SubAccountDeactivatedEvent sad:
+                // Q4.1 (#301). Soft-delete — the entry stays in the map
+                // (so historical orders still resolve) but IsActive
+                // flips to false and the submit gate rejects new ones.
+                _subAccounts?.ApplyDeactivated(sad.FirmId, sad.Id);
                 break;
         }
     }

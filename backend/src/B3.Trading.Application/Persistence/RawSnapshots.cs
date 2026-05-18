@@ -156,6 +156,27 @@ public sealed class RawPlatformSnapshot
     /// no-op, matching pre-pass-6 behaviour).
     /// </summary>
     public PendingReplacementRaw[] PendingReplacements { get; init; } = Array.Empty<PendingReplacementRaw>();
+
+    /// <summary>
+    /// Q4.1 (#301). Per-firm registry of sub-accounts. Empty on
+    /// snapshots pre-dating the field (additive); rebuilt entirely
+    /// from <c>SubAccountCreatedEvent</c> / <c>SubAccountDeactivatedEvent</c>
+    /// replay in that case.
+    /// </summary>
+    public IReadOnlyList<SubAccountSnapshot> SubAccounts { get; init; } =
+        Array.Empty<SubAccountSnapshot>();
+
+    /// <summary>
+    /// Q4.1 (#301). Per-(end-client, sub-account, symbol) net positions.
+    /// </summary>
+    public IReadOnlyList<SubAccountPositionSnapshot> SubAccountPositions { get; init; } =
+        Array.Empty<SubAccountPositionSnapshot>();
+
+    /// <summary>
+    /// Q4.1 (#301). Per-(end-client, sub-account, symbol, day) realized P&amp;L totals.
+    /// </summary>
+    public IReadOnlyList<SubAccountPnlSnapshot> SubAccountPnl { get; init; } =
+        Array.Empty<SubAccountPnlSnapshot>();
 }
 
 /// <summary>

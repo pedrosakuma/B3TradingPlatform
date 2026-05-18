@@ -84,6 +84,31 @@ public sealed class WorkingOrderBook
     }
 
     /// <summary>
+    /// Q4.1 (#301). Counts an owner's non-terminal orders restricted to
+    /// the given sub-account bucket. Orders without a sub-account tag
+    /// are NOT included (they live in the master bucket and are
+    /// counted by <see cref="CountOpenForOwner"/>). Used by
+    /// <c>SubAccountLimitsCheck</c> to apply per-sub-account
+    /// max-open-orders caps without re-scanning the whole book.
+    /// </summary>
+    public int CountOpenForOwnerAndSubAccount(EndClientId owner, SubAccountId subAccount)
+    {
+        ArgumentNullException.ThrowIfNull(subAccount);
+        if (!_byOwner.TryGetValue(owner.Value, out var set)) return 0;
+        var count = 0;
+        foreach (var clOrdId in set.Keys)
+        {
+            if (!_orders.TryGetValue(clOrdId, out var order)) continue;
+            if (IsTerminal(order.Status)) continue;
+            if (order.IsStale) continue;
+            if (order.SubAccountId is not { } sa) continue;
+            if (sa != subAccount) continue;
+            count++;
+        }
+        return count;
+    }
+
+    /// <summary>
     /// Sums <see cref="Order.LeavesQuantity"/> across the end-client's
     /// non-terminal Sell orders for a single symbol. Used by the
     /// pre-trade naked-short gate to compute available sellable
@@ -212,6 +237,7 @@ public sealed class WorkingOrderBook
                 GoodTillDate = o.GoodTillDate,
                 DisplayQty = o.DisplayQty,
                 DisplayResetPolicy = o.DisplayResetPolicy?.ToString(),
+                SubAccountId = o.SubAccountId?.Value,
             };
         }
     }
@@ -265,12 +291,14 @@ public sealed class WorkingOrderBook
             DisplayResetPolicy? policy = s.DisplayResetPolicy is { } dpName
                 ? Enum.Parse<DisplayResetPolicy>(dpName)
                 : (DisplayResetPolicy?)null;
+            var subAccount = SubAccountId.FromNullableString(s.SubAccountId);
             _orders[s.ClOrdId] = Order.Hydrate(s.ClOrdId, owner, s.Symbol, s.SecurityId, side, type,
                 s.Quantity, s.Price, s.LeavesQuantity, s.CumulativeQuantity, status, s.FirmId,
                 s.ParentAlgoId, s.AlgoSliceSeq,
                 isStale: s.IsStale, staleReason: s.StaleReason, staledAtUtc: s.StaledAtUtc,
                 timeInForce: tif, stopPrice: s.StopPrice, goodTillDate: s.GoodTillDate,
-                displayQty: s.DisplayQty, displayResetPolicy: policy);
+                displayQty: s.DisplayQty, displayResetPolicy: policy,
+                subAccountId: subAccount);
             var firmSet = _byFirm.GetOrAdd(s.FirmId, static _ => new ConcurrentDictionary<ulong, byte>());
             firmSet.TryAdd(s.ClOrdId, 0);
             var ownerSet = _byOwner.GetOrAdd(s.EndClientId, static _ => new ConcurrentDictionary<ulong, byte>());

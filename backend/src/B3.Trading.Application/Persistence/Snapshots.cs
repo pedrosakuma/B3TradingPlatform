@@ -229,6 +229,30 @@ public sealed class PlatformSnapshot
     /// process".
     /// </summary>
     public List<PendingReplacementSnapshot> PendingReplacements { get; init; } = new();
+
+    /// <summary>
+    /// Q4.1 (#301). Per-firm registry of known sub-accounts (active
+    /// + soft-deleted). Empty on snapshots pre-dating the field;
+    /// rebuilt entirely from <see cref="SubAccountCreatedEvent"/> /
+    /// <see cref="SubAccountDeactivatedEvent"/> replay in that case.
+    /// </summary>
+    public List<SubAccountSnapshot> SubAccounts { get; init; } = new();
+
+    /// <summary>
+    /// Q4.1 (#301). Per-(end-client, sub-account, symbol) net
+    /// positions for sub-account-tagged fills. The master aggregate
+    /// continues to live in <see cref="Positions"/> (sub-account-null
+    /// and sub-account-tagged fills both folded). Empty on snapshots
+    /// pre-dating the field.
+    /// </summary>
+    public List<SubAccountPositionSnapshot> SubAccountPositions { get; init; } = new();
+
+    /// <summary>
+    /// Q4.1 (#301). Per-(end-client, sub-account, symbol, day)
+    /// realized-P&amp;L running totals. Empty on snapshots
+    /// pre-dating the field.
+    /// </summary>
+    public List<SubAccountPnlSnapshot> SubAccountPnl { get; init; } = new();
 }
 
 /// <summary>
@@ -339,6 +363,14 @@ public sealed record OrderSnapshot(
     /// to <c>null</c>.
     /// </summary>
     public string? DisplayResetPolicy { get; init; }
+
+    /// <summary>
+    /// Q4.1 (#301). Optional sub-account bucket the order was booked
+    /// against at submit time. Null = master bucket. Older snapshots
+    /// without the field hydrate as null, matching the pre-#301
+    /// semantics they actually carried.
+    /// </summary>
+    public string? SubAccountId { get; init; }
 }
 
 /// <summary>
@@ -522,3 +554,36 @@ public sealed record AlgoIdCounterSnapshot(string FirmId, long Counter);
 /// enum name for forward-compat across reorderings.
 /// </summary>
 public sealed record SessionPhaseOverrideSnapshot(string Symbol, string Phase);
+
+/// <summary>
+/// Q4.1 (#301). One per-firm row of the
+/// <see cref="B3.Trading.Application.SubAccountsRegistry"/>.
+/// <see cref="Active"/> = false means soft-deleted: orders still
+/// resolve historically, but the submit pipeline rejects new ones
+/// (the registry's <c>IsActive</c> gate fails).
+/// </summary>
+public sealed record SubAccountSnapshot(string FirmId, string Id, string? DisplayName, bool Active);
+
+/// <summary>
+/// Q4.1 (#301). One <c>(EndClientId, SubAccountId, Symbol) → net
+/// quantity + avg price</c> row from
+/// <see cref="B3.Trading.Application.SubAccountPositionKeeper"/>.
+/// </summary>
+public sealed record SubAccountPositionSnapshot(
+    string EndClientId,
+    string SubAccountId,
+    string Symbol,
+    long NetQuantity,
+    decimal AverageEntryPrice);
+
+/// <summary>
+/// Q4.1 (#301). One <c>(EndClientId, SubAccountId, Symbol, Day) →
+/// realized total</c> row from
+/// <see cref="B3.Trading.Application.SubAccountPnlKeeper"/>.
+/// </summary>
+public sealed record SubAccountPnlSnapshot(
+    string EndClientId,
+    string SubAccountId,
+    string Symbol,
+    DateOnly Day,
+    decimal RealizedTotal);

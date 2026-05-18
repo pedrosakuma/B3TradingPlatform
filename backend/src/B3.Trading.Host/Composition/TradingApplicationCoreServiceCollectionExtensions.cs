@@ -44,6 +44,12 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         services.AddSingleton<IFeeCalculator, BpsFeeCalculator>();
         services.AddSingleton<FeeKeeper>();
         services.AddSingleton<PnlKeeper>();
+        // Q4.1 (#301). Sub-account model — registry + per-sub-account
+        // position and P&L keepers. All singletons so live folds, WAL
+        // replay, and snapshot capture/restore share the same instance.
+        services.AddSingleton<SubAccountsRegistry>();
+        services.AddSingleton<SubAccountPositionKeeper>();
+        services.AddSingleton<SubAccountPnlKeeper>();
         services.AddSingleton<InMemoryUserBotCredentialRegistry>();
         services.AddSingleton<IUserBotCredentialRegistry>(sp =>
             sp.GetRequiredService<InMemoryUserBotCredentialRegistry>());
