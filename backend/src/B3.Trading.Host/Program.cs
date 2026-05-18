@@ -1,4 +1,5 @@
 using B3.Trading.EntryPointListener;
+using B3.Trading.Api.RateLimit;
 using B3.Trading.Host.Composition;
 using B3.Trading.Host.Observability;
 
@@ -25,6 +26,7 @@ builder.Services.AddTradingRisk(builder.Configuration);
 builder.Services.AddTradingExchangeGateway(builder.Configuration);
 builder.Services.AddTradingDataProtection(builder.Configuration);
 builder.Services.AddTradingObservability(builder.Configuration);
+builder.Services.AddTradingRateLimit(builder.Configuration);
 
 var app = builder.Build();
 
@@ -42,6 +44,11 @@ app.UseRateLimiter();
 
 app.UseWebSockets();
 app.UseAuthentication();
+// Q4.4 (#304). Per-user × endpoint token-bucket runs AFTER auth so the
+// JWT sub-claim is the partition key for authenticated traffic, and
+// BEFORE authorization so the 429 short-circuits the handler pipeline
+// before any per-firm scoping or claims check runs.
+app.UseTradingRateLimit();
 app.UseAuthorization();
 
 app.MapTradingEndpoints();
