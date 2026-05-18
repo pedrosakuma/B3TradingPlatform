@@ -31,7 +31,8 @@ public sealed record ExecutionEvent(
     decimal LastPrice,
     string? RejectReason,
     DateTimeOffset TimestampUtc,
-    bool IsNativeStp = false);
+    bool IsNativeStp = false,
+    string? FirmId = null);
 
 public sealed class NoOpExecutionEventSink : IExecutionEventSink
 {

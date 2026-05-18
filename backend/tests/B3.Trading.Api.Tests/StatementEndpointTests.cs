@@ -400,7 +400,7 @@ public class StatementEndpointTests : IDisposable
                 {
                     ClOrdId = clOrdId,
                     EndClientId = owner.Value,
-                    FirmId = "TEST",
+                    FirmId = "default",
                     Symbol = "PETR4",
                     SecurityId = 4321UL,
                     Side = nameof(OrderSide.Buy),

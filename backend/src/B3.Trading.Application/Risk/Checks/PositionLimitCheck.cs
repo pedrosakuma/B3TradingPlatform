@@ -23,7 +23,7 @@ public sealed class PositionLimitCheck : IRiskCheck
         var limit = RiskLimitsResolver.Resolve(opts, ctx.Owner.Value, ctx.FirmId, ctx.Symbol, l => l.PositionLimit);
         if (!limit.HasValue) return RiskDecision.Approve;
 
-        var current = _positions.GetOrCreate(ctx.Owner, ctx.Symbol).NetQuantity;
+        var current = _positions.GetOrCreate(ctx.FirmId, ctx.Owner, ctx.Symbol).NetQuantity;
         var signed = ctx.Side == OrderSide.Buy ? ctx.Quantity : -ctx.Quantity;
         var projected = Math.Abs(current + signed);
         if (projected > limit.Value)

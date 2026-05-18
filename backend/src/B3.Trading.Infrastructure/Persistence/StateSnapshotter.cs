@@ -74,6 +74,9 @@ public sealed class StateSnapshotter
     /// </summary>
     private readonly PendingReplacementRegistry? _replacements;
     private readonly IReplaceMarginCoordinator? _replaceMargin;
+    private readonly SubAccountsRegistry? _subAccounts;
+    private readonly SubAccountPositionKeeper? _subAccountPositions;
+    private readonly SubAccountPnlKeeper? _subAccountPnl;
 
     public StateSnapshotter(
         WorkingOrderBook orders,
@@ -96,7 +99,10 @@ public sealed class StateSnapshotter
         PovProgressBook? povProgress = null,
         PeggedRepegBook? peggedRepeg = null,
         PendingReplacementRegistry? replacements = null,
-        IReplaceMarginCoordinator? replaceMargin = null)
+        IReplaceMarginCoordinator? replaceMargin = null,
+        SubAccountsRegistry? subAccounts = null,
+        SubAccountPositionKeeper? subAccountPositions = null,
+        SubAccountPnlKeeper? subAccountPnl = null)
     {
         _orders = orders;
         _positions = positions;
@@ -119,6 +125,9 @@ public sealed class StateSnapshotter
         _peggedRepeg = peggedRepeg;
         _replacements = replacements;
         _replaceMargin = replaceMargin;
+        _subAccounts = subAccounts;
+        _subAccountPositions = subAccountPositions;
+        _subAccountPnl = subAccountPnl;
     }
 
     public PlatformSnapshot Capture(long seq) => Project(CaptureRaw(seq));
@@ -211,6 +220,10 @@ public sealed class StateSnapshotter
                     AmbiguousAtUtc: s.AmbiguousAt,
                     NewRemainingNotional: s.NewRemainingNotional))
                 .ToArray(),
+        SubAccounts = _subAccounts?.Snapshot() ?? Array.Empty<SubAccountSnapshot>(),
+        SubAccountPositions = _subAccountPositions?.Snapshot() ?? Array.Empty<SubAccountPositionSnapshot>(),
+        SubAccountPnl = _subAccountPnl?.Snapshot() ?? Array.Empty<SubAccountPnlSnapshot>(),
+        SubAccountPnlBasis = _subAccountPnl?.SnapshotBasis() ?? Array.Empty<SubAccountPnlBasisSnapshot>(),
     };
 
     /// <summary>
@@ -254,6 +267,7 @@ public sealed class StateSnapshotter
                 GoodTillDate = o.GoodTillDate,
                 DisplayQty = o.DisplayQty,
                 DisplayResetPolicy = o.DisplayResetPolicy?.ToString(),
+                SubAccountId = o.SubAccountId?.Value,
             });
         }
 
@@ -265,7 +279,7 @@ public sealed class StateSnapshotter
         for (var i = 0; i < raw.Positions.Length; i++)
         {
             var p = raw.Positions[i];
-            positions.Add(new PositionSnapshot(p.EndClientId, p.Symbol, p.NetQuantity, p.AverageEntryPrice));
+            positions.Add(new PositionSnapshot(p.EndClientId, p.Symbol, p.NetQuantity, p.AverageEntryPrice, p.FirmId));
         }
 
         var ownership = new List<OwnershipMappingSnapshot>(raw.Ownership.Length);
@@ -307,19 +321,19 @@ public sealed class StateSnapshotter
         for (var i = 0; i < raw.PnlRealizedByEndclientSymbolDay.Length; i++)
         {
             var p = raw.PnlRealizedByEndclientSymbolDay[i];
-            pnlRealized[PnlKeeper.FormatRealizedKey(p.EndClientId, p.Symbol, p.Day)] = p.Realized;
+            pnlRealized[PnlKeeper.FormatRealizedKey(p.FirmId, p.EndClientId, p.Symbol, p.Day)] = p.Realized;
         }
         var pnlAvgCost = new List<PnlAvgCostSnapshot>(raw.PnlAvgCost.Length);
         for (var i = 0; i < raw.PnlAvgCost.Length; i++)
         {
             var a = raw.PnlAvgCost[i];
-            pnlAvgCost.Add(new PnlAvgCostSnapshot(a.EndClientId, a.Symbol, a.NetQuantity, a.AvgPrice));
+            pnlAvgCost.Add(new PnlAvgCostSnapshot(a.EndClientId, a.Symbol, a.NetQuantity, a.AvgPrice, a.FirmId));
         }
         var pnlUnknownBasis = new List<PnlUnknownBasisSnapshot>(raw.PnlUnknownBasis.Length);
         for (var i = 0; i < raw.PnlUnknownBasis.Length; i++)
         {
             var u = raw.PnlUnknownBasis[i];
-            pnlUnknownBasis.Add(new PnlUnknownBasisSnapshot(u.EndClientId, u.Symbol, u.NetQuantity));
+            pnlUnknownBasis.Add(new PnlUnknownBasisSnapshot(u.EndClientId, u.Symbol, u.NetQuantity, u.FirmId));
         }
         var pnlSeen = new List<string>(raw.PnlSeenExecutionIds.Length);
         for (var i = 0; i < raw.PnlSeenExecutionIds.Length; i++)
@@ -470,6 +484,10 @@ public sealed class StateSnapshotter
             PeggedRepegPending = peggedRepeg,
             PeggedRepegHistory = peggedRepegHistory,
             PendingReplacements = pendingReplacements,
+            SubAccounts = raw.SubAccounts.ToList(),
+            SubAccountPositions = raw.SubAccountPositions.ToList(),
+            SubAccountPnl = raw.SubAccountPnl.ToList(),
+            SubAccountPnlBasis = raw.SubAccountPnlBasis.ToList(),
         };
     }
 
@@ -628,6 +646,47 @@ public sealed class StateSnapshotter
                 }
             }
         }
+        // Q4.1 (#301). Restore the sub-account registry + parallel
+        // keepers BEFORE WAL replay starts. EventReplayer's
+        // SubAccountCreated/Deactivated branches and the
+        // SubAccountId-tagged RealizedPnlEvent fan-out are then
+        // applied on top of the snapshot baseline — idempotent for
+        // the registry (last-write-wins on Active) and additive for
+        // the per-sub-account P&L bucket (delta-add). Empty lists on
+        // legacy snapshots collapse to the no-sub-account world.
+        _subAccounts?.Restore(snap.SubAccounts);
+        _subAccountPositions?.Restore(snap.SubAccountPositions);
+        _subAccountPnl?.Restore(snap.SubAccountPnl, snap.SubAccountPnlBasis);
+        // PR #316 P1 (review). Backfill bucket-level avg-cost basis
+        // from the (master Positions, SubAccountPositions) blocks
+        // whenever a snapshot lands without a complete
+        // SubAccountPnlBasis block — i.e. a pre-#316 snapshot taken
+        // before the basis store existed, or a partial snapshot
+        // whose basis is missing for some buckets. Without this
+        // seed, the first close on a restored bucket whose basis is
+        // absent would route through ApplyBucketFill's fresh-open
+        // branch and emit realized PnL = 0, dropping a real economic
+        // delta on the floor (the aggregate keeper would compute it
+        // correctly via SeedAvgCostFromLegacyPositions above, but
+        // the aggregate result is discarded once _subAccountPnl is
+        // wired). Idempotent on already-present keys (a #316-shaped
+        // snapshot with SubAccountPnlBasis populated is a no-op).
+        //
+        // Caveat: when SubAccountPositions are present for the same
+        // (firm, owner, symbol) as a master Positions row AND no
+        // authoritative basis exists, the aggregate row is polluted
+        // (every fill — master- and sub-tagged alike — books into
+        // it). The keeper detects that case, refuses to seed master
+        // from the aggregate, and surfaces
+        // trading.subaccount.master_basis_unrecoverable_total +
+        // a one-shot warn so operators can investigate the snapshot
+        // writer. The statement endpoint already fail-closes
+        // (AvgPrice = 0 + master_avg_basis_degraded_total) on a
+        // missing master basis, so the absence is consistent.
+        if (_subAccountPnl is not null)
+        {
+            _subAccountPnl.SeedBucketBasisFromLegacyPositions(snap.Positions, snap.SubAccountPositions);
+        }
     }
 }
 
@@ -672,6 +731,9 @@ public sealed class EventReplayer
     private readonly CashKeeper? _cashKeeper;
     private readonly FeeKeeper? _feeKeeper;
     private readonly PnlKeeper? _pnlKeeper;
+    private readonly SubAccountsRegistry? _subAccounts;
+    private readonly SubAccountPositionKeeper? _subAccountPositions;
+    private readonly SubAccountPnlKeeper? _subAccountPnl;
     private readonly IFeeCalculator? _feeCalculator;
     /// <summary>
     /// Pass-1 review (#295) P1#1. Optional. When wired, replay folds
@@ -724,7 +786,10 @@ public sealed class EventReplayer
         // double-add (if Prepare ran again) or land in the
         // "neither side has owner" branch of <c>CommitReplace</c> —
         // both break the over-allocation invariant.
-        IReplaceMarginCoordinator? replaceMargin = null)
+        IReplaceMarginCoordinator? replaceMargin = null,
+        SubAccountsRegistry? subAccounts = null,
+        SubAccountPositionKeeper? subAccountPositions = null,
+        SubAccountPnlKeeper? subAccountPnl = null)
     {
         _orders = orders;
         _ownership = ownership;
@@ -747,6 +812,9 @@ public sealed class EventReplayer
         _povProgress = povProgress;
         _peggedRepeg = peggedRepeg;
         _replaceMargin = replaceMargin;
+        _subAccounts = subAccounts;
+        _subAccountPositions = subAccountPositions;
+        _subAccountPnl = subAccountPnl;
     }
 
     /// <summary>
@@ -766,7 +834,11 @@ public sealed class EventReplayer
         if (_feeKeeper is not null && _feeCalculator is not null)
             n += _feeKeeper.FinalizeReplay(_feeCalculator);
         if (_pnlKeeper is not null)
-            n += _pnlKeeper.FinalizeReplay();
+            // PR #316 P1.2. Route bucket-tagged synthesized deltas into
+            // SubAccountPnlKeeper so sub-bucket realised totals don't
+            // diverge from the live path when the durable
+            // RealizedPnlEvent did not survive the ER-then-crash window.
+            n += _pnlKeeper.FinalizeReplay(_subAccountPnl);
         return n;
     }
 
@@ -791,7 +863,8 @@ public sealed class EventReplayer
                 _orders.TryAdd(new Order(o.ClOrdId, owner, o.Symbol, o.SecurityId, side, type,
                     o.Quantity, o.Price, o.FirmId, o.ParentAlgoId, o.AlgoSliceSeq,
                     timeInForce: tif, stopPrice: o.StopPrice, goodTillDate: o.GoodTillDate,
-                    displayQty: o.DisplayQty, displayResetPolicy: policy));
+                    displayQty: o.DisplayQty, displayResetPolicy: policy,
+                    subAccountId: SubAccountId.FromNullableString(o.SubAccountId)));
                 _ownership.Register(o.ClOrdId, owner);
                 // #157: advance the ClOrdID registry watermark so the next
                 // live Generate(owner) cannot re-allocate this ID.
@@ -1063,6 +1136,35 @@ public sealed class EventReplayer
                 // recovery converges on the persisted value even if the
                 // basis tracker projection drifts.
                 _pnlKeeper?.Apply(rpe);
+                // Q4.1 (#301). Sub-account-tagged realized rows also
+                // flow into the per-sub-account keeper. Legacy events
+                // pre-dating the field carry null and short-circuit.
+                // The fan-out is firm-scoped: FirmId is emitted
+                // alongside SubAccountId at append time (PR review
+                // #301 P1). For belt-and-braces parity with WAL
+                // segments written between the original #301 merge
+                // and this fix — where SubAccountId may be set but
+                // FirmId is missing — fall back to "default", which
+                // is the same sentinel the API uses when no firm
+                // claim is present.
+                if (rpe.SubAccountId is { } subPnlId)
+                    _subAccountPnl?.Add(
+                        rpe.FirmId ?? "default",
+                        rpe.EndClientId, new SubAccountId(subPnlId),
+                        rpe.Symbol, rpe.DayKey, rpe.DeltaRealized);
+                break;
+            case SubAccountCreatedEvent sac:
+                // Q4.1 (#301). Seeds / revives the registry row. The
+                // submit pipeline gate reads IsActive directly off this
+                // map; deactivated entries that get re-created here
+                // flip back to active.
+                _subAccounts?.ApplyCreated(sac.FirmId, sac.Id, sac.DisplayName);
+                break;
+            case SubAccountDeactivatedEvent sad:
+                // Q4.1 (#301). Soft-delete — the entry stays in the map
+                // (so historical orders still resolve) but IsActive
+                // flips to false and the submit gate rejects new ones.
+                _subAccounts?.ApplyDeactivated(sad.FirmId, sad.Id);
                 break;
         }
     }

@@ -174,4 +174,39 @@ public class SelfTradePreventionCheckTests
         Assert.True(book.TryAdd(Make(1, OrderSide.Buy, 32.40m)));
         Assert.True(check.Check(Ctx(OrderSide.Buy, 32.50m)).Approved);
     }
+
+    // PR #316 P2.3. The owner index spans every firm; without an
+    // explicit firm filter on the contra scan, a working opposite-side
+    // order in FIRM02 would falsely reject an order from the SAME JWT
+    // sub authenticated under FIRM01. Self-trade prevention only makes
+    // sense within one matching-engine session (one firm).
+    [Fact]
+    public void ContraOrder_DifferentFirm_SameOwner_Approves()
+    {
+        var (check, book) = Build();
+        // FIRM02 working buy for owner alice on PETR4.
+        var firm02Order = new Order(
+            clOrdId: 42, owner: OwnerId, symbol: Symbol, securityId: 4321UL,
+            side: OrderSide.Buy, type: OrderType.Limit, quantity: 100, price: 32.40m,
+            firmId: "FIRM02");
+        Assert.True(book.TryAdd(firm02Order));
+
+        // FIRM01 same owner submitting an opposite-side Sell on PETR4
+        // must NOT trip STP — the FIRM02 contra is in a different
+        // matching session and can never self-cross.
+        var decision = check.Check(Ctx(OrderSide.Sell, 32.50m));
+        Assert.True(decision.Approved);
+    }
+
+    [Fact]
+    public void ContraOrder_SameFirm_SameOwner_StillRejects()
+    {
+        // Regression guard for the cross-firm fix: the within-firm
+        // rejection path must keep working after we narrowed the scan.
+        var (check, book) = Build();
+        Assert.True(book.TryAdd(Make(7, OrderSide.Buy, 32.40m))); // FIRM01 (test default)
+        var decision = check.Check(Ctx(OrderSide.Sell, 32.50m));
+        Assert.False(decision.Approved);
+        Assert.Contains("clOrdId=7", decision.Reason);
+    }
 }

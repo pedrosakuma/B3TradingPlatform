@@ -110,6 +110,13 @@ public sealed class OrderModifyService
         if (orig.Owner != req.Owner)
             return OrderModifyResult.NotFound; // do not leak existence cross-owner
 
+        // PR #316 P1. Reject cross-firm modifies — a JWT sub
+        // registered in two firms knowing a ClOrdId from another
+        // firm must not be able to mutate it. Treated as NotFound
+        // (same as cross-owner) so existence is not leaked.
+        if (req.FirmId is not null && !string.Equals(orig.FirmId, req.FirmId, StringComparison.Ordinal))
+            return OrderModifyResult.NotFound;
+
         if (orig.Status is OrderStatus.Filled or OrderStatus.Cancelled
             or OrderStatus.Rejected or OrderStatus.Replaced)
         {
@@ -207,6 +214,12 @@ public sealed class OrderModifyService
             // surface as BadRequest (400) before any WAL append.
             return OrderModifyResult.BadRequest(ex.Message);
         }
+        // PR #316 P1. Forward the original's SubAccountId (the
+        // replacement inherits it — see Order.cs ctor) so
+        // SubAccountLimitsCheck enforces per-(firm, sub-account)
+        // position/notional/open-order caps AND rejects modifies
+        // targeting a deactivated sub-account. Without this the
+        // check no-ops on null and the sub-account gate is bypassed.
         var riskCtx = new RiskContext(
             req.Owner, orig.FirmId, orig.Symbol, orig.Side, orig.Type,
             req.NewQuantity, req.NewPrice,
@@ -214,7 +227,8 @@ public sealed class OrderModifyService
             EffectiveLeavesQuantity: effectiveLeaves,
             TimeInForce: effTif,
             StopPrice: effStop,
-            GoodTillDate: effGtd);
+            GoodTillDate: effGtd,
+            SubAccountId: orig.SubAccountId);
 
         var decision = _risk.Evaluate(riskCtx);
         if (!decision.Approved)
@@ -322,7 +336,8 @@ public sealed class OrderModifyService
                 LeavesQuantity: 0, CumulativeQuantity: 0,
                 LastQuantity: 0, LastPrice: 0m,
                 RejectReason: "gateway_unavailable",
-                TimestampUtc: DateTimeOffset.UtcNow));
+                TimestampUtc: DateTimeOffset.UtcNow,
+                FirmId: orig.FirmId));
             return OrderModifyResult.GatewayFailed(newClOrdId, ex);
         }
 
@@ -357,7 +372,17 @@ public sealed record OrderModifyRequest(
     decimal? NewPrice,
     TimeInForce? NewTimeInForce = null,
     decimal? NewStopPrice = null,
-    DateTimeOffset? NewGoodTillDate = null);
+    DateTimeOffset? NewGoodTillDate = null,
+    /// <summary>
+    /// PR #316 P1. Caller's firm scope. When non-null, the service
+    /// rejects (as NotFound) modifies whose original order belongs
+    /// to a different firm — same isolation guard as
+    /// <c>OrdersEndpoints</c>' GET path. Optional for back-compat
+    /// with internal callers (algo engine, GTD scheduler) that
+    /// already operate on a known order; user-facing transports
+    /// (REST, FIXP) must populate it.
+    /// </summary>
+    string? FirmId = null);
 
 /// <summary>
 /// Outcome of <see cref="OrderModifyService.ModifyAsync"/>. The

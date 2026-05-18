@@ -616,7 +616,8 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
                     LastQuantity: 0,
                     LastPrice: 0m,
                     RejectReason: ReasonGtd,
-                    TimestampUtc: originalGtd));
+                    TimestampUtc: originalGtd,
+                    FirmId: order.FirmId));
             }
             catch (Exception ex)
             {

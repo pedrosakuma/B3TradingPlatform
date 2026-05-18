@@ -69,7 +69,7 @@ public class NoNakedShortCheckTests
     public void Sell_LongCoversFully_Approved()
     {
         var (check, positions, orders) = Build();
-        positions.ApplyFill(new EndClientId(DefaultOwner), DefaultSymbol, OrderSide.Buy, 500, 30m);
+        positions.ApplyFill(DefaultFirm, new EndClientId(DefaultOwner), DefaultSymbol, OrderSide.Buy, 500, 30m);
         SubmitInto(orders, MakeSell(1UL, 500));
         Assert.True(check.Check(SellCtx(500)).Approved);
     }
@@ -78,7 +78,7 @@ public class NoNakedShortCheckTests
     public void Sell_LongInsufficientByOne_Rejected()
     {
         var (check, positions, orders) = Build();
-        positions.ApplyFill(new EndClientId(DefaultOwner), DefaultSymbol, OrderSide.Buy, 500, 30m);
+        positions.ApplyFill(DefaultFirm, new EndClientId(DefaultOwner), DefaultSymbol, OrderSide.Buy, 500, 30m);
         SubmitInto(orders, MakeSell(1UL, 501));
         Assert.False(check.Check(SellCtx(501)).Approved);
     }
@@ -87,7 +87,7 @@ public class NoNakedShortCheckTests
     public void Sell_OpenSellsConsumeAvailableInventory()
     {
         var (check, positions, orders) = Build();
-        positions.ApplyFill(new EndClientId(DefaultOwner), DefaultSymbol, OrderSide.Buy, 500, 30m);
+        positions.ApplyFill(DefaultFirm, new EndClientId(DefaultOwner), DefaultSymbol, OrderSide.Buy, 500, 30m);
         // 300 already working as Sell; this incoming Sell of 200 just
         // fills the remaining sellable inventory exactly.
         SubmitInto(orders, MakeSell(1UL, 300));
@@ -99,7 +99,7 @@ public class NoNakedShortCheckTests
     public void Sell_OpenSellsExceedAvailableInventory_Rejected()
     {
         var (check, positions, orders) = Build();
-        positions.ApplyFill(new EndClientId(DefaultOwner), DefaultSymbol, OrderSide.Buy, 500, 30m);
+        positions.ApplyFill(DefaultFirm, new EndClientId(DefaultOwner), DefaultSymbol, OrderSide.Buy, 500, 30m);
         SubmitInto(orders, MakeSell(1UL, 300));
         SubmitInto(orders, MakeSell(2UL, 201));
         Assert.False(check.Check(SellCtx(201)).Approved);
@@ -109,7 +109,7 @@ public class NoNakedShortCheckTests
     public void Sell_OpenBuysDoNotCount_PessimisticProjection()
     {
         var (check, positions, orders) = Build();
-        positions.ApplyFill(new EndClientId(DefaultOwner), DefaultSymbol, OrderSide.Buy, 100, 30m);
+        positions.ApplyFill(DefaultFirm, new EndClientId(DefaultOwner), DefaultSymbol, OrderSide.Buy, 100, 30m);
         // A pending Buy of 1000 would, if it filled, give plenty of
         // inventory. The check must not credit it — open Buys can be
         // cancelled.
@@ -122,7 +122,7 @@ public class NoNakedShortCheckTests
     public void Sell_TerminalSellsDoNotConsumeInventory()
     {
         var (check, positions, orders) = Build();
-        positions.ApplyFill(new EndClientId(DefaultOwner), DefaultSymbol, OrderSide.Buy, 500, 30m);
+        positions.ApplyFill(DefaultFirm, new EndClientId(DefaultOwner), DefaultSymbol, OrderSide.Buy, 500, 30m);
         var oldSell = MakeSell(99UL, 500);
         SubmitInto(orders, oldSell);
         oldSell.MarkCancelled();
@@ -134,14 +134,14 @@ public class NoNakedShortCheckTests
     public void Sell_PartiallyFilled_OnlyLeavesConsumeInventory()
     {
         var (check, positions, orders) = Build();
-        positions.ApplyFill(new EndClientId(DefaultOwner), DefaultSymbol, OrderSide.Buy, 500, 30m);
+        positions.ApplyFill(DefaultFirm, new EndClientId(DefaultOwner), DefaultSymbol, OrderSide.Buy, 500, 30m);
         var partial = MakeSell(99UL, 400);
         SubmitInto(orders, partial);
         partial.ApplyFill(300); // 100 leaves
         // PositionKeeper would have been updated by the fill, but the
         // check reads the current net at evaluation time. Mirror that
         // here: net long is now 200, leaves on the partial sell are 100.
-        positions.ApplyFill(new EndClientId(DefaultOwner), DefaultSymbol, OrderSide.Sell, 300, 30m);
+        positions.ApplyFill(DefaultFirm, new EndClientId(DefaultOwner), DefaultSymbol, OrderSide.Sell, 300, 30m);
         SubmitInto(orders, MakeSell(1UL, 100));
         Assert.True(check.Check(SellCtx(100)).Approved);
     }
@@ -150,7 +150,7 @@ public class NoNakedShortCheckTests
     public void Sell_OtherSymbolLeaves_DoNotConsumeThisSymbolInventory()
     {
         var (check, positions, orders) = Build();
-        positions.ApplyFill(new EndClientId(DefaultOwner), DefaultSymbol, OrderSide.Buy, 500, 30m);
+        positions.ApplyFill(DefaultFirm, new EndClientId(DefaultOwner), DefaultSymbol, OrderSide.Buy, 500, 30m);
         SubmitInto(orders, MakeSell(99UL, 500, symbol: "VALE3"));
         SubmitInto(orders, MakeSell(1UL, 500));
         Assert.True(check.Check(SellCtx(500)).Approved);
@@ -160,7 +160,7 @@ public class NoNakedShortCheckTests
     public void Sell_OtherOwnerInventory_DoesNotCoverThisOwner()
     {
         var (check, positions, orders) = Build();
-        positions.ApplyFill(new EndClientId("bob"), DefaultSymbol, OrderSide.Buy, 1000, 30m);
+        positions.ApplyFill(DefaultFirm, new EndClientId("bob"), DefaultSymbol, OrderSide.Buy, 1000, 30m);
         SubmitInto(orders, MakeSell(1UL, 100, owner: DefaultOwner));
         Assert.False(check.Check(SellCtx(100, owner: DefaultOwner)).Approved);
     }
@@ -228,7 +228,7 @@ public class NoNakedShortCheckTests
         // ceiling. Modifying that Sell down to 60 should approve —
         // the original is going away.
         var (check, positions, orders) = Build();
-        positions.GetOrCreate(new EndClientId(DefaultOwner), DefaultSymbol).ApplyFill(OrderSide.Buy, 100, 30m);
+        positions.GetOrCreate(DefaultFirm, new EndClientId(DefaultOwner), DefaultSymbol).ApplyFill(OrderSide.Buy, 100, 30m);
         SubmitInto(orders, MakeSell(1UL, 100));
 
         var ctx = SellReplaceCtx(newQty: 60, origClOrdId: 1UL, effectiveLeaves: 60);
@@ -240,7 +240,7 @@ public class NoNakedShortCheckTests
     public void Replace_upsize_rejected_whenProjectionExceedsInventory()
     {
         var (check, positions, orders) = Build();
-        positions.GetOrCreate(new EndClientId(DefaultOwner), DefaultSymbol).ApplyFill(OrderSide.Buy, 100, 30m);
+        positions.GetOrCreate(DefaultFirm, new EndClientId(DefaultOwner), DefaultSymbol).ApplyFill(OrderSide.Buy, 100, 30m);
         SubmitInto(orders, MakeSell(1UL, 100));
 
         // Try to upsize from 100 to 150 — would need long ≥ 150.
@@ -253,7 +253,7 @@ public class NoNakedShortCheckTests
     public void Replace_upsize_approved_whenInventorySufficient()
     {
         var (check, positions, orders) = Build();
-        positions.GetOrCreate(new EndClientId(DefaultOwner), DefaultSymbol).ApplyFill(OrderSide.Buy, 200, 30m);
+        positions.GetOrCreate(DefaultFirm, new EndClientId(DefaultOwner), DefaultSymbol).ApplyFill(OrderSide.Buy, 200, 30m);
         SubmitInto(orders, MakeSell(1UL, 100));
 
         var ctx = SellReplaceCtx(newQty: 200, origClOrdId: 1UL, effectiveLeaves: 200);
@@ -271,7 +271,7 @@ public class NoNakedShortCheckTests
         // (80) it would compute 80 ≤ 100 here, but the meaningful
         // figure is the leaves the venue will assign.
         var (check, positions, orders) = Build();
-        positions.GetOrCreate(new EndClientId(DefaultOwner), DefaultSymbol).ApplyFill(OrderSide.Buy, 100, 30m);
+        positions.GetOrCreate(DefaultFirm, new EndClientId(DefaultOwner), DefaultSymbol).ApplyFill(OrderSide.Buy, 100, 30m);
         var orig = MakeSell(1UL, 100);
         orig.MarkWorking();
         orig.ApplyCumulativeFill(40);
@@ -289,7 +289,7 @@ public class NoNakedShortCheckTests
         // against this in the endpoint), the projection adjustment
         // is a no-op — behavior matches a fresh submission.
         var (check, positions, _) = Build();
-        positions.GetOrCreate(new EndClientId(DefaultOwner), DefaultSymbol).ApplyFill(OrderSide.Buy, 50, 30m);
+        positions.GetOrCreate(DefaultFirm, new EndClientId(DefaultOwner), DefaultSymbol).ApplyFill(OrderSide.Buy, 50, 30m);
 
         // No order in book + ctx claims to replace ID 999.
         var ctx = SellReplaceCtx(newQty: 100, origClOrdId: 999UL, effectiveLeaves: 100);
@@ -317,7 +317,7 @@ public class NoNakedShortCheckTests
         // the happy path; this defends the deeper invariant in case
         // that gate ever drifts.
         var (check, positions, orders) = Build();
-        positions.GetOrCreate(new EndClientId(DefaultOwner), DefaultSymbol).ApplyFill(OrderSide.Buy, 50, 30m);
+        positions.GetOrCreate(DefaultFirm, new EndClientId(DefaultOwner), DefaultSymbol).ApplyFill(OrderSide.Buy, 50, 30m);
         var orig = MakeSell(1UL, 100);
         orig.MarkCancelled();
         SubmitInto(orders, orig); // terminal; SumOpenSellLeavesForSymbol skips it
@@ -340,7 +340,7 @@ public class NoNakedShortCheckTests
         // the openSellLeaves sum). The replacement must still be
         // projected because it would be a fresh order at the venue.
         var (check, positions, orders) = Build();
-        positions.GetOrCreate(new EndClientId(DefaultOwner), DefaultSymbol).ApplyFill(OrderSide.Buy, 100, 30m);
+        positions.GetOrCreate(DefaultFirm, new EndClientId(DefaultOwner), DefaultSymbol).ApplyFill(OrderSide.Buy, 100, 30m);
         var orig = MakeSell(1UL, 100);
         orig.MarkWorking();
         SubmitInto(orders, orig);
@@ -366,7 +366,7 @@ public class NoNakedShortCheckTests
         // Slice 4 of #132. A ghost stale Sell must not block a new,
         // legitimate Sell against held inventory.
         var (check, positions, orders) = Build();
-        positions.GetOrCreate(new EndClientId(DefaultOwner), DefaultSymbol).ApplyFill(OrderSide.Buy, 100, 30m);
+        positions.GetOrCreate(DefaultFirm, new EndClientId(DefaultOwner), DefaultSymbol).ApplyFill(OrderSide.Buy, 100, 30m);
         var ghost = MakeSell(1UL, 100);
         ghost.MarkWorking();
         SubmitInto(orders, ghost);

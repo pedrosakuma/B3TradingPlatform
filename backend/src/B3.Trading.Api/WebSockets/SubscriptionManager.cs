@@ -86,12 +86,12 @@ public sealed class SubscriptionManager
 
             object? data = channel switch
             {
-                Channels.OrdersMe => _orders.ForEndClient(client.Owner).Select(o => o.ToDto()).ToArray(),
-                Channels.PositionsMe => _positions.ForEndClient(client.Owner).Select(p => p.ToDto()).ToArray(),
+                Channels.OrdersMe => _orders.ForEndClientAndFirm(client.FirmId, client.Owner).Select(o => o.ToDto()).ToArray(),
+                Channels.PositionsMe => _positions.ForEndClientAndFirm(client.FirmId, client.Owner).Select(p => p.ToDto()).ToArray(),
                 Channels.ExecutionsMe => Array.Empty<ExecutionDto>(), // no historical exec log in v1
                 Channels.AlgoMe => _algos.EnumerateForOwner(client.FirmId, client.Owner).Select(a => a.ToDto()).ToArray(),
                 Channels.PnlMe => (_pnl is not null && _refPrice is not null)
-                    ? PnlProjection.Build(client.Owner, _pnl, _positions, _refPrice)
+                    ? PnlProjection.Build(client.Owner, client.FirmId, _pnl, _positions, _refPrice)
                     : null,
                 _ => null,
             };
@@ -102,9 +102,25 @@ public sealed class SubscriptionManager
 
     /// <summary>
     /// Fan out <paramref name="payload"/> as a delta on <paramref name="channel"/>
-    /// to every subscribed client of <paramref name="owner"/>.
+    /// to every subscribed client of <paramref name="owner"/>. Legacy
+    /// overload — fans out to ALL subscribed clients of the owner
+    /// regardless of firm. New owner-keyed publish sites (orders.me /
+    /// positions.me / executions.me / pnl.me) should call the
+    /// firm-aware overload to avoid cross-firm leakage when the same
+    /// JWT <c>sub</c> is registered in multiple firms.
     /// </summary>
-    public void Publish(EndClientId owner, string channel, object payload)
+    public void Publish(EndClientId owner, string channel, object payload) =>
+        Publish(owner, firmId: null, channel, payload);
+
+    /// <summary>
+    /// PR #316 P1. Firm-scoped fan-out. Delivers <paramref name="payload"/>
+    /// only to subscribed clients whose <see cref="SubscribedClient.FirmId"/>
+    /// matches <paramref name="firmId"/>. A <c>null</c> firm preserves
+    /// the legacy behaviour (no filter) — kept so the public channel
+    /// path and any not-yet-threaded caller still work, but every
+    /// owner-keyed business publish should pass a concrete firmId.
+    /// </summary>
+    public void Publish(EndClientId owner, string? firmId, string channel, object payload)
     {
         if (!_byOwner.TryGetValue(owner, out var clients) || clients.IsEmpty)
             return;
@@ -114,6 +130,8 @@ public sealed class SubscriptionManager
             foreach (var client in clients)
             {
                 if (!client.IsSubscribed(channel) || client.MarkedForDisconnect)
+                    continue;
+                if (firmId is not null && !string.Equals(client.FirmId, firmId, StringComparison.OrdinalIgnoreCase))
                     continue;
                 var seq = client.NextSeq(channel);
                 if (seq < 0)

@@ -84,6 +84,61 @@ public sealed class WorkingOrderBook
     }
 
     /// <summary>
+    /// PR #316 P2.1. Firm-scoped variant of
+    /// <see cref="CountOpenForOwner"/>. Restricts the count to the
+    /// owner's non-terminal orders tagged with <paramref name="firmId"/>
+    /// so the same JWT <c>sub</c> active in multiple firms does not
+    /// consume another firm's max-open-orders quota. Used by
+    /// <see cref="Risk.Checks.MaxOpenOrdersCheck"/> — that cap is
+    /// resolved per-(firm, end-client) by <see cref="Risk.RiskLimitsResolver"/>,
+    /// so the counter must also be firm-scoped.
+    /// </summary>
+    public int CountOpenForOwnerAndFirm(string firmId, EndClientId owner)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        if (!_byOwner.TryGetValue(owner.Value, out var set)) return 0;
+        var count = 0;
+        foreach (var clOrdId in set.Keys)
+        {
+            if (!_orders.TryGetValue(clOrdId, out var order)) continue;
+            if (IsTerminal(order.Status)) continue;
+            if (order.IsStale) continue;
+            if (!string.Equals(order.FirmId, firmId, StringComparison.Ordinal)) continue;
+            count++;
+        }
+        return count;
+    }
+
+    /// <summary>
+    /// Q4.1 (#301). Counts an owner's non-terminal orders restricted to
+    /// the given <c>(firm, sub-account)</c> bucket. Orders without a
+    /// sub-account tag are NOT included (they live in the master bucket
+    /// and are counted by <see cref="CountOpenForOwner"/>), and orders
+    /// from a different firm are excluded so the same login under two
+    /// firms with the same sub-account id does not share the cap.
+    /// Used by <c>SubAccountLimitsCheck</c> to apply per-sub-account
+    /// max-open-orders caps without re-scanning the whole book.
+    /// </summary>
+    public int CountOpenForOwnerAndSubAccount(string firmId, EndClientId owner, SubAccountId subAccount)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        ArgumentNullException.ThrowIfNull(subAccount);
+        if (!_byOwner.TryGetValue(owner.Value, out var set)) return 0;
+        var count = 0;
+        foreach (var clOrdId in set.Keys)
+        {
+            if (!_orders.TryGetValue(clOrdId, out var order)) continue;
+            if (IsTerminal(order.Status)) continue;
+            if (order.IsStale) continue;
+            if (!string.Equals(order.FirmId, firmId, StringComparison.Ordinal)) continue;
+            if (order.SubAccountId is not { } sa) continue;
+            if (sa != subAccount) continue;
+            count++;
+        }
+        return count;
+    }
+
+    /// <summary>
     /// Sums <see cref="Order.LeavesQuantity"/> across the end-client's
     /// non-terminal Sell orders for a single symbol. Used by the
     /// pre-trade naked-short gate to compute available sellable
@@ -119,6 +174,53 @@ public sealed class WorkingOrderBook
             if (!_orders.TryGetValue(clOrdId, out var order)) continue;
             if (order.Side != OrderSide.Sell) continue;
             if (!string.Equals(order.Symbol, symbol, StringComparison.Ordinal)) continue;
+            if (IsTerminal(order.Status)) continue;
+            if (order.IsStale) continue;
+            total += order.LeavesQuantity;
+        }
+        return total;
+    }
+
+    /// <summary>
+    /// PR #316 P1. Firm-scoped variant of <see cref="ForEndClient"/>.
+    /// Filters the owner's orders to those tagged with
+    /// <paramref name="firmId"/> so the same JWT <c>sub</c> registered
+    /// in multiple firms sees only the orders that belong to the firm
+    /// it is currently authenticated under. Used by
+    /// <c>GET /orders</c> + <c>orders.me</c> snapshot.
+    /// </summary>
+    public IReadOnlyCollection<Order> ForEndClientAndFirm(string firmId, EndClientId owner)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        var list = new List<Order>();
+        foreach (var kv in _orders)
+        {
+            if (kv.Value.Owner != owner) continue;
+            if (!string.Equals(kv.Value.FirmId, firmId, StringComparison.Ordinal)) continue;
+            list.Add(kv.Value);
+        }
+        return list;
+    }
+
+    /// <summary>
+    /// PR #316 P1. Firm-scoped variant of
+    /// <see cref="SumOpenSellLeavesForSymbol"/>. Used by the naked-short
+    /// gate so that open Sell leaves of the same JWT <c>sub</c> in a
+    /// different firm don't restrict sellable inventory in the current
+    /// firm bucket.
+    /// </summary>
+    public long SumOpenSellLeavesForSymbolAndFirm(string firmId, EndClientId owner, string symbol)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(symbol);
+        if (!_byOwner.TryGetValue(owner.Value, out var set)) return 0;
+        long total = 0;
+        foreach (var clOrdId in set.Keys)
+        {
+            if (!_orders.TryGetValue(clOrdId, out var order)) continue;
+            if (order.Side != OrderSide.Sell) continue;
+            if (!string.Equals(order.Symbol, symbol, StringComparison.Ordinal)) continue;
+            if (!string.Equals(order.FirmId, firmId, StringComparison.Ordinal)) continue;
             if (IsTerminal(order.Status)) continue;
             if (order.IsStale) continue;
             total += order.LeavesQuantity;
@@ -212,6 +314,7 @@ public sealed class WorkingOrderBook
                 GoodTillDate = o.GoodTillDate,
                 DisplayQty = o.DisplayQty,
                 DisplayResetPolicy = o.DisplayResetPolicy?.ToString(),
+                SubAccountId = o.SubAccountId?.Value,
             };
         }
     }
@@ -265,12 +368,14 @@ public sealed class WorkingOrderBook
             DisplayResetPolicy? policy = s.DisplayResetPolicy is { } dpName
                 ? Enum.Parse<DisplayResetPolicy>(dpName)
                 : (DisplayResetPolicy?)null;
+            var subAccount = SubAccountId.FromNullableString(s.SubAccountId);
             _orders[s.ClOrdId] = Order.Hydrate(s.ClOrdId, owner, s.Symbol, s.SecurityId, side, type,
                 s.Quantity, s.Price, s.LeavesQuantity, s.CumulativeQuantity, status, s.FirmId,
                 s.ParentAlgoId, s.AlgoSliceSeq,
                 isStale: s.IsStale, staleReason: s.StaleReason, staledAtUtc: s.StaledAtUtc,
                 timeInForce: tif, stopPrice: s.StopPrice, goodTillDate: s.GoodTillDate,
-                displayQty: s.DisplayQty, displayResetPolicy: policy);
+                displayQty: s.DisplayQty, displayResetPolicy: policy,
+                subAccountId: subAccount);
             var firmSet = _byFirm.GetOrAdd(s.FirmId, static _ => new ConcurrentDictionary<ulong, byte>());
             firmSet.TryAdd(s.ClOrdId, 0);
             var ownerSet = _byOwner.GetOrAdd(s.EndClientId, static _ => new ConcurrentDictionary<ulong, byte>());

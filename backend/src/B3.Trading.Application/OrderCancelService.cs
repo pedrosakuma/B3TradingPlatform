@@ -61,13 +61,19 @@ public sealed class OrderCancelService
         EndClientId owner,
         ulong originalClOrdId,
         CancellationToken ct,
-        BotOrigin? botOrigin = null)
+        BotOrigin? botOrigin = null,
+        string? firmId = null)
     {
         ArgumentNullException.ThrowIfNull(owner);
 
         if (!_book.TryGet(originalClOrdId, out var order) || order is null)
             return OrderCancelResult.NotFound;
         if (order.Owner != owner)
+            return OrderCancelResult.NotFound;
+        // PR #316 P1. Reject cross-firm cancels (same posture as
+        // modify and read paths) — return NotFound so existence is
+        // not leaked across the firm boundary.
+        if (firmId is not null && !string.Equals(order.FirmId, firmId, StringComparison.Ordinal))
             return OrderCancelResult.NotFound;
         if (order.IsStale)
             return OrderCancelResult.Stale(order.StaleReason ?? "stale");

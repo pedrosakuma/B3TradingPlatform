@@ -52,6 +52,8 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(CashLedgerEvent), "cash.ledger")]
 [JsonDerivedType(typeof(FeeAccruedEvent), "fee.accrued")]
 [JsonDerivedType(typeof(RealizedPnlEvent), "pnl.realized")]
+[JsonDerivedType(typeof(SubAccountCreatedEvent), "sub-account.created")]
+[JsonDerivedType(typeof(SubAccountDeactivatedEvent), "sub-account.deactivated")]
 public abstract record WalEvent
 {
     public DateTimeOffset TimestampUtc { get; init; } = DateTimeOffset.UtcNow;
@@ -142,6 +144,17 @@ public sealed record OrderSubmittedEvent : WalEvent
     /// segments without the field deserialise as <c>null</c>.
     /// </summary>
     public string? DisplayResetPolicy { get; init; }
+
+    /// <summary>
+    /// Q4.1 (#301). Optional sub-account bucket. <c>null</c> = master
+    /// bucket — every legacy WAL segment deserialises with this field
+    /// missing, which maps to <c>null</c>, which is the only value
+    /// the platform produced before this slice. Validated through
+    /// <see cref="Domain.SubAccountId"/>'s constructor on replay so a
+    /// corrupted id surfaces as a deserialisation error rather than
+    /// silently poisoning the sub-account books.
+    /// </summary>
+    public string? SubAccountId { get; init; }
 }
 
 /// <summary>
@@ -370,6 +383,14 @@ public sealed record AlgoCreatedEvent : WalEvent
     public required string Type { get; init; }   // "Iceberg" | "Twap" | "Vwap" | "Pov" | "Pegged"
     public required long TotalQuantity { get; init; }
     public required DateTimeOffset CreatedAtUtc { get; init; }
+
+    /// <summary>
+    /// Q4.1 (#301). Optional sub-account bucket. Inherited by every
+    /// child <see cref="OrderSubmittedEvent"/> the engine produces
+    /// for this parent. <c>null</c> = master bucket (pre-#301
+    /// semantics — every legacy AlgoCreated row).
+    /// </summary>
+    public string? SubAccountId { get; init; }
     /// <summary>
     /// Iceberg-only: visible slice quantity. Mutually exclusive with
     /// the Twap fields below. Validated by the engine, not the WAL —
@@ -873,6 +894,11 @@ public sealed record FeeAccruedEvent : WalEvent
     public required decimal Emolumentos { get; init; }
     public required decimal Liquidacao { get; init; }
     public required decimal Total { get; init; }
+
+    /// <summary>Q4.1 (#301). Optional sub-account bucket; inherited
+    /// from the originating order. Legacy rows hydrate as <c>null</c>
+    /// (master).</summary>
+    public string? SubAccountId { get; init; }
 }
 
 /// <summary>
@@ -941,4 +967,53 @@ public sealed record RealizedPnlEvent : WalEvent
     /// avg-cost calculation in the keeper has drifted between runs.
     /// </summary>
     public required decimal RunningTotal { get; init; }
+
+    /// <summary>Q4.1 (#301). Optional sub-account bucket; inherited
+    /// from the originating order. Legacy rows hydrate as <c>null</c>
+    /// (master).</summary>
+    public string? SubAccountId { get; init; }
+
+    /// <summary>
+    /// Q4.1 (#301). Firm namespace for sub-account fan-out. Required
+    /// whenever <see cref="SubAccountId"/> is set so the replayer can
+    /// route the delta into the firm-scoped
+    /// <see cref="B3.Trading.Application.SubAccountPnlKeeper"/> without
+    /// depending on the <see cref="B3.Trading.Application.WorkingOrderBook"/>
+    /// having been restored first. Pre-#301 WAL segments and
+    /// post-#301 master-bucket rows (no <c>SubAccountId</c>) hydrate
+    /// this as <c>null</c>; the fan-out is short-circuited in those
+    /// cases.
+    /// </summary>
+    public string? FirmId { get; init; }
+}
+
+/// <summary>
+/// Q4.1 (#301). Recorded when a new sub-account is registered for a
+/// firm via <c>POST /sub-accounts</c>. The
+/// <c>SubAccountsRegistry</c> rehydrates the in-memory set on
+/// recovery by replaying this event family (CREATE / DEACTIVATE).
+/// Sub-accounts are namespaced per-firm: <c>(FirmId, Id)</c> is the
+/// uniqueness key.
+/// </summary>
+public sealed record SubAccountCreatedEvent : WalEvent
+{
+    public required string FirmId { get; init; }
+    public required string Id { get; init; }
+    public string? DisplayName { get; init; }
+    public string? ActorUserId { get; init; }
+}
+
+/// <summary>
+/// Q4.1 (#301). Soft-delete companion to
+/// <see cref="SubAccountCreatedEvent"/>. The registry marks the
+/// matching entry inactive; history endpoints continue to surface
+/// the id, but the submit pipeline rejects new orders against it
+/// (the registry returns <c>false</c> from <c>IsActive</c>).
+/// Re-issuing a CREATE for the same id revives it.
+/// </summary>
+public sealed record SubAccountDeactivatedEvent : WalEvent
+{
+    public required string FirmId { get; init; }
+    public required string Id { get; init; }
+    public string? ActorUserId { get; init; }
 }

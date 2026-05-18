@@ -47,13 +47,46 @@ public static class PnlEndpoints
             EndClientRegistry registry,
             PnlKeeper pnl,
             PositionKeeper positions,
-            IReferencePrice refPrice) =>
+            SubAccountPnlKeeper subPnl,
+            SubAccountsRegistry subAccounts,
+            IReferencePrice refPrice,
+            string? subAccount) =>
         {
             var sub = ctx.User.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)
                       ?? throw new InvalidOperationException("Authenticated request missing sub claim.");
             var owner = registry.Register(sub);
             Application.Observability.MetricsRegistry.PnlEndpointRequests.Add(1);
-            var snap = PnlProjection.Build(owner, pnl, positions, refPrice);
+            // Q4.1 (#301). With ?subAccount=X the response is restricted
+            // to the per-sub-account realized totals; the unrealized
+            // side is intentionally empty because per-sub-account
+            // avg-cost basis is not tracked in this slice (see PR
+            // body — deferred to a follow-up). Without the filter the
+            // legacy master-aggregate projection is returned.
+            if (!string.IsNullOrWhiteSpace(subAccount))
+            {
+                SubAccountId saId;
+                try { saId = new SubAccountId(subAccount); }
+                catch (ArgumentException ex)
+                {
+                    return Results.BadRequest(new { error = $"invalid subAccount: {ex.Message}" });
+                }
+                var firm = ctx.User.FindFirstValue(Auth.JwtIssuer.FirmClaim) ?? "default";
+                if (!subAccounts.TryGet(firm, saId.Value, out _))
+                    return Results.BadRequest(new { error = $"sub-account '{saId.Value}' is not registered for firm" });
+                var day = DateOnly.FromDateTime(DateTimeOffset.UtcNow.UtcDateTime);
+                var realized = new List<PnlRealizedEntry>();
+                decimal total = 0m;
+                foreach (var (symbol, value) in subPnl.ForSubAccountDay(firm, owner.Value, saId, day))
+                {
+                    if (value == 0m) continue;
+                    realized.Add(new PnlRealizedEntry(symbol, value));
+                    total += value;
+                }
+                return Results.Ok(new PnlTodayDto(realized,
+                    Array.Empty<PnlUnrealizedEntry>(), total, 0m));
+            }
+            var legacyFirm = ctx.User.FindFirstValue(Auth.JwtIssuer.FirmClaim) ?? "default";
+            var snap = PnlProjection.Build(owner, legacyFirm, pnl, positions, refPrice);
             return Results.Ok(snap);
         });
 
@@ -100,30 +133,33 @@ public static class PnlProjection
         PnlKeeper pnl,
         PositionKeeper positions,
         IReferencePrice refPrice,
+        DateOnly? day = null) =>
+        Build(owner, PnlKeeper.DefaultFirmId, pnl, positions, refPrice, day);
+
+    /// <summary>
+    /// PR #316 P1. Firm-scoped overload. The same JWT <c>sub</c>
+    /// registered in two firms must see only positions, basis, and
+    /// realized totals booked under <paramref name="firmId"/>. Master
+    /// keepers are firm-keyed since #316; the legacy 2-arg overload
+    /// above delegates to <see cref="PnlKeeper.DefaultFirmId"/> for
+    /// callers that have not yet been threaded.
+    /// </summary>
+    public static PnlTodayDto Build(
+        EndClientId owner,
+        string firmId,
+        PnlKeeper pnl,
+        PositionKeeper positions,
+        IReferencePrice refPrice,
         DateOnly? day = null)
     {
         var d = day ?? DateOnly.FromDateTime(DateTimeOffset.UtcNow.UtcDateTime);
 
-        // Unrealized: one row per OPEN position with a live ref price.
-        // Symbols whose ref-price lookup misses are omitted (rather
-        // than reported as 0) so the total stays honest.
-        //
-        // Pass-4 review (#278) P1#2. Unknown-basis legacy positions
-        // (seeded from pre-#271 snapshots whose AverageEntryPrice was
-        // zero) carry no usable basis: Position.AverageEntryPrice is
-        // either 0 or some polluted value, so a naive
-        // (refPrice - avg) * qty would publish phantom unrealized
-        // P&L. Skip them entirely — the position simply doesn't
-        // appear in the unrealized array until the legacy leg goes
-        // flat and a real basis is established by a fresh fill (see
-        // PnlKeeper.ApplyFillToAvgCost). The realized side is
-        // unaffected (those rows come from PnlKeeper.ForEndClientDay).
         var unrealized = new List<PnlUnrealizedEntry>();
         decimal totalUnrealized = 0m;
-        foreach (var p in positions.ForEndClient(owner))
+        foreach (var p in positions.ForEndClientAndFirm(firmId, owner))
         {
             if (p.NetQuantity == 0) continue;
-            if (pnl.GetUnknownBasisQty(owner.Value, p.Symbol) != 0) continue;
+            if (pnl.GetUnknownBasisQty(firmId, owner.Value, p.Symbol) != 0) continue;
             if (!refPrice.TryGet(p.Symbol, out var px)) continue;
             var value = p.NetQuantity >= 0
                 ? (px - p.AverageEntryPrice) * p.NetQuantity
@@ -132,12 +168,9 @@ public static class PnlProjection
             totalUnrealized += value;
         }
 
-        // Realized: every symbol with a non-zero realized total for
-        // the day, including symbols whose position has since closed
-        // out (no current position row).
         var realized = new List<PnlRealizedEntry>();
         decimal totalRealized = 0m;
-        foreach (var (symbol, value) in pnl.ForEndClientDay(owner.Value, d))
+        foreach (var (symbol, value) in pnl.ForEndClientDay(firmId, owner.Value, d))
         {
             if (value == 0m) continue;
             realized.Add(new PnlRealizedEntry(symbol, value));

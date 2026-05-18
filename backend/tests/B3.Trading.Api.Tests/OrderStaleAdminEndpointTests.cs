@@ -92,9 +92,13 @@ public class OrderStaleAdminEndpointTests : IClassFixture<TestAppFactory>
     [Fact]
     public async Task DeleteOrder_OnStaleOrder_Returns409()
     {
-        var order = SeedWorkingOrder(_factory, 9005UL);
+        // PR #316 P1: alice's JWT firm is "default" (no Firm set on
+        // the test user config), so the seeded order's firmId must
+        // match to exercise the stale gate (vs. being short-circuited
+        // by the cross-firm NotFound check on cancel).
+        var order = SeedWorkingOrder(_factory, 9005UL, firmId: "default");
         using var admin = await _factory.CreateAuthedClientAsync("admin");
-        await admin.PostAsJsonAsync("/admin/firms/TEST/orders/9005/mark-stale", new { reason = "x" });
+        await admin.PostAsJsonAsync("/admin/firms/default/orders/9005/mark-stale", new { reason = "x" });
         Assert.True(order.IsStale);
 
         // alice owns the order; she gets 409 trying to cancel.
@@ -106,9 +110,12 @@ public class OrderStaleAdminEndpointTests : IClassFixture<TestAppFactory>
     [Fact]
     public async Task ModifyOrder_OnStaleOrder_Returns409()
     {
-        var order = SeedWorkingOrder(_factory, 9006UL);
+        // PR #316 P1: see DeleteOrder_OnStaleOrder_Returns409 — order
+        // must be seeded under alice's firm ("default") so the stale
+        // gate is reached.
+        var order = SeedWorkingOrder(_factory, 9006UL, firmId: "default");
         using var admin = await _factory.CreateAuthedClientAsync("admin");
-        await admin.PostAsJsonAsync("/admin/firms/TEST/orders/9006/mark-stale", new { reason = "x" });
+        await admin.PostAsJsonAsync("/admin/firms/default/orders/9006/mark-stale", new { reason = "x" });
 
         using var alice = await _factory.CreateAuthedClientAsync();
         var resp = await alice.PutAsJsonAsync("/orders/9006", new { quantity = 200, price = 30m });

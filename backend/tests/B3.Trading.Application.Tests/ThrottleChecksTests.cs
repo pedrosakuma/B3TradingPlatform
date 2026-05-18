@@ -262,6 +262,27 @@ public class ThrottleChecksTests
         Assert.True(new MaxOpenOrdersCheck(opts, book).Check(Ctx()).Approved);
     }
 
+    [Fact]
+    public void MaxOpenOrders_OtherFirmsDoNotConsumeQuota()
+    {
+        // PR #316 P2.1. Cap is per-(firm, end-client). FIRM02 has the
+        // same owner at quota; a FIRM01 submission for the same owner
+        // must be approved against the empty FIRM01 quota — the
+        // FIRM02 working orders must not bleed across.
+        var book = new WorkingOrderBook();
+        AddOpenForFirm(book, "alice", "FIRM02", clOrdId: 10);
+        AddOpenForFirm(book, "alice", "FIRM02", clOrdId: 11);
+        // The current submission lands in the book before risk runs.
+        AddOpenForFirm(book, "alice", "FIRM01", clOrdId: 12);
+        var opts = Wrap(new RiskOptions { Default = new RiskLimits { MaxOpenOrders = 2 } });
+        var check = new MaxOpenOrdersCheck(opts, book);
+
+        Assert.True(check.Check(Ctx(firm: "FIRM01")).Approved);
+        // Sanity: FIRM02 actually IS at its cap (2 own + 0 cross).
+        AddOpenForFirm(book, "alice", "FIRM02", clOrdId: 13);
+        Assert.False(check.Check(Ctx(firm: "FIRM02")).Approved);
+    }
+
     // ────────────────── CompositeRiskAccountant ──────────────────
 
     [Fact]
@@ -316,6 +337,10 @@ public class ThrottleChecksTests
 
     private static void AddOpen(WorkingOrderBook book, string owner, ulong clOrdId) =>
         book.TryAdd(NewOrder(owner, clOrdId));
+
+    private static void AddOpenForFirm(WorkingOrderBook book, string owner, string firmId, ulong clOrdId) =>
+        book.TryAdd(new Order(clOrdId, new EndClientId(owner), "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit,
+            quantity: 100, price: 30m, firmId: firmId));
 
     private static Order NewOrder(string owner, ulong clOrdId) =>
         new(clOrdId, new EndClientId(owner), "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit,

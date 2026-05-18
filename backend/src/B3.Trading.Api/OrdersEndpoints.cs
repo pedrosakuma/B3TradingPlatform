@@ -18,7 +18,10 @@ public static class OrdersEndpoints
         group.MapGet("/", (HttpContext ctx, WorkingOrderBook book, EndClientRegistry registry) =>
         {
             var owner = ResolveOwner(ctx, registry);
-            var orders = book.ForEndClient(owner).Select(o => o.ToDto());
+            var firm = ResolveFirm(ctx);
+            // PR #316 P1. Scope by firm so the same JWT sub registered
+            // in two firms doesn't see the other firm's orders.
+            var orders = book.ForEndClientAndFirm(firm, owner).Select(o => o.ToDto());
             return Results.Ok(orders);
         });
 
@@ -28,6 +31,7 @@ public static class OrdersEndpoints
             EndClientRegistry registry,
             OrderSubmissionService submitter,
             SymbolDirectory symbols,
+            SubAccountsRegistry subAccounts,
             CancellationToken ct) =>
         {
             if (!Enum.TryParse<OrderSide>(req.Side, ignoreCase: true, out var side))
@@ -76,6 +80,44 @@ public static class OrdersEndpoints
                 displayPolicy = parsedPolicy;
             }
 
+            // Q4.1 (#301). Parse the optional sub-account hint, validate
+            // the id (1-64 chars, alphanumerics + ._-) via the value-type
+            // constructor, and confirm it exists and is active for the
+            // caller's firm. Active-status is checked again inside
+            // SubAccountLimitsCheck under the dispatcher lock — this
+            // is a fast-fail before any WAL write happens.
+            //
+            // PR review #301 P2: distinguish the two rejection cases
+            // with structured reasons so clients and metrics can tell
+            // "unknown id" apart from "operator-disabled".
+            //   * sub_account_not_registered — never seen this id
+            //     for this firm (or it was created under a different
+            //     firm and the caller's claim mismatches);
+            //   * sub_account_deactivated   — registered but soft-
+            //     deleted via DELETE /sub-accounts.
+            SubAccountId? subAccount = null;
+            if (!string.IsNullOrWhiteSpace(req.SubAccountId))
+            {
+                try { subAccount = new SubAccountId(req.SubAccountId); }
+                catch (ArgumentException ex)
+                {
+                    return Results.BadRequest(new { error = $"invalid subAccountId: {ex.Message}" });
+                }
+                var firmForLookup = ResolveFirm(ctx);
+                if (!subAccounts.TryGet(firmForLookup, subAccount.Value, out var entry))
+                    return Results.BadRequest(new
+                    {
+                        error = $"sub-account '{subAccount.Value}' is not registered for firm",
+                        reason = "sub_account_not_registered",
+                    });
+                if (!entry.Active)
+                    return Results.BadRequest(new
+                    {
+                        error = $"sub-account '{subAccount.Value}' has been deactivated for firm",
+                        reason = "sub_account_deactivated",
+                    });
+            }
+
             // SecurityId resolution: explicit non-zero in the payload
             // wins (preserves the conformance contract). Otherwise look
             // up the directory by symbol — that is the path the trader
@@ -95,7 +137,8 @@ public static class OrdersEndpoints
                 StopPrice: req.StopPrice,
                 GoodTillDate: req.GoodTillDate,
                 DisplayQty: req.DisplayQty,
-                DisplayResetPolicy: displayPolicy), ct);
+                DisplayResetPolicy: displayPolicy,
+                SubAccountId: subAccount), ct);
 
             return result.Kind switch
             {
@@ -149,10 +192,12 @@ public static class OrdersEndpoints
             }
 
             var owner = ResolveOwner(ctx, registry);
+            var firm = ResolveFirm(ctx);
             var result = await modifier.ModifyAsync(
                 new OrderModifyRequest(
                     owner, clOrdIdU, req.Quantity, req.Price,
-                    tif, req.StopPrice, req.GoodTillDate),
+                    tif, req.StopPrice, req.GoodTillDate,
+                    FirmId: firm),
                 ct);
 
             return result.Kind switch
@@ -198,10 +243,14 @@ public static class OrdersEndpoints
                 return Results.NotFound();
 
             var owner = ResolveOwner(ctx, registry);
+            var firm = ResolveFirm(ctx);
             // Sub-issue #171 (E): REST cancels now go through the WAL-
             // durable OrderCancelRequestedEvent path (RFC §4.6 / §4.8).
             // botOrigin is null — REST is not a bot session.
-            var result = await canceller.CancelAsync(owner, clOrdIdU, ct);
+            // PR #316 P1 — pass firm so the service rejects (as
+            // NotFound) cancels that target an order owned by a
+            // different firm, matching GET /orders scoping.
+            var result = await canceller.CancelAsync(owner, clOrdIdU, ct, firmId: firm);
             return result.Kind switch
             {
                 OrderCancelResultKind.Accepted => Results.NoContent(),
@@ -256,7 +305,15 @@ public sealed record SubmitOrderRequest(
     /// name (<c>"Always" | "OnPartialFill" | "Never"</c>). Defaults to <c>Always</c>
     /// when <c>DisplayQty</c> is set and this field is null. Must be null when
     /// <c>DisplayQty</c> is null.</summary>
-    string? DisplayResetPolicy = null);
+    string? DisplayResetPolicy = null,
+    /// <summary>Q4.1 (#301). Optional sub-account bucket the order is
+    /// booked against. Must satisfy <see cref="B3.Trading.Domain.SubAccountId"/>
+    /// validation (1-64 chars, alphanumerics + <c>._-</c>); rejected with
+    /// HTTP 400 if invalid (<c>reason: "sub_account_not_registered"</c>
+    /// when unknown, <c>reason: "sub_account_deactivated"</c> when
+    /// soft-deleted). <c>null</c> retains pre-#301 master-only
+    /// behaviour.</summary>
+    string? SubAccountId = null);
 
 public sealed record ModifyOrderRequest(
     long Quantity,

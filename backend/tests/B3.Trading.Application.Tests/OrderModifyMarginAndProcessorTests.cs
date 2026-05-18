@@ -778,7 +778,7 @@ public class OrderModifyMarginAndProcessorTests
         Assert.Equal(0, newOrder.LeavesQuantity);
         Assert.Equal(100, newOrder.CumulativeQuantity);
         // Position booked.
-        var pos = positions.GetOrCreate(bob, "PETR4");
+        var pos = positions.GetOrCreate("FIRM", bob, "PETR4");
         Assert.Equal(100, pos.NetQuantity);
         Assert.Equal(32.50m, pos.AverageEntryPrice);
         // Cash debited (Buy: available drops by notional).
@@ -1459,5 +1459,104 @@ public class OrderModifyMarginAndProcessorTests
                 replacements: Replacements,
                 replaceMargin: Margin);
         }
+    }
+
+    // ---------------- PR #316 P1: sub-account risk on modify ----------------
+
+    private static (OrderModifyService svc, CapturingGateway gw, SubAccountPositionKeeper subPos, SubAccountsRegistry reg)
+        BuildModifyServiceWithSubAccountRisk(
+            Order seedOrder,
+            SubAccountRiskOptions opts,
+            Action<SubAccountsRegistry>? configureRegistry = null)
+    {
+        var owner = seedOrder.Owner;
+        var clOrdIds = new ClOrdIdPrefixRegistry();
+        var ownership = new OrderOwnershipMap();
+        var book = new WorkingOrderBook();
+        Assert.True(book.TryAdd(seedOrder));
+        ownership.Register(seedOrder.ClOrdId, owner);
+        var gateway = new CapturingGateway();
+        var sink = new CapturingSink();
+        var subPos = new SubAccountPositionKeeper();
+        var registry = new SubAccountsRegistry();
+        configureRegistry?.Invoke(registry);
+        var subCheck = new Risk.Checks.SubAccountLimitsCheck(
+            new StaticOptionsMonitor<SubAccountRiskOptions>(opts), book, subPos, registry);
+        var risk = new Risk.RiskPipeline(new Risk.IRiskCheck[] { subCheck });
+        var margin = new NoOpReplaceMargin();
+        var replacements = new PendingReplacementRegistry();
+        var dispatcher = new EventDispatcher(new NullEventStore());
+        var svc = new OrderModifyService(
+            clOrdIds, ownership, book, gateway, sink, risk, margin, replacements, dispatcher,
+            new NeverDrain(), NullLogger<OrderModifyService>.Instance);
+        return (svc, gateway, subPos, registry);
+    }
+
+    [Fact]
+    public async Task Modify_subAccountPositionCap_rejectsWhenReplacementWouldBreach()
+    {
+        // PR #316 P1. Build a working buy in sub-account A with a
+        // pre-existing 60-lot position; sub-account cap is 100. A
+        // resize to 50 (delta +50) would project net 110 → reject.
+        const string firm = "FIRM01";
+        const string sub = "A";
+        var owner = new EndClientId("alice");
+        var seed = new Order(
+            2_000_001UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit,
+            10, 30m, firm, subAccountId: new SubAccountId(sub));
+        var opts = new SubAccountRiskOptions
+        {
+            PerFirm = new()
+            {
+                [firm] = new FirmSubAccountRiskOptions
+                {
+                    PerSubAccount = new() { [sub] = new SubAccountRiskLimits { PositionLimit = 100 } },
+                },
+            },
+        };
+        var (svc, gw, subPos, _) = BuildModifyServiceWithSubAccountRisk(
+            seed, opts, reg => reg.ApplyCreated(firm, sub, null));
+        // Seed an existing 60-lot net long in the sub-account.
+        subPos.ApplyFill(firm, owner, new SubAccountId(sub), "PETR4", OrderSide.Buy, 60, 30m);
+
+        var result = await svc.ModifyAsync(
+            new OrderModifyRequest(owner, seed.ClOrdId, NewQuantity: 50, NewPrice: 30m),
+            CancellationToken.None);
+
+        Assert.Equal(OrderModifyResultKind.RiskRejected, result.Kind);
+        Assert.StartsWith("sub_account_limit_exceeded", result.Reason);
+        Assert.Empty(gw.Replaces);
+    }
+
+    [Fact]
+    public async Task Modify_deactivatedSubAccount_rejectsWithDistinctReason()
+    {
+        // PR #316 P1. The original is booked against sub-account A;
+        // A is then deactivated. A modify must be rejected with the
+        // dedicated `sub_account_deactivated` reason (not aliased to
+        // the cap-breach reason) so operators and metrics can tell
+        // them apart.
+        const string firm = "FIRM01";
+        const string sub = "A";
+        var owner = new EndClientId("alice");
+        var seed = new Order(
+            2_000_002UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit,
+            10, 30m, firm, subAccountId: new SubAccountId(sub));
+        var (svc, gw, _, _) = BuildModifyServiceWithSubAccountRisk(
+            seed, new SubAccountRiskOptions(),
+            reg =>
+            {
+                reg.ApplyCreated(firm, sub, null);
+                reg.ApplyDeactivated(firm, sub);
+            });
+
+        var result = await svc.ModifyAsync(
+            new OrderModifyRequest(owner, seed.ClOrdId, NewQuantity: 15, NewPrice: 30m),
+            CancellationToken.None);
+
+        Assert.Equal(OrderModifyResultKind.RiskRejected, result.Kind);
+        Assert.StartsWith("sub_account_deactivated", result.Reason);
+        Assert.DoesNotContain("sub_account_limit_exceeded", result.Reason);
+        Assert.Empty(gw.Replaces);
     }
 }

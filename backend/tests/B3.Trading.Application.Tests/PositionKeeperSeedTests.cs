@@ -52,4 +52,33 @@ public class PositionKeeperSeedTests
         Assert.Equal(2000, keeper.GetOrCreate(bob, "PETR4").NetQuantity);
         Assert.Equal(0, keeper.GetOrCreate(bob, "VALE3").NetQuantity);
     }
+
+    // PR #316 P2.2. Position seeds carry an explicit Firm field; a
+    // seed for FIRM01 must be visible to the FIRM01 firm-scoped read
+    // path and NOT to a hypothetical FIRM02 user with the same JWT
+    // sub. Pre-fix the seed always landed in DefaultFirmId and was
+    // invisible to every real-mode user, causing naked-short rejects
+    // on the first Sell.
+    [Fact]
+    public void SeedIfAbsent_FirmScoped_VisibleOnlyToOwningFirm()
+    {
+        var keeper = new PositionKeeper();
+        var owner = new EndClientId("alice");
+
+        Assert.True(keeper.SeedIfAbsent("FIRM01", owner, "PETR4", 2000, 32.50m));
+
+        var firm01 = keeper.ForEndClientAndFirm("FIRM01", owner);
+        var seeded = Assert.Single(firm01);
+        Assert.Equal("PETR4", seeded.Symbol);
+        Assert.Equal(2000, seeded.NetQuantity);
+        Assert.Equal(32.50m, seeded.AverageEntryPrice);
+
+        // Same owner login under FIRM02 must not see the FIRM01 seed.
+        Assert.Empty(keeper.ForEndClientAndFirm("FIRM02", owner));
+
+        // Default-firm bucket is also empty (no legacy DefaultFirmId
+        // leakage), so the firm-aware read paths see what the
+        // operator configured and nothing else.
+        Assert.Empty(keeper.ForEndClientAndFirm(PositionKeeper.DefaultFirmId, owner));
+    }
 }

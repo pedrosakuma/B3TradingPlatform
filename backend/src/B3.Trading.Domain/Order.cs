@@ -181,7 +181,8 @@ public sealed class Order
         decimal? stopPrice = null,
         DateTimeOffset? goodTillDate = null,
         long? displayQty = null,
-        DisplayResetPolicy? displayResetPolicy = null)
+        DisplayResetPolicy? displayResetPolicy = null,
+        SubAccountId? subAccountId = null)
     {
         if (clOrdId == 0)
             throw new ArgumentOutOfRangeException(nameof(clOrdId), "ClOrdID cannot be zero (reserved as null sentinel by EntryPoint).");
@@ -261,6 +262,7 @@ public sealed class Order
         GoodTillDate = goodTillDate;
         DisplayQty = displayQty;
         DisplayResetPolicy = displayResetPolicy;
+        SubAccountId = subAccountId;
         LeavesQuantity = quantity;
         Status = OrderStatus.PendingNew;
     }
@@ -337,6 +339,16 @@ public sealed class Order
     /// a refresh-policy flag; the venue defaults to <c>Always</c>).
     /// </summary>
     public DisplayResetPolicy? DisplayResetPolicy { get; }
+
+    /// <summary>
+    /// Q4.1 (#301). Optional sub-account bucket the order is booked
+    /// against. <c>null</c> = master bucket (the only value legacy
+    /// callers ever produced). Sub-accounts are namespaced per-firm
+    /// at the registry level — see
+    /// <see cref="Domain.SubAccountId"/> and
+    /// <c>SubAccountsRegistry</c>.
+    /// </summary>
+    public SubAccountId? SubAccountId { get; }
 
     public long LeavesQuantity { get; private set; }
     public long CumulativeQuantity { get; private set; }
@@ -515,10 +527,11 @@ public sealed class Order
         decimal? stopPrice = null,
         DateTimeOffset? goodTillDate = null,
         long? displayQty = null,
-        DisplayResetPolicy? displayResetPolicy = null)
+        DisplayResetPolicy? displayResetPolicy = null,
+        SubAccountId? subAccountId = null)
     {
         var o = new Order(clOrdId, owner, symbol, securityId, side, type, quantity, price, firmId, parentAlgoId, algoSliceSeq,
-            timeInForce, stopPrice, goodTillDate, displayQty, displayResetPolicy);
+            timeInForce, stopPrice, goodTillDate, displayQty, displayResetPolicy, subAccountId);
         o.LeavesQuantity = leaves;
         o.CumulativeQuantity = cumQty;
         o.Status = status;
@@ -624,7 +637,8 @@ public sealed class Order
             stopPrice: effStop,
             goodTillDate: effGtd,
             displayQty: effDisplayQty,
-            displayResetPolicy: effPolicy);
+            displayResetPolicy: effPolicy,
+            subAccountId: original.SubAccountId);
     }
 
     /// <summary>

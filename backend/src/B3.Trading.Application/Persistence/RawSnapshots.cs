@@ -156,6 +156,34 @@ public sealed class RawPlatformSnapshot
     /// no-op, matching pre-pass-6 behaviour).
     /// </summary>
     public PendingReplacementRaw[] PendingReplacements { get; init; } = Array.Empty<PendingReplacementRaw>();
+
+    /// <summary>
+    /// Q4.1 (#301). Per-firm registry of sub-accounts. Empty on
+    /// snapshots pre-dating the field (additive); rebuilt entirely
+    /// from <c>SubAccountCreatedEvent</c> / <c>SubAccountDeactivatedEvent</c>
+    /// replay in that case.
+    /// </summary>
+    public IReadOnlyList<SubAccountSnapshot> SubAccounts { get; init; } =
+        Array.Empty<SubAccountSnapshot>();
+
+    /// <summary>
+    /// Q4.1 (#301). Per-(end-client, sub-account, symbol) net positions.
+    /// </summary>
+    public IReadOnlyList<SubAccountPositionSnapshot> SubAccountPositions { get; init; } =
+        Array.Empty<SubAccountPositionSnapshot>();
+
+    /// <summary>
+    /// Q4.1 (#301). Per-(end-client, sub-account, symbol, day) realized P&amp;L totals.
+    /// </summary>
+    public IReadOnlyList<SubAccountPnlSnapshot> SubAccountPnl { get; init; } =
+        Array.Empty<SubAccountPnlSnapshot>();
+
+    /// <summary>
+    /// PR #316 P2. Per-bucket avg-cost basis rows from
+    /// <see cref="B3.Trading.Application.SubAccountPnlKeeper"/>.
+    /// </summary>
+    public IReadOnlyList<SubAccountPnlBasisSnapshot> SubAccountPnlBasis { get; init; } =
+        Array.Empty<SubAccountPnlBasisSnapshot>();
 }
 
 /// <summary>
@@ -223,7 +251,9 @@ public readonly record struct PositionRaw(
     string EndClientId,
     string Symbol,
     long NetQuantity,
-    decimal AverageEntryPrice);
+    decimal AverageEntryPrice,
+    // PR #316 P1. Firm dimension on owner-keyed state.
+    string FirmId = "DEFAULT");
 
 public readonly record struct OwnershipRaw(ulong ClOrdId, string EndClientId);
 
@@ -251,14 +281,26 @@ public readonly record struct FeeKeeperRaw(string EndClientId, DateOnly Day, dec
 /// Q2.4 (#271). Raw lock-side capture of one (end-client, symbol, day)
 /// realized-P&amp;L bucket from <see cref="B3.Trading.Application.PnlKeeper"/>.
 /// </summary>
-public readonly record struct PnlRealizedRaw(string EndClientId, string Symbol, DateOnly Day, decimal Realized);
+public readonly record struct PnlRealizedRaw(
+    string EndClientId,
+    string Symbol,
+    DateOnly Day,
+    decimal Realized,
+    // PR #316 P1. Firm dimension on owner-keyed state.
+    string FirmId = "DEFAULT");
 
 /// <summary>
 /// Q2.4 (#271). Raw lock-side capture of one (end-client, symbol)
 /// avg-cost basis row tracked by <see cref="B3.Trading.Application.PnlKeeper"/>
 /// in parallel with <see cref="B3.Trading.Application.PositionKeeper"/>.
 /// </summary>
-public readonly record struct PnlAvgCostRaw(string EndClientId, string Symbol, long NetQuantity, decimal AvgPrice);
+public readonly record struct PnlAvgCostRaw(
+    string EndClientId,
+    string Symbol,
+    long NetQuantity,
+    decimal AvgPrice,
+    // PR #316 P1. Firm dimension on owner-keyed state.
+    string FirmId = "DEFAULT");
 
 /// <summary>
 /// Pass-3 review (#278) P1. Raw lock-side capture of one
@@ -267,7 +309,12 @@ public readonly record struct PnlAvgCostRaw(string EndClientId, string Symbol, l
 /// snapshot rehydration. Persisting this set keeps a snapshot+tail
 /// recovery from re-creating the phantom-P&amp;L bug on every restart.
 /// </summary>
-public readonly record struct PnlUnknownBasisRaw(string EndClientId, string Symbol, long NetQuantity);
+public readonly record struct PnlUnknownBasisRaw(
+    string EndClientId,
+    string Symbol,
+    long NetQuantity,
+    // PR #316 P1. Firm dimension on owner-keyed state.
+    string FirmId = "DEFAULT");
 
 public readonly record struct ClOrdIdCounterRaw(string EndClientId, ulong PrefixIdx, long Counter);
 

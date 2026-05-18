@@ -37,7 +37,14 @@ public sealed record RiskContext(
     // with the original positional arguments.
     TimeInForce TimeInForce = TimeInForce.Day,
     decimal? StopPrice = null,
-    DateTimeOffset? GoodTillDate = null);
+    DateTimeOffset? GoodTillDate = null,
+    /// <summary>
+    /// Q4.1 (#301). Optional sub-account bucket the order is booked
+    /// against. Forwarded to <c>SubAccountLimitsCheck</c> so the
+    /// per-(firm, subAccount) caps are applied alongside the master
+    /// caps. <c>null</c> means master-only (legacy semantics).
+    /// </summary>
+    SubAccountId? SubAccountId = null);
 
 public sealed record RiskDecision(bool Approved, string? Reason)
 {

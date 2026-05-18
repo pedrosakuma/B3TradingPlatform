@@ -181,4 +181,59 @@ public class WebSocketExecutionEventSinkTests
         Assert.Contains(Channels.ExecutionsMe, channels);
         Assert.DoesNotContain(Channels.PositionsMe, channels);
     }
+
+    [Fact]
+    public void Publish_WithFirmId_DoesNotFanOutAcrossFirms()
+    {
+        var book = new WorkingOrderBook();
+        var positions = new PositionKeeper();
+        var owner = new EndClientId("alice");
+
+        var mgr = new SubscriptionManager(book, positions, new AlgoBook());
+        var firm1 = new SubscribedClient(owner, "FIRM01");
+        var firm2 = new SubscribedClient(owner, "FIRM02");
+        mgr.Add(firm1);
+        mgr.Add(firm2);
+        mgr.SubscribeWithSnapshot(firm1, Channels.ExecutionsMe);
+        mgr.SubscribeWithSnapshot(firm2, Channels.ExecutionsMe);
+        firm1.Reader.TryRead(out _);
+        firm2.Reader.TryRead(out _);
+
+        mgr.Publish(owner, "FIRM01", Channels.ExecutionsMe, new { x = 1 });
+
+        Assert.True(firm1.Reader.TryRead(out var got));
+        Assert.Equal(1, got!.Seq);
+        Assert.False(firm2.Reader.TryRead(out _));
+    }
+
+    [Fact]
+    public void SubscribeSnapshot_FiltersOrdersAndPositionsByFirm()
+    {
+        var book = new WorkingOrderBook();
+        var positions = new PositionKeeper();
+        var owner = new EndClientId("alice");
+
+        var orderFirm1 = new Order(1UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m, firmId: "FIRM01");
+        var orderFirm2 = new Order(2UL, owner, "PETR4", 4322UL, OrderSide.Buy, OrderType.Limit, 200, 31m, firmId: "FIRM02");
+        book.TryAdd(orderFirm1);
+        book.TryAdd(orderFirm2);
+        positions.ApplyFill("FIRM01", owner, "PETR4", OrderSide.Buy, 100, 30m);
+        positions.ApplyFill("FIRM02", owner, "VALE3", OrderSide.Buy, 50, 60m);
+
+        var mgr = new SubscriptionManager(book, positions, new AlgoBook());
+        var client = new SubscribedClient(owner, "FIRM01");
+        mgr.Add(client);
+        mgr.SubscribeWithSnapshot(client, Channels.OrdersMe);
+        mgr.SubscribeWithSnapshot(client, Channels.PositionsMe);
+
+        Assert.True(client.Reader.TryRead(out var ordersSnap));
+        Assert.True(client.Reader.TryRead(out var positionsSnap));
+
+        var ordersJson = System.Text.Json.JsonSerializer.Serialize(ordersSnap!.Data);
+        var posJson = System.Text.Json.JsonSerializer.Serialize(positionsSnap!.Data);
+        Assert.Contains("4321", ordersJson);
+        Assert.DoesNotContain("4322", ordersJson);
+        Assert.Contains("PETR4", posJson);
+        Assert.DoesNotContain("VALE3", posJson);
+    }
 }

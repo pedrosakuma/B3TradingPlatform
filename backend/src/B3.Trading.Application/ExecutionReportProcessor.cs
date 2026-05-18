@@ -39,6 +39,8 @@ public sealed class ExecutionReportProcessor
     private readonly IFeeCalculator? _feeCalculator;
     private readonly FeeKeeper? _feeKeeper;
     private readonly PnlKeeper? _pnlKeeper;
+    private readonly SubAccountPositionKeeper? _subAccountPositions;
+    private readonly SubAccountPnlKeeper? _subAccountPnl;
     private readonly Persistence.EventDispatcher? _dispatcher;
     private readonly PendingReplacementRegistry? _replacements;
     private readonly Risk.IReplaceMarginCoordinator? _replaceMargin;
@@ -61,7 +63,9 @@ public sealed class ExecutionReportProcessor
         IFeeCalculator? feeCalculator = null,
         FeeKeeper? feeKeeper = null,
         Persistence.EventDispatcher? dispatcher = null,
-        PnlKeeper? pnlKeeper = null)
+        PnlKeeper? pnlKeeper = null,
+        SubAccountPositionKeeper? subAccountPositions = null,
+        SubAccountPnlKeeper? subAccountPnl = null)
     {
         _ownership = ownership;
         _orders = orders;
@@ -79,6 +83,8 @@ public sealed class ExecutionReportProcessor
         _feeKeeper = feeKeeper;
         _dispatcher = dispatcher;
         _pnlKeeper = pnlKeeper;
+        _subAccountPositions = subAccountPositions;
+        _subAccountPnl = subAccountPnl;
     }
 
     /// <summary>
@@ -239,19 +245,44 @@ public sealed class ExecutionReportProcessor
                     }
                     // Q2.4 (#271). Capture the pre-fill avg-cost basis
                     // BEFORE _positions.ApplyFill mutates it — realized
-                    // delta is computed off the pre-fill state. We read
-                    // off PnlKeeper's parallel basis tracker (kept in
-                    // lockstep with PositionKeeper via
-                    // ApplyFillToAvgCost below) so the snapshot/restore
-                    // path is independent of PositionKeeper.
+                    // delta is computed off the pre-fill state.
+                    //
+                    // PR #316 P2. The basis we read here must be the
+                    // BUCKET-of-the-fill's basis (master when
+                    // SubAccountId is null, else the sub-bucket), NOT
+                    // the aggregate _pnlKeeper basis — otherwise a
+                    // sub-account fill that offsets a position held in
+                    // the master bucket realises against the master's
+                    // avg cost and the spec's "P&L segregated" contract
+                    // is broken. Falls back to the aggregate keeper
+                    // only when _subAccountPnl is not wired (test
+                    // contexts that haven't been migrated), which
+                    // collapses to the original aggregate behaviour
+                    // for the no-sub-account case.
                     long preFillQty = 0;
                     decimal preFillAvg = 0m;
-                    if (_pnlKeeper is not null)
+                    if (_subAccountPnl is not null)
                     {
-                        var avg = _pnlKeeper.GetAvgCost(owner.Value, order.Symbol);
+                        var bucket = _subAccountPnl.GetBucketAvgCost(order.FirmId, owner.Value, order.SubAccountId, order.Symbol);
+                        if (bucket is not null) { preFillQty = bucket.NetQuantity; preFillAvg = bucket.AvgPrice; }
+                    }
+                    else if (_pnlKeeper is not null)
+                    {
+                        var avg = _pnlKeeper.GetAvgCost(order.FirmId, owner.Value, order.Symbol);
                         if (avg is not null) { preFillQty = avg.NetQuantity; preFillAvg = avg.AvgPrice; }
                     }
-                    _positions.ApplyFill(owner, order.Symbol, order.Side, delta, lastPx);
+                    _positions.ApplyFill(order.FirmId, owner, order.Symbol, order.Side, delta, lastPx);
+                    // Q4.1 (#301). Sub-account-tagged fills are also
+                    // booked into the parallel sub-account keeper so a
+                    // ?subAccount=X filter on GET /positions can read
+                    // a segregated row. The master keeper above sees
+                    // every fill (sub-account-null + sub-account-tagged)
+                    // so the aggregate view is naturally preserved.
+                    // FirmId is forwarded so the same login under two
+                    // firms with the same sub-account id stays
+                    // segregated (PR review #301 P1).
+                    if (order.SubAccountId is { } sa)
+                        _subAccountPositions?.ApplyFill(order.FirmId, owner, sa, order.Symbol, order.Side, delta, lastPx);
                     // Book the cash leg of the fill on the same delta as
                     // the position. Buys debit, Sells credit; T+0 settle.
                     // Null when the host hasn't wired CashLedger yet
@@ -386,18 +417,39 @@ public sealed class ExecutionReportProcessor
                             // mode, so they have nothing to reconcile
                             // — registering them would only inflate
                             // the FinalizeReplay materialisation count.
+                            //
+                            // PR #316 P1.2. (preFillQty, preFillAvg) is
+                            // the BUCKET-of-the-fill's pre-fill state
+                            // (master vs sub), so the would-realize
+                            // gate and synth payload match what live
+                            // would emit. The synth carries the
+                            // originating SubAccountId so FinalizeReplay
+                            // can fold the materialised delta into the
+                            // per-bucket realised total in
+                            // SubAccountPnlKeeper as well — without
+                            // this, a sub-bucket realised delta whose
+                            // RealizedPnlEvent did not survive the
+                            // ER-then-crash window would leak into the
+                            // aggregate keeper only.
                             var wouldRealize = PnlKeeper.ComputeRealizedDelta(preFillQty, preFillAvg, order.Side, delta, lastPx);
                             if (wouldRealize != 0m)
                             {
                                 _pnlKeeper.RegisterPendingReplaySynth(
-                                    executionIdPnl, owner.Value, order.Symbol, order.Side,
-                                    delta, lastPx, nowUtcPnl, preFillQty, preFillAvg);
+                                    order.FirmId, executionIdPnl, owner.Value, order.Symbol, order.Side,
+                                    delta, lastPx, nowUtcPnl, preFillQty, preFillAvg,
+                                    order.SubAccountId?.Value);
                             }
                             // Still advance the basis tracker on replay
                             // — the durable event Apply path uses
                             // RunningTotal directly, so basis is purely
                             // in-memory state used for live computation.
-                            _pnlKeeper.ApplyFillToAvgCost(owner.Value, order.Symbol, order.Side, delta, lastPx);
+                            // PR #316 P2. Aggregate basis stays in
+                            // lockstep with PositionKeeper; bucket
+                            // basis is advanced separately so a future
+                            // live close after replay uses the right
+                            // segregated basis.
+                            _pnlKeeper.ApplyFillToAvgCost(order.FirmId, owner.Value, order.Symbol, order.Side, delta, lastPx);
+                            _subAccountPnl?.ApplyBucketFill(order.FirmId, owner.Value, order.SubAccountId, order.Symbol, order.Side, delta, lastPx);
                         }
                         else
                         {
@@ -428,10 +480,32 @@ public sealed class ExecutionReportProcessor
                             // serialisation is sufficient because all
                             // live ER processing flows through it.
                             var dayKey = DateOnly.FromDateTime(nowUtcPnl.UtcDateTime);
-                            var realized = _pnlKeeper.ApplyFillToAvgCost(owner.Value, order.Symbol, order.Side, delta, lastPx);
+                            // PR #316 P2. The aggregate keeper still
+                            // advances its basis (consumed by legacy
+                            // statement paths, the live snapshot
+                            // mirror, and the no-sub-account fallback
+                            // pre-fill read above), but its returned
+                            // delta is NOT the event source. The
+                            // authoritative realized delta is computed
+                            // against the bucket-of-the-fill's own
+                            // basis via the sub-account keeper — so a
+                            // sub-bucket close against an aggregate
+                            // position dominated by the master bucket
+                            // realises against the SUB's basis, not
+                            // the master's, satisfying the
+                            // "fill in sub-account A increments only
+                            // A's P&L" contract. When _subAccountPnl
+                            // is not wired (legacy test contexts) we
+                            // fall back to the aggregate delta so
+                            // pre-#316 ER processor tests keep
+                            // passing unchanged.
+                            var aggregateRealized = _pnlKeeper.ApplyFillToAvgCost(order.FirmId, owner.Value, order.Symbol, order.Side, delta, lastPx);
+                            var realized = _subAccountPnl is not null
+                                ? _subAccountPnl.ApplyBucketFill(order.FirmId, owner.Value, order.SubAccountId, order.Symbol, order.Side, delta, lastPx)
+                                : aggregateRealized;
                             if (realized != 0m)
                             {
-                                var prevTotal = _pnlKeeper.GetDayRealized(owner.Value, order.Symbol, dayKey);
+                                var prevTotal = _pnlKeeper.GetDayRealized(order.FirmId, owner.Value, order.Symbol, dayKey);
                                 var running = prevTotal + realized;
                                 var pnlEvt = new Persistence.RealizedPnlEvent
                                 {
@@ -443,11 +517,29 @@ public sealed class ExecutionReportProcessor
                                     DeltaRealized = realized,
                                     RunningTotal = running,
                                     TimestampUtc = nowUtcPnl,
+                                    // PR #316 P1. Firm namespace for owner-keyed
+                                    // PnL fan-out. Always populated from the order
+                                    // (no longer conditional on SubAccountId) so a
+                                    // snapshot+tail recovery routes the realized
+                                    // delta into the correct firm bucket — required
+                                    // so the same JWT sub registered in two firms
+                                    // doesn't see cross-firm realized leaking on
+                                    // GET /pnl/today or pnl.me.
+                                    SubAccountId = order.SubAccountId?.Value,
+                                    FirmId = order.FirmId,
                                 };
                                 var keeperPnl = _pnlKeeper;
+                                var subPnl = _subAccountPnl;
+                                var subTag = order.SubAccountId;
+                                var firmTag = order.FirmId;
                                 try
                                 {
-                                    _dispatcher.Dispatch(pnlEvt, () => keeperPnl.Apply(pnlEvt));
+                                    _dispatcher.Dispatch(pnlEvt, () =>
+                                    {
+                                        keeperPnl.Apply(pnlEvt);
+                                        if (subTag is { } saInner)
+                                            subPnl?.Add(firmTag, owner.Value, saInner, order.Symbol, dayKey, realized);
+                                    });
                                     MetricsRegistry.PnlRealizedAppended.Add(1);
                                 }
                                 catch (Persistence.WalBackpressureException)
@@ -458,6 +550,8 @@ public sealed class ExecutionReportProcessor
                                         "Dropping RealizedPnlEvent for {ClOrdId} on WAL backpressure; applying realized pnl directly to keeper.",
                                         lookupId);
                                     keeperPnl.Apply(pnlEvt);
+                                    if (subTag is { } saInner2)
+                                        subPnl?.Add(firmTag, owner.Value, saInner2, order.Symbol, dayKey, realized);
                                 }
                             }
                         }
@@ -571,7 +665,8 @@ public sealed class ExecutionReportProcessor
             lastPx,
             rejectReason,
             DateTimeOffset.UtcNow,
-            isNativeStp);
+            isNativeStp,
+            order.FirmId);
         // RFC §5.2 (F2). Capture-then-fan-out path: the dispatcher walks
         // the writer and TryWrites into every per-sink channel while still
         // under the dispatcher lock so subscribers observe events in WAL
@@ -648,7 +743,8 @@ public sealed class ExecutionReportProcessor
             LastPrice: 0m,
             RejectReason: rejectReason,
             TimestampUtc: DateTimeOffset.UtcNow,
-            IsNativeStp: false);
+            IsNativeStp: false,
+            FirmId: intent.FirmId);
         if (fanOut is not null)
         {
             fanOut.Add(rejectedEv, Persistence.ExecutionFanOutTargets.BotRouter);
@@ -709,7 +805,8 @@ public sealed class ExecutionReportProcessor
             0m,
             null,
             DateTimeOffset.UtcNow,
-            false);
+            false,
+            intent.FirmId);
         if (fanOut is not null)
         {
             fanOut.Add(origEv);
@@ -813,7 +910,8 @@ public sealed class ExecutionReportProcessor
             erLastPx,
             null,
             DateTimeOffset.UtcNow,
-            false);
+            false,
+            intent.FirmId);
         if (fanOut is not null)
         {
             fanOut.Add(newEv);

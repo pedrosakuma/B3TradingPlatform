@@ -229,6 +229,38 @@ public sealed class PlatformSnapshot
     /// process".
     /// </summary>
     public List<PendingReplacementSnapshot> PendingReplacements { get; init; } = new();
+
+    /// <summary>
+    /// Q4.1 (#301). Per-firm registry of known sub-accounts (active
+    /// + soft-deleted). Empty on snapshots pre-dating the field;
+    /// rebuilt entirely from <see cref="SubAccountCreatedEvent"/> /
+    /// <see cref="SubAccountDeactivatedEvent"/> replay in that case.
+    /// </summary>
+    public List<SubAccountSnapshot> SubAccounts { get; init; } = new();
+
+    /// <summary>
+    /// Q4.1 (#301). Per-(end-client, sub-account, symbol) net
+    /// positions for sub-account-tagged fills. The master aggregate
+    /// continues to live in <see cref="Positions"/> (sub-account-null
+    /// and sub-account-tagged fills both folded). Empty on snapshots
+    /// pre-dating the field.
+    /// </summary>
+    public List<SubAccountPositionSnapshot> SubAccountPositions { get; init; } = new();
+
+    /// <summary>
+    /// Q4.1 (#301). Per-(end-client, sub-account, symbol, day)
+    /// realized-P&amp;L running totals. Empty on snapshots
+    /// pre-dating the field.
+    /// </summary>
+    public List<SubAccountPnlSnapshot> SubAccountPnl { get; init; } = new();
+
+    /// <summary>
+    /// PR #316 P2. Per-bucket avg-cost basis rows powering
+    /// <see cref="B3.Trading.Application.SubAccountPnlKeeper.ApplyBucketFill"/>.
+    /// Empty on snapshots predating the field — legacy hydrates to an
+    /// empty basis map (best-effort, see record doc).
+    /// </summary>
+    public List<SubAccountPnlBasisSnapshot> SubAccountPnlBasis { get; init; } = new();
 }
 
 /// <summary>
@@ -339,6 +371,14 @@ public sealed record OrderSnapshot(
     /// to <c>null</c>.
     /// </summary>
     public string? DisplayResetPolicy { get; init; }
+
+    /// <summary>
+    /// Q4.1 (#301). Optional sub-account bucket the order was booked
+    /// against at submit time. Null = master bucket. Older snapshots
+    /// without the field hydrate as null, matching the pre-#301
+    /// semantics they actually carried.
+    /// </summary>
+    public string? SubAccountId { get; init; }
 }
 
 /// <summary>
@@ -398,7 +438,12 @@ public sealed record PositionSnapshot(
     string EndClientId,
     string Symbol,
     long NetQuantity,
-    decimal AverageEntryPrice);
+    decimal AverageEntryPrice,
+    // PR #316 P1. Firm dimension on owner-keyed state. Defaults to
+    // "default" so older snapshots and test-only call sites that
+    // construct PositionSnapshot positionally still round-trip; the
+    // firm-aware code paths overwrite this with the real firm.
+    string FirmId = "DEFAULT");
 
 public sealed record CashBalanceSnapshot(
     string EndClientId,
@@ -412,7 +457,10 @@ public sealed record PnlAvgCostSnapshot(
     string EndClientId,
     string Symbol,
     long NetQuantity,
-    decimal AvgPrice);
+    decimal AvgPrice,
+    // PR #316 P1. Firm dimension on owner-keyed state. Defaults to
+    // "default" so older snapshots hydrate as a single legacy bucket.
+    string FirmId = "DEFAULT");
 
 /// <summary>
 /// Pass-3 review (#278) P1. Persisted "unknown basis" qty row —
@@ -421,7 +469,10 @@ public sealed record PnlAvgCostSnapshot(
 public sealed record PnlUnknownBasisSnapshot(
     string EndClientId,
     string Symbol,
-    long NetQuantity);
+    long NetQuantity,
+    // PR #316 P1. Firm dimension on owner-keyed state. Defaults to
+    // "default" so older snapshots hydrate as a single legacy bucket.
+    string FirmId = "DEFAULT");
 
 /// <summary>
 /// Pass-1 review (#295) P1#1. One row of the per-POV scheduling-progress
@@ -522,3 +573,72 @@ public sealed record AlgoIdCounterSnapshot(string FirmId, long Counter);
 /// enum name for forward-compat across reorderings.
 /// </summary>
 public sealed record SessionPhaseOverrideSnapshot(string Symbol, string Phase);
+
+/// <summary>
+/// Q4.1 (#301). One per-firm row of the
+/// <see cref="B3.Trading.Application.SubAccountsRegistry"/>.
+/// <see cref="Active"/> = false means soft-deleted: orders still
+/// resolve historically, but the submit pipeline rejects new ones
+/// (the registry's <c>IsActive</c> gate fails).
+/// </summary>
+public sealed record SubAccountSnapshot(string FirmId, string Id, string? DisplayName, bool Active);
+
+/// <summary>
+/// Q4.1 (#301). One <c>(FirmId, EndClientId, SubAccountId, Symbol) →
+/// net quantity + avg price</c> row from
+/// <see cref="B3.Trading.Application.SubAccountPositionKeeper"/>.
+///
+/// <para>
+/// <b>Migration note.</b> <see cref="FirmId"/> is additive and
+/// non-nullable. The DTO type is new in Q4.1 (#301) — no production
+/// snapshots predate it, so there are no legacy records to migrate.
+/// </para>
+/// </summary>
+public sealed record SubAccountPositionSnapshot(
+    string FirmId,
+    string EndClientId,
+    string SubAccountId,
+    string Symbol,
+    long NetQuantity,
+    decimal AverageEntryPrice);
+
+/// <summary>
+/// Q4.1 (#301). One <c>(FirmId, EndClientId, SubAccountId, Symbol,
+/// Day) → realized total</c> row from
+/// <see cref="B3.Trading.Application.SubAccountPnlKeeper"/>.
+///
+/// <para>
+/// <b>Migration note.</b> Same shape concern as
+/// <see cref="SubAccountPositionSnapshot"/>: <see cref="FirmId"/> is
+/// additive non-nullable on a type new in Q4.1, no pre-merge data
+/// exists.
+/// </para>
+/// </summary>
+public sealed record SubAccountPnlSnapshot(
+    string FirmId,
+    string EndClientId,
+    string SubAccountId,
+    string Symbol,
+    DateOnly Day,
+    decimal RealizedTotal);
+
+/// <summary>
+/// PR #316 P2. One row of the per-bucket avg-cost basis projected
+/// by <see cref="B3.Trading.Application.SubAccountPnlKeeper"/>.
+/// <see cref="SubAccountId"/> is
+/// <see cref="B3.Trading.Application.SubAccountPnlKeeper.MasterBucketKey"/>
+/// (empty string) for the MASTER bucket (fills with no sub-account
+/// tag) and a real sub-account id otherwise. Persisted alongside
+/// <see cref="SubAccountPnlSnapshot"/> so a snapshot+tail recovery
+/// preserves bucket-level basis. Additive on snapshots predating
+/// the field; legacy hydrates to an empty basis map (best-effort
+/// recovery — see <c>SubAccountPnlKeeper.SnapshotBasis</c> for the
+/// recovery semantics).
+/// </summary>
+public sealed record SubAccountPnlBasisSnapshot(
+    string FirmId,
+    string EndClientId,
+    string SubAccountId,
+    string Symbol,
+    long NetQuantity,
+    decimal AvgPrice);

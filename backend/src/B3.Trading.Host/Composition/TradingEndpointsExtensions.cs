@@ -31,6 +31,7 @@ public static class TradingEndpointsExtensions
         app.MapPositions();
         app.MapBalance();
         app.MapPnl();
+        app.MapSubAccounts();
         app.MapStatement();
         app.MapPolicy();
         app.MapAdmin();

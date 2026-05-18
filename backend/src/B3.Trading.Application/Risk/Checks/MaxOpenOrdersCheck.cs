@@ -46,7 +46,10 @@ public sealed class MaxOpenOrdersCheck : IRiskCheck
         if (!cap.HasValue) return RiskDecision.Approve;
 
         // The current order is already in the book — see XML doc.
-        var openIncludingSelf = _book.CountOpenForOwner(ctx.Owner);
+        // PR #316 P2.1. Cap is resolved per-(firm, end-client) so the
+        // counter must also be firm-scoped: a FIRM02 order under the
+        // same JWT sub must not consume the FIRM01 quota.
+        var openIncludingSelf = _book.CountOpenForOwnerAndFirm(ctx.FirmId, ctx.Owner);
         if (openIncludingSelf > cap.Value)
             return RiskDecision.Reject(
                 $"open orders {openIncludingSelf - 1} would exceed cap {cap.Value} for {ctx.Owner.Value}");

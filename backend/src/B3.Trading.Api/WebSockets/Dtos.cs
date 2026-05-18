@@ -117,12 +117,20 @@ public sealed record OrderDto(
     /// <summary>Q3.4 (#284). Refresh policy for the visible portion of an iceberg order;
     /// null iff <see cref="DisplayQty"/> is null. Today only <c>"Always"</c> is accepted
     /// at intake (SDK limitation — see #298).</summary>
-    string? DisplayResetPolicy = null);
+    string? DisplayResetPolicy = null,
+    /// <summary>Q4.1 (#301). Sub-account bucket this order is booked
+    /// against. Null = master bucket (legacy / non-sub-account flow).</summary>
+    string? SubAccountId = null);
 
 public sealed record PositionDto(
     string Symbol,
     long NetQuantity,
-    decimal AverageEntryPrice);
+    decimal AverageEntryPrice,
+    /// <summary>Q4.1 (#301). Sub-account this row belongs to. Null on
+    /// the master-aggregate row (sum across all sub-accounts plus the
+    /// untagged bucket) returned when the caller did not pass
+    /// <c>?subAccount=X</c>.</summary>
+    string? SubAccountId = null);
 
 /// <summary>
 /// Wire shape for <c>GET /balance</c>. Slice 1 of #107 exposes only
@@ -233,9 +241,13 @@ public static class DtoMappings
         o.ParentAlgoId?.ToString(), o.AlgoSliceSeq,
         o.IsStale, o.StaleReason, o.StaledAtUtc,
         o.TimeInForce.ToString(), o.StopPrice, o.GoodTillDate,
-        o.DisplayQty, o.DisplayResetPolicy?.ToString());
+        o.DisplayQty, o.DisplayResetPolicy?.ToString(),
+        o.SubAccountId?.Value);
 
     public static PositionDto ToDto(this Position p) => new(p.Symbol, p.NetQuantity, p.AverageEntryPrice);
+
+    public static PositionDto ToDto(this Position p, SubAccountId? subAccount) =>
+        new(p.Symbol, p.NetQuantity, p.AverageEntryPrice, subAccount?.Value);
 
     public static ExecutionDto ToDto(this ExecutionEvent ev) => new(
         ev.ClOrdId.ToString(), ev.Symbol, ev.Side.ToString(), ev.Status.ToString(), ev.Kind.ToString(),

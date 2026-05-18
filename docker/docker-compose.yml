@@ -222,18 +222,27 @@ services:
       Trading__Positions__Seeds__0__Symbol: PETR4
       Trading__Positions__Seeds__0__Quantity: "2000"
       Trading__Positions__Seeds__0__AverageEntryPrice: "32.50"
+      # PR #316 P2: explicit firm namespace. Without this the seed lands
+      # in PositionKeeper.DefaultFirmId and is invisible to FIRM01 users
+      # (the naked-short gate then rejects the first Sell). The
+      # Mode=Unavailable overlay reverts the user firm to "default"; its
+      # own seed-firm override matches.
+      Trading__Positions__Seeds__0__Firm: FIRM01
       Trading__Positions__Seeds__1__EndClientId: ${TRADING_SEED_USER:-alice}
       Trading__Positions__Seeds__1__Symbol: VALE3
       Trading__Positions__Seeds__1__Quantity: "2000"
       Trading__Positions__Seeds__1__AverageEntryPrice: "65.00"
+      Trading__Positions__Seeds__1__Firm: FIRM01
       Trading__Positions__Seeds__2__EndClientId: ${TRADING_SEED_USER_2:-bob}
       Trading__Positions__Seeds__2__Symbol: PETR4
       Trading__Positions__Seeds__2__Quantity: "2000"
       Trading__Positions__Seeds__2__AverageEntryPrice: "32.50"
+      Trading__Positions__Seeds__2__Firm: FIRM01
       Trading__Positions__Seeds__3__EndClientId: ${TRADING_SEED_USER_2:-bob}
       Trading__Positions__Seeds__3__Symbol: VALE3
       Trading__Positions__Seeds__3__Quantity: "2000"
       Trading__Positions__Seeds__3__AverageEntryPrice: "65.00"
+      Trading__Positions__Seeds__3__Firm: FIRM01
       # Live reference price via the marketdata WS leg (RFC §4.5 D3).
       # MarketDataReferencePrice subscribes to PETR4/VALE3/ITUB4 on boot;
       # cache misses fall back to Trading:Risk:ReferencePrices map. The

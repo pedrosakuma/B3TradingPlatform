@@ -29,6 +29,11 @@ public static class TradingRiskServiceCollectionExtensions
     {
         services.Configure<RiskOptions>(
             configuration.GetSection(RiskOptions.SectionName));
+        // Q4.1 (#301). Optional per-(firm, sub-account) cap config.
+        // Bound from Trading:Risk:SubAccount; missing section is fine —
+        // the resolver returns null and the check becomes a no-op.
+        services.Configure<SubAccountRiskOptions>(
+            configuration.GetSection(SubAccountRiskOptions.SectionName));
         services.Configure<SymbolDirectoryOptions>(
             configuration.GetSection(SymbolDirectoryOptions.SectionName));
         services.AddSingleton(sp =>
@@ -92,6 +97,7 @@ public static class TradingRiskServiceCollectionExtensions
         services.AddSingleton<IRiskCheck, RollingNotionalCheck>();
         services.AddSingleton<IRiskCheck, OrderRateLimitCheck>();
         services.AddSingleton<IRiskCheck, MaxOpenOrdersCheck>();
+        services.AddSingleton<IRiskCheck, SubAccountLimitsCheck>();
         services.AddSingleton<IRiskCheck, NoNakedShortCheck>();
         services.AddSingleton<IRiskCheck, SelfTradePreventionCheck>();
         services.AddSingleton<IRiskCheck, PriceCollarCheck>();

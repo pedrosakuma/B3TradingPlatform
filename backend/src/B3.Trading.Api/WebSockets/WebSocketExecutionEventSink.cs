@@ -142,30 +142,29 @@ public sealed class WebSocketExecutionEventSink : IExecutionEventSink, IExecutio
         if (_subs.CountFor(ev.Owner) == 0)
             return;
 
+        // PR #316 P1. Firm-scope every owner-keyed fan-out so the
+        // same JWT sub registered in two firms doesn't see the other
+        // firm's executions/orders/positions/pnl on its WS session.
+        var firmId = ev.FirmId;
+
         // executions.me — every ER becomes an execution event.
-        _subs.Publish(ev.Owner, Channels.ExecutionsMe, ev.ToDto());
+        _subs.Publish(ev.Owner, firmId, Channels.ExecutionsMe, ev.ToDto());
 
         // orders.me — current order state after mutation.
         if (_orders.TryGet(ev.ClOrdId, out var order) && order is not null)
-            _subs.Publish(ev.Owner, Channels.OrdersMe, order.ToDto());
+            _subs.Publish(ev.Owner, firmId, Channels.OrdersMe, order.ToDto());
 
         // positions.me — only fills affect positions.
         if (ev.Kind is ExecKind.Fill or ExecKind.PartialFill && ev.LastQuantity > 0)
         {
-            var position = _positions.GetOrCreate(ev.Owner, ev.Symbol);
-            _subs.Publish(ev.Owner, Channels.PositionsMe, position.ToDto());
+            var positionFirm = firmId ?? PnlKeeper.DefaultFirmId;
+            var position = _positions.GetOrCreate(positionFirm, ev.Owner, ev.Symbol);
+            _subs.Publish(ev.Owner, firmId, Channels.PositionsMe, position.ToDto());
 
-            // Q2.4 (#271). pnl.me — fills move both the realized
-            // bucket (via PnlKeeper) and unrealized (via the new
-            // avg-cost basis). Re-project the whole snapshot so
-            // subscribers can swap it in atomically. Note we project
-            // OFF the dispatcher path (this drain is async and
-            // ordered with positions.me — guaranteeing pnl reflects
-            // the same fill the position update reports).
             if (_pnl is not null && _refPrice is not null)
             {
-                var pnlSnap = PnlProjection.Build(ev.Owner, _pnl, _positions, _refPrice);
-                _subs.Publish(ev.Owner, Channels.PnlMe, pnlSnap);
+                var pnlSnap = PnlProjection.Build(ev.Owner, positionFirm, _pnl, _positions, _refPrice);
+                _subs.Publish(ev.Owner, firmId, Channels.PnlMe, pnlSnap);
             }
         }
     }
