@@ -68,6 +68,12 @@ services:
       Trading__Risk__ReferencePrices__VALE3: "65.00"
       Trading__Risk__ReferencePrices__ITUB4: "30.00"
 
+      # Q4.8 (#308) pass-2. CVM 35/505 export requires a non-empty
+      # LGPD opacification salt at boot in non-Development env. The
+      # demo overlay runs the host in Docker env, so set a fixed
+      # placeholder so the host boots. Production must override.
+      Trading__Reports__Cvm__OwnerHashSalt: "demo-only-cvm-salt-placeholder-DO-NOT-USE-IN-PROD"
+
       # The demo bots produce Buys and Sells uniformly to populate
       # both sides of the book. With the naked-short gate enabled
       # (the safe default for cash equities), Sells from accounts

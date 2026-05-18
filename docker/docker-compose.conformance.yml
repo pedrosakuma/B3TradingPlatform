@@ -37,6 +37,12 @@ services:
       # itself cover rate-limit semantics, so disable the limiter for
       # the conformance overlay only — production hosts keep it on.
       Trading__RateLimit__Enabled: "false"
+      # Q4.8 (#308) pass-2. CVM 35/505 export requires a non-empty
+      # LGPD opacification salt at boot. The conformance suite does
+      # not exercise CVM endpoints, but the boot guard fires on
+      # startup; bind a fixed placeholder so the host can come up.
+      # Production hosts MUST configure a real secret.
+      Trading__Reports__Cvm__OwnerHashSalt: "conformance-only-cvm-salt-placeholder-DO-NOT-USE-IN-PROD"
 
   conformance:
     build:
