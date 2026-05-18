@@ -671,6 +671,18 @@ public sealed class StateSnapshotter
         // the aggregate result is discarded once _subAccountPnl is
         // wired). Idempotent on already-present keys (a #316-shaped
         // snapshot with SubAccountPnlBasis populated is a no-op).
+        //
+        // Caveat: when SubAccountPositions are present for the same
+        // (firm, owner, symbol) as a master Positions row AND no
+        // authoritative basis exists, the aggregate row is polluted
+        // (every fill — master- and sub-tagged alike — books into
+        // it). The keeper detects that case, refuses to seed master
+        // from the aggregate, and surfaces
+        // trading.subaccount.master_basis_unrecoverable_total +
+        // a one-shot warn so operators can investigate the snapshot
+        // writer. The statement endpoint already fail-closes
+        // (AvgPrice = 0 + master_avg_basis_degraded_total) on a
+        // missing master basis, so the absence is consistent.
         if (_subAccountPnl is not null)
         {
             _subAccountPnl.SeedBucketBasisFromLegacyPositions(snap.Positions, snap.SubAccountPositions);

@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using B3.Trading.Domain;
+using Microsoft.Extensions.Logging;
 
 namespace B3.Trading.Application;
 
@@ -55,6 +56,15 @@ public sealed class SubAccountPnlKeeper
     /// </summary>
     private readonly ConcurrentDictionary<(string FirmId, string EndClient, string SubAccount, string Symbol), PnlKeeper.AvgCostState>
         _bucketAvgCost = new();
+
+    private readonly ILogger<SubAccountPnlKeeper>? _logger;
+
+    public SubAccountPnlKeeper() : this(logger: null) { }
+
+    public SubAccountPnlKeeper(ILogger<SubAccountPnlKeeper>? logger)
+    {
+        _logger = logger;
+    }
 
     /// <summary>
     /// Adds <paramref name="delta"/> to the (firm, owner, subAccount,
@@ -166,16 +176,30 @@ public sealed class SubAccountPnlKeeper
     /// </para>
     ///
     /// <para>
-    /// <b>Seed-price caveat.</b> The master bucket basis is seeded
-    /// from the aggregate <see cref="Persistence.PositionSnapshot"/>'s
-    /// <c>AverageEntryPrice</c> (best available — when there's no sub
-    /// activity yet, aggregate == master). Sub-bucket basis is seeded
-    /// from its own <see cref="Persistence.SubAccountPositionSnapshot.AverageEntryPrice"/>;
-    /// when the sub-position snapshot pre-dates per-bucket basis
-    /// tracking (zero avg), the row is skipped — there's no per-bucket
-    /// history to recover and seeding from the aggregate avg would
-    /// import pollution from sibling buckets. After at least one
-    /// snapshot is taken post-recovery, <see cref="SnapshotBasis"/>
+    /// <b>Seed-price caveat.</b> The master bucket basis can only be
+    /// seeded from <see cref="Persistence.PlatformSnapshot.Positions"/>
+    /// when that aggregate row is master-only — i.e. when no
+    /// <see cref="Persistence.SubAccountPositionSnapshot"/> exists for
+    /// the same <c>(FirmId, EndClientId, Symbol)</c>. Otherwise the
+    /// aggregate row is the SUM of master + every sub bucket and its
+    /// <c>AverageEntryPrice</c> is a cross-bucket weighted average;
+    /// seeding master from it would import sibling-bucket basis as
+    /// master-only history (PR #316 P1 review). In the incoherent case
+    /// — sub positions present AND no authoritative
+    /// <see cref="Persistence.SubAccountPnlBasisSnapshot"/> row for the
+    /// master bucket — the master basis is left absent; the statement
+    /// endpoint already fail-closes (<c>AvgPrice = 0</c> +
+    /// <c>trading.statement.master_avg_basis_degraded_total</c>) and a
+    /// new metric
+    /// <c>trading.subaccount.master_basis_unrecoverable_total</c>
+    /// fires (plus a one-shot warn log per <c>(firm, owner, symbol)</c>)
+    /// so operators can investigate the snapshot writer.
+    /// Sub-bucket basis is seeded from its own
+    /// <see cref="Persistence.SubAccountPositionSnapshot.AverageEntryPrice"/>
+    /// (each sub bucket maintains its own basis natively, no
+    /// pollution); when the sub-position snapshot pre-dates per-bucket
+    /// basis tracking (zero avg), the row is skipped. After at least
+    /// one snapshot is taken post-recovery, <see cref="SnapshotBasis"/>
     /// includes the seeded buckets and subsequent recoveries hydrate
     /// them directly without going through this path.
     /// </para>
@@ -187,16 +211,56 @@ public sealed class SubAccountPnlKeeper
     {
         ArgumentNullException.ThrowIfNull(masterPositions);
         ArgumentNullException.ThrowIfNull(subPositions);
+        // Materialize sub positions once: needed both to seed each sub
+        // bucket and to build a (firm, owner, symbol) presence set the
+        // master loop consults to detect the incoherent-snapshot case
+        // (sub positions present, master basis absent — aggregate
+        // Positions is polluted, cannot reconstruct master basis).
+        var subList = subPositions as IReadOnlyCollection<Persistence.SubAccountPositionSnapshot>
+                      ?? subPositions.ToArray();
+        var subKeys = new HashSet<(string FirmId, string EndClient, string Symbol)>();
+        foreach (var p in subList)
+        {
+            if (p.NetQuantity == 0) continue;
+            subKeys.Add((p.FirmId, p.EndClientId, p.Symbol));
+        }
+
         var seeded = 0;
+        var warnedUnrecoverable = new HashSet<(string FirmId, string EndClient, string Symbol)>();
         foreach (var p in masterPositions)
         {
             if (p.NetQuantity == 0) continue;
             if (p.AverageEntryPrice <= 0m) continue;
             var key = (p.FirmId, p.EndClientId, MasterBucketKey, p.Symbol);
+            // Authoritative basis (restored from SubAccountPnlBasis)
+            // wins — never overwrite, regardless of whether the
+            // aggregate row would be coherent.
+            if (_bucketAvgCost.ContainsKey(key)) continue;
+            var symbolKey = (p.FirmId, p.EndClientId, p.Symbol);
+            if (subKeys.Contains(symbolKey))
+            {
+                // Incoherent legacy snapshot: aggregate Positions
+                // mixes master + sub bucket fills. Leaving master
+                // unseeded is intentional — the statement endpoint's
+                // fail-closed path (AvgPrice = 0 + degraded metric)
+                // surfaces the gap to operators, and ApplyBucketFill
+                // will treat the next master fill as a fresh open
+                // (realized = 0) until basis re-establishes. Seeding
+                // from the polluted aggregate would silently realise
+                // wrong P&L instead.
+                if (warnedUnrecoverable.Add(symbolKey))
+                {
+                    Observability.MetricsRegistry.SubAccountMasterBasisUnrecoverable.Add(1);
+                    _logger?.LogWarning(
+                        "Sub-account master bucket basis unrecoverable from legacy snapshot (firm={FirmId}, owner={EndClientId}, symbol={Symbol}): aggregate Positions row pollutes master with cross-bucket avg cost; SubAccountPnlBasis block absent. Master basis left empty; statement endpoint will fail-closed (AvgPrice=0) and master realised PnL will be 0 until basis re-establishes via a fresh master fill.",
+                        p.FirmId, p.EndClientId, p.Symbol);
+                }
+                continue;
+            }
             if (_bucketAvgCost.TryAdd(key, new PnlKeeper.AvgCostState(p.NetQuantity, p.AverageEntryPrice)))
                 seeded++;
         }
-        foreach (var p in subPositions)
+        foreach (var p in subList)
         {
             if (p.NetQuantity == 0) continue;
             if (p.AverageEntryPrice <= 0m) continue;
