@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Security.Claims;
 using System.Text;
@@ -8,6 +9,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.Logging;
 
 namespace B3.Trading.Api;
 
@@ -32,6 +34,16 @@ namespace B3.Trading.Api;
 /// </summary>
 public static class StatementEndpoints
 {
+    // PR #316 P2 (review). One-shot warn dedupe set for the master-
+    // bucket avg-cost basis degraded path: per-process, per
+    // (firmId, ownerEndClient, symbol) tuple. The condition signals
+    // an invariant violation after P1's legacy-snapshot backfill,
+    // so we log once and lean on the
+    // statement.master_avg_basis_degraded_total counter for
+    // sustained surfaces.
+    private static readonly ConcurrentDictionary<(string Firm, string Owner, string Symbol), byte>
+        s_masterAvgDegradedWarned = new();
+
     public static IEndpointRouteBuilder MapStatement(this IEndpointRouteBuilder app)
     {
         app.MapGet("/statement/{dayKey?}", [Authorize] async (
@@ -43,6 +55,7 @@ public static class StatementEndpoints
             SubAccountPnlKeeper subAccountPnl,
             SubAccountsRegistry subAccounts,
             EventDispatcher dispatcher,
+            ILoggerFactory loggerFactory,
             string? dayKey,
             string? subAccount,
             CancellationToken ct) =>
@@ -55,7 +68,7 @@ public static class StatementEndpoints
                 return subError!;
             Application.Observability.MetricsRegistry.StatementEndpointRequests.Add(
                 1, new KeyValuePair<string, object?>("format", "json"));
-            var dto = await BuildAsync(owner, firm, day, store, positions, subPositions, subAccountPnl, dispatcher, subFilter, ct);
+            var dto = await BuildAsync(owner, firm, day, store, positions, subPositions, subAccountPnl, dispatcher, loggerFactory, subFilter, ct);
             EmitDayTradeMetric(dto);
             return Results.Ok(dto);
         });
@@ -69,6 +82,7 @@ public static class StatementEndpoints
             SubAccountPnlKeeper subAccountPnl,
             SubAccountsRegistry subAccounts,
             EventDispatcher dispatcher,
+            ILoggerFactory loggerFactory,
             string dayKey,
             string? subAccount,
             CancellationToken ct) =>
@@ -81,7 +95,7 @@ public static class StatementEndpoints
                 return subError!;
             Application.Observability.MetricsRegistry.StatementEndpointRequests.Add(
                 1, new KeyValuePair<string, object?>("format", "csv"));
-            var dto = await BuildAsync(owner, firm, day, store, positions, subPositions, subAccountPnl, dispatcher, subFilter, ct);
+            var dto = await BuildAsync(owner, firm, day, store, positions, subPositions, subAccountPnl, dispatcher, loggerFactory, subFilter, ct);
             EmitDayTradeMetric(dto);
             var bytes = RenderCsv(dto);
             return Results.File(
@@ -96,7 +110,7 @@ public static class StatementEndpoints
     private static async Task<DailyStatementDto> BuildAsync(
         EndClientId owner, string firmId, DateOnly day, IEventStore store, PositionKeeper positions,
         SubAccountPositionKeeper subPositions, SubAccountPnlKeeper subAccountPnl,
-        EventDispatcher dispatcher, string? subAccountFilter, CancellationToken ct)
+        EventDispatcher dispatcher, ILoggerFactory loggerFactory, string? subAccountFilter, CancellationToken ct)
     {
         var today = DateOnly.FromDateTime(DateTimeOffset.UtcNow.UtcDateTime);
         var isToday = day == today;
@@ -190,21 +204,8 @@ public static class StatementEndpoints
             //         fill mirrors into the master keeper).
             var symbols = new HashSet<string>(aggregateBySymbol.Keys, StringComparer.Ordinal);
             foreach (var sym in subSumBySymbol.Keys) symbols.Add(sym);
-            var masterRows = new List<PositionRowDto>(symbols.Count);
-            foreach (var symbol in symbols)
-            {
-                var aggQty = aggregateBySymbol.TryGetValue(symbol, out var agg) ? agg.Qty : 0;
-                var subSum = subSumBySymbol.TryGetValue(symbol, out var s) ? s : 0;
-                var masterQty = aggQty - subSum;
-                if (masterQty == 0) continue;
-                var bucket = subAccountPnl.GetBucketAvgCost(firmId, owner.Value, subAccount: null, symbol);
-                var masterAvg = bucket is not null && bucket.NetQuantity == masterQty
-                    ? bucket.AvgPrice
-                    : agg.Avg;
-                masterRows.Add(new PositionRowDto(symbol, masterQty, masterAvg, null));
-            }
-            masterRows.Sort(static (a, b) => string.CompareOrdinal(a.Symbol, b.Symbol));
-            capturedSeedFallback = masterRows;
+            capturedSeedFallback = BuildMasterBucketRows(
+                firmId, owner, symbols, aggregateBySymbol, subSumBySymbol, subAccountPnl, loggerFactory);
         });
         var snapshotSeq = capturedSeq;
         var livePositionsSnapshot = capturedPositions;
@@ -254,6 +255,72 @@ public static class StatementEndpoints
         if (dto.IrDayTrade.PerSymbol.Count > 0)
             Application.Observability.MetricsRegistry.StatementDayTradeDetected.Add(1);
     }
+
+    /// <summary>
+    /// PR #316 P1.1 / P2 (review). Build the live MASTER-bucket
+    /// snapshot rows used by the daily-statement projection. Each
+    /// row's quantity is <c>aggregate − sumSub</c> (the master-only
+    /// invariant). The avg-cost comes from the per-bucket basis
+    /// store; when that's missing or its recorded qty disagrees with
+    /// <c>aggregate − sumSub</c>, the row is emitted with
+    /// <c>AvgPrice = 0m</c> (fail-closed "unknown basis" semantic)
+    /// instead of falling back to the polluted aggregate avg, and
+    /// <c>statement.master_avg_basis_degraded_total</c> is incremented.
+    /// Post-#316 P1 backfill this degraded branch should never fire
+    /// in production — when it does, it signals an invariant
+    /// violation surfaced by the counter + a one-shot warn per
+    /// (firm, owner, symbol) per process.
+    /// </summary>
+    internal static IReadOnlyList<PositionRowDto> BuildMasterBucketRows(
+        string firmId,
+        EndClientId owner,
+        IEnumerable<string> symbols,
+        IReadOnlyDictionary<string, (long Qty, decimal Avg)> aggregateBySymbol,
+        IReadOnlyDictionary<string, long> subSumBySymbol,
+        SubAccountPnlKeeper subAccountPnl,
+        ILoggerFactory? loggerFactory)
+    {
+        var masterRows = new List<PositionRowDto>();
+        foreach (var symbol in symbols)
+        {
+            var aggQty = aggregateBySymbol.TryGetValue(symbol, out var agg) ? agg.Qty : 0;
+            var subSum = subSumBySymbol.TryGetValue(symbol, out var s) ? s : 0;
+            var masterQty = aggQty - subSum;
+            if (masterQty == 0) continue;
+            var bucket = subAccountPnl.GetBucketAvgCost(firmId, owner.Value, subAccount: null, symbol);
+            decimal masterAvg;
+            if (bucket is not null && bucket.NetQuantity == masterQty)
+            {
+                masterAvg = bucket.AvgPrice;
+            }
+            else
+            {
+                Application.Observability.MetricsRegistry.StatementMasterAvgBasisDegraded.Add(1);
+                if (loggerFactory is not null
+                    && s_masterAvgDegradedWarned.TryAdd((firmId, owner.Value, symbol), 0))
+                {
+                    loggerFactory
+                        .CreateLogger(typeof(StatementEndpoints).FullName!)
+                        .LogWarning(
+                            "Statement master-bucket avg-cost basis degraded for firm={FirmId} owner={Owner} symbol={Symbol}: bucket={BucketPresent} bucketQty={BucketQty} masterQty={MasterQty}. Emitting AvgPrice=0 (post-#316 P1 backfill this signals an invariant violation).",
+                            firmId, owner.Value, symbol,
+                            bucket is not null, bucket?.NetQuantity ?? 0L, masterQty);
+                }
+                masterAvg = 0m;
+            }
+            masterRows.Add(new PositionRowDto(symbol, masterQty, masterAvg, null));
+        }
+        masterRows.Sort(static (a, b) => string.CompareOrdinal(a.Symbol, b.Symbol));
+        return masterRows;
+    }
+
+    /// <summary>
+    /// Test-only: drops the one-shot warn dedupe so a test asserting
+    /// the warn-once contract can observe it without inter-test
+    /// pollution from a sibling test that already tripped the dedupe.
+    /// </summary>
+    internal static void ResetMasterAvgDegradedWarnDedupeForTesting() =>
+        s_masterAvgDegradedWarned.Clear();
 
     private static bool TryResolveDay(string? raw, out DateOnly day, out IResult? error)
     {

@@ -657,6 +657,24 @@ public sealed class StateSnapshotter
         _subAccounts?.Restore(snap.SubAccounts);
         _subAccountPositions?.Restore(snap.SubAccountPositions);
         _subAccountPnl?.Restore(snap.SubAccountPnl, snap.SubAccountPnlBasis);
+        // PR #316 P1 (review). Backfill bucket-level avg-cost basis
+        // from the (master Positions, SubAccountPositions) blocks
+        // whenever a snapshot lands without a complete
+        // SubAccountPnlBasis block — i.e. a pre-#316 snapshot taken
+        // before the basis store existed, or a partial snapshot
+        // whose basis is missing for some buckets. Without this
+        // seed, the first close on a restored bucket whose basis is
+        // absent would route through ApplyBucketFill's fresh-open
+        // branch and emit realized PnL = 0, dropping a real economic
+        // delta on the floor (the aggregate keeper would compute it
+        // correctly via SeedAvgCostFromLegacyPositions above, but
+        // the aggregate result is discarded once _subAccountPnl is
+        // wired). Idempotent on already-present keys (a #316-shaped
+        // snapshot with SubAccountPnlBasis populated is a no-op).
+        if (_subAccountPnl is not null)
+        {
+            _subAccountPnl.SeedBucketBasisFromLegacyPositions(snap.Positions, snap.SubAccountPositions);
+        }
     }
 }
 

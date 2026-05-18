@@ -175,6 +175,19 @@ public static class MetricsRegistry
         Meter.CreateCounter<long>("trading.statement.endpoint_requests");
     public static readonly Counter<long> StatementDayTradeDetected =
         Meter.CreateCounter<long>("trading.statement.day_trade_detected");
+    // PR #316 P2 (review). Bumped per (firmId, owner, symbol) row each
+    // time the daily-statement projection had to render a master-bucket
+    // row whose per-bucket avg-cost basis is absent OR whose recorded
+    // qty disagrees with (aggregate − sumSub). Post-#316 P1 backfill
+    // (StateSnapshotter.Restore → SubAccountPnlKeeper.SeedBucketBasisFromLegacyPositions)
+    // closes the legacy-snapshot gap, so a non-zero count after the
+    // P1 backfill ships indicates an invariant violation (a bucket-
+    // basis row was lost mid-process or never established). When the
+    // counter fires the projection emits AvgPrice = 0 (fail-closed
+    // "unknown basis" semantic) instead of the previous fallback to
+    // the polluted aggregate avg.
+    public static readonly Counter<long> StatementMasterAvgBasisDegraded =
+        Meter.CreateCounter<long>("trading.statement.master_avg_basis_degraded_total");
     // Pass-1 review (#278) P1#1. Bumped once per (endClient, symbol)
     // row when StateSnapshotter restores a legacy snapshot whose
     // PnlAvgCost block is empty but Positions has rows — the avg-cost

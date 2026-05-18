@@ -136,6 +136,77 @@ public sealed class SubAccountPnlKeeper
         return _bucketAvgCost.TryAdd(key, new PnlKeeper.AvgCostState(signedQuantity, avgPrice));
     }
 
+    /// <summary>
+    /// PR #316 P1 (review). Backfill the per-bucket avg-cost basis from a
+    /// legacy snapshot whose <see cref="Persistence.PlatformSnapshot.SubAccountPnlBasis"/>
+    /// block is empty or incomplete (pre-#316 snapshots have positions
+    /// but no bucket basis at all; partial snapshots may carry basis
+    /// for some buckets but not others). Without this seed, the first
+    /// closing fill on a restored master/sub bucket whose basis is
+    /// absent goes through <see cref="ApplyBucketFill"/>, hits the
+    /// "missing basis" branch, treats the close as a FRESH open, and
+    /// emits realized P&amp;L = 0 — even though the live (pre-restart)
+    /// keeper would have computed the realized delta against the
+    /// existing avg-cost basis. The aggregate <see cref="PnlKeeper"/>
+    /// already has its own legacy backfill
+    /// (<c>SeedAvgCostFromLegacyPositions</c>), but the ER processor
+    /// wires its return value as the authoritative event source for
+    /// the sub-keeper only when the sub-keeper is unwired — so once
+    /// the sub-keeper exists, only its own backfilled basis is
+    /// consulted on the close.
+    ///
+    /// <para>
+    /// Mirrors <see cref="PnlKeeper.SeedAvgCostFromLegacyPositions"/>:
+    /// idempotent (never overwrites an entry that <see cref="Restore"/>
+    /// loaded from <see cref="Persistence.SubAccountPnlBasisSnapshot"/>),
+    /// skips zero-quantity rows, and skips degenerate zero-avg rows
+    /// (the basis cannot be recovered; opening a leg at zero would
+    /// realise phantom P&amp;L on the first close — same treatment as
+    /// the aggregate keeper's pass-3 fix).
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Seed-price caveat.</b> The master bucket basis is seeded
+    /// from the aggregate <see cref="Persistence.PositionSnapshot"/>'s
+    /// <c>AverageEntryPrice</c> (best available — when there's no sub
+    /// activity yet, aggregate == master). Sub-bucket basis is seeded
+    /// from its own <see cref="Persistence.SubAccountPositionSnapshot.AverageEntryPrice"/>;
+    /// when the sub-position snapshot pre-dates per-bucket basis
+    /// tracking (zero avg), the row is skipped — there's no per-bucket
+    /// history to recover and seeding from the aggregate avg would
+    /// import pollution from sibling buckets. After at least one
+    /// snapshot is taken post-recovery, <see cref="SnapshotBasis"/>
+    /// includes the seeded buckets and subsequent recoveries hydrate
+    /// them directly without going through this path.
+    /// </para>
+    /// </summary>
+    /// <returns>The number of (bucket, symbol) rows seeded.</returns>
+    public int SeedBucketBasisFromLegacyPositions(
+        IEnumerable<Persistence.PositionSnapshot> masterPositions,
+        IEnumerable<Persistence.SubAccountPositionSnapshot> subPositions)
+    {
+        ArgumentNullException.ThrowIfNull(masterPositions);
+        ArgumentNullException.ThrowIfNull(subPositions);
+        var seeded = 0;
+        foreach (var p in masterPositions)
+        {
+            if (p.NetQuantity == 0) continue;
+            if (p.AverageEntryPrice <= 0m) continue;
+            var key = (p.FirmId, p.EndClientId, MasterBucketKey, p.Symbol);
+            if (_bucketAvgCost.TryAdd(key, new PnlKeeper.AvgCostState(p.NetQuantity, p.AverageEntryPrice)))
+                seeded++;
+        }
+        foreach (var p in subPositions)
+        {
+            if (p.NetQuantity == 0) continue;
+            if (p.AverageEntryPrice <= 0m) continue;
+            var key = (p.FirmId, p.EndClientId, p.SubAccountId, p.Symbol);
+            if (_bucketAvgCost.TryAdd(key, new PnlKeeper.AvgCostState(p.NetQuantity, p.AverageEntryPrice)))
+                seeded++;
+        }
+        return seeded;
+    }
+
     public decimal ApplyBucketFill(
         string firmId, string endClient, SubAccountId? subAccount, string symbol,
         OrderSide side, long fillQuantity, decimal fillPrice)
