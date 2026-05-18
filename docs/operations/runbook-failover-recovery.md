@@ -185,7 +185,10 @@ checks pass.
   (the WAL is on the critical path). Old snapshot files older than
   the one referenced in `latest.txt` are safe to delete:
   ```bash
-  KEEP=$(jq -r .file data/{firm}/snapshots/latest.txt)
+  # latest.txt is a PLAIN ASCII integer (the seq), NOT JSON.
+  # The pointed-to snapshot file is snap-<seq, zero-padded to 12 digits>.json.
+  SEQ=$(cat data/{firm}/snapshots/latest.txt | tr -d '[:space:]')
+  KEEP=$(printf 'snap-%012d.json' "$SEQ")
   find data/{firm}/snapshots -name 'snap-*.json' ! -name "$KEEP" -delete
   ```
 - EOD files older than your firm's regulatory retention can be
@@ -491,9 +494,20 @@ analysis, or restoring to a clean host).
 
 **Procedure.**
 1. Stop the host.
-2. Drop the snapshot file into `data/{firm}/snapshots/`.
-3. Write `data/{firm}/snapshots/latest.txt` pointing at it (JSON form:
-   `{"seq": N, "file": "snap-N.json", "ts": "...isoformat..."}`).
+2. Drop the snapshot file into `data/{firm}/snapshots/` using the
+   canonical filename `snap-<seq, zero-padded to 12 digits>.json`
+   (e.g. `snap-000000012345.json` for seq=12345).
+3. Write `data/{firm}/snapshots/latest.txt` pointing at it — the file
+   is a **plain ASCII integer** (the seq, no newline-sensitive format,
+   no JSON):
+   ```bash
+   echo -n 12345 > data/{firm}/snapshots/latest.txt
+   ```
+   Important: `SnapshotStore.LoadLatest` picks the highest-seq
+   `snap-*.json` file regardless of `latest.txt` (the pointer is just
+   a hint; on parse failure it falls back to `files[^1]`). If you
+   shipped multiple snapshots, **delete the unwanted ones** rather
+   than relying on the pointer alone.
 4. Ensure `data/{firm}/wal/` is empty (or contains only seq <= N
    events that have already been folded into the snapshot).
 5. Start the host.

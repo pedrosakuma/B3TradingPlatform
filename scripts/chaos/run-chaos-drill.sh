@@ -104,8 +104,20 @@ read_wal_seq() {
     if ! [[ "$snap_seq" =~ ^[0-9]+$ ]]; then
         snap_seq=null
     fi
-    wal_bytes="$(docker exec "$TRADING_CONTAINER" sh -c "test -d '${root}/wal' && find '${root}/wal' -type f -name '*.log' -printf '%s\n' 2>/dev/null | awk 'BEGIN{s=0}{s+=\$1}END{print s}' || echo ''" 2>/dev/null | tr -d '[:space:]')"
-    if ! [[ "$wal_bytes" =~ ^[0-9]+$ ]]; then
+    # Pass-2 review (#326) P1. FileEventStore creates the WAL root
+    # at startup, so a fresh stack with no events yields an empty
+    # dir. `find ... | awk` then prints `0`, which would pass the
+    # numeric regex below and bypass the all-null FAIL — masking a
+    # drill against an empty data dir. Require at least one *.log
+    # file before reporting a byte count; otherwise emit null.
+    local wal_log_count
+    wal_log_count="$(docker exec "$TRADING_CONTAINER" sh -c "test -d '${root}/wal' && find '${root}/wal' -type f -name '*.log' 2>/dev/null | wc -l || echo 0" 2>/dev/null | tr -d '[:space:]')"
+    if [[ "$wal_log_count" =~ ^[1-9][0-9]*$ ]]; then
+        wal_bytes="$(docker exec "$TRADING_CONTAINER" sh -c "find '${root}/wal' -type f -name '*.log' -printf '%s\n' 2>/dev/null | awk 'BEGIN{s=0}{s+=\$1}END{print s}' || echo ''" 2>/dev/null | tr -d '[:space:]')"
+        if ! [[ "$wal_bytes" =~ ^[0-9]+$ ]]; then
+            wal_bytes=null
+        fi
+    else
         wal_bytes=null
     fi
     printf '{"snapshot_seq":%s,"wal_bytes":%s}\n' "$snap_seq" "$wal_bytes"
@@ -316,8 +328,23 @@ scenario_network_partition() {
     # set we assert the touch payload is bit-identical, which is the
     # canonical "no replay clobbering" invariant from Q4.7 (#307).
     if [[ -n "${CHAOS_PRE_FILL_TOUCH:-}" && -n "${CHAOS_POST_FILL_TOUCH:-}" ]]; then
-        if ! diff -u <(curl -fsS --max-time 5 "${TRADING_BASE_URL}${CHAOS_PRE_FILL_TOUCH}") \
-                    <(curl -fsS --max-time 5 "${TRADING_BASE_URL}${CHAOS_POST_FILL_TOUCH}"); then
+        # Pass-2 review (#326) P2. Process substitution swallows
+        # curl exit codes, so a 4xx/5xx on BOTH sides would yield
+        # two empty bodies and `diff` would falsely PASS. Fetch
+        # both payloads explicitly, fail loudly on any HTTP error,
+        # and only then compare.
+        local pre_body post_body
+        if ! pre_body="$(curl -fsS --max-time 5 "${TRADING_BASE_URL}${CHAOS_PRE_FILL_TOUCH}")"; then
+            log "FAIL: pre-partition GET ${CHAOS_PRE_FILL_TOUCH} failed"
+            banner_end "$scenario" "FAIL"
+            return 1
+        fi
+        if ! post_body="$(curl -fsS --max-time 5 "${TRADING_BASE_URL}${CHAOS_POST_FILL_TOUCH}")"; then
+            log "FAIL: post-partition GET ${CHAOS_POST_FILL_TOUCH} failed"
+            banner_end "$scenario" "FAIL"
+            return 1
+        fi
+        if ! diff -u <(printf '%s' "$pre_body") <(printf '%s' "$post_body"); then
             log "FAIL: fill touch payload diverged across partition (replay clobber?)"
             banner_end "$scenario" "FAIL"
             return 1
