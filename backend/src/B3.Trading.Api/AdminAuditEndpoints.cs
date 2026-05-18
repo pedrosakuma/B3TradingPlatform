@@ -1,6 +1,8 @@
 using System.Buffers.Text;
 using System.Globalization;
+using System.Security.Claims;
 using System.Text;
+using B3.Trading.Api.Auth;
 using B3.Trading.Application.Audit;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -9,24 +11,33 @@ using Microsoft.AspNetCore.Routing;
 namespace B3.Trading.Api;
 
 /// <summary>
-/// Q4.5 (#305). Read-only admin surface over <see cref="AuditLogKeeper"/>.
-/// Mounted under <c>/admin/audit</c>, gated by the existing <c>"admin"</c>
-/// authorization policy (anonymous → 401, non-admin → 403). The endpoint
-/// returns events newest-first with opaque base64 cursor pagination.
+/// Q4.5 (#305) + Q4.14 (#314). Read-only admin/compliance surface over
+/// <see cref="AuditLogKeeper"/>. Mounted at <c>/admin/audit</c>, gated
+/// by the <c>"admin-or-compliance"</c> authorization policy
+/// (anonymous → 401, plain user → 403). The endpoint returns events
+/// newest-first with opaque base64 cursor pagination.
 ///
-/// <para>Scope is global by design: a single admin role exists today, so
-/// audit is visible across firms. Once #314 introduces a dedicated
-/// compliance role this should be retightened. Filters: <c>since</c>,
-/// <c>until</c>, <c>user</c>, <c>type</c> (exact or <c>prefix.*</c>),
-/// <c>outcome</c>, <c>limit</c> (default 100, max 500), <c>cursor</c>.</para>
+/// <para><b>Scope.</b> Admin sees everything across firms (and may
+/// pass <c>?firmId=</c> to narrow). Compliance is firm-scoped at the
+/// server: the caller's JWT <c>firm</c> claim is forced as the
+/// <c>firmFilter</c> on <see cref="AuditLogKeeper.Query"/>, regardless
+/// of what they pass on the query string. The <c>?firmId=</c> query
+/// argument is ignored for compliance — it cannot be used to peek at
+/// another firm's actor names (LGPD).</para>
+///
+/// <para>Filters: <c>since</c>, <c>until</c>, <c>user</c>, <c>type</c>
+/// (exact or <c>prefix.*</c>), <c>outcome</c>, <c>limit</c> (default
+/// 100, max 500), <c>cursor</c>, and (admin-only) <c>firmId</c>.</para>
 /// </summary>
 public static class AdminAuditEndpoints
 {
     public static IEndpointRouteBuilder MapAdminAudit(this IEndpointRouteBuilder app)
     {
-        var group = app.MapGroup("/admin").RequireAuthorization("admin");
-
-        group.MapGet("/audit", (HttpContext ctx, AuditLogKeeper keeper) =>
+        // Mounted as a standalone endpoint (NOT under the /admin
+        // group) so its policy stays orthogonal to the broader admin
+        // surface: compliance must reach /admin/audit but must NOT
+        // reach /admin/kill, /admin/halts, /admin/firms, etc.
+        app.MapGet("/admin/audit", (HttpContext ctx, AuditLogKeeper keeper) =>
         {
             var q = ctx.Request.Query;
             var now = DateTimeOffset.UtcNow;
@@ -54,13 +65,33 @@ public static class AdminAuditEndpoints
                 cursorSeq = decoded;
             }
 
-            var result = keeper.Query(since, until, user, type, outcome, limit, cursorSeq);
+            // Compliance is forced to its own JWT firm; admin may
+            // optionally narrow with ?firmId=. Plain admin (no
+            // firmId) sees ALL firms — backwards-compatible with
+            // Q4.5 (#305).
+            var role = ctx.User.FindFirstValue(JwtIssuer.RoleClaim);
+            var isAdmin = string.Equals(role, Roles.Admin, StringComparison.OrdinalIgnoreCase);
+            string? firmFilter;
+            if (isAdmin)
+            {
+                firmFilter = q.TryGetValue("firmId", out var qf) && !string.IsNullOrWhiteSpace(qf)
+                    ? qf.ToString()
+                    : null;
+            }
+            else
+            {
+                // Compliance (only other role admitted by the policy).
+                // Force the caller's own firm; ignore any ?firmId=.
+                firmFilter = ctx.User.FindFirstValue(JwtIssuer.FirmClaim) ?? "default";
+            }
+
+            var result = keeper.Query(since, until, user, type, outcome, limit, cursorSeq, firmFilter);
             return Results.Ok(new
             {
                 entries = result.Entries,
                 nextCursor = result.NextCursorSeq is long ns ? EncodeCursor(ns) : null,
             });
-        });
+        }).RequireAuthorization("admin-or-compliance");
 
         return app;
     }

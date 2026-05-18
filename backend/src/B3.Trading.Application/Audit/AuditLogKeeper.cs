@@ -216,7 +216,8 @@ public sealed class AuditLogKeeper
         string? typePattern,
         string? outcome,
         int limit,
-        long? cursorSeq)
+        long? cursorSeq,
+        string? firmFilter = null)
     {
         if (limit <= 0) limit = 100;
         if (limit > 500) limit = 500;
@@ -236,6 +237,13 @@ public sealed class AuditLogKeeper
                 var e = _ring[idx]!;
                 if (cursorSeq is long c && e.Seq >= c) continue;
                 if (e.TimestampUtc < since || e.TimestampUtc > until) continue;
+                // Q4.14 (#314). Optional firm-scope filter. When non-null,
+                // only entries whose ActorFirm matches survive — used to
+                // restrict compliance principals to their own firm at
+                // /admin/audit, never trusted from the query string.
+                if (!string.IsNullOrEmpty(firmFilter)
+                    && !string.Equals(e.ActorFirm, firmFilter, StringComparison.OrdinalIgnoreCase))
+                    continue;
                 if (!string.IsNullOrEmpty(outcome) && !string.Equals(e.Outcome, outcome, StringComparison.OrdinalIgnoreCase))
                     continue;
                 if (typePattern is not null)

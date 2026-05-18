@@ -117,6 +117,19 @@ public static class TradingAuthServiceCollectionExtensions
         services.AddAuthorization(options =>
         {
             options.AddPolicy("admin", policy => policy.RequireRole("admin"));
+            // Q4.14 (#314). Admin OR compliance — used by /admin/audit so a
+            // compliance principal can read the audit log (server-side
+            // firm-scoped at the endpoint, never trust query filters).
+            // Distinct from the CVM policy below because the policy name
+            // pattern is "admin-or-compliance" for surfaces that started as
+            // admin-only and were broadened. The CVM policy uses its own
+            // canonical name (ComplianceOrAdmin) for endpoints that were
+            // compliance-first.
+            options.AddPolicy(
+                "admin-or-compliance",
+                policy => policy.RequireRole(
+                    B3.Trading.Api.Auth.Roles.Admin,
+                    B3.Trading.Api.Auth.Roles.Compliance));
             // Q4.8 (#308). CVM 35/505 transaction-report export — open
             // to both admin and compliance principals (compliance is
             // the firm-scoped, read-only role added in Q4.6).
