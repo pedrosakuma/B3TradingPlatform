@@ -378,4 +378,112 @@ public class AdminAuditComplianceTests : IClassFixture<TestAppFactory>
         Assert.Equal("(other firm)", hit.ActorUsername);
         Assert.Equal("FIRM01", hit.Details!["firmIdViewed"]);
     }
+
+    // Pass-3 review (#327) P1 — Compliance ?user= must NOT probe
+    // cross-firm actor identity. Even if a foreign-firm admin performed
+    // an action touching the compliance firm (entry surfaces via
+    // FirmDetailKeys), the actor identity would be redacted to
+    // "(other firm)" — yet matching on ActorUsername *before* redaction
+    // would let a compliance caller enumerate foreign usernames by
+    // probing different ?user= values and observing whether anything
+    // surfaces. Restrict actor matching to entries authored within the
+    // caller's own firm.
+    [Fact]
+    public async Task Compliance_UserFilter_DoesNotProbeCrossFirmActors()
+    {
+        var unique = $"probe-{Guid.NewGuid():N}";
+        var audit = _factory.Services.GetRequiredService<Application.Audit.IAuditLogger>();
+        // Cross-firm action: foreign actor whose username is `unique`,
+        // touching FIRM01 via Details.firmId.
+        audit.Log(new Application.Persistence.AuditLogEvent
+        {
+            EventType = "test.cross_firm_probe",
+            Outcome = Application.Audit.AuditOutcomes.Success,
+            ActorUserId = unique,
+            ActorUsername = unique,
+            ActorFirm = "default",
+            ActorRole = "admin",
+            SourceIp = "10.0.0.1",
+            ResourcePath = "/admin/test",
+            Details = new Dictionary<string, string> { ["firmId"] = "FIRM01" },
+        });
+
+        using var compliance = ClientFor("dave", Roles.Compliance, "FIRM01");
+
+        // Probing the foreign username MUST return no rows for
+        // compliance, even though the entry technically touches FIRM01.
+        var probed = await QueryAuditAsync(compliance, $"?limit=50&user={Uri.EscapeDataString(unique)}");
+        Assert.Empty(probed.Entries);
+
+        // Admin (no firm restriction) still finds it via the same probe.
+        using var admin = ClientFor("alice", Roles.Admin, "default");
+        var adminProbed = await QueryAuditAsync(admin, $"?limit=50&user={Uri.EscapeDataString(unique)}");
+        Assert.NotEmpty(adminProbed.Entries);
+    }
+
+    // Pass-3 review (#327) P1 — Compliance cursors must not be
+    // base64-decodable back to a usable sequence number. AES-GCM with
+    // a per-cursor random nonce makes successive cursors (even for the
+    // same seq) indistinguishable from random, so a compliance caller
+    // cannot gap-count cross-firm WAL volume across pages.
+    [Fact]
+    public async Task Compliance_Cursor_IsOpaqueAndUnpredictable()
+    {
+        using var compliance = ClientFor("dave", Roles.Compliance, "FIRM01");
+        var first = await QueryAuditAsync(compliance, "?limit=1");
+        Assert.NotNull(first.NextCursor);
+
+        // Two consecutive cursors for the same head position must
+        // differ — proves the encoding is randomized, not deterministic
+        // base64(seq) or HMAC-of-seq.
+        var firstAgain = await QueryAuditAsync(compliance, "?limit=1");
+        Assert.NotNull(firstAgain.NextCursor);
+        Assert.NotEqual(first.NextCursor, firstAgain.NextCursor);
+
+        // The cursor decodes to 36 bytes (nonce 12 + ct 8 + tag 16);
+        // the 8 plaintext bytes are not directly readable.
+        var raw = Convert.FromBase64String(first.NextCursor!);
+        Assert.Equal(36, raw.Length);
+    }
+
+    // Pass-3 review (#327) P1 — CVM download events used to duplicate
+    // the actor id into Details["actorUserId"], bypassing
+    // ProjectForCompliance's actor-identity redaction (which only
+    // strips foreign-firm values from FirmDetailKeys). Removed: only
+    // the top-level ActorUserId/ActorUsername fields carry the actor
+    // and they are redacted on cross-firm hits.
+    [Fact]
+    public async Task Compliance_CvmDownload_DoesNotLeakActorViaDetails()
+    {
+        var audit = _factory.Services.GetRequiredService<Application.Audit.IAuditLogger>();
+        // Simulate a cross-firm CVM download: admin in `default` downloads
+        // FIRM01's report. Surface to FIRM01 compliance via Details.firmId.
+        audit.Log(new Application.Persistence.AuditLogEvent
+        {
+            EventType = Application.Audit.AuditEventTypes.ReportCvmDownload,
+            Outcome = Application.Audit.AuditOutcomes.Success,
+            ActorUserId = "admin",
+            ActorUsername = "admin",
+            ActorFirm = "default",
+            ActorRole = "admin",
+            SourceIp = "10.0.0.1",
+            ResourcePath = "/reports/cvm",
+            Details = new Dictionary<string, string>
+            {
+                ["firmId"] = "FIRM01",
+                ["reportType"] = "daily",
+                ["date"] = "2024-01-01",
+                ["rowCount"] = "0",
+            },
+        });
+
+        using var compliance = ClientFor("dave", Roles.Compliance, "FIRM01");
+        var page = await QueryAuditAsync(compliance, $"?limit=200&type={Application.Audit.AuditEventTypes.ReportCvmDownload}");
+        var hit = Assert.Single(page.Entries);
+        Assert.Null(hit.ActorUserId);
+        Assert.Equal("(other firm)", hit.ActorUsername);
+        Assert.NotNull(hit.Details);
+        Assert.False(hit.Details!.ContainsKey("actorUserId"),
+            "Details must not carry actorUserId — that path would bypass ProjectForCompliance's actor redaction.");
+    }
 }

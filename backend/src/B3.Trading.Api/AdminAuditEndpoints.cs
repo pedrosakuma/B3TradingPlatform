@@ -32,9 +32,10 @@ namespace B3.Trading.Api;
 /// redaction pass:
 /// <list type="bullet">
 ///   <item>The platform-wide <c>Seq</c> field is omitted, and the
-///   pagination cursor is HMAC-signed with the JWT signing key, so a
-///   compliance caller cannot infer cross-firm event volume by
-///   counting gaps between sequence numbers across pages.</item>
+///   pagination cursor is AES-GCM-encrypted with a key derived from
+///   the JWT signing key, so the underlying sequence number is not
+///   recoverable from the wire and a compliance caller cannot infer
+///   cross-firm event volume by comparing successive cursors.</item>
 ///   <item>When the entry is surfaced because the action targeted the
 ///   compliance firm (actor was in another firm), the actor identity
 ///   is replaced with an opaque <c>(other firm)</c> sentinel — the
@@ -113,7 +114,7 @@ public static class AdminAuditEndpoints
                     return Results.BadRequest(new { error = "invalid cursor" });
             }
 
-            var result = keeper.Query(since, until, user, type, outcome, limit, cursorSeq, firmFilter);
+            var result = keeper.Query(since, until, user, type, outcome, limit, cursorSeq, firmFilter, restrictUserToFirm: !isAdmin);
 
             if (isAdmin)
             {
@@ -207,24 +208,39 @@ public static class AdminAuditEndpoints
         }
     }
 
-    // ── Compliance cursor: 8-byte big-endian seq || 16-byte
-    // truncated HMAC-SHA256(seq, key) || base64. HMAC fixes two
-    // P1 leaks from pass-1: (a) raw seq is no longer base64-decodable,
-    // so a compliance caller cannot compare cursor values across
-    // pages to estimate platform event volume; (b) a tampered cursor
-    // is rejected up-front rather than letting an attacker probe the
-    // ring with an arbitrary seq.
-    private const int ComplianceMacLen = 16;
-    private const int ComplianceCursorLen = 8 + ComplianceMacLen;
+    // ── Compliance cursor: AES-GCM-encrypted big-endian seq, with the
+    // GCM tag providing both authentication and tamper rejection.
+    // Format on the wire: base64( nonce(12) || ciphertext(8) || tag(16) ).
+    //
+    // Pass-3 (#327) hardening: the prior format (raw big-endian seq ||
+    // HMAC) only authenticated the cursor; the sequence number was
+    // still base64-decodable. A compliance caller could therefore walk
+    // pages, decode each nextCursor, and gap-count hidden cross-firm
+    // WAL volume across pages. Encrypting the seq under a per-cursor
+    // random nonce makes successive cursors indistinguishable (same
+    // seq → different ciphertext) and unrecoverable without the key.
+    //
+    // Key: SHA-256 of the JWT signing key (which AuthSigningKeyValidator
+    // already constrains to ≥ 32 bytes); no second secret to manage.
+    private const int ComplianceNonceLen = 12;
+    private const int CompliancePlaintextLen = 8;
+    private const int ComplianceTagLen = 16;
+    private const int ComplianceCursorLen = ComplianceNonceLen + CompliancePlaintextLen + ComplianceTagLen;
 
     private static string EncodeComplianceCursor(long seq, byte[] key)
     {
+        Span<byte> nonce = stackalloc byte[ComplianceNonceLen];
+        RandomNumberGenerator.Fill(nonce);
+        Span<byte> plaintext = stackalloc byte[CompliancePlaintextLen];
+        BinaryPrimitives.WriteInt64BigEndian(plaintext, seq);
+        Span<byte> ciphertext = stackalloc byte[CompliancePlaintextLen];
+        Span<byte> tag = stackalloc byte[ComplianceTagLen];
+        using var aes = new AesGcm(key, ComplianceTagLen);
+        aes.Encrypt(nonce, plaintext, ciphertext, tag);
         Span<byte> combined = stackalloc byte[ComplianceCursorLen];
-        BinaryPrimitives.WriteInt64BigEndian(combined, seq);
-        var seqArr = combined.Slice(0, 8).ToArray();
-        using var hmac = new HMACSHA256(key);
-        var mac = hmac.ComputeHash(seqArr);
-        mac.AsSpan(0, ComplianceMacLen).CopyTo(combined.Slice(8));
+        nonce.CopyTo(combined);
+        ciphertext.CopyTo(combined.Slice(ComplianceNonceLen));
+        tag.CopyTo(combined.Slice(ComplianceNonceLen + CompliancePlaintextLen));
         return Convert.ToBase64String(combined);
     }
 
@@ -235,21 +251,30 @@ public static class AdminAuditEndpoints
         try { raw = Convert.FromBase64String(cursor); }
         catch (FormatException) { return false; }
         if (raw.Length != ComplianceCursorLen) return false;
-        using var hmac = new HMACSHA256(key);
-        var expected = hmac.ComputeHash(raw, 0, 8);
-        if (!CryptographicOperations.FixedTimeEquals(
-                raw.AsSpan(8, ComplianceMacLen),
-                expected.AsSpan(0, ComplianceMacLen)))
+        Span<byte> plaintext = stackalloc byte[CompliancePlaintextLen];
+        try
+        {
+            using var aes = new AesGcm(key, ComplianceTagLen);
+            aes.Decrypt(
+                raw.AsSpan(0, ComplianceNonceLen),
+                raw.AsSpan(ComplianceNonceLen, CompliancePlaintextLen),
+                raw.AsSpan(ComplianceNonceLen + CompliancePlaintextLen, ComplianceTagLen),
+                plaintext);
+        }
+        catch (CryptographicException)
+        {
             return false;
-        seq = BinaryPrimitives.ReadInt64BigEndian(raw.AsSpan(0, 8));
+        }
+        seq = BinaryPrimitives.ReadInt64BigEndian(plaintext);
         return true;
     }
 
     private static byte[] ResolveCursorKey(AuthOptions opts)
     {
-        // Reuse the JWT signing key — it's already required to be
-        // >= 32 bytes by AuthSigningKeyValidator, so HMAC-SHA256 is
-        // well-keyed without introducing a second secret to manage.
-        return Encoding.UTF8.GetBytes(opts.SigningKey ?? string.Empty);
+        // Derive a 32-byte AES key from the JWT signing key (which is
+        // already required to be ≥ 32 bytes by AuthSigningKeyValidator).
+        // SHA-256 gives us the right length without introducing a
+        // second secret to manage.
+        return SHA256.HashData(Encoding.UTF8.GetBytes(opts.SigningKey ?? string.Empty));
     }
 }

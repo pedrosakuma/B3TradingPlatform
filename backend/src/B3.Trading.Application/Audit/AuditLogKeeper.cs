@@ -217,7 +217,8 @@ public sealed class AuditLogKeeper
         string? outcome,
         int limit,
         long? cursorSeq,
-        string? firmFilter = null)
+        string? firmFilter = null,
+        bool restrictUserToFirm = false)
     {
         if (limit <= 0) limit = 100;
         if (limit > 500) limit = 500;
@@ -270,8 +271,20 @@ public sealed class AuditLogKeeper
                 }
                 if (!string.IsNullOrEmpty(user))
                 {
-                    var actorMatch = string.Equals(e.ActorUsername, user, StringComparison.OrdinalIgnoreCase)
-                                   || string.Equals(e.ActorUserId, user, StringComparison.OrdinalIgnoreCase);
+                    // Pass-3 (#327): when restrictUserToFirm is set
+                    // (compliance scope), only probe actor identity on
+                    // entries actually authored within the caller's
+                    // firm. Otherwise a compliance caller could guess
+                    // foreign usernames via ?user= and learn whether
+                    // they performed any action touching this firm,
+                    // even though the surfaced entry would later have
+                    // ActorUsername/ActorUserId redacted.
+                    var actorEligible = !restrictUserToFirm
+                        || (firmFilter is not null
+                            && string.Equals(e.ActorFirm, firmFilter, StringComparison.OrdinalIgnoreCase));
+                    var actorMatch = actorEligible
+                                   && (string.Equals(e.ActorUsername, user, StringComparison.OrdinalIgnoreCase)
+                                       || string.Equals(e.ActorUserId, user, StringComparison.OrdinalIgnoreCase));
                     var targetMatch = e.Details is not null
                         && e.Details.TryGetValue("target_user", out var tu)
                         && string.Equals(tu, user, StringComparison.OrdinalIgnoreCase);
