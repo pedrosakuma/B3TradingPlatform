@@ -1,5 +1,13 @@
 # Operations Runbook
 
+> **Looking for failover / recovery / WAL repair / chaos drill?**
+> That lives in
+> [`operations/runbook-failover-recovery.md`](operations/runbook-failover-recovery.md)
+> (Q4.15 / #315). This file is the **perf-hardening v0** runbook — read
+> it when you are paged for a metric alert; read the failover runbook
+> when the host is down, hanging, partitioned, or its on-disk state
+> looks corrupt.
+
 Top-level operational runbook for the B3 trading-host. Per-subsystem
 guides live alongside this file (e.g.
 [`operations/fixp-listener.md`](operations/fixp-listener.md));

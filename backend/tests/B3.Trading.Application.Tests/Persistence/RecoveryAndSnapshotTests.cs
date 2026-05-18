@@ -521,6 +521,91 @@ public class RecoveryAndSnapshotTests : IDisposable
         Assert.Equal(1UL, algoIds.Generate("OTHER"));
     }
 
+    /// <summary>
+    /// Q4.15 (#315). The chaos drill's <c>host-kill</c> scenario asserts
+    /// operational symptoms (the host reboots, /ready comes back, WAL
+    /// seq is monotonic). This test asserts the underlying invariant in
+    /// pure .NET, so the contract is enforceable without a docker stack:
+    ///
+    /// <list type="bullet">
+    ///   <item>Write N events, flush a prefix.</item>
+    ///   <item>Append a torn record at the tail (length header + partial
+    ///   payload) — exactly the shape an ungraceful <c>kill -9</c> mid-
+    ///   group-commit leaves on disk.</item>
+    ///   <item>Re-open and run <see cref="PersistenceRecovery"/>.</item>
+    ///   <item>Assert the in-memory state matches the WAL's last-flushed
+    ///   seq EXACTLY — no torn-write false positives (good records
+    ///   skipped), no false negatives (torn record applied).</item>
+    /// </list>
+    ///
+    /// Companion to <c>scripts/chaos/run-chaos-drill.sh</c> and
+    /// <c>docs/operations/runbook-failover-recovery.md</c> §2.4.
+    /// </summary>
+    [Fact]
+    public async Task UngracefulStop_NoFlush_RecoversToLastFlushedSeq_NoTornWriteFalsePositives()
+    {
+        const int flushedCount = 5;
+
+        // Phase 1: write `flushedCount` orders and flush. This is the
+        // "durable prefix" the recovery must reproduce exactly.
+        await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
+        {
+            var (book, _, _, ownership, _, dispatcher, _, _, _) = BuildState(store);
+            for (var i = 1UL; i <= (ulong)flushedCount; i++)
+                DispatchSubmit(dispatcher, book, ownership, i, "alice", "PETR4", OrderSide.Buy, 100, 30m);
+            await store.FlushAsync();
+        }
+
+        // Phase 2: simulate an ungraceful kill mid-write — append a
+        // record header that says "the next 999 bytes are the payload"
+        // but write only 3 bytes before "dying". SegmentReader must
+        // detect this as torn and stop at the last good record.
+        var segLog = Directory.EnumerateFiles(Path.Combine(_root, "test", "wal"), "*.log",
+            SearchOption.AllDirectories).Single();
+        var preTornLength = new FileInfo(segLog).Length;
+        await using (var fs = new FileStream(segLog, FileMode.Append, FileAccess.Write))
+        {
+            // [u32 length=999][u32 crc=0xDEADBEEF][3 bytes of "payload"]
+            var header = new byte[8];
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(0, 4), 999);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(4, 4), 0xDEADBEEFu);
+            await fs.WriteAsync(header);
+            await fs.WriteAsync(new byte[] { 0x7B, 0x22, 0x6B }); // 3 bytes (not 999)
+        }
+        Assert.True(new FileInfo(segLog).Length > preTornLength,
+            "test setup invariant: torn tail must have been appended");
+
+        // Phase 3: cold boot. PersistenceRecovery must reproduce
+        // exactly the flushed prefix — no torn-write false positives
+        // (every good record present), no false negatives (the torn
+        // record must NOT materialise as an order in the book).
+        await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
+        {
+            Assert.Equal(flushedCount, store.CurrentSeq);
+
+            var (book, _, killSwitch, ownership, snapshotter, _, processor, _, algos) = BuildState(store);
+            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(),
+                new SessionPhaseService(), processor, algos, new ClOrdIdPrefixRegistry(), new AlgoIdRegistry());
+            var recovery = new PersistenceRecovery(store, snapshotter, replayer,
+                new SnapshotStore(_root, "test"), NullLogger<PersistenceRecovery>.Instance);
+            await recovery.RunAsync();
+
+            for (var i = 1UL; i <= (ulong)flushedCount; i++)
+                Assert.True(book.TryGet(i, out _), $"missing flushed order ORD-{i} (torn-write false positive)");
+            Assert.False(book.TryGet((ulong)flushedCount + 1, out _),
+                "torn record materialised as an order — torn-write false negative");
+        }
+
+        // Phase 4: clean re-open of the SAME directory (still has the
+        // torn tail) must still report the same last-good seq, i.e. a
+        // repeat boot is idempotent — operators can restart any number
+        // of times without losing the durable prefix.
+        await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
+        {
+            Assert.Equal(flushedCount, store.CurrentSeq);
+        }
+    }
+
     private sealed class TestSink : IExecutionEventSink
     {
         public List<ExecutionEvent> Events { get; } = new();
