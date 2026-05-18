@@ -57,6 +57,15 @@ public enum ExecutionFanOutTargets : byte
     WsHub = 1,
     /// <summary>FIXP outbound multiplexer to the originating bot session.</summary>
     BotRouter = 2,
+    /// <summary>
+    /// Q4.6 (#306). Compliance drop-copy WebSocket feed
+    /// (<c>/ws/dropcopy</c>). Firm-scoped fan-out of every order /
+    /// fill / cancel regardless of which user originated the event —
+    /// the compliance subscriber is not user-scoped, so it bypasses
+    /// the WsHub's per-owner subscriber map and reads off its own
+    /// firm-keyed registry.
+    /// </summary>
+    DropCopy = 4,
     /// <summary>Default for an ER captured during apply — routes to every sink.</summary>
-    All = WsHub | BotRouter,
+    All = WsHub | BotRouter | DropCopy,
 }
