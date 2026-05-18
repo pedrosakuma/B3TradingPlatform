@@ -650,6 +650,69 @@ public class FileEventStoreTests : IDisposable
         Assert.Equal(new[] { 1L }, seqs);
     }
 
+    [Fact]
+    public async Task EnumerateAllRecords_LegacySegmentsThenHintedSegments_PreservesAppendOrder()
+    {
+        // #328 upgrade-path regression. When a binary that writes
+        // .firstseq sidecars opens a WAL produced by an older binary
+        // that didn't, the legacy segments hold synthetic seqs 1..N
+        // and the new hinted segments start at N+1. Enumeration must
+        // therefore yield ALL legacy records first (in their original
+        // directory-ordinal order) and only then the hinted records,
+        // otherwise ScanHighestSeq inflates _seq on reopen and every
+        // subsequent cap is off.
+        var opts = OptsForTest();
+        var walDir = Path.Combine(_root, "test", "wal", "2025-01-01");
+        Directory.CreateDirectory(walDir);
+
+        // Forge two legacy segments (no sidecar) holding seqs 1..3
+        // and 4..5 respectively. We have to choose seqs that match
+        // the legacy count-based assignment for the reopened store
+        // to ScanHighestSeq them back to the same numbers.
+        for (var segIdx = 0; segIdx < 2; segIdx++)
+        {
+            var logPath = Path.Combine(walDir, $"{segIdx:D3}.log");
+            var idxPath = Path.Combine(walDir, $"{segIdx:D3}.idx");
+            var records = segIdx == 0 ? 3 : 2;
+            await using (var w = new SegmentWriter(logPath, idxPath, opts.IndexEveryNRecords, opts.IndexEveryNBytes, opts.FsyncOnFlush))
+            {
+                for (var r = 0; r < records; r++)
+                {
+                    var payload = JsonSerializer.SerializeToUtf8Bytes<WalEvent>(NewOrder(segIdx * 10 + r), WalEventJsonContext.Default.WalEvent);
+                    w.Append(0, payload, 0); // seq arg is for the sidecar only; legacy fallback re-numbers via count
+                }
+                w.Flush();
+            }
+            File.Delete(logPath + SegmentWriter.FirstSeqSidecarSuffix);
+        }
+
+        // Open the new-format store; it must ScanHighestSeq the
+        // legacy segments to 5, then append starting at 6.
+        long[] newSeqs;
+        await using (var store = new FileEventStore(opts, NullLogger<FileEventStore>.Instance))
+        {
+            newSeqs = new[]
+            {
+                store.Append(NewOrder(100)),
+                store.Append(NewOrder(101)),
+            };
+            await store.FlushAsync();
+        }
+        Assert.Equal(new[] { 6L, 7L }, newSeqs);
+
+        // Reopen and enumerate: legacy 1..5 must come before hinted 6..7.
+        await using var reopened = new FileEventStore(opts, NullLogger<FileEventStore>.Instance);
+        var seqs = new List<long>();
+        var ids = new List<ulong>();
+        await foreach (var (seq, evt) in reopened.ReadFromAsync(0))
+        {
+            seqs.Add(seq);
+            if (evt is OrderSubmittedEvent os) ids.Add(os.ClOrdId);
+        }
+        Assert.Equal(new[] { 1L, 2L, 3L, 4L, 5L, 6L, 7L }, seqs);
+        Assert.Equal(new ulong[] { 1, 2, 3, 11, 12, 101, 102 }, ids);
+    }
+
     private static OrderSubmittedEvent NewOrder(int i) => new()
     {
         ClOrdId = (ulong)(i + 1),

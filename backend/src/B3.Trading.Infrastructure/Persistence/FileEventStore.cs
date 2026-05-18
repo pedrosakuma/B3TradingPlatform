@@ -389,19 +389,25 @@ public sealed class FileEventStore : IEventStore
     {
         public static readonly IComparer<SegmentEntry> OrderingComparer = Comparer<SegmentEntry>.Create((a, b) =>
         {
-            // Hinted segments first, ordered by firstSeq. Unhinted
-            // segments after, ordered by (dayName, fileName). This
-            // gives correct enumeration for any WAL written entirely
-            // by the post-#328 writer, and degrades to legacy
-            // directory-ordinal ordering only for the unhinted tail.
+            // Unhinted (legacy) segments come FIRST, ordered by the
+            // legacy (dayName, fileName) ordinal — their synthetic
+            // seqs occupy 1..N. Hinted segments (post-#328) come
+            // AFTER, ordered by firstSeq, which by construction is
+            // assigned after _seq has been initialised from the
+            // legacy tail (see ScanHighestSeq). This preserves
+            // upgrade-path correctness when a legacy WAL is opened
+            // by the new writer and gains hinted segments on top.
             var ah = a.FirstSeq.HasValue;
             var bh = b.FirstSeq.HasValue;
-            if (ah && bh) return a.FirstSeq!.Value.CompareTo(b.FirstSeq!.Value);
-            if (ah) return -1;
-            if (bh) return 1;
-            var d = StringComparer.Ordinal.Compare(a.DayName, b.DayName);
-            if (d != 0) return d;
-            return StringComparer.Ordinal.Compare(a.FileName, b.FileName);
+            if (!ah && !bh)
+            {
+                var d = StringComparer.Ordinal.Compare(a.DayName, b.DayName);
+                if (d != 0) return d;
+                return StringComparer.Ordinal.Compare(a.FileName, b.FileName);
+            }
+            if (!ah) return -1;
+            if (!bh) return 1;
+            return a.FirstSeq!.Value.CompareTo(b.FirstSeq!.Value);
         });
     }
 
