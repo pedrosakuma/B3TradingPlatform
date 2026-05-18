@@ -1,4 +1,5 @@
 using B3.Trading.Application;
+using B3.Trading.Application.MarketData;
 using B3.Trading.Domain;
 
 namespace B3.Trading.Api.WebSockets;
@@ -151,7 +152,27 @@ public sealed record ExecutionDto(
     decimal LastPrice,
     string? RejectReason,
     DateTimeOffset TimestampUtc,
-    bool IsNativeStp = false);
+    bool IsNativeStp = false,
+    /// <summary>
+    /// Q4.7 (#307). Optional best-execution evidence carried on Fill /
+    /// PartialFill DTOs only — populated from the top-of-book at the
+    /// instant the fill was observed by the host. <c>null</c> on every
+    /// other ER kind, and on fills produced before #307 shipped.
+    /// </summary>
+    BookTouchDto? BookTouch = null);
+
+/// <summary>
+/// Q4.7 (#307). Wire shape for the best-execution touch snapshot.
+/// Stable JSON shape: <c>bestBid</c>, <c>bestAsk</c>, <c>midPrice</c>,
+/// <c>lastTradePrice</c>, <c>capturedAtUtc</c>, <c>stale</c>.
+/// </summary>
+public sealed record BookTouchDto(
+    decimal? BestBid,
+    decimal? BestAsk,
+    decimal? MidPrice,
+    decimal? LastTradePrice,
+    DateTimeOffset CapturedAtUtc,
+    bool Stale);
 
 /// <summary>
 /// Wire shape for an algo parent. Per-type parameters live in the
@@ -252,7 +273,11 @@ public static class DtoMappings
     public static ExecutionDto ToDto(this ExecutionEvent ev) => new(
         ev.ClOrdId.ToString(), ev.Symbol, ev.Side.ToString(), ev.Status.ToString(), ev.Kind.ToString(),
         ev.LeavesQuantity, ev.CumulativeQuantity, ev.LastQuantity, ev.LastPrice, ev.RejectReason, ev.TimestampUtc,
-        ev.IsNativeStp);
+        ev.IsNativeStp,
+        ev.BookTouch is null ? null : ev.BookTouch.ToDto());
+
+    public static BookTouchDto ToDto(this BookTouchSnapshot s) => new(
+        s.BestBid, s.BestAsk, s.MidPrice, s.LastTradePrice, s.CapturedAtUtc, s.Stale);
 
     public static AlgoDto ToDto(this Algo a)
     {

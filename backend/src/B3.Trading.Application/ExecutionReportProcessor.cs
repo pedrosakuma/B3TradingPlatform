@@ -46,6 +46,7 @@ public sealed class ExecutionReportProcessor
     private readonly Risk.IReplaceMarginCoordinator? _replaceMargin;
     private readonly IBotErRouter? _botErRouter;
     private readonly Scheduling.GtdExpirationScheduler? _gtdScheduler;
+    private readonly FillProjection? _fillProjection;
 
     public ExecutionReportProcessor(
         OrderOwnershipMap ownership,
@@ -65,7 +66,8 @@ public sealed class ExecutionReportProcessor
         Persistence.EventDispatcher? dispatcher = null,
         PnlKeeper? pnlKeeper = null,
         SubAccountPositionKeeper? subAccountPositions = null,
-        SubAccountPnlKeeper? subAccountPnl = null)
+        SubAccountPnlKeeper? subAccountPnl = null,
+        FillProjection? fillProjection = null)
     {
         _ownership = ownership;
         _orders = orders;
@@ -85,6 +87,7 @@ public sealed class ExecutionReportProcessor
         _pnlKeeper = pnlKeeper;
         _subAccountPositions = subAccountPositions;
         _subAccountPnl = subAccountPnl;
+        _fillProjection = fillProjection;
     }
 
     /// <summary>
@@ -108,7 +111,7 @@ public sealed class ExecutionReportProcessor
     /// preserved so existing tests don't need rewiring.
     /// </para>
     /// </summary>
-    public void Apply(ulong clOrdId, ExecKind kind, long leaves, long cumQty, long lastQty, decimal lastPx, string? rejectReason, ulong origClOrdId = 0, Persistence.ExecutionFanOut? fanOut = null, bool isReplay = false, DateTimeOffset? eventTimestampUtc = null, string? envelopeFirmId = null)
+    public void Apply(ulong clOrdId, ExecKind kind, long leaves, long cumQty, long lastQty, decimal lastPx, string? rejectReason, ulong origClOrdId = 0, Persistence.ExecutionFanOut? fanOut = null, bool isReplay = false, DateTimeOffset? eventTimestampUtc = null, string? envelopeFirmId = null, MarketData.BookTouchSnapshot? bookTouch = null)
     {
         // PR #317 P1. Cross-firm guard hoisted ABOVE the replace
         // intercept block so a misrouted ER cannot consume the pending
@@ -746,9 +749,38 @@ public sealed class ExecutionReportProcessor
             lastQty,
             lastPx,
             rejectReason,
-            DateTimeOffset.UtcNow,
+            // Pass-2 P2 (#324). Honour the durable WAL timestamp on
+            // replay so legacy fills (no BookTouch, capturedAt falls
+            // back to record.TimestampUtc on the REST surface) keep
+            // their original execution time across restart. Live
+            // dispatch passes null → UtcNow as before.
+            eventTimestampUtc ?? DateTimeOffset.UtcNow,
             isNativeStp,
-            order.FirmId);
+            order.FirmId,
+            // Q4.7 (#307). Only fills carry a book-touch snapshot —
+            // cancels / rejects / news leave the field null on the wire.
+            BookTouch: kind is ExecKind.Fill or ExecKind.PartialFill ? bookTouch : null);
+
+        // Q4.7 (#307). Fold the fill into the in-memory projection so
+        // GET /fills/{id}/touch can read it back. Runs on both live
+        // dispatch and WAL replay (the latter passes the BookTouch
+        // hydrated from the WAL ER event) so cold restart preserves
+        // every fill's touch evidence without a separate snapshot
+        // section.
+        if (kind is ExecKind.Fill or ExecKind.PartialFill && lastQty > 0)
+        {
+            _fillProjection?.Record(
+                clOrdId: lookupId,
+                cumulativeQuantityAfterFill: order.CumulativeQuantity,
+                owner: owner,
+                firmId: order.FirmId,
+                symbol: order.Symbol,
+                side: order.Side,
+                lastQuantity: lastQty,
+                lastPrice: lastPx,
+                timestampUtc: ev.TimestampUtc,
+                bookTouch: bookTouch);
+        }
         // RFC §5.2 (F2). Capture-then-fan-out path: the dispatcher walks
         // the writer and TryWrites into every per-sink channel while still
         // under the dispatcher lock so subscribers observe events in WAL

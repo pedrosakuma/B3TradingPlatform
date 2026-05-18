@@ -30,6 +30,7 @@ public static class TradingEndpointsExtensions
         app.MapTotp();
         app.MapOrders();
         app.MapHistory();
+        app.MapFills();
         app.MapAlgo();
         app.MapPositions();
         app.MapBalance();
