@@ -217,13 +217,22 @@ public sealed class DropCopyManager
     /// </summary>
     public void DisconnectAllForResync(string reason)
     {
+        // Pass-9 review (#323) P1: enumerate from _byFirm.Keys (the
+        // source-of-truth for active subscribers) rather than from
+        // _firmResyncArmed.Keys. Add() inserts into _byFirm BEFORE
+        // writing _firmResyncArmed under the same stripe lock; iterating
+        // the armed-dict would skip a firm whose first subscriber is
+        // mid-Add (visible in _byFirm, arm-key not yet written), letting
+        // a concurrent drop survive without forcing a resync. Iterating
+        // _byFirm.Keys means the walker will acquire the stripe lock,
+        // block until Add releases, and then see armed=1 and the new
+        // client together — atomically.
+        //
         // Per-firm coalesce: arm is set under LockFor(firmId) by Add,
-        // and we consume it under the SAME lock here. NO unlocked
+        // and we consume it under the SAME lock here. No unlocked
         // fast-path: a stale armed==0 read outside the lock could race
-        // a registration-in-progress and skip the firm entirely (pass-7
-        // P1). The firm count is bounded by tenant cardinality so the
-        // per-drop O(firms) lock acquisition is acceptable.
-        foreach (var firmId in _firmResyncArmed.Keys)
+        // a registration-in-progress and skip the firm (pass-7 P1).
+        foreach (var firmId in _byFirm.Keys)
         {
             lock (LockFor(firmId))
             {
