@@ -102,25 +102,36 @@ public enum PublicChannelKind
 
 /// <summary>
 /// Q3.6 Stage B (#286). Wire shape for the public
-/// <c>book.${symbol}</c> top-of-book channel. Fields are nullable so
-/// an empty-state snapshot (no MBO frame seen for this symbol yet, or
-/// the side was cleared) ships a stable shape with <c>null</c>s rather
-/// than zeroes that look like real prices. Mirrors
-/// <see cref="L2TopOfBook"/> from the application layer.
+/// <c>book.${symbol}</c> top-N depth channel. Each side lists
+/// aggregated price levels sorted best-to-worst (bids descending,
+/// asks ascending), capped to <c>MarketDataOptions.BookChannelMaxLevels</c>.
+/// Empty array on a side means "no liquidity" (either never seen, or
+/// cleared). <c>UpdatedUtc</c> is <c>null</c> only on the empty-state
+/// cold snapshot served before any MBO frame lands.
 /// </summary>
-public sealed record L2TopOfBookDto(
+public sealed record L2LadderDto(
     string Symbol,
-    L2SideDto? Bid,
-    L2SideDto? Ask,
+    IReadOnlyList<L2SideDto> Bids,
+    IReadOnlyList<L2SideDto> Asks,
     DateTimeOffset? UpdatedUtc)
 {
-    public static L2TopOfBookDto Empty(string symbol) => new(symbol, null, null, null);
+    public static L2LadderDto Empty(string symbol) =>
+        new(symbol, Array.Empty<L2SideDto>(), Array.Empty<L2SideDto>(), null);
 
-    public static L2TopOfBookDto From(L2TopOfBook t) => new(
-        t.Symbol,
-        t.Bid.OrderCount > 0 ? new L2SideDto(t.Bid.Price, t.Bid.TotalQty, t.Bid.OrderCount) : null,
-        t.Ask.OrderCount > 0 ? new L2SideDto(t.Ask.Price, t.Ask.TotalQty, t.Ask.OrderCount) : null,
-        t.UpdatedUtc);
+    public static L2LadderDto From(L2Ladder l) => new(
+        l.Symbol,
+        Map(l.Bids),
+        Map(l.Asks),
+        l.UpdatedUtc);
+
+    private static IReadOnlyList<L2SideDto> Map(IReadOnlyList<L2Side> src)
+    {
+        if (src.Count == 0) return Array.Empty<L2SideDto>();
+        var arr = new L2SideDto[src.Count];
+        for (var i = 0; i < src.Count; i++)
+            arr[i] = new L2SideDto(src[i].Price, src[i].TotalQty, src[i].OrderCount);
+        return arr;
+    }
 }
 
 public sealed record L2SideDto(decimal Price, long TotalQty, int OrderCount);

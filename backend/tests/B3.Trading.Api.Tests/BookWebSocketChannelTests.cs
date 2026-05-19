@@ -2,17 +2,19 @@ using B3.Trading.Api.WebSockets;
 using B3.Trading.Application;
 using B3.Trading.Application.MarketData;
 using B3.Trading.Domain;
+using Microsoft.Extensions.Options;
 using Xunit;
 
 namespace B3.Trading.Api.Tests;
 
 public class BookWebSocketChannelTests
 {
-    private static (SubscriptionManager subs, MboBookStore store, WebSocketBookEventSink sink) Build()
+    private static (SubscriptionManager subs, MboBookStore store, WebSocketBookEventSink sink) Build(int maxLevels = 10)
     {
         var store = new MboBookStore();
         var subs = new SubscriptionManager(new WorkingOrderBook(), new PositionKeeper(), new AlgoBook());
-        var sink = new WebSocketBookEventSink(subs, store);
+        var opts = Options.Create(new MarketDataOptions { BookChannelMaxLevels = maxLevels });
+        var sink = new WebSocketBookEventSink(subs, store, opts);
         sink.StartAsync(default).GetAwaiter().GetResult();
         return (subs, store, sink);
     }
@@ -50,10 +52,10 @@ public class BookWebSocketChannelTests
         Assert.True(client.Reader.TryRead(out var msg));
         Assert.Equal("snapshot", msg!.Type);
         Assert.Equal("book.PETR4", msg.Channel);
-        var dto = Assert.IsType<L2TopOfBookDto>(msg.Data);
+        var dto = Assert.IsType<L2LadderDto>(msg.Data);
         Assert.Equal("PETR4", dto.Symbol);
-        Assert.Null(dto.Bid);
-        Assert.Null(dto.Ask);
+        Assert.Empty(dto.Bids);
+        Assert.Empty(dto.Asks);
         Assert.Null(dto.UpdatedUtc);
     }
 
@@ -72,13 +74,93 @@ public class BookWebSocketChannelTests
         Assert.Equal("delta", delta!.Type);
         Assert.Equal("book.PETR4", delta.Channel);
         Assert.Equal(1, delta.Seq);
-        var dto = Assert.IsType<L2TopOfBookDto>(delta.Data);
+        var dto = Assert.IsType<L2LadderDto>(delta.Data);
         Assert.Equal("PETR4", dto.Symbol);
-        Assert.NotNull(dto.Bid);
-        Assert.Equal(30.10m, dto.Bid!.Price);
-        Assert.Equal(100, dto.Bid.TotalQty);
-        Assert.Equal(1, dto.Bid.OrderCount);
-        Assert.Null(dto.Ask);
+        var bid = Assert.Single(dto.Bids);
+        Assert.Equal(30.10m, bid.Price);
+        Assert.Equal(100, bid.TotalQty);
+        Assert.Equal(1, bid.OrderCount);
+        Assert.Empty(dto.Asks);
+    }
+
+    [Fact]
+    public void Book_ladder_aggregates_orders_at_same_price()
+    {
+        var (subs, store, sink) = Build();
+        var client = new SubscribedClient(new EndClientId("alice"), "TEST");
+        subs.SubscribePublicWithSnapshot(client, "book.PETR4",
+            () => sink.GetSnapshot(PublicChannelKind.Book, "PETR4"));
+        client.Reader.TryRead(out _); // snapshot
+
+        store.ApplyAdded(Add("PETR4", 1UL, MarketBookSide.Bid, 30.10m, 100));
+        client.Reader.TryRead(out _); // first delta
+        store.ApplyAdded(Add("PETR4", 2UL, MarketBookSide.Bid, 30.10m, 200));
+
+        Assert.True(client.Reader.TryRead(out var delta));
+        var dto = Assert.IsType<L2LadderDto>(delta!.Data);
+        var bid = Assert.Single(dto.Bids);
+        Assert.Equal(30.10m, bid.Price);
+        Assert.Equal(300, bid.TotalQty);
+        Assert.Equal(2, bid.OrderCount);
+    }
+
+    [Fact]
+    public void Book_ladder_sorts_bids_descending_and_asks_ascending()
+    {
+        var (subs, store, sink) = Build();
+        store.ApplyAdded(Add("PETR4", 1UL, MarketBookSide.Bid, 30.10m, 100));
+        store.ApplyAdded(Add("PETR4", 2UL, MarketBookSide.Bid, 30.05m, 200));
+        store.ApplyAdded(Add("PETR4", 3UL, MarketBookSide.Bid, 30.20m, 150));
+        store.ApplyAdded(Add("PETR4", 4UL, MarketBookSide.Ask, 30.40m, 50));
+        store.ApplyAdded(Add("PETR4", 5UL, MarketBookSide.Ask, 30.30m, 75));
+
+        var client = new SubscribedClient(new EndClientId("alice"), "TEST");
+        subs.SubscribePublicWithSnapshot(client, "book.PETR4",
+            () => sink.GetSnapshot(PublicChannelKind.Book, "PETR4"));
+
+        Assert.True(client.Reader.TryRead(out var msg));
+        var dto = Assert.IsType<L2LadderDto>(msg!.Data);
+        Assert.Equal(new[] { 30.20m, 30.10m, 30.05m }, dto.Bids.Select(b => b.Price));
+        Assert.Equal(new[] { 30.30m, 30.40m }, dto.Asks.Select(a => a.Price));
+    }
+
+    [Fact]
+    public void Book_ladder_respects_BookChannelMaxLevels()
+    {
+        var (subs, store, sink) = Build(maxLevels: 3);
+        for (var i = 0; i < 5; i++)
+            store.ApplyAdded(Add("PETR4", (ulong)(100 + i), MarketBookSide.Bid, 30m + i * 0.01m, 10));
+
+        var client = new SubscribedClient(new EndClientId("alice"), "TEST");
+        subs.SubscribePublicWithSnapshot(client, "book.PETR4",
+            () => sink.GetSnapshot(PublicChannelKind.Book, "PETR4"));
+
+        Assert.True(client.Reader.TryRead(out var msg));
+        var dto = Assert.IsType<L2LadderDto>(msg!.Data);
+        // Best 3 levels (highest prices): 30.04, 30.03, 30.02.
+        Assert.Equal(new[] { 30.04m, 30.03m, 30.02m }, dto.Bids.Select(b => b.Price));
+    }
+
+    [Fact]
+    public void Book_coalesces_updates_beyond_visible_depth()
+    {
+        var (subs, store, sink) = Build(maxLevels: 2);
+        var client = new SubscribedClient(new EndClientId("alice"), "TEST");
+        subs.SubscribePublicWithSnapshot(client, "book.PETR4",
+            () => sink.GetSnapshot(PublicChannelKind.Book, "PETR4"));
+        client.Reader.TryRead(out _); // snapshot
+
+        // Build top-2 first; each emission is a real delta.
+        store.ApplyAdded(Add("PETR4", 1UL, MarketBookSide.Bid, 30.20m, 100));
+        Assert.True(client.Reader.TryRead(out _));
+        store.ApplyAdded(Add("PETR4", 2UL, MarketBookSide.Bid, 30.10m, 100));
+        Assert.True(client.Reader.TryRead(out _));
+
+        // Add an order at level 3 (below visible window) — coalesced.
+        store.ApplyAdded(Add("PETR4", 3UL, MarketBookSide.Bid, 30.00m, 500));
+
+        Assert.False(client.Reader.TryRead(out var maybe),
+            $"expected coalesced (no delta) but got {maybe?.Type} {maybe?.Data}");
     }
 
     [Fact]
@@ -94,29 +176,10 @@ public class BookWebSocketChannelTests
 
         Assert.True(client.Reader.TryRead(out var msg));
         Assert.Equal("snapshot", msg!.Type);
-        var dto = Assert.IsType<L2TopOfBookDto>(msg.Data);
-        Assert.Equal(30.10m, dto.Bid!.Price);
-        Assert.Equal(30.20m, dto.Ask!.Price);
-        Assert.Equal(50, dto.Ask.TotalQty);
-    }
-
-    [Fact]
-    public void Book_coalesces_deep_book_updates_that_do_not_change_top()
-    {
-        var (subs, store, sink) = Build();
-        var client = new SubscribedClient(new EndClientId("alice"), "TEST");
-        subs.SubscribePublicWithSnapshot(client, "book.PETR4",
-            () => sink.GetSnapshot(PublicChannelKind.Book, "PETR4"));
-        client.Reader.TryRead(out _); // snapshot
-
-        store.ApplyAdded(Add("PETR4", 1UL, MarketBookSide.Bid, 30.10m, 100));
-        Assert.True(client.Reader.TryRead(out _)); // first delta
-
-        // Deeper bid at lower price — top of book unchanged.
-        store.ApplyAdded(Add("PETR4", 2UL, MarketBookSide.Bid, 30.00m, 500));
-
-        Assert.False(client.Reader.TryRead(out var maybe),
-            $"expected coalesced (no delta) but got {maybe?.Type} {maybe?.Data}");
+        var dto = Assert.IsType<L2LadderDto>(msg.Data);
+        Assert.Equal(30.10m, dto.Bids[0].Price);
+        Assert.Equal(30.20m, dto.Asks[0].Price);
+        Assert.Equal(50, dto.Asks[0].TotalQty);
     }
 
     [Fact]
@@ -133,5 +196,16 @@ public class BookWebSocketChannelTests
 
         Assert.True(alice.Reader.TryRead(out _));
         Assert.False(bob.Reader.TryRead(out _));
+    }
+
+    [Fact]
+    public void GetLadder_returns_null_for_unseen_symbol_and_empty_state()
+    {
+        var (_, store, _) = Build();
+        Assert.Null(store.GetLadder("UNKNOWN", 10));
+
+        store.ApplyAdded(Add("PETR4", 1UL, MarketBookSide.Bid, 30m, 1));
+        store.ApplyDeleted(new MarketOrderDeleted("PETR4", 4321UL, 1UL, MarketBookSide.Bid, DateTimeOffset.UtcNow));
+        Assert.Null(store.GetLadder("PETR4", 10));
     }
 }
