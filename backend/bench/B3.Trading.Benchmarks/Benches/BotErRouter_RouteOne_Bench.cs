@@ -80,7 +80,7 @@ public class BotErRouter_RouteOne_Bench
         var coord = new BotOutboundCoordinator(sessions, opts.Value);
         _coord = coord;
         _mux = new BotErMultiplexer(_mappings, sessions, directory, coord,
-            NullLogger<BotErMultiplexer>.Instance, opts);
+            NullLogger<BotErMultiplexer>.Instance);
 
         _cts = new CancellationTokenSource();
         await _mux.StartAsync(_cts.Token).ConfigureAwait(false);
