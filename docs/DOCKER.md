@@ -33,7 +33,7 @@ docker compose \
 
 | Service | Image | Port (host) | Purpose |
 |---|---|---|---|
-| `matching-platform` | `ghcr.io/pedrosakuma/b3-matching:latest` | (internal `:9876`, `:8080`) | FIXP TCP listener + UMDF unicast publisher + `/admin/channels/*` snapshot ops |
+| `matching-platform` | `ghcr.io/pedrosakuma/b3-matching@sha256:…` (pinned — see [Bumping the matching image](#bumping-the-matching-image)) | (internal `:9876`, `:8080`) | FIXP TCP listener + UMDF unicast publisher + `/admin/channels/*` snapshot ops |
 | `marketdata` | `ghcr.io/pedrosakuma/b3-marketdata:latest` | `8081` | UMDF unicast consumer (`30084/30184/31084 udp`) + WebSocket fanout (`:8080`) |
 | `trading-host` | `ghcr.io/pedrosakuma/b3-trading-host:latest` | `5000` | REST + WebSocket; `Mode=Real`, FIRM01 session against matching, live `IReferencePrice` wired through marketdata WS |
 | `frontend` | `ghcr.io/pedrosakuma/b3-trading-frontend:latest` | `8080` | nginx serving the static UI + reverse-proxy to trading-host |
@@ -441,3 +441,48 @@ ports:
 
 See the full [FIXP listener operations guide](operations/fixp-listener.md) for
 TLS setup, rate-limit tuning, and monitoring.
+
+## Bumping the matching image
+
+The `matching-platform` service is pinned to an **immutable image
+digest** (`ghcr.io/pedrosakuma/b3-matching@sha256:…`) in
+`docker/docker-compose.yml`. We deliberately do **not** track
+`:latest` — every bump is a reviewable, CI-validated PR. This
+mitigates the class of flake where upstream churn lands on our builds
+without warning (e.g. #332, #345, #347).
+
+### Daily local override
+
+Devs who want the bleeding edge for a one-off run can override:
+
+```bash
+MATCHING_IMAGE=ghcr.io/pedrosakuma/b3-matching:latest \
+  docker compose -f docker/docker-compose.yml up matching-platform
+```
+
+### Detecting drift
+
+```bash
+scripts/matching-image/check-upstream.sh           # tag=latest
+scripts/matching-image/check-upstream.sh v1.2.3    # specific tag
+```
+
+Exit `0` means the pin matches upstream; `2` means upstream has
+advanced and a bump is due; `1` means an IO / argument error. The new
+digest is printed on the last stdout line when drift is detected.
+
+### Automated bump cadence
+
+The [`matching-image-bump`](../.github/workflows/matching-image-bump.yml)
+workflow runs the script on a weekly cron (Mondays 06:00 UTC) **and**
+on `workflow_dispatch`. When drift is detected it opens a PR bumping
+the pin; the standard CI matrix (`real-stack-conformance` included)
+validates the new digest before a human merges.
+
+### Manual bump (one-liner)
+
+```bash
+new=$(scripts/matching-image/check-upstream.sh | tail -n1)
+old=$(grep -oE 'b3-matching@sha256:[0-9a-f]{64}' docker/docker-compose.yml | head -n1 | sed 's/.*@//')
+sed -i "s|${old}|${new}|g" docker/docker-compose.yml
+```

@@ -1,0 +1,75 @@
+name: Matching image bump
+
+# Watches the upstream ghcr.io/pedrosakuma/b3-matching:latest digest
+# and opens an automated PR bumping docker/docker-compose.yml when it
+# advances. Bumping is a reviewable, CI-validated event — not a silent
+# pull on every build. See scripts/matching-image/check-upstream.sh and
+# B3TradingPlatform#352.
+
+on:
+  schedule:
+    # Mondays 06:00 UTC — early enough to land in a Monday review cycle.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Upstream tag to resolve (default: latest)'
+        required: false
+        default: 'latest'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve upstream digest and detect drift
+        id: drift
+        run: |
+          set +e
+          out=$(scripts/matching-image/check-upstream.sh "${{ github.event.inputs.tag || 'latest' }}")
+          code=$?
+          echo "$out"
+          echo "exit_code=${code}" >> "$GITHUB_OUTPUT"
+          if [[ $code -eq 2 ]]; then
+            new_digest=$(echo "$out" | tail -n1)
+            echo "new_digest=${new_digest}" >> "$GITHUB_OUTPUT"
+          fi
+          exit 0
+
+      - name: Apply bump
+        if: steps.drift.outputs.exit_code == '2'
+        run: |
+          old=$(grep -oE 'b3-matching@sha256:[0-9a-f]{64}' docker/docker-compose.yml | head -n1 | sed 's/.*@//')
+          new="${{ steps.drift.outputs.new_digest }}"
+          sed -i "s|${old}|${new}|g" docker/docker-compose.yml
+          git diff --stat
+
+      - name: Open pull request
+        if: steps.drift.outputs.exit_code == '2'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: bot/matching-image-bump
+          commit-message: |
+            ops: bump matching-platform image pin
+
+            Resolved by scripts/matching-image/check-upstream.sh.
+            Tag: ${{ github.event.inputs.tag || 'latest' }}
+            New digest: ${{ steps.drift.outputs.new_digest }}
+          title: 'ops: bump matching-platform image pin'
+          body: |
+            Automated bump of the matching-platform image pin in
+            `docker/docker-compose.yml`.
+
+            - Tag watched: `${{ github.event.inputs.tag || 'latest' }}`
+            - New digest: `${{ steps.drift.outputs.new_digest }}`
+
+            CI (including `real-stack-conformance`) will validate this
+            digest before merge. Refs #352.
+          labels: |
+            ops
+            dependencies

@@ -60,7 +60,12 @@ name: b3trading
 
 services:
   matching-platform:
-    image: ${MATCHING_IMAGE:-ghcr.io/pedrosakuma/b3-matching:latest}
+    # NB: pinned to an immutable digest, not :latest. See
+    # scripts/matching-image/check-upstream.sh and the
+    # matching-image-bump workflow for the bump cadence.
+    # Devs can still override (e.g. MATCHING_IMAGE=ghcr.io/pedrosakuma/b3-matching:latest)
+    # to test the bleeding edge locally.
+    image: ${MATCHING_IMAGE:-ghcr.io/pedrosakuma/b3-matching@sha256:0a5f6e77ec5895b0fd88ae49f7b3e051613ab77e20dc28c8f1f20e027bbbfda1}
     container_name: b3-matching-platform
     restart: unless-stopped
     networks:
