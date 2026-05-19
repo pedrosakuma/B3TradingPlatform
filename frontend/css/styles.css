@@ -507,6 +507,9 @@ tr.row-stale > td.row-stale-actions { opacity: 1; }
   font-size: .65rem; text-transform: uppercase; letter-spacing: .04em;
   margin-right: .35rem;
 }
+/* Firms admin: highlight rows whose FIXP session is not Established or
+ * is mid-reconnect so the worst row is visible at a glance (#342). */
+tr.firm-row-bad > td { background: rgba(239,83,80,.10); }
 .muted { color: var(--muted); text-align: center; padding: .8rem; }
 
 /* ---------- Blotter filter + row UX (section 3 of #30) ---------- */

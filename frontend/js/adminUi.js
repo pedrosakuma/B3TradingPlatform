@@ -86,12 +86,24 @@ export function bindAdminUi() {
     $("admin-add-halt-symbol").value = "";
   });
 
-  $("admin-eod-btn").addEventListener("click", () => {
+  $("admin-eod-btn").addEventListener("click", async () => {
+    const btn = $("admin-eod-btn");
+    if (btn?.disabled) return;
     if (!confirmTwice(
       "Run EOD materialisation now?",
       "Confirm: run EOD against today's WAL. This is normally scheduled.",
     )) return;
-    onRunEod();
+    // Idempotency guard (#342): disable the button while the POST is
+    // in flight so a double-click can't fire two concurrent EOD runs.
+    // Backend would handle it, but the UI shouldn't suggest the second
+    // click "did" anything separate.
+    const originalLabel = btn?.textContent;
+    if (btn) { btn.disabled = true; btn.textContent = "Running…"; }
+    try {
+      await onRunEod();
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = originalLabel ?? "Run EOD now"; }
+    }
   });
 
   subscribe(renderForSlice);
@@ -148,7 +160,13 @@ function renderFirms() {
     const action = killed ? "revive" : "engage";
     const btnLabel = killed ? "Revive" : "Killswitch";
     const btnClass = killed ? "danger-btn revive" : "danger-btn engage";
-    return `<tr>
+    // Visually flag firms that are not in a healthy "Established &
+    // not-reconnecting" state so the admin's eye lands on the row that
+    // needs attention without scanning the whole table (#342). Killed
+    // firms are already flagged via the KILLED tag + Revive button.
+    const bad = !killed && (f.sessionState !== "Established" || f.reconnecting === true);
+    const rowCls = bad ? ` class="firm-row-bad"` : "";
+    return `<tr${rowCls}>
       <td><code>${escapeHtml(f.firmId)}</code></td>
       <td>${escapeHtml(f.endpoint ?? "—")}</td>
       <td>${escapeHtml(f.sessionId ?? "—")}</td>
