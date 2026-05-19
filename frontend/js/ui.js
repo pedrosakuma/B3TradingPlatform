@@ -29,6 +29,30 @@ function fmtPx(n) {
 }
 export { fmtQty, fmtPx };
 
+// #342: Modal focus restoration. When a modal opens we snapshot the
+// element that had focus so closing it can return the user to where
+// they were. Keyed by modal id so concurrent / stacked modals don't
+// stomp each other's saved target.
+const _modalReturnFocus = new Map();
+
+function rememberFocusForModal(modalId) {
+  const el = document.activeElement;
+  // Skip <body> / null / the dialog itself — restoring those is a no-op
+  // and tends to mask real focus bugs.
+  if (!el || el === document.body || el.tagName === "BODY") return;
+  _modalReturnFocus.set(modalId, el);
+}
+
+function restoreFocusForModal(modalId) {
+  const el = _modalReturnFocus.get(modalId);
+  _modalReturnFocus.delete(modalId);
+  if (!el || !document.contains(el)) return;
+  // If the saved target was hidden or removed (e.g. session-modal +
+  // logout flow that swapped to the login view), focusing throws or
+  // silently fails. Either way we don't want to crash on close.
+  try { el.focus({ preventScroll: true }); } catch { /* ignore */ }
+}
+
 let onSubmitOrder = () => {};
 let onCancelOrder = () => {};
 let onCancelAll   = () => {};
@@ -136,6 +160,7 @@ export function openSessionModal({ onRenew, onLogout }) {
   const pwd   = $("session-modal-password");
   const logoutBtn = $("session-modal-logout");
   if (!modal || !form || !pwd) return;
+  rememberFocusForModal("session-modal");
   setSessionModalError(null);
   pwd.value = "";
   modal.hidden = false;
@@ -184,6 +209,7 @@ export function closeSessionModal() {
     document.removeEventListener("keydown", sessionModalKey);
     sessionModalKey = null;
   }
+  restoreFocusForModal("session-modal");
 }
 
 export function setSessionModalError(message) {
@@ -234,6 +260,7 @@ function openModifyModal(clOrdId) {
       `(qty ${order.quantity}, leaves ${order.leavesQuantity}, cum ${order.cumulativeQuantity}, px ${px})`;
   }
   if (error) { error.hidden = true; error.textContent = ""; }
+  rememberFocusForModal("modify-modal");
   modal.hidden = false;
   // Focus the qty field so keyboard-only operators don't need a
   // round-trip through the mouse to change the size.
@@ -248,6 +275,7 @@ export function closeModifyModal() {
   if (form) delete form.dataset.clordid;
   setModifyModalError(null);
   setModifyModalSubmitting(false);
+  restoreFocusForModal("modify-modal");
 }
 
 export function setModifyModalError(message) {
@@ -585,6 +613,7 @@ function openCancelAllModal() {
   if (close) { close.disabled = false; close.textContent = "Close"; }
   if (progress) { progress.hidden = true; progress.textContent = ""; }
   setCancelAllError(null);
+  rememberFocusForModal("cancel-all-modal");
   modal.hidden = false;
   // Defer focus so the autofocus doesn't fight the show transition.
   queueMicrotask(() => input.focus());
@@ -600,6 +629,7 @@ export function closeCancelAllModal() {
   modal.hidden = true;
   if (form) delete form.dataset.ids;
   setCancelAllError(null);
+  restoreFocusForModal("cancel-all-modal");
 }
 
 export function setCancelAllError(message) {
@@ -925,23 +955,31 @@ export function bindUi() {
   const mdClose = $("md-settings-close");
   if (mdOpen && mdModal) {
     mdOpen.addEventListener("click", () => {
+      rememberFocusForModal("md-settings-modal");
       mdModal.hidden = false;
       const urlInput = $("md-url");
       if (urlInput) urlInput.focus();
     });
   }
   if (mdClose && mdModal) {
-    mdClose.addEventListener("click", () => { mdModal.hidden = true; });
+    mdClose.addEventListener("click", () => {
+      mdModal.hidden = true;
+      restoreFocusForModal("md-settings-modal");
+    });
   }
   if (mdModal) {
     mdModal.addEventListener("click", (e) => {
-      if (e.target === mdModal) mdModal.hidden = true;
+      if (e.target === mdModal) {
+        mdModal.hidden = true;
+        restoreFocusForModal("md-settings-modal");
+      }
     });
     // Esc closes the popover (non-destructive — no logout).
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape" && !mdModal.hidden) {
         e.preventDefault();
         mdModal.hidden = true;
+        restoreFocusForModal("md-settings-modal");
       }
     });
   }
@@ -1026,6 +1064,20 @@ export function bindUi() {
   renderAll();
 }
 
+// #342: Esc inside the ticket arms a brief "press Esc again" window
+// before wiping the form so a reflex Esc can't blow away a typed-in
+// order. State lives at module scope (single global keydown handler).
+const TICKET_CLEAR_ARM_MS = 1500;
+let ticketClearArmedUntil = 0;
+
+function ticketHasContent() {
+  const ids = ["ticket-symbol", "ticket-qty", "ticket-price", "ticket-stop-price", "ticket-good-till-date", "ticket-display-qty"];
+  return ids.some(id => {
+    const el = $(id);
+    return el && typeof el.value === "string" && el.value.trim() !== "";
+  });
+}
+
 function onGlobalKeydown(e) {
   if (getState().currentView !== "trader") return;
   const target = e.target;
@@ -1055,7 +1107,25 @@ function onGlobalKeydown(e) {
       return;
     }
     if (target?.closest && target.closest("#ticket-form")) {
-      clearTicket();
+      // #342: Esc inside the ticket form used to wipe everything in one
+      // keystroke, which made a reflex Esc (to dismiss a datalist /
+      // popup) destroy a typed-in ticket. Now: if any of the
+      // user-visible fields hold content, the first Esc arms a brief
+      // "press Esc again to clear" feedback; a second Esc within the
+      // window completes the clear. An empty ticket still clears in
+      // one keystroke (no risk).
+      if (ticketHasContent()) {
+        if (ticketClearArmedUntil > Date.now()) {
+          ticketClearArmedUntil = 0;
+          clearTicket();
+          setTicketFeedback("ticket cleared", "warn");
+        } else {
+          ticketClearArmedUntil = Date.now() + TICKET_CLEAR_ARM_MS;
+          setTicketFeedback("press Esc again to clear ticket", "warn");
+        }
+      } else {
+        clearTicket();
+      }
     } else {
       onSelectOrder(null);
     }
