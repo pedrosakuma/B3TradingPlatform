@@ -452,6 +452,39 @@ public static class HistoryEndpoints
                     ownerByClOrdId[rr.NewClOrdId] = (rr.EndClientId, rr.Symbol, rr.Side);
                     replaceLinks[rr.NewClOrdId] = new ReplaceIntent(rr.OriginalClOrdId, rr.NewQuantity);
                     break;
+                case OrderReplaceRejectedEvent rrj:
+                    // #337 — surface the rejected modify so it shows up
+                    // in the trader's executions log alongside the
+                    // submit-side rejects. The original order's
+                    // owner/symbol/side are already in the side-table
+                    // (registered by the matching OrderSubmittedEvent
+                    // when the original was created); look them up so
+                    // the firm-isolation + owner filters apply
+                    // correctly. If we can't resolve the original
+                    // (truncated WAL window) we drop the row — same
+                    // posture as the ER branch below.
+                    if (rrj.TimestampUtc < from || rrj.TimestampUtc > to) break;
+                    if (!ownerByClOrdId.TryGetValue(rrj.OriginalClOrdId, out var origMeta)) break;
+                    if (!OwnerMatches(origMeta.Owner, owner)) break;
+                    if (symbol is not null && !origMeta.Symbol.Equals(symbol, StringComparison.Ordinal)) break;
+                    result.Add(new ExecutionProjection(
+                        Seq: seq,
+                        // Surface the burned NewClOrdId so the row is
+                        // unique against any other reject on the same
+                        // original (multiple modify attempts) — the
+                        // FE blotter already keys executions by
+                        // ClOrdId+Seq.
+                        ClOrdId: rrj.NewClOrdId,
+                        Symbol: origMeta.Symbol,
+                        Side: origMeta.Side,
+                        Kind: nameof(ExecKind.Rejected),
+                        LeavesQuantity: 0,
+                        CumulativeQuantity: 0,
+                        LastQuantity: 0,
+                        LastPrice: 0m,
+                        RejectReason: rrj.Reason,
+                        TimestampUtc: rrj.TimestampUtc));
+                    break;
                 case OrderCancelRequestedEvent cr:
                     cancelLinks[cr.CancelClOrdId] = cr.OriginalClOrdId;
                     break;

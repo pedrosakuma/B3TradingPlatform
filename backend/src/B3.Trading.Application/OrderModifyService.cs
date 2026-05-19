@@ -231,18 +231,23 @@ public sealed class OrderModifyService
             SubAccountId: orig.SubAccountId);
 
         // Ordering note (RFC docs/rfcs/risk-pipeline-ordering-v0.md, #262):
-        // risk evaluation runs *pre-WAL* on the modify path. A rejected
-        // modify leaves no WAL footprint today — an asymmetry vs.
-        // OrderSubmissionService that the RFC tracks as an open audit gap
-        // (Option B follow-up: emit OrderReplaceRejectedEvent here).
+        // risk evaluation runs *pre-WAL* on the modify path. #337 closed
+        // the audit gap below: a rejected modify dispatches an
+        // OrderReplaceRejectedEvent so /executions/history, the CVM /
+        // drop-copy / touch consumers and the FE blotter all observe
+        // the burned ClOrdId + reason. Replay treats the event as a
+        // pure no-op for book/ownership/margin state (advances the
+        // ClOrdId watermark only).
         var decision = _risk.Evaluate(riskCtx);
         if (!decision.Approved)
         {
+            var reason = decision.Reason ?? "risk_rejected";
             MetricsRegistry.OrdersRejectedByRisk.Add(1,
-                new KeyValuePair<string, object?>("reason", decision.Reason ?? "risk_rejected"),
+                new KeyValuePair<string, object?>("reason", reason),
                 new KeyValuePair<string, object?>("path", "modify"),
                 new KeyValuePair<string, object?>("firmId", orig.FirmId));
-            return OrderModifyResult.RiskRejected(decision.Reason ?? "risk_rejected");
+            PublishReplaceRejected(req, orig, newClOrdId, "risk", reason);
+            return OrderModifyResult.RiskRejected(reason);
         }
 
         // Margin Prepare: reserve only the upsize delta. The
@@ -256,11 +261,13 @@ public sealed class OrderModifyService
             req.OriginalClOrdId, newClOrdId, req.Owner, newRemainingNotional, ct);
         if (!marginDecision.Approved)
         {
+            var reason = marginDecision.Reason ?? "margin_rejected";
             MetricsRegistry.OrdersRejectedByRisk.Add(1,
-                new KeyValuePair<string, object?>("reason", marginDecision.Reason ?? "margin_rejected"),
+                new KeyValuePair<string, object?>("reason", reason),
                 new KeyValuePair<string, object?>("path", "modify"),
                 new KeyValuePair<string, object?>("firmId", orig.FirmId));
-            return OrderModifyResult.RiskRejected(marginDecision.Reason ?? "margin_rejected");
+            PublishReplaceRejected(req, orig, newClOrdId, "margin", reason);
+            return OrderModifyResult.RiskRejected(reason);
         }
 
         var intent = new OrderReplacementIntent(
@@ -356,6 +363,70 @@ public sealed class OrderModifyService
             new KeyValuePair<string, object?>("firmId", orig.FirmId));
 
         return OrderModifyResult.Accepted(newClOrdId);
+    }
+
+    /// <summary>
+    /// #337 — durable audit row for a modify rejected pre-WAL by the
+    /// risk pipeline or margin coordinator. Mirrors the submit-side
+    /// <c>OrderSubmissionService.PublishSyntheticRejection</c> shape:
+    /// dispatch the structured WAL event, and in the same commit
+    /// callback emit the live <see cref="ExecutionEvent"/> the FE
+    /// blotter listens on. WAL backpressure falls back to a sink-only
+    /// publish so the trader still observes the reject even when WAL
+    /// append is degraded (same posture as the submit path).
+    /// </summary>
+    private void PublishReplaceRejected(
+        OrderModifyRequest req,
+        Order orig,
+        ulong newClOrdId,
+        string source,
+        string reason)
+    {
+        var evt = new OrderReplaceRejectedEvent
+        {
+            OriginalClOrdId = req.OriginalClOrdId,
+            NewClOrdId = newClOrdId,
+            EndClientId = req.Owner.Value,
+            FirmId = orig.FirmId,
+            Symbol = orig.Symbol,
+            SecurityId = orig.SecurityId,
+            Side = orig.Side.ToString(),
+            Type = orig.Type.ToString(),
+            RequestedQuantity = req.NewQuantity,
+            RequestedPrice = req.NewPrice,
+            RequestedTimeInForce = req.NewTimeInForce?.ToString(),
+            RequestedStopPrice = req.NewStopPrice,
+            RequestedGoodTillDate = req.NewGoodTillDate,
+            Source = source,
+            Reason = reason,
+            ParentAlgoId = orig.ParentAlgoId,
+            AlgoSliceSeq = orig.AlgoSliceSeq,
+        };
+
+        Action publishLive = () => _sink.Publish(new ExecutionEvent(
+            req.Owner, newClOrdId, orig.Symbol, orig.Side,
+            // Status is the ORIGINAL order's current status — the
+            // replace was rejected; the original keeps Working /
+            // PartiallyFilled / etc.
+            orig.Status, ExecKind.Rejected,
+            LeavesQuantity: orig.LeavesQuantity,
+            CumulativeQuantity: orig.CumulativeQuantity,
+            LastQuantity: 0, LastPrice: 0m,
+            RejectReason: reason,
+            TimestampUtc: DateTimeOffset.UtcNow,
+            FirmId: orig.FirmId));
+
+        try
+        {
+            _dispatcher.Dispatch(evt, publishLive);
+        }
+        catch (WalBackpressureException)
+        {
+            MetricsRegistry.WalBackpressure.Add(1,
+                new KeyValuePair<string, object?>("call_site", "orders.modify.reject"),
+                new KeyValuePair<string, object?>("firmId", orig.FirmId));
+            publishLive();
+        }
     }
 }
 

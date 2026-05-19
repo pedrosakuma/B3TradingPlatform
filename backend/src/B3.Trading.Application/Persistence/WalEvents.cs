@@ -26,6 +26,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "kind")]
 [JsonDerivedType(typeof(OrderSubmittedEvent), "order.submitted")]
 [JsonDerivedType(typeof(OrderReplaceRequestedEvent), "order.replace-requested")]
+[JsonDerivedType(typeof(OrderReplaceRejectedEvent), "order.replace-rejected")]
 [JsonDerivedType(typeof(OrderReplaceAmbiguousMarginHeldEvent), "order.replace-ambiguous-margin-held")]
 [JsonDerivedType(typeof(ExecutionReportReceivedEvent), "er.received")]
 [JsonDerivedType(typeof(KillSwitchToggledEvent), "killswitch.toggled")]
@@ -235,6 +236,78 @@ public sealed record OrderReplaceRequestedEvent : WalEvent
     public string? RequestedTimeInForce { get; init; }
     public decimal? RequestedStopPrice { get; init; }
     public DateTimeOffset? RequestedGoodTillDate { get; init; }
+}
+
+/// <summary>
+/// #337 — pre-trade reject on the modify (cancel-replace) pipeline.
+/// Recorded when <see cref="B3.Trading.Application.OrderModifyService"/>
+/// rejects a replace request via the risk pipeline OR the margin
+/// coordinator, before any gateway dispatch. Closes the audit gap
+/// flagged by the risk-pipeline-ordering RFC (#262): without this
+/// event the rejected modify left zero WAL footprint — invisible to
+/// <c>/executions/history</c>, the FE blotter, the CVM 35/505 export
+/// (#308), the drop-copy feed (#306) and the best-exec touch capture
+/// (#307). The companion <see cref="OrderReplaceRequestedEvent"/> is
+/// NOT emitted on the reject path (no intent registration, no
+/// new-ClOrdId watermark advance needed downstream), so this record
+/// is the sole durable trace of the burned ClOrdId.
+///
+/// <para>
+/// <b>Replay semantics.</b> Pure audit — replay does NOT mutate the
+/// working book, ownership map, replacement registry, margin or
+/// position state. The <see cref="NewClOrdId"/> is recorded so the
+/// ClOrdId watermark advances during replay (consistent with the
+/// successful-replace path), preventing the same ID from being
+/// re-issued post-restart. See
+/// <c>StateSnapshotter.ApplyWalEventDuringRecovery</c>.
+/// </para>
+///
+/// <para>
+/// <b>Additive payload.</b> Older binaries skip the unknown
+/// discriminator with a structured warning (see <see cref="WalEvent"/>
+/// schema evolution rule), so segments produced with this event remain
+/// readable by pre-#337 readers.
+/// </para>
+/// </summary>
+public sealed record OrderReplaceRejectedEvent : WalEvent
+{
+    public required ulong OriginalClOrdId { get; init; }
+    /// <summary>
+    /// ClOrdId that was generated and burned by the reject. Recorded
+    /// so the post-restart watermark replay advances past it; never
+    /// reused for a live order.
+    /// </summary>
+    public required ulong NewClOrdId { get; init; }
+    public required string EndClientId { get; init; }
+    public required string FirmId { get; init; }
+    public required string Symbol { get; init; }
+    public required ulong SecurityId { get; init; }
+    public required string Side { get; init; }
+    public required string Type { get; init; }
+    public required long RequestedQuantity { get; init; }
+    public decimal? RequestedPrice { get; init; }
+    public string? RequestedTimeInForce { get; init; }
+    public decimal? RequestedStopPrice { get; init; }
+    public DateTimeOffset? RequestedGoodTillDate { get; init; }
+    /// <summary>
+    /// Origin of the reject: <c>"risk"</c> for a pre-WAL
+    /// <see cref="B3.Trading.Application.Risk.RiskPipeline"/> decline,
+    /// <c>"margin"</c> for an
+    /// <see cref="B3.Trading.Application.Risk.Accounting.IReplaceMarginCoordinator"/>
+    /// decline. Mirrors the <c>path=modify</c> +
+    /// <c>reason=…</c> tags on <c>trading.orders.rejected.by_risk</c>.
+    /// </summary>
+    public required string Source { get; init; }
+    /// <summary>
+    /// Human-readable / machine-parsable reason string from the
+    /// rejecting check (e.g. <c>"position_limit_exceeded"</c>,
+    /// <c>"margin_insufficient"</c>). Same field the synthetic
+    /// <see cref="ExecutionReportReceivedEvent.RejectReason"/> carries
+    /// on the submit-side reject.
+    /// </summary>
+    public required string Reason { get; init; }
+    public ulong? ParentAlgoId { get; init; }
+    public int? AlgoSliceSeq { get; init; }
 }
 
 /// <summary>
