@@ -109,7 +109,7 @@ public class BotErMultiplexerTests
         });
         var coord = new BotOutboundCoordinator(sessions, opts.Value);
         var mux = new BotErMultiplexer(mappings, sessions, directory, coord,
-            NullLogger<BotErMultiplexer>.Instance, opts);
+            NullLogger<BotErMultiplexer>.Instance);
         // Start the BackgroundService manually so Tests don't need a host.
         var cts = new CancellationTokenSource();
         await mux.StartAsync(cts.Token);

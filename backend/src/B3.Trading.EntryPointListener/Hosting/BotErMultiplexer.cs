@@ -5,7 +5,6 @@ using B3.Trading.Application.UserBots;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 
 namespace B3.Trading.EntryPointListener.Hosting;
 
@@ -79,15 +78,13 @@ public sealed class BotErMultiplexer : BackgroundService, IBotErRouter, IExecuti
         IUserBotSessionRegistry sessions,
         IBotSessionConnectionDirectory directory,
         BotOutboundCoordinator outbound,
-        ILogger<BotErMultiplexer> logger,
-        IOptions<BotErMultiplexerOptions>? options = null)
+        ILogger<BotErMultiplexer> logger)
     {
         _mappings = mappings;
         _sessions = sessions;
         _directory = directory;
         _outbound = outbound;
         _logger = logger;
-        _ = options; // P9 (F4) removed the global router channel; RouterChannelCapacity is retained on the options type only for backwards-compatible config binding (see BotErMultiplexerOptions).
 
         // CredentialId-only overflow signal channel. Unbounded is safe
         // here because the message is a 16-byte Guid and the post rate
