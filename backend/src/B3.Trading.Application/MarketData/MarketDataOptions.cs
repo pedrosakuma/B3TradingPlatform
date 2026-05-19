@@ -61,4 +61,14 @@ public sealed class MarketDataOptions
     /// </para>
     /// </summary>
     public bool EnableBook { get; set; } = false;
+
+    /// <summary>
+    /// Q3.6 Stage B (#286). Depth of the per-symbol ladder fanned out
+    /// over the public <c>book.${symbol}</c> WebSocket channel. Each
+    /// side is capped to this many price levels (best-to-worst). 10 is
+    /// the depth the FE depth view consumes today; raise carefully
+    /// (bandwidth grows linearly per update). Ignored when
+    /// <see cref="EnableBook"/> is false.
+    /// </summary>
+    public int BookChannelMaxLevels { get; set; } = 10;
 }

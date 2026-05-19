@@ -427,6 +427,31 @@ export function applyMdBookSnapshot({ symbol }) {
   notify("book");
 }
 
+/// <summary>
+/// Q3.6 Stage B (#286). Apply a `book.${symbol}` frame coming from the
+/// trading-host WS (replaces both sides with the server's coalesced
+/// top-N ladder). Snapshot and delta share the same shape, so a single
+/// reducer handles both — the server already replays the latest
+/// ladder as a `snapshot` frame on subscribe.
+/// </summary>
+export function applyBookFrame(frame) {
+  if (!frame || typeof frame.Symbol !== "string") return;
+  const entry = ensureBook(frame.Symbol);
+  entry.bids.clear();
+  entry.asks.clear();
+  for (const lv of frame.Bids ?? []) {
+    entry.bids.set(priceKey(lv.Price), { qty: lv.TotalQty, count: lv.OrderCount });
+  }
+  for (const lv of frame.Asks ?? []) {
+    entry.asks.set(priceKey(lv.Price), { qty: lv.TotalQty, count: lv.OrderCount });
+  }
+  // Empty-state snapshot (UpdatedUtc=null) keeps ready=false so the
+  // DOB shows its "waiting" affordance instead of an empty ladder.
+  entry.ready = frame.UpdatedUtc != null;
+  entry.updatedAt = Date.now();
+  notify("book");
+}
+
 export function applyMdLevelSnapshot({ symbol, bids, asks }) {
   const entry = ensureBook(symbol);
   entry.bids.clear();

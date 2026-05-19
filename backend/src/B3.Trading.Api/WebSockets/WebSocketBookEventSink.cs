@@ -1,23 +1,28 @@
 using System.Collections.Concurrent;
 using B3.Trading.Application.MarketData;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
 
 namespace B3.Trading.Api.WebSockets;
 
 /// <summary>
 /// Q3.6 Stage B (#286). WebSocket fan-out for the public per-symbol
-/// top-of-book channel (<c>book.${symbol}</c>). Listens to
-/// <see cref="MboBookStore.TopChanged"/> and broadcasts deltas to all
-/// subscribed clients; snapshot bootstrap is served through
+/// depth ladder channel (<c>book.${symbol}</c>). Listens to
+/// <see cref="MboBookStore.BookChanged"/>; on each event pulls the
+/// top-N ladder from the store at the configured depth
+/// (<c>MarketDataOptions.BookChannelMaxLevels</c>) and broadcasts a
+/// <see cref="L2LadderDto"/> delta to all subscribed clients.
+/// Snapshot bootstrap is served through
 /// <see cref="IPublicChannelSnapshots"/> so a newly-subscribed client
-/// always sees the current top before the next delta lands.
+/// always sees the current ladder before the next delta lands.
 ///
 /// <para>
 /// Coalesces no-op updates: an apply that did not change the derived
-/// top-of-book (e.g. a deep-book add that did not affect the best
-/// price/qty/order-count) is dropped so quiet symbols stay quiet on
-/// the wire. The "last sent" snapshot is kept per symbol; the first
-/// observed update for a symbol is always emitted.
+/// top-N ladder (e.g. a level beyond <c>BookChannelMaxLevels</c>
+/// changed, or a deeper-than-top update that left the visible window
+/// untouched) is dropped so quiet symbols stay quiet on the wire.
+/// The last-sent DTO is kept per symbol; the first observed update
+/// for a symbol is always emitted.
 /// </para>
 ///
 /// <para>
@@ -34,26 +39,31 @@ public sealed class WebSocketBookEventSink : IPublicChannelSnapshots, IHostedSer
 {
     private readonly SubscriptionManager _subs;
     private readonly MboBookStore _store;
+    private readonly int _maxLevels;
 
-    // Last DTO we put on the wire for each symbol — used to coalesce
-    // identical updates (no-op deep-book mutations). Keyed
-    // case-insensitively to match the store.
-    private readonly ConcurrentDictionary<string, L2TopOfBookDto> _lastSent =
+    // Last DTO put on the wire per symbol — used to coalesce identical
+    // updates. Keyed case-insensitively to match the store.
+    private readonly ConcurrentDictionary<string, L2LadderDto> _lastSent =
         new(StringComparer.OrdinalIgnoreCase);
 
-    public WebSocketBookEventSink(SubscriptionManager subs, MboBookStore store)
+    public WebSocketBookEventSink(
+        SubscriptionManager subs,
+        MboBookStore store,
+        IOptions<MarketDataOptions> options)
     {
         _subs = subs;
         _store = store;
+        var max = options.Value.BookChannelMaxLevels;
+        _maxLevels = max > 0 ? max : 10;
     }
 
     // ---------------- IPublicChannelSnapshots ----------------
 
     public object? GetSnapshot(PublicChannelKind kind, string symbol) => kind switch
     {
-        PublicChannelKind.Book => _store.GetTopOfBook(symbol) is { } top
-            ? L2TopOfBookDto.From(top)
-            : L2TopOfBookDto.Empty(symbol),
+        PublicChannelKind.Book => _store.GetLadder(symbol, _maxLevels) is { } ladder
+            ? L2LadderDto.From(ladder)
+            : L2LadderDto.Empty(symbol),
         _ => null,
     };
 
@@ -61,30 +71,41 @@ public sealed class WebSocketBookEventSink : IPublicChannelSnapshots, IHostedSer
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
-        _store.TopChanged += OnTopChanged;
+        _store.BookChanged += OnBookChanged;
         return Task.CompletedTask;
     }
 
     public Task StopAsync(CancellationToken cancellationToken)
     {
-        _store.TopChanged -= OnTopChanged;
+        _store.BookChanged -= OnBookChanged;
         return Task.CompletedTask;
     }
 
     // ---------------- Event handlers ----------------
 
-    private void OnTopChanged(L2TopOfBook? top)
+    private void OnBookChanged(string symbol)
     {
-        if (top is null) return; // nothing to broadcast when both sides went empty
-        var dto = L2TopOfBookDto.From(top.Value);
-        // Coalesce: skip if best bid+ask are identical to last sent for
-        // this symbol — UpdatedUtc is intentionally excluded so a
-        // deep-book mutation that bumped the store's timestamp but did
-        // not move the top stays off the wire.
-        if (_lastSent.TryGetValue(dto.Symbol, out var prev) &&
-            Equals(prev.Bid, dto.Bid) && Equals(prev.Ask, dto.Ask))
+        var ladder = _store.GetLadder(symbol, _maxLevels);
+        if (ladder is null) return; // nothing to broadcast when both sides went empty
+        var dto = L2LadderDto.From(ladder.Value);
+        // Coalesce: skip if bid/ask ladders are identical to last sent
+        // for this symbol — UpdatedUtc is intentionally excluded so a
+        // deep-book mutation that bumped the store's timestamp but
+        // did not move the visible window stays off the wire.
+        if (_lastSent.TryGetValue(dto.Symbol, out var prev) && SidesEqual(prev, dto))
             return;
         _lastSent[dto.Symbol] = dto;
         _subs.BroadcastPublic(Channels.BookFor(dto.Symbol), dto);
+    }
+
+    private static bool SidesEqual(L2LadderDto a, L2LadderDto b) =>
+        SideEqual(a.Bids, b.Bids) && SideEqual(a.Asks, b.Asks);
+
+    private static bool SideEqual(IReadOnlyList<L2SideDto> a, IReadOnlyList<L2SideDto> b)
+    {
+        if (a.Count != b.Count) return false;
+        for (var i = 0; i < a.Count; i++)
+            if (!Equals(a[i], b[i])) return false;
+        return true;
     }
 }

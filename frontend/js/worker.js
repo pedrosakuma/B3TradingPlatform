@@ -154,6 +154,11 @@ function handleFrame(frame) {
         post({ type: "phases.frame", data: frame.data });
       } else if (frame.channel.startsWith("auction.")) {
         post({ type: "auction.frame", data: frame.data });
+      } else if (frame.channel.startsWith("book.")) {
+        // Q3.6 Stage B (#286). Depth ladder fan-out from the trading
+        // host. Snapshot + delta share the same payload shape, so the
+        // main-thread reducer handles both identically.
+        post({ type: "book.frame", data: frame.data });
       }
       break;
   }
