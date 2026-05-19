@@ -575,12 +575,20 @@ public class AlgoModifyEndpointTests
             r => r.OriginalClOrdId == child.ClOrdId);
 
         // Margin-reason rejection observed; no child-modify success
-        // counter bump (which would have implied an
-        // AlgoChildModifiedEvent emit).
+        // counter bump for THIS child (proven by the mock gateway
+        // assertions above — no SubmittedReplaces for child.ClOrdId).
+        //
+        // #300 (PR #334): we used to also assert the global
+        // trading.algo.child_modifies_total counter stayed at 0, but
+        // engine-driven Pegged repegs in PARALLEL test classes now
+        // also bump that counter (cross-test pollution via the static
+        // MetricsRegistry). The mock-gateway assertion above is the
+        // authoritative per-test signal for "no successful modify
+        // happened for this child".
         listener.RecordObservableInstruments();
         Assert.True(Interlocked.Read(ref rejectedByMargin) >= 1,
             "expected algo.modify_rejected_total{reason=margin_rejected} to bump at least once");
-        Assert.Equal(0, Interlocked.Read(ref childModifies));
+        _ = childModifies; // unused under #300; see comment above
     }
 
     [Fact]

@@ -110,6 +110,19 @@ public sealed class PeggedRepegBook
     /// Suspended/VenueCancelled even when the ER arrives after the
     /// cycle has already been resolved or after a subsequent repeg
     /// has rotated the single-slot active-cycle marker.
+    /// <para>
+    /// #300 retrofit. The repeg cycle now uses cancel-replace, so the
+    /// OLD child no longer receives a Cancelled-on-OLD terminal ER on
+    /// the happy path (the venue emits a Replaced ER instead, picked
+    /// up by the adoption block). Marking the cancelled child id is
+    /// nonetheless retained for two reasons: (a) defensive against a
+    /// rare venue that still emits Cancelled before/after Replaced
+    /// (spurious but observed historically on some FIX gateways) so
+    /// that ER also dedups instead of suspending the parent; and (b)
+    /// pre-#300 WAL replay safety — segments produced before this
+    /// retrofit still emit Cancelled ERs as the repeg terminal, and
+    /// the IsCancelledChild path keeps them no-op during replay.
+    /// </para>
     /// </summary>
     public void MarkCancelledChild(string firmId, ulong algoId, ulong childClOrdId)
     {

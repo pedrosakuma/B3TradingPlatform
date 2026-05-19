@@ -96,9 +96,44 @@ public class CvmReportEndpointTests : IDisposable
             LastQty = 10L,
             LastPx = 30.0m,
         });
+
+        // /admin/simulator/er returns 202 once the ER is enqueued on the
+        // mock gateway channel; the ExecutionReportProcessor drains the
+        // channel on a background task. Without an explicit wait the
+        // CVM report query can race past the in-flight Fill, see zero
+        // rows, and return 404. Poll /executions/history (user scope)
+        // until the fill is observable. Bounded at ~3s wall clock;
+        // empirically completes in <20ms locally.
+        var deadline = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < deadline)
+        {
+            var req = new HttpRequestMessage(HttpMethod.Get, "/executions/history?limit=10");
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", userToken);
+            using var resp = await userHttp.SendAsync(req);
+            if (resp.IsSuccessStatusCode)
+            {
+                var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+                if (body.TryGetProperty("items", out var items) && items.GetArrayLength() > 0)
+                    return;
+            }
+            await Task.Delay(20);
+        }
+        throw new Xunit.Sdk.XunitException("SeedOneFillAsync timed out waiting for fill to be visible in /executions/history.");
     }
 
-    private static DateOnly TodayUtc() => DateOnly.FromDateTime(DateTimeOffset.UtcNow.UtcDateTime);
+    private static DateOnly TodayUtc()
+    {
+        // CvmReportSource buckets fills by São Paulo business day
+        // (UTC-3). When the test runs late UTC evening (e.g. ~00:00
+        // UTC == ~21:00 SP), a fill landing "today" UTC is
+        // bucketed to "yesterday" SP. Compute the date the source
+        // will use so the query and the fill agree.
+        TimeZoneInfo tz;
+        try { tz = TimeZoneInfo.FindSystemTimeZoneById("America/Sao_Paulo"); }
+        catch { tz = TimeZoneInfo.CreateCustomTimeZone("BRT", TimeSpan.FromHours(-3), "BRT", "BRT"); }
+        var nowSp = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, tz);
+        return DateOnly.FromDateTime(nowSp.DateTime);
+    }
 
     [Fact]
     public async Task UserRole_IsForbidden_ByPolicy()
