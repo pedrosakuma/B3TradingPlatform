@@ -192,8 +192,8 @@ public class AuctionWebSocketChannelTests
     private sealed class FakeMdSubscriber : IMarketDataSubscriber
     {
 #pragma warning disable CS0067
-        #pragma warning disable CS0067
-    public event Action<MarketTrade>? Trade;
+#pragma warning disable CS0067
+        public event Action<MarketTrade>? Trade;
         public event Action<MarketInfoSnapshot>? InfoSnapshot;
         public event Action<MarketDataConnectionState>? ConnectionStateChanged;
         public event Action<MarketSubscribeError>? SubscribeError;
@@ -207,7 +207,7 @@ public class AuctionWebSocketChannelTests
         public event Action<MarketOrderUpdated>? OrderUpdated;
         public event Action<MarketOrderDeleted>? OrderDeleted;
         public event Action<MarketBookCleared>? BookCleared;
-    #pragma warning restore CS0067
+#pragma warning restore CS0067
 
         public MarketDataConnectionState State => MarketDataConnectionState.Connected;
         public long DroppedEventCount => 0;
