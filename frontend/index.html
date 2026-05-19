@@ -297,8 +297,18 @@
             Market data
             <span id="md-status" class="status-pill status-disconnected" role="status" aria-live="polite" aria-label="Market data: disconnected" title="MarketData WebSocket connection">disconnected</span>
           </span>
-          <button type="button" id="md-settings-open" class="icon-button" aria-label="Market data settings" title="Market data settings">⚙</button>
+          <span class="md-h2-controls">
+            <!-- #71: Volume heatmap toggle — opt-in per the decision gate.
+                 Persists in sessionStorage so a trader who relies on it
+                 doesn't have to re-enable on every reload. -->
+            <button type="button" id="heatmap-toggle" class="icon-button"
+                    aria-pressed="false" aria-label="Toggle volume heatmap"
+                    title="Toggle volume heatmap (10s rolling)">🔥</button>
+            <button type="button" id="md-settings-open" class="icon-button" aria-label="Market data settings" title="Market data settings">⚙</button>
+          </span>
         </h2>
+        <div id="heatmap-panel" class="heatmap-panel" role="grid"
+             aria-label="Volume heatmap (10s rolling, click cell to select symbol)" hidden></div>
         <div class="table-scroll">
           <table id="md-table">
             <thead>

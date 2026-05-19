@@ -5,6 +5,7 @@ import {
   getState, subscribe, isTerminalOrderStatus,
   getPhase, getAuctionState, isAuctionPhase, setAuctionPanelSymbol,
   isStopOrderType, isGtdTif, ORDER_TYPE_CHIP,
+  computeHeatmapVolumes, HEATMAP_WINDOW_MS,
 } from "./state.js";
 import { rulesFor } from "./validation.js";
 
@@ -1032,6 +1033,14 @@ export function bindUi() {
   const mdModal = $("md-settings-modal");
   const mdOpen = $("md-settings-open");
   const mdClose = $("md-settings-close");
+
+  // #71: Volume heatmap toggle (🔥 button in MD panel header). Opt-in
+  // per the decision gate; persisted per tab via sessionStorage.
+  const heatmapBtn = $("heatmap-toggle");
+  if (heatmapBtn) {
+    setHeatmapEnabled(readHeatmapEnabled());
+    heatmapBtn.addEventListener("click", () => setHeatmapEnabled(!_heatmapEnabled));
+  }
   if (mdOpen && mdModal) {
     mdOpen.addEventListener("click", () => {
       rememberFocusForModal("md-settings-modal");
@@ -1428,6 +1437,10 @@ function ensureTicker() {
       // useful information. State changes still trigger an immediate
       // re-render via the wsReconnect subscription.
       renderReconnect();
+      // #71: heatmap intensity decays as the rolling window rolls,
+      // even with no new trades. A periodic re-render keeps the
+      // cells fading instead of latching on the last trade.
+      if (_heatmapEnabled) renderHeatmap();
       renderMarketData();
       // Only re-render the DOB while we're still waiting for a snapshot
       // — the live render path is already wired to the book slice.
@@ -1589,6 +1602,10 @@ export function renderForSlice(slice) {
   if (slice === "watchlist" || slice === "selectedSymbol" || slice === "book" || slice === "all") renderDob();
   if (slice === "watchlist" || slice === "selectedSymbol" || slice === "chartResolution" || slice === "candles" || slice === "all") scheduleChartRender();
   if (slice === "watchlist" || slice === "selectedSymbol" || slice === "tapeShowAll" || slice === "tape" || slice === "all") scheduleTapeRender();
+  // #71: heatmap re-renders on any tape/trade update (via "heatmap"
+  // slice notify) and also when the watchlist or selection changes
+  // so the cell set + selected-cell highlight stay in sync.
+  if (slice === "heatmap" || slice === "watchlist" || slice === "selectedSymbol" || slice === "all") renderHeatmap();
   // Q1.6 (#258). Phase + auction wiring.
   if (slice === "phases" || slice === "marketData" || slice === "watchlist" || slice === "all") renderMarketData();
   if (slice === "phases" || slice === "selectedSymbol" || slice === "all") {
@@ -1711,6 +1728,115 @@ function renderMarketData() {
       <td${tsCls}>${ts}</td>
     </tr>`;
   }).join("");
+}
+
+// ── #71 Volume heatmap ──────────────────────────────────────────────
+
+const HEATMAP_KEY = "b3tp.heatmap.enabled";
+let _heatmapEnabled = false;
+
+function readHeatmapEnabled() {
+  try { return sessionStorage.getItem(HEATMAP_KEY) === "1"; }
+  catch { return false; }
+}
+function writeHeatmapEnabled(on) {
+  try {
+    if (on) sessionStorage.setItem(HEATMAP_KEY, "1");
+    else    sessionStorage.removeItem(HEATMAP_KEY);
+  } catch { /* swallow */ }
+}
+
+// Pure helper: given a Map<symbol,sum>, return a Map<symbol, intensity>
+// where intensity ∈ [0,1] normalised by the per-render global max. A
+// uniform-zero grid (no recent trades anywhere) returns all-zero so the
+// renderer can paint a uniform "cold" cell rather than divide-by-zero.
+export function normaliseHeatmap(volumes) {
+  let max = 0;
+  for (const v of volumes.values()) if (v > max) max = v;
+  const out = new Map();
+  for (const [k, v] of volumes) out.set(k, max > 0 ? v / max : 0);
+  return out;
+}
+
+function heatmapCellColor(intensity) {
+  // 0 → dark slate (no recent volume), 1 → hot red. Use HSL so the
+  // mid-range cells stay clearly distinguishable from the floor.
+  if (!(intensity > 0)) return "rgba(255,255,255,.04)";
+  // Hue 30 (warm orange) → 0 (red); lightness 18% → 50%.
+  const hue   = 30 - 30 * intensity;
+  const light = 18 + 32 * intensity;
+  return `hsl(${hue.toFixed(1)} 80% ${light.toFixed(1)}%)`;
+}
+
+function renderHeatmap() {
+  const el = $("heatmap-panel");
+  if (!el) return;
+  if (!_heatmapEnabled) {
+    if (!el.hidden) { el.hidden = true; el.replaceChildren(); }
+    return;
+  }
+  el.hidden = false;
+  const st = getState();
+  // Drive the grid from the watchlist so the cell layout matches what
+  // the user explicitly subscribed to. Fall back to any symbol that has
+  // received market data — keeps the panel useful even before the
+  // trader edits the watchlist.
+  const symbols = st.watchlist.length > 0
+    ? [...st.watchlist]
+    : [...st.marketData.keys()];
+  if (symbols.length === 0) {
+    el.replaceChildren();
+    const empty = document.createElement("p");
+    empty.className = "heatmap-empty muted";
+    empty.textContent = "no symbols subscribed";
+    el.appendChild(empty);
+    return;
+  }
+  const volumes = computeHeatmapVolumes(st.heatmapTrades, symbols, Date.now(), HEATMAP_WINDOW_MS);
+  const intensities = normaliseHeatmap(volumes);
+  const sel = st.selectedSymbol;
+  // Diff against existing cell set so we don't churn the DOM on every
+  // tick — cells are reused, only style + label content change.
+  const existing = new Map();
+  for (const child of el.children) {
+    if (child.dataset && child.dataset.symbol) existing.set(child.dataset.symbol, child);
+  }
+  const frag = document.createDocumentFragment();
+  for (const sym of symbols) {
+    const intensity = intensities.get(sym) ?? 0;
+    const vol = volumes.get(sym) ?? 0;
+    let cell = existing.get(sym);
+    if (!cell) {
+      cell = document.createElement("button");
+      cell.type = "button";
+      cell.className = "heatmap-cell";
+      cell.setAttribute("role", "gridcell");
+      cell.dataset.symbol = sym;
+      cell.addEventListener("click", () => onSelectSymbol(sym));
+    } else {
+      existing.delete(sym);
+    }
+    cell.style.backgroundColor = heatmapCellColor(intensity);
+    cell.classList.toggle("heatmap-cell--selected", sym === sel);
+    cell.setAttribute("aria-label",
+      `${sym}: ${fmtQty(vol)} traded in last ${Math.round(HEATMAP_WINDOW_MS / 1000)}s`);
+    cell.title = cell.getAttribute("aria-label");
+    cell.innerHTML = `<span class="heatmap-cell-sym">${escapeHtml(sym)}</span>` +
+                     `<span class="heatmap-cell-vol">${fmtQty(vol)}</span>`;
+    frag.appendChild(cell);
+  }
+  // Surviving entries in `existing` are symbols no longer in the
+  // watchlist (or removed snapshot) — drop their cells.
+  for (const stale of existing.values()) stale.remove();
+  el.replaceChildren(frag);
+}
+
+function setHeatmapEnabled(on) {
+  _heatmapEnabled = !!on;
+  writeHeatmapEnabled(_heatmapEnabled);
+  const btn = $("heatmap-toggle");
+  if (btn) btn.setAttribute("aria-pressed", _heatmapEnabled ? "true" : "false");
+  renderHeatmap();
 }
 
 // ── Q1.6 (#258): Phase badge + auction panel + ticket coupling ────
