@@ -152,9 +152,20 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         services.AddHostedService(sp =>
             sp.GetRequiredService<B3.Trading.Application.MarketData.AuctionStateStore>());
         services.AddSingleton<WebSocketAuctionEventSink>();
-        services.AddSingleton<IPublicChannelSnapshots>(sp =>
-            sp.GetRequiredService<WebSocketAuctionEventSink>());
         services.AddHostedService(sp => sp.GetRequiredService<WebSocketAuctionEventSink>());
+
+        // Q3.6 Stage B (#286). Public per-symbol book.${symbol} fan-out.
+        // Listens to MboBookStore.TopChanged (raised only when EnableBook
+        // is true and the SDK feeds MBO frames) and broadcasts derived
+        // L2 top-of-book deltas. Doubles as the snapshot provider for
+        // PublicChannelKind.Book; composed with the auction sink below.
+        services.AddSingleton<WebSocketBookEventSink>();
+        services.AddHostedService(sp => sp.GetRequiredService<WebSocketBookEventSink>());
+
+        services.AddSingleton<IPublicChannelSnapshots>(sp =>
+            new CompositePublicChannelSnapshots(
+                sp.GetRequiredService<WebSocketAuctionEventSink>(),
+                sp.GetRequiredService<WebSocketBookEventSink>()));
 
         services.AddSingleton<ExecutionReportProcessor>();
         services.AddSingleton<OrderSubmissionService>();
