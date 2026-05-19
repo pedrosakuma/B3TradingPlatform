@@ -675,10 +675,6 @@ function handleApplyMd({ url, symbols }) {
 
 // Q3.6 Stage B (#286). MBP retired from the direct marketdata path —
 // depth ladder is fanned out by the trading host via book.${symbol}.
-// `mbpEnabled` is left as a no-op flag during the deprecation window
-// so any in-flight call sites stay structurally valid; the next pass
-// removes it together with the dead mdWorker book code paths.
-let mbpEnabled = false;
 let lastAutoFilledTicketSymbol = null;
 let _successToastTimer = null;
 
@@ -720,12 +716,10 @@ function onMdWorkerMessage(msg) {
     case "md.subError":
       ui.setMdFeedback(`subscribe ${msg.symbol}: ${msg.errorName}`, "error");
       state.removeMdSymbol(msg.symbol);
-      state.removeBookSymbol(msg.symbol);
       state.removeCandlesSymbol(msg.symbol);
       break;
     case "md.removed":
       state.removeMdSymbol(msg.symbol);
-      state.removeBookSymbol(msg.symbol);
       state.removeCandlesSymbol(msg.symbol);
       break;
     case "md.candle.snapshot": state.applyMdCandleSnapshot(msg); break;
@@ -1043,7 +1037,6 @@ function logout() {
     mdWorker.terminate();
     mdWorker = null;
   }
-  mbpEnabled = false;
   session = null;
   mdConfig = null;
   closeComplianceDropCopy();

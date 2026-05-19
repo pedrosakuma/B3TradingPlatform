@@ -391,10 +391,6 @@ export function clearMarketData() {
 
 // ── Depth-of-Book slice (T2) ───────────────────────────────────────
 
-// Side encoding from mdWorker (mdProtocol.SIDE): 0=Bid, 1=Ask.
-const SIDE_BID = 0;
-const SIDE_ASK = 1;
-
 // Decoder produces JS numbers post-PRICE_DIVISOR division. The wire
 // price exponent is -4, so toFixed(4) is the canonical bucket key —
 // resilient to any future float-rounding drift.
@@ -407,24 +403,6 @@ function ensureBook(symbol) {
     state.book.set(symbol, entry);
   }
   return entry;
-}
-
-function sideMap(entry, side) {
-  if (side === SIDE_BID) return entry.bids;
-  if (side === SIDE_ASK) return entry.asks;
-  return null;
-}
-
-export function applyMdBookSnapshot({ symbol }) {
-  // Marker that a fresh full snapshot is incoming — the level.snapshot
-  // that follows carries the data. Mark not-ready and clear so the UI
-  // doesn't render a half-built book during the gap.
-  const entry = ensureBook(symbol);
-  entry.bids.clear();
-  entry.asks.clear();
-  entry.ready = false;
-  entry.updatedAt = Date.now();
-  notify("book");
 }
 
 /// <summary>
@@ -448,55 +426,6 @@ export function applyBookFrame(frame) {
   // Empty-state snapshot (UpdatedUtc=null) keeps ready=false so the
   // DOB shows its "waiting" affordance instead of an empty ladder.
   entry.ready = frame.UpdatedUtc != null;
-  entry.updatedAt = Date.now();
-  notify("book");
-}
-
-export function applyMdLevelSnapshot({ symbol, bids, asks }) {
-  const entry = ensureBook(symbol);
-  entry.bids.clear();
-  entry.asks.clear();
-  for (const lv of bids ?? []) entry.bids.set(priceKey(lv.price), { qty: lv.qty, count: lv.count });
-  for (const lv of asks ?? []) entry.asks.set(priceKey(lv.price), { qty: lv.qty, count: lv.count });
-  entry.ready = true;
-  entry.updatedAt = Date.now();
-  notify("book");
-}
-
-export function applyMdLevelUpdate({ symbol, side, price, qty, count }) {
-  const entry = ensureBook(symbol);
-  // Drop incremental updates before the first level.snapshot — they
-  // would build a partial / misleading book.
-  if (!entry.ready) return;
-  const target = sideMap(entry, side);
-  if (target === null) return; // defensive: ignore malformed/future sides
-  target.set(priceKey(price), { qty, count });
-  entry.updatedAt = Date.now();
-  notify("book");
-}
-
-export function applyMdLevelDeleted({ symbol, side, price }) {
-  const entry = state.book.get(symbol);
-  if (!entry?.ready) return;
-  const target = sideMap(entry, side);
-  if (target === null) return;
-  if (target.delete(priceKey(price))) {
-    entry.updatedAt = Date.now();
-    notify("book");
-  }
-}
-
-export function applyMdBookCleared({ symbol, side }) {
-  const entry = state.book.get(symbol);
-  if (!entry) return;
-  if (side === null || side === undefined) {
-    entry.bids.clear();
-    entry.asks.clear();
-  } else {
-    const target = sideMap(entry, side);
-    if (target === null) return;
-    target.clear();
-  }
   entry.updatedAt = Date.now();
   notify("book");
 }
