@@ -756,11 +756,25 @@ function onWorkerMessage(msg) {
     case "phases.frame":        state.applyPhaseFrame(msg.data); break;
     case "auction.frame":       state.applyAuctionFrame(msg.data); break;
     case "error":
-      // A frame-level error from the server (e.g., unknown_channel).
-      // Surface in the executions log to keep it visible without a toast.
+      // A frame-level error from the server (e.g., unknown_channel,
+      // bad subscribe args, channel auth). #342: surface it as a
+      // transient toast so the trader notices a quietly-failing
+      // subscription without having to open devtools.
       console.warn("[ws]", msg);
+      ui.showWsErrorToast(formatWsError(msg));
       break;
   }
+}
+
+// #342: render a worker `error` frame as a short human-readable string
+// for the WS error toast. The frame is { type:"error", channel?, code?, message? };
+// we keep noise low by collapsing missing fields rather than printing
+// "undefined" / JSON.
+function formatWsError(msg) {
+  const channel = msg?.channel ? `[${msg.channel}] ` : "";
+  const code    = msg?.code ? `${msg.code}: ` : "";
+  const body    = msg?.message ? String(msg.message) : "websocket error";
+  return `${channel}${code}${body}`;
 }
 
 function formatPretradeWarning(w) {

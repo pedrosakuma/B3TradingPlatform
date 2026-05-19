@@ -120,6 +120,12 @@
       </div>
     </header>
 
+    <!-- #342: Transient toast for WebSocket frame-level errors (e.g.,
+         unknown_channel, channel auth failure). Lives between the topbar
+         and the grid so it's visible from any panel without taking up
+         persistent screen real estate. Auto-dismissed after a few seconds. -->
+    <div id="ws-error-toast" class="ws-error-toast" role="status" aria-live="polite" hidden></div>
+
     <main class="grid">
       <!-- ORDER TICKET ----------------------------------------------- -->
       <section class="panel ticket">
