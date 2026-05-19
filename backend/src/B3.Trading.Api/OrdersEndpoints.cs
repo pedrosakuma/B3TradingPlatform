@@ -146,7 +146,7 @@ public static class OrdersEndpoints
                     Results.Accepted($"/orders/{result.ClOrdId}", new { ClOrdId = result.ClOrdId.ToString() }),
                 OrderSubmissionResultKind.Rejected =>
                     Results.Accepted($"/orders/{result.ClOrdId}",
-                        new { ClOrdId = result.ClOrdId.ToString(), Status = "Rejected", Reason = result.Reason }),
+                        new { ClOrdId = result.ClOrdId.ToString(), Status = "Rejected", Reason = result.Reason, Code = result.Code }),
                 OrderSubmissionResultKind.GatewayFailed =>
                     Results.Json(
                         new { error = "gateway unavailable", clOrdId = result.ClOrdId.ToString() },
@@ -213,7 +213,7 @@ public static class OrdersEndpoints
                 OrderModifyResultKind.BadRequest =>
                     Results.BadRequest(new { error = result.Reason }),
                 OrderModifyResultKind.RiskRejected =>
-                    Results.UnprocessableEntity(new { error = result.Reason }),
+                    Results.UnprocessableEntity(new { error = result.Reason, code = result.Code }),
                 OrderModifyResultKind.GatewayFailed =>
                     Results.Json(
                         new { error = "gateway unavailable", clOrdId = result.NewClOrdId.ToString() },

@@ -242,12 +242,14 @@ public sealed class OrderModifyService
         if (!decision.Approved)
         {
             var reason = decision.Reason ?? "risk_rejected";
+            var code = decision.Code ?? "risk_rejected";
             MetricsRegistry.OrdersRejectedByRisk.Add(1,
                 new KeyValuePair<string, object?>("reason", reason),
+                new KeyValuePair<string, object?>("code", code),
                 new KeyValuePair<string, object?>("path", "modify"),
                 new KeyValuePair<string, object?>("firmId", orig.FirmId));
             PublishReplaceRejected(req, orig, newClOrdId, "risk", reason);
-            return OrderModifyResult.RiskRejected(reason);
+            return OrderModifyResult.RiskRejected(reason, code);
         }
 
         // Margin Prepare: reserve only the upsize delta. The
@@ -262,12 +264,14 @@ public sealed class OrderModifyService
         if (!marginDecision.Approved)
         {
             var reason = marginDecision.Reason ?? "margin_rejected";
+            var code = marginDecision.Code ?? "margin_rejected";
             MetricsRegistry.OrdersRejectedByRisk.Add(1,
                 new KeyValuePair<string, object?>("reason", reason),
+                new KeyValuePair<string, object?>("code", code),
                 new KeyValuePair<string, object?>("path", "modify"),
                 new KeyValuePair<string, object?>("firmId", orig.FirmId));
             PublishReplaceRejected(req, orig, newClOrdId, "margin", reason);
-            return OrderModifyResult.RiskRejected(reason);
+            return OrderModifyResult.RiskRejected(reason, code);
         }
 
         var intent = new OrderReplacementIntent(
@@ -475,32 +479,38 @@ public sealed class OrderModifyResult
     public OrderModifyResultKind Kind { get; }
     public ulong NewClOrdId { get; }
     public string? Reason { get; }
+    /// <summary>
+    /// #288 — stable machine-readable code (e.g. <c>min_tick_size</c>,
+    /// <c>price_collar</c>) on risk-rejection paths. Null on accept.
+    /// </summary>
+    public string? Code { get; }
     public Exception? GatewayException { get; }
 
-    private OrderModifyResult(OrderModifyResultKind kind, ulong newClOrdId, string? reason, Exception? ex)
+    private OrderModifyResult(OrderModifyResultKind kind, ulong newClOrdId, string? reason, string? code, Exception? ex)
     {
         Kind = kind;
         NewClOrdId = newClOrdId;
         Reason = reason;
+        Code = code;
         GatewayException = ex;
     }
 
     public static OrderModifyResult Accepted(ulong newClOrdId) =>
-        new(OrderModifyResultKind.Accepted, newClOrdId, null, null);
-    public static OrderModifyResult RiskRejected(string reason) =>
-        new(OrderModifyResultKind.RiskRejected, 0, reason, null);
+        new(OrderModifyResultKind.Accepted, newClOrdId, null, null, null);
+    public static OrderModifyResult RiskRejected(string reason, string? code = null) =>
+        new(OrderModifyResultKind.RiskRejected, 0, reason, code, null);
     public static OrderModifyResult GatewayFailed(ulong newClOrdId, Exception ex) =>
-        new(OrderModifyResultKind.GatewayFailed, newClOrdId, "gateway_unavailable", ex);
+        new(OrderModifyResultKind.GatewayFailed, newClOrdId, "gateway_unavailable", "gateway_unavailable", ex);
     public static OrderModifyResult WalBackpressure(string detail) =>
-        new(OrderModifyResultKind.WalBackpressure, 0, detail, null);
+        new(OrderModifyResultKind.WalBackpressure, 0, detail, "wal_backpressure", null);
     public static OrderModifyResult BadRequest(string reason) =>
-        new(OrderModifyResultKind.BadRequest, 0, reason, null);
+        new(OrderModifyResultKind.BadRequest, 0, reason, "bad_request", null);
     public static OrderModifyResult Conflict(string reason) =>
-        new(OrderModifyResultKind.Conflict, 0, reason, null);
+        new(OrderModifyResultKind.Conflict, 0, reason, "conflict", null);
     public static OrderModifyResult NotFound { get; } =
-        new(OrderModifyResultKind.NotFound, 0, null, null);
+        new(OrderModifyResultKind.NotFound, 0, null, null, null);
     public static OrderModifyResult Drained { get; } =
-        new(OrderModifyResultKind.Drained, 0, "service draining", null);
+        new(OrderModifyResultKind.Drained, 0, "service draining", "service_draining", null);
     /// <summary>
     /// #108 — DuplicateClOrdID guard. The just-allocated new ClOrdID
     /// already exists in <see cref="WorkingOrderBook"/> or
@@ -508,7 +518,7 @@ public sealed class OrderModifyResult
     /// no WAL event, no gateway call. Endpoints map to <c>409 Conflict</c>.
     /// </summary>
     public static OrderModifyResult DuplicateClOrdId(ulong newClOrdId) =>
-        new(OrderModifyResultKind.DuplicateClOrdId, newClOrdId, "duplicate_clordid", null);
+        new(OrderModifyResultKind.DuplicateClOrdId, newClOrdId, "duplicate_clordid", "duplicate_clordid", null);
 }
 
 public enum OrderModifyResultKind
