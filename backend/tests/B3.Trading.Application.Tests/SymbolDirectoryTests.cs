@@ -240,4 +240,164 @@ public class SymbolDirectoryTests
         // dictionary enumeration is implementation defined.
         Assert.Contains(symbol, new[] { "PETR4", "PETR3" });
     }
+
+    // ── #360 tick-ladder coverage ─────────────────────────────────────
+
+    [Fact]
+    public void TickLadder_ResolveTick_picksBandByPrice()
+    {
+        var sut = new SymbolDirectory(new SymbolDirectoryOptions
+        {
+            Specs =
+            {
+                ["PETR4"] = new InstrumentSpecOptions
+                {
+                    TickLadder = new()
+                    {
+                        new TickBandOptions { MinPriceInclusive = 0m,   Tick = 0.01m },
+                        new TickBandOptions { MinPriceInclusive = 1m,   Tick = 0.05m },
+                        new TickBandOptions { MinPriceInclusive = 10m,  Tick = 0.10m },
+                        new TickBandOptions { MinPriceInclusive = 100m, Tick = 0.50m },
+                    },
+                },
+            },
+        });
+
+        Assert.True(sut.TryGetSpec("PETR4", out var spec));
+        Assert.Equal(0.01m, spec.ResolveTick(0.50m));
+        Assert.Equal(0.05m, spec.ResolveTick(1m));     // boundary inclusive
+        Assert.Equal(0.05m, spec.ResolveTick(9.99m));
+        Assert.Equal(0.10m, spec.ResolveTick(10m));
+        Assert.Equal(0.10m, spec.ResolveTick(50m));
+        Assert.Equal(0.50m, spec.ResolveTick(100m));
+        Assert.Equal(0.50m, spec.ResolveTick(9999m));
+    }
+
+    [Fact]
+    public void TickLadder_isCanonicalized_outOfOrder_andDeduped()
+    {
+        // Operator writes the ladder in any order; the directory must
+        // sort ascending and dedup (last-write-wins per MinPriceInclusive).
+        var sut = new SymbolDirectory(new SymbolDirectoryOptions
+        {
+            Specs =
+            {
+                ["VALE3"] = new InstrumentSpecOptions
+                {
+                    TickLadder = new()
+                    {
+                        new TickBandOptions { MinPriceInclusive = 100m, Tick = 0.50m },
+                        new TickBandOptions { MinPriceInclusive = 1m,   Tick = 0.05m },
+                        new TickBandOptions { MinPriceInclusive = 1m,   Tick = 0.99m }, // dup -> wins
+                        new TickBandOptions { MinPriceInclusive = 0m,   Tick = 0.01m },
+                    },
+                },
+            },
+        });
+
+        Assert.True(sut.TryGetSpec("VALE3", out var spec));
+        Assert.Equal(0.01m, spec.ResolveTick(0.50m));
+        Assert.Equal(0.99m, spec.ResolveTick(5m));   // dedup last-write-wins
+        Assert.Equal(0.50m, spec.ResolveTick(100m));
+    }
+
+    [Fact]
+    public void TickLadder_dropsMalformedRows()
+    {
+        // Non-positive tick or negative MinPriceInclusive are dropped.
+        // Spec with ONLY malformed rows yields null ladder; combined
+        // with no flat TickSize the entry is dropped (matches the
+        // existing "no constraint = no spec" rule).
+        var sut = new SymbolDirectory(new SymbolDirectoryOptions
+        {
+            Specs =
+            {
+                ["JUNK"] = new InstrumentSpecOptions
+                {
+                    TickLadder = new()
+                    {
+                        new TickBandOptions { MinPriceInclusive = 0m,  Tick = 0m },
+                        new TickBandOptions { MinPriceInclusive = 0m,  Tick = -1m },
+                        new TickBandOptions { MinPriceInclusive = -5m, Tick = 0.01m },
+                    },
+                },
+            },
+        });
+
+        Assert.False(sut.TryGetSpec("JUNK", out _));
+    }
+
+    [Fact]
+    public void TickLadder_fallsBackToFlatTickSize_belowLowestBand()
+    {
+        // A ladder that starts at price 1 plus a flat TickSize of 0.01
+        // — prices below 1 fall back to the flat tick (preserves the
+        // legacy behavior for symbols whose operator opts in to the
+        // ladder schema only for higher bands).
+        var sut = new SymbolDirectory(new SymbolDirectoryOptions
+        {
+            Specs =
+            {
+                ["MGLU3"] = new InstrumentSpecOptions
+                {
+                    TickSize = 0.01m,
+                    TickLadder = new()
+                    {
+                        new TickBandOptions { MinPriceInclusive = 1m,  Tick = 0.05m },
+                        new TickBandOptions { MinPriceInclusive = 10m, Tick = 0.10m },
+                    },
+                },
+            },
+        });
+
+        Assert.True(sut.TryGetSpec("MGLU3", out var spec));
+        Assert.Equal(0.01m, spec.ResolveTick(0.50m));
+        Assert.Equal(0.05m, spec.ResolveTick(1m));
+        Assert.Equal(0.10m, spec.ResolveTick(20m));
+    }
+
+    [Fact]
+    public void TickLadder_ResolveBand_reportsHalfOpenRange()
+    {
+        var sut = new SymbolDirectory(new SymbolDirectoryOptions
+        {
+            Specs =
+            {
+                ["PETR4"] = new InstrumentSpecOptions
+                {
+                    TickLadder = new()
+                    {
+                        new TickBandOptions { MinPriceInclusive = 0m,   Tick = 0.01m },
+                        new TickBandOptions { MinPriceInclusive = 1m,   Tick = 0.05m },
+                        new TickBandOptions { MinPriceInclusive = 100m, Tick = 0.50m },
+                    },
+                },
+            },
+        });
+
+        Assert.True(sut.TryGetSpec("PETR4", out var spec));
+
+        var b0 = spec.ResolveBand(0.50m);
+        Assert.NotNull(b0);
+        Assert.Equal(0m, b0.Value.LowerInclusive);
+        Assert.Equal(1m, b0.Value.UpperExclusive);
+
+        var bMid = spec.ResolveBand(50m);
+        Assert.NotNull(bMid);
+        Assert.Equal(1m, bMid.Value.LowerInclusive);
+        Assert.Equal(100m, bMid.Value.UpperExclusive);
+
+        var bTop = spec.ResolveBand(500m);
+        Assert.NotNull(bTop);
+        Assert.Equal(100m, bTop.Value.LowerInclusive);
+        Assert.Null(bTop.Value.UpperExclusive);
+
+        // Spec with no ladder -> null match.
+        var flat = new SymbolDirectory(new SymbolDirectoryOptions
+        {
+            Specs = { ["X"] = new InstrumentSpecOptions { TickSize = 0.01m } },
+        });
+        Assert.True(flat.TryGetSpec("X", out var flatSpec));
+        Assert.Null(flatSpec.ResolveBand(1m));
+    }
 }

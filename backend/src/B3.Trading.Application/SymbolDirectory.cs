@@ -62,16 +62,42 @@ public sealed class SymbolDirectory
         foreach (var kv in options.Specs)
         {
             if (string.IsNullOrWhiteSpace(kv.Key) || kv.Value is null) continue;
-            // Drop entries that wouldn't constrain anything — keeps
-            // TryGetSpec callers from having to special-case zero/negative.
             var t = kv.Value.TickSize;
             var l = kv.Value.LotSize;
-            if ((t is null or <= 0m) && (l is null or <= 0)) continue;
+            var ladder = NormalizeLadder(kv.Value.TickLadder);
+            // Drop entries that wouldn't constrain anything — keeps
+            // TryGetSpec callers from having to special-case zero/negative.
+            if ((t is null or <= 0m) && (l is null or <= 0) && ladder is null) continue;
             specs[kv.Key] = new InstrumentSpec(
                 t is > 0m ? t : null,
-                l is > 0 ? l : null);
+                l is > 0 ? l : null,
+                ladder);
         }
         _specs = specs;
+    }
+
+    // #360. Validate and canonicalize the optional CVM-style tick
+    // ladder: drop malformed rows (non-positive tick, NaN), de-dup by
+    // MinPriceInclusive (last-write-wins per band), sort ascending so
+    // ResolveTick can do a binary search. Returns null when the
+    // resulting ladder is empty so MinTickSizeCheck can treat
+    // "ladder present" as a positive signal.
+    private static IReadOnlyList<TickBand>? NormalizeLadder(IReadOnlyList<TickBandOptions>? rows)
+    {
+        if (rows is null || rows.Count == 0) return null;
+        var sorted = new SortedDictionary<decimal, decimal>();
+        foreach (var r in rows)
+        {
+            if (r is null) continue;
+            if (r.Tick <= 0m) continue;
+            if (r.MinPriceInclusive < 0m) continue;
+            sorted[r.MinPriceInclusive] = r.Tick;
+        }
+        if (sorted.Count == 0) return null;
+        var list = new TickBand[sorted.Count];
+        var i = 0;
+        foreach (var kv in sorted) list[i++] = new TickBand(kv.Key, kv.Value);
+        return list;
     }
 
     public int Count => _byName.Count;
@@ -133,11 +159,92 @@ public sealed class SymbolDirectory
 /// Per-instrument trading constraints that don't fit in
 /// <see cref="Risk.RiskOptions"/> because they describe the
 /// instrument itself, not the firm/end-client risk policy. Both
-/// fields are optional — a null/missing value means "no constraint",
-/// so partial entries are valid (e.g. a TickSize-only spec for a
-/// symbol whose lot size is 1).
+/// flat fields are optional — a null/missing value means "no
+/// constraint", so partial entries are valid (e.g. a TickSize-only
+/// spec for a symbol whose lot size is 1).
+///
+/// <para>
+/// #360. <see cref="TickLadder"/> is an optional CVM-style tiered
+/// tick schedule (price-band → tick) for venues where the tick
+/// varies by price bucket. When present it overrides
+/// <see cref="TickSize"/> on a per-price basis; <see cref="TickSize"/>
+/// (when also set) acts as a fallback for prices below the lowest
+/// band's <c>MinPriceInclusive</c> and as backwards-compatible
+/// metadata. The ladder is canonicalized at construction time
+/// (sorted ascending by <c>MinPriceInclusive</c>, malformed rows
+/// dropped); see <see cref="ResolveTick(decimal)"/>.
+/// </para>
 /// </summary>
-public readonly record struct InstrumentSpec(decimal? TickSize, long? LotSize);
+public readonly record struct InstrumentSpec(
+    decimal? TickSize,
+    long? LotSize,
+    IReadOnlyList<TickBand>? TickLadder = null)
+{
+    /// <summary>
+    /// #360. Returns the tick that applies at <paramref name="price"/>:
+    /// the largest band whose <c>MinPriceInclusive &lt;= price</c>
+    /// when <see cref="TickLadder"/> is set, otherwise the flat
+    /// <see cref="TickSize"/>. Returns null when neither resolves
+    /// (price below the lowest band and no flat fallback) — the
+    /// caller treats that as fail-open consistent with the existing
+    /// "unconfigured symbol" posture.
+    /// </summary>
+    public decimal? ResolveTick(decimal price)
+    {
+        if (TickLadder is { Count: > 0 } ladder)
+        {
+            decimal? match = null;
+            // Linear scan is fine — production ladders are <10 rows.
+            // Bands are sorted ascending so we keep the latest match.
+            for (int i = 0; i < ladder.Count; i++)
+            {
+                if (ladder[i].MinPriceInclusive <= price) match = ladder[i].Tick;
+                else break;
+            }
+            if (match.HasValue) return match;
+        }
+        return TickSize is > 0m ? TickSize : null;
+    }
+
+    /// <summary>
+    /// #360. Returns the band index and tick that applied at
+    /// <paramref name="price"/>, or null when no ladder is set or
+    /// the price is below every band. Used by the reject reason in
+    /// <c>MinTickSizeCheck</c> to surface the band range to the
+    /// trader.
+    /// </summary>
+    public TickBandMatch? ResolveBand(decimal price)
+    {
+        if (TickLadder is not { Count: > 0 } ladder) return null;
+        int idx = -1;
+        for (int i = 0; i < ladder.Count; i++)
+        {
+            if (ladder[i].MinPriceInclusive <= price) idx = i;
+            else break;
+        }
+        if (idx < 0) return null;
+        var lo = ladder[idx].MinPriceInclusive;
+        decimal? hi = idx + 1 < ladder.Count ? ladder[idx + 1].MinPriceInclusive : null;
+        return new TickBandMatch(lo, hi, ladder[idx].Tick);
+    }
+}
+
+/// <summary>
+/// #360. One row of the CVM-style tiered tick ladder: the tick that
+/// applies from <see cref="MinPriceInclusive"/> up to the next
+/// band's <c>MinPriceInclusive</c> (exclusive) or +infinity.
+/// </summary>
+public readonly record struct TickBand(decimal MinPriceInclusive, decimal Tick);
+
+/// <summary>
+/// #360. Result of <see cref="InstrumentSpec.ResolveBand(decimal)"/>
+/// — the half-open price range that produced the resolved tick.
+/// <see cref="UpperExclusive"/> is null on the topmost band.
+/// </summary>
+public readonly record struct TickBandMatch(
+    decimal LowerInclusive,
+    decimal? UpperExclusive,
+    decimal Tick);
 
 /// <summary>
 /// Bound from <c>Trading:SymbolDirectory</c>.
@@ -172,4 +279,22 @@ public sealed class InstrumentSpecOptions
 {
     public decimal? TickSize { get; set; }
     public long? LotSize { get; set; }
+
+    /// <summary>
+    /// #360. Optional CVM-style tiered tick schedule. Bound from
+    /// <c>Trading:SymbolDirectory:Specs:&lt;SYMBOL&gt;:TickLadder</c>.
+    /// Order in JSON does not matter — <see cref="SymbolDirectory"/>
+    /// canonicalizes (sort + dedup + drop malformed) at startup.
+    /// </summary>
+    public List<TickBandOptions>? TickLadder { get; set; }
+}
+
+/// <summary>
+/// #360. Mutable counterpart of <see cref="TickBand"/> for
+/// configuration binding.
+/// </summary>
+public sealed class TickBandOptions
+{
+    public decimal MinPriceInclusive { get; set; }
+    public decimal Tick { get; set; }
 }

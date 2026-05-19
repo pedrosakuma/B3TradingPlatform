@@ -466,6 +466,119 @@ public class RiskPipelineTests
         Assert.True(new MinTickSizeCheck(dir).Check(Ctx(price: null, type: OrderType.Market)).Approved);
     }
 
+    // ── #360 tiered tick-ladder coverage ──────────────────────────────
+
+    [Fact]
+    public void MinTickSize_Ladder_appliesPerBand()
+    {
+        var dir = BuildDirectory(specs: new()
+        {
+            ["PETR4"] = new()
+            {
+                TickLadder = new()
+                {
+                    new TickBandOptions { MinPriceInclusive = 0m,   Tick = 0.01m },
+                    new TickBandOptions { MinPriceInclusive = 1m,   Tick = 0.05m },
+                    new TickBandOptions { MinPriceInclusive = 10m,  Tick = 0.10m },
+                    new TickBandOptions { MinPriceInclusive = 100m, Tick = 0.50m },
+                },
+            },
+        });
+        var check = new MinTickSizeCheck(dir);
+
+        // 0.01 band [0,1): 0.50 valid, 0.501 rejects.
+        Assert.True(check.Check(Ctx(price: 0.50m)).Approved);
+        Assert.False(check.Check(Ctx(price: 0.501m)).Approved);
+
+        // 0.05 band [1,10): 5.05 valid, 5.07 rejects.
+        Assert.True(check.Check(Ctx(price: 5.05m)).Approved);
+        Assert.False(check.Check(Ctx(price: 5.07m)).Approved);
+
+        // 0.10 band [10,100): 50.10 valid, 50.05 rejects.
+        Assert.True(check.Check(Ctx(price: 50.10m)).Approved);
+        Assert.False(check.Check(Ctx(price: 50.05m)).Approved);
+
+        // 0.50 band [100,+inf): 150.50 valid, 150.10 rejects.
+        Assert.True(check.Check(Ctx(price: 150.50m)).Approved);
+        Assert.False(check.Check(Ctx(price: 150.10m)).Approved);
+    }
+
+    [Fact]
+    public void MinTickSize_Ladder_rejectReason_surfacesBandRange()
+    {
+        var dir = BuildDirectory(specs: new()
+        {
+            ["PETR4"] = new()
+            {
+                TickLadder = new()
+                {
+                    new TickBandOptions { MinPriceInclusive = 0m,   Tick = 0.01m },
+                    new TickBandOptions { MinPriceInclusive = 10m,  Tick = 0.10m },
+                    new TickBandOptions { MinPriceInclusive = 100m, Tick = 0.50m },
+                },
+            },
+        });
+        var check = new MinTickSizeCheck(dir);
+
+        var midBand = check.Check(Ctx(price: 50.05m));
+        Assert.False(midBand.Approved);
+        Assert.Equal(RiskRejectCodes.MinTickSize, midBand.Code);
+        Assert.Contains("band [10,100)", midBand.Reason);
+        Assert.Contains("tick size 0.10", midBand.Reason);
+
+        var topBand = check.Check(Ctx(price: 200.10m));
+        Assert.False(topBand.Approved);
+        Assert.Contains("band [100,+inf)", topBand.Reason);
+    }
+
+    [Fact]
+    public void MinTickSize_Ladder_belowLowestBand_fallsBackToFlatTick()
+    {
+        // Operator declares a ladder starting at price 1 plus a flat
+        // 0.01 tick — sub-real prices use the flat fallback; the
+        // reject reason on the flat path keeps the legacy message
+        // (no "band" suffix) so the format only changes when ladder
+        // actually applied.
+        var dir = BuildDirectory(specs: new()
+        {
+            ["MGLU3"] = new()
+            {
+                TickSize = 0.01m,
+                TickLadder = new()
+                {
+                    new TickBandOptions { MinPriceInclusive = 1m,  Tick = 0.05m },
+                    new TickBandOptions { MinPriceInclusive = 10m, Tick = 0.10m },
+                },
+            },
+        });
+        var check = new MinTickSizeCheck(dir);
+
+        // Sub-real: flat 0.01 fallback approves valid + reject reason omits band.
+        Assert.True(check.Check(Ctx(symbol: "MGLU3", price: 0.50m)).Approved);
+        var rej = check.Check(Ctx(symbol: "MGLU3", price: 0.505m));
+        Assert.False(rej.Approved);
+        Assert.DoesNotContain("band", rej.Reason);
+
+        // In-band: ladder applies — message carries band suffix.
+        var rejBand = check.Check(Ctx(symbol: "MGLU3", price: 5.07m));
+        Assert.False(rejBand.Approved);
+        Assert.Contains("band [1,10)", rejBand.Reason);
+    }
+
+    [Fact]
+    public void MinTickSize_legacyFlatOnly_reasonUnchanged()
+    {
+        // Pre-#360 behavior preserved for symbols that never opt in to
+        // the ladder schema — surface the exact same reject text the
+        // earlier tests asserted.
+        var dir = BuildDirectory(specs: new() { ["PETR4"] = new() { TickSize = 0.01m } });
+        var rej = new MinTickSizeCheck(dir).Check(Ctx(price: 30.001m));
+        Assert.False(rej.Approved);
+        Assert.Equal(
+            "price 30.001 is not a multiple of tick size 0.01 for PETR4",
+            rej.Reason);
+    }
+
     [Fact]
     public void MinLotSize_RejectsNonMultiple()
     {

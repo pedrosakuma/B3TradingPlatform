@@ -13,6 +13,16 @@ namespace B3.Trading.Application.Risk.Checks;
 /// </para>
 ///
 /// <para>
+/// #360. Supports the CVM-style tiered tick ladder via
+/// <see cref="InstrumentSpec.TickLadder"/>: the active tick is
+/// resolved per-price (binary-style scan over canonicalized bands).
+/// When no ladder is configured the legacy flat
+/// <see cref="InstrumentSpec.TickSize"/> still applies, so symbols
+/// not yet migrated to the ladder schema keep the prior behavior
+/// and message verbatim.
+/// </para>
+///
+/// <para>
 /// <b>Fail-open:</b> symbols missing from
 /// <see cref="SymbolDirectory.TryGetSpec"/> approve. The fat-finger
 /// checks are additive — never blocking on a symbol whose spec wasn't
@@ -35,17 +45,27 @@ public sealed class MinTickSizeCheck : IRiskCheck
     public RiskDecision Check(RiskContext ctx)
     {
         if (!ctx.Price.HasValue) return RiskDecision.Approve;
-        if (!_directory.TryGetSpec(ctx.Symbol, out var spec) || spec.TickSize is not { } tick || tick <= 0m)
-            return RiskDecision.Approve;
+        if (!_directory.TryGetSpec(ctx.Symbol, out var spec)) return RiskDecision.Approve;
+
+        var price = ctx.Price.Value;
+        var tick = spec.ResolveTick(price);
+        if (tick is not { } t || t <= 0m) return RiskDecision.Approve;
 
         // decimal arithmetic is exact for the values we care about
         // (tick sizes are 0.01 / 0.001 etc., prices have at most 4-6
         // decimals). decimal.Remainder avoids the FP precision trap
         // that would bite a double-based modulus.
-        if (decimal.Remainder(ctx.Price.Value, tick) != 0m)
-            return RiskDecision.Reject(
-                RiskRejectCodes.MinTickSize,
-                $"price {ctx.Price.Value} is not a multiple of tick size {tick} for {ctx.Symbol}");
+        if (decimal.Remainder(price, t) != 0m)
+        {
+            // #360. When a ladder is in play surface the band in the
+            // reject reason so the trader sees *why* the tick changed
+            // ("...in band [10,100)" vs the global flat "...0.05").
+            var band = spec.ResolveBand(price);
+            var reason = band is { } b
+                ? $"price {price} is not a multiple of tick size {t} (band [{b.LowerInclusive},{(b.UpperExclusive?.ToString() ?? "+inf")})) for {ctx.Symbol}"
+                : $"price {price} is not a multiple of tick size {t} for {ctx.Symbol}";
+            return RiskDecision.Reject(RiskRejectCodes.MinTickSize, reason);
+        }
         return RiskDecision.Approve;
     }
 }
