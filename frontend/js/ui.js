@@ -1239,6 +1239,27 @@ export function setTicketFeedback(message, kind) {
   el.className = `feedback ${cls}`;
 }
 
+// #342: Transient WS error toast. Surfaces frame-level errors from the
+// data WebSocket (unknown_channel, malformed subscribe, server-side
+// close) so the trader notices a quietly-failing subscription without
+// having to open devtools. Auto-dismisses after WS_ERROR_TOAST_MS;
+// successive errors restart the timer (most recent message wins).
+const WS_ERROR_TOAST_MS = 6_000;
+let _wsErrorToastTimer = null;
+export function showWsErrorToast(message) {
+  const el = $("ws-error-toast");
+  if (!el) return;
+  if (!message) { el.hidden = true; el.textContent = ""; return; }
+  el.hidden = false;
+  el.textContent = message;
+  if (_wsErrorToastTimer) clearTimeout(_wsErrorToastTimer);
+  _wsErrorToastTimer = setTimeout(() => {
+    _wsErrorToastTimer = null;
+    el.hidden = true;
+    el.textContent = "";
+  }, WS_ERROR_TOAST_MS);
+}
+
 // Clear the ticket feedback only if it still shows `expected`. Used by
 // the success-toast auto-dismiss so a later warning/error message that
 // landed before the timer fires isn't accidentally erased.
@@ -1398,11 +1419,15 @@ function ensureTicker() {
   if (tickTimer) return;
   tickTimer = setInterval(() => {
     renderInflight();
-    renderReconnect();
     // Slow tick (1s) for time-driven re-renders that don't need 4 Hz.
     const now = Date.now();
     if (now - lastSlowTick >= 1000) {
       lastSlowTick = now;
+      // #342: reconnect countdown ticks at 1Hz (integer seconds) — the
+      // previous 4Hz / decisecond display flickered without conveying
+      // useful information. State changes still trigger an immediate
+      // re-render via the wsReconnect subscription.
+      renderReconnect();
       renderMarketData();
       // Only re-render the DOB while we're still waiting for a snapshot
       // — the live render path is already wired to the book slice.
@@ -1438,9 +1463,12 @@ function renderReconnect() {
   if (!el) return;
   const r = getState().wsReconnect;
   if (!r || !r.nextAt) { el.hidden = true; el.textContent = ""; return; }
+  // #342: integer-second precision is enough at 1Hz, and prevents the
+  // jitter the old `.1s` format showed every tick even when nothing
+  // had changed at the second granularity.
   const remaining = Math.max(0, r.nextAt - Date.now());
   el.hidden = false;
-  el.textContent = `retry in ${(remaining / 1000).toFixed(1)}s`;
+  el.textContent = `retry in ${Math.ceil(remaining / 1000)}s`;
 }
 
 function renderFirmsHealth() {
