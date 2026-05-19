@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>B3.Trading.Reconciliation</RootNamespace>
+    <AssemblyName>b3-reconcile</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="B3.Trading.Reconciliation.Tests" />
+  </ItemGroup>
+
+</Project>
