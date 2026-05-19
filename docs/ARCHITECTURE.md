@@ -194,10 +194,15 @@ replay on (re)connect. Revisit when the matching side does.
 - **Platform ↔ exchange.** FIXP credentials per firm, in config, mirrors
   `B3EntryPointClient`'s API. Lands when that lib is wired in.
 
-### 5. Market data for the trader UI
+### 5. Market data
 
-Three options on the table (see issue #1 §5). Not committed yet. The
-bootstrap is order-only; market data will arrive in a follow-up.
+The host consumes `B3.MarketData.WebSocketClient` (SDK) through
+`SdkMarketDataSubscriber` and exposes events via the
+application-side `IMarketDataSubscriber` seam. Trade + info events
+are always on; the opt-in `Trading:MarketData:EnableBook` flag adds
+the MBO (L3) stream consumed by `MboBookStore` and bridged to
+Pegged BBO by `MboPegBookPump`. See [`MARKET-DATA.md`](MARKET-DATA.md)
+for configuration, event flow and the SDK→app DTO mapping.
 
 ## Pre-trade risk (Phase 4)
 
