@@ -274,6 +274,22 @@ public sealed class FixpOutboundChannelWriterTests
         // (timeout + 250 ms cancel grace ≈ 300 ms).
         await writer.CompleteAsync(TimeSpan.FromMilliseconds(50));
 
+        // Issue #332. Bounded poll instead of bare assert: although
+        // MeterListener callbacks run synchronously to Counter.Add per
+        // .NET docs, under CI parallelism we have observed at least one
+        // miss (run 26064747516). The miss is most plausibly explained
+        // by a race between MeterListener.Start() and concurrent
+        // instrument publication from other test classes — Start()
+        // enumerates already-published instruments under an internal
+        // lock, but a Counter created on another thread mid-Start can
+        // slip past. Polling up to 1 s on Interlocked.Read absorbs that
+        // window without masking a real regression (an actually-missing
+        // increment would still time out and fail).
+        var deadline = Environment.TickCount64 + 1_000;
+        while (Interlocked.Read(ref captured) == 0 && Environment.TickCount64 < deadline)
+        {
+            await Task.Delay(10);
+        }
         Assert.Equal(1, Interlocked.Read(ref captured));
 
         // Unblock so the orphaned drain task can exit cleanly and
