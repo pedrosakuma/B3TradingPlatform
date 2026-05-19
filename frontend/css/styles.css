@@ -120,6 +120,13 @@ body {
   border: 1px solid var(--border);
 }
 .symbol-tag--muted { color: var(--muted); }
+/* #342: DOB sub-header with mid + spread. Same tabular-nums alignment
+ * as the symbol tag so the numbers don't dance on each update. */
+.dob-spread {
+  display: inline-block; margin-left: .5rem;
+  font-size: .72rem; font-weight: 400; font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
 .tape-all-toggle {
   display: inline-flex; align-items: center; gap: .25rem;
   font-size: .7rem; color: var(--muted);
@@ -521,6 +528,15 @@ tr.firm-row-bad > td { background: rgba(239,83,80,.10); }
   border-radius: 4px; padding: .25rem .45rem; font: inherit; font-size: .8rem;
 }
 .blotter-filter input { flex: 1; }
+/* #342: "Working only" toggle sits next to the status select. The
+ * checkbox inherits browser styling but the label text picks up the
+ * muted palette so the toggle reads as a filter, not as a status pill. */
+.blotter-filter-toggle {
+  display: inline-flex; align-items: center; gap: .3rem;
+  color: var(--muted); font-size: .78rem; white-space: nowrap;
+  user-select: none; cursor: pointer;
+}
+.blotter-filter-toggle input { flex: none; margin: 0; }
 .blotter-pagination {
   display: flex; align-items: center; justify-content: flex-end;
   gap: .5rem; margin-top: .4rem; font-size: .8rem;
