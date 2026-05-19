@@ -144,7 +144,7 @@ public class BotErRouter_RouteOne_LiveSocket_Bench
         });
         _coord = new BotOutboundCoordinator(sessions, opts.Value);
         _mux = new BotErMultiplexer(_mappings, sessions, directory, _coord,
-            NullLogger<BotErMultiplexer>.Instance, opts);
+            NullLogger<BotErMultiplexer>.Instance);
 
         _cts = new CancellationTokenSource();
         await _mux.StartAsync(_cts.Token).ConfigureAwait(false);

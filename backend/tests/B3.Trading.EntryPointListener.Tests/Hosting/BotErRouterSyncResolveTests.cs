@@ -245,7 +245,7 @@ public class BotErRouterSyncResolveTests
         });
         var coord = new BotOutboundCoordinator(sessions, opts.Value);
         var mux = new BotErMultiplexer(mappings, sessions, directory, coord,
-            NullLogger<BotErMultiplexer>.Instance, opts);
+            NullLogger<BotErMultiplexer>.Instance);
         var cts = new CancellationTokenSource();
         await mux.StartAsync(cts.Token);
         return (mux, new MuxCtx(sessions, mappings, directory, coord));

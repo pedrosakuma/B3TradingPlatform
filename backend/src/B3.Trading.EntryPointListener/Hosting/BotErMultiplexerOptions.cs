@@ -18,21 +18,6 @@ public sealed class BotErMultiplexerOptions
     public int OutboundBufferMaxMessages { get; set; } = BotOutboundBuffer.DefaultMaxMessages;
 
     /// <summary>
-    /// <b>Deprecated (P9 / RFC §5.4).</b> Pre-P9, this sized the global
-    /// <c>Channel&lt;ExecutionEvent&gt;</c> between the dispatcher and
-    /// the multiplexer drain thread. P9 / F4 removed that channel —
-    /// credential resolve is now synchronous in the fan-out path and
-    /// the per-credential <see cref="BotOutboundBuffer"/> is the sole
-    /// bounded layer (with <see cref="OutboundBufferMaxMessages"/> the
-    /// only knob for ER-rate backpressure). The property is retained
-    /// solely for backwards-compatible binding of existing
-    /// <c>appsettings.json</c> sections so deployment configs do not
-    /// fail to load; the value is ignored.
-    /// </summary>
-    [Obsolete("Removed in P9 / RFC §5.4 — synchronous credential resolve eliminated the global router channel. Tune OutboundBufferMaxMessages instead.")]
-    public int RouterChannelCapacity { get; set; } = 16_384;
-
-    /// <summary>
     /// Checkpoint cadence (RFC §4.8): every N seconds OR every M
     /// messages, whichever comes first. Either both at default (5s,
     /// 100msg) or operator-tuned.
