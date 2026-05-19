@@ -553,6 +553,32 @@ tr.firm-row-bad > td { background: rgba(239,83,80,.10); }
   background: rgba(255,255,255,.05);
 }
 .blotter-page-info { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* #342: Positions click-to-sort headers. The column whose
+ * aria-sort is set gets an inline indicator using ::after so the
+ * indicator never disturbs the column's text alignment. */
+.positions-sort-hint {
+  font-size: .65rem; font-weight: 400; text-transform: none;
+  letter-spacing: 0; color: var(--muted); opacity: .55;
+}
+.panel.positions th.sortable {
+  cursor: pointer; user-select: none;
+}
+.panel.positions th.sortable:hover { color: var(--text); }
+.panel.positions th.sortable:focus-visible {
+  outline: 1px solid var(--accent, #4aa3ff); outline-offset: 1px;
+}
+.panel.positions th.sortable[aria-sort="ascending"]::after  { content: " ▲"; opacity: .7; }
+.panel.positions th.sortable[aria-sort="descending"]::after { content: " ▼"; opacity: .7; }
+
+/* #342: Executions log symbol filter sits inside the panel <h2>. */
+.exec-filter-symbol {
+  font: inherit; font-size: .72rem; font-weight: 400; text-transform: none;
+  letter-spacing: 0; color: var(--text);
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px;
+  padding: .15rem .4rem; width: 9rem;
+}
+.exec-filter-symbol::placeholder { color: var(--muted); opacity: .8; }
 @keyframes row-fresh-fade {
   0%   { background: rgba(79,158,255,.32); }
   100% { background: transparent; }

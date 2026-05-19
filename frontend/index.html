@@ -255,11 +255,18 @@
 
       <!-- POSITIONS -------------------------------------------------- -->
       <section class="panel positions">
-        <h2>Positions</h2>
+        <h2>
+          Positions
+          <span class="muted positions-sort-hint">click header to sort</span>
+        </h2>
         <div class="table-scroll">
           <table>
             <thead>
-              <tr><th>Symbol</th><th class="num">Net</th><th class="num">Avg price</th></tr>
+              <tr>
+                <th data-sort-key="symbol" class="sortable" role="button" tabindex="0" aria-sort="none">Symbol</th>
+                <th data-sort-key="absNet" class="num sortable" role="button" tabindex="0" aria-sort="descending">Net</th>
+                <th data-sort-key="price"  class="num sortable" role="button" tabindex="0" aria-sort="none">Avg price</th>
+              </tr>
             </thead>
             <tbody id="positions-body"></tbody>
           </table>
@@ -268,7 +275,12 @@
 
       <!-- EXECUTIONS LOG --------------------------------------------- -->
       <section class="panel executions">
-        <h2>Executions log</h2>
+        <h2>
+          Executions log
+          <input id="exec-filter-symbol" class="exec-filter-symbol"
+                 type="search" inputmode="latin" autocomplete="off"
+                 placeholder="filter by symbol" aria-label="Filter executions by symbol" />
+        </h2>
         <ol id="executions-log" class="executions-log"></ol>
       </section>
 
