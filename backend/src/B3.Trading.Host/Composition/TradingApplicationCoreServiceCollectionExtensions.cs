@@ -222,6 +222,18 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         services.AddSingleton<B3.Trading.Application.MarketData.MarketDataPegBookPump>();
         services.AddHostedService(sp =>
             sp.GetRequiredService<B3.Trading.Application.MarketData.MarketDataPegBookPump>());
+        // Q3.6 Stage A (#286). In-host L3/MBO book store + pump. Off by
+        // default — events only flow when MarketDataOptions.EnableBook
+        // is true, in which case SdkMarketDataSubscriber subscribes to
+        // SubscribeFlags.Book and the SDK raises the Book* events the
+        // pump bridges into the store. L2 view is derived from the L3
+        // state and exposed via IL2BookView for downstream consumers.
+        services.AddSingleton<B3.Trading.Application.MarketData.MboBookStore>();
+        services.AddSingleton<B3.Trading.Application.MarketData.IL2BookView>(
+            sp => sp.GetRequiredService<B3.Trading.Application.MarketData.MboBookStore>());
+        services.AddSingleton<B3.Trading.Application.MarketData.MboBookStorePump>();
+        services.AddHostedService(sp =>
+            sp.GetRequiredService<B3.Trading.Application.MarketData.MboBookStorePump>());
         services.AddSingleton<AlgoEngine>();
         services.AddHostedService(sp => sp.GetRequiredService<AlgoEngine>());
         services.AddHostedService<AlgoScheduler>();

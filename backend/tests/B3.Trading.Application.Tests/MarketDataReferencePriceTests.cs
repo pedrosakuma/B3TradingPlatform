@@ -203,6 +203,7 @@ internal sealed class StaticFallback : IReferencePrice
 
 internal sealed class FakeMarketDataSubscriber : IMarketDataSubscriber
 {
+    #pragma warning disable CS0067
     public event Action<MarketTrade>? Trade;
     public event Action<MarketInfoSnapshot>? InfoSnapshot;
     public event Action<MarketDataConnectionState>? ConnectionStateChanged;
@@ -210,6 +211,12 @@ internal sealed class FakeMarketDataSubscriber : IMarketDataSubscriber
     public event Action<MarketTheoreticalOpening>? TheoreticalOpening;
     public event Action<MarketAuctionImbalance>? AuctionImbalance;
     public event Action<MarketAuctionPrint>? AuctionPrint;
+    public event Action<MarketBookSnapshot>? BookSnapshot;
+    public event Action<MarketOrderAdded>? OrderAdded;
+    public event Action<MarketOrderUpdated>? OrderUpdated;
+    public event Action<MarketOrderDeleted>? OrderDeleted;
+    public event Action<MarketBookCleared>? BookCleared;
+    #pragma warning restore CS0067
 
     public MarketDataConnectionState State { get; private set; } = MarketDataConnectionState.Disconnected;
     public long DroppedEventCount => 0;

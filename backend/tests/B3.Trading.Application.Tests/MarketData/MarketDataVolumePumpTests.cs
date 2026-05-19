@@ -184,7 +184,8 @@ public class MarketDataVolumePumpTests
 
         public MarketDataConnectionState State => MarketDataConnectionState.Connected;
         public long DroppedEventCount => 0;
-        public event Action<MarketTrade>? Trade;
+        #pragma warning disable CS0067
+    public event Action<MarketTrade>? Trade;
 #pragma warning disable CS0067 // unused in this test
         public event Action<MarketInfoSnapshot>? InfoSnapshot;
         public event Action<MarketDataConnectionState>? ConnectionStateChanged;
@@ -192,6 +193,12 @@ public class MarketDataVolumePumpTests
         public event Action<MarketTheoreticalOpening>? TheoreticalOpening;
         public event Action<MarketAuctionImbalance>? AuctionImbalance;
         public event Action<MarketAuctionPrint>? AuctionPrint;
+        public event Action<MarketBookSnapshot>? BookSnapshot;
+        public event Action<MarketOrderAdded>? OrderAdded;
+        public event Action<MarketOrderUpdated>? OrderUpdated;
+        public event Action<MarketOrderDeleted>? OrderDeleted;
+        public event Action<MarketBookCleared>? BookCleared;
+    #pragma warning restore CS0067
 #pragma warning restore CS0067
 
         public void RaiseTrade(MarketTrade t) => Trade?.Invoke(t);
