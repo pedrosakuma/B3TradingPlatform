@@ -34,9 +34,22 @@ public sealed class MboBookStore : IL2BookView
     private readonly ConcurrentDictionary<string, SymbolState> _bySymbol =
         new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Q3.6 Stage B (#286). Raised after every applied frame, with the
+    /// derived top-of-book at that instant — <c>null</c> when the frame
+    /// emptied both sides. The event fires <b>outside</b> the per-symbol
+    /// lock so a slow subscriber cannot stall the apply path; producers
+    /// must therefore tolerate stale reads racing newer updates (the
+    /// derived snapshot is point-in-time and self-contained, so this is
+    /// safe). Used by <c>WebSocketBookEventSink</c> to fan out to
+    /// <c>book.${symbol}</c> subscribers.
+    /// </summary>
+    public event Action<L2TopOfBook?>? TopChanged;
+
     public void ApplySnapshot(MarketBookSnapshot snap)
     {
         var state = _bySymbol.GetOrAdd(snap.Symbol, _ => new SymbolState(snap.Symbol));
+        L2TopOfBook? top;
         lock (state.Gate)
         {
             state.Bids.Clear();
@@ -46,23 +59,29 @@ public sealed class MboBookStore : IL2BookView
             foreach (var o in snap.Asks)
                 state.Asks[o.OrderId] = new OrderEntry(o.Price, o.Qty);
             state.UpdatedUtc = snap.ReceivedUtc;
+            top = ComputeTopLocked(state);
         }
+        TopChanged?.Invoke(top);
     }
 
     public void ApplyAdded(MarketOrderAdded ev)
     {
         if (ev.Qty <= 0) return;
         var state = _bySymbol.GetOrAdd(ev.Symbol, _ => new SymbolState(ev.Symbol));
+        L2TopOfBook? top;
         lock (state.Gate)
         {
             SideMap(state, ev.Side)[ev.OrderId] = new OrderEntry(ev.Price, ev.Qty);
             state.UpdatedUtc = ev.ReceivedUtc;
+            top = ComputeTopLocked(state);
         }
+        TopChanged?.Invoke(top);
     }
 
     public void ApplyUpdated(MarketOrderUpdated ev)
     {
         var state = _bySymbol.GetOrAdd(ev.Symbol, _ => new SymbolState(ev.Symbol));
+        L2TopOfBook? top;
         lock (state.Gate)
         {
             var map = SideMap(state, ev.Side);
@@ -75,22 +94,28 @@ public sealed class MboBookStore : IL2BookView
                 map[ev.OrderId] = new OrderEntry(ev.Price, ev.Qty);
             }
             state.UpdatedUtc = ev.ReceivedUtc;
+            top = ComputeTopLocked(state);
         }
+        TopChanged?.Invoke(top);
     }
 
     public void ApplyDeleted(MarketOrderDeleted ev)
     {
         if (!_bySymbol.TryGetValue(ev.Symbol, out var state)) return;
+        L2TopOfBook? top;
         lock (state.Gate)
         {
             SideMap(state, ev.Side).Remove(ev.OrderId);
             state.UpdatedUtc = ev.ReceivedUtc;
+            top = ComputeTopLocked(state);
         }
+        TopChanged?.Invoke(top);
     }
 
     public void ApplyCleared(MarketBookCleared ev)
     {
         if (!_bySymbol.TryGetValue(ev.Symbol, out var state)) return;
+        L2TopOfBook? top;
         lock (state.Gate)
         {
             switch (ev.ClearSide)
@@ -107,21 +132,24 @@ public sealed class MboBookStore : IL2BookView
                     break;
             }
             state.UpdatedUtc = ev.ReceivedUtc;
+            top = ComputeTopLocked(state);
         }
+        TopChanged?.Invoke(top);
     }
 
     public L2TopOfBook? GetTopOfBook(string symbol)
     {
         if (string.IsNullOrWhiteSpace(symbol)) return null;
         if (!_bySymbol.TryGetValue(symbol.Trim(), out var state)) return null;
-        lock (state.Gate)
-        {
-            // Bid side: best = highest price; Ask side: best = lowest price.
-            var bid = TopOfSide(state.Bids, ascending: false);
-            var ask = TopOfSide(state.Asks, ascending: true);
-            if (bid.OrderCount == 0 && ask.OrderCount == 0) return null;
-            return new L2TopOfBook(state.Symbol, bid, ask, state.UpdatedUtc);
-        }
+        lock (state.Gate) return ComputeTopLocked(state);
+    }
+
+    private static L2TopOfBook? ComputeTopLocked(SymbolState state)
+    {
+        var bid = TopOfSide(state.Bids, ascending: false);
+        var ask = TopOfSide(state.Asks, ascending: true);
+        if (bid.OrderCount == 0 && ask.OrderCount == 0) return null;
+        return new L2TopOfBook(state.Symbol, bid, ask, state.UpdatedUtc);
     }
 
     /// <summary>Test/diagnostic hook: per-side live order count.</summary>

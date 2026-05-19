@@ -25,6 +25,14 @@ public static class Channels
     public const string AuctionPrefix = "auction.";
 
     /// <summary>
+    /// Q3.6 Stage B (#286). Public per-symbol top-of-book channel
+    /// (<c>book.${symbol}</c>) fed by the in-host MBO store
+    /// (<c>MboBookStore</c>). Same auth posture as the auction/phases
+    /// channels: authenticated bearer required, no per-firm filter.
+    /// </summary>
+    public const string BookPrefix = "book.";
+
+    /// <summary>
     /// Per-owner channel names (validated against an exact set).
     /// Per-symbol public channels (<see cref="PhasesPrefix"/> /
     /// <see cref="AuctionPrefix"/>) are validated separately via
@@ -56,6 +64,11 @@ public static class Channels
             kind = PublicChannelKind.Auction;
             raw = channel[AuctionPrefix.Length..];
         }
+        else if (channel.StartsWith(BookPrefix, StringComparison.Ordinal))
+        {
+            kind = PublicChannelKind.Book;
+            raw = channel[BookPrefix.Length..];
+        }
         else
         {
             return false;
@@ -76,6 +89,7 @@ public static class Channels
 
     public static string PhasesFor(string symbol) => PhasesPrefix + symbol;
     public static string AuctionFor(string symbol) => AuctionPrefix + symbol;
+    public static string BookFor(string symbol) => BookPrefix + symbol;
 }
 
 public enum PublicChannelKind
@@ -83,7 +97,33 @@ public enum PublicChannelKind
     None,
     Phases,
     Auction,
+    Book,
 }
+
+/// <summary>
+/// Q3.6 Stage B (#286). Wire shape for the public
+/// <c>book.${symbol}</c> top-of-book channel. Fields are nullable so
+/// an empty-state snapshot (no MBO frame seen for this symbol yet, or
+/// the side was cleared) ships a stable shape with <c>null</c>s rather
+/// than zeroes that look like real prices. Mirrors
+/// <see cref="L2TopOfBook"/> from the application layer.
+/// </summary>
+public sealed record L2TopOfBookDto(
+    string Symbol,
+    L2SideDto? Bid,
+    L2SideDto? Ask,
+    DateTimeOffset? UpdatedUtc)
+{
+    public static L2TopOfBookDto Empty(string symbol) => new(symbol, null, null, null);
+
+    public static L2TopOfBookDto From(L2TopOfBook t) => new(
+        t.Symbol,
+        t.Bid.OrderCount > 0 ? new L2SideDto(t.Bid.Price, t.Bid.TotalQty, t.Bid.OrderCount) : null,
+        t.Ask.OrderCount > 0 ? new L2SideDto(t.Ask.Price, t.Ask.TotalQty, t.Ask.OrderCount) : null,
+        t.UpdatedUtc);
+}
+
+public sealed record L2SideDto(decimal Price, long TotalQty, int OrderCount);
 
 /// <summary>Inbound command from a connected client.</summary>
 public sealed record InboundCommand(string Type, string[]? Channels);
