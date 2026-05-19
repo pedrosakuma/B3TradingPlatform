@@ -236,6 +236,17 @@ Rationale:
 > "modify: emit `OrderReplaceRejectedEvent` on risk reject" to close the
 > audit gap without touching the submit path's invariants.
 
+**Status update (#337 — modify audit gap closed):** the modify pipeline now
+dispatches an `OrderReplaceRejectedEvent` WAL row on both the risk-reject and
+the margin-reject branches (with `Source="risk"` / `Source="margin"`) and
+publishes a synthetic `ExecKind.Rejected` `ExecutionEvent` to the live sink
+for the FE blotter. Replay treats the event as audit-only (advances the
+ClOrdId watermark; no book/ownership/margin mutation), and
+`/executions/history` projects the row with `Kind="Rejected"`. The
+modify-side row of the asymmetry table in §1.3 (the three rows tagged "no
+WAL row / no FE notification / no /executions/history row") is therefore now
+on parity with the submit path.
+
 ## 6. Out of scope
 
 - Reworking `IRiskCheck` to be async — no current check needs I/O.

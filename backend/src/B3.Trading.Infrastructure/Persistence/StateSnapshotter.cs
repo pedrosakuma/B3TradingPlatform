@@ -970,6 +970,17 @@ public sealed class EventReplayer
                 // intent itself wasn't re-registered (orig already gone).
                 _clOrdIds.AdvanceCounterTo(new EndClientId(rr.EndClientId), rr.NewClOrdId);
                 break;
+            case OrderReplaceRejectedEvent rrj:
+                // #337 — pure-audit event. Replay does NOT mutate the
+                // book / ownership / replacement registry / margin —
+                // none of those were touched on the live path either
+                // (reject happens BEFORE intent registration and
+                // BEFORE the gateway dispatch). The only durable
+                // effect to recover is the burned ClOrdId watermark
+                // so the same ID is never re-issued post-restart,
+                // matching the successful-replace branch above.
+                _clOrdIds.AdvanceCounterTo(new EndClientId(rrj.EndClientId), rrj.NewClOrdId);
+                break;
             case OrderReplaceAmbiguousMarginHeldEvent amh:
                 // Pass-5 review (#299) P1. Re-establish the held
                 // margin reservation a pre-crash modify left in
