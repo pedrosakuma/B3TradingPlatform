@@ -106,7 +106,7 @@ const state = {
   // and not miss the tail-end of a high-volume burst.
   complianceFeed: { paused: false, entries: [] },
   // Blotter UX (section 3 of #30).
-  blotterFilter: { text: "", status: "" }, // { text: substring, status: "" | <OrderStatus> }
+  blotterFilter: { text: "", status: "", hideTerminal: true }, // { text, status, hideTerminal }
   // Per-ClOrdID monotonic arrival sequence. Newly-seen orders get the
   // next number; updates keep the original. Drives the default
   // newest-first sort of the working orders blotter, robust to the
@@ -763,6 +763,10 @@ export function setBlotterFilter(filter) {
   state.blotterFilter = {
     text:   typeof filter?.text   === "string" ? filter.text   : "",
     status: typeof filter?.status === "string" ? filter.status : "",
+    // #342: default-on "Working only" toggle. The common case for a
+    // trader is "what's still actionable"; terminal orders are
+    // accessible via History tab or by unchecking the box.
+    hideTerminal: filter?.hideTerminal !== false,
   };
   // Filter changes shrink the visible set; reset pagination so the
   // user lands on results instead of a now-empty page N.

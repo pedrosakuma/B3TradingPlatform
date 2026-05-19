@@ -920,15 +920,19 @@ export function bindUi() {
     });
   }
 
-  // Blotter filter: text + status select. Persisted via app.js.
+  // Blotter filter: text + status select + working-only toggle (#342).
+  // Persisted via app.js.
   const filterText = $("blotter-filter-text");
   const filterStatus = $("blotter-filter-status");
+  const filterHideTerm = $("blotter-hide-terminal");
   const fireFilter = () => onBlotterFilter({
     text:   filterText.value,
     status: filterStatus.value,
+    hideTerminal: filterHideTerm ? filterHideTerm.checked : true,
   });
-  if (filterText)   filterText.addEventListener("input",  fireFilter);
-  if (filterStatus) filterStatus.addEventListener("change", fireFilter);
+  if (filterText)     filterText.addEventListener("input",  fireFilter);
+  if (filterStatus)   filterStatus.addEventListener("change", fireFilter);
+  if (filterHideTerm) filterHideTerm.addEventListener("change", fireFilter);
 
   // Blotter pagination controls. Renderer hides the bar when there's
   // only one page; clicks here only request a page change — clamping
@@ -1824,6 +1828,7 @@ function renderDob() {
   const bidsBody = document.querySelector("#dob-bids tbody");
   const asksBody = document.querySelector("#dob-asks tbody");
   const feedback = $("dob-feedback");
+  const spreadEl = $("dob-spread");
   if (!bidsBody || !asksBody) return;
 
   const st = getState();
@@ -1833,6 +1838,7 @@ function renderDob() {
     bidsBody.innerHTML = `<tr><td colspan="3" class="muted-cell">select a symbol</td></tr>`;
     asksBody.innerHTML = `<tr><td colspan="3" class="muted-cell">select a symbol</td></tr>`;
     if (feedback) { feedback.hidden = true; feedback.textContent = ""; }
+    if (spreadEl) spreadEl.textContent = "";
     return;
   }
 
@@ -1848,6 +1854,7 @@ function renderDob() {
     bidsBody.innerHTML = `<tr><td colspan="3" class="muted-cell">${msg}</td></tr>`;
     asksBody.innerHTML = `<tr><td colspan="3" class="muted-cell">${msg}</td></tr>`;
     if (feedback) { feedback.hidden = true; feedback.textContent = ""; }
+    if (spreadEl) spreadEl.textContent = "";
     return;
   }
 
@@ -1863,6 +1870,26 @@ function renderDob() {
   bidsBody.innerHTML = renderDobSide(bids, "bid");
   asksBody.innerHTML = renderDobSide(asks, "ask");
   if (feedback) { feedback.hidden = true; feedback.textContent = ""; }
+
+  // #342: Spread + mid sub-header. Saves the trader from eyeballing
+  // top-of-book themselves. Crossed / locked markets render as a
+  // muted "—" rather than a misleading negative spread.
+  if (spreadEl) {
+    if (bids.length === 0 || asks.length === 0) {
+      spreadEl.textContent = "";
+    } else {
+      const bestBid = bids[0].price;
+      const bestAsk = asks[0].price;
+      const spread = bestAsk - bestBid;
+      const mid = (bestAsk + bestBid) / 2;
+      if (!Number.isFinite(spread) || spread <= 0) {
+        spreadEl.textContent = `mid ${fmtPx(mid)} · spread —`;
+      } else {
+        const bps = mid > 0 ? Math.round((spread / mid) * 10000) : 0;
+        spreadEl.textContent = `mid ${fmtPx(mid)} · spread ${fmtPx(spread)} (${bps} bp)`;
+      }
+    }
+  }
 }
 
 function renderDobSide(levels, side) {
@@ -2101,10 +2128,11 @@ const BLOTTER_PAGE_SIZE = 25;
 function renderBlotter() {
   const body = $("blotter-body");
   const st = getState();
-  const filter = st.blotterFilter ?? { text: "", status: "" };
+  const filter = st.blotterFilter ?? { text: "", status: "", hideTerminal: true };
   syncFilterInputs(filter);
   const search = filter.text.trim().toUpperCase();
   const wantStatus = filter.status;
+  const hideTerm = filter.hideTerminal !== false;
   const all = [...st.orders.values()];
   // Default sort: newest-first by per-ClOrdID arrival sequence
   // (assigned in state.applyOrders*). Falling back to clOrdId keeps
@@ -2113,6 +2141,10 @@ function renderBlotter() {
   const filtered = all
     .filter(o => !search || o.symbol.toUpperCase().includes(search) || o.clOrdId.toUpperCase().includes(search))
     .filter(o => !wantStatus || o.status === wantStatus)
+    // #342: "Working only" hides terminal rows (Filled / Cancelled /
+    // Rejected). Skipped when an explicit status filter is set so the
+    // trader can still pin a terminal status when they want to.
+    .filter(o => !hideTerm || wantStatus || !isTerminalOrderStatus(o.status))
     .sort((a, b) => {
       const diff = seqOf(b) - seqOf(a);
       return diff !== 0 ? diff : b.clOrdId.localeCompare(a.clOrdId);
@@ -2202,8 +2234,13 @@ function orderRow(o, st) {
 function syncFilterInputs(filter) {
   const t = $("blotter-filter-text");
   const s = $("blotter-filter-status");
+  const h = $("blotter-hide-terminal");
   if (t && document.activeElement !== t) t.value = filter.text;
   if (s && s.value !== filter.status) s.value = filter.status;
+  if (h) {
+    const want = filter.hideTerminal !== false;
+    if (h.checked !== want) h.checked = want;
+  }
 }
 
 function renderPositions() {

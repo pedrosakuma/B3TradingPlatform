@@ -1002,13 +1002,16 @@ function handleKeyboardCancel() {
 function readBlotterFilter() {
   try {
     const raw = sessionStorage.getItem(BLOTTER_FILTER_KEY);
-    if (!raw) return { text: "", status: "" };
+    if (!raw) return { text: "", status: "", hideTerminal: true };
     const parsed = JSON.parse(raw);
     return {
       text:   typeof parsed?.text   === "string" ? parsed.text   : "",
       status: typeof parsed?.status === "string" ? parsed.status : "",
+      // #342: hideTerminal defaults to true for both fresh and pre-existing
+      // sessions (no persisted value → treat as on).
+      hideTerminal: parsed?.hideTerminal !== false,
     };
-  } catch { return { text: "", status: "" }; }
+  } catch { return { text: "", status: "", hideTerminal: true }; }
 }
 function writeBlotterFilter(f) { sessionStorage.setItem(BLOTTER_FILTER_KEY, JSON.stringify(f)); }
 
