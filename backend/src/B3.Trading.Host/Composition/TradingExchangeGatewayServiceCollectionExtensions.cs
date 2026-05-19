@@ -97,13 +97,20 @@ public static class TradingExchangeGatewayServiceCollectionExtensions
                     }
                     var resolvedVerId = SessionVerIdResolver.Resolve(firm.SessionVerId, persistedVerId);
 
+                    // #126. Materialise the access key via the central
+                    // resolver so file-mounted secrets + the legacy flat
+                    // AccessKey shape both flow through the same code
+                    // path (with file-mode enforcement on Linux).
+                    var accessKey = FirmCredentialResolver.ResolveAccessKey(
+                        firm, lf.CreateLogger($"FirmCredentialResolver[{firm.FirmId}]"));
+
                     var clientOpts = new B3.EntryPoint.Client.EntryPointClientOptions
                     {
                         Endpoint = ep,
                         SessionId = firm.SessionId,
                         SessionVerId = resolvedVerId,
                         EnteringFirm = firm.EnteringFirm,
-                        Credentials = B3.EntryPoint.Client.EntryPointClientOptions.AccessKey(firm.AccessKey),
+                        Credentials = B3.EntryPoint.Client.EntryPointClientOptions.AccessKey(accessKey),
                         KeepAliveIntervalMs = firm.KeepAliveIntervalMs,
                         SenderLocation = firm.SenderLocation,
                         EnteringTrader = firm.EnteringTrader,
