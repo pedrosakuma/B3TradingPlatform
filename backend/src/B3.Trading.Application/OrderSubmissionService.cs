@@ -254,11 +254,14 @@ public sealed class OrderSubmissionService
         }
         if (!decision.Approved)
         {
+            var reason = decision.Reason ?? "risk_rejected";
+            var code = decision.Code ?? "risk_rejected";
             MetricsRegistry.OrdersRejectedByRisk.Add(1,
-                new KeyValuePair<string, object?>("reason", decision.Reason ?? "risk_rejected"),
+                new KeyValuePair<string, object?>("reason", reason),
+                new KeyValuePair<string, object?>("code", code),
                 new KeyValuePair<string, object?>("firmId", req.FirmId));
-            PublishSyntheticRejection(order, decision.Reason ?? "risk_rejected");
-            return OrderSubmissionResult.Rejected(clOrdId, decision.Reason ?? "risk_rejected");
+            PublishSyntheticRejection(order, reason);
+            return OrderSubmissionResult.Rejected(clOrdId, reason, code);
         }
 
         _accountant.RecordAccepted(riskCtx);
@@ -417,28 +420,34 @@ public sealed class OrderSubmissionResult
     public OrderSubmissionResultKind Kind { get; }
     public ulong ClOrdId { get; }
     public string? Reason { get; }
+    /// <summary>
+    /// #288 — stable machine-readable code (e.g. <c>min_tick_size</c>,
+    /// <c>kill_switch</c>) on rejection paths. Null on accept.
+    /// </summary>
+    public string? Code { get; }
     public Exception? GatewayException { get; }
 
-    private OrderSubmissionResult(OrderSubmissionResultKind kind, ulong clOrdId, string? reason, Exception? ex)
+    private OrderSubmissionResult(OrderSubmissionResultKind kind, ulong clOrdId, string? reason, string? code, Exception? ex)
     {
         Kind = kind;
         ClOrdId = clOrdId;
         Reason = reason;
+        Code = code;
         GatewayException = ex;
     }
 
     public static OrderSubmissionResult Accepted(ulong clOrdId) =>
-        new(OrderSubmissionResultKind.Accepted, clOrdId, null, null);
-    public static OrderSubmissionResult Rejected(ulong clOrdId, string reason) =>
-        new(OrderSubmissionResultKind.Rejected, clOrdId, reason, null);
+        new(OrderSubmissionResultKind.Accepted, clOrdId, null, null, null);
+    public static OrderSubmissionResult Rejected(ulong clOrdId, string reason, string? code = null) =>
+        new(OrderSubmissionResultKind.Rejected, clOrdId, reason, code, null);
     public static OrderSubmissionResult GatewayFailed(ulong clOrdId, Exception ex) =>
-        new(OrderSubmissionResultKind.GatewayFailed, clOrdId, "gateway_unavailable", ex);
+        new(OrderSubmissionResultKind.GatewayFailed, clOrdId, "gateway_unavailable", "gateway_unavailable", ex);
     public static OrderSubmissionResult WalBackpressure(string detail) =>
-        new(OrderSubmissionResultKind.WalBackpressure, 0, detail, null);
+        new(OrderSubmissionResultKind.WalBackpressure, 0, detail, "wal_backpressure", null);
     public static OrderSubmissionResult BadRequest(string reason) =>
-        new(OrderSubmissionResultKind.BadRequest, 0, reason, null);
+        new(OrderSubmissionResultKind.BadRequest, 0, reason, "bad_request", null);
     public static OrderSubmissionResult Drained { get; } =
-        new(OrderSubmissionResultKind.Drained, 0, "service draining", null);
+        new(OrderSubmissionResultKind.Drained, 0, "service draining", "service_draining", null);
     /// <summary>
     /// #108 — DuplicateClOrdID guard. The just-allocated ClOrdID
     /// already exists in the <see cref="WorkingOrderBook"/>. No WAL
@@ -448,7 +457,7 @@ public sealed class OrderSubmissionResult
     /// failures and so operators can spot the invariant breach.
     /// </summary>
     public static OrderSubmissionResult DuplicateClOrdId(ulong clOrdId) =>
-        new(OrderSubmissionResultKind.DuplicateClOrdId, clOrdId, "duplicate_clordid", null);
+        new(OrderSubmissionResultKind.DuplicateClOrdId, clOrdId, "duplicate_clordid", "duplicate_clordid", null);
 }
 
 public enum OrderSubmissionResultKind

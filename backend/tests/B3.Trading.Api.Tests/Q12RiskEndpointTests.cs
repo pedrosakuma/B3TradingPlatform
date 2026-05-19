@@ -237,5 +237,5 @@ public class Q12RiskEndpointTests
         return ack!;
     }
 
-    private sealed record OrderAck(string ClOrdId, string? Status, string? Reason);
+    private sealed record OrderAck(string ClOrdId, string? Status, string? Reason, string? Code);
 }

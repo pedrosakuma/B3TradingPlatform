@@ -23,7 +23,17 @@ public sealed class RiskPipeline
         {
             var decision = check.Check(ctx);
             if (!decision.Approved)
-                return decision;
+            {
+                // #288 — every pipeline rejection must surface a stable
+                // code. Most checks today only call
+                // RiskDecision.Reject(reason); fall back to the check
+                // Name (already a stable lower_snake_case identifier
+                // per the IRiskCheck contract) so the REST surface and
+                // the FE never see a null code on a pipeline reject.
+                return decision.Code is null
+                    ? decision with { Code = check.Name }
+                    : decision;
+            }
         }
         return RiskDecision.Approve;
     }

@@ -445,7 +445,11 @@ public class RiskPipelineTests
         var check = new MinTickSizeCheck(dir);
         Assert.True(check.Check(Ctx(price: 30.01m)).Approved);
         Assert.True(check.Check(Ctx(price: 30.00m)).Approved);
-        Assert.False(check.Check(Ctx(price: 30.001m)).Approved);
+        var rejected = check.Check(Ctx(price: 30.001m));
+        Assert.False(rejected.Approved);
+        // #288 — stable code on the decision itself (independent of the
+        // pipeline fallback) so direct callers also see it.
+        Assert.Equal(RiskRejectCodes.MinTickSize, rejected.Code);
     }
 
     [Fact]
@@ -469,8 +473,50 @@ public class RiskPipelineTests
         var check = new MinLotSizeCheck(dir);
         Assert.True(check.Check(Ctx(qty: 100)).Approved);
         Assert.True(check.Check(Ctx(qty: 300)).Approved);
-        Assert.False(check.Check(Ctx(qty: 150)).Approved);
+        var rejected = check.Check(Ctx(qty: 150));
+        Assert.False(rejected.Approved);
+        Assert.Equal(RiskRejectCodes.MinLotSize, rejected.Code);
         Assert.False(check.Check(Ctx(qty: 1)).Approved);
+    }
+
+    [Fact]
+    public void Pipeline_AttachesCheckName_AsCode_WhenCheckDidNotSetOne()
+    {
+        // KillSwitchCheck rejects with RiskDecision.Reject(reason) only
+        // (no explicit code), so the pipeline must fall back to its
+        // Name property. Any future check that adopts the explicit
+        // overload keeps its own code untouched (covered by the tick
+        // and lot tests above).
+        var pipeline = new RiskPipeline(new IRiskCheck[] { new AlwaysRejectNoCodeCheck("custom_name") });
+        var decision = pipeline.Evaluate(Ctx(price: 10m));
+        Assert.False(decision.Approved);
+        Assert.Equal("custom_name", decision.Code);
+    }
+
+    [Fact]
+    public void Pipeline_PreservesExplicitCode_WhenCheckSetOne()
+    {
+        var pipeline = new RiskPipeline(new IRiskCheck[] { new AlwaysRejectWithCodeCheck("custom_name", "EXPLICIT_CODE") });
+        var decision = pipeline.Evaluate(Ctx(price: 10m));
+        Assert.False(decision.Approved);
+        Assert.Equal("EXPLICIT_CODE", decision.Code);
+    }
+
+    private sealed class AlwaysRejectNoCodeCheck : IRiskCheck
+    {
+        public AlwaysRejectNoCodeCheck(string name) => Name = name;
+        public int Order => 0;
+        public string Name { get; }
+        public RiskDecision Check(RiskContext ctx) => RiskDecision.Reject("nope");
+    }
+
+    private sealed class AlwaysRejectWithCodeCheck : IRiskCheck
+    {
+        private readonly string _code;
+        public AlwaysRejectWithCodeCheck(string name, string code) { Name = name; _code = code; }
+        public int Order => 0;
+        public string Name { get; }
+        public RiskDecision Check(RiskContext ctx) => RiskDecision.Reject(_code, "nope");
     }
 
     [Fact]

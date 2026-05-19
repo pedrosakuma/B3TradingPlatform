@@ -46,10 +46,22 @@ public sealed record RiskContext(
     /// </summary>
     SubAccountId? SubAccountId = null);
 
-public sealed record RiskDecision(bool Approved, string? Reason)
+public sealed record RiskDecision(bool Approved, string? Reason, string? Code = null)
 {
-    public static readonly RiskDecision Approve = new(true, null);
-    public static RiskDecision Reject(string reason) => new(false, reason);
+    public static readonly RiskDecision Approve = new(true, null, null);
+    public static RiskDecision Reject(string reason) => new(false, reason, null);
+
+    /// <summary>
+    /// #288 — stable machine-readable code. Preferred over the legacy
+    /// <c>Reject(reason)</c> overload so the REST surface and the FE
+    /// can branch on a fixed identifier instead of parsing the
+    /// human-readable reason. <see cref="RiskPipeline.Evaluate"/> falls
+    /// back to the rejecting check's <see cref="IRiskCheck.Name"/> when
+    /// a check rejects without supplying its own code, so every
+    /// pipeline rejection surfaces a non-null code without each check
+    /// having to opt in.
+    /// </summary>
+    public static RiskDecision Reject(string code, string reason) => new(false, reason, code);
 }
 
 /// <summary>

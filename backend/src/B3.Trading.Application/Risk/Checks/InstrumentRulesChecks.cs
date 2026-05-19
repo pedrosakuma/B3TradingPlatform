@@ -44,6 +44,7 @@ public sealed class MinTickSizeCheck : IRiskCheck
         // that would bite a double-based modulus.
         if (decimal.Remainder(ctx.Price.Value, tick) != 0m)
             return RiskDecision.Reject(
+                RiskRejectCodes.MinTickSize,
                 $"price {ctx.Price.Value} is not a multiple of tick size {tick} for {ctx.Symbol}");
         return RiskDecision.Approve;
     }
@@ -70,6 +71,7 @@ public sealed class MinLotSizeCheck : IRiskCheck
 
         if (ctx.Quantity % lot != 0)
             return RiskDecision.Reject(
+                RiskRejectCodes.MinLotSize,
                 $"quantity {ctx.Quantity} is not a multiple of lot size {lot} for {ctx.Symbol}");
         return RiskDecision.Approve;
     }
