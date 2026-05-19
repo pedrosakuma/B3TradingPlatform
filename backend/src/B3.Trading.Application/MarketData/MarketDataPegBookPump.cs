@@ -22,10 +22,12 @@ namespace B3.Trading.Application.MarketData;
 /// </para>
 ///
 /// <para>
-/// <b>SDK gap.</b> Today only <c>Trade</c> and <c>InfoSnapshot.LastTradePrice</c>
-/// drive the cache; the BBO legs in <see cref="BookTop"/> stay null
-/// until the SDK surfaces book-top frames. See
-/// <see cref="PegBookTopCache"/> for the fallback contract.
+/// <b>BBO source.</b> This pump only writes <c>Last</c> (from Trade /
+/// InfoSnapshot). The BBO legs in <see cref="BookTop"/> are populated
+/// by <see cref="MboPegBookPump"/> off <see cref="MboBookStore"/>
+/// when <c>MarketDataOptions.EnableBook</c> is on (Q3.6 Stage C,
+/// #286). When MBO is off, BBO stays null and the cache falls back
+/// to last-trade per the contract in <see cref="PegBookTopCache"/>.
 /// </para>
 /// </summary>
 public sealed class MarketDataPegBookPump : IHostedService

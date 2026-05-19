@@ -245,6 +245,15 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         services.AddSingleton<B3.Trading.Application.MarketData.MboBookStorePump>();
         services.AddHostedService(sp =>
             sp.GetRequiredService<B3.Trading.Application.MarketData.MboBookStorePump>());
+        // Q3.6 Stage C (#286). Bridges MboBookStore-derived BBO into
+        // the Pegged book-top cache. Closes the v1 SDK gap where
+        // PegRef.Mid / PegRef.Best transparently fell back to last-
+        // trade because no BBO source existed. No-op when EnableBook
+        // is false (the legacy v1 last-trade fallback then kicks in
+        // unchanged).
+        services.AddSingleton<B3.Trading.Application.MarketData.MboPegBookPump>();
+        services.AddHostedService(sp =>
+            sp.GetRequiredService<B3.Trading.Application.MarketData.MboPegBookPump>());
         services.AddSingleton<AlgoEngine>();
         services.AddHostedService(sp => sp.GetRequiredService<AlgoEngine>());
         services.AddHostedService<AlgoScheduler>();
