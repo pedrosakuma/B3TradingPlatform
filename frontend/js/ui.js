@@ -10,13 +10,15 @@ import { rulesFor } from "./validation.js";
 
 const $ = (id) => document.getElementById(id);
 
-// ── Number formatting (pt-BR) ──────────────────────────────────────
+// ── Number formatting (en-US thousands separators / decimal point).
+// #340 quick-wins: unified locale so quantities and prices render with
+// 1,000.00 separators across the trader UI regardless of OS locale.
 // B3 traders expect Brazilian locale (`100.000,00`) for quantities,
 // prices and notionals. Centralised here so every panel stays in sync
 // and we have a single place to flip the locale if the product call
 // changes later.
-const _qtyFmt = new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 0 });
-const _pxFmt  = new Intl.NumberFormat("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const _qtyFmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
+const _pxFmt  = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 function fmtQty(n) {
   if (n == null || n === "" || Number.isNaN(Number(n))) return "—";
   return _qtyFmt.format(Number(n));
@@ -1439,7 +1441,7 @@ const MD_PANEL_SELECTORS = [".panel.market-data", ".panel.dob", ".panel.chart", 
 
 function fmtStaleTimestamp(ms) {
   if (!ms) return "no data";
-  return new Date(ms).toLocaleTimeString("pt-BR", { hour12: false });
+  return new Date(ms).toLocaleTimeString("en-US", { hour12: false });
 }
 
 function renderStaleness(kind) {
