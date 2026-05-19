@@ -35,6 +35,45 @@ export { fmtQty, fmtPx };
 // stomp each other's saved target.
 const _modalReturnFocus = new Map();
 
+// #342: Positions sort + executions log symbol filter — purely view-local
+// UI state with sessionStorage persistence. Not in state.js because no
+// other module depends on it; keeping it in the renderer avoids cross-
+// module churn for what is a per-tab cosmetic preference.
+const POSITIONS_SORT_KEY = "b3tp.positions.sort";
+const EXEC_FILTER_KEY    = "b3tp.executions.symbolFilter";
+
+// Default: largest absolute net first — the position that needs the
+// most attention. Click cycles ascending → descending → none (back to
+// default). String columns omit the "none" leg since alpha-asc is a
+// useful baseline.
+const POSITIONS_SORT_DEFAULT = { col: "absNet", dir: "desc" };
+let _positionsSort = POSITIONS_SORT_DEFAULT;
+let _execSymbolFilter = "";
+
+function readPositionsSort() {
+  try {
+    const raw = sessionStorage.getItem(POSITIONS_SORT_KEY);
+    if (!raw) return { ...POSITIONS_SORT_DEFAULT };
+    const parsed = JSON.parse(raw);
+    const col = ["symbol", "absNet", "price"].includes(parsed?.col) ? parsed.col : "absNet";
+    const dir = parsed?.dir === "asc" ? "asc" : "desc";
+    return { col, dir };
+  } catch { return { ...POSITIONS_SORT_DEFAULT }; }
+}
+function writePositionsSort(s) {
+  try { sessionStorage.setItem(POSITIONS_SORT_KEY, JSON.stringify(s)); } catch { /* swallow */ }
+}
+function readExecSymbolFilter() {
+  try { return sessionStorage.getItem(EXEC_FILTER_KEY) || ""; }
+  catch { return ""; }
+}
+function writeExecSymbolFilter(v) {
+  try {
+    if (v) sessionStorage.setItem(EXEC_FILTER_KEY, v);
+    else   sessionStorage.removeItem(EXEC_FILTER_KEY);
+  } catch { /* swallow */ }
+}
+
 function rememberFocusForModal(modalId) {
   const el = document.activeElement;
   // Skip <body> / null / the dialog itself — restoring those is a no-op
@@ -933,6 +972,42 @@ export function bindUi() {
   if (filterText)     filterText.addEventListener("input",  fireFilter);
   if (filterStatus)   filterStatus.addEventListener("change", fireFilter);
   if (filterHideTerm) filterHideTerm.addEventListener("change", fireFilter);
+
+  // #342: Positions click-to-sort. Click cycles asc → desc → default
+  // (|net| desc). Keyboard activation mirrors mouse for accessibility
+  // since the headers are role="button".
+  _positionsSort = readPositionsSort();
+  document.querySelectorAll(".panel.positions th.sortable").forEach(th => {
+    const cycle = () => {
+      const key = th.getAttribute("data-sort-key");
+      if (_positionsSort.col === key) {
+        _positionsSort = _positionsSort.dir === "desc"
+          ? { col: key, dir: "asc" }
+          : { ...POSITIONS_SORT_DEFAULT };
+      } else {
+        _positionsSort = { col: key, dir: "desc" };
+      }
+      writePositionsSort(_positionsSort);
+      renderPositions();
+    };
+    th.addEventListener("click", cycle);
+    th.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); cycle(); }
+    });
+  });
+
+  // #342: Executions log symbol filter. Substring match, case-insensitive,
+  // persisted per tab so the trader's last filter survives a page reload.
+  const execFilter = $("exec-filter-symbol");
+  if (execFilter) {
+    _execSymbolFilter = readExecSymbolFilter();
+    execFilter.value = _execSymbolFilter;
+    execFilter.addEventListener("input", () => {
+      _execSymbolFilter = execFilter.value;
+      writeExecSymbolFilter(_execSymbolFilter);
+      renderExecutions();
+    });
+  }
 
   // Blotter pagination controls. Renderer hides the bar when there's
   // only one page; clicks here only request a page change — clamping
@@ -2246,8 +2321,8 @@ function syncFilterInputs(filter) {
 function renderPositions() {
   const body = $("positions-body");
   const positions = [...getState().positions.values()]
-    .filter(p => p.netQuantity !== 0)
-    .sort((a, b) => a.symbol.localeCompare(b.symbol));
+    .filter(p => p.netQuantity !== 0);
+  sortPositionsInPlace(positions, _positionsSort);
   body.innerHTML = positions.length === 0
     ? `<tr><td colspan="3" class="muted">No positions</td></tr>`
     : positions.map(p => `<tr>
@@ -2255,11 +2330,45 @@ function renderPositions() {
         <td class="num">${fmtQty(p.netQuantity)}</td>
         <td class="num">${fmtPx(p.averageEntryPrice)}</td>
       </tr>`).join("");
+  syncPositionsSortHeaders();
+}
+
+// #342: pure sort helper so the column logic can be exercised without
+// touching the DOM. `dir` is "asc" | "desc"; for the |net| column we
+// compare absolute values so longs and shorts of equal magnitude land
+// adjacent.
+export function sortPositionsInPlace(rows, sort) {
+  const dirMul = sort.dir === "asc" ? 1 : -1;
+  if (sort.col === "symbol") {
+    rows.sort((a, b) => a.symbol.localeCompare(b.symbol) * dirMul);
+  } else if (sort.col === "price") {
+    rows.sort((a, b) => ((Number(a.averageEntryPrice) || 0) - (Number(b.averageEntryPrice) || 0)) * dirMul);
+  } else {
+    // absNet (default).
+    rows.sort((a, b) => (Math.abs(Number(a.netQuantity) || 0) - Math.abs(Number(b.netQuantity) || 0)) * dirMul);
+  }
+  return rows;
+}
+
+function syncPositionsSortHeaders() {
+  const ths = document.querySelectorAll(".panel.positions th.sortable");
+  ths.forEach(th => {
+    const key = th.getAttribute("data-sort-key");
+    if (key === _positionsSort.col) {
+      th.setAttribute("aria-sort", _positionsSort.dir === "asc" ? "ascending" : "descending");
+    } else {
+      th.setAttribute("aria-sort", "none");
+    }
+  });
 }
 
 function renderExecutions() {
   const log = $("executions-log");
-  const items = getState().executions;
+  const filter = _execSymbolFilter.trim().toUpperCase();
+  let items = getState().executions;
+  if (filter) {
+    items = items.filter(e => typeof e.symbol === "string" && e.symbol.toUpperCase().includes(filter));
+  }
   // Newest first.
   log.innerHTML = items.slice().reverse().map(execRow).join("");
 }
