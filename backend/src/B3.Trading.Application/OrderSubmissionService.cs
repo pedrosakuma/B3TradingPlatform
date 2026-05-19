@@ -38,6 +38,7 @@ public sealed class OrderSubmissionService
     private readonly Lifecycle.IDrainGate _drain;
     private readonly IUserBotOrderMappingRegistry? _botMappings;
     private readonly Scheduling.GtdExpirationScheduler? _gtdScheduler;
+    private readonly Scheduling.IocFokWatchdog? _iocWatchdog;
     private readonly ILogger<OrderSubmissionService> _logger;
 
     public OrderSubmissionService(
@@ -53,7 +54,8 @@ public sealed class OrderSubmissionService
         Lifecycle.IDrainGate drain,
         ILogger<OrderSubmissionService> logger,
         IUserBotOrderMappingRegistry? botMappings = null,
-        Scheduling.GtdExpirationScheduler? gtdScheduler = null)
+        Scheduling.GtdExpirationScheduler? gtdScheduler = null,
+        Scheduling.IocFokWatchdog? iocWatchdog = null)
     {
         _clOrdIds = clOrdIds;
         _ownership = ownership;
@@ -67,6 +69,7 @@ public sealed class OrderSubmissionService
         _drain = drain;
         _botMappings = botMappings;
         _gtdScheduler = gtdScheduler;
+        _iocWatchdog = iocWatchdog;
         _logger = logger;
     }
 
@@ -286,6 +289,16 @@ public sealed class OrderSubmissionService
         // No-ops for non-GTD orders; no-ops when the scheduler is not
         // wired (test contexts that don't need expiry firing).
         _gtdScheduler?.OnOrderTracked(order);
+
+        // #351 — Defensive watchdog for IOC/FOK. Upstream matching
+        // (B3MatchingPlatform#357) can silently drop an IOC aggressor
+        // that finds no liquidity, leaving the order pinned in
+        // WorkingOrderBook with a never-released margin reservation.
+        // Arming the watchdog AFTER the gateway submit succeeds
+        // mirrors the GTD scheduler ordering: the timer should only
+        // run once we believe the venue has the order, otherwise a
+        // submit-side failure synthesises its own rejection above.
+        _iocWatchdog?.Register(order);
 
         return OrderSubmissionResult.Accepted(clOrdId);
     }

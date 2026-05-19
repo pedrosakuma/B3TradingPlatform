@@ -38,6 +38,17 @@ public static class MetricsRegistry
         Meter.CreateCounter<long>("trading.orders.gtd_expired");
     public static readonly Counter<long> OrdersModifyRequested =
         Meter.CreateCounter<long>("trading.orders.modify_requested");
+    /// <summary>
+    /// #351 — Counts every time the IOC/FOK watchdog had to
+    /// synthesise a terminal Cancel because the gateway never
+    /// returned an ExecutionReport within the configured timeout
+    /// (defends against upstream <c>B3MatchingPlatform#357</c>
+    /// silent-drop). Tagged with <c>firmId</c>, <c>symbol</c>, and
+    /// <c>tif</c>. A non-zero rate is a regression detector after a
+    /// matching-image bump.
+    /// </summary>
+    public static readonly Counter<long> OrdersIocNoResponse =
+        Meter.CreateCounter<long>("trading.orders.ioc_no_response");
 
     // Execution reports inbound
     public static readonly Counter<long> ExecutionReportsReceived =

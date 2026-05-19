@@ -172,6 +172,16 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         services.AddHostedService(sp =>
             sp.GetRequiredService<B3.Trading.Application.Scheduling.GtdExpirationScheduler>());
 
+        // #351 — IOC/FOK silent-drop watchdog. Defensive against
+        // upstream B3MatchingPlatform#357 (Limit/IOC against empty
+        // opposite book silently drops without an ER). Singleton so
+        // OrderSubmissionService.Register and
+        // ExecutionReportProcessor.OnOrderTerminal both target the
+        // same timer registry.
+        services.Configure<B3.Trading.Application.Scheduling.IocFokWatchdogOptions>(
+            configuration.GetSection(B3.Trading.Application.Scheduling.IocFokWatchdogOptions.SectionName));
+        services.AddSingleton<B3.Trading.Application.Scheduling.IocFokWatchdog>();
+
         // Algo engine signal channel + hosted consumer (RFC algo-orders-v0 §4.3).
         // In slice 5a the consumer body was a no-op reactor; slice 5b plugged in the
         // Iceberg state machine; slice 6 adds the AlgoScheduler hosted service that
