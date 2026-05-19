@@ -228,6 +228,13 @@ public sealed class OrderSubmissionService
                 req.Source == OrderSubmissionSource.Algo ? "algo" : "manual"),
             new KeyValuePair<string, object?>("firmId", req.FirmId));
 
+        // Ordering note (RFC docs/rfcs/risk-pipeline-ordering-v0.md, #262):
+        // risk evaluation runs *post-WAL* on the submit path. On reject we
+        // emit a synthetic ExecutionReportReceivedEvent so the rejection is
+        // recoverable from the WAL (FE executions log, /executions/history,
+        // CVM 35/505, drop-copy, best-exec touch). This is intentionally
+        // asymmetric with OrderModifyService, which evaluates pre-WAL — see
+        // RFC §1.3 and the open audit-gap follow-up.
         var riskCtx = new RiskContext(
             req.Owner, req.FirmId, req.Symbol, req.Side, req.Type, req.Quantity, req.Price,
             TimeInForce: req.TimeInForce,

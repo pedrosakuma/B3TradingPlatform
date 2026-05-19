@@ -230,6 +230,11 @@ public sealed class OrderModifyService
             GoodTillDate: effGtd,
             SubAccountId: orig.SubAccountId);
 
+        // Ordering note (RFC docs/rfcs/risk-pipeline-ordering-v0.md, #262):
+        // risk evaluation runs *pre-WAL* on the modify path. A rejected
+        // modify leaves no WAL footprint today — an asymmetry vs.
+        // OrderSubmissionService that the RFC tracks as an open audit gap
+        // (Option B follow-up: emit OrderReplaceRejectedEvent here).
         var decision = _risk.Evaluate(riskCtx);
         if (!decision.Approved)
         {
