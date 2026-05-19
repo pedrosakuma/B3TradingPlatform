@@ -1983,14 +1983,23 @@ public sealed class AlgoEngine : BackgroundService
             if (_replacements.TryConsumeByOriginal(child.ClOrdId, out var intent, out var ambiguousHeld))
             {
                 MetricsRegistry.AlgoPeggedRepegFailed.Add(1);
-                if (ambiguousHeld && _replaceMargin is not null && intent is not null)
+                // Code review feedback on #300 (PR #334). PrepareReplaceAsync
+                // always records a reservation under the new ClOrdID (even
+                // for zero-delta replaces) — the only registry-driven
+                // cleanup APIs are CommitReplace/AbortReplace. Once we've
+                // consumed the intent the venue's later Replaced/Rejected/
+                // Canceled ER will no longer hit those cleanup paths, so
+                // the reservation must be aborted unconditionally here —
+                // the earlier ambiguousHeld-only gate leaked normal in-
+                // flight reservations indefinitely.
+                if (_replaceMargin is not null && intent is not null)
                 {
                     try { _replaceMargin.AbortReplace(intent.NewClOrdId); }
                     catch (Exception abortEx)
                     {
                         _logger.LogWarning(abortEx,
-                            "AlgoEngine pegged repeg fill-race: AbortReplace failed for new ClOrdID {NewClOrdId}.",
-                            intent.NewClOrdId);
+                            "AlgoEngine pegged repeg fill-race: AbortReplace failed for new ClOrdID {NewClOrdId} (ambiguousHeld={Ambiguous}).",
+                            intent.NewClOrdId, ambiguousHeld);
                     }
                 }
             }
@@ -2079,23 +2088,16 @@ public sealed class AlgoEngine : BackgroundService
         // throttle anchor is unrelated to in-flight cycles, and
         // bumping it would mask the next legitimate drift eval once
         // the cycle completes.
-        if (rt.RepegPending) return;
-
-        var now = _clock.GetUtcNow();
-        if (rt.PeggedLastEvalUtc != default
-            && (now - rt.PeggedLastEvalUtc) < pgp.RepegInterval)
-        {
-            return;
-        }
-
-        var target = ResolvePeggedTarget(algo, pgp);
-        if (target is null)
-        {
-            // No live ref yet — don't disturb the working slice; next
-            // tick may have a price.
-            return;
-        }
-
+        // #300 (PR #334) code-review fix. The terminal-OLD watchdog
+        // (#329) MUST run before the RepegPending throttle. Pre-#300
+        // the throttle was the only state that meant "cycle in flight"
+        // and would naturally clear on the Cancelled-ack. Post-#300 it
+        // only clears on Replaced-adoption — and if AlgoSignalQueue
+        // drops that signal the throttle stays true forever, the
+        // watchdog at lines ~2126-2134 never runs, and the parent is
+        // wedged on the terminal OLD child indefinitely. Order matters:
+        // watchdog first (it both ticks the counter and can clean up
+        // when ticks exhaust), throttle second (governs new cycles only).
         if (!_orders.TryGet(liveChildClOrdId, out var child) || child is null
             || IsChildTerminal(child))
         {
@@ -2131,6 +2133,62 @@ public sealed class AlgoEngine : BackgroundService
                 _logger.LogWarning(
                     "AlgoEngine Pegged repeg: live child {Child} on {Firm}/{AlgoId} observed terminal=Replaced for {Ticks} ticks; adoption signal appears dropped — clearing slot and resubmitting on next tick.",
                     liveChildClOrdId, algo.FirmId, algo.AlgoId, rt.PeggedReplacedHoldTicks);
+
+                // #300 (PR #334) code-review fix. The dropped-adoption
+                // fallback must also wind down the cancel-replace cycle
+                // it started: release the pending replace intent + its
+                // margin reservation, clear RepegPending, and emit the
+                // Resolved-with-Aborted WAL companion if a Started was
+                // already persisted. Without this the parent leaks a
+                // PendingReplacementRegistry row + a reserve-margin
+                // entry indefinitely AND the audit pair stays
+                // unbalanced. Best-effort under WAL backpressure —
+                // Reconcile's orphan-prune covers the audit-pair gap on
+                // the next restart.
+                if (rt.RepegPending)
+                {
+                    rt.RepegPending = false;
+                    if (_replacements is not null
+                        && _replacements.TryConsumeByOriginal(liveChildClOrdId, out var staleIntent, out var staleAmbiguous)
+                        && staleIntent is not null
+                        && _replaceMargin is not null)
+                    {
+                        try { _replaceMargin.AbortReplace(staleIntent.NewClOrdId); }
+                        catch (Exception abortEx)
+                        {
+                            _logger.LogWarning(abortEx,
+                                "AlgoEngine Pegged repeg watchdog: AbortReplace failed for new ClOrdID {NewClOrdId} (ambiguousHeld={Ambiguous}).",
+                                staleIntent.NewClOrdId, staleAmbiguous);
+                        }
+                    }
+                    if (_peggedRepeg?.TryGet(algo.FirmId, algo.AlgoId) is not null)
+                    {
+                        try
+                        {
+                            var firmIdSnap = algo.FirmId;
+                            var algoIdSnap = algo.AlgoId;
+                            var cancelledIdSnap = liveChildClOrdId;
+                            var atUtcSnap = _clock.GetUtcNow();
+                            var book = _peggedRepeg;
+                            _dispatcher.Dispatch(
+                                new AlgoPeggedRepegResolvedEvent
+                                {
+                                    AlgoId = algoIdSnap,
+                                    FirmId = firmIdSnap,
+                                    CancelledChildClOrdId = cancelledIdSnap,
+                                    AtUtc = atUtcSnap,
+                                    Aborted = true,
+                                },
+                                () => book?.Remove(firmIdSnap, algoIdSnap));
+                        }
+                        catch (WalBackpressureException)
+                        {
+                            MetricsRegistry.WalBackpressure.Add(1,
+                                new KeyValuePair<string, object?>("call_site", "algo.pegged.repeg-resolved.watchdog"));
+                        }
+                    }
+                    MetricsRegistry.AlgoPeggedRepegFailed.Add(1);
+                }
             }
             rt.PeggedReplacedHoldTicks = 0;
             rt.LiveChildClOrdId = null;
@@ -2140,6 +2198,26 @@ public sealed class AlgoEngine : BackgroundService
         // Non-terminal child observed — clear the dropped-adoption
         // watchdog so a future Replaced does not inherit a stale count.
         rt.PeggedReplacedHoldTicks = 0;
+
+        // Throttle: don't start a NEW cycle while one is in flight.
+        // Moved here from before the terminal block (PR #334 code review)
+        // so the dropped-adoption watchdog above always runs.
+        if (rt.RepegPending) return;
+
+        var now = _clock.GetUtcNow();
+        if (rt.PeggedLastEvalUtc != default
+            && (now - rt.PeggedLastEvalUtc) < pgp.RepegInterval)
+        {
+            return;
+        }
+
+        var target = ResolvePeggedTarget(algo, pgp);
+        if (target is null)
+        {
+            // No live ref yet — don't disturb the working slice; next
+            // tick may have a price.
+            return;
+        }
 
         var currentPrice = child.Price ?? 0m;
         if (currentPrice <= 0m
