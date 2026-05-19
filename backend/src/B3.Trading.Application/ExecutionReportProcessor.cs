@@ -46,6 +46,7 @@ public sealed class ExecutionReportProcessor
     private readonly Risk.IReplaceMarginCoordinator? _replaceMargin;
     private readonly IBotErRouter? _botErRouter;
     private readonly Scheduling.GtdExpirationScheduler? _gtdScheduler;
+    private readonly Scheduling.IocFokWatchdog? _iocWatchdog;
     private readonly FillProjection? _fillProjection;
 
     public ExecutionReportProcessor(
@@ -67,7 +68,8 @@ public sealed class ExecutionReportProcessor
         PnlKeeper? pnlKeeper = null,
         SubAccountPositionKeeper? subAccountPositions = null,
         SubAccountPnlKeeper? subAccountPnl = null,
-        FillProjection? fillProjection = null)
+        FillProjection? fillProjection = null,
+        Scheduling.IocFokWatchdog? iocWatchdog = null)
     {
         _ownership = ownership;
         _orders = orders;
@@ -88,6 +90,7 @@ public sealed class ExecutionReportProcessor
         _subAccountPositions = subAccountPositions;
         _subAccountPnl = subAccountPnl;
         _fillProjection = fillProjection;
+        _iocWatchdog = iocWatchdog;
     }
 
     /// <summary>
@@ -719,6 +722,12 @@ public sealed class ExecutionReportProcessor
             or OrderStatus.Rejected or OrderStatus.Replaced)
         {
             _gtdScheduler?.OnOrderTerminal(lookupId);
+            // #351 — Cancel the IOC/FOK watchdog timer (if any). The
+            // expected happy-path: a fill / cancel / reject ER lands
+            // within the watchdog timeout, this hook disposes the
+            // pending timer, and the synthetic Cancel never fires.
+            // Cheap no-op for non IOC/FOK orders.
+            _iocWatchdog?.OnOrderTerminal(lookupId);
         }
 
         // Server-side STP detection (#117): if the matching engine
