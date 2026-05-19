@@ -770,9 +770,9 @@ function formatPretradeWarning(w) {
       return `fat-finger: price deviates ${pct}% from last trade ${ui.fmtPx(w.lastPrice)}`;
     }
     case "qty":
-      return `large quantity: ${w.qty.toLocaleString("pt-BR")} > ${w.multiple}× lot (${w.threshold.toLocaleString("pt-BR")})`;
+      return `large quantity: ${w.qty.toLocaleString("en-US")} > ${w.multiple}× lot (${w.threshold.toLocaleString("en-US")})`;
     case "market_notional": {
-      const fmt = (n) => `R$ ${n.toLocaleString("pt-BR", { maximumFractionDigits: 0 })}`;
+      const fmt = (n) => `R$ ${n.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
       return `market notional ≈ ${fmt(w.notional)} ≥ ${fmt(w.threshold)}`;
     }
     default:
