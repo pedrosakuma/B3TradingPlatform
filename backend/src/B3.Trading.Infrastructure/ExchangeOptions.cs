@@ -3,6 +3,56 @@ using B3.Trading.Application;
 namespace B3.Trading.Infrastructure;
 
 /// <summary>
+/// #126. Selects the credential shape used in <see cref="FirmCredentialsConfig"/>.
+/// Today the B3.EntryPoint.Client SDK (0.14.3) only exposes
+/// <c>Credentials.FromUtf8(accessKey)</c>; this enum exists so future SDK
+/// modes (certificate / token) can be added without re-shaping every
+/// firm config in the wild.
+/// </summary>
+public enum FirmCredentialsMode
+{
+    /// <summary>Opaque access key passed via <c>Negotiate.Credentials</c> (the only mode supported by SDK 0.14.3).</summary>
+    AccessKey,
+}
+
+/// <summary>
+/// #126. Per-firm credential bundle. Replaces the loose
+/// <see cref="FirmConfig.AccessKey"/> with a discriminated shape so secret
+/// material can be loaded from indirection (file mount) and so new SDK
+/// credential modes can be added without breaking deployments.
+/// <para>
+/// Exactly one secret source must be supplied for each mode:
+/// <list type="bullet">
+///   <item><see cref="AccessKey"/> — inline literal (back-compat / dev).</item>
+///   <item><see cref="AccessKeyFile"/> — path read at startup (preferred for prod;
+///         file must be 0600 / 0400 on Linux, see <see cref="FirmCredentialResolver"/>).</item>
+/// </list>
+/// </para>
+/// </summary>
+public sealed class FirmCredentialsConfig
+{
+    /// <summary>Discriminator. Only <see cref="FirmCredentialsMode.AccessKey"/> is wired today.</summary>
+    public FirmCredentialsMode Mode { get; set; } = FirmCredentialsMode.AccessKey;
+
+    /// <summary>Inline access-key literal. Mutually exclusive with <see cref="AccessKeyFile"/>.</summary>
+    public string? AccessKey { get; set; }
+
+    /// <summary>Path to a file containing the access key (single line, trimmed). Mutually exclusive with <see cref="AccessKey"/>.</summary>
+    public string? AccessKeyFile { get; set; }
+
+    /// <summary>
+    /// Sanitized projection — credential material is never printed. Test
+    /// fixtures + the structured logger surface this shape so a config
+    /// dump never leaks secret bytes.
+    /// </summary>
+    public override string ToString() =>
+        $"FirmCredentialsConfig {{ Mode = {Mode}, AccessKey = {Redact(AccessKey)}, AccessKeyFile = {AccessKeyFile ?? "<null>"} }}";
+
+    private static string Redact(string? value) =>
+        string.IsNullOrEmpty(value) ? "<null>" : $"<redacted:{value!.Length}>";
+}
+
+/// <summary>
 /// Per-firm FIXP session configuration. One instance per firm represented
 /// on the platform (1 platform → N FIXP sessions, see issue #1 §1).
 ///
@@ -27,8 +77,21 @@ public sealed class FirmConfig
     /// <summary>Identifies the broker firm that will enter orders.</summary>
     public uint EnteringFirm { get; set; }
 
-    /// <summary>Opaque access key sent in <c>Negotiate.Credentials</c> via <c>Credentials.FromUtf8</c>.</summary>
+    /// <summary>
+    /// Legacy. Opaque access key sent in <c>Negotiate.Credentials</c> via
+    /// <c>Credentials.FromUtf8</c>. Kept for back-compat with existing
+    /// deployments; new configs should use <see cref="Credentials"/>. When
+    /// both are set, <see cref="Credentials"/> wins and the legacy value
+    /// is ignored after a startup WARN.
+    /// </summary>
     public string AccessKey { get; set; } = string.Empty;
+
+    /// <summary>
+    /// #126. Discriminated credential bundle. When set, wins over the
+    /// legacy <see cref="AccessKey"/> field and supports file-mounted
+    /// secret indirection (preferred for production).
+    /// </summary>
+    public FirmCredentialsConfig? Credentials { get; set; }
 
     /// <summary>FIX <c>SenderLocation</c> (max 10 chars). Per-firm default; not threaded per-order in v1.</summary>
     public string SenderLocation { get; set; } = string.Empty;

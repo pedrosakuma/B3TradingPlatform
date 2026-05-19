@@ -82,8 +82,10 @@ public sealed class ExchangeOptionsValidator : IValidateOptions<ExchangeOptions>
             failures.Add($"{p}.Endpoint is required (host:port).");
         else if (!TryParseEndpointShape(f.Endpoint))
             failures.Add($"{p}.Endpoint='{f.Endpoint}' must be 'host:port' with a numeric port.");
-        if (string.IsNullOrEmpty(f.AccessKey))
-            failures.Add($"{p}.AccessKey is required.");
+        if (!HasAnyCredentialConfigured(f))
+            failures.Add($"{p}.AccessKey or {p}.Credentials is required.");
+        else
+            ValidateCredentials(p, f, failures);
         if (f.SessionId == 0)
             failures.Add($"{p}.SessionId must be > 0 (assigned by B3 per firm).");
         if (f.SessionVerId == 0)
@@ -110,5 +112,38 @@ public sealed class ExchangeOptionsValidator : IValidateOptions<ExchangeOptions>
             && !string.IsNullOrWhiteSpace(parts[0])
             && int.TryParse(parts[1], out var port)
             && port is > 0 and <= 65535;
+    }
+
+    private static bool HasAnyCredentialConfigured(FirmConfig f) =>
+        !string.IsNullOrEmpty(f.AccessKey) || f.Credentials is not null;
+
+    /// <summary>
+    /// #126. Per-mode shape check. The detailed file-mode enforcement
+    /// (Linux 0600 / 0400) lives in <see cref="FirmCredentialResolver"/>
+    /// because it requires a filesystem stat and we want options
+    /// validation to stay pure / cheap. Here we only validate the static
+    /// shape — exactly one secret source per mode, no spurious fields.
+    /// </summary>
+    private static void ValidateCredentials(string p, FirmConfig f, List<string> failures)
+    {
+        var creds = f.Credentials;
+        if (creds is null)
+            return;
+
+        switch (creds.Mode)
+        {
+            case FirmCredentialsMode.AccessKey:
+                var hasInline = !string.IsNullOrEmpty(creds.AccessKey);
+                var hasFile = !string.IsNullOrWhiteSpace(creds.AccessKeyFile);
+                if (hasInline && hasFile)
+                    failures.Add($"{p}.Credentials sets both AccessKey and AccessKeyFile; exactly one is required for Mode=AccessKey.");
+                else if (!hasInline && !hasFile)
+                    failures.Add($"{p}.Credentials.Mode=AccessKey requires either AccessKey or AccessKeyFile to be set.");
+                break;
+
+            default:
+                failures.Add($"{p}.Credentials.Mode={creds.Mode} is not supported by the wired B3.EntryPoint.Client SDK.");
+                break;
+        }
     }
 }
