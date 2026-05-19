@@ -9,16 +9,16 @@ namespace B3.Trading.Application.MarketData;
 /// layer so tests can inject prices directly without a real MD feed.
 ///
 /// <para>
-/// <b>SDK gap.</b> The current <c>B3.MarketData.WebSocketClient</c> 0.1.0
-/// only surfaces <c>Trade</c> + <c>InfoSnapshot</c> events; BBO frames
-/// are not raised end-to-end (tracked alongside the auction-event SDK
-/// gap — see <c>IMarketDataSubscriber</c>). Until the SDK ships BBO,
-/// <see cref="MarketDataPegBookPump"/> only writes the <c>Last</c>
-/// field. For <see cref="PegRef.Mid"/> / <see cref="PegRef.Best"/>
-/// callers therefore transparently fall back to last-trade — same
-/// price for all three pegRefs in v0. Tests that need to exercise
-/// distinct mid/best/last paths use the in-memory cache directly via
-/// <see cref="UpdateBookTop"/>.
+/// <b>BBO source (Q3.6 Stage C, #286).</b> Best-bid / best-ask are
+/// populated by <see cref="MboPegBookPump"/> off the in-host
+/// <see cref="MboBookStore"/> when <c>MarketDataOptions.EnableBook</c>
+/// is on — the SDK still does not raise standalone BBO frames, but
+/// the MBO feed already carries the per-order book we aggregate. When
+/// MBO is disabled, the BBO legs stay null and <see cref="BookTop"/>
+/// transparently falls back to last-trade for all three pegRefs
+/// (legacy v1 behavior). Last-trade itself is fed by
+/// <see cref="MarketDataPegBookPump"/> off <c>Trade</c> /
+/// <c>InfoSnapshot</c> events as before.
 /// </para>
 /// </summary>
 public sealed class PegBookTopCache
