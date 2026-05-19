@@ -78,6 +78,13 @@ const state = {
   // `selectedSymbol`.
   tape: new Map(),         // Symbol -> [{tradeId, price, qty, side, receivedAt, busted}]
   tapeShowAll: true,
+  // #71: Volume heatmap rolling-window buffer. Per-symbol ring of
+  // { ts, qty } entries from TRADE frames, trimmed to the configured
+  // window on each push. The render layer reads this slice and
+  // computes the per-symbol sum + global max for the colour scale
+  // — keeping the buffer raw (not pre-aggregated) lets the window
+  // size be tuned without rebuilding state.
+  heatmapTrades: new Map(), // Symbol -> [{ ts: ms, qty }]
   // Single symbol selection shared by DOB / chart / tape (the three
   // panels used to carry their own *Symbol slice; that drift made
   // it easy to look at the wrong instrument across panels). Auto-
@@ -195,7 +202,7 @@ export function subscribe(fn) {
 // coupled to the actual data flow without a separate instrumentation
 // surface every applyX has to remember to call.
 const WS_NOTIFY_SLICES = new Set(["orders", "positions", "executions"]);
-const MD_NOTIFY_SLICES = new Set(["marketData", "book", "candles", "tape"]);
+const MD_NOTIFY_SLICES = new Set(["marketData", "book", "candles", "tape", "heatmap"]);
 
 function notify(slice) {
   if (WS_NOTIFY_SLICES.has(slice)) state.lastWsActivity = Date.now();
@@ -349,6 +356,8 @@ export function applyMdTrade({ symbol, price, qty, tradeId }) {
     receivedAt: Date.now(),
     busted: false,
   });
+  // #71: heatmap rolling-window — keep raw {ts, qty}, trimmed lazily.
+  pushHeatmapTrade(symbol, qty);
 }
 
 export function applyMdInfo({ symbol, fields }) {
@@ -621,6 +630,62 @@ export function clearAllTape() {
   if (state.tape.size === 0) return;
   state.tape.clear();
   notify("tape");
+}
+
+// ── #71 Volume heatmap rolling-window slice ────────────────────────
+
+// Default window — issue #71 calls out "10 s rolling volume" but the
+// renderer is free to crop a shorter view if needed for responsiveness.
+export const HEATMAP_WINDOW_MS = 10_000;
+// Hard cap per symbol to keep the per-trade push O(1). A symbol that
+// somehow prints >5000 trades inside the window is well outside the
+// design envelope and the trim-on-push already evicts the head; the
+// cap is just a paranoid backstop against unbounded growth if the
+// clock jumps backwards.
+const HEATMAP_MAX_PER_SYMBOL = 5_000;
+
+function pushHeatmapTrade(symbol, qty) {
+  const q = Number(qty);
+  if (!Number.isFinite(q) || q <= 0) return;
+  let arr = state.heatmapTrades.get(symbol);
+  if (!arr) { arr = []; state.heatmapTrades.set(symbol, arr); }
+  const now = Date.now();
+  arr.push({ ts: now, qty: q });
+  // Trim head past the window. Linear scan is fine — entries are in
+  // chronological order so we can stop at the first in-window row.
+  const cutoff = now - HEATMAP_WINDOW_MS;
+  let i = 0;
+  while (i < arr.length && arr[i].ts < cutoff) i++;
+  if (i > 0) arr.splice(0, i);
+  if (arr.length > HEATMAP_MAX_PER_SYMBOL) {
+    arr.splice(0, arr.length - HEATMAP_MAX_PER_SYMBOL);
+  }
+  notify("heatmap");
+}
+
+// Pure reducer extracted so the renderer (and tests) can compute the
+// per-symbol volume sum without re-walking the buffer twice. Returns
+// a Map<symbol, sumQty>. Symbols with no in-window prints get 0.
+export function computeHeatmapVolumes(map, symbols, nowMs, windowMs = HEATMAP_WINDOW_MS) {
+  const cutoff = nowMs - windowMs;
+  const out = new Map();
+  for (const sym of symbols) {
+    const arr = map.get(sym);
+    if (!arr || arr.length === 0) { out.set(sym, 0); continue; }
+    let sum = 0;
+    for (let i = arr.length - 1; i >= 0; i--) {
+      if (arr[i].ts < cutoff) break;
+      sum += arr[i].qty;
+    }
+    out.set(sym, sum);
+  }
+  return out;
+}
+
+export function clearAllHeatmap() {
+  if (state.heatmapTrades.size === 0) return;
+  state.heatmapTrades.clear();
+  notify("heatmap");
 }
 
 export function setTapeSymbol(symbol) {

@@ -212,6 +212,43 @@ body {
 .executions { grid-area: execs; min-height: 0; }
 .market-data{ grid-area: md; }
 .market-data .empty { color: var(--muted); font-size: .8rem; }
+.md-h2-controls { display: inline-flex; gap: .25rem; align-items: center; }
+
+/* #71: Volume heatmap. Compact grid of cells living at the top of the
+ * Market data panel; cell colour encodes rolling 10s volume normalised
+ * by the per-render global max. Click a cell → selectedSymbol. */
+.heatmap-panel {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+  gap: 4px; margin-bottom: .55rem;
+}
+.heatmap-empty {
+  grid-column: 1 / -1; font-size: .75rem; margin: 0;
+}
+.heatmap-cell {
+  display: flex; flex-direction: column; align-items: flex-start;
+  gap: .15rem;
+  padding: .35rem .4rem; min-height: 44px;
+  background: rgba(255,255,255,.04);
+  color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
+  font: inherit; cursor: pointer; text-align: left;
+  transition: transform .08s ease-out;
+}
+.heatmap-cell:hover { transform: translateY(-1px); }
+.heatmap-cell:focus-visible {
+  outline: 2px solid var(--accent, #4aa3ff); outline-offset: 1px;
+}
+.heatmap-cell--selected {
+  outline: 2px solid var(--text); outline-offset: -2px;
+}
+.heatmap-cell-sym {
+  font-size: .72rem; font-weight: 600; letter-spacing: .03em;
+}
+.heatmap-cell-vol {
+  font-size: .68rem; font-variant-numeric: tabular-nums;
+  color: rgba(255,255,255,.85);
+}
 .dob { grid-area: dob; }
 .dob-grid {
   display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; min-height: 0;

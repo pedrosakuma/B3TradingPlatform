@@ -658,6 +658,7 @@ function handleApplyMd({ url, symbols }) {
     state.clearAllBooks();
     state.clearAllCandles();
     state.clearAllTape();
+    state.clearAllHeatmap();
     mbpEnabled = false;
     startMdWorker();
   } else {
@@ -712,6 +713,7 @@ function onMdWorkerMessage(msg) {
       state.clearAllBooks();
       state.clearAllCandles();
       state.clearAllTape();
+      state.clearAllHeatmap();
       break;
     case "md.trade":    state.applyMdTrade(msg); break;
     case "md.info":     state.applyMdInfo(msg); break;
