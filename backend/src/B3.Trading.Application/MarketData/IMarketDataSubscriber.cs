@@ -54,6 +54,21 @@ public interface IMarketDataSubscriber : IAsyncDisposable
     event Action<MarketAuctionImbalance>? AuctionImbalance;
     event Action<MarketAuctionPrint>? AuctionPrint;
 
+    // -------------------------------------------------------------
+    // L3 / MBO book (Q3.6 Stage A, #286). Raised only when the
+    // adapter is configured with EnableBook=true; otherwise these
+    // stay silent (existing consumers pay nothing). The events fire
+    // in the order the SDK delivers them; consumers MUST treat
+    // BookSnapshot as a state-reset marker and apply subsequent
+    // OrderAdded/Updated/Deleted in delivery order.
+    // -------------------------------------------------------------
+
+    event Action<MarketBookSnapshot>? BookSnapshot;
+    event Action<MarketOrderAdded>? OrderAdded;
+    event Action<MarketOrderUpdated>? OrderUpdated;
+    event Action<MarketOrderDeleted>? OrderDeleted;
+    event Action<MarketBookCleared>? BookCleared;
+
     Task ConnectAsync(CancellationToken ct = default);
 
     /// <summary>

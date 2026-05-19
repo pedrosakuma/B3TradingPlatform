@@ -24,6 +24,7 @@ public class PnlRefPriceFanOutTests
 
     private sealed class FakeSubscriber : IMarketDataSubscriber
     {
+#pragma warning disable CS0067
         public event Action<MarketTrade>? Trade;
 #pragma warning disable CS0067
         public event Action<MarketInfoSnapshot>? InfoSnapshot;
@@ -32,6 +33,12 @@ public class PnlRefPriceFanOutTests
         public event Action<MarketTheoreticalOpening>? TheoreticalOpening;
         public event Action<MarketAuctionImbalance>? AuctionImbalance;
         public event Action<MarketAuctionPrint>? AuctionPrint;
+        public event Action<MarketBookSnapshot>? BookSnapshot;
+        public event Action<MarketOrderAdded>? OrderAdded;
+        public event Action<MarketOrderUpdated>? OrderUpdated;
+        public event Action<MarketOrderDeleted>? OrderDeleted;
+        public event Action<MarketBookCleared>? BookCleared;
+#pragma warning restore CS0067
 #pragma warning restore CS0067
 
         public MarketDataConnectionState State => MarketDataConnectionState.Connected;

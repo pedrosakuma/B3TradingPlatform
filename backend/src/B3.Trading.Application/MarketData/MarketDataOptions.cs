@@ -43,4 +43,22 @@ public sealed class MarketDataOptions
     /// (cache wins forever as long as it has a value).
     /// </summary>
     public TimeSpan MaxStaleness { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// Q3.6 Stage A (#286). Opt-in flag to subscribe to the L3 / MBO
+    /// book stream (<c>SubscribeFlags.Book</c>) in addition to
+    /// <c>Trades | Info</c>. When <c>true</c>, every symbol passed to
+    /// <see cref="IMarketDataSubscriber.SubscribeAsync"/> receives the
+    /// per-order add/update/delete + book-snapshot stream, which the
+    /// in-host <c>MboBookStore</c> assembles into both an L3 view and a
+    /// derived L2 top-of-book.
+    /// <para>
+    /// Default <c>false</c> so existing deployments (which only need
+    /// trades + info for the collar / VWAP estimator) pay nothing for
+    /// the MBO bandwidth + per-order CPU cost. Set to <c>true</c> once
+    /// a consumer (pegging v2, depth UI, surveillance) needs the
+    /// book.
+    /// </para>
+    /// </summary>
+    public bool EnableBook { get; set; } = false;
 }
