@@ -8,8 +8,8 @@ namespace B3.Trading.Api.WebSockets;
 /// <summary>
 /// Q3.6 Stage B (#286). WebSocket fan-out for the public per-symbol
 /// depth ladder channel (<c>book.${symbol}</c>). Listens to
-/// <see cref="MboBookStore.BookChanged"/>; on each event pulls the
-/// top-N ladder from the store at the configured depth
+/// <see cref="IL2BookView.BookChanged"/>; on each event pulls the
+/// top-N ladder from the view at the configured depth
 /// (<c>MarketDataOptions.BookChannelMaxLevels</c>) and broadcasts a
 /// <see cref="L2LadderDto"/> delta to all subscribed clients.
 /// Snapshot bootstrap is served through
@@ -38,7 +38,7 @@ namespace B3.Trading.Api.WebSockets;
 public sealed class WebSocketBookEventSink : IPublicChannelSnapshots, IHostedService
 {
     private readonly SubscriptionManager _subs;
-    private readonly MboBookStore _store;
+    private readonly IL2BookView _store;
     private readonly int _maxLevels;
 
     // Last DTO put on the wire per symbol — used to coalesce identical
@@ -48,7 +48,7 @@ public sealed class WebSocketBookEventSink : IPublicChannelSnapshots, IHostedSer
 
     public WebSocketBookEventSink(
         SubscriptionManager subs,
-        MboBookStore store,
+        IL2BookView store,
         IOptions<MarketDataOptions> options)
     {
         _subs = subs;

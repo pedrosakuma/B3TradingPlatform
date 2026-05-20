@@ -4,47 +4,37 @@ using Microsoft.Extensions.Logging;
 namespace B3.Trading.Application.MarketData;
 
 /// <summary>
-/// Q3.6 Stage C (#286). Bridges the in-host MBO book
-/// (<see cref="MboBookStore"/>) into the Pegged-algo BBO cache
-/// (<see cref="PegBookTopCache"/>) so <c>PegRef.Mid</c> and
-/// <c>PegRef.Best</c> resolve to real best-bid/best-ask instead of
-/// transparently falling back to last-trade.
+/// Bridges the in-host MBO-derived L2 view (<see cref="IL2BookView"/>)
+/// into the Pegged-algo BBO cache (<see cref="PegBookTopCache"/>) so
+/// <c>PegRef.Mid</c> and <c>PegRef.Best</c> resolve to real best-bid /
+/// best-ask instead of transparently falling back to last-trade.
 ///
 /// <para>
-/// Closes the "SDK gap" originally noted on
-/// <see cref="MarketDataPegBookPump"/> and <see cref="PegBookTopCache"/>:
-/// while the broker-side SDK still does not raise standalone BBO frames,
-/// the MBO feed already exposes a per-order book that
-/// <see cref="MboBookStore"/> aggregates into a top-of-book — we just
-/// pump that derived view into the same cache the Pegged engine reads.
+/// The live wire-path implementation of <see cref="IL2BookView"/> is
+/// <c>SdkBookFeedAdapter</c> (host) backed by the SDK 0.4.0
+/// <c>IBookFeed</c>; when MD is off or <c>EnableBook</c> is false a
+/// no-op <see cref="InMemoryL2BookView"/> is wired instead and this
+/// pump silently never fires — the engine falls back to last-trade
+/// exactly as before, no behavioral regression.
 /// </para>
 ///
 /// <para>
-/// <b>Gating.</b> <see cref="MboBookStore.BookChanged"/> only fires
-/// when <c>MarketDataOptions.EnableBook</c> is true and the SDK feeds
-/// MBO frames. When MBO is off, this pump silently no-ops and the
-/// engine falls back to last-trade exactly as before — no behavioral
-/// regression in the configuration the legacy v1 path was tested on.
-/// </para>
-///
-/// <para>
-/// <b>Thread-safety.</b> <see cref="MboBookStore"/> raises
-/// <see cref="MboBookStore.BookChanged"/> outside its per-symbol lock,
-/// so the <see cref="MboBookStore.GetTopOfBook"/> read here races
-/// newer mutations. That is intentional and correct: each callback
-/// publishes a self-consistent snapshot to the cache; the most recent
-/// writer wins, ordering preserved because the SDK delivers
+/// <b>Thread-safety.</b> <see cref="IL2BookView.BookChanged"/> may fire
+/// outside any internal lock, so the <see cref="IL2BookView.GetTopOfBook"/>
+/// read here races newer mutations. That is intentional and correct:
+/// each callback publishes a self-consistent snapshot to the cache; the
+/// most recent writer wins, ordering preserved because the SDK delivers
 /// per-symbol events on a single dispatch thread.
 /// </para>
 /// </summary>
 public sealed class MboPegBookPump : IHostedService
 {
-    private readonly MboBookStore _store;
+    private readonly IL2BookView _store;
     private readonly PegBookTopCache _cache;
     private readonly ILogger<MboPegBookPump>? _logger;
 
     public MboPegBookPump(
-        MboBookStore store,
+        IL2BookView store,
         PegBookTopCache cache,
         ILogger<MboPegBookPump>? logger = null)
     {

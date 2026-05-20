@@ -56,6 +56,13 @@ public static class MarketDataRegistration
         services.TryAddSingleton<ConfigReferencePrice>();
         services.TryAddSingleton(TimeProvider.System);
 
+        // IL2BookView is registered unconditionally so MboPegBookPump +
+        // WebSocketBookEventSink resolve in DI. The live wire-path adapter
+        // (SdkBookFeedAdapter, backed by SDK 0.4.0 IBookFeed) replaces this
+        // singleton further down when WsUrl + EnableBook are both on.
+        services.TryAddSingleton<InMemoryL2BookView>();
+        services.TryAddSingleton<IL2BookView>(sp => sp.GetRequiredService<InMemoryL2BookView>());
+
         if (string.IsNullOrWhiteSpace(opts.WsUrl))
         {
             services.AddSingleton<IReferencePrice>(sp =>
@@ -77,6 +84,21 @@ public static class MarketDataRegistration
             o.AutoResubscribeOnReconnect = true;
             o.BackPressure = BackPressurePolicy.DropOldest;
         });
+
+        // SDK 0.4.0 (B3MarketDataPlatform #43 / #44 / #53) materialized
+        // book layer — opt-in via MarketDataOptions.EnableBook. When on,
+        // BookFeed attaches to the already-registered MarketDataClient
+        // and the host-side SdkBookFeedAdapter replaces the no-op
+        // InMemoryL2BookView registered above so MboPegBookPump +
+        // WebSocketBookEventSink see live BBO + depth ladders.
+        if (opts.EnableBook)
+        {
+            services.AddMarketDataClient(_ => { }).WithBookFeed();
+            services.AddSingleton<SdkBookFeedAdapter>(sp =>
+                new SdkBookFeedAdapter(sp.GetRequiredService<IBookFeed>()));
+            services.Replace(ServiceDescriptor.Singleton<IL2BookView>(sp =>
+                sp.GetRequiredService<SdkBookFeedAdapter>()));
+        }
 
         services.AddSingleton<IMarketDataSubscriber, SdkMarketDataSubscriber>();
 

@@ -4,7 +4,7 @@ namespace B3.Trading.Application.Tests.MarketData;
 
 /// <summary>
 /// Q3.6 Stage C (#286). Unit tests for <see cref="MboPegBookPump"/> —
-/// bridges <see cref="MboBookStore.BookChanged"/> into
+/// bridges <see cref="InMemoryL2BookView.BookChanged"/> into
 /// <see cref="PegBookTopCache.UpdateBookTop"/>.
 /// </summary>
 public class MboPegBookPumpTests
@@ -25,7 +25,7 @@ public class MboPegBookPumpTests
     [Fact]
     public async Task BookChanged_pushes_top_of_book_into_cache()
     {
-        var store = new MboBookStore();
+        var store = new InMemoryL2BookView();
         var cache = new PegBookTopCache();
         var pump = new MboPegBookPump(store, cache);
         try
@@ -47,7 +47,7 @@ public class MboPegBookPumpTests
     [Fact]
     public async Task Subsequent_updates_replace_cached_bbo()
     {
-        var store = new MboBookStore();
+        var store = new InMemoryL2BookView();
         var cache = new PegBookTopCache();
         var pump = new MboPegBookPump(store, cache);
         try
@@ -77,7 +77,7 @@ public class MboPegBookPumpTests
     [Fact]
     public async Task Empty_side_preserves_known_leg_via_cache_merge()
     {
-        var store = new MboBookStore();
+        var store = new InMemoryL2BookView();
         var cache = new PegBookTopCache();
         // Pre-seed both legs via a direct cache write so we can prove
         // the pump's "empty side -> null" path does not clobber the
@@ -114,7 +114,7 @@ public class MboPegBookPumpTests
     [Fact]
     public async Task StopAsync_unsubscribes_from_BookChanged()
     {
-        var store = new MboBookStore();
+        var store = new InMemoryL2BookView();
         var cache = new PegBookTopCache();
         var pump = new MboPegBookPump(store, cache);
 
@@ -128,7 +128,7 @@ public class MboPegBookPumpTests
     [Fact]
     public async Task Both_sides_empty_yields_no_cache_write()
     {
-        var store = new MboBookStore();
+        var store = new InMemoryL2BookView();
         var cache = new PegBookTopCache();
         var pump = new MboPegBookPump(store, cache);
         try

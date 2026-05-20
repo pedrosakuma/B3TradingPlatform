@@ -3,24 +3,24 @@ using B3.Trading.Application.MarketData;
 namespace B3.Trading.Application.Tests.MarketData;
 
 /// <summary>
-/// Q3.6 Stage A (#286). Unit tests for MboBookStore (L3 maintenance +
+/// Q3.6 Stage A (#286). Unit tests for InMemoryL2BookView (L3 maintenance +
 /// derived L2 top-of-book).
 /// </summary>
-public class MboBookStoreTests
+public class InMemoryL2BookViewTests
 {
     private static readonly DateTimeOffset T0 = new(2026, 5, 19, 14, 0, 0, TimeSpan.Zero);
 
     [Fact]
     public void TopOfBook_returns_null_for_unknown_symbol()
     {
-        var s = new MboBookStore();
+        var s = new InMemoryL2BookView();
         Assert.Null(s.GetTopOfBook("UNKN"));
     }
 
     [Fact]
     public void Snapshot_seeds_book_and_top_picks_best_bid_and_best_ask()
     {
-        var s = new MboBookStore();
+        var s = new InMemoryL2BookView();
         s.ApplySnapshot(new MarketBookSnapshot
         {
             Symbol = "PETR4",
@@ -145,7 +145,7 @@ public class MboBookStoreTests
     [Fact]
     public void OrderAdded_with_nonpositive_qty_is_ignored()
     {
-        var s = new MboBookStore();
+        var s = new InMemoryL2BookView();
         s.ApplyAdded(new MarketOrderAdded("PETR4", 4321, 1, MarketBookSide.Bid, 30m, 0, T0));
         s.ApplyAdded(new MarketOrderAdded("PETR4", 4321, 2, MarketBookSide.Bid, 30m, -5, T0));
         Assert.Null(s.GetTopOfBook("PETR4"));
@@ -154,7 +154,7 @@ public class MboBookStoreTests
     [Fact]
     public void Top_unknown_symbol_after_only_one_side_present_returns_value_with_empty_other()
     {
-        var s = new MboBookStore();
+        var s = new InMemoryL2BookView();
         s.ApplyAdded(new MarketOrderAdded("PETR4", 4321, 1, MarketBookSide.Ask, 30m, 100, T0));
         var top = s.GetTopOfBook("PETR4")!.Value;
         Assert.Equal(30m, top.Ask.Price);
@@ -171,26 +171,9 @@ public class MboBookStoreTests
         Assert.NotNull(s.GetTopOfBook("  PETR4  "));
     }
 
-    [Fact]
-    public async Task Pump_bridges_subscriber_events_into_store()
+    private static InMemoryL2BookView SeedSimple()
     {
-        var sub = new FakeBookSubscriber();
-        var store = new MboBookStore();
-        var pump = new MboBookStorePump(sub, store);
-        await pump.StartAsync(CancellationToken.None);
-        sub.RaiseSnapshot("PETR4", new[] { new MarketBookOrder(1, 30m, 100) }, Array.Empty<MarketBookOrder>(), T0);
-        sub.RaiseAdded("PETR4", 2, MarketBookSide.Ask, 30.10m, 50, T0);
-        var top = store.GetTopOfBook("PETR4")!.Value;
-        Assert.Equal(30m, top.Bid.Price);
-        Assert.Equal(30.10m, top.Ask.Price);
-        await pump.StopAsync(CancellationToken.None);
-        sub.RaiseDeleted("PETR4", 1, MarketBookSide.Bid, T0.AddSeconds(1));
-        Assert.Equal(30m, store.GetTopOfBook("PETR4")!.Value.Bid.Price);
-    }
-
-    private static MboBookStore SeedSimple()
-    {
-        var s = new MboBookStore();
+        var s = new InMemoryL2BookView();
         s.ApplySnapshot(new MarketBookSnapshot
         {
             Symbol = "PETR4",
@@ -210,50 +193,5 @@ public class MboBookStoreTests
             ReceivedUtc = T0,
         });
         return s;
-    }
-
-    private sealed class FakeBookSubscriber : IMarketDataSubscriber
-    {
-#pragma warning disable CS0067
-        public event Action<MarketTrade>? Trade;
-        public event Action<MarketInfoSnapshot>? InfoSnapshot;
-        public event Action<MarketDataConnectionState>? ConnectionStateChanged;
-        public event Action<MarketSubscribeError>? SubscribeError;
-        public event Action<MarketTheoreticalOpening>? TheoreticalOpening;
-        public event Action<MarketAuctionImbalance>? AuctionImbalance;
-        public event Action<MarketAuctionPrint>? AuctionPrint;
-#pragma warning restore CS0067
-        public event Action<MarketBookSnapshot>? BookSnapshot;
-        public event Action<MarketOrderAdded>? OrderAdded;
-#pragma warning disable CS0067
-        public event Action<MarketOrderUpdated>? OrderUpdated;
-#pragma warning restore CS0067
-        public event Action<MarketOrderDeleted>? OrderDeleted;
-#pragma warning disable CS0067
-        public event Action<MarketBookCleared>? BookCleared;
-#pragma warning restore CS0067
-
-        public MarketDataConnectionState State => MarketDataConnectionState.Connected;
-        public long DroppedEventCount => 0;
-        public Task ConnectAsync(CancellationToken ct = default) => Task.CompletedTask;
-        public ValueTask SubscribeAsync(string symbol, CancellationToken ct = default) => ValueTask.CompletedTask;
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
-
-        public void RaiseSnapshot(string symbol, IReadOnlyList<MarketBookOrder> bids, IReadOnlyList<MarketBookOrder> asks, DateTimeOffset ts) =>
-            BookSnapshot?.Invoke(new MarketBookSnapshot
-            {
-                Symbol = symbol,
-                SecurityId = 0,
-                RptSeq = 1,
-                Bids = bids,
-                Asks = asks,
-                ReceivedUtc = ts,
-            });
-
-        public void RaiseAdded(string sym, ulong id, MarketBookSide side, decimal px, long qty, DateTimeOffset ts) =>
-            OrderAdded?.Invoke(new MarketOrderAdded(sym, 0, id, side, px, qty, ts));
-
-        public void RaiseDeleted(string sym, ulong id, MarketBookSide side, DateTimeOffset ts) =>
-            OrderDeleted?.Invoke(new MarketOrderDeleted(sym, 0, id, side, ts));
     }
 }

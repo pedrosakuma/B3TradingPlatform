@@ -57,15 +57,9 @@ internal sealed class SdkMarketDataSubscriber : IMarketDataSubscriber
     // those into AuctionProjector, which collapses cumulative snapshots into
     // delta events and decides opening vs closing kind from the last
     // TradingStatus observed for the symbol. Upstream B3MarketDataPlatform#40.
-    public event Action<B3.Trading.Application.MarketData.MarketTheoreticalOpening>? TheoreticalOpening;
-    public event Action<B3.Trading.Application.MarketData.MarketAuctionImbalance>? AuctionImbalance;
-    public event Action<B3.Trading.Application.MarketData.MarketAuctionPrint>? AuctionPrint;
-
-    public event Action<MarketBookSnapshot>? BookSnapshot;
-    public event Action<MarketOrderAdded>? OrderAdded;
-    public event Action<MarketOrderUpdated>? OrderUpdated;
-    public event Action<MarketOrderDeleted>? OrderDeleted;
-    public event Action<MarketBookCleared>? BookCleared;
+    public event Action<MarketTheoreticalOpening>? TheoreticalOpening;
+    public event Action<MarketAuctionImbalance>? AuctionImbalance;
+    public event Action<MarketAuctionPrint>? AuctionPrint;
 
     public SdkMarketDataSubscriber(
         MarketDataClient client,
@@ -89,14 +83,12 @@ internal sealed class SdkMarketDataSubscriber : IMarketDataSubscriber
         _client.ConnectionStateChanged += OnSdkConn;
         _client.SubscribeError += OnSdkSubErr;
 
-        if (_bookEnabled)
-        {
-            _client.BookSnapshot += OnSdkBookSnapshot;
-            _client.OrderAdded += OnSdkOrderAdded;
-            _client.OrderUpdated += OnSdkOrderUpdated;
-            _client.OrderDeleted += OnSdkOrderDeleted;
-            _client.BookCleared += OnSdkBookCleared;
-        }
+        // Note: when _bookEnabled is true the host registers SDK 0.4.0's
+        // IBookFeed which subscribes to MarketDataClient.Book* events
+        // internally and maintains the materialised book that
+        // SdkBookFeedAdapter projects into IL2BookView. We only need to
+        // include SubscribeFlags.Book so the server actually streams the
+        // MBO frames to that BookFeed.
     }
 
     public AppConnState State => Translate(_client.State);
@@ -126,14 +118,6 @@ internal sealed class SdkMarketDataSubscriber : IMarketDataSubscriber
         _client.InfoSnapshot -= OnSdkInfo;
         _client.ConnectionStateChanged -= OnSdkConn;
         _client.SubscribeError -= OnSdkSubErr;
-        if (_bookEnabled)
-        {
-            _client.BookSnapshot -= OnSdkBookSnapshot;
-            _client.OrderAdded -= OnSdkOrderAdded;
-            _client.OrderUpdated -= OnSdkOrderUpdated;
-            _client.OrderDeleted -= OnSdkOrderDeleted;
-            _client.BookCleared -= OnSdkBookCleared;
-        }
         return _client.DisposeAsync();
     }
 
@@ -189,63 +173,13 @@ internal sealed class SdkMarketDataSubscriber : IMarketDataSubscriber
         SubscribeError?.Invoke(new MarketSubscribeError(ev.Symbol, ev.ErrorCode.ToString()));
 
     // ── Q3.6 Stage A (#286) MBO translation ─────────────────────────
-
-    private void OnSdkBookSnapshot(BookSnapshotEvent ev)
-    {
-        var bids = ev.Bids.Count == 0
-            ? (IReadOnlyList<MarketBookOrder>)Array.Empty<MarketBookOrder>()
-            : ev.Bids.Select(o => new MarketBookOrder(o.OrderId, o.Price, o.Qty)).ToArray();
-        var asks = ev.Asks.Count == 0
-            ? (IReadOnlyList<MarketBookOrder>)Array.Empty<MarketBookOrder>()
-            : ev.Asks.Select(o => new MarketBookOrder(o.OrderId, o.Price, o.Qty)).ToArray();
-        BookSnapshot?.Invoke(new MarketBookSnapshot
-        {
-            Symbol = ev.Symbol,
-            SecurityId = ev.SecurityId,
-            RptSeq = ev.RptSeq,
-            Bids = bids,
-            Asks = asks,
-            ReceivedUtc = AsOffset(ev.ReceivedUtc),
-        });
-    }
-
-    private void OnSdkOrderAdded(OrderAddedEvent ev) =>
-        OrderAdded?.Invoke(new MarketOrderAdded(
-            ev.Symbol, ev.SecurityId, ev.OrderId, TranslateSide(ev.Side),
-            ev.Price, ev.Qty, AsOffset(ev.ReceivedUtc)));
-
-    private void OnSdkOrderUpdated(OrderUpdatedEvent ev) =>
-        OrderUpdated?.Invoke(new MarketOrderUpdated(
-            ev.Symbol, ev.SecurityId, ev.OrderId, TranslateSide(ev.Side),
-            ev.Price, ev.Qty, AsOffset(ev.ReceivedUtc)));
-
-    private void OnSdkOrderDeleted(OrderDeletedEvent ev) =>
-        OrderDeleted?.Invoke(new MarketOrderDeleted(
-            ev.Symbol, ev.SecurityId, ev.OrderId, TranslateSide(ev.Side),
-            AsOffset(ev.ReceivedUtc)));
-
-    private void OnSdkBookCleared(BookClearedEvent ev) =>
-        BookCleared?.Invoke(new MarketBookCleared(
-            ev.Symbol, ev.SecurityId, TranslateClearSide(ev.ClearSide),
-            AsOffset(ev.ReceivedUtc)));
+    // Removed: MBO frames are now consumed directly by SDK 0.4.0's
+    // IBookFeed (registered in MarketDataRegistration when EnableBook)
+    // and surfaced via SdkBookFeedAdapter → IL2BookView. No translation
+    // hop on this seam any more.
 
     private static DateTimeOffset AsOffset(DateTime dt) =>
         new(DateTime.SpecifyKind(dt, DateTimeKind.Utc));
-
-    private static MarketBookSide TranslateSide(BookSide s) => s switch
-    {
-        BookSide.Bid => MarketBookSide.Bid,
-        BookSide.Ask => MarketBookSide.Ask,
-        _ => MarketBookSide.Bid,
-    };
-
-    private static MarketBookClearSide TranslateClearSide(BookClearSide s) => s switch
-    {
-        BookClearSide.Both => MarketBookClearSide.Both,
-        BookClearSide.Bid => MarketBookClearSide.Bid,
-        BookClearSide.Ask => MarketBookClearSide.Ask,
-        _ => MarketBookClearSide.Both,
-    };
 
     private static AppConnState Translate(SdkConnState s) => s switch
     {

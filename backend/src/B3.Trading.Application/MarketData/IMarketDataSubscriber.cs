@@ -54,20 +54,10 @@ public interface IMarketDataSubscriber : IAsyncDisposable
     event Action<MarketAuctionImbalance>? AuctionImbalance;
     event Action<MarketAuctionPrint>? AuctionPrint;
 
-    // -------------------------------------------------------------
-    // L3 / MBO book (Q3.6 Stage A, #286). Raised only when the
-    // adapter is configured with EnableBook=true; otherwise these
-    // stay silent (existing consumers pay nothing). The events fire
-    // in the order the SDK delivers them; consumers MUST treat
-    // BookSnapshot as a state-reset marker and apply subsequent
-    // OrderAdded/Updated/Deleted in delivery order.
-    // -------------------------------------------------------------
-
-    event Action<MarketBookSnapshot>? BookSnapshot;
-    event Action<MarketOrderAdded>? OrderAdded;
-    event Action<MarketOrderUpdated>? OrderUpdated;
-    event Action<MarketOrderDeleted>? OrderDeleted;
-    event Action<MarketBookCleared>? BookCleared;
+    // L3 / MBO frames are not raised on this seam. The live wire path
+    // funnels them through SDK 0.4.0's IBookFeed → SdkBookFeedAdapter →
+    // IL2BookView; tests that need to drive an L3 book directly use
+    // InMemoryL2BookView's Apply* mutators instead.
 
     Task ConnectAsync(CancellationToken ct = default);
 
