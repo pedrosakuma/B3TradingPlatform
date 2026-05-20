@@ -63,6 +63,13 @@ public static class MarketDataRegistration
         services.TryAddSingleton<InMemoryL2BookView>();
         services.TryAddSingleton<IL2BookView>(sp => sp.GetRequiredService<InMemoryL2BookView>());
 
+        // IMboBookEventSource is registered unconditionally as a no-op
+        // so WebSocketMboBookEventSink resolves in DI even when MD is
+        // off. The live wire-path adapter (SdkMboBookEventSource)
+        // replaces this singleton further down when WsUrl + EnableBook
+        // are both on.
+        services.TryAddSingleton<IMboBookEventSource, NullMboBookEventSource>();
+
         if (string.IsNullOrWhiteSpace(opts.WsUrl))
         {
             services.AddSingleton<IReferencePrice>(sp =>
@@ -98,6 +105,16 @@ public static class MarketDataRegistration
                 new SdkBookFeedAdapter(sp.GetRequiredService<IBookFeed>()));
             services.Replace(ServiceDescriptor.Singleton<IL2BookView>(sp =>
                 sp.GetRequiredService<SdkBookFeedAdapter>()));
+
+            // #372 / #293. Raw L3 MBO event source for the public
+            // bookmbo.${symbol} WS channel. Subscribes to the SAME
+            // MarketDataClient instance the BookFeed uses — both
+            // handlers run on every Book*/Order* event; no duplicate
+            // network traffic.
+            services.AddSingleton<SdkMboBookEventSource>(sp =>
+                new SdkMboBookEventSource(sp.GetRequiredService<MarketDataClient>()));
+            services.Replace(ServiceDescriptor.Singleton<IMboBookEventSource>(sp =>
+                sp.GetRequiredService<SdkMboBookEventSource>()));
         }
 
         services.AddSingleton<IMarketDataSubscriber, SdkMarketDataSubscriber>();

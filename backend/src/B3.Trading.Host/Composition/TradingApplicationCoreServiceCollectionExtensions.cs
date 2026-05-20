@@ -174,10 +174,20 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         services.AddSingleton<WebSocketBookEventSink>();
         services.AddHostedService(sp => sp.GetRequiredService<WebSocketBookEventSink>());
 
+        // #372 / #293. Public per-symbol bookmbo.${symbol} L3 fan-out.
+        // Listens to IMboBookEventSource (raw MBO events from the SDK
+        // adapter when live, no-op otherwise) and broadcasts one
+        // per-order delta per event. Doubles as the snapshot provider
+        // for PublicChannelKind.BookMbo; composed below alongside the
+        // L2 + auction sinks.
+        services.AddSingleton<WebSocketMboBookEventSink>();
+        services.AddHostedService(sp => sp.GetRequiredService<WebSocketMboBookEventSink>());
+
         services.AddSingleton<IPublicChannelSnapshots>(sp =>
             new CompositePublicChannelSnapshots(
                 sp.GetRequiredService<WebSocketAuctionEventSink>(),
-                sp.GetRequiredService<WebSocketBookEventSink>()));
+                sp.GetRequiredService<WebSocketBookEventSink>(),
+                sp.GetRequiredService<WebSocketMboBookEventSink>()));
 
         services.AddSingleton<ExecutionReportProcessor>();
         services.AddSingleton<OrderSubmissionService>();
