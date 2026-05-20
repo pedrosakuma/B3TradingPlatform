@@ -1,11 +1,13 @@
 using B3.MarketData.WebSocketClient;
 using B3.Trading.Application.MarketData;
+using B3.Trading.Domain;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using AppConnState = B3.Trading.Application.MarketData.MarketDataConnectionState;
 using AppTrade = B3.Trading.Application.MarketData.MarketTrade;
 using AppInfoSnapshot = B3.Trading.Application.MarketData.MarketInfoSnapshot;
 using SdkConnState = B3.MarketData.WebSocketClient.ConnectionState;
+using SdkAuctionCondition = B3.MarketData.WebSocketClient.AuctionImbalanceCondition;
 
 namespace B3.Trading.Host.MarketData;
 
@@ -42,22 +44,22 @@ internal sealed class SdkMarketDataSubscriber : IMarketDataSubscriber
     private readonly ILogger<SdkMarketDataSubscriber> _logger;
     private readonly SubscribeFlags _subscribeFlags;
     private readonly bool _bookEnabled;
+    private readonly AuctionProjector _auctionProjector;
 
     public event Action<AppTrade>? Trade;
     public event Action<AppInfoSnapshot>? InfoSnapshot;
     public event Action<AppConnState>? ConnectionStateChanged;
     public event Action<MarketSubscribeError>? SubscribeError;
 
-    // SDK gap: B3.MarketData.WebSocketClient 0.2.0 still does not surface
-    // dedicated auction events. We declare the events on the seam so
-    // AuctionStateStore + WS channels are wired end-to-end; they
-    // simply never fire under the live SDK today. Tests inject a fake
-    // subscriber that raises them. Tracking: B3MarketDataPlatform#40.
-#pragma warning disable CS0067 // event never used — see SDK-gap note above.
+    // Auction events: surfaced by SDK 0.4.0 as cumulative fields on
+    // InfoSnapshotEvent (TheoreticalOpening / AuctionImbalance) and as a
+    // TradeFlags bit on TradeEvent (AuctionPrint). The host adapter funnels
+    // those into AuctionProjector, which collapses cumulative snapshots into
+    // delta events and decides opening vs closing kind from the last
+    // TradingStatus observed for the symbol. Upstream B3MarketDataPlatform#40.
     public event Action<B3.Trading.Application.MarketData.MarketTheoreticalOpening>? TheoreticalOpening;
     public event Action<B3.Trading.Application.MarketData.MarketAuctionImbalance>? AuctionImbalance;
     public event Action<B3.Trading.Application.MarketData.MarketAuctionPrint>? AuctionPrint;
-#pragma warning restore CS0067
 
     public event Action<MarketBookSnapshot>? BookSnapshot;
     public event Action<MarketOrderAdded>? OrderAdded;
@@ -76,6 +78,11 @@ internal sealed class SdkMarketDataSubscriber : IMarketDataSubscriber
         _subscribeFlags = _bookEnabled
             ? SubscribeFlags.Trades | SubscribeFlags.Info | SubscribeFlags.Book
             : SubscribeFlags.Trades | SubscribeFlags.Info;
+
+        _auctionProjector = new AuctionProjector();
+        _auctionProjector.TheoreticalOpening += ev => TheoreticalOpening?.Invoke(ev);
+        _auctionProjector.AuctionImbalance += ev => AuctionImbalance?.Invoke(ev);
+        _auctionProjector.AuctionPrint += ev => AuctionPrint?.Invoke(ev);
 
         _client.Trade += OnSdkTrade;
         _client.InfoSnapshot += OnSdkInfo;
@@ -132,23 +139,48 @@ internal sealed class SdkMarketDataSubscriber : IMarketDataSubscriber
 
     private void OnSdkTrade(TradeEvent ev)
     {
+        var receivedUtc = new DateTimeOffset(DateTime.SpecifyKind(ev.ReceivedUtc, DateTimeKind.Utc));
         Trade?.Invoke(new AppTrade(
             Symbol: ev.Symbol,
             SecurityId: ev.SecurityId,
             Price: ev.Price,
             Qty: ev.Qty,
-            ReceivedUtc: new DateTimeOffset(DateTime.SpecifyKind(ev.ReceivedUtc, DateTimeKind.Utc))));
+            ReceivedUtc: receivedUtc));
+
+        if ((ev.Flags & TradeFlags.AuctionPrint) != 0)
+        {
+            _auctionProjector.OnAuctionTrade(ev.Symbol, ev.SecurityId, ev.Price, ev.Qty, receivedUtc);
+        }
     }
 
     private void OnSdkInfo(InfoSnapshotEvent ev)
     {
+        var receivedUtc = new DateTimeOffset(DateTime.SpecifyKind(ev.ReceivedUtc, DateTimeKind.Utc));
         InfoSnapshot?.Invoke(new AppInfoSnapshot(
             Symbol: ev.Symbol,
             SecurityId: ev.SecurityId,
             LastTradePrice: ev.LastTradePrice,
             TradingReferencePrice: ev.TradingReferencePrice,
-            ReceivedUtc: new DateTimeOffset(DateTime.SpecifyKind(ev.ReceivedUtc, DateTimeKind.Utc))));
+            ReceivedUtc: receivedUtc));
+
+        _auctionProjector.OnInfoSnapshot(
+            symbol: ev.Symbol,
+            securityId: ev.SecurityId,
+            theoreticalOpeningPrice: ev.TheoreticalOpeningPrice,
+            theoreticalOpeningSize: ev.TheoreticalOpeningSize,
+            imbalanceSize: ev.AuctionImbalanceSize,
+            imbalanceSide: TranslateAuctionSide(ev.AuctionImbalanceCondition),
+            tradingStatus: ev.TradingStatus,
+            receivedUtc: receivedUtc);
     }
+
+    private static OrderSide? TranslateAuctionSide(SdkAuctionCondition? c) => c switch
+    {
+        SdkAuctionCondition.MoreBuyers => OrderSide.Buy,
+        SdkAuctionCondition.MoreSellers => OrderSide.Sell,
+        // Balanced / Unknown / null → no pending side → no imbalance delta.
+        _ => null,
+    };
 
     private void OnSdkConn(ConnectionStateChangedEvent ev) =>
         ConnectionStateChanged?.Invoke(Translate(ev.State));
