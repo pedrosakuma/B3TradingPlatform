@@ -19,6 +19,42 @@ public class MetricsFirmTagTests
     [Fact]
     public async Task OrdersSubmittedCounter_CarriesFirmIdTag()
     {
+        // Start the MeterListener BEFORE building the TestAppFactory so the
+        // InstrumentPublished callback observes "trading.orders.submitted"
+        // at registration time. Doing it after the factory races: parallel
+        // tests may have already published the instrument on the shared
+        // "B3.Trading" Meter on a different thread.
+        //
+        // The Meter is process-global, so this listener also sees increments
+        // emitted by every other TestAppFactory running concurrently in the
+        // same xunit collection. We therefore collect every observed firmId
+        // into a bag and assert FIRM01 appears at least once, instead of
+        // tracking a single "last seen" value that would be raced by sibling
+        // factories' "default" firm increments (#332).
+        var observedFirms = new System.Collections.Concurrent.ConcurrentBag<string>();
+        var firm01Count = 0L;
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (instr, l) =>
+        {
+            if (instr.Meter.Name == "B3.Trading" && instr.Name == "trading.orders.submitted")
+                l.EnableMeasurementEvents(instr);
+        };
+        listener.SetMeasurementEventCallback<long>((_, value, tags, _) =>
+        {
+            string? firm = null;
+            foreach (var tag in tags)
+            {
+                if (tag.Key == "firmId" && tag.Value is string s)
+                {
+                    firm = s;
+                    observedFirms.Add(s);
+                }
+            }
+            if (firm == "FIRM01")
+                Interlocked.Add(ref firm01Count, value);
+        });
+        listener.Start();
+
         await using var factory = TestAppFactory.WithOverrides(new Dictionary<string, string?>
         {
             // Re-use the configured FIRM01 user so the order routes
@@ -28,25 +64,6 @@ public class MetricsFirmTagTests
 
         var issuer = factory.Services.GetRequiredService<JwtIssuer>();
         var (token, _) = issuer.Issue(TestAppFactory.TestUser, "user", "FIRM01");
-
-        string? observedFirmTag = null;
-        var observed = 0L;
-        using var listener = new MeterListener();
-        listener.InstrumentPublished = (instr, l) =>
-        {
-            if (instr.Meter.Name == "B3.Trading" && instr.Name == "trading.orders.submitted")
-                l.EnableMeasurementEvents(instr);
-        };
-        listener.SetMeasurementEventCallback<long>((_, value, tags, _) =>
-        {
-            foreach (var tag in tags)
-            {
-                if (tag.Key == "firmId" && tag.Value is string s)
-                    observedFirmTag = s;
-            }
-            Interlocked.Add(ref observed, value);
-        });
-        listener.Start();
 
         using var client = factory.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
@@ -61,7 +78,19 @@ public class MetricsFirmTagTests
         });
         resp.EnsureSuccessStatusCode();
 
-        Assert.True(observed >= 1, $"expected at least one increment, observed {observed}");
-        Assert.Equal("FIRM01", observedFirmTag);
+        // counter.Add runs on a pipeline thread; the MeasurementEventCallback
+        // fires asynchronously, so poll instead of asserting synchronously
+        // (per CodebaseFact: assert OTel counter increments via bounded poll
+        // on Interlocked.Read).
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (Interlocked.Read(ref firm01Count) < 1 && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(20);
+        }
+
+        var seen = Interlocked.Read(ref firm01Count);
+        Assert.True(
+            seen >= 1,
+            $"expected at least one FIRM01 increment, got {seen}; observed firms: [{string.Join(",", observedFirms)}]");
     }
 }
