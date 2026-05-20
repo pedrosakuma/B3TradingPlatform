@@ -9,9 +9,9 @@ namespace B3.Trading.Api.Tests;
 
 public class BookWebSocketChannelTests
 {
-    private static (SubscriptionManager subs, MboBookStore store, WebSocketBookEventSink sink) Build(int maxLevels = 10)
+    private static (SubscriptionManager subs, InMemoryL2BookView store, WebSocketBookEventSink sink) Build(int maxLevels = 10)
     {
-        var store = new MboBookStore();
+        var store = new InMemoryL2BookView();
         var subs = new SubscriptionManager(new WorkingOrderBook(), new PositionKeeper(), new AlgoBook());
         var opts = Options.Create(new MarketDataOptions { BookChannelMaxLevels = maxLevels });
         var sink = new WebSocketBookEventSink(subs, store, opts);

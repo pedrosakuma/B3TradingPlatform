@@ -3,21 +3,28 @@ using System.Collections.Concurrent;
 namespace B3.Trading.Application.MarketData;
 
 /// <summary>
-/// Q3.6 Stage A (#286). In-host L3 (MBO) book store + derived L2 view.
-/// Applies the per-symbol stream of
-/// <see cref="MarketBookSnapshot"/> + <see cref="MarketOrderAdded"/> /
-/// <see cref="MarketOrderUpdated"/> / <see cref="MarketOrderDeleted"/> /
-/// <see cref="MarketBookCleared"/> frames the
-/// <see cref="IMarketDataSubscriber"/> raises (when
-/// <c>MarketDataOptions.EnableBook</c> is on) and exposes the aggregate
-/// top-of-book via <see cref="IL2BookView"/>.
+/// In-memory <see cref="IL2BookView"/> implementation: maintains a per-
+/// symbol L3 (MBO) book and exposes a derived L2 top + ladder. Callers
+/// drive it directly through <c>Apply*</c> mutators — there is no
+/// adapter to a live wire feed; the production MBO path is owned by
+/// <c>SdkBookFeedAdapter</c> (host-side, backed by the SDK 0.4.0
+/// <c>IBookFeed</c>) which materializes the same surface from real
+/// <c>MarketDataClient</c> events.
 ///
 /// <para>
-/// <b>Design choice (MBO-only on the wire).</b> The server also exposes
-/// an L2 / MBP stream, but we deliberately subscribe to MBO only and
-/// derive L2 internally — one feed, one source of truth, no L2/L3
-/// divergence bugs. See <c>docs/rfcs/</c> design notes; tracking
-/// issue #286.
+/// Two roles today:
+/// <list type="bullet">
+///   <item>The <c>IL2BookView</c> fallback when
+///         <c>MarketDataOptions.EnableBook</c> is false (or
+///         <c>WsUrl</c> is unset) — registered as a singleton, never
+///         mutated, so reads return <c>null</c> / empty exactly like
+///         the old store-with-no-pump behavior.</item>
+///   <item>The programmable fake used by unit tests that exercise the
+///         <c>BookChanged</c> →
+///         <see cref="WebSockets.WebSocketBookEventSink"/> /
+///         <see cref="MboPegBookPump"/> consumer paths without
+///         standing up the SDK book feed.</item>
+/// </list>
 /// </para>
 ///
 /// <para>
@@ -25,11 +32,9 @@ namespace B3.Trading.Application.MarketData;
 /// own lock. The outer <see cref="ConcurrentDictionary{TKey,TValue}"/>
 /// handles concurrent symbol upserts. Reads (<see cref="GetTopOfBook"/>)
 /// take the same per-symbol lock to publish a consistent aggregate.
-/// The SDK delivers per-symbol events on a single dispatch thread so
-/// contention is limited to readers vs. that thread.
 /// </para>
 /// </summary>
-public sealed class MboBookStore : IL2BookView
+public sealed class InMemoryL2BookView : IL2BookView
 {
     private readonly ConcurrentDictionary<string, SymbolState> _bySymbol =
         new(StringComparer.OrdinalIgnoreCase);

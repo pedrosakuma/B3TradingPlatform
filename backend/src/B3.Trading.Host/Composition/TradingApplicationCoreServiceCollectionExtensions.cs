@@ -155,10 +155,11 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         services.AddHostedService(sp => sp.GetRequiredService<WebSocketAuctionEventSink>());
 
         // Q3.6 Stage B (#286). Public per-symbol book.${symbol} fan-out.
-        // Listens to MboBookStore.TopChanged (raised only when EnableBook
-        // is true and the SDK feeds MBO frames) and broadcasts derived
-        // L2 top-of-book deltas. Doubles as the snapshot provider for
-        // PublicChannelKind.Book; composed with the auction sink below.
+        // Listens to IL2BookView.BookChanged (raised by SdkBookFeedAdapter
+        // when the SDK feeds MBO frames, or never when the in-memory
+        // fallback is wired) and broadcasts derived L2 top-of-book deltas.
+        // Doubles as the snapshot provider for PublicChannelKind.Book;
+        // composed with the auction sink below.
         services.AddSingleton<WebSocketBookEventSink>();
         services.AddHostedService(sp => sp.GetRequiredService<WebSocketBookEventSink>());
 
@@ -233,24 +234,12 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         services.AddSingleton<B3.Trading.Application.MarketData.MarketDataPegBookPump>();
         services.AddHostedService(sp =>
             sp.GetRequiredService<B3.Trading.Application.MarketData.MarketDataPegBookPump>());
-        // Q3.6 Stage A (#286). In-host L3/MBO book store + pump. Off by
-        // default — events only flow when MarketDataOptions.EnableBook
-        // is true, in which case SdkMarketDataSubscriber subscribes to
-        // SubscribeFlags.Book and the SDK raises the Book* events the
-        // pump bridges into the store. L2 view is derived from the L3
-        // state and exposed via IL2BookView for downstream consumers.
-        services.AddSingleton<B3.Trading.Application.MarketData.MboBookStore>();
-        services.AddSingleton<B3.Trading.Application.MarketData.IL2BookView>(
-            sp => sp.GetRequiredService<B3.Trading.Application.MarketData.MboBookStore>());
-        services.AddSingleton<B3.Trading.Application.MarketData.MboBookStorePump>();
-        services.AddHostedService(sp =>
-            sp.GetRequiredService<B3.Trading.Application.MarketData.MboBookStorePump>());
-        // Q3.6 Stage C (#286). Bridges MboBookStore-derived BBO into
-        // the Pegged book-top cache. Closes the v1 SDK gap where
-        // PegRef.Mid / PegRef.Best transparently fell back to last-
-        // trade because no BBO source existed. No-op when EnableBook
-        // is false (the legacy v1 last-trade fallback then kicks in
-        // unchanged).
+        // Q3.6 Stage C (#286). Bridges live BBO from IL2BookView into
+        // the Pegged book-top cache so PegRef.Mid / PegRef.Best resolve
+        // to real best-bid/best-ask. No-op when IL2BookView is wired to
+        // the InMemoryL2BookView fallback (MarketData off or
+        // EnableBook=false): the legacy v1 last-trade fallback then
+        // kicks in unchanged.
         services.AddSingleton<B3.Trading.Application.MarketData.MboPegBookPump>();
         services.AddHostedService(sp =>
             sp.GetRequiredService<B3.Trading.Application.MarketData.MboPegBookPump>());

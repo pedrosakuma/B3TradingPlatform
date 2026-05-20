@@ -10,6 +10,17 @@ namespace B3.Trading.Application.MarketData;
 public interface IL2BookView
 {
     /// <summary>
+    /// Raised after any state change for the named symbol (snapshot, add,
+    /// update, delete, clear, or stale transition). Coarse-grained on
+    /// purpose so consumers can decide whether to recompute derived state;
+    /// pair with <see cref="GetTopOfBook"/> / <see cref="GetLadder"/> to
+    /// read the resulting state. Implementations MAY fire on the
+    /// underlying SDK / receive-loop thread — handlers must be fast and
+    /// must not throw.
+    /// </summary>
+    event Action<string>? BookChanged;
+
+    /// <summary>
     /// Returns the current best bid + best ask + the aggregated qty /
     /// order count on each top level, or <c>null</c> when the store
     /// has not seen any orders for <paramref name="symbol"/> yet (no
