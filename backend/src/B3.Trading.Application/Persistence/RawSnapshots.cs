@@ -39,6 +39,15 @@ public sealed class RawPlatformSnapshot
     public string[] KilledFirms { get; init; } = Array.Empty<string>();
     public string[] HaltedSymbols { get; init; } = Array.Empty<string>();
 
+    /// <summary>
+    /// Halted symbols with origin flags (#370 Stage A). Authoritative
+    /// post-#370; pre-existing snapshots leave this empty and the
+    /// projection falls back to <see cref="HaltedSymbols"/> tagged as
+    /// operator halts.
+    /// </summary>
+    public B3.Trading.Application.Risk.SymbolHaltEntry[] HaltedSymbolOrigins { get; init; } =
+        Array.Empty<B3.Trading.Application.Risk.SymbolHaltEntry>();
+
     public SessionPhase DefaultPhase { get; init; } = SessionPhase.Continuous;
     public SessionPhaseOverrideRaw[] SessionPhaseOverrides { get; init; } =
         Array.Empty<SessionPhaseOverrideRaw>();

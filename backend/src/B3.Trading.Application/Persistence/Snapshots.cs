@@ -50,6 +50,17 @@ public sealed class PlatformSnapshot
     public List<string> HaltedSymbols { get; init; } = new();
 
     /// <summary>
+    /// Halted symbols with their origin bitmask
+    /// (<see cref="B3.Trading.Application.Risk.SymbolHaltEntry.Flags"/>:
+    /// Operator=1, Venue=2). Added in #370 Stage A; older snapshots
+    /// pre-date the field and deserialise empty, in which case the
+    /// snapshotter falls back to <see cref="HaltedSymbols"/> and
+    /// treats every entry as an operator halt (the only origin that
+    /// existed pre-#370).
+    /// </summary>
+    public List<SymbolHaltOriginSnapshot> HaltedSymbolOrigins { get; init; } = new();
+
+    /// <summary>
     /// Global default <see cref="B3.Trading.Domain.SessionPhase"/>
     /// (#108) — applied when a symbol has no override. Older snapshots
     /// pre-date the field and deserialise as <c>"Continuous"</c>, which
@@ -600,6 +611,13 @@ public sealed record AlgoIdCounterSnapshot(string FirmId, long Counter);
 /// enum name for forward-compat across reorderings.
 /// </summary>
 public sealed record SessionPhaseOverrideSnapshot(string Symbol, string Phase);
+
+/// <summary>
+/// A halted symbol with its origin bitmask (Operator=1, Venue=2,
+/// both=3). Wire form for <see cref="PlatformSnapshot.HaltedSymbolOrigins"/>.
+/// Added by #370 Stage A.
+/// </summary>
+public sealed record SymbolHaltOriginSnapshot(string Symbol, byte Flags);
 
 /// <summary>
 /// Q4.1 (#301). One per-firm row of the

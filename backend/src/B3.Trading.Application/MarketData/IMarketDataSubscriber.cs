@@ -54,6 +54,18 @@ public interface IMarketDataSubscriber : IAsyncDisposable
     event Action<MarketAuctionImbalance>? AuctionImbalance;
     event Action<MarketAuctionPrint>? AuctionPrint;
 
+    // -------------------------------------------------------------
+    // Per-symbol trading-status delta (#370 Stage A). The adapter
+    // remembers the last observed status per symbol (raw SBE
+    // SecurityTradingStatus code carried in InfoSnapshot.TradingStatus)
+    // and raises this event only when it actually changes. Consumers:
+    // VenueHaltSubscriber bridges PAUSE/FORBIDDEN ↔ SymbolHaltService.
+    // Stage B will replace the delta-detection with a typed SDK event
+    // once B3.MarketData.WebSocketClient exposes one.
+    // -------------------------------------------------------------
+
+    event Action<MarketTradingStatusChange>? TradingStatusChanged;
+
     // L3 / MBO frames are not raised on this seam. The live wire path
     // funnels them through SDK 0.4.0's IBookFeed → SdkBookFeedAdapter →
     // IL2BookView; tests that need to drive an L3 book directly use

@@ -61,6 +61,16 @@ internal sealed class SdkMarketDataSubscriber : IMarketDataSubscriber
     public event Action<MarketAuctionImbalance>? AuctionImbalance;
     public event Action<MarketAuctionPrint>? AuctionPrint;
 
+    // ── #370 Stage A — venue trading-status delta detection ─────────
+    // SDK 0.4.0 carries TradingStatus as a nullable long inside
+    // InfoSnapshotEvent. The application seam wants a discrete event,
+    // not a snapshot stream, so we keep the last observed value per
+    // symbol here and only raise when it changes. Single-threaded
+    // access from the SDK callback path; no lock needed.
+    public event Action<MarketTradingStatusChange>? TradingStatusChanged;
+    private readonly Dictionary<string, long> _lastTradingStatus =
+        new(StringComparer.OrdinalIgnoreCase);
+
     public SdkMarketDataSubscriber(
         MarketDataClient client,
         ILogger<SdkMarketDataSubscriber> logger,
@@ -156,6 +166,32 @@ internal sealed class SdkMarketDataSubscriber : IMarketDataSubscriber
             imbalanceSide: TranslateAuctionSide(ev.AuctionImbalanceCondition),
             tradingStatus: ev.TradingStatus,
             receivedUtc: receivedUtc);
+
+        // #370 Stage A: surface a TradingStatus delta only when the
+        // SDK actually carries the field and the value changed. The
+        // wire encodes status as long? (SBE SecurityTradingStatus
+        // codes) — see SecurityTradingStatusCodes for the values
+        // VenueHaltSubscriber interprets.
+        if (ev.TradingStatus is { } status)
+        {
+            long? previous = null;
+            var changed = true;
+            if (_lastTradingStatus.TryGetValue(ev.Symbol, out var prev))
+            {
+                previous = prev;
+                changed = prev != status;
+            }
+            if (changed)
+            {
+                _lastTradingStatus[ev.Symbol] = status;
+                TradingStatusChanged?.Invoke(new MarketTradingStatusChange(
+                    Symbol: ev.Symbol,
+                    SecurityId: ev.SecurityId,
+                    PreviousStatus: previous,
+                    NewStatus: status,
+                    ReceivedUtc: receivedUtc));
+            }
+        }
     }
 
     private static OrderSide? TranslateAuctionSide(SdkAuctionCondition? c) => c switch

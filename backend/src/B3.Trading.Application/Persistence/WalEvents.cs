@@ -431,12 +431,26 @@ public sealed record KillSwitchToggledEvent : WalEvent
 /// when, and why" — and the only way recovery reconstructs the halt
 /// set, since halts are an out-of-band admin decision rather than a
 /// side-effect of an exchange ER.
+///
+/// <para>
+/// <see cref="Origin"/> distinguishes operator vs venue halts
+/// (#370 Stage A). Null on legacy events (pre-#370) — recovery treats
+/// the absence as <see cref="B3.Trading.Application.MarketData.HaltOrigin.Operator"/>,
+/// matching the single-origin behaviour that existed before the slice.
+/// </para>
 /// </summary>
 public sealed record SymbolHaltToggledEvent : WalEvent
 {
     public required string Symbol { get; init; }
     public required bool Halted { get; init; }    // true=halt, false=resume
     public string? ActorUserId { get; init; }
+
+    /// <summary>
+    /// Origin of the halt/resume. Null on legacy events; new code
+    /// always sets it. See
+    /// <see cref="B3.Trading.Application.MarketData.HaltOrigin"/>.
+    /// </summary>
+    public B3.Trading.Application.MarketData.HaltOrigin? Origin { get; init; }
 }
 
 /// <summary>

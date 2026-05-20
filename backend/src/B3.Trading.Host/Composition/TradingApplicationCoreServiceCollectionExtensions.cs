@@ -151,6 +151,17 @@ public static class TradingApplicationCoreServiceCollectionExtensions
             sp.GetRequiredService<B3.Trading.Application.MarketData.AuctionStateStore>());
         services.AddHostedService(sp =>
             sp.GetRequiredService<B3.Trading.Application.MarketData.AuctionStateStore>());
+
+        // #370 Stage A. Bridges venue-originated trading-status deltas
+        // observed by the market-data adapter into SymbolHaltService,
+        // audited via SymbolHaltToggledEvent { Origin = Venue }. Lives
+        // here (next to the other MD-driven singletons) so wiring stays
+        // colocated; the subscriber itself is in B3.Trading.Application
+        // because the service it bridges to is.
+        services.AddSingleton<B3.Trading.Application.Risk.VenueHaltSubscriber>();
+        services.AddHostedService(sp =>
+            sp.GetRequiredService<B3.Trading.Application.Risk.VenueHaltSubscriber>());
+
         services.AddSingleton<WebSocketAuctionEventSink>();
         services.AddHostedService(sp => sp.GetRequiredService<WebSocketAuctionEventSink>());
 

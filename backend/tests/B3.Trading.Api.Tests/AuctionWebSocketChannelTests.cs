@@ -202,6 +202,7 @@ public class AuctionWebSocketChannelTests
         public event Action<MarketAuctionImbalance>? AuctionImbalance;
         public event Action<MarketAuctionPrint>? AuctionPrint;
 #pragma warning disable CS0067
+        public event Action<MarketTradingStatusChange>? TradingStatusChanged;
         public event Action<MarketBookSnapshot>? BookSnapshot;
         public event Action<MarketOrderAdded>? OrderAdded;
         public event Action<MarketOrderUpdated>? OrderUpdated;
