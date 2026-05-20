@@ -33,6 +33,7 @@ public class PnlRefPriceFanOutTests
         public event Action<MarketTheoreticalOpening>? TheoreticalOpening;
         public event Action<MarketAuctionImbalance>? AuctionImbalance;
         public event Action<MarketAuctionPrint>? AuctionPrint;
+        public event Action<MarketTradingStatusChange>? TradingStatusChanged;
         public event Action<MarketBookSnapshot>? BookSnapshot;
         public event Action<MarketOrderAdded>? OrderAdded;
         public event Action<MarketOrderUpdated>? OrderUpdated;

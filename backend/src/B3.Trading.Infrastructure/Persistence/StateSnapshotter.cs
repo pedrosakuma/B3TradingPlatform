@@ -163,6 +163,7 @@ public sealed class StateSnapshotter
         KilledEndClients = _killSwitch.RawSnapshotKilledEndClients(),
         KilledFirms = _killSwitch.RawSnapshotKilledFirms(),
         HaltedSymbols = _symbolHalts.RawSnapshot(),
+        HaltedSymbolOrigins = _symbolHalts.RawSnapshotWithOrigin(),
         DefaultPhase = _sessionPhases.DefaultPhase,
         SessionPhaseOverrides = _sessionPhases.RawSnapshotOverrides(),
         ClOrdIds = _clOrdIds.RawSnapshot(),
@@ -462,6 +463,11 @@ public sealed class StateSnapshotter
             KilledEndClients = new List<string>(raw.KilledEndClients),
             KilledFirms = new List<string>(raw.KilledFirms),
             HaltedSymbols = new List<string>(raw.HaltedSymbols),
+            HaltedSymbolOrigins = raw.HaltedSymbolOrigins.Length == 0
+                ? new List<SymbolHaltOriginSnapshot>()
+                : raw.HaltedSymbolOrigins
+                    .Select(e => new SymbolHaltOriginSnapshot(e.Symbol, e.Flags))
+                    .ToList(),
             DefaultSessionPhase = raw.DefaultPhase.ToString(),
             SessionPhaseOverrides = phaseOverrides,
             ClOrdIds = clOrdIds,
@@ -498,7 +504,17 @@ public sealed class StateSnapshotter
         _orders.Restore(snap.WorkingOrders);
         _positions.Restore(snap.Positions);
         _killSwitch.Restore(snap.KilledEndClients, snap.KilledFirms);
-        _symbolHalts.Restore(snap.HaltedSymbols);
+        // #370 Stage A: prefer origin-bearing list when present;
+        // fall back to the legacy string list (treat as Operator).
+        if (snap.HaltedSymbolOrigins is { Count: > 0 })
+        {
+            _symbolHalts.RestoreWithOrigin(snap.HaltedSymbolOrigins
+                .Select(s => new B3.Trading.Application.Risk.SymbolHaltEntry(s.Symbol, s.Flags)));
+        }
+        else
+        {
+            _symbolHalts.Restore(snap.HaltedSymbols);
+        }
         var defaultPhase = Enum.TryParse<SessionPhase>(snap.DefaultSessionPhase, ignoreCase: true, out var dp)
             ? dp : SessionPhase.Continuous;
         var overrides = snap.SessionPhaseOverrides
@@ -1045,8 +1061,9 @@ public sealed class EventReplayer
                 }
                 break;
             case SymbolHaltToggledEvent sh:
-                if (sh.Halted) _symbolHalts.Halt(sh.Symbol);
-                else _symbolHalts.Resume(sh.Symbol);
+                var origin = sh.Origin ?? B3.Trading.Application.MarketData.HaltOrigin.Operator;
+                if (sh.Halted) _symbolHalts.Halt(sh.Symbol, origin);
+                else _symbolHalts.Resume(sh.Symbol, origin);
                 break;
             case SessionPhaseChangedEvent sp:
                 if (string.IsNullOrWhiteSpace(sp.Symbol))

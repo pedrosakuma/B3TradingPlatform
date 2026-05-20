@@ -606,10 +606,12 @@ public static class AdminEndpoints
                     Symbol = symbol,
                     Halted = halted,
                     ActorUserId = actor,
+                    Origin = B3.Trading.Application.MarketData.HaltOrigin.Operator,
                 },
                 mutate);
             MetricsRegistry.SymbolHaltToggled.Add(1,
-                new KeyValuePair<string, object?>("halted", halted));
+                new KeyValuePair<string, object?>("halted", halted),
+                new KeyValuePair<string, object?>("origin", "operator"));
             return Results.NoContent();
         }
         catch (WalBackpressureException ex)
