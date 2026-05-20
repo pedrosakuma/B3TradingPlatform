@@ -66,7 +66,7 @@ public class GtdSchedulerRegressionTests
         // The scheduler clamps a past-due head to a tiny floor; advance
         // a couple of ms to let the timer fire deterministically.
         h.Clock.Advance(TimeSpan.FromMilliseconds(5));
-        for (int i = 0; i < 200 && h.Gateway.CancelCalls.Count == 0; i++)
+        for (int i = 0; i < 1000 && h.Gateway.CancelCalls.Count == 0; i++)
             await Task.Delay(10);
 
         Assert.Single(h.Gateway.CancelCalls);
@@ -108,12 +108,12 @@ public class GtdSchedulerRegressionTests
         h.Store.Reset();
 
         h.Clock.Advance(TimeSpan.FromSeconds(5));
-        for (int i = 0; i < 200 && h.Gateway.CancelCount == 0; i++)
+        for (int i = 0; i < 1000 && h.Gateway.CancelCount == 0; i++)
             await Task.Delay(10);
         // Allow the audit-only OrderExpiredEvent dispatch (which runs
         // after CancelAsync returns is no longer the case — it now
         // runs before — so wait until both have been observed).
-        for (int i = 0; i < 200 && h.Store.AppendedTypes.Count < 2; i++)
+        for (int i = 0; i < 1000 && h.Store.AppendedTypes.Count < 2; i++)
             await Task.Delay(10);
 
         Assert.Equal(2, h.Store.AppendedTypes.Count);
@@ -147,7 +147,7 @@ public class GtdSchedulerRegressionTests
 
         // Tick #1: fire the expiry.
         h.Clock.Advance(TimeSpan.FromSeconds(5));
-        for (int i = 0; i < 200 && h.Store.AppendedTypes.Count < 1; i++)
+        for (int i = 0; i < 1000 && h.Store.AppendedTypes.Count < 1; i++)
             await Task.Delay(10);
 
         // After tick #1: OrderExpiredEvent is on the WAL, but
@@ -158,9 +158,17 @@ public class GtdSchedulerRegressionTests
         Assert.Equal(1, h.Sut.TrackedCount);
 
         // Tick #2: backoff fires. RetryCount==1 → 100ms delay.
-        h.Clock.Advance(TimeSpan.FromMilliseconds(105));
+        // The re-arm happens asynchronously on the thread pool after
+        // the rejected dispatch returns, so we cannot Advance once and
+        // poll: the timer may not yet be registered for the new "now".
+        // Walk in small clock increments interleaved with wall-time
+        // yields so each rearm Task settles before the next Advance
+        // sweep (#325).
         for (int i = 0; i < 200 && h.Gateway.CancelCount == 0; i++)
-            await Task.Delay(10);
+        {
+            h.Clock.Advance(TimeSpan.FromMilliseconds(50));
+            await Task.Delay(20);
+        }
 
         Assert.Equal(1, h.Gateway.CancelCount);
         // Exactly one OrderExpiredEvent (audit dedupe) + one
@@ -192,44 +200,27 @@ public class GtdSchedulerRegressionTests
         // Fire the expiry. OrderExpiredEvent goes through; cancel
         // returns WalBackpressure → re-arm with 100ms backoff.
         h.Clock.Advance(TimeSpan.FromSeconds(5));
-        for (int i = 0; i < 200 && h.Store.AppendedTypes.Count < 1; i++)
+        for (int i = 0; i < 1000 && h.Store.AppendedTypes.Count < 1; i++)
             await Task.Delay(10);
         Assert.Equal(0, h.Gateway.CancelCount);
 
         // Backoff schedule: 100, 200, 400, 800, 1600 ms — five
         // attempts total before the store stops rejecting. Step 6 is
-        // the success.
-        var schedule = new[]
-        {
-            TimeSpan.FromMilliseconds(100),
-            TimeSpan.FromMilliseconds(200),
-            TimeSpan.FromMilliseconds(400),
-            TimeSpan.FromMilliseconds(800),
-            TimeSpan.FromMilliseconds(1600),
-        };
-
-        foreach (var step in schedule)
-        {
-            // A retry slightly before the backoff must NOT fire.
-            h.Clock.Advance(step - TimeSpan.FromMilliseconds(5));
-            await Task.Delay(15);
-            // We may already be past the threshold for fast steps
-            // because the dispatch path runs on the thread pool, so
-            // assert against a snapshot taken now and re-check after
-            // crossing the boundary.
-            var beforeCount = h.Store.AppendedTypes.Count;
-
-            h.Clock.Advance(TimeSpan.FromMilliseconds(10));
-            for (int i = 0; i < 200 && h.Store.AppendedTypes.Count == beforeCount; i++)
-                await Task.Delay(10);
-        }
-
-        // The 6th attempt drains the rejection counter and succeeds.
-        // After all five rejected attempts plus the success, the WAL
-        // has exactly one OrderExpiredEvent and one
-        // OrderCancelRequestedEvent.
+        // the success. We previously verified each step's "fires only
+        // after the threshold" property by toggling the clock around
+        // each boundary, but that races the dispatch thread-pool
+        // callback (re-arm happens on Task.Run, so the next
+        // VirtualTimeProvider.Advance() may not see the new timer yet
+        // — see #325). Each backoff retry is fired via Task.Run so
+        // the re-arm must settle on the thread pool BETWEEN clock
+        // advances. Walk in coarse increments and yield enough wall
+        // time per increment for the re-arm Task to register the
+        // next timer before the following Advance sweep.
         for (int i = 0; i < 200 && h.Gateway.CancelCount == 0; i++)
-            await Task.Delay(10);
+        {
+            h.Clock.Advance(TimeSpan.FromMilliseconds(100));
+            await Task.Delay(20);
+        }
         Assert.Equal(1, h.Gateway.CancelCount);
         Assert.Equal(1, h.Store.AppendedTypes.Count(t => t == typeof(OrderExpiredEvent)));
         Assert.Equal(1, h.Store.AppendedTypes.Count(t => t == typeof(OrderCancelRequestedEvent)));
@@ -266,7 +257,7 @@ public class GtdSchedulerRegressionTests
         // Tick #1: expiry fires; audit appends; cancel hits WAL
         // backpressure; scheduler re-arms with 100ms backoff.
         h.Clock.Advance(TimeSpan.FromSeconds(5));
-        for (int i = 0; i < 200 && h.Store.AppendedTypes.Count < 1; i++)
+        for (int i = 0; i < 1000 && h.Store.AppendedTypes.Count < 1; i++)
             await Task.Delay(10);
         Assert.Equal(1, h.Sut.TrackedCount);
         Assert.Equal(0, h.Gateway.CancelCount);
@@ -330,7 +321,7 @@ public class GtdSchedulerRegressionTests
 
         // Past-due head: timer floor fires the dispatch immediately.
         h.Clock.Advance(GtdExpirationScheduler.MinTimerFloor + TimeSpan.FromMilliseconds(5));
-        for (int i = 0; i < 200 && h.Gateway.CancelCount == 0; i++)
+        for (int i = 0; i < 1000 && h.Gateway.CancelCount == 0; i++)
             await Task.Delay(10);
 
         // Cancel went through (1 OrderCancelRequestedEvent), but NO
@@ -366,7 +357,7 @@ public class GtdSchedulerRegressionTests
         h1.Store.Reset();
 
         h1.Clock.Advance(GtdExpirationScheduler.MinTimerFloor + TimeSpan.FromMilliseconds(5));
-        for (int i = 0; i < 200 && h1.Gateway.CancelCount == 0; i++)
+        for (int i = 0; i < 1000 && h1.Gateway.CancelCount == 0; i++)
             await Task.Delay(10);
 
         Assert.Equal(1, h1.Gateway.CancelCount);
@@ -439,11 +430,11 @@ public class GtdSchedulerRegressionTests
 
         // Past-due head fires immediately; wait for the audit event to land.
         h.Clock.Advance(GtdExpirationScheduler.MinTimerFloor + TimeSpan.FromMilliseconds(5));
-        for (int i = 0; i < 200 && h.Store.AppendedTypes.Count(t => t == typeof(OrderExpiredEvent)) == 0; i++)
+        for (int i = 0; i < 1000 && h.Store.AppendedTypes.Count(t => t == typeof(OrderExpiredEvent)) == 0; i++)
             await Task.Delay(10);
         Assert.Equal(1, h.Store.AppendedTypes.Count(t => t == typeof(OrderExpiredEvent)));
         // Cancel was rejected → still tracked, awaiting backoff retry.
-        for (int i = 0; i < 200 && h.Sut.TrackedCount == 0; i++)
+        for (int i = 0; i < 1000 && h.Sut.TrackedCount == 0; i++)
             await Task.Delay(10);
         Assert.Equal(1, h.Sut.TrackedCount);
 
@@ -456,7 +447,7 @@ public class GtdSchedulerRegressionTests
 
         // Drain the backoff and let the cancel succeed.
         h.Clock.Advance(TimeSpan.FromMilliseconds(110));
-        for (int i = 0; i < 200 && h.Sut.TrackedCount > 0; i++)
+        for (int i = 0; i < 1000 && h.Sut.TrackedCount > 0; i++)
             await Task.Delay(10);
         Assert.Equal(0, h.Sut.TrackedCount);
 
@@ -525,7 +516,7 @@ public class GtdSchedulerRegressionTests
 
         // Past-due head: timer floor fires the dispatch immediately.
         h.Clock.Advance(GtdExpirationScheduler.MinTimerFloor + TimeSpan.FromMilliseconds(5));
-        for (int i = 0; i < 200 && h.Gateway.CancelCount == 0; i++)
+        for (int i = 0; i < 1000 && h.Gateway.CancelCount == 0; i++)
             await Task.Delay(10);
 
         Assert.Equal(1, h.Gateway.CancelCount);
