@@ -33,19 +33,22 @@ public sealed class SubscriptionManager
     private readonly AlgoBook _algos;
     private readonly PnlKeeper? _pnl;
     private readonly Application.Risk.IReferencePrice? _refPrice;
+    private readonly CashLedger? _cash;
 
     public SubscriptionManager(
         WorkingOrderBook orders,
         PositionKeeper positions,
         AlgoBook algos,
         PnlKeeper? pnl = null,
-        Application.Risk.IReferencePrice? refPrice = null)
+        Application.Risk.IReferencePrice? refPrice = null,
+        CashLedger? cash = null)
     {
         _orders = orders;
         _positions = positions;
         _algos = algos;
         _pnl = pnl;
         _refPrice = refPrice;
+        _cash = cash;
     }
 
     private object LockFor(EndClientId owner) =>
@@ -93,6 +96,7 @@ public sealed class SubscriptionManager
                 Channels.PnlMe => (_pnl is not null && _refPrice is not null)
                     ? PnlProjection.Build(client.Owner, client.FirmId, _pnl, _positions, _refPrice)
                     : null,
+                Channels.BalanceMe => new BalanceDto(_cash?.GetAvailable(client.Owner) ?? 0m),
                 _ => null,
             };
 

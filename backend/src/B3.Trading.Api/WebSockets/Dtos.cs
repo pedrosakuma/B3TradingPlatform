@@ -15,6 +15,16 @@ public static class Channels
     public const string PnlMe = "pnl.me";
 
     /// <summary>
+    /// #386. Per-end-client live cash balance projection. Snapshot is
+    /// a single <see cref="BalanceDto"/> at subscribe time; deltas are
+    /// pushed by <c>WebSocketBalanceFanOut</c> whenever
+    /// <see cref="CashLedger.BalanceChanged"/> fires (fills, fees,
+    /// opening-balance seed). Not firm-scoped — the underlying
+    /// <see cref="CashLedger"/> is keyed only by end-client owner.
+    /// </summary>
+    public const string BalanceMe = "balance.me";
+
+    /// <summary>
     /// Q1.5 (#257). Public per-symbol market-data channels of the form
     /// <c>phases.${symbol}</c> and <c>auction.${symbol}</c> — fed off
     /// the UMDF auction listener via <c>AuctionStateStore</c>. They are
@@ -50,7 +60,7 @@ public static class Channels
     /// <see cref="TryParsePublic"/>.
     /// </summary>
     public static readonly IReadOnlySet<string> All =
-        new HashSet<string>(StringComparer.Ordinal) { OrdersMe, ExecutionsMe, PositionsMe, AlgoMe, PnlMe };
+        new HashSet<string>(StringComparer.Ordinal) { OrdersMe, ExecutionsMe, PositionsMe, AlgoMe, PnlMe, BalanceMe };
 
     /// <summary>
     /// Recognises <c>phases.SYMBOL</c> / <c>auction.SYMBOL</c> and
