@@ -34,24 +34,9 @@ public static class Channels
     public const string PhasesPrefix = "phases.";
     public const string AuctionPrefix = "auction.";
 
-    /// <summary>
-    /// Q3.6 Stage B (#286). Public per-symbol top-of-book channel
-    /// (<c>book.${symbol}</c>) fed by the in-host MBO store
-    /// (<c>MboBookStore</c>). Same auth posture as the auction/phases
-    /// channels: authenticated bearer required, no per-firm filter.
-    /// </summary>
-    public const string BookPrefix = "book.";
-
-    /// <summary>
-    /// #372 / #293. Public per-symbol L3 (order-by-order) channel
-    /// (<c>bookmbo.${symbol}</c>) fed by the raw MBO frames from the
-    /// market-data SDK (<c>IMboBookEventSource</c>). Independent of
-    /// <see cref="BookPrefix"/>: <c>book.</c> coalesces a derived L2
-    /// top-N ladder for chart-style consumers, <c>bookmbo.</c> ships
-    /// every per-order event for L3-aware front-ends. Same auth
-    /// posture (authenticated bearer required, no per-firm filter).
-    /// </summary>
-    public const string BookMboPrefix = "bookmbo.";
+    // #394. The book.${symbol} (L2) and bookmbo.${symbol} (L3)
+    // trading-host fan-out channels were deprecated. FE consumes
+    // B3MarketDataPlatform directly via the mdWorker.
 
     /// <summary>
     /// Per-owner channel names (validated against an exact set).
@@ -85,16 +70,6 @@ public static class Channels
             kind = PublicChannelKind.Auction;
             raw = channel[AuctionPrefix.Length..];
         }
-        else if (channel.StartsWith(BookMboPrefix, StringComparison.Ordinal))
-        {
-            kind = PublicChannelKind.BookMbo;
-            raw = channel[BookMboPrefix.Length..];
-        }
-        else if (channel.StartsWith(BookPrefix, StringComparison.Ordinal))
-        {
-            kind = PublicChannelKind.Book;
-            raw = channel[BookPrefix.Length..];
-        }
         else
         {
             return false;
@@ -115,8 +90,6 @@ public static class Channels
 
     public static string PhasesFor(string symbol) => PhasesPrefix + symbol;
     public static string AuctionFor(string symbol) => AuctionPrefix + symbol;
-    public static string BookFor(string symbol) => BookPrefix + symbol;
-    public static string BookMboFor(string symbol) => BookMboPrefix + symbol;
 }
 
 public enum PublicChannelKind
@@ -124,86 +97,7 @@ public enum PublicChannelKind
     None,
     Phases,
     Auction,
-    Book,
-    BookMbo,
 }
-
-/// <summary>
-/// Q3.6 Stage B (#286). Wire shape for the public
-/// <c>book.${symbol}</c> top-N depth channel. Each side lists
-/// aggregated price levels sorted best-to-worst (bids descending,
-/// asks ascending), capped to <c>MarketDataOptions.BookChannelMaxLevels</c>.
-/// Empty array on a side means "no liquidity" (either never seen, or
-/// cleared). <c>UpdatedUtc</c> is <c>null</c> only on the empty-state
-/// cold snapshot served before any MBO frame lands.
-/// </summary>
-public sealed record L2LadderDto(
-    string Symbol,
-    IReadOnlyList<L2SideDto> Bids,
-    IReadOnlyList<L2SideDto> Asks,
-    DateTimeOffset? UpdatedUtc)
-{
-    public static L2LadderDto Empty(string symbol) =>
-        new(symbol, Array.Empty<L2SideDto>(), Array.Empty<L2SideDto>(), null);
-
-    public static L2LadderDto From(L2Ladder l) => new(
-        l.Symbol,
-        Map(l.Bids),
-        Map(l.Asks),
-        l.UpdatedUtc);
-
-    private static IReadOnlyList<L2SideDto> Map(IReadOnlyList<L2Side> src)
-    {
-        if (src.Count == 0) return Array.Empty<L2SideDto>();
-        var arr = new L2SideDto[src.Count];
-        for (var i = 0; i < src.Count; i++)
-            arr[i] = new L2SideDto(src[i].Price, src[i].TotalQty, src[i].OrderCount);
-        return arr;
-    }
-}
-
-public sealed record L2SideDto(decimal Price, long TotalQty, int OrderCount);
-
-// ── L3 / MBO depth channel (#372 / #293) ────────────────────────────
-
-/// <summary>
-/// Wire shape for the <c>bookmbo.${symbol}</c> snapshot frame.
-/// Lists every order known to the host per side, sorted server-side
-/// (best price first). <c>UpdatedUtc</c> is <c>null</c> on the cold
-/// snapshot served before any MBO frame has landed for the symbol.
-/// <c>Sequence</c> is the last applied <c>RptSeq</c> (opaque to the
-/// client — used only for debug + ops correlation).
-/// </summary>
-public sealed record MboBookSnapshotDto(
-    string Symbol,
-    long? Sequence,
-    IReadOnlyList<MboOrderDto> Bids,
-    IReadOnlyList<MboOrderDto> Asks,
-    DateTimeOffset? UpdatedUtc)
-{
-    public static MboBookSnapshotDto Empty(string symbol) =>
-        new(symbol, null, Array.Empty<MboOrderDto>(), Array.Empty<MboOrderDto>(), null);
-}
-
-/// <summary>One MBO order inside a snapshot.</summary>
-public sealed record MboOrderDto(string OrderId, decimal Price, long Qty);
-
-/// <summary>
-/// Wire shape for one per-order delta on <c>bookmbo.${symbol}</c>.
-/// <c>Kind</c> is one of <c>added</c> / <c>updated</c> / <c>deleted</c>
-/// / <c>cleared</c>. Fields not relevant for <c>kind</c> are null:
-/// <c>cleared</c> carries only <c>Symbol</c> + <c>Side</c> (the side
-/// being cleared — null means both sides).
-/// </summary>
-public sealed record MboBookDeltaDto(
-    string Kind,
-    string Symbol,
-    string? OrderId,
-    string? Side,
-    decimal? Price,
-    long? Qty,
-    DateTimeOffset Ts);
-
 
 /// <summary>Inbound command from a connected client.</summary>
 public sealed record InboundCommand(string Type, string[]? Channels);

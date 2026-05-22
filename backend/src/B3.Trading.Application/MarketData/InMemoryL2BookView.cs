@@ -20,10 +20,8 @@ namespace B3.Trading.Application.MarketData;
 ///         mutated, so reads return <c>null</c> / empty exactly like
 ///         the old store-with-no-pump behavior.</item>
 ///   <item>The programmable fake used by unit tests that exercise the
-///         <c>BookChanged</c> →
-///         <see cref="WebSockets.WebSocketBookEventSink"/> /
-///         <see cref="MboPegBookPump"/> consumer paths without
-///         standing up the SDK book feed.</item>
+///         <c>BookChanged</c> → <see cref="MboPegBookPump"/> consumer
+///         path without standing up the SDK book feed.</item>
 /// </list>
 /// </para>
 ///

@@ -2,10 +2,10 @@ namespace B3.Trading.Application.MarketData;
 
 /// <summary>
 /// Q3.6 Stage A (#286). Read-only L2 view derived from the L3 / MBO
-/// book maintained by <see cref="MboBookStore"/>. Consumers that only
-/// need top-of-book (pegging v2, collar v2, depth-ladder FE channel)
-/// take a dependency on this seam instead of the full L3 store so the
-/// MBO implementation can change without rippling.
+/// book maintained by the SDK book feed adapter. Consumers that only
+/// need top-of-book (pegging v2, collar v2) take a dependency on this
+/// seam instead of the full L3 store so the MBO implementation can
+/// change without rippling.
 /// </summary>
 public interface IL2BookView
 {
@@ -60,10 +60,10 @@ public readonly record struct L2Side(
 /// <summary>
 /// Q3.6 Stage B (#286). Top-N depth ladder derived from the L3 / MBO
 /// store: per-side list of aggregated price levels, sorted best-to-
-/// worst (bids descending, asks ascending). Used by the FE depth
-/// view via the <c>book.${symbol}</c> WS channel. Same null/empty
-/// semantics as <see cref="L2TopOfBook"/> — sides may be empty when
-/// the store has not seen any orders on that side yet.
+/// worst (bids descending, asks ascending). Consumed today by the
+/// pegged-algo top cache. Same null/empty semantics as
+/// <see cref="L2TopOfBook"/> — sides may be empty when the store has
+/// not seen any orders on that side yet.
 /// </summary>
 public readonly record struct L2Ladder(
     string Symbol,

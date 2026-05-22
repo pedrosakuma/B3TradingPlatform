@@ -417,27 +417,79 @@ function ensureBook(symbol) {
   return entry;
 }
 
+const SIDE_BID = 0;
+const SIDE_ASK = 1;
+
+function sideMap(entry, side) {
+  if (side === SIDE_BID) return entry.bids;
+  if (side === SIDE_ASK) return entry.asks;
+  return null;
+}
+
 /// <summary>
-/// Q3.6 Stage B (#286). Apply a `book.${symbol}` frame coming from the
-/// trading-host WS (replaces both sides with the server's coalesced
-/// top-N ladder). Snapshot and delta share the same shape, so a single
-/// reducer handles both — the server already replays the latest
-/// ladder as a `snapshot` frame on subscribe.
+/// #394. Apply a BookSnapshot marker for `symbol`. A `LevelSnapshot`
+/// frame follows on the same MBP stream carrying the data — until then
+/// the UI must show "waiting" instead of a half-built book.
 /// </summary>
-export function applyBookFrame(frame) {
-  if (!frame || typeof frame.Symbol !== "string") return;
-  const entry = ensureBook(frame.Symbol);
+export function applyMdBookSnapshot({ symbol }) {
+  const entry = ensureBook(symbol);
   entry.bids.clear();
   entry.asks.clear();
-  for (const lv of frame.Bids ?? []) {
-    entry.bids.set(priceKey(lv.Price), { qty: lv.TotalQty, count: lv.OrderCount });
+  entry.ready = false;
+  entry.updatedAt = Date.now();
+  notify("book");
+}
+
+/// <summary>
+/// #394. Apply the full MBP snapshot. Replaces both sides with the
+/// server's level-aggregated state and flips `ready=true` so subsequent
+/// `LevelUpdate` / `LevelDeleted` deltas are honoured.
+/// </summary>
+export function applyMdLevelSnapshot({ symbol, bids, asks }) {
+  const entry = ensureBook(symbol);
+  entry.bids.clear();
+  entry.asks.clear();
+  for (const lv of bids ?? []) entry.bids.set(priceKey(lv.price), { qty: lv.qty, count: lv.count });
+  for (const lv of asks ?? []) entry.asks.set(priceKey(lv.price), { qty: lv.qty, count: lv.count });
+  entry.ready = true;
+  entry.updatedAt = Date.now();
+  notify("book");
+}
+
+export function applyMdLevelUpdate({ symbol, side, price, qty, count }) {
+  const entry = ensureBook(symbol);
+  // Drop incremental updates before the first level.snapshot — they
+  // would build a partial / misleading book.
+  if (!entry.ready) return;
+  const target = sideMap(entry, side);
+  if (target === null) return;
+  target.set(priceKey(price), { qty, count });
+  entry.updatedAt = Date.now();
+  notify("book");
+}
+
+export function applyMdLevelDeleted({ symbol, side, price }) {
+  const entry = state.book.get(symbol);
+  if (!entry?.ready) return;
+  const target = sideMap(entry, side);
+  if (target === null) return;
+  if (target.delete(priceKey(price))) {
+    entry.updatedAt = Date.now();
+    notify("book");
   }
-  for (const lv of frame.Asks ?? []) {
-    entry.asks.set(priceKey(lv.Price), { qty: lv.TotalQty, count: lv.OrderCount });
+}
+
+export function applyMdBookCleared({ symbol, side }) {
+  const entry = state.book.get(symbol);
+  if (!entry) return;
+  if (side === null || side === undefined) {
+    entry.bids.clear();
+    entry.asks.clear();
+  } else {
+    const target = sideMap(entry, side);
+    if (target === null) return;
+    target.clear();
   }
-  // Empty-state snapshot (UpdatedUtc=null) keeps ready=false so the
-  // DOB shows its "waiting" affordance instead of an empty ladder.
-  entry.ready = frame.UpdatedUtc != null;
   entry.updatedAt = Date.now();
   notify("book");
 }

@@ -141,13 +141,13 @@ function init() {
     onCvmDownload:     handleCvmDownload,
   });
 
-  // Q1.6 (#258) + Q3.6 Stage B (#286). Whenever the watchlist,
-  // auctionPanelSymbol or selectedSymbol slice changes, re-diff the
-  // public WS subscription set so phase badges stay in sync,
-  // auction.${symbol} is only subscribed while the panel is open, and
-  // book.${symbol} tracks the currently selected DOB symbol.
+  // Q1.6 (#258). Whenever the watchlist or auctionPanelSymbol slice
+  // changes, re-diff the public WS subscription set so phase badges
+  // stay in sync and auction.${symbol} is only subscribed while the
+  // panel is open. (Depth comes from the mdWorker MBP path now, not
+  // a trading-host channel — see #394.)
   state.subscribe((slice) => {
-    if (slice === "watchlist" || slice === "auctionPanelSymbol" || slice === "selectedSymbol" || slice === "all") {
+    if (slice === "watchlist" || slice === "auctionPanelSymbol" || slice === "all") {
       syncPublicChannels();
     }
   });
@@ -572,10 +572,8 @@ function syncPublicChannels() {
   const channels = [];
   for (const sym of st.watchlist) channels.push("phases." + sym);
   if (st.auctionPanelSymbol) channels.push("auction." + st.auctionPanelSymbol);
-  // Q3.6 Stage B (#286). Depth ladder only flows for the currently
-  // selected symbol — the DOB renders one symbol at a time. Keeps WS
-  // fan-out cost predictable as the watchlist grows.
-  if (st.selectedSymbol) channels.push("book." + st.selectedSymbol);
+  // #394. Depth ladder no longer flows through the trading-host WS —
+  // FE consumes B3MarketDataPlatform directly via mdWorker (MBP path).
   try { worker.postMessage({ type: "setPublicChannels", channels }); }
   catch { /* worker not ready yet — replayed by next slice notify */ }
 }
@@ -624,10 +622,10 @@ function startMdWorker() {
 
   mdWorker = new Worker(new URL("./mdWorker.js", import.meta.url), { type: "module" });
   mdWorker.onmessage = (ev) => onMdWorkerMessage(ev.data);
-  // Q3.6 Stage B (#286): trading-host owns the book channel now, so
-  // mdWorker drops MBP — trades + info only. Depth comes from the
-  // authenticated `book.${symbol}` WS sub managed in syncPublicChannels.
-  const flags = FLAGS.TRADES | FLAGS.INFO;
+  // #394. mdWorker is now the sole depth source — trades + info + MBP.
+  // The trading-host book.${symbol} fan-out was removed; FE consumes
+  // B3MarketDataPlatform directly.
+  const flags = FLAGS.TRADES | FLAGS.INFO | FLAGS.MBP;
   mdWorker.postMessage({
     type: "start",
     url: mdConfig.url,
@@ -673,16 +671,17 @@ function handleApplyMd({ url, symbols }) {
   ui.setMdFeedback(`watching ${symbols.length} symbol(s)`, "ok");
 }
 
-// Q3.6 Stage B (#286). MBP retired from the direct marketdata path —
-// depth ladder is fanned out by the trading host via book.${symbol}.
+// #394. Depth ladder is fed by the mdWorker MBP stream (every
+// watchlist symbol subscribed once at the marketdata WS). No
+// per-selection promotion needed; selectedSymbol just drives which
+// ladder the DOB renders.
 let lastAutoFilledTicketSymbol = null;
 let _successToastTimer = null;
 
 function handleSelectSymbol(symbol) {
-  // Single global selector drives DOB, chart and tape. The depth view
-  // for `symbol` is now wired through the trading-host `book.${symbol}`
-  // sub (added by syncPublicChannels on the next selectedSymbol slice
-  // notify), so we no longer need to promote the mdWorker bitmask.
+  // Single global selector drives DOB, chart and tape. The DOB reads
+  // the per-symbol entry from state.book that mdWorker already keeps
+  // up to date via MBP — no public-channel resync is required here.
   state.setSelectedSymbol(symbol || null);
   // Auto-fill the ticket-symbol input when it's empty or still tracking
   // a previously auto-filled symbol. We never clobber a value the trader
@@ -724,6 +723,11 @@ function onMdWorkerMessage(msg) {
       break;
     case "md.candle.snapshot": state.applyMdCandleSnapshot(msg); break;
     case "md.candle.update":   state.applyMdCandleUpdate(msg); break;
+    case "md.book.snapshot":   state.applyMdBookSnapshot(msg); break;
+    case "md.book.cleared":    state.applyMdBookCleared(msg); break;
+    case "md.level.snapshot":  state.applyMdLevelSnapshot(msg); break;
+    case "md.level.update":    state.applyMdLevelUpdate(msg); break;
+    case "md.level.deleted":   state.applyMdLevelDeleted(msg); break;
     case "md.error":    console.warn("[md]", msg); break;
   }
 }
@@ -746,7 +750,6 @@ function onWorkerMessage(msg) {
     case "balance.frame":       state.applyBalanceFrame(msg.data); break;
     case "phases.frame":        state.applyPhaseFrame(msg.data); break;
     case "auction.frame":       state.applyAuctionFrame(msg.data); break;
-    case "book.frame":          state.applyBookFrame(msg.data); break;
     case "error":
       // A frame-level error from the server (e.g., unknown_channel,
       // bad subscribe args, channel auth). #342: surface it as a

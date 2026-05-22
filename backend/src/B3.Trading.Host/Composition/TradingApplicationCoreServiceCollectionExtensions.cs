@@ -173,29 +173,14 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         services.AddSingleton<WebSocketAuctionEventSink>();
         services.AddHostedService(sp => sp.GetRequiredService<WebSocketAuctionEventSink>());
 
-        // Q3.6 Stage B (#286). Public per-symbol book.${symbol} fan-out.
-        // Listens to IL2BookView.BookChanged (raised by SdkBookFeedAdapter
-        // when the SDK feeds MBO frames, or never when the in-memory
-        // fallback is wired) and broadcasts derived L2 top-of-book deltas.
-        // Doubles as the snapshot provider for PublicChannelKind.Book;
-        // composed with the auction sink below.
-        services.AddSingleton<WebSocketBookEventSink>();
-        services.AddHostedService(sp => sp.GetRequiredService<WebSocketBookEventSink>());
-
-        // #372 / #293. Public per-symbol bookmbo.${symbol} L3 fan-out.
-        // Listens to IMboBookEventSource (raw MBO events from the SDK
-        // adapter when live, no-op otherwise) and broadcasts one
-        // per-order delta per event. Doubles as the snapshot provider
-        // for PublicChannelKind.BookMbo; composed below alongside the
-        // L2 + auction sinks.
-        services.AddSingleton<WebSocketMboBookEventSink>();
-        services.AddHostedService(sp => sp.GetRequiredService<WebSocketMboBookEventSink>());
-
+        // #394. The per-symbol book.${symbol} (L2) and bookmbo.${symbol}
+        // (L3) trading-host fan-out channels were deprecated in favour of
+        // having the FE consume B3MarketDataPlatform directly — see issue
+        // #394 + RFC. The matching IL2BookView infrastructure remains
+        // wired above because MboPegBookPump still consumes BookChanged
+        // for pegged-algo recalculation.
         services.AddSingleton<IPublicChannelSnapshots>(sp =>
-            new CompositePublicChannelSnapshots(
-                sp.GetRequiredService<WebSocketAuctionEventSink>(),
-                sp.GetRequiredService<WebSocketBookEventSink>(),
-                sp.GetRequiredService<WebSocketMboBookEventSink>()));
+            sp.GetRequiredService<WebSocketAuctionEventSink>());
 
         services.AddSingleton<ExecutionReportProcessor>();
         services.AddSingleton<OrderSubmissionService>();
