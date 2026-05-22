@@ -32,6 +32,20 @@ public sealed class FeeKeeper
     private readonly ConcurrentDictionary<(string EndClient, DateOnly Day), decimal> _totals = new();
     private readonly ConcurrentDictionary<string, byte> _seenExecutionIds = new();
     /// <summary>
+    /// #387. Optional cash sink: when wired, every successful (non-
+    /// duplicate) fee application also debits the end-client's free
+    /// cash via <see cref="CashLedger.ApplyFee"/>. Optional so tests
+    /// and the daily-statement projection (which only consumes the
+    /// keeper's totals) can construct a FeeKeeper without a cash
+    /// dependency.
+    /// </summary>
+    private readonly CashLedger? _cash;
+
+    public FeeKeeper(CashLedger? cash = null)
+    {
+        _cash = cash;
+    }
+    /// <summary>
     /// Pass-3 review (#277). Holds ER-synthesised fee placeholders
     /// during a replay run. The WAL sequencing guarantees a durable
     /// <see cref="FeeAccruedEvent"/> (if it exists) follows its ER, so
@@ -86,6 +100,12 @@ public sealed class FeeKeeper
         var day = DateOnly.FromDateTime(evt.TimestampUtc.UtcDateTime);
         var key = (evt.EndClientId, day);
         _totals.AddOrUpdate(key, evt.Total, (_, current) => current + evt.Total);
+        // #387. Mirror the fee debit into CashLedger so the trader's
+        // Available reflects post-fee cash. Gated by the seen-set above,
+        // so replay (FeeAccruedEvent re-applied on WAL drain) is a
+        // no-op for cash too. Optional dep — when null, only totals
+        // advance (test contexts / statement-only deployments).
+        _cash?.ApplyFee(new B3.Trading.Domain.EndClientId(evt.EndClientId), evt.Total);
         return true;
     }
 
@@ -143,6 +163,12 @@ public sealed class FeeKeeper
             var day = DateOnly.FromDateTime(p.TimestampUtc.UtcDateTime);
             var key = (p.EndClientId, day);
             _totals.AddOrUpdate(key, breakdown.Total, (_, current) => current + breakdown.Total);
+            // #387. Same cash-debit hook as Apply, executed only for
+            // ER-then-crash window survivors. The seen-set TryAdd above
+            // is the idempotency gate — a fee that was already in the
+            // snapshot (loaded via Restore + seen-set) never reaches
+            // here.
+            _cash?.ApplyFee(new B3.Trading.Domain.EndClientId(p.EndClientId), breakdown.Total);
             Observability.MetricsRegistry.FeeReplaySynth.Add(1,
                 new KeyValuePair<string, object?>("reconciled", false));
             materialised++;

@@ -40,6 +40,19 @@ public sealed class CashBalance
     }
 
     /// <summary>
+    /// #387. Debit a brokerage / settlement fee from <see cref="Available"/>.
+    /// Fees are always a cost — the sign is fixed (debit). Caller
+    /// (CashLedger.ApplyFee, gated by FeeKeeper's seen-set) is
+    /// responsible for replay idempotency.
+    /// </summary>
+    public void ApplyFee(decimal amount)
+    {
+        if (amount < 0m)
+            throw new ArgumentOutOfRangeException(nameof(amount), "fee must be non-negative");
+        Available -= amount;
+    }
+
+    /// <summary>
     /// Recovery / seed-only constructor used by snapshot replay and
     /// startup seeding. Skips the ApplyFill arithmetic so a snapshot
     /// loaded with a negative or zero balance round-trips exactly.
