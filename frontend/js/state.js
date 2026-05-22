@@ -411,21 +411,25 @@ function ensureBook(symbol) {
 /// top-N ladder). Snapshot and delta share the same shape, so a single
 /// reducer handles both — the server already replays the latest
 /// ladder as a `snapshot` frame on subscribe.
+///
+/// Wire shape is camelCase: `WebSocketHub` serializes outbound frames
+/// with `JsonSerializerDefaults.Web`, so `L2LadderDto.Symbol` lands on
+/// the wire as `symbol`, `Bids[i].Price` as `price`, etc. (#382 follow-up.)
 /// </summary>
 export function applyBookFrame(frame) {
-  if (!frame || typeof frame.Symbol !== "string") return;
-  const entry = ensureBook(frame.Symbol);
+  if (!frame || typeof frame.symbol !== "string") return;
+  const entry = ensureBook(frame.symbol);
   entry.bids.clear();
   entry.asks.clear();
-  for (const lv of frame.Bids ?? []) {
-    entry.bids.set(priceKey(lv.Price), { qty: lv.TotalQty, count: lv.OrderCount });
+  for (const lv of frame.bids ?? []) {
+    entry.bids.set(priceKey(lv.price), { qty: lv.totalQty, count: lv.orderCount });
   }
-  for (const lv of frame.Asks ?? []) {
-    entry.asks.set(priceKey(lv.Price), { qty: lv.TotalQty, count: lv.OrderCount });
+  for (const lv of frame.asks ?? []) {
+    entry.asks.set(priceKey(lv.price), { qty: lv.totalQty, count: lv.orderCount });
   }
-  // Empty-state snapshot (UpdatedUtc=null) keeps ready=false so the
+  // Empty-state snapshot (updatedUtc=null) keeps ready=false so the
   // DOB shows its "waiting" affordance instead of an empty ladder.
-  entry.ready = frame.UpdatedUtc != null;
+  entry.ready = frame.updatedUtc != null;
   entry.updatedAt = Date.now();
   notify("book");
 }

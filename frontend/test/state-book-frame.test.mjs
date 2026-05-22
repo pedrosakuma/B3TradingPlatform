@@ -5,6 +5,15 @@
 // Coverage: snapshot replaces both sides, empty snapshot keeps
 // ready=false, defensive null guards, watchlist trimming still
 // evicts the entry.
+//
+// IMPORTANT: WebSocketHub serializes outbound frames with
+// JsonSerializerDefaults.Web, so the wire payload is camelCase
+// (`symbol`, `bids`, `asks`, `updatedUtc`, level fields `price`,
+// `totalQty`, `orderCount`). Fixtures here must match the wire
+// shape — early test fixtures used PascalCase and silently masked
+// a real bug where the reducer dropped every live frame (#382
+// follow-up: DOB stayed empty even with EnableBook=true and a
+// populated book on the wire).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -16,15 +25,15 @@ async function freshState() {
 }
 
 const frame = (overrides = {}) => ({
-  Symbol: 'PETR4',
-  Bids: [
-    { Price: 30.20, TotalQty: 100, OrderCount: 1 },
-    { Price: 30.10, TotalQty: 250, OrderCount: 3 },
+  symbol: 'PETR4',
+  bids: [
+    { price: 30.20, totalQty: 100, orderCount: 1 },
+    { price: 30.10, totalQty: 250, orderCount: 3 },
   ],
-  Asks: [
-    { Price: 30.30, TotalQty: 50, OrderCount: 1 },
+  asks: [
+    { price: 30.30, totalQty: 50, orderCount: 1 },
   ],
-  UpdatedUtc: '2026-05-19T20:00:00Z',
+  updatedUtc: '2026-05-19T20:00:00Z',
   ...overrides,
 });
 
@@ -42,7 +51,7 @@ test('applyBookFrame populates both sides with priceKey-bucketed levels and flip
 
 test('applyBookFrame empty-state snapshot leaves ready=false', async () => {
   const s = await freshState();
-  s.applyBookFrame({ Symbol: 'VALE3', Bids: [], Asks: [], UpdatedUtc: null });
+  s.applyBookFrame({ symbol: 'VALE3', bids: [], asks: [], updatedUtc: null });
   const entry = s.getState().book.get('VALE3');
   assert.equal(entry.ready, false);
   assert.equal(entry.bids.size, 0);
@@ -53,8 +62,8 @@ test('applyBookFrame replaces the prior ladder rather than merging', async () =>
   const s = await freshState();
   s.applyBookFrame(frame());
   s.applyBookFrame(frame({
-    Bids: [{ Price: 31.00, TotalQty: 999, OrderCount: 7 }],
-    Asks: [],
+    bids: [{ price: 31.00, totalQty: 999, orderCount: 7 }],
+    asks: [],
   }));
   const entry = s.getState().book.get('PETR4');
   assert.equal(entry.bids.size, 1);
@@ -67,6 +76,10 @@ test('applyBookFrame ignores malformed payloads', async () => {
   s.applyBookFrame(null);
   s.applyBookFrame(undefined);
   s.applyBookFrame({});
-  s.applyBookFrame({ Symbol: 42 });
+  s.applyBookFrame({ symbol: 42 });
+  // Pascal-case shape (pre-#382 wire mismatch) is also rejected so a
+  // future serializer regression surfaces in tests instead of silently
+  // emptying the DOB.
+  s.applyBookFrame({ Symbol: 'PETR4', Bids: [], Asks: [], UpdatedUtc: '2026-05-19T20:00:00Z' });
   assert.equal(s.getState().book.size, 0);
 });
