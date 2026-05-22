@@ -208,4 +208,74 @@ public class BookWebSocketChannelTests
         store.ApplyDeleted(new MarketOrderDeleted("PETR4", 4321UL, 1UL, MarketBookSide.Bid, DateTimeOffset.UtcNow));
         Assert.Null(store.GetLadder("PETR4", 10));
     }
+
+    /// <summary>
+    /// #382 follow-up regression. Until this fix, OnBookChanged early-returned
+    /// when <see cref="IL2BookView.GetLadder"/> returned null on the populated →
+    /// empty edge (last resting order filled / cancelled). The FE never got the
+    /// "book emptied" frame and the DOB kept rendering the last populated
+    /// ladder until a hard refresh refetched the cold-start snapshot.
+    /// </summary>
+    [Fact]
+    public void Book_emptied_after_fill_broadcasts_empty_dto()
+    {
+        var (subs, store, sink) = Build();
+        var client = new SubscribedClient(new EndClientId("alice"), "TEST");
+        subs.SubscribePublicWithSnapshot(client, "book.PETR4",
+            () => sink.GetSnapshot(PublicChannelKind.Book, "PETR4"));
+        client.Reader.TryRead(out _); // cold snapshot
+
+        store.ApplyAdded(Add("PETR4", 1UL, MarketBookSide.Bid, 32.50m, 100));
+        Assert.True(client.Reader.TryRead(out var populatedDelta));
+        var populated = Assert.IsType<L2LadderDto>(populatedDelta!.Data);
+        Assert.Single(populated.Bids);
+
+        // Last resting order gone → store returns null ladder.
+        store.ApplyDeleted(new MarketOrderDeleted("PETR4", 4321UL, 1UL, MarketBookSide.Bid, DateTimeOffset.UtcNow));
+
+        Assert.True(client.Reader.TryRead(out var emptyDelta), "FE must receive a delta when the book empties");
+        Assert.Equal("delta", emptyDelta!.Type);
+        var emptyDto = Assert.IsType<L2LadderDto>(emptyDelta.Data);
+        Assert.Equal("PETR4", emptyDto.Symbol);
+        Assert.Empty(emptyDto.Bids);
+        Assert.Empty(emptyDto.Asks);
+        // Empty-state marker matches the cold-start snapshot shape so the FE
+        // reducer's `ready = updatedUtc != null` branch flips ready=false and
+        // the DOB drops back to the waiting affordance instead of carrying
+        // stale levels.
+        Assert.Null(emptyDto.UpdatedUtc);
+    }
+
+    /// <summary>
+    /// #382 follow-up. Empty-state broadcasts must coalesce: a steady-state
+    /// empty book (e.g. nobody trading the symbol) should not spam a delta
+    /// every time the store fires BookChanged.
+    /// </summary>
+    [Fact]
+    public void Book_empty_steady_state_coalesces_subsequent_empty_events()
+    {
+        var (subs, store, sink) = Build();
+        var client = new SubscribedClient(new EndClientId("alice"), "TEST");
+        subs.SubscribePublicWithSnapshot(client, "book.PETR4",
+            () => sink.GetSnapshot(PublicChannelKind.Book, "PETR4"));
+        client.Reader.TryRead(out _); // cold snapshot
+
+        store.ApplyAdded(Add("PETR4", 1UL, MarketBookSide.Bid, 32.50m, 100));
+        client.Reader.TryRead(out _); // populated delta
+
+        store.ApplyDeleted(new MarketOrderDeleted("PETR4", 4321UL, 1UL, MarketBookSide.Bid, DateTimeOffset.UtcNow));
+        Assert.True(client.Reader.TryRead(out _)); // first empty delta
+
+        // Second populated → empty cycle exercises the coalesce gate: the
+        // store's empty state hasn't moved since the prior broadcast, so no
+        // new delta hits the wire.
+        store.ApplyAdded(Add("PETR4", 2UL, MarketBookSide.Bid, 32.40m, 50));
+        Assert.True(client.Reader.TryRead(out _)); // re-populated delta
+        store.ApplyDeleted(new MarketOrderDeleted("PETR4", 4321UL, 2UL, MarketBookSide.Bid, DateTimeOffset.UtcNow));
+        Assert.True(client.Reader.TryRead(out _)); // empty delta after second cycle
+
+        // No further deltas: any extra BookChanged that resolves to empty
+        // must be swallowed.
+        Assert.False(client.Reader.TryRead(out _));
+    }
 }

@@ -86,7 +86,24 @@ public sealed class WebSocketBookEventSink : IPublicChannelSnapshots, IHostedSer
     private void OnBookChanged(string symbol)
     {
         var ladder = _store.GetLadder(symbol, _maxLevels);
-        if (ladder is null) return; // nothing to broadcast when both sides went empty
+        if (ladder is null)
+        {
+            // Book emptied (last resting order on both sides was filled,
+            // cancelled, or expired). Without an explicit empty frame on
+            // the wire the FE keeps rendering the last populated ladder
+            // forever (#382 follow-up: bid lingered after fill — only a
+            // hard refresh re-fetched the cold-start snapshot and cleared
+            // the DOB). Broadcast Empty(symbol) once on the populated →
+            // empty edge so the FE reducer clears both sides; coalesce
+            // subsequent empty-events by tracking the empty as the new
+            // _lastSent so a steady-state empty book stays off the wire.
+            if (_lastSent.TryGetValue(symbol, out var prevEmpty) && IsEmptyLadder(prevEmpty))
+                return;
+            var emptyDto = L2LadderDto.Empty(symbol);
+            _lastSent[symbol] = emptyDto;
+            _subs.BroadcastPublic(Channels.BookFor(symbol), emptyDto);
+            return;
+        }
         var dto = L2LadderDto.From(ladder.Value);
         // Coalesce: skip if bid/ask ladders are identical to last sent
         // for this symbol — UpdatedUtc is intentionally excluded so a
@@ -97,6 +114,9 @@ public sealed class WebSocketBookEventSink : IPublicChannelSnapshots, IHostedSer
         _lastSent[dto.Symbol] = dto;
         _subs.BroadcastPublic(Channels.BookFor(dto.Symbol), dto);
     }
+
+    private static bool IsEmptyLadder(L2LadderDto dto) =>
+        dto.Bids.Count == 0 && dto.Asks.Count == 0;
 
     private static bool SidesEqual(L2LadderDto a, L2LadderDto b) =>
         SideEqual(a.Bids, b.Bids) && SideEqual(a.Asks, b.Asks);
