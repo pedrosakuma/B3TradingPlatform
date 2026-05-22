@@ -8,6 +8,7 @@ import {
   computeHeatmapVolumes, HEATMAP_WINDOW_MS,
 } from "./state.js";
 import { rulesFor } from "./validation.js";
+import { tabsForRole } from "./complianceUi.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -127,6 +128,8 @@ export function setHandlers(handlers) {
 
 export function showLogin() {
   $("login-view").hidden = false;
+  const shell = $("app-shell");
+  if (shell) shell.hidden = true;
   $("trader-view").hidden = true;
   $("admin-view").hidden = true;
   const cred = $("bot-credentials-view");
@@ -135,6 +138,10 @@ export function showLogin() {
   if (hist) hist.hidden = true;
   const compliance = $("compliance-view");
   if (compliance) compliance.hidden = true;
+  const settings = $("settings-view");
+  if (settings) settings.hidden = true;
+  const algos = $("algos-view");
+  if (algos) algos.hidden = true;
   // Default to the login card; a user that previously toggled to the
   // signup card and was bumped back to login (e.g. logout, expiry)
   // shouldn't land staring at the signup form.
@@ -147,6 +154,8 @@ export function showLogin() {
 
 export function showTrader() {
   $("login-view").hidden = true;
+  const shell = $("app-shell");
+  if (shell) shell.hidden = false;
   $("trader-view").hidden = false;
   $("admin-view").hidden = true;
   const cred = $("bot-credentials-view");
@@ -155,23 +164,26 @@ export function showTrader() {
   if (hist) hist.hidden = true;
   const compliance = $("compliance-view");
   if (compliance) compliance.hidden = true;
+  const settings = $("settings-view");
+  if (settings) settings.hidden = true;
+  const algos = $("algos-view");
+  if (algos) algos.hidden = true;
 }
 
 function setViewToggleVisible(visible, current) {
   const wrap = $("view-toggle");
   if (!wrap) return;
+  // Fase 1 (#397). The tablist itself is always visible while logged
+  // in — only the per-role gating decides which tab buttons render.
+  // `visible=false` is now the logged-out signal coming from showLogin.
   wrap.hidden = !visible;
-  // Q4.14 (#314). The Compliance tab is gated independently — show
-  // it for admin (who sees every tab) and hide it otherwise. The
-  // wider toggle row is itself driven by the caller (admin-only
-  // today, since compliance lands directly on the compliance view
-  // with no sibling tabs to switch to).
   const role = getState().user?.role;
-  const complianceTab = wrap.querySelector('button[data-view="compliance"]');
-  if (complianceTab) complianceTab.hidden = !(role === "admin");
+  const allowed = visible ? new Set(tabsForRole(role)) : new Set();
   for (const btn of wrap.querySelectorAll("button[data-view]")) {
-    btn.classList.toggle("active", btn.dataset.view === current);
-    btn.setAttribute("aria-selected", btn.dataset.view === current ? "true" : "false");
+    const view = btn.dataset.view;
+    btn.hidden = !allowed.has(view);
+    btn.classList.toggle("active", view === current);
+    btn.setAttribute("aria-selected", view === current ? "true" : "false");
   }
 }
 
@@ -1383,9 +1395,10 @@ export function setUserLabel(user) {
       roleEl.hidden = true;
     }
   }
-  // Toggle visibility of the trader/admin view switch based on role.
-  const isAdmin = user?.role === "admin";
-  setViewToggleVisible(isAdmin, getState().currentView);
+  // Fase 1 (#397). The tablist is visible whenever a user is signed
+  // in; per-button gating is computed inside setViewToggleVisible.
+  const loggedIn = !!user?.username;
+  setViewToggleVisible(loggedIn, getState().currentView);
 }
 
 // #385. Render the live cash balance in the topbar. The widget shows
@@ -1432,29 +1445,35 @@ function applyCurrentView(view) {
   const credentials = $("bot-credentials-view");
   const history = $("history-view");
   const compliance = $("compliance-view");
+  const settings = $("settings-view");
+  const algos = $("algos-view");
   if (!trader || !admin) return;
   const showTraderView = view === "trader";
   const showAdminView = view === "admin";
   const showCredentialsView = view === "bot-credentials";
   const showHistoryView = view === "history";
   const showComplianceView = view === "compliance";
+  const showSettingsView = view === "settings";
+  const showAlgosView = view === "algos";
   trader.hidden = !showTraderView;
   admin.hidden = !showAdminView;
   if (credentials) credentials.hidden = !showCredentialsView;
   if (history)     history.hidden     = !showHistoryView;
   if (compliance)  compliance.hidden  = !showComplianceView;
-  // The trader/admin pill toggle stays hidden when the credentials /
-  // history views are up — they're self-contained sub-pages reached
-  // via the header link, not siblings of trader/admin. For compliance
-  // the toggle stays visible (admin can hop between admin / trader /
-  // compliance via the tabs); a pure-compliance principal has no
-  // sibling tabs so the toggle hides itself via the visible flag.
-  if (showCredentialsView || showHistoryView) {
-    setViewToggleVisible(false, view);
-  } else {
-    const role = getState().user?.role;
-    setViewToggleVisible(role === "admin", view);
-  }
+  if (settings)    settings.hidden    = !showSettingsView;
+  if (algos)       algos.hidden       = !showAlgosView;
+  // Fase 1 (#397): the primary tablist now persists across every view.
+  // `setViewToggleVisible(true, …)` runs whenever a user is signed in;
+  // the logged-out path (showLogin) is the only caller that passes
+  // `false`. We highlight the active tab — when the active view is
+  // `bot-credentials` (reached from Settings) we keep the Settings tab
+  // highlighted to communicate the user is still "inside" Settings.
+  const highlight = view === "bot-credentials" ? "settings" : view;
+  setViewToggleVisible(true, highlight);
+  // Trader-specific topbar controls (symbol selector) are only
+  // meaningful while the trading view is mounted.
+  const symbolWrap = $("selected-symbol")?.closest("label.symbol-select");
+  if (symbolWrap) symbolWrap.hidden = !showTraderView;
 }
 
 // Periodic UI tick for time-based elements (in-flight elapsed, reconnect

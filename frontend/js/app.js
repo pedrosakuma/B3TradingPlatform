@@ -87,6 +87,20 @@ function init() {
   });
   document.getElementById("security-confirm")?.addEventListener("click", onSecurityEnrollConfirm);
   document.getElementById("security-disable")?.addEventListener("click", onSecurityDisable);
+  // Fase 1 (#397): Settings tab is a placeholder shell exposing entry
+  // points to the now-removed standalone topbar buttons (Bot creds,
+  // Security, Market data). Fase 3 (#399) folds these into proper
+  // sub-tabs.
+  document.getElementById("settings-open-bot-credentials")
+    ?.addEventListener("click", () => handleSwitchView("bot-credentials"));
+  document.getElementById("settings-open-security")
+    ?.addEventListener("click", openSecurityPanel);
+  document.getElementById("settings-open-md")
+    ?.addEventListener("click", () => {
+      // Reuse the existing MD-settings popover trigger; the actual
+      // modal/open logic lives in ui.js and is wired to #md-settings-open.
+      document.getElementById("md-settings-open")?.click();
+    });
   ui.bindUi();
   adminUi.bindAdminUi();
   botCredentialsUi.bindBotCredentialsUi();
@@ -150,6 +164,19 @@ function init() {
     if (slice === "watchlist" || slice === "auctionPanelSymbol" || slice === "all") {
       syncPublicChannels();
     }
+  });
+
+  // Fase 1 (#397). URL hash navigation. The tablist click handler
+  // itself lives in ui.js (which already dispatches through the
+  // shared `onSwitchView` handler we wired below); here we just keep
+  // the browser back/forward buttons walking the tab history.
+  // Avoid loops: handleSwitchView only pushes a hash entry when the
+  // active view actually changes, so reapplying the current hash
+  // here is a no-op.
+  window.addEventListener("popstate", () => {
+    if (!session) return;
+    const view = tabFromHash();
+    if (view) handleSwitchView(view);
   });
 
   const stored = readSession();
@@ -463,14 +490,27 @@ function startSession(next) {
   // visible. showTrader() runs first so the brief flash is the
   // trader scaffold, never login-into-compliance.
   ui.showTrader();
-  const initialView = defaultViewForRole(next.role);
+  // Fase 1 (#397). Resolve the landing tab in priority order:
+  //   1. URL hash (deep-link / refresh after navigation),
+  //   2. sessionStorage (last tab in this browser tab),
+  //   3. role default (compliance lands on its own console; everyone
+  //      else lands on trader).
+  // Each candidate must pass the same role-gate as handleSwitchView,
+  // otherwise we fall through to the next candidate.
+  const allowed = new Set(tabsForRole(next.role));
+  const candidates = [tabFromHash(), readPersistedTab(), defaultViewForRole(next.role)];
+  const initialView = candidates.find((v) => v && (allowed.has(v) || v === "bot-credentials"))
+    || defaultViewForRole(next.role);
   state.setCurrentView(initialView);
+  persistActiveTab(initialView);
+  syncUrlHash(initialView, /*replace*/ true);
   if (initialView === "compliance") {
     // Compliance users land directly on the compliance console — no
     // trader view, no admin polls. Open the drop-copy socket so the
     // live feed has data the moment the panel renders.
     openComplianceDropCopy();
   }
+  syncPnlSubscription(initialView);
 
   startWorker();
   startMdWorker();
@@ -1046,6 +1086,10 @@ function logout() {
   closeComplianceDropCopy();
   clearSession();
   clearMdConfig();
+  // Fase 1 (#397). Drop the persisted tab so the next sign-in lands
+  // on the role-default rather than reviving the previous user's
+  // navigation state.
+  try { sessionStorage.removeItem(ACTIVE_TAB_KEY); } catch { /* private mode */ }
   state.setUser(null);
   state.setStatus("disconnected");
   state.setMarketDataStatus("disconnected");
@@ -1166,16 +1210,88 @@ async function pollGatewayOnce() {
 
 // ── Admin view + actions ───────────────────────────────────────────
 
+// ── Primary tab routing ────────────────────────────────────────────
+//
+// Fase 1 (#397). Single seam for activating any of the top-level
+// tabs (`trader`, `algos`, `history`, `settings`, `admin`,
+// `compliance`) plus the `bot-credentials` sub-view (still reached
+// from inside Settings).
+//
+// Side-effects:
+//   * gates by role via `tabsForRole`;
+//   * persists the active tab in sessionStorage (`fe.activeTab`)
+//     so a refresh lands on the same tab;
+//   * syncs the URL hash via pushState so the browser back/forward
+//     buttons walk the tab history;
+//   * lifts/drops the per-view subscriptions (drop-copy WS, pnl.me).
+
+const ACTIVE_TAB_KEY = "fe.activeTab";
+// Map of view → URL hash; views without a hash here aren't deep-linked
+// (e.g. bot-credentials shares its hash with Settings since it's an
+// inner navigation target).
+const HASH_FOR_VIEW = Object.freeze({
+  trader: "#trading",
+  algos: "#algos",
+  history: "#history",
+  settings: "#settings",
+  admin: "#admin",
+  compliance: "#compliance",
+});
+// Reverse map + a few legacy aliases for back-compat with bookmarked
+// hashes that used the old standalone-button names.
+const VIEW_FOR_HASH = Object.freeze({
+  "#trading": "trader",
+  "#trader": "trader",
+  "#algos": "algos",
+  "#history": "history",
+  "#settings": "settings",
+  "#admin": "admin",
+  "#compliance": "compliance",
+  "#bot-credentials": "settings",  // legacy deep-link → Settings shell
+});
+
+function tabFromHash() {
+  const hash = (typeof window !== "undefined" && window.location?.hash) || "";
+  return VIEW_FOR_HASH[hash] || null;
+}
+
+function persistActiveTab(view) {
+  try { sessionStorage.setItem(ACTIVE_TAB_KEY, view); } catch { /* private mode */ }
+}
+
+function readPersistedTab() {
+  try { return sessionStorage.getItem(ACTIVE_TAB_KEY); } catch { return null; }
+}
+
+function syncUrlHash(view, replace) {
+  if (typeof window === "undefined" || !window.history) return;
+  const hash = HASH_FOR_VIEW[view];
+  if (!hash) return; // bot-credentials et al — don't pollute the URL
+  if (window.location.hash === hash) return;
+  const url = window.location.pathname + window.location.search + hash;
+  if (replace) window.history.replaceState(null, "", url);
+  else window.history.pushState(null, "", url);
+}
+
 function handleSwitchView(view) {
   if (!session) return;
-  // Role-gate the target view. Plain users can only see trader /
-  // bot-credentials / history. Admin sees everything. Compliance is
-  // pinned to its own console.
+  // Fase 1 (#397). Algos tab is a disabled placeholder until Fase 2
+  // (#398) — drop the activation silently.
+  if (view === "algos") return;
+  // Role-gate the target view. Plain users see trader / algos /
+  // history / settings; admin sees everything; compliance is pinned
+  // to its own console. `bot-credentials` is an inner-navigation
+  // target reached from Settings, not a primary tab — allow it for
+  // any role that already has Settings access.
   const allowed = tabsForRole(session.role);
-  // history is reachable from every role via the header link — keep it
-  // available even though it doesn't appear in the nav tabs list.
-  if (view !== "history" && !allowed.includes(view)) return;
+  if (view === "bot-credentials") {
+    if (!allowed.includes("settings")) return;
+  } else if (!allowed.includes(view)) {
+    return;
+  }
   state.setCurrentView(view);
+  persistActiveTab(view);
+  syncUrlHash(view, /*replace*/ false);
   // Drop-copy WS lifecycle: open on enter, close on leave. Cheap to
   // re-open; we don't pay the cost of holding the socket while the
   // user is parked on a different view.

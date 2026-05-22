@@ -343,10 +343,18 @@ export function yesterdayBrt() {
 
 // Returns the role → views map so app.js (and the unit test) share a
 // single source of truth for nav-tab gating.
+//
+// Fase 1 (#397) reshape: every signed-in role gets Trading + History +
+// Settings + Algos (Algos is disabled in the UI until Fase 2 lands but
+// still belongs to the nav set — `handleSwitchView` blocks the actual
+// activation). Admin layers on Admin + Compliance. Compliance role is
+// pinned to its own console plus History so the user can audit their
+// own session activity. `bot-credentials` is no longer a primary tab —
+// it's reached from the Settings view.
 export function tabsForRole(role) {
-  if (role === "admin")      return ["trader", "admin", "bot-credentials", "compliance"];
-  if (role === "compliance") return ["compliance"];
-  return ["trader", "bot-credentials"];
+  if (role === "admin")      return ["trader", "algos", "history", "settings", "admin", "compliance"];
+  if (role === "compliance") return ["compliance", "history"];
+  return ["trader", "algos", "history", "settings"];
 }
 
 export function defaultViewForRole(role) {

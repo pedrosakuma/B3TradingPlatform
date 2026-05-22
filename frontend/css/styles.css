@@ -24,8 +24,18 @@ body {
   background: var(--bg);
   color: var(--text);
   font: 13px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  /* Fase 1 (#397). The app-shell (topbar + tablist) is now a body-level
+     sibling of each view, not nested inside trader-view. Stack them so
+     the shell pins to the top and the active view fills the remaining
+     viewport height. */
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
 }
-.view { min-height: 100vh; }
+.view { flex: 1 1 auto; min-height: 0; }
+/* App-shell topbar pinned at the top; views render below it. */
+#app-shell { flex: 0 0 auto; }
+.trader-view { display: flex; flex-direction: column; }
 
 /* ---------- Login ---------- */
 .login-view { display: grid; place-items: center; }
@@ -73,7 +83,8 @@ body {
    trapping content under the topbar. The previous `height: 100vh;
    overflow: hidden` swallowed the bottom row (Executions Log + Market
    Data) and let the Tape panel paint over the Blotter. */
-.trader-view { display: flex; flex-direction: column; min-height: 100vh; }
+/* `.trader-view` flex layout moved earlier (next to body shell rules)
+   in Fase 1 (#397) — keep the comment above for context. */
 .topbar {
   display: flex; justify-content: space-between; align-items: center;
   padding: .6rem 1rem; background: var(--panel); border-bottom: 1px solid var(--border);

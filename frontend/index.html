@@ -88,49 +88,58 @@
     </form>
   </section>
 
+  <!-- APP SHELL --------------------------------------------------------
+       Fase 1 (#397). The topbar lives outside any individual view so
+       the primary tablist + global status pills + logout are always
+       visible while a session is mounted. `app-shell` is hidden until
+       login completes and re-hidden on logout. -->
+  <header id="app-shell" class="app-shell topbar" hidden>
+    <div class="brand">B3TradingPlatform <span class="pill">trader</span></div>
+    <div class="status">
+      <nav id="view-toggle" class="view-toggle" role="tablist" aria-label="Primary navigation">
+        <button type="button" data-view="trader" class="active" role="tab"
+                aria-selected="true" aria-controls="trader-view" id="tab-trader">Trading</button>
+        <button type="button" data-view="algos" role="tab"
+                aria-selected="false" aria-controls="algos-view" id="tab-algos"
+                disabled title="Em breve (Fase 2)">Algos</button>
+        <button type="button" data-view="history" role="tab"
+                aria-selected="false" aria-controls="history-view" id="tab-history">History</button>
+        <button type="button" data-view="settings" role="tab"
+                aria-selected="false" aria-controls="settings-view" id="tab-settings">Settings</button>
+        <button type="button" data-view="compliance" role="tab"
+                aria-selected="false" aria-controls="compliance-view" id="tab-compliance" hidden>Compliance</button>
+        <button type="button" data-view="admin" role="tab"
+                aria-selected="false" aria-controls="admin-view" id="tab-admin" hidden>Admin</button>
+      </nav>
+      <label class="symbol-select" for="selected-symbol">
+        Symbol
+        <select id="selected-symbol" aria-label="Selected symbol (DOB / chart / tape)">
+          <option value="">— select —</option>
+        </select>
+      </label>
+      <span id="firms-health" class="firms-health" role="status" aria-live="polite" aria-label="Firms health" hidden></span>
+      <span id="gateway-status" class="status-pill status-disconnected" role="status" aria-live="polite" aria-label="Exchange gateway: unknown" title="Exchange gateway session state (FIXP)" hidden>gateway</span>
+      <span id="ws-status" class="status-pill status-disconnected" role="status" aria-live="polite" aria-label="WebSocket: disconnected" title="WebSocket connection">disconnected</span>
+      <span id="ws-reconnect" class="reconnect-countdown" hidden></span>
+      <span id="user-label" class="user-label"></span>
+      <span id="user-role" class="role-badge" hidden></span>
+      <!-- #385. Live cash balance for the logged-in end-client.
+           Hidden when no session is mounted. Updated by `balance.me`
+           WS frames (see WebSocketBalanceFanOut / #386). -->
+      <span id="user-balance" class="user-balance" role="status" aria-live="polite"
+            aria-label="Saldo disponível" title="Saldo disponível" hidden>R$ —</span>
+      <button id="logout" class="link-button" type="button" aria-label="Logout">Logout</button>
+    </div>
+  </header>
+
+  <!-- #342: Transient toast for WebSocket frame-level errors (e.g.,
+       unknown_channel, channel auth failure). Lives between the shell
+       and the active view so it's visible from any panel without taking
+       up persistent screen real estate. Auto-dismissed after a few seconds. -->
+  <div id="ws-error-toast" class="ws-error-toast" role="status" aria-live="polite" hidden></div>
+
   <!-- TRADER VIEW ------------------------------------------------------ -->
-  <section id="trader-view" class="view trader-view" hidden>
-    <header class="topbar">
-      <div class="brand">B3TradingPlatform <span class="pill">trader</span></div>
-      <div class="status">
-        <span id="view-toggle" class="view-toggle" role="tablist" aria-label="View" hidden>
-          <button type="button" data-view="trader" class="active" role="tab" aria-selected="true">Trader</button>
-          <button type="button" data-view="admin" role="tab" aria-selected="false">Admin</button>
-          <button type="button" data-view="compliance" role="tab" aria-selected="false" hidden>Compliance</button>
-        </span>
-        <label class="symbol-select" for="selected-symbol">
-          Symbol
-          <select id="selected-symbol" aria-label="Selected symbol (DOB / chart / tape)">
-            <option value="">— select —</option>
-          </select>
-        </label>
-        <span id="firms-health" class="firms-health" role="status" aria-live="polite" aria-label="Firms health" hidden></span>
-        <span id="gateway-status" class="status-pill status-disconnected" role="status" aria-live="polite" aria-label="Exchange gateway: unknown" title="Exchange gateway session state (FIXP)" hidden>gateway</span>
-        <span id="ws-status" class="status-pill status-disconnected" role="status" aria-live="polite" aria-label="WebSocket: disconnected" title="WebSocket connection">disconnected</span>
-        <span id="ws-reconnect" class="reconnect-countdown" hidden></span>
-        <span id="user-label" class="user-label"></span>
-        <span id="user-role" class="role-badge" hidden></span>
-        <!-- #385. Live cash balance for the logged-in end-client.
-             Hidden when no session is mounted. Updated by `balance.me`
-             WS frames (see WebSocketBalanceFanOut / #386). -->
-        <span id="user-balance" class="user-balance" role="status" aria-live="polite"
-              aria-label="Saldo disponível" title="Saldo disponível" hidden>R$ —</span>
-        <button id="bot-credentials-open" class="link-button" type="button"
-                aria-label="Bot credentials">Bot credentials</button>
-        <button id="security-open" class="link-button" type="button"
-                aria-label="Security (two-factor authentication)">Security</button>
-        <button id="history-open" class="link-button" type="button"
-                aria-label="History, P&amp;L and statement">History</button>
-        <button id="logout" class="link-button" type="button" aria-label="Logout">Logout</button>
-      </div>
-    </header>
-
-    <!-- #342: Transient toast for WebSocket frame-level errors (e.g.,
-         unknown_channel, channel auth failure). Lives between the topbar
-         and the grid so it's visible from any panel without taking up
-         persistent screen real estate. Auto-dismissed after a few seconds. -->
-    <div id="ws-error-toast" class="ws-error-toast" role="status" aria-live="polite" hidden></div>
-
+  <section id="trader-view" class="view trader-view" role="tabpanel" aria-labelledby="tab-trader" hidden>
     <main class="grid">
       <!-- ORDER TICKET ----------------------------------------------- -->
       <section class="panel ticket">
@@ -440,7 +449,7 @@
   </section>
 
   <!-- ADMIN VIEW ------------------------------------------------------- -->
-  <section id="admin-view" class="view admin-view" hidden>
+  <section id="admin-view" class="view admin-view" role="tabpanel" aria-labelledby="tab-admin" hidden>
     <header class="admin-subbar">
       <h2>Operator console — mode: <span id="admin-mode">—</span></h2>
       <div class="admin-actions">
@@ -615,7 +624,7 @@
   <!-- BOT CREDENTIALS VIEW (sub-issue #169 of user-bot-fixp-listener-v0)
        Manage user-issued PATs that authenticate external FIXP bots.
        Visible to every authenticated user (no admin gate). -->
-  <section id="bot-credentials-view" class="view bot-credentials-view" hidden>
+  <section id="bot-credentials-view" class="view bot-credentials-view" role="region" aria-label="Bot credentials" hidden>
     <header class="admin-subbar">
       <h2>Bot credentials</h2>
       <div class="admin-actions">
@@ -692,7 +701,7 @@
        downloader (CSV blob + JSON modal). Mirrors the bot-credentials
        view layout — a sibling top-level <section> toggled via the
        header link, not a child of the trader grid. -->
-  <section id="history-view" class="view history-view" hidden>
+  <section id="history-view" class="view history-view" role="tabpanel" aria-labelledby="tab-history" hidden>
     <header class="admin-subbar">
       <h2>History · P&amp;L · Statement</h2>
       <div class="admin-actions">
@@ -888,7 +897,7 @@
        unless currentView === "compliance". The drop-copy feed
        attaches to /ws/dropcopy on view-enter and closes on leave;
        all other panels are pure REST. -->
-  <section id="compliance-view" class="view compliance-view" hidden>
+  <section id="compliance-view" class="view compliance-view" role="tabpanel" aria-labelledby="tab-compliance" hidden>
     <header class="admin-subbar">
       <h2>Compliance console</h2>
       <div class="admin-actions"></div>
@@ -982,6 +991,45 @@
         <button id="compliance-cvm-505" type="button">Download model 505</button>
       </div>
       <p id="compliance-cvm-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
+    </section>
+  </section>
+
+  <!-- ALGOS VIEW (Fase 2 #398 placeholder) ----------------------------
+       Stub panel rendered when #algos tab is active. Real list / boleta
+       / detail UI lands in #398; for now the tab itself is disabled and
+       this section is unreachable through the tablist, but kept so the
+       hash router has a target. -->
+  <section id="algos-view" class="view algos-view" role="tabpanel" aria-labelledby="tab-algos" hidden>
+    <header class="admin-subbar">
+      <h2>Algos</h2>
+    </header>
+    <section class="panel admin-panel">
+      <p class="muted-line">Em construção — chega na Fase 2 (#398).</p>
+    </section>
+  </section>
+
+  <!-- SETTINGS VIEW (Fase 3 #399 placeholder) -------------------------
+       Fase 1 lands the tab + a thin shell that exposes Bot credentials
+       + Security (2FA) entry points. Fase 3 replaces this body with
+       sub-tabs (Bot creds / Security / Market data / Preferences). -->
+  <section id="settings-view" class="view settings-view" role="tabpanel" aria-labelledby="tab-settings" hidden>
+    <header class="admin-subbar">
+      <h2>Settings</h2>
+    </header>
+    <section class="panel admin-panel">
+      <h3>Bot credentials</h3>
+      <p class="muted-line">Gerencie tokens de acesso programático (PATs).</p>
+      <button id="settings-open-bot-credentials" type="button" class="link-button">Abrir Bot credentials →</button>
+    </section>
+    <section class="panel admin-panel">
+      <h3>Security (2FA)</h3>
+      <p class="muted-line">Configure autenticação de dois fatores (TOTP).</p>
+      <button id="settings-open-security" type="button" class="link-button">Abrir Security →</button>
+    </section>
+    <section class="panel admin-panel">
+      <h3>Market data</h3>
+      <p class="muted-line">Endpoint do WebSocket de market data e watchlist.</p>
+      <button id="settings-open-md" type="button" class="link-button">Abrir Market data settings →</button>
     </section>
   </section>
 
