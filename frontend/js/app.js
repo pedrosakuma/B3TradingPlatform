@@ -9,7 +9,10 @@ import { defaultBackend, defaultMarketDataUrl, login, signup, submitOrder, cance
          getOrdersHistory, getExecutionsHistory, getPnlToday,
          getStatement, downloadStatementCsv,
          searchAuditLog, getFillTouch, downloadCvmReport, buildDropCopyWebSocketUrl,
-         verifyTotp, enrollTotp, disableTotp } from "./protocol.js";
+         verifyTotp, enrollTotp, disableTotp,
+         listAlgos, createAlgo, cancelAlgo, modifyAlgo } from "./protocol.js";
+import { validateCreateAlgo } from "./validation.js";
+import * as algosUi from "./algosUi.js";
 import { claimsFromToken } from "./jwt.js";
 import { validateOrder, pretradeWarnings, payloadKey } from "./validation.js";
 import * as state from "./state.js";
@@ -511,6 +514,15 @@ function startSession(next) {
     openComplianceDropCopy();
   }
   syncPnlSubscription(initialView);
+  // Fase 2 (#398). Init the algos UI once per session — it's idempotent
+  // but needs the action callbacks so the boleta knows where to POST.
+  algosUi.initAlgosUi({
+    onSubmitAlgo: handleSubmitAlgo,
+    onCancelAlgo: handleCancelAlgo,
+    onModifyAlgo: handleModifyAlgo,
+  });
+  syncAlgoSubscription(initialView);
+  if (initialView === "algos") refreshAlgosList();
 
   startWorker();
   startMdWorker();
@@ -788,6 +800,8 @@ function onWorkerMessage(msg) {
     case "pnl.snapshot":        state.applyPnlDelta(msg.data); break;
     case "pnl.delta":           state.applyPnlDelta(msg.data); break;
     case "balance.frame":       state.applyBalanceFrame(msg.data); break;
+    case "algo.snapshot":       state.applyAlgoSnapshot(msg.data); break;
+    case "algo.delta":          state.applyAlgoDelta(msg.data); break;
     case "phases.frame":        state.applyPhaseFrame(msg.data); break;
     case "auction.frame":       state.applyAuctionFrame(msg.data); break;
     case "error":
@@ -1275,9 +1289,6 @@ function syncUrlHash(view, replace) {
 
 function handleSwitchView(view) {
   if (!session) return;
-  // Fase 1 (#397). Algos tab is a disabled placeholder until Fase 2
-  // (#398) — drop the activation silently.
-  if (view === "algos") return;
   // Role-gate the target view. Plain users see trader / algos /
   // history / settings; admin sees everything; compliance is pinned
   // to its own console. `bot-credentials` is an inner-navigation
@@ -1301,9 +1312,12 @@ function handleSwitchView(view) {
   // while the history view (which hosts the P&L panel) is mounted, so
   // the per-fill fan-out doesn't run for traders parked on other views.
   syncPnlSubscription(view);
+  // Fase 2 (#398). Same dynamic gating for algo.me.
+  syncAlgoSubscription(view);
   if (view === "admin") refreshAdminData();
   if (view === "bot-credentials") refreshBotCredentials();
   if (view === "history") refreshHistoryAll();
+  if (view === "algos") refreshAlgosList();
 }
 
 function syncPnlSubscription(view) {
@@ -1311,6 +1325,72 @@ function syncPnlSubscription(view) {
   const want = view === "history";
   try { worker.postMessage({ type: "setPnlSubscribed", value: want }); }
   catch { /* worker not ready yet — replayed by next start */ }
+}
+
+// Fase 2 (#398). Algo.me is only useful while the Algos view is mounted.
+// Outside it the snapshot the user already has is "frozen" — that's OK:
+// next entry triggers a re-snapshot via the worker subscribe + a REST
+// refresh below.
+function syncAlgoSubscription(view) {
+  if (!worker) return;
+  const want = view === "algos";
+  try { worker.postMessage({ type: "setAlgoSubscribed", value: want }); }
+  catch { /* worker not ready yet — replayed by next start */ }
+}
+
+async function refreshAlgosList() {
+  if (!session) return;
+  try {
+    const rows = await listAlgos(session.backend, session.token, { includeTerminal: false });
+    state.applyAlgoSnapshot(Array.isArray(rows) ? rows : []);
+  } catch (err) {
+    console.warn("[algos] list failed", err);
+    algosUi.showBoletaError(`Falha ao carregar algos: ${err?.message || err}`);
+  }
+}
+
+async function handleSubmitAlgo(payload) {
+  if (!session) return;
+  const result = validateCreateAlgo(payload);
+  if (!result.ok) {
+    algosUi.showBoletaError(result.error + (result.detail ? ` (${JSON.stringify(result.detail)})` : ""));
+    return;
+  }
+  try {
+    const created = await createAlgo(session.backend, session.token, payload);
+    algosUi.showBoletaSuccess(`Algo ${created?.algoId ?? ""} criado.`);
+    // WS delta normally arrives within ms; fire a defensive refresh in
+    // case the user opened the tab and hit submit before the snapshot
+    // landed (algo.me subscribe + REST list both repopulate cleanly).
+    refreshAlgosList();
+  } catch (err) {
+    algosUi.showBoletaError(`Erro ao criar algo: ${err?.message || err}`);
+  }
+}
+
+async function handleCancelAlgo(algoId) {
+  if (!session || !algoId) return;
+  state.markAlgoCancelInflight(algoId, true);
+  try {
+    await cancelAlgo(session.backend, session.token, algoId);
+  } catch (err) {
+    algosUi.showBoletaError(`Erro ao cancelar ${algoId}: ${err?.message || err}`);
+  } finally {
+    state.markAlgoCancelInflight(algoId, false);
+  }
+}
+
+async function handleModifyAlgo(algoId, payload) {
+  if (!session || !algoId) return;
+  state.markAlgoModifyInflight(algoId, true);
+  try {
+    await modifyAlgo(session.backend, session.token, algoId, payload);
+    algosUi.showBoletaSuccess(`Modify enviado para ${algoId}.`);
+  } catch (err) {
+    algosUi.showBoletaError(`Erro ao modificar ${algoId}: ${err?.message || err}`);
+  } finally {
+    state.markAlgoModifyInflight(algoId, false);
+  }
 }
 
 async function refreshAdminData() {

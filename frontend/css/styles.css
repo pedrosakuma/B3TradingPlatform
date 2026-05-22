@@ -928,3 +928,51 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
   height: 192px;
   shape-rendering: crispEdges;
 }
+
+/* ── Fase 2 (#398). Algos tab. ─────────────────────────────────── */
+.algos-view .admin-subbar-actions { display: flex; gap: 1rem; align-items: center; }
+.algos-view .inline-field { display: inline-flex; gap: .35rem; align-items: center; font-size: .85rem; }
+.algos-grid {
+  display: grid;
+  grid-template-columns: 1.4fr 1.2fr 1fr;
+  gap: .75rem;
+  padding: .5rem;
+  align-items: start;
+}
+@media (max-width: 1200px) { .algos-grid { grid-template-columns: 1fr; } }
+.algos-list-panel .table-scroll { max-height: 60vh; overflow: auto; }
+.algos-list-table tbody tr { cursor: pointer; }
+.algos-list-table tbody tr.selected { background: var(--row-selected, rgba(255,255,255,.08)); }
+.algos-list-table tbody tr:hover { background: var(--row-hover, rgba(255,255,255,.04)); }
+.algos-type-tabs { display: flex; gap: .25rem; margin-bottom: .5rem; flex-wrap: wrap; }
+.algos-type-tab {
+  padding: .25rem .6rem;
+  background: transparent;
+  border: 1px solid var(--border, #444);
+  color: inherit;
+  cursor: pointer;
+  border-radius: 4px;
+  font-size: .85rem;
+}
+.algos-type-tab.active { background: var(--accent, #357); color: white; border-color: var(--accent, #357); }
+.algos-boleta-form fieldset { border: 1px solid var(--border, #444); padding: .5rem .75rem; margin-bottom: .5rem; border-radius: 4px; }
+.algos-boleta-form legend { padding: 0 .35rem; font-size: .8rem; color: var(--muted, #999); }
+.algos-boleta-form label {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: center;
+  gap: .5rem;
+  margin-bottom: .35rem;
+  font-size: .85rem;
+}
+.algos-boleta-form input, .algos-boleta-form select { width: 100%; box-sizing: border-box; }
+.algos-boleta-footer { display: flex; gap: 1rem; align-items: center; }
+.algos-boleta-status { margin: 0; font-size: .85rem; }
+.algos-boleta-status.error { color: var(--danger, #d66); }
+.algos-boleta-status.success { color: var(--accent, #6c6); }
+.algos-detail-grid { display: grid; grid-template-columns: max-content 1fr; gap: .25rem .75rem; font-size: .85rem; margin: 0 0 .75rem; }
+.algos-detail-grid dt { color: var(--muted, #999); }
+.algos-detail-grid dd { margin: 0; word-break: break-word; }
+.algos-params-pre { background: rgba(0,0,0,.25); padding: .5rem; border-radius: 4px; font-size: .75rem; overflow: auto; max-height: 14rem; }
+.algos-modify-form { display: grid; gap: .35rem; border-top: 1px solid var(--border, #444); padding-top: .5rem; margin-top: .5rem; }
+.algos-modify-form h4 { margin: 0; }

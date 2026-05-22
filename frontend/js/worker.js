@@ -34,6 +34,11 @@ const CHANNELS = ["orders.me", "executions.me", "positions.me", "balance.me"];
 // public-channel set.
 let wantPnl = false;
 
+// Fase 2 (#398). Same pattern as wantPnl for the algo.me channel.
+// Only subscribed while the user is parked on the Algos view so the
+// per-event fan-out doesn't run for users on other tabs.
+let wantAlgo = false;
+
 // Q1.6 (#258). Wanted set of public per-symbol channels that should be
 // subscribed any time the WS is connected. Drives diff (un)subscribes
 // when the main thread calls setPublicChannels, and is replayed on
@@ -94,6 +99,11 @@ function connect() {
     if (wantPnl) {
       send({ type: "subscribe", channels: ["pnl.me"] });
     }
+    // Fase 2 (#398). Replay the algo.me subscription on reconnect so a
+    // flap doesn't drop the algos blotter mid-view.
+    if (wantAlgo) {
+      send({ type: "subscribe", channels: ["algo.me"] });
+    }
     // Q1.6 (#258). Replay the public-channel set the main thread had
     // configured so the watchlist phase badges + auction panel keep
     // working across reconnects without a re-set from app.js.
@@ -149,6 +159,12 @@ function handleFrame(frame) {
       // (applyBalanceFrame) replaces wholesale either way.
       post({ type: "balance.frame", data: frame.data });
       break;
+    case "algo.me":
+      // Fase 2 (#398). Snapshot = AlgoDto[]; delta = AlgoDto (single).
+      // The state reducer (applyAlgoSnapshot / applyAlgoDelta) treats
+      // the two payload shapes differently, so forward distinct events.
+      post({ type: frame.type === "snapshot" ? "algo.snapshot" : "algo.delta", data: frame.data });
+      break;
     default:
       // Q1.6 (#258). Public per-symbol channels — phases.${symbol} and
       // auction.${symbol}. Snapshot and delta share the same payload
@@ -195,6 +211,17 @@ function setPnlSubscribed(value) {
   else      send({ type: "unsubscribe", channels: ["pnl.me"] });
 }
 
+// Fase 2 (#398). Toggle the algo.me subscription. Same idempotent
+// shape as setPnlSubscribed — the wanted state is remembered across
+// reconnects.
+function setAlgoSubscribed(value) {
+  const next = !!value;
+  if (next === wantAlgo) return;
+  wantAlgo = next;
+  if (next) send({ type: "subscribe",   channels: ["algo.me"] });
+  else      send({ type: "unsubscribe", channels: ["algo.me"] });
+}
+
 self.onmessage = (ev) => {
   const msg = ev.data || {};
   switch (msg.type) {
@@ -215,12 +242,16 @@ self.onmessage = (ev) => {
       ws = null;
       wantedPublic.clear();
       wantPnl = false;
+      wantAlgo = false;
       break;
     case "setPublicChannels":
       setPublicChannels(msg.channels);
       break;
     case "setPnlSubscribed":
       setPnlSubscribed(!!msg.value);
+      break;
+    case "setAlgoSubscribed":
+      setAlgoSubscribed(!!msg.value);
       break;
   }
 };

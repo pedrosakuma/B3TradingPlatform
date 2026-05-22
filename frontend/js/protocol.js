@@ -157,6 +157,57 @@ export async function modifyOrder(backend, token, clOrdId, payload) {
   return jsonOrThrow(resp);
 }
 
+// ── Fase 2 (#398). Algos REST. ─────────────────────────────────────
+// Routes are JWT-scoped to the caller's owner+firm. listAlgos accepts
+// includeTerminal (default false). createAlgo body shape must match
+// AlgoEndpoints.CreateAlgoRequest verbatim — the per-type sub-object
+// is read based on `type`. modifyAlgo requires at least one of
+// newQuantity / newPrice. cancelAlgo returns 202 + JSON envelope on
+// accept and 404 / 409 on miss / terminal — all surfaced via
+// jsonOrThrow so the UI can show a readable reason.
+export async function listAlgos(backend, token, { includeTerminal = false } = {}) {
+  const url = new URL(`${backend}/algo/`);
+  if (includeTerminal) url.searchParams.set("includeTerminal", "true");
+  const resp = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return jsonOrThrow(resp);
+}
+
+export async function getAlgo(backend, token, algoId) {
+  const resp = await fetch(`${backend}/algo/${encodeURIComponent(algoId)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return jsonOrThrow(resp);
+}
+
+export async function createAlgo(backend, token, payload) {
+  const resp = await fetch(`${backend}/algo`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+  return jsonOrThrow(resp);
+}
+
+export async function cancelAlgo(backend, token, algoId) {
+  const resp = await fetch(`${backend}/algo/${encodeURIComponent(algoId)}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (resp.status === 204 || resp.status === 404) return null;
+  return jsonOrThrow(resp);
+}
+
+export async function modifyAlgo(backend, token, algoId, payload) {
+  const resp = await fetch(`${backend}/algo/${encodeURIComponent(algoId)}/modify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+  return jsonOrThrow(resp);
+}
+
 // Admin-only: per-firm operator visibility. Returns 403 for non-admin
 // callers — the UI must gate the call by inspecting the JWT role
 // before invoking this. Schema mirrors AdminEndpoints.MapAdmin /firms.

@@ -157,3 +157,150 @@ export function payloadKey(payload) {
     payload.goodTillDate ?? "",
   ].join("|");
 }
+
+// ── Fase 2 (#398). Algos creation validation ──────────────────────
+//
+// Pure-function mirror of `AlgoEndpoints.MapAlgo` POST /algo validation
+// (PT-BR messages). Returns `{ ok: true }` or `{ ok: false, error,
+// detail? }`. Callers normalise the form input into the same shape
+// the REST request expects (CreateAlgoRequest) before invoking this.
+
+const ALGO_TYPES = ["Iceberg", "Twap", "Vwap", "Pov", "Pegged"];
+const ALGO_SIDES = ["Buy", "Sell"];
+const ALGO_CHILD_TYPES_LIMIT_MARKET = ["Limit", "Market"];
+const PEGGED_REFS = ["Mid", "Best", "Last"];
+
+function _err(error, detail) {
+  return detail === undefined ? { ok: false, error } : { ok: false, error, detail };
+}
+
+function _validateChildTypeAndPrice(params, allowMarket = true) {
+  const childType = params.childOrderType;
+  const allowed = allowMarket ? ALGO_CHILD_TYPES_LIMIT_MARKET : ["Limit"];
+  if (!allowed.includes(childType)) {
+    return _err(`childOrderType deve ser ${allowed.join(" ou ")}`);
+  }
+  if (childType === "Limit") {
+    if (params.childPrice == null || !(params.childPrice > 0)) {
+      return _err("childPrice é obrigatório (> 0) quando childOrderType=Limit");
+    }
+  }
+  return null;
+}
+
+function _validateStartEnd(params) {
+  if (!params.startUtc || !params.endUtc) {
+    return _err("startUtc e endUtc são obrigatórios");
+  }
+  const s = Date.parse(params.startUtc);
+  const e = Date.parse(params.endUtc);
+  if (!Number.isFinite(s) || !Number.isFinite(e)) {
+    return _err("startUtc e endUtc devem ser datas ISO-8601 válidas");
+  }
+  if (e <= s) {
+    return _err("endUtc deve ser maior que startUtc");
+  }
+  return null;
+}
+
+export function validateCreateAlgo(payload) {
+  if (!payload || typeof payload !== "object") return _err("payload inválido");
+  const { symbol, side, type, totalQuantity, securityId } = payload;
+  if (!symbol || typeof symbol !== "string") return _err("symbol é obrigatório");
+  if (!ALGO_SIDES.includes(side)) return _err("side deve ser Buy ou Sell");
+  if (!ALGO_TYPES.includes(type)) return _err(`type deve ser um de ${ALGO_TYPES.join(", ")}`);
+  if (!Number.isFinite(Number(totalQuantity)) || Number(totalQuantity) <= 0) {
+    return _err("totalQuantity deve ser positivo");
+  }
+  if (securityId == null || !(Number(securityId) > 0)) {
+    return _err("securityId é obrigatório (> 0)");
+  }
+
+  switch (type) {
+    case "Iceberg": {
+      const p = payload.iceberg;
+      if (!p) return _err("bloco iceberg é obrigatório");
+      const dq = Number(p.displayQuantity);
+      if (!Number.isFinite(dq) || dq <= 0) return _err("displayQuantity deve ser positivo");
+      if (dq > Number(totalQuantity)) return _err("displayQuantity não pode exceder totalQuantity");
+      if (p.limitPrice != null && !(p.limitPrice > 0)) return _err("limitPrice deve ser positivo quando informado");
+      return { ok: true };
+    }
+    case "Twap": {
+      const p = payload.twap;
+      if (!p) return _err("bloco twap é obrigatório");
+      const sliceCount = Number(p.sliceCount);
+      if (!Number.isFinite(sliceCount) || sliceCount <= 0) return _err("sliceCount deve ser positivo");
+      const childErr = _validateChildTypeAndPrice(p, true);
+      if (childErr) return childErr;
+      const seErr = _validateStartEnd(p);
+      if (seErr) return seErr;
+      const floor = Math.floor(Number(totalQuantity) / sliceCount);
+      if (floor <= 0) {
+        return _err("totalQuantity / sliceCount deve ser ≥ 1", { impliedSliceQuantity: floor });
+      }
+      return { ok: true };
+    }
+    case "Vwap": {
+      const p = payload.vwap;
+      if (!p) return _err("bloco vwap é obrigatório");
+      const childErr = _validateChildTypeAndPrice(p, true);
+      if (childErr) return childErr;
+      const seErr = _validateStartEnd(p);
+      if (seErr) return seErr;
+      if (p.tickIntervalSeconds != null && !(p.tickIntervalSeconds > 0)) {
+        return _err("tickIntervalSeconds deve ser positivo");
+      }
+      if (p.sliceMaxPct != null && !(p.sliceMaxPct > 0 && p.sliceMaxPct <= 1)) {
+        return _err("sliceMaxPct deve estar em (0, 1]");
+      }
+      if (p.participationCap != null && !(p.participationCap > 0 && p.participationCap <= 1)) {
+        return _err("participationCap deve estar em (0, 1]");
+      }
+      if (p.priceLimit != null && !(p.priceLimit > 0)) return _err("priceLimit deve ser positivo quando informado");
+      return { ok: true };
+    }
+    case "Pov": {
+      const p = payload.pov;
+      if (!p) return _err("bloco pov é obrigatório");
+      const childErr = _validateChildTypeAndPrice(p, true);
+      if (childErr) return childErr;
+      const seErr = _validateStartEnd(p);
+      if (seErr) return seErr;
+      if (!(p.participationRate > 0 && p.participationRate <= 1)) {
+        return _err("participationRate é obrigatório em (0, 1]");
+      }
+      if (p.tickIntervalSeconds != null && !(p.tickIntervalSeconds > 0)) {
+        return _err("tickIntervalSeconds deve ser positivo");
+      }
+      if (p.minSliceQty != null && !(p.minSliceQty >= 1)) {
+        return _err("minSliceQty deve ser ≥ 1");
+      }
+      if (p.priceLimit != null && !(p.priceLimit > 0)) return _err("priceLimit deve ser positivo quando informado");
+      return { ok: true };
+    }
+    case "Pegged": {
+      const p = payload.pegged;
+      if (!p) return _err("bloco pegged é obrigatório");
+      const ref = typeof p.ref === "string" ? p.ref : "";
+      const normalized = PEGGED_REFS.find(r => r.toLowerCase() === ref.toLowerCase());
+      if (!normalized) return _err(`ref deve ser ${PEGGED_REFS.join(" | ")}`);
+      if (p.repegIntervalMs != null && !(p.repegIntervalMs > 0)) {
+        return _err("repegIntervalMs deve ser positivo");
+      }
+      if (p.tickSize != null && !(p.tickSize > 0)) {
+        return _err("tickSize deve ser positivo");
+      }
+      if (p.childOrderType != null && p.childOrderType !== "Limit") {
+        return _err("Pegged só aceita childOrderType=Limit");
+      }
+      if (!Number.isFinite(Number(p.offsetTicks))) {
+        return _err("offsetTicks é obrigatório (inteiro)");
+      }
+      if (p.priceLimit != null && !(p.priceLimit > 0)) return _err("priceLimit deve ser positivo quando informado");
+      return { ok: true };
+    }
+    default:
+      return _err(`type desconhecido: ${type}`);
+  }
+}
