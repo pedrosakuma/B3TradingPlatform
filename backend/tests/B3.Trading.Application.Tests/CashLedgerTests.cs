@@ -138,4 +138,79 @@ public class CashLedgerTests
         Assert.Throws<ArgumentOutOfRangeException>(() =>
             ledger.ApplyFee(new EndClientId("alice"), -1m));
     }
+
+    // ── #386 BalanceChanged event ────────────────────────────────────
+
+    [Fact]
+    public void BalanceChanged_FiresOnSeed_WithSeededAmount()
+    {
+        var ledger = new CashLedger();
+        var owner = new EndClientId("alice");
+        (EndClientId Owner, decimal Available)? observed = null;
+        ledger.BalanceChanged += (o, a) => observed = (o, a);
+
+        ledger.SeedIfAbsent(owner, 1_000m);
+
+        Assert.NotNull(observed);
+        Assert.Equal(owner, observed!.Value.Owner);
+        Assert.Equal(1_000m, observed.Value.Available);
+    }
+
+    [Fact]
+    public void BalanceChanged_FiresOnFill_WithPostMutationAvailable()
+    {
+        var ledger = new CashLedger();
+        var owner = new EndClientId("alice");
+        ledger.SeedIfAbsent(owner, 500m);
+        var captured = new List<decimal>();
+        ledger.BalanceChanged += (_, a) => captured.Add(a);
+
+        ledger.ApplyFill(owner, OrderSide.Buy, 10, 25m); // -250
+
+        Assert.Single(captured);
+        Assert.Equal(250m, captured[0]);
+    }
+
+    [Fact]
+    public void BalanceChanged_FiresOnFee_WithPostMutationAvailable()
+    {
+        var ledger = new CashLedger();
+        var owner = new EndClientId("alice");
+        ledger.SeedIfAbsent(owner, 100m);
+        var captured = new List<decimal>();
+        ledger.BalanceChanged += (_, a) => captured.Add(a);
+
+        ledger.ApplyFee(owner, 7.50m);
+
+        Assert.Single(captured);
+        Assert.Equal(92.50m, captured[0]);
+    }
+
+    [Fact]
+    public void BalanceChanged_DoesNotFire_OnZeroFee()
+    {
+        var ledger = new CashLedger();
+        var owner = new EndClientId("alice");
+        ledger.SeedIfAbsent(owner, 100m);
+        var fireCount = 0;
+        ledger.BalanceChanged += (_, _) => fireCount++;
+
+        ledger.ApplyFee(owner, 0m);
+
+        Assert.Equal(0, fireCount);
+    }
+
+    [Fact]
+    public void BalanceChanged_ThrowingSubscriber_DoesNotPoisonLedger()
+    {
+        var ledger = new CashLedger();
+        var owner = new EndClientId("alice");
+        ledger.BalanceChanged += (_, _) => throw new InvalidOperationException("bad subscriber");
+
+        // Must not throw out of the ledger.
+        ledger.SeedIfAbsent(owner, 100m);
+        ledger.ApplyFill(owner, OrderSide.Sell, 5, 10m); // +50
+
+        Assert.Equal(150m, ledger.GetAvailable(owner));
+    }
 }
