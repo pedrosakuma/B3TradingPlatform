@@ -68,5 +68,36 @@ test('applyBookFrame ignores malformed payloads', async () => {
   s.applyBookFrame(undefined);
   s.applyBookFrame({});
   s.applyBookFrame({ Symbol: 42 });
+  s.applyBookFrame({ symbol: 42 });
   assert.equal(s.getState().book.size, 0);
+});
+
+test('applyBookFrame accepts the camelCase wire shape produced by JsonSerializerDefaults.Web', async () => {
+  // Real wire shape served by trading-host (System.Text.Json web defaults
+  // camelCase the L2LadderDto / L2SideDto record properties).
+  const s = await freshState();
+  s.applyBookFrame({
+    symbol: 'PETR4',
+    bids: [
+      { price: 30.20, totalQty: 100, orderCount: 1 },
+      { price: 30.10, totalQty: 250, orderCount: 3 },
+    ],
+    asks: [
+      { price: 30.30, totalQty: 50, orderCount: 1 },
+    ],
+    updatedUtc: '2026-05-22T18:47:00Z',
+  });
+  const entry = s.getState().book.get('PETR4');
+  assert.equal(entry.ready, true);
+  assert.equal(entry.bids.size, 2);
+  assert.equal(entry.asks.size, 1);
+  assert.deepEqual(entry.bids.get('30.2000'), { qty: 100, count: 1 });
+  assert.deepEqual(entry.asks.get('30.3000'), { qty: 50, count: 1 });
+});
+
+test('applyBookFrame camelCase empty-state snapshot keeps ready=false', async () => {
+  const s = await freshState();
+  s.applyBookFrame({ symbol: 'VALE3', bids: [], asks: [], updatedUtc: null });
+  const entry = s.getState().book.get('VALE3');
+  assert.equal(entry.ready, false);
 });

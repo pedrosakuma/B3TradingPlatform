@@ -425,19 +425,33 @@ function ensureBook(symbol) {
 /// ladder as a `snapshot` frame on subscribe.
 /// </summary>
 export function applyBookFrame(frame) {
-  if (!frame || typeof frame.Symbol !== "string") return;
-  const entry = ensureBook(frame.Symbol);
+  if (!frame) return;
+  // The trading-host WS serializes DTOs with JsonSerializerDefaults.Web
+  // (camelCase). Tolerate PascalCase too for forward-compat with any
+  // older sink or test fixture.
+  const symbol = frame.symbol ?? frame.Symbol;
+  if (typeof symbol !== "string") return;
+  const bids = frame.bids ?? frame.Bids ?? [];
+  const asks = frame.asks ?? frame.Asks ?? [];
+  const updatedUtc = frame.updatedUtc ?? frame.UpdatedUtc ?? null;
+  const entry = ensureBook(symbol);
   entry.bids.clear();
   entry.asks.clear();
-  for (const lv of frame.Bids ?? []) {
-    entry.bids.set(priceKey(lv.Price), { qty: lv.TotalQty, count: lv.OrderCount });
+  for (const lv of bids) {
+    const price = lv.price ?? lv.Price;
+    const qty = lv.totalQty ?? lv.TotalQty;
+    const count = lv.orderCount ?? lv.OrderCount;
+    entry.bids.set(priceKey(price), { qty, count });
   }
-  for (const lv of frame.Asks ?? []) {
-    entry.asks.set(priceKey(lv.Price), { qty: lv.TotalQty, count: lv.OrderCount });
+  for (const lv of asks) {
+    const price = lv.price ?? lv.Price;
+    const qty = lv.totalQty ?? lv.TotalQty;
+    const count = lv.orderCount ?? lv.OrderCount;
+    entry.asks.set(priceKey(price), { qty, count });
   }
-  // Empty-state snapshot (UpdatedUtc=null) keeps ready=false so the
+  // Empty-state snapshot (updatedUtc=null) keeps ready=false so the
   // DOB shows its "waiting" affordance instead of an empty ladder.
-  entry.ready = frame.UpdatedUtc != null;
+  entry.ready = updatedUtc != null;
   entry.updatedAt = Date.now();
   notify("book");
 }
