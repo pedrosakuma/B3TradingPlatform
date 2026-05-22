@@ -123,6 +123,9 @@ const state = {
   traderSubTab: "markets",       // "markets" | "watchlist" | "auctions"
   traderBottomTab: "blotter",    // "blotter"  | "executions"
   ticketAdvancedOpen: false,     // Quick-ticket advanced fields expanded
+  // Fase 5 (#401). UI density toggle. Persists in localStorage (not
+  // sessionStorage) — it's a per-trader preference, not per-tab state.
+  density: "comfortable",        // "comfortable" | "compact"
   // Q4.14 (#314). Rolling drop-copy feed surfaced on the compliance
   // view. The buffer is capped at COMPLIANCE_FEED_CAP so the table
   // can render every entry without virtualising. `paused` halts
@@ -933,6 +936,16 @@ export function setTicketAdvancedOpen(open) {
   if (state.ticketAdvancedOpen === next) return;
   state.ticketAdvancedOpen = next;
   notify("ticketAdvancedOpen");
+}
+
+// ── Fase 5 (#401). UI density (compact / comfortable) ─────────────
+export const DENSITY_VALUES = new Set(["comfortable", "compact"]);
+
+export function setDensity(name) {
+  if (!DENSITY_VALUES.has(name)) return;
+  if (state.density === name) return;
+  state.density = name;
+  notify("density");
 }
 
 // ── Q4.14 (#314). Compliance drop-copy feed slice ──────────────────

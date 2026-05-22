@@ -1137,3 +1137,71 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
    lived alongside the others) was dropped in markup, but keep the
    rule for any test fixture that still sets the class. */
 .auctions-layout .auction-panel { flex: 1; }
+
+/* ─────────────────────────────────────────────────────────────────
+   Fase 5 (#401). Polish: density toggle, focus-visible, responsive.
+   ───────────────────────────────────────────────────────────────── */
+
+/* UI density.  Comfortable (default) is unchanged; compact pulls every
+   rem-based metric down ~10%.  We do this by lowering the root
+   font-size and tightening a handful of obviously roomy paddings so
+   the trader can fit more rows on a 1366×768 laptop. */
+:root[data-density="compact"] { font-size: 14px; }
+:root[data-density="compact"] .panel { padding: .35rem .5rem; }
+:root[data-density="compact"] table th,
+:root[data-density="compact"] table td { padding: .15rem .35rem; }
+:root[data-density="compact"] .ticket-row-quick { gap: .35rem; }
+:root[data-density="compact"] .ticket-advanced  { gap: .35rem; }
+:root[data-density="compact"] .topbar           { padding: .35rem .5rem; }
+
+/* Preferences panel: density toggle. */
+.preferences-panel .preference-row { padding: .5rem 0; }
+.preferences-panel .preference-row + .preference-row {
+  border-top: 1px dashed var(--border);
+  margin-top: .5rem;
+}
+.preferences-panel .preference-label {
+  display: block; font-weight: 600; margin-bottom: .25rem;
+}
+.preferences-panel .field-hint {
+  margin: .25rem 0 0; font-size: .8rem; color: var(--muted, #888);
+}
+.density-toggle { display: inline-flex; gap: .25rem; }
+.density-option {
+  padding: .35rem .75rem; font: inherit; font-size: .85rem;
+  background: transparent; color: inherit;
+  border: 1px solid var(--border); border-radius: 4px;
+  cursor: pointer;
+}
+.density-option.active {
+  background: var(--accent, #357); color: white;
+  border-color: var(--accent, #357);
+}
+.keyboard-shortcuts {
+  margin: .25rem 0 0; padding-left: 1.25rem; font-size: .85rem;
+  line-height: 1.6;
+}
+.keyboard-shortcuts kbd {
+  display: inline-block; padding: 0 .3rem;
+  background: var(--panel-2, #222); border: 1px solid var(--border);
+  border-radius: 3px; font-size: .8em; font-family: ui-monospace, monospace;
+}
+
+/* Focus-visible. Surface a clearly visible focus ring on keyboard
+   navigation; mouse focus stays unstyled. */
+:focus-visible {
+  outline: 2px solid var(--accent, #357);
+  outline-offset: 2px;
+}
+:focus:not(:focus-visible) { outline: none; }
+
+/* Responsive ≤1280px.  Multi-column trader sub-tabs collapse to a
+   single column so they remain usable on a 1366×768 laptop. */
+@media (max-width: 1280px) {
+  .markets-layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto;
+  }
+  .watchlist-layout { grid-template-columns: 1fr; }
+  .ticket-row-quick { flex-wrap: wrap; }
+}
