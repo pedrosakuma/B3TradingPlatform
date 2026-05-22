@@ -1207,15 +1207,35 @@
       </form>
     </section>
 
-    <!-- Preferences placeholder. Fase 3 (#399) only sketches the
-         tab; concrete preference toggles land in a follow-up. -->
+    <!-- Preferences (Fase 5 / #401). Hosts the UI density toggle and a
+         keyboard-shortcut reference. -->
     <section id="settings-panel-preferences" class="settings-subpanel"
              role="tabpanel" aria-labelledby="settings-subtab-preferences" hidden>
       <header class="admin-subbar">
         <h3>Preferences</h3>
       </header>
-      <section class="panel admin-panel">
-        <p class="muted-line">Em breve — preferências de exibição e atalhos.</p>
+      <section class="panel admin-panel preferences-panel">
+        <div class="preference-row">
+          <label class="preference-label" id="density-label">UI density</label>
+          <div id="density-toggle" class="density-toggle" role="group" aria-labelledby="density-label">
+            <button type="button" class="density-option" data-density="comfortable"
+                    aria-pressed="true">Comfortable</button>
+            <button type="button" class="density-option" data-density="compact"
+                    aria-pressed="false">Compact</button>
+          </div>
+          <p class="field-hint">Compact reduces padding and font-size ~10% — useful on 1366×768 laptops.</p>
+        </div>
+        <div class="preference-row">
+          <h4>Keyboard shortcuts</h4>
+          <ul class="keyboard-shortcuts">
+            <li><kbd>Alt</kbd>+<kbd>1</kbd>…<kbd>6</kbd> — switch primary tab (Trader / Algos / History / Settings / Admin / Compliance).</li>
+            <li><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>1</kbd>…<kbd>3</kbd> — switch Trader sub-tab (Markets / Watchlist / Auctions).</li>
+            <li><kbd>Alt</kbd>+<kbd>B</kbd> / <kbd>Alt</kbd>+<kbd>E</kbd> — lower-band Working orders / Executions.</li>
+            <li><kbd>/</kbd> — focus the symbol selector.</li>
+            <li><kbd>B</kbd> / <kbd>S</kbd> — set Quick-ticket side to Buy / Sell (outside of text fields).</li>
+            <li><kbd>Esc</kbd> — close the open modal / drawer.</li>
+          </ul>
+        </div>
       </section>
     </section>
   </section>

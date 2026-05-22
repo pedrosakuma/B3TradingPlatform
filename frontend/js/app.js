@@ -15,6 +15,8 @@ import { validateCreateAlgo } from "./validation.js";
 import * as algosUi from "./algosUi.js";
 import * as settingsUi from "./settingsUi.js";
 import * as traderUi from "./traderUi.js";
+import * as preferencesUi from "./preferencesUi.js";
+import { bindKeyboardShortcuts } from "./keyboard.js";
 import {
   parseHashRoute,
   hashForView,
@@ -112,6 +114,15 @@ function init() {
   settingsUi.bindSettingsUi();
   // Fase 4 (#400). Trader sub-tab + lower-band + ticket-advanced.
   traderUi.bindTraderUi();
+  // Fase 5 (#401). Preferences sub-tab (density toggle).
+  preferencesUi.bindPreferencesUi();
+  // Restore density preference before any view renders so the login
+  // screen itself respects the saved choice. Persisted in localStorage
+  // (per-trader preference, not per-tab state).
+  try {
+    const dens = localStorage.getItem(DENSITY_KEY);
+    if (dens === "compact" || dens === "comfortable") state.setDensity(dens);
+  } catch { /* private mode */ }
   ui.setHandlers({
     onSubmitOrder: handleSubmitOrder,
     onCancelOrder: handleCancelOrder,
@@ -161,6 +172,44 @@ function init() {
     onCvmDownload:     handleCvmDownload,
   });
 
+  // Fase 5 (#401). Global keyboard shortcuts. Handlers gate on
+  // `session` so they no-op while the user is on the login screen.
+  bindKeyboardShortcuts({
+    "tab:trader":     () => session && handleSwitchView("trader"),
+    "tab:algos":      () => session && handleSwitchView("algos"),
+    "tab:history":    () => session && handleSwitchView("history"),
+    "tab:settings":   () => session && handleSwitchView("settings"),
+    "tab:admin":      () => session && handleSwitchView("admin"),
+    "tab:compliance": () => session && handleSwitchView("compliance"),
+    "trader-sub:markets":   () => session && handleSwitchView("trader", "markets"),
+    "trader-sub:watchlist": () => session && handleSwitchView("trader", "watchlist"),
+    "trader-sub:auctions":  () => session && handleSwitchView("trader", "auctions"),
+    "trader-bottom:blotter":    () => state.setTraderBottomTab("blotter"),
+    "trader-bottom:executions": () => state.setTraderBottomTab("executions"),
+    "focus:symbol": () => {
+      const el = document.getElementById("ticket-symbol")
+              || document.getElementById("selected-symbol");
+      if (el && typeof el.focus === "function") el.focus();
+    },
+    "ticket:buy":  () => {
+      const sel = document.getElementById("ticket-side");
+      if (sel) { sel.value = "Buy";  sel.dispatchEvent(new Event("change", { bubbles: true })); }
+    },
+    "ticket:sell": () => {
+      const sel = document.getElementById("ticket-side");
+      if (sel) { sel.value = "Sell"; sel.dispatchEvent(new Event("change", { bubbles: true })); }
+    },
+    "modal:close": () => {
+      // Order-detail modal is the only modal still in use post-Fase-3;
+      // its overlay listens for Esc on its own backdrop, so the global
+      // shortcut just calls into the same close path when present.
+      const backdrop = document.getElementById("order-detail-backdrop");
+      if (backdrop && !backdrop.hidden) {
+        backdrop.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      }
+    },
+  });
+
   // Q1.6 (#258). Whenever the watchlist or auctionPanelSymbol slice
   // changes, re-diff the public WS subscription set so phase badges
   // stay in sync and auction.${symbol} is only subscribed while the
@@ -182,6 +231,9 @@ function init() {
     }
     if (slice === "ticketAdvancedOpen" || slice === "all") {
       persistTicketAdvancedOpen(state.getState().ticketAdvancedOpen);
+    }
+    if (slice === "density" || slice === "all") {
+      persistDensity(state.getState().density);
     }
   });
 
@@ -556,6 +608,14 @@ function startSession(next) {
     if (bottom === "blotter" || bottom === "executions") state.setTraderBottomTab(bottom);
     const adv = sessionStorage.getItem(TICKET_ADVANCED_KEY);
     if (adv === "1") state.setTicketAdvancedOpen(true);
+  } catch { /* private mode */ }
+  // Fase 5 (#401). Restore density preference (localStorage, not
+  // session — survives across browser sessions). Already applied at
+  // init() so the login screen respects it; re-apply here so a tab
+  // opened with a stale in-memory default catches up.
+  try {
+    const dens = localStorage.getItem(DENSITY_KEY);
+    if (dens === "compact" || dens === "comfortable") state.setDensity(dens);
   } catch { /* private mode */ }
   persistActiveTab(initialView);
   syncUrlHash(initialView, /*replace*/ true,
@@ -1299,6 +1359,9 @@ const SETTINGS_SUB_TAB_KEY = "fe.settingsSubTab";
 const TRADER_SUB_TAB_KEY = "fe.traderSubTab";
 const TRADER_BOTTOM_TAB_KEY = "fe.traderBottomTab";
 const TICKET_ADVANCED_KEY = "fe.ticketAdvancedOpen";
+// Fase 5 (#401). Density is a per-trader preference, not per-tab — lives
+// in localStorage so a new tab inherits the user's choice.
+const DENSITY_KEY = "fe.density";
 
 function tabFromHash() {
   const hash = (typeof window !== "undefined" && window.location?.hash) || "";
@@ -1325,6 +1388,9 @@ function persistTraderBottomTab(sub) {
 }
 function persistTicketAdvancedOpen(open) {
   try { sessionStorage.setItem(TICKET_ADVANCED_KEY, open ? "1" : "0"); } catch { /* private mode */ }
+}
+function persistDensity(name) {
+  try { localStorage.setItem(DENSITY_KEY, name); } catch { /* private mode */ }
 }
 
 function syncUrlHash(view, replace, subTab) {
