@@ -92,6 +92,14 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         services.AddSingleton<IUserBotOrderMappingRegistry>(sp =>
             sp.GetRequiredService<InMemoryUserBotOrderMappingRegistry>());
         services.AddSingleton<SubscriptionManager>();
+
+        // #386. balance.me WS fan-out — bridges CashLedger.BalanceChanged
+        // (fills + fees + opening seed) to subscribed clients. Singleton +
+        // hosted service so the drain task starts/stops with the host;
+        // the event subscription itself attaches in the ctor so deltas
+        // queued before StartAsync run are picked up at start.
+        services.AddSingleton<WebSocketBalanceFanOut>();
+        services.AddHostedService(sp => sp.GetRequiredService<WebSocketBalanceFanOut>());
         // RFC §5.2 (F2). The WS hub sink is channel-backed and runs as
         // a hosted service so its drain task starts/stops with the host.
         // Both the IExecutionEventSink (synthetic publishes from

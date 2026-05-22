@@ -20,6 +20,24 @@ public sealed class CashLedger
     private readonly ConcurrentDictionary<EndClientId, CashBalance> _balances = new();
 
     /// <summary>
+    /// #386. Fired AFTER every mutation that changes
+    /// <see cref="CashBalance.Available"/> for an owner — fills, fees,
+    /// and the opening-balance seed. Invoked under the per-balance
+    /// lock so subscribers observe a consistent (owner, newAvailable)
+    /// pair, in mutation order. Listeners must NOT block (the lock is
+    /// held); the WS fan-out enqueues onto a channel and returns.
+    /// </summary>
+    public event Action<EndClientId, decimal>? BalanceChanged;
+
+    private void RaiseBalanceChanged(EndClientId owner, decimal newAvailable)
+    {
+        var handler = BalanceChanged;
+        if (handler is null) return;
+        try { handler(owner, newAvailable); }
+        catch { /* one bad subscriber must not poison the keeper */ }
+    }
+
+    /// <summary>
     /// Returns the existing balance or creates a fresh one at zero. Used
     /// by ER processor to fold fills lazily — accounts that never fill
     /// stay out of memory.
@@ -36,15 +54,23 @@ public sealed class CashLedger
     public bool SeedIfAbsent(EndClientId owner, decimal initialAvailable)
     {
         var seeded = CashBalance.Hydrate(owner, initialAvailable);
-        return _balances.TryAdd(owner, seeded);
+        if (_balances.TryAdd(owner, seeded))
+        {
+            RaiseBalanceChanged(owner, initialAvailable);
+            return true;
+        }
+        return false;
     }
 
     public void ApplyFill(EndClientId owner, OrderSide side, long quantity, decimal price)
     {
         var balance = GetOrCreate(owner);
+        decimal newAvailable;
         lock (balance)
         {
             balance.ApplyFill(side, quantity, price);
+            newAvailable = balance.Available;
+            RaiseBalanceChanged(owner, newAvailable);
         }
     }
 
@@ -72,6 +98,7 @@ public sealed class CashLedger
         lock (balance)
         {
             balance.ApplyFee(amount);
+            RaiseBalanceChanged(owner, balance.Available);
         }
     }
 
