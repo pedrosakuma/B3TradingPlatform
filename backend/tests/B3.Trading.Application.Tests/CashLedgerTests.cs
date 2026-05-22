@@ -103,4 +103,39 @@ public class CashLedgerTests
         Assert.Equal(src.GetAvailable(new EndClientId("alice")), dst.GetAvailable(new EndClientId("alice")));
         Assert.Equal(src.GetAvailable(new EndClientId("bob")), dst.GetAvailable(new EndClientId("bob")));
     }
+
+    // #387. Cash debit hook used by FeeKeeper.Apply after the seen-set
+    // gate succeeds. Idempotency lives in the keeper; from the ledger's
+    // point of view ApplyFee is just an unconditional debit.
+    [Fact]
+    public void ApplyFee_DebitsAvailable()
+    {
+        var ledger = new CashLedger();
+        var alice = new EndClientId("alice");
+        ledger.SeedIfAbsent(alice, 1_000m);
+
+        ledger.ApplyFee(alice, 0.50m);
+        ledger.ApplyFee(alice, 0.25m);
+
+        Assert.Equal(999.25m, ledger.GetAvailable(alice));
+    }
+
+    [Fact]
+    public void ApplyFee_ZeroAmount_DoesNotMaterialiseRow()
+    {
+        var ledger = new CashLedger();
+        var ghost = new EndClientId("ghost");
+
+        ledger.ApplyFee(ghost, 0m);
+
+        Assert.Empty(ledger.Snapshot());
+    }
+
+    [Fact]
+    public void ApplyFee_NegativeAmount_Throws()
+    {
+        var ledger = new CashLedger();
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            ledger.ApplyFee(new EndClientId("alice"), -1m));
+    }
 }

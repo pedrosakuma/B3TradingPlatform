@@ -49,6 +49,33 @@ public sealed class CashLedger
     }
 
     /// <summary>
+    /// #387. Debit a brokerage / settlement fee from <see cref="CashBalance.Available"/>.
+    /// Called by <see cref="FeeKeeper.Apply"/> after the seen-set
+    /// guard succeeds, so this method itself is NOT idempotent — it
+    /// always debits the supplied <paramref name="amount"/>. Replay
+    /// idempotency lives in the keeper (FeeAccruedEvent.ExecutionId
+    /// dedup); from there it's the same byte-identical recovery
+    /// contract as <see cref="ApplyFill"/>.
+    /// <para>
+    /// <paramref name="amount"/> is a positive fee total (the
+    /// <see cref="Persistence.FeeAccruedEvent.Total"/> field is always
+    /// non-negative). Zero amounts are a no-op so a fee-free symbol
+    /// does not materialise a balance row.
+    /// </para>
+    /// </summary>
+    public void ApplyFee(EndClientId owner, decimal amount)
+    {
+        if (amount < 0m)
+            throw new ArgumentOutOfRangeException(nameof(amount), "fee must be non-negative");
+        if (amount == 0m) return;
+        var balance = GetOrCreate(owner);
+        lock (balance)
+        {
+            balance.ApplyFee(amount);
+        }
+    }
+
+    /// <summary>
     /// Read-only convenience for risk / API callers. Returns <c>0</c> for
     /// an unknown owner without materialising an entry, so probing the
     /// balance can't pollute the dictionary.
