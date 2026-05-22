@@ -18,3 +18,10 @@ services:
       # symbol into a SecurityId so the validator does not 400.
       Trading__SymbolDirectory__SecurityIds__PETR4: "4321"
       Trading__SymbolDirectory__SecurityIds__VALE3: "1234"
+      # #382. The smoke E2E uses the in-process StubExchangeGateway and
+      # the matching/marketdata services are suppressed via profiles;
+      # the SDK has nothing to subscribe to. Clear the inherited WsUrl
+      # and pin EnableBook off so the trading-host stays quiet on the
+      # MD side (no reconnect churn, no SDK Book subscription).
+      Trading__MarketData__WsUrl: ""
+      Trading__MarketData__EnableBook: "false"

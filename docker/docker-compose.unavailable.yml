@@ -93,6 +93,12 @@ services:
       # Static fallback Trading:Risk:ReferencePrices map (still set by
       # base) keeps the price-collar happy if any code path consults it.
       Trading__MarketData__WsUrl: ""
+      # #382. Belt-and-suspenders: WsUrl="" already short-circuits the
+      # MD registration before EnableBook is read, but pin the flag off
+      # explicitly so a future change that wires a stub MD URL under
+      # this overlay does not accidentally re-enable the Book
+      # subscription.
+      Trading__MarketData__EnableBook: "false"
 
   matching-platform:
     profiles: ["never-on"]

@@ -300,6 +300,18 @@ services:
       Trading__MarketData__Symbols__0: PETR4
       Trading__MarketData__Symbols__1: VALE3
       Trading__MarketData__Symbols__2: ITUB4
+      # #382. EnableBook flips two switches in lockstep:
+      #   - SdkMarketDataSubscriber adds SubscribeFlags.Book to the SDK
+      #     subscription so marketdata streams MBO frames to trading-host.
+      #   - MarketDataRegistration replaces the no-op InMemoryL2BookView
+      #     with SdkBookFeedAdapter (backed by SDK 0.4.0 IBookFeed) so
+      #     WebSocketBookEventSink and MboPegBookPump see real depth.
+      # MarketDataOptions defaults to false to keep the application
+      # surface honest when MD is wired but the SDK Book extension is
+      # not desired; for the real-stack compose, depth IS the headline
+      # feature so we flip it on by default. Override via .env when
+      # debugging MD cost or chasing a Book-feed regression.
+      Trading__MarketData__EnableBook: ${TRADING_MARKETDATA_ENABLE_BOOK:-true}
     volumes:
       - trading-data:/var/lib/b3trading
     networks:
