@@ -743,6 +743,7 @@ function onWorkerMessage(msg) {
     case "executions.delta":    state.applyExecutionsDelta(msg.data); break;
     case "pnl.snapshot":        state.applyPnlDelta(msg.data); break;
     case "pnl.delta":           state.applyPnlDelta(msg.data); break;
+    case "balance.frame":       state.applyBalanceFrame(msg.data); break;
     case "phases.frame":        state.applyPhaseFrame(msg.data); break;
     case "auction.frame":       state.applyAuctionFrame(msg.data); break;
     case "book.frame":          state.applyBookFrame(msg.data); break;

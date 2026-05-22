@@ -1388,6 +1388,44 @@ export function setUserLabel(user) {
   setViewToggleVisible(isAdmin, getState().currentView);
 }
 
+// #385. Render the live cash balance in the topbar. The widget shows
+// "R$ —" until the first `balance.me` frame lands (or when the user
+// logs out / WS reconnects clears the slice). Negative balances are
+// rendered with a `balance-negative` class so the trader notices they
+// are underwater. Format uses pt-BR thousands/decimal separators to
+// match the rest of the trader UI (price ticket, P&L panel).
+const BALANCE_FORMATTER = new Intl.NumberFormat("pt-BR", {
+  style: "currency",
+  currency: "BRL",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+function renderBalance() {
+  const el = $("user-balance");
+  if (!el) return;
+  const st = getState();
+  if (!st.user?.username) {
+    // Logged out — hide the badge entirely so the topbar collapses
+    // back to the login layout.
+    el.hidden = true;
+    el.textContent = "";
+    el.classList.remove("balance-negative");
+    return;
+  }
+  el.hidden = false;
+  const bal = st.balance;
+  if (bal == null || !Number.isFinite(bal.available)) {
+    el.textContent = "R$ —";
+    el.classList.remove("balance-negative");
+    el.title = "Saldo disponível — aguardando dados";
+    return;
+  }
+  el.textContent = BALANCE_FORMATTER.format(bal.available);
+  el.classList.toggle("balance-negative", bal.available < 0);
+  el.title = `Saldo disponível: ${BALANCE_FORMATTER.format(bal.available)}`;
+}
+
 function applyCurrentView(view) {
   const trader = $("trader-view");
   const admin = $("admin-view");
@@ -1587,6 +1625,7 @@ export function renderForSlice(slice) {
     renderStaleness("ws");
   }
   if (slice === "user")   setUserLabel(getState().user);
+  if (slice === "balance" || slice === "user" || slice === "all") renderBalance();
   if (slice === "marketData" || slice === "all") renderMarketData();
   if (slice === "marketDataStatus") {
     setMdStatusPill(getState().marketDataStatus);

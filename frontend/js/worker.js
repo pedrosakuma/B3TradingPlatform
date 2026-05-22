@@ -26,7 +26,7 @@ let stopped = false;
 // only useful while the P&L panel is mounted, so the main thread
 // dynamically (un)subscribes via setPnlSubscribed when the user
 // enters / leaves the history view.
-const CHANNELS = ["orders.me", "executions.me", "positions.me"];
+const CHANNELS = ["orders.me", "executions.me", "positions.me", "balance.me"];
 
 // Q2.6 (#273). Tracks whether the main thread wants pnl.me subscribed
 // right now. Held across reconnects so a flap doesn't drop the
@@ -142,6 +142,12 @@ function handleFrame(frame) {
       // PnlTodayDto — the main thread reducer treats them identically,
       // so we forward a single event type per direction.
       post({ type: frame.type === "snapshot" ? "pnl.snapshot" : "pnl.delta", data: frame.data });
+      break;
+    case "balance.me":
+      // #385 / #386. Snapshot + delta carry the full BalanceDto, so a
+      // single forwarded event type is enough — the main thread reducer
+      // (applyBalanceFrame) replaces wholesale either way.
+      post({ type: "balance.frame", data: frame.data });
       break;
     default:
       // Q1.6 (#258). Public per-symbol channels — phases.${symbol} and
