@@ -10,7 +10,7 @@ namespace B3.Trading.Host.MarketData;
 /// <summary>
 /// Adapter from the SDK 0.4.0 <see cref="IBookFeed"/> (B3MarketDataPlatform #43 /
 /// #44 / #53) to the application-side <see cref="IL2BookView"/> seam consumed by
-/// <c>MboPegBookPump</c> and <c>WebSocketBookEventSink</c>.
+/// <c>MboPegBookPump</c>.
 ///
 /// <para>
 /// The SDK's <c>BookFeed</c> already maintains a per-symbol L3 (MBO) book and

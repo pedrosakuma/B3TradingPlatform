@@ -11,7 +11,7 @@ namespace B3.Trading.Application.MarketData;
 /// <para>
 /// <b>BBO source (Q3.6 Stage C, #286).</b> Best-bid / best-ask are
 /// populated by <see cref="MboPegBookPump"/> off the in-host
-/// <see cref="MboBookStore"/> when <c>MarketDataOptions.EnableBook</c>
+/// <see cref="IL2BookView"/> when <c>MarketDataOptions.EnableBook</c>
 /// is on — the SDK still does not raise standalone BBO frames, but
 /// the MBO feed already carries the per-order book we aggregate. When
 /// MBO is disabled, the BBO legs stay null and <see cref="BookTop"/>

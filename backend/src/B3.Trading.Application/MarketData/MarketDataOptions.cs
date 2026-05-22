@@ -50,25 +50,15 @@ public sealed class MarketDataOptions
     /// <c>Trades | Info</c>. When <c>true</c>, every symbol passed to
     /// <see cref="IMarketDataSubscriber.SubscribeAsync"/> receives the
     /// per-order add/update/delete + book-snapshot stream, which the
-    /// in-host <c>MboBookStore</c> assembles into both an L3 view and a
-    /// derived L2 top-of-book.
+    /// host-side <see cref="InMemoryL2BookView"/> / SDK adapter
+    /// assembles into a derived L2 top-of-book consumed by
+    /// <c>MboPegBookPump</c> for pegged-algo recalc.
     /// <para>
     /// Default <c>false</c> so existing deployments (which only need
     /// trades + info for the collar / VWAP estimator) pay nothing for
-    /// the MBO bandwidth + per-order CPU cost. Set to <c>true</c> once
-    /// a consumer (pegging v2, depth UI, surveillance) needs the
-    /// book.
+    /// the MBO bandwidth + per-order CPU cost. Set to <c>true</c> only
+    /// when pegged algos are enabled.
     /// </para>
     /// </summary>
     public bool EnableBook { get; set; } = false;
-
-    /// <summary>
-    /// Q3.6 Stage B (#286). Depth of the per-symbol ladder fanned out
-    /// over the public <c>book.${symbol}</c> WebSocket channel. Each
-    /// side is capped to this many price levels (best-to-worst). 10 is
-    /// the depth the FE depth view consumes today; raise carefully
-    /// (bandwidth grows linearly per update). Ignored when
-    /// <see cref="EnableBook"/> is false.
-    /// </summary>
-    public int BookChannelMaxLevels { get; set; } = 10;
 }

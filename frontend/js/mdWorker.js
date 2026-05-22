@@ -36,7 +36,7 @@ let stopped = false;
 let attempt = 0;
 let reconnectTimer = null;
 let serverReady = false;
-let subscribeFlags = FLAGS.TRADES | FLAGS.INFO;
+let subscribeFlags = FLAGS.TRADES | FLAGS.INFO | FLAGS.MBP;
 
 // Subscribed symbols. Keys are normalized (UPPERCASE, trimmed) so set
 // arithmetic is straightforward. Value is the resolved securityId once
