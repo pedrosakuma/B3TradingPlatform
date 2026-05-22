@@ -110,6 +110,11 @@
         <span id="ws-reconnect" class="reconnect-countdown" hidden></span>
         <span id="user-label" class="user-label"></span>
         <span id="user-role" class="role-badge" hidden></span>
+        <!-- #385. Live cash balance for the logged-in end-client.
+             Hidden when no session is mounted. Updated by `balance.me`
+             WS frames (see WebSocketBalanceFanOut / #386). -->
+        <span id="user-balance" class="user-balance" role="status" aria-live="polite"
+              aria-label="Saldo disponível" title="Saldo disponível" hidden>R$ —</span>
         <button id="bot-credentials-open" class="link-button" type="button"
                 aria-label="Bot credentials">Bot credentials</button>
         <button id="security-open" class="link-button" type="button"
