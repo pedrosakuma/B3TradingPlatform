@@ -14,10 +14,12 @@ import { defaultBackend, defaultMarketDataUrl, login, signup, submitOrder, cance
 import { validateCreateAlgo } from "./validation.js";
 import * as algosUi from "./algosUi.js";
 import * as settingsUi from "./settingsUi.js";
+import * as traderUi from "./traderUi.js";
 import {
   parseHashRoute,
   hashForView,
   SETTINGS_SUB_TABS,
+  TRADER_SUB_TABS,
 } from "./hashRouter.js";
 import { claimsFromToken } from "./jwt.js";
 import { validateOrder, pretradeWarnings, payloadKey } from "./validation.js";
@@ -108,6 +110,8 @@ function init() {
   // DOM is parsed; bindUi is enough of a guard since this script is
   // loaded at the end of <body>.
   settingsUi.bindSettingsUi();
+  // Fase 4 (#400). Trader sub-tab + lower-band + ticket-advanced.
+  traderUi.bindTraderUi();
   ui.setHandlers({
     onSubmitOrder: handleSubmitOrder,
     onCancelOrder: handleCancelOrder,
@@ -165,6 +169,19 @@ function init() {
   state.subscribe((slice) => {
     if (slice === "watchlist" || slice === "auctionPanelSymbol" || slice === "all") {
       syncPublicChannels();
+    }
+    // Fase 4 (#400). Persist trader UI state so a reload restores it.
+    // The sub-tab is also persisted by handleSwitchView (for the hash
+    // sync path), but lower-band / ticket-advanced toggles never route
+    // through handleSwitchView, so they get their persistence here.
+    if (slice === "traderSubTab" || slice === "all") {
+      persistTraderSubTab(state.getState().traderSubTab);
+    }
+    if (slice === "traderBottomTab" || slice === "all") {
+      persistTraderBottomTab(state.getState().traderBottomTab);
+    }
+    if (slice === "ticketAdvancedOpen" || slice === "all") {
+      persistTicketAdvancedOpen(state.getState().ticketAdvancedOpen);
     }
   });
 
@@ -522,9 +539,29 @@ function startSession(next) {
     }
     if (SETTINGS_SUB_TABS.has(subTab)) state.setSettingsSubTab(subTab);
   }
+  // Fase 4 (#400). Restore trader sub-tab from hash → sessionStorage.
+  if (initialView === "trader") {
+    let subTab = hashRoute?.subTab;
+    if (!subTab) {
+      try { subTab = sessionStorage.getItem(TRADER_SUB_TAB_KEY); }
+      catch { /* private mode */ }
+    }
+    if (TRADER_SUB_TABS.has(subTab)) state.setTraderSubTab(subTab);
+  }
+  // Lower-band tab + ticket-advanced are persisted globally (no hash
+  // routing — they're UI state inside the trader shell, not first-class
+  // views).
+  try {
+    const bottom = sessionStorage.getItem(TRADER_BOTTOM_TAB_KEY);
+    if (bottom === "blotter" || bottom === "executions") state.setTraderBottomTab(bottom);
+    const adv = sessionStorage.getItem(TICKET_ADVANCED_KEY);
+    if (adv === "1") state.setTicketAdvancedOpen(true);
+  } catch { /* private mode */ }
   persistActiveTab(initialView);
   syncUrlHash(initialView, /*replace*/ true,
-    initialView === "settings" ? state.getState().settingsSubTab : undefined);
+    initialView === "settings" ? state.getState().settingsSubTab :
+    initialView === "trader"   ? state.getState().traderSubTab   :
+    undefined);
   if (initialView === "compliance") {
     // Compliance users land directly on the compliance console — no
     // trader view, no admin polls. Open the drop-copy socket so the
@@ -1259,6 +1296,9 @@ async function pollGatewayOnce() {
 
 const ACTIVE_TAB_KEY = "fe.activeTab";
 const SETTINGS_SUB_TAB_KEY = "fe.settingsSubTab";
+const TRADER_SUB_TAB_KEY = "fe.traderSubTab";
+const TRADER_BOTTOM_TAB_KEY = "fe.traderBottomTab";
+const TICKET_ADVANCED_KEY = "fe.ticketAdvancedOpen";
 
 function tabFromHash() {
   const hash = (typeof window !== "undefined" && window.location?.hash) || "";
@@ -1275,6 +1315,16 @@ function readPersistedTab() {
 
 function persistSettingsSubTab(sub) {
   try { sessionStorage.setItem(SETTINGS_SUB_TAB_KEY, sub); } catch { /* private mode */ }
+}
+
+function persistTraderSubTab(sub) {
+  try { sessionStorage.setItem(TRADER_SUB_TAB_KEY, sub); } catch { /* private mode */ }
+}
+function persistTraderBottomTab(sub) {
+  try { sessionStorage.setItem(TRADER_BOTTOM_TAB_KEY, sub); } catch { /* private mode */ }
+}
+function persistTicketAdvancedOpen(open) {
+  try { sessionStorage.setItem(TICKET_ADVANCED_KEY, open ? "1" : "0"); } catch { /* private mode */ }
 }
 
 function syncUrlHash(view, replace, subTab) {
@@ -1301,11 +1351,19 @@ function handleSwitchView(view, subTab) {
     state.setSettingsSubTab(subTab);
     persistSettingsSubTab(subTab);
   }
+  // Fase 4 (#400). Same dance for the trader sub-tab.
+  if (view === "trader" && subTab && TRADER_SUB_TABS.has(subTab)) {
+    state.setTraderSubTab(subTab);
+    persistTraderSubTab(subTab);
+  }
   state.setCurrentView(view);
   persistActiveTab(view);
-  const effectiveSub = view === "settings"
-    ? (SETTINGS_SUB_TABS.has(subTab) ? subTab : state.getState().settingsSubTab)
-    : undefined;
+  let effectiveSub;
+  if (view === "settings") {
+    effectiveSub = SETTINGS_SUB_TABS.has(subTab) ? subTab : state.getState().settingsSubTab;
+  } else if (view === "trader") {
+    effectiveSub = TRADER_SUB_TABS.has(subTab) ? subTab : state.getState().traderSubTab;
+  }
   syncUrlHash(view, /*replace*/ false, effectiveSub);
   // Drop-copy WS lifecycle: open on enter, close on leave. Cheap to
   // re-open; we don't pay the cost of holding the socket while the
