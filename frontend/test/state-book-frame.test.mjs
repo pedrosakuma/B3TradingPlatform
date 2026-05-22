@@ -58,6 +58,21 @@ test('applyBookFrame empty-state snapshot leaves ready=false', async () => {
   assert.equal(entry.asks.size, 0);
 });
 
+// #379. Live-but-empty: the trading-host stamps UpdatedUtc on the
+// populated → empty edge (and serves it from _lastSent to late
+// subscribers) so the FE can tell "MD never spoke" (cold start,
+// updatedUtc=null → ready=false → "check MD settings" copy) apart from
+// "MD is live, just nothing resting" (updatedUtc=iso → ready=true →
+// the renderer falls through to the per-side "empty" muted-cell).
+test('applyBookFrame live-empty frame (zero sides + non-null updatedUtc) flips ready=true', async () => {
+  const s = await freshState();
+  s.applyBookFrame({ symbol: 'ITUB4', bids: [], asks: [], updatedUtc: '2026-05-22T14:00:00Z' });
+  const entry = s.getState().book.get('ITUB4');
+  assert.equal(entry.ready, true);
+  assert.equal(entry.bids.size, 0);
+  assert.equal(entry.asks.size, 0);
+});
+
 test('applyBookFrame replaces the prior ladder rather than merging', async () => {
   const s = await freshState();
   s.applyBookFrame(frame());

@@ -39,6 +39,7 @@ public sealed class WebSocketBookEventSink : IPublicChannelSnapshots, IHostedSer
 {
     private readonly SubscriptionManager _subs;
     private readonly IL2BookView _store;
+    private readonly TimeProvider _clock;
     private readonly int _maxLevels;
 
     // Last DTO put on the wire per symbol — used to coalesce identical
@@ -49,23 +50,41 @@ public sealed class WebSocketBookEventSink : IPublicChannelSnapshots, IHostedSer
     public WebSocketBookEventSink(
         SubscriptionManager subs,
         IL2BookView store,
-        IOptions<MarketDataOptions> options)
+        IOptions<MarketDataOptions> options,
+        TimeProvider? clock = null)
     {
         _subs = subs;
         _store = store;
+        _clock = clock ?? TimeProvider.System;
         var max = options.Value.BookChannelMaxLevels;
         _maxLevels = max > 0 ? max : 10;
     }
 
     // ---------------- IPublicChannelSnapshots ----------------
 
+    /// <summary>
+    /// #379. A late subscriber to <c>book.${symbol}</c> must see the same
+    /// "live but empty" marker (zero levels, non-null UpdatedUtc) that
+    /// active subscribers saw when the book emptied — otherwise the FE
+    /// can't tell apart "MD never spoke to us" (cold start, UpdatedUtc=null)
+    /// from "MD is live, just nothing resting" (UpdatedUtc=now). When we
+    /// have a last-sent DTO for this symbol it IS the authoritative
+    /// snapshot; fall back to the store only when we've never broadcast.
+    /// </summary>
     public object? GetSnapshot(PublicChannelKind kind, string symbol) => kind switch
     {
-        PublicChannelKind.Book => _store.GetLadder(symbol, _maxLevels) is { } ladder
-            ? L2LadderDto.From(ladder)
-            : L2LadderDto.Empty(symbol),
+        PublicChannelKind.Book => GetBookSnapshot(symbol),
         _ => null,
     };
+
+    private L2LadderDto GetBookSnapshot(string symbol)
+    {
+        if (_lastSent.TryGetValue(symbol, out var prev))
+            return prev;
+        return _store.GetLadder(symbol, _maxLevels) is { } ladder
+            ? L2LadderDto.From(ladder)
+            : L2LadderDto.Empty(symbol);
+    }
 
     // ---------------- IHostedService ----------------
 
@@ -93,13 +112,25 @@ public sealed class WebSocketBookEventSink : IPublicChannelSnapshots, IHostedSer
             // the wire the FE keeps rendering the last populated ladder
             // forever (#382 follow-up: bid lingered after fill — only a
             // hard refresh re-fetched the cold-start snapshot and cleared
-            // the DOB). Broadcast Empty(symbol) once on the populated →
-            // empty edge so the FE reducer clears both sides; coalesce
-            // subsequent empty-events by tracking the empty as the new
-            // _lastSent so a steady-state empty book stays off the wire.
+            // the DOB).
+            //
+            // #379. Stamp UpdatedUtc with the broadcast time so the FE
+            // can distinguish "MD never spoke to us" (cold start, the
+            // store has never had a frame for this symbol → snapshot
+            // shape is L2LadderDto.Empty with UpdatedUtc=null) from
+            // "MD is live, just nothing resting right now" (this path —
+            // a BookChanged event fired, so MD is definitely alive).
+            // The FE reducer flips ready=true on any non-null UpdatedUtc
+            // and the DOB renderer switches the empty case from the
+            // misleading "no book — check MD settings ⚙" copy to a
+            // simple "no resting orders" placeholder.
             if (_lastSent.TryGetValue(symbol, out var prevEmpty) && IsEmptyLadder(prevEmpty))
                 return;
-            var emptyDto = L2LadderDto.Empty(symbol);
+            var emptyDto = new L2LadderDto(
+                symbol,
+                Array.Empty<L2SideDto>(),
+                Array.Empty<L2SideDto>(),
+                _clock.GetUtcNow());
             _lastSent[symbol] = emptyDto;
             _subs.BroadcastPublic(Channels.BookFor(symbol), emptyDto);
             return;

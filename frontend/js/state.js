@@ -415,6 +415,17 @@ function ensureBook(symbol) {
 /// Wire shape is camelCase: `WebSocketHub` serializes outbound frames
 /// with `JsonSerializerDefaults.Web`, so `L2LadderDto.Symbol` lands on
 /// the wire as `symbol`, `Bids[i].Price` as `price`, etc. (#382 follow-up.)
+///
+/// `ready` reflects MD liveness for the symbol, NOT order presence:
+///   - `updatedUtc=null` (cold-start L2LadderDto.Empty) → ready=false,
+///     the DOB renders the "awaiting / check MD settings" affordance.
+///   - `updatedUtc=<iso>` with non-empty sides → ready=true, depth renders.
+///   - `updatedUtc=<iso>` with both sides empty (live-empty: book just
+///     emptied, or late subscriber to a quiet symbol) → ready=true and
+///     each side falls through to `renderDobSide`'s "empty" muted-cell.
+///     The server stamps this UpdatedUtc itself on the populated → empty
+///     edge so the FE can tell apart "MD never spoke" from "MD is live,
+///     just nothing resting" (#379).
 /// </summary>
 export function applyBookFrame(frame) {
   if (!frame || typeof frame.symbol !== "string") return;

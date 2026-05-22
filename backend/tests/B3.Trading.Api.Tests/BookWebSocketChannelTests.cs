@@ -9,18 +9,30 @@ namespace B3.Trading.Api.Tests;
 
 public class BookWebSocketChannelTests
 {
+    private static readonly DateTimeOffset FixedClockNow =
+        new(2026, 5, 22, 14, 0, 0, TimeSpan.Zero);
+
     private static (SubscriptionManager subs, InMemoryL2BookView store, WebSocketBookEventSink sink) Build(int maxLevels = 10)
     {
         var store = new InMemoryL2BookView();
         var subs = new SubscriptionManager(new WorkingOrderBook(), new PositionKeeper(), new AlgoBook());
         var opts = Options.Create(new MarketDataOptions { BookChannelMaxLevels = maxLevels });
-        var sink = new WebSocketBookEventSink(subs, store, opts);
+        var clock = new FakeTimeProvider(FixedClockNow);
+        var sink = new WebSocketBookEventSink(subs, store, opts, clock);
         sink.StartAsync(default).GetAwaiter().GetResult();
         return (subs, store, sink);
     }
 
     private static MarketOrderAdded Add(string sym, ulong id, MarketBookSide side, decimal price, long qty) =>
         new(sym, 4321UL, id, side, price, qty, DateTimeOffset.UtcNow);
+
+    private sealed class FakeTimeProvider : TimeProvider
+    {
+        private DateTimeOffset _now;
+        public FakeTimeProvider(DateTimeOffset now) => _now = now;
+        public override DateTimeOffset GetUtcNow() => _now;
+        public void Advance(TimeSpan delta) => _now += delta;
+    }
 
     [Fact]
     public void TryParsePublic_recognises_book_with_valid_symbol()
@@ -239,11 +251,61 @@ public class BookWebSocketChannelTests
         Assert.Equal("PETR4", emptyDto.Symbol);
         Assert.Empty(emptyDto.Bids);
         Assert.Empty(emptyDto.Asks);
-        // Empty-state marker matches the cold-start snapshot shape so the FE
-        // reducer's `ready = updatedUtc != null` branch flips ready=false and
-        // the DOB drops back to the waiting affordance instead of carrying
-        // stale levels.
-        Assert.Null(emptyDto.UpdatedUtc);
+        // #379. Live-empty marker: UpdatedUtc is non-null (stamped with the
+        // sink's TimeProvider) so the FE reducer flips ready=true and the
+        // DOB renders "empty" per-side instead of "no book — check MD
+        // settings". Cold-start L2LadderDto.Empty(symbol) keeps UpdatedUtc=null
+        // (see Book_subscribe_emits_empty_snapshot_when_no_frame_seen).
+        Assert.Equal(FixedClockNow, emptyDto.UpdatedUtc);
+    }
+
+    /// <summary>
+    /// #379. A late subscriber to a symbol whose book has emptied since the
+    /// last populated broadcast must see the live-empty marker (non-null
+    /// UpdatedUtc), not the cold-start shape. Otherwise the DOB shows
+    /// "check MD settings" to a trader whose MD subscription is perfectly
+    /// healthy — the symbol is just quiet right now.
+    /// </summary>
+    [Fact]
+    public void Book_late_subscriber_after_empty_sees_live_empty_marker()
+    {
+        var (subs, store, sink) = Build();
+        // Drive the populated → empty cycle without any subscriber to
+        // prove _lastSent is populated purely by OnBookChanged.
+        store.ApplyAdded(Add("PETR4", 1UL, MarketBookSide.Bid, 32.50m, 100));
+        store.ApplyDeleted(new MarketOrderDeleted("PETR4", 4321UL, 1UL, MarketBookSide.Bid, DateTimeOffset.UtcNow));
+
+        var client = new SubscribedClient(new EndClientId("bob"), "TEST");
+        subs.SubscribePublicWithSnapshot(client, "book.PETR4",
+            () => sink.GetSnapshot(PublicChannelKind.Book, "PETR4"));
+
+        Assert.True(client.Reader.TryRead(out var snap));
+        Assert.Equal("snapshot", snap!.Type);
+        var dto = Assert.IsType<L2LadderDto>(snap.Data);
+        Assert.Empty(dto.Bids);
+        Assert.Empty(dto.Asks);
+        Assert.Equal(FixedClockNow, dto.UpdatedUtc);
+    }
+
+    /// <summary>
+    /// #379. Cold-start contract preserved: a subscriber arriving before
+    /// any BookChanged has fired for the symbol still sees the null
+    /// UpdatedUtc marker so the FE shows "awaiting book snapshot…" → then
+    /// "check MD settings" after the timeout, which IS the right copy
+    /// when MD truly hasn't spoken.
+    /// </summary>
+    [Fact]
+    public void Book_cold_start_snapshot_still_carries_null_updated_utc()
+    {
+        var (subs, _, sink) = Build();
+        var client = new SubscribedClient(new EndClientId("alice"), "TEST");
+        subs.SubscribePublicWithSnapshot(client, "book.PETR4",
+            () => sink.GetSnapshot(PublicChannelKind.Book, "PETR4"));
+        Assert.True(client.Reader.TryRead(out var snap));
+        var dto = Assert.IsType<L2LadderDto>(snap!.Data);
+        Assert.Empty(dto.Bids);
+        Assert.Empty(dto.Asks);
+        Assert.Null(dto.UpdatedUtc);
     }
 
     /// <summary>
