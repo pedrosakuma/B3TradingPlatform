@@ -112,7 +112,12 @@ const state = {
   killStatus: null,        // { endClients: [], firms: [], fetchedAt } | null — admin-only
   haltStatus: null,        // { symbols: [], fetchedAt } | null — admin-only
   eodReport: null,         // { ranAt, report } | null — last EOD response in this session
-  currentView: "trader",   // "trader" | "algos" | "history" | "settings" | "admin" | "compliance" | "bot-credentials" — which view is mounted
+  currentView: "trader",   // "trader" | "algos" | "history" | "settings" | "admin" | "compliance" — which view is mounted
+  // Fase 3 (#399). Settings is now a shell with 4 inline sub-tabs.
+  // The legacy `bot-credentials` view collapses into this slice as
+  // the `bot-credentials` sub-tab; deep-link `#bot-credentials` is
+  // redirected on entry.
+  settingsSubTab: "bot-credentials", // "bot-credentials" | "security" | "market-data" | "preferences"
   // Q4.14 (#314). Rolling drop-copy feed surfaced on the compliance
   // view. The buffer is capped at COMPLIANCE_FEED_CAP so the table
   // can render every entry without virtualising. `paused` halts
@@ -881,6 +886,23 @@ export function setCurrentView(view) {
   if (state.currentView === view) return;
   state.currentView = view;
   notify("currentView");
+}
+
+// Fase 3 (#399). Settings sub-tab slice. Subscribers re-render the
+// sub-panel visibility; persistence (sessionStorage) lives in app.js
+// alongside the active-tab key.
+const SETTINGS_SUB_TABS = new Set([
+  "bot-credentials",
+  "security",
+  "market-data",
+  "preferences",
+]);
+
+export function setSettingsSubTab(name) {
+  if (!SETTINGS_SUB_TABS.has(name)) return;
+  if (state.settingsSubTab === name) return;
+  state.settingsSubTab = name;
+  notify("settingsSubTab");
 }
 
 // ── Q4.14 (#314). Compliance drop-copy feed slice ──────────────────

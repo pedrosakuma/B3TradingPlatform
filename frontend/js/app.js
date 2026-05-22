@@ -13,6 +13,12 @@ import { defaultBackend, defaultMarketDataUrl, login, signup, submitOrder, cance
          listAlgos, createAlgo, cancelAlgo, modifyAlgo } from "./protocol.js";
 import { validateCreateAlgo } from "./validation.js";
 import * as algosUi from "./algosUi.js";
+import * as settingsUi from "./settingsUi.js";
+import {
+  parseHashRoute,
+  hashForView,
+  SETTINGS_SUB_TABS,
+} from "./hashRouter.js";
 import { claimsFromToken } from "./jwt.js";
 import { validateOrder, pretradeWarnings, payloadKey } from "./validation.js";
 import * as state from "./state.js";
@@ -82,33 +88,26 @@ function init() {
     pendingTotp = null;
     showTotpCard(false);
   });
-  document.getElementById("security-open")?.addEventListener("click", openSecurityPanel);
-  document.getElementById("security-close")?.addEventListener("click", closeSecurityPanel);
+  // Fase 3 (#399). The legacy Security button + modal collapsed into
+  // the Settings > Security sub-tab. `openSecurityPanel` is now a
+  // sub-tab navigation; the close/reset behaviour that used to live
+  // on the modal's × button has no analogue (the sub-tab is reset
+  // every time it's re-entered via openSecurityPanel).
   document.getElementById("security-enroll-begin")?.addEventListener("click", onSecurityEnrollBegin);
   document.getElementById("security-recovery-ack")?.addEventListener("change", (e) => {
     document.getElementById("security-confirm").disabled = !e.target.checked;
   });
   document.getElementById("security-confirm")?.addEventListener("click", onSecurityEnrollConfirm);
   document.getElementById("security-disable")?.addEventListener("click", onSecurityDisable);
-  // Fase 1 (#397): Settings tab is a placeholder shell exposing entry
-  // points to the now-removed standalone topbar buttons (Bot creds,
-  // Security, Market data). Fase 3 (#399) folds these into proper
-  // sub-tabs.
-  document.getElementById("settings-open-bot-credentials")
-    ?.addEventListener("click", () => handleSwitchView("bot-credentials"));
-  document.getElementById("settings-open-security")
-    ?.addEventListener("click", openSecurityPanel);
-  document.getElementById("settings-open-md")
-    ?.addEventListener("click", () => {
-      // Reuse the existing MD-settings popover trigger; the actual
-      // modal/open logic lives in ui.js and is wired to #md-settings-open.
-      document.getElementById("md-settings-open")?.click();
-    });
   ui.bindUi();
   adminUi.bindAdminUi();
   botCredentialsUi.bindBotCredentialsUi();
   historyUi.bindHistoryUi();
   complianceUi.bindComplianceUi();
+  // Fase 3 (#399). Settings sub-tab navigation. Must run after the
+  // DOM is parsed; bindUi is enough of a guard since this script is
+  // loaded at the end of <body>.
+  settingsUi.bindSettingsUi();
   ui.setHandlers({
     onSubmitOrder: handleSubmitOrder,
     onCancelOrder: handleCancelOrder,
@@ -135,7 +134,7 @@ function init() {
     onRefresh:         refreshAdminData,
   });
   botCredentialsUi.setBotCredentialsHandlers({
-    onOpenView: () => handleSwitchView("bot-credentials"),
+    onOpenView: () => handleSwitchView("settings", "bot-credentials"),
     onBack:     () => handleSwitchView("trader"),
     onRefresh:  refreshBotCredentials,
     onCreate:   handleCreateBotCredential,
@@ -178,8 +177,8 @@ function init() {
   // here is a no-op.
   window.addEventListener("popstate", () => {
     if (!session) return;
-    const view = tabFromHash();
-    if (view) handleSwitchView(view);
+    const route = tabFromHash();
+    if (route?.view) handleSwitchView(route.view, route.subTab);
   });
 
   const stored = readSession();
@@ -306,25 +305,31 @@ async function onTotpSubmit(e) {
 }
 
 // ── Security panel (TOTP enrollment / disable) — #303 ───────────────
+// Fase 3 (#399). What used to be a modal is now the Settings > Security
+// sub-tab. `openSecurityPanel` navigates to that sub-tab and resets the
+// transient inputs; `closeSecurityPanel` (still called on logout /
+// session reset) wipes the recovery codes + QR so secret material
+// leaves the DOM as soon as the sub-tab is dismissed.
 function openSecurityPanel() {
-  const modal = document.getElementById("security-modal");
-  if (!modal || !session) return;
-  modal.hidden = false;
+  if (!session) return;
+  handleSwitchView("settings", "security");
   setSecurityError(null);
   // We can't distinguish "enrolled" vs "not enrolled" without a probe
   // endpoint, so show both controls and let the user choose: enrolling
   // when already enrolled returns 409 (caught + surfaced); disabling
   // when not enrolled returns 400. Keeps the FE thin.
-  document.getElementById("security-enroll-start").hidden = false;
-  document.getElementById("security-enroll-show").hidden = true;
-  document.getElementById("security-enrolled").hidden = false;
-  document.getElementById("security-status").textContent =
+  const start = document.getElementById("security-enroll-start");
+  const show  = document.getElementById("security-enroll-show");
+  const enrolled = document.getElementById("security-enrolled");
+  const status = document.getElementById("security-status");
+  if (start) start.hidden = false;
+  if (show)  show.hidden  = true;
+  if (enrolled) enrolled.hidden = false;
+  if (status) status.textContent =
     "Enroll to add a second factor, or disable an existing enrollment.";
 }
 
 function closeSecurityPanel() {
-  const modal = document.getElementById("security-modal");
-  if (modal) modal.hidden = true;
   // Wipe the recovery codes from the DOM as soon as the user dismisses.
   const pre = document.getElementById("security-recovery-codes");
   if (pre) pre.textContent = "";
@@ -500,13 +505,26 @@ function startSession(next) {
   //      else lands on trader).
   // Each candidate must pass the same role-gate as handleSwitchView,
   // otherwise we fall through to the next candidate.
+  // Fase 3 (#399). `tabFromHash` may also surface a Settings sub-tab
+  // (`#settings/security`, legacy `#bot-credentials` → settings/
+  // bot-credentials); apply it once the view is mounted.
   const allowed = new Set(tabsForRole(next.role));
-  const candidates = [tabFromHash(), readPersistedTab(), defaultViewForRole(next.role)];
-  const initialView = candidates.find((v) => v && (allowed.has(v) || v === "bot-credentials"))
+  const hashRoute = tabFromHash();
+  const candidates = [hashRoute?.view, readPersistedTab(), defaultViewForRole(next.role)];
+  const initialView = candidates.find((v) => v && allowed.has(v))
     || defaultViewForRole(next.role);
   state.setCurrentView(initialView);
+  if (initialView === "settings") {
+    let subTab = hashRoute?.subTab;
+    if (!subTab) {
+      try { subTab = sessionStorage.getItem(SETTINGS_SUB_TAB_KEY); }
+      catch { /* private mode */ }
+    }
+    if (SETTINGS_SUB_TABS.has(subTab)) state.setSettingsSubTab(subTab);
+  }
   persistActiveTab(initialView);
-  syncUrlHash(initialView, /*replace*/ true);
+  syncUrlHash(initialView, /*replace*/ true,
+    initialView === "settings" ? state.getState().settingsSubTab : undefined);
   if (initialView === "compliance") {
     // Compliance users land directly on the compliance console — no
     // trader view, no admin polls. Open the drop-copy socket so the
@@ -1240,33 +1258,11 @@ async function pollGatewayOnce() {
 //   * lifts/drops the per-view subscriptions (drop-copy WS, pnl.me).
 
 const ACTIVE_TAB_KEY = "fe.activeTab";
-// Map of view → URL hash; views without a hash here aren't deep-linked
-// (e.g. bot-credentials shares its hash with Settings since it's an
-// inner navigation target).
-const HASH_FOR_VIEW = Object.freeze({
-  trader: "#trading",
-  algos: "#algos",
-  history: "#history",
-  settings: "#settings",
-  admin: "#admin",
-  compliance: "#compliance",
-});
-// Reverse map + a few legacy aliases for back-compat with bookmarked
-// hashes that used the old standalone-button names.
-const VIEW_FOR_HASH = Object.freeze({
-  "#trading": "trader",
-  "#trader": "trader",
-  "#algos": "algos",
-  "#history": "history",
-  "#settings": "settings",
-  "#admin": "admin",
-  "#compliance": "compliance",
-  "#bot-credentials": "settings",  // legacy deep-link → Settings shell
-});
+const SETTINGS_SUB_TAB_KEY = "fe.settingsSubTab";
 
 function tabFromHash() {
   const hash = (typeof window !== "undefined" && window.location?.hash) || "";
-  return VIEW_FOR_HASH[hash] || null;
+  return parseHashRoute(hash);
 }
 
 function persistActiveTab(view) {
@@ -1277,32 +1273,40 @@ function readPersistedTab() {
   try { return sessionStorage.getItem(ACTIVE_TAB_KEY); } catch { return null; }
 }
 
-function syncUrlHash(view, replace) {
+function persistSettingsSubTab(sub) {
+  try { sessionStorage.setItem(SETTINGS_SUB_TAB_KEY, sub); } catch { /* private mode */ }
+}
+
+function syncUrlHash(view, replace, subTab) {
   if (typeof window === "undefined" || !window.history) return;
-  const hash = HASH_FOR_VIEW[view];
-  if (!hash) return; // bot-credentials et al — don't pollute the URL
+  const hash = hashForView(view, subTab);
+  if (!hash) return;
   if (window.location.hash === hash) return;
   const url = window.location.pathname + window.location.search + hash;
   if (replace) window.history.replaceState(null, "", url);
   else window.history.pushState(null, "", url);
 }
 
-function handleSwitchView(view) {
+function handleSwitchView(view, subTab) {
   if (!session) return;
   // Role-gate the target view. Plain users see trader / algos /
   // history / settings; admin sees everything; compliance is pinned
-  // to its own console. `bot-credentials` is an inner-navigation
-  // target reached from Settings, not a primary tab — allow it for
-  // any role that already has Settings access.
+  // to its own console.
   const allowed = tabsForRole(session.role);
-  if (view === "bot-credentials") {
-    if (!allowed.includes("settings")) return;
-  } else if (!allowed.includes(view)) {
-    return;
+  if (!allowed.includes(view)) return;
+  // Fase 3 (#399). Settings sub-tab is applied BEFORE setCurrentView
+  // so the subscriber that toggles panel visibility sees the right
+  // sub-tab on the same render pass that mounts the view.
+  if (view === "settings" && subTab && SETTINGS_SUB_TABS.has(subTab)) {
+    state.setSettingsSubTab(subTab);
+    persistSettingsSubTab(subTab);
   }
   state.setCurrentView(view);
   persistActiveTab(view);
-  syncUrlHash(view, /*replace*/ false);
+  const effectiveSub = view === "settings"
+    ? (SETTINGS_SUB_TABS.has(subTab) ? subTab : state.getState().settingsSubTab)
+    : undefined;
+  syncUrlHash(view, /*replace*/ false, effectiveSub);
   // Drop-copy WS lifecycle: open on enter, close on leave. Cheap to
   // re-open; we don't pay the cost of holding the socket while the
   // user is parked on a different view.
@@ -1315,7 +1319,7 @@ function handleSwitchView(view) {
   // Fase 2 (#398). Same dynamic gating for algo.me.
   syncAlgoSubscription(view);
   if (view === "admin") refreshAdminData();
-  if (view === "bot-credentials") refreshBotCredentials();
+  if (view === "settings" && effectiveSub === "bot-credentials") refreshBotCredentials();
   if (view === "history") refreshHistoryAll();
   if (view === "algos") refreshAlgosList();
 }
