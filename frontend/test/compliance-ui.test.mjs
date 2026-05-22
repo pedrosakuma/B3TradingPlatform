@@ -70,15 +70,19 @@ const protocol = await import("../js/protocol.js");
 const state = await import("../js/state.js");
 
 test("tabsForRole gates the nav tabs per JWT role", () => {
+  // Fase 1 (#397): primary tablist is Trading / Algos / History /
+  // Settings (+ Admin / Compliance for admin; Compliance + History
+  // for the compliance role). `bot-credentials` is no longer a
+  // primary tab — it's reached from inside Settings.
   assert.deepEqual(compliance.tabsForRole("user"),
-    ["trader", "bot-credentials"]);
+    ["trader", "algos", "history", "settings"]);
   assert.deepEqual(compliance.tabsForRole("admin"),
-    ["trader", "admin", "bot-credentials", "compliance"]);
+    ["trader", "algos", "history", "settings", "admin", "compliance"]);
   assert.deepEqual(compliance.tabsForRole("compliance"),
-    ["compliance"]);
+    ["compliance", "history"]);
   // Unknown role defaults to plain-user surface (least privilege).
   assert.deepEqual(compliance.tabsForRole(undefined),
-    ["trader", "bot-credentials"]);
+    ["trader", "algos", "history", "settings"]);
 });
 
 test("defaultViewForRole lands compliance on its own console", () => {

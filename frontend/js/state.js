@@ -104,7 +104,7 @@ const state = {
   killStatus: null,        // { endClients: [], firms: [], fetchedAt } | null — admin-only
   haltStatus: null,        // { symbols: [], fetchedAt } | null — admin-only
   eodReport: null,         // { ranAt, report } | null — last EOD response in this session
-  currentView: "trader",   // "trader" | "admin" | "bot-credentials" | "compliance" — which view is mounted
+  currentView: "trader",   // "trader" | "algos" | "history" | "settings" | "admin" | "compliance" | "bot-credentials" — which view is mounted
   // Q4.14 (#314). Rolling drop-copy feed surfaced on the compliance
   // view. The buffer is capped at COMPLIANCE_FEED_CAP so the table
   // can render every entry without virtualising. `paused` halts
