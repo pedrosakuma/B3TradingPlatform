@@ -317,7 +317,6 @@
             <button type="button" id="heatmap-toggle" class="icon-button"
                     aria-pressed="false" aria-label="Toggle volume heatmap"
                     title="Toggle volume heatmap (10s rolling)">🔥</button>
-            <button type="button" id="md-settings-open" class="icon-button" aria-label="Market data settings" title="Market data settings">⚙</button>
           </span>
         </h2>
         <div id="heatmap-panel" class="heatmap-panel" role="grid"
@@ -507,25 +506,9 @@
     </section>
   </section>
 
-  <!-- MARKET DATA SETTINGS POPOVER ------------------------------------ -->
-  <div id="md-settings-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="md-settings-title">
-    <form id="md-form" class="modal-card md-settings-card">
-      <h2 id="md-settings-title">Market data settings</h2>
-      <label>
-        <span>WS URL</span>
-        <input id="md-url" type="url" placeholder="ws://localhost:8081/ws" />
-      </label>
-      <label>
-        <span>Watchlist (comma-separated)</span>
-        <input id="md-symbols" type="text" placeholder="PETR4,VALE3" />
-      </label>
-      <p id="md-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
-      <div class="modal-actions">
-        <button type="button" id="md-settings-close" class="link-button">Close</button>
-        <button type="submit" id="md-apply">Apply</button>
-      </div>
-    </form>
-  </div>
+  <!-- MARKET DATA SETTINGS now live inline inside the Settings tab
+       (Fase 3 / #399). The legacy modal-backdrop wrapper was removed;
+       the `md-form` markup moved into `settings-view`. -->
 
   <!-- SESSION-EXPIRY MODAL -------------------------------------------- -->
   <div id="session-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="session-modal-title">
@@ -620,49 +603,9 @@
     </form>
   </div>
 
-  <!-- BOT CREDENTIALS VIEW (sub-issue #169 of user-bot-fixp-listener-v0)
-       Manage user-issued PATs that authenticate external FIXP bots.
-       Visible to every authenticated user (no admin gate). -->
-  <section id="bot-credentials-view" class="view bot-credentials-view" role="region" aria-label="Bot credentials" hidden>
-    <header class="admin-subbar">
-      <h2>Bot credentials</h2>
-      <div class="admin-actions">
-        <button id="bot-credentials-back" type="button" class="link-button">Back to trader</button>
-        <button id="bot-credentials-refresh" type="button" class="link-button">Refresh</button>
-      </div>
-    </header>
-    <p id="bot-credentials-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
-
-    <section class="panel admin-panel">
-      <h3>Create credential</h3>
-      <form id="bot-credentials-create-form" class="admin-inline-form">
-        <input id="bot-credentials-label" type="text" placeholder="label (e.g. my-bot)"
-               maxlength="128" autocomplete="off" required />
-        <button type="submit" id="bot-credentials-create-submit">Create credential</button>
-      </form>
-      <p class="muted-line">
-        The plaintext token is shown only once, immediately after creation —
-        copy it before dismissing the dialog.
-      </p>
-    </section>
-
-    <section class="panel admin-panel">
-      <h3>Your credentials</h3>
-      <div class="table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th>Label</th><th>CredShortId</th><th>Created</th>
-              <th>Status</th><th></th>
-            </tr>
-          </thead>
-          <tbody id="bot-credentials-body">
-            <tr><td colspan="5" class="muted">loading…</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
-  </section>
+  <!-- BOT CREDENTIALS now live inline inside the Settings tab
+       (Fase 3 / #399). The standalone view was removed; the create
+       form + table moved into `settings-view`. -->
 
   <!-- "Shown once" PAT modal — surfaces the plaintext secret returned by
        POST /api/user-bot-credentials. The secret lives in this dialog's
@@ -827,68 +770,9 @@
     </div>
   </div>
 
-  <!-- SECURITY (2FA) MODAL (#303) ------------------------------------ -->
-  <div id="security-modal" class="modal-backdrop" hidden role="dialog"
-       aria-modal="true" aria-labelledby="security-title">
-    <div class="modal-card">
-      <header class="order-detail-title-row">
-        <h2 id="security-title">Two-factor authentication</h2>
-        <button type="button" id="security-close" class="order-detail-close"
-                aria-label="Close security panel">×</button>
-      </header>
-      <div id="security-body">
-        <p id="security-status" class="subtitle"></p>
-
-        <div id="security-enroll-start" hidden>
-          <p>2FA is not enrolled on this account. Click below to begin.</p>
-          <button type="button" id="security-enroll-begin">Enroll TOTP</button>
-        </div>
-
-        <div id="security-enroll-show" hidden>
-          <p>Scan the QR code below with your authenticator app
-             (Google Authenticator, 1Password, Authy…), or paste the
-             URI / secret manually if you prefer:</p>
-          <!-- #320: client-side QR rendering. Populated by app.js
-               via qrRender.renderQrInto(). Inline SVG so it stays
-               under default-src 'self' without needing img-src data:. -->
-          <div id="security-qr" class="qr-badge" hidden aria-label="TOTP enrollment QR code"></div>
-          <label>
-            <span>otpauth URI</span>
-            <input id="security-otpauth-uri" type="text" readonly />
-          </label>
-          <label>
-            <span>Secret (base32)</span>
-            <input id="security-secret" type="text" readonly />
-          </label>
-          <p><strong>Recovery codes — save them now. They are shown ONCE.</strong></p>
-          <pre id="security-recovery-codes"></pre>
-          <label class="row">
-            <input id="security-recovery-ack" type="checkbox" />
-            <span>I've saved my recovery codes</span>
-          </label>
-          <label>
-            <span>Enter a 6-digit code from your app to activate</span>
-            <input id="security-confirm-code" type="text" inputmode="numeric"
-                   autocomplete="one-time-code" maxlength="8" />
-          </label>
-          <button type="button" id="security-confirm" disabled>Activate 2FA</button>
-        </div>
-
-        <div id="security-enrolled" hidden>
-          <p>2FA is enrolled. To disable, enter a current 6-digit code (or
-             a recovery code).</p>
-          <label>
-            <span>Code</span>
-            <input id="security-disable-code" type="text" inputmode="numeric"
-                   autocomplete="one-time-code" maxlength="32" />
-          </label>
-          <button type="button" id="security-disable">Disable 2FA</button>
-        </div>
-
-        <p id="security-error" class="error" role="alert" hidden></p>
-      </div>
-    </div>
-  </div>
+  <!-- SECURITY (2FA) now lives inline inside the Settings tab
+       (Fase 3 / #399). The modal markup was removed; the form moved
+       into `settings-view`. -->
 
   <!-- COMPLIANCE VIEW (Q4.14 #314) -----------------------------------
        Four-panel read-only console for the `compliance` role (also
@@ -1145,20 +1029,155 @@
     <header class="admin-subbar">
       <h2>Settings</h2>
     </header>
-    <section class="panel admin-panel">
-      <h3>Bot credentials</h3>
-      <p class="muted-line">Gerencie tokens de acesso programático (PATs).</p>
-      <button id="settings-open-bot-credentials" type="button" class="link-button">Abrir Bot credentials →</button>
+    <!-- Fase 3 (#399). Settings sub-tab nav. The four sub-panels
+         below are mutually exclusive; settingsUi.js toggles `hidden`
+         in response to the `settingsSubTab` state slice. -->
+    <div id="settings-subtabs" class="settings-subtabs" role="tablist"
+         aria-label="Settings sections">
+      <button type="button" class="settings-subtab" role="tab"
+              data-settings-subtab="bot-credentials"
+              aria-controls="settings-panel-bot-credentials">Bot credentials</button>
+      <button type="button" class="settings-subtab" role="tab"
+              data-settings-subtab="security"
+              aria-controls="settings-panel-security">Security (2FA)</button>
+      <button type="button" class="settings-subtab" role="tab"
+              data-settings-subtab="market-data"
+              aria-controls="settings-panel-market-data">Market data</button>
+      <button type="button" class="settings-subtab" role="tab"
+              data-settings-subtab="preferences"
+              aria-controls="settings-panel-preferences">Preferences</button>
+    </div>
+
+    <!-- Bot credentials sub-panel (migrated from former bot-credentials-view). -->
+    <section id="settings-panel-bot-credentials" class="settings-subpanel"
+             role="tabpanel" aria-labelledby="settings-subtab-bot-credentials" hidden>
+      <header class="admin-subbar">
+        <h3>Bot credentials</h3>
+        <div class="admin-actions">
+          <button id="bot-credentials-refresh" type="button" class="link-button">Refresh</button>
+        </div>
+      </header>
+      <p id="bot-credentials-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
+
+      <section class="panel admin-panel">
+        <h3>Create credential</h3>
+        <form id="bot-credentials-create-form" class="admin-inline-form">
+          <input id="bot-credentials-label" type="text" placeholder="label (e.g. my-bot)"
+                 maxlength="128" autocomplete="off" required />
+          <button type="submit" id="bot-credentials-create-submit">Create credential</button>
+        </form>
+        <p class="muted-line">
+          The plaintext token is shown only once, immediately after creation —
+          copy it before dismissing the dialog.
+        </p>
+      </section>
+
+      <section class="panel admin-panel">
+        <h3>Your credentials</h3>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Label</th><th>CredShortId</th><th>Created</th>
+                <th>Status</th><th></th>
+              </tr>
+            </thead>
+            <tbody id="bot-credentials-body">
+              <tr><td colspan="5" class="muted">loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
     </section>
-    <section class="panel admin-panel">
-      <h3>Security (2FA)</h3>
-      <p class="muted-line">Configure autenticação de dois fatores (TOTP).</p>
-      <button id="settings-open-security" type="button" class="link-button">Abrir Security →</button>
+
+    <!-- Security sub-panel (migrated from former security-modal #303). -->
+    <section id="settings-panel-security" class="settings-subpanel"
+             role="tabpanel" aria-labelledby="settings-subtab-security" hidden>
+      <header class="admin-subbar">
+        <h3 id="security-title">Two-factor authentication</h3>
+      </header>
+      <div id="security-body" class="panel admin-panel">
+        <p id="security-status" class="subtitle"></p>
+
+        <div id="security-enroll-start" hidden>
+          <p>2FA is not enrolled on this account. Click below to begin.</p>
+          <button type="button" id="security-enroll-begin">Enroll TOTP</button>
+        </div>
+
+        <div id="security-enroll-show" hidden>
+          <p>Scan the QR code below with your authenticator app
+             (Google Authenticator, 1Password, Authy…), or paste the
+             URI / secret manually if you prefer:</p>
+          <div id="security-qr" class="qr-badge" hidden aria-label="TOTP enrollment QR code"></div>
+          <label>
+            <span>otpauth URI</span>
+            <input id="security-otpauth-uri" type="text" readonly />
+          </label>
+          <label>
+            <span>Secret (base32)</span>
+            <input id="security-secret" type="text" readonly />
+          </label>
+          <p><strong>Recovery codes — save them now. They are shown ONCE.</strong></p>
+          <pre id="security-recovery-codes"></pre>
+          <label class="row">
+            <input id="security-recovery-ack" type="checkbox" />
+            <span>I've saved my recovery codes</span>
+          </label>
+          <label>
+            <span>Enter a 6-digit code from your app to activate</span>
+            <input id="security-confirm-code" type="text" inputmode="numeric"
+                   autocomplete="one-time-code" maxlength="8" />
+          </label>
+          <button type="button" id="security-confirm" disabled>Activate 2FA</button>
+        </div>
+
+        <div id="security-enrolled" hidden>
+          <p>2FA is enrolled. To disable, enter a current 6-digit code (or
+             a recovery code).</p>
+          <label>
+            <span>Code</span>
+            <input id="security-disable-code" type="text" inputmode="numeric"
+                   autocomplete="one-time-code" maxlength="32" />
+          </label>
+          <button type="button" id="security-disable">Disable 2FA</button>
+        </div>
+
+        <p id="security-error" class="error" role="alert" hidden></p>
+      </div>
     </section>
-    <section class="panel admin-panel">
-      <h3>Market data</h3>
-      <p class="muted-line">Endpoint do WebSocket de market data e watchlist.</p>
-      <button id="settings-open-md" type="button" class="link-button">Abrir Market data settings →</button>
+
+    <!-- Market data sub-panel (migrated from former md-settings-modal). -->
+    <section id="settings-panel-market-data" class="settings-subpanel"
+             role="tabpanel" aria-labelledby="settings-subtab-market-data" hidden>
+      <header class="admin-subbar">
+        <h3 id="md-settings-title">Market data</h3>
+      </header>
+      <form id="md-form" class="panel admin-panel md-settings-card">
+        <label>
+          <span>WS URL</span>
+          <input id="md-url" type="url" placeholder="ws://localhost:8081/ws" />
+        </label>
+        <label>
+          <span>Watchlist (comma-separated)</span>
+          <input id="md-symbols" type="text" placeholder="PETR4,VALE3" />
+        </label>
+        <p id="md-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
+        <div class="form-actions">
+          <button type="submit" id="md-apply">Apply</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- Preferences placeholder. Fase 3 (#399) only sketches the
+         tab; concrete preference toggles land in a follow-up. -->
+    <section id="settings-panel-preferences" class="settings-subpanel"
+             role="tabpanel" aria-labelledby="settings-subtab-preferences" hidden>
+      <header class="admin-subbar">
+        <h3>Preferences</h3>
+      </header>
+      <section class="panel admin-panel">
+        <p class="muted-line">Em breve — preferências de exibição e atalhos.</p>
+      </section>
     </section>
   </section>
 

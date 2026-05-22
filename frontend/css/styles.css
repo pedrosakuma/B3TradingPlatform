@@ -976,3 +976,30 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
 .algos-params-pre { background: rgba(0,0,0,.25); padding: .5rem; border-radius: 4px; font-size: .75rem; overflow: auto; max-height: 14rem; }
 .algos-modify-form { display: grid; gap: .35rem; border-top: 1px solid var(--border, #444); padding-top: .5rem; margin-top: .5rem; }
 .algos-modify-form h4 { margin: 0; }
+
+/* Fase 3 (#399). Settings sub-tabs — mirror the algos-type-tabs visual
+   so the user sees the same primary/sub-tab idiom across the app. */
+.settings-subtabs {
+  display: flex;
+  gap: .25rem;
+  margin: .5rem 0 .75rem;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--border, #444);
+  padding-bottom: .5rem;
+}
+.settings-subtab {
+  padding: .35rem .75rem;
+  background: transparent;
+  border: 1px solid var(--border, #444);
+  color: inherit;
+  cursor: pointer;
+  border-radius: 4px;
+  font-size: .9rem;
+}
+.settings-subtab.active {
+  background: var(--accent, #357);
+  color: white;
+  border-color: var(--accent, #357);
+}
+.settings-subpanel { margin-top: .5rem; }
+.settings-subpanel .admin-subbar { margin-bottom: .5rem; }

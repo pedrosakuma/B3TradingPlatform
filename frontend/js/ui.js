@@ -132,8 +132,6 @@ export function showLogin() {
   if (shell) shell.hidden = true;
   $("trader-view").hidden = true;
   $("admin-view").hidden = true;
-  const cred = $("bot-credentials-view");
-  if (cred) cred.hidden = true;
   const hist = $("history-view");
   if (hist) hist.hidden = true;
   const compliance = $("compliance-view");
@@ -158,8 +156,6 @@ export function showTrader() {
   if (shell) shell.hidden = false;
   $("trader-view").hidden = false;
   $("admin-view").hidden = true;
-  const cred = $("bot-credentials-view");
-  if (cred) cred.hidden = true;
   const hist = $("history-view");
   if (hist) hist.hidden = true;
   const compliance = $("compliance-view");
@@ -1041,10 +1037,10 @@ export function bindUi() {
     onApplyMd({ url, symbols });
   });
 
-  // Market data settings popover (⚙ button in MD panel header).
-  const mdModal = $("md-settings-modal");
-  const mdOpen = $("md-settings-open");
-  const mdClose = $("md-settings-close");
+  // Market data settings now live inline as a sub-tab of Settings
+  // (Fase 3 / #399). The ⚙ trader-panel popover was removed; the form
+  // submit handler (md-form above) is the only md-* wiring that
+  // remains in this view.
 
   // #71: Volume heatmap toggle (🔥 button in MD panel header). Opt-in
   // per the decision gate; persisted per tab via sessionStorage.
@@ -1052,36 +1048,6 @@ export function bindUi() {
   if (heatmapBtn) {
     setHeatmapEnabled(readHeatmapEnabled());
     heatmapBtn.addEventListener("click", () => setHeatmapEnabled(!_heatmapEnabled));
-  }
-  if (mdOpen && mdModal) {
-    mdOpen.addEventListener("click", () => {
-      rememberFocusForModal("md-settings-modal");
-      mdModal.hidden = false;
-      const urlInput = $("md-url");
-      if (urlInput) urlInput.focus();
-    });
-  }
-  if (mdClose && mdModal) {
-    mdClose.addEventListener("click", () => {
-      mdModal.hidden = true;
-      restoreFocusForModal("md-settings-modal");
-    });
-  }
-  if (mdModal) {
-    mdModal.addEventListener("click", (e) => {
-      if (e.target === mdModal) {
-        mdModal.hidden = true;
-        restoreFocusForModal("md-settings-modal");
-      }
-    });
-    // Esc closes the popover (non-destructive — no logout).
-    document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && !mdModal.hidden) {
-        e.preventDefault();
-        mdModal.hidden = true;
-        restoreFocusForModal("md-settings-modal");
-      }
-    });
   }
 
   // Global symbol selector (drives DOB / chart / tape).
@@ -1442,7 +1408,6 @@ function renderBalance() {
 function applyCurrentView(view) {
   const trader = $("trader-view");
   const admin = $("admin-view");
-  const credentials = $("bot-credentials-view");
   const history = $("history-view");
   const compliance = $("compliance-view");
   const settings = $("settings-view");
@@ -1450,14 +1415,12 @@ function applyCurrentView(view) {
   if (!trader || !admin) return;
   const showTraderView = view === "trader";
   const showAdminView = view === "admin";
-  const showCredentialsView = view === "bot-credentials";
   const showHistoryView = view === "history";
   const showComplianceView = view === "compliance";
   const showSettingsView = view === "settings";
   const showAlgosView = view === "algos";
   trader.hidden = !showTraderView;
   admin.hidden = !showAdminView;
-  if (credentials) credentials.hidden = !showCredentialsView;
   if (history)     history.hidden     = !showHistoryView;
   if (compliance)  compliance.hidden  = !showComplianceView;
   if (settings)    settings.hidden    = !showSettingsView;
@@ -1465,11 +1428,9 @@ function applyCurrentView(view) {
   // Fase 1 (#397): the primary tablist now persists across every view.
   // `setViewToggleVisible(true, …)` runs whenever a user is signed in;
   // the logged-out path (showLogin) is the only caller that passes
-  // `false`. We highlight the active tab — when the active view is
-  // `bot-credentials` (reached from Settings) we keep the Settings tab
-  // highlighted to communicate the user is still "inside" Settings.
-  const highlight = view === "bot-credentials" ? "settings" : view;
-  setViewToggleVisible(true, highlight);
+  // `false`. Fase 3 (#399) folded the former `bot-credentials` view
+  // into Settings, so no special-case highlight remap is needed.
+  setViewToggleVisible(true, view);
   // Trader-specific topbar controls (symbol selector) are only
   // meaningful while the trading view is mounted.
   const symbolWrap = $("selected-symbol")?.closest("label.symbol-select");
