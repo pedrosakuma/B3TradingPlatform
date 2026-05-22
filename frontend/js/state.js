@@ -173,6 +173,14 @@ const state = {
   // accounting client-side. `null` until the first fetch/frame lands;
   // readers render a "no data yet" placeholder in the meantime.
   pnl: null,                // PnlTodayDto | null
+  // #385 / #386. Live cash balance for the logged-in end-client. Mirrors
+  // the GET /balance projection (BalanceDto = { Available }) and is kept
+  // fresh by the `balance.me` WS channel — snapshot on subscribe, delta
+  // on every CashLedger mutation (fills, fees, opening-balance seed).
+  // `null` until the first frame lands; the header widget renders an
+  // "R$ —" placeholder in the meantime so a slow first frame doesn't
+  // freeze a stale number from a prior session.
+  balance: null,            // { available: number } | null
   // Q2.6 (#273). History tab slices. Cursor-based pagination: each
   // append() preserves accumulated items so "load more" feels stable.
   // `nextCursor === null` means the server has no further pages.
@@ -311,6 +319,10 @@ export function clearAll() {
   // or trader-WS reconnect so the next session can't read the previous
   // user's data while waiting for its own snapshot.
   state.pnl = null;
+  // #385. Cash balance is per-session — drop on logout / WS reconnect
+  // so the next session can't render the previous user's number while
+  // waiting for its own snapshot.
+  state.balance = null;
   state.historyOrders     = { items: [], nextCursor: null, loading: false };
   state.historyExecutions = { items: [], nextCursor: null, loading: false };
   state.historyFilters    = { from: "", to: "", symbol: "" };
@@ -982,6 +994,22 @@ export function clearPnl() {
   if (state.pnl == null) return;
   state.pnl = null;
   notify("pnl");
+}
+
+// ── #385. Cash balance frame ──────────────────────────────────────
+// Snapshot and delta on `balance.me` share the same payload
+// (`BalanceDto { Available }`) — the wire is the full value, never a
+// diff — so a single reducer handles both. The decimal is serialised
+// by STJ as a JSON number; we coerce to Number once here so renderers
+// can format with Intl.NumberFormat without re-parsing.
+export function applyBalanceFrame(dto) {
+  if (dto == null) return;
+  const raw = dto.available ?? dto.Available;
+  if (raw == null) return;
+  const available = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(available)) return;
+  state.balance = { available };
+  notify("balance");
 }
 
 // ── Q2.6 (#273). History tab slices ───────────────────────────────

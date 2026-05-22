@@ -100,6 +100,23 @@ body {
    the in-progress `connecting` tone. */
 .status-not_ready    { background: rgba(217,122,74,.18); color: #d97a4a; }
 .user-label { color: var(--muted); }
+/* #385. Live cash balance pill in the topbar. Same muted palette as
+   the other status badges so it doesn't fight for attention with the
+   WS / market-data pills; switches to a warning tone when the
+   available balance goes negative. */
+.user-balance {
+  display: inline-flex; align-items: center;
+  padding: .15rem .5rem;
+  border: 1px solid var(--border); border-radius: 4px;
+  background: var(--panel-2); color: var(--text);
+  font-variant-numeric: tabular-nums;
+  font-size: .85rem;
+}
+.user-balance.balance-negative {
+  background: rgba(217,122,74,.18);
+  color: #d97a4a;
+  border-color: rgba(217,122,74,.35);
+}
 .symbol-select {
   display: inline-flex; align-items: center; gap: .35rem;
   font-size: .72rem; color: var(--muted); text-transform: uppercase;
