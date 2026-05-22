@@ -13,6 +13,14 @@ import { bumpRiskPolicyGeneration } from "./riskPolicy.js";
 // only.
 const TERMINAL_ORDER_STATUSES = new Set(["Filled", "Cancelled", "Rejected", "Replaced"]);
 
+// Fase 2 (#398). Terminal algo statuses mirror the backend `AlgoStatus`
+// enum. Used by the algos blotter filter ("includeTerminal" toggle) and
+// by the detail panel to disable Modify/Cancel once an algo is parked.
+const TERMINAL_ALGO_STATUSES = new Set(["Completed", "Cancelled", "Rejected", "Expired", "Failed"]);
+export function isTerminalAlgoStatus(status) {
+  return TERMINAL_ALGO_STATUSES.has(status);
+}
+
 // Q1.4 (#256). Mirrors of the backend OrderType / TimeInForce enums
 // expanded by Q1.1 (#253). The ticket UI exposes every value listed
 // here; the helpers below drive the conditional StopPrice + GTD inputs
@@ -195,6 +203,21 @@ const state = {
   // can surface a confirmation toast; `lastJson` holds the JSON
   // projection while the "view JSON" modal is open (cleared on close).
   statement: { lastDownload: null, lastJson: null, busy: false, error: null },
+  // Fase 2 (#398). Algos slice — mirror of `algo.me` WS channel + REST
+  // `GET /algo/`. Map<algoId, AlgoDto>. Snapshot replaces wholesale on
+  // (re)subscribe; deltas upsert. Server never sends a "remove" frame —
+  // terminal algos stay until clearAll() (logout / WS reconnect) or
+  // until the user toggles the includeTerminal filter and we
+  // re-snapshot from REST. `algosFilter` is shared between the blotter
+  // and the boleta default symbol. `selectedAlgoId` drives the detail
+  // panel + the Modify/Cancel handlers. `inflightAlgoCancels` /
+  // `inflightAlgoModifies` mirror the corresponding order sets — used
+  // to disable the buttons while a request is in flight.
+  algos: new Map(),                 // algoId -> AlgoDto
+  algosFilter: { text: "", status: "", hideTerminal: true },
+  selectedAlgoId: null,
+  inflightAlgoCancels: new Set(),
+  inflightAlgoModifies: new Set(),
 };
 
 const EXECUTIONS_CAPACITY = 500;
@@ -209,7 +232,7 @@ export function subscribe(fn) {
 // the last-activity timestamp — keeps the freshness signal tightly
 // coupled to the actual data flow without a separate instrumentation
 // surface every applyX has to remember to call.
-const WS_NOTIFY_SLICES = new Set(["orders", "positions", "executions"]);
+const WS_NOTIFY_SLICES = new Set(["orders", "positions", "executions", "algos"]);
 const MD_NOTIFY_SLICES = new Set(["marketData", "book", "candles", "tape", "heatmap"]);
 
 function notify(slice) {
@@ -279,6 +302,50 @@ export function applyExecutionsDelta(row) {
   notify("executions");
 }
 
+// Fase 2 (#398). Algos slice reducers. Snapshot replaces wholesale —
+// the WS sink (WebSocketAlgoEventSink) re-fetches the latest committed
+// state at publish time, so any in-memory drift is corrected by the
+// next snapshot/delta. Deltas upsert by algoId (string in the wire
+// shape — AlgoDto.AlgoId is `ulong.ToString()`).
+export function applyAlgoSnapshot(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  state.algos = new Map(list.map(a => [a.algoId, a]));
+  notify("algos");
+}
+export function applyAlgoDelta(row) {
+  if (!row || typeof row.algoId !== "string") return;
+  state.algos.set(row.algoId, row);
+  notify("algos");
+}
+export function clearAlgos() {
+  if (state.algos.size === 0 && state.inflightAlgoCancels.size === 0
+      && state.inflightAlgoModifies.size === 0 && state.selectedAlgoId == null) return;
+  state.algos.clear();
+  state.inflightAlgoCancels.clear();
+  state.inflightAlgoModifies.clear();
+  state.selectedAlgoId = null;
+  notify("algos");
+}
+
+export function setAlgosFilter(patch) {
+  state.algosFilter = { ...state.algosFilter, ...(patch || {}) };
+  notify("algos");
+}
+export function setSelectedAlgoId(id) {
+  state.selectedAlgoId = id ?? null;
+  notify("algos");
+}
+export function markAlgoCancelInflight(id, value) {
+  if (value) state.inflightAlgoCancels.add(id);
+  else state.inflightAlgoCancels.delete(id);
+  notify("algos");
+}
+export function markAlgoModifyInflight(id, value) {
+  if (value) state.inflightAlgoModifies.add(id);
+  else state.inflightAlgoModifies.delete(id);
+  notify("algos");
+}
+
 export function clearAll() {
   state.orders.clear();
   state.positions.clear();
@@ -327,6 +394,13 @@ export function clearAll() {
   state.historyExecutions = { items: [], nextCursor: null, loading: false };
   state.historyFilters    = { from: "", to: "", symbol: "" };
   state.statement = { lastDownload: null, lastJson: null, busy: false, error: null };
+  // Fase 2 (#398). Algos are per-session — drop on logout / trader-WS
+  // reconnect so the next session can't read the previous user's algos
+  // while waiting for the algo.me snapshot.
+  state.algos.clear();
+  state.inflightAlgoCancels.clear();
+  state.inflightAlgoModifies.clear();
+  state.selectedAlgoId = null;
   // Treat clearAll() as an authoritative generation/epoch advance —
   // same semantics as a WS delta or filter change. Any in-flight REST
   // P&L or history responses captured the previous epoch/generation
