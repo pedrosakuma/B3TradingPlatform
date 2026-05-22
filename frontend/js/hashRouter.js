@@ -28,10 +28,15 @@ export const SETTINGS_SUB_TABS = new Set([
   "preferences",
 ]);
 
+// Fase 4 (#400). Trader sub-tabs deep-linkable via `#trading/<sub>`.
+export const TRADER_SUB_TABS = new Set(["markets", "watchlist", "auctions"]);
+
 // Hash schema:
 //   #settings                       → settings, default sub-tab
 //   #settings/<sub>                 → settings, named sub-tab
 //   #bot-credentials                → settings, bot-credentials sub-tab (legacy)
+//   #trading                        → trader, default sub-tab
+//   #trading/<sub>                  → trader, named sub-tab
 // Anything that doesn't match returns { view: null, subTab: null }.
 export function parseHashRoute(hash) {
   if (typeof hash !== "string" || hash.length === 0) return { view: null, subTab: null };
@@ -47,6 +52,16 @@ export function parseHashRoute(hash) {
     }
     return { view: null, subTab: null };
   }
+  if (hash.startsWith("#trading") || hash.startsWith("#trader")) {
+    const prefix = hash.startsWith("#trading") ? "#trading" : "#trader";
+    const rest = hash.slice(prefix.length);
+    if (rest === "") return { view: "trader", subTab: null };
+    if (rest.startsWith("/")) {
+      const sub = rest.slice(1);
+      if (TRADER_SUB_TABS.has(sub)) return { view: "trader", subTab: sub };
+    }
+    return { view: null, subTab: null };
+  }
   const view = VIEW_FOR_HASH[hash];
   return { view: view || null, subTab: null };
 }
@@ -55,6 +70,8 @@ export function hashForView(view, subTab) {
   let hash = HASH_FOR_VIEW[view];
   if (!hash) return null;
   if (view === "settings" && subTab && SETTINGS_SUB_TABS.has(subTab)) {
+    hash = `${hash}/${subTab}`;
+  } else if (view === "trader" && subTab && TRADER_SUB_TABS.has(subTab)) {
     hash = `${hash}/${subTab}`;
   }
   return hash;

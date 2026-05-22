@@ -164,23 +164,14 @@ body {
   background: transparent; border: 0; color: var(--accent); cursor: pointer; font: inherit;
 }
 
-/* ---------- Grid layout ---------- */
-.grid {
+/* ---------- Trader layout (Fase 4 / #400) ----------
+   Vertical shell stacking the Quick ticket strip, the sub-tab band
+   (Markets / Watchlist / Auctions) and the lower-band (Working orders
+   / Executions) tabbed panel. Replaced the legacy 3×4 named grid so
+   the trader never shows more than 4 panels at the same time. */
+.trader-layout {
   flex: 1;
-  display: grid;
-  grid-template-columns: 1fr 280px 280px;
-  /* Row 1 min-height bumped from 300px → 360px so the Order Ticket
-     Submit button stays visible without scrolling at viewport ≥1024×600
-     (issue #105). 300px was within ~5px of the ticket form's natural
-     height, leaving the button clipped by `.ticket { overflow-y: auto }`
-     under default font-size. 360px gives ~50px of headroom for future
-     fields (TIF, Stop, etc.) without forcing the chart smaller. */
-  grid-template-rows: minmax(360px, 1.2fr) minmax(160px, .9fr) minmax(220px, 1.4fr) minmax(140px, .8fr);
-  grid-template-areas:
-    "chart    dob      ticket"
-    "tape     dob      positions"
-    "blotter  blotter  blotter"
-    "execs    execs    md";
+  display: flex; flex-direction: column;
   gap: 8px; padding: 8px; min-height: 0;
 }
 .panel {
@@ -234,11 +225,14 @@ body {
   border-radius: 999px; font-size: .7rem; font-weight: 600;
   letter-spacing: .04em; text-transform: none; line-height: 1.4;
 }
-.ticket     { grid-area: ticket; overflow-y: auto; overflow-x: hidden; min-width: 0; }
-.blotter    { grid-area: blotter; min-height: 0; }
-.positions  { grid-area: positions; }
-.executions { grid-area: execs; min-height: 0; }
-.market-data{ grid-area: md; }
+/* Fase 4 (#400). The legacy `grid-template-areas` rules previously laid
+   out every trader panel in a fixed 3×4 grid; the new shell instead
+   stacks ticket → sub-panel → bottom-band vertically (see
+   `.trader-layout` below), so panels only need to opt into overflow
+   behaviour, not a grid slot. */
+.ticket     { overflow-y: auto; overflow-x: hidden; min-width: 0; }
+.blotter    { min-height: 0; }
+.executions { min-height: 0; }
 .market-data .empty { color: var(--muted); font-size: .8rem; }
 .md-h2-controls { display: inline-flex; gap: .25rem; align-items: center; }
 
@@ -277,7 +271,7 @@ body {
   font-size: .68rem; font-variant-numeric: tabular-nums;
   color: rgba(255,255,255,.85);
 }
-.dob { grid-area: dob; }
+.dob { min-height: 0; } /* was grid-area: dob; — see Fase 4 (#400) */
 .dob-grid {
   display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; min-height: 0;
 }
@@ -290,7 +284,7 @@ body {
 .dob-grid .muted-cell { color: var(--muted); text-align: center; padding: .8rem; }
 
 /* ---------- Chart panel (T3) ---------- */
-.chart { grid-area: chart; min-height: 220px; }
+.chart { min-height: 220px; } /* was grid-area: chart; — see Fase 4 (#400) */
 .chart h2 { display: flex; align-items: center; gap: .55rem; }
 .chart .chart-controls { display: inline-flex; gap: .35rem; }
 .chart h2 select {
@@ -311,7 +305,7 @@ body {
 .candle-wick { stroke-width: 1; }
 
 /* ---------- Trade tape (T4) ---------- */
-.tape { grid-area: tape; min-height: 200px; }
+.tape { min-height: 200px; } /* was grid-area: tape; — see Fase 4 (#400) */
 .tape h2 { display: flex; align-items: center; gap: .55rem; }
 .tape-paused {
   font-size: .65rem; color: var(--warn);
@@ -1003,3 +997,143 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
 }
 .settings-subpanel { margin-top: .5rem; }
 .settings-subpanel .admin-subbar { margin-bottom: .5rem; }
+
+/* ─────────────────────────────────────────────────────────────────
+   Fase 4 (#400). Trader-view reflow: sub-tabs + lower-band tabs +
+   compact Quick ticket. Built on the same primary/sub-tab idiom as
+   `.settings-subtabs` / `.algos-type-tabs` so the visual vocabulary
+   stays consistent across the app.
+   ───────────────────────────────────────────────────────────────── */
+
+/* Sub-tab navigation (Markets / Watchlist / Auctions). */
+.trader-subtabs {
+  display: flex; gap: .25rem; flex-wrap: wrap;
+  border-bottom: 1px solid var(--border, #444);
+  padding-bottom: .35rem;
+}
+.trader-subtab {
+  padding: .35rem .75rem;
+  background: transparent;
+  border: 1px solid var(--border, #444);
+  color: inherit; cursor: pointer;
+  border-radius: 4px; font-size: .9rem;
+}
+.trader-subtab.active {
+  background: var(--accent, #357); color: white;
+  border-color: var(--accent, #357);
+}
+
+/* Active sub-panel — fills the remaining trader-layout space. Each
+   sub-tab uses its own internal grid; auctions is full-width. */
+.trader-subpanel {
+  flex: 1; min-height: 0;
+  display: grid; gap: 8px;
+}
+.markets-layout {
+  /* Chart wide + DOB + Tape stacked on the right. */
+  grid-template-columns: minmax(0, 1.4fr) minmax(240px, .9fr) minmax(220px, .9fr);
+  grid-template-rows: minmax(0, 1fr);
+}
+.watchlist-layout {
+  /* Heatmap+MD table wide on the left, Positions on the right. */
+  grid-template-columns: minmax(0, 1.6fr) minmax(240px, .9fr);
+  grid-template-rows: minmax(0, 1fr);
+}
+.auctions-layout {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* Lower-band tabbed panel (Working orders / Executions). */
+.trader-bottom-band {
+  min-height: 180px; max-height: 30vh;
+  display: flex; flex-direction: column;
+}
+.trader-bottom-tabs {
+  display: flex; gap: .25rem; flex-wrap: wrap;
+  border-bottom: 1px solid var(--border, #444);
+  padding-bottom: .35rem; margin-bottom: .5rem;
+}
+.trader-bottom-tab {
+  padding: .3rem .65rem;
+  background: transparent;
+  border: 1px solid var(--border, #444);
+  color: inherit; cursor: pointer;
+  border-radius: 4px; font-size: .85rem;
+}
+.trader-bottom-tab.active {
+  background: var(--accent, #357); color: white;
+  border-color: var(--accent, #357);
+}
+.trader-bottom-subpanel {
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column;
+}
+.trader-bottom-subpanel[hidden] { display: none; }
+/* h2-equivalent strip inside the lower-band sub-panels (the old h2
+   tags moved into the tab list, so each sub-panel now uses a flat
+   header strip for its filter/cancel-all controls). */
+.blotter-h2, .executions-h2 {
+  display: flex; justify-content: space-between; align-items: center;
+  margin: 0 0 .5rem 0; font-size: .85rem; font-weight: 600;
+  color: var(--muted); text-transform: uppercase; letter-spacing: .06em;
+}
+
+/* Quick ticket (compact horizontal strip). */
+.ticket.ticket-compact {
+  /* The compact ticket is a single-row strip, so the per-form vertical
+     scroll the old layout needed is no longer necessary; let height be
+     content-driven instead. */
+  overflow-y: visible;
+  padding: .6rem .8rem;
+}
+.ticket-form-compact {
+  display: flex; flex-direction: column; gap: .35rem;
+}
+.ticket-row-quick {
+  display: flex; flex-wrap: wrap; gap: .5rem; align-items: flex-end;
+}
+.ticket-field {
+  display: flex; flex-direction: column; min-width: 0;
+}
+.ticket-field > span {
+  font-size: .7rem; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .04em;
+  margin-bottom: .1rem;
+}
+.ticket-field > input, .ticket-field > select {
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: .35rem .4rem; font: inherit; font-size: .85rem;
+  min-width: 0;
+}
+.ticket-field-symbol > input { min-width: 7.5rem; }
+.ticket-submit {
+  padding: .5rem 1rem; font: inherit; font-size: .85rem;
+  background: var(--accent, #357); color: white;
+  border: 1px solid var(--accent, #357); border-radius: 4px;
+  cursor: pointer; font-weight: 600;
+}
+.ticket-submit:hover { filter: brightness(1.1); }
+.ticket-advanced-toggle {
+  padding: .35rem .65rem; font: inherit; font-size: .8rem;
+  background: transparent; color: inherit;
+  border: 1px solid var(--border); border-radius: 4px;
+  cursor: pointer;
+}
+.ticket-advanced-toggle.active {
+  background: var(--panel-2);
+  border-color: var(--accent, #357);
+}
+.ticket-advanced-toggle .ticket-advanced-caret { margin-right: .25rem; }
+.ticket-advanced {
+  display: flex; flex-wrap: wrap; gap: .5rem;
+  padding-top: .35rem; border-top: 1px dashed var(--border);
+}
+.ticket-advanced[hidden] { display: none; }
+.ticket-advanced .ticket-field { min-width: 8rem; }
+
+/* Auction panel inside the Auctions sub-tab fills its container —
+   the legacy `.collapsed` modifier (default state when the panel
+   lived alongside the others) was dropped in markup, but keep the
+   rule for any test fixture that still sets the class. */
+.auctions-layout .auction-panel { flex: 1; }

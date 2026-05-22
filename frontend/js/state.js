@@ -118,6 +118,11 @@ const state = {
   // the `bot-credentials` sub-tab; deep-link `#bot-credentials` is
   // redirected on entry.
   settingsSubTab: "bot-credentials", // "bot-credentials" | "security" | "market-data" | "preferences"
+  // Fase 4 (#400). Trader view is now a shell with 3 sub-tabs and a
+  // tabbed lower band. Trader never shows more than 4 panels at once.
+  traderSubTab: "markets",       // "markets" | "watchlist" | "auctions"
+  traderBottomTab: "blotter",    // "blotter"  | "executions"
+  ticketAdvancedOpen: false,     // Quick-ticket advanced fields expanded
   // Q4.14 (#314). Rolling drop-copy feed surfaced on the compliance
   // view. The buffer is capped at COMPLIANCE_FEED_CAP so the table
   // can render every entry without virtualising. `paused` halts
@@ -903,6 +908,31 @@ export function setSettingsSubTab(name) {
   if (state.settingsSubTab === name) return;
   state.settingsSubTab = name;
   notify("settingsSubTab");
+}
+
+// ── Fase 4 (#400). Trader sub-tab / lower-band / ticket-advanced ──
+export const TRADER_SUB_TABS = new Set(["markets", "watchlist", "auctions"]);
+export const TRADER_BOTTOM_TABS = new Set(["blotter", "executions"]);
+
+export function setTraderSubTab(name) {
+  if (!TRADER_SUB_TABS.has(name)) return;
+  if (state.traderSubTab === name) return;
+  state.traderSubTab = name;
+  notify("traderSubTab");
+}
+
+export function setTraderBottomTab(name) {
+  if (!TRADER_BOTTOM_TABS.has(name)) return;
+  if (state.traderBottomTab === name) return;
+  state.traderBottomTab = name;
+  notify("traderBottomTab");
+}
+
+export function setTicketAdvancedOpen(open) {
+  const next = !!open;
+  if (state.ticketAdvancedOpen === next) return;
+  state.ticketAdvancedOpen = next;
+  notify("ticketAdvancedOpen");
 }
 
 // ── Q4.14 (#314). Compliance drop-copy feed slice ──────────────────

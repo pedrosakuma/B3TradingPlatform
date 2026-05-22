@@ -139,25 +139,30 @@
 
   <!-- TRADER VIEW ------------------------------------------------------ -->
   <section id="trader-view" class="view trader-view" role="tabpanel" aria-labelledby="tab-trader" hidden>
-    <main class="grid">
-      <!-- ORDER TICKET ----------------------------------------------- -->
-      <section class="panel ticket">
-        <h2>Order ticket</h2>
-        <form id="ticket-form" class="ticket-form">
-          <label>
-            <span>Symbol</span>
-            <input id="ticket-symbol" type="text" required maxlength="12" list="watchlist-symbols" title="Focus (F2)" />
-            <datalist id="watchlist-symbols"></datalist>
-          </label>
-          <div class="row-two">
-            <label>
+    <main class="trader-layout">
+      <!-- ──────────────────────────────────────────────────────────────
+           QUICK TICKET (#400 — Fase 4).
+           Compact horizontal strip exposing Symbol/Side/Type/Qty/Price/
+           Submit. The "Advanced ▸" toggle expands the rest of the fields
+           (Stop price, TIF, GTD, Display qty, Reset policy) preserving
+           every IDs the existing ui.js / app.js handlers expect.
+           ────────────────────────────────────────────────────────────── -->
+      <section class="panel ticket ticket-compact">
+        <form id="ticket-form" class="ticket-form ticket-form-compact">
+          <div class="ticket-row-quick">
+            <label class="ticket-field ticket-field-symbol">
+              <span>Symbol</span>
+              <input id="ticket-symbol" type="text" required maxlength="12" list="watchlist-symbols" title="Focus (F2)" />
+              <datalist id="watchlist-symbols"></datalist>
+            </label>
+            <label class="ticket-field">
               <span>Side</span>
               <select id="ticket-side">
                 <option value="Buy">Buy</option>
                 <option value="Sell">Sell</option>
               </select>
             </label>
-            <label>
+            <label class="ticket-field">
               <span>Type</span>
               <select id="ticket-type">
                 <option value="Limit">Limit</option>
@@ -167,53 +172,56 @@
                 <option value="MarketWithLeftover">MarketWithLeftover</option>
               </select>
             </label>
-          </div>
-          <div class="row-two">
-            <label>
+            <label class="ticket-field">
               <span>Quantity</span>
               <input id="ticket-qty" type="number" min="100" step="100" required />
             </label>
-            <label id="ticket-price-label">
+            <label class="ticket-field" id="ticket-price-label">
               <span>Price</span>
               <input id="ticket-price" type="number" min="0" step="0.01" />
             </label>
+            <button type="submit" id="ticket-submit" class="ticket-submit">Submit</button>
+            <button type="button" id="ticket-advanced-toggle"
+                    class="ticket-advanced-toggle" aria-expanded="false"
+                    aria-controls="ticket-advanced"
+                    title="Show advanced fields (TIF, Stop, GTD, Display qty)">
+              <span class="ticket-advanced-caret" aria-hidden="true">▸</span>
+              Advanced
+            </button>
           </div>
-          <label id="ticket-stop-price-label" hidden>
-            <span>Stop price</span>
-            <input id="ticket-stop-price" type="number" min="0" step="0.01" />
-          </label>
-          <label>
-            <span>Time in force</span>
-            <select id="ticket-tif" aria-describedby="ticket-tif-hint">
-              <option value="Day">Day</option>
-              <option value="IOC">IOC</option>
-              <option value="FOK">FOK</option>
-              <option value="GTC">GTC</option>
-              <option value="GTD">GTD</option>
-              <option value="GoodForAuction">GoodForAuction</option>
-              <option value="AtClose">AtClose</option>
-            </select>
-          </label>
-          <label id="ticket-good-till-date-label" hidden>
-            <span>Good-till-date</span>
-            <input id="ticket-good-till-date" type="datetime-local" />
-          </label>
-          <!-- Q3.4 (#284). Native iceberg / reserve display-qty. Leave
-               Display qty empty for full disclosure (no reserve). When
-               set, must satisfy 0 < Display qty <= Quantity; the
-               backend enforces this and returns 400 otherwise.
-               Pass-1 review (#297) follow-up #298: the entrypoint SDK
-               does not yet expose a refresh-policy field, so today only
-               "Always" is accepted at intake — OnPartialFill / Never
-               would be rejected with 400. The dropdown is kept so the
-               UI shape is forward-compatible; extra options can be
-               re-added when #298 lands. -->
-          <div class="row-two">
-            <label>
+          <div id="ticket-advanced" class="ticket-advanced" hidden>
+            <label id="ticket-stop-price-label" class="ticket-field" hidden>
+              <span>Stop price</span>
+              <input id="ticket-stop-price" type="number" min="0" step="0.01" />
+            </label>
+            <label class="ticket-field">
+              <span>Time in force</span>
+              <select id="ticket-tif" aria-describedby="ticket-tif-hint">
+                <option value="Day">Day</option>
+                <option value="IOC">IOC</option>
+                <option value="FOK">FOK</option>
+                <option value="GTC">GTC</option>
+                <option value="GTD">GTD</option>
+                <option value="GoodForAuction">GoodForAuction</option>
+                <option value="AtClose">AtClose</option>
+              </select>
+            </label>
+            <label id="ticket-good-till-date-label" class="ticket-field" hidden>
+              <span>Good-till-date</span>
+              <input id="ticket-good-till-date" type="datetime-local" />
+            </label>
+            <!-- Q3.4 (#284). Native iceberg / reserve display-qty. Leave
+                 Display qty empty for full disclosure (no reserve). When
+                 set, must satisfy 0 < Display qty <= Quantity; the
+                 backend enforces this and returns 400 otherwise.
+                 Pass-1 review (#297) follow-up #298: the entrypoint SDK
+                 does not yet expose a refresh-policy field, so today only
+                 "Always" is accepted at intake. -->
+            <label class="ticket-field">
               <span>Display qty</span>
               <input id="ticket-display-qty" type="number" min="1" step="1" placeholder="(no reserve)" />
             </label>
-            <label>
+            <label class="ticket-field">
               <span>Reset policy</span>
               <select id="ticket-display-reset-policy">
                 <option value="Always">Always</option>
@@ -223,225 +231,256 @@
           <p id="ticket-tif-hint" class="field-hint" role="status" aria-live="polite" hidden></p>
           <p id="ticket-rules-hint" class="field-hint" aria-live="polite">lot 100 · tick 0.01</p>
           <p id="ticket-validation" class="field-hint hint-warn" role="status" aria-live="polite" hidden></p>
-          <button type="submit" id="ticket-submit">Submit</button>
           <p id="ticket-inflight" class="inflight" hidden></p>
           <p id="ticket-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
         </form>
       </section>
 
-      <!-- BLOTTER ---------------------------------------------------- -->
-      <section class="panel blotter">
-        <h2>
-          <span class="blotter-title">
-            Working orders <span id="blotter-count" class="count">0</span>
-          </span>
-          <button type="button" id="cancel-all-btn" class="cancel-all-btn" hidden
-                  aria-label="Cancel all working orders">Cancel all</button>
-        </h2>
-        <div class="blotter-filter">
-          <input id="blotter-filter-text" type="search" placeholder="filter by symbol or ClOrdID" maxlength="32" />
-          <select id="blotter-filter-status">
-            <option value="">all statuses</option>
-            <option value="New">New</option>
-            <option value="PartiallyFilled">PartiallyFilled</option>
-            <option value="Filled">Filled</option>
-            <option value="Cancelled">Cancelled</option>
-            <option value="Rejected">Rejected</option>
-          </select>
-          <label class="blotter-filter-toggle" title="Hide Filled / Cancelled / Rejected">
-            <input id="blotter-hide-terminal" type="checkbox" checked />
-            Working only
-          </label>
-        </div>
-        <div class="table-scroll">
-          <table id="blotter-table">
-            <thead>
-              <tr>
-                <th>ClOrdID</th><th>Symbol</th><th>Side</th><th>Type</th><th>TIF</th>
-                <th class="num">Qty</th><th class="num">Leaves</th><th class="num">Cum</th>
-                <th class="num">Price</th><th>Status</th><th></th><th></th>
-              </tr>
-            </thead>
-            <tbody id="blotter-body"></tbody>
-          </table>
-        </div>
-        <div class="blotter-pagination" id="blotter-pagination" hidden>
-          <button type="button" id="blotter-prev" aria-label="Previous page">‹ Prev</button>
-          <span id="blotter-page-info" class="blotter-page-info">page 1 / 1</span>
-          <button type="button" id="blotter-next" aria-label="Next page">Next ›</button>
-        </div>
-      </section>
+      <!-- ──────────────────────────────────────────────────────────────
+           SUB-TAB NAVIGATION (#400).
+           Markets / Watchlist / Auctions. Active sub-tab is persisted in
+           sessionStorage and deep-linkable via #trading/<sub>.
+           ────────────────────────────────────────────────────────────── -->
+      <div id="trader-subtabs" class="trader-subtabs" role="tablist" aria-label="Trader sub-tabs">
+        <button type="button" class="trader-subtab" data-trader-subtab="markets"
+                role="tab" aria-selected="true">Markets</button>
+        <button type="button" class="trader-subtab" data-trader-subtab="watchlist"
+                role="tab" aria-selected="false" tabindex="-1">Watchlist</button>
+        <button type="button" class="trader-subtab" data-trader-subtab="auctions"
+                role="tab" aria-selected="false" tabindex="-1">Auctions</button>
+      </div>
 
-      <!-- POSITIONS -------------------------------------------------- -->
-      <section class="panel positions">
-        <h2>
-          Positions
-          <span class="muted positions-sort-hint">click header to sort</span>
-        </h2>
-        <div class="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th data-sort-key="symbol" class="sortable" role="button" tabindex="0" aria-sort="none">Symbol</th>
-                <th data-sort-key="absNet" class="num sortable" role="button" tabindex="0" aria-sort="descending">Net</th>
-                <th data-sort-key="price"  class="num sortable" role="button" tabindex="0" aria-sort="none">Avg price</th>
-              </tr>
-            </thead>
-            <tbody id="positions-body"></tbody>
-          </table>
-        </div>
-      </section>
-
-      <!-- EXECUTIONS LOG --------------------------------------------- -->
-      <section class="panel executions">
-        <h2>
-          Executions log
-          <input id="exec-filter-symbol" class="exec-filter-symbol"
-                 type="search" inputmode="latin" autocomplete="off"
-                 placeholder="filter by symbol" aria-label="Filter executions by symbol" />
-        </h2>
-        <ol id="executions-log" class="executions-log"></ol>
-      </section>
-
-      <!-- MARKET DATA ----------------------------------------------- -->
-      <section class="panel market-data">
-        <h2>
-          <span class="md-title">
-            Market data
-            <span id="md-status" class="status-pill status-disconnected" role="status" aria-live="polite" aria-label="Market data: disconnected" title="MarketData WebSocket connection">disconnected</span>
-          </span>
-          <span class="md-h2-controls">
-            <!-- #71: Volume heatmap toggle — opt-in per the decision gate.
-                 Persists in sessionStorage so a trader who relies on it
-                 doesn't have to re-enable on every reload. -->
-            <button type="button" id="heatmap-toggle" class="icon-button"
-                    aria-pressed="false" aria-label="Toggle volume heatmap"
-                    title="Toggle volume heatmap (10s rolling)">🔥</button>
-          </span>
-        </h2>
-        <div id="heatmap-panel" class="heatmap-panel" role="grid"
-             aria-label="Volume heatmap (10s rolling, click cell to select symbol)" hidden></div>
-        <div class="table-scroll">
-          <table id="md-table">
-            <thead>
-              <tr>
-                <th>Symbol</th>
-                <th class="num">Last</th>
-                <th class="num">Qty</th>
-                <th class="num">TradeID</th>
-                <th>Updated</th>
-              </tr>
-            </thead>
-            <tbody id="md-body"></tbody>
-          </table>
-        </div>
-      </section>
-
-      <!-- AUCTION PANEL (Q1.6 / #258) ------------------------------- -->
-      <!-- Collapsed by default; auto-expands when the selected symbol -->
-      <!-- enters an auction phase (OpeningCall / FinalClosingCall).   -->
-      <section id="auction-panel" class="panel auction-panel collapsed"
-               role="region" aria-label="Auction state" hidden>
-        <h2>
-          <button type="button" id="auction-toggle" class="auction-toggle"
-                  aria-expanded="false" aria-controls="auction-body">
-            <span class="auction-caret" aria-hidden="true">▸</span>
-            Auction
-            <span id="auction-symbol-tag" class="symbol-tag" aria-live="polite">—</span>
-          </button>
-        </h2>
-        <div id="auction-body" class="auction-body" hidden>
-          <div class="auction-grid">
-            <div class="auction-cell">
-              <span class="auction-label">TOP</span>
-              <span id="auction-top" class="auction-value">
-                <span id="auction-top-arrow" class="auction-arrow" aria-hidden="true"></span>
-                <span id="auction-top-price">—</span>
-              </span>
-            </div>
-            <div class="auction-cell">
-              <span class="auction-label">Match qty</span>
-              <span id="auction-match-qty" class="auction-value">—</span>
-            </div>
-            <div class="auction-cell">
-              <span class="auction-label">Imbalance</span>
-              <span id="auction-imbalance" class="auction-value">—</span>
-            </div>
-            <div class="auction-cell">
-              <span class="auction-label" title="Time to uncross — not yet emitted upstream">TTU</span>
-              <span id="auction-ttu" class="auction-value">—</span>
-            </div>
+      <!-- MARKETS sub-tab: Chart + DOB + Tape (single-symbol focus). -->
+      <div id="trader-panel-markets" class="trader-subpanel markets-layout" role="tabpanel">
+        <section class="panel chart">
+          <h2>
+            Chart
+            <span id="chart-symbol-tag" class="symbol-tag" aria-live="polite"></span>
+            <span class="chart-controls">
+              <select id="chart-resolution" aria-label="Chart resolution">
+                <option value="60">1m</option>
+                <option value="300">5m</option>
+                <option value="900">15m</option>
+              </select>
+            </span>
+          </h2>
+          <div class="chart-canvas">
+            <svg id="chart-svg" viewBox="0 0 300 100" preserveAspectRatio="none" aria-label="Candlestick chart"></svg>
+            <p id="chart-empty" class="chart-empty muted-cell">select a symbol</p>
           </div>
-          <h3 class="auction-prints-title">Recent prints</h3>
-          <ol id="auction-prints" class="auction-prints">
-            <li class="muted-line">No prints yet</li>
-          </ol>
-        </div>
-      </section>
+        </section>
 
-      <!-- DEPTH OF BOOK ---------------------------------------------- -->
-      <section class="panel dob">
-        <h2>
-          Depth of book
-          <span id="dob-symbol-tag" class="symbol-tag" aria-live="polite"></span>
-          <span id="dob-spread" class="dob-spread" aria-live="polite"></span>
-        </h2>
-        <p id="dob-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
-        <div class="dob-grid">
-          <table id="dob-bids" class="dob-side dob-bid">
-            <thead>
-              <tr>
-                <th class="num">Cum</th>
-                <th class="num">Qty</th>
-                <th class="num">Bid</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-          <table id="dob-asks" class="dob-side dob-ask">
-            <thead>
-              <tr>
-                <th class="num">Ask</th>
-                <th class="num">Qty</th>
-                <th class="num">Cum</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </section>
+        <section class="panel dob">
+          <h2>
+            Depth of book
+            <span id="dob-symbol-tag" class="symbol-tag" aria-live="polite"></span>
+            <span id="dob-spread" class="dob-spread" aria-live="polite"></span>
+          </h2>
+          <p id="dob-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
+          <div class="dob-grid">
+            <table id="dob-bids" class="dob-side dob-bid">
+              <thead>
+                <tr>
+                  <th class="num">Cum</th>
+                  <th class="num">Qty</th>
+                  <th class="num">Bid</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+            <table id="dob-asks" class="dob-side dob-ask">
+              <thead>
+                <tr>
+                  <th class="num">Ask</th>
+                  <th class="num">Qty</th>
+                  <th class="num">Cum</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
 
-      <!-- CHART ------------------------------------------------------ -->
-      <section class="panel chart">
-        <h2>
-          Chart
-          <span id="chart-symbol-tag" class="symbol-tag" aria-live="polite"></span>
-          <span class="chart-controls">
-            <select id="chart-resolution" aria-label="Chart resolution">
-              <option value="60">1m</option>
-              <option value="300">5m</option>
-              <option value="900">15m</option>
+        <section class="panel tape">
+          <h2>
+            Tape
+            <span id="tape-symbol-tag" class="symbol-tag" aria-live="polite"></span>
+            <label class="tape-all-toggle">
+              <input id="tape-show-all" type="checkbox" />
+              All symbols
+            </label>
+            <span id="tape-paused" class="tape-paused" hidden>paused</span>
+          </h2>
+          <ol id="tape-list" class="tape-list" aria-live="off"></ol>
+        </section>
+      </div>
+
+      <!-- WATCHLIST sub-tab: Heatmap + MD table + Positions. -->
+      <div id="trader-panel-watchlist" class="trader-subpanel watchlist-layout" role="tabpanel" hidden>
+        <section class="panel market-data">
+          <h2>
+            <span class="md-title">
+              Market data
+              <span id="md-status" class="status-pill status-disconnected" role="status" aria-live="polite" aria-label="Market data: disconnected" title="MarketData WebSocket connection">disconnected</span>
+            </span>
+            <span class="md-h2-controls">
+              <!-- #71: Volume heatmap toggle — opt-in per the decision gate.
+                   Persists in sessionStorage so a trader who relies on it
+                   doesn't have to re-enable on every reload. -->
+              <button type="button" id="heatmap-toggle" class="icon-button"
+                      aria-pressed="false" aria-label="Toggle volume heatmap"
+                      title="Toggle volume heatmap (10s rolling)">🔥</button>
+            </span>
+          </h2>
+          <div id="heatmap-panel" class="heatmap-panel" role="grid"
+               aria-label="Volume heatmap (10s rolling, click cell to select symbol)" hidden></div>
+          <div class="table-scroll">
+            <table id="md-table">
+              <thead>
+                <tr>
+                  <th>Symbol</th>
+                  <th class="num">Last</th>
+                  <th class="num">Qty</th>
+                  <th class="num">TradeID</th>
+                  <th>Updated</th>
+                </tr>
+              </thead>
+              <tbody id="md-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel positions">
+          <h2>
+            Positions
+            <span class="muted positions-sort-hint">click header to sort</span>
+          </h2>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th data-sort-key="symbol" class="sortable" role="button" tabindex="0" aria-sort="none">Symbol</th>
+                  <th data-sort-key="absNet" class="num sortable" role="button" tabindex="0" aria-sort="descending">Net</th>
+                  <th data-sort-key="price"  class="num sortable" role="button" tabindex="0" aria-sort="none">Avg price</th>
+                </tr>
+              </thead>
+              <tbody id="positions-body"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <!-- AUCTIONS sub-tab: auction-panel detail (always expanded here).
+           Phases badges for the full watchlist are a follow-up — for now
+           the panel only fills when the selected symbol enters an auction
+           phase, matching the Markets behaviour. -->
+      <div id="trader-panel-auctions" class="trader-subpanel auctions-layout" role="tabpanel" hidden>
+        <section id="auction-panel" class="panel auction-panel"
+                 role="region" aria-label="Auction state">
+          <h2>
+            <button type="button" id="auction-toggle" class="auction-toggle"
+                    aria-expanded="false" aria-controls="auction-body">
+              <span class="auction-caret" aria-hidden="true">▸</span>
+              Auction
+              <span id="auction-symbol-tag" class="symbol-tag" aria-live="polite">—</span>
+            </button>
+          </h2>
+          <div id="auction-body" class="auction-body" hidden>
+            <div class="auction-grid">
+              <div class="auction-cell">
+                <span class="auction-label">TOP</span>
+                <span id="auction-top" class="auction-value">
+                  <span id="auction-top-arrow" class="auction-arrow" aria-hidden="true"></span>
+                  <span id="auction-top-price">—</span>
+                </span>
+              </div>
+              <div class="auction-cell">
+                <span class="auction-label">Match qty</span>
+                <span id="auction-match-qty" class="auction-value">—</span>
+              </div>
+              <div class="auction-cell">
+                <span class="auction-label">Imbalance</span>
+                <span id="auction-imbalance" class="auction-value">—</span>
+              </div>
+              <div class="auction-cell">
+                <span class="auction-label" title="Time to uncross — not yet emitted upstream">TTU</span>
+                <span id="auction-ttu" class="auction-value">—</span>
+              </div>
+            </div>
+            <h3 class="auction-prints-title">Recent prints</h3>
+            <ol id="auction-prints" class="auction-prints">
+              <li class="muted-line">No prints yet</li>
+            </ol>
+          </div>
+        </section>
+      </div>
+
+      <!-- ──────────────────────────────────────────────────────────────
+           LOWER BAND (#400). Working orders / Executions tabbed.
+           Both panels keep their own h2 / filters / pagination state;
+           the surrounding tabs only flip [hidden] on whichever sub-
+           panel isn't active.
+           ────────────────────────────────────────────────────────────── -->
+      <section class="panel trader-bottom-band">
+        <div id="trader-bottom-tabs" class="trader-bottom-tabs" role="tablist"
+             aria-label="Lower-band toggle">
+          <button type="button" class="trader-bottom-tab" data-trader-bottom-tab="blotter"
+                  role="tab" aria-selected="true">Working orders</button>
+          <button type="button" class="trader-bottom-tab" data-trader-bottom-tab="executions"
+                  role="tab" aria-selected="false" tabindex="-1">Executions</button>
+        </div>
+
+        <div id="trader-bottom-panel-blotter" class="trader-bottom-subpanel" role="tabpanel">
+          <div class="blotter-h2">
+            <span class="blotter-title">
+              Working orders <span id="blotter-count" class="count">0</span>
+            </span>
+            <button type="button" id="cancel-all-btn" class="cancel-all-btn" hidden
+                    aria-label="Cancel all working orders">Cancel all</button>
+          </div>
+          <div class="blotter-filter">
+            <input id="blotter-filter-text" type="search" placeholder="filter by symbol or ClOrdID" maxlength="32" />
+            <select id="blotter-filter-status">
+              <option value="">all statuses</option>
+              <option value="New">New</option>
+              <option value="PartiallyFilled">PartiallyFilled</option>
+              <option value="Filled">Filled</option>
+              <option value="Cancelled">Cancelled</option>
+              <option value="Rejected">Rejected</option>
             </select>
-          </span>
-        </h2>
-        <div class="chart-canvas">
-          <svg id="chart-svg" viewBox="0 0 300 100" preserveAspectRatio="none" aria-label="Candlestick chart"></svg>
-          <p id="chart-empty" class="chart-empty muted-cell">select a symbol</p>
+            <label class="blotter-filter-toggle" title="Hide Filled / Cancelled / Rejected">
+              <input id="blotter-hide-terminal" type="checkbox" checked />
+              Working only
+            </label>
+          </div>
+          <div class="table-scroll">
+            <table id="blotter-table">
+              <thead>
+                <tr>
+                  <th>ClOrdID</th><th>Symbol</th><th>Side</th><th>Type</th><th>TIF</th>
+                  <th class="num">Qty</th><th class="num">Leaves</th><th class="num">Cum</th>
+                  <th class="num">Price</th><th>Status</th><th></th><th></th>
+                </tr>
+              </thead>
+              <tbody id="blotter-body"></tbody>
+            </table>
+          </div>
+          <div class="blotter-pagination" id="blotter-pagination" hidden>
+            <button type="button" id="blotter-prev" aria-label="Previous page">‹ Prev</button>
+            <span id="blotter-page-info" class="blotter-page-info">page 1 / 1</span>
+            <button type="button" id="blotter-next" aria-label="Next page">Next ›</button>
+          </div>
         </div>
-      </section>
 
-      <!-- TAPE ------------------------------------------------------- -->
-      <section class="panel tape">
-        <h2>
-          Tape
-          <span id="tape-symbol-tag" class="symbol-tag" aria-live="polite"></span>
-          <label class="tape-all-toggle">
-            <input id="tape-show-all" type="checkbox" />
-            All symbols
-          </label>
-          <span id="tape-paused" class="tape-paused" hidden>paused</span>
-        </h2>
-        <ol id="tape-list" class="tape-list" aria-live="off"></ol>
+        <div id="trader-bottom-panel-executions" class="trader-bottom-subpanel" role="tabpanel" hidden>
+          <div class="executions-h2">
+            <span>Executions log</span>
+            <input id="exec-filter-symbol" class="exec-filter-symbol"
+                   type="search" inputmode="latin" autocomplete="off"
+                   placeholder="filter by symbol" aria-label="Filter executions by symbol" />
+          </div>
+          <ol id="executions-log" class="executions-log"></ol>
+        </div>
       </section>
     </main>
   </section>
