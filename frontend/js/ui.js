@@ -9,6 +9,7 @@ import {
 } from "./state.js";
 import { rulesFor } from "./validation.js";
 import { tabsForRole } from "./complianceUi.js";
+import { createVirtualList } from "./virtualList.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -2535,15 +2536,32 @@ function syncPositionsSortHeaders() {
   });
 }
 
+// Lazily-constructed virtualizer for the Executions log (#409). We
+// reuse one controller across re-renders so the spacer/window pair
+// stays in place and the scroll position is preserved between deltas.
+let _execVList = null;
+// Row height in px. Must match `.executions-log .exec-row { height }`
+// in styles.css — the virtualizer relies on a fixed row size.
+const EXEC_ROW_HEIGHT = 24;
+
 function renderExecutions() {
   const log = $("executions-log");
+  if (!log) return;
   const filter = _execSymbolFilter.trim().toUpperCase();
   let items = getState().executions;
   if (filter) {
     items = items.filter(e => typeof e.symbol === "string" && e.symbol.toUpperCase().includes(filter));
   }
-  // Newest first.
-  log.innerHTML = items.slice().reverse().map(execRow).join("");
+  // Newest first. slice() to avoid mutating state.
+  const ordered = items.slice().reverse();
+  if (!_execVList) {
+    _execVList = createVirtualList(log, {
+      rowHeight: EXEC_ROW_HEIGHT,
+      overscan: 8,
+      renderRow: execRow,
+    });
+  }
+  _execVList.setItems(ordered);
 }
 
 function execRow(e) {
@@ -2556,11 +2574,11 @@ function execRow(e) {
   // reject. Both categories surface as small badges so a glance at
   // the executions log tells the trader which layer fired.
   const stpBadge = stpBadgeFor(e);
-  return `<li>
+  return `<div class="exec-row">
     <span class="ts">${ts}</span>
     <span class="kind ${escapeHtml(e.kind)}">${escapeHtml(e.kind)}</span>
     <span class="meta">${escapeHtml(e.clOrdId)} ${escapeHtml(e.symbol)} ${lastQty}${lastPx}${stpBadge}${reason}</span>
-  </li>`;
+  </div>`;
 }
 
 function stpBadgeFor(e) {

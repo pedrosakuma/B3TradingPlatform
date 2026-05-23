@@ -412,7 +412,11 @@ tr.row-stale > td.row-stale-actions { opacity: 1; }
 .executions-log {
   list-style: none; padding: 0; margin: 0; overflow: auto; flex: 1;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .75rem;
+  position: relative;
 }
+.executions-log .vlist-spacer { width: 1px; pointer-events: none; }
+.executions-log .vlist-window { position: absolute; top: 0; left: 0; right: 0; will-change: transform; }
+.executions-log .exec-row { height: 24px; box-sizing: border-box; padding: .25rem .4rem; border-bottom: 1px solid #20283a; display: flex; gap: .6rem; align-items: center; }
 .executions-log li { padding: .25rem .4rem; border-bottom: 1px solid #20283a; display: flex; gap: .6rem; }
 .executions-log .ts    { color: var(--muted); flex: 0 0 7em; }
 .executions-log .kind  { font-weight: 600; flex: 0 0 7em; }
