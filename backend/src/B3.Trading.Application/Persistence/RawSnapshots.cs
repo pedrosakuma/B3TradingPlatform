@@ -193,6 +193,15 @@ public sealed class RawPlatformSnapshot
     /// </summary>
     public IReadOnlyList<SubAccountPnlBasisSnapshot> SubAccountPnlBasis { get; init; } =
         Array.Empty<SubAccountPnlBasisSnapshot>();
+
+    /// <summary>
+    /// #380 path B. Per-firm last-observed FIXP <c>SessionVerId</c> at
+    /// snapshot capture time. Empty on snapshots pre-dating the field
+    /// or in compositions without an <c>IFirmSessionStatusProvider</c>
+    /// (e.g. Mock/Stub/Unavailable exchange modes).
+    /// </summary>
+    public IReadOnlyDictionary<string, uint> FirmSessionVerIds { get; init; } =
+        new Dictionary<string, uint>();
 }
 
 /// <summary>

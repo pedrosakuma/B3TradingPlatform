@@ -299,6 +299,24 @@ public sealed class PlatformSnapshot
     /// empty basis map (best-effort, see record doc).
     /// </summary>
     public List<SubAccountPnlBasisSnapshot> SubAccountPnlBasis { get; init; } = new();
+
+    /// <summary>
+    /// #380 path B. Per-firm last-observed FIXP <c>SessionVerId</c> at
+    /// snapshot capture time, sourced from each
+    /// <see cref="B3.Trading.Infrastructure.IFirmSessionStatusProvider"/>
+    /// entry. Empty on snapshots pre-dating the field (additive). When
+    /// present, <see cref="B3.Trading.Infrastructure.Persistence.PersistenceRecovery"/>
+    /// compares each firm's current gateway <c>SessionVerId</c> against
+    /// the stored value after replay and eagerly retires every
+    /// <see cref="B3.Trading.Application.WorkingOrderBook"/> entry
+    /// attached to a firm whose verId has advanced past the snapshot
+    /// (the venue rolled the session — orders attached to the prior
+    /// version are ghosts and would otherwise poison STP, modify, and
+    /// margin checks until the next ER ack that never comes).
+    /// Restore is a no-op for the snapshot itself; the dict is read
+    /// straight off the loaded snapshot by the recovery path.
+    /// </summary>
+    public Dictionary<string, uint> FirmSessionVerIds { get; init; } = new();
 }
 
 /// <summary>

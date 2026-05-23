@@ -39,6 +39,15 @@ public sealed class PersistenceRecovery
     private readonly FillProjection? _fillProjection;
     private readonly WorkingOrderBook? _orders;
     private readonly OrderOwnershipMap? _ownership;
+    // #380 path B. Optional. When wired AND the loaded snapshot carries
+    // per-firm SessionVerIds, recovery compares each firm's current
+    // gateway SessionVerId against the stored value after WAL replay.
+    // For any firm whose verId has advanced past the snapshot, every
+    // working order attached to that firm is eagerly retired
+    // (MarkCancelled) — those orders cannot exist at the venue under
+    // the new session version and would otherwise poison STP, modify,
+    // and margin checks until the next ER ack that never comes.
+    private readonly IFirmSessionStatusProvider? _firmSessionStatus;
 
     public PersistenceRecovery(
         IEventStore store,
@@ -49,7 +58,8 @@ public sealed class PersistenceRecovery
         AuditLogKeeper? auditKeeper = null,
         FillProjection? fillProjection = null,
         WorkingOrderBook? orders = null,
-        OrderOwnershipMap? ownership = null)
+        OrderOwnershipMap? ownership = null,
+        IFirmSessionStatusProvider? firmSessionStatus = null)
     {
         _store = store;
         _snapshotter = snapshotter;
@@ -60,6 +70,7 @@ public sealed class PersistenceRecovery
         _fillProjection = fillProjection;
         _orders = orders;
         _ownership = ownership;
+        _firmSessionStatus = firmSessionStatus;
     }
 
     public async Task RunAsync(CancellationToken ct = default)
@@ -162,6 +173,69 @@ public sealed class PersistenceRecovery
         }
         MetricsRegistry.RecoveryEventsReplayed.Add(replayed);
         _logger.LogInformation("Persistence recovery: replayed {Count} events past seq={Since}.", replayed, since);
+
+        // #380 path B. Session-version guard. Compares the snapshot's
+        // per-firm SessionVerId record against each gateway's current
+        // live verId; for any firm whose verId has advanced past the
+        // snapshot, every WorkingOrderBook entry attached to that firm
+        // is retired (MarkCancelled). Skipped silently when either side
+        // is absent: legacy snapshots have no FirmSessionVerIds, Mock /
+        // Stub / Unavailable exchange modes have no IFirmSessionStatusProvider.
+        if (snap is not null && _firmSessionStatus is not null && _orders is not null)
+        {
+            ReconcileFirmSessionVerIds(snap);
+        }
+    }
+
+    private void ReconcileFirmSessionVerIds(PlatformSnapshot snap)
+    {
+        if (snap.FirmSessionVerIds is null || snap.FirmSessionVerIds.Count == 0)
+        {
+            // Pre-#380 snapshot — no recorded baseline. Cannot
+            // distinguish "venue rolled" from "first restart since
+            // the field was added"; skip rather than retire blindly.
+            return;
+        }
+
+        var currentByFirm = _firmSessionStatus!.Snapshot();
+        foreach (var status in currentByFirm)
+        {
+            if (!snap.FirmSessionVerIds.TryGetValue(status.FirmId, out var storedVerId)
+                || storedVerId == 0)
+            {
+                // No baseline for this firm — first snapshot after the
+                // firm was added, or capture happened before the firm
+                // ever Established. Skip.
+                continue;
+            }
+            if (status.SessionVerId <= storedVerId)
+            {
+                // Same or earlier session — orders attached at the
+                // stored verId are still valid at the venue.
+                continue;
+            }
+
+            // Session-version advanced past the snapshot. Every working
+            // order attached to this firm at snapshot capture (and
+            // anything the WAL tail re-confirmed) is a ghost on the
+            // venue side. Retire each one.
+            var dropped = 0;
+            foreach (var order in _orders!.EnumerateForFirm(status.FirmId, includeTerminal: false))
+            {
+                order.MarkCancelled();
+                if (order.Status == B3.Trading.Domain.OrderStatus.Cancelled)
+                {
+                    dropped++;
+                }
+            }
+            _logger.LogWarning(
+                "event=recovery.session-rolled firm={Firm} from={From} to={To} dropped={Dropped}",
+                status.FirmId, storedVerId, status.SessionVerId, dropped);
+            MetricsRegistry.RecoverySessionRolledFirms.Add(1,
+                new KeyValuePair<string, object?>("firm", status.FirmId));
+            MetricsRegistry.RecoverySessionRolledOrdersDropped.Add(dropped,
+                new KeyValuePair<string, object?>("firm", status.FirmId));
+        }
     }
 }
 

@@ -78,6 +78,12 @@ public sealed class StateSnapshotter
     private readonly SubAccountsRegistry? _subAccounts;
     private readonly SubAccountPositionKeeper? _subAccountPositions;
     private readonly SubAccountPnlKeeper? _subAccountPnl;
+    // #380 path B. Optional. When wired (Real exchange mode), capture
+    // each firm gateway's live SessionVerId so the recovery path can
+    // detect a session-version roll and retire ghost orders. Null in
+    // Mock/Stub modes — capture writes an empty dict, recovery skips
+    // the reconcile.
+    private readonly IFirmSessionStatusProvider? _firmSessionStatus;
 
     public StateSnapshotter(
         WorkingOrderBook orders,
@@ -103,7 +109,8 @@ public sealed class StateSnapshotter
         IReplaceMarginCoordinator? replaceMargin = null,
         SubAccountsRegistry? subAccounts = null,
         SubAccountPositionKeeper? subAccountPositions = null,
-        SubAccountPnlKeeper? subAccountPnl = null)
+        SubAccountPnlKeeper? subAccountPnl = null,
+        IFirmSessionStatusProvider? firmSessionStatus = null)
     {
         _orders = orders;
         _positions = positions;
@@ -129,6 +136,7 @@ public sealed class StateSnapshotter
         _subAccounts = subAccounts;
         _subAccountPositions = subAccountPositions;
         _subAccountPnl = subAccountPnl;
+        _firmSessionStatus = firmSessionStatus;
     }
 
     public PlatformSnapshot Capture(long seq) => Project(CaptureRaw(seq));
@@ -226,6 +234,13 @@ public sealed class StateSnapshotter
         SubAccountPositions = _subAccountPositions?.Snapshot() ?? Array.Empty<SubAccountPositionSnapshot>(),
         SubAccountPnl = _subAccountPnl?.Snapshot() ?? Array.Empty<SubAccountPnlSnapshot>(),
         SubAccountPnlBasis = _subAccountPnl?.SnapshotBasis() ?? Array.Empty<SubAccountPnlBasisSnapshot>(),
+        // #380 path B. Each firm's live SessionVerId at capture time so
+        // recovery can detect a session-roll between snapshot and restart.
+        // Empty when the provider is null (Mock/Stub modes).
+        FirmSessionVerIds = _firmSessionStatus is null
+            ? new Dictionary<string, uint>()
+            : _firmSessionStatus.Snapshot()
+                .ToDictionary(s => s.FirmId, s => s.SessionVerId, StringComparer.Ordinal),
     };
 
     /// <summary>
@@ -495,6 +510,9 @@ public sealed class StateSnapshotter
             SubAccountPositions = raw.SubAccountPositions.ToList(),
             SubAccountPnl = raw.SubAccountPnl.ToList(),
             SubAccountPnlBasis = raw.SubAccountPnlBasis.ToList(),
+            FirmSessionVerIds = raw.FirmSessionVerIds.Count == 0
+                ? new Dictionary<string, uint>()
+                : new Dictionary<string, uint>(raw.FirmSessionVerIds, StringComparer.Ordinal),
         };
     }
 

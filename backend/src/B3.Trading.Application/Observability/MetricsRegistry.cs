@@ -191,6 +191,24 @@ public static class MetricsRegistry
     public static readonly Counter<long> RecoveryEventsReplayed =
         Meter.CreateCounter<long>("trading.recovery.events_replayed");
 
+    // #380 path B. Session-version guard. Fires once per firm whose
+    // gateway SessionVerId has advanced past the verId recorded in the
+    // loaded snapshot — i.e. the venue rolled the session while the
+    // process was down. Tag `firm` carries the FirmId. A non-zero rate
+    // outside known dev-bridge data-wipe scenarios indicates the venue
+    // is dropping our session more often than expected.
+    public static readonly Counter<long> RecoverySessionRolledFirms =
+        Meter.CreateCounter<long>("trading.recovery.session_rolled_firms");
+
+    // #380 path B. Number of WorkingOrderBook entries eagerly retired
+    // (MarkCancelled) by the session-version guard. Tag `firm` carries
+    // the FirmId. Burst on a single restart is expected when a real
+    // session roll happens; a steady drip across restarts means the
+    // snapshot is not being refreshed often enough relative to gateway
+    // reconnect frequency.
+    public static readonly Counter<long> RecoverySessionRolledOrdersDropped =
+        Meter.CreateCounter<long>("trading.recovery.session_rolled_orders_dropped");
+
     // Q2.3 (#270). Fee-keeper deterministic replay synth — surfaces the
     // crash window between ER append (seq N) and FeeAccruedEvent append
     // (seq N+1). Tag `reconciled` is true when a durable FeeAccruedEvent
