@@ -172,7 +172,7 @@ jobs:
           npx axe http://127.0.0.1:8088/ \
             --exit \
             --tags wcag2a,wcag2aa,wcag21a,wcag21aa \
-            --chromium-path "$GOOGLE_CHROME_BIN"
+            --chrome-path "$GOOGLE_CHROME_BIN"
 
       - name: Lighthouse CI (a11y + perf)
         # chrome-launcher prefers $CHROME_PATH; the bundled Puppeteer
