@@ -773,13 +773,17 @@ public class OrderModifyMarginAndProcessorTests
         Assert.Single(replaceCoord.Commits);
         Assert.Empty(replaceCoord.Aborts);
         Assert.Equal((777UL, 778UL, 32.50m * 100), replaceCoord.Commits[0]);
-        // Replace-fanout: orig + new ExecutionEvent (kind=Replaced) on the sink.
+        // Replace-fanout: orig (kind=Replaced) + new (kind=ReplacedNew, #417) on the sink.
         Assert.Equal(2, sink.Events.Count);
-        Assert.All(sink.Events, e => Assert.Equal(ExecKind.Replaced, e.Kind));
-        Assert.Contains(sink.Events, e => e.ClOrdId == 777UL);
-        Assert.Contains(sink.Events, e => e.ClOrdId == 778UL);
-        // Bot router saw both replace ERs.
-        Assert.Equal(2, botRouter.Events.Count);
+        Assert.Equal(ExecKind.Replaced, sink.Events.Single(e => e.ClOrdId == 777UL).Kind);
+        Assert.Equal(ExecKind.ReplacedNew, sink.Events.Single(e => e.ClOrdId == 778UL).Kind);
+        // #417: bot router is wire-faithful — sees ONE ExecutionReport
+        // for the replace ack (the new leg, carrying OrigClOrdID via
+        // the FIXP encoder), not two. The orig-leg terminalisation is
+        // an internal WS projection only.
+        Assert.Single(botRouter.Events);
+        Assert.Equal(778UL, botRouter.Events[0].ClOrdId);
+        Assert.Equal(ExecKind.ReplacedNew, botRouter.Events[0].Kind);
 
         // 4) Subsequent Trade ER on the new ClOrdID (orig=0 in priority-lost trade).
         proc.Apply(778UL, ExecKind.Fill, leaves: 0, cumQty: 100, lastQty: 100, lastPx: 32.50m, rejectReason: null, origClOrdId: 0);
@@ -798,7 +802,8 @@ public class OrderModifyMarginAndProcessorTests
         var fillEv = sink.Events[2];
         Assert.Equal(ExecKind.Fill, fillEv.Kind);
         Assert.Equal(778UL, fillEv.ClOrdId);
-        Assert.Equal(3, botRouter.Events.Count);
+        // #417: bot saw 1 replace ER (new leg only) + 1 fill = 2 total.
+        Assert.Equal(2, botRouter.Events.Count);
     }
 
     [Fact]

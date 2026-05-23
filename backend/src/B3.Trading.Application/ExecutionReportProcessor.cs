@@ -987,9 +987,16 @@ public sealed class ExecutionReportProcessor
         else
         {
             _sink.Publish(origEv);
-            // Sub-issue #172 (F): the bot must observe the original's
-            // terminalisation as part of the replace ack stream.
-            _botErRouter?.Route(origEv);
+            // #417. The orig-leg ExecutionEvent is a state-transition
+            // projection for internal WS consumers (executions.me /
+            // orders.me / drop-copy). It is NOT routed to the FIXP
+            // outbound bot — FIX/FIXP/SBE semantics dictate ONE
+            // ExecutionReport with ExecType=Replace per cancel-replace
+            // ack, carrying both new ClOrdID and OrigClOrdID. Emitting
+            // a second OrderModified frame for the orig leg would
+            // violate that contract and confuse bot replay state
+            // machines. The new-leg event below is the wire-faithful
+            // one and is the only one routed to _botErRouter.
         }
 
         // 2) Hydrate the replacement with intent metadata + venue's
@@ -1076,7 +1083,12 @@ public sealed class ExecutionReportProcessor
             newOrder.Symbol,
             newOrder.Side,
             newOrder.Status,
-            ExecKind.Replaced,
+            // #417. New-leg face of the replace ack. The orig-leg
+            // event above stays as Replaced (terminal); this one is
+            // ReplacedNew (replacement entering Working) so the
+            // executions blotter can render the two legs distinctly
+            // instead of two indistinguishable "Replaced" rows.
+            ExecKind.ReplacedNew,
             newOrder.LeavesQuantity,
             newOrder.CumulativeQuantity,
             0,
@@ -1191,4 +1203,32 @@ public enum ExecKind
     /// fill price (no economic event).
     /// </summary>
     ReplaceRejected,
+    /// <summary>
+    /// #417. Companion of <see cref="Replaced"/>. A successful venue
+    /// cancel-replace ack produces TWO internal <c>ExecutionEvent</c>s
+    /// from <c>ExecutionReportProcessor.ApplyReplaceAccepted</c>: one
+    /// <see cref="Replaced"/> against the original ClOrdID (which
+    /// terminalises) and one <see cref="ReplacedNew"/> against the
+    /// new ClOrdID (which enters Working / PartiallyFilled). Before
+    /// #417 both events carried <see cref="Replaced"/>, which made the
+    /// executions blotter render two indistinguishable "Replaced"
+    /// rows for a single modify.
+    /// <para>
+    /// <b>Wire fidelity (FIX/FIXP/SBE).</b> FIX semantics specify ONE
+    /// ExecutionReport with <c>ExecType=Replace</c> per cancel-replace
+    /// ack, carrying both the new <c>ClOrdID</c> and <c>OrigClOrdID</c>.
+    /// The split into two internal events is a projection convenience
+    /// for our WebSocket consumers (executions.me / orders.me) and
+    /// drop-copy compliance only — bot-bound traffic via
+    /// <c>BotErRouter</c> stays wire-faithful: only the
+    /// <see cref="ReplacedNew"/> leg is routed (it carries
+    /// OrigClOrdID through the FIXP encoder), the
+    /// <see cref="Replaced"/> orig-leg event is NOT routed to bots.
+    /// </para>
+    /// Carries the replacement's seeded <c>LeavesQuantity</c> /
+    /// <c>CumulativeQuantity</c> baseline and the ER's <c>LastPrice</c>
+    /// (0 for plain replace; non-zero only on priority-lost replace
+    /// with concurrent fill — see issue #241 / #299 P1).
+    /// </summary>
+    ReplacedNew,
 }
