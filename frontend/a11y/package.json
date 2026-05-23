@@ -1,0 +1,16 @@
+{
+  "name": "b3tp-fe-a11y",
+  "private": true,
+  "version": "0.0.0",
+  "description": "A11y (axe-core) + perf (Lighthouse CI) gate for the static frontend. Pinned deps; runs on every PR via .github/workflows/ci.yml.",
+  "scripts": {
+    "serve": "http-server .. -p 8088 -c-1 -s",
+    "axe": "axe http://127.0.0.1:8088/ --exit --tags wcag2a,wcag2aa,wcag21a,wcag21aa",
+    "lhci": "lhci autorun --config=./lighthouserc.json"
+  },
+  "devDependencies": {
+    "@axe-core/cli": "4.10.0",
+    "@lhci/cli": "0.14.0",
+    "http-server": "14.1.1"
+  }
+}
