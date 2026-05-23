@@ -10,6 +10,7 @@ import {
 import { rulesFor } from "./validation.js";
 import { tabsForRole } from "./complianceUi.js";
 import { createVirtualList } from "./virtualList.js";
+import { bindMobileDrawer } from "./mobileDrawer.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -182,6 +183,12 @@ function setViewToggleVisible(visible, current) {
     btn.classList.toggle("active", view === current);
     btn.setAttribute("aria-selected", view === current ? "true" : "false");
   }
+  // #408. Mirror per-role visibility + active state into the mobile
+  // drawer so the two stay in sync (canonical source = tablist).
+  const trigger = $("mobile-nav-trigger");
+  if (trigger) trigger.hidden = !visible;
+  const drawer = $("mobile-nav-drawer");
+  if (drawer && _mobileDrawer) _mobileDrawer.syncFromTablist(wrap);
 }
 
 export function setLoginError(message) {
@@ -1099,6 +1106,24 @@ export function bindUi() {
       if (!btn) return;
       onSwitchView(btn.dataset.view);
     });
+  }
+
+  // #408. Mobile hamburger drawer mirrors the inline tablist. CSS hides
+  // the trigger / drawer on >=768px viewports so desktop is byte-
+  // identical to before.
+  const drawerTrigger = $("mobile-nav-trigger");
+  const drawerEl      = $("mobile-nav-drawer");
+  const drawerList    = $("mobile-nav-list");
+  const drawerBackdrop = $("mobile-nav-backdrop");
+  if (drawerTrigger && drawerEl && drawerList) {
+    _mobileDrawer = bindMobileDrawer({
+      trigger: drawerTrigger,
+      drawer: drawerEl,
+      list: drawerList,
+      backdrop: drawerBackdrop,
+      onSelect: (view) => onSwitchView(view),
+    });
+    if (toggle) _mobileDrawer.syncFromTablist(toggle);
   }
 
   // Global keyboard shortcuts:
@@ -2543,6 +2568,11 @@ let _execVList = null;
 // Row height in px. Must match `.executions-log .exec-row { height }`
 // in styles.css — the virtualizer relies on a fixed row size.
 const EXEC_ROW_HEIGHT = 24;
+
+// #408. Mobile navigation drawer instance. Constructed by bindUi once;
+// setViewToggleVisible mirrors per-role visibility into it whenever
+// the tablist re-renders.
+let _mobileDrawer = null;
 
 function renderExecutions() {
   const log = $("executions-log");

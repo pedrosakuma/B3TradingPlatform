@@ -94,6 +94,13 @@
        visible while a session is mounted. `app-shell` is hidden until
        login completes and re-hidden on logout. -->
   <header id="app-shell" class="app-shell topbar" hidden>
+    <!-- #408. Mobile-only hamburger trigger. CSS hides it on
+         viewports >= 768px and hides the inline `.view-toggle`
+         tablist below 768px; the drawer mirrors the tablist's
+         buttons via mobileDrawer.syncFromTablist(). -->
+    <button id="mobile-nav-trigger" class="mobile-nav-trigger" type="button"
+            aria-label="Open navigation menu" aria-expanded="false"
+            aria-controls="mobile-nav-drawer">☰</button>
     <div class="brand">B3TradingPlatform <span class="pill">trader</span></div>
     <div class="status">
       <nav id="view-toggle" class="view-toggle" role="tablist" aria-label="Primary navigation">
@@ -130,6 +137,16 @@
       <button id="logout" class="link-button" type="button" aria-label="Logout">Logout</button>
     </div>
   </header>
+
+  <!-- #408. Mobile navigation drawer. Hidden on >=768px viewports
+       via CSS; on smaller viewports the hamburger trigger toggles
+       its visibility. Items are populated by
+       mobileDrawer.syncFromTablist() to mirror per-role visibility. -->
+  <div id="mobile-nav-backdrop" class="mobile-nav-backdrop" hidden></div>
+  <nav id="mobile-nav-drawer" class="mobile-nav-drawer" role="navigation"
+       aria-label="Main" hidden>
+    <div id="mobile-nav-list" class="mobile-nav-list" role="menu"></div>
+  </nav>
 
   <!-- #342: Transient toast for WebSocket frame-level errors (e.g.,
        unknown_channel, channel auth failure). Lives between the shell
