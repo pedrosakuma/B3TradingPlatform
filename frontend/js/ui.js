@@ -2121,7 +2121,12 @@ function renderDob() {
     // After ~10s without a snapshot, swap the soft "awaiting…" copy for
     // a louder hint that something is wrong with the MD subscription
     // (most commonly: MBP not enabled or the URL is mistyped).
-    const waited = st.selectedSymbolSetAt ? Date.now() - st.selectedSymbolSetAt : 0;
+    // #379: also factor in the last MD-side reset (mdWorker `md.clear` on
+    // reconnect, or an explicit clearAllBooks). Otherwise a long-standing
+    // selection + a fresh reconnect would trip the agressive warning
+    // immediately, even when a healthy snapshot is moments away.
+    const sinceMd = Math.max(st.selectedSymbolSetAt || 0, st.lastMdResetAt || 0);
+    const waited = sinceMd ? Date.now() - sinceMd : 0;
     const msg = waited > DOB_NO_BOOK_AFTER_MS
       ? "no book — check MD settings ⚙"
       : "awaiting book snapshot…";
@@ -2273,7 +2278,10 @@ function renderChart() {
   const perRes = st.candles.get(st.selectedSymbol);
   const entry = perRes?.get(st.chartResolution);
   if (!entry || !entry.ready) {
-    const waited = st.selectedSymbolSetAt ? Date.now() - st.selectedSymbolSetAt : 0;
+    // #379: see renderDob — chart staleness must also reset on MD-side
+    // reconnects, not just on selection changes.
+    const sinceMd = Math.max(st.selectedSymbolSetAt || 0, st.lastMdResetAt || 0);
+    const waited = sinceMd ? Date.now() - sinceMd : 0;
     showEmpty(waited > CHART_NO_DATA_AFTER_MS
       ? "no candle snapshot received"
       : "awaiting candle snapshot…");

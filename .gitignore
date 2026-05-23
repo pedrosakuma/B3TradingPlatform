@@ -55,3 +55,6 @@ docker/.env
 # Local dotnet run data dir (WAL + snapshots + DataProtection keys)
 backend/src/B3.Trading.Host/data/
 
+
+# Local manual-validation compose override (session artifact)
+docker-compose.local-validation.yml

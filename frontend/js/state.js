@@ -162,6 +162,13 @@ const state = {
   // placeholder to a louder "no book — check MD settings ⚙" warning
   // (after ~10s without a snapshot).
   selectedSymbolSetAt: 0,
+  // #379. Wall-clock of the most recent MD-side reset (mdWorker `md.clear`
+  // posted on (re)connect, or an explicit clearAllBooks/clearMarketData).
+  // The DOB / chart "awaiting…" → "no book — check MD settings ⚙" upgrade
+  // measures elapsed time against max(selectedSymbolSetAt, lastMdResetAt)
+  // so a reconnect that lands a fresh snapshot in <10s never flashes the
+  // agressive warning when the symbol selection itself is hours old.
+  lastMdResetAt: 0,
   // Q1.6 (#258). Per-symbol auction-phase state from the public
   // `phases.${symbol}` WS channel. Populated for every watchlist
   // symbol via auto-subscribe; absent until the first snapshot lands
@@ -483,6 +490,9 @@ export function removeMdSymbol(symbol) {
 }
 
 export function clearMarketData() {
+  // Stamp the reset even on an empty cache: the DOB/chart staleness gate
+  // (#379) keys off this regardless of whether marketData held anything.
+  state.lastMdResetAt = Date.now();
   if (state.marketData.size === 0) return;
   state.marketData.clear();
   notify("marketData");
@@ -586,6 +596,7 @@ export function removeBookSymbol(symbol) {
 }
 
 export function clearAllBooks() {
+  state.lastMdResetAt = Date.now();
   if (state.book.size === 0) return;
   state.book.clear();
   notify("book");
