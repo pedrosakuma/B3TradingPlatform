@@ -775,7 +775,7 @@ public class OrderModifyMarginAndProcessorTests
         Assert.Equal((777UL, 778UL, 32.50m * 100), replaceCoord.Commits[0]);
         // Replace-fanout: orig (kind=Replaced) + new (kind=ReplacedNew, #417) on the sink.
         Assert.Equal(2, sink.Events.Count);
-        Assert.Equal(ExecKind.Replaced,    sink.Events.Single(e => e.ClOrdId == 777UL).Kind);
+        Assert.Equal(ExecKind.Replaced, sink.Events.Single(e => e.ClOrdId == 777UL).Kind);
         Assert.Equal(ExecKind.ReplacedNew, sink.Events.Single(e => e.ClOrdId == 778UL).Kind);
         // #417: bot router is wire-faithful — sees ONE ExecutionReport
         // for the replace ack (the new leg, carrying OrigClOrdID via
