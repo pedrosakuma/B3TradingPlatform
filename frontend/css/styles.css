@@ -1209,3 +1209,50 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
   .watchlist-layout { grid-template-columns: 1fr; }
   .ticket-row-quick { flex-wrap: wrap; }
 }
+
+/* ---------- Mobile navigation drawer (#408) ----------
+   The primary tablist + hamburger trigger swap places at the 768px
+   breakpoint. Drawer + backdrop live as body-level siblings of the
+   topbar so they overlay any view; both are display:none-via-[hidden]
+   above 768px (the trigger is also display:none above the breakpoint)
+   so desktop is byte-identical to before. */
+.mobile-nav-trigger {
+  display: none;  /* shown <768px by media query below */
+  background: transparent; border: 1px solid var(--border); color: var(--text);
+  border-radius: 4px; padding: .2rem .55rem; font: inherit; font-size: 1rem;
+  cursor: pointer; line-height: 1;
+}
+.mobile-nav-trigger:hover, .mobile-nav-trigger:focus-visible {
+  border-color: var(--accent); color: var(--accent);
+}
+.mobile-nav-backdrop {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, .55);
+  z-index: 99;
+}
+.mobile-nav-drawer {
+  position: fixed; top: 0; left: 0; bottom: 0;
+  width: min(280px, 80vw);
+  background: var(--panel); border-right: 1px solid var(--border);
+  padding: .75rem .5rem; z-index: 100;
+  display: flex; flex-direction: column; gap: .25rem;
+  box-shadow: 4px 0 18px rgba(0, 0, 0, .35);
+}
+.mobile-nav-list {
+  display: flex; flex-direction: column; gap: .15rem;
+}
+.mobile-drawer-item {
+  background: transparent; border: 0; color: var(--text);
+  font: inherit; font-size: .95rem; text-align: left;
+  padding: .65rem .75rem; border-radius: 4px; cursor: pointer;
+}
+.mobile-drawer-item:hover, .mobile-drawer-item:focus-visible {
+  background: var(--panel-2); outline: none;
+}
+.mobile-drawer-item.active {
+  background: var(--accent); color: #0b1320; font-weight: 600;
+}
+@media (max-width: 767px) {
+  .mobile-nav-trigger { display: inline-flex; align-items: center; }
+  /* Hide the inline tablist on phones — the drawer owns primary nav. */
+  .view-toggle { display: none !important; }
+}
