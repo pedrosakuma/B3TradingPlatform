@@ -129,6 +129,16 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/a11y/package-lock.json
 
+      - name: Set up Chrome (matches axe-core's bundled ChromeDriver)
+        # axe-core/cli auto-downloads the latest ChromeDriver; the
+        # ubuntu-latest preinstalled Chrome lags by ~1 version which
+        # makes ChromeDriver refuse to attach. Install the latest
+        # stable Chrome via setup-chrome so both stay in sync.
+        uses: browser-actions/setup-chrome@v1
+        id: setup-chrome
+        with:
+          chrome-version: stable
+
       - name: Cache Puppeteer / Lighthouse Chromium
         uses: actions/cache@v5
         with:
@@ -140,19 +150,10 @@ jobs:
       - name: Install pinned deps
         run: npm ci --no-audit --no-fund
 
-      - name: Verify system Chrome (axe-core needs it)
-        # ubuntu-latest ships google-chrome-stable; export the path so
-        # axe-core/cli's webdriver picks it up without scanning $PATH.
+      - name: Export Chrome binary path
         run: |
-          if command -v google-chrome >/dev/null 2>&1; then
-            echo "GOOGLE_CHROME_BIN=$(command -v google-chrome)" >>"$GITHUB_ENV"
-          elif command -v chromium-browser >/dev/null 2>&1; then
-            echo "GOOGLE_CHROME_BIN=$(command -v chromium-browser)" >>"$GITHUB_ENV"
-          else
-            echo "::error::No Chrome binary found on the runner."
-            exit 1
-          fi
-          google-chrome --version || chromium-browser --version
+          echo "GOOGLE_CHROME_BIN=${{ steps.setup-chrome.outputs.chrome-path }}" >>"$GITHUB_ENV"
+          "${{ steps.setup-chrome.outputs.chrome-path }}" --version
 
       - name: Serve frontend on :8088
         run: |
