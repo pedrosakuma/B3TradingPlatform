@@ -154,6 +154,13 @@
        up persistent screen real estate. Auto-dismissed after a few seconds. -->
   <div id="ws-error-toast" class="ws-error-toast" role="status" aria-live="polite" hidden></div>
 
+  <!-- #421: Transient toast for successful order submits. Lives next to
+       the ws-error-toast so success and failure surfaces share the same
+       visual region (top of the shell, no layout shift when hidden).
+       Replaces the inline "accepted: …" text that used to live under the
+       ticket form and was easy to miss while scrolling the blotter. -->
+  <div id="order-toast" class="order-toast" role="status" aria-live="polite" hidden></div>
+
   <!-- TRADER VIEW ------------------------------------------------------ -->
   <section id="trader-view" class="view trader-view" role="tabpanel" aria-labelledby="tab-trader" hidden>
     <main class="trader-layout">
