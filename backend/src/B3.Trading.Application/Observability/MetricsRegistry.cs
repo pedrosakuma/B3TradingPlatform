@@ -202,12 +202,22 @@ public static class MetricsRegistry
 
     // #380 path B. Number of WorkingOrderBook entries eagerly retired
     // (MarkCancelled) by the session-version guard. Tag `firm` carries
-    // the FirmId. Burst on a single restart is expected when a real
-    // session roll happens; a steady drip across restarts means the
-    // snapshot is not being refreshed often enough relative to gateway
-    // reconnect frequency.
+    // the FirmId. Post-#419, this counter only ticks for PendingNew
+    // orders (never acked by the venue → safe to cancel); confirmed
+    // working orders go through the staleness overlay instead — see
+    // <see cref="RecoverySessionRolledOrdersStaled"/>.
     public static readonly Counter<long> RecoverySessionRolledOrdersDropped =
         Meter.CreateCounter<long>("trading.recovery.session_rolled_orders_dropped");
+
+    // #419. Number of Working / PartiallyFilled orders flagged stale
+    // (Order.MarkStale) by the session-version guard. Tag `firm`
+    // carries the FirmId. The venue may still hold these orders
+    // (B3 persists the book across FIXP session rolls), so we keep
+    // them visible in the blotter and accounting but gate
+    // Cancel/Modify at the API until a real ER (or a future
+    // OrderMassStatusRequest reconciliation) confirms their fate.
+    public static readonly Counter<long> RecoverySessionRolledOrdersStaled =
+        Meter.CreateCounter<long>("trading.recovery.session_rolled_orders_staled");
 
     // Q2.3 (#270). Fee-keeper deterministic replay synth — surfaces the
     // crash window between ER append (seq N) and FeeAccruedEvent append

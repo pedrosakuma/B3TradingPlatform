@@ -10,13 +10,18 @@ namespace B3.Trading.Application.Tests.Persistence;
 
 /// <summary>
 /// #380 path B — session-version guard on recovery. Verifies that
-/// <see cref="PersistenceRecovery"/> retires WorkingOrderBook entries
-/// whose firm's live FIXP SessionVerId has advanced past the verId the
-/// snapshot recorded. Catches the dev-bridge case where the matching
-/// layer's volume was wiped while trading-host's was kept: every order
-/// the snapshot restored is a ghost on the venue side; STP, modify, and
-/// margin checks would otherwise treat them as live until ER replies
-/// that never come.
+/// <see cref="PersistenceRecovery"/> reacts to a firm whose live FIXP
+/// SessionVerId has advanced past the verId the snapshot recorded.
+///
+/// <para>
+/// Per <see href="https://github.com/pedrosakuma/B3TradingPlatform/issues/419">#419</see>
+/// the reaction is two-tier: <see cref="Order.MarkStale"/> for
+/// confirmed Working / PartiallyFilled orders (the venue typically
+/// persists the book across FIXP session rolls — keep them visible
+/// but gate Cancel/Modify until reconciliation), <see cref="Order.MarkCancelled"/>
+/// for never-acked PendingNew orders (no venue record possible under
+/// any session version).
+/// </para>
 /// </summary>
 public class PersistenceRecoverySessionVerGuardTests : IDisposable
 {
@@ -52,7 +57,8 @@ public class PersistenceRecoverySessionVerGuardTests : IDisposable
     [Fact]
     public async Task RolledForward_RetiresAllWorkingOrdersForThatFirm()
     {
-        // Phase 1: snapshot 2 firms with verId 5 each, 2 working orders each.
+        // Phase 1: snapshot 2 firms with verId 5 each, 2 PendingNew orders each.
+        // PendingNew = no venue ack ever received → cancel-fallback path.
         await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
         {
             var (book, _, _, ownership, snapshotter, dispatcher, _, _, _) =
@@ -80,8 +86,9 @@ public class PersistenceRecoverySessionVerGuardTests : IDisposable
         }
 
         // Phase 2: cold boot — provider reports FIRM01 advanced to 8,
-        // FIRM02 still at 5. FIRM01 must lose all its orders; FIRM02
-        // must keep them.
+        // FIRM02 still at 5. FIRM01 PendingNew orders take the
+        // cancel-fallback (#419) since they were never acked; FIRM02
+        // keeps everything.
         await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
         {
             var provider = new FakeFirmSessionStatusProvider(new[]
@@ -99,14 +106,77 @@ public class PersistenceRecoverySessionVerGuardTests : IDisposable
 
             await recovery.RunAsync();
 
+            // PendingNew + session-roll → cancelled (no possible venue record).
             Assert.True(book.TryGet(1UL, out var o1) && o1!.Status == OrderStatus.Cancelled);
+            Assert.False(o1!.IsStale);
             Assert.True(book.TryGet(2UL, out var o2) && o2!.Status == OrderStatus.Cancelled);
+            Assert.False(o2!.IsStale);
             Assert.True(book.TryGet(10UL, out var o10) && o10!.Status == OrderStatus.PendingNew);
             Assert.True(book.TryGet(11UL, out var o11) && o11!.Status == OrderStatus.PendingNew);
 
-            // Retired orders disappear from the "working" view.
+            // Cancelled orders drop out of the "working" view.
             Assert.Empty(book.EnumerateForFirm("FIRM01"));
             Assert.Equal(2, book.EnumerateForFirm("FIRM02").Count);
+        }
+    }
+
+    [Fact]
+    public async Task RolledForward_ConfirmedOrders_AreStaled_NotCancelled()
+    {
+        // #419. Confirmed (Working / PartiallyFilled) orders survive a
+        // session roll — the venue persists the book — but get the
+        // staleness overlay so Cancel/Modify is gated at the API until
+        // a real ER lifts the flag. Verifies the order stays visible
+        // and keeps its pre-roll status.
+        await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
+        {
+            var (book, _, _, ownership, snapshotter, dispatcher, _, _, _) =
+                BuildState(store, new FakeFirmSessionStatusProvider(new[]
+                {
+                    new FirmSessionStatus("FIRM01", "established", false, 5u),
+                }));
+            DispatchSubmit(dispatcher, book, ownership, 1UL, "alice", "FIRM01", "PETR4");
+            // Confirm at the venue so the order transitions PendingNew → Working
+            // (mirrors what an inbound OrderConfirmed ER would do during normal
+            // operation, captured into the snapshot we're about to write).
+            dispatcher.WithSnapshotLock(_ =>
+            {
+                Assert.True(book.TryGet(1UL, out var order));
+                order!.MarkWorking();
+            });
+
+            var snapStore = new SnapshotStore(_root, "test");
+            PlatformSnapshot? snap = null;
+            dispatcher.WithSnapshotLock(seq => snap = snapshotter.Capture(seq));
+            snapStore.Write(snap!);
+            await store.FlushAsync();
+        }
+
+        await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
+        {
+            var provider = new FakeFirmSessionStatusProvider(new[]
+            {
+                new FirmSessionStatus("FIRM01", "established", false, 8u),
+            });
+            var (book, _, killSwitch, ownership, snapshotter, _, processor, _, algos) =
+                BuildState(store, provider);
+            var replayer = new EventReplayer(book, ownership, killSwitch, new SymbolHaltService(),
+                new SessionPhaseService(), processor, algos, new ClOrdIdPrefixRegistry(), new AlgoIdRegistry());
+            var recovery = new PersistenceRecovery(store, snapshotter, replayer,
+                new SnapshotStore(_root, "test"), NullLogger<PersistenceRecovery>.Instance,
+                orders: book, ownership: ownership, firmSessionStatus: provider);
+
+            await recovery.RunAsync();
+
+            Assert.True(book.TryGet(1UL, out var o1));
+            Assert.Equal(OrderStatus.Working, o1!.Status);
+            Assert.True(o1.IsStale);
+            Assert.Contains("session-rolled", o1.StaleReason ?? "");
+            Assert.NotNull(o1.StaledAtUtc);
+
+            // Stale orders MUST remain enumerable so positions/cash/blotter
+            // reflect the live venue state until reconciliation completes.
+            Assert.Single(book.EnumerateForFirm("FIRM01"));
         }
     }
 
