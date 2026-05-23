@@ -65,6 +65,9 @@ internal static class OutboundExecutionReportEncoder
             ExecKind.PartialFill or ExecKind.Fill => EncodeTrade(ev, externalClOrdId),
             ExecKind.Canceled => EncodeCancel(ev, externalClOrdId, externalOrigClOrdId),
             ExecKind.Replaced => EncodeModify(ev, externalClOrdId, externalOrigClOrdId),
+            // #417. New-leg face of the same FIX ExecType=Replace ack;
+            // wire-encoded identically.
+            ExecKind.ReplacedNew => EncodeModify(ev, externalClOrdId, externalOrigClOrdId),
             ExecKind.Rejected => EncodeReject(ev, externalClOrdId, externalOrigClOrdId),
             _ => throw new NotSupportedException(
                 $"ExecKind {ev.Kind} has no SBE ExecutionReport mapping in v0."),

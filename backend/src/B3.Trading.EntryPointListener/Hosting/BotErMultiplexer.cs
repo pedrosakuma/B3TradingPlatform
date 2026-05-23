@@ -194,7 +194,10 @@ public sealed class BotErMultiplexer : BackgroundService, IBotErRouter, IExecuti
         // not yet correlate the raw cancel-side id (sub-issue G when
         // raw side-channel lands), so we omit it for cancel/replace
         // and the bot reads OrigClOrdID = its original ClOrdID.
-        ulong externalOrig = (ev.Kind is ExecKind.Canceled or ExecKind.Replaced)
+        // #417: ReplacedNew is the new-leg companion of Replaced;
+        // same externalOrig treatment so the bot sees a consistent
+        // OrigClOrdID across both legs of the cancel-replace ack.
+        ulong externalOrig = (ev.Kind is ExecKind.Canceled or ExecKind.Replaced or ExecKind.ReplacedNew)
             ? mapping.ExternalClOrdId
             : 0UL;
 
