@@ -5,12 +5,13 @@
   "description": "A11y (axe-core) + perf (Lighthouse CI) gate for the static frontend. Pinned deps; runs on every PR via .github/workflows/ci.yml.",
   "scripts": {
     "serve": "http-server .. -p 8088 -c-1 -s",
-    "axe": "axe http://127.0.0.1:8088/ --exit --tags wcag2a,wcag2aa,wcag21a,wcag21aa",
+    "axe": "node scripts/run-axe.mjs",
     "lhci": "lhci autorun --config=./lighthouserc.json"
   },
   "devDependencies": {
-    "@axe-core/cli": "4.10.0",
+    "@axe-core/puppeteer": "^4.10.2",
     "@lhci/cli": "0.14.0",
-    "http-server": "14.1.1"
+    "http-server": "14.1.1",
+    "puppeteer": "^23.10.4"
   }
 }

@@ -129,18 +129,7 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/a11y/package-lock.json
 
-      - name: Set up Chrome + matching ChromeDriver
-        # The runner's preinstalled google-chrome lags axe-core's
-        # selenium-webdriver auto-download, so we pin both via
-        # setup-chrome and feed the explicit driver path into axe.
-        uses: browser-actions/setup-chrome@v1
-        id: setup-chrome
-        with:
-          chrome-version: stable
-          install-dependencies: true
-          install-chromedriver: true
-
-      - name: Cache Puppeteer / Lighthouse Chromium
+      - name: Cache Puppeteer Chromium
         uses: actions/cache@v5
         with:
           path: ~/.cache/puppeteer
@@ -149,14 +138,18 @@ jobs:
             ${{ runner.os }}-puppeteer-
 
       - name: Install pinned deps
+        # Triggers puppeteer's postinstall which downloads its bundled
+        # Chromium into ~/.cache/puppeteer (cache-hit reuses it).
         run: npm ci --no-audit --no-fund
 
-      - name: Export Chrome + ChromeDriver paths
+      - name: Resolve Puppeteer Chromium for Lighthouse
+        # lhci uses chrome-launcher, which honours $CHROME_PATH. Point it
+        # at the same Chromium puppeteer downloaded so both audits run
+        # against the same binary.
         run: |
-          echo "GOOGLE_CHROME_BIN=${{ steps.setup-chrome.outputs.chrome-path }}" >>"$GITHUB_ENV"
-          echo "CHROMEDRIVER_PATH=${{ steps.setup-chrome.outputs.chromedriver-path }}" >>"$GITHUB_ENV"
-          "${{ steps.setup-chrome.outputs.chrome-path }}" --version
-          "${{ steps.setup-chrome.outputs.chromedriver-path }}" --version
+          CHROME_BIN="$(node -e 'process.stdout.write(require("puppeteer").executablePath())')"
+          echo "CHROME_PATH=${CHROME_BIN}" >>"$GITHUB_ENV"
+          "${CHROME_BIN}" --version
 
       - name: Serve frontend on :8088
         run: |
@@ -172,20 +165,12 @@ jobs:
           echo "::error::http-server never came up"; cat /tmp/http-server.log; exit 1
 
       - name: axe-core (WCAG 2.1 AA)
-        run: |
-          npx axe http://127.0.0.1:8088/ \
-            --exit \
-            --tags wcag2a,wcag2aa,wcag21a,wcag21aa \
-            --chrome-path "$GOOGLE_CHROME_BIN" \
-            --chromedriver-path "$CHROMEDRIVER_PATH"
+        # Wrapper script launches puppeteer with --no-sandbox so Chrome
+        # can start as root on the runner; @axe-core/cli didn't expose
+        # that flag and crashed on launch.
+        run: npm run axe
 
       - name: Lighthouse CI (a11y + perf)
-        # chrome-launcher prefers $CHROME_PATH; the bundled Puppeteer
-        # Chromium under ~/.cache/puppeteer is fine, but explicitly
-        # pointing at the system Chrome keeps both audits on the same
-        # build.
-        env:
-          CHROME_PATH: ${{ env.GOOGLE_CHROME_BIN }}
         run: npx lhci autorun --config=./lighthouserc.json
 
       - name: Tail http-server log on failure
