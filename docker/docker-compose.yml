@@ -14,7 +14,12 @@
 #   - matching-data volume → matching-platform's per-channel snapshots +
 #     WAL (upstream pedrosakuma/B3MatchingPlatform#260 phase work). A
 #     `docker compose restart matching-platform` no longer drops the
-#     working order book on the floor.
+#     order book on the floor, but FIXP session state (SessionVerId,
+#     seq numbers, claim registry) is still in-memory only — every
+#     client must fully re-Negotiate with a fresh SessionVerId after
+#     a restart, and the trading-host stales surviving working orders
+#     via ReconcileFirmSessionVerIds (#420). Tracked upstream as
+#     pedrosakuma/B3MatchingPlatform#405.
 #
 # Topology (all on b3-net):
 #
