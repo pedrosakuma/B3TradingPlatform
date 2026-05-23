@@ -1,5 +1,6 @@
 using B3.Trading.Application.Risk;
 using B3.Trading.Application;
+using B3.Trading.Application.UserBots;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -350,9 +351,121 @@ public class ExecutionReportProcessorTests
         Assert.True(order.IsStale);
     }
 
+    [Fact]
+    public void ApplyReplaceRejected_EmitsUiVisibleEvent_ScopedToOriginalClOrdId()
+    {
+        // #381 regression: a venue replace-reject (PUT /orders/{orig} ->
+        // venue rejected the new ClOrdID) used to publish ONLY the synthetic
+        // Rejected event tagged BotRouter-only (per #172 F), so the WS hub
+        // never observed the rejection. The trader who clicked Modify saw
+        // nothing — Modify button silently re-enabled, no row update, no
+        // toast. Now ApplyReplaceRejected MUST also publish a second event
+        // scoped to intent.OriginalClOrdId with ExecKind.ReplaceRejected so
+        // the operator sees the modify failed.
+        var ownership = new OrderOwnershipMap();
+        var book = new WorkingOrderBook();
+        var positions = new PositionKeeper();
+        var sink = new RecordingSink();
+        var botRouter = new RecordingBotErRouter();
+        var replacements = new PendingReplacementRegistry();
+        var proc = new ExecutionReportProcessor(
+            ownership, book, positions, sink, new NoOpMarginProvider(),
+            NullLogger<ExecutionReportProcessor>.Instance,
+            replacements: replacements,
+            botErRouter: botRouter);
+
+        var owner = new EndClientId("alice");
+        var orig = new Order(1UL, owner, "PETR4", 4321UL, OrderSide.Sell, OrderType.Limit, 100, 32.50m);
+        book.TryAdd(orig);
+        ownership.Register(1UL, owner);
+        orig.MarkWorking();
+
+        // Operator clicks Modify: a fresh replace-side ClOrdID (3) is
+        // registered as in-flight against orig=1. The new request reaches
+        // the venue which rejects it (reject_code=5 / unknown order).
+        var intent = new OrderReplacementIntent(
+            OriginalClOrdId: 1UL, NewClOrdId: 3UL,
+            Owner: owner, Symbol: "PETR4", SecurityId: 4321UL,
+            Side: OrderSide.Sell, Type: OrderType.Limit,
+            NewQuantity: 100, NewPrice: 32.55m,
+            FirmId: "FIRM01", ParentAlgoId: null, AlgoSliceSeq: null);
+        Assert.True(replacements.TryAdd(intent));
+
+        proc.Apply(3UL, ExecKind.Rejected, leaves: 0, cumQty: 0, lastQty: 0, lastPx: 0m, rejectReason: "reject_code=5");
+
+        // Bot side: replace-side ClOrdID receives the synthetic Rejected
+        // (preserves #172 F — bots own the ClOrdIDs they issue).
+        Assert.Single(botRouter.Events);
+        var botEv = botRouter.Events[0];
+        Assert.Equal(3UL, botEv.ClOrdId);
+        Assert.Equal(ExecKind.Rejected, botEv.Kind);
+        Assert.Equal(OrderStatus.Rejected, botEv.Status);
+
+        // UI side: the new #381 event scoped to OrigClOrdId, status preserved
+        // (Working, since orig was MarkWorking-ed), Leaves/Cum copied from
+        // the still-alive original Order, and kind discriminated as
+        // ReplaceRejected so the FE can clear inflightModifies + toast.
+        Assert.Single(sink.Events);
+        var uiEv = sink.Events[0];
+        Assert.Equal(intent.OriginalClOrdId, uiEv.ClOrdId);
+        Assert.Equal(ExecKind.ReplaceRejected, uiEv.Kind);
+        Assert.Equal(OrderStatus.Working, uiEv.Status);
+        Assert.Equal(orig.LeavesQuantity, uiEv.LeavesQuantity);
+        Assert.Equal(orig.CumulativeQuantity, uiEv.CumulativeQuantity);
+        Assert.Equal("reject_code=5", uiEv.RejectReason);
+        Assert.Equal(intent.FirmId, uiEv.FirmId);
+
+        // Original order itself is untouched (replace-reject is non-economic).
+        Assert.Equal(OrderStatus.Working, orig.Status);
+    }
+
+    [Fact]
+    public void ApplyReplaceRejected_OrigMissingFromBook_StillEmitsUiVisibleEvent_WithSafeDefaults()
+    {
+        // Edge case: the original Order has already terminalised (rare race
+        // — late ApplyReplaceRejected for a replace that was issued just
+        // before a fill arrived and Filled the original). The UI-visible
+        // event still ships so the operator's Modify button gets unstuck;
+        // Leaves/Cum fall back to 0 and Status defaults to Working (the
+        // FE only uses the event as a "modify failed" signal in this case).
+        var ownership = new OrderOwnershipMap();
+        var book = new WorkingOrderBook();
+        var sink = new RecordingSink();
+        var replacements = new PendingReplacementRegistry();
+        var proc = new ExecutionReportProcessor(
+            ownership, book, new PositionKeeper(), sink, new NoOpMarginProvider(),
+            NullLogger<ExecutionReportProcessor>.Instance,
+            replacements: replacements);
+
+        var owner = new EndClientId("alice");
+        ownership.Register(1UL, owner);
+        var intent = new OrderReplacementIntent(
+            OriginalClOrdId: 1UL, NewClOrdId: 3UL,
+            Owner: owner, Symbol: "PETR4", SecurityId: 4321UL,
+            Side: OrderSide.Sell, Type: OrderType.Limit,
+            NewQuantity: 100, NewPrice: 32.55m,
+            FirmId: "FIRM01", ParentAlgoId: null, AlgoSliceSeq: null);
+        Assert.True(replacements.TryAdd(intent));
+
+        proc.Apply(3UL, ExecKind.Rejected, leaves: 0, cumQty: 0, lastQty: 0, lastPx: 0m, rejectReason: "reject_code=5");
+
+        Assert.Single(sink.Events);
+        var uiEv = sink.Events[0];
+        Assert.Equal(1UL, uiEv.ClOrdId);
+        Assert.Equal(ExecKind.ReplaceRejected, uiEv.Kind);
+        Assert.Equal(0, uiEv.LeavesQuantity);
+        Assert.Equal(0, uiEv.CumulativeQuantity);
+    }
+
     private sealed class RecordingSink : IExecutionEventSink
     {
         public readonly List<ExecutionEvent> Events = new();
         public void Publish(ExecutionEvent ev) => Events.Add(ev);
+    }
+
+    private sealed class RecordingBotErRouter : IBotErRouter
+    {
+        public readonly List<ExecutionEvent> Events = new();
+        public void Route(ExecutionEvent ev) => Events.Add(ev);
     }
 }

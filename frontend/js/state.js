@@ -319,6 +319,17 @@ export function applyExecutionsDelta(row) {
   if (state.executions.length > EXECUTIONS_CAPACITY) {
     state.executions.splice(0, state.executions.length - EXECUTIONS_CAPACITY);
   }
+  // #381. Replace-reject is non-economic — the backend does NOT emit an
+  // orders delta for the original ClOrdID (its Status/Leaves/Cum are
+  // preserved). Without explicit clearing here the operator's Modify
+  // button stays stuck in the "inflight" spin state forever, since the
+  // optimistic markModifyInflight(clOrdId, true) set at submit-time only
+  // gets cleared by a subsequent orders delta or a successful Replaced
+  // ER. The new ExecKind.ReplaceRejected (scoped to OriginalClOrdId) is
+  // our cue to release the spinner so the trader can retry.
+  if (row && row.kind === "ReplaceRejected" && row.clOrdId != null) {
+    markModifyInflight(row.clOrdId, false);
+  }
   notify("executions");
 }
 

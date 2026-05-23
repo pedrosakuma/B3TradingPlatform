@@ -876,6 +876,56 @@ public sealed class ExecutionReportProcessor
         {
             _botErRouter.Route(rejectedEv);
         }
+
+        // #381. The replace-side BotRouter event above intentionally
+        // does NOT reach the WS hub (orders.me has no record of the
+        // replace-side ClOrdID). But the operator who clicked Modify
+        // on the *original* ClOrdID has every right to know their
+        // PUT /orders/{clOrdId} got rejected — without this second
+        // event the UI silently re-enables the Modify button as if
+        // nothing happened. Emit a discriminated ExecKind.ReplaceRejected
+        // scoped to intent.OriginalClOrdId, carrying the original's
+        // preserved Leaves/Cumulative so the UI doesn't have to special-
+        // case "this is a reject, ignore the quantities". Route to
+        // WsHub | DropCopy — never BotRouter, to avoid double-delivery
+        // to bots that already received the synthetic Rejected above.
+        long origLeaves = 0;
+        long origCum = 0;
+        var origStatus = OrderStatus.Working;
+        if (_orders.TryGet(intent.OriginalClOrdId, out var origOrder) && origOrder is not null)
+        {
+            origLeaves = origOrder.LeavesQuantity;
+            origCum = origOrder.CumulativeQuantity;
+            origStatus = origOrder.Status;
+        }
+
+        var origVisibleEv = new ExecutionEvent(
+            intent.Owner,
+            intent.OriginalClOrdId,
+            intent.Symbol,
+            intent.Side,
+            origStatus,
+            ExecKind.ReplaceRejected,
+            LeavesQuantity: origLeaves,
+            CumulativeQuantity: origCum,
+            LastQuantity: 0,
+            LastPrice: 0m,
+            RejectReason: rejectReason,
+            TimestampUtc: DateTimeOffset.UtcNow,
+            IsNativeStp: false,
+            FirmId: intent.FirmId);
+        if (fanOut is not null)
+        {
+            fanOut.Add(origVisibleEv,
+                Persistence.ExecutionFanOutTargets.WsHub | Persistence.ExecutionFanOutTargets.DropCopy);
+        }
+        else
+        {
+            // Test / legacy path with no fan-out registry: surface via
+            // the direct sink. BotRouter is deliberately not invoked —
+            // bots get the replace-side Rejected event above.
+            _sink.Publish(origVisibleEv);
+        }
     }
 
     private void ApplyReplaceAccepted(
@@ -1118,4 +1168,27 @@ public enum ExecKind
     /// double-update consumers for the same observation.
     /// </summary>
     Restored,
+    /// <summary>
+    /// #381. Synthetic projection of a venue-side replace-reject (FIXP
+    /// <c>OrderCancelReplaceRequest</c> rejected, surfaced as ER kind
+    /// <see cref="Rejected"/> against the replace-side ClOrdID and
+    /// intercepted by the <c>PendingReplacementRegistry</c> consumer).
+    /// The original order is untouched (status stays Working /
+    /// PartiallyFilled) but the operator who issued the
+    /// <c>PUT /orders/{clOrdId}</c> must know the modify failed.
+    /// <para>
+    /// Routing: the <see cref="Rejected"/> event for the *replace-side*
+    /// ClOrdID continues to flow to <c>BotRouter</c> only (per #172 F:
+    /// the WS hub has no <c>orders.me</c> record for a ClOrdID that
+    /// never opened an order). The <c>ReplaceRejected</c> event scoped
+    /// to <c>intent.OriginalClOrdId</c> targets <c>WsHub | DropCopy</c>
+    /// — never <c>BotRouter</c>, to avoid double-delivery to bots that
+    /// already received the <see cref="Rejected"/> event via the
+    /// existing path.
+    /// </para>
+    /// Carries the original's preserved <c>LeavesQuantity</c> /
+    /// <c>CumulativeQuantity</c> and the venue's reject reason; no
+    /// fill price (no economic event).
+    /// </summary>
+    ReplaceRejected,
 }
