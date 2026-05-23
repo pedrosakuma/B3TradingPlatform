@@ -843,7 +843,6 @@ function handleApplyMd({ url, symbols }) {
 // per-selection promotion needed; selectedSymbol just drives which
 // ladder the DOB renders.
 let lastAutoFilledTicketSymbol = null;
-let _successToastTimer = null;
 
 function handleSelectSymbol(symbol) {
   // Single global selector drives DOB, chart and tape. The DOB reads
@@ -991,16 +990,12 @@ async function handleSubmitOrder(payload) {
   state.setSubmitInflight({ startedAt: Date.now() });
   try {
     const resp = await submitOrder(session.backend, session.token, payload);
+    // #421: success surface is the standalone toast above the panel
+    // grid — easier to notice than the previous inline text under the
+    // ticket form, and doesn't fight for space with the next submit.
     const msg = `accepted: ${resp.clOrdId}${resp.status ? ` (${resp.status})` : ""}`;
-    ui.setTicketFeedback(msg, "ok");
+    ui.showOrderToast(msg, "ok");
     ui.clearTicket();
-    // Auto-dismiss the success toast after 5s, but only if the message
-    // hasn't been replaced (e.g. by a later submit's warning/error).
-    if (_successToastTimer) clearTimeout(_successToastTimer);
-    _successToastTimer = setTimeout(() => {
-      _successToastTimer = null;
-      ui.setTicketFeedbackIfMatches(msg, null);
-    }, 5000);
   } catch (err) {
     if (err.status === 401) { logout(); return; }
     ui.setTicketFeedback(err.message || "submit failed", "error");

@@ -1273,14 +1273,35 @@ export function showWsErrorToast(message) {
   }, WS_ERROR_TOAST_MS);
 }
 
-// Clear the ticket feedback only if it still shows `expected`. Used by
-// the success-toast auto-dismiss so a later warning/error message that
-// landed before the timer fires isn't accidentally erased.
-export function setTicketFeedbackIfMatches(expected, replacement) {
-  const el = $("ticket-feedback");
-  if (!el || el.hidden) return;
-  if (el.textContent !== expected) return;
-  setTicketFeedback(replacement, null);
+// #421: Transient toast for order-submit feedback. Replaces the
+// "accepted: …" text that used to sit under the ticket form (easy to
+// miss when the trader's eyes were on the blotter). `kind` is one of
+// "ok" (default — green), "warn" (yellow), "error" (red). Auto-dismisses
+// after ORDER_TOAST_MS; successive calls restart the timer. Pass
+// `null` to hide immediately.
+const ORDER_TOAST_MS = 5_000;
+let _orderToastTimer = null;
+export function showOrderToast(message, kind) {
+  const el = $("order-toast");
+  if (!el) return;
+  if (!message) {
+    if (_orderToastTimer) { clearTimeout(_orderToastTimer); _orderToastTimer = null; }
+    el.hidden = true;
+    el.textContent = "";
+    el.className = "order-toast";
+    return;
+  }
+  el.hidden = false;
+  el.textContent = message;
+  const cls = kind === "warn" ? "warn" : kind === "error" ? "error" : "";
+  el.className = cls ? `order-toast ${cls}` : "order-toast";
+  if (_orderToastTimer) clearTimeout(_orderToastTimer);
+  _orderToastTimer = setTimeout(() => {
+    _orderToastTimer = null;
+    el.hidden = true;
+    el.textContent = "";
+    el.className = "order-toast";
+  }, ORDER_TOAST_MS);
 }
 
 // Submit button disabled-state is the OR of two independent conditions

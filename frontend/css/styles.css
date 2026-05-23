@@ -665,6 +665,27 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
   font-size: .8rem; font-variant-numeric: tabular-nums;
 }
 
+/* #421: Transient success/info toast for order submits. Same slot as
+ * .ws-error-toast (lives between the topbar and the panel grid, takes
+ * no space when hidden) but green-tinted by default. Kind modifiers
+ * (.warn / .error) let the same surface carry a fat-finger warning or
+ * a submit failure when we want them above the fold rather than buried
+ * under the ticket form. */
+.order-toast {
+  margin: .35rem 1rem 0; padding: .35rem .7rem;
+  background: rgba(38,166,154,.14); color: var(--green, #26a69a);
+  border: 1px solid rgba(38,166,154,.35); border-radius: 4px;
+  font-size: .8rem; font-variant-numeric: tabular-nums;
+}
+.order-toast.warn {
+  background: rgba(255,167,38,.14); color: var(--yellow, #ffa726);
+  border-color: rgba(255,167,38,.35);
+}
+.order-toast.error {
+  background: rgba(239,83,80,.14); color: var(--red);
+  border-color: rgba(239,83,80,.35);
+}
+
 /* ---------- Session-expiry modal + helpers (section 4 of #30) ---------- */
 .muted-cell { color: var(--muted); }
 .muted-line { color: var(--muted); margin: 0 0 .4rem; font-size: .8rem; }
