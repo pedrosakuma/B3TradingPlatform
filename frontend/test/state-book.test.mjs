@@ -154,6 +154,40 @@ test('clearAllBooks empties the book Map', async () => {
   assert.equal(s.getState().book.size, 0);
 });
 
+test('#379: clearAllBooks stamps lastMdResetAt so DOB gate resets on MD reconnect', async () => {
+  const s = await freshState();
+  assert.equal(s.getState().lastMdResetAt, 0);
+  s.applyMdLevelSnapshot({ symbol: 'PETR4', bids: [], asks: [] });
+  const before = Date.now();
+  s.clearAllBooks();
+  const after = Date.now();
+  const ts = s.getState().lastMdResetAt;
+  assert.ok(ts >= before && ts <= after,
+    `lastMdResetAt ${ts} should fall in [${before}, ${after}]`);
+});
+
+test('#379: clearAllBooks stamps lastMdResetAt even when the book Map is already empty', async () => {
+  // mdWorker posts md.clear on every (re)connect attempt — the very first
+  // attempt finds an empty book Map but we still need the stamp so the
+  // DOB renderer doesn't trip the agressive warning against a stale
+  // selectedSymbolSetAt from a prior session-storage rehydration.
+  const s = await freshState();
+  assert.equal(s.getState().book.size, 0);
+  s.clearAllBooks();
+  assert.notEqual(s.getState().lastMdResetAt, 0);
+});
+
+test('#379: clearMarketData stamps lastMdResetAt so chart gate resets on MD reconnect', async () => {
+  const s = await freshState();
+  assert.equal(s.getState().lastMdResetAt, 0);
+  const before = Date.now();
+  s.clearMarketData();
+  const after = Date.now();
+  const ts = s.getState().lastMdResetAt;
+  assert.ok(ts >= before && ts <= after,
+    `lastMdResetAt ${ts} should fall in [${before}, ${after}]`);
+});
+
 test('setSelectedSymbol notifies "selectedSymbol" slice', async () => {
   const s = await freshState();
   const seen = [];
