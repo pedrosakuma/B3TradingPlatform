@@ -720,6 +720,20 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
 }
 .modal-actions button[type="submit"]:hover { filter: brightness(1.1); }
 
+/*
+ * Modify-modal helper line.
+ *
+ * The qty input on the modify modal represents the **new remaining**
+ * (leaves) quantity the trader wants the order to keep working — this
+ * is more intuitive after a partial fill than "new total". The wire
+ * (FIX OrderCancelReplaceRequest.OrderQty / our equivalent) is always
+ * the new total = cum + remaining, computed at submit time. The hint
+ * below the qty input shows the trader exactly what total the wire
+ * will carry so there is no ambiguity between UX and protocol.
+ */
+.modify-hint { margin: -.4rem 0 0; color: var(--muted); font-size: .75rem; }
+.modify-hint.error { color: var(--red); }
+
 /* ---------- Bot credentials view (sub-issue #169) ---------- */
 .bot-credentials-view {
   display: flex; flex-direction: column; height: 100vh; overflow: auto;

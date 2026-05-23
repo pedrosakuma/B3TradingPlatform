@@ -276,6 +276,51 @@ export function setSessionModalError(message) {
 }
 
 // ── Modify-order modal (slice 5 of #122) ───────────────────────────
+//
+// UX-vs-wire contract (#421 follow-up):
+//
+//   The "New quantity" field shown to the trader represents the
+//   **new remaining (leaves)** quantity they want to keep working.
+//   After a partial fill, "leaves" is the number the trader
+//   actually thinks about ("I have 100 still working — change it
+//   to 80"); pre-filling the field with the original total qty
+//   would force the trader to mentally re-add the cum, which is
+//   easy to get wrong (esp. on a busy book).
+//
+//   The wire, however, MUST stay 100% FIX-conformant:
+//   OrderCancelReplaceRequest.OrderQty (38) is always the
+//   **new total** = cumQty + newLeaves, with the invariant
+//   OrderQty ≥ CumQty. The conversion happens at submit time
+//   inside `computeWireOrderQty`, and a live hint under the input
+//   ("→ total wire = cum 100 + remaining 80 = 180") makes the
+//   translation visible to the trader so the UX abstraction never
+//   hides what we are actually sending.
+//
+//   See `modifyModalDefaultLeaves` / `computeWireOrderQty` for the
+//   pure helpers exercised by frontend/test/modify-modal-leaves.
+
+// Pure helper: choose the input default for the modify modal.
+// Falls back to the order's total quantity for orders that never
+// touched a fill (cum=0 ⇒ leaves==quantity anyway).
+export function modifyModalDefaultLeaves(order) {
+  if (!order) return "";
+  const leaves = Number(order.leavesQuantity);
+  if (Number.isFinite(leaves) && leaves > 0) return leaves;
+  const qty = Number(order.quantity);
+  if (Number.isFinite(qty) && qty > 0) return qty;
+  return "";
+}
+
+// Pure helper: translate the UX-level "new leaves" back into the
+// wire-level OrderQty. Returns NaN on bad input so callers can
+// short-circuit with a validation error.
+export function computeWireOrderQty(newLeaves, cumQty) {
+  const lv = Number(newLeaves);
+  const cum = Number(cumQty);
+  if (!Number.isFinite(lv) || !Number.isInteger(lv) || lv <= 0) return NaN;
+  if (!Number.isFinite(cum) || cum < 0) return NaN;
+  return cum + lv;
+}
 
 // The modal stores its "current target" on the form element via
 // dataset so the submit handler doesn't depend on UI state churn
@@ -295,11 +340,18 @@ function openModifyModal(clOrdId) {
   const qty   = $("modify-modal-qty");
   const price = $("modify-modal-price");
   const summary = $("modify-modal-summary");
+  const hint  = $("modify-modal-wire-hint");
   const error = $("modify-modal-error");
   if (!modal || !form || !qty) return;
 
+  // Snapshot cumQty on the form so the submit handler converts
+  // leaves→wire against the exact value the trader saw when the
+  // modal opened, even if a background ER bumps cum mid-edit.
   form.dataset.clordid = clOrdId;
-  qty.value = order.quantity ?? "";
+  const cumSnapshot = Number(order.cumulativeQuantity) || 0;
+  form.dataset.cumqty = String(cumSnapshot);
+
+  qty.value = modifyModalDefaultLeaves(order);
   if (price) {
     if (order.price == null) {
       price.value = "";
@@ -315,6 +367,7 @@ function openModifyModal(clOrdId) {
       `Order ${order.clOrdId} — ${order.symbol} ${order.side} ${order.type} ` +
       `(qty ${order.quantity}, leaves ${order.leavesQuantity}, cum ${order.cumulativeQuantity}, px ${px})`;
   }
+  refreshModifyWireHint();
   if (error) { error.hidden = true; error.textContent = ""; }
   rememberFocusForModal("modify-modal");
   modal.hidden = false;
@@ -323,12 +376,42 @@ function openModifyModal(clOrdId) {
   setTimeout(() => qty.focus(), 0);
 }
 
+// Recompute the "→ wire total = cum + remaining = N" hint shown
+// under the qty input. Called on open and on every input change so
+// the trader always sees the OrderQty that will hit the wire.
+function refreshModifyWireHint() {
+  const form  = $("modify-modal-form");
+  const qty   = $("modify-modal-qty");
+  const hint  = $("modify-modal-wire-hint");
+  if (!form || !qty || !hint) return;
+  const cum = Number(form.dataset.cumqty) || 0;
+  const raw = qty.value.trim();
+  if (raw === "") {
+    hint.textContent = `Wire OrderQty = cum ${cum} + remaining ?`;
+    hint.classList.remove("error");
+    return;
+  }
+  const wire = computeWireOrderQty(raw, cum);
+  if (!Number.isFinite(wire)) {
+    hint.textContent = "Remaining must be a positive integer.";
+    hint.classList.add("error");
+    return;
+  }
+  hint.textContent = `Wire OrderQty = cum ${cum} + remaining ${Number(raw)} = ${wire}`;
+  hint.classList.remove("error");
+}
+
 export function closeModifyModal() {
   const modal = $("modify-modal");
   const form  = $("modify-modal-form");
+  const hint  = $("modify-modal-wire-hint");
   if (!modal) return;
   modal.hidden = true;
-  if (form) delete form.dataset.clordid;
+  if (form) {
+    delete form.dataset.clordid;
+    delete form.dataset.cumqty;
+  }
+  if (hint) { hint.textContent = ""; hint.classList.remove("error"); }
   setModifyModalError(null);
   setModifyModalSubmitting(false);
   restoreFocusForModal("modify-modal");
@@ -607,9 +690,15 @@ function submitModifyForm() {
   if (!clOrdId) return;
 
   const qtyRaw = qtyEl.value.trim();
-  const qty = Number(qtyRaw);
-  if (!Number.isFinite(qty) || qty <= 0 || !Number.isInteger(qty)) {
-    setModifyModalError("Quantity must be a positive integer.");
+  const newLeaves = Number(qtyRaw);
+  if (!Number.isFinite(newLeaves) || newLeaves <= 0 || !Number.isInteger(newLeaves)) {
+    setModifyModalError("Remaining quantity must be a positive integer.");
+    return;
+  }
+  const cumSnapshot = Number(form.dataset.cumqty) || 0;
+  const wireQty = computeWireOrderQty(newLeaves, cumSnapshot);
+  if (!Number.isFinite(wireQty)) {
+    setModifyModalError("Remaining quantity must be a positive integer.");
     return;
   }
   let price = null;
@@ -625,7 +714,10 @@ function submitModifyForm() {
     }
   }
   setModifyModalError(null);
-  onModifyOrder(clOrdId, { quantity: qty, price });
+  // Wire-level: OrderCancelReplaceRequest.OrderQty = cum + newLeaves
+  // (FIX invariant OrderQty ≥ CumQty); see the "UX-vs-wire" comment
+  // block above openModifyModal.
+  onModifyOrder(clOrdId, { quantity: wireQty, price });
 }
 
 // ── Cancel-all modal (T3) ──────────────────────────────────────────
@@ -940,6 +1032,13 @@ export function bindUi() {
       e.preventDefault();
       submitModifyForm();
     });
+  }
+  // Live wire-OrderQty hint: refresh on every qty edit so the trader
+  // always sees the FIX OrderQty = cum + remaining that will hit the
+  // wire (UX-vs-wire contract above openModifyModal).
+  const modifyQtyInput = $("modify-modal-qty");
+  if (modifyQtyInput) {
+    modifyQtyInput.addEventListener("input", () => refreshModifyWireHint());
   }
   if (modifyCancelBtn) {
     modifyCancelBtn.addEventListener("click", () => closeModifyModal());
