@@ -629,7 +629,17 @@ public class OrderModifyMarginAndProcessorTests
         Assert.Equal(OrderStatus.PendingNew, orig.Status); // unchanged
         Assert.False(book.TryGet(2UL, out _));
         Assert.False(reg.TryGet(2UL, out _));
-        Assert.Empty(sink.Events); // replace-reject does not publish (no new order to surface)
+        // #381. The new contract: replace-reject DOES surface a single
+        // ExecKind.ReplaceRejected event scoped to OriginalClOrdId so the
+        // operator's UI can release the optimistic Modify-inflight flag.
+        // The replace-side Rejected event is BotRouter-only (#172 F) and
+        // does not reach _sink in this test wiring (no botErRouter wired).
+        var ev = Assert.Single(sink.Events);
+        Assert.Equal(1UL, ev.ClOrdId);
+        Assert.Equal(ExecKind.ReplaceRejected, ev.Kind);
+        Assert.Equal(OrderStatus.PendingNew, ev.Status);
+        Assert.Equal(100, ev.LeavesQuantity);
+        Assert.Equal("tick-out-of-range", ev.RejectReason);
     }
 
     [Fact]

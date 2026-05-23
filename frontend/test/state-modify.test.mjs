@@ -57,3 +57,38 @@ test('clearAll() empties inflightModifies', async () => {
   s.clearAll();
   assert.equal(s.getState().inflightModifies.size, 0);
 });
+
+// #381 — ExecKind.ReplaceRejected from the backend lands as an executions
+// delta scoped to the OriginalClOrdId. applyExecutionsDelta must release
+// the optimistic inflight-modify flag so the Modify button gets unstuck;
+// without this the trader sees a permanently-spinning button after every
+// venue replace-reject (no orders delta arrives — the order itself is
+// unchanged by definition for a replace-reject).
+test('applyExecutionsDelta(ReplaceRejected) clears inflightModifies for the original ClOrdID', async () => {
+  const s = await freshState();
+  s.markModifyInflight('42', true);
+  assert.ok(s.getState().inflightModifies.has('42'));
+  s.applyExecutionsDelta({
+    clOrdId: '42', symbol: 'PETR4', side: 'Sell', status: 'Working',
+    kind: 'ReplaceRejected', leavesQuantity: 100, cumulativeQuantity: 0,
+    lastQuantity: 0, lastPrice: 0, rejectReason: 'reject_code=5',
+    timestampUtc: new Date().toISOString(),
+  });
+  assert.ok(!s.getState().inflightModifies.has('42'));
+  // Event is still appended to the executions log for the trader to see.
+  assert.equal(s.getState().executions.length, 1);
+  assert.equal(s.getState().executions[0].kind, 'ReplaceRejected');
+});
+
+test('applyExecutionsDelta with other kinds does NOT clear inflightModifies', async () => {
+  const s = await freshState();
+  s.markModifyInflight('42', true);
+  s.applyExecutionsDelta({
+    clOrdId: '42', symbol: 'PETR4', side: 'Sell', status: 'PartiallyFilled',
+    kind: 'PartialFill', leavesQuantity: 80, cumulativeQuantity: 20,
+    lastQuantity: 20, lastPrice: 30, rejectReason: null,
+    timestampUtc: new Date().toISOString(),
+  });
+  // Spinner stays until the actual Replaced ack / explicit clear arrives.
+  assert.ok(s.getState().inflightModifies.has('42'));
+});
