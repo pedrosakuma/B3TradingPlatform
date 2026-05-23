@@ -45,6 +45,9 @@ BenchmarkDotNet.Artifacts/
 ## Node.js (frontend tooling, when/if introduced)
 node_modules/
 package-lock.json
+# Exception: the a11y gate (frontend/a11y) is pinned via `npm ci`,
+# so its lockfile must be committed for reproducible CI runs.
+!frontend/a11y/package-lock.json
 
 # Local docker compose env (contains real secrets — TRADING_AUTH_SIGNING_KEY)
 docker/.env

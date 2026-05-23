@@ -1,0 +1,17 @@
+{
+  "name": "b3tp-fe-a11y",
+  "private": true,
+  "version": "0.0.0",
+  "description": "A11y (axe-core) + perf (Lighthouse CI) gate for the static frontend. Pinned deps; runs on every PR via .github/workflows/ci.yml.",
+  "scripts": {
+    "serve": "http-server .. -p 8088 -c-1 -s",
+    "axe": "node scripts/run-axe.mjs",
+    "lhci": "lhci autorun --config=./lighthouserc.json"
+  },
+  "devDependencies": {
+    "@axe-core/puppeteer": "^4.10.2",
+    "@lhci/cli": "0.14.0",
+    "http-server": "14.1.1",
+    "puppeteer": "^23.10.4"
+  }
+}

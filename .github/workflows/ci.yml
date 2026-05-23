@@ -106,3 +106,77 @@ jobs:
 
       - name: Run state reducer tests (no deps, node:test)
         run: node --test frontend/test/state-modify.test.mjs frontend/test/state-staleness.test.mjs frontend/test/cancel-all.test.mjs frontend/test/validation-rules.test.mjs frontend/test/pretrade-guards.test.mjs frontend/test/bot-credentials-ui.test.mjs frontend/test/phase-badge.test.mjs frontend/test/auction-panel.test.mjs frontend/test/ticket-phase-coupling.test.mjs frontend/test/ticket-validation.test.mjs frontend/test/ticket-form-conditionals.test.mjs frontend/test/working-orders-render.test.mjs frontend/test/order-detail-q14.test.mjs frontend/test/executions-expired-badge.test.mjs frontend/test/expired-status-surfaces.test.mjs frontend/test/history-tab.test.mjs frontend/test/pnl-panel.test.mjs frontend/test/statement-download.test.mjs frontend/test/state-clear-races.test.mjs frontend/test/compliance-ui.test.mjs frontend/test/qr-render.test.mjs frontend/test/algos-state.test.mjs frontend/test/algos-validation.test.mjs frontend/test/settings-subtab.test.mjs frontend/test/trader-subtab.test.mjs frontend/test/keyboard.test.mjs frontend/test/density.test.mjs
+
+  frontend-a11y:
+    # Fase 5 follow-up (#407). axe-core + Lighthouse CI gate against
+    # the static frontend. Runs on every PR; Chromium is cached so
+    # warm runs stay under a couple of minutes.
+    name: Frontend a11y
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend/a11y
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/a11y/package-lock.json
+
+      - name: Cache Puppeteer Chromium
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/puppeteer
+          key: ${{ runner.os }}-puppeteer-${{ hashFiles('frontend/a11y/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-puppeteer-
+
+      - name: Install pinned deps
+        # Triggers puppeteer's postinstall which downloads its bundled
+        # Chromium into ~/.cache/puppeteer (cache-hit reuses it).
+        run: npm ci --no-audit --no-fund
+
+      - name: Resolve Puppeteer Chromium for Lighthouse
+        # lhci uses chrome-launcher, which honours $CHROME_PATH. Point it
+        # at the same Chromium puppeteer downloaded so both audits run
+        # against the same binary.
+        run: |
+          CHROME_BIN="$(node -e 'process.stdout.write(require("puppeteer").executablePath())')"
+          echo "CHROME_PATH=${CHROME_BIN}" >>"$GITHUB_ENV"
+          "${CHROME_BIN}" --version
+
+      - name: Serve frontend on :8088
+        run: |
+          nohup npx http-server .. -p 8088 -c-1 -s >/tmp/http-server.log 2>&1 &
+          echo "HTTP_PID=$!" >>"$GITHUB_ENV"
+          # Wait until the server actually answers (max 20s).
+          for i in $(seq 1 40); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8088/; then
+              echo "http-server up after ${i}*0.5s"; exit 0
+            fi
+            sleep 0.5
+          done
+          echo "::error::http-server never came up"; cat /tmp/http-server.log; exit 1
+
+      - name: axe-core (WCAG 2.1 AA)
+        # Wrapper script launches puppeteer with --no-sandbox so Chrome
+        # can start as root on the runner; @axe-core/cli didn't expose
+        # that flag and crashed on launch.
+        run: npm run axe
+
+      - name: Lighthouse CI (a11y + perf)
+        run: npx lhci autorun --config=./lighthouserc.json
+
+      - name: Tail http-server log on failure
+        if: failure()
+        run: tail -200 /tmp/http-server.log || true
+
+      - name: Stop http-server
+        if: always()
+        run: kill "$HTTP_PID" 2>/dev/null || true
