@@ -88,7 +88,18 @@
       // Persistence (upstream PRs #261/#269/#262/#274 etc, closes part of
       // pedrosakuma/B3MatchingPlatform#260). dataDir is mounted from the
       // named volume `b3-matching-data` in docker-compose.real.yml so
-      // restarts preserve order book + FIXP session counters / SessionVerId.
+      // restarts preserve the order book + per-channel WAL.
+      //
+      // IMPORTANT — what is NOT preserved (pedrosakuma/B3MatchingPlatform#405):
+      // FIXP session state (SessionId, SessionVerId, inbound/outbound seq
+      // numbers, SessionClaimRegistry, CoD timers) lives in process memory
+      // only. A graceful `docker compose restart matching-platform` will
+      // force every connected client to fully re-Negotiate with a fresh
+      // SessionVerId — even though the book itself is intact. The host
+      // compensates via ReconcileFirmSessionVerIds (#420) which stales
+      // surviving working orders so the UI never silently lies about
+      // venue state, but the proper fix is server-side persistence.
+      //
       // WAL closes the RPO gap between snapshots; fsyncPerWrite trades
       // throughput for at-most-one-cmd loss on unclean shutdown.
       "persistence": {
