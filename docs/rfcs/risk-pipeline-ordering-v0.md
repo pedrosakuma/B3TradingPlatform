@@ -2,9 +2,9 @@
 
 | Field    | Value                                                                                       |
 | -------- | ------------------------------------------------------------------------------------------- |
-| Status   | Proposed                                                                                    |
+| Status   | **Implemented** (audit gap closed by [#337](https://github.com/pedrosakuma/B3TradingPlatform/pull/337); asymmetry retained intentionally — see §1.3 update) |
 | Tracking | [#262](https://github.com/pedrosakuma/B3TradingPlatform/issues/262)                         |
-| Related  | [#261](https://github.com/pedrosakuma/B3TradingPlatform/issues/261) (gpt-5.5 review surfaced this) |
+| Related  | [#261](https://github.com/pedrosakuma/B3TradingPlatform/issues/261) (gpt-5.5 review surfaced this), [#337](https://github.com/pedrosakuma/B3TradingPlatform/pull/337) (audit-gap fix), [#429](https://github.com/pedrosakuma/B3TradingPlatform/issues/429) (B3 compliance audit closed as already-fixed) |
 | Replaces | n/a — refines the v1 ordering from `pre-trade-risk-v2`                                     |
 
 ## 1. Context
@@ -45,19 +45,26 @@ Source of truth: `backend/src/B3.Trading.Application/OrderModifyService.cs:167�
 
 ### 1.3 The asymmetry — concretely
 
-| Aspect                                | Submit (post-WAL)              | Modify (pre-WAL)                                     |
-| ------------------------------------- | ------------------------------ | ---------------------------------------------------- |
-| ClOrdID burn on risk reject           | Yes                            | Yes (newClOrdId)                                     |
-| WAL rows on risk reject               | 2 (`Submitted` + synthetic `Rejected`) | 0                                            |
-| Observable in `/executions/history`   | Yes (`Rejected`, `Synthetic`)   | **No**                                              |
-| Observable in `/orders/history`       | Yes (terminal `Rejected`)       | **No**                                              |
-| FE rendering (`ui.js:2179`)           | Renders STP-local + risk reason | Surface is only the HTTP 4xx body                   |
-| WAL replay reconstructs the reject?   | Yes                            | No (no event was appended)                          |
-| Counter `OrdersRejectedByRisk`        | Bumped with `firmId` tag        | Bumped with `firmId` + `path:"modify"` tag          |
+| Aspect                                | Submit (post-WAL)              | Modify (pre-WAL) — **post-#337**                       |
+| ------------------------------------- | ------------------------------ | ----------------------------------------------------- |
+| ClOrdID burn on risk reject           | Yes                            | Yes (newClOrdId)                                      |
+| WAL rows on risk reject               | 2 (`Submitted` + synthetic `Rejected`) | 1 (`OrderReplaceRejectedEvent`)               |
+| Observable in `/executions/history`   | Yes (`Rejected`, `Synthetic`)   | Yes (via `OrderReplaceRejectedEvent`, `HistoryEndpoints.cs:455`) |
+| Observable in `/orders/history`       | Yes (terminal `Rejected`)       | N/A — original order keeps pre-modify state           |
+| FE rendering                           | Renders STP-local + risk reason | Renders via `ExecutionEvent { Kind=Rejected }` published in same dispatch callback (`OrderModifyService.cs:410-421`) |
+| WAL replay reconstructs the reject?   | Yes                            | Yes (replay is a no-op for book/ownership/margin; advances ClOrdId watermark — `StateSnapshotter.cs:1007`) |
+| Counter `OrdersRejectedByRisk`        | Bumped with `firmId` tag        | Bumped with `firmId` + `path:"modify"` tag           |
 
-The first three rows are the **audit asymmetry**: a risk-rejected modify is
-invisible to anyone who looks at the trade log, while a risk-rejected submit
-is fully reconstructable from the WAL.
+The audit asymmetry was closed by [#337](https://github.com/pedrosakuma/B3TradingPlatform/pull/337): risk-rejected
+and margin-rejected modifies now dispatch `OrderReplaceRejectedEvent` to the WAL
+and emit a live `ExecutionEvent` in the same commit callback. Coverage:
+`backend/tests/B3.Trading.Application.Tests/OrderReplaceRejectedEventTests.cs`.
+
+The remaining asymmetry — number of WAL rows (2 vs 1) and the source enum
+(`Synthetic ER` vs `OrderReplaceRejected`) — is intentional. The submit-path
+synthetic ER reuses the ER replay path; the modify-path uses a dedicated event
+because no `OrderReplaceRequestedEvent` was ever appended, so a synthetic
+ExecutionReport would be referencing a ClOrdId the WAL has no other trace of.
 
 ### 1.4 Risk-check inventory
 
