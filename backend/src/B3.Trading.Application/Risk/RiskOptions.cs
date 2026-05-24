@@ -94,10 +94,22 @@ public sealed class OrderRateLimit
 }
 
 /// <summary>
-/// Reserve-on-submit margin configuration. Disabled by default —
-/// <see cref="NoOpMarginProvider"/> stays in place until an operator
-/// opts in. See <c>docs/rfcs/pre-trade-risk-v2.md</c> §3.1 for the
-/// model assumed by v2 (crypto-spot ledger; not T+N, not derivatives).
+/// Reserve-on-submit margin configuration. <b>Enabled by default</b>
+/// (#416): the trading-platform factory default must be the safe
+/// posture — an operator who forgets to flip this on otherwise gets
+/// silently overspending accounts (cash ledger non-blocking by design;
+/// the pre-trade guard lives here). Equivalent rationale to shipping
+/// a database with foreign keys ON by default. See
+/// <c>docs/rfcs/pre-trade-risk-v2.md</c> §3.1 for the model assumed
+/// by v2 (crypto-spot ledger; not T+N, not derivatives).
+///
+/// <para>
+/// Opt-out is explicit: set <c>Trading:Risk:Margin:Enabled=false</c>
+/// to fall back to <see cref="NoOpMarginProvider"/> (e.g. test
+/// compositions that do not seed cash). The host emits a startup
+/// warning when this is disabled outside <c>Development</c> so the
+/// drift is visible on dashboards.
+/// </para>
 ///
 /// <para>
 /// <b>Migration note (#107 slice 4):</b> the per-end-client opening
@@ -112,7 +124,7 @@ public sealed class OrderRateLimit
 /// </summary>
 public sealed class MarginOptions
 {
-    public bool Enabled { get; set; }
+    public bool Enabled { get; set; } = true;
 
     /// <summary>
     /// Pass-4 review (#299) P1. Bounded TTL for ambiguous-send

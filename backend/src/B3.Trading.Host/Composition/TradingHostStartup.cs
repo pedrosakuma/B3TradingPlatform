@@ -111,6 +111,29 @@ internal static class TradingHostStartup
         // owner hashes in the regulator-facing XML.
         var cvmOpts = app.Services.GetRequiredService<IOptions<B3.Trading.Application.Reports.Cvm.CvmReportOptions>>().Value;
         cvmOpts.Validate(app.Environment.EnvironmentName);
+
+        // #416. The factory default for Trading:Risk:Margin:Enabled is
+        // now `true` so an operator who forgets to opt in does NOT get a
+        // silently overspending account (CashLedger.ApplyFill is
+        // non-blocking by design; the pre-trade guard lives in the
+        // margin provider). When an operator explicitly opts out outside
+        // Development, emit a loud warning so the drift is visible on
+        // dashboards — mirrors ErInjectionBootGuard's warning posture
+        // for "unsafe-but-allowed" configurations.
+        var riskBootOpts = app.Services.GetRequiredService<IOptions<RiskOptions>>().Value;
+        if (!riskBootOpts.Margin.Enabled
+            && !string.Equals(app.Environment.EnvironmentName, "Development", StringComparison.OrdinalIgnoreCase))
+        {
+            app.Services.GetRequiredService<ILoggerFactory>()
+                .CreateLogger("MarginDisabled")
+                .LogWarning(
+                    "Trading:Risk:Margin:Enabled=false in environment '{Environment}'. "
+                    + "Pre-trade cash reservation is OFF (NoOpMarginProvider) — buy orders "
+                    + "can drive end-client cash ledgers negative without any guard. "
+                    + "This is permitted but explicitly unsafe; flip to true (#416) unless "
+                    + "this composition genuinely runs without ledger-backed accounts.",
+                    app.Environment.EnvironmentName);
+        }
     }
 
     /// <summary>
