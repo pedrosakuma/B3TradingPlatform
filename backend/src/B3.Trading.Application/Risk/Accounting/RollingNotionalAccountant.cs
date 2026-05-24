@@ -14,6 +14,7 @@ public sealed class RollingNotionalAccountant : IRiskAccountant
 {
     private readonly SlidingWindowLedger _perEndClient;
     private readonly SlidingWindowLedger _perFirm;
+    private readonly SlidingWindowLedger _perAlgo;
     private readonly IOptionsMonitor<RiskOptions> _options;
     private readonly IReferencePrice _refPrice;
     private readonly IMarketValueCalculator _values;
@@ -29,10 +30,25 @@ public sealed class RollingNotionalAccountant : IRiskAccountant
         _values = values ?? EquityMarketValueCalculator.Instance;
         _perEndClient = new SlidingWindowLedger(clock);
         _perFirm = new SlidingWindowLedger(clock);
+        _perAlgo = new SlidingWindowLedger(clock);
     }
 
     public SlidingWindowLedger EndClientLedger => _perEndClient;
     public SlidingWindowLedger FirmLedger => _perFirm;
+
+    /// <summary>
+    /// #435. Per-(firm, parentAlgoId) ledger; keys are formatted
+    /// <c>{firmId}:{parentAlgoId}</c>. Backs the per-algo throttle
+    /// bucket in <see cref="Checks.RollingNotionalCheck"/>.
+    /// </summary>
+    public SlidingWindowLedger AlgoLedger => _perAlgo;
+
+    /// <summary>
+    /// #435. Stable composite key for the per-algo ledger so the
+    /// check and the accountant agree on the bucket addressed.
+    /// </summary>
+    public static string AlgoKey(string firmId, ulong parentAlgoId) =>
+        $"{firmId}:{parentAlgoId.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
 
     /// <summary>
     /// Computes the notional that will be charged to the rolling
@@ -72,5 +88,7 @@ public sealed class RollingNotionalAccountant : IRiskAccountant
         _perEndClient.Append(ctx.Owner.Value, notional);
         if (!string.IsNullOrWhiteSpace(ctx.FirmId))
             _perFirm.Append(ctx.FirmId, notional);
+        if (ctx.ParentAlgoId is { } algoId && !string.IsNullOrWhiteSpace(ctx.FirmId))
+            _perAlgo.Append(AlgoKey(ctx.FirmId, algoId), notional);
     }
 }

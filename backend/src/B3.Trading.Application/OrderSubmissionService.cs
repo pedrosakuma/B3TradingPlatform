@@ -292,7 +292,11 @@ public sealed class OrderSubmissionService
             // ever sees the order. The gateway will resolve again at
             // stamp time — resolvers MUST be deterministic per-Order
             // (see IRoutingInstructionResolver doc).
-            RoutingInstruction: _routingResolver?.TryResolve(order));
+            RoutingInstruction: _routingResolver?.TryResolve(order),
+            ParentAlgoId: req.Source == OrderSubmissionSource.Algo ? req.ParentAlgoId : null,
+            AlgoType: req.Source == OrderSubmissionSource.Algo
+                ? req.AlgoTypeTag
+                : null);
         var decision = _risk.Evaluate(riskCtx);
         var marginReserved = false;
         if (decision.Approved)
@@ -439,7 +443,15 @@ public sealed record OrderSubmissionRequest(
     /// = no minimum. Validated by <see cref="Order"/>'s constructor:
     /// <c>0 &lt; MinQty &lt;= Quantity</c>.
     /// </summary>
-    long? MinQty = null)
+    long? MinQty = null,
+    /// <summary>
+    /// #435. Lowercase algo-type label (iceberg/twap/pegged/...) when
+    /// <see cref="Source"/> is <see cref="OrderSubmissionSource.Algo"/>.
+    /// Forwarded to <c>RiskContext.AlgoType</c> so the throttle checks
+    /// can resolve <c>RiskOptions.RollingNotional.PerAlgoType</c> and
+    /// <c>RiskOptions.OrderRate.PerAlgoType</c> per algo strategy.
+    /// </summary>
+    string? AlgoTypeTag = null)
 {
     /// <summary>
     /// Sub-issue #171 (E). When non-null, the request originates from
