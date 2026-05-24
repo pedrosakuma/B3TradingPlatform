@@ -157,12 +157,12 @@ public sealed class CvmReportWriter
         w.WriteElementString("ExecutedAtUtc", Namespace, row.ExecutedAtUtc.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ"));
         w.WriteElementString("Counterparty", Namespace, CounterpartyFixed);
 
-        // CVM 505 (fundos) placeholder Fund column. TODO (#308): when
-        // an order-level fund-classification field exists, surface it
-        // here and have CvmReportSource pre-filter the row set to
-        // fund-tagged fills only. For now the element is emitted
-        // empty for 505 reports and omitted entirely for 35 reports
-        // so the same XSD validates both.
+        // CVM 505 (fundos) placeholder Fund column. Deferred to #452
+        // (#308 origin): when an order-level fund-classification
+        // field exists, surface it here and have CvmReportSource
+        // pre-filter the row set to fund-tagged fills only. For now
+        // the element is emitted empty for 505 reports and omitted
+        // entirely for 35 reports so the same XSD validates both.
         if (reportType == CvmReportType.Cvm505)
             w.WriteElementString("Fund", Namespace, string.Empty);
 

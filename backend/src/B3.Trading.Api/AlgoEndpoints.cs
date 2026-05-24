@@ -202,8 +202,8 @@ public static class AlgoEndpoints
                 case AlgoType.Pegged:
                     // Q3.3 (#283). Pegged shares the POST /algo surface
                     // with the other algos via the type discriminator.
-                    // Tick size has no per-symbol provider yet (open
-                    // TODO across the repo), so the API accepts an
+                    // Tick size has no per-symbol provider yet
+                    // (deferred — see #454), so the API accepts an
                     // explicit override and falls back to 0.01 (BRL
                     // equity default) — documented in the PR notes.
                     if (req.Pegged is null)
@@ -557,8 +557,8 @@ public sealed record CreateAlgoPovParams(
 /// <para>
 /// <b>Defaults.</b> <see cref="RepegIntervalMs"/> defaults to 500ms,
 /// <see cref="TickSize"/> defaults to <c>0.01</c> (BRL equity floor;
-/// per-symbol provider TODO), <see cref="ChildOrderType"/> defaults
-/// to <c>Limit</c> (the only legal value — Market would defeat the
+/// per-symbol provider deferred — see #454), <see cref="ChildOrderType"/>
+/// defaults to <c>Limit</c> (the only legal value — Market would defeat the
 /// peg). <see cref="OffsetTicks"/> is required and may be negative
 /// for passive pegs (Buy below the bid, Sell above the ask).
 /// </para>

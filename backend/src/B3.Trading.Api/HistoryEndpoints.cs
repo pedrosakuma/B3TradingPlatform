@@ -39,8 +39,8 @@ namespace B3.Trading.Api;
 /// retention grows. The cursor envelope is intentionally future-proof:
 /// <c>{seq,ts}</c> is enough to anchor a binary search via the segment
 /// index, so an indexed implementation can ship without a wire-shape
-/// change. TODO(history-index): indexed reader keyed by
-/// <c>(endclient, ts)</c>, tracked alongside the EOD materialiser.
+/// change. Deferred — see issue #453 (history-index reader keyed by
+/// <c>(endclient, ts)</c>, to land alongside the EOD materialiser).
 /// </para>
 /// </summary>
 public static class HistoryEndpoints

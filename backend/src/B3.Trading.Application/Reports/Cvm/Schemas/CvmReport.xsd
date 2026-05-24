@@ -10,7 +10,8 @@
   505 reports — the only difference is the optional <Fund>
   element on each <Transaction>, present in 505 reports as a
   placeholder until an order-level fund-classification field is
-  added (tracked as TODO in CvmReportWriter.WriteTransaction).
+  added (deferred — see issue #452, originally tracked as TODO
+  in CvmReportWriter.WriteTransaction).
 -->
 <xs:schema
     xmlns="urn:b3:cvm:35:v1"
