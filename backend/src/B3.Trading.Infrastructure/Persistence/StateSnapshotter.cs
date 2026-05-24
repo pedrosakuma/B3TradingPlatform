@@ -931,7 +931,8 @@ public sealed class EventReplayer
                     o.Quantity, o.Price, o.FirmId, o.ParentAlgoId, o.AlgoSliceSeq,
                     timeInForce: tif, stopPrice: o.StopPrice, goodTillDate: o.GoodTillDate,
                     displayQty: o.DisplayQty, displayResetPolicy: policy,
-                    subAccountId: SubAccountId.FromNullableString(o.SubAccountId)));
+                    subAccountId: SubAccountId.FromNullableString(o.SubAccountId),
+                    minQty: o.MinQty));
                 _ownership.Register(o.ClOrdId, owner);
                 // #157: advance the ClOrdID registry watermark so the next
                 // live Generate(owner) cannot re-allocate this ID.

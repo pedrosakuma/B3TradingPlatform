@@ -138,7 +138,8 @@ public static class OrdersEndpoints
                 GoodTillDate: req.GoodTillDate,
                 DisplayQty: req.DisplayQty,
                 DisplayResetPolicy: displayPolicy,
-                SubAccountId: subAccount), ct);
+                SubAccountId: subAccount,
+                MinQty: req.MinQty), ct);
 
             return result.Kind switch
             {
@@ -313,7 +314,13 @@ public sealed record SubmitOrderRequest(
     /// when unknown, <c>reason: "sub_account_deactivated"</c> when
     /// soft-deleted). <c>null</c> retains pre-#301 master-only
     /// behaviour.</summary>
-    string? SubAccountId = null);
+    string? SubAccountId = null,
+    /// <summary>#457. Optional minimum execution quantity (FIX MinQty).
+    /// When set, the venue must fill at least this many contracts at
+    /// submit time or reject the order. Validated as
+    /// <c>0 &lt; MinQty &lt;= Quantity</c> by the submit pipeline
+    /// (<see cref="B3.Trading.Domain.Order"/>'s constructor).</summary>
+    long? MinQty = null);
 
 public sealed record ModifyOrderRequest(
     long Quantity,

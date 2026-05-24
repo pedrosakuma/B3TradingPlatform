@@ -435,6 +435,13 @@ public sealed record OrderSnapshot(
     /// semantics they actually carried.
     /// </summary>
     public string? SubAccountId { get; init; }
+
+    /// <summary>
+    /// #457. Minimum execution quantity (FIX MinQty) at submit time.
+    /// Null = no minimum. Older snapshots default to <c>null</c>,
+    /// matching the pre-#457 no-minimum semantics.
+    /// </summary>
+    public long? MinQty { get; init; }
 }
 
 /// <summary>

@@ -42,7 +42,10 @@ public sealed class EntryPointClientGateway : IExchangeGateway
             // mock seam so tests can pin wire mapping. The real SDK
             // path in B3EntryPointClientGateway maps the same field
             // to UpModels.NewOrderRequest.MaxFloor.
-            MaxFloor: order.DisplayQty);
+            MaxFloor: order.DisplayQty,
+            // #457. Plumb MinQty through the mock seam (FIX MinQty);
+            // real SDK path maps to UpModels.NewOrderRequest.MinQty.
+            MinQty: order.MinQty);
 
         return _client.SubmitNewOrderAsync(req, cancellationToken);
     }
@@ -82,6 +85,12 @@ public sealed class EntryPointClientGateway : IExchangeGateway
                 // SDK path in B3EntryPointClientGateway.CancelReplaceAsync.
                 MaxFloor: original.DisplayQty is { } odq
                     ? Math.Min(odq, newQuantity)
+                    : (long?)null,
+                // #457. Replace inherits the original's MinQty (clamped to
+                // newQuantity when the new order qty would otherwise be <
+                // MinQty), mirroring the real SDK path.
+                MinQty: original.MinQty is { } omq
+                    ? Math.Min(omq, newQuantity)
                     : (long?)null),
             cancellationToken);
     }

@@ -140,7 +140,8 @@ public sealed class OrderSubmissionService
                 parentAlgoId: req.ParentAlgoId, algoSliceSeq: req.AlgoSliceSeq,
                 timeInForce: req.TimeInForce, stopPrice: req.StopPrice, goodTillDate: req.GoodTillDate,
                 displayQty: req.DisplayQty, displayResetPolicy: req.DisplayResetPolicy,
-                subAccountId: req.SubAccountId);
+                subAccountId: req.SubAccountId,
+                minQty: req.MinQty);
         }
         catch (ArgumentException ex)
         {
@@ -186,6 +187,7 @@ public sealed class OrderSubmissionService
                     DisplayQty = order.DisplayQty,
                     DisplayResetPolicy = order.DisplayResetPolicy?.ToString(),
                     SubAccountId = order.SubAccountId?.Value,
+                    MinQty = order.MinQty,
                 },
                 () =>
                 {
@@ -384,7 +386,13 @@ public sealed record OrderSubmissionRequest(
     /// per-sub-account risk gates ON TOP OF the existing master ones
     /// — reject-on-either-fail (see <c>SubAccountLimitsCheck</c>).
     /// </summary>
-    SubAccountId? SubAccountId = null)
+    SubAccountId? SubAccountId = null,
+    /// <summary>
+    /// #457. Optional minimum execution quantity (FIX MinQty). Null
+    /// = no minimum. Validated by <see cref="Order"/>'s constructor:
+    /// <c>0 &lt; MinQty &lt;= Quantity</c>.
+    /// </summary>
+    long? MinQty = null)
 {
     /// <summary>
     /// Sub-issue #171 (E). When non-null, the request originates from

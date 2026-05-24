@@ -208,6 +208,12 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             // wire order.DisplayResetPolicy here and drop the validation
             // guard in OrdersEndpoints.cs + OrderSubmissionService.cs.
             MaxFloor = order.DisplayQty is { } dq ? (ulong)dq : (ulong?)null,
+            // #457. Native MinQty (FIX). When the trader sets a minimum
+            // execution quantity, the venue must fill at least this many
+            // contracts at submit time or reject the order. Domain.Order's
+            // ctor already validated 0 < MinQty <= Quantity so the cast
+            // to ulong? is safe.
+            MinQty = order.MinQty is { } mq ? (ulong)mq : (ulong?)null,
         };
     }
 
@@ -257,7 +263,36 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             original.Type, original.TimeInForce, original.StopPrice, original.GoodTillDate,
             requestedTimeInForce, requestedStopPrice, requestedGoodTillDate);
 
-        var req = new UpModels.ReplaceOrderRequest
+        var req = BuildReplaceOrderRequest(original, newClOrdId, newQuantity, newPrice,
+            requestedTimeInForce, requestedStopPrice, requestedGoodTillDate);
+
+        return SendAsync(newClOrdId, OrderEntryLatencyProbe.OpReplace,
+            ct => _client.ReplaceAsync(req, ct), cancellationToken);
+    }
+
+    /// <summary>
+    /// #457. Extracted from <see cref="CancelReplaceAsync"/> so the outbound
+    /// <c>ReplaceOrderRequest</c> mapping (including the FIX MinQty / MaxFloor
+    /// inheritance + clamp) can be pinned by unit tests without standing up a
+    /// real <c>EntryPointClient</c>. Pure function: every field is read from
+    /// the original domain <see cref="Order"/> and the modify-call arguments,
+    /// with no side effects.
+    /// </summary>
+    internal static UpModels.ReplaceOrderRequest BuildReplaceOrderRequest(
+        Order original,
+        ulong newClOrdId,
+        long newQuantity,
+        decimal? newPrice,
+        TimeInForce? requestedTimeInForce,
+        decimal? requestedStopPrice,
+        DateTimeOffset? requestedGoodTillDate)
+    {
+        ArgumentNullException.ThrowIfNull(original);
+        var (effTif, effStop, effGtd) = Order.MergeReplacementOptionals(
+            original.Type, original.TimeInForce, original.StopPrice, original.GoodTillDate,
+            requestedTimeInForce, requestedStopPrice, requestedGoodTillDate);
+
+        return new UpModels.ReplaceOrderRequest
         {
             ClOrdID = new UpModels.ClOrdID(newClOrdId),
             OrigClOrdID = new UpModels.ClOrdID(original.ClOrdId),
@@ -281,10 +316,15 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             MaxFloor = original.DisplayQty is { } odq
                 ? (ulong)Math.Min(odq, newQuantity)
                 : (ulong?)null,
+            // #457. Replace inherits the original's MinQty (clamped to
+            // newQuantity if the new order qty would otherwise be below
+            // MinQty), mirroring the DisplayQty handling above and
+            // Order.HydrateReplacement. A future modify-pipeline slice
+            // can plumb explicit MinQty overrides.
+            MinQty = original.MinQty is { } omq
+                ? (ulong)Math.Min(omq, newQuantity)
+                : (ulong?)null,
         };
-
-        return SendAsync(newClOrdId, OrderEntryLatencyProbe.OpReplace,
-            ct => _client.ReplaceAsync(req, ct), cancellationToken);
     }
 
     /// <summary>

@@ -62,7 +62,13 @@ public sealed record NewOrderSingle(
     /// already wires MaxFloor on the upstream <c>NewOrderRequest</c>; this
     /// field plumbs the same intent through the mock seam so tests can
     /// assert wire mapping without standing up the real client.</summary>
-    long? MaxFloor = null);
+    long? MaxFloor = null,
+    /// <summary>#457. Minimum execution quantity (FIX MinQty). Null = no
+    /// minimum. Set by <see cref="EntryPointClientGateway"/> from the
+    /// domain order's <c>MinQty</c>. The real SDK path
+    /// (<c>B3EntryPointClientGateway</c>) maps the same field to
+    /// <c>NewOrderRequest.MinQty</c> (<c>ulong?</c>) on the wire.</summary>
+    long? MinQty = null);
 
 public sealed record OrderCancelRequest(
     ulong ClOrdId,
@@ -83,7 +89,12 @@ public sealed record OrderCancelReplaceRequest(
     /// inherited from the original order, clamped to <c>NewQuantity</c> when the
     /// replace shrinks the order below the original visible portion. Null when
     /// the original was a full-disclosure order.</summary>
-    long? MaxFloor = null);
+    long? MaxFloor = null,
+    /// <summary>#457. Minimum execution quantity (FIX MinQty) inherited from
+    /// the original order, clamped to <c>NewQuantity</c> when the replace
+    /// shrinks the order below the original MinQty. Null when the original
+    /// had no MinQty constraint.</summary>
+    long? MinQty = null);
 
 /// <summary>
 /// ExecutionReport surfaced by the wire to the platform. <see cref="OrigClOrdId"/>
