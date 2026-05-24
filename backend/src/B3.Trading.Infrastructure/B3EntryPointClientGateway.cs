@@ -34,6 +34,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     private readonly SemaphoreSlim _reconnectLock = new(1, 1);
     private readonly TimeSpan _initialReconnectDelay;
     private readonly TimeSpan _maxReconnectDelay;
+    private readonly TimeSpan _gracefulTerminateTimeout;
     private readonly TimeProvider _clock;
     private readonly OrderEntryLatencyProbe _latencyProbe;
     private Task? _eventLoop;
@@ -66,7 +67,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         TimeSpan? maxReconnectDelay = null,
         TimeProvider? clock = null,
         OrderEntryLatencyProbe? latencyProbe = null,
-        IVenueDisconnectReactor? venueDisconnectReactor = null)
+        IVenueDisconnectReactor? venueDisconnectReactor = null,
+        TimeSpan? gracefulTerminateTimeout = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _firmId = firmId ?? throw new ArgumentNullException(nameof(firmId));
@@ -74,6 +76,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         _currentSessionVerId = initialSessionVerId;
         _initialReconnectDelay = initialReconnectDelay ?? TimeSpan.FromSeconds(1);
         _maxReconnectDelay = maxReconnectDelay ?? TimeSpan.FromSeconds(30);
+        _gracefulTerminateTimeout = gracefulTerminateTimeout ?? TimeSpan.FromSeconds(2);
         _clock = clock ?? TimeProvider.System;
         _latencyProbe = latencyProbe ?? new OrderEntryLatencyProbe(_clock);
         _reactor = venueDisconnectReactor;
@@ -702,6 +705,42 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         {
             try { await _eventLoop.ConfigureAwait(false); } catch { /* event loop swallows, but be defensive */ }
         }
+
+        // Graceful FIXP Terminate(Finished) before tearing down the SDK so the
+        // peer flushes our session promptly and our next boot doesn't trip
+        // DUPLICATE_SESSION_CONNECTION. The SDK's own DisposeAsync also sends
+        // Terminate(Finished) internally as a last-resort fallback, but it
+        // swallows IOException silently and doesn't emit the
+        // `entrypoint.terminate` activity + counter that the public
+        // TerminateAsync surfaces — so we call it explicitly here for both
+        // observability (one log line per firm shutdown) and protocol-level
+        // determinism (bounded timeout so a stuck peer can't hang shutdown).
+        //
+        // OnTerminated is intentionally still attached at this point: the SDK
+        // raises Terminated(InitiatedByClient=true) from inside TerminateAsync,
+        // and we want the existing handler to record the metric / log line
+        // (the _disposed guard on line 527 ensures it skips the reconnect loop).
+        if (Volatile.Read(ref _connectedState) == 1)
+        {
+            try
+            {
+                using var cts = new CancellationTokenSource(_gracefulTerminateTimeout);
+                await _client.TerminateAsync(Up.TerminationCode.Finished, cts.Token).ConfigureAwait(false);
+                _logger.LogInformation(
+                    "Sent graceful FIXP Terminate(Finished) for firm {Firm} on shutdown.", _firmId);
+            }
+            catch (InvalidOperationException)
+            {
+                // SDK throws this if the session was torn down between our
+                // connected-state check and the call (race with peer Terminate).
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Graceful FIXP Terminate failed for firm {Firm}; proceeding with dispose.", _firmId);
+            }
+        }
+
         _client.Terminated -= OnTerminated;
         _client.InboundGapAtReconnect -= OnInboundGapAtReconnect;
         await _client.DisposeAsync().ConfigureAwait(false);
