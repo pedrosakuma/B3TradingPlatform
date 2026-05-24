@@ -636,7 +636,7 @@ function execDetailRow(e) {
   const notes = [reason, stp].filter(Boolean).join(" ");
   return `<tr>
     <td>${ts}</td>
-    <td class="kind ${escapeHtml(e.kind)}">${escapeHtml(e.kind)}</td>
+    <td class="kind ${escapeHtml(e.kind)}">${escapeHtml(execKindLabel(e.kind))}</td>
     <td class="num">${lastQty}</td>
     <td class="num">${lastPx}</td>
     <td class="num">${fmtQty(e.cumulativeQuantity)}</td>
@@ -2734,7 +2734,7 @@ function execRow(e) {
   const stpBadge = stpBadgeFor(e);
   return `<div class="exec-row">
     <span class="ts">${ts}</span>
-    <span class="kind ${escapeHtml(e.kind)}">${escapeHtml(e.kind)}</span>
+    <span class="kind ${escapeHtml(e.kind)}">${escapeHtml(execKindLabel(e.kind))}</span>
     <span class="meta">${escapeHtml(e.clOrdId)} ${escapeHtml(e.symbol)} ${lastQty}${lastPx}${stpBadge}${reason}</span>
   </div>`;
 }
@@ -2802,6 +2802,23 @@ export function typeChipHtml(type) {
   const meta = ORDER_TYPE_CHIP[type];
   if (!meta) return escapeHtml(type ?? "");
   return `<span class="type-chip ${meta.cls}" title="${escapeHtml(type)}">${meta.label}</span>`;
+}
+
+// Map ExecKind enum strings (as emitted by the backend `executions.me`
+// stream) to user-friendly display labels. PR #418 split the legacy
+// `Replaced` into two events: the original ClOrdID terminalises as
+// `Replaced` (still labeled "Replaced") and the replacement entering
+// Working surfaces as `ReplacedNew` — which would render literally as
+// "ReplacedNew" without this mapping. All other kinds keep their raw
+// enum spelling so a future ExecKind addition stays visible while the
+// label table catches up. Returns the raw input (escape-safe) when no
+// mapping is registered.
+const EXEC_KIND_LABELS = Object.freeze({
+  ReplacedNew: "Replacement",
+});
+export function execKindLabel(kind) {
+  if (kind == null) return "";
+  return EXEC_KIND_LABELS[kind] ?? kind;
 }
 
 // Format an ISO timestamp for the order-detail GTD field. Returns "—"

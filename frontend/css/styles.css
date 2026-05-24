@@ -426,6 +426,7 @@ tr.row-stale > td.row-stale-actions { opacity: 1; }
 .executions-log .Canceled    { color: var(--gray); }
 .executions-log .New         { color: var(--accent); }
 .executions-log .Replaced    { color: var(--gray); }
+.executions-log .ReplacedNew { color: var(--accent); }
 .executions-log .Expired     { color: #888; }
 .executions-log .meta { color: var(--muted); }
 .executions-log .badge {
