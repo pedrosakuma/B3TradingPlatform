@@ -537,12 +537,23 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     }
 
     /// <summary>
-    /// Singleflight reconnect loop. Bumps <c>SessionVerId</c> on every
-    /// attempt (the gateway requires strict-greater) and applies
-    /// exponential backoff with jitter. Exits cleanly on shutdown CT.
-    /// On success the inbound event-loop is restarted via
-    /// <see cref="StartEventLoop"/> so ER replay (FIXP retransmit) lands
-    /// on the existing <c>ExecutionReportReceived</c> subscribers.
+    /// Singleflight reconnect loop. Uses the SDK v0.14.4 (#173) spec-
+    /// canonical <c>EstablishReuseThenNegotiate</c> mode: the client first
+    /// tries an <c>Establish</c> against the prior <c>SessionVerID</c>
+    /// (reattach — peer keeps our working set + retransmit window) and
+    /// only on a recoverable <c>EstablishmentReject</c> falls back to a
+    /// fresh <c>Negotiate</c> with a strictly-greater <c>SessionVerID</c>
+    /// supplied by the selector (renegotiate — peer's per-session state
+    /// for this firm is discarded). The new SDK overload returns a
+    /// <see cref="Up.ReconnectOutcome"/> whose <c>Kind</c> tells us which
+    /// branch was taken; we mirror its <c>SessionVerId</c> into
+    /// <see cref="_currentSessionVerId"/> so reattached cycles do NOT
+    /// trigger downstream session-rolled bookkeeping (see PR #420 /
+    /// <see cref="SnapshotService"/>). Exponential backoff with jitter
+    /// guards the retry; exits cleanly on shutdown CT. On success the
+    /// inbound event-loop is restarted via <see cref="StartEventLoop"/>
+    /// so ER replay (FIXP retransmit) lands on the existing
+    /// <c>ExecutionReportReceived</c> subscribers.
     /// </summary>
     private async Task ReconnectLoopAsync(CancellationToken ct)
     {
@@ -555,23 +566,27 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             while (!ct.IsCancellationRequested && !_disposed)
             {
                 attempt++;
-                uint nextVerId;
-                try { nextVerId = checked(_currentSessionVerId + 1); }
-                catch (OverflowException)
-                {
-                    _logger.LogError("SessionVerId overflow for firm {Firm}; giving up.", _firmId);
-                    return;
-                }
                 MetricsRegistry.EntryPointReconnectAttempts.Add(1,
                     new KeyValuePair<string, object?>("firm", _firmId),
                     new KeyValuePair<string, object?>("attempt", attempt));
+                var priorVerId = Volatile.Read(ref _currentSessionVerId);
                 try
                 {
-                    await _client.ReconnectAsync(nextVerId, ct).ConfigureAwait(false);
-                    _currentSessionVerId = nextVerId;
-                    MetricsRegistry.EntryPointReconnectSucceeded.Add(1, FirmTag());
-                    _logger.LogInformation("EntryPoint reconnect ok for firm {Firm} on attempt {N} (sessionVerId={Ver}).",
-                        _firmId, attempt, nextVerId);
+                    // Selector is invoked at most once per ReconnectAsync —
+                    // only when the SDK falls back to Negotiate after a
+                    // recoverable Establish-reject. Reattach path skips it
+                    // entirely, preserving the SessionVerID.
+                    var outcome = await _client.ReconnectAsync(
+                        Up.ReconnectMode.EstablishReuseThenNegotiate,
+                        BumpSessionVerIdSelector,
+                        ct).ConfigureAwait(false);
+                    _currentSessionVerId = outcome.SessionVerId;
+                    MetricsRegistry.EntryPointReconnectSucceeded.Add(1,
+                        new KeyValuePair<string, object?>("firm", _firmId),
+                        new KeyValuePair<string, object?>("kind", ReconnectKindTag(outcome.Kind)));
+                    _logger.LogInformation(
+                        "EntryPoint reconnect ok for firm {Firm} on attempt {N} (kind={Kind} sessionVerId={Ver} priorVerId={Prior} retransmitWindowReady={RetransmitReady}).",
+                        _firmId, attempt, outcome.Kind, outcome.SessionVerId, priorVerId, outcome.RetransmitWindowReady);
                     OnConnected();
                     NotifyVenueDisconnectReactor();
                     return;
@@ -580,17 +595,32 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 {
                     return;
                 }
+                catch (OverflowException)
+                {
+                    // Selector overflowed — uint32 SessionVerId would wrap.
+                    // Operator intervention required; give up.
+                    _logger.LogError("SessionVerId overflow for firm {Firm}; giving up.", _firmId);
+                    return;
+                }
                 catch (Exception ex)
                 {
                     MetricsRegistry.EntryPointReconnectFailed.Add(1,
                         new KeyValuePair<string, object?>("firm", _firmId),
                         new KeyValuePair<string, object?>("reason", ex.GetType().Name));
-                    _logger.LogWarning(ex, "EntryPoint reconnect failed for firm {Firm} (attempt {N}, sessionVerId={Ver}); will retry.",
-                        _firmId, attempt, nextVerId);
-                    // Bump the in-memory version even on failure: if the
-                    // failure was anything past Negotiate, the gateway has
-                    // already burned the value. Cheap to skip a few.
-                    _currentSessionVerId = nextVerId;
+                    _logger.LogWarning(ex, "EntryPoint reconnect failed for firm {Firm} (attempt {N}, priorSessionVerId={Prior}); will retry.",
+                        _firmId, attempt, priorVerId);
+                    // Defensive bump: if the failure happened past Negotiate
+                    // the SDK has already burned the next value, so reuse
+                    // would race with the peer's strict-monotonic guard.
+                    // Cheap to skip a few. Reattach path doesn't burn the
+                    // current value (Establish is idempotent on SessionVerID)
+                    // so the +1 is safe either way.
+                    try { _currentSessionVerId = checked(priorVerId + 1); }
+                    catch (OverflowException)
+                    {
+                        _logger.LogError("SessionVerId overflow for firm {Firm}; giving up.", _firmId);
+                        return;
+                    }
                     var delay = ComputeBackoff(attempt);
                     try { await Task.Delay(delay, ct).ConfigureAwait(false); }
                     catch (OperationCanceledException) { return; }
@@ -603,6 +633,21 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             _reconnectLock.Release();
         }
     }
+
+    /// <summary>
+    /// SessionVerID selector for the SDK v0.14.4 reconnect API. Invoked
+    /// only on the renegotiate fallback (Reattach skips it). Returns
+    /// <c>prior + 1</c>; an <see cref="OverflowException"/> escapes back
+    /// to <see cref="ReconnectLoopAsync"/> which short-circuits the loop.
+    /// </summary>
+    private static uint BumpSessionVerIdSelector(uint prior) => checked(prior + 1);
+
+    private static string ReconnectKindTag(Up.ReconnectKind kind) => kind switch
+    {
+        Up.ReconnectKind.Reattached => "reattached",
+        Up.ReconnectKind.Renegotiated => "renegotiated",
+        _ => kind.ToString().ToLowerInvariant(),
+    };
 
     /// <summary>
     /// Slice 2 of #132. After a successful reconnect, drains the
