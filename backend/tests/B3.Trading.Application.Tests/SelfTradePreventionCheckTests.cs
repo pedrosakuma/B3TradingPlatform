@@ -209,4 +209,141 @@ public class SelfTradePreventionCheckTests
         Assert.False(decision.Approved);
         Assert.Contains("clOrdId=7", decision.Reason);
     }
+
+    // ---- #433 cross-firm beneficial-owner scope -------------------------
+
+    private const string FirmA = "FIRM-A";
+    private const string FirmB = "FIRM-B";
+    private const string OwnerA = "alice";
+    private const string OwnerB = "alice_b";
+    private const string BO = "CPF-123";
+
+    private static (SelfTradePreventionCheck check, WorkingOrderBook book) BuildCrossFirm(
+        bool enforceCrossFirm = true, Dictionary<string, string>? boMap = null)
+    {
+        var opts = new RiskOptions
+        {
+            Default = new RiskLimits { EnforceCrossFirmStp = enforceCrossFirm },
+            BeneficialOwners = boMap ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                [OwnerA] = BO,
+                [OwnerB] = BO,
+            },
+        };
+        var book = new WorkingOrderBook();
+        var monitor = Wrap(opts);
+        var resolver = new OptionsBeneficialOwnerResolver(monitor);
+        var check = new SelfTradePreventionCheck(monitor, book, resolver);
+        return (check, book);
+    }
+
+    private static Order MakeFor(string firmId, string owner, ulong clOrdId, OrderSide side, decimal price,
+                                 string symbol = Symbol) =>
+        new(clOrdId, new EndClientId(owner), symbol, 4321UL, side, OrderType.Limit, 100, price, firmId);
+
+    private static RiskContext CtxFor(string firmId, string owner, OrderSide side, decimal price,
+                                       string symbol = Symbol) =>
+        new(new EndClientId(owner), firmId, symbol, side, OrderType.Limit, 100, price);
+
+    [Fact]
+    public void CrossFirm_SameBeneficialOwner_OptIn_Rejected()
+    {
+        // CVM 168 práticas equitativas: a single beneficial owner trading
+        // through two firms on this trading-host cannot wash-trade across
+        // the firms. Opt-in via EnforceCrossFirmStp + BeneficialOwners map.
+        var (check, book) = BuildCrossFirm();
+        Assert.True(book.TryAdd(MakeFor(FirmB, OwnerB, clOrdId: 99, OrderSide.Sell, 32.40m)));
+
+        var decision = check.Check(CtxFor(FirmA, OwnerA, OrderSide.Buy, 32.50m));
+
+        Assert.False(decision.Approved);
+        Assert.Contains("cross_firm", decision.Reason);
+        Assert.Contains($"beneficial_owner={BO}", decision.Reason);
+        Assert.Contains($"contra_firm={FirmB}", decision.Reason);
+        Assert.Contains("clOrdId=99", decision.Reason);
+    }
+
+    [Fact]
+    public void CrossFirm_SameBeneficialOwner_OptOut_Approved()
+    {
+        // Default-off back-compat: with EnforceCrossFirmStp unset (= null)
+        // the cross-firm wash-trade is allowed through. Tested by
+        // explicitly setting the flag false here for symmetry with the
+        // opt-in case.
+        var (check, book) = BuildCrossFirm(enforceCrossFirm: false);
+        Assert.True(book.TryAdd(MakeFor(FirmB, OwnerB, clOrdId: 99, OrderSide.Sell, 32.40m)));
+
+        var decision = check.Check(CtxFor(FirmA, OwnerA, OrderSide.Buy, 32.50m));
+
+        Assert.True(decision.Approved);
+    }
+
+    [Fact]
+    public void CrossFirm_DifferentBeneficialOwners_Approved()
+    {
+        // Different BO = different real-world legal persons; the cross-
+        // firm working order is legitimate counterparty activity even
+        // with EnforceCrossFirmStp on.
+        var (check, book) = BuildCrossFirm(boMap: new Dictionary<string, string>
+        {
+            [OwnerA] = "CPF-AAA",
+            [OwnerB] = "CPF-BBB",
+        });
+        Assert.True(book.TryAdd(MakeFor(FirmB, OwnerB, clOrdId: 99, OrderSide.Sell, 32.40m)));
+
+        var decision = check.Check(CtxFor(FirmA, OwnerA, OrderSide.Buy, 32.50m));
+
+        Assert.True(decision.Approved);
+    }
+
+    [Fact]
+    public void CrossFirm_AllowSelfTrade_Wins()
+    {
+        // AllowSelfTrade=true is the global opt-out; cross-firm scope
+        // does not override it.
+        var monitor = Wrap(new RiskOptions
+        {
+            Default = new RiskLimits { AllowSelfTrade = true, EnforceCrossFirmStp = true },
+            BeneficialOwners = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                [OwnerA] = BO,
+                [OwnerB] = BO,
+            },
+        });
+        var book = new WorkingOrderBook();
+        var check = new SelfTradePreventionCheck(monitor, book, new OptionsBeneficialOwnerResolver(monitor));
+        Assert.True(book.TryAdd(MakeFor(FirmB, OwnerB, clOrdId: 99, OrderSide.Sell, 32.40m)));
+
+        Assert.True(check.Check(CtxFor(FirmA, OwnerA, OrderSide.Buy, 32.50m)).Approved);
+    }
+
+    [Fact]
+    public void CrossFirm_SameFirmContra_ReportedAsSameFirm_NotCrossFirm()
+    {
+        // Phase ordering: same-firm scope must run first so a contra
+        // order in the SAME (firm, owner) tuple is attributed to the
+        // same_firm bucket even with cross-firm enforcement on.
+        var (check, book) = BuildCrossFirm();
+        Assert.True(book.TryAdd(MakeFor(FirmA, OwnerA, clOrdId: 50, OrderSide.Sell, 32.40m)));
+
+        var decision = check.Check(CtxFor(FirmA, OwnerA, OrderSide.Buy, 32.50m));
+
+        Assert.False(decision.Approved);
+        Assert.Contains("same_firm", decision.Reason);
+        Assert.DoesNotContain("cross_firm", decision.Reason);
+    }
+
+    [Fact]
+    public void CrossFirm_NoBeneficialOwnerMap_CollapsesToOwnerSelf_NoFalseHit()
+    {
+        // With no BeneficialOwners entries, every owner is its own BO so
+        // OwnersFor(BO) returns just {owner}; a cross-firm contra from a
+        // DIFFERENT owner cannot match — no wash trade.
+        var (check, book) = BuildCrossFirm(boMap: new Dictionary<string, string>());
+        Assert.True(book.TryAdd(MakeFor(FirmB, OwnerB, clOrdId: 99, OrderSide.Sell, 32.40m)));
+
+        var decision = check.Check(CtxFor(FirmA, OwnerA, OrderSide.Buy, 32.50m));
+
+        Assert.True(decision.Approved);
+    }
 }
