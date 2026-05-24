@@ -21,7 +21,7 @@
 // the renderers via dom-stub.mjs — same pattern as bot-credentials.
 
 import { getState, subscribe } from "./state.js";
-import { fmtQty, fmtPx } from "./ui.js";
+import { fmtQty, fmtPx, execKindLabel } from "./ui.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -275,7 +275,7 @@ function executionRow(e) {
     <td>${escapeHtml(e.clOrdId ?? "")}</td>
     <td>${escapeHtml(e.symbol ?? "")}</td>
     <td>${escapeHtml(e.side ?? "")}</td>
-    <td>${escapeHtml(e.kind ?? "")}</td>
+    <td>${escapeHtml(execKindLabel(e.kind))}</td>
     <td class="num">${fmtQty(e.lastQuantity)}</td>
     <td class="num">${e.lastPrice == null ? "—" : fmtPx(e.lastPrice)}</td>
     <td class="num">${fmtQty(e.cumulativeQuantity)}</td>
