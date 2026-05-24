@@ -41,6 +41,7 @@ public sealed class MockEntryPointClient : IEntryPointClient
     public Func<OrderCancelRequest, Task>? CancelDelayInjector { get; set; }
 
     public event Action<ExecutionReportEnvelope>? ExecutionReportReceived;
+    public event Action<BusinessRejectEnvelope>? BusinessRejectReceived;
 
     public Task SubmitNewOrderAsync(NewOrderSingle request, CancellationToken cancellationToken)
     {
@@ -117,4 +118,11 @@ public sealed class MockEntryPointClient : IEntryPointClient
     /// </summary>
     public void EmitExecutionReport(ExecutionReportEnvelope er) =>
         ExecutionReportReceived?.Invoke(er);
+
+    /// <summary>
+    /// #432 — test/host hook to push a <c>BusinessReject</c> through the
+    /// exchange-side event channel.
+    /// </summary>
+    public void EmitBusinessReject(BusinessRejectEnvelope reject) =>
+        BusinessRejectReceived?.Invoke(reject);
 }

@@ -121,6 +121,97 @@ public class EntryPointGatewayAndRouterTests
         Assert.Single(sink.Events);
     }
 
+    [Fact]
+    public void Router_OnBusinessReject_AppendsWalEvent_WithGatewayStampedFirm()
+    {
+        // #432. BusinessReject from the venue must reach the WAL so the
+        // operator can reconcile "request sent but no ER" gaps and so the
+        // history projection / replay can surface it. The router stamps
+        // FirmId from the envelope (which the gateway itself stamps from
+        // its own configured firm) — defending against a future refactor
+        // that forgets to plumb FirmId through.
+        var ownership = new OrderOwnershipMap();
+        var book = new WorkingOrderBook();
+        var positions = new PositionKeeper();
+        var sink = new TestSink();
+        var proc = new ExecutionReportProcessor(ownership, book, positions, sink, new NoOpMarginProvider(), NullLogger<ExecutionReportProcessor>.Instance);
+        var client = new MockEntryPointClient();
+        var store = new BrRecordingStore();
+        var dispatcher = new EventDispatcher(store, Array.Empty<IExecutionFanOutSink>());
+        using var router = new EntryPointExecutionReportRouter(client, proc, dispatcher);
+
+        var sendingTime = new DateTimeOffset(2026, 5, 24, 14, 30, 0, TimeSpan.Zero);
+        client.EmitBusinessReject(new BusinessRejectEnvelope(
+            FirmId: "FIRM-A",
+            RefSeqNum: 4242UL,
+            RejectReason: 3,
+            Text: "Unknown SecurityID",
+            SeqNum: 5000UL,
+            SendingTime: sendingTime));
+
+        var (_, evt) = Assert.Single(store.Recorded);
+        var br = Assert.IsType<BusinessRejectReceivedEvent>(evt);
+        Assert.Equal("FIRM-A", br.FirmId);
+        Assert.Equal(4242UL, br.RefSeqNum);
+        Assert.Equal(3, br.RejectReason);
+        Assert.Equal("Unknown SecurityID", br.Text);
+        Assert.Equal(5000UL, br.SeqNum);
+        Assert.Equal(sendingTime, br.SendingTime);
+
+        // BR is replay-inert — it must not touch order state.
+        Assert.Empty(sink.Events);
+    }
+
+    [Fact]
+    public void Router_OnBusinessReject_NullFirm_DefaultsToDefaultFirm()
+    {
+        // Back-compat: legacy gateways / mocks that don't stamp FirmId
+        // still produce a recoverable WAL row rather than crashing.
+        var ownership = new OrderOwnershipMap();
+        var book = new WorkingOrderBook();
+        var positions = new PositionKeeper();
+        var sink = new TestSink();
+        var proc = new ExecutionReportProcessor(ownership, book, positions, sink, new NoOpMarginProvider(), NullLogger<ExecutionReportProcessor>.Instance);
+        var client = new MockEntryPointClient();
+        var store = new BrRecordingStore();
+        var dispatcher = new EventDispatcher(store, Array.Empty<IExecutionFanOutSink>());
+        using var router = new EntryPointExecutionReportRouter(client, proc, dispatcher);
+
+        client.EmitBusinessReject(new BusinessRejectEnvelope(
+            FirmId: null,
+            RefSeqNum: 1UL,
+            RejectReason: 0,
+            Text: null,
+            SeqNum: 2UL,
+            SendingTime: DateTimeOffset.UtcNow));
+
+        var (_, evt) = Assert.Single(store.Recorded);
+        var br = Assert.IsType<BusinessRejectReceivedEvent>(evt);
+        Assert.Equal("default", br.FirmId);
+    }
+
+    private sealed class BrRecordingStore : IEventStore
+    {
+        public System.Collections.Concurrent.ConcurrentQueue<(long Seq, WalEvent Event)> Recorded { get; } = new();
+        private long _seq;
+        public long CurrentSeq => Interlocked.Read(ref _seq);
+        public long Append(WalEvent evt)
+        {
+            var s = Interlocked.Increment(ref _seq);
+            Recorded.Enqueue((s, evt));
+            return s;
+        }
+        public long Append(WalEvent evt, ReadOnlyMemory<byte> _) => Append(evt);
+        public ValueTask FlushAsync(CancellationToken ct = default) => ValueTask.CompletedTask;
+        public async System.Collections.Generic.IAsyncEnumerable<(long Seq, WalEvent Event)> ReadFromAsync(
+            long sinceSeqExclusive, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
     private sealed class TestSink : IExecutionEventSink, IExecutionFanOutSink
     {
         public readonly List<ExecutionEvent> Events = new();

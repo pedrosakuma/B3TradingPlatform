@@ -126,6 +126,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     public bool IsReconnecting => Volatile.Read(ref _reconnectingState) == 1;
 
     public event Action<ExecutionReportEnvelope>? ExecutionReportReceived;
+    public event Action<BusinessRejectEnvelope>? BusinessRejectReceived;
 
     /// <summary>
     /// Establish the FIXP session and start the inbound event loop. Idempotent;
@@ -399,6 +400,33 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 {
                     MetricsRegistry.EntryPointTranslationErrors.Add(1, FirmTag());
                     _logger.LogError(ex, "Failed to translate upstream event {Event} for firm {Firm}", ev.GetType().Name, _firmId);
+                    continue;
+                }
+
+                // #432 — BusinessReject has no ClOrdID anchor and therefore
+                // no ExecutionReportEnvelope, but it must NOT be silently
+                // discarded: it indicates a structural rejection (malformed
+                // payload / unknown SecurityID / outside trading hours) for
+                // which the order request never produced an ER. Route via
+                // its own event channel + metric so the downstream router
+                // can persist it to the WAL for operator audit.
+                if (ev is UpModels.BusinessReject br)
+                {
+                    RecordBusinessReject(_firmId, br);
+                    try
+                    {
+                        BusinessRejectReceived?.Invoke(new BusinessRejectEnvelope(
+                            FirmId: _firmId,
+                            RefSeqNum: br.RefSeqNum,
+                            RejectReason: br.RejectReason,
+                            Text: br.Text,
+                            SeqNum: br.SeqNum,
+                            SendingTime: br.SendingTime));
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "BusinessReject subscriber threw for firm {Firm}; continuing.", _firmId);
+                    }
                     continue;
                 }
 

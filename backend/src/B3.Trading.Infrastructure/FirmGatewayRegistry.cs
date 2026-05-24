@@ -19,6 +19,7 @@ public sealed class FirmGatewayRegistry : IEntryPointClient, IFirmSessionStatusP
 {
     private readonly Dictionary<string, B3EntryPointClientGateway> _gateways;
     private readonly Action<ExecutionReportEnvelope> _bridge;
+    private readonly Action<BusinessRejectEnvelope> _brBridge;
 
     public FirmGatewayRegistry(IEnumerable<B3EntryPointClientGateway> gateways)
     {
@@ -26,8 +27,12 @@ public sealed class FirmGatewayRegistry : IEntryPointClient, IFirmSessionStatusP
         if (_gateways.Count == 0)
             throw new InvalidOperationException("FirmGatewayRegistry requires at least one configured firm.");
         _bridge = e => ExecutionReportReceived?.Invoke(e);
+        _brBridge = e => BusinessRejectReceived?.Invoke(e);
         foreach (var g in _gateways.Values)
+        {
             g.ExecutionReportReceived += _bridge;
+            g.BusinessRejectReceived += _brBridge;
+        }
     }
 
     public IReadOnlyDictionary<string, B3EntryPointClientGateway> Gateways => _gateways;
@@ -68,6 +73,7 @@ public sealed class FirmGatewayRegistry : IEntryPointClient, IFirmSessionStatusP
     }
 
     public event Action<ExecutionReportEnvelope>? ExecutionReportReceived;
+    public event Action<BusinessRejectEnvelope>? BusinessRejectReceived;
 
     // Submit-side surface unused — OrdersEndpoints injects IExchangeGateway,
     // which resolves to MultiFirmExchangeGateway (which dispatches by firmId).
@@ -81,7 +87,10 @@ public sealed class FirmGatewayRegistry : IEntryPointClient, IFirmSessionStatusP
     public async ValueTask DisposeAsync()
     {
         foreach (var g in _gateways.Values)
+        {
             g.ExecutionReportReceived -= _bridge;
+            g.BusinessRejectReceived -= _brBridge;
+        }
         foreach (var g in _gateways.Values)
             await g.DisposeAsync().ConfigureAwait(false);
     }

@@ -19,6 +19,11 @@ public sealed class EntryPointExecutionReportRouter : IDisposable
     private readonly ExecutionReportProcessor _processor;
     private readonly EventDispatcher _dispatcher;
     private readonly Action<ExecutionReportEnvelope> _handler;
+    // #432 — second subscription on the gateway: BusinessReject envelopes
+    // travel on their own channel because they lack a ClOrdID anchor; the
+    // router persists them to the WAL for operator audit but does not
+    // hand them to the ExecutionReportProcessor (no order state changes).
+    private readonly Action<BusinessRejectEnvelope> _businessRejectHandler;
     // Q4.7 (#307). Both optional so the legacy two-arg test ctor keeps
     // working. When wired, the router captures a top-of-book snapshot
     // for every Fill / PartialFill and threads it through both the WAL
@@ -47,10 +52,16 @@ public sealed class EntryPointExecutionReportRouter : IDisposable
         _orders = orders;
         _bookTop = bookTop;
         _handler = OnExecutionReport;
+        _businessRejectHandler = OnBusinessReject;
         _client.ExecutionReportReceived += _handler;
+        _client.BusinessRejectReceived += _businessRejectHandler;
     }
 
-    public void Dispose() => _client.ExecutionReportReceived -= _handler;
+    public void Dispose()
+    {
+        _client.ExecutionReportReceived -= _handler;
+        _client.BusinessRejectReceived -= _businessRejectHandler;
+    }
 
     private void OnExecutionReport(ExecutionReportEnvelope er)
     {
@@ -141,6 +152,37 @@ public sealed class EntryPointExecutionReportRouter : IDisposable
             _dispatcher.RunExclusive(() =>
                 _processor.Apply(er.ClOrdId, kind, er.LeavesQuantity, er.CumulativeQuantity,
                     er.LastQuantity, er.LastPrice, er.RejectReason, er.OrigClOrdId, envelopeFirmId: er.FirmId, bookTouch: bookTouch));
+        }
+    }
+
+    // #432. BusinessReject is replay-inert (no order state mutation), so the
+    // router just persists it to the WAL and lets the dispatcher fan it out
+    // to any subscribers (history projection, WS fan-out — both deferred to
+    // follow-up issues). The dispatcher lock isn't needed because nothing
+    // downstream consumes the in-memory ordering against ER right now;
+    // ordering vs ER is preserved by the WAL seqnum anyway.
+    private void OnBusinessReject(BusinessRejectEnvelope br)
+    {
+        var walEvent = new BusinessRejectReceivedEvent
+        {
+            FirmId = br.FirmId ?? "default",
+            RefSeqNum = br.RefSeqNum,
+            RejectReason = br.RejectReason,
+            Text = br.Text,
+            SeqNum = br.SeqNum,
+            SendingTime = br.SendingTime,
+        };
+
+        try
+        {
+            _dispatcher.Dispatch(walEvent, _ => { });
+        }
+        catch (WalBackpressureException)
+        {
+            // BR is an audit signal, not a state mutation — losing it on
+            // backpressure is acceptable. The metric makes the loss visible.
+            MetricsRegistry.WalBackpressure.Add(1,
+                new KeyValuePair<string, object?>("call_site", "business_reject.router"));
         }
     }
 }

@@ -56,6 +56,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(SubAccountCreatedEvent), "sub-account.created")]
 [JsonDerivedType(typeof(SubAccountDeactivatedEvent), "sub-account.deactivated")]
 [JsonDerivedType(typeof(AuditLogEvent), "audit.log")]
+[JsonDerivedType(typeof(BusinessRejectReceivedEvent), "business-reject.received")]
 public abstract record WalEvent
 {
     public DateTimeOffset TimestampUtc { get; init; } = DateTimeOffset.UtcNow;
@@ -1181,4 +1182,35 @@ public sealed record AuditLogEvent : WalEvent
 
     /// <summary>Free-form per-capture-site context — endpoint args, before/after summaries, target user, etc. Bounded to small string values by convention so the WAL record stays compact.</summary>
     public Dictionary<string, string>? Details { get; init; }
+}
+
+/// <summary>
+/// #432. Records a venue <c>BusinessReject</c> — a structural rejection
+/// of an inbound message (malformed payload, unknown <c>SecurityID</c>,
+/// outside trading hours, etc.) that never produces an
+/// <see cref="ExecutionReportReceivedEvent"/>. Persisted so the operator
+/// can reconcile "request sent but no ER" gaps without log scraping and
+/// so the WAL replay reconstructs the audit trail.
+///
+/// <para>
+/// Has no ClOrdID anchor — the venue references the inbound seqnum
+/// (<see cref="RefSeqNum"/>) rather than a business identifier. The
+/// event is replay-inert: it does not mutate order state. It exists
+/// purely for audit / history visibility.
+/// </para>
+/// </summary>
+public sealed record BusinessRejectReceivedEvent : WalEvent
+{
+    /// <summary>Firm the reject arrived on (gateway-stamped).</summary>
+    public required string FirmId { get; init; }
+    /// <summary>FIX <c>RefSeqNum</c> — session seqnum of the rejected inbound message.</summary>
+    public required ulong RefSeqNum { get; init; }
+    /// <summary>FIX <c>BusinessRejectReason</c> code as emitted by the venue.</summary>
+    public required int RejectReason { get; init; }
+    /// <summary>Free-form detail string from the venue.</summary>
+    public string? Text { get; init; }
+    /// <summary>Venue session inbound seqnum of the reject message itself.</summary>
+    public required ulong SeqNum { get; init; }
+    /// <summary>Venue <c>SendingTime</c> from the reject envelope.</summary>
+    public required DateTimeOffset SendingTime { get; init; }
 }
