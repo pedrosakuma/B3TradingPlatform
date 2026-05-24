@@ -43,7 +43,8 @@ public static class UserBotCredentialsEndpoints
             if (label.Length > MaxLabelLength)
                 return Results.BadRequest(new { error = $"Label exceeds {MaxLabelLength} characters." });
 
-            var created = await registry.CreateAsync(sub, label, ct);
+            var created = await registry.CreateAsync(sub, label, ct,
+                firmId: ctx.User.FindFirstValue(Auth.JwtIssuer.FirmClaim) ?? "default");
             var dto = new CreatedUserBotCredentialDto(
                 Id: created.Credential.Id,
                 Label: created.Credential.Label,

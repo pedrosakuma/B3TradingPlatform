@@ -17,7 +17,8 @@ public interface IUserBotCredentialRegistry
     Task<CreatedUserBotCredential> CreateAsync(
         string userId,
         string label,
-        CancellationToken ct);
+        CancellationToken ct,
+        string firmId = "default");
 
     /// <summary>
     /// Soft-revoke (sets <c>RevokedAtUtc</c>). Returns <c>false</c>

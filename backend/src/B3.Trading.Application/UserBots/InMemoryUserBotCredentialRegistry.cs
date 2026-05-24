@@ -44,10 +44,11 @@ public sealed class InMemoryUserBotCredentialRegistry : IUserBotCredentialRegist
     }
 
     public Task<CreatedUserBotCredential> CreateAsync(
-        string userId, string label, CancellationToken ct)
+        string userId, string label, CancellationToken ct, string firmId = "default")
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(userId);
         ArgumentException.ThrowIfNullOrWhiteSpace(label);
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
 
         var shortId = MintShortId();
         var secret = MintSecret();
@@ -60,7 +61,8 @@ public sealed class InMemoryUserBotCredentialRegistry : IUserBotCredentialRegist
             Label: label.Trim(),
             SecretHash: hash,
             CreatedAtUtc: DateTimeOffset.UtcNow,
-            RevokedAtUtc: null);
+            RevokedAtUtc: null,
+            FirmId: firmId);
 
         var evt = new UserBotCredentialCreatedEvent
         {
@@ -70,6 +72,7 @@ public sealed class InMemoryUserBotCredentialRegistry : IUserBotCredentialRegist
             Label = credential.Label,
             SecretHash = credential.SecretHash,
             CreatedAtUtc = credential.CreatedAtUtc,
+            FirmId = credential.FirmId,
         };
 
         if (_dispatcher is not null)
@@ -171,7 +174,7 @@ public sealed class InMemoryUserBotCredentialRegistry : IUserBotCredentialRegist
                 .ThenBy(c => c.Id)
                 .Select(c => new UserBotCredentialSnapshot(
                     c.Id, c.UserId, c.CredShortId, c.Label, c.SecretHash,
-                    c.CreatedAtUtc, c.RevokedAtUtc))
+                    c.CreatedAtUtc, c.RevokedAtUtc, c.FirmId))
                 .ToList();
         }
     }
@@ -208,7 +211,11 @@ public sealed class InMemoryUserBotCredentialRegistry : IUserBotCredentialRegist
             {
                 var c = new UserBotCredential(
                     s.Id, s.UserId, s.CredShortId, s.Label, s.SecretHash,
-                    s.CreatedAtUtc, s.RevokedAtUtc);
+                    s.CreatedAtUtc, s.RevokedAtUtc,
+                    // #431 — pre-existing snapshots have no FirmId; replay
+                    // to the legacy "default" sentinel so attribution stays
+                    // aligned with the old listener behavior.
+                    FirmId: string.IsNullOrEmpty(s.FirmId) ? "default" : s.FirmId);
                 _byId[c.Id] = c;
                 _byShortId[c.CredShortId] = c;
             }

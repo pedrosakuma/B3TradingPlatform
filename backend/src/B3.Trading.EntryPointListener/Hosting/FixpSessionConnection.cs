@@ -542,7 +542,8 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         // scope without re-querying the registry.
         var sessionState = await _sessions.GetOrCreateAsync(credential.Id, ct).ConfigureAwait(false);
         var principal = new BotSessionPrincipal(
-            credential.UserId, credential.Id, credential.CredShortId, credential.Label);
+            credential.UserId, credential.Id, credential.CredShortId, credential.Label,
+            credential.FirmId);
         _scope = new FixpConnectionScope(_connectionId, principal, sessionState);
 
         _logger.LogInformation(
