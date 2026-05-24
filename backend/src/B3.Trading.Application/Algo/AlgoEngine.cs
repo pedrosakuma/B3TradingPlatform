@@ -244,6 +244,66 @@ public sealed class AlgoEngine : BackgroundService
     /// Returns null when the parent runtime hasn't been created yet
     /// or has no live child (e.g. mid-terminal transition).
     /// </summary>
+    /// <summary>
+    /// #434. Deterministic wait for an adoption epoch bump. Tests and
+    /// orchestration helpers that need to issue a follow-up modify
+    /// after the engine adopts a new child can call this instead of
+    /// polling <see cref="TryGetLiveChildClOrdId"/>. The flow is:
+    ///
+    /// <code>
+    /// var before = engine.SnapshotAdoptionEpoch(firmId, algoId);
+    /// // ... trigger the action that should cause adoption ...
+    /// await engine.WaitForAdoptionAsync(firmId, algoId, before, timeout);
+    /// // LiveChildClOrdId is now guaranteed visible to this thread.
+    /// </code>
+    ///
+    /// <para>
+    /// Returns the new live child ClOrdID. Throws <see cref="TimeoutException"/>
+    /// when no adoption is observed within <paramref name="timeout"/>.
+    /// Implementation is poll-with-backoff at a short interval (memory
+    /// model is taken care of by <see cref="AlgoParentRuntime"/>'s
+    /// Volatile.Read on AdoptionEpoch); the polling is deterministic
+    /// because the volatile-published epoch eliminates the prior
+    /// "publication may never become visible" hazard documented on
+    /// <see cref="TryGetLiveChildClOrdId"/>.
+    /// </para>
+    /// </summary>
+    internal async Task<ulong?> WaitForAdoptionAsync(
+        string firmId, ulong algoId, long sinceEpoch, TimeSpan timeout,
+        CancellationToken ct = default)
+    {
+        var deadline = _clock.GetUtcNow() + timeout;
+        var step = TimeSpan.FromMilliseconds(2);
+        var maxStep = TimeSpan.FromMilliseconds(25);
+        while (true)
+        {
+            if (_runtime.TryGetValue((firmId, algoId), out var rt)
+                && rt.AdoptionEpoch > sinceEpoch)
+            {
+                return rt.LiveChildClOrdId;
+            }
+            if (_clock.GetUtcNow() >= deadline)
+                throw new TimeoutException(
+                    $"AlgoEngine adoption epoch did not advance past {sinceEpoch} for {firmId}/{algoId} within {timeout}.");
+            try { await Task.Delay(step, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { throw; }
+            if (step < maxStep) step += step;
+        }
+    }
+
+    /// <summary>
+    /// #434. Snapshot the current adoption epoch for a parent. Pair
+    /// with <see cref="WaitForAdoptionAsync"/> to capture "wait for the
+    /// NEXT adoption after now". Returns 0 when the runtime does not
+    /// exist yet (i.e. the parent has just been created and no child
+    /// has been adopted) — the caller can still wait against 0 and
+    /// will be released on the very first adoption.
+    /// </summary>
+    internal long SnapshotAdoptionEpoch(string firmId, ulong algoId) =>
+        _runtime.TryGetValue((firmId, algoId), out var rt)
+            ? rt.AdoptionEpoch
+            : 0L;
+
     internal ulong? TryGetLiveChildClOrdId(string firmId, ulong algoId)
     {
         return _runtime.TryGetValue((firmId, algoId), out var rt)
@@ -2545,7 +2605,43 @@ public sealed class AlgoEngine : BackgroundService
     /// </summary>
     internal sealed class AlgoParentRuntime
     {
-        public ulong? LiveChildClOrdId;
+        // #434. Backing storage for LiveChildClOrdId. Stored as a long
+        // so reads/writes can use Volatile.Read/Write for correct
+        // publication across the engine-consumer task and any reader
+        // thread (HTTP/REST modify handlers, tests, observability
+        // queries via TryGetLiveChildClOrdId). Encoding: 0 = null;
+        // every real ClOrdId emitted by the platform is > 0. A field
+        // initializer-style write here is safe because the runtime is
+        // freshly constructed before any reader can observe it.
+        private long _liveChildClOrdIdEncoded;
+
+        public ulong? LiveChildClOrdId
+        {
+            get
+            {
+                var raw = Volatile.Read(ref _liveChildClOrdIdEncoded);
+                return raw == 0 ? (ulong?)null : (ulong)raw;
+            }
+            set
+            {
+                var encoded = value.HasValue ? unchecked((long)value.Value) : 0L;
+                Volatile.Write(ref _liveChildClOrdIdEncoded, encoded);
+                Interlocked.Increment(ref _adoptionEpoch);
+            }
+        }
+
+        // #434. Monotonic per-parent epoch incremented on every
+        // <see cref="LiveChildClOrdId"/> mutation. Lets observers
+        // (tests, REST, the modify path itself) wait for a specific
+        // adoption to publish without polling. Combined with
+        // <see cref="LiveChildClOrdId"/>'s Volatile.Write above, a
+        // reader that observes <c>AdoptionEpoch > sinceEpoch</c> is
+        // guaranteed to see the matching <c>LiveChildClOrdId</c>
+        // value too (the Volatile.Write happens-before the
+        // Interlocked.Increment release).
+        private long _adoptionEpoch;
+        public long AdoptionEpoch => Volatile.Read(ref _adoptionEpoch);
+
         public int NextSliceSeq;
         public int RetryAttempts;
         public Dictionary<ulong, long> ChildBookedCum { get; } = new();
