@@ -26,7 +26,11 @@ namespace B3.Trading.Application.Audit;
 ///   notably <c>auth.login.success</c>/<c>auth.login.failure</c>
 ///   and the TOTP verify paths. Pass-1 review (#322) P1.2 — the
 ///   contract here is that the caller's structured response is
-///   unaffected by audit failures.</item>
+///   unaffected by audit failures. Every drop bumps
+///   <c>trading.audit.dropped_total{call_site,event_type,reason}</c>
+///   (#438) — operators MUST alert on sustained non-zero rate so
+///   the deliberate availability/forensics trade-off does not
+///   silently hide audit loss.</item>
 ///   <item><see cref="LogOrFail"/> — <i>fail-closed for the
 ///   WAL</i>. Propagates <see cref="WalBackpressureException"/> to
 ///   the caller so admin endpoints can translate it into HTTP 503
@@ -99,12 +103,14 @@ public sealed class AuditLogger : IAuditLogger
             // WAL backpressure counter already classifies these.
             MetricsRegistry.WalBackpressure.Add(1,
                 new KeyValuePair<string, object?>("call_site", "audit.log"));
+            RecordDropMetric(evt, reason: "wal_backpressure");
             _log.LogWarning(ex, "Audit append dropped under WAL backpressure: type={EventType}", evt.EventType);
         }
         catch (Exception ex)
         {
             // Defensive: keepers / serialisers should never throw, but
             // if they do we still must not poison the caller.
+            RecordDropMetric(evt, reason: "exception");
             _log.LogError(ex, "Audit append failed: type={EventType}", evt.EventType);
         }
 
@@ -141,6 +147,7 @@ public sealed class AuditLogger : IAuditLogger
             // Defensive: the keeper/dispatcher contract is that these
             // never throw. If they do (genuine bug), we still must not
             // brick the endpoint — fall through to best-effort.
+            RecordDropMetric(evt, reason: "exception");
             _log.LogError(ex, "Audit append failed (LogOrFail path): type={EventType}", evt.EventType);
         }
 
@@ -171,6 +178,30 @@ public sealed class AuditLogger : IAuditLogger
             new KeyValuePair<string, object?>("outcome", evt.Outcome));
 
         Debug.Assert(evt.EventType.Length > 0, "EventType must not be empty");
+    }
+
+    /// <summary>
+    /// #438. First-class drop metric so operator alerts can target
+    /// "audit lost" independently of the broader WAL backpressure
+    /// counter. <paramref name="reason"/> is one of
+    /// <c>wal_backpressure</c> | <c>exception</c>. <c>call_site</c>
+    /// is derived from the first segment of the canonical event type
+    /// (<c>auth</c>, <c>admin</c>, <c>totp</c>, …) so cardinality
+    /// stays bounded.
+    /// </summary>
+    private static void RecordDropMetric(AuditLogEvent evt, string reason)
+    {
+        MetricsRegistry.AuditDropped.Add(1,
+            new KeyValuePair<string, object?>("call_site", DeriveCallSite(evt.EventType)),
+            new KeyValuePair<string, object?>("event_type", evt.EventType),
+            new KeyValuePair<string, object?>("reason", reason));
+    }
+
+    private static string DeriveCallSite(string eventType)
+    {
+        if (string.IsNullOrEmpty(eventType)) return "unknown";
+        var dot = eventType.IndexOf('.');
+        return dot <= 0 ? eventType : eventType[..dot];
     }
 }
 
