@@ -1,6 +1,7 @@
 using B3.Trading.Api.Lifecycle;
 using B3.Trading.Application;
 using B3.Trading.Application.Persistence;
+using B3.Trading.Application.SubAccount;
 using B3.Trading.Application.UserBots;
 using B3.Trading.Api.WebSockets;
 using B3.Trading.Host.Lifecycle;
@@ -58,6 +59,13 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         services.AddSingleton<SubAccountsRegistry>();
         services.AddSingleton<SubAccountPositionKeeper>();
         services.AddSingleton<SubAccountPnlKeeper>();
+        // #471 (SDK 0.15.0). Map domain SubAccountId (string) → numeric
+        // uint? stamped on every outbound NewOrderRequest /
+        // ReplaceOrderRequest. Default = deterministic FNV-1a hash of
+        // (firmId, subAccountId.Value); operators can override at the
+        // composition root with an explicit lookup table if they
+        // negotiate a registered mapping with the broker.
+        services.AddSingleton<ISubAccountWireIdMapper, DeterministicSubAccountWireIdMapper>();
         // Q4.5 (#305). Audit log keeper + dispatcher-backed logger.
         // Both singletons so the live-dispatch path, recovery replay
         // and admin read endpoint all share the same in-memory ring

@@ -1,5 +1,6 @@
 using B3.Trading.Application.Observability;
 using B3.Trading.Application.Risk;
+using B3.Trading.Application.SubAccount;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -66,6 +67,13 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     // SelfTradePreventionInstruction.None and the wire behavior
     // matches pre-#433.
     private readonly IOptionsMonitor<RiskOptions>? _riskOptions;
+    // #471. Optional mapper from domain SubAccountId (string) to the
+    // numeric uint? carried in NewOrderRequest.TradingSubAccount /
+    // ReplaceOrderRequest.TradingSubAccount (SDK 0.15.0+). Null →
+    // no mapper wired → orders never stamp the field (legacy wire
+    // behavior, matches the pre-#471 contract). Production
+    // composition root always wires DeterministicSubAccountWireIdMapper.
+    private readonly ISubAccountWireIdMapper? _subAccountWireIdMapper;
 
     public B3EntryPointClientGateway(
         Up.EntryPointClient client,
@@ -78,7 +86,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         OrderEntryLatencyProbe? latencyProbe = null,
         IVenueDisconnectReactor? venueDisconnectReactor = null,
         TimeSpan? gracefulTerminateTimeout = null,
-        IOptionsMonitor<RiskOptions>? riskOptions = null)
+        IOptionsMonitor<RiskOptions>? riskOptions = null,
+        ISubAccountWireIdMapper? subAccountWireIdMapper = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _firmId = firmId ?? throw new ArgumentNullException(nameof(firmId));
@@ -91,6 +100,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         _latencyProbe = latencyProbe ?? new OrderEntryLatencyProbe(_clock);
         _reactor = venueDisconnectReactor;
         _riskOptions = riskOptions;
+        _subAccountWireIdMapper = subAccountWireIdMapper;
         _client.Terminated += OnTerminated;
         _client.InboundGapAtReconnect += OnInboundGapAtReconnect;
         MetricsRegistry.RecordSessionVerId(_firmId, _currentSessionVerId);
@@ -176,7 +186,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         if (order.Quantity < 0)
             throw new ArgumentOutOfRangeException(nameof(order), "Quantity cannot be negative when submitted upstream.");
 
-        var req = BuildNewOrderRequest(order, ResolveStpInstruction(order));
+        var req = BuildNewOrderRequest(order, ResolveStpInstruction(order), ResolveTradingSubAccount(order));
 
         return SendAsync(req.ClOrdID.Value, OrderEntryLatencyProbe.OpSubmit,
             ct => _client.SubmitAsync(req, ct), cancellationToken);
@@ -199,10 +209,16 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// </para>
     /// </summary>
     internal static UpModels.NewOrderRequest BuildNewOrderRequest(Order order)
-        => BuildNewOrderRequest(order, UpModels.SelfTradePreventionInstruction.None);
+        => BuildNewOrderRequest(order, UpModels.SelfTradePreventionInstruction.None, tradingSubAccount: null);
 
     internal static UpModels.NewOrderRequest BuildNewOrderRequest(
         Order order, UpModels.SelfTradePreventionInstruction stpInstruction)
+        => BuildNewOrderRequest(order, stpInstruction, tradingSubAccount: null);
+
+    internal static UpModels.NewOrderRequest BuildNewOrderRequest(
+        Order order,
+        UpModels.SelfTradePreventionInstruction stpInstruction,
+        uint? tradingSubAccount)
     {
         ArgumentNullException.ThrowIfNull(order);
         return new UpModels.NewOrderRequest
@@ -238,6 +254,11 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             // resolved by the caller (gateway SubmitAsync) so this
             // static stays pure.
             SelfTradePreventionInstruction = stpInstruction,
+            // #471. Numeric wire id for the order's sub-account, when
+            // the order carries one. Null = no sub-account on the
+            // wire (SDK omits the field entirely) — matches the
+            // master-bucket semantics of Order.SubAccountId == null.
+            TradingSubAccount = tradingSubAccount,
         };
     }
 
@@ -318,6 +339,13 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             // order's (owner, firm, symbol) — modify never changes
             // those three.
             SelfTradePreventionInstruction = ResolveStpInstruction(original),
+            // #471. Same rationale as STP above: from the matching
+            // engine's perspective a replace is a fresh order, so the
+            // TradingSubAccount wire id must re-accompany it. The
+            // domain sub-account on the original Order is preserved
+            // through every modify path (HydrateReplacement copies it
+            // verbatim), so resolving from `original` is correct.
+            TradingSubAccount = ResolveTradingSubAccount(original),
         };
 
         return SendAsync(newClOrdId, OrderEntryLatencyProbe.OpReplace,
@@ -419,6 +447,21 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         var mode = RiskLimitsResolver.ResolveSelfTradePreventionMode(
             _riskOptions.CurrentValue, order.Owner.Value, order.FirmId, order.Symbol);
         return MapStpInstruction(mode);
+    }
+
+    /// <summary>
+    /// #471. Resolve the numeric <c>TradingSubAccount</c> stamped on
+    /// an outbound <c>NewOrderRequest</c> / <c>ReplaceOrderRequest</c>.
+    /// Returns <c>null</c> when no <see cref="ISubAccountWireIdMapper"/>
+    /// is wired (legacy gateways that don't care about the field stay
+    /// green) or when the order itself has no sub-account (master
+    /// bucket — wire field stays omitted). The production composition
+    /// root always wires <see cref="DeterministicSubAccountWireIdMapper"/>.
+    /// </summary>
+    private uint? ResolveTradingSubAccount(Order order)
+    {
+        if (_subAccountWireIdMapper is null) return null;
+        return _subAccountWireIdMapper.TryMap(order.FirmId, order.SubAccountId);
     }
 
     // The IEntryPointClient submit-side surface is unused on the real adapter
