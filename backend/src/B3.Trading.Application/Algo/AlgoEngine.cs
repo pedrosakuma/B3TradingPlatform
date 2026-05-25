@@ -229,20 +229,26 @@ public sealed class AlgoEngine : BackgroundService
     }
 
     /// <summary>
-    /// Test-only deterministic adoption probe (#329 fix). Returns the
-    /// parent's currently-adopted child ClOrdID — i.e. the value the
-    /// modify path will read from <c>rt.LiveChildClOrdId</c> when the
-    /// next operator-modify signal is dispatched. The book carrying
-    /// the new child does NOT guarantee adoption has happened: the
-    /// ER processor first hydrates the child (visible in the book)
-    /// then enqueues a <see cref="ChildExecutionObservedSignal"/>;
+    /// Test-only deterministic adoption probe (#329, #434). Returns
+    /// the parent's currently-adopted child ClOrdID — i.e. the value
+    /// the modify path will read from <c>rt.LiveChildClOrdId</c> when
+    /// the next operator-modify signal is dispatched. The book
+    /// carrying the new child does NOT guarantee adoption has
+    /// happened: the ER processor first hydrates the child (visible
+    /// in the book) then enqueues a <see cref="ChildExecutionObservedSignal"/>;
     /// the engine consumer task processes that signal asynchronously
-    /// and only then updates <c>LiveChildClOrdId</c>. Tests that drive
-    /// successive modify cycles MUST poll this before issuing the
-    /// next modify, otherwise the engine still sees the prior child
-    /// and dispatches a replace with the wrong OriginalClOrdId.
-    /// Returns null when the parent runtime hasn't been created yet
-    /// or has no live child (e.g. mid-terminal transition).
+    /// and only then updates <c>LiveChildClOrdId</c>. Tests that
+    /// drive successive modify cycles MUST poll this before issuing
+    /// the next modify, otherwise the engine still sees the prior
+    /// child and dispatches a replace with the wrong OriginalClOrdId.
+    /// #434 ordering guarantee: by the time this probe observes the
+    /// new ClOrdID, <see cref="AlgoParentRuntime.RetireChildSlot"/>,
+    /// the <c>AlgoModifyRetiredChildEvictedTotal</c> counter bump and
+    /// the pegged-repeg resolution dispatch are ALL already committed
+    /// — adoption is published via a lock-fenced setter so prior
+    /// bookkeeping is happens-before visible to readers that observe
+    /// the flip. Returns null when the parent runtime hasn't been
+    /// created yet or has no live child (e.g. mid-terminal transition).
     /// </summary>
     internal ulong? TryGetLiveChildClOrdId(string firmId, ulong algoId)
     {
@@ -719,7 +725,16 @@ public sealed class AlgoEngine : BackgroundService
             && _ownership.TryResolveOrig(child.ClOrdId, out var origOfNew)
             && origOfNew == oldLive)
         {
-            rt.LiveChildClOrdId = child.ClOrdId;
+            // #434: All adoption-side bookkeeping (ChildBookedCum
+            // seed, RetireChildSlot + eviction counter, pegged repeg
+            // resolution) is performed BEFORE the LiveChildClOrdId
+            // flip below. The flip then publishes via a lock-fenced
+            // setter so any cross-thread reader (notably tests
+            // gating on TryGetLiveChildClOrdId) that observes the
+            // new ClOrdID is also guaranteed to observe the prior
+            // bookkeeping — closing the #347 / #345 / #329 race
+            // class where a "next modify cycle" or "assert counter"
+            // gate fired before the side state was committed.
             rt.ChildBookedCum[child.ClOrdId] = child.CumulativeQuantity;
 
             // #300 retrofit. Discriminate operator-modify adoption vs
@@ -811,6 +826,14 @@ public sealed class AlgoEngine : BackgroundService
                         new KeyValuePair<string, object?>("call_site", "algo.pegged.repeg-resolved"));
                 }
             }
+
+            // #434: Publish the adoption LAST. The lock-fenced setter
+            // (AlgoParentRuntime.LiveChildClOrdId) ensures all prior
+            // writes in this block — ChildBookedCum seed,
+            // RetiredChildSlots enqueue, counter Add, repeg book
+            // Remove dispatch — are happens-before visible to any
+            // reader that observes the new ClOrdID.
+            rt.LiveChildClOrdId = child.ClOrdId;
         }
 
         // Book the cum-quantity delta. Child orders deliver fills via
@@ -2541,11 +2564,30 @@ public sealed class AlgoEngine : BackgroundService
     /// <summary>
     /// Mutable per-parent runtime state. Lives only in memory (not
     /// snapshotted) — recovery rebuilds it from the order book on engine
-    /// start. Not thread-safe; only the single consumer task touches it.
+    /// start. The engine consumer task is the sole writer for every
+    /// field; <see cref="LiveChildClOrdId"/> additionally publishes via
+    /// a lock-fenced setter/getter so cross-thread readers (notably
+    /// tests gating on <see cref="AlgoEngine.TryGetLiveChildClOrdId"/>)
+    /// observe the adoption flip strictly after every prior write in
+    /// the adoption block (#434).
     /// </summary>
     internal sealed class AlgoParentRuntime
     {
-        public ulong? LiveChildClOrdId;
+        // #434: backing field for the lock-fenced LiveChildClOrdId
+        // property below. Single-writer (engine consumer task) +
+        // occasional cross-thread reader (tests). The lock acts as
+        // a release-store on write and acquire-load on read so any
+        // bookkeeping mutated by the writer BEFORE assigning this
+        // field becomes happens-before visible to a reader that
+        // observes the new value.
+        private ulong? _liveChildClOrdId;
+        private readonly object _liveChildLock = new();
+
+        public ulong? LiveChildClOrdId
+        {
+            get { lock (_liveChildLock) return _liveChildClOrdId; }
+            set { lock (_liveChildLock) _liveChildClOrdId = value; }
+        }
         public int NextSliceSeq;
         public int RetryAttempts;
         public Dictionary<ulong, long> ChildBookedCum { get; } = new();
