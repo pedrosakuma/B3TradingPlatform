@@ -74,6 +74,14 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     // behavior, matches the pre-#471 contract). Production
     // composition root always wires DeterministicSubAccountWireIdMapper.
     private readonly ISubAccountWireIdMapper? _subAccountWireIdMapper;
+    // #458. Optional resolver for the CBLC Account number (ulong?)
+    // carried in NewOrderRequest.Account / ReplaceOrderRequest.Account.
+    // Default = NullVenueAccountResolver (always null) — wire field
+    // stays omitted and post-trade allocation continues via the
+    // broker's out-of-band matching. Operators that have configured
+    // a real mapping (lookup table, broker handshake) swap in a real
+    // impl at the composition root.
+    private readonly IVenueAccountResolver? _venueAccountResolver;
 
     public B3EntryPointClientGateway(
         Up.EntryPointClient client,
@@ -87,7 +95,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         IVenueDisconnectReactor? venueDisconnectReactor = null,
         TimeSpan? gracefulTerminateTimeout = null,
         IOptionsMonitor<RiskOptions>? riskOptions = null,
-        ISubAccountWireIdMapper? subAccountWireIdMapper = null)
+        ISubAccountWireIdMapper? subAccountWireIdMapper = null,
+        IVenueAccountResolver? venueAccountResolver = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _firmId = firmId ?? throw new ArgumentNullException(nameof(firmId));
@@ -101,6 +110,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         _reactor = venueDisconnectReactor;
         _riskOptions = riskOptions;
         _subAccountWireIdMapper = subAccountWireIdMapper;
+        _venueAccountResolver = venueAccountResolver;
         _client.Terminated += OnTerminated;
         _client.InboundGapAtReconnect += OnInboundGapAtReconnect;
         MetricsRegistry.RecordSessionVerId(_firmId, _currentSessionVerId);
@@ -186,7 +196,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         if (order.Quantity < 0)
             throw new ArgumentOutOfRangeException(nameof(order), "Quantity cannot be negative when submitted upstream.");
 
-        var req = BuildNewOrderRequest(order, ResolveStpInstruction(order), ResolveTradingSubAccount(order));
+        var req = BuildNewOrderRequest(order, ResolveStpInstruction(order), ResolveTradingSubAccount(order), ResolveVenueAccount(order));
 
         return SendAsync(req.ClOrdID.Value, OrderEntryLatencyProbe.OpSubmit,
             ct => _client.SubmitAsync(req, ct), cancellationToken);
@@ -209,16 +219,23 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// </para>
     /// </summary>
     internal static UpModels.NewOrderRequest BuildNewOrderRequest(Order order)
-        => BuildNewOrderRequest(order, UpModels.SelfTradePreventionInstruction.None, tradingSubAccount: null);
+        => BuildNewOrderRequest(order, UpModels.SelfTradePreventionInstruction.None, tradingSubAccount: null, venueAccount: null);
 
     internal static UpModels.NewOrderRequest BuildNewOrderRequest(
         Order order, UpModels.SelfTradePreventionInstruction stpInstruction)
-        => BuildNewOrderRequest(order, stpInstruction, tradingSubAccount: null);
+        => BuildNewOrderRequest(order, stpInstruction, tradingSubAccount: null, venueAccount: null);
 
     internal static UpModels.NewOrderRequest BuildNewOrderRequest(
         Order order,
         UpModels.SelfTradePreventionInstruction stpInstruction,
         uint? tradingSubAccount)
+        => BuildNewOrderRequest(order, stpInstruction, tradingSubAccount, venueAccount: null);
+
+    internal static UpModels.NewOrderRequest BuildNewOrderRequest(
+        Order order,
+        UpModels.SelfTradePreventionInstruction stpInstruction,
+        uint? tradingSubAccount,
+        ulong? venueAccount)
     {
         ArgumentNullException.ThrowIfNull(order);
         return new UpModels.NewOrderRequest
@@ -259,6 +276,12 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             // wire (SDK omits the field entirely) — matches the
             // master-bucket semantics of Order.SubAccountId == null.
             TradingSubAccount = tradingSubAccount,
+            // #458. CBLC Account number for clearing/allocation, when
+            // an operator has wired a real IVenueAccountResolver. Null
+            // = no mapping known → wire field stays omitted and the
+            // broker's out-of-band post-trade allocation continues to
+            // apply (pre-#458 wire behavior).
+            Account = venueAccount,
         };
     }
 
@@ -346,6 +369,12 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             // through every modify path (HydrateReplacement copies it
             // verbatim), so resolving from `original` is correct.
             TradingSubAccount = ResolveTradingSubAccount(original),
+            // #458. Same rationale: replace is a fresh book entry; the
+            // CBLC Account must re-accompany it. Resolving from
+            // `original` is correct because owner/firm/sub-account
+            // (the typical inputs to the resolver) are immutable
+            // across a modify.
+            Account = ResolveVenueAccount(original),
         };
 
         return SendAsync(newClOrdId, OrderEntryLatencyProbe.OpReplace,
@@ -462,6 +491,21 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     {
         if (_subAccountWireIdMapper is null) return null;
         return _subAccountWireIdMapper.TryMap(order.FirmId, order.SubAccountId);
+    }
+
+    /// <summary>
+    /// #458. Resolve the CBLC <c>Account</c> stamped on an outbound
+    /// <c>NewOrderRequest</c> / <c>ReplaceOrderRequest</c>. Returns
+    /// <c>null</c> when no <see cref="IVenueAccountResolver"/> is
+    /// wired (legacy gateways stay green) or when the wired resolver
+    /// has no mapping for the order — in both cases the wire field
+    /// stays omitted and post-trade allocation continues via the
+    /// broker's out-of-band matching.
+    /// </summary>
+    private ulong? ResolveVenueAccount(Order order)
+    {
+        if (_venueAccountResolver is null) return null;
+        return _venueAccountResolver.TryResolve(order);
     }
 
     // The IEntryPointClient submit-side surface is unused on the real adapter

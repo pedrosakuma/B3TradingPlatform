@@ -66,6 +66,16 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         // composition root with an explicit lookup table if they
         // negotiate a registered mapping with the broker.
         services.AddSingleton<ISubAccountWireIdMapper, DeterministicSubAccountWireIdMapper>();
+        // #458 (SDK 0.14.4+). Resolve CBLC Account number stamped on
+        // every outbound NewOrderRequest / ReplaceOrderRequest. Unlike
+        // the sub-account wire id, the CBLC number is issued by the
+        // clearing house and cannot be derived internally — default is
+        // the null resolver (wire field stays omitted, post-trade
+        // allocation continues via the broker's out-of-band matching).
+        // Operators replace this with a real impl (lookup table,
+        // admin-managed registry, broker handshake) when they have a
+        // negotiated mapping.
+        services.AddSingleton<IVenueAccountResolver>(NullVenueAccountResolver.Instance);
         // Q4.5 (#305). Audit log keeper + dispatcher-backed logger.
         // Both singletons so the live-dispatch path, recovery replay
         // and admin read endpoint all share the same in-memory ring

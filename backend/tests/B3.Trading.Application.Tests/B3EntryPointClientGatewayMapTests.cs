@@ -259,5 +259,47 @@ public class B3EntryPointClientGatewayMapTests
             order, Up.SelfTradePreventionInstruction.None, tradingSubAccount: null);
         Assert.Null(withoutId.TradingSubAccount);
     }
+
+    // ------------------------------------------------------------------
+    // #458. CBLC Account wire field. The five-arg BuildNewOrderRequest
+    // overload stamps whatever the gateway resolved from its
+    // IVenueAccountResolver. Legacy overloads must leave the field
+    // null so any caller that has not opted into a real resolver
+    // continues to send the field omitted on the wire.
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void BuildNewOrderRequest_LegacyOverloads_LeaveAccountNull()
+    {
+        var owner = new EndClientId("alice");
+        var order = new Order(42UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit,
+            100, 30m, "FIRM-A");
+
+        Assert.Null(B3EntryPointClientGateway.BuildNewOrderRequest(order).Account);
+        Assert.Null(B3EntryPointClientGateway
+            .BuildNewOrderRequest(order, Up.SelfTradePreventionInstruction.None)
+            .Account);
+        Assert.Null(B3EntryPointClientGateway
+            .BuildNewOrderRequest(order, Up.SelfTradePreventionInstruction.None, tradingSubAccount: 42u)
+            .Account);
+    }
+
+    [Fact]
+    public void BuildNewOrderRequest_StampsResolvedVenueAccount()
+    {
+        var owner = new EndClientId("alice");
+        var order = new Order(42UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit,
+            100, 30m, "FIRM-A");
+
+        var withAccount = B3EntryPointClientGateway.BuildNewOrderRequest(
+            order, Up.SelfTradePreventionInstruction.None,
+            tradingSubAccount: null, venueAccount: 123456789UL);
+        Assert.Equal(123456789UL, withAccount.Account);
+
+        var withoutAccount = B3EntryPointClientGateway.BuildNewOrderRequest(
+            order, Up.SelfTradePreventionInstruction.None,
+            tradingSubAccount: null, venueAccount: null);
+        Assert.Null(withoutAccount.Account);
+    }
 }
 
