@@ -26,6 +26,16 @@ public static class MetricsRegistry
     public static readonly Counter<long> OrdersCancelRequested =
         Meter.CreateCounter<long>("trading.orders.cancel_requested");
     /// <summary>
+    /// #473. Counts every approved stamp of a routing instruction on
+    /// an outbound NewOrder / Replace. Tagged with <c>value</c>
+    /// (RetailLiquidityTaker / WaivedPriority / BrokerOnly /
+    /// BrokerOnlyRemoval) and <c>firmId</c>. Conflict-of-interest
+    /// sensitive (BrokerOnly especially) — downstream alerts can
+    /// pin a threshold on the BrokerOnly slice per firm.
+    /// </summary>
+    public static readonly Counter<long> RoutingInstructionStamped =
+        Meter.CreateCounter<long>("trading.orders.routing_instruction_stamped");
+    /// <summary>
     /// Q1.3 (#255). Counts every GTD expiry the scheduler dispatched.
     /// Tagged with <c>cancel_result</c> = the
     /// <see cref="OrderCancelResultKind"/> the cancel pipeline

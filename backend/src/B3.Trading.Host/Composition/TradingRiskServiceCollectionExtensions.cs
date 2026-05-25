@@ -88,6 +88,16 @@ public static class TradingRiskServiceCollectionExtensions
         services.AddSingleton<IRiskCheck, SymbolHaltedCheck>();
         services.AddSingleton<IRiskCheck, SessionPhaseCheck>();
         services.AddSingleton<IRiskCheck, OrderTypeAllowedCheck>();
+        // #473 (SDK 0.15.0). Pre-trade whitelist gate for the
+        // routing instruction stamped on outbound orders. Default-
+        // DENY: if a resolver returns a value but the resolved
+        // scope has no AllowedRoutingInstructions whitelist, the
+        // order is rejected. This is intentionally inverse to
+        // OrderTypeAllowedCheck (default-allow) because routing
+        // instructions carry fairness / conflict-of-interest
+        // implications (e.g. BrokerOnly) — a value flowing into
+        // an unconfigured scope is a config smell.
+        services.AddSingleton<IRiskCheck, RoutingInstructionAllowedCheck>();
         services.AddSingleton<IRiskCheck, MinTickSizeCheck>();
         services.AddSingleton<IRiskCheck, MinLotSizeCheck>();
         services.AddSingleton<IRiskCheck, MaxQuantityCheck>();

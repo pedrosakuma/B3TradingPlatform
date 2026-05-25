@@ -1,4 +1,5 @@
 using B3.Trading.Application.Investor;
+using B3.Trading.Application.Routing;
 using B3.Trading.Domain;
 using B3.Trading.Infrastructure;
 using Up = B3.EntryPoint.Client.Models;
@@ -351,6 +352,63 @@ public class B3EntryPointClientGatewayMapTests
             tradingSubAccount: null, venueAccount: null,
             investorId: null);
         Assert.Null(withoutId.InvestorId);
+    }
+
+    // ------------------------------------------------------------------
+    // #473. RoutingInstruction wire field. The seven-arg
+    // BuildNewOrderRequest overload stamps whatever the gateway
+    // resolved via IRoutingInstructionResolver, translating the
+    // Application-layer enum into the SDK wire enum. Legacy overloads
+    // must leave the field null so callers that have not opted in
+    // continue to omit the field on the wire.
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void BuildNewOrderRequest_LegacyOverloads_LeaveRoutingInstructionNull()
+    {
+        var owner = new EndClientId("alice");
+        var order = new Order(42UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit,
+            100, 30m, "FIRM-A");
+
+        Assert.Null(B3EntryPointClientGateway.BuildNewOrderRequest(order).RoutingInstruction);
+        Assert.Null(B3EntryPointClientGateway
+            .BuildNewOrderRequest(order, Up.SelfTradePreventionInstruction.None)
+            .RoutingInstruction);
+        Assert.Null(B3EntryPointClientGateway
+            .BuildNewOrderRequest(order, Up.SelfTradePreventionInstruction.None, tradingSubAccount: 42u)
+            .RoutingInstruction);
+        Assert.Null(B3EntryPointClientGateway
+            .BuildNewOrderRequest(order, Up.SelfTradePreventionInstruction.None, tradingSubAccount: 42u, venueAccount: 99UL)
+            .RoutingInstruction);
+        Assert.Null(B3EntryPointClientGateway
+            .BuildNewOrderRequest(order, Up.SelfTradePreventionInstruction.None,
+                tradingSubAccount: 42u, venueAccount: 99UL, investorId: new InvestorIdentity(1, 2))
+            .RoutingInstruction);
+    }
+
+    [Theory]
+    [InlineData(RoutingInstruction.RetailLiquidityTaker, Up.RoutingInstruction.RetailLiquidityTaker)]
+    [InlineData(RoutingInstruction.WaivedPriority, Up.RoutingInstruction.WaivedPriority)]
+    [InlineData(RoutingInstruction.BrokerOnly, Up.RoutingInstruction.BrokerOnly)]
+    [InlineData(RoutingInstruction.BrokerOnlyRemoval, Up.RoutingInstruction.BrokerOnlyRemoval)]
+    public void BuildNewOrderRequest_StampsResolvedRoutingInstruction(
+        RoutingInstruction domain, Up.RoutingInstruction wire)
+    {
+        var owner = new EndClientId("alice");
+        var order = new Order(42UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit,
+            100, 30m, "FIRM-A");
+
+        var withRi = B3EntryPointClientGateway.BuildNewOrderRequest(
+            order, Up.SelfTradePreventionInstruction.None,
+            tradingSubAccount: null, venueAccount: null,
+            investorId: null, routingInstruction: domain);
+        Assert.Equal(wire, withRi.RoutingInstruction);
+
+        var withoutRi = B3EntryPointClientGateway.BuildNewOrderRequest(
+            order, Up.SelfTradePreventionInstruction.None,
+            tradingSubAccount: null, venueAccount: null,
+            investorId: null, routingInstruction: null);
+        Assert.Null(withoutRi.RoutingInstruction);
     }
 }
 

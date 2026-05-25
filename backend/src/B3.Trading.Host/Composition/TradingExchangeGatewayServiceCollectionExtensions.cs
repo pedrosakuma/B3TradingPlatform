@@ -1,6 +1,7 @@
 using B3.Trading.Application;
 using B3.Trading.Application.Investor;
 using B3.Trading.Application.Lifecycle;
+using B3.Trading.Application.Routing;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.SubAccount;
@@ -126,12 +127,14 @@ public static class TradingExchangeGatewayServiceCollectionExtensions
                     var subAccountMapper = sp.GetService<ISubAccountWireIdMapper>();
                     var venueAccountResolver = sp.GetService<IVenueAccountResolver>();
                     var investorIdResolver = sp.GetService<IInvestorIdResolver>();
+                    var routingInstructionResolver = sp.GetService<IRoutingInstructionResolver>();
                     return new B3EntryPointClientGateway(upstream, firm.FirmId, resolvedVerId, gwLogger,
                         venueDisconnectReactor: reactor,
                         riskOptions: riskOpts,
                         subAccountWireIdMapper: subAccountMapper,
                         venueAccountResolver: venueAccountResolver,
-                        investorIdResolver: investorIdResolver);
+                        investorIdResolver: investorIdResolver,
+                        routingInstructionResolver: routingInstructionResolver);
                 });
                 return new FirmGatewayRegistry(gateways);
             });

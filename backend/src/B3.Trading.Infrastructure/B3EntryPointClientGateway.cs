@@ -1,5 +1,6 @@
 using B3.Trading.Application.Investor;
 using B3.Trading.Application.Observability;
+using B3.Trading.Application.Routing;
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.SubAccount;
 using B3.Trading.Domain;
@@ -92,6 +93,16 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     // broker-issued registry, keeping PII off the wire and out of the
     // WAL (LGPD posture — see IInvestorIdResolver doc).
     private readonly IInvestorIdResolver? _investorIdResolver;
+    // #473. Optional resolver for the RoutingInstruction stamped on
+    // outbound NewOrderRequest / ReplaceOrderRequest. Default = null
+    // → resolver helper short-circuits to null → wire field stays
+    // omitted (pre-#473 behavior). Pre-trade gating happens at the
+    // caller (OrderSubmissionService / OrderModifyService) via
+    // RoutingInstructionAllowedCheck; the gateway re-resolves here
+    // to keep the BuildNewOrderRequest path SDK-self-contained, and
+    // resolvers MUST be deterministic per-Order so the two
+    // resolutions agree (see IRoutingInstructionResolver doc).
+    private readonly IRoutingInstructionResolver? _routingInstructionResolver;
 
     public B3EntryPointClientGateway(
         Up.EntryPointClient client,
@@ -107,7 +118,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         IOptionsMonitor<RiskOptions>? riskOptions = null,
         ISubAccountWireIdMapper? subAccountWireIdMapper = null,
         IVenueAccountResolver? venueAccountResolver = null,
-        IInvestorIdResolver? investorIdResolver = null)
+        IInvestorIdResolver? investorIdResolver = null,
+        IRoutingInstructionResolver? routingInstructionResolver = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _firmId = firmId ?? throw new ArgumentNullException(nameof(firmId));
@@ -123,6 +135,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         _subAccountWireIdMapper = subAccountWireIdMapper;
         _venueAccountResolver = venueAccountResolver;
         _investorIdResolver = investorIdResolver;
+        _routingInstructionResolver = routingInstructionResolver;
         _client.Terminated += OnTerminated;
         _client.InboundGapAtReconnect += OnInboundGapAtReconnect;
         MetricsRegistry.RecordSessionVerId(_firmId, _currentSessionVerId);
@@ -208,7 +221,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         if (order.Quantity < 0)
             throw new ArgumentOutOfRangeException(nameof(order), "Quantity cannot be negative when submitted upstream.");
 
-        var req = BuildNewOrderRequest(order, ResolveStpInstruction(order), ResolveTradingSubAccount(order), ResolveVenueAccount(order), ResolveInvestorId(order));
+        var req = BuildNewOrderRequest(order, ResolveStpInstruction(order), ResolveTradingSubAccount(order), ResolveVenueAccount(order), ResolveInvestorId(order), ResolveRoutingInstruction(order));
 
         return SendAsync(req.ClOrdID.Value, OrderEntryLatencyProbe.OpSubmit,
             ct => _client.SubmitAsync(req, ct), cancellationToken);
@@ -231,24 +244,24 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// </para>
     /// </summary>
     internal static UpModels.NewOrderRequest BuildNewOrderRequest(Order order)
-        => BuildNewOrderRequest(order, UpModels.SelfTradePreventionInstruction.None, tradingSubAccount: null, venueAccount: null, investorId: null);
+        => BuildNewOrderRequest(order, UpModels.SelfTradePreventionInstruction.None, tradingSubAccount: null, venueAccount: null, investorId: null, routingInstruction: null);
 
     internal static UpModels.NewOrderRequest BuildNewOrderRequest(
         Order order, UpModels.SelfTradePreventionInstruction stpInstruction)
-        => BuildNewOrderRequest(order, stpInstruction, tradingSubAccount: null, venueAccount: null, investorId: null);
+        => BuildNewOrderRequest(order, stpInstruction, tradingSubAccount: null, venueAccount: null, investorId: null, routingInstruction: null);
 
     internal static UpModels.NewOrderRequest BuildNewOrderRequest(
         Order order,
         UpModels.SelfTradePreventionInstruction stpInstruction,
         uint? tradingSubAccount)
-        => BuildNewOrderRequest(order, stpInstruction, tradingSubAccount, venueAccount: null, investorId: null);
+        => BuildNewOrderRequest(order, stpInstruction, tradingSubAccount, venueAccount: null, investorId: null, routingInstruction: null);
 
     internal static UpModels.NewOrderRequest BuildNewOrderRequest(
         Order order,
         UpModels.SelfTradePreventionInstruction stpInstruction,
         uint? tradingSubAccount,
         ulong? venueAccount)
-        => BuildNewOrderRequest(order, stpInstruction, tradingSubAccount, venueAccount, investorId: null);
+        => BuildNewOrderRequest(order, stpInstruction, tradingSubAccount, venueAccount, investorId: null, routingInstruction: null);
 
     internal static UpModels.NewOrderRequest BuildNewOrderRequest(
         Order order,
@@ -256,6 +269,15 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         uint? tradingSubAccount,
         ulong? venueAccount,
         InvestorIdentity? investorId)
+        => BuildNewOrderRequest(order, stpInstruction, tradingSubAccount, venueAccount, investorId, routingInstruction: null);
+
+    internal static UpModels.NewOrderRequest BuildNewOrderRequest(
+        Order order,
+        UpModels.SelfTradePreventionInstruction stpInstruction,
+        uint? tradingSubAccount,
+        ulong? venueAccount,
+        InvestorIdentity? investorId,
+        RoutingInstruction? routingInstruction)
     {
         ArgumentNullException.ThrowIfNull(order);
         return new UpModels.NewOrderRequest
@@ -310,6 +332,13 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             InvestorId = investorId is { } id
                 ? new UpModels.InvestorId { Prefix = id.Prefix, Document = id.Document }
                 : (UpModels.InvestorId?)null,
+            // #473. Routing instruction stamped when an operator has
+            // wired a real IRoutingInstructionResolver AND the
+            // resolved scope's RiskLimits.AllowedRoutingInstructions
+            // permits the value (gating happens upstream in
+            // RoutingInstructionAllowedCheck). Null = wire field
+            // omitted (pre-#473 behavior).
+            RoutingInstruction = MapRoutingInstructionToWire(routingInstruction),
         };
     }
 
@@ -408,6 +437,12 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             // `original` is correct because owner/firm (the typical
             // inputs to the resolver) are immutable across a modify.
             InvestorId = MapInvestorIdToWire(ResolveInvestorId(original)),
+            // #473. Same rationale: replace is a fresh book entry,
+            // routing intent must re-accompany it. Resolved off the
+            // original since owner/firm (the typical inputs) are
+            // immutable across modify; pre-trade whitelist gating
+            // was already applied by OrderModifyService.
+            RoutingInstruction = MapRoutingInstructionToWire(ResolveRoutingInstruction(original)),
         };
 
         return SendAsync(newClOrdId, OrderEntryLatencyProbe.OpReplace,
@@ -564,6 +599,38 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         => id is { } v
             ? new UpModels.InvestorId { Prefix = v.Prefix, Document = v.Document }
             : (UpModels.InvestorId?)null;
+
+    /// <summary>
+    /// #473. Resolve the <see cref="RoutingInstruction"/> stamped on
+    /// an outbound <c>NewOrderRequest</c> / <c>ReplaceOrderRequest</c>.
+    /// Returns <c>null</c> when no
+    /// <see cref="IRoutingInstructionResolver"/> is wired (legacy
+    /// gateways stay green) or when the wired resolver has no
+    /// instruction for the order. Pre-trade whitelist gating is the
+    /// caller's responsibility — the gateway trusts what the resolver
+    /// returns here.
+    /// </summary>
+    private RoutingInstruction? ResolveRoutingInstruction(Order order)
+    {
+        if (_routingInstructionResolver is null) return null;
+        return _routingInstructionResolver.TryResolve(order);
+    }
+
+    /// <summary>
+    /// Translate domain <see cref="RoutingInstruction"/> → SDK wire
+    /// enum. Kept private so the SDK type never leaks past the
+    /// gateway boundary.
+    /// </summary>
+    private static UpModels.RoutingInstruction? MapRoutingInstructionToWire(RoutingInstruction? value)
+        => value switch
+        {
+            RoutingInstruction.RetailLiquidityTaker => UpModels.RoutingInstruction.RetailLiquidityTaker,
+            RoutingInstruction.WaivedPriority => UpModels.RoutingInstruction.WaivedPriority,
+            RoutingInstruction.BrokerOnly => UpModels.RoutingInstruction.BrokerOnly,
+            RoutingInstruction.BrokerOnlyRemoval => UpModels.RoutingInstruction.BrokerOnlyRemoval,
+            null => null,
+            _ => throw new ArgumentOutOfRangeException(nameof(value), value, "Unknown RoutingInstruction"),
+        };
 
     // The IEntryPointClient submit-side surface is unused on the real adapter
     // (OrdersEndpoints calls IExchangeGateway directly). We implement it to
