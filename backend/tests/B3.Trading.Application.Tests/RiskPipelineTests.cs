@@ -1,4 +1,5 @@
 using B3.Trading.Application;
+using B3.Trading.Application.MarketData;
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.Risk.Checks;
 using B3.Trading.Domain;
@@ -442,7 +443,7 @@ public class RiskPipelineTests
     public void MinTickSize_RejectsNonMultiple()
     {
         var dir = BuildDirectory(specs: new() { ["PETR4"] = new() { TickSize = 0.01m } });
-        var check = new MinTickSizeCheck(dir);
+        var check = new MinTickSizeCheck(dir, new SymbolDirectoryTickSizeProvider(dir));
         Assert.True(check.Check(Ctx(price: 30.01m)).Approved);
         Assert.True(check.Check(Ctx(price: 30.00m)).Approved);
         var rejected = check.Check(Ctx(price: 30.001m));
@@ -456,14 +457,14 @@ public class RiskPipelineTests
     public void MinTickSize_NoSpec_Approves()
     {
         var dir = BuildDirectory();
-        Assert.True(new MinTickSizeCheck(dir).Check(Ctx(price: 30.001m)).Approved);
+        Assert.True(new MinTickSizeCheck(dir, new SymbolDirectoryTickSizeProvider(dir)).Check(Ctx(price: 30.001m)).Approved);
     }
 
     [Fact]
     public void MinTickSize_MarketOrder_Approves()
     {
         var dir = BuildDirectory(specs: new() { ["PETR4"] = new() { TickSize = 0.01m } });
-        Assert.True(new MinTickSizeCheck(dir).Check(Ctx(price: null, type: OrderType.Market)).Approved);
+        Assert.True(new MinTickSizeCheck(dir, new SymbolDirectoryTickSizeProvider(dir)).Check(Ctx(price: null, type: OrderType.Market)).Approved);
     }
 
     // ── #360 tiered tick-ladder coverage ──────────────────────────────
@@ -484,7 +485,7 @@ public class RiskPipelineTests
                 },
             },
         });
-        var check = new MinTickSizeCheck(dir);
+        var check = new MinTickSizeCheck(dir, new SymbolDirectoryTickSizeProvider(dir));
 
         // 0.01 band [0,1): 0.50 valid, 0.501 rejects.
         Assert.True(check.Check(Ctx(price: 0.50m)).Approved);
@@ -518,7 +519,7 @@ public class RiskPipelineTests
                 },
             },
         });
-        var check = new MinTickSizeCheck(dir);
+        var check = new MinTickSizeCheck(dir, new SymbolDirectoryTickSizeProvider(dir));
 
         var midBand = check.Check(Ctx(price: 50.05m));
         Assert.False(midBand.Approved);
@@ -551,7 +552,7 @@ public class RiskPipelineTests
                 },
             },
         });
-        var check = new MinTickSizeCheck(dir);
+        var check = new MinTickSizeCheck(dir, new SymbolDirectoryTickSizeProvider(dir));
 
         // Sub-real: flat 0.01 fallback approves valid + reject reason omits band.
         Assert.True(check.Check(Ctx(symbol: "MGLU3", price: 0.50m)).Approved);
@@ -572,7 +573,7 @@ public class RiskPipelineTests
         // the ladder schema — surface the exact same reject text the
         // earlier tests asserted.
         var dir = BuildDirectory(specs: new() { ["PETR4"] = new() { TickSize = 0.01m } });
-        var rej = new MinTickSizeCheck(dir).Check(Ctx(price: 30.001m));
+        var rej = new MinTickSizeCheck(dir, new SymbolDirectoryTickSizeProvider(dir)).Check(Ctx(price: 30.001m));
         Assert.False(rej.Approved);
         Assert.Equal(
             "price 30.001 is not a multiple of tick size 0.01 for PETR4",

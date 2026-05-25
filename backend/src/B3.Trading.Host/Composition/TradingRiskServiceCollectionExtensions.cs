@@ -39,6 +39,13 @@ public static class TradingRiskServiceCollectionExtensions
         services.AddSingleton(sp =>
             new SymbolDirectory(sp.GetRequiredService<IOptions<SymbolDirectoryOptions>>().Value));
 
+        // #454 Fase 1. Per-symbol tick-size provider seam. Default impl
+        // wraps the config-backed SymbolDirectory; Fase 2 will swap (or
+        // chain in front of) an SDK-backed impl once upstream
+        // pedrosakuma/B3MarketDataPlatform#55 ships SecurityDefinitionEvent.
+        services.AddSingleton<B3.Trading.Application.MarketData.ITickSizeProvider,
+            B3.Trading.Application.MarketData.SymbolDirectoryTickSizeProvider>();
+
         // Pre-trade risk: pipeline + checks + kill-switch + reference price +
         // margin provider. Each IRiskCheck registration is auto-discovered by
         // the RiskPipeline through the IEnumerable<IRiskCheck> ctor injection.

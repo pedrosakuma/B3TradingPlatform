@@ -4,6 +4,7 @@ using B3.Trading.Api.Lifecycle;
 using B3.Trading.Api.WebSockets;
 using B3.Trading.Application;
 
+using B3.Trading.Application.MarketData;
 using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Domain;
@@ -57,7 +58,8 @@ public static class AlgoEndpoints
             EventDispatcher dispatcher,
             DrainState drain,
             SymbolDirectory symbols,
-            IAlgoSignalQueue signals) =>
+            IAlgoSignalQueue signals,
+            ITickSizeProvider tickSizes) =>
         {
             if (drain.IsDraining)
             {
@@ -202,10 +204,15 @@ public static class AlgoEndpoints
                 case AlgoType.Pegged:
                     // Q3.3 (#283). Pegged shares the POST /algo surface
                     // with the other algos via the type discriminator.
-                    // Tick size has no per-symbol provider yet (open
-                    // TODO across the repo), so the API accepts an
-                    // explicit override and falls back to 0.01 (BRL
-                    // equity default) — documented in the PR notes.
+                    // #454 Fase 1: tick now resolves through
+                    // ITickSizeProvider (config-backed SymbolDirectory
+                    // today; SDK-backed in Fase 2 once upstream
+                    // pedrosakuma/B3MarketDataPlatform#55 ships
+                    // SecurityDefinitionEvent). The request body keeps
+                    // its explicit override (operator wins), but the
+                    // legacy 0.01m BRL-equity floor is gone — a missing
+                    // tick now surfaces as an explicit reject instead
+                    // of a silent fallback that could mismatch the venue.
                     if (req.Pegged is null)
                         return Results.BadRequest(new { error = "pegged parameters are required for type=Pegged" });
                     if (!Enum.TryParse<PegRef>(req.Pegged.Ref, ignoreCase: true, out var peggedRef))
@@ -213,9 +220,21 @@ public static class AlgoEndpoints
                     var peggedRepegMs = req.Pegged.RepegIntervalMs ?? 500;
                     if (peggedRepegMs <= 0)
                         return Results.BadRequest(new { error = "pegged.repegIntervalMs must be positive" });
-                    var peggedTickSize = req.Pegged.TickSize ?? 0.01m;
-                    if (peggedTickSize <= 0m)
-                        return Results.BadRequest(new { error = "pegged.tickSize must be positive" });
+                    decimal peggedTickSize;
+                    if (req.Pegged.TickSize is { } overrideTick)
+                    {
+                        if (overrideTick <= 0m)
+                            return Results.BadRequest(new { error = "pegged.tickSize must be positive" });
+                        peggedTickSize = overrideTick;
+                    }
+                    else if (tickSizes.TryGetTickSize(req.Symbol, req.Pegged.PriceLimit, out var resolvedTick))
+                    {
+                        peggedTickSize = resolvedTick;
+                    }
+                    else
+                    {
+                        return Results.BadRequest(new { error = $"pegged.tickSize is required for symbol '{req.Symbol}' (no per-symbol tick configured)" });
+                    }
                     var peggedChildType = OrderType.Limit;
                     if (!string.IsNullOrWhiteSpace(req.Pegged.ChildOrderType))
                     {
@@ -556,11 +575,13 @@ public sealed record CreateAlgoPovParams(
 /// HTTP request shape for the Pegged parameter block (Q3.3 / #283).
 /// <para>
 /// <b>Defaults.</b> <see cref="RepegIntervalMs"/> defaults to 500ms,
-/// <see cref="TickSize"/> defaults to <c>0.01</c> (BRL equity floor;
-/// per-symbol provider TODO), <see cref="ChildOrderType"/> defaults
-/// to <c>Limit</c> (the only legal value — Market would defeat the
-/// peg). <see cref="OffsetTicks"/> is required and may be negative
-/// for passive pegs (Buy below the bid, Sell above the ask).
+/// <see cref="TickSize"/> is now resolved from
+/// <c>ITickSizeProvider</c> when the request omits it (#454 Fase 1 —
+/// the legacy 0.01 BRL-equity fallback was removed; explicit override
+/// still wins). <see cref="ChildOrderType"/> defaults to <c>Limit</c>
+/// (the only legal value — Market would defeat the peg).
+/// <see cref="OffsetTicks"/> is required and may be negative for
+/// passive pegs (Buy below the bid, Sell above the ask).
 /// </para>
 /// </summary>
 public sealed record CreateAlgoPeggedParams(
