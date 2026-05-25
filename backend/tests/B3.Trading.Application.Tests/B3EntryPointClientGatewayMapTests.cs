@@ -1,3 +1,4 @@
+using B3.Trading.Application.Investor;
 using B3.Trading.Domain;
 using B3.Trading.Infrastructure;
 using Up = B3.EntryPoint.Client.Models;
@@ -300,6 +301,56 @@ public class B3EntryPointClientGatewayMapTests
             order, Up.SelfTradePreventionInstruction.None,
             tradingSubAccount: null, venueAccount: null);
         Assert.Null(withoutAccount.Account);
+    }
+
+    // ------------------------------------------------------------------
+    // #472. InvestorId wire field. The six-arg BuildNewOrderRequest
+    // overload stamps whatever the gateway resolved from its
+    // IInvestorIdResolver, translating the domain InvestorIdentity
+    // record into the SDK's InvestorId struct. Legacy overloads must
+    // leave the field null so any caller that has not opted into a
+    // real resolver continues to send the field omitted on the wire.
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void BuildNewOrderRequest_LegacyOverloads_LeaveInvestorIdNull()
+    {
+        var owner = new EndClientId("alice");
+        var order = new Order(42UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit,
+            100, 30m, "FIRM-A");
+
+        Assert.Null(B3EntryPointClientGateway.BuildNewOrderRequest(order).InvestorId);
+        Assert.Null(B3EntryPointClientGateway
+            .BuildNewOrderRequest(order, Up.SelfTradePreventionInstruction.None)
+            .InvestorId);
+        Assert.Null(B3EntryPointClientGateway
+            .BuildNewOrderRequest(order, Up.SelfTradePreventionInstruction.None, tradingSubAccount: 42u)
+            .InvestorId);
+        Assert.Null(B3EntryPointClientGateway
+            .BuildNewOrderRequest(order, Up.SelfTradePreventionInstruction.None, tradingSubAccount: 42u, venueAccount: 99UL)
+            .InvestorId);
+    }
+
+    [Fact]
+    public void BuildNewOrderRequest_StampsResolvedInvestorId()
+    {
+        var owner = new EndClientId("alice");
+        var order = new Order(42UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit,
+            100, 30m, "FIRM-A");
+
+        var withId = B3EntryPointClientGateway.BuildNewOrderRequest(
+            order, Up.SelfTradePreventionInstruction.None,
+            tradingSubAccount: null, venueAccount: null,
+            investorId: new InvestorIdentity(7, 12345));
+        Assert.NotNull(withId.InvestorId);
+        Assert.Equal((ushort)7, withId.InvestorId!.Value.Prefix);
+        Assert.Equal(12345u, withId.InvestorId!.Value.Document);
+
+        var withoutId = B3EntryPointClientGateway.BuildNewOrderRequest(
+            order, Up.SelfTradePreventionInstruction.None,
+            tradingSubAccount: null, venueAccount: null,
+            investorId: null);
+        Assert.Null(withoutId.InvestorId);
     }
 }
 

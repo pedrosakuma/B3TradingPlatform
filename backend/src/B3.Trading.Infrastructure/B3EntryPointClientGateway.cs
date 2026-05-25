@@ -1,3 +1,4 @@
+using B3.Trading.Application.Investor;
 using B3.Trading.Application.Observability;
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.SubAccount;
@@ -82,6 +83,15 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     // a real mapping (lookup table, broker handshake) swap in a real
     // impl at the composition root.
     private readonly IVenueAccountResolver? _venueAccountResolver;
+    // #472. Optional resolver for the opaque InvestorId (Prefix,
+    // Document) carried in NewOrderRequest.InvestorId /
+    // ReplaceOrderRequest.InvestorId. Default = NullInvestorIdResolver
+    // (always null) — wire field stays omitted (pre-#472 behavior).
+    // The platform deliberately treats InvestorId as opaque (NOT
+    // CPF/CNPJ); operators wire a real resolver that hits their
+    // broker-issued registry, keeping PII off the wire and out of the
+    // WAL (LGPD posture — see IInvestorIdResolver doc).
+    private readonly IInvestorIdResolver? _investorIdResolver;
 
     public B3EntryPointClientGateway(
         Up.EntryPointClient client,
@@ -96,7 +106,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         TimeSpan? gracefulTerminateTimeout = null,
         IOptionsMonitor<RiskOptions>? riskOptions = null,
         ISubAccountWireIdMapper? subAccountWireIdMapper = null,
-        IVenueAccountResolver? venueAccountResolver = null)
+        IVenueAccountResolver? venueAccountResolver = null,
+        IInvestorIdResolver? investorIdResolver = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _firmId = firmId ?? throw new ArgumentNullException(nameof(firmId));
@@ -111,6 +122,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         _riskOptions = riskOptions;
         _subAccountWireIdMapper = subAccountWireIdMapper;
         _venueAccountResolver = venueAccountResolver;
+        _investorIdResolver = investorIdResolver;
         _client.Terminated += OnTerminated;
         _client.InboundGapAtReconnect += OnInboundGapAtReconnect;
         MetricsRegistry.RecordSessionVerId(_firmId, _currentSessionVerId);
@@ -196,7 +208,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         if (order.Quantity < 0)
             throw new ArgumentOutOfRangeException(nameof(order), "Quantity cannot be negative when submitted upstream.");
 
-        var req = BuildNewOrderRequest(order, ResolveStpInstruction(order), ResolveTradingSubAccount(order), ResolveVenueAccount(order));
+        var req = BuildNewOrderRequest(order, ResolveStpInstruction(order), ResolveTradingSubAccount(order), ResolveVenueAccount(order), ResolveInvestorId(order));
 
         return SendAsync(req.ClOrdID.Value, OrderEntryLatencyProbe.OpSubmit,
             ct => _client.SubmitAsync(req, ct), cancellationToken);
@@ -219,23 +231,31 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// </para>
     /// </summary>
     internal static UpModels.NewOrderRequest BuildNewOrderRequest(Order order)
-        => BuildNewOrderRequest(order, UpModels.SelfTradePreventionInstruction.None, tradingSubAccount: null, venueAccount: null);
+        => BuildNewOrderRequest(order, UpModels.SelfTradePreventionInstruction.None, tradingSubAccount: null, venueAccount: null, investorId: null);
 
     internal static UpModels.NewOrderRequest BuildNewOrderRequest(
         Order order, UpModels.SelfTradePreventionInstruction stpInstruction)
-        => BuildNewOrderRequest(order, stpInstruction, tradingSubAccount: null, venueAccount: null);
+        => BuildNewOrderRequest(order, stpInstruction, tradingSubAccount: null, venueAccount: null, investorId: null);
 
     internal static UpModels.NewOrderRequest BuildNewOrderRequest(
         Order order,
         UpModels.SelfTradePreventionInstruction stpInstruction,
         uint? tradingSubAccount)
-        => BuildNewOrderRequest(order, stpInstruction, tradingSubAccount, venueAccount: null);
+        => BuildNewOrderRequest(order, stpInstruction, tradingSubAccount, venueAccount: null, investorId: null);
 
     internal static UpModels.NewOrderRequest BuildNewOrderRequest(
         Order order,
         UpModels.SelfTradePreventionInstruction stpInstruction,
         uint? tradingSubAccount,
         ulong? venueAccount)
+        => BuildNewOrderRequest(order, stpInstruction, tradingSubAccount, venueAccount, investorId: null);
+
+    internal static UpModels.NewOrderRequest BuildNewOrderRequest(
+        Order order,
+        UpModels.SelfTradePreventionInstruction stpInstruction,
+        uint? tradingSubAccount,
+        ulong? venueAccount,
+        InvestorIdentity? investorId)
     {
         ArgumentNullException.ThrowIfNull(order);
         return new UpModels.NewOrderRequest
@@ -282,6 +302,14 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             // broker's out-of-band post-trade allocation continues to
             // apply (pre-#458 wire behavior).
             Account = venueAccount,
+            // #472. Opaque InvestorId (Prefix, Document) when an
+            // operator has wired a real IInvestorIdResolver. Null =
+            // wire field omitted (pre-#472 behavior). Translated from
+            // the domain InvestorIdentity record to the SDK struct at
+            // this boundary so Application/Domain stay SDK-free.
+            InvestorId = investorId is { } id
+                ? new UpModels.InvestorId { Prefix = id.Prefix, Document = id.Document }
+                : (UpModels.InvestorId?)null,
         };
     }
 
@@ -375,6 +403,11 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             // (the typical inputs to the resolver) are immutable
             // across a modify.
             Account = ResolveVenueAccount(original),
+            // #472. Same rationale: replace is a fresh book entry;
+            // the InvestorId must re-accompany it. Resolving from
+            // `original` is correct because owner/firm (the typical
+            // inputs to the resolver) are immutable across a modify.
+            InvestorId = MapInvestorIdToWire(ResolveInvestorId(original)),
         };
 
         return SendAsync(newClOrdId, OrderEntryLatencyProbe.OpReplace,
@@ -507,6 +540,30 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         if (_venueAccountResolver is null) return null;
         return _venueAccountResolver.TryResolve(order);
     }
+
+    /// <summary>
+    /// #472. Resolve the opaque <see cref="InvestorIdentity"/>
+    /// stamped on an outbound <c>NewOrderRequest</c> /
+    /// <c>ReplaceOrderRequest</c>. Returns <c>null</c> when no
+    /// <see cref="IInvestorIdResolver"/> is wired (legacy gateways
+    /// stay green) or when the wired resolver has no mapping for the
+    /// order — in both cases the wire field stays omitted.
+    /// </summary>
+    private InvestorIdentity? ResolveInvestorId(Order order)
+    {
+        if (_investorIdResolver is null) return null;
+        return _investorIdResolver.TryResolve(order);
+    }
+
+    /// <summary>
+    /// Translate the domain <see cref="InvestorIdentity"/> to the SDK
+    /// wire struct. Kept private so the SDK type never leaks past the
+    /// gateway boundary.
+    /// </summary>
+    private static UpModels.InvestorId? MapInvestorIdToWire(InvestorIdentity? id)
+        => id is { } v
+            ? new UpModels.InvestorId { Prefix = v.Prefix, Document = v.Document }
+            : (UpModels.InvestorId?)null;
 
     // The IEntryPointClient submit-side surface is unused on the real adapter
     // (OrdersEndpoints calls IExchangeGateway directly). We implement it to
