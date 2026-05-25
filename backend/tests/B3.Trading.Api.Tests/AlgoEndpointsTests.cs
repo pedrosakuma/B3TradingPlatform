@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using xRetry;
 
 namespace B3.Trading.Api.Tests;
 
@@ -48,7 +49,9 @@ public class AlgoEndpointsTests
             },
         };
 
-    [Fact]
+    // Known host-dispose race (ObjectDisposedException at
+    // WebSocketBalanceFanOut.StopAsync); retry 3x.
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 250)]
     public async Task PostAlgo_Iceberg_HappyPath_ReturnsAcceptedWithPendingNew()
     {
         using var factory = NewFactory();

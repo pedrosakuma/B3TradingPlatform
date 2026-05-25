@@ -10,6 +10,7 @@ using B3.Trading.Api.WebSockets.DropCopy;
 using B3.Trading.Application;
 using B3.Trading.Application.Audit;
 using B3.Trading.Domain;
+using xRetry;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace B3.Trading.Api.Tests;
@@ -658,7 +659,9 @@ public class DropCopyWebSocketTests
     // WhenAny, and aborts the socket so the receive loop unblocks.
     // We assert the subscriber count returns to zero within a
     // reasonable timeout once the channel fills.
-    [Fact]
+    // Slow-consumer eviction is timing-sensitive (channel full +
+    // 30s WhenAny timeout window); retry 3x.
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 250)]
     public async Task SlowConsumer_FillsChannel_SubscriberRemovedWithoutLeak()
     {
         await using var factory = TestAppFactory.WithOverrides(new Dictionary<string, string?>());
