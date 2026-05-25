@@ -395,13 +395,13 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// </summary>
     internal static UpModels.SelfTradePreventionInstruction MapStpInstruction(
         SelfTradePreventionMode mode) => mode switch
-    {
-        SelfTradePreventionMode.None => UpModels.SelfTradePreventionInstruction.None,
-        SelfTradePreventionMode.CancelAggressorOrder => UpModels.SelfTradePreventionInstruction.CancelAggressorOrder,
-        SelfTradePreventionMode.CancelRestingOrder => UpModels.SelfTradePreventionInstruction.CancelRestingOrder,
-        SelfTradePreventionMode.CancelBothOrders => UpModels.SelfTradePreventionInstruction.CancelBothOrders,
-        _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, "Unmapped Application.SelfTradePreventionMode."),
-    };
+        {
+            SelfTradePreventionMode.None => UpModels.SelfTradePreventionInstruction.None,
+            SelfTradePreventionMode.CancelAggressorOrder => UpModels.SelfTradePreventionInstruction.CancelAggressorOrder,
+            SelfTradePreventionMode.CancelRestingOrder => UpModels.SelfTradePreventionInstruction.CancelRestingOrder,
+            SelfTradePreventionMode.CancelBothOrders => UpModels.SelfTradePreventionInstruction.CancelBothOrders,
+            _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, "Unmapped Application.SelfTradePreventionMode."),
+        };
 
     /// <summary>
     /// #433 P1. Resolve the STP instruction to stamp on an outbound
