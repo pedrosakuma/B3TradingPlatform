@@ -123,10 +123,12 @@ public static class TradingExchangeGatewayServiceCollectionExtensions
                     var reactor = sp.GetService<IVenueDisconnectReactor>();
                     var riskOpts = sp.GetService<IOptionsMonitor<RiskOptions>>();
                     var subAccountMapper = sp.GetService<ISubAccountWireIdMapper>();
+                    var venueAccountResolver = sp.GetService<IVenueAccountResolver>();
                     return new B3EntryPointClientGateway(upstream, firm.FirmId, resolvedVerId, gwLogger,
                         venueDisconnectReactor: reactor,
                         riskOptions: riskOpts,
-                        subAccountWireIdMapper: subAccountMapper);
+                        subAccountWireIdMapper: subAccountMapper,
+                        venueAccountResolver: venueAccountResolver);
                 });
                 return new FirmGatewayRegistry(gateways);
             });
