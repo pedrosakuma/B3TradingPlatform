@@ -249,6 +249,28 @@ public sealed class RiskLimits
     /// or for staged rollouts of a new order type.
     /// </summary>
     public List<string>? AllowedOrderTypes { get; set; }
+
+    /// <summary>
+    /// #433 P1. Venue-side STP instruction sent on every outbound
+    /// <c>NewOrderRequest</c> / <c>ReplaceOrderRequest</c> (B3
+    /// EntryPoint SDK ≥ 0.15.0). Belt-and-braces companion to the
+    /// pre-trade <see cref="Checks.SelfTradePreventionCheck"/>: the
+    /// pre-trade check still rejects same-firm same-owner crosses
+    /// synchronously when <see cref="AllowSelfTrade"/> is not
+    /// <c>true</c>; this field tells the matching engine what to do
+    /// if a cross still reaches the book (e.g. same-firm
+    /// different-owner pairs that the pre-trade check intentionally
+    /// allows, or any pair the platform missed because the
+    /// working-order snapshot was stale). Default semantics when
+    /// unset everywhere in the precedence chain are
+    /// <see cref="SelfTradePreventionMode.CancelAggressorOrder"/> —
+    /// mirrors the pre-trade "newest rejects" stance so the venue
+    /// behavior matches the app-side check by default. Set to
+    /// <see cref="SelfTradePreventionMode.None"/> per-firm or
+    /// per-end-client to opt out (e.g. market-maker accounts that
+    /// rely on an external risk layer).
+    /// </summary>
+    public SelfTradePreventionMode? SelfTradePreventionMode { get; set; }
 }
 
 public static class RiskLimitsResolver
@@ -342,5 +364,19 @@ public static class RiskLimitsResolver
             AllowedOrderTypes = ResolveRef(opts, endClient, firmId, symbol,
                 l => l.AllowedOrderTypes,
                 v => v.Count > 0),
+            SelfTradePreventionMode = Resolve(opts, endClient, firmId, symbol, l => l.SelfTradePreventionMode),
         };
+
+    /// <summary>
+    /// #433 P1. Resolve the venue-side STP mode for a single order,
+    /// applying the project-wide default of
+    /// <see cref="SelfTradePreventionMode.CancelAggressorOrder"/>
+    /// when no scope in the precedence chain pins a value. Returns a
+    /// non-nullable value so the gateway never has to make the
+    /// "what does null mean" decision at submit time.
+    /// </summary>
+    public static SelfTradePreventionMode ResolveSelfTradePreventionMode(
+        RiskOptions opts, string endClient, string? firmId, string symbol) =>
+        Resolve(opts, endClient, firmId, symbol, l => l.SelfTradePreventionMode)
+            ?? SelfTradePreventionMode.CancelAggressorOrder;
 }

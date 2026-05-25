@@ -85,4 +85,131 @@ public class B3EntryPointClientGatewayMapTests
         Assert.Equal((ulong)displayQty, req.MaxFloor);
         Assert.Equal((ulong)quantity, req.OrderQty);
     }
+
+    // ------------------------------------------------------------------
+    // #433 P1. Venue-side SelfTradePreventionInstruction wire mapping.
+    // ------------------------------------------------------------------
+
+    [Theory]
+    [InlineData(B3.Trading.Application.Risk.SelfTradePreventionMode.None,
+                Up.SelfTradePreventionInstruction.None)]
+    [InlineData(B3.Trading.Application.Risk.SelfTradePreventionMode.CancelAggressorOrder,
+                Up.SelfTradePreventionInstruction.CancelAggressorOrder)]
+    [InlineData(B3.Trading.Application.Risk.SelfTradePreventionMode.CancelRestingOrder,
+                Up.SelfTradePreventionInstruction.CancelRestingOrder)]
+    [InlineData(B3.Trading.Application.Risk.SelfTradePreventionMode.CancelBothOrders,
+                Up.SelfTradePreventionInstruction.CancelBothOrders)]
+    public void MapStpInstruction_CoversAllDomainValues(
+        B3.Trading.Application.Risk.SelfTradePreventionMode mode,
+        Up.SelfTradePreventionInstruction sdk)
+    {
+        Assert.Equal(sdk, B3EntryPointClientGateway.MapStpInstruction(mode));
+    }
+
+    [Fact]
+    public void MapStpInstruction_UnmappedValue_Throws()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => B3EntryPointClientGateway.MapStpInstruction(
+                (B3.Trading.Application.Risk.SelfTradePreventionMode)999));
+    }
+
+    [Fact]
+    public void BuildNewOrderRequest_LegacyOverload_DefaultsStpInstructionToNone()
+    {
+        // The single-arg overload exists so pre-#433 tests stay green.
+        // It must collapse to None on the wire (legacy behavior).
+        var owner = new EndClientId("alice");
+        var order = new Order(42UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit,
+            100, 30m, "FIRM-A");
+
+        var req = B3EntryPointClientGateway.BuildNewOrderRequest(order);
+
+        Assert.Equal(Up.SelfTradePreventionInstruction.None, req.SelfTradePreventionInstruction);
+    }
+
+    [Theory]
+    [InlineData(Up.SelfTradePreventionInstruction.None)]
+    [InlineData(Up.SelfTradePreventionInstruction.CancelAggressorOrder)]
+    [InlineData(Up.SelfTradePreventionInstruction.CancelRestingOrder)]
+    [InlineData(Up.SelfTradePreventionInstruction.CancelBothOrders)]
+    public void BuildNewOrderRequest_StampsResolvedStpInstruction(
+        Up.SelfTradePreventionInstruction stp)
+    {
+        var owner = new EndClientId("alice");
+        var order = new Order(42UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit,
+            100, 30m, "FIRM-A");
+
+        var req = B3EntryPointClientGateway.BuildNewOrderRequest(order, stp);
+
+        Assert.Equal(stp, req.SelfTradePreventionInstruction);
+    }
+
+    [Fact]
+    public void ResolveSelfTradePreventionMode_Default_IsCancelAggressorOrder()
+    {
+        // #433 P1. Default-everywhere semantics intentionally mirror
+        // the pre-trade SelfTradePreventionCheck's "newest rejects"
+        // stance so the venue behavior matches the app-side check by
+        // default (defense in depth, not contradictory policy).
+        var opts = new B3.Trading.Application.Risk.RiskOptions();
+
+        var mode = B3.Trading.Application.Risk.RiskLimitsResolver
+            .ResolveSelfTradePreventionMode(opts, "alice", "FIRM-A", "PETR4");
+
+        Assert.Equal(
+            B3.Trading.Application.Risk.SelfTradePreventionMode.CancelAggressorOrder,
+            mode);
+    }
+
+    [Fact]
+    public void ResolveSelfTradePreventionMode_HonoursPrecedenceChain()
+    {
+        // per-end-client wins over per-firm wins over per-symbol wins
+        // over Default — the same precedence as every other field in
+        // RiskLimitsResolver.
+        var opts = new B3.Trading.Application.Risk.RiskOptions
+        {
+            Default = new B3.Trading.Application.Risk.RiskLimits
+            {
+                SelfTradePreventionMode = B3.Trading.Application.Risk.SelfTradePreventionMode.None,
+            },
+        };
+        opts.PerSymbol["PETR4"] = new B3.Trading.Application.Risk.RiskLimits
+        {
+            SelfTradePreventionMode = B3.Trading.Application.Risk.SelfTradePreventionMode.CancelBothOrders,
+        };
+        opts.PerFirm["FIRM-A"] = new B3.Trading.Application.Risk.RiskLimits
+        {
+            SelfTradePreventionMode = B3.Trading.Application.Risk.SelfTradePreventionMode.CancelRestingOrder,
+        };
+        opts.PerEndClient["alice"] = new B3.Trading.Application.Risk.RiskLimits
+        {
+            SelfTradePreventionMode = B3.Trading.Application.Risk.SelfTradePreventionMode.CancelAggressorOrder,
+        };
+
+        // alice wins (per-end-client)
+        Assert.Equal(
+            B3.Trading.Application.Risk.SelfTradePreventionMode.CancelAggressorOrder,
+            B3.Trading.Application.Risk.RiskLimitsResolver
+                .ResolveSelfTradePreventionMode(opts, "alice", "FIRM-A", "PETR4"));
+
+        // unknown end-client → firm wins
+        Assert.Equal(
+            B3.Trading.Application.Risk.SelfTradePreventionMode.CancelRestingOrder,
+            B3.Trading.Application.Risk.RiskLimitsResolver
+                .ResolveSelfTradePreventionMode(opts, "bob", "FIRM-A", "PETR4"));
+
+        // unknown firm → symbol wins
+        Assert.Equal(
+            B3.Trading.Application.Risk.SelfTradePreventionMode.CancelBothOrders,
+            B3.Trading.Application.Risk.RiskLimitsResolver
+                .ResolveSelfTradePreventionMode(opts, "bob", "FIRM-X", "PETR4"));
+
+        // nothing matches → Default
+        Assert.Equal(
+            B3.Trading.Application.Risk.SelfTradePreventionMode.None,
+            B3.Trading.Application.Risk.RiskLimitsResolver
+                .ResolveSelfTradePreventionMode(opts, "bob", "FIRM-X", "VALE3"));
+    }
 }

@@ -120,8 +120,10 @@ public static class TradingExchangeGatewayServiceCollectionExtensions
                     var upstream = new B3.EntryPoint.Client.EntryPointClient(clientOpts);
                     var gwLogger = lf.CreateLogger<B3EntryPointClientGateway>();
                     var reactor = sp.GetService<IVenueDisconnectReactor>();
+                    var riskOpts = sp.GetService<IOptionsMonitor<RiskOptions>>();
                     return new B3EntryPointClientGateway(upstream, firm.FirmId, resolvedVerId, gwLogger,
-                        venueDisconnectReactor: reactor);
+                        venueDisconnectReactor: reactor,
+                        riskOptions: riskOpts);
                 });
                 return new FirmGatewayRegistry(gateways);
             });
