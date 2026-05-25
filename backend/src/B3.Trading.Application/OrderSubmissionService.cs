@@ -39,6 +39,7 @@ public sealed class OrderSubmissionService
     private readonly IUserBotOrderMappingRegistry? _botMappings;
     private readonly Scheduling.GtdExpirationScheduler? _gtdScheduler;
     private readonly Scheduling.IocFokWatchdog? _iocWatchdog;
+    private readonly Routing.IRoutingInstructionResolver? _routingResolver;
     private readonly ILogger<OrderSubmissionService> _logger;
 
     public OrderSubmissionService(
@@ -55,7 +56,8 @@ public sealed class OrderSubmissionService
         ILogger<OrderSubmissionService> logger,
         IUserBotOrderMappingRegistry? botMappings = null,
         Scheduling.GtdExpirationScheduler? gtdScheduler = null,
-        Scheduling.IocFokWatchdog? iocWatchdog = null)
+        Scheduling.IocFokWatchdog? iocWatchdog = null,
+        Routing.IRoutingInstructionResolver? routingInstructionResolver = null)
     {
         _clOrdIds = clOrdIds;
         _ownership = ownership;
@@ -70,6 +72,7 @@ public sealed class OrderSubmissionService
         _botMappings = botMappings;
         _gtdScheduler = gtdScheduler;
         _iocWatchdog = iocWatchdog;
+        _routingResolver = routingInstructionResolver;
         _logger = logger;
     }
 
@@ -243,7 +246,14 @@ public sealed class OrderSubmissionService
             TimeInForce: req.TimeInForce,
             StopPrice: req.StopPrice,
             GoodTillDate: req.GoodTillDate,
-            SubAccountId: req.SubAccountId);
+            SubAccountId: req.SubAccountId,
+            // #473. Resolve the routing instruction once here so the
+            // pre-trade RoutingInstructionAllowedCheck can gate it
+            // against the per-scope whitelist before the gateway
+            // ever sees the order. The gateway will resolve again at
+            // stamp time — resolvers MUST be deterministic per-Order
+            // (see IRoutingInstructionResolver doc).
+            RoutingInstruction: _routingResolver?.TryResolve(order));
         var decision = _risk.Evaluate(riskCtx);
         var marginReserved = false;
         if (decision.Approved)

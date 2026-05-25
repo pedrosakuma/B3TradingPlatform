@@ -275,6 +275,27 @@ public sealed class RiskLimits
     /// inside the same firm).
     /// </summary>
     public SelfTradePreventionMode? SelfTradePreventionMode { get; set; }
+
+    /// <summary>
+    /// #473 (SDK 0.15.0). Optional whitelist of
+    /// <see cref="Routing.RoutingInstruction"/> values the resolved
+    /// scope may stamp on outbound orders. Case-insensitive enum
+    /// names (e.g. <c>"RetailLiquidityTaker"</c>, <c>"BrokerOnly"</c>).
+    /// <c>null</c> or empty = <b>no instruction permitted</b> (the
+    /// resolved value, if any, is rejected pre-trade). Non-empty =
+    /// only the listed values are permitted; anything else is
+    /// rejected with <c>routing_instruction_blocked</c>.
+    ///
+    /// <para>
+    /// Default is intentionally restrictive (null → block) so a
+    /// misconfigured <see cref="Routing.IRoutingInstructionResolver"/>
+    /// cannot ship a routing instruction past the risk pipeline by
+    /// accident. Operators that want to use any value must explicitly
+    /// opt in per scope. Stamps of <c>BrokerOnly</c> are additionally
+    /// metric-tagged for audit (conflict-of-interest sensitive).
+    /// </para>
+    /// </summary>
+    public List<string>? AllowedRoutingInstructions { get; set; }
 }
 
 public static class RiskLimitsResolver
@@ -369,6 +390,9 @@ public static class RiskLimitsResolver
                 l => l.AllowedOrderTypes,
                 v => v.Count > 0),
             SelfTradePreventionMode = Resolve(opts, endClient, firmId, symbol, l => l.SelfTradePreventionMode),
+            AllowedRoutingInstructions = ResolveRef(opts, endClient, firmId, symbol,
+                l => l.AllowedRoutingInstructions,
+                v => v.Count > 0),
         };
 
     /// <summary>

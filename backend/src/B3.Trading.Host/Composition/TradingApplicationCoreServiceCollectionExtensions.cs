@@ -2,6 +2,7 @@ using B3.Trading.Api.Lifecycle;
 using B3.Trading.Application;
 using B3.Trading.Application.Investor;
 using B3.Trading.Application.Persistence;
+using B3.Trading.Application.Routing;
 using B3.Trading.Application.SubAccount;
 using B3.Trading.Application.UserBots;
 using B3.Trading.Api.WebSockets;
@@ -85,6 +86,14 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         // that hits their broker-issued opaque-id registry. LGPD
         // posture is documented on IInvestorIdResolver.
         services.AddSingleton<IInvestorIdResolver>(NullInvestorIdResolver.Instance);
+        // #473 (SDK 0.15.0). Resolve the RoutingInstruction stamped
+        // on outbound NewOrderRequest / ReplaceOrderRequest. Default
+        // = NullRoutingInstructionResolver (wire field omitted,
+        // pre-#473 behavior). Pre-trade gating happens via
+        // RiskLimits.AllowedRoutingInstructions +
+        // RoutingInstructionAllowedCheck (default-deny: a resolver
+        // value with no whitelist configured is rejected).
+        services.AddSingleton<IRoutingInstructionResolver>(NullRoutingInstructionResolver.Instance);
         // Q4.5 (#305). Audit log keeper + dispatcher-backed logger.
         // Both singletons so the live-dispatch path, recovery replay
         // and admin read endpoint all share the same in-memory ring
