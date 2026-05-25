@@ -27,6 +27,15 @@ public class DropCopyWebSocketTests
     private const string Firm01 = "FIRM01";
     private const string Firm02 = "FIRM02";
 
+    /// <summary>
+    /// #435 Part B. Resolve the masked drop-copy form of a raw ClOrdId.
+    /// The integration tests publish ExecutionEvents with raw ulong
+    /// ClOrdIds; the drop-copy DTO emitted on the wire carries the
+    /// opaque mask, so assertions need the masked equivalent.
+    /// </summary>
+    private static string Mask(TestAppFactory factory, string firmId, ulong clOrdId) =>
+        factory.Services.GetRequiredService<IClOrdIdMasker>().MaskClOrdId(firmId, clOrdId);
+
     // 1. Compliance sees orders/fills/cancels submitted by OTHER users in the same firm.
     [Fact]
     public async Task ComplianceUser_SeesEventsFromOtherUsersInSameFirm()
@@ -61,14 +70,14 @@ public class DropCopyWebSocketTests
             OrderStatus.Cancelled, ExecKind.Canceled, 0, 0, 0, 0m, null, DateTimeOffset.UtcNow, FirmId: Firm01));
 
         var observed = await DrainDeltasUntilAsync(ws, cts.Token, deadline: TimeSpan.FromSeconds(5),
-            condition: bag => bag.Contains((DropCopyManager.DropCopyChannels.Fills, "101")) &&
-                              bag.Contains((DropCopyManager.DropCopyChannels.Cancels, "102")) &&
-                              bag.Contains((DropCopyManager.DropCopyChannels.Orders, "101")) &&
-                              bag.Contains((DropCopyManager.DropCopyChannels.Orders, "102")));
-        Assert.Contains((DropCopyManager.DropCopyChannels.Fills, "101"), observed);
-        Assert.Contains((DropCopyManager.DropCopyChannels.Cancels, "102"), observed);
-        Assert.Contains((DropCopyManager.DropCopyChannels.Orders, "101"), observed);
-        Assert.Contains((DropCopyManager.DropCopyChannels.Orders, "102"), observed);
+            condition: bag => bag.Contains((DropCopyManager.DropCopyChannels.Fills, Mask(factory, Firm01, 101UL))) &&
+                              bag.Contains((DropCopyManager.DropCopyChannels.Cancels, Mask(factory, Firm01, 102UL))) &&
+                              bag.Contains((DropCopyManager.DropCopyChannels.Orders, Mask(factory, Firm01, 101UL))) &&
+                              bag.Contains((DropCopyManager.DropCopyChannels.Orders, Mask(factory, Firm01, 102UL))));
+        Assert.Contains((DropCopyManager.DropCopyChannels.Fills, Mask(factory, Firm01, 101UL)), observed);
+        Assert.Contains((DropCopyManager.DropCopyChannels.Cancels, Mask(factory, Firm01, 102UL)), observed);
+        Assert.Contains((DropCopyManager.DropCopyChannels.Orders, Mask(factory, Firm01, 101UL)), observed);
+        Assert.Contains((DropCopyManager.DropCopyChannels.Orders, Mask(factory, Firm01, 102UL)), observed);
     }
 
     // 2. Compliance does NOT see orders from a different firm.
@@ -97,10 +106,10 @@ public class DropCopyWebSocketTests
             OrderStatus.Filled, ExecKind.Fill, 0, 100, 100, 30m, null, DateTimeOffset.UtcNow, FirmId: Firm01));
 
         var observed = await DrainDeltasUntilAsync(ws, cts.Token, deadline: TimeSpan.FromSeconds(5),
-            condition: bag => bag.Contains((DropCopyManager.DropCopyChannels.Fills, "888")));
-        Assert.Contains((DropCopyManager.DropCopyChannels.Fills, "888"), observed);
-        Assert.DoesNotContain((DropCopyManager.DropCopyChannels.Fills, "999"), observed);
-        Assert.DoesNotContain((DropCopyManager.DropCopyChannels.Orders, "999"), observed);
+            condition: bag => bag.Contains((DropCopyManager.DropCopyChannels.Fills, Mask(factory, Firm01, 888UL))));
+        Assert.Contains((DropCopyManager.DropCopyChannels.Fills, Mask(factory, Firm01, 888UL)), observed);
+        Assert.DoesNotContain((DropCopyManager.DropCopyChannels.Fills, Mask(factory, Firm02, 999UL)), observed);
+        Assert.DoesNotContain((DropCopyManager.DropCopyChannels.Orders, Mask(factory, Firm02, 999UL)), observed);
     }
 
     // 3. Snapshot+stream consistency: N pre-connect orders → snapshot N entries; M after → stream M; no dupes/no gaps.
@@ -189,8 +198,8 @@ public class DropCopyWebSocketTests
             OrderStatus.Filled, ExecKind.Fill, 0, 100, 100, 60m, null, DateTimeOffset.UtcNow, FirmId: Firm02));
 
         var observed = await DrainDeltasUntilAsync(ws, cts.Token, deadline: TimeSpan.FromSeconds(5),
-            condition: bag => bag.Contains((DropCopyManager.DropCopyChannels.Fills, "777")));
-        Assert.Contains((DropCopyManager.DropCopyChannels.Fills, "777"), observed);
+            condition: bag => bag.Contains((DropCopyManager.DropCopyChannels.Fills, Mask(factory, Firm02, 777UL))));
+        Assert.Contains((DropCopyManager.DropCopyChannels.Fills, Mask(factory, Firm02, 777UL)), observed);
     }
 
     // 5. Admin without ?firmId defaults to its own firm.
@@ -215,8 +224,8 @@ public class DropCopyWebSocketTests
             OrderStatus.Filled, ExecKind.Fill, 0, 100, 100, 30m, null, DateTimeOffset.UtcNow, FirmId: "default"));
 
         var observed = await DrainDeltasUntilAsync(ws, cts.Token, deadline: TimeSpan.FromSeconds(5),
-            condition: bag => bag.Contains((DropCopyManager.DropCopyChannels.Fills, "555")));
-        Assert.Contains((DropCopyManager.DropCopyChannels.Fills, "555"), observed);
+            condition: bag => bag.Contains((DropCopyManager.DropCopyChannels.Fills, Mask(factory, "default", 555UL))));
+        Assert.Contains((DropCopyManager.DropCopyChannels.Fills, Mask(factory, "default", 555UL)), observed);
     }
 
     // 6. Compliance passing ?firmId is IGNORED (returns its own firm's drop-copy).
@@ -250,9 +259,9 @@ public class DropCopyWebSocketTests
             OrderStatus.Filled, ExecKind.Fill, 0, 100, 100, 30m, null, DateTimeOffset.UtcNow, FirmId: Firm01));
 
         var observed = await DrainDeltasUntilAsync(ws, cts.Token, deadline: TimeSpan.FromSeconds(5),
-            condition: bag => bag.Contains((DropCopyManager.DropCopyChannels.Fills, "667")));
-        Assert.Contains((DropCopyManager.DropCopyChannels.Fills, "667"), observed);
-        Assert.DoesNotContain((DropCopyManager.DropCopyChannels.Fills, "666"), observed);
+            condition: bag => bag.Contains((DropCopyManager.DropCopyChannels.Fills, Mask(factory, Firm01, 667UL))));
+        Assert.Contains((DropCopyManager.DropCopyChannels.Fills, Mask(factory, Firm01, 667UL)), observed);
+        Assert.DoesNotContain((DropCopyManager.DropCopyChannels.Fills, Mask(factory, Firm02, 666UL)), observed);
     }
 
     // 7. Non-compliance/non-admin user is rejected (WS close 1008).
@@ -359,7 +368,7 @@ public class DropCopyWebSocketTests
     public void DisconnectAllForResync_MarksEverySubscriberForReconnect()
     {
         var book = new WorkingOrderBook();
-        var manager = new DropCopyManager(book);
+        var manager = new DropCopyManager(book, NullClOrdIdMasker.Instance);
 
         var a = new DropCopyClient(Firm01, "dave", "compliance");
         var b = new DropCopyClient(Firm01, "eve", "admin");
@@ -390,7 +399,7 @@ public class DropCopyWebSocketTests
     public void DisconnectAllForResync_CoalescesWithinBurst_ReArmsOnAdd()
     {
         var book = new WorkingOrderBook();
-        var manager = new DropCopyManager(book);
+        var manager = new DropCopyManager(book, NullClOrdIdMasker.Instance);
 
         var a = new DropCopyClient(Firm01, "dave", "compliance");
         manager.Add(a);
@@ -428,7 +437,7 @@ public class DropCopyWebSocketTests
     public async Task ConcurrentAddAndDisconnectAllForResync_NeverLeavesClientUnmarked()
     {
         var book = new WorkingOrderBook();
-        var manager = new DropCopyManager(book);
+        var manager = new DropCopyManager(book, NullClOrdIdMasker.Instance);
         var clients = new List<DropCopyClient>(capacity: 500);
         var cts = new CancellationTokenSource();
 
@@ -557,7 +566,7 @@ public class DropCopyWebSocketTests
         for (var iter = 0; iter < Iterations; iter++)
         {
             var book = new WorkingOrderBook();
-            var manager = new DropCopyManager(book);
+            var manager = new DropCopyManager(book, NullClOrdIdMasker.Instance);
             var client = new DropCopyClient(Firm, "compliance-" + iter, "compliance");
 
             long published = 0;
