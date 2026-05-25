@@ -146,19 +146,22 @@ public class B3EntryPointClientGatewayMapTests
     }
 
     [Fact]
-    public void ResolveSelfTradePreventionMode_Default_IsCancelAggressorOrder()
+    public void ResolveSelfTradePreventionMode_Default_IsNone()
     {
-        // #433 P1. Default-everywhere semantics intentionally mirror
-        // the pre-trade SelfTradePreventionCheck's "newest rejects"
-        // stance so the venue behavior matches the app-side check by
-        // default (defense in depth, not contradictory policy).
+        // #433 P1. Default-everywhere semantics are intentionally
+        // None so the venue does not enforce STP unless an operator
+        // explicitly opts in — preserves historical behavior for
+        // tenants that rely on crossed trades reaching the book
+        // (e.g. cross-account hedging inside the same firm). The
+        // app-side SelfTradePreventionCheck remains the primary
+        // line of defense.
         var opts = new B3.Trading.Application.Risk.RiskOptions();
 
         var mode = B3.Trading.Application.Risk.RiskLimitsResolver
             .ResolveSelfTradePreventionMode(opts, "alice", "FIRM-A", "PETR4");
 
         Assert.Equal(
-            B3.Trading.Application.Risk.SelfTradePreventionMode.CancelAggressorOrder,
+            B3.Trading.Application.Risk.SelfTradePreventionMode.None,
             mode);
     }
 
