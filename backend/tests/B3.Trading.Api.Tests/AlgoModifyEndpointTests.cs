@@ -7,6 +7,7 @@ using B3.Trading.Application.MarketData;
 using B3.Trading.Domain;
 using B3.Trading.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
+using xRetry;
 
 namespace B3.Trading.Api.Tests;
 
@@ -403,7 +404,9 @@ public class AlgoModifyEndpointTests
         Assert.Equal(replace.NewClOrdId, newChild.ClOrdId);
     }
 
-    [Fact]
+    // #347. Known timing-flake under CI parallelism; retry up to 3x
+    // (a real regression still fails after 3 attempts).
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 250)]
     public async Task Modify_ReplacedErWithStaleZeroCum_ClampsBaselineToOriginal()
     {
         // Pass-2 review (#299) P1. Translators in
@@ -646,7 +649,8 @@ public class AlgoModifyEndpointTests
         Assert.Equal(replace.NewClOrdId, newChild.ClOrdId);
     }
 
-    [Fact]
+    // Known timing-flake under CI parallelism (see memory); retry 3x.
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 250)]
     public async Task Modify_RepeatedAdoptions_OverflowRetiredFifo_BumpsEvictionCounter()
     {
         // Pass-3 review (#299) P2. Mirror PR #296's CancelledChildRing

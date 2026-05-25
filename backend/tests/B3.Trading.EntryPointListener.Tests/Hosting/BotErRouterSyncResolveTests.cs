@@ -6,6 +6,7 @@ using B3.Trading.Domain;
 using B3.Trading.EntryPointListener.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using xRetry;
 
 namespace B3.Trading.EntryPointListener.Tests.Hosting;
 
@@ -176,7 +177,8 @@ public class BotErRouterSyncResolveTests
         Assert.False(fastSender.Disposed);
     }
 
-    [Fact]
+    // Known timing-flake (CI run 25745848456); retry 3x.
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 250)]
     public async Task BufferFull_TripsOverflow_NoUnboundedQueueElsewhere()
     {
         // Per RFC §6.3, the per-credential BotOutboundBuffer is the

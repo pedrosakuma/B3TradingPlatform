@@ -8,6 +8,7 @@ using B3.Trading.Domain;
 using B3.Trading.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using xRetry;
 
 namespace B3.Trading.Api.Tests;
 
@@ -954,7 +955,8 @@ public class PeggedAlgoEndpointTests
 
     // ──────────────── Pass-4 review (#296) regression tests ────────────────
 
-    [Fact]
+    // #345. ~50% failure rate in CI under load; retry 3x.
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 250)]
     public async Task Pegged_FillRacesRepegReplace_DelayInjectedFill_NoOrphanReplacementChildAndIntentReleased()
     {
         // #300 retrofit. Window-3 race for the cancel-replace path:
