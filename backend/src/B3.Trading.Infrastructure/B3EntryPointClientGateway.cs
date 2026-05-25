@@ -1,6 +1,8 @@
 using B3.Trading.Application.Observability;
+using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Up = B3.EntryPoint.Client;
 using UpModels = B3.EntryPoint.Client.Models;
 
@@ -57,6 +59,13 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     private ulong _lastGapPriorSessionVerId;
     private string? _lastTerminationCode;
     private readonly IVenueDisconnectReactor? _reactor;
+    // #433 P1. Optional resolver for the venue-side STP instruction
+    // stamped on every outbound NewOrderRequest / ReplaceOrderRequest.
+    // Optional (rather than required) so legacy tests that construct
+    // the gateway directly stay green — a null resolver collapses to
+    // SelfTradePreventionInstruction.None and the wire behavior
+    // matches pre-#433.
+    private readonly IOptionsMonitor<RiskOptions>? _riskOptions;
 
     public B3EntryPointClientGateway(
         Up.EntryPointClient client,
@@ -68,7 +77,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         TimeProvider? clock = null,
         OrderEntryLatencyProbe? latencyProbe = null,
         IVenueDisconnectReactor? venueDisconnectReactor = null,
-        TimeSpan? gracefulTerminateTimeout = null)
+        TimeSpan? gracefulTerminateTimeout = null,
+        IOptionsMonitor<RiskOptions>? riskOptions = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _firmId = firmId ?? throw new ArgumentNullException(nameof(firmId));
@@ -80,6 +90,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         _clock = clock ?? TimeProvider.System;
         _latencyProbe = latencyProbe ?? new OrderEntryLatencyProbe(_clock);
         _reactor = venueDisconnectReactor;
+        _riskOptions = riskOptions;
         _client.Terminated += OnTerminated;
         _client.InboundGapAtReconnect += OnInboundGapAtReconnect;
         MetricsRegistry.RecordSessionVerId(_firmId, _currentSessionVerId);
@@ -165,7 +176,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         if (order.Quantity < 0)
             throw new ArgumentOutOfRangeException(nameof(order), "Quantity cannot be negative when submitted upstream.");
 
-        var req = BuildNewOrderRequest(order);
+        var req = BuildNewOrderRequest(order, ResolveStpInstruction(order));
 
         return SendAsync(req.ClOrdID.Value, OrderEntryLatencyProbe.OpSubmit,
             ct => _client.SubmitAsync(req, ct), cancellationToken);
@@ -177,8 +188,21 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// tests without standing up a real <c>EntryPointClient</c>. Pure
     /// function: every field is read from the domain
     /// <see cref="Order"/> exactly once and there are no side effects.
+    ///
+    /// <para>
+    /// #433 P1. <paramref name="stpInstruction"/> is the venue-side
+    /// self-trade-prevention instruction (SDK 0.15.0+). Resolved by
+    /// the caller via <see cref="RiskLimitsResolver.ResolveSelfTradePreventionMode"/>
+    /// and mapped through <see cref="MapStpInstruction"/>; defaults
+    /// to <see cref="UpModels.SelfTradePreventionInstruction.None"/>
+    /// on the legacy overload below so existing tests stay green.
+    /// </para>
     /// </summary>
     internal static UpModels.NewOrderRequest BuildNewOrderRequest(Order order)
+        => BuildNewOrderRequest(order, UpModels.SelfTradePreventionInstruction.None);
+
+    internal static UpModels.NewOrderRequest BuildNewOrderRequest(
+        Order order, UpModels.SelfTradePreventionInstruction stpInstruction)
     {
         ArgumentNullException.ThrowIfNull(order);
         return new UpModels.NewOrderRequest
@@ -197,7 +221,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             // visible qty"). Domain.Order's ctor already validated
             // 0 < DisplayQty <= Quantity, so the cast is safe.
             // TODO(#298): DisplayResetPolicy is NOT plumbed to the SDK —
-            // B3.EntryPoint.Client 0.14.3 NewOrderRequest exposes no
+            // B3.EntryPoint.Client 0.15.0 NewOrderRequest exposes no
             // refresh-policy flag. To avoid the venue silently defaulting
             // to Always (which would break the OnPartialFill / Never
             // contracts), the REST + risk validation boundary REJECTS
@@ -208,6 +232,12 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             // wire order.DisplayResetPolicy here and drop the validation
             // guard in OrdersEndpoints.cs + OrderSubmissionService.cs.
             MaxFloor = order.DisplayQty is { } dq ? (ulong)dq : (ulong?)null,
+            // #433 P1. Venue-side STP. Defense-in-depth pair with
+            // SelfTradePreventionCheck — see SelfTradePreventionMode
+            // doc comment for the rationale. The instruction value is
+            // resolved by the caller (gateway SubmitAsync) so this
+            // static stays pure.
+            SelfTradePreventionInstruction = stpInstruction,
         };
     }
 
@@ -281,6 +311,13 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             MaxFloor = original.DisplayQty is { } odq
                 ? (ulong)Math.Min(odq, newQuantity)
                 : (ulong?)null,
+            // #433 P1. Venue-side STP carried on the replace too —
+            // a modified order is a fresh book entry from the
+            // matching engine's perspective so the instruction must
+            // re-accompany it. Resolution scope is the original
+            // order's (owner, firm, symbol) — modify never changes
+            // those three.
+            SelfTradePreventionInstruction = ResolveStpInstruction(original),
         };
 
         return SendAsync(newClOrdId, OrderEntryLatencyProbe.OpReplace,
@@ -348,6 +385,41 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         TimeInForce.GoodForAuction => UpModels.TimeInForce.GoodForAuction,
         _ => throw new ArgumentOutOfRangeException(nameof(tif), tif, "Unmapped Domain.TimeInForce."),
     };
+
+    /// <summary>
+    /// #433 P1. Application → SDK STP-instruction mapping. Total over
+    /// every <see cref="SelfTradePreventionMode"/> value; throws on
+    /// unmapped values so adding a future variant without updating
+    /// this table fails loudly instead of silently sending
+    /// <c>None</c> on the wire.
+    /// </summary>
+    internal static UpModels.SelfTradePreventionInstruction MapStpInstruction(
+        SelfTradePreventionMode mode) => mode switch
+        {
+            SelfTradePreventionMode.None => UpModels.SelfTradePreventionInstruction.None,
+            SelfTradePreventionMode.CancelAggressorOrder => UpModels.SelfTradePreventionInstruction.CancelAggressorOrder,
+            SelfTradePreventionMode.CancelRestingOrder => UpModels.SelfTradePreventionInstruction.CancelRestingOrder,
+            SelfTradePreventionMode.CancelBothOrders => UpModels.SelfTradePreventionInstruction.CancelBothOrders,
+            _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, "Unmapped Application.SelfTradePreventionMode."),
+        };
+
+    /// <summary>
+    /// #433 P1. Resolve the STP instruction to stamp on an outbound
+    /// <c>NewOrderRequest</c> / <c>ReplaceOrderRequest</c> for a
+    /// given order. Falls back to
+    /// <see cref="UpModels.SelfTradePreventionInstruction.None"/>
+    /// when no <see cref="RiskOptions"/> monitor is wired (test
+    /// gateways that don't care about the field stay green); the
+    /// production composition root always passes one.
+    /// </summary>
+    private UpModels.SelfTradePreventionInstruction ResolveStpInstruction(Order order)
+    {
+        if (_riskOptions is null)
+            return UpModels.SelfTradePreventionInstruction.None;
+        var mode = RiskLimitsResolver.ResolveSelfTradePreventionMode(
+            _riskOptions.CurrentValue, order.Owner.Value, order.FirmId, order.Symbol);
+        return MapStpInstruction(mode);
+    }
 
     // The IEntryPointClient submit-side surface is unused on the real adapter
     // (OrdersEndpoints calls IExchangeGateway directly). We implement it to
