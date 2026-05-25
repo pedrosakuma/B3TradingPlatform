@@ -1,4 +1,5 @@
 using B3.Trading.Application;
+using B3.Trading.Application.Audit;
 using B3.Trading.Application.MarketData;
 using B3.Trading.Domain;
 
@@ -286,6 +287,39 @@ public static class DtoMappings
 
     public static ExecutionDto ToDto(this ExecutionEvent ev) => new(
         ev.ClOrdId.ToString(), ev.Symbol, ev.Side.ToString(), ev.Status.ToString(), ev.Kind.ToString(),
+        ev.LeavesQuantity, ev.CumulativeQuantity, ev.LastQuantity, ev.LastPrice, ev.RejectReason, ev.TimestampUtc,
+        ev.IsNativeStp,
+        ev.BookTouch is null ? null : ev.BookTouch.ToDto());
+
+    /// <summary>
+    /// #435 Part B. Drop-copy projection of <see cref="Order"/> with
+    /// the externally-observable <c>ClOrdId</c> and <c>ParentAlgoId</c>
+    /// replaced by an opaque, per-(firm, UTC-day) handle. Wire shape
+    /// (<see cref="OrderDto"/>) is unchanged — only the values mutate.
+    /// AlgoSliceSeq is also stripped because a monotonic seq trivially
+    /// re-links children to a parent even if both ids are masked.
+    /// </summary>
+    public static OrderDto ToDropCopyDto(this Order o, IClOrdIdMasker masker, string firmId) => new(
+        masker.MaskClOrdId(firmId, o.ClOrdId),
+        o.Symbol, o.SecurityId, o.Side.ToString(), o.Type.ToString(),
+        o.Quantity, o.LeavesQuantity, o.CumulativeQuantity, o.Price, o.Status.ToString(),
+        o.ParentAlgoId is { } parentId ? masker.MaskAlgoId(firmId, parentId) : null,
+        AlgoSliceSeq: null,
+        o.IsStale, o.StaleReason, o.StaledAtUtc,
+        o.TimeInForce.ToString(), o.StopPrice, o.GoodTillDate,
+        o.DisplayQty, o.DisplayResetPolicy?.ToString(),
+        o.SubAccountId?.Value);
+
+    /// <summary>
+    /// #435 Part B. Drop-copy projection of <see cref="ExecutionEvent"/>
+    /// with the externally-observable <c>ClOrdId</c> replaced by an
+    /// opaque, per-(firm, UTC-day) handle. <see cref="ExecutionEvent"/>
+    /// carries no <c>ParentAlgoId</c>, so this overload only rewrites
+    /// the one field.
+    /// </summary>
+    public static ExecutionDto ToDropCopyDto(this ExecutionEvent ev, IClOrdIdMasker masker, string firmId) => new(
+        masker.MaskClOrdId(firmId, ev.ClOrdId),
+        ev.Symbol, ev.Side.ToString(), ev.Status.ToString(), ev.Kind.ToString(),
         ev.LeavesQuantity, ev.CumulativeQuantity, ev.LastQuantity, ev.LastPrice, ev.RejectReason, ev.TimestampUtc,
         ev.IsNativeStp,
         ev.BookTouch is null ? null : ev.BookTouch.ToDto());

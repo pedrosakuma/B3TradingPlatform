@@ -155,6 +155,17 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         // target=DropCopy); synthetic publishes from
         // OrderStalenessService / WAL-backpressure fallback also reach
         // it via the composite IExecutionEventSink wired below.
+        //
+        // #435 Part B. IClOrdIdMasker rewrites ClOrdId/ParentAlgoId on
+        // every DTO that crosses the drop-copy WebSocket boundary, so
+        // a counterparty consuming a downstream tap cannot reconstruct
+        // an algo's footprint across days or correlate flow across firms.
+        // Bind options from "Trading:DropCopy"; the default impl throws
+        // at construction if ClOrdIdMaskSalt is unset (matches
+        // CvmReportWriter.OwnerHashSalt boot-guard convention).
+        services.AddOptions<B3.Trading.Application.Audit.ClOrdIdMaskerOptions>()
+            .Bind(configuration.GetSection("Trading:DropCopy"));
+        services.AddSingleton<B3.Trading.Application.Audit.IClOrdIdMasker, B3.Trading.Application.Audit.ClOrdIdMasker>();
         services.AddSingleton<B3.Trading.Api.WebSockets.DropCopy.DropCopyManager>();
         services.AddSingleton<B3.Trading.Api.WebSockets.DropCopy.DropCopyExecutionEventSink>();
         services.AddSingleton<IExecutionFanOutSink>(sp =>

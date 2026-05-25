@@ -43,6 +43,9 @@ services:
       # startup; bind a fixed placeholder so the host can come up.
       # Production hosts MUST configure a real secret.
       Trading__Reports__Cvm__OwnerHashSalt: "conformance-only-cvm-salt-placeholder-DO-NOT-USE-IN-PROD"
+      # #435 Part B. Drop-copy ClOrdId masker salt — boot-guard throws
+      # if unset in non-Development. Placeholder for conformance only.
+      Trading__DropCopy__ClOrdIdMaskSalt: "conformance-only-clordid-mask-salt-placeholder-DO-NOT-USE-IN-PROD"
 
   conformance:
     build:
