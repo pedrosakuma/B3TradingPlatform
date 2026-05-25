@@ -2,6 +2,7 @@ using B3.Trading.Application;
 using B3.Trading.Application.Lifecycle;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
+using B3.Trading.Application.SubAccount;
 using B3.Trading.Host.Hosted;
 using B3.Trading.Infrastructure;
 using B3.Trading.Infrastructure.Persistence;
@@ -121,9 +122,11 @@ public static class TradingExchangeGatewayServiceCollectionExtensions
                     var gwLogger = lf.CreateLogger<B3EntryPointClientGateway>();
                     var reactor = sp.GetService<IVenueDisconnectReactor>();
                     var riskOpts = sp.GetService<IOptionsMonitor<RiskOptions>>();
+                    var subAccountMapper = sp.GetService<ISubAccountWireIdMapper>();
                     return new B3EntryPointClientGateway(upstream, firm.FirmId, resolvedVerId, gwLogger,
                         venueDisconnectReactor: reactor,
-                        riskOptions: riskOpts);
+                        riskOptions: riskOpts,
+                        subAccountWireIdMapper: subAccountMapper);
                 });
                 return new FirmGatewayRegistry(gateways);
             });

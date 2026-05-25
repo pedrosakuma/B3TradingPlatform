@@ -215,4 +215,49 @@ public class B3EntryPointClientGatewayMapTests
             B3.Trading.Application.Risk.RiskLimitsResolver
                 .ResolveSelfTradePreventionMode(opts, "bob", "FIRM-X", "VALE3"));
     }
+
+    // ------------------------------------------------------------------
+    // #471. TradingSubAccount wire field (SDK 0.15.0). The four-arg
+    // BuildNewOrderRequest overload is the seam the gateway calls in
+    // production; these tests pin null-passthrough, non-null stamping,
+    // and the legacy overloads' wire-stable default of null.
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void BuildNewOrderRequest_LegacyOverloads_LeaveTradingSubAccountNull()
+    {
+        // Both the single-arg and the two-arg overload pre-date #471.
+        // They MUST leave the wire field null so existing tests stay
+        // green and any caller that has not opted into the mapper does
+        // not accidentally start stamping a wire id derived from
+        // some default.
+        var owner = new EndClientId("alice");
+        var order = new Order(42UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit,
+            100, 30m, "FIRM-A");
+
+        Assert.Null(B3EntryPointClientGateway.BuildNewOrderRequest(order).TradingSubAccount);
+        Assert.Null(B3EntryPointClientGateway
+            .BuildNewOrderRequest(order, Up.SelfTradePreventionInstruction.None)
+            .TradingSubAccount);
+    }
+
+    [Fact]
+    public void BuildNewOrderRequest_StampsResolvedTradingSubAccount()
+    {
+        // The four-arg overload propagates whatever the gateway
+        // resolved from its ISubAccountWireIdMapper into the wire
+        // field. Null in → null out; non-null in → exact value out.
+        var owner = new EndClientId("alice");
+        var order = new Order(42UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit,
+            100, 30m, "FIRM-A");
+
+        var withId = B3EntryPointClientGateway.BuildNewOrderRequest(
+            order, Up.SelfTradePreventionInstruction.None, tradingSubAccount: 12345u);
+        Assert.Equal(12345u, withId.TradingSubAccount);
+
+        var withoutId = B3EntryPointClientGateway.BuildNewOrderRequest(
+            order, Up.SelfTradePreventionInstruction.None, tradingSubAccount: null);
+        Assert.Null(withoutId.TradingSubAccount);
+    }
 }
+
