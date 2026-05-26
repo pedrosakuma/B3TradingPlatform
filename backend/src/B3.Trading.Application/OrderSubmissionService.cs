@@ -40,6 +40,7 @@ public sealed class OrderSubmissionService
     private readonly Scheduling.GtdExpirationScheduler? _gtdScheduler;
     private readonly Scheduling.IocFokWatchdog? _iocWatchdog;
     private readonly Routing.IRoutingInstructionResolver? _routingResolver;
+    private readonly SymbolDirectory? _symbolDirectory;
     private readonly ILogger<OrderSubmissionService> _logger;
 
     public OrderSubmissionService(
@@ -57,7 +58,8 @@ public sealed class OrderSubmissionService
         IUserBotOrderMappingRegistry? botMappings = null,
         Scheduling.GtdExpirationScheduler? gtdScheduler = null,
         Scheduling.IocFokWatchdog? iocWatchdog = null,
-        Routing.IRoutingInstructionResolver? routingInstructionResolver = null)
+        Routing.IRoutingInstructionResolver? routingInstructionResolver = null,
+        SymbolDirectory? symbolDirectory = null)
     {
         _clOrdIds = clOrdIds;
         _ownership = ownership;
@@ -73,6 +75,7 @@ public sealed class OrderSubmissionService
         _gtdScheduler = gtdScheduler;
         _iocWatchdog = iocWatchdog;
         _routingResolver = routingInstructionResolver;
+        _symbolDirectory = symbolDirectory;
         _logger = logger;
     }
 
@@ -227,12 +230,46 @@ public sealed class OrderSubmissionService
             return OrderSubmissionResult.WalBackpressure(ex.Message);
         }
 
+        // OPT-F (#488). Classify the symbol so equity vs option flow
+        // can be split on dashboards. SymbolDirectory is optional —
+        // when not injected (most tests), the tag value is "unknown"
+        // and the option-specific counter is silenced. Unknown symbols
+        // (not in the directory) also tag as "unknown" so onboarding
+        // a new ticker is observable in surveillance.
+        var securityTypeTag = "unknown";
+        var isOption = false;
+        OptionMetadata? optionMeta = null;
+        if (_symbolDirectory is { } dir && dir.TryGetSpec(req.Symbol, out var spec))
+        {
+            isOption = spec.SecurityType == SecurityType.Option;
+            securityTypeTag = isOption ? "option" : "equity";
+            optionMeta = spec.Option;
+        }
+
         MetricsRegistry.OrdersSubmitted.Add(1,
             new KeyValuePair<string, object?>("symbol", req.Symbol),
             new KeyValuePair<string, object?>("side", req.Side.ToString()),
             new KeyValuePair<string, object?>("source",
                 req.Source == OrderSubmissionSource.Algo ? "algo" : "manual"),
-            new KeyValuePair<string, object?>("firmId", req.FirmId));
+            new KeyValuePair<string, object?>("firmId", req.FirmId),
+            new KeyValuePair<string, object?>("security_type", securityTypeTag));
+
+        // OPT-F (#488). Cabinet / worthless-OTM closeout surveillance
+        // counter. OPT-C (#485) relaxed MinNotional for option orders
+        // at price=0; this metric makes the (small) population of such
+        // orders observable per (symbol, side, firm, put_call) so a
+        // sudden spike — which would be unusual for a healthy desk —
+        // can trip a compliance alert. Only fires for orders we can
+        // classify as Option AND that carry an explicit price of 0.
+        if (isOption && req.Price is 0m)
+        {
+            MetricsRegistry.OptionZeroPriceOrdersSubmitted.Add(1,
+                new KeyValuePair<string, object?>("symbol", req.Symbol),
+                new KeyValuePair<string, object?>("side", req.Side.ToString()),
+                new KeyValuePair<string, object?>("firmId", req.FirmId),
+                new KeyValuePair<string, object?>("put_call",
+                    optionMeta?.PutOrCall.ToString().ToLowerInvariant() ?? "unknown"));
+        }
 
         // Ordering note (RFC docs/rfcs/risk-pipeline-ordering-v0.md, #262):
         // risk evaluation runs *post-WAL* on the submit path. On reject we
