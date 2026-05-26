@@ -777,6 +777,37 @@ public static class MetricsRegistry
     public static readonly Counter<long> CollarBypassedNoReference =
         Meter.CreateCounter<long>("trading.risk.collar.bypassed_no_reference");
 
+    // ── OPT-E (#487) — venue-pushed price-band observability ─────────
+    //
+    // The new PriceBandCheck (Order=305, right after the static
+    // PriceCollarCheck at 300) consults PriceBandRegistry — fed by the
+    // upstream PriceBand WebSocket channel (SDK 0.6.0 /
+    // pedrosakuma/B3MarketDataPlatform#56). These three instruments
+    // give ops the same coverage signal the collar+refprice pair
+    // already provides:
+    //
+    //   * PriceBandRejects — actual hard-rejections (tagged by
+    //     symbol + side + reject reason "above" / "below" so a sudden
+    //     spike on one side hints at a venue band tightening into
+    //     existing flow).
+    //   * PriceBandAgeSeconds — per-symbol band staleness at the
+    //     moment of the check. A sustained climb on a single symbol
+    //     means the venue stopped re-publishing — same alert posture
+    //     as RefPriceStalenessSeconds.
+    //   * PriceBandBypassedNoBand — approvals that landed only
+    //     because the registry had no entry (pre-bootstrap window,
+    //     kill-switch off, or a symbol the venue never bands). Tag
+    //     is the symbol so coverage gaps don't get lost in the
+    //     aggregate.
+    public static readonly Counter<long> PriceBandRejects =
+        Meter.CreateCounter<long>("trading.risk.price_band.reject");
+
+    public static readonly Histogram<double> PriceBandAgeSeconds =
+        Meter.CreateHistogram<double>("trading.risk.price_band.age_seconds");
+
+    public static readonly Counter<long> PriceBandBypassedNoBand =
+        Meter.CreateCounter<long>("trading.risk.price_band.bypassed_no_band");
+
     // Q1.2 (#254). Counts the cases where StopTriggerCheck approved a
     // Stop* order purely because it could not obtain a reference price
     // for the symbol — the StopPrice > 0 invariant still ran, but the

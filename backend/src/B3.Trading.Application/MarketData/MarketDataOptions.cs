@@ -90,4 +90,33 @@ public sealed class MarketDataOptions
     /// </para>
     /// </summary>
     public bool EnableSecurityDefinition { get; set; } = true;
+
+    /// <summary>
+    /// OPT-E (#487). Opt-in flag to subscribe to the SDK
+    /// <c>PriceBand</c> channel (<c>SubscribeFlags.PriceBand</c>,
+    /// 0x40) introduced in upstream
+    /// <c>pedrosakuma/B3MarketDataPlatform#56</c> / SDK 0.6.0.
+    /// When <c>true</c>, every symbol passed to
+    /// <see cref="IMarketDataSubscriber.SubscribeAsync"/> receives a
+    /// bootstrap + delta stream of <c>PriceBandEvent</c> frames
+    /// carrying the venue's authoritative dynamic price band
+    /// (<c>LowerBand</c> / <c>UpperBand</c>, plus
+    /// <c>TradingReferencePrice</c>, <c>PriceLimitType</c>,
+    /// <c>PriceBandType</c> discriminators). The host adapter
+    /// projects those frames into <see cref="PriceBandRegistry"/>,
+    /// which the new pre-trade
+    /// <see cref="Risk.Checks.PriceBandCheck"/> consults as the source
+    /// of truth — replacing the static-config fat-finger collar
+    /// (<see cref="Risk.Checks.PriceCollarCheck"/>) with the venue
+    /// truth on a per-symbol intraday basis.
+    /// <para>
+    /// Default <c>true</c>: once the SDK is bumped past 0.6.0 we
+    /// always want venue-pushed bands as authoritative, same
+    /// rationale as <see cref="EnableSecurityDefinition"/>. Set to
+    /// <c>false</c> as an emergency kill-switch only — the price-band
+    /// check then becomes a no-op (fail-open) and the collar takes
+    /// over exclusively.
+    /// </para>
+    /// </summary>
+    public bool EnablePriceBand { get; set; } = true;
 }

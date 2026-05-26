@@ -47,6 +47,8 @@ internal sealed class SdkMarketDataSubscriber : IMarketDataSubscriber
     private readonly bool _bookEnabled;
     private readonly bool _securityDefinitionEnabled;
     private readonly SecurityDefinitionRegistry? _securityDefinitionRegistry;
+    private readonly bool _priceBandEnabled;
+    private readonly PriceBandRegistry? _priceBandRegistry;
     private readonly AuctionProjector _auctionProjector;
 
     public event Action<AppTrade>? Trade;
@@ -78,7 +80,8 @@ internal sealed class SdkMarketDataSubscriber : IMarketDataSubscriber
         MarketDataClient client,
         ILogger<SdkMarketDataSubscriber> logger,
         IOptions<MarketDataOptions> options,
-        SecurityDefinitionRegistry? securityDefinitionRegistry = null)
+        SecurityDefinitionRegistry? securityDefinitionRegistry = null,
+        PriceBandRegistry? priceBandRegistry = null)
     {
         _client = client;
         _logger = logger;
@@ -88,15 +91,26 @@ internal sealed class SdkMarketDataSubscriber : IMarketDataSubscriber
         _securityDefinitionRegistry = _securityDefinitionEnabled
             ? securityDefinitionRegistry
             : null;
+        _priceBandEnabled = options.Value.EnablePriceBand
+            && priceBandRegistry is not null;
+        _priceBandRegistry = _priceBandEnabled
+            ? priceBandRegistry
+            : null;
 
         // OPT-D (#486). SubscribeFlags.SecurityDefinition (0x20) ships
         // in SDK 0.5.0 / pedrosakuma/B3MarketDataPlatform#55 — bootstrap
         // + delta of tick / lot / contractMultiplier / option metadata
         // per symbol, projected by OnSdkSecurityDefinition into the
         // registry SymbolDirectory.TryGetSpec consults first.
+        // OPT-E (#487). SubscribeFlags.PriceBand (0x40) ships in
+        // SDK 0.6.0 / pedrosakuma/B3MarketDataPlatform#56 — bootstrap
+        // + delta of the venue's authoritative dynamic price band per
+        // symbol, projected by OnSdkPriceBand into the registry
+        // PriceBandCheck consults.
         var flags = SubscribeFlags.Trades | SubscribeFlags.Info;
         if (_bookEnabled) flags |= SubscribeFlags.Book;
         if (_securityDefinitionEnabled) flags |= SubscribeFlags.SecurityDefinition;
+        if (_priceBandEnabled) flags |= SubscribeFlags.PriceBand;
         _subscribeFlags = flags;
 
         _auctionProjector = new AuctionProjector();
@@ -111,6 +125,10 @@ internal sealed class SdkMarketDataSubscriber : IMarketDataSubscriber
         if (_securityDefinitionEnabled)
         {
             _client.SecurityDefinition += OnSdkSecurityDefinition;
+        }
+        if (_priceBandEnabled)
+        {
+            _client.PriceBand += OnSdkPriceBand;
         }
 
         // Note: when _bookEnabled is true the host registers SDK 0.4.0's
@@ -151,6 +169,10 @@ internal sealed class SdkMarketDataSubscriber : IMarketDataSubscriber
         if (_securityDefinitionEnabled)
         {
             _client.SecurityDefinition -= OnSdkSecurityDefinition;
+        }
+        if (_priceBandEnabled)
+        {
+            _client.PriceBand -= OnSdkPriceBand;
         }
         return _client.DisposeAsync();
     }
@@ -260,6 +282,60 @@ internal sealed class SdkMarketDataSubscriber : IMarketDataSubscriber
             "SecurityDefinition upsert: Symbol={Symbol} SecurityId={SecurityId} Tick={Tick} Lot={Lot} SecurityType={SecurityType} ContractMultiplier={Multiplier}",
             ev.Symbol, ev.SecurityId, tick, lot, securityType,
             option is { } o ? o.ContractMultiplier : 1m);
+    }
+
+    private void OnSdkPriceBand(PriceBandEvent ev)
+    {
+        if (_priceBandRegistry is null) return;
+        if (string.IsNullOrWhiteSpace(ev.Symbol)) return;
+
+        // OPT-E translator lives in Application (PriceBandRegistry.TryProject)
+        // so it can be unit-tested without taking the SDK as a test-project
+        // dep. The host adapter passes primitives only — PriceLimitType
+        // discriminates absolute (PRICE_UNIT) vs derived (TICKS/PERCENTAGE);
+        // only PRICE_UNIT is projected today, the rest fail-open into
+        // PriceBandBypassedNoBand (see XML doc on TryProject).
+        if (!PriceBandRegistry.TryProject(
+                lowerBand: ev.LowerBand,
+                upperBand: ev.UpperBand,
+                priceLimitType: ev.PriceLimitType,
+                out var lower,
+                out var upper))
+        {
+            return;
+        }
+
+        // AsOfTimestamp is a SBE wall-clock long? (SBE epoch nanos when
+        // present). When the venue omits it — or it's malformed — fall
+        // back to the SDK's ReceivedUtc so the age-staleness signal stays
+        // honest (under-counts age in the fallback case, which is the
+        // safer bias: the band gets at most a few ms of age credit it
+        // didn't strictly earn rather than appearing artificially fresh).
+        var asOfUtc = TryParseAsOf(ev.AsOfTimestamp)
+            ?? new DateTimeOffset(DateTime.SpecifyKind(ev.ReceivedUtc, DateTimeKind.Utc));
+
+        _priceBandRegistry.Upsert(ev.Symbol, lower, upper, asOfUtc);
+
+        _logger.LogDebug(
+            "PriceBand upsert: Symbol={Symbol} SecurityId={SecurityId} Lower={Lower} Upper={Upper} PriceLimitType={Type} AsOf={AsOf}",
+            ev.Symbol, ev.SecurityId, lower, upper, ev.PriceLimitType, asOfUtc);
+    }
+
+    private static DateTimeOffset? TryParseAsOf(long? sbeNanos)
+    {
+        // SBE wall-clock epoch in nanoseconds per B3 UMDF convention.
+        // Guard the conversion so a 0 / negative / future-dated frame
+        // can't poison the staleness gauge with a bogus timestamp.
+        if (sbeNanos is not { } n || n <= 0) return null;
+        try
+        {
+            var ticks = n / 100L; // 1 tick = 100 ns
+            return new DateTimeOffset(DateTime.UnixEpoch.AddTicks(ticks), TimeSpan.Zero);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return null;
+        }
     }
 
     private void OnSdkConn(ConnectionStateChangedEvent ev) =>
