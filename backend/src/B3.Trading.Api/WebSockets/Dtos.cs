@@ -136,7 +136,19 @@ public sealed record OrderDto(
     string? DisplayResetPolicy = null,
     /// <summary>Q4.1 (#301). Sub-account bucket this order is booked
     /// against. Null = master bucket (legacy / non-sub-account flow).</summary>
-    string? SubAccountId = null);
+    string? SubAccountId = null,
+    /// <summary>FE-OPT-1 (#497). Instrument family; null = Equity (backward compat).</summary>
+    string? SecurityType = null,
+    /// <summary>FE-OPT-1 (#497). Option strike price; null for equities.</summary>
+    decimal? OptionStrikePrice = null,
+    /// <summary>FE-OPT-1 (#497). Option expiration date (ISO 8601); null for equities.</summary>
+    string? OptionExpirationDate = null,
+    /// <summary>FE-OPT-1 (#497). Option side: "Put" or "Call"; null for equities.</summary>
+    string? OptionPutOrCall = null,
+    /// <summary>FE-OPT-1 (#497). Underlying symbol for options; null for equities.</summary>
+    string? OptionUnderlyingSymbol = null,
+    /// <summary>FE-OPT-1 (#497). Contract multiplier (typically 100 for B3 options); null for equities.</summary>
+    decimal? OptionContractMultiplier = null);
 
 public sealed record PositionDto(
     string Symbol,
@@ -146,7 +158,19 @@ public sealed record PositionDto(
     /// the master-aggregate row (sum across all sub-accounts plus the
     /// untagged bucket) returned when the caller did not pass
     /// <c>?subAccount=X</c>.</summary>
-    string? SubAccountId = null);
+    string? SubAccountId = null,
+    /// <summary>FE-OPT-1 (#497). Instrument family; null = Equity (backward compat).</summary>
+    string? SecurityType = null,
+    /// <summary>FE-OPT-1 (#497). Option strike price; null for equities.</summary>
+    decimal? OptionStrikePrice = null,
+    /// <summary>FE-OPT-1 (#497). Option expiration date (ISO 8601); null for equities.</summary>
+    string? OptionExpirationDate = null,
+    /// <summary>FE-OPT-1 (#497). Option side: "Put" or "Call"; null for equities.</summary>
+    string? OptionPutOrCall = null,
+    /// <summary>FE-OPT-1 (#497). Underlying symbol for options; null for equities.</summary>
+    string? OptionUnderlyingSymbol = null,
+    /// <summary>FE-OPT-1 (#497). Contract multiplier (typically 100 for B3 options); null for equities.</summary>
+    decimal? OptionContractMultiplier = null);
 
 /// <summary>
 /// Wire shape for <c>GET /balance</c>. Slice 1 of #107 exposes only
@@ -271,19 +295,44 @@ public sealed record PeggedParamsDto(
 
 public static class DtoMappings
 {
-    public static OrderDto ToDto(this Order o) => new(
+    public static OrderDto ToDto(this Order o) => ToDto(o, null);
+
+    /// <summary>
+    /// FE-OPT-1 (#497). Overload that enriches the DTO with option metadata
+    /// from the symbol directory. Callers look up the spec once and pass it
+    /// so the conversion stays allocation-free for equities (the common case).
+    /// </summary>
+    public static OrderDto ToDto(this Order o, OptionMetadata? opt) => new(
         o.ClOrdId.ToString(), o.Symbol, o.SecurityId, o.Side.ToString(), o.Type.ToString(),
         o.Quantity, o.LeavesQuantity, o.CumulativeQuantity, o.Price, o.Status.ToString(),
         o.ParentAlgoId?.ToString(), o.AlgoSliceSeq,
         o.IsStale, o.StaleReason, o.StaledAtUtc,
         o.TimeInForce.ToString(), o.StopPrice, o.GoodTillDate,
         o.DisplayQty, o.DisplayResetPolicy?.ToString(),
-        o.SubAccountId?.Value);
+        o.SubAccountId?.Value,
+        SecurityType: opt is null ? null : "Option",
+        OptionStrikePrice: opt?.StrikePrice,
+        OptionExpirationDate: opt?.ExpirationDate.ToString("yyyy-MM-dd"),
+        OptionPutOrCall: opt?.PutOrCall.ToString(),
+        OptionUnderlyingSymbol: opt?.UnderlyingSymbol,
+        OptionContractMultiplier: opt?.ContractMultiplier);
 
-    public static PositionDto ToDto(this Position p) => new(p.Symbol, p.NetQuantity, p.AverageEntryPrice);
+    public static PositionDto ToDto(this Position p) => ToDto(p, null, null);
 
     public static PositionDto ToDto(this Position p, SubAccountId? subAccount) =>
-        new(p.Symbol, p.NetQuantity, p.AverageEntryPrice, subAccount?.Value);
+        ToDto(p, subAccount, null);
+
+    /// <summary>
+    /// FE-OPT-1 (#497). Overload that enriches the DTO with option metadata.
+    /// </summary>
+    public static PositionDto ToDto(this Position p, SubAccountId? subAccount, OptionMetadata? opt) =>
+        new(p.Symbol, p.NetQuantity, p.AverageEntryPrice, subAccount?.Value,
+            SecurityType: opt is null ? null : "Option",
+            OptionStrikePrice: opt?.StrikePrice,
+            OptionExpirationDate: opt?.ExpirationDate.ToString("yyyy-MM-dd"),
+            OptionPutOrCall: opt?.PutOrCall.ToString(),
+            OptionUnderlyingSymbol: opt?.UnderlyingSymbol,
+            OptionContractMultiplier: opt?.ContractMultiplier);
 
     public static ExecutionDto ToDto(this ExecutionEvent ev) => new(
         ev.ClOrdId.ToString(), ev.Symbol, ev.Side.ToString(), ev.Status.ToString(), ev.Kind.ToString(),
@@ -299,7 +348,13 @@ public static class DtoMappings
     /// AlgoSliceSeq is also stripped because a monotonic seq trivially
     /// re-links children to a parent even if both ids are masked.
     /// </summary>
-    public static OrderDto ToDropCopyDto(this Order o, IClOrdIdMasker masker, string firmId) => new(
+    public static OrderDto ToDropCopyDto(this Order o, IClOrdIdMasker masker, string firmId) =>
+        ToDropCopyDto(o, masker, firmId, null);
+
+    /// <summary>
+    /// FE-OPT-1 (#497). Overload with option metadata enrichment.
+    /// </summary>
+    public static OrderDto ToDropCopyDto(this Order o, IClOrdIdMasker masker, string firmId, OptionMetadata? opt) => new(
         masker.MaskClOrdId(firmId, o.ClOrdId),
         o.Symbol, o.SecurityId, o.Side.ToString(), o.Type.ToString(),
         o.Quantity, o.LeavesQuantity, o.CumulativeQuantity, o.Price, o.Status.ToString(),
@@ -308,7 +363,13 @@ public static class DtoMappings
         o.IsStale, o.StaleReason, o.StaledAtUtc,
         o.TimeInForce.ToString(), o.StopPrice, o.GoodTillDate,
         o.DisplayQty, o.DisplayResetPolicy?.ToString(),
-        o.SubAccountId?.Value);
+        o.SubAccountId?.Value,
+        SecurityType: opt is null ? null : "Option",
+        OptionStrikePrice: opt?.StrikePrice,
+        OptionExpirationDate: opt?.ExpirationDate.ToString("yyyy-MM-dd"),
+        OptionPutOrCall: opt?.PutOrCall.ToString(),
+        OptionUnderlyingSymbol: opt?.UnderlyingSymbol,
+        OptionContractMultiplier: opt?.ContractMultiplier);
 
     /// <summary>
     /// #435 Part B. Drop-copy projection of <see cref="ExecutionEvent"/>
