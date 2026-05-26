@@ -890,6 +890,14 @@ export function bindUi() {
     el.addEventListener("change", refreshTicketValidation);
   }
 
+  // Update notional preview when qty, price, or symbol changes.
+  // This provides live feedback of the estimated notional value accounting
+  // for option contract multipliers.
+  const symEl = $("ticket-symbol");
+  if (symEl) symEl.addEventListener("change", updateNotionalPreview);
+  if (qtyEl) qtyEl.addEventListener("input", updateNotionalPreview);
+  if (priceEl) priceEl.addEventListener("input", updateNotionalPreview);
+
   $("ticket-form").addEventListener("submit", (e) => {
     e.preventDefault();
     // Q1.4 (#256). Re-validate against the live policy snapshot just
@@ -953,7 +961,6 @@ export function bindUi() {
 
   // Auto-uppercase the symbol field as the trader types so the visual
   // matches what we actually submit (we already toUpperCase on submit).
-  const symEl = $("ticket-symbol");
   if (symEl) {
     symEl.addEventListener("input", (e) => {
       // Don't fight IME composition; uppercase on compositionend instead.
@@ -1267,6 +1274,44 @@ function ticketHasContent() {
     const el = $(id);
     return el && typeof el.value === "string" && el.value.trim() !== "";
   });
+}
+
+function updateNotionalPreview() {
+  const preview = $("ticket-notional-preview");
+  if (!preview) return;
+  
+  const qty = parseFloat($("ticket-qty")?.value) || 0;
+  const price = parseFloat($("ticket-price")?.value) || 0;
+  const symbol = $("ticket-symbol")?.value?.trim().toUpperCase();
+  
+  // Look up multiplier from state (positions or a symbol cache)
+  // For now, default to 1 (equity) unless we can detect it's an option
+  let multiplier = 1;
+  
+  // If we have a symbol, try to find it in positions to check if it's an option
+  if (symbol && getState().positions.has(symbol)) {
+    const position = getState().positions.get(symbol);
+    // optionContractMultiplier is present if it's an option (securityType === "Option")
+    if (position.optionContractMultiplier) {
+      multiplier = position.optionContractMultiplier;
+    }
+  }
+  
+  const notional = qty * price * multiplier;
+  
+  // Format with Brazilian locale (1000,00 format) but since we want R$ 1,000.00 format
+  // Let's use Intl for proper formatting
+  if (notional > 0) {
+    const formatted = new Intl.NumberFormat("pt-BR", {
+      style: "currency",
+      currency: "BRL",
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    }).format(notional);
+    preview.textContent = `≈ ${formatted}`;
+  } else {
+    preview.textContent = "";
+  }
 }
 
 function onGlobalKeydown(e) {
@@ -2616,10 +2661,13 @@ function orderRow(o, st) {
   const staleBadge = isStale
     ? `<span class="order-stale-badge" title="${escapeHtml(staleTitle)}">stale</span>`
     : "";
+  const optionBadge = o.securityType === "Option" ? optionBadgeHtml(o.optionPutOrCall) : "";
+  const optionTooltip = formatOptionTooltip(o);
+  const symbolTitle = optionTooltip ? ` title="${escapeHtml(optionTooltip)}"` : "";
   const actionTitle = isStale ? `disabled — ${staleTitle}` : "";
   return `<tr data-clordid="${escapeHtml(o.clOrdId)}"${cls ? ` class="${cls}"` : ""}>
     <td><code>${escapeHtml(o.clOrdId)}</code></td>
-    <td>${escapeHtml(o.symbol)}</td>
+    <td${symbolTitle}>${escapeHtml(o.symbol)}${optionBadge}</td>
     <td>${escapeHtml(o.side)}</td>
     <td>${typeChipHtml(o.type)}</td>
     <td>${escapeHtml(o.timeInForce ?? "")}</td>
@@ -2652,11 +2700,16 @@ function renderPositions() {
   sortPositionsInPlace(positions, _positionsSort);
   body.innerHTML = positions.length === 0
     ? `<tr><td colspan="3" class="muted">No positions</td></tr>`
-    : positions.map(p => `<tr>
-        <td>${escapeHtml(p.symbol)}</td>
+    : positions.map(p => {
+      const optionBadge = p.securityType === "Option" ? optionBadgeHtml(p.optionPutOrCall) : "";
+      const optionTooltip = formatOptionTooltip(p);
+      const symbolTitle = optionTooltip ? ` title="${escapeHtml(optionTooltip)}"` : "";
+      return `<tr>
+        <td${symbolTitle}>${escapeHtml(p.symbol)}${optionBadge}</td>
         <td class="num">${fmtQty(p.netQuantity)}</td>
         <td class="num">${fmtPx(p.averageEntryPrice)}</td>
-      </tr>`).join("");
+      </tr>`;
+    }).join("");
   syncPositionsSortHeaders();
 }
 
@@ -2804,6 +2857,17 @@ export function typeChipHtml(type) {
   return `<span class="type-chip ${meta.cls}" title="${escapeHtml(type)}">${meta.label}</span>`;
 }
 
+// Render option badges ("C" for Calls, "P" for Puts) for option orders/positions.
+// Returns an empty string for non-options; renders a colored badge for options.
+function optionBadgeHtml(putOrCall) {
+  if (!putOrCall) return "";
+  const isCall = putOrCall === "Call";
+  const label = isCall ? "C" : "P";
+  const cls = isCall ? "option-call" : "option-put";
+  const title = isCall ? "Call" : "Put";
+  return ` <span class="option-badge ${cls}" title="${title}">${label}</span>`;
+}
+
 // Map ExecKind enum strings (as emitted by the backend `executions.me`
 // stream) to user-friendly display labels. PR #418 split the legacy
 // `Replaced` into two events: the original ClOrdID terminalises as
@@ -2831,6 +2895,17 @@ export function fmtGtd(iso) {
   // the trader sees the venue's wall clock, no locale surprises.
   const pad = (n) => String(n).padStart(2, "0");
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`;
+}
+
+// Format option tooltip for hover. Returns null for non-options; for options
+// returns a string like "PETR4 Call 35.00 @ 2026-06-20" (underlying putOrCall strike @ expiry).
+function formatOptionTooltip(order) {
+  if (order.securityType !== "Option") return null;
+  const side = order.optionPutOrCall || "?";
+  const strike = order.optionStrikePrice != null ? order.optionStrikePrice.toFixed(2) : "?";
+  const expiry = order.optionExpirationDate || "?";
+  const underlying = order.optionUnderlyingSymbol || "?";
+  return `${underlying} ${side} ${strike} @ ${expiry}`;
 }
 
 // Pure validator. Returns { valid, errors } where errors is a record
