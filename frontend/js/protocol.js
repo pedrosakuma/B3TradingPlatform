@@ -496,6 +496,21 @@ export async function downloadCvmReport(backend, token, model, dayKey) {
   return { blob, filename };
 }
 
+// FE-OPT-2 (#498). Fetch option chain for an underlying symbol.
+// Returns array of { symbol, securityId, securityType, strikePrice,
+// expirationDate, putOrCall, underlyingSymbol, contractMultiplier }.
+export async function getInstruments(backend, token, { underlying, type } = {}) {
+  const params = new URLSearchParams();
+  if (underlying) params.set("underlying", underlying);
+  if (type) params.set("type", type);
+  const qs = params.toString();
+  const url = `${backend}/instruments${qs ? "?" + qs : ""}`;
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return jsonOrThrow(resp);
+}
+
 // Build the WebSocket URL for the drop-copy feed. Browsers cannot
 // set Authorization on a WS handshake; the JWT travels as
 // ?access_token= (per the host's JwtBearerEvents convention for
