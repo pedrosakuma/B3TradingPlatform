@@ -834,6 +834,149 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
 #blotter-body tr[data-clordid] { cursor: pointer; }
 #blotter-body tr[data-clordid] td.row-stale-actions { cursor: default; }
 
+/* ---------- FE-OPT-2 (#498) Option chain picker ---------- */
+.chain-picker-modal {
+  max-width: 90vw;
+  max-height: 90vh;
+}
+.chain-picker-content {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem;
+  border-bottom: 1px solid var(--border-color, #e5e7eb);
+}
+.modal-header h2 { margin: 0; }
+.modal-close {
+  background: none;
+  border: none;
+  font-size: 1.5rem;
+  cursor: pointer;
+  color: var(--text);
+  padding: 0;
+  width: 2rem;
+  height: 2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.modal-close:hover { color: var(--accent); }
+.chain-picker-controls {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-end;
+  padding: 1rem;
+  border-bottom: 1px solid var(--border-color, #e5e7eb);
+}
+.chain-picker-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: .8rem;
+  color: var(--muted);
+}
+.chain-picker-controls input {
+  width: 120px;
+  padding: 0.5rem;
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 4px;
+  font-size: .8rem;
+}
+.chain-picker-grid {
+  flex: 1;
+  overflow: auto;
+  padding: 1rem;
+}
+.chain-placeholder {
+  color: #6b7280;
+  text-align: center;
+  padding: 2rem;
+  margin: 0;
+}
+.chain-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.875rem;
+}
+.chain-table th,
+.chain-table td {
+  border: 1px solid var(--border-color, #e5e7eb);
+  padding: 0.5rem;
+  text-align: center;
+}
+.chain-table th {
+  background: var(--header-bg, #f3f4f6);
+  position: sticky;
+  top: 0;
+}
+.chain-table .strike-col {
+  font-weight: 600;
+  background: var(--header-bg, #f3f4f6);
+  position: sticky;
+  left: 0;
+}
+.chain-cell {
+  cursor: pointer;
+}
+.chain-cell:hover {
+  background: var(--hover-bg, #e0f2fe);
+}
+.chain-cell-call { color: #16a34a; }
+.chain-cell-put { color: #dc2626; }
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding: 1rem;
+  border-top: 1px solid var(--border-color, #e5e7eb);
+}
+.btn {
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: .8rem;
+  background: var(--panel);
+  color: var(--text);
+}
+.btn:hover {
+  filter: brightness(1.1);
+}
+.btn-primary {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+.btn-secondary {
+  background: var(--panel-2);
+  border-color: var(--border-color, #e5e7eb);
+}
+.btn-icon {
+  padding: 0.5rem;
+  width: 2rem;
+  height: 2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Mobile: full screen */
+@media (max-width: 768px) {
+  .chain-picker-modal {
+    max-width: 100vw;
+    max-height: 100vh;
+    width: 100vw;
+    height: 100vh;
+    margin: 0;
+    border-radius: 0;
+  }
+}
+
 /* ---------- Phase badges + auction panel (Q1.6 / #258) ---------- */
 
 /* Compact pill rendered next to the symbol cell in the market-data

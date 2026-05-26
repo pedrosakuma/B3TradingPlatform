@@ -114,6 +114,30 @@ public sealed class SecurityDefinitionRegistry
     /// </summary>
     public int Count => _bySymbol.Count;
 
+    /// <summary>
+    /// FE-OPT-2 (#498). Enumerates all symbols matching the given filter.
+    /// When <paramref name="underlying"/> is non-null, returns only option
+    /// symbols whose <see cref="OptionMetadata.UnderlyingSymbol"/> matches
+    /// (case-insensitive). When <paramref name="optionsOnly"/> is true,
+    /// returns only symbols with <see cref="SecurityType.Option"/>.
+    /// Returns a snapshot — concurrent upserts may not be visible.
+    /// </summary>
+    public IEnumerable<(string Symbol, ulong SecurityId, InstrumentSpec Spec)> Enumerate(
+        string? underlying = null,
+        bool optionsOnly = false)
+    {
+        foreach (var kvp in _bySymbol)
+        {
+            var spec = kvp.Value.Spec;
+            if (optionsOnly && spec.SecurityType != SecurityType.Option)
+                continue;
+            if (underlying is not null &&
+                !string.Equals(spec.Option?.UnderlyingSymbol, underlying, StringComparison.OrdinalIgnoreCase))
+                continue;
+            yield return (kvp.Key, kvp.Value.SecurityId, spec);
+        }
+    }
+
     private readonly record struct Entry(InstrumentSpec Spec, ulong SecurityId);
 
     /// <summary>
