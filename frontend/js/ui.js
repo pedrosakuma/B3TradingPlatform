@@ -45,6 +45,8 @@ const _modalReturnFocus = new Map();
 // module churn for what is a per-tab cosmetic preference.
 const POSITIONS_SORT_KEY = "b3tp.positions.sort";
 const EXEC_FILTER_KEY    = "b3tp.executions.symbolFilter";
+// FE-OPT-3 (#499). Group-by-underlying toggle for positions panel.
+const POSITIONS_GROUP_KEY = "b3tp.positions.grouped";
 
 // Default: largest absolute net first — the position that needs the
 // most attention. Click cycles ascending → descending → none (back to
@@ -53,6 +55,8 @@ const EXEC_FILTER_KEY    = "b3tp.executions.symbolFilter";
 const POSITIONS_SORT_DEFAULT = { col: "absNet", dir: "desc" };
 let _positionsSort = POSITIONS_SORT_DEFAULT;
 let _execSymbolFilter = "";
+// FE-OPT-3 (#499). Grouping state.
+let _positionsGrouped = false;
 
 function readPositionsSort() {
   try {
@@ -75,6 +79,17 @@ function writeExecSymbolFilter(v) {
   try {
     if (v) sessionStorage.setItem(EXEC_FILTER_KEY, v);
     else   sessionStorage.removeItem(EXEC_FILTER_KEY);
+  } catch { /* swallow */ }
+}
+// FE-OPT-3 (#499). Grouped positions persistence.
+function readPositionsGrouped() {
+  try { return sessionStorage.getItem(POSITIONS_GROUP_KEY) === "1"; }
+  catch { return false; }
+}
+function writePositionsGrouped(v) {
+  try {
+    if (v) sessionStorage.setItem(POSITIONS_GROUP_KEY, "1");
+    else   sessionStorage.removeItem(POSITIONS_GROUP_KEY);
   } catch { /* swallow */ }
 }
 
@@ -1174,6 +1189,7 @@ export function bindUi() {
   // (|net| desc). Keyboard activation mirrors mouse for accessibility
   // since the headers are role="button".
   _positionsSort = readPositionsSort();
+  _positionsGrouped = readPositionsGrouped();
   document.querySelectorAll(".panel.positions th.sortable").forEach(th => {
     const cycle = () => {
       const key = th.getAttribute("data-sort-key");
@@ -1192,6 +1208,28 @@ export function bindUi() {
       if (e.key === "Enter" || e.key === " ") { e.preventDefault(); cycle(); }
     });
   });
+
+  // FE-OPT-3 (#499). Positions group-by-underlying toggle.
+  const posGroupToggle = $("positions-group-toggle");
+  if (posGroupToggle) {
+    posGroupToggle.addEventListener("click", () => {
+      _positionsGrouped = !_positionsGrouped;
+      writePositionsGrouped(_positionsGrouped);
+      renderPositions();
+    });
+  }
+
+  // FE-OPT-3 (#499). Expiry strip click handler (event delegation).
+  const expiryStrip = $("expiry-strip-items");
+  if (expiryStrip) {
+    expiryStrip.addEventListener("click", (e) => {
+      const chip = e.target.closest(".expiry-chip");
+      if (!chip) return;
+      const exp = chip.dataset.expiry;
+      _expiryFilter = exp || null; // empty string = "All" = null
+      renderPositions();
+    });
+  }
 
   // #342: Executions log symbol filter. Substring match, case-insensitive,
   // persisted per tab so the trader's last filter survives a page reload.
@@ -2813,22 +2851,155 @@ function syncFilterInputs(filter) {
 
 function renderPositions() {
   const body = $("positions-body");
-  const positions = [...getState().positions.values()]
+  let positions = [...getState().positions.values()]
     .filter(p => p.netQuantity !== 0);
+  
+  // FE-OPT-3 (#499). Apply expiry filter if set.
+  if (_expiryFilter) {
+    positions = positions.filter(p => 
+      p.securityType === "Option" && p.optionExpirationDate === _expiryFilter
+    );
+  }
+  
   sortPositionsInPlace(positions, _positionsSort);
-  body.innerHTML = positions.length === 0
-    ? `<tr><td colspan="3" class="muted">No positions</td></tr>`
-    : positions.map(p => {
-      const optionBadge = p.securityType === "Option" ? optionBadgeHtml(p.optionPutOrCall) : "";
-      const optionTooltip = formatOptionTooltip(p);
-      const symbolTitle = optionTooltip ? ` title="${escapeHtml(optionTooltip)}"` : "";
-      return `<tr>
-        <td${symbolTitle}>${escapeHtml(p.symbol)}${optionBadge}</td>
-        <td class="num">${fmtQty(p.netQuantity)}</td>
-        <td class="num">${fmtPx(p.averageEntryPrice)}</td>
-      </tr>`;
-    }).join("");
+  
+  if (positions.length === 0) {
+    const msg = _expiryFilter 
+      ? `No positions for expiry ${formatExpiryChip(_expiryFilter)}`
+      : "No positions";
+    body.innerHTML = `<tr><td colspan="3" class="muted">${msg}</td></tr>`;
+    syncPositionsSortHeaders();
+    syncPositionsGroupToggle();
+    renderExpiryStrip();
+    return;
+  }
+  
+  if (_positionsGrouped) {
+    body.innerHTML = renderGroupedPositions(positions);
+  } else {
+    body.innerHTML = positions.map(p => renderPositionRow(p)).join("");
+  }
   syncPositionsSortHeaders();
+  syncPositionsGroupToggle();
+  renderExpiryStrip();
+}
+
+// FE-OPT-3 (#499). Render a single position row (used in flat and grouped views).
+function renderPositionRow(p, indent = false) {
+  const optionBadge = p.securityType === "Option" ? optionBadgeHtml(p.optionPutOrCall) : "";
+  const optionTooltip = formatOptionTooltip(p);
+  const symbolTitle = optionTooltip ? ` title="${escapeHtml(optionTooltip)}"` : "";
+  const indentClass = indent ? ' class="pos-indent"' : "";
+  return `<tr${indentClass}>
+    <td${symbolTitle}>${escapeHtml(p.symbol)}${optionBadge}</td>
+    <td class="num">${fmtQty(p.netQuantity)}</td>
+    <td class="num">${fmtPx(p.averageEntryPrice)}</td>
+  </tr>`;
+}
+
+// FE-OPT-3 (#499). Group positions by underlying symbol.
+function renderGroupedPositions(positions) {
+  // Group: options go under their underlyingSymbol, equities stand alone.
+  const groups = new Map();
+  for (const p of positions) {
+    const key = p.securityType === "Option" && p.optionUnderlyingSymbol
+      ? p.optionUnderlyingSymbol
+      : p.symbol;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(p);
+  }
+  
+  // Sort group keys alphabetically.
+  const sortedKeys = [...groups.keys()].sort((a, b) => a.localeCompare(b));
+  
+  let html = "";
+  for (const key of sortedKeys) {
+    const items = groups.get(key);
+    // Count total net contracts in group.
+    const totalNet = items.reduce((sum, p) => sum + (Number(p.netQuantity) || 0), 0);
+    // Check if this is a single equity (not a group of options).
+    const isSingleEquity = items.length === 1 && items[0].securityType !== "Option";
+    
+    if (isSingleEquity) {
+      // Render single equity without group header.
+      html += renderPositionRow(items[0]);
+    } else {
+      // Render group header row.
+      const netSign = totalNet > 0 ? "+" : "";
+      html += `<tr class="pos-group-header" data-underlying="${escapeHtml(key)}">
+        <td><strong>${escapeHtml(key)}</strong> <span class="muted">(${items.length})</span></td>
+        <td class="num"><strong>${netSign}${fmtQty(totalNet)}</strong></td>
+        <td></td>
+      </tr>`;
+      // Render items (options) indented under the header.
+      for (const p of items) {
+        html += renderPositionRow(p, true);
+      }
+    }
+  }
+  return html;
+}
+
+// FE-OPT-3 (#499). Sync the group toggle button state.
+function syncPositionsGroupToggle() {
+  const btn = $("positions-group-toggle");
+  if (!btn) return;
+  btn.setAttribute("aria-pressed", _positionsGrouped ? "true" : "false");
+  btn.classList.toggle("active", _positionsGrouped);
+}
+
+// FE-OPT-3 (#499). Render expiry strip showing upcoming option expirations.
+let _expiryFilter = null; // null = show all, else ISO date string
+function renderExpiryStrip() {
+  const strip = $("positions-expiry-strip");
+  const items = $("expiry-strip-items");
+  if (!strip || !items) return;
+  
+  const positions = [...getState().positions.values()]
+    .filter(p => p.netQuantity !== 0 && p.securityType === "Option" && p.optionExpirationDate);
+  
+  if (positions.length === 0) {
+    strip.hidden = true;
+    return;
+  }
+  
+  // Collect unique expiry dates and count positions per date.
+  const expiries = new Map();
+  for (const p of positions) {
+    const exp = p.optionExpirationDate;
+    expiries.set(exp, (expiries.get(exp) || 0) + 1);
+  }
+  
+  // Sort by date.
+  const sortedDates = [...expiries.keys()].sort();
+  
+  // Render chips.
+  items.innerHTML = sortedDates.map(exp => {
+    const count = expiries.get(exp);
+    const isActive = _expiryFilter === exp;
+    const label = formatExpiryChip(exp);
+    return `<button type="button" class="expiry-chip${isActive ? " active" : ""}" 
+            data-expiry="${escapeHtml(exp)}" title="${count} position(s)">
+      ${label} <span class="expiry-count">(${count})</span>
+    </button>`;
+  }).join("");
+  
+  // Add "All" chip.
+  const allActive = _expiryFilter === null;
+  items.innerHTML = `<button type="button" class="expiry-chip${allActive ? " active" : ""}" 
+    data-expiry="">All</button>` + items.innerHTML;
+  
+  strip.hidden = false;
+}
+
+// Format expiry date as short label (e.g., "Jun 20").
+function formatExpiryChip(isoDate) {
+  try {
+    const d = new Date(isoDate + "T12:00:00");
+    return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  } catch {
+    return isoDate;
+  }
 }
 
 // #342: pure sort helper so the column logic can be exercised without

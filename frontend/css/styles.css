@@ -647,6 +647,67 @@ tr.firm-row-bad > td { background: rgba(239,83,80,.10); }
 .panel.positions th.sortable[aria-sort="ascending"]::after  { content: " ▲"; opacity: .7; }
 .panel.positions th.sortable[aria-sort="descending"]::after { content: " ▼"; opacity: .7; }
 
+/* FE-OPT-3 (#499). Positions grouping toggle + grouped rows */
+.btn-toggle {
+  opacity: 0.6;
+  transition: opacity 0.15s, background 0.15s;
+}
+.btn-toggle:hover { opacity: 0.9; }
+.btn-toggle.active, .btn-toggle[aria-pressed="true"] {
+  opacity: 1;
+  background: var(--accent, #4aa3ff);
+  color: #fff;
+}
+.pos-group-header > td {
+  background: var(--panel-2, #1e1e1e);
+  border-top: 1px solid var(--border, #333);
+}
+.pos-indent > td:first-child {
+  padding-left: 1.5rem;
+}
+
+/* FE-OPT-3 (#499). Expiry strip for option positions */
+.expiry-strip {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  border-top: 1px solid var(--border, #333);
+  font-size: 0.75rem;
+  overflow-x: auto;
+}
+.expiry-strip-label {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.expiry-strip-items {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+.expiry-chip {
+  background: var(--panel-2, #1e1e1e);
+  border: 1px solid var(--border, #333);
+  border-radius: 4px;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.7rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s;
+}
+.expiry-chip:hover {
+  background: var(--panel-3, #2a2a2a);
+  border-color: var(--accent, #4aa3ff);
+}
+.expiry-chip.active {
+  background: var(--accent, #4aa3ff);
+  color: #fff;
+  border-color: var(--accent, #4aa3ff);
+}
+.expiry-count {
+  opacity: 0.7;
+}
+
 /* #342: Executions log symbol filter sits inside the panel <h2>. */
 .exec-filter-symbol {
   font: inherit; font-size: .72rem; font-weight: 400; text-transform: none;

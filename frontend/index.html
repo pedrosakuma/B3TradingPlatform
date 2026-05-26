@@ -382,6 +382,11 @@
           <h2>
             Positions
             <span class="muted positions-sort-hint">click header to sort</span>
+            <!-- FE-OPT-3 (#499). Group by underlying toggle -->
+            <button type="button" id="positions-group-toggle" class="btn btn-icon btn-toggle" 
+                    title="Group by underlying" aria-label="Group by underlying" aria-pressed="false">
+              ⊞
+            </button>
           </h2>
           <div class="table-scroll">
             <table>
@@ -394,6 +399,11 @@
               </thead>
               <tbody id="positions-body"></tbody>
             </table>
+          </div>
+          <!-- FE-OPT-3 (#499). Expiry calendar strip for option positions -->
+          <div id="positions-expiry-strip" class="expiry-strip" hidden>
+            <span class="expiry-strip-label">Expiries:</span>
+            <div id="expiry-strip-items" class="expiry-strip-items"></div>
           </div>
         </section>
       </div>
