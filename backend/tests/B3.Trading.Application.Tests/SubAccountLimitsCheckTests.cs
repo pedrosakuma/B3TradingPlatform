@@ -172,4 +172,90 @@ public class SubAccountLimitsCheckTests
         Assert.False(f2.Approved);
         Assert.Contains("position", f2.Reason);
     }
+
+    // ── OPT-B (#484) compliance regression ────────────────────────────
+
+    [Fact]
+    public void Option_MaxNotional_HonoursContractMultiplier_NotJustPriceTimesQty()
+    {
+        // Before OPT-B (#484): the check computed notional = price * qty
+        // and silently let options breeze past MaxNotional caps by a
+        // factor of contractMultiplier (typically 100). After the fix,
+        // an option order with 10 contracts at 0.50 premium and a 100x
+        // multiplier reports notional = 500 BRL, which CORRECTLY trips
+        // a 200-BRL sub-account cap. The same notional in equity (50
+        // BRL on AnotherSym) stays well under the cap.
+        var book = new WorkingOrderBook();
+        var pos = new SubAccountPositionKeeper();
+        var reg = new SubAccountsRegistry();
+        reg.ApplyCreated(Firm, Sub, null);
+
+        var dir = new SymbolDirectory(new SymbolDirectoryOptions
+        {
+            Specs =
+            {
+                ["PETRL200"] = new InstrumentSpecOptions
+                {
+                    Option = new OptionMetadataOptions
+                    {
+                        ExpirationDate = new DateOnly(2026, 12, 18),
+                        PutOrCall = "Call",
+                        ExerciseStyle = "American",
+                        ContractMultiplier = 100m,
+                    },
+                },
+            },
+        });
+        var values = new B3.Trading.Application.MarketData.SymbolDirectoryMarketValueCalculator(dir);
+
+        var opts = new SubAccountRiskOptions
+        {
+            PerFirm = new()
+            {
+                [Firm] = new FirmSubAccountRiskOptions
+                {
+                    PerSubAccount = new() { [Sub] = new SubAccountRiskLimits { MaxNotional = 200m } },
+                },
+            },
+        };
+        var check = new SubAccountLimitsCheck(
+            new StaticOptionsMonitor<SubAccountRiskOptions>(opts),
+            book, pos, reg, values);
+
+        // 10 contracts × 0.50 × 100 multiplier = 500 BRL → exceeds 200 cap.
+        var ctxOpt = new RiskContext(
+            new EndClientId(Owner), Firm, "PETRL200",
+            OrderSide.Buy, OrderType.Limit, Quantity: 10, Price: 0.50m,
+            SubAccountId: new SubAccountId(Sub));
+        var d = check.Check(ctxOpt);
+        Assert.False(d.Approved);
+        Assert.Contains("sub_account_limit_exceeded", d.Reason);
+        Assert.Contains("500", d.Reason);
+    }
+
+    [Fact]
+    public void Equity_MaxNotional_BehaviorByteIdentical_WithOrWithoutCalculator()
+    {
+        // Sanity: introducing IMarketValueCalculator must not change
+        // any equity reject reason — the equity-only fallback returns
+        // the historical price * qty.
+        var opts = new SubAccountRiskOptions
+        {
+            PerFirm = new()
+            {
+                [Firm] = new FirmSubAccountRiskOptions
+                {
+                    PerSubAccount = new() { [Sub] = new SubAccountRiskLimits { MaxNotional = 500m } },
+                },
+            },
+        };
+        var (defaultCheck, _, _, _) = Build(opts);
+
+        // No injected calculator → EquityMarketValueCalculator.Instance fallback.
+        var ctx = Ctx(new SubAccountId(Sub), qty: 100, px: 10m); // 1000 > 500
+        var d = defaultCheck.Check(ctx);
+        Assert.False(d.Approved);
+        Assert.Contains("1000", d.Reason);
+        Assert.Contains("500", d.Reason);
+    }
 }

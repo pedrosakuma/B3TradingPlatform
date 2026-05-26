@@ -46,6 +46,15 @@ public static class TradingRiskServiceCollectionExtensions
         services.AddSingleton<B3.Trading.Application.MarketData.ITickSizeProvider,
             B3.Trading.Application.MarketData.SymbolDirectoryTickSizeProvider>();
 
+        // OPT-B (#484). Per-symbol notional calculator seam — applies
+        // OptionMetadata.ContractMultiplier so MaxNotional / margin
+        // reserve / rolling-notional ledger don't silently
+        // under-count option flow by ~100x. Same source of truth as
+        // ITickSizeProvider above; Fase 2 swaps both when
+        // SecurityDefinitionEvent lands.
+        services.AddSingleton<B3.Trading.Application.MarketData.IMarketValueCalculator,
+            B3.Trading.Application.MarketData.SymbolDirectoryMarketValueCalculator>();
+
         // Pre-trade risk: pipeline + checks + kill-switch + reference price +
         // margin provider. Each IRiskCheck registration is auto-discovered by
         // the RiskPipeline through the IEnumerable<IRiskCheck> ctor injection.

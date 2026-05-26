@@ -1,3 +1,4 @@
+using B3.Trading.Application.MarketData;
 using Microsoft.Extensions.Options;
 
 namespace B3.Trading.Application.Risk.Checks;
@@ -23,7 +24,15 @@ public sealed class MaxQuantityCheck : IRiskCheck
 public sealed class MaxNotionalCheck : IRiskCheck
 {
     private readonly IOptionsMonitor<RiskOptions> _options;
-    public MaxNotionalCheck(IOptionsMonitor<RiskOptions> options) => _options = options;
+    private readonly IMarketValueCalculator _values;
+
+    public MaxNotionalCheck(
+        IOptionsMonitor<RiskOptions> options,
+        IMarketValueCalculator? values = null)
+    {
+        _options = options;
+        _values = values ?? EquityMarketValueCalculator.Instance;
+    }
 
     public int Order => 100;
     public string Name => "max_notional";
@@ -34,7 +43,9 @@ public sealed class MaxNotionalCheck : IRiskCheck
         var max = RiskLimitsResolver.Resolve(opts, ctx.Owner.Value, ctx.FirmId, ctx.Symbol, l => l.MaxNotional);
         if (!max.HasValue || !ctx.Price.HasValue)
             return RiskDecision.Approve; // no cap, or market order — let venue handle
-        var notional = ctx.Price.Value * ctx.Quantity;
+        // OPT-B (#484): _values applies contractMultiplier for option
+        // symbols; equity stays price * qty (Equity fallback).
+        var notional = _values.GetNotional(ctx.Symbol, ctx.Price.Value, ctx.Quantity);
         if (notional > max.Value)
             return RiskDecision.Reject($"notional {notional} exceeds max {max.Value}");
         return RiskDecision.Approve;
@@ -64,7 +75,15 @@ public sealed class MaxNotionalCheck : IRiskCheck
 public sealed class MinNotionalCheck : IRiskCheck
 {
     private readonly IOptionsMonitor<RiskOptions> _options;
-    public MinNotionalCheck(IOptionsMonitor<RiskOptions> options) => _options = options;
+    private readonly IMarketValueCalculator _values;
+
+    public MinNotionalCheck(
+        IOptionsMonitor<RiskOptions> options,
+        IMarketValueCalculator? values = null)
+    {
+        _options = options;
+        _values = values ?? EquityMarketValueCalculator.Instance;
+    }
 
     public int Order => 110; // after max-quantity / max-notional, before throttles
     public string Name => "min_notional";
@@ -75,7 +94,9 @@ public sealed class MinNotionalCheck : IRiskCheck
         var min = RiskLimitsResolver.Resolve(opts, ctx.Owner.Value, ctx.FirmId, ctx.Symbol, l => l.MinNotional);
         if (!min.HasValue || !ctx.Price.HasValue)
             return RiskDecision.Approve; // no floor configured, or market order
-        var notional = ctx.Price.Value * ctx.Quantity;
+        // OPT-B (#484): notional is in BRL (price * qty * multiplier
+        // for options); fee/dust math compares apples-to-apples.
+        var notional = _values.GetNotional(ctx.Symbol, ctx.Price.Value, ctx.Quantity);
         if (notional < min.Value)
             return RiskDecision.Reject($"notional {notional} below min {min.Value}");
         return RiskDecision.Approve;
