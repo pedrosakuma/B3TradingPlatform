@@ -41,7 +41,7 @@ One `AddMeter(MetricsRegistry.Meter.Name)` call wires the lot.
 
 | OTel name | Type | Tags |
 |---|---|---|
-| `trading.orders.submitted` | Counter | `symbol`, `side`, `source` (manual/algo) |
+| `trading.orders.submitted` | Counter | `symbol`, `side`, `source` (manual/algo), `firmId`, `security_type` (equity/option/unknown) |
 | `trading.orders.rejected_by_risk` | Counter | `check` |
 | `trading.orders.gateway_failed` | Counter | (none) |
 | `trading.orders.cancel_requested` | Counter | (none) |
@@ -76,6 +76,7 @@ One `AddMeter(MetricsRegistry.Meter.Name)` call wires the lot.
 | `trading.algo.twap.slice_fire_jitter` | Histogram (ms) | (none) |
 | `trading.algo.scheduler.tick_duration` | Histogram (ms) | (none) |
 | `trading.algo.signal_queue_depth` | UpDownCounter | (none) |
+| `trading.options.zero_price_orders_submitted` | Counter | `symbol`, `side`, `firmId`, `put_call` |
 
 The `trading.risk.*` series back the **B3 Trading — Risk** Grafana
 dashboard (`docker/observability/grafana/dashboards/risk.json`); the
@@ -90,6 +91,21 @@ v0 algo pipeline is documented in
 C1, `parentAlgoId` is intentionally **not** a metric tag (cardinality
 would explode); per-algo drill-down lives in structured logs and
 traces.
+
+## Option-specific surveillance (OPT-F / #488)
+
+`trading.orders.submitted.security_type` lets dashboards split equity
+vs option flow (and surface "unknown" buckets that signal a symbol
+missing from the directory). The `security_type` value is derived from
+`SymbolDirectory.TryGetSpec(...).SecurityType` at submit time; when
+the directory is not injected (most unit tests) the tag is `unknown`.
+
+`trading.options.zero_price_orders_submitted` is the dedicated
+surveillance signal for the OPT-C (#485) cabinet / worthless-OTM
+closeout flow — orders that travel as `Limit Price=0` on the OPT
+channel. A small steady stream is normal end-of-cycle hygiene; a
+sudden spike on one `(symbol, firmId, put_call)` tuple is the
+compliance alert (off-market levelling, wash-out, mis-keyed price).
 
 ## Auto-instrumentation also exported
 

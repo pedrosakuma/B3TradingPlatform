@@ -60,6 +60,19 @@ public static class MetricsRegistry
     public static readonly Counter<long> OrdersIocNoResponse =
         Meter.CreateCounter<long>("trading.orders.ioc_no_response");
 
+    /// <summary>
+    /// OPT-F (#488). Surveillance counter for cabinet trades and
+    /// worthless out-of-the-money option closeouts that travel as
+    /// Limit Price=0 on the OPT channel (relaxed by OPT-C / #485 +
+    /// upstream B3MatchingPlatform#473). A small steady stream is
+    /// normal end-of-cycle hygiene; a sudden spike on a single
+    /// (symbol, firmId, put_call) tuple is a compliance signal
+    /// (off-market levelling, wash-out, mis-keyed price).
+    /// Tags: <c>symbol</c>, <c>side</c>, <c>firmId</c>, <c>put_call</c>.
+    /// </summary>
+    public static readonly Counter<long> OptionZeroPriceOrdersSubmitted =
+        Meter.CreateCounter<long>("trading.options.zero_price_orders_submitted");
+
     // Execution reports inbound
     public static readonly Counter<long> ExecutionReportsReceived =
         Meter.CreateCounter<long>("trading.er.received");
