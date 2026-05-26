@@ -36,8 +36,18 @@ public static class TradingRiskServiceCollectionExtensions
             configuration.GetSection(SubAccountRiskOptions.SectionName));
         services.Configure<SymbolDirectoryOptions>(
             configuration.GetSection(SymbolDirectoryOptions.SectionName));
+        // OPT-D (#486, refs #454 Fase 2). SecurityDefinitionRegistry
+        // is the projection target for SDK 0.5.0's SecurityDefinition
+        // channel. Registered as a singleton so the host adapter
+        // (writer) and SymbolDirectory (reader) share the same
+        // instance; tests that build SymbolDirectory directly without
+        // DI still get the v1 (config-only) behaviour because the
+        // ctor with no registry argument remains.
+        services.AddSingleton<B3.Trading.Application.MarketData.SecurityDefinitionRegistry>();
         services.AddSingleton(sp =>
-            new SymbolDirectory(sp.GetRequiredService<IOptions<SymbolDirectoryOptions>>().Value));
+            new SymbolDirectory(
+                sp.GetRequiredService<IOptions<SymbolDirectoryOptions>>().Value,
+                sp.GetService<B3.Trading.Application.MarketData.SecurityDefinitionRegistry>()));
 
         // #454 Fase 1. Per-symbol tick-size provider seam. Default impl
         // wraps the config-backed SymbolDirectory; Fase 2 will swap (or
