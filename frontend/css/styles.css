@@ -459,6 +459,19 @@ tr.row-stale > td.row-stale-actions { opacity: 1; }
 .type-chip.chip-stpl { background: #4a2455; color: #f0c8ff; }
 .type-chip.chip-mwl  { background: #145a4a; color: #8af0d4; }
 
+/* Option badges for Call/Put labels (#497) */
+.option-badge {
+ display: inline-block;
+ font-size: 0.75rem;
+ font-weight: 600;
+ padding: 0 4px;
+ border-radius: 3px;
+ margin-left: 4px;
+ vertical-align: middle;
+}
+.option-call { background: #22c55e; color: white; }
+.option-put { background: #ef4444; color: white; }
+
 /* Status cell coloring reserved for potential future OrderStatus.Expired
    addition; not currently rendered (backend OrderStatus has no Expired
    member — GTD expiry terminalises as Cancelled). Kept so a future
@@ -1154,6 +1167,14 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
   cursor: pointer; font-weight: 600;
 }
 .ticket-submit:hover { filter: brightness(1.1); }
+.ticket-notional {
+  font-size: .875rem;
+  color: var(--gray);
+  margin-left: .5rem;
+  white-space: nowrap;
+  align-self: flex-end;
+  padding-bottom: .35rem;
+}
 .ticket-advanced-toggle {
   padding: .35rem .65rem; font: inherit; font-size: .8rem;
   background: transparent; color: inherit;
