@@ -206,6 +206,9 @@
             </label>
             <span id="ticket-notional-preview" class="ticket-notional" title="Estimated notional value"></span>
             <button type="submit" id="ticket-submit" class="ticket-submit">Submit</button>
+            <button type="button" id="open-chain-picker" class="btn btn-icon" title="Open option chain (Ctrl+O)" aria-label="Open option chain">
+              ⛓
+            </button>
             <button type="button" id="ticket-advanced-toggle"
                     class="ticket-advanced-toggle" aria-expanded="false"
                     aria-controls="ticket-advanced"
@@ -699,6 +702,31 @@
       </div>
     </form>
   </div>
+
+  <!-- FE-OPT-2 (#498). Option chain picker modal -->
+  <dialog id="chain-picker-modal" class="modal chain-picker-modal" aria-labelledby="chain-picker-title">
+    <div class="modal-content chain-picker-content">
+      <header class="modal-header">
+        <h2 id="chain-picker-title">Option Chain</h2>
+        <button type="button" class="modal-close" aria-label="Close">&times;</button>
+      </header>
+      <div class="chain-picker-controls">
+        <label>
+          Underlying
+          <input type="text" id="chain-underlying" placeholder="e.g. PETR4" list="chain-underlying-list" />
+          <datalist id="chain-underlying-list"></datalist>
+        </label>
+        <button type="button" id="chain-load-btn" class="btn btn-primary">Load Chain</button>
+      </div>
+      <div id="chain-picker-grid" class="chain-picker-grid">
+        <!-- Grid populated by JS: rows=strikes, cols=expiries -->
+        <p class="chain-placeholder">Enter an underlying symbol and click Load</p>
+      </div>
+      <footer class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
+      </footer>
+    </div>
+  </dialog>
 
   <!-- HISTORY / P&L / STATEMENT VIEW (Q2.6 #273) ---------------------
        Consumes the read-side endpoints shipped by Q2.1 (#268),

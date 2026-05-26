@@ -851,6 +851,80 @@ function renderCancelAllButton() {
   btn.textContent = `Cancel all (${n})`;
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// FE-OPT-2 (#498). Option chain picker
+// ═══════════════════════════════════════════════════════════════════
+
+let chainPickerOnSelect = null; // callback when user clicks a cell
+
+function openChainPicker(onSelect) {
+  chainPickerOnSelect = onSelect;
+  const modal = $("chain-picker-modal");
+  if (modal && typeof modal.showModal === "function") {
+   modal.showModal();
+  }
+}
+
+function closeChainPicker() {
+  const modal = $("chain-picker-modal");
+  if (modal && typeof modal.close === "function") {
+   modal.close();
+  }
+  chainPickerOnSelect = null;
+}
+
+function buildChainGrid(instruments) {
+  // Group by expiry (columns) and strike (rows)
+  const expiries = [...new Set(instruments.map(i => i.expirationDate))].sort();
+  const strikes = [...new Set(instruments.map(i => i.strikePrice))].sort((a, b) => a - b);
+  
+  // Build lookup: { "strike|expiry|putOrCall" => instrument }
+  const lookup = new Map();
+  for (const inst of instruments) {
+   lookup.set(`${inst.strikePrice}|${inst.expirationDate}|${inst.putOrCall}`, inst);
+  }
+  
+  // Build table HTML
+  let html = '<table class="chain-table"><thead><tr><th class="strike-col">Strike</th>';
+  for (const exp of expiries) {
+   // Show both C and P columns per expiry
+   html += `<th colspan="2">${exp}</th>`;
+  }
+  html += '</tr><tr><th></th>';
+  for (const exp of expiries) {
+   html += '<th>Call</th><th>Put</th>';
+  }
+  html += '</tr></thead><tbody>';
+  
+  for (const strike of strikes) {
+   html += `<tr><td class="strike-col">${strike.toFixed(2)}</td>`;
+   for (const exp of expiries) {
+     const call = lookup.get(`${strike}|${exp}|Call`);
+     const put = lookup.get(`${strike}|${exp}|Put`);
+     html += call 
+       ? `<td class="chain-cell chain-cell-call" data-symbol="${call.symbol}" data-security-id="${call.securityId}">C</td>`
+       : '<td class="chain-cell-empty">—</td>';
+     html += put
+       ? `<td class="chain-cell chain-cell-put" data-symbol="${put.symbol}" data-security-id="${put.securityId}">P</td>`
+       : '<td class="chain-cell-empty">—</td>';
+   }
+   html += '</tr>';
+  }
+  html += '</tbody></table>';
+  return html;
+}
+
+function handleChainCellClick(e) {
+  const cell = e.target.closest(".chain-cell");
+  if (!cell) return;
+  const symbol = cell.dataset.symbol;
+  const securityId = cell.dataset.securityId;
+  if (symbol && chainPickerOnSelect) {
+   chainPickerOnSelect(symbol, securityId);
+   closeChainPicker();
+  }
+}
+
 export function bindUi() {
   // Order ticket: enable/disable price field + show/hide stop-price +
   // good-till-date inputs based on type / TIF (Q1.4 #256).
@@ -1257,6 +1331,50 @@ export function bindUi() {
       }
     });
   }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // FE-OPT-2 (#498). Option chain picker modal wiring
+  // ═══════════════════════════════════════════════════════════════════
+  const chainModal = $("chain-picker-modal");
+  const chainGrid = $("chain-picker-grid");
+  const chainUnderlyingInput = $("chain-underlying");
+  const chainLoadBtn = $("chain-load-btn");
+  const openChainBtn = $("open-chain-picker");
+  
+  if (chainModal) {
+    // Close on backdrop click (click on the dialog but not its content)
+    chainModal.addEventListener("click", (e) => {
+      if (e.target === chainModal) closeChainPicker();
+    });
+    // Close on X button (class or data attr varies, common patterns)
+    chainModal.querySelector(".modal-close")?.addEventListener("click", closeChainPicker);
+    chainModal.querySelector("[data-dismiss='modal']")?.addEventListener("click", closeChainPicker);
+    // Cell clicks inside the grid
+    if (chainGrid) {
+      chainGrid.addEventListener("click", handleChainCellClick);
+    }
+  }
+  
+  if (openChainBtn) {
+    openChainBtn.addEventListener("click", () => {
+      openChainPicker((symbol, securityId) => {
+        // Populate ticket with selected option
+        const symInput = $("ticket-symbol");
+        if (symInput) {
+          symInput.value = symbol;
+          symInput.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+      });
+    });
+  }
+
+  // Ctrl+O opens chain picker (Mac: Cmd+O)
+  document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "o") {
+      e.preventDefault();
+      openChainBtn?.click();
+    }
+  });
 
   subscribe(renderForSlice);
   renderAll();
@@ -3032,4 +3150,4 @@ function refreshTicketValidation() {
   }
   return result;
 }
-export { refreshTicketValidation };
+export { refreshTicketValidation, openChainPicker, closeChainPicker, buildChainGrid, handleChainCellClick };

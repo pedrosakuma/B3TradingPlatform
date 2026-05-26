@@ -10,7 +10,8 @@ import { defaultBackend, defaultMarketDataUrl, login, signup, submitOrder, cance
          getStatement, downloadStatementCsv,
          searchAuditLog, getFillTouch, downloadCvmReport, buildDropCopyWebSocketUrl,
          verifyTotp, enrollTotp, disableTotp,
-         listAlgos, createAlgo, cancelAlgo, modifyAlgo } from "./protocol.js";
+         listAlgos, createAlgo, cancelAlgo, modifyAlgo,
+         getInstruments } from "./protocol.js";
 import { validateCreateAlgo } from "./validation.js";
 import * as algosUi from "./algosUi.js";
 import * as settingsUi from "./settingsUi.js";
@@ -171,6 +172,9 @@ function init() {
     onFillTouchLookup: handleFillTouchLookup,
     onCvmDownload:     handleCvmDownload,
   });
+
+  // FE-OPT-2 (#498). Chain picker load button — needs session for API call.
+  document.getElementById("chain-load-btn")?.addEventListener("click", handleLoadChain);
 
   // Fase 5 (#401). Global keyboard shortcuts. Handlers gate on
   // `session` so they no-op while the user is on the login screen.
@@ -954,6 +958,29 @@ function formatPretradeWarning(w) {
     }
     default:
       return "advisory warning";
+  }
+}
+
+// FE-OPT-2 (#498). Load option chain from API and build grid in modal.
+async function handleLoadChain() {
+  if (!session) return;
+  const underlying = document.getElementById("chain-underlying")?.value?.trim().toUpperCase();
+  if (!underlying) {
+    document.getElementById("chain-picker-grid").innerHTML =
+      '<p class="chain-placeholder">Enter an underlying symbol (e.g., PETR4)</p>';
+    return;
+  }
+  const grid = document.getElementById("chain-picker-grid");
+  if (grid) grid.innerHTML = '<p class="chain-placeholder">Loading…</p>';
+  try {
+    const instruments = await getInstruments(session.backend, session.token, { underlying });
+    if (!instruments || instruments.length === 0) {
+      if (grid) grid.innerHTML = '<p class="chain-placeholder">No options found for this underlying</p>';
+      return;
+    }
+    if (grid) grid.innerHTML = ui.buildChainGrid(instruments);
+  } catch (err) {
+    if (grid) grid.innerHTML = `<p class="chain-placeholder" style="color:#dc2626">Error: ${err.message}</p>`;
   }
 }
 
