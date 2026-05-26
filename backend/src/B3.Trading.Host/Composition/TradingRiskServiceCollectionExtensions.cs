@@ -49,6 +49,20 @@ public static class TradingRiskServiceCollectionExtensions
                 sp.GetRequiredService<IOptions<SymbolDirectoryOptions>>().Value,
                 sp.GetService<B3.Trading.Application.MarketData.SecurityDefinitionRegistry>()));
 
+        // OPT-E (#487, refs #482 OPT-readiness umbrella).
+        // PriceBandRegistry is the projection target for SDK 0.6.0's
+        // PriceBand channel (upstream pedrosakuma/B3MarketDataPlatform#56).
+        // Registered as a singleton so the host adapter (writer) and
+        // PriceBandCheck (reader) share the same instance; the
+        // IPriceBandSource seam is also bound to it so tests can
+        // substitute a stub without bringing the SDK. When
+        // Trading:MarketData:EnablePriceBand=false the adapter skips
+        // the subscribe-flag (no SDK callbacks fire), the registry
+        // stays empty, the check fails open via PriceBandBypassedNoBand.
+        services.AddSingleton<B3.Trading.Application.MarketData.PriceBandRegistry>();
+        services.AddSingleton<B3.Trading.Application.MarketData.IPriceBandSource>(
+            sp => sp.GetRequiredService<B3.Trading.Application.MarketData.PriceBandRegistry>());
+
         // #454 Fase 1. Per-symbol tick-size provider seam. Default impl
         // wraps the config-backed SymbolDirectory; Fase 2 will swap (or
         // chain in front of) an SDK-backed impl once upstream
@@ -137,6 +151,7 @@ public static class TradingRiskServiceCollectionExtensions
         services.AddSingleton<IRiskCheck, NoNakedShortCheck>();
         services.AddSingleton<IRiskCheck, SelfTradePreventionCheck>();
         services.AddSingleton<IRiskCheck, PriceCollarCheck>();
+        services.AddSingleton<IRiskCheck, PriceBandCheck>();
         services.AddSingleton<IRiskCheck, StaleReferencePriceCheck>();
         // Q1.2 (#254). Stop-trigger / IOC-FOK-leftover / GFA-phase /
         // GTD-bounds gates for the new Q1.1 order surface.

@@ -6,7 +6,7 @@
   <ItemGroup>
     <PackageVersion Include="B3.EntryPoint.Client" Version="0.15.0" />
     <PackageVersion Include="B3.EntryPoint.Sbe" Version="0.15.0" />
-    <PackageVersion Include="B3.MarketData.WebSocketClient" Version="0.5.0" />
+    <PackageVersion Include="B3.MarketData.WebSocketClient" Version="0.6.0" />
     <PackageVersion Include="BCrypt.Net-Next" Version="4.2.0" />
     <PackageVersion Include="BenchmarkDotNet" Version="0.15.8" />
     <PackageVersion Include="coverlet.collector" Version="10.0.0" />

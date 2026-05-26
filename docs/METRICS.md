@@ -67,6 +67,9 @@ One `AddMeter(MetricsRegistry.Meter.Name)` call wires the lot.
 | `trading.risk.refprice.lookups` | Counter | `source` (live/fallback/missing) |
 | `trading.risk.refprice.staleness_seconds` | Observable Gauge | `symbol` |
 | `trading.risk.collar.bypassed_no_reference` | Counter | `symbol` |
+| `trading.risk.price_band.reject` | Counter | `symbol`, `side`, `reason` (above/below) |
+| `trading.risk.price_band.age_seconds` | Histogram | `symbol` |
+| `trading.risk.price_band.bypassed_no_band` | Counter | `symbol` |
 | `trading.risk.rolling_notional.bypassed_no_reference` | Counter | `symbol` |
 | `trading.risk.rolling_notional.active_buckets` | Observable Gauge | `scope` (end_client/firm) |
 | `trading.risk.order_rate.active_buckets` | Observable Gauge | `scope` (end_client/firm) |
