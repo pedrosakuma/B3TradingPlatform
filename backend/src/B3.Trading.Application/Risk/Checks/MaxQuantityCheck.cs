@@ -76,13 +76,16 @@ public sealed class MinNotionalCheck : IRiskCheck
 {
     private readonly IOptionsMonitor<RiskOptions> _options;
     private readonly IMarketValueCalculator _values;
+    private readonly SymbolDirectory? _directory;
 
     public MinNotionalCheck(
         IOptionsMonitor<RiskOptions> options,
-        IMarketValueCalculator? values = null)
+        IMarketValueCalculator? values = null,
+        SymbolDirectory? directory = null)
     {
         _options = options;
         _values = values ?? EquityMarketValueCalculator.Instance;
+        _directory = directory;
     }
 
     public int Order => 110; // after max-quantity / max-notional, before throttles
@@ -94,6 +97,24 @@ public sealed class MinNotionalCheck : IRiskCheck
         var min = RiskLimitsResolver.Resolve(opts, ctx.Owner.Value, ctx.FirmId, ctx.Symbol, l => l.MinNotional);
         if (!min.HasValue || !ctx.Price.HasValue)
             return RiskDecision.Approve; // no floor configured, or market order
+
+        // OPT-C (#485). B3 OPT channel relaxes minPx to 0 for equity
+        // options (upstream B3MatchingPlatform#473): cabinet trades and
+        // worthless out-of-the-money closeouts legitimately price at 0.
+        // The MinNotional dust floor is a fat-finger guard for equities;
+        // applying it to a zero-priced option closeout would reject a
+        // venue-legal order with a spurious dust reason. Skip when the
+        // symbol resolves as Option AND price is exactly 0 — any
+        // positive option price still trips the floor (so a 0.005×100=0.5
+        // BRL real option still gets caught if the floor is set higher).
+        if (ctx.Price.Value == 0m
+            && _directory is { } dir
+            && dir.TryGetSpec(ctx.Symbol, out var spec)
+            && spec.SecurityType == SecurityType.Option)
+        {
+            return RiskDecision.Approve;
+        }
+
         // OPT-B (#484): notional is in BRL (price * qty * multiplier
         // for options); fee/dust math compares apples-to-apples.
         var notional = _values.GetNotional(ctx.Symbol, ctx.Price.Value, ctx.Quantity);

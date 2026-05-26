@@ -392,6 +392,84 @@ public class RiskPipelineTests
     }
 
     [Fact]
+    public void MinNotional_OptionAtZeroPrice_SkipsFloor()
+    {
+        // OPT-C (#485). B3 OPT channel allows minPx=0 for options
+        // (cabinet trades / worthless closeouts). MinNotional dust
+        // floor must not reject a venue-legal zero-priced option.
+        var opts = Wrap(new RiskOptions { Default = new RiskLimits { MinNotional = 100m } });
+        var dir = BuildDirectory(specs: new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["PETRL200"] = new InstrumentSpecOptions
+            {
+                Option = new OptionMetadataOptions
+                {
+                    ExpirationDate = new DateOnly(2026, 12, 18),
+                    PutOrCall = "Call",
+                    ExerciseStyle = "American",
+                    ContractMultiplier = 100m,
+                },
+            },
+        });
+        var check = new MinNotionalCheck(
+            opts,
+            values: new SymbolDirectoryMarketValueCalculator(dir),
+            directory: dir);
+
+        Assert.True(check.Check(Ctx(symbol: "PETRL200", qty: 100, price: 0m)).Approved);
+    }
+
+    [Fact]
+    public void MinNotional_OptionAtNonZeroPrice_StillEnforcesFloor()
+    {
+        // Real option price (0.01 × 100 × 10 = 10 BRL) is still
+        // subject to the floor — the OPT-C relax is strictly
+        // scoped to price == 0 (cabinet/worthless), not to any
+        // small-but-positive option price.
+        var opts = Wrap(new RiskOptions { Default = new RiskLimits { MinNotional = 100m } });
+        var dir = BuildDirectory(specs: new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["PETRL200"] = new InstrumentSpecOptions
+            {
+                Option = new OptionMetadataOptions
+                {
+                    ExpirationDate = new DateOnly(2026, 12, 18),
+                    PutOrCall = "Call",
+                    ExerciseStyle = "American",
+                    ContractMultiplier = 100m,
+                },
+            },
+        });
+        var check = new MinNotionalCheck(
+            opts,
+            values: new SymbolDirectoryMarketValueCalculator(dir),
+            directory: dir);
+
+        var d = check.Check(Ctx(symbol: "PETRL200", qty: 10, price: 0.01m));
+        Assert.False(d.Approved);
+        Assert.Contains("min", d.Reason);
+    }
+
+    [Fact]
+    public void MinNotional_EquityAtZeroPrice_StillRejects()
+    {
+        // Equity zero-price isn't a venue-legal scenario; the OPT-C
+        // relax is options-only. Equities at price=0 keep the legacy
+        // reject (defense-in-depth fat-finger guard).
+        var opts = Wrap(new RiskOptions { Default = new RiskLimits { MinNotional = 100m } });
+        var dir = BuildDirectory(specs: new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["PETR4"] = new InstrumentSpecOptions { TickSize = 0.01m, LotSize = 100 },
+        });
+        var check = new MinNotionalCheck(
+            opts,
+            values: new SymbolDirectoryMarketValueCalculator(dir),
+            directory: dir);
+
+        Assert.False(check.Check(Ctx(symbol: "PETR4", qty: 100, price: 0m)).Approved);
+    }
+
+    [Fact]
     public void PriceCollar_RejectsOutsideBand()
     {
         var refPx = new StubRef(("PETR4", 30m));
