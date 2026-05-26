@@ -32,10 +32,27 @@ public sealed class SymbolDirectory
     private readonly IReadOnlyDictionary<string, ulong> _byName;
     private readonly IReadOnlyDictionary<ulong, string> _bySecurityId;
     private readonly IReadOnlyDictionary<string, InstrumentSpec> _specs;
+    private readonly MarketData.SecurityDefinitionRegistry? _registry;
 
     public SymbolDirectory(SymbolDirectoryOptions options)
+        : this(options, registry: null)
+    {
+    }
+
+    /// <summary>
+    /// OPT-D (#486, refs #454 Fase 2). Construct with an optional
+    /// <see cref="MarketData.SecurityDefinitionRegistry"/> overlay.
+    /// When supplied, <see cref="TryGetSpec(string?, out InstrumentSpec)"/>
+    /// consults the registry FIRST and only falls back to the static
+    /// <paramref name="options"/>-bound dictionary when the registry
+    /// has no entry for the symbol. The single-arg ctor preserves
+    /// the v1 behaviour for tests that construct the directory
+    /// directly without DI.
+    /// </summary>
+    public SymbolDirectory(SymbolDirectoryOptions options, MarketData.SecurityDefinitionRegistry? registry)
     {
         ArgumentNullException.ThrowIfNull(options);
+        _registry = registry;
         // Always copy to enforce case-insensitive comparison even if
         // the binder produced a culture-sensitive dictionary.
         var copy = new Dictionary<string, ulong>(StringComparer.OrdinalIgnoreCase);
@@ -201,6 +218,15 @@ public sealed class SymbolDirectory
         {
             spec = default;
             return false;
+        }
+        // OPT-D (#486): the SDK-driven SecurityDefinition projection
+        // wins over the static config. Bootstrap + delta semantics
+        // mean once a frame has been seen for the symbol the registry
+        // entry is authoritative; before the first frame (and when
+        // the kill-switch is set) we fall through to the config.
+        if (_registry is not null && _registry.TryGetSpec(symbol, out spec))
+        {
+            return true;
         }
         return _specs.TryGetValue(symbol, out spec!);
     }

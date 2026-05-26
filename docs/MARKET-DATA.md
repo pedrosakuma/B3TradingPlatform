@@ -14,11 +14,26 @@ L3) events flow through the application after PR #286 (Stages A–C).
 - `SubscribeFlags.Book` — MBO order-by-order events
   (`OrderAdded` / `OrderUpdated` / `OrderDeleted` /
   `BookSnapshot` / `BookCleared`)
+- `SubscribeFlags.SecurityDefinition` — bootstrap + delta of
+  `SecurityDefinition_12` (tick, lot, contract multiplier, option
+  metadata). Projected by `SdkMarketDataSubscriber` into
+  `SecurityDefinitionRegistry`, which `SymbolDirectory.TryGetSpec`
+  consults before falling back to the operator-configured static
+  dictionary. Added in SDK 0.5.0 (#486 / upstream
+  `pedrosakuma/B3MarketDataPlatform#55`).
 
 The book flag is opt-in; the trading-host subscribes to it only
 when `Trading:MarketData:EnableBook` is `true`. With the flag off
 the host runs in legacy mode: no MBO events, Pegged algos fall
 back to last-trade for `PegRef.Mid`/`Best`.
+
+The `SecurityDefinition` flag is **opt-out**: enabled by default
+once the SDK is bumped past 0.5.0 because the OPT umbrella ships
+hundreds of option series per underlying and config-only entry is
+infeasible. Set `Trading:MarketData:EnableSecurityDefinition=false`
+as an emergency kill-switch — `SymbolDirectory` will then keep
+returning the static config values exclusively (legacy v1
+behaviour).
 
 ## Configuration
 
@@ -37,7 +52,15 @@ back to last-trade for `PegRef.Mid`/`Best`.
       // When true, includes SubscribeFlags.Book in the SDK
       // subscribe call so MBO events flow into MboBookStore.
       // Default: false.
-      "EnableBook": true
+      "EnableBook": true,
+
+      // OPT-D (#486). When true, includes
+      // SubscribeFlags.SecurityDefinition so the SDK pushes tick /
+      // lot / multiplier / option metadata per symbol; the host
+      // projects each frame into SecurityDefinitionRegistry which
+      // SymbolDirectory.TryGetSpec consults before falling back to
+      // static config. Default: true (kill-switch only).
+      "EnableSecurityDefinition": true
     }
   }
 }
