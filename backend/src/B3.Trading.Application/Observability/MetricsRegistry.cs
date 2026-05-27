@@ -223,24 +223,15 @@ public static class MetricsRegistry
     public static readonly Counter<long> RecoverySessionRolledFirms =
         Meter.CreateCounter<long>("trading.recovery.session_rolled_firms");
 
-    // #380 path B. Number of WorkingOrderBook entries eagerly retired
-    // (MarkCancelled) by the session-version guard. Tag `firm` carries
-    // the FirmId. Post-#419, this counter only ticks for PendingNew
-    // orders (never acked by the venue → safe to cancel); confirmed
-    // working orders go through the staleness overlay instead — see
-    // <see cref="RecoverySessionRolledOrdersStaled"/>.
+    // #380 path B, refined by #504. Number of WorkingOrderBook entries
+    // eagerly retired (MarkCancelled) by the session-version guard. Tag
+    // `firm` carries the FirmId. Per #504, only PendingNew orders are
+    // cancelled (never acked by the venue → safe to cancel). Confirmed
+    // Working/PartiallyFilled orders are NOT marked stale on session
+    // roll — the FIXP protocol handles synchronization via retransmission
+    // during recovery, so if no terminal ER arrives, the order is valid.
     public static readonly Counter<long> RecoverySessionRolledOrdersDropped =
         Meter.CreateCounter<long>("trading.recovery.session_rolled_orders_dropped");
-
-    // #419. Number of Working / PartiallyFilled orders flagged stale
-    // (Order.MarkStale) by the session-version guard. Tag `firm`
-    // carries the FirmId. The venue may still hold these orders
-    // (B3 persists the book across FIXP session rolls), so we keep
-    // them visible in the blotter and accounting but gate
-    // Cancel/Modify at the API until a real ER (or a future
-    // OrderMassStatusRequest reconciliation) confirms their fate.
-    public static readonly Counter<long> RecoverySessionRolledOrdersStaled =
-        Meter.CreateCounter<long>("trading.recovery.session_rolled_orders_staled");
 
     // Q2.3 (#270). Fee-keeper deterministic replay synth — surfaces the
     // crash window between ER append (seq N) and FeeAccruedEvent append

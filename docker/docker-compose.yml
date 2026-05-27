@@ -264,6 +264,11 @@ services:
       Trading__Risk__ReferencePrices__PETR4: "32.50"
       Trading__Risk__ReferencePrices__VALE3: "65.00"
       Trading__Risk__ReferencePrices__ITUB4: "30.00"
+      # CVM report hashing salt. Required by boot guard. Use a proper secret
+      # in production; this placeholder is acceptable for local dev/test.
+      Trading__Reports__Cvm__OwnerHashSalt: ${TRADING_CVM_OWNER_HASH_SALT:-local-dev-cvm-salt-not-for-prod}
+      # ClOrdId masking salt for drop-copy compliance (#435). Required by boot guard.
+      Trading__DropCopy__ClOrdIdMaskSalt: ${TRADING_CLORDID_MASK_SALT:-local-dev-clordid-mask-salt-not-for-prod}
       # Opening positions seeded for the default dogfood accounts so
       # both alice and bob can sell out of the box without being blocked
       # by the NoNakedShortCheck gate. Quantities are expressed in

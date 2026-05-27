@@ -219,34 +219,20 @@ public sealed class PersistenceRecovery
                 continue;
             }
 
-            // Session-version advanced past the snapshot. Per #419, this
-            // does NOT imply the venue purged the firm's orders — B3 (and
-            // our local matching-platform) persist the order book across
-            // FIXP session rolls; cancel-on-disconnect is opt-in per
-            // session, not default. Mark each Working / PartiallyFilled
-            // order stale instead of cancelling: Cancel/Modify is gated
-            // (409 at the API) so we don't fire wasted requests against
-            // a possibly-still-live order, but the order stays visible
-            // in /orders + executions blotter + positions/cash so
-            // operators see what the venue might still be matching. Real
-            // ERs (or a future OrderMassStatusRequest reconciliation —
-            // out of scope here) lift the flag automatically.
+            // Session-version advanced past the snapshot. Per #504, this
+            // does NOT imply uncertainty about order state — the FIXP
+            // protocol handles synchronization via retransmission during
+            // recovery. If no terminal ER (Cancel/Fill) arrives during
+            // FIXP recovery, the order is still valid on the venue.
             //
             // PendingNew is the one exception: the venue never acked
             // those, so a session roll guarantees they cannot exist
             // under any session version. Fall back to MarkCancelled for
             // those — same behaviour as PR #415.
-            var staled = 0;
             var cancelled = 0;
-            var now = DateTimeOffset.UtcNow;
-            var reason = $"recovery.session-rolled:{storedVerId}->{status.SessionVerId}";
             foreach (var order in _orders!.EnumerateForFirm(status.FirmId, includeTerminal: false))
             {
-                if (order.MarkStale(reason, now))
-                {
-                    staled++;
-                }
-                else if (order.Status == B3.Trading.Domain.OrderStatus.PendingNew)
+                if (order.Status == B3.Trading.Domain.OrderStatus.PendingNew)
                 {
                     order.MarkCancelled();
                     if (order.Status == B3.Trading.Domain.OrderStatus.Cancelled)
@@ -255,12 +241,19 @@ public sealed class PersistenceRecovery
                     }
                 }
             }
-            _logger.LogWarning(
-                "event=recovery.session-rolled firm={Firm} from={From} to={To} staled={Staled} cancelled={Cancelled}",
-                status.FirmId, storedVerId, status.SessionVerId, staled, cancelled);
+            if (cancelled > 0)
+            {
+                _logger.LogWarning(
+                    "event=recovery.session-rolled firm={Firm} from={From} to={To} pendingNewCancelled={Cancelled}",
+                    status.FirmId, storedVerId, status.SessionVerId, cancelled);
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "event=recovery.session-rolled firm={Firm} from={From} to={To} (FIXP recovery handles sync)",
+                    status.FirmId, storedVerId, status.SessionVerId);
+            }
             MetricsRegistry.RecoverySessionRolledFirms.Add(1,
-                new KeyValuePair<string, object?>("firm", status.FirmId));
-            MetricsRegistry.RecoverySessionRolledOrdersStaled.Add(staled,
                 new KeyValuePair<string, object?>("firm", status.FirmId));
             MetricsRegistry.RecoverySessionRolledOrdersDropped.Add(cancelled,
                 new KeyValuePair<string, object?>("firm", status.FirmId));
