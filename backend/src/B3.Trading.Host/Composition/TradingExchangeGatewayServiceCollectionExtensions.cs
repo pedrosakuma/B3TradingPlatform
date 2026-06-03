@@ -137,6 +137,7 @@ public static class TradingExchangeGatewayServiceCollectionExtensions
                     var venueAccountResolver = sp.GetService<IVenueAccountResolver>();
                     var investorIdResolver = sp.GetService<IInvestorIdResolver>();
                     var routingInstructionResolver = sp.GetService<IRoutingInstructionResolver>();
+                    var connectRollReactor = sp.GetService<IConnectSessionRollReactor>();
                     return new B3EntryPointClientGateway(upstream, firm.FirmId, resumeVerId, gwLogger,
                         venueDisconnectReactor: reactor,
                         riskOptions: riskOpts,
@@ -144,7 +145,12 @@ public static class TradingExchangeGatewayServiceCollectionExtensions
                         venueAccountResolver: venueAccountResolver,
                         investorIdResolver: investorIdResolver,
                         routingInstructionResolver: routingInstructionResolver,
-                        terminateOnShutdown: false);
+                        terminateOnShutdown: false,
+                        // #512. Read the SDK's effective verId off the SAME
+                        // options instance the client mutates on a cold-resume
+                        // fallback bump, and reap PendingNew if it advanced.
+                        effectiveSessionVerIdProvider: () => clientOpts.SessionVerId,
+                        connectSessionRollReactor: connectRollReactor);
                 });
                 return new FirmGatewayRegistry(gateways);
             });

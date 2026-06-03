@@ -104,6 +104,19 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     // resolvers MUST be deterministic per-Order so the two
     // resolutions agree (see IRoutingInstructionResolver doc).
     private readonly IRoutingInstructionResolver? _routingInstructionResolver;
+    // #512. Reads the SDK's EFFECTIVE SessionVerId after ConnectAsync
+    // returns. The SDK may have fallen back from Establish-reuse to a
+    // freshly negotiated session with a bumped verId (recoverable reuse
+    // reject); that mutation lands on the EntryPointClientOptions instance
+    // the composition root passed to the client, so the provider closes
+    // over the same instance. Null → no post-connect roll detection
+    // (legacy behaviour, matches direct-construction tests).
+    private readonly Func<uint>? _effectiveSessionVerIdProvider;
+    // #512. Hands a detected connect-time session roll to the Application
+    // layer to reap un-acked PendingNew BEFORE the event loop / first
+    // snapshot. Null → detection still syncs CurrentSessionVerId but
+    // performs no reap.
+    private readonly IConnectSessionRollReactor? _connectSessionRollReactor;
 
     public B3EntryPointClientGateway(
         Up.EntryPointClient client,
@@ -121,7 +134,9 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         IVenueAccountResolver? venueAccountResolver = null,
         IInvestorIdResolver? investorIdResolver = null,
         IRoutingInstructionResolver? routingInstructionResolver = null,
-        bool terminateOnShutdown = true)
+        bool terminateOnShutdown = true,
+        Func<uint>? effectiveSessionVerIdProvider = null,
+        IConnectSessionRollReactor? connectSessionRollReactor = null)
     {
         _terminateOnShutdown = terminateOnShutdown;
         _client = client ?? throw new ArgumentNullException(nameof(client));
@@ -139,6 +154,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         _venueAccountResolver = venueAccountResolver;
         _investorIdResolver = investorIdResolver;
         _routingInstructionResolver = routingInstructionResolver;
+        _effectiveSessionVerIdProvider = effectiveSessionVerIdProvider;
+        _connectSessionRollReactor = connectSessionRollReactor;
         _client.Terminated += OnTerminated;
         _client.InboundGapAtReconnect += OnInboundGapAtReconnect;
         MetricsRegistry.RecordSessionVerId(_firmId, _currentSessionVerId);
@@ -193,7 +210,78 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     public async Task ConnectAsync(CancellationToken cancellationToken)
     {
         await _client.ConnectAsync(cancellationToken).ConfigureAwait(false);
+        ReconcileConnectSessionRoll();
         OnConnected();
+    }
+
+    /// <summary>
+    /// #512. Detect a deferred connect-time session-version bump and
+    /// reconcile it BEFORE the event loop / first snapshot starts.
+    ///
+    /// <para>
+    /// The #512 happy path resumes the persisted session via Establish-reuse
+    /// (verId unchanged) — this is a no-op. But when the venue rejects the
+    /// reuse with a recoverable reject, the SDK falls back to Negotiate with
+    /// a bumped verId inside the same <c>ConnectAsync</c>. The boot-time
+    /// #380/#504 baseline reconcile already ran against the OLD verId before
+    /// app start, so it never sees this bump. We read the SDK's effective
+    /// verId, sync <see cref="CurrentSessionVerId"/> (so the next snapshot
+    /// records the new baseline), and hand the roll to the Application reactor
+    /// to reap un-acked PendingNew. Mirrors the reconnect path which already
+    /// syncs the verId from the reconnect outcome.
+    /// </para>
+    /// </summary>
+    internal void ReconcileConnectSessionRoll()
+    {
+        if (_effectiveSessionVerIdProvider is null) return;
+
+        var prior = Volatile.Read(ref _currentSessionVerId);
+        uint effective;
+        try
+        {
+            effective = _effectiveSessionVerIdProvider();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to read effective SessionVerId after connect for firm {Firm}; skipping session-roll reconcile.",
+                _firmId);
+            return;
+        }
+
+        if (effective <= prior) return;
+
+        // Order matters for the cross-restart backstop. The boot reconcile
+        // re-detects a roll only while the snapshot baseline still records
+        // the OLD verId. So we must REAP first and publish the bumped verId
+        // only after the reap succeeds: a snapshot interleaving between the
+        // reap (orders already cancelled under the dispatcher lock) and the
+        // verId publish records old-baseline + cancelled-orders — safe. If
+        // we published the verId first, a snapshot could seal
+        // baseline=bumped with the ghosts still present, and a crash before
+        // the next snapshot would make next-restart boot reconcile miss the
+        // roll (storedVerId == currentVerId) — the ghosts would survive
+        // permanently. Same reasoning is why a reactor failure must NOT
+        // publish the bumped verId: leaving the baseline old keeps the
+        // backstop armed.
+        try
+        {
+            _connectSessionRollReactor?.OnSessionRolledAtConnect(_firmId, prior, effective);
+        }
+        catch (Exception ex)
+        {
+            // A reactor failure must never abort the connect — the session
+            // is established. Leave _currentSessionVerId at the old baseline
+            // so the next-restart boot reconcile still re-detects the roll
+            // and reaps the ghosts.
+            _logger.LogError(ex,
+                "Connect session-roll reactor failed for firm {Firm} (from={From} to={To}); leaving SessionVerId baseline at {Prior} to keep the restart backstop armed.",
+                _firmId, prior, effective, prior);
+            return;
+        }
+
+        Volatile.Write(ref _currentSessionVerId, effective);
+        MetricsRegistry.RecordSessionVerId(_firmId, effective);
     }
 
     private void OnConnected()
