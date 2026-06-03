@@ -227,36 +227,13 @@ public sealed class PersistenceRecovery
             //
             // PendingNew is the one exception: the venue never acked
             // those, so a session roll guarantees they cannot exist
-            // under any session version. Fall back to MarkCancelled for
-            // those — same behaviour as PR #415.
-            var cancelled = 0;
-            foreach (var order in _orders!.EnumerateForFirm(status.FirmId, includeTerminal: false))
-            {
-                if (order.Status == B3.Trading.Domain.OrderStatus.PendingNew)
-                {
-                    order.MarkCancelled();
-                    if (order.Status == B3.Trading.Domain.OrderStatus.Cancelled)
-                    {
-                        cancelled++;
-                    }
-                }
-            }
-            if (cancelled > 0)
-            {
-                _logger.LogWarning(
-                    "event=recovery.session-rolled firm={Firm} from={From} to={To} pendingNewCancelled={Cancelled}",
-                    status.FirmId, storedVerId, status.SessionVerId, cancelled);
-            }
-            else
-            {
-                _logger.LogInformation(
-                    "event=recovery.session-rolled firm={Firm} from={From} to={To} (FIXP recovery handles sync)",
-                    status.FirmId, storedVerId, status.SessionVerId);
-            }
-            MetricsRegistry.RecoverySessionRolledFirms.Add(1,
-                new KeyValuePair<string, object?>("firm", status.FirmId));
-            MetricsRegistry.RecoverySessionRolledOrdersDropped.Add(cancelled,
-                new KeyValuePair<string, object?>("firm", status.FirmId));
+            // under any session version. The reap policy + log + metrics
+            // live in the shared helper so this boot-time reconcile and
+            // the runtime post-connect reactor (#512) never drift apart.
+            // Boot reconcile runs single-threaded before app start, so no
+            // dispatcher lock is needed here.
+            B3.Trading.Application.FirmSessionRollReconciliation.CancelPendingNewForRolledFirm(
+                _orders!, status.FirmId, storedVerId, status.SessionVerId, _logger);
         }
     }
 }

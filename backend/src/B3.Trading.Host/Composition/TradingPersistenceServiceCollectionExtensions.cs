@@ -67,6 +67,16 @@ public static class TradingPersistenceServiceCollectionExtensions
             sp.GetRequiredService<IEventStore>(),
             sp.GetServices<IExecutionFanOutSink>()));
 
+        // #512. Runtime post-connect session-roll reactor. Reaps un-acked
+        // PendingNew under the dispatcher lock when the gateway detects a
+        // cold-resume fallback verId bump. Always available (EventDispatcher
+        // is registered unconditionally — NullEventStore when persistence is
+        // off), so the gateway's reap path degrades gracefully.
+        services.AddSingleton<IConnectSessionRollReactor>(sp => new PendingNewReapingConnectRollReactor(
+            sp.GetRequiredService<WorkingOrderBook>(),
+            sp.GetRequiredService<EventDispatcher>(),
+            sp.GetRequiredService<ILogger<PendingNewReapingConnectRollReactor>>()));
+
         return services;
     }
 }

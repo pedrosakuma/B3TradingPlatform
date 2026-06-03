@@ -98,7 +98,13 @@ public static class TradingExchangeGatewayServiceCollectionExtensions
                         lf.CreateLogger("FirmGatewayConnector").LogWarning(ex,
                             "Failed to load persisted SessionStateStore for firm {Firm}; starting from configured SessionVerId.", firm.FirmId);
                     }
-                    var resolvedVerId = SessionVerIdResolver.Resolve(firm.SessionVerId, persistedVerId);
+                    // #512 cold-start resume: do NOT pre-bump the SessionVerId on
+                    // every restart. Resume the persisted verId as-is so the venue
+                    // reattaches the SAME session (Establish-reuse) and keeps our
+                    // resting orders. The bump is now a FALLBACK only — applied by
+                    // the SDK via NextSessionVerIdSelector when the venue rejects
+                    // the reuse with a recoverable reject.
+                    var resumeVerId = persistedVerId ?? firm.SessionVerId;
 
                     // #126. Materialise the access key via the central
                     // resolver so file-mounted secrets + the legacy flat
@@ -111,7 +117,10 @@ public static class TradingExchangeGatewayServiceCollectionExtensions
                     {
                         Endpoint = ep,
                         SessionId = firm.SessionId,
-                        SessionVerId = resolvedVerId,
+                        SessionVerId = resumeVerId,
+                        ConnectMode = B3.EntryPoint.Client.ConnectMode.EstablishReuseThenNegotiate,
+                        TerminateOnDispose = false,
+                        NextSessionVerIdSelector = prev => SessionVerIdResolver.Resolve(firm.SessionVerId, prev),
                         EnteringFirm = firm.EnteringFirm,
                         Credentials = B3.EntryPoint.Client.EntryPointClientOptions.AccessKey(accessKey),
                         KeepAliveIntervalMs = firm.KeepAliveIntervalMs,
@@ -128,13 +137,20 @@ public static class TradingExchangeGatewayServiceCollectionExtensions
                     var venueAccountResolver = sp.GetService<IVenueAccountResolver>();
                     var investorIdResolver = sp.GetService<IInvestorIdResolver>();
                     var routingInstructionResolver = sp.GetService<IRoutingInstructionResolver>();
-                    return new B3EntryPointClientGateway(upstream, firm.FirmId, resolvedVerId, gwLogger,
+                    var connectRollReactor = sp.GetService<IConnectSessionRollReactor>();
+                    return new B3EntryPointClientGateway(upstream, firm.FirmId, resumeVerId, gwLogger,
                         venueDisconnectReactor: reactor,
                         riskOptions: riskOpts,
                         subAccountWireIdMapper: subAccountMapper,
                         venueAccountResolver: venueAccountResolver,
                         investorIdResolver: investorIdResolver,
-                        routingInstructionResolver: routingInstructionResolver);
+                        routingInstructionResolver: routingInstructionResolver,
+                        terminateOnShutdown: false,
+                        // #512. Read the SDK's effective verId off the SAME
+                        // options instance the client mutates on a cold-resume
+                        // fallback bump, and reap PendingNew if it advanced.
+                        effectiveSessionVerIdProvider: () => clientOpts.SessionVerId,
+                        connectSessionRollReactor: connectRollReactor);
                 });
                 return new FirmGatewayRegistry(gateways);
             });
