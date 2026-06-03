@@ -30,6 +30,7 @@
 | WS fan-out drop | `trading_dispatcher_ws_fanout_dropped_total` — see [`../RUNBOOK.md`](../RUNBOOK.md) §1.1 |
 | Source-of-truth invariant | ER stream from B3 EntryPoint is canonical — [`../PERSISTENCE.md`](../PERSISTENCE.md) §"Source-of-truth invariant" |
 | Recovery driver | [`backend/src/B3.Trading.Infrastructure/Persistence/SnapshotService.cs`](../../backend/src/B3.Trading.Infrastructure/Persistence/SnapshotService.cs) (`PersistenceRecovery`) |
+| Venue session-roll recovery (reattach vs stale) | §1.12; `kind=Reattached`/`Renegotiated` reconnect logs; `trading.entrypoint.orders_auto_staled{reason=session_rolled}` |
 | WAL framing & torn-write detection | [`backend/src/B3.Trading.Infrastructure/Persistence/SegmentReader.cs`](../../backend/src/B3.Trading.Infrastructure/Persistence/SegmentReader.cs), [`SegmentWriter.cs`](../../backend/src/B3.Trading.Infrastructure/Persistence/SegmentWriter.cs) |
 | Chaos drill script | [`../../scripts/chaos/run-chaos-drill.sh`](../../scripts/chaos/run-chaos-drill.sh) |
 
@@ -416,6 +417,83 @@ checks pass.
   `KillSwitchToggledEvent` — covered by
   [`backend/tests/B3.Trading.Application.Tests/Persistence/RecoveryAndSnapshotTests.cs`](../../backend/tests/B3.Trading.Application.Tests/Persistence/RecoveryAndSnapshotTests.cs)
   `Recovery_FromWalAlone_ReproducesOrdersOwnershipPositionsAndKillSwitch`).
+
+### 1.12 Venue FIXP session roll — recoverable reattach vs stale-on-roll
+
+**Background.** When the trading-host's FIXP order-entry session to the
+venue drops and the gateway reconnects
+([`B3EntryPointClientGateway.ReconnectLoopAsync`](../../backend/src/B3.Trading.Infrastructure/B3EntryPointClientGateway.cs)),
+the SDK returns a `ReconnectKind` that determines whether working orders
+are recoverable. There is **no** `MassStatusRequest` / order-status sweep
+on the B3 EntryPoint binary wire (8.4.2) — it does not exist in the
+protocol (`MessageType` enum has no status-query verb), so reconciliation
+is **not** a back-office query. The two regimes are:
+
+| Disconnect window | SDK `ReconnectKind` | What happened | Recovery |
+|---|---|---|---|
+| ≤ `SuspendedTimeoutMs` | `Reattached` | Venue kept the session **Suspended**; `SessionVerId` preserved | SDK auto Establish-reattach + `RetransmitRequest` replays the venue's per-session `RetransmitBuffer` (`PossResend=1`); our gateway consumes the replay and the **idempotent ER processor** (#16) dedupes it. **Working orders re-sync with no operator action.** |
+| > `SuspendedTimeoutMs` | `Renegotiated` | Venue **reaped** the session; Establish-reuse **rejected**; fresh Negotiate with a **bumped `SessionVerId`** | Genuinely unrecoverable on the wire — the venue discarded its per-session state. The gateway reconciles via the session-roll reactor: un-acked `PendingNew` are reaped and surviving `Working`/`PartiallyFilled` orders are flagged **stale** (#380 / #515). |
+
+`SuspendedTimeoutMs` is a **venue-side / matching-platform** setting (not
+a `B3.Trading.*` option) — it is owned by the FIXP peer, not configurable
+from this repo's compose overlays.
+
+**Detect.**
+- `Reattached` is silent and self-healing; look for
+  `EntryPoint reconnect ok … kind=Reattached` in trading-host logs and a
+  burst of duplicate-inbound metric (`EntryPointDuplicateInbound`,
+  expected during retransmit).
+- `Renegotiated` surfaces as `kind=Renegotiated`, a jump in
+  `RecordSessionVerId`, and the auto-stale counters
+  `trading.entrypoint.orders_auto_staled{reason=session_rolled}` /
+  `trading.entrypoint.session_roll_stale_reconcile_failed`
+  ([`MetricsRegistry.cs`](../../backend/src/B3.Trading.Application/Observability/MetricsRegistry.cs)).
+- Operators see the affected orders carry `isStale=true` /
+  `staleReason=session_rolled:{from}-{to}` in `GET /orders/` and
+  `GET /orders/history`.
+
+**Triage.**
+1. Confirm the `ReconnectKind` from the reconnect log line — this alone
+   tells you whether the orders were recoverable (Reattached) or are
+   genuine ghosts (Renegotiated).
+2. On `Renegotiated`, the stale flag is **expected and correct**, not a
+   bug: the venue reaped the session, so the platform cannot trust its
+   working set without operator confirmation.
+3. If `session_roll_stale_reconcile_failed` fired, the staling phase hit
+   a WAL error mid-bulk and the **tail of the working set may be
+   un-flagged** — reconcile those orders by hand (see Mitigate).
+
+**Mitigate.**
+- `Reattached`: nothing to do — confirm orders re-synced.
+- `Renegotiated`: review the stale orders in the blotter; clear the flag
+  once reconciled against the venue, via
+  `POST /admin/firms/{firmId}/orders/{clOrdId}/clear-stale`
+  ([`AdminEndpoints.cs`](../../backend/src/B3.Trading.Api/AdminEndpoints.cs)).
+  A stale flag also **auto-clears** when a terminal ER arrives for the
+  order.
+- `session_roll_stale_reconcile_failed`: treat as a WAL incident (§1.4),
+  and manually mark-stale any surviving working orders for the firm via
+  `POST /admin/firms/{firmId}/orders/{clOrdId}/mark-stale`.
+
+**Verify.**
+- After `Reattached`: working orders present pre-disconnect are still
+  live and not flagged stale.
+- After `Renegotiated`: surviving `Working`/`PartiallyFilled` orders for
+  the rolled firm are flagged stale; un-acked `PendingNew` are cancelled.
+- The boundary policy is unit-covered by
+  [`backend/tests/B3.Trading.Application.Tests/GatewayConnectSessionRollTests.cs`](../../backend/tests/B3.Trading.Application.Tests/GatewayConnectSessionRollTests.cs)
+  (Reattached → no reactor; Renegotiated → reap + stale) and
+  [`ConnectSessionRollReactorTests.cs`](../../backend/tests/B3.Trading.Application.Tests/ConnectSessionRollReactorTests.cs).
+
+> **Why no `OrderStatusRequest` reconciliation?** The B3 matching
+> platform serves every recovery the FIXP protocol exposes
+> (`RetransmitRequest`, `Establish` reattach, Cancel-on-Disconnect)
+> end-to-end; out-of-band reconciliation (a status sweep) is an explicit
+> anti-pattern, not a designed-in recovery path. The stale-on-roll
+> heuristic is the correct fallback **only** for the genuinely
+> unrecoverable case (session reaped past `SuspendedTimeoutMs`). See the
+> upstream wire audit in
+> [`pedrosakuma/B3EntryPointClient#193`](https://github.com/pedrosakuma/B3EntryPointClient/issues/193).
 
 ---
 
