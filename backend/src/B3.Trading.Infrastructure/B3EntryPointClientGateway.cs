@@ -40,6 +40,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     private readonly TimeSpan _initialReconnectDelay;
     private readonly TimeSpan _maxReconnectDelay;
     private readonly TimeSpan _gracefulTerminateTimeout;
+    private readonly bool _terminateOnShutdown;
     private readonly TimeProvider _clock;
     private readonly OrderEntryLatencyProbe _latencyProbe;
     private Task? _eventLoop;
@@ -119,8 +120,10 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         ISubAccountWireIdMapper? subAccountWireIdMapper = null,
         IVenueAccountResolver? venueAccountResolver = null,
         IInvestorIdResolver? investorIdResolver = null,
-        IRoutingInstructionResolver? routingInstructionResolver = null)
+        IRoutingInstructionResolver? routingInstructionResolver = null,
+        bool terminateOnShutdown = true)
     {
+        _terminateOnShutdown = terminateOnShutdown;
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _firmId = firmId ?? throw new ArgumentNullException(nameof(firmId));
         _logger = logger;
@@ -1003,7 +1006,15 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         // raises Terminated(InitiatedByClient=true) from inside TerminateAsync,
         // and we want the existing handler to record the metric / log line
         // (the _disposed guard on line 527 ensures it skips the reconnect loop).
-        if (Volatile.Read(ref _connectedState) == 1)
+        // #512 cold-start resume: when the gateway is configured to SUSPEND on
+        // shutdown (terminateOnShutdown=false), we deliberately send NO
+        // Terminate(Finished). A Terminate(Finished) tells the venue the
+        // session is permanently finished and evicts session-scoped working
+        // order ownership — exactly the bug behind #507/#512. Suspending (clean
+        // TCP close, no Terminate) lets the next boot reattach via Establish-
+        // reuse and keep its resting orders. The SDK's own DisposeAsync Terminate
+        // is independently gated by EntryPointClientOptions.TerminateOnDispose.
+        if (_terminateOnShutdown && Volatile.Read(ref _connectedState) == 1)
         {
             try
             {
