@@ -18,7 +18,7 @@ public class GatewayConnectSessionRollTests
     private sealed class SpyReactor : IConnectSessionRollReactor
     {
         public readonly List<(string Firm, uint From, uint To)> Calls = new();
-        public void OnSessionRolledAtConnect(string firmId, uint fromVerId, uint toVerId)
+        public void OnSessionRolled(string firmId, uint fromVerId, uint toVerId)
             => Calls.Add((firmId, fromVerId, toVerId));
     }
 
@@ -107,7 +107,62 @@ public class GatewayConnectSessionRollTests
 
     private sealed class ThrowingReactor : IConnectSessionRollReactor
     {
-        public void OnSessionRolledAtConnect(string firmId, uint fromVerId, uint toVerId)
+        public void OnSessionRolled(string firmId, uint fromVerId, uint toVerId)
             => throw new InvalidOperationException("boom");
+    }
+
+    [Fact]
+    public void ReconcileReconnectSessionRoll_Renegotiated_Advanced_InvokesReactor_AndPublishesVerId()
+    {
+        var reactor = new SpyReactor();
+        var gw = BuildGateway(initialVerId: 8, provider: null, reactor: reactor);
+
+        gw.ReconcileReconnectSessionRoll(
+            B3.EntryPoint.Client.ReconnectKind.Renegotiated, priorVerId: 8, effectiveVerId: 9);
+
+        Assert.Equal(9u, gw.CurrentSessionVerId);
+        var call = Assert.Single(reactor.Calls);
+        Assert.Equal(("FIRM_A", 8u, 9u), call);
+    }
+
+    [Fact]
+    public void ReconcileReconnectSessionRoll_Reattached_NoReactor_MirrorsVerId()
+    {
+        var reactor = new SpyReactor();
+        var gw = BuildGateway(initialVerId: 8, provider: null, reactor: reactor);
+
+        // Reattach preserves the verId (effective == prior); no ghosts.
+        gw.ReconcileReconnectSessionRoll(
+            B3.EntryPoint.Client.ReconnectKind.Reattached, priorVerId: 8, effectiveVerId: 8);
+
+        Assert.Equal(8u, gw.CurrentSessionVerId);
+        Assert.Empty(reactor.Calls);
+    }
+
+    [Fact]
+    public void ReconcileReconnectSessionRoll_Renegotiated_NoAdvance_IsNoReactorCall()
+    {
+        // Defensive: Renegotiated but verId did not advance — treat as no roll.
+        var reactor = new SpyReactor();
+        var gw = BuildGateway(initialVerId: 8, provider: null, reactor: reactor);
+
+        gw.ReconcileReconnectSessionRoll(
+            B3.EntryPoint.Client.ReconnectKind.Renegotiated, priorVerId: 8, effectiveVerId: 8);
+
+        Assert.Equal(8u, gw.CurrentSessionVerId);
+        Assert.Empty(reactor.Calls);
+    }
+
+    [Fact]
+    public void ReconcileReconnectSessionRoll_ReactorThrows_LeavesVerIdAtOldBaseline()
+    {
+        // Backstop: a reactor failure must NOT publish the bumped verId, so the
+        // next-restart boot reconcile can re-detect the roll.
+        var gw = BuildGateway(initialVerId: 8, provider: null, reactor: new ThrowingReactor());
+
+        gw.ReconcileReconnectSessionRoll(
+            B3.EntryPoint.Client.ReconnectKind.Renegotiated, priorVerId: 8, effectiveVerId: 9); // must not throw
+
+        Assert.Equal(8u, gw.CurrentSessionVerId);
     }
 }
