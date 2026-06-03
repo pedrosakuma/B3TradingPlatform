@@ -70,7 +70,7 @@ services:
     # matching-image-bump workflow for the bump cadence.
     # Devs can still override (e.g. MATCHING_IMAGE=ghcr.io/pedrosakuma/b3-matching:latest)
     # to test the bleeding edge locally.
-    image: ${MATCHING_IMAGE:-ghcr.io/pedrosakuma/b3-matching@sha256:49fea67b24f7250589eded89d4607f8e2927c8ea097eb7d5375b2aa3b5e8103f}
+    image: ${MATCHING_IMAGE:-ghcr.io/pedrosakuma/b3-matching@sha256:18a934325e4259159be31e47f571bdff4e98158578c8805088999b74e7b4ac6a}
     container_name: b3-matching-platform
     restart: unless-stopped
     networks:
