@@ -573,6 +573,19 @@ public static class MetricsRegistry
         Meter.CreateCounter<long>("trading.entrypoint.orders_auto_staled");
 
     /// <summary>
+    /// #380 / #503. Counts CONFIRMED session-roll reconciliations whose
+    /// Working/PartiallyFilled staling phase FAILED (e.g. a WAL append error
+    /// mid-bulk). PendingNew reaping is recovered by the restart boot reconcile,
+    /// but the boot path is conservative (PendingNew only), so a staling failure
+    /// can leave surviving Working/PartiallyFilled orders un-flagged. This is a
+    /// critical operator signal: surviving orders for the tagged <c>{firm}</c>
+    /// must be reconciled by hand via the admin <c>mark-stale</c> endpoint.
+    /// Tagged <c>{firm}</c>; one Add per failed reconciliation.
+    /// </summary>
+    public static readonly Counter<long> SessionRollStaleReconcileFailed =
+        Meter.CreateCounter<long>("trading.entrypoint.session_roll_stale_reconcile_failed");
+
+    /// <summary>
     /// #153. Counts cash-margin reservation Restore calls (admin
     /// clear-stale path) that pushed the per-owner reserved figure
     /// above the resolved base capacity. Restore intentionally never

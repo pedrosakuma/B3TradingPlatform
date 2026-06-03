@@ -77,16 +77,38 @@ public static class FirmSessionRollReconciliation
             new KeyValuePair<string, object?>("firm", firmId));
         return cancelled;
     }
+
+    /// <summary>
+    /// Canonical stale-reason string for a confirmed session roll, so the
+    /// runtime reactor (connect / reconnect) and any future caller emit an
+    /// identical, operator-greppable reason. Format mirrors the sibling
+    /// <c>inbound_gap:{from}-{to}</c> / <c>peer_terminated:{code}</c> reasons
+    /// produced by <see cref="OrderStaleningVenueReactor"/>.
+    /// </summary>
+    public static string SessionRolledStaleReason(uint fromVerId, uint toVerId)
+        => $"session_rolled:{fromVerId}-{toVerId}";
 }
 
 /// <summary>
-/// #512 seam. Called by the FIXP gateway immediately after the initial
-/// <c>ConnectAsync</c> when the SDK fell back from Establish-reuse to a
-/// freshly negotiated session with a BUMPED SessionVerId (a recoverable
-/// reuse reject — the venue genuinely lost the session). The boot-time
-/// #380/#504 reconcile already ran against the OLD verId before app start,
-/// so it cannot observe this deferred bump; without this seam the un-acked
-/// PendingNew "ghosts" would linger for the whole process lifetime.
+/// #512 / #380 seam. Called by the FIXP gateway after a CONFIRMED venue
+/// session roll — i.e. an Establish-reuse was REJECTED and the SDK
+/// renegotiated a fresh session with a BUMPED SessionVerId, so the venue
+/// genuinely discarded its per-session state (our working set is gone).
+/// Two callers, both high-confidence (reuse-rejected, not a benign blip):
+///
+/// <list type="number">
+///   <item>the initial <c>ConnectAsync</c> cold-resume fallback
+///         (<c>B3EntryPointClientGateway.ReconcileConnectSessionRoll</c>);</item>
+///   <item>the live reconnect loop on a <c>Renegotiated</c> outcome
+///         (<c>B3EntryPointClientGateway.ReconcileReconnectSessionRoll</c>).</item>
+/// </list>
+///
+/// The boot-time #380/#504 reconcile only sees raw verId numbers (it cannot
+/// distinguish a reuse-reject from a benign advance), so it stays
+/// conservative (reap PendingNew only). This seam carries the richer
+/// reuse-rejected signal, so it ALSO flags surviving Working / PartiallyFilled
+/// orders stale — they cannot exist under the new session and FIXP
+/// retransmission cannot recreate them.
 ///
 /// <para>
 /// Mirrors the <see cref="IVenueDisconnectReactor"/> shape: the gateway
@@ -100,43 +122,127 @@ public interface IConnectSessionRollReactor
     /// <summary>
     /// Reconcile order state for <paramref name="firmId"/> after its venue
     /// session rolled from <paramref name="fromVerId"/> to
-    /// <paramref name="toVerId"/> during the initial connect. MUST run before
+    /// <paramref name="toVerId"/> on a confirmed reuse-reject. MUST run before
     /// the firm's event loop and the first snapshot.
     /// </summary>
-    void OnSessionRolledAtConnect(string firmId, uint fromVerId, uint toVerId);
+    void OnSessionRolled(string firmId, uint fromVerId, uint toVerId);
 }
 
 /// <summary>
-/// Default <see cref="IConnectSessionRollReactor"/>: reaps un-acked
-/// PendingNew orders for the rolled firm under the <see cref="EventDispatcher"/>
-/// lock so the mutation is serialised against concurrently-connecting firms'
-/// event loops and the snapshot service. Durability follows the #504 model:
-/// the cancellation is captured by the next snapshot (taken under the same
-/// lock); a crash before that snapshot is backstopped by the boot-time
-/// baseline reconcile on the next restart, which re-detects the advance
-/// (the snapshot baseline still records the pre-bump verId) and re-reaps.
+/// Default <see cref="IConnectSessionRollReactor"/>. On a confirmed session
+/// roll it does two things, in order:
+///
+/// <list type="number">
+///   <item>reaps un-acked <see cref="OrderStatus.PendingNew"/> orders for the
+///         rolled firm under the <see cref="EventDispatcher"/> lock (in-memory
+///         <c>MarkCancelled</c>, durable via the next snapshot — the #504
+///         model);</item>
+///   <item>flags surviving <see cref="OrderStatus.Working"/> /
+///         <see cref="OrderStatus.PartiallyFilled"/> orders STALE via
+///         <see cref="OrderStalenessService.MarkAllWorkingByFirm"/>. Unlike the
+///         boot reconcile (which cannot tell a reuse-reject from a benign verId
+///         advance and therefore keeps Working orders), this seam only fires on
+///         a reuse-reject, so the venue truly lost the order and FIXP
+///         retransmission cannot resurrect it. Staling is non-destructive
+///         (operator-clearable; auto-clears on a terminal ER) and WAL-durable
+///         per order (<c>OrderStaledEvent</c> via <c>Dispatch</c>). Recovery is
+///         ASYMMETRIC with Phase 1: PendingNew reaping is re-runnable from the
+///         restart boot reconcile, but the boot reconcile is conservative (#504,
+///         PendingNew only) and will NOT re-stale Working/PartiallyFilled. So if
+///         this phase fails mid-bulk (e.g. a WAL append error) the un-marked
+///         tail is stranded; the reactor emits
+///         <see cref="MetricsRegistry.SessionRollStaleReconcileFailed"/> +
+///         a critical log and rethrows so an operator reconciles the survivors
+///         via the admin mark-stale endpoint.</item>
+/// </list>
+///
+/// <para>
+/// The two phases are deliberately NOT nested: <see cref="OrderStalenessService.MarkAllWorkingByFirm"/>
+/// takes the dispatcher lock per order, so running it inside the PendingNew
+/// reap's <see cref="EventDispatcher.RunExclusive"/> would hold the lock across
+/// every order's payload serialisation + WAL append. PendingNew (now Cancelled)
+/// and Working/PartiallyFilled are disjoint sets, so no atomicity is needed
+/// between them.
+/// </para>
 /// </summary>
 public sealed class PendingNewReapingConnectRollReactor : IConnectSessionRollReactor
 {
     private readonly WorkingOrderBook _orders;
     private readonly EventDispatcher _dispatcher;
+    private readonly OrderStalenessService? _staleness;
+    private readonly TimeProvider _clock;
     private readonly ILogger<PendingNewReapingConnectRollReactor> _logger;
 
     public PendingNewReapingConnectRollReactor(
         WorkingOrderBook orders,
         EventDispatcher dispatcher,
-        ILogger<PendingNewReapingConnectRollReactor> logger)
+        ILogger<PendingNewReapingConnectRollReactor> logger,
+        OrderStalenessService? staleness = null,
+        TimeProvider? clock = null)
     {
         _orders = orders ?? throw new ArgumentNullException(nameof(orders));
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _staleness = staleness;
+        _clock = clock ?? TimeProvider.System;
     }
 
-    public void OnSessionRolledAtConnect(string firmId, uint fromVerId, uint toVerId)
+    public void OnSessionRolled(string firmId, uint fromVerId, uint toVerId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+
+        // Phase 1: reap un-acked PendingNew under the dispatcher lock.
         _dispatcher.RunExclusive(() =>
             FirmSessionRollReconciliation.CancelPendingNewForRolledFirm(
                 _orders, firmId, fromVerId, toVerId, _logger));
+
+        // Phase 2: flag surviving Working / PartiallyFilled stale. NOT nested
+        // inside RunExclusive (see class remarks).
+        if (_staleness is null)
+        {
+            // Real trading mode always wires the staleness service; a null
+            // here means a reduced composition (tests / mock exchange). Warn
+            // so a misconfigured production deployment that silently drops
+            // back to "keep Working ghosts" (#380) is visible in logs.
+            _logger.LogWarning(
+                "event=recovery.session-rolled firm={Firm} from={From} to={To} stale=skipped reason=no_staleness_service",
+                firmId, fromVerId, toVerId);
+            return;
+        }
+
+        var reason = FirmSessionRollReconciliation.SessionRolledStaleReason(fromVerId, toVerId);
+        int marked;
+        try
+        {
+            marked = _staleness.MarkAllWorkingByFirm(firmId, reason, _clock.GetUtcNow(), actorUserId: null);
+        }
+        catch (Exception ex)
+        {
+            // The staling phase is recovered ONLY by its own per-order WAL
+            // durability (OrderStaledEvent re-applied on replay): the restart
+            // boot reconcile is deliberately conservative (#504, PendingNew
+            // only) and will NOT re-stale surviving Working/PartiallyFilled
+            // orders. So a failure here (e.g. a WAL append error mid-bulk) can
+            // strand the un-marked tail. Emit a CRITICAL, operator-actionable
+            // signal — survivors for this firm must be reconciled by hand via
+            // the admin mark-stale endpoint — then rethrow so the gateway keeps
+            // SessionVerId at the old baseline (preserving the PendingNew boot
+            // backstop) and logs the reconcile failure.
+            MetricsRegistry.SessionRollStaleReconcileFailed.Add(1,
+                new KeyValuePair<string, object?>("firm", firmId));
+            _logger.LogCritical(ex,
+                "event=recovery.session-rolled.stale-failed firm={Firm} from={From} to={To} action=operator_must_mark_stale "
+                + "(confirmed session roll: surviving Working/PartiallyFilled orders may be venue ghosts that were NOT flagged stale; "
+                + "the boot reconcile will not re-stale them — reconcile via the admin mark-stale endpoint).",
+                firmId, fromVerId, toVerId);
+            throw;
+        }
+
+        if (marked > 0)
+        {
+            MetricsRegistry.OrdersAutoStaledByVenueDesync.Add(marked,
+                new KeyValuePair<string, object?>("firm", firmId),
+                new KeyValuePair<string, object?>("reason", "session_rolled"));
+        }
     }
 }

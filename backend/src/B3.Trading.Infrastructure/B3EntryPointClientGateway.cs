@@ -266,7 +266,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         // backstop armed.
         try
         {
-            _connectSessionRollReactor?.OnSessionRolledAtConnect(_firmId, prior, effective);
+            _connectSessionRollReactor?.OnSessionRolled(_firmId, prior, effective);
         }
         catch (Exception ex)
         {
@@ -282,6 +282,64 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
         Volatile.Write(ref _currentSessionVerId, effective);
         MetricsRegistry.RecordSessionVerId(_firmId, effective);
+    }
+
+    /// <summary>
+    /// #380 / #503. Reconcile a live-reconnect session-version transition.
+    /// Called by <see cref="ReconnectLoopAsync"/> after a successful reconnect,
+    /// before <see cref="OnConnected"/>.
+    ///
+    /// <para>
+    /// On a <see cref="Up.ReconnectKind.Renegotiated"/> outcome the SDK fell
+    /// back from Establish-reuse to a fresh Negotiate because the venue
+    /// REJECTED the reuse — a confirmed session roll: the venue discarded our
+    /// working set, so un-acked PendingNew cannot exist and surviving
+    /// Working / PartiallyFilled orders are ghosts that FIXP retransmission
+    /// cannot resurrect. We hand the roll to the Application reactor (reap
+    /// PendingNew + flag Working/PartiallyFilled stale) and publish the bumped
+    /// verId only AFTER the reactor succeeds. A reactor failure leaves
+    /// <see cref="CurrentSessionVerId"/> at the old baseline so the next
+    /// restart's boot reconcile re-detects the roll — identical backstop
+    /// reasoning to <see cref="ReconcileConnectSessionRoll"/>.
+    /// </para>
+    ///
+    /// <para>
+    /// On a <see cref="Up.ReconnectKind.Reattached"/> outcome the venue kept
+    /// our working set (verId preserved); we simply mirror the SDK's verId and
+    /// do no reconciliation. The conditional inbound-gap / peer-terminate
+    /// staleness for that case is handled separately by
+    /// <see cref="NotifyVenueDisconnectReactor"/>.
+    /// </para>
+    /// </summary>
+    internal void ReconcileReconnectSessionRoll(Up.ReconnectKind kind, uint priorVerId, uint effectiveVerId)
+    {
+        var confirmedRoll = kind == Up.ReconnectKind.Renegotiated && effectiveVerId > priorVerId;
+        if (!confirmedRoll)
+        {
+            // Reattach (or a defensive no-advance Renegotiate): mirror the
+            // SDK's verId. No ghosts — venue kept our set.
+            Volatile.Write(ref _currentSessionVerId, effectiveVerId);
+            MetricsRegistry.RecordSessionVerId(_firmId, effectiveVerId);
+            return;
+        }
+
+        try
+        {
+            _connectSessionRollReactor?.OnSessionRolled(_firmId, priorVerId, effectiveVerId);
+        }
+        catch (Exception ex)
+        {
+            // A reactor failure must never abort the reconnect — the session
+            // is established. Leave _currentSessionVerId at the old baseline
+            // so the next-restart boot reconcile still re-detects the roll.
+            _logger.LogError(ex,
+                "Reconnect session-roll reactor failed for firm {Firm} (from={From} to={To}); leaving SessionVerId baseline at {Prior} to keep the restart backstop armed.",
+                _firmId, priorVerId, effectiveVerId, priorVerId);
+            return;
+        }
+
+        Volatile.Write(ref _currentSessionVerId, effectiveVerId);
+        MetricsRegistry.RecordSessionVerId(_firmId, effectiveVerId);
     }
 
     private void OnConnected()
@@ -957,13 +1015,19 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                         Up.ReconnectMode.EstablishReuseThenNegotiate,
                         BumpSessionVerIdSelector,
                         ct).ConfigureAwait(false);
-                    _currentSessionVerId = outcome.SessionVerId;
                     MetricsRegistry.EntryPointReconnectSucceeded.Add(1,
                         new KeyValuePair<string, object?>("firm", _firmId),
                         new KeyValuePair<string, object?>("kind", ReconnectKindTag(outcome.Kind)));
                     _logger.LogInformation(
                         "EntryPoint reconnect ok for firm {Firm} on attempt {N} (kind={Kind} sessionVerId={Ver} priorVerId={Prior} retransmitWindowReady={RetransmitReady}).",
                         _firmId, attempt, outcome.Kind, outcome.SessionVerId, priorVerId, outcome.RetransmitWindowReady);
+                    // Reconcile the session-version transition BEFORE restarting
+                    // the event loop (so the reap/stale lands ahead of ER replay)
+                    // and, on a confirmed roll, BEFORE publishing the bumped
+                    // verId (so a snapshot can't seal the new baseline with
+                    // ghosts still present — same backstop reasoning as the
+                    // connect path).
+                    ReconcileReconnectSessionRoll(outcome.Kind, priorVerId, outcome.SessionVerId);
                     OnConnected();
                     NotifyVenueDisconnectReactor();
                     return;
