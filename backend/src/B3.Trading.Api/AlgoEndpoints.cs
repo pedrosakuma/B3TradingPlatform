@@ -85,6 +85,26 @@ public static class AlgoEndpoints
             if (securityId == 0)
                 return Results.BadRequest(new { error = "securityId is required" });
 
+            // #518. Lot-size gate mirroring the per-order MinLotSizeCheck.
+            // The algo parent never hits the risk pipeline, so without this
+            // an off-lot total would only surface when the engine submits an
+            // off-lot child — which the venue rejects, terminally suspending
+            // the parent. Validating the total (and, below, slice-derived
+            // quantities) up front keeps every algo child a whole lot.
+            long lotSize = 1;
+            if (symbols.TryGetSpec(req.Symbol, out var instrumentSpec)
+                && instrumentSpec.LotSize is { } configuredLot
+                && configuredLot > 1)
+            {
+                lotSize = configuredLot;
+            }
+            if (lotSize > 1 && req.TotalQuantity % lotSize != 0)
+                return Results.BadRequest(new
+                {
+                    error = $"totalQuantity {req.TotalQuantity} is not a multiple of lot size {lotSize} for {req.Symbol}",
+                    code = "min_lot_size",
+                });
+
             // Type-specific parameter validation. v0 keeps the rules
             // explicit + duplicated rather than hiding them behind a
             // visitor — the surface is small and the failure messages
@@ -99,6 +119,15 @@ public static class AlgoEndpoints
                         return Results.BadRequest(new { error = "iceberg.displayQuantity must be positive" });
                     if (req.Iceberg.DisplayQuantity > req.TotalQuantity)
                         return Results.BadRequest(new { error = "iceberg.displayQuantity must be <= totalQuantity" });
+                    // #518. The display quantity is the child order size, so
+                    // it must itself be a whole lot or every iceberg child is
+                    // risk-rejected.
+                    if (lotSize > 1 && req.Iceberg.DisplayQuantity % lotSize != 0)
+                        return Results.BadRequest(new
+                        {
+                            error = $"iceberg.displayQuantity {req.Iceberg.DisplayQuantity} is not a multiple of lot size {lotSize} for {req.Symbol}",
+                            code = "min_lot_size",
+                        });
                     parameters = new IcebergParameters(req.Iceberg.DisplayQuantity, req.Iceberg.LimitPrice);
                     break;
 
@@ -118,15 +147,19 @@ public static class AlgoEndpoints
                     // unpriced child orders that contradict the user's chosen type.
                     if (childType == OrderType.Limit && req.Twap.ChildPrice is null)
                         return Results.BadRequest(new { error = "twap.childPrice is required when twap.childOrderType is Limit" });
-                    // RFC §4.8: reject when the implied per-slice quantity
-                    // rounds to zero. Echo the floor in the error body so
-                    // the caller can lower sliceCount or raise totalQuantity
-                    // without guessing.
-                    var floorQty = TwapPlan.FloorSliceQty(req.TotalQuantity, req.Twap.SliceCount);
+                    // RFC §4.8 / #518: reject when the implied per-slice
+                    // quantity rounds to zero — computed in lot units when a
+                    // lot is configured so sliceCount cannot exceed the
+                    // available whole lots. Echo the floor in the error body
+                    // so the caller can lower sliceCount or raise
+                    // totalQuantity without guessing.
+                    var floorQty = TwapPlan.FloorSliceQty(req.TotalQuantity, req.Twap.SliceCount, lotSize);
                     if (floorQty <= 0)
                         return Results.BadRequest(new
                         {
-                            error = "twap.sliceCount produces a per-slice quantity of zero",
+                            error = lotSize > 1
+                                ? $"twap.sliceCount produces a per-slice quantity below one lot ({lotSize}) for {req.Symbol}"
+                                : "twap.sliceCount produces a per-slice quantity of zero",
                             impliedSliceQuantity = floorQty,
                             totalQuantity = req.TotalQuantity,
                             sliceCount = req.Twap.SliceCount,
