@@ -91,6 +91,9 @@ public static class AlgoEndpoints
             // off-lot child — which the venue rejects, terminally suspending
             // the parent. Validating the total (and, below, slice-derived
             // quantities) up front keeps every algo child a whole lot.
+            // TWAP is excluded here: its §4.8 branch performs the same
+            // off-lot-total check but returns the richer rejection body
+            // (impliedSliceQuantity / totalQuantity / sliceCount echo).
             long lotSize = 1;
             if (symbols.TryGetSpec(req.Symbol, out var instrumentSpec)
                 && instrumentSpec.LotSize is { } configuredLot
@@ -98,7 +101,7 @@ public static class AlgoEndpoints
             {
                 lotSize = configuredLot;
             }
-            if (lotSize > 1 && req.TotalQuantity % lotSize != 0)
+            if (lotSize > 1 && type != AlgoType.Twap && req.TotalQuantity % lotSize != 0)
                 return Results.BadRequest(new
                 {
                     error = $"totalQuantity {req.TotalQuantity} is not a multiple of lot size {lotSize} for {req.Symbol}",
@@ -148,18 +151,23 @@ public static class AlgoEndpoints
                     if (childType == OrderType.Limit && req.Twap.ChildPrice is null)
                         return Results.BadRequest(new { error = "twap.childPrice is required when twap.childOrderType is Limit" });
                     // RFC §4.8 / #518: reject when the implied per-slice
-                    // quantity rounds to zero — computed in lot units when a
-                    // lot is configured so sliceCount cannot exceed the
-                    // available whole lots. Echo the floor in the error body
-                    // so the caller can lower sliceCount or raise
-                    // totalQuantity without guessing.
+                    // quantity rounds to zero — or, on a round-lot
+                    // instrument, when the total itself is not a whole
+                    // number of lots (an off-lot total would otherwise
+                    // strand an off-lot remainder on the last slice). Both
+                    // are computed in lot units when a lot is configured.
+                    // Echo the floor / total / sliceCount in the error body
+                    // so the caller can fix either input without guessing.
                     var floorQty = TwapPlan.FloorSliceQty(req.TotalQuantity, req.Twap.SliceCount, lotSize);
-                    if (floorQty <= 0)
+                    var offLotTotal = lotSize > 1 && req.TotalQuantity % lotSize != 0;
+                    if (floorQty <= 0 || offLotTotal)
                         return Results.BadRequest(new
                         {
-                            error = lotSize > 1
-                                ? $"twap.sliceCount produces a per-slice quantity below one lot ({lotSize}) for {req.Symbol}"
-                                : "twap.sliceCount produces a per-slice quantity of zero",
+                            error = offLotTotal
+                                ? $"totalQuantity {req.TotalQuantity} is not a multiple of lot size {lotSize} for {req.Symbol}"
+                                : lotSize > 1
+                                    ? $"twap.sliceCount produces a per-slice quantity below one lot ({lotSize}) for {req.Symbol}"
+                                    : "twap.sliceCount produces a per-slice quantity of zero",
                             impliedSliceQuantity = floorQty,
                             totalQuantity = req.TotalQuantity,
                             sliceCount = req.Twap.SliceCount,
