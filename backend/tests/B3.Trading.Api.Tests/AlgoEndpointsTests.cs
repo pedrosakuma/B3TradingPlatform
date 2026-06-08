@@ -279,4 +279,81 @@ public class AlgoEndpointsTests
         Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
         Assert.Contains(second.StatusCode, new[] { HttpStatusCode.Accepted, HttpStatusCode.Conflict });
     }
+
+    // ──────────────────── #518 TWAP lot-size validation ────────────────────
+
+    private static TestAppFactory NewLotFactory() =>
+        TestAppFactory.WithOverrides(new Dictionary<string, string?>
+        {
+            ["Trading:SymbolDirectory:SecurityIds:PETR4"] = "4321",
+            ["Trading:SymbolDirectory:Specs:PETR4:LotSize"] = "100",
+        });
+
+    private static object LotTwapBody(long total, int sliceCount) => new
+    {
+        Symbol = "PETR4",
+        Side = "Buy",
+        Type = "Twap",
+        TotalQuantity = total,
+        Twap = new
+        {
+            StartUtc = DateTimeOffset.UtcNow,
+            EndUtc = DateTimeOffset.UtcNow.AddMinutes(1),
+            SliceCount = sliceCount,
+            ChildOrderType = "Limit",
+            ChildPrice = 30m,
+        },
+    };
+
+    [Fact]
+    public async Task PostAlgo_Twap_ImpliedSliceBelowLot_Returns400WithEcho()
+    {
+        // #518. On a round-lot instrument (lot 100) a total that is below
+        // one lot floors to a zero per-slice quantity. The §4.8 contract
+        // requires the rejection body to echo impliedSliceQuantity /
+        // totalQuantity / sliceCount even when the lot table (not the raw
+        // share floor) is what collapses the slice. Mirrors the real-stack
+        // conformance test PostAlgoTwap_ImpliedSliceZero_Returns400WithEcho.
+        using var factory = NewLotFactory();
+        using var client = await factory.CreateAuthedClientAsync();
+
+        var resp = await client.PostAsJsonAsync("/algo/", LotTwapBody(total: 2, sliceCount: 5));
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(0, body.GetProperty("impliedSliceQuantity").GetInt64());
+        Assert.Equal(2, body.GetProperty("totalQuantity").GetInt64());
+        Assert.Equal(5, body.GetProperty("sliceCount").GetInt32());
+    }
+
+    [Fact]
+    public async Task PostAlgo_Twap_OffLotTotal_Returns400WithEcho()
+    {
+        // #518. A total that is a positive number of whole lots per slice
+        // but not itself a whole number of lots (250 with lot 100, 2 slices
+        // ⇒ slices 100/150) would strand an off-lot remainder on the last
+        // slice. The TWAP branch rejects it up front, still echoing the
+        // §4.8 fields so the rejection body shape is consistent.
+        using var factory = NewLotFactory();
+        using var client = await factory.CreateAuthedClientAsync();
+
+        var resp = await client.PostAsJsonAsync("/algo/", LotTwapBody(total: 250, sliceCount: 2));
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(250, body.GetProperty("totalQuantity").GetInt64());
+        Assert.Equal(2, body.GetProperty("sliceCount").GetInt32());
+    }
+
+    [Fact]
+    public async Task PostAlgo_Twap_WholeLotTotal_Accepted()
+    {
+        // Sanity: a lot-aligned total that divides into whole lots per
+        // slice (400 with lot 100, 4 slices ⇒ 100 each) is admitted.
+        using var factory = NewLotFactory();
+        using var client = await factory.CreateAuthedClientAsync();
+
+        var resp = await client.PostAsJsonAsync("/algo/", LotTwapBody(total: 400, sliceCount: 4));
+        Assert.Equal(HttpStatusCode.Accepted, resp.StatusCode);
+    }
 }
