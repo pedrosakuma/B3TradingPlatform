@@ -404,9 +404,10 @@ public class AlgoModifyEndpointTests
         Assert.Equal(replace.NewClOrdId, newChild.ClOrdId);
     }
 
-    // #347. Known timing-flake under CI parallelism; retry up to 3x
-    // (a real regression still fails after 3 attempts).
-    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 250)]
+    // #347. Root cause was a fixed Task.Delay racing the async ER
+    // pipeline; fixed by polling the projected filledQuantity (see
+    // WaitForAlgoLong) instead of sleeping, so no retry is needed.
+    [Fact]
     public async Task Modify_ReplacedErWithStaleZeroCum_ClampsBaselineToOriginal()
     {
         // Pass-2 review (#299) P1. Translators in
@@ -439,8 +440,7 @@ public class AlgoModifyEndpointTests
         // Partial fill of 30 on the OLD child BEFORE the modify dispatch.
         await InjectEr(http, adminToken, oldChild.ClOrdId, "PartialFill",
             lastQty: 30, lastPx: 30.0m);
-        await Task.Delay(150);
-        var algoBefore = await GetAlgo(http, token, algoId);
+        var algoBefore = await WaitForAlgoLong(http, token, algoId, "filledQuantity", 30L);
         Assert.Equal(30L, algoBefore.GetProperty("filledQuantity").GetInt64());
 
         // Operator modify: keep quantity unchanged (100) but bump price.
@@ -480,9 +480,8 @@ public class AlgoModifyEndpointTests
         // Drive a Fill ER for the NEW child taking total cum to 50.
         await InjectEr(http, adminToken, newChild.ClOrdId, "PartialFill",
             lastQty: 20, lastPx: 30.5m);
-        await Task.Delay(150);
 
-        var algoAfter = await GetAlgo(http, token, algoId);
+        var algoAfter = await WaitForAlgoLong(http, token, algoId, "filledQuantity", 50L);
         Assert.Equal(50L, algoAfter.GetProperty("filledQuantity").GetInt64());
         Assert.Equal(50L, algoAfter.GetProperty("remainingQuantity").GetInt64());
     }
@@ -1044,5 +1043,31 @@ public class AlgoModifyEndpointTests
             await Task.Delay(20);
         }
         throw new TimeoutException($"Algo {algoId} did not reach any of [{string.Join(",", anyOf)}] within 5s; last={last}");
+    }
+
+    // Polls GET /algo/{id} until the given long-valued property equals
+    // the expected value, then returns the latest snapshot. Replaces
+    // fixed Task.Delay sleeps that race the async ER pipeline under load
+    // (#347): the ExecutionReportProcessor → AlgoEngine → projection hop
+    // is asynchronous, so a fixed sleep can read stale state on a
+    // contended runner.
+    private static async Task<JsonElement> WaitForAlgoLong(
+        HttpClient http, string token, string algoId, string property, long expected,
+        TimeSpan? timeout = null)
+    {
+        var deadline = timeout ?? TimeSpan.FromSeconds(5);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        long last = long.MinValue;
+        JsonElement algo = default;
+        while (sw.Elapsed < deadline)
+        {
+            algo = await GetAlgo(http, token, algoId);
+            last = algo.GetProperty(property).GetInt64();
+            if (last == expected) return algo;
+            await Task.Delay(20);
+        }
+        throw new TimeoutException(
+            $"Algo {algoId} property '{property}' did not reach {expected} within " +
+            $"{deadline.TotalSeconds}s; last={last}");
     }
 }
