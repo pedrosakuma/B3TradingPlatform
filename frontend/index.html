@@ -1167,6 +1167,9 @@
         <form id="bot-credentials-create-form" class="admin-inline-form">
           <input id="bot-credentials-label" type="text" placeholder="label (e.g. my-bot)"
                  maxlength="128" autocomplete="off" required />
+          <input id="bot-credentials-cert-thumbprint" type="text"
+                 placeholder="client cert thumbprint (SHA-256, optional)"
+                 maxlength="95" autocomplete="off" spellcheck="false" />
           <button type="submit" id="bot-credentials-create-submit">Create credential</button>
         </form>
         <p class="muted-line">
@@ -1181,12 +1184,12 @@
           <table>
             <thead>
               <tr>
-                <th>Label</th><th>CredShortId</th><th>Created</th>
+                <th>Label</th><th>CredShortId</th><th>Created</th><th>Cert binding</th>
                 <th>Status</th><th></th>
               </tr>
             </thead>
             <tbody id="bot-credentials-body">
-              <tr><td colspan="5" class="muted">loading…</td></tr>
+              <tr><td colspan="6" class="muted">loading…</td></tr>
             </tbody>
           </table>
         </div>
