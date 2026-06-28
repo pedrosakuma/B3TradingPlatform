@@ -20,6 +20,12 @@ Trading__EntryPointListener__AllowInProduction=true
 Trading__EntryPointListener__Tls__Required=true
 Trading__EntryPointListener__Tls__CertPath=/etc/ssl/fixp/server.crt
 Trading__EntryPointListener__Tls__KeyPath=/etc/ssl/fixp/server.key
+# Optional mTLS second factor for public bot access:
+Trading__EntryPointListener__Tls__ClientCertificateMode=Required
+Trading__EntryPointListener__Tls__ClientCa__BundlePath=/etc/ssl/fixp/bot-ca-bundle.pem
+Trading__EntryPointListener__Tls__ClientCa__DenyListPath=/etc/ssl/fixp/bot-denylist.txt
+Trading__EntryPointListener__Tls__ClientCa__ReloadInterval=00:05:00
+Trading__EntryPointListener__Tls__RequireClientAuthEku=true
 ```
 
 ### Boot guard
@@ -69,6 +75,33 @@ Use certbot or ACME clients to obtain PEM files, then point `CertPath` and `KeyP
 at the fullchain and privkey files. Renewal requires a host restart (v0 does not
 hot-reload certs).
 
+## mTLS client certificates
+
+The listener can require a trusted bot client certificate in addition to the
+bot PAT:
+
+| Setting | Values / default | Description |
+|---------|------------------|-------------|
+| `Tls:ClientCertificateMode` | `None`, `Optional`, `Required` (`None`) | `Optional` observes cert adoption; `Required` rejects clients without a valid cert. |
+| `Tls:ClientCa:BundlePath` | path | Concatenated PEM bundle of trusted bot CA certificates. |
+| `Tls:ClientCa:DenyListPath` | path or empty | SHA-256 leaf thumbprint deny-list. |
+| `Tls:ClientCa:ReloadInterval` | `00:05:00` | Hot-reload cadence for the bundle and deny-list. |
+| `Tls:RequireClientAuthEku` | `true` | Require `clientAuth` EKU on client leaf certificates. |
+| `AllowInsecureMtlsInProduction` | `false` | Explicit escape hatch for less-secure production mTLS posture. |
+
+Provision a bot CA out of band, issue each bot a client leaf certificate, and
+mount only the CA bundle and deny-list into the trading-host. Bot private keys
+belong only in bot runtimes.
+
+For CA rotation, concatenate old and new CA PEMs in the bundle, wait one
+`ReloadInterval`, move bots to leaves issued by the new CA, then remove the
+old CA. The listener picks this up without a restart.
+
+For fast revocation, add the leaf's SHA-256 thumbprint to the deny-list. The
+format is one 64-character SHA-256 hex thumbprint per line; uppercase is
+canonical, separators are ignored, and blank lines / `#` comments are allowed.
+New handshakes using a denied leaf fail after the next reload.
+
 ## Rate Limiting
 
 Token-bucket rate limiting protects the Negotiate endpoint:
@@ -77,12 +110,17 @@ Token-bucket rate limiting protects the Negotiate endpoint:
 |---------|---------|-------------|
 | `RateLimit:NegotiatesPerMinutePerIp` | 30 | Per source IP |
 | `RateLimit:NegotiatesPerMinutePerUsername` | 10 | Per credential (post-auth) |
+| `AcceptRateLimit:ConnectionsPerSecondPerIp` | 0 | Opt-in accept-loop connection rate limit; `0` disables it |
+| `AcceptRateLimit:BurstPerIp` | 30 | Burst size for the accept-loop limiter |
 
 ### Tuning
 
 - For N bots each reconnecting every 5 minutes: set per-IP ≥ N×12/min safety margin.
 - Per-credential limits protect against a bot in a tight reconnect loop.
 - Tokens refill continuously at the configured rate per minute.
+- The accept-loop limiter is disabled by default. For public exposure, prefer
+  upstream LB / WAF / firewall connection-rate controls and tune the in-process
+  limiter only as an additional guard.
 
 ## Max Sessions Per User
 
@@ -190,8 +228,5 @@ The `/admin/fixp/credentials/{id}/buffer` endpoint shows:
 ## Out of v0
 
 The following are explicitly deferred:
-- mTLS / client certificate auth
 - Mass-cancel on disconnect
-- Per-IP `MaxConnectionsPerSec`
 - WAL-persisted outbound buffer
-- Certificate hot-reload

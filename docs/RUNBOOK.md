@@ -228,7 +228,116 @@ rule lives in [`ops/perf-v0-alerts.md`](ops/perf-v0-alerts.md) §1.1.
 
 ---
 
-## 2. Cross-references
+## 2. FIXP listener mTLS operations
+
+The user-bot FIXP listener can require client certificates as a second factor
+in addition to the bot PAT. mTLS is configured under
+`Trading:EntryPointListener:Tls` and uses an operator-managed CA bundle, not
+the machine root store.
+
+### 2.1 Provisioning a bot CA and leaf certificate
+
+1. Create or select an offline / near-line bot client CA. Keep its private key
+   out of the trading-host container.
+2. Export the trusted issuer certificate(s) as PEM and concatenate them into a
+   bundle, for example `/certs/bot-ca-bundle.pem`.
+3. For each bot, generate a private key + CSR out of band, then issue a client
+   leaf from the bot CA. Recommended leaf shape:
+   - subject/SAN identifies the credential, e.g. `CN=b3t-bot-<credShortId>`;
+   - EKU includes `clientAuth` (`1.3.6.1.5.5.7.3.2`) when
+     `Trading__EntryPointListener__Tls__RequireClientAuthEku=true`;
+   - short validity, with renewal before expiry.
+4. Distribute the bot leaf + private key only to that bot runtime. Distribute
+   the server trust anchor separately so the bot can validate the listener.
+   Never place bot private keys in the trading-host image or compose file.
+
+### 2.2 Enabling and rollout modes
+
+Use `Optional` first to observe adoption, then flip to `Required` once every
+bot presents a valid certificate.
+
+```env
+Trading__EntryPointListener__Tls__ClientCertificateMode=Optional
+Trading__EntryPointListener__Tls__ClientCa__BundlePath=/certs/bot-ca-bundle.pem
+Trading__EntryPointListener__Tls__ClientCa__DenyListPath=/certs/bot-denylist.txt
+Trading__EntryPointListener__Tls__ClientCa__ReloadInterval=00:05:00
+Trading__EntryPointListener__Tls__RequireClientAuthEku=true
+Trading__EntryPointListener__AllowInsecureMtlsInProduction=false
+```
+
+| Env var | Values / default | Operational meaning |
+|---|---|---|
+| `Trading__EntryPointListener__Tls__ClientCertificateMode` | `None` / `Optional` / `Required` (`None`) | `None` is PAT-only; `Optional` requests and validates a cert if present; `Required` rejects connections without a trusted client cert. |
+| `Trading__EntryPointListener__Tls__ClientCa__BundlePath` | path | PEM bundle of trusted bot issuer CA(s). Required when mTLS is enabled. |
+| `Trading__EntryPointListener__Tls__ClientCa__DenyListPath` | path or empty | Newline-delimited SHA-256 leaf thumbprints to reject at handshake time. |
+| `Trading__EntryPointListener__Tls__ClientCa__ReloadInterval` | `TimeSpan`, e.g. `00:05:00` | Poll interval for hot-reloading the CA bundle and deny-list. |
+| `Trading__EntryPointListener__Tls__RequireClientAuthEku` | `true` / `false` | Require client leafs to carry the `clientAuth` EKU. |
+| `Trading__EntryPointListener__AllowInsecureMtlsInProduction` | `false` / `true` | Explicit audited escape hatch for less-secure production mTLS posture. |
+
+`ClientCertificateMode` only makes sense when server TLS is enabled
+(`Trading__EntryPointListener__Tls__Required=true`). In Production, the boot
+guard banner should show the selected mTLS mode and CA bundle; treat
+`mTLS: None` or `Optional` as a conscious public-exposure risk unless an
+upstream private network boundary is doing admission control.
+
+### 2.3 CA rotation without restart
+
+The CA bundle is a concatenated PEM file and is hot-reloaded within
+`ClientCa:ReloadInterval`:
+
+1. Append the new CA certificate to the existing bundle, leaving the old CA in
+   place for overlap.
+2. Wait at least one reload interval and confirm new bot connections succeed
+   with leaves issued by the new CA.
+3. Re-issue / redistribute bot leaf certificates under the new CA.
+4. After the overlap window, remove the old CA from the bundle.
+5. Wait one reload interval. New handshakes under the retired CA now fail; no
+   listener restart is required.
+
+### 2.4 Fast revocation by SHA-256 deny-list
+
+For network-free emergency revocation, add the compromised leaf certificate's
+SHA-256 thumbprint to the deny-list file. New handshakes using that leaf are
+rejected after the next `ReloadInterval`, even if the certificate still chains
+to a trusted CA.
+
+Deny-list format:
+
+- one SHA-256 thumbprint per line;
+- 64 hex characters after normalisation;
+- uppercase is canonical, but separators such as `:` or spaces are ignored;
+- blank lines and `#` comments are allowed.
+
+Example:
+
+```text
+# revoked bot leafs
+9F2A6C0E4B1D3A5C7E8F90123456789ABCDEF0123456789ABCDEF0123456789
+```
+
+This revokes the certificate globally for the listener. Credential revocation
+still happens through the existing user-bot credential flow and rejects at
+Negotiate time regardless of certificate validity.
+
+### 2.5 Public-exposure hardening
+
+mTLS chain building happens during TLS handshakes, before the Negotiate
+rate-limit is reached. For public listeners, put the service behind an
+upstream LB / WAF / firewall with connection-rate controls. The listener also
+has an opt-in accept-loop limiter:
+
+```env
+Trading__EntryPointListener__AcceptRateLimit__ConnectionsPerSecondPerIp=0
+Trading__EntryPointListener__AcceptRateLimit__BurstPerIp=30
+```
+
+`ConnectionsPerSecondPerIp=0` disables the in-process limiter by default.
+Tune both values only after sizing expected reconnect bursts; the default
+production posture relies on upstream LB/WAF controls for internet exposure.
+
+---
+
+## 3. Cross-references
 
 - **Alert rules.** [`ops/perf-v0-alerts.md`](ops/perf-v0-alerts.md)
 - **Metric inventory.** [`METRICS.md`](METRICS.md)

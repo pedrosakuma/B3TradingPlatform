@@ -45,6 +45,13 @@ public sealed record PlatformEndpoint(
     public const string EnvFixpTls = "B3T_FIXP_TLS";
     public const string EnvFixpCredentialToken = "B3T_FIXP_CREDENTIAL";
 
+    // mTLS conformance env vars (sub-issue F / RFC §8). The operator points
+    // these at a listener configured for client-cert auth and supplies a
+    // trusted client PFX; the matrix rows that need wrong-CA/expired/denied
+    // material are exercised by the in-process listener suite instead.
+    public const string EnvFixpMtlsClientPfx = "B3T_FIXP_MTLS_CLIENT_PFX";
+    public const string EnvFixpMtlsClientPfxPass = "B3T_FIXP_MTLS_CLIENT_PFX_PASS";
+
     public static PlatformEndpoint? TryResolve()
     {
         var baseUrl = Environment.GetEnvironmentVariable(EnvBaseUrl);
@@ -161,4 +168,15 @@ public sealed record PlatformEndpoint(
 
     public const string FixpListenerSkipReason =
         "FIXP listener scenario skipped: B3T_FIXP_ENDPOINT not set.";
+
+    /// <summary>
+    /// True when an mTLS-enabled FIXP endpoint plus a trusted client PFX are
+    /// configured, so the SDK-as-client mTLS conformance rows can run.
+    /// </summary>
+    public static bool IsFixpMtlsConfigured() =>
+        IsFixpListenerConfigured() &&
+        !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(EnvFixpMtlsClientPfx));
+
+    public const string FixpMtlsSkipReason =
+        "FIXP mTLS scenario skipped: set B3T_FIXP_ENDPOINT + B3T_FIXP_MTLS_CLIENT_PFX (trusted client PFX).";
 }

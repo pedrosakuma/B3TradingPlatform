@@ -93,6 +93,15 @@ public sealed class EntryPointListenerOptions
     /// <summary>Rate-limit options for Negotiate requests.</summary>
     public RateLimitOptions RateLimit { get; set; } = new();
 
+    /// <summary>
+    /// RFC user-bot-fixp-mtls-v0 §10.5. Pre-Negotiate accept-loop
+    /// connection-rate limit, the only knob that bounds the TLS-handshake
+    /// flood vector (the per-IP <see cref="RateLimit"/> only applies after
+    /// Negotiate). Opt-in: default disabled — public deployments are
+    /// expected to front the listener with an LB/WAF connection-rate cap.
+    /// </summary>
+    public AcceptRateLimitOptions AcceptRateLimit { get; set; } = new();
+
     /// <summary>Outbound buffer sizing options.</summary>
     public BuffersOptions Buffers { get; set; } = new();
 
@@ -190,6 +199,26 @@ public sealed class EntryPointListenerOptions
         /// (RFC §5.2). Default 5 minutes. Must be &gt; <see cref="TimeSpan.Zero"/>.
         /// </summary>
         public TimeSpan ReloadInterval { get; set; } = TimeSpan.FromMinutes(5);
+    }
+
+    /// <summary>
+    /// RFC user-bot-fixp-mtls-v0 §10.5. Pre-Negotiate accept-loop
+    /// connection-rate limit. Disabled by default
+    /// (<see cref="ConnectionsPerSecondPerIp"/> = 0): public exposure is
+    /// expected to be fronted by an LB/WAF. When enabled, a token-bucket
+    /// per source IP throttles new TCP connections before the TLS
+    /// handshake runs, bounding the handshake-flood DoS vector.
+    /// </summary>
+    public sealed class AcceptRateLimitOptions
+    {
+        /// <summary>
+        /// Steady-state accepted connections per second per source IP.
+        /// 0 disables the accept-loop limit entirely. Default 0.
+        /// </summary>
+        public int ConnectionsPerSecondPerIp { get; set; }
+
+        /// <summary>Token-bucket burst capacity per source IP. Default 30.</summary>
+        public int BurstPerIp { get; set; } = 30;
     }
 
     /// <summary>Token-bucket rate limiting for Negotiate requests.</summary>

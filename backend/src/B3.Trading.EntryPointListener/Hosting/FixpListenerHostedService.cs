@@ -42,6 +42,7 @@ public sealed class FixpListenerHostedService : BackgroundService
 
     private TcpListener? _listener;
     private X509Certificate2? _tlsCert;
+    private readonly AcceptConnectionRateLimiter _acceptLimiter;
 
     public FixpListenerHostedService(
         IOptions<EntryPointListenerOptions> opts,
@@ -91,6 +92,9 @@ public sealed class FixpListenerHostedService : BackgroundService
         _sessionCounter = sessionCounter;
         _caTrust = caTrust;
         _clock = clock ?? TimeProvider.System;
+        _acceptLimiter = new AcceptConnectionRateLimiter(
+            _opts.AcceptRateLimit.ConnectionsPerSecondPerIp,
+            _opts.AcceptRateLimit.BurstPerIp);
     }
 
     /// <summary>
@@ -170,6 +174,18 @@ public sealed class FixpListenerHostedService : BackgroundService
                 catch (Exception ex)
                 {
                     _logger.LogWarning(ex, "FIXP listener AcceptTcpClientAsync failed; retrying.");
+                    continue;
+                }
+
+                if (!_acceptLimiter.Disabled && client.Client.RemoteEndPoint is IPEndPoint rep
+                    && !_acceptLimiter.TryAccept(rep.Address, _clock))
+                {
+                    FixpListenerMetrics.ConnectionsRejected.Add(
+                        1, new KeyValuePair<string, object?>("reason", "accept_rate_limit"));
+                    _logger.LogWarning(
+                        "fixp.accept.rate_limited remote={Remote} — closing before handshake.",
+                        SafeRemote(client));
+                    try { client.Dispose(); } catch { /* best effort */ }
                     continue;
                 }
 
