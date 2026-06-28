@@ -137,7 +137,8 @@ public static class EntryPointListenerServiceCollectionExtensions
                     sp.GetRequiredService<BotOutboundCoordinator>(),
                     sp.GetRequiredService<RateLimiterRegistry>(),
                     sp.GetRequiredService<UserSessionCounter>(),
-                    sp.GetService<TimeProvider>()));
+                    sp.GetService<TimeProvider>(),
+                    sp.GetService<Mtls.IClientCaTrustProvider>()));
             services.AddHostedService(sp =>
                 sp.GetRequiredService<Hosting.FixpListenerHostedService>());
         }
