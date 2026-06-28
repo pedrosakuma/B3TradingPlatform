@@ -1,6 +1,29 @@
 namespace B3.Trading.EntryPointListener;
 
 /// <summary>
+/// Client-certificate (mTLS) enforcement mode for the FIXP listener
+/// (RFC user-bot-fixp-mtls-v0 §5). Defaults to <see cref="None"/> so the
+/// historical server-only-TLS behaviour is preserved.
+/// </summary>
+public enum ClientCertificateMode
+{
+    /// <summary>No client certificate requested. Bot identity rests on the
+    /// PAT alone (today's behaviour).</summary>
+    None = 0,
+
+    /// <summary>Client certificate requested and validated <em>if presented</em>,
+    /// but a connection without one is still admitted — observe-then-enforce
+    /// rollout. Pinned credentials enforce the thumbprint only when a cert
+    /// was presented.</summary>
+    Optional = 1,
+
+    /// <summary>Client certificate required: a connection without a valid,
+    /// trusted certificate is rejected during the TLS handshake before any
+    /// application bytes are processed.</summary>
+    Required = 2,
+}
+
+/// <summary>
 /// Configuration for the inbound FIXP/SBE listener that lets external bots
 /// connect to the trading-host using native B3 EntryPoint protocol.
 /// </summary>
@@ -27,6 +50,20 @@ public sealed class EntryPointListenerOptions
     /// valid cert/key paths to satisfy the boot guard.
     /// </summary>
     public bool AllowInProduction { get; set; }
+
+    /// <summary>
+    /// RFC user-bot-fixp-mtls-v0 §7. Explicit opt-in escape hatch that
+    /// permits a <em>less secure than default public posture</em> mTLS
+    /// configuration in Production — e.g. running
+    /// <see cref="ClientCertificateMode.Required"/> without a configured
+    /// deny-list, or silencing the loud boot warning emitted when mTLS is
+    /// <see cref="ClientCertificateMode.None"/>/<see cref="ClientCertificateMode.Optional"/>
+    /// in Production. Mirrors the <see cref="AllowInProduction"/> /
+    /// <c>AllowErInjectionInProduction</c> opt-in shape so a weaker posture
+    /// is always an explicit, audited choice. Consumed by the boot guard
+    /// (sub-issue E). Default false.
+    /// </summary>
+    public bool AllowInsecureMtlsInProduction { get; set; }
 
     /// <summary>
     /// Sub-issue #173 (G). Cadence (ms) at which an established
@@ -88,10 +125,71 @@ public sealed class EntryPointListenerOptions
         /// </summary>
         public string? Password { get; set; }
 
+        /// <summary>
+        /// RFC user-bot-fixp-mtls-v0 §5. Client-certificate (mTLS)
+        /// enforcement mode. Meaningful only when <see cref="Required"/>
+        /// is true (you cannot do mTLS without TLS). Default
+        /// <see cref="ClientCertificateMode.None"/> preserves today's
+        /// server-only-TLS behaviour.
+        /// </summary>
+        public ClientCertificateMode ClientCertificateMode { get; set; } = ClientCertificateMode.None;
+
+        /// <summary>
+        /// RFC user-bot-fixp-mtls-v0 §4.2 / §5. Trust-anchor and
+        /// revocation configuration for client-certificate validation.
+        /// Required when <see cref="ClientCertificateMode"/> is not
+        /// <see cref="ClientCertificateMode.None"/>.
+        /// </summary>
+        public ClientCaOptions ClientCa { get; set; } = new();
+
+        /// <summary>
+        /// RFC user-bot-fixp-mtls-v0 §4.1 / §7. When true, the client-cert
+        /// validation callback requires the leaf to carry the
+        /// <c>clientAuth</c> Enhanced Key Usage (1.3.6.1.5.5.7.3.2).
+        /// Default true. Consumed by the handshake gate (sub-issue C).
+        /// </summary>
+        public bool RequireClientAuthEku { get; set; } = true;
+
         /// <summary>Returns true when <see cref="CertPath"/> ends in a PFX/P12 extension.</summary>
         public bool IsPfx => CertPath is not null &&
             (CertPath.EndsWith(".pfx", StringComparison.OrdinalIgnoreCase) ||
              CertPath.EndsWith(".p12", StringComparison.OrdinalIgnoreCase));
+
+        /// <summary>True when client-certificate (mTLS) enforcement is active.</summary>
+        public bool MtlsEnabled => ClientCertificateMode != ClientCertificateMode.None;
+    }
+
+    /// <summary>
+    /// RFC user-bot-fixp-mtls-v0 §4.2 / §5.2. Trust-anchor (custom-root)
+    /// and revocation inputs for client-certificate validation. Both files
+    /// are hot-reloaded by the trust provider so a CA rotation or a
+    /// thumbprint revocation takes effect without restarting the listener.
+    /// </summary>
+    public sealed class ClientCaOptions
+    {
+        /// <summary>
+        /// Path to a PEM bundle (one or more concatenated
+        /// <c>-----BEGIN CERTIFICATE-----</c> blocks) of the issuer CA(s)
+        /// that are trusted to sign bot client certificates. This is the
+        /// <em>custom</em> trust anchor — the OS root store is never
+        /// consulted (RFC §4.2). Required when mTLS is enabled.
+        /// </summary>
+        public string? BundlePath { get; set; }
+
+        /// <summary>
+        /// Optional path to a newline-delimited list of SHA-256 leaf
+        /// thumbprints (hex, separators and <c>#</c> comment lines ignored)
+        /// that are denied even when their chain is otherwise valid — the
+        /// network-free fast revocation path (RFC §4.4).
+        /// </summary>
+        public string? DenyListPath { get; set; }
+
+        /// <summary>
+        /// Cadence at which <see cref="BundlePath"/> and
+        /// <see cref="DenyListPath"/> are re-read and atomically swapped
+        /// (RFC §5.2). Default 5 minutes. Must be &gt; <see cref="TimeSpan.Zero"/>.
+        /// </summary>
+        public TimeSpan ReloadInterval { get; set; } = TimeSpan.FromMinutes(5);
     }
 
     /// <summary>Token-bucket rate limiting for Negotiate requests.</summary>
