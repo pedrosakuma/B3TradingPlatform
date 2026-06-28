@@ -37,6 +37,22 @@ public static class EntryPointListenerServiceCollectionExtensions
 
         if (enabled)
         {
+            // RFC user-bot-fixp-mtls-v0 §5.2 (sub-issue B). When client-cert
+            // (mTLS) enforcement is on, register the hot-reloading trust
+            // provider as a singleton so the handshake gate (sub-issue C) can
+            // read the current CA bundle + deny-list per connection. Eager
+            // construction loads the bundle once and fails closed at boot on a
+            // broken anchor (the validator also guards this up front).
+            var mtlsMode = configuration
+                .GetSection(EntryPointListenerOptions.SectionName)
+                .GetValue<ClientCertificateMode>("Tls:ClientCertificateMode");
+            if (mtlsMode != ClientCertificateMode.None)
+            {
+                services.TryAddSingleton<Mtls.ClientCaTrustProvider>();
+                services.TryAddSingleton<Mtls.IClientCaTrustProvider>(sp =>
+                    sp.GetRequiredService<Mtls.ClientCaTrustProvider>());
+            }
+
             // Issue #185: composition guard runs first so a missing
             // order-path dependency aborts host startup with a clear,
             // actionable message before FixpListenerHostedService binds
