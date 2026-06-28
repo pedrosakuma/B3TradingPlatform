@@ -43,6 +43,16 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     private readonly EntryPointListenerOptions _options;
     private readonly TimeProvider _clock;
     private readonly string _connectionId;
+
+    /// <summary>
+    /// The validated client certificate captured during the TLS handshake
+    /// (RFC user-bot-fixp-mtls-v0 §4.3), or null when no cert was presented
+    /// (Optional mode) or mTLS is off. Consumed by the Negotiate-time
+    /// per-credential thumbprint pin check (sub-issue D / #540).
+    /// </summary>
+    internal System.Security.Cryptography.X509Certificates.X509Certificate2? ClientCertificate
+        => _clientCertificate;
+    private readonly System.Security.Cryptography.X509Certificates.X509Certificate2? _clientCertificate;
     private readonly FixpHandshakeStateMachine _sm = new();
 
     private long _nextExpectedInboundSeq = 1;
@@ -72,7 +82,8 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         EntryPointListenerOptions? options = null,
         TimeProvider? clock = null,
         RateLimiterRegistry? rateLimiter = null,
-        UserSessionCounter? sessionCounter = null)
+        UserSessionCounter? sessionCounter = null,
+        System.Security.Cryptography.X509Certificates.X509Certificate2? clientCertificate = null)
     {
         _tcpClient = tcpClient;
         _stream = stream;
@@ -86,6 +97,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         _options = options ?? new EntryPointListenerOptions();
         _clock = clock ?? TimeProvider.System;
         _logger = logger;
+        _clientCertificate = clientCertificate;
         _connectionId = Guid.NewGuid().ToString("N");
         _lastOutboundTicks = _clock.GetUtcNow().UtcTicks;
     }
@@ -104,10 +116,11 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         EntryPointListenerOptions? options = null,
         TimeProvider? clock = null,
         RateLimiterRegistry? rateLimiter = null,
-        UserSessionCounter? sessionCounter = null)
+        UserSessionCounter? sessionCounter = null,
+        System.Security.Cryptography.X509Certificates.X509Certificate2? clientCertificate = null)
         : this(tcpClient, tcpClient.GetStream(), credentials, sessions, logger,
                orders, connectionDirectory, outboundCoordinator, options, clock,
-               rateLimiter, sessionCounter)
+               rateLimiter, sessionCounter, clientCertificate)
     {
     }
 

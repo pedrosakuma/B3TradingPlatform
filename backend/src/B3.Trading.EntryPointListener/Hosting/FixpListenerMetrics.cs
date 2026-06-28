@@ -50,4 +50,14 @@ public static class FixpListenerMetrics
     /// <summary>Rejected connections. Tag: reason.</summary>
     public static readonly Counter<long> ConnectionsRejected =
         Meter.CreateCounter<long>("fixp.connections.rejected.total");
+
+    /// <summary>
+    /// Client-certificate (mTLS) validation outcomes during the TLS
+    /// handshake (RFC user-bot-fixp-mtls-v0 §6). Tag: outcome
+    /// (<c>ok</c>, <c>absent</c>, <c>reject:&lt;reason&gt;</c>). Lets
+    /// <c>Optional</c>-mode adoption be measured (watch <c>absent</c> fall to
+    /// zero) before flipping to <c>Required</c>.
+    /// </summary>
+    public static readonly Counter<long> MtlsClientCertsTotal =
+        Meter.CreateCounter<long>("entrypoint_listener.mtls_client_certs_total");
 }
