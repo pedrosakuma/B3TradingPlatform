@@ -39,6 +39,29 @@ In `Environment=Production`, the host refuses to start unless ALL of:
 
 PFX/P12 users can put the `.pfx` path in `CertPath` and leave `KeyPath` empty.
 
+### Public-exposure overlay (#531)
+
+For internet-facing deployments use the dedicated `docker/docker-compose.public.yml`
+overlay instead of hand-editing env. It pins `ASPNETCORE_ENVIRONMENT=Production`
+(every fail-closed boot guard fires), enables the listener with TLS + mTLS
+`Required`, and applies hardened connection caps. Every secret uses the
+`${VAR:?...}` required form — a missing value aborts `up` instead of booting
+with a dev placeholder.
+
+```bash
+# 1. Provision cert material into one host dir (mounted ro at /etc/ssl/fixp):
+#      server.pfx (or server.crt + server.key), bot-ca-bundle.pem, bot-denylist.txt
+# 2. Fill the PUBLIC_* + TRADING_* secrets in docker/.env (see .env.example).
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.public.yml up -d
+```
+
+Required secrets (no defaults in public mode): `TRADING_AUTH_SIGNING_KEY`
+(≥32 bytes), `TRADING_SEED_PASSWORD_HASH`, `TRADING_SEED_PASSWORD_SALT`,
+`TRADING_CVM_OWNER_HASH_SALT`, `TRADING_CLORDID_MASK_SALT`,
+`PUBLIC_FIXP_TLS_DIR`, `PUBLIC_FIXP_TLS_CERT`, `PUBLIC_FIXP_CA_BUNDLE`,
+`PUBLIC_FIXP_CA_DENYLIST`. Pair with the alerting in
+[`docs/ops/public-auth-alerts.md`](../ops/public-auth-alerts.md).
+
 ## TLS Setup
 
 ### PEM (recommended)
