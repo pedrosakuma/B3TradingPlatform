@@ -47,6 +47,15 @@ public static class FixpListenerMetrics
     public static readonly Counter<long> TlsHandshakeCompleted =
         Meter.CreateCounter<long>("fixp.handshake.tls.completed.total");
 
+    /// <summary>
+    /// TLS handshake duration in ms (#533). Recorded for both successful and
+    /// failed/rejected handshakes (tag: outcome=ok|tls|mtls), so a public
+    /// dashboard can chart latency and a flood shows up as p99 climbing
+    /// toward <c>Tls:HandshakeTimeout</c>.
+    /// </summary>
+    public static readonly Histogram<double> TlsHandshakeDurationMs =
+        Meter.CreateHistogram<double>("fixp.handshake.tls.duration_ms");
+
     /// <summary>Rejected connections. Tag: reason.</summary>
     public static readonly Counter<long> ConnectionsRejected =
         Meter.CreateCounter<long>("fixp.connections.rejected.total");

@@ -1,0 +1,138 @@
+{
+  "annotations": { "list": [] },
+  "description": "Public auth-surface dashboard for the user-bot FIXP listener (go-public, #533). Watches the surface a hostile internet can reach: TLS/mTLS handshakes, Negotiate auth, connection caps, per-credential order flow. Companion to docs/ops/public-auth-alerts.md.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Currently established FIXP bot sessions. The baseline working set; a sudden drop alongside a reject spike means clients are being turned away.",
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "max(entrypoint_listener_sessions_active)",
+          "legendFormat": "active sessions",
+          "refId": "A"
+        }
+      ],
+      "title": "Active FIXP sessions",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Negotiate auth outcomes. A sustained reject:* rate on the public surface is a credential-stuffing / brute-force signal — see alert PublicAuthNegotiateRejectSpike.",
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (outcome) (rate(entrypoint_listener_negotiate_total[1m]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Negotiate rate (per outcome)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Rejected connections by reason: tls/mtls (handshake failures), accept_rate_limit, ip_blocked, max_connections (caps saturated). Sustained spikes = flood, misconfig, or a real client being turned away.",
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "id": 3,
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (reason) (rate(fixp_connections_rejected_total[1m]))",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Connections rejected (per reason)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "mTLS client-cert validation outcomes. Watch absent fall to zero before flipping Required; sustained reject:* means expired/rotated/untrusted bot certs or a scanner.",
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 4,
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (outcome) (rate(entrypoint_listener_mtls_client_certs_total[1m]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "title": "mTLS client-cert outcomes",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "TLS handshake latency. p99 climbing toward Tls:HandshakeTimeout (5s) is a TLS-DoS / slow-loris signal — see alert PublicTlsHandshakeLatencyHigh.",
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "ms" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "id": 5,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(fixp_handshake_tls_duration_ms_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(fixp_handshake_tls_duration_ms_bucket[5m])))",
+          "legendFormat": "p99",
+          "refId": "B"
+        }
+      ],
+      "title": "TLS handshake latency (p50 / p99)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Inbound order intake. A spike concentrated in a window matching a reject spike helps tell a real-load surge from an abusive credential.",
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "id": 6,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(entrypoint_listener_orders_in_total[1m]))",
+          "legendFormat": "orders in",
+          "refId": "A"
+        }
+      ],
+      "title": "Inbound order rate",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["b3-trading", "public-auth", "fixp-listener"],
+  "templating": { "list": [] },
+  "time": { "from": "now-15m", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "B3 Trading — Public Auth Surface",
+  "uid": "b3-trading-public-auth",
+  "version": 1,
+  "weekStart": ""
+}
