@@ -145,6 +145,26 @@ jobs:
               -f docker/docker-compose.er-injection.yml \
               config --quiet
 
+      - name: docker compose config (public overlay)
+        # The public overlay (#531) fails closed: every secret/cert uses
+        # `${VAR:?}`. Set validate-only placeholders so the merged file
+        # parses. Validate-only — never boots the host.
+        env:
+          TRADING_AUTH_SIGNING_KEY: validate-only-placeholder-key-min-32-bytes-long-aaaaa
+          TRADING_SEED_PASSWORD_HASH: ZDzDHANAHq8NDQK3BWk/YZjybKLCMKdRzw0z9Da5wic=
+          TRADING_SEED_PASSWORD_SALT: rXA+be7/gEYYZQrQDsUr2g==
+          TRADING_CVM_OWNER_HASH_SALT: validate-only-cvm-salt
+          TRADING_CLORDID_MASK_SALT: validate-only-clordid-mask-salt
+          PUBLIC_FIXP_TLS_DIR: /tmp/fixp-tls
+          PUBLIC_FIXP_TLS_CERT: /etc/ssl/fixp/server.pfx
+          PUBLIC_FIXP_CA_BUNDLE: /etc/ssl/fixp/bot-ca-bundle.pem
+          PUBLIC_FIXP_CA_DENYLIST: /etc/ssl/fixp/bot-denylist.txt
+        run: |
+          docker compose \
+              -f docker/docker-compose.yml \
+              -f docker/docker-compose.public.yml \
+              config --quiet
+
   conformance:
     name: Run conformance suite against unavailable-mode stack
     runs-on: ubuntu-latest
