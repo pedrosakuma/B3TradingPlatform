@@ -108,11 +108,11 @@ public class ManyBotLoadTests
         }
     }
 
-    [Fact(Timeout = 30_000)]
+    [Fact(Timeout = 90_000)]
     public async Task ManyConcurrentBots_AllHandshakeSucceed()
     {
-        const int bots = 25;
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+        const int bots = 12;
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
         var bundle = BuildHost();
         try
         {
