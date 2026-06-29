@@ -337,7 +337,49 @@ production posture relies on upstream LB/WAF controls for internet exposure.
 
 ---
 
-## 3. Cross-references
+## 3. User-bot tenant lifecycle
+
+For public bot operators. All credential APIs are per-user; admin kill /
+mass-cancel live under `/admin` (role `admin`). Secret provisioning for the
+public overlay is in `docs/operations/fixp-listener.md` and
+`docker/docker-compose.public.yml`.
+
+### 3.1 Provision a bot tenant
+
+1. Create the human/bot user (seed via `Trading:Auth:Users` or the auth
+   store). Assign a `Firm` so orders route correctly.
+2. Mint a credential: `POST /api/user-bot-credentials` `{ "label": "...",
+   "boundCertThumbprint": "<sha256 hex|null>" }`. The plaintext PAT
+   (`b3t_<shortId>_<secret>`) is shown **once** — hand it to the bot, never
+   logged. Pin a cert thumbprint (mTLS, #540) for a second factor.
+3. The bot connects FIXP, Negotiates with the PAT, presents its client leaf.
+
+### 3.2 Rotate / revoke
+
+- **Revoke (now):** `DELETE /api/user-bot-credentials/{id}` — soft-revoke,
+  rejected at next Negotiate. Cross-user → 404 (no id oracle).
+- **Re-issue:** mint a new credential, switch the bot, revoke the old. Until
+  overlap-window rotation ships (RFC `user-bot-fixp-rotation-v0`, #530) this is
+  a brief flag-day; schedule it.
+- **Cert rotation:** repin thumbprint, or add the leaf to the deny-list (§2.4)
+  for instant revoke; PAT stays valid.
+
+### 3.3 Incident response — rogue bot or session
+
+1. **Stop the orders:** kill-switch the tenant —
+   `POST /admin/kill/end-client/{id}` (or `/admin/kill/firm/{id}`). Working
+   orders cancel; new submits rejected until `DELETE` revives.
+2. **Cut access:** revoke the credential (§3.2). Next Negotiate fails;
+   in-flight session has no working orders left after kill.
+3. **Cert-level:** add the leaf thumbprint to the deny-list (§2.4) — global,
+   network-free, ~one reload interval.
+4. **Confirm:** `GET /admin/kill` shows killed end-clients/firms; reject-reason
+   metrics (#533) show `reject:credentials` climb. Mark stuck venue orders
+   stale via `/admin/firms/{firmId}/orders/{clOrdId}/mark-stale` if needed.
+
+---
+
+## 4. Cross-references
 
 - **Alert rules.** [`ops/perf-v0-alerts.md`](ops/perf-v0-alerts.md)
 - **Metric inventory.** [`METRICS.md`](METRICS.md)
@@ -348,3 +390,7 @@ production posture relies on upstream LB/WAF controls for internet exposure.
   (durability), §5.3 (per-connection writer / drain), §6.3
   (backpressure policy).
 - **Composite results.** [`perf-hardening-v0-results.md`](perf-hardening-v0-results.md)
+- **Sandbox / legal framing.** [`SANDBOX-AND-LEGAL.md`](SANDBOX-AND-LEGAL.md)
+- **mTLS RFC.** [`rfcs/user-bot-fixp-mtls-v0.md`](rfcs/user-bot-fixp-mtls-v0.md)
+- **Rotation RFC.** [`rfcs/user-bot-fixp-rotation-v0.md`](rfcs/user-bot-fixp-rotation-v0.md)
+- **Edge-topology RFC.** [`rfcs/user-bot-fixp-edge-topology-v0.md`](rfcs/user-bot-fixp-edge-topology-v0.md)
