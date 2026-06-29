@@ -67,6 +67,13 @@ public sealed class ConformanceFactAttribute : FactAttribute
     /// </summary>
     public bool RequiresFixpListener { get; init; }
 
+    /// <summary>
+    /// When true, the scenario requires an mTLS-enabled FIXP listener plus a
+    /// trusted client PFX (<c>B3T_FIXP_MTLS_CLIENT_PFX</c>) so the SDK-as-
+    /// client mTLS matrix can drive a real handshake. Skipped otherwise.
+    /// </summary>
+    public bool RequiresFixpMtls { get; init; }
+
     public ConformanceFactAttribute()
     {
         var peer = PlatformEndpoint.TryResolve();
@@ -114,6 +121,8 @@ public sealed class ConformanceFactAttribute : FactAttribute
                 return PlatformEndpoint.AuthSigningKeySkipReason;
             if (RequiresFixpListener && !PlatformEndpoint.IsFixpListenerConfigured())
                 return PlatformEndpoint.FixpListenerSkipReason;
+            if (RequiresFixpMtls && !PlatformEndpoint.IsFixpMtlsConfigured())
+                return PlatformEndpoint.FixpMtlsSkipReason;
             return null;
         }
         set => base.Skip = value;

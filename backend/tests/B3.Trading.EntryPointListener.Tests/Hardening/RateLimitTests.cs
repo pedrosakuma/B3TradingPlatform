@@ -72,6 +72,46 @@ public class RateLimitTests
         Assert.True(registry.TryAcquireForCredential(credId, clock));
         Assert.False(registry.TryAcquireForCredential(credId, clock));
     }
+
+    [Fact]
+    public void AcceptLimiter_DisabledWhenRateZero_AdmitsEverything()
+    {
+        var limiter = new AcceptConnectionRateLimiter(0, 30);
+        var clock = new FakeTimeProvider(DateTimeOffset.UtcNow);
+        Assert.True(limiter.Disabled);
+        for (int i = 0; i < 1000; i++)
+            Assert.True(limiter.TryAccept(System.Net.IPAddress.Loopback, clock));
+    }
+
+    [Fact]
+    public void AcceptLimiter_RejectsBurstThenRefillsPerSecond()
+    {
+        var clock = new FakeTimeProvider(DateTimeOffset.UtcNow);
+        var limiter = new AcceptConnectionRateLimiter(connectionsPerSecondPerIp: 2, burstPerIp: 3);
+        var ip = System.Net.IPAddress.Loopback;
+
+        for (int i = 0; i < 3; i++)
+            Assert.True(limiter.TryAccept(ip, clock));
+        Assert.False(limiter.TryAccept(ip, clock));
+
+        clock.Advance(TimeSpan.FromSeconds(1)); // +2 tokens
+        Assert.True(limiter.TryAccept(ip, clock));
+        Assert.True(limiter.TryAccept(ip, clock));
+        Assert.False(limiter.TryAccept(ip, clock));
+    }
+
+    [Fact]
+    public void AcceptLimiter_PerIpIsolation()
+    {
+        var clock = new FakeTimeProvider(DateTimeOffset.UtcNow);
+        var limiter = new AcceptConnectionRateLimiter(connectionsPerSecondPerIp: 1, burstPerIp: 1);
+        var a = System.Net.IPAddress.Parse("10.0.0.1");
+        var b = System.Net.IPAddress.Parse("10.0.0.2");
+
+        Assert.True(limiter.TryAccept(a, clock));
+        Assert.False(limiter.TryAccept(a, clock));
+        Assert.True(limiter.TryAccept(b, clock)); // independent bucket
+    }
 }
 
 internal sealed class FakeTimeProvider : TimeProvider
