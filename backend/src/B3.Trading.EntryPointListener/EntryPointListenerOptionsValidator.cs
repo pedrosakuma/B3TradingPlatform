@@ -39,6 +39,17 @@ public sealed class EntryPointListenerOptionsValidator : IValidateOptions<EntryP
         if (options.MaxSessionsPerUser <= 0)
             failures.Add("Trading:EntryPointListener:MaxSessionsPerUser must be > 0.");
 
+        // #529 public-hardening: caps + IP filter + handshake timeout
+        if (options.ConnectionCaps.MaxConcurrentTotal < 0)
+            failures.Add("Trading:EntryPointListener:ConnectionCaps:MaxConcurrentTotal must be >= 0.");
+        if (options.ConnectionCaps.MaxConcurrentPerIp < 0)
+            failures.Add("Trading:EntryPointListener:ConnectionCaps:MaxConcurrentPerIp must be >= 0.");
+        if (options.Tls.HandshakeTimeout <= TimeSpan.Zero)
+            failures.Add("Trading:EntryPointListener:Tls:HandshakeTimeout must be > 0.");
+        foreach (var ip in options.ConnectionCaps.AllowedIps.Concat(options.ConnectionCaps.DeniedIps))
+            if (!System.Net.IPAddress.TryParse(ip, out _))
+                failures.Add($"Trading:EntryPointListener:ConnectionCaps allow/deny entry '{ip}' is not a valid IP.");
+
         // TCP tunables (RFC §5.9 / P11)
         if (options.Tcp.SendBufferBytes <= 0)
             failures.Add("Trading:EntryPointListener:Tcp:SendBufferBytes must be > 0.");

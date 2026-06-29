@@ -102,6 +102,14 @@ public sealed class EntryPointListenerOptions
     /// </summary>
     public AcceptRateLimitOptions AcceptRateLimit { get; set; } = new();
 
+    /// <summary>
+    /// Public-grade abuse hardening (#529): pre-auth concurrent-connection
+    /// caps + optional source-IP allow/deny. Opt-in; defaults are
+    /// permissive (0 = unlimited, empty = no filter) so UAT behaviour is
+    /// unchanged. Tighten via env for hostile-internet exposure.
+    /// </summary>
+    public ConnectionCapsOptions ConnectionCaps { get; set; } = new();
+
     /// <summary>Outbound buffer sizing options.</summary>
     public BuffersOptions Buffers { get; set; } = new();
 
@@ -166,6 +174,13 @@ public sealed class EntryPointListenerOptions
 
         /// <summary>True when client-certificate (mTLS) enforcement is active.</summary>
         public bool MtlsEnabled => ClientCertificateMode != ClientCertificateMode.None;
+
+        /// <summary>
+        /// Public-hardening (#529). Maximum time the TLS handshake may take
+        /// before the socket is dropped — bounds slow-loris handshake
+        /// exhaustion. Default 5 s. Must be &gt; <see cref="TimeSpan.Zero"/>.
+        /// </summary>
+        public TimeSpan HandshakeTimeout { get; set; } = TimeSpan.FromSeconds(5);
     }
 
     /// <summary>
@@ -219,6 +234,39 @@ public sealed class EntryPointListenerOptions
 
         /// <summary>Token-bucket burst capacity per source IP. Default 30.</summary>
         public int BurstPerIp { get; set; } = 30;
+    }
+
+    /// <summary>
+    /// #529 public-grade abuse hardening. Pre-auth concurrent-connection
+    /// caps and source-IP access control evaluated in the accept loop
+    /// before any TLS/Negotiate bytes. All defaults are permissive so UAT
+    /// posture is unchanged; tighten via env for public exposure.
+    /// </summary>
+    public sealed class ConnectionCapsOptions
+    {
+        /// <summary>
+        /// Maximum live connections across all peers. 0 = unlimited.
+        /// New accepts beyond the cap are closed immediately. Default 0.
+        /// </summary>
+        public int MaxConcurrentTotal { get; set; }
+
+        /// <summary>
+        /// Maximum live connections per source IP. 0 = unlimited. Caps
+        /// pre-Negotiate slow-loris fan-out from a single host. Default 0.
+        /// </summary>
+        public int MaxConcurrentPerIp { get; set; }
+
+        /// <summary>
+        /// If non-empty, only these source IPs may connect (allow-list
+        /// wins; every other IP is rejected). Exact-match IPv4/IPv6.
+        /// </summary>
+        public IList<string> AllowedIps { get; set; } = new List<string>();
+
+        /// <summary>
+        /// Source IPs rejected before handshake. Ignored for an IP that is
+        /// also in <see cref="AllowedIps"/> (allow-list takes precedence).
+        /// </summary>
+        public IList<string> DeniedIps { get; set; } = new List<string>();
     }
 
     /// <summary>Token-bucket rate limiting for Negotiate requests.</summary>

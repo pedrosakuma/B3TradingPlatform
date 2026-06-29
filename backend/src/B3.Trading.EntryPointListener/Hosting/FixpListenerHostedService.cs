@@ -43,6 +43,7 @@ public sealed class FixpListenerHostedService : BackgroundService
     private TcpListener? _listener;
     private X509Certificate2? _tlsCert;
     private readonly AcceptConnectionRateLimiter _acceptLimiter;
+    private readonly ConnectionGate _connectionGate;
 
     public FixpListenerHostedService(
         IOptions<EntryPointListenerOptions> opts,
@@ -95,6 +96,7 @@ public sealed class FixpListenerHostedService : BackgroundService
         _acceptLimiter = new AcceptConnectionRateLimiter(
             _opts.AcceptRateLimit.ConnectionsPerSecondPerIp,
             _opts.AcceptRateLimit.BurstPerIp);
+        _connectionGate = new ConnectionGate(_opts.ConnectionCaps);
     }
 
     /// <summary>
@@ -189,7 +191,31 @@ public sealed class FixpListenerHostedService : BackgroundService
                     continue;
                 }
 
-                _ = Task.Run(() => HandleAcceptedClientAsync(client, stoppingToken), stoppingToken);
+                var sourceIp = (client.Client.RemoteEndPoint as IPEndPoint)?.Address;
+                if (sourceIp is not null && _connectionGate.IsBlocked(sourceIp))
+                {
+                    FixpListenerMetrics.ConnectionsRejected.Add(
+                        1, new KeyValuePair<string, object?>("reason", "ip_blocked"));
+                    _logger.LogWarning("fixp.accept.ip_blocked remote={Remote}", SafeRemote(client));
+                    try { client.Dispose(); } catch { /* best effort */ }
+                    continue;
+                }
+
+                IDisposable? capLease = null;
+                if (sourceIp is not null && !_connectionGate.TryAcquire(sourceIp, out capLease))
+                {
+                    FixpListenerMetrics.ConnectionsRejected.Add(
+                        1, new KeyValuePair<string, object?>("reason", "max_connections"));
+                    _logger.LogWarning("fixp.accept.max_connections remote={Remote}", SafeRemote(client));
+                    try { client.Dispose(); } catch { /* best effort */ }
+                    continue;
+                }
+
+                // Don't pass stoppingToken to Task.Run: on shutdown it could
+                // skip the delegate entirely, leaking the cap lease + socket.
+                // The handler always runs and releases the lease in finally;
+                // the token still flows into the connection for cancellation.
+                _ = Task.Run(() => HandleAcceptedClientAsync(client, capLease, stoppingToken));
             }
         }
         finally
@@ -199,7 +225,19 @@ public sealed class FixpListenerHostedService : BackgroundService
         }
     }
 
-    private async Task HandleAcceptedClientAsync(TcpClient client, CancellationToken ct)
+    private async Task HandleAcceptedClientAsync(TcpClient client, IDisposable? capLease, CancellationToken ct)
+    {
+        try
+        {
+            await HandleAcceptedClientCoreAsync(client, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            capLease?.Dispose();
+        }
+    }
+
+    private async Task HandleAcceptedClientCoreAsync(TcpClient client, CancellationToken ct)
     {
         Stream stream;
         X509Certificate2? clientCert = null;
@@ -218,7 +256,7 @@ public sealed class FixpListenerHostedService : BackgroundService
                 try
                 {
                     using var handshakeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                    handshakeCts.CancelAfter(TimeSpan.FromSeconds(5));
+                    handshakeCts.CancelAfter(_opts.Tls.HandshakeTimeout);
 
                     var authOptions = new SslServerAuthenticationOptions
                     {
