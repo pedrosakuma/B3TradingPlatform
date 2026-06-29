@@ -112,6 +112,11 @@ Token-bucket rate limiting protects the Negotiate endpoint:
 | `RateLimit:NegotiatesPerMinutePerUsername` | 10 | Per credential (post-auth) |
 | `AcceptRateLimit:ConnectionsPerSecondPerIp` | 0 | Opt-in accept-loop connection rate limit; `0` disables it |
 | `AcceptRateLimit:BurstPerIp` | 30 | Burst size for the accept-loop limiter |
+| `ConnectionCaps:MaxConcurrentTotal` | 0 | Max live connections across all peers; `0` = unlimited |
+| `ConnectionCaps:MaxConcurrentPerIp` | 0 | Max live connections per source IP; `0` = unlimited |
+| `ConnectionCaps:AllowedIps:N` | (empty) | If set, only these source IPs may connect (allow-list wins) |
+| `ConnectionCaps:DeniedIps:N` | (empty) | Source IPs rejected before handshake |
+| `Tls:HandshakeTimeout` | 00:00:05 | Drop a socket whose TLS handshake exceeds this (slow-loris guard) |
 
 ### Tuning
 
@@ -121,6 +126,11 @@ Token-bucket rate limiting protects the Negotiate endpoint:
 - The accept-loop limiter is disabled by default. For public exposure, prefer
   upstream LB / WAF / firewall connection-rate controls and tune the in-process
   limiter only as an additional guard.
+- **Public exposure (#529):** set `ConnectionCaps:MaxConcurrentTotal` and
+  `MaxConcurrentPerIp` to bound pre-auth socket fan-out (slow-loris), shorten
+  `Tls:HandshakeTimeout`, and optionally pin `ConnectionCaps:AllowedIps` /
+  `DeniedIps`. Each reject path increments `fixp.connections.rejected.total`
+  with `reason=ip_blocked|max_connections|accept_rate_limit|tls|mtls`.
 
 ## Max Sessions Per User
 
