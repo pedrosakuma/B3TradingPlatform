@@ -156,7 +156,13 @@ All instruments use the `B3.Trading` meter (subscribe with OTel or Prometheus).
 | `entrypoint_listener.er_outbound_dropped_total` | Counter | — | Overflow drops |
 | `entrypoint_listener.retransmit_requests_total` | Counter | `outcome` | Retransmit outcomes |
 | `fixp.handshake.tls.completed.total` | Counter | — | TLS handshakes |
+| `fixp.handshake.tls.duration_ms` | Histogram | `outcome` (ok/tls/mtls) | TLS handshake latency, recorded for success + failure |
 | `fixp.connections.rejected.total` | Counter | `reason` | Rejected connections |
+| `entrypoint_listener.mtls_client_certs_total` | Counter | `outcome` | Client-cert validation outcomes |
+
+For public-internet exposure, copy the alert rules and Grafana dashboard
+in [`docs/ops/public-auth-alerts.md`](../ops/public-auth-alerts.md) /
+`docker/observability/grafana/dashboards/public-auth.json`.
 
 ### Prometheus query examples
 

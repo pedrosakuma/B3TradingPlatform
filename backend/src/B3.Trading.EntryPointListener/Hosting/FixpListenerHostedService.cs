@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Diagnostics;
 using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using B3.Trading.Application;
@@ -252,6 +253,7 @@ public sealed class FixpListenerHostedService : BackgroundService
                 // emit the right metric/log and reject reason after the
                 // handshake completes or throws (RFC §6).
                 var mtlsOutcome = Mtls.ClientCertificateValidator.Outcome.Absent;
+                var handshakeStart = Stopwatch.GetTimestamp();
 
                 try
                 {
@@ -291,6 +293,10 @@ public sealed class FixpListenerHostedService : BackgroundService
                     await sslStream.AuthenticateAsServerAsync(authOptions, handshakeCts.Token)
                         .ConfigureAwait(false);
 
+                    var handshakeOutcome = mtlsMode != ClientCertificateMode.None ? "mtls" : "ok";
+                    FixpListenerMetrics.TlsHandshakeDurationMs.Record(
+                        Stopwatch.GetElapsedTime(handshakeStart).TotalMilliseconds,
+                        new KeyValuePair<string, object?>("outcome", "ok"));
                     FixpListenerMetrics.TlsHandshakeCompleted.Add(1);
                     _logger.LogInformation("fixp.tls.handshake.completed remote={Remote}", SafeRemote(client));
 
@@ -305,6 +311,10 @@ public sealed class FixpListenerHostedService : BackgroundService
                 }
                 catch (Exception ex)
                 {
+                    var failOutcome = mtlsOutcome.IsAdmitted() ? "tls" : "mtls";
+                    FixpListenerMetrics.TlsHandshakeDurationMs.Record(
+                        Stopwatch.GetElapsedTime(handshakeStart).TotalMilliseconds,
+                        new KeyValuePair<string, object?>("outcome", failOutcome));
                     // Distinguish an mTLS policy rejection (cert absent /
                     // untrusted / denied / bad EKU) from a generic TLS failure
                     // so the reason tag and log are actionable.
