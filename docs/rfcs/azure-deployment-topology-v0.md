@@ -240,6 +240,14 @@ to fix.
 So "StatefulSets are non-scalable" is **correct and not a problem for the core** —
 the resilience question there is **fast failover, not redundancy**.
 
+> ⚠️ **Caveat — this only holds *once §11.6 is addressed*.** Today the
+> trading-host's public edge is **not** a separable stateless tier: it is welded
+> into the same process as the single-writer WAL, so it inherits the core's
+> single-instance constraint. The horizontal-scale claim above is **aspirational
+> for the trading-host edge pending the process split in §11.6**; it holds today
+> only for the `marketdata` WS fan-out and the frontend, which are already
+> separate deployables.
+
 ### 11.5 Honest gaps (degraded-mode, not HA)
 
 - **matching-platform active-passive HA is unshipped** (#309 / Q4.9; runbook §4 is
@@ -258,6 +266,60 @@ the resilience question there is **fast failover, not redundancy**.
 §6); availability resilience is partial — good for a public bot-arena, gated on
 #309 for true HA of the execution core, with the **marketdata UDP consumer** as
 the weakest MD-side link.
+
+### 11.6 Biggest structural risk — the single-process monolith
+
+The largest offender to the scaling/resilience model above is **how the
+trading-host process is assembled**, not any single transport. `Program.cs`
+(`B3.Trading.Host`) builds **one OS process / one deployable** (`b3-trading-host`)
+that co-hosts, on the same heap and thread pool:
+
+- `AddEntryPointListener` — the **public, untrusted FIXP/SBE listener** (mTLS
+  edge, exposed to hostile input / DoS);
+- `MapTradingEndpoints` — the **public REST/WS API + execution fan-out +
+  `/ws/dropcopy`** (Kestrel);
+- `AddTradingPersistence` (**single-writer WAL**) + `AddTradingRisk` +
+  `AddTradingExchangeGateway` — the **stateful core / money-path**;
+- plus the MD ref-price consumer, auth (password hashing), and the rate limiter.
+
+**Why it is the load-bearing risk:**
+
+1. **The WAL single-writer contaminates the naturally-stateless edge.** A second
+   trading-host replica would be a second WAL writer — forbidden (§8). So the
+   legitimate single-writer constraint of the core **forces the public FIXP
+   listener and the WS/REST fan-out to be single-instance per firm too**. This is
+   *why* §11.4's horizontal-scale story does not hold for the trading-host edge
+   today.
+2. **Shared failure domain.** The untrusted public edge shares a process with the
+   money-path. A crash / OOM / unbounded GC pause / thread-pool starvation / bug
+   or DoS in the listener takes down order processing, risk, WAL, and drop-copy
+   for that firm.
+3. **Resource contention, no isolation.** Bot TLS handshakes, password hashing,
+   REST/JSON, WS fan-out, and the latency-sensitive order/risk/WAL path share one
+   thread pool and GC heap; an edge burst injects latency/GC pressure into
+   execution.
+
+**Mitigating factors.** The seams already exist as **separate projects**
+(`EntryPointListener`, `Api`, `Application`+WAL) with a clean layering
+contract (WAL = source of truth, `Application` = single-writer — `AGENTS.md`).
+So this is a **process-boundary + internal-transport** change, not a rewrite. For
+current sandbox scale a single process is also simpler, and the core is
+single-instance regardless — so the win from splitting is **fault isolation of
+the untrusted edge from the money-path** and **unblocking horizontal fan-out**,
+**not** raw throughput.
+
+**Direction (own RFC — see Q5).** Carve along the existing seams:
+
+- **Edge tier** (stateless, horizontal, untrusted): session-terminating FIXP
+  listener + public WS/REST read + fan-out. N replicas behind the L4 LB; forwards
+  order *intents* to the core.
+- **Core tier** (stateful, single-writer, active-passive): `Application` + WAL +
+  risk + exchange gateway. One writer per firm.
+
+The wrinkle: the `listener → Application` call is **in-process** today; splitting
+needs an internal RPC/queue between edge and core and a decision on whether
+pre-trade risk runs at the edge (fast reject) or only in the core (authoritative)
+— non-trivial, hence a dedicated RFC rather than a line item here.
 
 ## 12. Decisions summary
 
@@ -285,3 +347,10 @@ the weakest MD-side link.
   (rejected in the edge RFC)? Probe before committing.
 - **Q4** WAL durability under node eviction — Premium Disk reattach time vs a
   brief accept-closed window; measure against `OutboundDrainShutdownTimeout`.
+- **Q5** **Trading-host process decomposition** (§11.6) — split the untrusted
+  public edge (FIXP listener + WS/REST fan-out) from the stateful single-writer
+  core into separate deployables. Needs a dedicated RFC: internal edge↔core
+  transport (RPC vs queue), where pre-trade risk runs (edge fast-reject vs
+  core-authoritative), and back-pressure/ordering across the boundary. Highest-
+  leverage item for making §11.4's horizontal-scale story real and isolating the
+  hostile-input edge from the money-path.
