@@ -233,9 +233,36 @@ to fix.
 - **Stateful core** (matching, trading-host, marketdata UDP consumer) → scale
   **vertically** (bigger node), resilience via **active-passive failover**, never
   active-active. Single-instance throughput is the ceiling; past it the lever is
-  vertical sizing or **sharding by instrument/firm**, not StatefulSet replicas.
+  vertical sizing or **sharding by partition key** (see below), not StatefulSet
+  replicas.
 - **Stateless edges** (the `marketdata` WS fan-out, REST/WS read paths, frontend)
   → scale **horizontally** (Deployments + HPA). This is where public load lands.
+
+**Not all "single-writer" cores are equally un-scalable — the partition scope
+differs.** The single-writer constraint is about the *scope* over which ordering
+must be total, and that scope is different per tier:
+
+- **matching-platform** — its sequencing authority is **global per instrument**:
+  one order book, one sequencer, across **all** participants. There is no finer
+  partition key below the instrument, so a firm's flow cannot be split off. This
+  tier genuinely **does not scale out** below instrument granularity — a *given*,
+  accepted constraint.
+- **trading-host** — its invariants are **per-`EndClientId`** (grouped per firm):
+  the ClOrdID monotonic watermark, and the stateful/order-sensitive pre-trade
+  risk (`RollingNotional` sliding window, margin reservations, cash, self-trade
+  prevention) are all keyed by end-client (`WalEvents.cs`,
+  `Risk/Accounting/`, `Risk/ReserveOnSubmitMarginProvider.cs`). So single-writer
+  here is **correctness, not just durability** — but its natural **partition key
+  is the firm / end-client**. The host therefore **does scale horizontally by
+  sharding on firm** (already the model: the `Firms[]` config, "one host per
+  firm" — `runbook-failover-recovery.md` §4). You may not run two writers for the
+  *same* firm's accounts, but you may run N firm-shards, each single-writer only
+  over its own accounts.
+
+So the core's horizontal-scale lever is the **partition key**, not the replica
+count: matching is pinned at instrument granularity; trading-host shards by firm.
+Per-shard availability is still a **fast-failover** question (WAL replay, or
+#309-style active-passive if a shard needs hot standby), not a redundancy one.
 
 So "StatefulSets are non-scalable" is **correct and not a problem for the core** —
 the resilience question there is **fast failover, not redundancy**.
