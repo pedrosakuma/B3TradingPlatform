@@ -165,7 +165,101 @@ Keep the health endpoint **internal**; expose only a TCP liveness to the L4 LB
 (`user-bot-fixp-edge-topology-v0` §7), and drive drain alerting off
 `entrypoint_listener.enabled` + `sessions_active`.
 
-## 11. Decisions summary
+## 11. Resilience posture & scaling model
+
+This section states honestly what the topology buys us. The short version:
+**strong recovery resilience, partial availability (HA) resilience** — the
+single points of failure fail *closed/degraded*, not catastrophically, and
+recover from durable state. Appropriate for a public *simulation* sandbox; not
+zero-downtime HA.
+
+### 11.1 Two independent fan-outs (do not conflate them)
+
+Market data and execution are **separate fan-outs in separate services** — they
+scale and fail in **different domains**:
+
+- **Market-data fan-out = the `marketdata` service** itself (WebSocket `:8080/ws`,
+  binary protocol v2). Public clients / the frontend consume it **directly**
+  (`frontend/js/app.js` "FE consumes B3MarketDataPlatform directly via mdWorker";
+  `frontend/js/mdProtocol.js`). The trading-host does **not** re-broadcast MD.
+- **Execution fan-out = the trading-host** (`B3.Trading.Api` WS/REST): order
+  updates, execution reports, positions, `/ws/dropcopy`. It is **per-client /
+  per-firm**, bound to the WAL/session — **not a broadcast**.
+- The trading-host only **consumes** the MD WS as a *thin ref-price client* for
+  the risk layer (`Trading__MarketData__WsUrl`, `docker-compose.yml`). One
+  subscription, not a fan-out. If it drops, risk degrades (§1.8 *Degraded*) —
+  **independently** of what public clients see, because they are on `marketdata`
+  directly.
+
+Consequence: the descoped conflated-MD-tier concern (#536) lives **upstream in
+`marketdata`**, not in the trading-host; there is no MD consume+fan-out to
+"split apart" on our side.
+
+### 11.2 Three single-writer cores, three separate failure domains
+
+| Core (single-writer) | Domain | On loss | Recovery | Blast radius |
+|----------------------|--------|---------|----------|--------------|
+| **matching-platform** (+ its WAL) | execution / sequencing | order accept pauses, `502`, `readyForOrders=false` (§1.7, fail-closed) | pod restart + WAL/snapshot replay; client re-Negotiate (`ReconcileFirmSessionVerIds` #420) | halts trading; MD to public clients unaffected |
+| **trading-host WAL** | our positions / working orders / ClOrdId watermark | that firm's host down | warm restart snapshot+WAL replay; FIXP reconnect state machine (§11.3) | one host/firm; other firms unaffected |
+| **marketdata UDP consumer** | market data | MD *Degraded*, ref-price stale (§1.8) | restart + SnapshotRecovery; matching re-resolves target IP | public MD gap; **execution unaffected** |
+
+They are single-writer **by domain design**, not by StatefulSet limitation (§11.4).
+
+### 11.3 Recovery resilience we actually have
+
+- **Crash-consistent WAL** on trading-host + matching (source of truth). Cold
+  start, warm restart snapshot+WAL replay, snapshot-only, WAL repair
+  (`runbook-failover-recovery.md` §2). Premium Disk reattach preserves it across
+  an AKS reschedule.
+- **Graded FIXP reconnect state machine** (runbook §1.12): within
+  `SuspendedTimeoutMs` → `Reattached` (auto `RetransmitRequest` replay + idempotent
+  ER dedup, no operator action); beyond → `Renegotiated` (reap `PendingNew`, flag
+  stale survivors #380/#515). Directly resists the disconnect churn a cloud env
+  produces.
+- **Fail-closed on dependency loss** (§1.7): matching down ⇒ `502`,
+  `readyForOrders=false`. No silent bad trades.
+- **Graceful drain** (§3, `OutboundDrainShutdownTimeout`) + health/liveness ⇒
+  clean rolling updates on AKS.
+- **AKS platform layer** adds what compose never had: pod reschedule, node
+  self-heal, PVC reattach, multi-AZ node pools.
+
+### 11.4 Scaling model — stateful vertical, stateless horizontal
+
+StatefulSets *can* run N replicas; what pins the core to **one active writer** is
+the single-writer WAL / sequencing authority — running N active writers would
+**break ordering/truth invariants** (§8). This is intentional, not a limitation
+to fix.
+
+- **Stateful core** (matching, trading-host, marketdata UDP consumer) → scale
+  **vertically** (bigger node), resilience via **active-passive failover**, never
+  active-active. Single-instance throughput is the ceiling; past it the lever is
+  vertical sizing or **sharding by instrument/firm**, not StatefulSet replicas.
+- **Stateless edges** (the `marketdata` WS fan-out, REST/WS read paths, frontend)
+  → scale **horizontally** (Deployments + HPA). This is where public load lands.
+
+So "StatefulSets are non-scalable" is **correct and not a problem for the core** —
+the resilience question there is **fast failover, not redundancy**.
+
+### 11.5 Honest gaps (degraded-mode, not HA)
+
+- **matching-platform active-passive HA is unshipped** (#309 / Q4.9; runbook §4 is
+  *intended* behaviour only). Until it lands, matching is a **SPOF** with a
+  failover *window* (disk reattach + re-Negotiate), not single-digit-second hot
+  failover.
+- **The UDP MD leg has no hot standby.** Unicast + single consumer (Decision U1)
+  ⇒ MD availability = **MTTR of one pod**; multicast would have allowed a warm
+  second consumer, unicast does not. Co-locating the UDP pair in one AZ (for
+  latency) makes **that AZ a failure domain** for MD.
+- **matching session state (SessionVerId/seq) is in-memory** ⇒ every failover
+  forces client re-Negotiate + stales working orders (handled, but disruptive).
+- **Single AKS cluster; no multi-region / DR** (explicit non-goal §4).
+
+**Net:** recovery resilience is strong and CI-exercised (chaos drills, runbook
+§6); availability resilience is partial — good for a public bot-arena, gated on
+#309 for true HA of the execution core, with the **marketdata UDP consumer** as
+the weakest MD-side link.
+
+## 12. Decisions summary
 
 - **U1** UMDF runs **unicast UDP** (no multicast on Azure); one marketdata
   instance per emitter, stable private endpoint, co-located with matching, no LB
@@ -179,7 +273,7 @@ Keep the health endpoint **internal**; expose only a TCP liveness to the L4 LB
 - Secrets: Key Vault + CSI; hot-reload deny-list. Registry: ACR, digest-pinned.
 - Observability: Managed Prometheus + Grafana; internal health, TCP liveness.
 
-## 12. Open questions
+## 13. Open questions
 
 - **Q1** AKS single cluster vs matching/marketdata in a separate "venue" node
   pool (blast-radius + UDP locality) vs entirely separate cluster.
