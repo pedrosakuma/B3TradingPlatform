@@ -1,9 +1,19 @@
 # RFC: azure-deployment-topology-v0 — cloud deployment topology & transport mapping
 
-> Status: **Draft** · Tracking: [#557](https://github.com/pedrosakuma/B3TradingPlatform/issues/557)
+> Status: **Accepted** (2026-07-03) · Tracking: [#557](https://github.com/pedrosakuma/B3TradingPlatform/issues/557)
 > · Epic: go-public (#527, closed) follow-up
 > · Interacts with `user-bot-fixp-edge-topology-v0`, `user-bot-fixp-mtls-v0`,
 > `integration-real-stack-v0`, `docker-compose.public.yml` (#531).
+>
+> **Acceptance note.** Land on **AKS** (C1) as the target; ship the trading-host
+> monolith as a single StatefulSet now and treat the edge/core process split
+> (§11.6, Q5) as a **deferred, AKS-enabled, additive** change (topology unchanged).
+> Immediate low-cost resilience win: **ZRS** disk for the single-writer WAL where
+> the SKU/region supports it; the addressable SPOF is the failover *window*
+> (#309), not the single-writer invariant itself. IaC realization is cross-family
+> and lands in a dedicated **private** deploy repo (artifact-based composition:
+> `image@digest` + OCI `chart@version`, no submodules); component-required charts/
+> overlays stay in each component repo.
 
 ## 1. Context
 
