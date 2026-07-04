@@ -138,6 +138,7 @@ public static class TradingExchangeGatewayServiceCollectionExtensions
                     var investorIdResolver = sp.GetService<IInvestorIdResolver>();
                     var routingInstructionResolver = sp.GetService<IRoutingInstructionResolver>();
                     var connectRollReactor = sp.GetService<IConnectSessionRollReactor>();
+                    var gatewayLogger = lf.CreateLogger("FirmGatewayConnector");
                     return new B3EntryPointClientGateway(upstream, firm.FirmId, resumeVerId, gwLogger,
                         venueDisconnectReactor: reactor,
                         riskOptions: riskOpts,
@@ -150,7 +151,30 @@ public static class TradingExchangeGatewayServiceCollectionExtensions
                         // options instance the client mutates on a cold-resume
                         // fallback bump, and reap PendingNew if it advanced.
                         effectiveSessionVerIdProvider: () => clientOpts.SessionVerId,
-                        connectSessionRollReactor: connectRollReactor);
+                        connectSessionRollReactor: connectRollReactor,
+                        // #565. The SDK dials whatever IPEndPoint sits on
+                        // `clientOpts.Endpoint` and never re-resolves it
+                        // itself. Re-resolve the configured host:port fresh
+                        // before every reconnect attempt and mutate the SAME
+                        // options instance the client holds, so a matching
+                        // pod IP change (Kubernetes failover/reschedule) is
+                        // picked up without a trading-host restart. Keep the
+                        // last-known-good endpoint on transient resolution
+                        // failure (e.g. a brief CoreDNS blip) rather than
+                        // throwing out of the reconnect loop.
+                        reResolveEndpoint: () =>
+                        {
+                            try
+                            {
+                                clientOpts.Endpoint = FirmConfigValidation.ParseEndpoint(firm.Endpoint);
+                            }
+                            catch (Exception ex)
+                            {
+                                gatewayLogger.LogWarning(ex,
+                                    "DNS re-resolve of endpoint '{Endpoint}' failed for firm {Firm}; reusing last-known address {LastKnown}.",
+                                    firm.Endpoint, firm.FirmId, clientOpts.Endpoint);
+                            }
+                        });
                 });
                 return new FirmGatewayRegistry(gateways);
             });
