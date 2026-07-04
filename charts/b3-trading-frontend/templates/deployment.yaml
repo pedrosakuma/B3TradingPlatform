@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "b3-trading-frontend.fullname" . }}
+  labels:
+    {{- include "b3-trading-frontend.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "b3-trading-frontend.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "b3-trading-frontend.labels" . | nindent 8 }}
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: frontend
+          image: {{ include "b3-trading-frontend.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            # nginx re-resolves the upstream through this resolver on every
+            # request (see nginx.conf.template's `resolver` directive) —
+            # point it at your cluster DNS ClusterIP.
+            - name: NGINX_RESOLVER
+              value: {{ .Values.nginx.resolver | quote }}
+            # The trading-host upstream as "host:port". MUST be an FQDN on
+            # Kubernetes (B3TradingPlatform#564) — nginx's `resolver`
+            # doesn't apply search-domain suffixing.
+            - name: TRADING_UPSTREAM
+              value: {{ .Values.nginx.tradingUpstream | quote }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: 80
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: 80
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
