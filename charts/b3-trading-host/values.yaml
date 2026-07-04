@@ -1,0 +1,169 @@
+# Default values for b3-trading-host.
+# Mirrors the authoritative live-on-AKS manifests from b3deploy@3b4c1d9
+# (envs/prod/trading-host.yaml + secret-provider.yaml), parameterized so a
+# single chart serves every environment. See #568.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/pedrosakuma/b3-trading-host
+  # Defaults to .Chart.AppVersion when empty.
+  tag: ""
+  # Optional digest pin (e.g. "sha256:f80b81883cc6ad6b3c42fe81682afab1088e972cd069995ce753c450da417ec5").
+  # When set, the image reference becomes "repository@digest" and `tag` is ignored,
+  # matching the pinning convention b3deploy already uses in prod.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# StatefulSet is intentionally hardcoded to 1 replica in templates/statefulset.yaml
+# — the WAL is single-writer (RFC integration-real-stack-v0, #309). HA is
+# disk-reattach on failover, NOT horizontal scale. This value exists only so
+# operators can't accidentally scale it via `helm upgrade --set replicaCount=N`
+# without editing the chart.
+replicaCount: 1
+
+# The image runs as non-root uid/gid 10001 (b3trading). The mounted Premium
+# Disk PVC roots as root:root, so fsGroup is REQUIRED (M6 finding, #568) —
+# without it the app crash-loops with "Access to '/var/lib/b3trading/dp-keys'
+# is denied" (ASP.NET Core Data Protection key ring).
+securityContext:
+  fsGroup: 10001
+
+service:
+  port: 5000
+
+persistence:
+  storageClassName: managed-csi-premium
+  size: 4Gi
+
+resources:
+  requests:
+    cpu: 150m
+    memory: 768Mi
+  limits:
+    memory: 1536Mi
+
+probes:
+  readiness:
+    path: /health
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    failureThreshold: 12
+  liveness:
+    path: /health
+    initialDelaySeconds: 30
+    periodSeconds: 20
+
+# ASPNETCORE_ENVIRONMENT. "Docker" matches the appsettings.Docker.json
+# overlay shipped in the image; leave as-is unless you know you need a
+# different appsettings.*.json layer.
+aspnetcoreEnvironment: Docker
+
+# Trading:Exchange:Mode. Real wires the upstream FIXP EntryPointClient per
+# firm; Unavailable is the honest no-broker fail-closed posture (no matching
+# configured yet). See ExchangeOptions.cs / TradingExchangeGatewayServiceCollectionExtensions.
+mode: Real
+
+# Azure Key Vault CSI Secrets Store wiring (SecretProviderClass). Required
+# whenever mode != Stub — the app boot-guards on these being present
+# (Auth:SigningKey, seed password hash/salt, Cvm:OwnerHashSalt,
+# DropCopy:ClOrdIdMaskSalt). Never inline secret values in values.yaml
+# (AGENTS.md) — these three fields are infra references, not secrets.
+keyVault:
+  name: ""
+  clientId: ""
+  tenantId: ""
+  # Key Vault object names backing each secret. Override only if your Key
+  # Vault uses different object names than the b3-prod convention.
+  objectNames:
+    signingKey: trading-auth-signing-key
+    seedPasswordHash: trading-seed-password-hash
+    seedPasswordSalt: trading-seed-password-salt
+    cvmOwnerHashSalt: trading-cvm-owner-hash-salt
+    clordidMaskSalt: trading-clordid-mask-salt
+
+# Trading:Auth:Users[]. passwordHash/salt are NEVER set here — they always
+# come from the trading-secrets k8s Secret synced by the SecretProviderClass
+# (shared across all seeded users, matching the b3deploy prod convention of
+# one shared seed password across dogfood accounts).
+auth:
+  users:
+    - username: alice
+      role: user
+      firm: FIRM01
+      iterations: 600000
+    - username: bob
+      role: user
+      firm: FIRM01
+      iterations: 600000
+
+# Trading:Exchange:Firms[]. One entry per FIXP session. `endpoint` is
+# "host:port" — see B3TradingPlatform#565 for why the trading-host reconnect
+# loop now re-resolves this DNS name on every attempt (matching failover).
+# accessKey is dev-shaped by default (matches docker-compose); production
+# should override with Credentials.AccessKeyFile wiring instead (#126) —
+# not yet surfaced as a values knob, follow up if/when a prod deploy needs it.
+exchange:
+  firms:
+    - firmId: FIRM01
+      endpoint: matching-platform:9876
+      sessionId: 10101
+      sessionVerId: 1
+      enteringFirm: 100
+      accessKey: '{"auth_type":"basic","username":"10101","access_key":"dev-key-1"}'
+      senderLocation: SP
+      enteringTrader: ALICE
+
+# Trading:SymbolDirectory. Mirrors matching-platform's instruments-eqt.json —
+# MUST stay in sync with whatever instrument set the paired matching-platform
+# release is running, or the app will reject orders for unknown symbols.
+symbolDirectory:
+  symbols:
+    - symbol: PETR4
+      securityId: "900000000001"
+      lotSize: 100
+      tickSize: "0.01"
+    - symbol: VALE3
+      securityId: "900000000002"
+      lotSize: 100
+      tickSize: "0.01"
+    - symbol: ITUB4
+      securityId: "900000000003"
+      lotSize: 100
+      tickSize: "0.01"
+
+# Trading:Risk:ReferencePrices — fallback/warm-up prices for the price-collar
+# risk check until the live MarketData WS feed populates real references.
+risk:
+  referencePrices:
+    PETR4: "32.50"
+    VALE3: "65.00"
+    ITUB4: "30.00"
+
+# Trading:Positions:Seeds[] — dogfood opening positions. Empty by default;
+# override per-environment (prod seeds alice/bob per b3deploy's convention).
+positionSeeds: []
+
+# Trading:MarketData — live reference-price feed over the marketdata WS leg.
+marketData:
+  wsUrl: ws://marketdata:8080/ws
+  symbols:
+    - PETR4
+    - VALE3
+    - ITUB4
+
+# NetworkPolicy admitting ingress to trading-host:5000 from the frontend only
+# (and matching label-selector references consumed by the companion
+# b3-trading-frontend chart's own egress story — see docs there). Disable if
+# your cluster doesn't enforce NetworkPolicy or you manage it out-of-band.
+networkPolicy:
+  enabled: true
+  frontendPodSelector:
+    app.kubernetes.io/name: trading-frontend
+
+extraEnv: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

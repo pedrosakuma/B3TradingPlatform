@@ -1,0 +1,27 @@
+apiVersion: v2
+name: b3-trading-frontend
+description: >-
+  B3TradingPlatform trading-frontend — the nginx SPA + reverse-proxy public
+  edge. Ships a stateless Deployment behind a Standard L4 LoadBalancer
+  Service (externalTrafficPolicy: Local) and the NetworkPolicy admitting
+  inbound HTTP + egress to trading-host:5000 (companion chart:
+  b3-trading-host).
+type: application
+# Chart version is released in lockstep with the image (see #568 versioning
+# contract): bump this whenever templates/values change, independent of
+# appVersion.
+version: 0.1.0
+# appVersion tracks the validated ghcr.io/pedrosakuma/b3-trading-frontend
+# image tag this chart was last verified against. Overridable per-release via
+# values.image.tag.
+appVersion: "0.1.0"
+home: https://github.com/pedrosakuma/B3TradingPlatform
+sources:
+  - https://github.com/pedrosakuma/B3TradingPlatform
+keywords:
+  - b3
+  - trading
+  - frontend
+  - nginx
+maintainers:
+  - name: pedrosakuma
