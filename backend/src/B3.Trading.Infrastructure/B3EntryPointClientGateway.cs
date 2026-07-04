@@ -117,6 +117,24 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     // snapshot. Null → detection still syncs CurrentSessionVerId but
     // performs no reap.
     private readonly IConnectSessionRollReactor? _connectSessionRollReactor;
+    // #565. The upstream SDK dials whatever `IPEndPoint` is on the
+    // `EntryPointClientOptions` instance it was constructed with — it never
+    // re-resolves the configured hostname itself (see
+    // B3.EntryPoint.Client.EntryPointClient.ReconnectAsync, which reads
+    // `_options.Endpoint.Address` verbatim). On Kubernetes the peer's pod IP
+    // changes across a failover/reschedule, so without re-resolving DNS
+    // before each attempt the reconnect loop keeps dialing a dead IP
+    // forever. The composition root closes over the shared
+    // `EntryPointClientOptions` and the original `host:port` string and
+    // hands us this callback to refresh `Endpoint` in place immediately
+    // before every `ReconnectAsync` attempt. Async + cancellable (rather
+    // than a blocking `Action`) so a slow/hung resolver during exactly the
+    // network incident this feature targets can't starve the thread pool
+    // or ignore shutdown; the composition root uses
+    // `Dns.GetHostAddressesAsync` under a bounded timeout tied to `ct`.
+    // Null → legacy behaviour (matches direct-construction tests and Mock
+    // mode, where there is no DNS to re-resolve).
+    private readonly Func<CancellationToken, Task>? _reResolveEndpoint;
 
     public B3EntryPointClientGateway(
         Up.EntryPointClient client,
@@ -136,7 +154,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         IRoutingInstructionResolver? routingInstructionResolver = null,
         bool terminateOnShutdown = true,
         Func<uint>? effectiveSessionVerIdProvider = null,
-        IConnectSessionRollReactor? connectSessionRollReactor = null)
+        IConnectSessionRollReactor? connectSessionRollReactor = null,
+        Func<CancellationToken, Task>? reResolveEndpoint = null)
     {
         _terminateOnShutdown = terminateOnShutdown;
         _client = client ?? throw new ArgumentNullException(nameof(client));
@@ -156,6 +175,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         _routingInstructionResolver = routingInstructionResolver;
         _effectiveSessionVerIdProvider = effectiveSessionVerIdProvider;
         _connectSessionRollReactor = connectSessionRollReactor;
+        _reResolveEndpoint = reResolveEndpoint;
         _client.Terminated += OnTerminated;
         _client.InboundGapAtReconnect += OnInboundGapAtReconnect;
         MetricsRegistry.RecordSessionVerId(_firmId, _currentSessionVerId);
@@ -985,7 +1005,11 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// <see cref="_currentSessionVerId"/> so reattached cycles do NOT
     /// trigger downstream session-rolled bookkeeping (see PR #420 /
     /// <see cref="SnapshotService"/>). Exponential backoff with jitter
-    /// guards the retry; exits cleanly on shutdown CT. On success the
+    /// guards the retry; exits cleanly on shutdown CT. Immediately before
+    /// each <c>ReconnectAsync</c> attempt, <see cref="_reResolveEndpoint"/>
+    /// (if wired) re-resolves the peer hostname so a matching-side pod IP
+    /// change (Kubernetes failover/reschedule) is picked up without a
+    /// trading-host restart (#565). On success the
     /// inbound event-loop is restarted via <see cref="StartEventLoop"/>
     /// so ER replay (FIXP retransmit) lands on the existing
     /// <c>ExecutionReportReceived</c> subscribers.
@@ -1007,6 +1031,17 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 var priorVerId = Volatile.Read(ref _currentSessionVerId);
                 try
                 {
+                    // #565. Re-resolve the peer hostname immediately before
+                    // dialing so a matching-side pod IP change (Kubernetes
+                    // failover/reschedule) is picked up on THIS attempt
+                    // rather than requiring a trading-host restart. Resolver
+                    // failures/timeouts are swallowed by the callback itself
+                    // (logged there) and fall through to ReconnectAsync with
+                    // the last-known endpoint — the existing backoff/retry
+                    // loop still applies if that's also unreachable.
+                    if (_reResolveEndpoint is not null)
+                        await _reResolveEndpoint(ct).ConfigureAwait(false);
+
                     // Selector is invoked at most once per ReconnectAsync —
                     // only when the SDK falls back to Negotiate after a
                     // recoverable Establish-reject. Reattach path skips it
