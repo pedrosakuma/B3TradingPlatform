@@ -158,17 +158,30 @@ public static class TradingExchangeGatewayServiceCollectionExtensions
                         // before every reconnect attempt and mutate the SAME
                         // options instance the client holds, so a matching
                         // pod IP change (Kubernetes failover/reschedule) is
-                        // picked up without a trading-host restart. Keep the
-                        // last-known-good endpoint on transient resolution
-                        // failure (e.g. a brief CoreDNS blip) rather than
-                        // throwing out of the reconnect loop.
-                        reResolveEndpoint: () =>
+                        // picked up without a trading-host restart. Bounded
+                        // to a short timeout (separate from `ct`, which is
+                        // shutdown-only) so a hung resolver can't stall the
+                        // reconnect loop or starve the thread pool during
+                        // exactly the kind of network incident this targets;
+                        // keep the last-known-good endpoint on timeout/
+                        // resolution failure (e.g. a brief CoreDNS blip)
+                        // rather than throwing out of the reconnect loop.
+                        reResolveEndpoint: async ct =>
                         {
+                            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                            timeoutCts.CancelAfter(TimeSpan.FromSeconds(5));
                             try
                             {
-                                clientOpts.Endpoint = FirmConfigValidation.ParseEndpoint(firm.Endpoint);
+                                clientOpts.Endpoint = await FirmConfigValidation.ParseEndpointAsync(
+                                    firm.Endpoint, timeoutCts.Token).ConfigureAwait(false);
                             }
-                            catch (Exception ex)
+                            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                            {
+                                gatewayLogger.LogWarning(
+                                    "DNS re-resolve of endpoint '{Endpoint}' timed out for firm {Firm}; reusing last-known address {LastKnown}.",
+                                    firm.Endpoint, firm.FirmId, clientOpts.Endpoint);
+                            }
+                            catch (Exception ex) when (ex is not OperationCanceledException)
                             {
                                 gatewayLogger.LogWarning(ex,
                                     "DNS re-resolve of endpoint '{Endpoint}' failed for firm {Firm}; reusing last-known address {LastKnown}.",

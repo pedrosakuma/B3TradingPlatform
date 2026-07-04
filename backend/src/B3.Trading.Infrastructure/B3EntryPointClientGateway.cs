@@ -127,10 +127,14 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     // forever. The composition root closes over the shared
     // `EntryPointClientOptions` and the original `host:port` string and
     // hands us this callback to refresh `Endpoint` in place immediately
-    // before every `ReconnectAsync` attempt. Null → legacy behaviour
-    // (matches direct-construction tests and Mock mode, where there is no
-    // DNS to re-resolve).
-    private readonly Action? _reResolveEndpoint;
+    // before every `ReconnectAsync` attempt. Async + cancellable (rather
+    // than a blocking `Action`) so a slow/hung resolver during exactly the
+    // network incident this feature targets can't starve the thread pool
+    // or ignore shutdown; the composition root uses
+    // `Dns.GetHostAddressesAsync` under a bounded timeout tied to `ct`.
+    // Null → legacy behaviour (matches direct-construction tests and Mock
+    // mode, where there is no DNS to re-resolve).
+    private readonly Func<CancellationToken, Task>? _reResolveEndpoint;
 
     public B3EntryPointClientGateway(
         Up.EntryPointClient client,
@@ -151,7 +155,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         bool terminateOnShutdown = true,
         Func<uint>? effectiveSessionVerIdProvider = null,
         IConnectSessionRollReactor? connectSessionRollReactor = null,
-        Action? reResolveEndpoint = null)
+        Func<CancellationToken, Task>? reResolveEndpoint = null)
     {
         _terminateOnShutdown = terminateOnShutdown;
         _client = client ?? throw new ArgumentNullException(nameof(client));
@@ -1030,12 +1034,13 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                     // #565. Re-resolve the peer hostname immediately before
                     // dialing so a matching-side pod IP change (Kubernetes
                     // failover/reschedule) is picked up on THIS attempt
-                    // rather than requiring a trading-host restart. Swallow
-                    // resolution failures here (logged by the callback) and
-                    // fall through to ReconnectAsync with the last-known
-                    // endpoint — the existing backoff/retry loop still
-                    // applies if that's also unreachable.
-                    _reResolveEndpoint?.Invoke();
+                    // rather than requiring a trading-host restart. Resolver
+                    // failures/timeouts are swallowed by the callback itself
+                    // (logged there) and fall through to ReconnectAsync with
+                    // the last-known endpoint — the existing backoff/retry
+                    // loop still applies if that's also unreachable.
+                    if (_reResolveEndpoint is not null)
+                        await _reResolveEndpoint(ct).ConfigureAwait(false);
 
                     // Selector is invoked at most once per ReconnectAsync —
                     // only when the SDK falls back to Negotiate after a
