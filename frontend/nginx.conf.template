@@ -6,13 +6,21 @@
 # defaultBackend() (= location.origin for non-localhost) just works.
 #
 # Upstream is resolved via the platform's service-discovery DNS name
-# (docker-compose bridge: "trading-host"; Kubernetes: a Service name, same
-# literal by convention). We use a `resolver` so nginx doesn't cache a
-# NXDOMAIN at startup if trading-host isn't up yet.
+# (docker-compose bridge: "trading-host"; Kubernetes: a Service name/FQDN,
+# configurable via TRADING_UPSTREAM). We use a `resolver` so nginx doesn't
+# cache a NXDOMAIN at startup if trading-host isn't up yet.
+#
+# nginx's `resolver` directive does NOT apply /etc/resolv.conf `search`
+# domains the way libc does, so a bare short name (e.g. "trading-host")
+# resolves fine under Docker's embedded DNS but is NXDOMAIN on Kubernetes,
+# where the Service is only reachable at its (partially-)qualified name
+# (e.g. "trading-host.<namespace>.svc.cluster.local"). Deployers set
+# TRADING_UPSTREAM to the FQDN:port in that case. See #564.
 #
 # This file is a template: the entrypoint script
-# (docker-entrypoint.d/40-render-nginx-conf.sh) envsubst's it into
-# /etc/nginx/nginx.conf at container start, substituting ${NGINX_RESOLVER}.
+# (docker-entrypoint.d/25-render-nginx-conf.sh) envsubst's it into
+# /etc/nginx/nginx.conf at container start, substituting ${NGINX_RESOLVER}
+# and ${TRADING_UPSTREAM}.
 # `resolver local=on;` (NGINX Plus only) is NOT available in the open-source
 # nginx this image ships, so the resolver address must come from the
 # environment instead: default 127.0.0.11 (Docker's embedded DNS) for
@@ -112,7 +120,7 @@ http {
         location ~ ^/__proxy(?<orig_path>/.*)$ {
             internal;
 
-            set $trading_upstream "trading-host:5000";
+            set $trading_upstream "${TRADING_UPSTREAM}";
 
             # WebSocket upgrade headers are harmless on plain HTTP responses,
             # so we set them unconditionally rather than branching on path.
