@@ -153,10 +153,12 @@ marketData:
     - VALE3
     - ITUB4
 
-# NetworkPolicy admitting ingress to trading-host:5000 from the frontend only
-# (and matching label-selector references consumed by the companion
-# b3-trading-frontend chart's own egress story — see docs there). Disable if
-# your cluster doesn't enforce NetworkPolicy or you manage it out-of-band.
+# NetworkPolicy admitting ingress to trading-host:5000 from the frontend pod
+# selector only. This chart (and the companion b3-trading-frontend chart)
+# ships ingress-only NetworkPolicies today — neither restricts egress; add
+# an egress policy separately if your cluster enforces default-deny-egress.
+# Disable if your cluster doesn't enforce NetworkPolicy or you manage it
+# out-of-band.
 networkPolicy:
   enabled: true
   frontendPodSelector:

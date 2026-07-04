@@ -3,9 +3,10 @@ name: b3-trading-frontend
 description: >-
   B3TradingPlatform trading-frontend — the nginx SPA + reverse-proxy public
   edge. Ships a stateless Deployment behind a Standard L4 LoadBalancer
-  Service (externalTrafficPolicy: Local) and the NetworkPolicy admitting
-  inbound HTTP + egress to trading-host:5000 (companion chart:
-  b3-trading-host).
+  Service (externalTrafficPolicy: Local) and an ingress-only NetworkPolicy
+  admitting inbound HTTP on :80 (companion chart b3-trading-host owns the
+  trading-host-5000 ingress-side allow rule; neither chart ships an egress
+  policy today — see charts/README.md).
 type: application
 # Chart version is released in lockstep with the image (see #568 versioning
 # contract): bump this whenever templates/values change, independent of
