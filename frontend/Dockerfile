@@ -9,6 +9,7 @@ COPY index.html /usr/share/nginx/html/
 COPY css /usr/share/nginx/html/css
 COPY js  /usr/share/nginx/html/js
 ENV NGINX_RESOLVER=127.0.0.11
+ENV TRADING_UPSTREAM=trading-host:5000
 EXPOSE 80
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
     CMD wget -qO- http://127.0.0.1/ >/dev/null || exit 1
