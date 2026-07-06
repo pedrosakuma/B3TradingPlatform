@@ -41,6 +41,10 @@ spec:
             # doesn't apply search-domain suffixing.
             - name: TRADING_UPSTREAM
               value: {{ .Values.nginx.tradingUpstream | quote }}
+            # Deploy-time default for the "Market Data" panel's WS URL,
+            # rendered into js/env.js (B3TradingPlatform#572).
+            - name: MARKETDATA_WS_URL
+              value: {{ .Values.nginx.marketDataWsUrl | quote }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

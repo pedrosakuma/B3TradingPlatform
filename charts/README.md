@@ -57,6 +57,10 @@ tags are treated as immutable once released).
   (#564) — without it, the upstream is hardcoded to the Docker Compose short
   name and Kubernetes deploys get 502s (nginx's `resolver` doesn't apply
   `/etc/resolv.conf` search domains).
+- `b3-trading-frontend`'s `nginx.marketDataWsUrl` requires the image built
+  from this repo's `frontend/` directory to support `MARKETDATA_WS_URL`
+  (#572) — without it, the "Market Data" panel has no deploy-time default
+  and every operator must paste the WS URL in by hand each session.
 - `b3-trading-host`'s reconnect resilience after a matching pod IP change
   depends on #565 (FIXP `EntryPointClient` re-resolving DNS on reconnect).
 - `b3-trading-host` requires the Azure Key Vault CSI Secrets Store driver
