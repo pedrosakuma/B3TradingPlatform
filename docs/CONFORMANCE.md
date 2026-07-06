@@ -61,6 +61,16 @@ dotnet test backend/tests/B3.Trading.Conformance --filter "Category=Conformance"
   (`B3T_REAL_STACK_CONFORMANCE=true`) plus docker CLI/socket access for
   the test process (`B3T_DOCKER_CONTROL=true`; the
   `docker-compose.real-conformance.yml` overlay wires this automatically).
+- **`Spec_HTTP_MarketData/MarketDataOutageSpecTests`** — marketdata-leg
+  resilience on the real stack: sever the `b3-marketdata` container's
+  `b3-net` attachment, prove
+  `GET /admin/marketdata/reference-prices` stays on the last-known-good
+  live cache instead of crashing, prove `POST /orders` / matching fills
+  still work while the feed is down, then reconnect and assert a fresh
+  crossed trade advances the live ref-price again. Pairs with the
+  operational guidance in
+  [`docs/operations/runbook-failover-recovery.md`](operations/runbook-failover-recovery.md)
+  §1.8.
 
 ### Backlog (separate scenarios; add as the contract solidifies)
 
