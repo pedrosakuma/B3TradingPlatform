@@ -479,14 +479,20 @@ real-stack runs.
 
 **Verify.**
 - After `Reattached`: working orders present pre-disconnect are still
-  live and not flagged stale.
+  live and not flagged stale; the platform should also accept a fresh
+  order, surface it as `Working` in `GET /orders`, and let it execute to
+  `Filled`.
 - After `Renegotiated`: surviving `Working`/`PartiallyFilled` orders for
-  the rolled firm are flagged stale; un-acked `PendingNew` are cancelled.
+  the rolled firm are flagged stale; un-acked `PendingNew` are cancelled;
+  fresh post-reconnect orders should still trade through to `Filled`
+  even though the older survivors remain operator-review stale.
 - The real-stack contract is covered end-to-end by
   [`backend/tests/B3.Trading.Conformance/Spec_FIXP_SessionRoll/SuspendedTimeoutBoundarySpecTests.cs`](../../backend/tests/B3.Trading.Conformance/Spec_FIXP_SessionRoll/SuspendedTimeoutBoundarySpecTests.cs)
   (requires the docker-compose real-conformance overlay, which mounts the
   docker CLI/socket into the conformance runner so the spec can
-  disconnect/reconnect the matching-platform network leg).
+  disconnect/reconnect the matching-platform network leg, then proves
+  both recovery paths still support a full post-reconnect order
+  round-trip).
 - The boundary policy is unit-covered by
   [`backend/tests/B3.Trading.Application.Tests/GatewayConnectSessionRollTests.cs`](../../backend/tests/B3.Trading.Application.Tests/GatewayConnectSessionRollTests.cs)
   (Reattached → no reactor; Renegotiated → reap + stale) and

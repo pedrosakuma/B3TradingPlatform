@@ -52,7 +52,12 @@ dotnet test backend/tests/B3.Trading.Conformance --filter "Category=Conformance"
   disconnect the matching-platform TCP leg **within**
   `SuspendedTimeoutMs` and assert the order re-syncs without a stale
   flag; disconnect **past** the timeout and assert the surviving order
-  is flagged stale after renegotiation. Requires the real-stack sandbox
+  is flagged stale after renegotiation. Both recovery paths then submit
+  a fresh post-reconnect crossed pair and assert trading is genuinely
+  back: the new order becomes `Working` in `GET /orders`, then both legs
+  transition to `Filled` (note: `GET /orders` is full history, so
+  "leaves the book" is asserted as `Working` → terminal, not literal
+  disappearance from the response). Requires the real-stack sandbox
   (`B3T_REAL_STACK_CONFORMANCE=true`) plus docker CLI/socket access for
   the test process (`B3T_DOCKER_CONTROL=true`; the
   `docker-compose.real-conformance.yml` overlay wires this automatically).
