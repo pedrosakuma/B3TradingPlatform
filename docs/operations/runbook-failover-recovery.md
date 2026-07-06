@@ -434,9 +434,11 @@ is **not** a back-office query. The two regimes are:
 | ≤ `SuspendedTimeoutMs` | `Reattached` | Venue kept the session **Suspended**; `SessionVerId` preserved | SDK auto Establish-reattach + `RetransmitRequest` replays the venue's per-session `RetransmitBuffer` (`PossResend=1`); our gateway consumes the replay and the **idempotent ER processor** (#16) dedupes it. **Working orders re-sync with no operator action.** |
 | > `SuspendedTimeoutMs` | `Renegotiated` | Venue **reaped** the session; Establish-reuse **rejected**; fresh Negotiate with a **bumped `SessionVerId`** | Genuinely unrecoverable on the wire — the venue discarded its per-session state. The gateway reconciles via the session-roll reactor: un-acked `PendingNew` are reaped and surviving `Working`/`PartiallyFilled` orders are flagged **stale** (#380 / #515). |
 
-`SuspendedTimeoutMs` is a **venue-side / matching-platform** setting (not
-a `B3.Trading.*` option) — it is owned by the FIXP peer, not configurable
-from this repo's compose overlays.
+`SuspendedTimeoutMs` remains a **venue-side / matching-platform** setting
+(not a `B3.Trading.*` option), but the real-stack conformance overlay now
+mounts a dedicated matching bridge config with a shorter value so this
+boundary can be exercised deterministically in seconds during CI and local
+real-stack runs.
 
 **Detect.**
 - `Reattached` is silent and self-healing; look for
@@ -480,6 +482,11 @@ from this repo's compose overlays.
   live and not flagged stale.
 - After `Renegotiated`: surviving `Working`/`PartiallyFilled` orders for
   the rolled firm are flagged stale; un-acked `PendingNew` are cancelled.
+- The real-stack contract is covered end-to-end by
+  [`backend/tests/B3.Trading.Conformance/Spec_FIXP_SessionRoll/SuspendedTimeoutBoundarySpecTests.cs`](../../backend/tests/B3.Trading.Conformance/Spec_FIXP_SessionRoll/SuspendedTimeoutBoundarySpecTests.cs)
+  (requires the docker-compose real-conformance overlay, which mounts the
+  docker CLI/socket into the conformance runner so the spec can
+  disconnect/reconnect the matching-platform network leg).
 - The boundary policy is unit-covered by
   [`backend/tests/B3.Trading.Application.Tests/GatewayConnectSessionRollTests.cs`](../../backend/tests/B3.Trading.Application.Tests/GatewayConnectSessionRollTests.cs)
   (Reattached → no reactor; Renegotiated → reap + stale) and

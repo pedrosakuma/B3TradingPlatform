@@ -62,6 +62,14 @@ public sealed class ConformanceFactAttribute : FactAttribute
     public bool RequiresAuthSigningKey { get; init; }
 
     /// <summary>
+    /// When true, the scenario also requires an operator-opted-in docker
+    /// control path (<c>B3T_DOCKER_CONTROL=true</c>) so the test process can
+    /// intentionally disconnect and reconnect the matching-platform network
+    /// leg. Used by real-stack transport fault-injection specs only.
+    /// </summary>
+    public bool RequiresDockerControl { get; init; }
+
+    /// <summary>
     /// When true, the scenario requires a running FIXP listener configured
     /// via <c>B3T_FIXP_ENDPOINT</c>. Skipped when the env var is not set.
     /// </summary>
@@ -117,6 +125,8 @@ public sealed class ConformanceFactAttribute : FactAttribute
                 return PlatformEndpoint.SimulatorSkipReason;
             if (RequiresSandboxMatching && !PlatformEndpoint.IsRealStackConformance())
                 return PlatformEndpoint.RealStackConformanceSkipReason;
+            if (RequiresDockerControl && !PlatformEndpoint.IsDockerControlEnabled())
+                return PlatformEndpoint.DockerControlSkipReason;
             if (RequiresAuthSigningKey && !PlatformEndpoint.IsAuthSigningKeyConfigured())
                 return PlatformEndpoint.AuthSigningKeySkipReason;
             if (RequiresFixpListener && !PlatformEndpoint.IsFixpListenerConfigured())

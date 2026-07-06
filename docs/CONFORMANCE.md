@@ -45,6 +45,18 @@ dotnet test backend/tests/B3.Trading.Conformance --filter "Category=Conformance"
   possible end-to-end: platform up, JWT pipeline wired, user store
   loaded.
 
+### Real-stack recovery
+
+- **`Spec_FIXP_SessionRoll/SuspendedTimeoutBoundarySpecTests`** —
+  transport-fault boundary coverage for the venue FIXP suspend window:
+  disconnect the matching-platform TCP leg **within**
+  `SuspendedTimeoutMs` and assert the order re-syncs without a stale
+  flag; disconnect **past** the timeout and assert the surviving order
+  is flagged stale after renegotiation. Requires the real-stack sandbox
+  (`B3T_REAL_STACK_CONFORMANCE=true`) plus docker CLI/socket access for
+  the test process (`B3T_DOCKER_CONTROL=true`; the
+  `docker-compose.real-conformance.yml` overlay wires this automatically).
+
 ### Backlog (separate scenarios; add as the contract solidifies)
 
 - **`Spec_HTTP_Orders/`** — `POST /orders` happy path + validation
