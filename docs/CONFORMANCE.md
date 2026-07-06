@@ -71,6 +71,20 @@ dotnet test backend/tests/B3.Trading.Conformance --filter "Category=Conformance"
   operational guidance in
   [`docs/operations/runbook-failover-recovery.md`](operations/runbook-failover-recovery.md)
   §1.8.
+- **`Spec_Recovery/TradingHostCrashRestartSpecTests`** — hard-crash
+  recovery coverage for the participant host itself: `docker kill -s
+  SIGKILL b3-trading-host`, wait for the host to be down, then restart it
+  and prove two
+  sibling contracts: (a) a pre-crash resting order still comes back with
+  the same working-state leaves/cum quantities, pre-crash
+  cash/position/realized-PnL state from a real fill survived WAL replay,
+  `/admin/firms` shows both FIRM01 and FIRM02 FIXP sessions back in
+  `established`, and a fresh post-restart crossed pair still trades
+  through to `Filled`; and (b) an external FIXP counterparty on session
+  `10102` can fill a trading-host-owned order **while the host is down**,
+  with the missed ER replayed on restart so `GET /orders` shows the
+  correct terminal fill instead of a stale `Working` snapshot. Also uses
+  the docker-control gate and real-stack sandbox overlay.
 
 ### Backlog (separate scenarios; add as the contract solidifies)
 
@@ -92,9 +106,6 @@ dotnet test backend/tests/B3.Trading.Conformance --filter "Category=Conformance"
   SIGTERM drain (`/ready` flips to 503; in-flight `POST /orders`
   completes; new `POST /orders` returns 503; WAL flushes; final
   snapshot lands).
-- **`Spec_Recovery/`** — kill the process mid-flight, restart, assert
-  the restored state matches what was last acknowledged on the wire
-  (working orders, positions, kill-switch).
 
 Add a new scenario by:
 

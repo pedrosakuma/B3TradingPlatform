@@ -440,6 +440,16 @@ mounts a dedicated matching bridge config with a shorter value so this
 boundary can be exercised deterministically in seconds during CI and local
 real-stack runs.
 
+Separately, a full matching-platform **process restart** is stricter than a
+mere TCP partition: upstream issue
+[`pedrosakuma/B3MatchingPlatform#405`](https://github.com/pedrosakuma/B3MatchingPlatform/issues/405)
+tracks that FIXP session state still lives in matching's process memory
+only, so `docker compose restart matching-platform` necessarily forces a
+fresh Negotiate / bumped `SessionVerId` even when the venue book + WAL are
+intact. Operators should therefore expect the same stale-on-roll behavior as
+the `> SuspendedTimeoutMs` row above, but with the venue's resting book still
+potentially alive underneath the advisory stale flags.
+
 **Detect.**
 - `Reattached` is silent and self-healing; look for
   `EntryPoint reconnect ok … kind=Reattached` in trading-host logs and a
@@ -864,9 +874,18 @@ boots a full compose stack and is too expensive to gate every PR.
 
 ### 6.4 Validation invariants
 
-The chaos drill checks operational symptoms. The deeper "no event
-loss across an ungraceful restart" invariant is also tested in pure
-.NET as
+The chaos drill checks operational symptoms. The real-stack API/WAL
+recovery contract is additionally covered by
+[`backend/tests/B3.Trading.Conformance/Spec_Recovery/TradingHostCrashRestartSpecTests.cs`](../../backend/tests/B3.Trading.Conformance/Spec_Recovery/TradingHostCrashRestartSpecTests.cs),
+which `docker kill -s SIGKILL`s `b3-trading-host`, waits for the host to
+be down, then restarts it and proves both that pre-crash working-order
+and cash/position/P&L state are still queryable **and** that a fill
+generated during the outage window by the independent FIXP counterparty
+session `10102` is replayed on recovery
+instead of being lost/stuck as `Working`.
+
+The deeper "no event loss across an ungraceful restart" invariant is
+also tested in pure .NET as
 `UngracefulStop_NoFlush_RecoversToLastFlushedSeq_NoTornWriteFalsePositives`
 in
 [`backend/tests/B3.Trading.Application.Tests/Persistence/RecoveryAndSnapshotTests.cs`](../../backend/tests/B3.Trading.Application.Tests/Persistence/RecoveryAndSnapshotTests.cs).
