@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Globalization;
+using System.IO;
 using System.Text.Json;
 
 namespace B3.Trading.Conformance.Infrastructure;
@@ -7,14 +9,17 @@ internal sealed class DockerVenueTransportController
 {
     private const string DefaultDockerPath = "docker";
     private const string DefaultMatchingContainer = "b3-matching-platform";
+    private const string DefaultMarketDataContainer = "b3-marketdata";
 
     private readonly string _dockerPath;
     private readonly string _matchingContainer;
+    private readonly string _marketDataContainer;
 
     public DockerVenueTransportController()
     {
         _dockerPath = Environment.GetEnvironmentVariable("B3T_DOCKER_PATH") ?? DefaultDockerPath;
         _matchingContainer = Environment.GetEnvironmentVariable("B3T_DOCKER_MATCHING_CONTAINER") ?? DefaultMatchingContainer;
+        _marketDataContainer = Environment.GetEnvironmentVariable("B3T_DOCKER_MARKETDATA_CONTAINER") ?? DefaultMarketDataContainer;
     }
 
     public async Task<DetachedMatchingNetwork> DisconnectMatchingAsync(CancellationToken ct = default)
@@ -24,6 +29,34 @@ internal sealed class DockerVenueTransportController
         var network = await InspectMatchingNetworkAsync(ct);
         await RunDockerAsync(new[] { "network", "disconnect", "--force", network.Name, _matchingContainer }, ct);
         return new DetachedMatchingNetwork(this, network);
+    }
+
+    public async Task WaitForMarketDataTradeDrainAsync(
+        DateTimeOffset sinceUtc,
+        TimeSpan timeout,
+        CancellationToken ct = default)
+    {
+        await EnsureDockerAvailableAsync(ct);
+
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            var result = await RunDockerAsync(
+                new[]
+                {
+                    "logs", "--timestamps", "--since", sinceUtc.ToUniversalTime().AddSeconds(-10).ToString("O"),
+                    _marketDataContainer,
+                },
+                ct);
+
+            if (MarketDataLogShowsTradeDrain(result.StdOut, sinceUtc))
+                return;
+
+            await Task.Delay(TimeSpan.FromMilliseconds(250), ct);
+        }
+
+        throw new InvalidOperationException(
+            $"Timed out after {timeout.TotalSeconds:F0}s waiting for marketdata trade drain in container '{_marketDataContainer}' since {sinceUtc:o}.");
     }
 
     private async Task EnsureDockerAvailableAsync(CancellationToken ct)
@@ -104,8 +137,92 @@ internal sealed class DockerVenueTransportController
         return new ProcessResult(process.ExitCode, stdout, stderr);
     }
 
+    private static bool MarketDataLogShowsTradeDrain(string logs, DateTimeOffset sinceUtc)
+    {
+        var baseline = new TradeCounters(0, 0, 0);
+        var sawBaseline = false;
+        var sawTradeWindow = false;
+        using var reader = new StringReader(logs);
+        string? line;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            if (TryParseTradeCounters(line, out var timestampUtc, out var counters))
+            {
+                if (timestampUtc < sinceUtc)
+                {
+                    baseline = counters;
+                    sawBaseline = true;
+                    continue;
+                }
+
+                if (!sawBaseline || counters.Sbe > baseline.Sbe || counters.Recv > baseline.Recv || counters.Emit > baseline.Emit)
+                    sawTradeWindow = true;
+                continue;
+            }
+
+            if (sawTradeWindow &&
+                TryParseTimestamp(line, out timestampUtc) &&
+                timestampUtc >= sinceUtc &&
+                line.Contains("per-symbol:", StringComparison.Ordinal) &&
+                !line.Contains("gate:on", StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryParseTradeCounters(string line, out DateTimeOffset timestampUtc, out TradeCounters counters)
+    {
+        timestampUtc = default;
+        counters = default;
+        if (!TryParseTimestamp(line, out timestampUtc) || !line.Contains("trades:", StringComparison.Ordinal))
+            return false;
+
+        if (!TryParseCounter(line, "sbe=", out var sbe) ||
+            !TryParseCounter(line, "recv=", out var recv) ||
+            !TryParseCounter(line, "emit=", out var emit))
+        {
+            return false;
+        }
+
+        counters = new TradeCounters(sbe, recv, emit);
+        return true;
+    }
+
+    private static bool TryParseTimestamp(string line, out DateTimeOffset timestampUtc)
+    {
+        timestampUtc = default;
+        var space = line.IndexOf(' ');
+        if (space <= 0)
+            return false;
+
+        return DateTimeOffset.TryParse(
+            line[..space],
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+            out timestampUtc);
+    }
+
+    private static bool TryParseCounter(string line, string marker, out int value)
+    {
+        value = 0;
+        var start = line.IndexOf(marker, StringComparison.Ordinal);
+        if (start < 0)
+            return false;
+
+        start += marker.Length;
+        var end = start;
+        while (end < line.Length && char.IsDigit(line[end]))
+            end++;
+
+        return end > start && int.TryParse(line[start..end], out value);
+    }
+
     internal sealed record NetworkAttachment(string Name, IReadOnlyList<string> Aliases);
     private sealed record ProcessResult(int ExitCode, string StdOut, string StdErr);
+    private readonly record struct TradeCounters(int Sbe, int Recv, int Emit);
 
     internal sealed class DetachedMatchingNetwork : IAsyncDisposable
     {

@@ -54,7 +54,8 @@ public class SuspendedTimeoutBoundarySpecTests
         Assert.False(orderAfter.IsStale);
         Assert.Null(orderAfter.StaleReason);
 
-        await AssertPostRecoveryTradingRoundTripAsync(http, userAuth, "PETR4", ReattachRoundTripPrice, RoundTripQuantity);
+        await AssertPostRecoveryTradingRoundTripAsync(
+            http, userAuth, docker, "PETR4", ReattachRoundTripPrice, RoundTripQuantity);
     }
 
     [ConformanceFact(RequiresAdmin = true, RequiresSandboxMatching = true, RequiresDockerControl = true)]
@@ -92,7 +93,8 @@ public class SuspendedTimeoutBoundarySpecTests
         Assert.True(orderAfter.IsStale);
         Assert.StartsWith("session_rolled:", orderAfter.StaleReason);
 
-        await AssertPostRecoveryTradingRoundTripAsync(http, userAuth, "VALE3", RenegotiatedRoundTripPrice, RoundTripQuantity);
+        await AssertPostRecoveryTradingRoundTripAsync(
+            http, userAuth, docker, "VALE3", RenegotiatedRoundTripPrice, RoundTripQuantity);
     }
 
     private static async Task<ulong> SubmitOrderAsync(
@@ -133,10 +135,12 @@ public class SuspendedTimeoutBoundarySpecTests
     private static async Task AssertPostRecoveryTradingRoundTripAsync(
         HttpClient http,
         AuthenticationHeaderValue auth,
+        DockerVenueTransportController docker,
         string symbol,
         decimal price,
         long quantity)
     {
+        var submitStartUtc = DateTimeOffset.UtcNow;
         var buyClOrdId = await SubmitOrderAsync(http, auth, symbol, price, side: "Buy", quantity: quantity);
         await WaitForOrderAsync(http, auth, buyClOrdId, order =>
                 order.Status == "Working" && order.CumulativeQuantity == 0,
@@ -160,6 +164,13 @@ public class SuspendedTimeoutBoundarySpecTests
 
         Assert.Equal(quantity, filledBuy.CumulativeQuantity);
         Assert.Equal(quantity, filledSell.CumulativeQuantity);
+
+        // The FIXP/order path can recover slightly ahead of the separate
+        // UMDF channel-84 stream after a forced transport cut. Wait until
+        // marketdata's own progress logs show the post-recovery trade window
+        // drained without the reconnect-era stale gate still being on before
+        // handing off to the next real-stack spec.
+        await docker.WaitForMarketDataTradeDrainAsync(submitStartUtc, TradeTimeout);
     }
 
     private static async Task StimulateGatewayWriteAsync(
