@@ -451,12 +451,17 @@ the `> SuspendedTimeoutMs` row above, but with the venue's resting book still
 potentially alive underneath the advisory stale flags.
 
 **Detect.**
-- `Reattached` is silent and self-healing; look for
-  `EntryPoint reconnect ok … kind=Reattached` in trading-host logs and a
-  burst of duplicate-inbound metric (`EntryPointDuplicateInbound`,
-  expected during retransmit).
-- `Renegotiated` surfaces as `kind=Renegotiated`, a jump in
-  `RecordSessionVerId`, and the auto-stale counters
+- First classify by whether `RecordSessionVerId` advanced. Any reconnect that
+  comes back on a higher effective `SessionVerId` is a real session roll even
+  if the SDK labels the reconnect as `Reattached`; expect the same stale-on-roll
+  behavior as an explicit `Renegotiated`.
+- Non-advancing `Reattached` reconnects are the silent/self-healing case; look
+  for `EntryPoint reconnect ok … kind=Reattached` in trading-host logs and a
+  burst of duplicate-inbound metric (`EntryPointDuplicateInbound`, expected
+  during retransmit).
+- Advanced-session reconnects surface as either `kind=Renegotiated` or
+  `kind=Reattached` plus a `RecordSessionVerId` jump, together with the
+  auto-stale counters
   `trading.entrypoint.orders_auto_staled{reason=session_rolled}` /
   `trading.entrypoint.session_roll_stale_reconcile_failed`
   ([`MetricsRegistry.cs`](../../backend/src/B3.Trading.Application/Observability/MetricsRegistry.cs)).
@@ -465,10 +470,10 @@ potentially alive underneath the advisory stale flags.
   `GET /orders/history`.
 
 **Triage.**
-1. Confirm the `ReconnectKind` from the reconnect log line — this alone
-   tells you whether the orders were recoverable (Reattached) or are
-   genuine ghosts (Renegotiated).
-2. On `Renegotiated`, the stale flag is **expected and correct**, not a
+1. Confirm whether `SessionVerId` advanced across the reconnect. A bumped
+   effective version means the old working set is no longer authoritative,
+   regardless of whether the log line says `Reattached` or `Renegotiated`.
+2. On any advanced-version reconnect, the stale flag is **expected and correct**, not a
    bug: the venue reaped the session, so the platform cannot trust its
    working set without operator confirmation.
 3. If `session_roll_stale_reconcile_failed` fired, the staling phase hit
@@ -502,7 +507,12 @@ potentially alive underneath the advisory stale flags.
   docker CLI/socket into the conformance runner so the spec can
   disconnect/reconnect the matching-platform network leg, then proves
   both recovery paths still support a full post-reconnect order
-  round-trip).
+  round-trip), and by
+  [`backend/tests/B3.Trading.Conformance/Spec_FIXP_SessionRoll/MatchingPlatformRestartSpecTests.cs`](../../backend/tests/B3.Trading.Conformance/Spec_FIXP_SessionRoll/MatchingPlatformRestartSpecTests.cs)
+  which restarts the matching-platform process itself, proves that the host
+  takes the forced-`Renegotiated` stale path, and then contract-proves the
+  venue book survived the restart by filling the pre-restart stale survivor
+  after recovery before asserting a fresh post-restart trade round-trip.
 - The boundary policy is unit-covered by
   [`backend/tests/B3.Trading.Application.Tests/GatewayConnectSessionRollTests.cs`](../../backend/tests/B3.Trading.Application.Tests/GatewayConnectSessionRollTests.cs)
   (Reattached → no reactor; Renegotiated → reap + stale) and
@@ -883,7 +893,6 @@ and cash/position/P&L state are still queryable **and** that a fill
 generated during the outage window by the independent FIXP counterparty
 session `10102` is replayed on recovery
 instead of being lost/stuck as `Working`.
-
 The deeper "no event loss across an ungraceful restart" invariant is
 also tested in pure .NET as
 `UngracefulStop_NoFlush_RecoversToLastFlushedSeq_NoTornWriteFalsePositives`

@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using B3.Trading.Conformance.Infrastructure;
+using B3.Trading.Conformance.Spec_FIXP_SessionRoll;
 
 namespace B3.Trading.Conformance.Spec_Recovery;
 
@@ -14,14 +15,10 @@ public class TradingHostCrashRestartSpecTests
     private const string Firm01User = "bob";
     private const string Firm02User = "bob-firm02";
     private const string RestingSymbol = "ITUB4";
-    private const decimal RestingPrice = 29.25m;
     private const string RecoveredStateSymbol = "VALE3";
-    private const decimal RecoveredStatePrice = 62.50m;
     private const string OutageFillSymbol = "PETR4";
-    private const decimal OutageFillPrice = 31.40m;
     private const ulong OutageFillSecurityId = 900000000001UL;
     private const string PostRestartTradeSymbol = "PETR4";
-    private const decimal PostRestartTradePrice = 31.80m;
     private const string DirectCounterpartyEndpoint = "matching-platform:9876";
     private const uint DirectCounterpartySessionId = 10102;
     private const uint DirectCounterpartySessionVerId = 1;
@@ -51,9 +48,13 @@ public class TradingHostCrashRestartSpecTests
         _ = await WaitForFirmEstablishedAsync(http, adminAuth, Firm01);
         _ = await WaitForFirmEstablishedAsync(http, adminAuth, Firm02);
 
+        var restingPrice = SessionRollSpecSupport.PriceNearLowerCollar(
+            await SessionRollSpecSupport.GetEffectiveReferencePriceAsync(http, adminAuth, RestingSymbol));
+        var recoveredStatePrice = SessionRollSpecSupport.PriceNearLowerCollar(
+            await SessionRollSpecSupport.GetEffectiveReferencePriceAsync(http, adminAuth, RecoveredStateSymbol));
         var buyerBaseline = await GetTradeStateAsync(http, firm02Auth, RecoveredStateSymbol);
 
-        var restingClOrdId = await SubmitOrderAsync(http, firm02Auth, RestingSymbol, RestingPrice, side: "Buy");
+        var restingClOrdId = await SubmitOrderAsync(http, firm02Auth, RestingSymbol, restingPrice, side: "Buy");
         var restingBeforeCrash = await WaitForOrderAsync(
             http,
             firm02Auth,
@@ -65,7 +66,7 @@ public class TradingHostCrashRestartSpecTests
             OrderTimeout,
             "resting order to reach Working before the crash");
 
-        var buyBeforeCrash = await SubmitOrderAsync(http, firm02Auth, RecoveredStateSymbol, RecoveredStatePrice, side: "Buy");
+        var buyBeforeCrash = await SubmitOrderAsync(http, firm02Auth, RecoveredStateSymbol, recoveredStatePrice, side: "Buy");
         await WaitForOrderAsync(
             http,
             firm02Auth,
@@ -74,7 +75,7 @@ public class TradingHostCrashRestartSpecTests
             OrderTimeout,
             "pre-crash buy order to reach Working before the cross");
 
-        var sellBeforeCrash = await SubmitOrderAsync(http, firm01Auth, RecoveredStateSymbol, RecoveredStatePrice, side: "Sell");
+        var sellBeforeCrash = await SubmitOrderAsync(http, firm01Auth, RecoveredStateSymbol, recoveredStatePrice, side: "Sell");
         await WaitForOrderAsync(
             http,
             firm02Auth,
@@ -95,7 +96,7 @@ public class TradingHostCrashRestartSpecTests
             firm02Auth,
             RecoveredStateSymbol,
             state => state.PositionNetQuantity == buyerBaseline.PositionNetQuantity + OrderQuantity
-                     && state.PositionAverageEntryPrice == RecoveredStatePrice
+                     && state.PositionAverageEntryPrice == recoveredStatePrice
                      && state.RealizedPnl == buyerBaseline.RealizedPnl
                      && state.TotalRealizedPnl == buyerBaseline.TotalRealizedPnl
                      && state.AvailableBalance < buyerBaseline.AvailableBalance,
@@ -133,13 +134,15 @@ public class TradingHostCrashRestartSpecTests
             "buyer cash/position/pnl to survive the restart unchanged");
         Assert.Equal(buyerBeforeCrash, buyerAfterRestart);
 
+        var postRestartTradePrice = SessionRollSpecSupport.PriceNearUpperCollar(
+            await SessionRollSpecSupport.GetEffectiveReferencePriceAsync(http, adminAuth, PostRestartTradeSymbol));
         await AssertPostRecoveryTradingRoundTripAsync(
             http,
             firm02Auth,
             firm01Auth,
             docker,
             PostRestartTradeSymbol,
-            PostRestartTradePrice,
+            postRestartTradePrice,
             OrderQuantity);
 
         await TryCleanupRecoveredOrderAsync(http, adminAuth, firm02Auth, Firm02, restingClOrdId, restingAfterRestart.IsStale);
@@ -165,9 +168,11 @@ public class TradingHostCrashRestartSpecTests
         await WaitForReadyAsync(http);
         _ = await WaitForFirmEstablishedAsync(http, adminAuth, Firm02);
 
+        var outageFillPrice = SessionRollSpecSupport.PriceNearLowerCollar(
+            await SessionRollSpecSupport.GetEffectiveReferencePriceAsync(http, adminAuth, OutageFillSymbol));
         var buyerBaseline = await GetTradeStateAsync(http, firm02Auth, OutageFillSymbol);
 
-        var restingBuyClOrdId = await SubmitOrderAsync(http, firm02Auth, OutageFillSymbol, OutageFillPrice, side: "Buy");
+        var restingBuyClOrdId = await SubmitOrderAsync(http, firm02Auth, OutageFillSymbol, outageFillPrice, side: "Buy");
         await WaitForOrderAsync(
             http,
             firm02Auth,
@@ -186,7 +191,7 @@ public class TradingHostCrashRestartSpecTests
         var counterpartySellClOrdId = await counterparty.SubmitLimitAsync(
             OutageFillSecurityId,
             isBuy: false,
-            price: OutageFillPrice,
+            price: outageFillPrice,
             quantity: OrderQuantity);
         var counterpartyFill = await counterparty.WaitForFilledAsync(counterpartySellClOrdId, TradeTimeout);
 
@@ -217,7 +222,7 @@ public class TradingHostCrashRestartSpecTests
             buyerBaseline.PositionNetQuantity,
             buyerBaseline.PositionAverageEntryPrice,
             OrderQuantity,
-            OutageFillPrice);
+            outageFillPrice);
         var buyerAfterRestart = await WaitForTradeStateAsync(
             http,
             firm02Auth,

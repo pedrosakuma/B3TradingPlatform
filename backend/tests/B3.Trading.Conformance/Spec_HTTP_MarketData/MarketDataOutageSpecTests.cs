@@ -15,9 +15,6 @@ namespace B3.Trading.Conformance.Spec_HTTP_MarketData;
 public class MarketDataOutageSpecTests
 {
     private const string Symbol = "PETR4";
-    private const decimal BaselinePrice = 31.50m;
-    private const decimal OutagePrice = 31.60m;
-    private const decimal RecoveryPrice = 31.70m;
     private const long CrossQuantity = 100;
     private static readonly TimeSpan PollTimeout = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
@@ -36,6 +33,8 @@ public class MarketDataOutageSpecTests
         await WaitForFirmEstablishedAsync(http, adminAuth);
 
         var baseline = await EstablishBaselineAsync(http, userAuth, adminAuth);
+        var outagePrice = NextTradePrice(baseline.Live!.Price, 1);
+        var recoveryPrice = NextTradePrice(baseline.Live.Price, 2);
 
         await using var detached = await docker.DisconnectMarketDataAsync();
         await Task.Delay(PollInterval);
@@ -43,7 +42,7 @@ public class MarketDataOutageSpecTests
         await AssertTradingHostHealthyAsync(http);
 
         var outageTradeStartUtc = DateTimeOffset.UtcNow;
-        await CrossTradeAndAssertFilledAsync(http, userAuth, Symbol, OutagePrice);
+        await CrossTradeAndAssertFilledAsync(http, userAuth, Symbol, outagePrice);
         await AssertTradingHostHealthyAsync(http);
 
         var duringOutage = await AssertReferencePriceStaysPinnedDuringOutageAsync(
@@ -63,11 +62,11 @@ public class MarketDataOutageSpecTests
 
         var recoveryTradeStartUtc = DateTimeOffset.UtcNow;
         var recovered = await CrossTradeAndWaitForReferencePriceAsync(
-            http, userAuth, adminAuth, Symbol, RecoveryPrice, recoveryTradeStartUtc, maxAttempts: 3);
+            http, userAuth, adminAuth, Symbol, recoveryPrice, recoveryTradeStartUtc, maxAttempts: 3);
 
         Assert.Equal("Live", recovered.EffectiveSource);
         Assert.NotNull(recovered.Live);
-        Assert.Equal(RecoveryPrice, recovered.Live!.Price);
+        Assert.Equal(recoveryPrice, recovered.Live!.Price);
         Assert.True(recovered.Live.UpdatedUtc > recoveryTradeStartUtc,
             $"Expected recovered live ref-price sample after {recoveryTradeStartUtc:o}, observed {recovered.Live.UpdatedUtc:o}.");
 
@@ -80,17 +79,20 @@ public class MarketDataOutageSpecTests
         AuthenticationHeaderValue adminAuth)
     {
         var current = await GetReferencePriceAsync(http, adminAuth, Symbol);
+        var baselinePrice = ResolveBaselinePrice(current);
+        var outagePrice = NextTradePrice(baselinePrice, 1);
+        var recoveryPrice = NextTradePrice(baselinePrice, 2);
         if (current.EffectiveSource == "Live" &&
             current.Live is not null &&
-            current.Live.Price != OutagePrice &&
-            current.Live.Price != RecoveryPrice)
+            current.Live.Price != outagePrice &&
+            current.Live.Price != recoveryPrice)
         {
             return current;
         }
 
         var baselineTradeStartUtc = DateTimeOffset.UtcNow;
         return await CrossTradeAndWaitForReferencePriceAsync(
-            http, userAuth, adminAuth, Symbol, BaselinePrice, baselineTradeStartUtc, maxAttempts: 2);
+            http, userAuth, adminAuth, Symbol, baselinePrice, baselineTradeStartUtc, maxAttempts: 2);
     }
 
     private static async Task<ReferencePriceDiagnostic> CrossTradeAndWaitForReferencePriceAsync(
@@ -168,30 +170,31 @@ public class MarketDataOutageSpecTests
         for (var sweep = 0; sweep < 2; sweep++)
         {
             var openOrders = await ListOpenOrdersForSymbolAsync(http, auth, symbol);
-            if (openOrders.Count == 0)
+            var cancelableOrders = openOrders.Where(order => !order.IsStale).ToList();
+            if (cancelableOrders.Count == 0)
                 return;
 
-            foreach (var openOrder in openOrders)
+            foreach (var openOrder in cancelableOrders)
             {
                 using var cancel = new HttpRequestMessage(HttpMethod.Delete, $"/orders/{openOrder.ClOrdId}");
                 cancel.Headers.Authorization = auth;
                 var resp = await http.SendAsync(cancel);
                 Assert.True(
-                    resp.StatusCode is HttpStatusCode.NoContent or HttpStatusCode.NotFound,
-                    $"DELETE /orders/{openOrder.ClOrdId} expected 204/404 while clearing {symbol}, got {(int)resp.StatusCode}: {await resp.Content.ReadAsStringAsync()}");
+                    resp.StatusCode is HttpStatusCode.NoContent or HttpStatusCode.NotFound or HttpStatusCode.Conflict,
+                    $"DELETE /orders/{openOrder.ClOrdId} expected 204/404/409 while clearing {symbol}, got {(int)resp.StatusCode}: {await resp.Content.ReadAsStringAsync()}");
             }
 
             var deadline = DateTimeOffset.UtcNow + TradeTimeout;
             while (DateTimeOffset.UtcNow < deadline)
             {
-                if ((await ListOpenOrdersForSymbolAsync(http, auth, symbol)).Count == 0)
+                if ((await ListOpenOrdersForSymbolAsync(http, auth, symbol)).All(order => order.IsStale))
                     return;
                 await Task.Delay(PollInterval);
             }
         }
 
         var remaining = await ListOpenOrdersForSymbolAsync(http, auth, symbol);
-        Assert.Fail($"Timed out clearing pre-existing open orders for {symbol}. Remaining: {string.Join(", ", remaining.Select(o => $"{o.ClOrdId}:{o.Status}:{o.Symbol}"))}");
+        Assert.Fail($"Timed out clearing pre-existing open orders for {symbol}. Remaining: {string.Join(", ", remaining.Select(o => $"{o.ClOrdId}:{o.Status}:{o.Symbol}:stale={o.IsStale}"))}");
     }
 
     private static async Task<ReferencePriceDiagnostic> AssertReferencePriceStaysPinnedDuringOutageAsync(
@@ -383,7 +386,8 @@ public class MarketDataOutageSpecTests
             result.Add(new OpenOrderSnapshot(
                 ulong.Parse(order.GetProperty("clOrdId").GetString()!),
                 orderSymbol!,
-                status!));
+                status!,
+                order.TryGetProperty("isStale", out var staleProp) && staleProp.GetBoolean()));
         }
 
         return result;
@@ -426,6 +430,16 @@ public class MarketDataOutageSpecTests
         ? "<none>"
         : $"{{ source={d.EffectiveSource}, effective={d.EffectivePrice?.ToString() ?? "null"}, live={(d.Live is { } l ? $"{l.Price}@{l.UpdatedUtc:o}" : "null")}, fallback={d.FallbackPrice?.ToString() ?? "null"} }}";
 
+    private static decimal ResolveBaselinePrice(ReferencePriceDiagnostic current)
+    {
+        var anchor = current.Live?.Price ?? current.EffectivePrice ?? current.FallbackPrice
+            ?? throw new InvalidOperationException($"No reference/fallback price available for {current.Symbol}: {Format(current)}");
+        return decimal.Round(anchor * 0.97m, 2, MidpointRounding.AwayFromZero);
+    }
+
+    private static decimal NextTradePrice(decimal baselinePrice, int step)
+        => decimal.Round(baselinePrice + (0.10m * step), 2, MidpointRounding.AwayFromZero);
+
     private static string Format(OrderSnapshot? order) => order is null
         ? "<missing>"
         : $"{{ status={order.Status}, cumulativeQuantity={order.CumulativeQuantity}, isStale={order.IsStale}, staleReason={order.StaleReason ?? "null"} }}";
@@ -448,5 +462,6 @@ public class MarketDataOutageSpecTests
     private sealed record OpenOrderSnapshot(
         ulong ClOrdId,
         string Symbol,
-        string Status);
+        string Status,
+        bool IsStale);
 }
