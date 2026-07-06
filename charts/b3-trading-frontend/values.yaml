@@ -32,6 +32,15 @@ nginx:
   # docker-compose-only short name so `helm template` doesn't fail before
   # this is set — every real environment MUST override it.
   tradingUpstream: "trading-host:5000"
+  # Deploy-time default for the OPTIONAL B3MarketDataPlatform WS feed,
+  # rendered into js/env.js at container start (see
+  # B3TradingPlatform#572; requires the image to support
+  # MARKETDATA_WS_URL, fixed alongside that issue). Empty by default so
+  # `helm template` doesn't fail before this is set; the frontend falls
+  # back to its localhost-only dev guess, then "" (the Market Data panel's
+  # manual override keeps working either way). Every real environment
+  # SHOULD override it (e.g. "wss://<lb-ip>:8080/ws").
+  marketDataWsUrl: ""
 
 service:
   type: LoadBalancer
