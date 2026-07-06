@@ -10,9 +10,13 @@ namespace B3.Trading.Conformance.Spec_FIXP_SessionRoll;
 public class SuspendedTimeoutBoundarySpecTests
 {
     private const string FirmId = "FIRM01";
+    private const long RoundTripQuantity = 100;
+    private const decimal ReattachRoundTripPrice = 32.00m;
+    private const decimal RenegotiatedRoundTripPrice = 61.00m;
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan OrderTimeout = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan ReconnectTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan TradeTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan WithinWindowDisconnect = TimeSpan.FromMilliseconds(1000);
     private static readonly TimeSpan PastWindowDisconnect = TimeSpan.FromMilliseconds(5000);
 
@@ -49,6 +53,9 @@ public class SuspendedTimeoutBoundarySpecTests
         Assert.Equal(before.SessionVerId, after.SessionVerId);
         Assert.False(orderAfter.IsStale);
         Assert.Null(orderAfter.StaleReason);
+
+        await AssertPostRecoveryTradingRoundTripAsync(
+            http, userAuth, docker, "PETR4", ReattachRoundTripPrice, RoundTripQuantity);
     }
 
     [ConformanceFact(RequiresAdmin = true, RequiresSandboxMatching = true, RequiresDockerControl = true)]
@@ -85,13 +92,18 @@ public class SuspendedTimeoutBoundarySpecTests
             $"Expected sessionVerId to advance past {before.SessionVerId}, observed {after.SessionVerId}.");
         Assert.True(orderAfter.IsStale);
         Assert.StartsWith("session_rolled:", orderAfter.StaleReason);
+
+        await AssertPostRecoveryTradingRoundTripAsync(
+            http, userAuth, docker, "VALE3", RenegotiatedRoundTripPrice, RoundTripQuantity);
     }
 
     private static async Task<ulong> SubmitOrderAsync(
         HttpClient http,
         AuthenticationHeaderValue auth,
         string symbol,
-        decimal price)
+        decimal price,
+        string side = "Buy",
+        long quantity = RoundTripQuantity)
     {
         using var req = new HttpRequestMessage(HttpMethod.Post, "/orders")
         {
@@ -99,9 +111,9 @@ public class SuspendedTimeoutBoundarySpecTests
             Content = JsonContent.Create(new
             {
                 symbol,
-                side = "Buy",
+                side,
                 type = "Limit",
-                quantity = 100,
+                quantity,
                 price,
             }),
         };
@@ -118,6 +130,47 @@ public class SuspendedTimeoutBoundarySpecTests
         }
 
         return ulong.Parse(json.GetProperty("clOrdId").GetString()!);
+    }
+
+    private static async Task AssertPostRecoveryTradingRoundTripAsync(
+        HttpClient http,
+        AuthenticationHeaderValue auth,
+        DockerVenueTransportController docker,
+        string symbol,
+        decimal price,
+        long quantity)
+    {
+        var submitStartUtc = DateTimeOffset.UtcNow;
+        var buyClOrdId = await SubmitOrderAsync(http, auth, symbol, price, side: "Buy", quantity: quantity);
+        await WaitForOrderAsync(http, auth, buyClOrdId, order =>
+                order.Status == "Working" && order.CumulativeQuantity == 0,
+            OrderTimeout,
+            "post-recovery buy order to reach Working before the cross");
+
+        var sellClOrdId = await SubmitOrderAsync(http, auth, symbol, price, side: "Sell", quantity: quantity);
+
+        // GET /orders is the full per-client history projection, not an
+        // "open orders only" book view. Contract-level "disappears from the
+        // book" therefore means the order leaves Working and reaches a
+        // terminal state; it should remain queryable here as Filled.
+        var filledBuy = await WaitForOrderAsync(http, auth, buyClOrdId, order =>
+                order.Status == "Filled" && order.CumulativeQuantity == quantity,
+            TradeTimeout,
+            "post-recovery buy order to reach Filled");
+        var filledSell = await WaitForOrderAsync(http, auth, sellClOrdId, order =>
+                order.Status == "Filled" && order.CumulativeQuantity == quantity,
+            TradeTimeout,
+            "post-recovery sell order to reach Filled");
+
+        Assert.Equal(quantity, filledBuy.CumulativeQuantity);
+        Assert.Equal(quantity, filledSell.CumulativeQuantity);
+
+        // The FIXP/order path can recover slightly ahead of the separate
+        // UMDF channel-84 stream after a forced transport cut. Wait until
+        // marketdata's own progress logs show the post-recovery trade window
+        // drained without the reconnect-era stale gate still being on before
+        // handing off to the next real-stack spec.
+        await docker.WaitForMarketDataTradeDrainAsync(submitStartUtc, TradeTimeout);
     }
 
     private static async Task StimulateGatewayWriteAsync(
@@ -197,6 +250,7 @@ public class SuspendedTimeoutBoundarySpecTests
             {
                 return new OrderSnapshot(
                     Status: order.GetProperty("status").GetString()!,
+                    CumulativeQuantity: order.GetProperty("cumulativeQuantity").GetInt64(),
                     IsStale: order.TryGetProperty("isStale", out var staleProp) && staleProp.GetBoolean(),
                     StaleReason: order.TryGetProperty("staleReason", out var reasonProp) && reasonProp.ValueKind == JsonValueKind.String
                         ? reasonProp.GetString()
@@ -289,7 +343,7 @@ public class SuspendedTimeoutBoundarySpecTests
 
     private static string Format(OrderSnapshot? order) => order is null
         ? "<missing>"
-        : $"{{ status={order.Status}, isStale={order.IsStale}, staleReason={order.StaleReason ?? "null"} }}";
+        : $"{{ status={order.Status}, cumulativeQuantity={order.CumulativeQuantity}, isStale={order.IsStale}, staleReason={order.StaleReason ?? "null"} }}";
 
     private static string Format(FirmSnapshot? firm) => firm is null
         ? "<missing>"
@@ -297,6 +351,7 @@ public class SuspendedTimeoutBoundarySpecTests
 
     private sealed record OrderSnapshot(
         string Status,
+        long CumulativeQuantity,
         bool IsStale,
         string? StaleReason);
 
