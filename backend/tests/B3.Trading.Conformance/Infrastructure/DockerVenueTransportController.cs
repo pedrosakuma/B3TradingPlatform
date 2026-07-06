@@ -93,20 +93,12 @@ internal sealed class DockerVenueTransportController
                 }
             }
 
-            var ipv4Address = network.Value.TryGetProperty("IPAddress", out var ipProp)
-                              && ipProp.ValueKind == JsonValueKind.String
-                ? string.IsNullOrWhiteSpace(ipProp.GetString())
-                    ? null
-                    : ipProp.GetString()!.Trim()
-                : null;
-
             if (aliases.Count == 0)
                 aliases.Add(containerName);
 
             return new NetworkAttachment(
                 network.Name,
-                aliases.Distinct(StringComparer.Ordinal).ToArray(),
-                ipv4Address);
+                aliases.Distinct(StringComparer.Ordinal).ToArray());
         }
 
         throw new InvalidOperationException($"Container '{containerName}' is not attached to any Docker network.");
@@ -161,15 +153,7 @@ internal sealed class DockerVenueTransportController
         NetworkAttachment network,
         CancellationToken ct)
     {
-        try
-        {
-            await RunDockerAsync(BuildConnectArgs(containerName, network, includeIp: true), ct);
-        }
-        catch (InvalidOperationException ex) when (!string.IsNullOrWhiteSpace(network.Ipv4Address)
-                                                  && ex.Message.Contains("Address already in use", StringComparison.Ordinal))
-        {
-            await RunDockerAsync(BuildConnectArgs(containerName, network, includeIp: false), ct);
-        }
+        await RunDockerAsync(BuildConnectArgs(containerName, network), ct);
     }
 
     private static bool MarketDataLogShowsTradeDrain(string logs, DateTimeOffset sinceUtc)
@@ -255,26 +239,19 @@ internal sealed class DockerVenueTransportController
         return end > start && int.TryParse(line[start..end], out value);
     }
 
-    internal sealed record NetworkAttachment(string Name, IReadOnlyList<string> Aliases, string? Ipv4Address);
+    internal sealed record NetworkAttachment(string Name, IReadOnlyList<string> Aliases);
     private sealed record ProcessResult(int ExitCode, string StdOut, string StdErr);
     private readonly record struct TradeCounters(int Sbe, int Recv, int Emit);
 
     private static List<string> BuildConnectArgs(
         string containerName,
-        NetworkAttachment network,
-        bool includeIp)
+        NetworkAttachment network)
     {
         var connectArgs = new List<string> { "network", "connect" };
         foreach (var alias in network.Aliases)
         {
             connectArgs.Add("--alias");
             connectArgs.Add(alias);
-        }
-
-        if (includeIp && !string.IsNullOrWhiteSpace(network.Ipv4Address))
-        {
-            connectArgs.Add("--ip");
-            connectArgs.Add(network.Ipv4Address);
         }
 
         connectArgs.Add(network.Name);
