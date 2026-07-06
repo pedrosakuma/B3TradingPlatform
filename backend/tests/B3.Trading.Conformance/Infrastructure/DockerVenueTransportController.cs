@@ -26,9 +26,18 @@ internal sealed class DockerVenueTransportController
     {
         await EnsureDockerAvailableAsync(ct);
 
-        var network = await InspectMatchingNetworkAsync(ct);
+        var network = await InspectNetworkAsync(_matchingContainer, ct);
         await RunDockerAsync(new[] { "network", "disconnect", "--force", network.Name, _matchingContainer }, ct);
         return new DetachedMatchingNetwork(this, network);
+    }
+
+    public async Task<DetachedMarketDataNetwork> DisconnectMarketDataAsync(CancellationToken ct = default)
+    {
+        await EnsureDockerAvailableAsync(ct);
+
+        var network = await InspectNetworkAsync(_marketDataContainer, ct);
+        await RunDockerAsync(new[] { "network", "disconnect", "--force", network.Name, _marketDataContainer }, ct);
+        return new DetachedMarketDataNetwork(this, network);
     }
 
     public async Task WaitForMarketDataTradeDrainAsync(
@@ -64,9 +73,9 @@ internal sealed class DockerVenueTransportController
         await RunDockerAsync(new[] { "version", "--format", "{{.Client.Version}}" }, ct);
     }
 
-    private async Task<NetworkAttachment> InspectMatchingNetworkAsync(CancellationToken ct)
+    private async Task<NetworkAttachment> InspectNetworkAsync(string containerName, CancellationToken ct)
     {
-        var result = await RunDockerAsync(new[] { "inspect", _matchingContainer }, ct);
+        var result = await RunDockerAsync(new[] { "inspect", containerName }, ct);
         using var doc = JsonDocument.Parse(result.StdOut);
         var root = doc.RootElement[0];
         var networks = root.GetProperty("NetworkSettings").GetProperty("Networks");
@@ -84,13 +93,23 @@ internal sealed class DockerVenueTransportController
                 }
             }
 
-            if (aliases.Count == 0)
-                aliases.Add(_matchingContainer);
+            var ipv4Address = network.Value.TryGetProperty("IPAddress", out var ipProp)
+                              && ipProp.ValueKind == JsonValueKind.String
+                ? string.IsNullOrWhiteSpace(ipProp.GetString())
+                    ? null
+                    : ipProp.GetString()!.Trim()
+                : null;
 
-            return new NetworkAttachment(network.Name, aliases.Distinct(StringComparer.Ordinal).ToArray());
+            if (aliases.Count == 0)
+                aliases.Add(containerName);
+
+            return new NetworkAttachment(
+                network.Name,
+                aliases.Distinct(StringComparer.Ordinal).ToArray(),
+                ipv4Address);
         }
 
-        throw new InvalidOperationException($"Container '{_matchingContainer}' is not attached to any Docker network.");
+        throw new InvalidOperationException($"Container '{containerName}' is not attached to any Docker network.");
     }
 
     private async Task<ProcessResult> RunDockerAsync(
@@ -135,6 +154,22 @@ internal sealed class DockerVenueTransportController
         }
 
         return new ProcessResult(process.ExitCode, stdout, stderr);
+    }
+
+    private async Task ConnectContainerAsync(
+        string containerName,
+        NetworkAttachment network,
+        CancellationToken ct)
+    {
+        try
+        {
+            await RunDockerAsync(BuildConnectArgs(containerName, network, includeIp: true), ct);
+        }
+        catch (InvalidOperationException ex) when (!string.IsNullOrWhiteSpace(network.Ipv4Address)
+                                                  && ex.Message.Contains("Address already in use", StringComparison.Ordinal))
+        {
+            await RunDockerAsync(BuildConnectArgs(containerName, network, includeIp: false), ct);
+        }
     }
 
     private static bool MarketDataLogShowsTradeDrain(string logs, DateTimeOffset sinceUtc)
@@ -220,9 +255,32 @@ internal sealed class DockerVenueTransportController
         return end > start && int.TryParse(line[start..end], out value);
     }
 
-    internal sealed record NetworkAttachment(string Name, IReadOnlyList<string> Aliases);
+    internal sealed record NetworkAttachment(string Name, IReadOnlyList<string> Aliases, string? Ipv4Address);
     private sealed record ProcessResult(int ExitCode, string StdOut, string StdErr);
     private readonly record struct TradeCounters(int Sbe, int Recv, int Emit);
+
+    private static List<string> BuildConnectArgs(
+        string containerName,
+        NetworkAttachment network,
+        bool includeIp)
+    {
+        var connectArgs = new List<string> { "network", "connect" };
+        foreach (var alias in network.Aliases)
+        {
+            connectArgs.Add("--alias");
+            connectArgs.Add(alias);
+        }
+
+        if (includeIp && !string.IsNullOrWhiteSpace(network.Ipv4Address))
+        {
+            connectArgs.Add("--ip");
+            connectArgs.Add(network.Ipv4Address);
+        }
+
+        connectArgs.Add(network.Name);
+        connectArgs.Add(containerName);
+        return connectArgs;
+    }
 
     internal sealed class DetachedMatchingNetwork : IAsyncDisposable
     {
@@ -241,16 +299,35 @@ internal sealed class DockerVenueTransportController
             if (_reconnected)
                 return;
 
-            var connectArgs = new List<string> { "network", "connect" };
-            foreach (var alias in _network.Aliases)
-            {
-                connectArgs.Add("--alias");
-                connectArgs.Add(alias);
-            }
+            await _owner.ConnectContainerAsync(_owner._matchingContainer, _network, ct);
+            _reconnected = true;
+        }
 
-            connectArgs.Add(_network.Name);
-            connectArgs.Add(_owner._matchingContainer);
-            await _owner.RunDockerAsync(connectArgs, ct);
+        public async ValueTask DisposeAsync()
+        {
+            if (!_reconnected)
+                await ReconnectAsync();
+        }
+    }
+
+    internal sealed class DetachedMarketDataNetwork : IAsyncDisposable
+    {
+        private readonly DockerVenueTransportController _owner;
+        private readonly NetworkAttachment _network;
+        private bool _reconnected;
+
+        internal DetachedMarketDataNetwork(DockerVenueTransportController owner, NetworkAttachment network)
+        {
+            _owner = owner;
+            _network = network;
+        }
+
+        public async Task ReconnectAsync(CancellationToken ct = default)
+        {
+            if (_reconnected)
+                return;
+
+            await _owner.ConnectContainerAsync(_owner._marketDataContainer, _network, ct);
             _reconnected = true;
         }
 
