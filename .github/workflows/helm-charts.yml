@@ -74,6 +74,41 @@ jobs:
             --set nginx.resolver=10.0.0.10 \
             --set nginx.tradingUpstream=trading-host.b3-prod.svc.cluster.local:5000
 
+      # #574: a values/template-only chart change that lands without a
+      # Chart.yaml version bump silently fails to republish (the "Package +
+      # push" job treats OCI tags as immutable and only emits a
+      # ::notice::). Fail the PR up front instead, mirroring the digest/tag
+      # immutability checks used elsewhere in this repo's CI.
+      - name: Check Chart.yaml version bumped
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.sha }}"
+          base_sha="${{ github.event.pull_request.base.sha }}"
+
+          changed="$(git diff --name-only "$base_sha" HEAD -- "charts/${{ matrix.chart }}" \
+            | grep -v "^charts/${{ matrix.chart }}/Chart.yaml$" || true)"
+          if [ -z "$changed" ]; then
+            echo "No non-Chart.yaml changes under charts/${{ matrix.chart }}; skipping version check."
+            exit 0
+          fi
+
+          old_version="$(git show "$base_sha:charts/${{ matrix.chart }}/Chart.yaml" 2>/dev/null \
+            | awk '/^version:/ {print $2}' || true)"
+          new_version="$(awk '/^version:/ {print $2}' "charts/${{ matrix.chart }}/Chart.yaml")"
+
+          if [ -z "$old_version" ]; then
+            echo "No prior Chart.yaml on base ref; treating as new chart, skipping version check."
+            exit 0
+          fi
+
+          if [ "$old_version" = "$new_version" ]; then
+            echo "::error file=charts/${{ matrix.chart }}/Chart.yaml::charts/${{ matrix.chart }} has template/values changes but Chart.yaml's version ($new_version) was not bumped. Bump 'version' so CI republishes this chart."
+            exit 1
+          fi
+
+          echo "charts/${{ matrix.chart }} version bumped: $old_version -> $new_version"
+
   publish:
     name: Package + push (${{ matrix.chart }})
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
