@@ -1,6 +1,7 @@
 using B3.Trading.Application;
 using B3.Trading.Infrastructure;
 using Microsoft.Extensions.Logging.Abstractions;
+using Up = B3.EntryPoint.Client;
 
 namespace B3.Trading.Application.Tests;
 
@@ -25,7 +26,9 @@ public class GatewayConnectSessionRollTests
     private static B3EntryPointClientGateway BuildGateway(
         uint initialVerId,
         Func<uint>? provider,
-        IConnectSessionRollReactor? reactor)
+        IConnectSessionRollReactor? reactor,
+        Func<Up.ReconnectMode, Func<uint, uint>, CancellationToken, Task<Up.ReconnectOutcome>>? reconnectAsyncOverride = null,
+        Action? connectedTestHook = null)
     {
         var opts = new B3.EntryPoint.Client.EntryPointClientOptions
         {
@@ -39,7 +42,9 @@ public class GatewayConnectSessionRollTests
         return new B3EntryPointClientGateway(
             client, "FIRM_A", initialVerId, NullLogger<B3EntryPointClientGateway>.Instance,
             effectiveSessionVerIdProvider: provider,
-            connectSessionRollReactor: reactor);
+            connectSessionRollReactor: reactor,
+            reconnectAsyncOverride: reconnectAsyncOverride,
+            connectedTestHook: connectedTestHook);
     }
 
     [Fact]
@@ -137,6 +142,59 @@ public class GatewayConnectSessionRollTests
 
         Assert.Equal(8u, gw.CurrentSessionVerId);
         Assert.Empty(reactor.Calls);
+    }
+
+    [Fact]
+    public void ReconcileReconnectSessionRoll_Reattached_Advanced_InvokesReactor_AndPublishesVerId()
+    {
+        var reactor = new SpyReactor();
+        var gw = BuildGateway(initialVerId: 8, provider: null, reactor: reactor);
+
+        gw.ReconcileReconnectSessionRoll(
+            B3.EntryPoint.Client.ReconnectKind.Reattached, priorVerId: 8, effectiveVerId: 9);
+
+        Assert.Equal(9u, gw.CurrentSessionVerId);
+        var call = Assert.Single(reactor.Calls);
+        Assert.Equal(("FIRM_A", 8u, 9u), call);
+    }
+
+    [Fact]
+    public async Task ReconnectLoopAsync_FailedReconnectAttempt_DoesNotAdvancePriorBaselineBeforeSuccessfulReattach()
+    {
+        var reactor = new SpyReactor();
+        var attempts = 0;
+        var selectorInputs = new List<uint>();
+        var gw = BuildGateway(
+            initialVerId: 8,
+            provider: null,
+            reactor: reactor,
+            reconnectAsyncOverride: (mode, selector, ct) =>
+            {
+                Assert.Equal(Up.ReconnectMode.EstablishReuseThenNegotiate, mode);
+                attempts++;
+                if (attempts == 1)
+                {
+                    selectorInputs.Add(selector(8));
+                    throw new IOException("simulated reconnect failure after local session-ver bump");
+                }
+
+                return Task.FromResult(new Up.ReconnectOutcome(
+                    Up.ReconnectKind.Reattached,
+                    SessionVerId: 9,
+                    ServerNextSeqNoExpected: 0,
+                    ServerLastIncomingSeqNoSeen: 0,
+                    RetransmitWindowReady: true));
+            },
+            connectedTestHook: static () => { });
+
+        await gw.ReconnectLoopForTestsAsync(CancellationToken.None);
+
+        Assert.Equal(2, attempts);
+        Assert.Equal([9u], selectorInputs);
+        Assert.Equal(9u, gw.CurrentSessionVerId);
+        var call = Assert.Single(reactor.Calls);
+        Assert.Equal(("FIRM_A", 8u, 9u), call);
+        Assert.False(gw.IsReconnecting);
     }
 
     [Fact]

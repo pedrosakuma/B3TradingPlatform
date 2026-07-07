@@ -85,6 +85,14 @@ dotnet test backend/tests/B3.Trading.Conformance --filter "Category=Conformance"
   with the missed ER replayed on restart so `GET /orders` shows the
   correct terminal fill instead of a stale `Working` snapshot. Also uses
   the docker-control gate and real-stack sandbox overlay.
+- **`Spec_FIXP_SessionRoll/MatchingPlatformRestartSpecTests`** —
+  process-fault sibling of the scenario above: restart the
+  `matching-platform` container itself (not just its TCP leg), assert the
+  host is forced onto the `Renegotiated`/advanced-`SessionVerId` path and
+  stale-flags the pre-restart survivor, then contract-prove the venue's
+  book/WAL survived by crossing that stale survivor into a real `Filled`
+  terminal ER before finally asserting a fresh post-restart order round-trip
+  still trades through to `Filled`.
 
 ### Backlog (separate scenarios; add as the contract solidifies)
 
