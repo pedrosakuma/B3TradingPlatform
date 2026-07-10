@@ -797,7 +797,13 @@ function startMdWorker() {
   // #394. mdWorker is now the sole depth source — trades + info + MBP.
   // The trading-host book.${symbol} fan-out was removed; FE consumes
   // B3MarketDataPlatform directly.
-  const flags = FLAGS.TRADES | FLAGS.INFO | FLAGS.MBP;
+  // `Book` is required too: per B3MarketDataPlatform docs/WEBSOCKET-PROTOCOL.md,
+  // the initial CandleSnapshot sequence is only sent "on subscribe with
+  // the Book flag" (CandleUpdate itself rides Mbp, but state.js drops
+  // every update until a completed snapshot sets `entry.ready`). Without
+  // it the chart never leaves "no candle snapshot received" even though
+  // trades are executing.
+  const flags = FLAGS.TRADES | FLAGS.INFO | FLAGS.MBP | FLAGS.BOOK;
   mdWorker.postMessage({
     type: "start",
     url: mdConfig.url,
