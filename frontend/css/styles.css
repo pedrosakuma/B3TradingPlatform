@@ -1534,6 +1534,23 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
      grows/scrolls instead — consistent with the "no overflow trap, page
      scrolls" approach documented above for `.trader-view`. */
   .trader-subpanel { min-height: auto; }
+
+  /* `.trader-bottom-band`'s desktop sizing (`min-height: 180px; max-height:
+     30vh`) is a *floor and ceiling* pair, not a target — with no
+     `flex-grow` of its own (unlike `.trader-subpanel`, the only
+     flex-grow item in `.trader-layout`'s column), the band's actual
+     height is driven by its content's natural size, which — thanks to
+     the `flex: 1; min-height: 0` chain inside it
+     (`.trader-bottom-subpanel` → `.table-scroll`) — collapses right
+     back down to the 180px floor rather than growing toward the 30vh
+     ceiling. That's fine on desktop, where the *rest* of the viewport
+     (Chart/DOB/Tape) needs the room instead. On mobile, now that
+     `.trader-subpanel` takes its full natural height and the page
+     scrolls, there's no such competition — so bumping the *floor*
+     itself (not just the ceiling) gives Working orders/Executions a
+     genuinely usable area instead of one barely tall enough for a
+     single row. */
+  .trader-bottom-band { min-height: 45vh; max-height: 60vh; }
 }
 
 /* ---------- Mobile navigation drawer (#408) ----------
