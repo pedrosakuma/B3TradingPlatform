@@ -1551,6 +1551,27 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
      genuinely usable area instead of one barely tall enough for a
      single row. */
   .trader-bottom-band { min-height: 45vh; max-height: 60vh; }
+
+  /* Same underlying flexbox spec quirk as `.trader-subpanel`/`.dob`/
+     `.dob-grid` above, now hitting `.ticket` itself: it has its own
+     `overflow-y: auto` (line ~233), so its "automatic minimum size" is
+     forced to 0 rather than being based on content — on desktop this
+     was masked because `.ticket-row-quick` fits on one line and there
+     was always enough leftover flex space in `.trader-layout`'s column
+     to naturally fit ~95px, but once `.trader-subpanel`/
+     `.trader-bottom-band`'s min-heights grew to their real (large)
+     content sizes just above, `.ticket`'s "leftover" share of the flex
+     column shrank toward 0, and — being flex-shrinkable with no min-
+     height floor of its own — it collapsed to a sliver just tall
+     enough to clip its own first line, spilling the rest of the (now
+     multi-line, `flex-wrap: wrap` — see above) quick-ticket row on top
+     of `.trader-subtabs` below. Unlike `.trader-subpanel` above,
+     `min-height: auto` is a no-op here (the automatic-minimum-size
+     override applies specifically because *this* element itself has
+     non-visible overflow) — `min-height: max-content` sidesteps that
+     by requesting the content's real size directly instead of relying
+     on the (overflow-suppressed) automatic minimum. */
+  .ticket { min-height: max-content; }
 }
 
 /* ---------- Mobile navigation drawer (#408) ----------
