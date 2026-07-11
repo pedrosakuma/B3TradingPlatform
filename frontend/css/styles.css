@@ -271,24 +271,47 @@ body {
   font-size: .68rem; font-variant-numeric: tabular-nums;
   color: rgba(255,255,255,.85);
 }
-.dob { min-height: 0; } /* was grid-area: dob; — see Fase 4 (#400) */
+/* `.dob` (the flex-column panel wrapping the title + `.dob-grid`) also
+   needs an explicit non-zero `min-height`, not just `.dob-grid` below:
+   `.markets-layout`'s <=1280px `grid-template-rows: auto auto auto`
+   sizes the dob *row track* off `.dob`'s own intrinsic height during
+   grid auto-track sizing, which does not "see through" into
+   `.dob-grid`'s min-height once `.dob-grid` establishes its own
+   overflow/scroll context — verified empirically: with only
+   `.dob-grid { min-height: 180px }` and `.dob { min-height: 0 }`, the
+   grid row locked at the collapsed ~28px title-only height and
+   `.dob-grid` rendered 180px tall but overflowed *outside* `.dob`'s
+   box into the Tape panel below. `230px` covers `.dob`'s real content
+   floor (title ~19px + top/bottom padding ~25.6px + dob-grid's 180px
+   min-height, ~225px, rounded up for safety). */
+.dob { min-height: 230px; }
 /* `.dob-grid th` is `position: sticky; top: 0` (generic `th` rule
    below), which needs a scrolling ancestor to stick *within* — every
    other sticky-header table on the page gets one via `.table-scroll`
    (blotter/executions/etc), but the DOB tables were never wrapped in
    one. Without a local scroll container the sticky header escapes to
    the nearest ancestor that actually scrolls, which on mobile's
-   single-column stack (markets-layout collapses to 1fr at <=1280px)
-   is the whole page — so as the trader scrolls, "Cum Qty Bid | Ask Qty
-   Cum" detaches and floats over whatever panel happens to be at the
-   top of the viewport (typically the Working Orders table), hiding
-   both. `flex: 1` + `overflow-y: auto` gives it the same local
-   scroll-container treatment as `.tape-list`/`.table-scroll` so its
-   sticky header stays pinned to its own panel only.
-*/
+   single-column stack (markets-layout collapses to `grid-template-rows:
+   auto auto auto` at <=1280px) is the whole page — so as the trader
+   scrolls, "Cum Qty Bid | Ask Qty Cum" detaches and floats over
+   whatever panel happens to be at the top of the viewport (typically
+   the Working Orders table), hiding both.
+
+   `min-height: 180px` (not `0`) + `max-height` + `overflow-y: auto` is
+   deliberate: any non-visible `overflow` value forces a flex/grid
+   item's *automatic minimum size* in its main axis to 0 per spec
+   (verified empirically: with `min-height: 0` this collapsed to a
+   computed `height: 0px`, hiding the DOB entirely on the <=1280px
+   single-column stack where `.markets-layout` rows are `auto` — i.e.
+   content-sized with nothing to resolve the ambiguity, so the browser
+   picked the automatic-minimum-size floor of 0. Desktop's definite
+   `minmax(0, 1fr)` grid row masked the same collapse when an earlier
+   `flex: 1` version of this rule was tried). An explicit non-zero
+   `min-height` (matching `.trader-bottom-band`'s 180px convention)
+   guarantees a real, non-zero height in both contexts. */
 .dob-grid {
-  display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; min-height: 0;
-  flex: 1; overflow-y: auto;
+  display: grid; grid-template-columns: 1fr 1fr; gap: .5rem;
+  min-height: 180px; max-height: min(45vh, 420px); overflow-y: auto;
 }
 .dob-grid table { width: 100%; border-collapse: collapse; font-size: .8rem; }
 .dob-grid th { color: var(--muted); font-weight: 500; padding: .15rem .35rem; }
