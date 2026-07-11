@@ -312,6 +312,14 @@ body {
 .dob-grid {
   display: grid; grid-template-columns: 1fr 1fr; gap: .5rem;
   min-height: 180px; max-height: min(45vh, 420px); overflow-y: auto;
+  /* Grid items default to `align-self: stretch`, so the bid/ask
+     `<table>`s were stretched to fill the full grid-row height (the
+     180-420px above) regardless of how many rows they actually have —
+     with a thin book (e.g. one bid, no asks) the lone `<tr>` absorbed
+     all the leftover space and rendered as one absurdly tall row.
+     `align-items: start` lets each table keep its natural
+     content-based height and leaves any extra space blank below. */
+  align-items: start;
 }
 .dob-grid table { width: 100%; border-collapse: collapse; font-size: .8rem; }
 .dob-grid th { color: var(--muted); font-weight: 500; padding: .15rem .35rem; }
@@ -1507,6 +1515,25 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
   }
   .watchlist-layout { grid-template-columns: 1fr; }
   .ticket-row-quick { flex-wrap: wrap; }
+
+  /* `.trader-subpanel`'s default `flex: 1; min-height: 0` (desktop) is a
+     shrink-to-fit strategy that pairs with `.markets-layout`'s definite
+     `minmax(0, 1fr)` row so the panel can flex-shrink to whatever space
+     is available. At this breakpoint `.markets-layout`/`.watchlist-layout`
+     switch to content-sized `auto` row(s) instead — those two strategies
+     conflict: `min-height: 0` still lets the *flex item* itself be
+     squeezed below its content's real height by whatever's left over
+     after `.ticket`/`.trader-subtabs`/`.trader-bottom-band` claim their
+     share of the viewport, but the `auto` grid rows inside don't shrink
+     to match — they keep their full content height and simply paint
+     past the squeezed box's bottom edge (no `overflow` is set on
+     `.trader-subpanel`), visually overlapping `.trader-bottom-band`
+     (Working orders / Executions) below. `min-height: auto` restores
+     flexbox's normal "automatic minimum size" (don't shrink below
+     content), so the panel takes its real ~content height and the page
+     grows/scrolls instead — consistent with the "no overflow trap, page
+     scrolls" approach documented above for `.trader-view`. */
+  .trader-subpanel { min-height: auto; }
 }
 
 /* ---------- Mobile navigation drawer (#408) ----------
