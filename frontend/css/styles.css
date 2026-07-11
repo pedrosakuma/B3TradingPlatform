@@ -1516,4 +1516,14 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
   .mobile-nav-trigger { display: inline-flex; align-items: center; }
   /* Hide the inline tablist on phones — the drawer owns primary nav. */
   .view-toggle { display: none !important; }
+
+  /* #408 follow-up: on phones the topbar packs hamburger + brand +
+     symbol select + gateway/ws/balance pills + logout into one
+     `justify-content: space-between` row with no wrap allowed, so on
+     narrow viewports (~360-400px) everything overlaps instead of
+     shrinking. Let both rows wrap and shrink the brand text so the
+     status cluster gets its own line(s) instead of overlapping. */
+  .topbar { flex-wrap: wrap; row-gap: .35rem; }
+  .status { flex-wrap: wrap; row-gap: .35rem; }
+  .brand { font-size: .95rem; }
 }
