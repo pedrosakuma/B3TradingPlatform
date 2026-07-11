@@ -272,8 +272,23 @@ body {
   color: rgba(255,255,255,.85);
 }
 .dob { min-height: 0; } /* was grid-area: dob; — see Fase 4 (#400) */
+/* `.dob-grid th` is `position: sticky; top: 0` (generic `th` rule
+   below), which needs a scrolling ancestor to stick *within* — every
+   other sticky-header table on the page gets one via `.table-scroll`
+   (blotter/executions/etc), but the DOB tables were never wrapped in
+   one. Without a local scroll container the sticky header escapes to
+   the nearest ancestor that actually scrolls, which on mobile's
+   single-column stack (markets-layout collapses to 1fr at <=1280px)
+   is the whole page — so as the trader scrolls, "Cum Qty Bid | Ask Qty
+   Cum" detaches and floats over whatever panel happens to be at the
+   top of the viewport (typically the Working Orders table), hiding
+   both. `flex: 1` + `overflow-y: auto` gives it the same local
+   scroll-container treatment as `.tape-list`/`.table-scroll` so its
+   sticky header stays pinned to its own panel only.
+*/
 .dob-grid {
   display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; min-height: 0;
+  flex: 1; overflow-y: auto;
 }
 .dob-grid table { width: 100%; border-collapse: collapse; font-size: .8rem; }
 .dob-grid th { color: var(--muted); font-weight: 500; padding: .15rem .35rem; }
