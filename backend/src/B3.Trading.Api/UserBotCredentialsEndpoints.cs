@@ -46,13 +46,17 @@ public static class UserBotCredentialsEndpoints
             CreatedUserBotCredential created;
             try
             {
-                created = await registry.CreateAsync(sub, label, req.BoundCertThumbprint, ct);
+                created = await registry.CreateAsync(
+                    sub,
+                    label,
+                    req.BoundCertThumbprint,
+                    ct,
+                    firmId: ctx.User.FindFirstValue(Auth.JwtIssuer.FirmClaim) ?? "default");
             }
             catch (ArgumentException ex)
             {
                 return Results.BadRequest(new { error = ex.Message });
             }
-
             var dto = new CreatedUserBotCredentialDto(
                 Id: created.Credential.Id,
                 Label: created.Credential.Label,

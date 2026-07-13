@@ -809,6 +809,13 @@ public sealed record UserBotCredentialCreatedEvent : WalEvent
     public required string Label { get; init; }
     public required string SecretHash { get; init; }
     public required DateTimeOffset CreatedAtUtc { get; init; }
+    /// <summary>
+    /// #431 — firm scope inherited from the JWT <c>firm</c> claim of the
+    /// human user at credential creation time. Nullable so events minted
+    /// by older builds (pre-#431) replay as the legacy <c>"default"</c>
+    /// sentinel — see <c>StateSnapshotter</c> apply step.
+    /// </summary>
+    public string? FirmId { get; init; }
 
     /// <summary>
     /// Optional SHA-256 client-certificate thumbprint pin (RFC
