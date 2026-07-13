@@ -567,7 +567,10 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             requestedTimeInForce, requestedStopPrice, requestedGoodTillDate);
 
         var req = BuildReplaceOrderRequest(original, newClOrdId, newQuantity, newPrice,
-            requestedTimeInForce, requestedStopPrice, requestedGoodTillDate);
+            requestedTimeInForce, requestedStopPrice, requestedGoodTillDate,
+            ResolveStpInstruction(original), ResolveTradingSubAccount(original),
+            ResolveVenueAccount(original), ResolveInvestorId(original),
+            ResolveRoutingInstruction(original));
 
         return SendAsync(newClOrdId, OrderEntryLatencyProbe.OpReplace,
             ct => _client.ReplaceAsync(req, ct), cancellationToken);
@@ -588,7 +591,12 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         decimal? newPrice,
         TimeInForce? requestedTimeInForce,
         decimal? requestedStopPrice,
-        DateTimeOffset? requestedGoodTillDate)
+        DateTimeOffset? requestedGoodTillDate,
+        UpModels.SelfTradePreventionInstruction selfTradePreventionInstruction = UpModels.SelfTradePreventionInstruction.None,
+        uint? tradingSubAccount = null,
+        ulong? account = null,
+        InvestorIdentity? investorId = null,
+        RoutingInstruction? routingInstruction = null)
     {
         ArgumentNullException.ThrowIfNull(original);
         var (effTif, effStop, effGtd) = Order.MergeReplacementOptionals(
@@ -633,31 +641,31 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             // re-accompany it. Resolution scope is the original
             // order's (owner, firm, symbol) — modify never changes
             // those three.
-            SelfTradePreventionInstruction = ResolveStpInstruction(original),
+            SelfTradePreventionInstruction = selfTradePreventionInstruction,
             // #471. Same rationale as STP above: from the matching
             // engine's perspective a replace is a fresh order, so the
             // TradingSubAccount wire id must re-accompany it. The
             // domain sub-account on the original Order is preserved
             // through every modify path (HydrateReplacement copies it
             // verbatim), so resolving from `original` is correct.
-            TradingSubAccount = ResolveTradingSubAccount(original),
+            TradingSubAccount = tradingSubAccount,
             // #458. Same rationale: replace is a fresh book entry; the
             // CBLC Account must re-accompany it. Resolving from
             // `original` is correct because owner/firm/sub-account
             // (the typical inputs to the resolver) are immutable
             // across a modify.
-            Account = ResolveVenueAccount(original),
+            Account = account,
             // #472. Same rationale: replace is a fresh book entry;
             // the InvestorId must re-accompany it. Resolving from
             // `original` is correct because owner/firm (the typical
             // inputs to the resolver) are immutable across a modify.
-            InvestorId = MapInvestorIdToWire(ResolveInvestorId(original)),
+            InvestorId = MapInvestorIdToWire(investorId),
             // #473. Same rationale: replace is a fresh book entry,
             // routing intent must re-accompany it. Resolved off the
             // original since owner/firm (the typical inputs) are
             // immutable across modify; pre-trade whitelist gating
             // was already applied by OrderModifyService.
-            RoutingInstruction = MapRoutingInstructionToWire(ResolveRoutingInstruction(original)),
+            RoutingInstruction = MapRoutingInstructionToWire(routingInstruction),
         };
     }
 

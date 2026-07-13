@@ -285,6 +285,7 @@ public sealed class StateSnapshotter
                 DisplayQty = o.DisplayQty,
                 DisplayResetPolicy = o.DisplayResetPolicy?.ToString(),
                 SubAccountId = o.SubAccountId?.Value,
+                MinQty = o.MinQty,
             });
         }
 
