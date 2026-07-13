@@ -45,6 +45,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(OrderStaleClearedEvent), "order.stale-cleared")]
 [JsonDerivedType(typeof(UserBotCredentialCreatedEvent), "userbot.cred.created")]
 [JsonDerivedType(typeof(UserBotCredentialRevokedEvent), "userbot.cred.revoked")]
+[JsonDerivedType(typeof(UserBotCredentialCertBindingChangedEvent), "userbot.cred.cert-binding-changed")]
 [JsonDerivedType(typeof(BotSessionInitializedEvent), "userbot.session.initialized")]
 [JsonDerivedType(typeof(BotSessionVerAdvancedEvent), "userbot.session.ver-advanced")]
 [JsonDerivedType(typeof(BotSessionSeqAdvancedEvent), "userbot.session.seq-advanced")]
@@ -808,6 +809,14 @@ public sealed record UserBotCredentialCreatedEvent : WalEvent
     public required string Label { get; init; }
     public required string SecretHash { get; init; }
     public required DateTimeOffset CreatedAtUtc { get; init; }
+
+    /// <summary>
+    /// Optional SHA-256 client-certificate thumbprint pin (RFC
+    /// user-bot-fixp-mtls-v0 §4.3, sub-issue #540). <c>null</c> = unpinned.
+    /// Not <c>required</c> so credentials written before mTLS replay as
+    /// unpinned with no WAL migration.
+    /// </summary>
+    public string? BoundCertThumbprint { get; init; }
 }
 
 /// <summary>
@@ -819,6 +828,20 @@ public sealed record UserBotCredentialRevokedEvent : WalEvent
     public required Guid Id { get; init; }
     public required string UserId { get; init; }
     public required DateTimeOffset RevokedAtUtc { get; init; }
+}
+
+/// <summary>
+/// Sub-issue #540 (RFC user-bot-fixp-mtls-v0 §4.3). Records a change to a
+/// credential's client-certificate thumbprint pin: set, re-pin, or clear.
+/// <see cref="BoundCertThumbprint"/> is <c>null</c> when the operator clears
+/// the pin (credential becomes unpinned again). The thumbprint is non-secret.
+/// </summary>
+public sealed record UserBotCredentialCertBindingChangedEvent : WalEvent
+{
+    public required Guid Id { get; init; }
+    public required string UserId { get; init; }
+    public required DateTimeOffset ChangedAtUtc { get; init; }
+    public string? BoundCertThumbprint { get; init; }
 }
 
 /// <summary>

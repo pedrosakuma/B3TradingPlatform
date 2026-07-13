@@ -1,0 +1,59 @@
+# Public-exposure overlay for the user-bot FIXP listener (go-public, #531).
+#
+# Promotes the trading-host into a fail-closed Production posture suitable
+# for exposing the inbound FIXP listener to the public internet:
+#   - ASPNETCORE_ENVIRONMENT=Production so every Production boot guard
+#     fires (auth signing key, OwnerHashSalt, ClOrdId mask salt, listener).
+#   - FIXP listener enabled with TLS.Required + mTLS Required and hardened
+#     connection caps / accept rate-limit (#528 + #529).
+#   - NO default secrets: every secret uses the ${VAR:?...} required form,
+#     so a missing value aborts `docker compose up` instead of silently
+#     booting with a dev placeholder. AGENTS.md: "Compose overlay variables
+#     must be set everywhere."
+#
+# Usage:
+#   cp docker/.env.example docker/.env   # then fill in the PUBLIC_* secrets
+#   docker compose \
+#       -f docker/docker-compose.yml \
+#       -f docker/docker-compose.public.yml \
+#       up -d
+#
+# Provision the TLS material first (see docs/operations/fixp-listener.md):
+#   server cert/key + bot CA bundle + revocation deny-list, mounted into
+#   the trading-host at /etc/ssl/fixp. Rotate the deny-list without restart.
+
+services:
+  trading-host:
+    environment:
+      # Production env activates the fail-closed boot guards. With this set,
+      # the host aborts if any required secret/cert is missing.
+      ASPNETCORE_ENVIRONMENT: Production
+
+      # No-default secrets — required, no dev fallback. Boot fails closed.
+      Trading__Reports__Cvm__OwnerHashSalt: ${TRADING_CVM_OWNER_HASH_SALT:?Set TRADING_CVM_OWNER_HASH_SALT in .env (no default in public mode)}
+      Trading__DropCopy__ClOrdIdMaskSalt: ${TRADING_CLORDID_MASK_SALT:?Set TRADING_CLORDID_MASK_SALT in .env (no default in public mode)}
+
+      # --- FIXP listener: public, TLS + mTLS required (#528) ---
+      Trading__EntryPointListener__Enabled: "true"
+      Trading__EntryPointListener__AllowInProduction: "true"
+      Trading__EntryPointListener__Endpoint: 0.0.0.0:5001
+      Trading__EntryPointListener__Tls__Required: "true"
+      Trading__EntryPointListener__Tls__CertPath: ${PUBLIC_FIXP_TLS_CERT:?Set PUBLIC_FIXP_TLS_CERT (server cert/pfx path) in .env}
+      Trading__EntryPointListener__Tls__KeyPath: ${PUBLIC_FIXP_TLS_KEY:-}
+      Trading__EntryPointListener__Tls__Password: ${PUBLIC_FIXP_TLS_PASSWORD:-}
+      Trading__EntryPointListener__Tls__ClientCertificateMode: Required
+      Trading__EntryPointListener__Tls__ClientCa__BundlePath: ${PUBLIC_FIXP_CA_BUNDLE:?Set PUBLIC_FIXP_CA_BUNDLE (bot CA bundle path) in .env}
+      Trading__EntryPointListener__Tls__ClientCa__DenyListPath: ${PUBLIC_FIXP_CA_DENYLIST:?Set PUBLIC_FIXP_CA_DENYLIST (revocation deny-list path) in .env}
+      Trading__EntryPointListener__Tls__RequireClientAuthEku: "true"
+
+      # --- hardened rate-limit + connection caps profile (#529) ---
+      Trading__EntryPointListener__ConnectionCaps__MaxConcurrentTotal: ${PUBLIC_FIXP_MAX_CONN:-200}
+      Trading__EntryPointListener__ConnectionCaps__MaxConcurrentPerIp: ${PUBLIC_FIXP_MAX_CONN_PER_IP:-5}
+      Trading__EntryPointListener__AcceptRateLimit__ConnectionsPerSecondPerIp: ${PUBLIC_FIXP_ACCEPT_PER_SEC:-5}
+      Trading__EntryPointListener__AcceptRateLimit__BurstPerIp: ${PUBLIC_FIXP_ACCEPT_BURST:-20}
+    expose:
+      - "5001"
+    ports:
+      - "${PUBLIC_FIXP_PORT:-5001}:5001"
+    volumes:
+      - ${PUBLIC_FIXP_TLS_DIR:?Set PUBLIC_FIXP_TLS_DIR (host dir with cert/key/CA/deny-list) in .env}:/etc/ssl/fixp:ro

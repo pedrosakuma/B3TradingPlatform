@@ -1,0 +1,66 @@
+{
+  // Conformance-only variant of exchange-simulator.bridge.json.
+  //
+  // The real/dev stack keeps the venue's FIXP timers at production-like
+  // values so manual dogfooding and demos behave naturally. The
+  // real-conformance overlay mounts THIS file instead to shorten BOTH:
+  //   - the keepalive / idle timers (so the broken TCP leg is noticed in
+  //     under a second), and
+  //   - suspendedTimeoutMs (so the session reap boundary is testable in a
+  //     few seconds rather than 5 minutes).
+  "tcp": {
+    "listen": "0.0.0.0:9876",
+    "enteringFirm": 1,
+    "heartbeatIntervalMs": 500,
+    "idleTimeoutMs": 500,
+    "testRequestGraceMs": 250,
+    "suspendedTimeoutMs": 3000
+  },
+  "auth": {
+    "devMode": true
+  },
+  "firms": [
+    { "id": "FIRM01", "name": "Alpha Corretora", "enteringFirmCode": 100 },
+    { "id": "FIRM02", "name": "Beta Corretora", "enteringFirmCode": 200 },
+    { "id": "FIRM03", "name": "Gamma Corretora", "enteringFirmCode": 300 }
+  ],
+  "sessions": [
+    { "sessionId": "10101", "firmId": "FIRM01", "accessKey": "dev-key-1" },
+    { "sessionId": "10102", "firmId": "FIRM01", "accessKey": "dev-key-2" },
+    { "sessionId": "10103", "firmId": "FIRM02", "accessKey": "dev-key-3" },
+    { "sessionId": "10104", "firmId": "FIRM03", "accessKey": "dev-key-4" }
+  ],
+  "http": {
+    "listen": "0.0.0.0:8080",
+    "livenessStaleMs": 5000
+  },
+  "channels": [
+    {
+      "channelNumber": 84,
+      "transport": "unicast",
+      "incrementalGroup": "marketdata",
+      "incrementalPort": 30084,
+      "selfTradePrevention": "none",
+      "instruments": "config/instruments-eqt.json",
+      "snapshot": {
+        "group": "marketdata",
+        "port": 30184,
+        "cadenceMs": 1000,
+        "maxEntriesPerChunk": 30
+      },
+      "instrumentDefinition": {
+        "channelNumber": 184,
+        "group": "marketdata",
+        "port": 31084,
+        "cadenceMs": 5000
+      },
+      "persistence": {
+        "dataDir": "/var/lib/b3matching",
+        "wal": {
+          "enabled": true,
+          "fsyncPerWrite": true
+        }
+      }
+    }
+  ]
+}

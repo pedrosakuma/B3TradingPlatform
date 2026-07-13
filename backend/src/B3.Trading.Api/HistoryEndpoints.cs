@@ -39,8 +39,12 @@ namespace B3.Trading.Api;
 /// retention grows. The cursor envelope is intentionally future-proof:
 /// <c>{seq,ts}</c> is enough to anchor a binary search via the segment
 /// index, so an indexed implementation can ship without a wire-shape
-/// change. Deferred — see issue #453 (history-index reader keyed by
-/// <c>(endclient, ts)</c>, to land alongside the EOD materialiser).
+/// change. TODO(history-index): indexed reader keyed by
+/// <c>(endclient, ts)</c>, tracked alongside the EOD materialiser.
+/// Design agreed in <c>docs/rfcs/history-index-v0.md</c> (#453,
+/// Option C — resolved per-day index emitted by the EOD pass);
+/// implementation deferred until the retention/latency trigger in
+/// that RFC's §7 fires.
 /// </para>
 /// </summary>
 public static class HistoryEndpoints

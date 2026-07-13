@@ -33,6 +33,7 @@ public static class TradingEndpointsExtensions
         app.MapFills();
         app.MapAlgo();
         app.MapPositions();
+        app.MapInstruments();
         app.MapBalance();
         app.MapPnl();
         app.MapSubAccounts();
