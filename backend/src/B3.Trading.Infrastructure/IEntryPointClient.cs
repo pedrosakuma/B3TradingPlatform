@@ -1,3 +1,5 @@
+using B3.Trading.Domain;
+
 namespace B3.Trading.Infrastructure;
 
 /// <summary>
@@ -95,7 +97,28 @@ public sealed record OrderCancelReplaceRequest(
     /// inherited from the original order, clamped to <c>NewQuantity</c> when the
     /// replace shrinks the order below the original visible portion. Null when
     /// the original was a full-disclosure order.</summary>
-    long? MaxFloor = null);
+    long? MaxFloor = null,
+    /// <summary>
+    /// #437. Effective TimeInForce on the replacement after the
+    /// domain merge in <see cref="EntryPointClientGateway.CancelReplaceAsync"/>
+    /// — mirrors what the real adapter sends on the wire so test
+    /// assertions on the mock seam stay faithful to the venue
+    /// contract. Null only for legacy callers that have not been
+    /// updated to set it.
+    /// </summary>
+    TimeInForce? TimeInForce = null,
+    /// <summary>
+    /// #437. Effective StopPrice on the replacement (required iff
+    /// the order type is Stop / StopLimit). Mirrors the real
+    /// adapter's <c>req.StopPrice</c>.
+    /// </summary>
+    decimal? StopPrice = null,
+    /// <summary>
+    /// #437. Effective GoodTillDate on the replacement (required iff
+    /// <see cref="TimeInForce"/> is <see cref="Domain.TimeInForce.GTD"/>;
+    /// auto-cleared when TIF moves away from GTD by the domain merge).
+    /// </summary>
+    DateTimeOffset? GoodTillDate = null);
 
 /// <summary>
 /// ExecutionReport surfaced by the wire to the platform. <see cref="OrigClOrdId"/>

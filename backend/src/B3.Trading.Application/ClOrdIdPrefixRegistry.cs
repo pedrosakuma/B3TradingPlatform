@@ -36,6 +36,32 @@ public sealed class ClOrdIdPrefixRegistry
     public const ulong CounterMask = (1UL << CounterBits) - 1;
     public const long MaxPrefixIndex = 1L << 21;
 
+    /// <summary>
+    /// #440. Hard upper bound on the FIX wire representation of a
+    /// generated ClOrdID. FIX 4.4 §3.1.1 caps tag 11 (ClOrdID) at
+    /// 20 characters; B3 EntryPoint inherits the same limit. Today
+    /// the canonical encoding is the <c>ulong</c> rendered as a
+    /// decimal string via invariant culture (see
+    /// <see cref="EncodeFixClOrdId"/>) and the bit layout caps the
+    /// value at <c>(2^21 - 1) &lt;&lt; 40 | (2^40 - 1) = 2^61 - 1 =
+    /// 2_305_843_009_213_693_951</c> — 19 decimal digits — so we
+    /// have a 1-character margin. The defensive guard in
+    /// <see cref="Generate"/> catches any future encoding change
+    /// (adding a prefix string, switching to hex, widening counter
+    /// bits) that would silently push past the venue limit and
+    /// trigger BusinessReject at the gateway — a known footgun the
+    /// auditoria B3 (#439→#440) explicitly asked us to harden.
+    /// </summary>
+    public const int MaxFixClOrdIdLength = 20;
+
+    /// <summary>
+    /// Canonical wire encoding of a generated ClOrdID for FIX/B3 EntryPoint.
+    /// Centralised so the <see cref="MaxFixClOrdIdLength"/> guard, tests,
+    /// and any future log/audit string representation all agree byte-for-byte.
+    /// </summary>
+    public static string EncodeFixClOrdId(ulong clOrdId) =>
+        clOrdId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
     private readonly ConcurrentDictionary<EndClientId, EndClientCounter> _counters = new();
     private long _nextPrefix;
 
@@ -52,7 +78,22 @@ public sealed class ClOrdIdPrefixRegistry
         var seq = (ulong)Interlocked.Increment(ref entry.Counter);
         if (seq > CounterMask)
             throw new InvalidOperationException($"ClOrdID counter overflow for end-client {endClient.Value} (>2^{CounterBits}).");
-        return (entry.PrefixIdx << CounterBits) | seq;
+        var clOrdId = (entry.PrefixIdx << CounterBits) | seq;
+
+        // #440 defense-in-depth: pin the FIX wire-length cap so a
+        // future encoding change cannot silently push the produced
+        // ClOrdID past 20 characters (FIX 4.4 §3.1.1) and trigger
+        // BusinessReject at the venue. The check is O(log10 N) and
+        // runs once per submit; cheap relative to the WAL append it
+        // precedes.
+        var encoded = EncodeFixClOrdId(clOrdId);
+        if (encoded.Length > MaxFixClOrdIdLength)
+        {
+            throw new InvalidOperationException(
+                $"ClOrdID encoding produced {encoded.Length} characters ('{encoded}'), exceeds FIX limit of {MaxFixClOrdIdLength}. " +
+                "Either the bit layout widened (regression) or the encoding scheme changed without updating MaxFixClOrdIdLength.");
+        }
+        return clOrdId;
     }
 
     private EndClientCounter CreateCounter(EndClientId _)

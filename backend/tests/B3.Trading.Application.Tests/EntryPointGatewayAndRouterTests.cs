@@ -71,6 +71,44 @@ public class EntryPointGatewayAndRouterTests
         Assert.Equal(200, sent.NewQuantity);
         // Q3.4 (#284). Plain (no-reserve) replace must not surface MaxFloor.
         Assert.Null(sent.MaxFloor);
+        // #437. With no override the replace inherits the original's
+        // TimeInForce (Day default) and carries no Stop/GTD because
+        // OrderType is Limit and TIF != GoodTillDate.
+        Assert.Equal(TimeInForce.Day, sent.TimeInForce);
+        Assert.Null(sent.StopPrice);
+        Assert.Null(sent.GoodTillDate);
+    }
+
+    [Fact]
+    public async Task Gateway_CancelReplace_PropagatesTifStopAndGtd()
+    {
+        // #437. Mock seam parity with B3EntryPointClientGateway: when
+        // the modify pipeline asks to switch TIF to GoodTillDate it
+        // must also supply a GoodTillDate; Stop* order types must
+        // surface their StopPrice. The domain merge enforces these
+        // invariants; the gateway just plumbs the merged values onto
+        // the wire request so test wire-mapping pins both adapter
+        // paths to the same shape.
+        var client = new MockEntryPointClient();
+        var gateway = new EntryPointClientGateway(client, "FIRM-A");
+
+        var stopOrig = new Order(200UL, new EndClientId("alice"), "PETR4", 4321UL, OrderSide.Buy,
+            OrderType.StopLimit, 100, price: 30m, firmId: "FIRM-A", stopPrice: 29.5m);
+        await gateway.CancelReplaceAsync(stopOrig, 201UL, 100, 31m,
+            requestedTimeInForce: null, requestedStopPrice: 29m, requestedGoodTillDate: null,
+            CancellationToken.None);
+        var withStop = client.SubmittedReplaces.Last();
+        Assert.Equal(29m, withStop.StopPrice);
+
+        var gtdMoment = new DateTimeOffset(2030, 1, 2, 17, 0, 0, TimeSpan.Zero);
+        var dayOrig = new Order(300UL, new EndClientId("alice"), "PETR4", 4321UL, OrderSide.Buy,
+            OrderType.Limit, 100, 30m);
+        await gateway.CancelReplaceAsync(dayOrig, 301UL, 150, 30m,
+            requestedTimeInForce: TimeInForce.GTD, requestedStopPrice: null, requestedGoodTillDate: gtdMoment,
+            CancellationToken.None);
+        var gtd = client.SubmittedReplaces.Last();
+        Assert.Equal(TimeInForce.GTD, gtd.TimeInForce);
+        Assert.Equal(gtdMoment, gtd.GoodTillDate);
     }
 
     [Fact]
