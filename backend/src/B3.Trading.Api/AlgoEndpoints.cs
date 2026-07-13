@@ -4,6 +4,7 @@ using B3.Trading.Api.Lifecycle;
 using B3.Trading.Api.WebSockets;
 using B3.Trading.Application;
 
+using B3.Trading.Application.MarketData;
 using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Domain;
@@ -57,7 +58,8 @@ public static class AlgoEndpoints
             EventDispatcher dispatcher,
             DrainState drain,
             SymbolDirectory symbols,
-            IAlgoSignalQueue signals) =>
+            IAlgoSignalQueue signals,
+            ITickSizeProvider tickSizes) =>
         {
             if (drain.IsDraining)
             {
@@ -83,6 +85,29 @@ public static class AlgoEndpoints
             if (securityId == 0)
                 return Results.BadRequest(new { error = "securityId is required" });
 
+            // #518. Lot-size gate mirroring the per-order MinLotSizeCheck.
+            // The algo parent never hits the risk pipeline, so without this
+            // an off-lot total would only surface when the engine submits an
+            // off-lot child — which the venue rejects, terminally suspending
+            // the parent. Validating the total (and, below, slice-derived
+            // quantities) up front keeps every algo child a whole lot.
+            // TWAP is excluded here: its §4.8 branch performs the same
+            // off-lot-total check but returns the richer rejection body
+            // (impliedSliceQuantity / totalQuantity / sliceCount echo).
+            long lotSize = 1;
+            if (symbols.TryGetSpec(req.Symbol, out var instrumentSpec)
+                && instrumentSpec.LotSize is { } configuredLot
+                && configuredLot > 1)
+            {
+                lotSize = configuredLot;
+            }
+            if (lotSize > 1 && type != AlgoType.Twap && req.TotalQuantity % lotSize != 0)
+                return Results.BadRequest(new
+                {
+                    error = $"totalQuantity {req.TotalQuantity} is not a multiple of lot size {lotSize} for {req.Symbol}",
+                    code = "min_lot_size",
+                });
+
             // Type-specific parameter validation. v0 keeps the rules
             // explicit + duplicated rather than hiding them behind a
             // visitor — the surface is small and the failure messages
@@ -97,6 +122,15 @@ public static class AlgoEndpoints
                         return Results.BadRequest(new { error = "iceberg.displayQuantity must be positive" });
                     if (req.Iceberg.DisplayQuantity > req.TotalQuantity)
                         return Results.BadRequest(new { error = "iceberg.displayQuantity must be <= totalQuantity" });
+                    // #518. The display quantity is the child order size, so
+                    // it must itself be a whole lot or every iceberg child is
+                    // risk-rejected.
+                    if (lotSize > 1 && req.Iceberg.DisplayQuantity % lotSize != 0)
+                        return Results.BadRequest(new
+                        {
+                            error = $"iceberg.displayQuantity {req.Iceberg.DisplayQuantity} is not a multiple of lot size {lotSize} for {req.Symbol}",
+                            code = "min_lot_size",
+                        });
                     parameters = new IcebergParameters(req.Iceberg.DisplayQuantity, req.Iceberg.LimitPrice);
                     break;
 
@@ -116,15 +150,24 @@ public static class AlgoEndpoints
                     // unpriced child orders that contradict the user's chosen type.
                     if (childType == OrderType.Limit && req.Twap.ChildPrice is null)
                         return Results.BadRequest(new { error = "twap.childPrice is required when twap.childOrderType is Limit" });
-                    // RFC §4.8: reject when the implied per-slice quantity
-                    // rounds to zero. Echo the floor in the error body so
-                    // the caller can lower sliceCount or raise totalQuantity
-                    // without guessing.
-                    var floorQty = TwapPlan.FloorSliceQty(req.TotalQuantity, req.Twap.SliceCount);
-                    if (floorQty <= 0)
+                    // RFC §4.8 / #518: reject when the implied per-slice
+                    // quantity rounds to zero — or, on a round-lot
+                    // instrument, when the total itself is not a whole
+                    // number of lots (an off-lot total would otherwise
+                    // strand an off-lot remainder on the last slice). Both
+                    // are computed in lot units when a lot is configured.
+                    // Echo the floor / total / sliceCount in the error body
+                    // so the caller can fix either input without guessing.
+                    var floorQty = TwapPlan.FloorSliceQty(req.TotalQuantity, req.Twap.SliceCount, lotSize);
+                    var offLotTotal = lotSize > 1 && req.TotalQuantity % lotSize != 0;
+                    if (floorQty <= 0 || offLotTotal)
                         return Results.BadRequest(new
                         {
-                            error = "twap.sliceCount produces a per-slice quantity of zero",
+                            error = offLotTotal
+                                ? $"totalQuantity {req.TotalQuantity} is not a multiple of lot size {lotSize} for {req.Symbol}"
+                                : lotSize > 1
+                                    ? $"twap.sliceCount produces a per-slice quantity below one lot ({lotSize}) for {req.Symbol}"
+                                    : "twap.sliceCount produces a per-slice quantity of zero",
                             impliedSliceQuantity = floorQty,
                             totalQuantity = req.TotalQuantity,
                             sliceCount = req.Twap.SliceCount,
@@ -202,10 +245,15 @@ public static class AlgoEndpoints
                 case AlgoType.Pegged:
                     // Q3.3 (#283). Pegged shares the POST /algo surface
                     // with the other algos via the type discriminator.
-                    // Tick size has no per-symbol provider yet (open
-                    // TODO across the repo), so the API accepts an
-                    // explicit override and falls back to 0.01 (BRL
-                    // equity default) — documented in the PR notes.
+                    // #454 Fase 1: tick now resolves through
+                    // ITickSizeProvider (config-backed SymbolDirectory
+                    // today; SDK-backed in Fase 2 once upstream
+                    // pedrosakuma/B3MarketDataPlatform#55 ships
+                    // SecurityDefinitionEvent). The request body keeps
+                    // its explicit override (operator wins), but the
+                    // legacy 0.01m BRL-equity floor is gone — a missing
+                    // tick now surfaces as an explicit reject instead
+                    // of a silent fallback that could mismatch the venue.
                     if (req.Pegged is null)
                         return Results.BadRequest(new { error = "pegged parameters are required for type=Pegged" });
                     if (!Enum.TryParse<PegRef>(req.Pegged.Ref, ignoreCase: true, out var peggedRef))
@@ -213,9 +261,21 @@ public static class AlgoEndpoints
                     var peggedRepegMs = req.Pegged.RepegIntervalMs ?? 500;
                     if (peggedRepegMs <= 0)
                         return Results.BadRequest(new { error = "pegged.repegIntervalMs must be positive" });
-                    var peggedTickSize = req.Pegged.TickSize ?? 0.01m;
-                    if (peggedTickSize <= 0m)
-                        return Results.BadRequest(new { error = "pegged.tickSize must be positive" });
+                    decimal peggedTickSize;
+                    if (req.Pegged.TickSize is { } overrideTick)
+                    {
+                        if (overrideTick <= 0m)
+                            return Results.BadRequest(new { error = "pegged.tickSize must be positive" });
+                        peggedTickSize = overrideTick;
+                    }
+                    else if (tickSizes.TryGetTickSize(req.Symbol, req.Pegged.PriceLimit, out var resolvedTick))
+                    {
+                        peggedTickSize = resolvedTick;
+                    }
+                    else
+                    {
+                        return Results.BadRequest(new { error = $"pegged.tickSize is required for symbol '{req.Symbol}' (no per-symbol tick configured)" });
+                    }
                     var peggedChildType = OrderType.Limit;
                     if (!string.IsNullOrWhiteSpace(req.Pegged.ChildOrderType))
                     {
@@ -556,11 +616,13 @@ public sealed record CreateAlgoPovParams(
 /// HTTP request shape for the Pegged parameter block (Q3.3 / #283).
 /// <para>
 /// <b>Defaults.</b> <see cref="RepegIntervalMs"/> defaults to 500ms,
-/// <see cref="TickSize"/> defaults to <c>0.01</c> (BRL equity floor;
-/// per-symbol provider TODO), <see cref="ChildOrderType"/> defaults
-/// to <c>Limit</c> (the only legal value — Market would defeat the
-/// peg). <see cref="OffsetTicks"/> is required and may be negative
-/// for passive pegs (Buy below the bid, Sell above the ask).
+/// <see cref="TickSize"/> is now resolved from
+/// <c>ITickSizeProvider</c> when the request omits it (#454 Fase 1 —
+/// the legacy 0.01 BRL-equity fallback was removed; explicit override
+/// still wins). <see cref="ChildOrderType"/> defaults to <c>Limit</c>
+/// (the only legal value — Market would defeat the peg).
+/// <see cref="OffsetTicks"/> is required and may be negative for
+/// passive pegs (Buy below the bid, Sell above the ask).
 /// </para>
 /// </summary>
 public sealed record CreateAlgoPeggedParams(

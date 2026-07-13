@@ -400,4 +400,206 @@ public class SymbolDirectoryTests
         Assert.True(flat.TryGetSpec("X", out var flatSpec));
         Assert.Null(flatSpec.ResolveBand(1m));
     }
+
+    // ── OPT-A (#483) option-metadata coverage ──────────────────────────
+
+    [Fact]
+    public void Option_wellFormedBlock_producesOptionSpec()
+    {
+        var sut = new SymbolDirectory(new SymbolDirectoryOptions
+        {
+            Specs =
+            {
+                ["PETRL200"] = new InstrumentSpecOptions
+                {
+                    TickSize = 0.01m,
+                    LotSize = 100,
+                    Option = new OptionMetadataOptions
+                    {
+                        StrikePrice = 20m,
+                        ExpirationDate = new DateOnly(2026, 12, 18),
+                        PutOrCall = "Call",
+                        ExerciseStyle = "American",
+                        UnderlyingSymbol = "PETR4",
+                        ContractMultiplier = 100m,
+                        OptPayoutType = "Vanilla",
+                    },
+                },
+            },
+        });
+
+        Assert.True(sut.TryGetSpec("PETRL200", out var spec));
+        Assert.Equal(SecurityType.Option, spec.SecurityType);
+        Assert.NotNull(spec.Option);
+        var opt = spec.Option!.Value;
+        Assert.Equal(20m, opt.StrikePrice);
+        Assert.Equal(new DateOnly(2026, 12, 18), opt.ExpirationDate);
+        Assert.Equal(PutOrCall.Call, opt.PutOrCall);
+        Assert.Equal(ExerciseStyle.American, opt.ExerciseStyle);
+        Assert.Equal("PETR4", opt.UnderlyingSymbol);
+        Assert.Equal(100m, opt.ContractMultiplier);
+        Assert.Equal(OptPayoutType.Vanilla, opt.OptPayoutType);
+    }
+
+    [Fact]
+    public void Option_omitted_defaultsToEquity_andNoOptionBlock()
+    {
+        var sut = new SymbolDirectory(new SymbolDirectoryOptions
+        {
+            Specs = { ["PETR4"] = new InstrumentSpecOptions { TickSize = 0.01m, LotSize = 100 } },
+        });
+
+        Assert.True(sut.TryGetSpec("PETR4", out var spec));
+        Assert.Equal(SecurityType.Equity, spec.SecurityType);
+        Assert.Null(spec.Option);
+    }
+
+    [Fact]
+    public void Option_payoutTypeOmitted_defaultsToVanilla()
+    {
+        var sut = new SymbolDirectory(new SymbolDirectoryOptions
+        {
+            Specs =
+            {
+                ["PETRX250"] = new InstrumentSpecOptions
+                {
+                    Option = new OptionMetadataOptions
+                    {
+                        ExpirationDate = new DateOnly(2026, 12, 18),
+                        PutOrCall = "put",
+                        ExerciseStyle = "european",
+                        ContractMultiplier = 100m,
+                    },
+                },
+            },
+        });
+
+        Assert.True(sut.TryGetSpec("PETRX250", out var spec));
+        Assert.Equal(SecurityType.Option, spec.SecurityType);
+        Assert.Equal(OptPayoutType.Vanilla, spec.Option!.Value.OptPayoutType);
+        // Defensive: missing strike binds to 0 (deep-OTM is legitimate
+        // upstream — the option block survives so downstream multiplier
+        // math still works).
+        Assert.Equal(0m, spec.Option!.Value.StrikePrice);
+    }
+
+    [Theory]
+    [InlineData(null, 100, "Call", "American")]    // missing expiry
+    [InlineData("2026-12-18", null, "Call", "American")]    // missing multiplier
+    [InlineData("2026-12-18", 0, "Call", "American")]   // non-positive multiplier
+    [InlineData("2026-12-18", -100, "Call", "American")]    // negative multiplier
+    [InlineData("2026-12-18", 100, "Bogus", "American")]    // unknown put/call
+    [InlineData("2026-12-18", 100, "Call", "Bermudan")] // unknown exercise style
+    [InlineData("2026-12-18", 100, null, "American")]   // missing put/call
+    [InlineData("2026-12-18", 100, "Call", null)]   // missing exercise style
+    public void Option_malformedBlock_isDropped(string? expiryIso, int? multiplier, string? putOrCall, string? style)
+    {
+        // Spec keeps a tick so it survives the "no constraint" drop;
+        // the OptionMetadata itself is the only thing we're testing.
+        var sut = new SymbolDirectory(new SymbolDirectoryOptions
+        {
+            Specs =
+            {
+                ["BAD"] = new InstrumentSpecOptions
+                {
+                    TickSize = 0.01m,
+                    Option = new OptionMetadataOptions
+                    {
+                        ExpirationDate = expiryIso is null ? null : DateOnly.Parse(expiryIso),
+                        ContractMultiplier = multiplier,
+                        PutOrCall = putOrCall,
+                        ExerciseStyle = style,
+                    },
+                },
+            },
+        });
+
+        Assert.True(sut.TryGetSpec("BAD", out var spec));
+        Assert.Equal(SecurityType.Equity, spec.SecurityType);
+        Assert.Null(spec.Option);
+    }
+
+    [Fact]
+    public void Option_unknownPayoutType_dropsEntireBlock()
+    {
+        var sut = new SymbolDirectory(new SymbolDirectoryOptions
+        {
+            Specs =
+            {
+                ["EXOTIC"] = new InstrumentSpecOptions
+                {
+                    TickSize = 0.01m,
+                    Option = new OptionMetadataOptions
+                    {
+                        ExpirationDate = new DateOnly(2026, 12, 18),
+                        PutOrCall = "Call",
+                        ExerciseStyle = "American",
+                        ContractMultiplier = 100m,
+                        OptPayoutType = "Binary",
+                    },
+                },
+            },
+        });
+
+        Assert.True(sut.TryGetSpec("EXOTIC", out var spec));
+        Assert.Equal(SecurityType.Equity, spec.SecurityType);
+        Assert.Null(spec.Option);
+    }
+
+    [Fact]
+    public void Option_caseInsensitiveEnumParsing()
+    {
+        var sut = new SymbolDirectory(new SymbolDirectoryOptions
+        {
+            Specs =
+            {
+                ["MIX"] = new InstrumentSpecOptions
+                {
+                    Option = new OptionMetadataOptions
+                    {
+                        ExpirationDate = new DateOnly(2026, 12, 18),
+                        PutOrCall = "CALL",
+                        ExerciseStyle = "european",
+                        ContractMultiplier = 100m,
+                        OptPayoutType = "vanilla",
+                    },
+                },
+            },
+        });
+
+        Assert.True(sut.TryGetSpec("MIX", out var spec));
+        Assert.Equal(PutOrCall.Call, spec.Option!.Value.PutOrCall);
+        Assert.Equal(ExerciseStyle.European, spec.Option!.Value.ExerciseStyle);
+        Assert.Equal(OptPayoutType.Vanilla, spec.Option!.Value.OptPayoutType);
+    }
+
+    [Fact]
+    public void Option_onlyOptionBlock_survivesEvenWithoutTickOrLot()
+    {
+        // The directory previously dropped any spec without
+        // TickSize/LotSize/TickLadder; an option-only entry must now
+        // survive so OPT-B can read ContractMultiplier without
+        // requiring operators to repeat tick/lot.
+        var sut = new SymbolDirectory(new SymbolDirectoryOptions
+        {
+            Specs =
+            {
+                ["OPTONLY"] = new InstrumentSpecOptions
+                {
+                    Option = new OptionMetadataOptions
+                    {
+                        ExpirationDate = new DateOnly(2026, 12, 18),
+                        PutOrCall = "Call",
+                        ExerciseStyle = "American",
+                        ContractMultiplier = 100m,
+                    },
+                },
+            },
+        });
+
+        Assert.True(sut.TryGetSpec("OPTONLY", out var spec));
+        Assert.Equal(SecurityType.Option, spec.SecurityType);
+        Assert.Null(spec.TickSize);
+        Assert.Null(spec.LotSize);
+    }
 }

@@ -182,8 +182,16 @@ public sealed class SelfTradePreventionCheck : IRiskCheck
     // We exclude terminal states (Filled/Cancelled/Rejected/Replaced)
     // defensively even though terminal orders should also have
     // LeavesQuantity == 0.
+    //
+    // #570: also exclude stale orders (e.g. session_rolled after a
+    // matching-engine restart). Every other WorkingOrderBook query
+    // used for matching/risk purposes skips stale orders, and a stale
+    // order can never itself be cancelled (OrderCancelService refuses
+    // to cancel IsStale orders) — counting it here would permanently
+    // lock the end-client out of the opposite side with no way out.
     private static bool IsStillRestable(Order o) =>
         o.LeavesQuantity > 0
+        && !o.IsStale
         && o.Status is not OrderStatus.Filled
                        and not OrderStatus.Cancelled
                        and not OrderStatus.Rejected

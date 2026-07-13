@@ -1,0 +1,81 @@
+# Default values for b3-trading-frontend.
+# Mirrors the authoritative live-on-AKS manifest from b3deploy@3b4c1d9
+# (envs/prod/frontend.yaml), parameterized so a single chart serves every
+# environment. See #568.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/pedrosakuma/b3-trading-frontend
+  # Defaults to .Chart.AppVersion when empty.
+  tag: ""
+  # Optional digest pin (e.g. "sha256:69e680acd32e74548f92c003bff06f2a08059b83f4c90a1c8d90469405654f02").
+  # When set, the image reference becomes "repository@digest" and `tag` is ignored.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+nginx:
+  # nginx's `resolver` directive (used to re-resolve $trading_upstream on
+  # every request) does NOT apply /etc/resolv.conf search domains. Point it
+  # at your cluster DNS ClusterIP (AKS: dnsServiceIP in infra/modules/aks.bicep,
+  # commonly 10.0.0.10). See B3TradingPlatform#562/#563.
+  resolver: ""
+  # The upstream trading-host address as "host:port". On Kubernetes this
+  # MUST be the Service FQDN (e.g.
+  # "trading-host.<namespace>.svc.cluster.local:5000") — nginx's `resolver`
+  # doesn't apply search-domain suffixing, so a bare short name is NXDOMAIN.
+  # See B3TradingPlatform#564; requires the image to support
+  # TRADING_UPSTREAM (fixed alongside that issue). Defaults to the
+  # docker-compose-only short name so `helm template` doesn't fail before
+  # this is set — every real environment MUST override it.
+  tradingUpstream: "trading-host:5000"
+  # Deploy-time default for the OPTIONAL B3MarketDataPlatform WS feed,
+  # rendered into js/env.js at container start (see
+  # B3TradingPlatform#572; requires the image to support
+  # MARKETDATA_WS_URL, fixed alongside that issue). Empty by default so
+  # `helm template` doesn't fail before this is set; the frontend falls
+  # back to its localhost-only dev guess, then "" (the Market Data panel's
+  # manual override keeps working either way). Every real environment
+  # SHOULD override it (e.g. "wss://<lb-ip>:8080/ws").
+  marketDataWsUrl: ""
+
+service:
+  type: LoadBalancer
+  # Standard L4 LB per the deploy topology RFC (no L7 PaaS in the path;
+  # preserves client source IP for the FIXP/bot-facing story upstream).
+  externalTrafficPolicy: Local
+  port: 80
+  annotations: {}
+
+resources:
+  requests:
+    cpu: 25m
+    memory: 64Mi
+  limits:
+    memory: 128Mi
+
+probes:
+  readiness:
+    path: /
+    initialDelaySeconds: 5
+    periodSeconds: 10
+  liveness:
+    path: /
+    initialDelaySeconds: 15
+    periodSeconds: 20
+
+# NetworkPolicy admitting inbound HTTP from anywhere (the Standard L4 LB
+# terminates client connections, so pod-level ingress is open on :80 by
+# design — the LB itself is the access boundary). Disable if your cluster
+# doesn't enforce NetworkPolicy or you manage it out-of-band.
+networkPolicy:
+  enabled: true
+
+extraEnv: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -14,13 +14,12 @@ namespace B3.Trading.Application.Tests.Persistence;
 /// SessionVerId has advanced past the verId the snapshot recorded.
 ///
 /// <para>
-/// Per <see href="https://github.com/pedrosakuma/B3TradingPlatform/issues/419">#419</see>
-/// the reaction is two-tier: <see cref="Order.MarkStale"/> for
-/// confirmed Working / PartiallyFilled orders (the venue typically
-/// persists the book across FIXP session rolls — keep them visible
-/// but gate Cancel/Modify until reconciliation), <see cref="Order.MarkCancelled"/>
-/// for never-acked PendingNew orders (no venue record possible under
-/// any session version).
+/// Per <see href="https://github.com/pedrosakuma/B3TradingPlatform/issues/504">#504</see>
+/// only never-acked PendingNew orders are retired (<see cref="Order.MarkCancelled"/>)
+/// — no venue record possible under any session version. Confirmed
+/// Working/PartiallyFilled orders are NOT marked stale on session roll
+/// because the FIXP protocol handles synchronization via retransmission
+/// during recovery. If no terminal ER arrives, the order is valid.
 /// </para>
 /// </summary>
 public class PersistenceRecoverySessionVerGuardTests : IDisposable
@@ -121,13 +120,12 @@ public class PersistenceRecoverySessionVerGuardTests : IDisposable
     }
 
     [Fact]
-    public async Task RolledForward_ConfirmedOrders_AreStaled_NotCancelled()
+    public async Task RolledForward_ConfirmedOrders_NotStaled_FixpHandlesSync()
     {
-        // #419. Confirmed (Working / PartiallyFilled) orders survive a
-        // session roll — the venue persists the book — but get the
-        // staleness overlay so Cancel/Modify is gated at the API until
-        // a real ER lifts the flag. Verifies the order stays visible
-        // and keeps its pre-roll status.
+        // #504. Confirmed (Working / PartiallyFilled) orders survive a
+        // session roll without any stale flag. The FIXP protocol handles
+        // synchronization via retransmission — if no terminal ER arrives
+        // during recovery, the order is still valid on the venue.
         await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
         {
             var (book, _, _, ownership, snapshotter, dispatcher, _, _, _) =
@@ -170,12 +168,12 @@ public class PersistenceRecoverySessionVerGuardTests : IDisposable
 
             Assert.True(book.TryGet(1UL, out var o1));
             Assert.Equal(OrderStatus.Working, o1!.Status);
-            Assert.True(o1.IsStale);
-            Assert.Contains("session-rolled", o1.StaleReason ?? "");
-            Assert.NotNull(o1.StaledAtUtc);
+            // #504: NO stale flag — FIXP handles sync
+            Assert.False(o1.IsStale);
+            Assert.Null(o1.StaleReason);
+            Assert.Null(o1.StaledAtUtc);
 
-            // Stale orders MUST remain enumerable so positions/cash/blotter
-            // reflect the live venue state until reconciliation completes.
+            // Order remains fully enumerable and operable.
             Assert.Single(book.EnumerateForFirm("FIRM01"));
         }
     }

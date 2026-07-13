@@ -34,6 +34,7 @@ public sealed class SubscriptionManager
     private readonly PnlKeeper? _pnl;
     private readonly Application.Risk.IReferencePrice? _refPrice;
     private readonly CashLedger? _cash;
+    private readonly SymbolDirectory? _symbols;
 
     public SubscriptionManager(
         WorkingOrderBook orders,
@@ -41,7 +42,8 @@ public sealed class SubscriptionManager
         AlgoBook algos,
         PnlKeeper? pnl = null,
         Application.Risk.IReferencePrice? refPrice = null,
-        CashLedger? cash = null)
+        CashLedger? cash = null,
+        SymbolDirectory? symbols = null)
     {
         _orders = orders;
         _positions = positions;
@@ -49,6 +51,19 @@ public sealed class SubscriptionManager
         _pnl = pnl;
         _refPrice = refPrice;
         _cash = cash;
+        _symbols = symbols;
+    }
+
+    /// <summary>
+    /// FE-OPT-1 (#497). Looks up option metadata for a symbol.
+    /// Returns null for equities or when directory is unavailable.
+    /// </summary>
+    private OptionMetadata? GetOptionMetadata(string? symbol)
+    {
+        if (_symbols is null || string.IsNullOrWhiteSpace(symbol)) return null;
+        if (_symbols.TryGetSpec(symbol, out var spec) && spec.SecurityType == SecurityType.Option)
+            return spec.Option;
+        return null;
     }
 
     private object LockFor(EndClientId owner) =>
@@ -89,8 +104,10 @@ public sealed class SubscriptionManager
 
             object? data = channel switch
             {
-                Channels.OrdersMe => _orders.ForEndClientAndFirm(client.FirmId, client.Owner).Select(o => o.ToDto()).ToArray(),
-                Channels.PositionsMe => _positions.ForEndClientAndFirm(client.FirmId, client.Owner).Select(p => p.ToDto()).ToArray(),
+                Channels.OrdersMe => _orders.ForEndClientAndFirm(client.FirmId, client.Owner)
+                    .Select(o => o.ToDto(GetOptionMetadata(o.Symbol))).ToArray(),
+                Channels.PositionsMe => _positions.ForEndClientAndFirm(client.FirmId, client.Owner)
+                    .Select(p => p.ToDto(null, GetOptionMetadata(p.Symbol))).ToArray(),
                 Channels.ExecutionsMe => Array.Empty<ExecutionDto>(), // no historical exec log in v1
                 Channels.AlgoMe => _algos.EnumerateForOwner(client.FirmId, client.Owner).Select(a => a.ToDto()).ToArray(),
                 Channels.PnlMe => (_pnl is not null && _refPrice is not null)

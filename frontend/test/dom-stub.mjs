@@ -46,6 +46,14 @@ class FakeElement {
     const i = l.indexOf(fn);
     if (i >= 0) l.splice(i, 1);
   }
+  dispatchEvent(event) {
+    const e = event ?? {};
+    e.type = e.type ?? "";
+    e.target = e.target ?? this;
+    e.preventDefault = e.preventDefault ?? (() => {});
+    for (const fn of this._listeners.get(e.type) ?? []) fn(e);
+    return true;
+  }
   setAttribute(name, value) { this._attributes.set(String(name), String(value)); }
   removeAttribute(name)     { this._attributes.delete(String(name)); }
   getAttribute(name)        { return this._attributes.has(String(name)) ? this._attributes.get(String(name)) : null; }

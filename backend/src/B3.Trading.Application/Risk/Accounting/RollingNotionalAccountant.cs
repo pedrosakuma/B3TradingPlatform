@@ -1,3 +1,4 @@
+using B3.Trading.Application.MarketData;
 using B3.Trading.Application.Observability;
 using Microsoft.Extensions.Options;
 
@@ -15,14 +16,17 @@ public sealed class RollingNotionalAccountant : IRiskAccountant
     private readonly SlidingWindowLedger _perFirm;
     private readonly IOptionsMonitor<RiskOptions> _options;
     private readonly IReferencePrice _refPrice;
+    private readonly IMarketValueCalculator _values;
 
     public RollingNotionalAccountant(
         IOptionsMonitor<RiskOptions> options,
         IReferencePrice refPrice,
-        TimeProvider clock)
+        TimeProvider clock,
+        IMarketValueCalculator? values = null)
     {
         _options = options;
         _refPrice = refPrice;
+        _values = values ?? EquityMarketValueCalculator.Instance;
         _perEndClient = new SlidingWindowLedger(clock);
         _perFirm = new SlidingWindowLedger(clock);
     }
@@ -37,14 +41,21 @@ public sealed class RollingNotionalAccountant : IRiskAccountant
     /// no reference is available the notional is 0 and a bypass
     /// metric is incremented — fail-open posture matching the
     /// price-collar check.
+    ///
+    /// <para>
+    /// OPT-B (#484): both branches go through
+    /// <see cref="IMarketValueCalculator"/> so option flow charges
+    /// the ledger the correct multiplier-adjusted notional (the
+    /// rolling cap is in BRL, not contracts).
+    /// </para>
     /// </summary>
     public decimal NotionalFor(RiskContext ctx)
     {
-        if (ctx.Price is { } px) return px * ctx.Quantity;
+        if (ctx.Price is { } px) return _values.GetNotional(ctx.Symbol, px, ctx.Quantity);
 
         var lookup = _refPrice.Lookup(ctx.Symbol);
         if (lookup.Found && lookup.Price > 0m)
-            return lookup.Price * ctx.Quantity;
+            return _values.GetNotional(ctx.Symbol, lookup.Price, ctx.Quantity);
 
         MetricsRegistry.RollingNotionalBypassedNoReference.Add(1,
             new KeyValuePair<string, object?>("symbol", ctx.Symbol));

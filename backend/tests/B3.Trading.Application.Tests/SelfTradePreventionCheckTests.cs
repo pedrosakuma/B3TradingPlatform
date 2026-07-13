@@ -136,6 +136,24 @@ public class SelfTradePreventionCheckTests
         Assert.True(check.Check(Ctx(OrderSide.Buy, 32.50m)).Approved);
     }
 
+    // #570: a stale working order (session_rolled after a matching-
+    // engine restart) can never be cancelled by the end-client
+    // (OrderCancelService refuses IsStale orders), so counting it as
+    // "working" here would permanently deadlock the opposite side.
+    // Every other WorkingOrderBook-backed query skips stale orders;
+    // this check must too.
+    [Fact]
+    public void StaleContra_Ignored_Approves()
+    {
+        var (check, book) = Build();
+        var buy = Make(1, OrderSide.Buy, 30.00m);
+        Assert.True(book.TryAdd(buy));
+        buy.MarkWorking();
+        Assert.True(buy.MarkStale("session_rolled:3-4", DateTimeOffset.UtcNow));
+        var decision = check.Check(Ctx(OrderSide.Sell, 40.00m));
+        Assert.True(decision.Approved);
+    }
+
     [Fact]
     public void AllowSelfTrade_OptIn_Approves()
     {
