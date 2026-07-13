@@ -32,10 +32,27 @@ public sealed class SymbolDirectory
     private readonly IReadOnlyDictionary<string, ulong> _byName;
     private readonly IReadOnlyDictionary<ulong, string> _bySecurityId;
     private readonly IReadOnlyDictionary<string, InstrumentSpec> _specs;
+    private readonly MarketData.SecurityDefinitionRegistry? _registry;
 
     public SymbolDirectory(SymbolDirectoryOptions options)
+        : this(options, registry: null)
+    {
+    }
+
+    /// <summary>
+    /// OPT-D (#486, refs #454 Fase 2). Construct with an optional
+    /// <see cref="MarketData.SecurityDefinitionRegistry"/> overlay.
+    /// When supplied, <see cref="TryGetSpec(string?, out InstrumentSpec)"/>
+    /// consults the registry FIRST and only falls back to the static
+    /// <paramref name="options"/>-bound dictionary when the registry
+    /// has no entry for the symbol. The single-arg ctor preserves
+    /// the v1 behaviour for tests that construct the directory
+    /// directly without DI.
+    /// </summary>
+    public SymbolDirectory(SymbolDirectoryOptions options, MarketData.SecurityDefinitionRegistry? registry)
     {
         ArgumentNullException.ThrowIfNull(options);
+        _registry = registry;
         // Always copy to enforce case-insensitive comparison even if
         // the binder produced a culture-sensitive dictionary.
         var copy = new Dictionary<string, ulong>(StringComparer.OrdinalIgnoreCase);
@@ -67,11 +84,25 @@ public sealed class SymbolDirectory
             var ladder = NormalizeLadder(kv.Value.TickLadder);
             // Drop entries that wouldn't constrain anything — keeps
             // TryGetSpec callers from having to special-case zero/negative.
-            if ((t is null or <= 0m) && (l is null or <= 0) && ladder is null) continue;
+            // OPT-A (#483). Bind optional OptionMetadata. We require
+            // at minimum ContractMultiplier and ExpirationDate to be
+            // present — without those two we can't honour OPT-B
+            // (notional = price * qty * multiplier) or OPT-C
+            // (expiry-aware lifecycle). A malformed option block is
+            // dropped silently, same defensive contract as a
+            // non-positive TickSize. SecurityType is derived: if
+            // OptionMetadata survives, the spec is Option; otherwise
+            // Equity (the historical default for every existing
+            // symbol).
+            var option = NormalizeOption(kv.Value.Option);
+            var securityType = option is null ? SecurityType.Equity : SecurityType.Option;
+            if ((t is null or <= 0m) && (l is null or <= 0) && ladder is null && option is null) continue;
             specs[kv.Key] = new InstrumentSpec(
                 t is > 0m ? t : null,
                 l is > 0 ? l : null,
-                ladder);
+                ladder,
+                securityType,
+                option);
         }
         _specs = specs;
     }
@@ -98,6 +129,43 @@ public sealed class SymbolDirectory
         var i = 0;
         foreach (var kv in sorted) list[i++] = new TickBand(kv.Key, kv.Value);
         return list;
+    }
+
+    // OPT-A (#483). Validate and freeze the optional OptionMetadata
+    // block bound from configuration. Drops the block when the
+    // minimum-viable fields are missing or invalid (no
+    // ContractMultiplier, non-positive multiplier, no ExpirationDate,
+    // or an unknown PutOrCall/ExerciseStyle string). Defensive on
+    // purpose: an "option" entry that doesn't carry the data we need
+    // to honour OPT-B (multiplier-aware notional) or OPT-C
+    // (expiry-aware checks) is worse than no entry at all.
+    private static OptionMetadata? NormalizeOption(OptionMetadataOptions? src)
+    {
+        if (src is null) return null;
+        if (src.ContractMultiplier is not { } mult || mult <= 0m) return null;
+        if (src.ExpirationDate is not { } expiry) return null;
+        if (!TryParseEnum<PutOrCall>(src.PutOrCall, out var pc)) return null;
+        if (!TryParseEnum<ExerciseStyle>(src.ExerciseStyle, out var ex)) return null;
+        var payout = OptPayoutType.Vanilla;
+        if (!string.IsNullOrWhiteSpace(src.OptPayoutType)
+            && !Enum.TryParse(src.OptPayoutType, ignoreCase: true, out payout))
+        {
+            return null;
+        }
+        return new OptionMetadata(
+            src.StrikePrice ?? 0m,
+            expiry,
+            pc,
+            ex,
+            src.UnderlyingSymbol ?? string.Empty,
+            mult,
+            payout);
+    }
+
+    private static bool TryParseEnum<TEnum>(string? raw, out TEnum value) where TEnum : struct, Enum
+    {
+        if (string.IsNullOrWhiteSpace(raw)) { value = default; return false; }
+        return Enum.TryParse(raw, ignoreCase: true, out value) && Enum.IsDefined(value);
     }
 
     public int Count => _byName.Count;
@@ -151,6 +219,15 @@ public sealed class SymbolDirectory
             spec = default;
             return false;
         }
+        // OPT-D (#486): the SDK-driven SecurityDefinition projection
+        // wins over the static config. Bootstrap + delta semantics
+        // mean once a frame has been seen for the symbol the registry
+        // entry is authoritative; before the first frame (and when
+        // the kill-switch is set) we fall through to the config.
+        if (_registry is not null && _registry.TryGetSpec(symbol, out spec))
+        {
+            return true;
+        }
         return _specs.TryGetValue(symbol, out spec!);
     }
 }
@@ -178,7 +255,9 @@ public sealed class SymbolDirectory
 public readonly record struct InstrumentSpec(
     decimal? TickSize,
     long? LotSize,
-    IReadOnlyList<TickBand>? TickLadder = null)
+    IReadOnlyList<TickBand>? TickLadder = null,
+    SecurityType SecurityType = SecurityType.Equity,
+    OptionMetadata? Option = null)
 {
     /// <summary>
     /// #360. Returns the tick that applies at <paramref name="price"/>:
@@ -247,6 +326,72 @@ public readonly record struct TickBandMatch(
     decimal Tick);
 
 /// <summary>
+/// OPT-A (#483). Discriminates the instrument family. The pipeline
+/// historically assumed Equity end-to-end; OPT-B / OPT-C / OPT-F use
+/// this enum to gate option-only behaviour (contract-multiplier
+/// notional, zero-price relax, option-specific metrics) without
+/// touching the equity hot path. Equity is the default so existing
+/// configuration and tests stay byte-identical.
+/// </summary>
+public enum SecurityType
+{
+    Equity = 0,
+    Option = 1,
+}
+
+/// <summary>
+/// OPT-A (#483). Option side — Put (right to sell) or Call (right to
+/// buy). Matches the upstream <c>SecurityDefinition_12</c> field
+/// landed in pedrosakuma/B3MatchingPlatform#473.
+/// </summary>
+public enum PutOrCall
+{
+    Put = 0,
+    Call = 1,
+}
+
+/// <summary>
+/// OPT-A (#483). Exercise style of the listed option. B3 lists both
+/// American (early exercise allowed at any time before expiry) and
+/// European (exercise only at expiry) series.
+/// </summary>
+public enum ExerciseStyle
+{
+    American = 0,
+    European = 1,
+}
+
+/// <summary>
+/// OPT-A (#483). Payout family — vanilla is the only kind currently
+/// emitted by upstream. The enum exists so binary / exotic payouts
+/// can be added later without re-shaping <see cref="OptionMetadata"/>.
+/// </summary>
+public enum OptPayoutType
+{
+    Vanilla = 0,
+}
+
+/// <summary>
+/// OPT-A (#483). Option-specific metadata bound from
+/// <c>Trading:SymbolDirectory:Specs:&lt;SYMBOL&gt;:Option</c>.
+/// Present only when the spec describes an option (see
+/// <see cref="InstrumentSpec.SecurityType"/>); equity specs leave
+/// this null. <see cref="ContractMultiplier"/> drives OPT-B notional
+/// math (qty is in contracts, each contract is worth
+/// <c>price * multiplier</c> shares — typically 100 for B3 equity
+/// options). <see cref="ExpirationDate"/> drives OPT-C zero-price
+/// relax (and future expiry-aware lifecycle checks).
+/// </summary>
+public readonly record struct OptionMetadata(
+    decimal StrikePrice,
+    DateOnly ExpirationDate,
+    PutOrCall PutOrCall,
+    ExerciseStyle ExerciseStyle,
+    string UnderlyingSymbol,
+    decimal ContractMultiplier,
+    OptPayoutType OptPayoutType);
+
+/// <summary>
 /// Bound from <c>Trading:SymbolDirectory</c>.
 /// </summary>
 public sealed class SymbolDirectoryOptions
@@ -287,6 +432,36 @@ public sealed class InstrumentSpecOptions
     /// canonicalizes (sort + dedup + drop malformed) at startup.
     /// </summary>
     public List<TickBandOptions>? TickLadder { get; set; }
+
+    /// <summary>
+    /// OPT-A (#483). Optional option-specific metadata. When set
+    /// (and well-formed — see <see cref="OptionMetadataOptions"/>)
+    /// the resulting <see cref="InstrumentSpec"/> reports
+    /// <see cref="SecurityType.Option"/>; otherwise the spec stays
+    /// Equity. Malformed blocks are dropped silently in the
+    /// directory ctor.
+    /// </summary>
+    public OptionMetadataOptions? Option { get; set; }
+}
+
+/// <summary>
+/// OPT-A (#483). Mutable counterpart of <see cref="OptionMetadata"/>
+/// used by <c>Microsoft.Extensions.Configuration</c> binding.
+/// <see cref="PutOrCall"/> and <see cref="ExerciseStyle"/> are
+/// stringly-typed for JSON ergonomics (e.g. "Call" / "American");
+/// <see cref="SymbolDirectory"/> parses them case-insensitively.
+/// <see cref="OptPayoutType"/> defaults to <c>Vanilla</c> when
+/// omitted.
+/// </summary>
+public sealed class OptionMetadataOptions
+{
+    public decimal? StrikePrice { get; set; }
+    public DateOnly? ExpirationDate { get; set; }
+    public string? PutOrCall { get; set; }
+    public string? ExerciseStyle { get; set; }
+    public string? UnderlyingSymbol { get; set; }
+    public decimal? ContractMultiplier { get; set; }
+    public string? OptPayoutType { get; set; }
 }
 
 /// <summary>

@@ -6,9 +6,16 @@
 // helper — keeping a thin, hand-rolled subset here means the trader UI
 // has no upstream coupling beyond the wire.
 //
-// v2 (T1, issue #67): adds MBP book frames (BOOK_SNAPSHOT, LEVEL_*,
+// (T1, issue #67): adds MBP book frames (BOOK_SNAPSHOT, LEVEL_*,
 // BOOK_CLEARED) and server-side candles (CANDLE_*). MBO order frames
 // (ORDER_*) remain out of scope — see RFC #66 for rationale.
+//
+// Wire protocol v2 (MD repo PR #61): the framing is an 8-byte header
+// `[len u32][type u16][headerFlags u16]` (was the 4-byte `[len u16]
+// [type u16]`); DataFlags/SubscribeFlags widened to u32; and the hot
+// fixed frames are laid out largest-field-first so the `side` byte now
+// trails LevelUpdate/LevelDeleted. headerFlags is reserved (0) and
+// ignored on receive for forward-compat.
 
 export const MSG = {
   SUBSCRIBE: 0x0001,
@@ -101,23 +108,27 @@ export function buildSubscribe(symbol, flags = DEFAULT_SUBSCRIBE_FLAGS) {
   if (symBytes.length === 0 || symBytes.length > 255) {
     throw new Error(`invalid symbol length: ${symBytes.length}`);
   }
-  const totalLen = 4 + 1 + 1 + symBytes.length;
+  // v2: [len u32][type u16][headerFlags u16][flags u32][symLen u8][symbol]
+  const totalLen = 8 + 4 + 1 + symBytes.length;
   const buf = new ArrayBuffer(totalLen);
   const v = new DataView(buf);
-  v.setUint16(0, totalLen, true);
-  v.setUint16(2, MSG.SUBSCRIBE, true);
-  v.setUint8(4, flags);
-  v.setUint8(5, symBytes.length);
-  new Uint8Array(buf, 6).set(symBytes);
+  v.setUint32(0, totalLen, true);
+  v.setUint16(4, MSG.SUBSCRIBE, true);
+  v.setUint16(6, 0, true); // headerFlags reserved
+  v.setUint32(8, flags >>> 0, true);
+  v.setUint8(12, symBytes.length);
+  new Uint8Array(buf, 13).set(symBytes);
   return buf;
 }
 
 export function buildUnsubscribe(securityId) {
-  const buf = new ArrayBuffer(12);
+  // v2: [len u32][type u16][headerFlags u16][securityId u64] = 16 bytes
+  const buf = new ArrayBuffer(16);
   const v = new DataView(buf);
-  v.setUint16(0, 12, true);
-  v.setUint16(2, MSG.UNSUBSCRIBE, true);
-  v.setBigUint64(4, BigInt(securityId), true);
+  v.setUint32(0, 16, true);
+  v.setUint16(4, MSG.UNSUBSCRIBE, true);
+  v.setUint16(6, 0, true); // headerFlags reserved
+  v.setBigUint64(8, BigInt(securityId), true);
   return buf;
 }
 
@@ -135,10 +146,10 @@ export function parseFrames(arrayBuffer) {
   const out = [];
   const total = arrayBuffer.byteLength;
   let off = 0;
-  while (off + 4 <= total) {
-    const v = new DataView(arrayBuffer, off, Math.min(4, total - off));
-    const len = v.getUint16(0, true);
-    if (len < 4 || off + len > total) break; // truncated/garbage; bail
+  while (off + 8 <= total) {
+    const v = new DataView(arrayBuffer, off, 8);
+    const len = v.getUint32(0, true);
+    if (len < 8 || off + len > total) break; // truncated/garbage; bail
     let ev = null;
     try { ev = parseOne(arrayBuffer, off, len); }
     catch { /* malformed payload of a known type; skip this frame, keep parsing */ }
@@ -150,15 +161,15 @@ export function parseFrames(arrayBuffer) {
 
 function parseOne(buf, base, len) {
   const v = new DataView(buf, base, len);
-  const type = v.getUint16(2, true);
-  let o = 4;
+  const type = v.getUint16(4, true);
+  let o = 8;
   switch (type) {
     case MSG.SERVER_STATUS:
       return { type: 'ServerStatus', ready: v.getUint8(o) === 1 };
 
     case MSG.SUBSCRIBE_OK: {
       const securityId = v.getBigUint64(o, true); o += 8;
-      const flags = v.getUint8(o); o += 1;
+      const flags = v.getUint32(o, true); o += 4;
       const sLen = v.getUint8(o); o += 1;
       const symbol = decoder.decode(new Uint8Array(buf, base + o, sLen));
       return { type: 'SubscribeOk', securityId, flags, symbol };
@@ -254,18 +265,20 @@ function parseOne(buf, base, len) {
     }
 
     case MSG.LEVEL_UPDATE: {
+      // v2 layout: secId, price, qty, orderCount(u32), side(u8) at the end.
       const securityId = v.getBigUint64(o, true); o += 8;
-      const side = v.getUint8(o); o += 1;
       const price = Number(v.getBigInt64(o, true)) / PRICE_DIVISOR; o += 8;
       const qty = Number(v.getBigInt64(o, true)); o += 8;
-      const count = v.getUint32(o, true);
+      const count = v.getUint32(o, true); o += 4;
+      const side = v.getUint8(o);
       return { type: 'LevelUpdate', securityId, side, price, qty, count };
     }
 
     case MSG.LEVEL_DELETED: {
+      // v2 layout: secId, price, side(u8) at the end.
       const securityId = v.getBigUint64(o, true); o += 8;
-      const side = v.getUint8(o); o += 1;
-      const price = Number(v.getBigInt64(o, true)) / PRICE_DIVISOR;
+      const price = Number(v.getBigInt64(o, true)) / PRICE_DIVISOR; o += 8;
+      const side = v.getUint8(o);
       return { type: 'LevelDeleted', securityId, side, price };
     }
 

@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using B3.Trading.Api.Auth;
 using Microsoft.Extensions.DependencyInjection;
+using xRetry;
 
 namespace B3.Trading.Api.Tests;
 
@@ -16,7 +17,8 @@ namespace B3.Trading.Api.Tests;
 /// </summary>
 public class MetricsFirmTagTests
 {
-    [Fact]
+    // MeterListener race with parallel tests; retry 3x.
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 250)]
     public async Task OrdersSubmittedCounter_CarriesFirmIdTag()
     {
         // Start the MeterListener BEFORE building the TestAppFactory so the

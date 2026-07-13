@@ -1,6 +1,9 @@
 using B3.Trading.Api.Lifecycle;
 using B3.Trading.Application;
+using B3.Trading.Application.Investor;
 using B3.Trading.Application.Persistence;
+using B3.Trading.Application.Routing;
+using B3.Trading.Application.SubAccount;
 using B3.Trading.Application.UserBots;
 using B3.Trading.Api.WebSockets;
 using B3.Trading.Host.Lifecycle;
@@ -58,6 +61,39 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         services.AddSingleton<SubAccountsRegistry>();
         services.AddSingleton<SubAccountPositionKeeper>();
         services.AddSingleton<SubAccountPnlKeeper>();
+        // #471 (SDK 0.15.0). Map domain SubAccountId (string) → numeric
+        // uint? stamped on every outbound NewOrderRequest /
+        // ReplaceOrderRequest. Default = deterministic FNV-1a hash of
+        // (firmId, subAccountId.Value); operators can override at the
+        // composition root with an explicit lookup table if they
+        // negotiate a registered mapping with the broker.
+        services.AddSingleton<ISubAccountWireIdMapper, DeterministicSubAccountWireIdMapper>();
+        // #458 (SDK 0.14.4+). Resolve CBLC Account number stamped on
+        // every outbound NewOrderRequest / ReplaceOrderRequest. Unlike
+        // the sub-account wire id, the CBLC number is issued by the
+        // clearing house and cannot be derived internally — default is
+        // the null resolver (wire field stays omitted, post-trade
+        // allocation continues via the broker's out-of-band matching).
+        // Operators replace this with a real impl (lookup table,
+        // admin-managed registry, broker handshake) when they have a
+        // negotiated mapping.
+        services.AddSingleton<IVenueAccountResolver>(NullVenueAccountResolver.Instance);
+        // #472 (SDK 0.15.0). Resolve the opaque InvestorId (Prefix,
+        // Document) stamped on every outbound NewOrderRequest /
+        // ReplaceOrderRequest. Default = NullInvestorIdResolver (wire
+        // field omitted, pre-#472 behavior). The platform refuses to
+        // touch CPF/CNPJ on the path; operators wire a real resolver
+        // that hits their broker-issued opaque-id registry. LGPD
+        // posture is documented on IInvestorIdResolver.
+        services.AddSingleton<IInvestorIdResolver>(NullInvestorIdResolver.Instance);
+        // #473 (SDK 0.15.0). Resolve the RoutingInstruction stamped
+        // on outbound NewOrderRequest / ReplaceOrderRequest. Default
+        // = NullRoutingInstructionResolver (wire field omitted,
+        // pre-#473 behavior). Pre-trade gating happens via
+        // RiskLimits.AllowedRoutingInstructions +
+        // RoutingInstructionAllowedCheck (default-deny: a resolver
+        // value with no whitelist configured is rejected).
+        services.AddSingleton<IRoutingInstructionResolver>(NullRoutingInstructionResolver.Instance);
         // Q4.5 (#305). Audit log keeper + dispatcher-backed logger.
         // Both singletons so the live-dispatch path, recovery replay
         // and admin read endpoint all share the same in-memory ring
@@ -119,6 +155,17 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         // target=DropCopy); synthetic publishes from
         // OrderStalenessService / WAL-backpressure fallback also reach
         // it via the composite IExecutionEventSink wired below.
+        //
+        // #435 Part B. IClOrdIdMasker rewrites ClOrdId/ParentAlgoId on
+        // every DTO that crosses the drop-copy WebSocket boundary, so
+        // a counterparty consuming a downstream tap cannot reconstruct
+        // an algo's footprint across days or correlate flow across firms.
+        // Bind options from "Trading:DropCopy"; the default impl throws
+        // at construction if ClOrdIdMaskSalt is unset (matches
+        // CvmReportWriter.OwnerHashSalt boot-guard convention).
+        services.AddOptions<B3.Trading.Application.Audit.ClOrdIdMaskerOptions>()
+            .Bind(configuration.GetSection("Trading:DropCopy"));
+        services.AddSingleton<B3.Trading.Application.Audit.IClOrdIdMasker, B3.Trading.Application.Audit.ClOrdIdMasker>();
         services.AddSingleton<B3.Trading.Api.WebSockets.DropCopy.DropCopyManager>();
         services.AddSingleton<B3.Trading.Api.WebSockets.DropCopy.DropCopyExecutionEventSink>();
         services.AddSingleton<IExecutionFanOutSink>(sp =>

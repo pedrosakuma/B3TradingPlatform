@@ -271,9 +271,55 @@ body {
   font-size: .68rem; font-variant-numeric: tabular-nums;
   color: rgba(255,255,255,.85);
 }
-.dob { min-height: 0; } /* was grid-area: dob; — see Fase 4 (#400) */
+/* `.dob` (the flex-column panel wrapping the title + `.dob-grid`) also
+   needs an explicit non-zero `min-height`, not just `.dob-grid` below:
+   `.markets-layout`'s <=1280px `grid-template-rows: auto auto auto`
+   sizes the dob *row track* off `.dob`'s own intrinsic height during
+   grid auto-track sizing, which does not "see through" into
+   `.dob-grid`'s min-height once `.dob-grid` establishes its own
+   overflow/scroll context — verified empirically: with only
+   `.dob-grid { min-height: 180px }` and `.dob { min-height: 0 }`, the
+   grid row locked at the collapsed ~28px title-only height and
+   `.dob-grid` rendered 180px tall but overflowed *outside* `.dob`'s
+   box into the Tape panel below. `230px` covers `.dob`'s real content
+   floor (title ~19px + top/bottom padding ~25.6px + dob-grid's 180px
+   min-height, ~225px, rounded up for safety). */
+.dob { min-height: 230px; }
+/* `.dob-grid th` is `position: sticky; top: 0` (generic `th` rule
+   below), which needs a scrolling ancestor to stick *within* — every
+   other sticky-header table on the page gets one via `.table-scroll`
+   (blotter/executions/etc), but the DOB tables were never wrapped in
+   one. Without a local scroll container the sticky header escapes to
+   the nearest ancestor that actually scrolls, which on mobile's
+   single-column stack (markets-layout collapses to `grid-template-rows:
+   auto auto auto` at <=1280px) is the whole page — so as the trader
+   scrolls, "Cum Qty Bid | Ask Qty Cum" detaches and floats over
+   whatever panel happens to be at the top of the viewport (typically
+   the Working Orders table), hiding both.
+
+   `min-height: 180px` (not `0`) + `max-height` + `overflow-y: auto` is
+   deliberate: any non-visible `overflow` value forces a flex/grid
+   item's *automatic minimum size* in its main axis to 0 per spec
+   (verified empirically: with `min-height: 0` this collapsed to a
+   computed `height: 0px`, hiding the DOB entirely on the <=1280px
+   single-column stack where `.markets-layout` rows are `auto` — i.e.
+   content-sized with nothing to resolve the ambiguity, so the browser
+   picked the automatic-minimum-size floor of 0. Desktop's definite
+   `minmax(0, 1fr)` grid row masked the same collapse when an earlier
+   `flex: 1` version of this rule was tried). An explicit non-zero
+   `min-height` (matching `.trader-bottom-band`'s 180px convention)
+   guarantees a real, non-zero height in both contexts. */
 .dob-grid {
-  display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; min-height: 0;
+  display: grid; grid-template-columns: 1fr 1fr; gap: .5rem;
+  min-height: 180px; max-height: min(45vh, 420px); overflow-y: auto;
+  /* Grid items default to `align-self: stretch`, so the bid/ask
+     `<table>`s were stretched to fill the full grid-row height (the
+     180-420px above) regardless of how many rows they actually have —
+     with a thin book (e.g. one bid, no asks) the lone `<tr>` absorbed
+     all the leftover space and rendered as one absurdly tall row.
+     `align-items: start` lets each table keep its natural
+     content-based height and leaves any extra space blank below. */
+  align-items: start;
 }
 .dob-grid table { width: 100%; border-collapse: collapse; font-size: .8rem; }
 .dob-grid th { color: var(--muted); font-weight: 500; padding: .15rem .35rem; }
@@ -459,6 +505,19 @@ tr.row-stale > td.row-stale-actions { opacity: 1; }
 .type-chip.chip-stpl { background: #4a2455; color: #f0c8ff; }
 .type-chip.chip-mwl  { background: #145a4a; color: #8af0d4; }
 
+/* Option badges for Call/Put labels (#497) */
+.option-badge {
+ display: inline-block;
+ font-size: 0.75rem;
+ font-weight: 600;
+ padding: 0 4px;
+ border-radius: 3px;
+ margin-left: 4px;
+ vertical-align: middle;
+}
+.option-call { background: #22c55e; color: white; }
+.option-put { background: #ef4444; color: white; }
+
 /* Status cell coloring reserved for potential future OrderStatus.Expired
    addition; not currently rendered (backend OrderStatus has no Expired
    member — GTD expiry terminalises as Cancelled). Kept so a future
@@ -633,6 +692,67 @@ tr.firm-row-bad > td { background: rgba(239,83,80,.10); }
 }
 .panel.positions th.sortable[aria-sort="ascending"]::after  { content: " ▲"; opacity: .7; }
 .panel.positions th.sortable[aria-sort="descending"]::after { content: " ▼"; opacity: .7; }
+
+/* FE-OPT-3 (#499). Positions grouping toggle + grouped rows */
+.btn-toggle {
+  opacity: 0.6;
+  transition: opacity 0.15s, background 0.15s;
+}
+.btn-toggle:hover { opacity: 0.9; }
+.btn-toggle.active, .btn-toggle[aria-pressed="true"] {
+  opacity: 1;
+  background: var(--accent, #4aa3ff);
+  color: #fff;
+}
+.pos-group-header > td {
+  background: var(--panel-2, #1e1e1e);
+  border-top: 1px solid var(--border, #333);
+}
+.pos-indent > td:first-child {
+  padding-left: 1.5rem;
+}
+
+/* FE-OPT-3 (#499). Expiry strip for option positions */
+.expiry-strip {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  border-top: 1px solid var(--border, #333);
+  font-size: 0.75rem;
+  overflow-x: auto;
+}
+.expiry-strip-label {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.expiry-strip-items {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+.expiry-chip {
+  background: var(--panel-2, #1e1e1e);
+  border: 1px solid var(--border, #333);
+  border-radius: 4px;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.7rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s;
+}
+.expiry-chip:hover {
+  background: var(--panel-3, #2a2a2a);
+  border-color: var(--accent, #4aa3ff);
+}
+.expiry-chip.active {
+  background: var(--accent, #4aa3ff);
+  color: #fff;
+  border-color: var(--accent, #4aa3ff);
+}
+.expiry-count {
+  opacity: 0.7;
+}
 
 /* #342: Executions log symbol filter sits inside the panel <h2>. */
 .exec-filter-symbol {
@@ -820,6 +940,149 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
 .order-detail-table tr.empty td { color: var(--muted); text-align: center; padding: .8rem; }
 #blotter-body tr[data-clordid] { cursor: pointer; }
 #blotter-body tr[data-clordid] td.row-stale-actions { cursor: default; }
+
+/* ---------- FE-OPT-2 (#498) Option chain picker ---------- */
+.chain-picker-modal {
+  max-width: 90vw;
+  max-height: 90vh;
+}
+.chain-picker-content {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem;
+  border-bottom: 1px solid var(--border-color, #e5e7eb);
+}
+.modal-header h2 { margin: 0; }
+.modal-close {
+  background: none;
+  border: none;
+  font-size: 1.5rem;
+  cursor: pointer;
+  color: var(--text);
+  padding: 0;
+  width: 2rem;
+  height: 2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.modal-close:hover { color: var(--accent); }
+.chain-picker-controls {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-end;
+  padding: 1rem;
+  border-bottom: 1px solid var(--border-color, #e5e7eb);
+}
+.chain-picker-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: .8rem;
+  color: var(--muted);
+}
+.chain-picker-controls input {
+  width: 120px;
+  padding: 0.5rem;
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 4px;
+  font-size: .8rem;
+}
+.chain-picker-grid {
+  flex: 1;
+  overflow: auto;
+  padding: 1rem;
+}
+.chain-placeholder {
+  color: #6b7280;
+  text-align: center;
+  padding: 2rem;
+  margin: 0;
+}
+.chain-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.875rem;
+}
+.chain-table th,
+.chain-table td {
+  border: 1px solid var(--border-color, #e5e7eb);
+  padding: 0.5rem;
+  text-align: center;
+}
+.chain-table th {
+  background: var(--header-bg, #f3f4f6);
+  position: sticky;
+  top: 0;
+}
+.chain-table .strike-col {
+  font-weight: 600;
+  background: var(--header-bg, #f3f4f6);
+  position: sticky;
+  left: 0;
+}
+.chain-cell {
+  cursor: pointer;
+}
+.chain-cell:hover {
+  background: var(--hover-bg, #e0f2fe);
+}
+.chain-cell-call { color: #16a34a; }
+.chain-cell-put { color: #dc2626; }
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding: 1rem;
+  border-top: 1px solid var(--border-color, #e5e7eb);
+}
+.btn {
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: .8rem;
+  background: var(--panel);
+  color: var(--text);
+}
+.btn:hover {
+  filter: brightness(1.1);
+}
+.btn-primary {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+.btn-secondary {
+  background: var(--panel-2);
+  border-color: var(--border-color, #e5e7eb);
+}
+.btn-icon {
+  padding: 0.5rem;
+  width: 2rem;
+  height: 2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Mobile: full screen */
+@media (max-width: 768px) {
+  .chain-picker-modal {
+    max-width: 100vw;
+    max-height: 100vh;
+    width: 100vw;
+    height: 100vh;
+    margin: 0;
+    border-radius: 0;
+  }
+}
 
 /* ---------- Phase badges + auction panel (Q1.6 / #258) ---------- */
 
@@ -1154,6 +1417,14 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
   cursor: pointer; font-weight: 600;
 }
 .ticket-submit:hover { filter: brightness(1.1); }
+.ticket-notional {
+  font-size: .875rem;
+  color: var(--gray);
+  margin-left: .5rem;
+  white-space: nowrap;
+  align-self: flex-end;
+  padding-bottom: .35rem;
+}
 .ticket-advanced-toggle {
   padding: .35rem .65rem; font: inherit; font-size: .8rem;
   background: transparent; color: inherit;
@@ -1244,6 +1515,63 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
   }
   .watchlist-layout { grid-template-columns: 1fr; }
   .ticket-row-quick { flex-wrap: wrap; }
+
+  /* `.trader-subpanel`'s default `flex: 1; min-height: 0` (desktop) is a
+     shrink-to-fit strategy that pairs with `.markets-layout`'s definite
+     `minmax(0, 1fr)` row so the panel can flex-shrink to whatever space
+     is available. At this breakpoint `.markets-layout`/`.watchlist-layout`
+     switch to content-sized `auto` row(s) instead — those two strategies
+     conflict: `min-height: 0` still lets the *flex item* itself be
+     squeezed below its content's real height by whatever's left over
+     after `.ticket`/`.trader-subtabs`/`.trader-bottom-band` claim their
+     share of the viewport, but the `auto` grid rows inside don't shrink
+     to match — they keep their full content height and simply paint
+     past the squeezed box's bottom edge (no `overflow` is set on
+     `.trader-subpanel`), visually overlapping `.trader-bottom-band`
+     (Working orders / Executions) below. `min-height: auto` restores
+     flexbox's normal "automatic minimum size" (don't shrink below
+     content), so the panel takes its real ~content height and the page
+     grows/scrolls instead — consistent with the "no overflow trap, page
+     scrolls" approach documented above for `.trader-view`. */
+  .trader-subpanel { min-height: auto; }
+
+  /* `.trader-bottom-band`'s desktop sizing (`min-height: 180px; max-height:
+     30vh`) is a *floor and ceiling* pair, not a target — with no
+     `flex-grow` of its own (unlike `.trader-subpanel`, the only
+     flex-grow item in `.trader-layout`'s column), the band's actual
+     height is driven by its content's natural size, which — thanks to
+     the `flex: 1; min-height: 0` chain inside it
+     (`.trader-bottom-subpanel` → `.table-scroll`) — collapses right
+     back down to the 180px floor rather than growing toward the 30vh
+     ceiling. That's fine on desktop, where the *rest* of the viewport
+     (Chart/DOB/Tape) needs the room instead. On mobile, now that
+     `.trader-subpanel` takes its full natural height and the page
+     scrolls, there's no such competition — so bumping the *floor*
+     itself (not just the ceiling) gives Working orders/Executions a
+     genuinely usable area instead of one barely tall enough for a
+     single row. */
+  .trader-bottom-band { min-height: 45vh; max-height: 60vh; }
+
+  /* Same underlying flexbox spec quirk as `.trader-subpanel`/`.dob`/
+     `.dob-grid` above, now hitting `.ticket` itself: it has its own
+     `overflow-y: auto` (line ~233), so its "automatic minimum size" is
+     forced to 0 rather than being based on content — on desktop this
+     was masked because `.ticket-row-quick` fits on one line and there
+     was always enough leftover flex space in `.trader-layout`'s column
+     to naturally fit ~95px, but once `.trader-subpanel`/
+     `.trader-bottom-band`'s min-heights grew to their real (large)
+     content sizes just above, `.ticket`'s "leftover" share of the flex
+     column shrank toward 0, and — being flex-shrinkable with no min-
+     height floor of its own — it collapsed to a sliver just tall
+     enough to clip its own first line, spilling the rest of the (now
+     multi-line, `flex-wrap: wrap` — see above) quick-ticket row on top
+     of `.trader-subtabs` below. Unlike `.trader-subpanel` above,
+     `min-height: auto` is a no-op here (the automatic-minimum-size
+     override applies specifically because *this* element itself has
+     non-visible overflow) — `min-height: max-content` sidesteps that
+     by requesting the content's real size directly instead of relying
+     on the (overflow-suppressed) automatic minimum. */
+  .ticket { min-height: max-content; }
 }
 
 /* ---------- Mobile navigation drawer (#408) ----------
@@ -1291,4 +1619,14 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
   .mobile-nav-trigger { display: inline-flex; align-items: center; }
   /* Hide the inline tablist on phones — the drawer owns primary nav. */
   .view-toggle { display: none !important; }
+
+  /* #408 follow-up: on phones the topbar packs hamburger + brand +
+     symbol select + gateway/ws/balance pills + logout into one
+     `justify-content: space-between` row with no wrap allowed, so on
+     narrow viewports (~360-400px) everything overlaps instead of
+     shrinking. Let both rows wrap and shrink the brand text so the
+     status cluster gets its own line(s) instead of overlapping. */
+  .topbar { flex-wrap: wrap; row-gap: .35rem; }
+  .status { flex-wrap: wrap; row-gap: .35rem; }
+  .brand { font-size: .95rem; }
 }

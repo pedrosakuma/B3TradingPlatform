@@ -5,12 +5,13 @@ import { defaultBackend, defaultMarketDataUrl, login, signup, submitOrder, cance
          getKillStatus, killFirm, reviveFirm, killEndClient, reviveEndClient,
          getHaltStatus, haltSymbol, resumeSymbol,
          runEod,
-         listUserBotCredentials, createUserBotCredential, deleteUserBotCredential,
+         listUserBotCredentials, createUserBotCredential, setUserBotCredentialCertBinding, deleteUserBotCredential,
          getOrdersHistory, getExecutionsHistory, getPnlToday,
          getStatement, downloadStatementCsv,
          searchAuditLog, getFillTouch, downloadCvmReport, buildDropCopyWebSocketUrl,
          verifyTotp, enrollTotp, disableTotp,
-         listAlgos, createAlgo, cancelAlgo, modifyAlgo } from "./protocol.js";
+         listAlgos, createAlgo, cancelAlgo, modifyAlgo,
+         getInstruments } from "./protocol.js";
 import { validateCreateAlgo } from "./validation.js";
 import * as algosUi from "./algosUi.js";
 import * as settingsUi from "./settingsUi.js";
@@ -153,6 +154,7 @@ function init() {
     onBack:     () => handleSwitchView("trader"),
     onRefresh:  refreshBotCredentials,
     onCreate:   handleCreateBotCredential,
+    onSetCertBinding: handleSetCertBinding,
     onRevoke:   handleRevokeBotCredential,
   });
   historyUi.setHistoryHandlers({
@@ -171,6 +173,9 @@ function init() {
     onFillTouchLookup: handleFillTouchLookup,
     onCvmDownload:     handleCvmDownload,
   });
+
+  // FE-OPT-2 (#498). Chain picker load button — needs session for API call.
+  document.getElementById("chain-load-btn")?.addEventListener("click", handleLoadChain);
 
   // Fase 5 (#401). Global keyboard shortcuts. Handlers gate on
   // `session` so they no-op while the user is on the login screen.
@@ -792,7 +797,13 @@ function startMdWorker() {
   // #394. mdWorker is now the sole depth source — trades + info + MBP.
   // The trading-host book.${symbol} fan-out was removed; FE consumes
   // B3MarketDataPlatform directly.
-  const flags = FLAGS.TRADES | FLAGS.INFO | FLAGS.MBP;
+  // `Book` is required too: per B3MarketDataPlatform docs/WEBSOCKET-PROTOCOL.md,
+  // the initial CandleSnapshot sequence is only sent "on subscribe with
+  // the Book flag" (CandleUpdate itself rides Mbp, but state.js drops
+  // every update until a completed snapshot sets `entry.ready`). Without
+  // it the chart never leaves "no candle snapshot received" even though
+  // trades are executing.
+  const flags = FLAGS.TRADES | FLAGS.INFO | FLAGS.MBP | FLAGS.BOOK;
   mdWorker.postMessage({
     type: "start",
     url: mdConfig.url,
@@ -954,6 +965,29 @@ function formatPretradeWarning(w) {
     }
     default:
       return "advisory warning";
+  }
+}
+
+// FE-OPT-2 (#498). Load option chain from API and build grid in modal.
+async function handleLoadChain() {
+  if (!session) return;
+  const underlying = document.getElementById("chain-underlying")?.value?.trim().toUpperCase();
+  if (!underlying) {
+    document.getElementById("chain-picker-grid").innerHTML =
+      '<p class="chain-placeholder">Enter an underlying symbol (e.g., PETR4)</p>';
+    return;
+  }
+  const grid = document.getElementById("chain-picker-grid");
+  if (grid) grid.innerHTML = '<p class="chain-placeholder">Loading…</p>';
+  try {
+    const instruments = await getInstruments(session.backend, session.token, { underlying });
+    if (!instruments || instruments.length === 0) {
+      if (grid) grid.innerHTML = '<p class="chain-placeholder">No options found for this underlying</p>';
+      return;
+    }
+    if (grid) grid.innerHTML = ui.buildChainGrid(instruments);
+  } catch (err) {
+    if (grid) grid.innerHTML = `<p class="chain-placeholder" style="color:#dc2626">Error: ${err.message}</p>`;
   }
 }
 
@@ -1549,13 +1583,18 @@ async function refreshBotCredentials() {
   }
 }
 
-async function handleCreateBotCredential({ label }) {
+async function handleCreateBotCredential({ label, boundCertThumbprint = null }) {
   if (!session) return;
   const captured = session;
   botCredentialsUi.setCreateSubmitting(true);
   botCredentialsUi.setBotCredentialsFeedback(null);
   try {
-    const created = await createUserBotCredential(captured.backend, captured.token, label);
+    const created = await createUserBotCredential(
+      captured.backend,
+      captured.token,
+      label,
+      boundCertThumbprint,
+    );
     // Critical: if the user logged out (or a new user signed in) while
     // the POST was in flight, drop the plaintext PAT on the floor —
     // surfacing it to whoever is now in front of the browser would
@@ -1582,6 +1621,32 @@ async function handleCreateBotCredential({ label }) {
     if (session === captured) {
       botCredentialsUi.setCreateSubmitting(false);
     }
+  }
+}
+
+async function handleSetCertBinding({ id, label, boundCertThumbprint }) {
+  if (!session) return;
+  const captured = session;
+  botCredentialsUi.setBotCredentialsFeedback(null);
+  try {
+    await setUserBotCredentialCertBinding(
+      captured.backend,
+      captured.token,
+      id,
+      boundCertThumbprint,
+    );
+    if (session !== captured) return;
+    botCredentialsUi.setBotCredentialsFeedback(
+      boundCertThumbprint
+        ? `Credential "${label}" cert pin updated.`
+        : `Credential "${label}" cert pin cleared.`,
+      "ok");
+    await refreshBotCredentials();
+  } catch (err) {
+    if (session !== captured) return;
+    if (err?.status === 401) { logout(); return; }
+    botCredentialsUi.setBotCredentialsFeedback(
+      err?.message || "Failed to update credential cert pin.", "error");
   }
 }
 

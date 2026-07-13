@@ -20,6 +20,12 @@ Trading__EntryPointListener__AllowInProduction=true
 Trading__EntryPointListener__Tls__Required=true
 Trading__EntryPointListener__Tls__CertPath=/etc/ssl/fixp/server.crt
 Trading__EntryPointListener__Tls__KeyPath=/etc/ssl/fixp/server.key
+# Optional mTLS second factor for public bot access:
+Trading__EntryPointListener__Tls__ClientCertificateMode=Required
+Trading__EntryPointListener__Tls__ClientCa__BundlePath=/etc/ssl/fixp/bot-ca-bundle.pem
+Trading__EntryPointListener__Tls__ClientCa__DenyListPath=/etc/ssl/fixp/bot-denylist.txt
+Trading__EntryPointListener__Tls__ClientCa__ReloadInterval=00:05:00
+Trading__EntryPointListener__Tls__RequireClientAuthEku=true
 ```
 
 ### Boot guard
@@ -32,6 +38,29 @@ In `Environment=Production`, the host refuses to start unless ALL of:
 - `Tls:CertPath` is set (and for PEM certs, `Tls:KeyPath` is also set)
 
 PFX/P12 users can put the `.pfx` path in `CertPath` and leave `KeyPath` empty.
+
+### Public-exposure overlay (#531)
+
+For internet-facing deployments use the dedicated `docker/docker-compose.public.yml`
+overlay instead of hand-editing env. It pins `ASPNETCORE_ENVIRONMENT=Production`
+(every fail-closed boot guard fires), enables the listener with TLS + mTLS
+`Required`, and applies hardened connection caps. Every secret uses the
+`${VAR:?...}` required form — a missing value aborts `up` instead of booting
+with a dev placeholder.
+
+```bash
+# 1. Provision cert material into one host dir (mounted ro at /etc/ssl/fixp):
+#      server.pfx (or server.crt + server.key), bot-ca-bundle.pem, bot-denylist.txt
+# 2. Fill the PUBLIC_* + TRADING_* secrets in docker/.env (see .env.example).
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.public.yml up -d
+```
+
+Required secrets (no defaults in public mode): `TRADING_AUTH_SIGNING_KEY`
+(≥32 bytes), `TRADING_SEED_PASSWORD_HASH`, `TRADING_SEED_PASSWORD_SALT`,
+`TRADING_CVM_OWNER_HASH_SALT`, `TRADING_CLORDID_MASK_SALT`,
+`PUBLIC_FIXP_TLS_DIR`, `PUBLIC_FIXP_TLS_CERT`, `PUBLIC_FIXP_CA_BUNDLE`,
+`PUBLIC_FIXP_CA_DENYLIST`. Pair with the alerting in
+[`docs/ops/public-auth-alerts.md`](../ops/public-auth-alerts.md).
 
 ## TLS Setup
 
@@ -69,6 +98,33 @@ Use certbot or ACME clients to obtain PEM files, then point `CertPath` and `KeyP
 at the fullchain and privkey files. Renewal requires a host restart (v0 does not
 hot-reload certs).
 
+## mTLS client certificates
+
+The listener can require a trusted bot client certificate in addition to the
+bot PAT:
+
+| Setting | Values / default | Description |
+|---------|------------------|-------------|
+| `Tls:ClientCertificateMode` | `None`, `Optional`, `Required` (`None`) | `Optional` observes cert adoption; `Required` rejects clients without a valid cert. |
+| `Tls:ClientCa:BundlePath` | path | Concatenated PEM bundle of trusted bot CA certificates. |
+| `Tls:ClientCa:DenyListPath` | path or empty | SHA-256 leaf thumbprint deny-list. |
+| `Tls:ClientCa:ReloadInterval` | `00:05:00` | Hot-reload cadence for the bundle and deny-list. |
+| `Tls:RequireClientAuthEku` | `true` | Require `clientAuth` EKU on client leaf certificates. |
+| `AllowInsecureMtlsInProduction` | `false` | Explicit escape hatch for less-secure production mTLS posture. |
+
+Provision a bot CA out of band, issue each bot a client leaf certificate, and
+mount only the CA bundle and deny-list into the trading-host. Bot private keys
+belong only in bot runtimes.
+
+For CA rotation, concatenate old and new CA PEMs in the bundle, wait one
+`ReloadInterval`, move bots to leaves issued by the new CA, then remove the
+old CA. The listener picks this up without a restart.
+
+For fast revocation, add the leaf's SHA-256 thumbprint to the deny-list. The
+format is one 64-character SHA-256 hex thumbprint per line; uppercase is
+canonical, separators are ignored, and blank lines / `#` comments are allowed.
+New handshakes using a denied leaf fail after the next reload.
+
 ## Rate Limiting
 
 Token-bucket rate limiting protects the Negotiate endpoint:
@@ -77,12 +133,27 @@ Token-bucket rate limiting protects the Negotiate endpoint:
 |---------|---------|-------------|
 | `RateLimit:NegotiatesPerMinutePerIp` | 30 | Per source IP |
 | `RateLimit:NegotiatesPerMinutePerUsername` | 10 | Per credential (post-auth) |
+| `AcceptRateLimit:ConnectionsPerSecondPerIp` | 0 | Opt-in accept-loop connection rate limit; `0` disables it |
+| `AcceptRateLimit:BurstPerIp` | 30 | Burst size for the accept-loop limiter |
+| `ConnectionCaps:MaxConcurrentTotal` | 0 | Max live connections across all peers; `0` = unlimited |
+| `ConnectionCaps:MaxConcurrentPerIp` | 0 | Max live connections per source IP; `0` = unlimited |
+| `ConnectionCaps:AllowedIps:N` | (empty) | If set, only these source IPs may connect (allow-list wins) |
+| `ConnectionCaps:DeniedIps:N` | (empty) | Source IPs rejected before handshake |
+| `Tls:HandshakeTimeout` | 00:00:05 | Drop a socket whose TLS handshake exceeds this (slow-loris guard) |
 
 ### Tuning
 
 - For N bots each reconnecting every 5 minutes: set per-IP ≥ N×12/min safety margin.
 - Per-credential limits protect against a bot in a tight reconnect loop.
 - Tokens refill continuously at the configured rate per minute.
+- The accept-loop limiter is disabled by default. For public exposure, prefer
+  upstream LB / WAF / firewall connection-rate controls and tune the in-process
+  limiter only as an additional guard.
+- **Public exposure (#529):** set `ConnectionCaps:MaxConcurrentTotal` and
+  `MaxConcurrentPerIp` to bound pre-auth socket fan-out (slow-loris), shorten
+  `Tls:HandshakeTimeout`, and optionally pin `ConnectionCaps:AllowedIps` /
+  `DeniedIps`. Each reject path increments `fixp.connections.rejected.total`
+  with `reason=ip_blocked|max_connections|accept_rate_limit|tls|mtls`.
 
 ## Max Sessions Per User
 
@@ -108,7 +179,13 @@ All instruments use the `B3.Trading` meter (subscribe with OTel or Prometheus).
 | `entrypoint_listener.er_outbound_dropped_total` | Counter | — | Overflow drops |
 | `entrypoint_listener.retransmit_requests_total` | Counter | `outcome` | Retransmit outcomes |
 | `fixp.handshake.tls.completed.total` | Counter | — | TLS handshakes |
+| `fixp.handshake.tls.duration_ms` | Histogram | `outcome` (ok/tls/mtls) | TLS handshake latency, recorded for success + failure |
 | `fixp.connections.rejected.total` | Counter | `reason` | Rejected connections |
+| `entrypoint_listener.mtls_client_certs_total` | Counter | `outcome` | Client-cert validation outcomes |
+
+For public-internet exposure, copy the alert rules and Grafana dashboard
+in [`docs/ops/public-auth-alerts.md`](../ops/public-auth-alerts.md) /
+`docker/observability/grafana/dashboards/public-auth.json`.
 
 ### Prometheus query examples
 
@@ -190,8 +267,5 @@ The `/admin/fixp/credentials/{id}/buffer` endpoint shows:
 ## Out of v0
 
 The following are explicitly deferred:
-- mTLS / client certificate auth
 - Mass-cancel on disconnect
-- Per-IP `MaxConnectionsPerSec`
 - WAL-persisted outbound buffer
-- Certificate hot-reload

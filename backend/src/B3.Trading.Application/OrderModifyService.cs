@@ -35,6 +35,7 @@ public sealed class OrderModifyService
     private readonly PendingReplacementRegistry _replacements;
     private readonly EventDispatcher _dispatcher;
     private readonly Lifecycle.IDrainGate _drain;
+    private readonly Routing.IRoutingInstructionResolver? _routingResolver;
     private readonly ILogger<OrderModifyService> _logger;
 
     public OrderModifyService(
@@ -48,7 +49,8 @@ public sealed class OrderModifyService
         PendingReplacementRegistry replacements,
         EventDispatcher dispatcher,
         Lifecycle.IDrainGate drain,
-        ILogger<OrderModifyService> logger)
+        ILogger<OrderModifyService> logger,
+        Routing.IRoutingInstructionResolver? routingInstructionResolver = null)
     {
         _clOrdIds = clOrdIds;
         _ownership = ownership;
@@ -60,6 +62,7 @@ public sealed class OrderModifyService
         _replacements = replacements;
         _dispatcher = dispatcher;
         _drain = drain;
+        _routingResolver = routingInstructionResolver;
         _logger = logger;
     }
 
@@ -228,7 +231,13 @@ public sealed class OrderModifyService
             TimeInForce: effTif,
             StopPrice: effStop,
             GoodTillDate: effGtd,
-            SubAccountId: orig.SubAccountId);
+            SubAccountId: orig.SubAccountId,
+            // #473. Resolve the routing instruction for the modify so
+            // the per-scope whitelist gates the replace identically to
+            // a fresh submit. Resolved off the original Order since
+            // replace inherits routing intent (owner/firm/sub-account
+            // are immutable across modify).
+            RoutingInstruction: _routingResolver?.TryResolve(orig));
 
         // Ordering note (RFC docs/rfcs/risk-pipeline-ordering-v0.md, #262):
         // risk evaluation runs *pre-WAL* on the modify path. #337 closed

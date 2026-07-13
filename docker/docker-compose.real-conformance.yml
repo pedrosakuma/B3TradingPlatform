@@ -20,6 +20,16 @@ services:
   conformance:
     environment:
       B3T_REAL_STACK_CONFORMANCE: "true"
+      B3T_DOCKER_CONTROL: "true"
+      B3T_DOCKER_MATCHING_CONTAINER: b3-matching-platform
+      B3T_DOCKER_PATH: /usr/bin/docker
+    volumes:
+      # Session-roll conformance actively severs the matching-platform TCP
+      # leg from inside the test runner. Mount the host docker CLI + socket
+      # only in the real-conformance overlay so ordinary conformance runs
+      # (pointed at arbitrary hosts) stay pure HTTP/WS clients.
+      - /usr/bin/docker:/usr/bin/docker:ro
+      - /var/run/docker.sock:/var/run/docker.sock
 
   # The ReferencePriceLiveSpec scenario crosses Buy+Sell from a single
   # authenticated end-client (alice) so matching can print a trade and
@@ -41,3 +51,11 @@ services:
       # to the conformance run only — the gate stays armed for
       # every other end-client in this stack.
       Trading__Risk__PerEndClient__alice__AllowSelfTrade: "true"
+
+  matching-platform:
+    # Conformance-only shorter suspend window for the SessionRoll spec.
+    # The base real stack keeps the default long timeout for manual
+    # dogfooding; only this overlay swaps the bridge file and command.
+    volumes:
+      - ./real/exchange-simulator.conformance-bridge.json:/app/config/exchange-simulator.conformance-bridge.json:ro
+    command: ["/app/config/exchange-simulator.conformance-bridge.json"]
