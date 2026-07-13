@@ -261,6 +261,53 @@ public sealed class RiskLimits
     /// or for staged rollouts of a new order type.
     /// </summary>
     public List<string>? AllowedOrderTypes { get; set; }
+
+    /// <summary>
+    /// #433 P1. Venue-side STP instruction sent on every outbound
+    /// <c>NewOrderRequest</c> / <c>ReplaceOrderRequest</c> (B3
+    /// EntryPoint SDK ≥ 0.15.0). Belt-and-braces companion to the
+    /// pre-trade <see cref="Checks.SelfTradePreventionCheck"/>: the
+    /// pre-trade check still rejects same-firm same-owner crosses
+    /// synchronously when <see cref="AllowSelfTrade"/> is not
+    /// <c>true</c>; this field tells the matching engine what to do
+    /// if a cross still reaches the book (e.g. same-firm
+    /// different-owner pairs that the pre-trade check intentionally
+    /// allows, or any pair the platform missed because the
+    /// working-order snapshot was stale). Default semantics when
+    /// unset everywhere in the precedence chain are
+    /// <see cref="SelfTradePreventionMode.None"/> — the venue does
+    /// not enforce STP unless an operator explicitly opts in per-firm
+    /// or per-end-client. The app-side
+    /// <see cref="AllowSelfTrade"/> pre-trade check remains the
+    /// primary line of defense; this field exists as an opt-in
+    /// belt-and-braces enforcement at the matching engine for scopes
+    /// that want it. Defaulting to <c>None</c> avoids changing
+    /// historical venue behavior for tenants that already rely on
+    /// crossed trades reaching the book (e.g. cross-account hedging
+    /// inside the same firm).
+    /// </summary>
+    public SelfTradePreventionMode? SelfTradePreventionMode { get; set; }
+
+    /// <summary>
+    /// #473 (SDK 0.15.0). Optional whitelist of
+    /// <see cref="Routing.RoutingInstruction"/> values the resolved
+    /// scope may stamp on outbound orders. Case-insensitive enum
+    /// names (e.g. <c>"RetailLiquidityTaker"</c>, <c>"BrokerOnly"</c>).
+    /// <c>null</c> or empty = <b>no instruction permitted</b> (the
+    /// resolved value, if any, is rejected pre-trade). Non-empty =
+    /// only the listed values are permitted; anything else is
+    /// rejected with <c>routing_instruction_blocked</c>.
+    ///
+    /// <para>
+    /// Default is intentionally restrictive (null → block) so a
+    /// misconfigured <see cref="Routing.IRoutingInstructionResolver"/>
+    /// cannot ship a routing instruction past the risk pipeline by
+    /// accident. Operators that want to use any value must explicitly
+    /// opt in per scope. Stamps of <c>BrokerOnly</c> are additionally
+    /// metric-tagged for audit (conflict-of-interest sensitive).
+    /// </para>
+    /// </summary>
+    public List<string>? AllowedRoutingInstructions { get; set; }
 }
 
 public static class RiskLimitsResolver
@@ -354,5 +401,25 @@ public static class RiskLimitsResolver
             AllowedOrderTypes = ResolveRef(opts, endClient, firmId, symbol,
                 l => l.AllowedOrderTypes,
                 v => v.Count > 0),
+            SelfTradePreventionMode = Resolve(opts, endClient, firmId, symbol, l => l.SelfTradePreventionMode),
+            AllowedRoutingInstructions = ResolveRef(opts, endClient, firmId, symbol,
+                l => l.AllowedRoutingInstructions,
+                v => v.Count > 0),
         };
+
+    /// <summary>
+    /// #433 P1. Resolve the venue-side STP mode for a single order,
+    /// applying the project-wide default of
+    /// <see cref="SelfTradePreventionMode.None"/>
+    /// when no scope in the precedence chain pins a value. Returns a
+    /// non-nullable value so the gateway never has to make the
+    /// "what does null mean" decision at submit time. Defaulting to
+    /// <c>None</c> preserves existing venue behavior — operators
+    /// opt-in to matching-engine STP enforcement per-firm /
+    /// per-end-client.
+    /// </summary>
+    public static SelfTradePreventionMode ResolveSelfTradePreventionMode(
+        RiskOptions opts, string endClient, string? firmId, string symbol) =>
+        Resolve(opts, endClient, firmId, symbol, l => l.SelfTradePreventionMode)
+            ?? SelfTradePreventionMode.None;
 }

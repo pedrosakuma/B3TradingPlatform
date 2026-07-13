@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Diagnostics.Metrics;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using B3.Trading.Application.UserBots;
@@ -64,6 +65,22 @@ public class TlsHandshakeTests
                 var listener = host.Services.GetRequiredService<FixpListenerHostedService>();
                 var ep = await listener.WhenBound;
 
+                var recorded = 0;
+                var sawOk = false;
+                using var meter = new MeterListener();
+                meter.InstrumentPublished = (instr, ml) =>
+                {
+                    if (instr.Name == "fixp.handshake.tls.duration_ms")
+                        ml.EnableMeasurementEvents(instr);
+                };
+                meter.SetMeasurementEventCallback<double>((_, _, tags, _) =>
+                {
+                    recorded++;
+                    foreach (var t in tags)
+                        if (t.Key == "outcome" && (t.Value as string) == "ok") sawOk = true;
+                });
+                meter.Start();
+
                 using var tcp = new TcpClient();
                 await tcp.ConnectAsync(ep);
                 using var ssl = new SslStream(tcp.GetStream(), false, (_, _, _, _) => true);
@@ -74,6 +91,12 @@ public class TlsHandshakeTests
 
                 Assert.True(ssl.IsAuthenticated);
                 Assert.True(ssl.IsEncrypted);
+
+                var deadline = DateTime.UtcNow.AddSeconds(2);
+                while (!sawOk && DateTime.UtcNow < deadline)
+                    await Task.Delay(20);
+                Assert.True(recorded >= 1);
+                Assert.True(sawOk);
             }
             finally
             {

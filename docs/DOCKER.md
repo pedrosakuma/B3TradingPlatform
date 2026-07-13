@@ -435,9 +435,27 @@ environment:
   # For TLS, mount cert files and set:
   # Trading__EntryPointListener__Tls__CertPath: /certs/server.crt
   # Trading__EntryPointListener__Tls__KeyPath: /certs/server.key
+  # For mTLS, mount the bot CA bundle and optional SHA-256 deny-list:
+  # Trading__EntryPointListener__Tls__ClientCertificateMode: Required  # None|Optional|Required
+  # Trading__EntryPointListener__Tls__ClientCa__BundlePath: /certs/bot-ca-bundle.pem
+  # Trading__EntryPointListener__Tls__ClientCa__DenyListPath: /certs/bot-denylist.txt
+  # Trading__EntryPointListener__Tls__ClientCa__ReloadInterval: "00:05:00"
+  # Trading__EntryPointListener__Tls__RequireClientAuthEku: "true"
+  # Trading__EntryPointListener__AcceptRateLimit__ConnectionsPerSecondPerIp: "0"
+  # Trading__EntryPointListener__AcceptRateLimit__BurstPerIp: "30"
+volumes:
+  # - ./certs/server.crt:/certs/server.crt:ro
+  # - ./certs/server.key:/certs/server.key:ro
+  # - ./certs/bot-ca-bundle.pem:/certs/bot-ca-bundle.pem:ro
+  # - ./certs/bot-denylist.txt:/certs/bot-denylist.txt:ro
 ports:
   - "5001:5001"  # expose FIXP port
 ```
+
+When mTLS is enabled in a compose overlay, set the required mTLS variables in
+that overlay and mount the referenced `/certs` files there. Demo and
+conformance overlays must do this explicitly when they exercise mTLS so the
+base stack remains PAT-only by default.
 
 See the full [FIXP listener operations guide](operations/fixp-listener.md) for
 TLS setup, rate-limit tuning, and monitoring.

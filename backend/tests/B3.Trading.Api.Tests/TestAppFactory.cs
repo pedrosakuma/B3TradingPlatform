@@ -152,6 +152,9 @@ public class TestAppFactory : WebApplicationFactory<Program>
                 // TestOnly sentinel; production hosts MUST configure a
                 // real secret — see CvmReportOptions.Validate.
                 ["Trading:Reports:Cvm:OwnerHashSalt"] = B3.Trading.Application.Reports.Cvm.CvmReportOptions.TestOnlySalt,
+                // #435 Part B. Drop-copy ClOrdId masker salt — boot-guard
+                // throws if unset in non-Development, mirrors CVM pattern.
+                ["Trading:DropCopy:ClOrdIdMaskSalt"] = B3.Trading.Application.Audit.ClOrdIdMaskerOptions.TestOnlySalt,
             });
 
             if (_configOverrides is not null)

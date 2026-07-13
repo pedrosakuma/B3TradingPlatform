@@ -1,7 +1,10 @@
 using B3.Trading.Application;
+using B3.Trading.Application.Investor;
 using B3.Trading.Application.Lifecycle;
+using B3.Trading.Application.Routing;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
+using B3.Trading.Application.SubAccount;
 using B3.Trading.Host.Hosted;
 using B3.Trading.Infrastructure;
 using B3.Trading.Infrastructure.Persistence;
@@ -95,7 +98,13 @@ public static class TradingExchangeGatewayServiceCollectionExtensions
                         lf.CreateLogger("FirmGatewayConnector").LogWarning(ex,
                             "Failed to load persisted SessionStateStore for firm {Firm}; starting from configured SessionVerId.", firm.FirmId);
                     }
-                    var resolvedVerId = SessionVerIdResolver.Resolve(firm.SessionVerId, persistedVerId);
+                    // #512 cold-start resume: do NOT pre-bump the SessionVerId on
+                    // every restart. Resume the persisted verId as-is so the venue
+                    // reattaches the SAME session (Establish-reuse) and keeps our
+                    // resting orders. The bump is now a FALLBACK only — applied by
+                    // the SDK via NextSessionVerIdSelector when the venue rejects
+                    // the reuse with a recoverable reject.
+                    var resumeVerId = persistedVerId ?? firm.SessionVerId;
 
                     // #126. Materialise the access key via the central
                     // resolver so file-mounted secrets + the legacy flat
@@ -108,7 +117,10 @@ public static class TradingExchangeGatewayServiceCollectionExtensions
                     {
                         Endpoint = ep,
                         SessionId = firm.SessionId,
-                        SessionVerId = resolvedVerId,
+                        SessionVerId = resumeVerId,
+                        ConnectMode = B3.EntryPoint.Client.ConnectMode.EstablishReuseThenNegotiate,
+                        TerminateOnDispose = false,
+                        NextSessionVerIdSelector = prev => SessionVerIdResolver.Resolve(firm.SessionVerId, prev),
                         EnteringFirm = firm.EnteringFirm,
                         Credentials = B3.EntryPoint.Client.EntryPointClientOptions.AccessKey(accessKey),
                         KeepAliveIntervalMs = firm.KeepAliveIntervalMs,
@@ -120,8 +132,62 @@ public static class TradingExchangeGatewayServiceCollectionExtensions
                     var upstream = new B3.EntryPoint.Client.EntryPointClient(clientOpts);
                     var gwLogger = lf.CreateLogger<B3EntryPointClientGateway>();
                     var reactor = sp.GetService<IVenueDisconnectReactor>();
-                    return new B3EntryPointClientGateway(upstream, firm.FirmId, resolvedVerId, gwLogger,
-                        venueDisconnectReactor: reactor);
+                    var riskOpts = sp.GetService<IOptionsMonitor<RiskOptions>>();
+                    var subAccountMapper = sp.GetService<ISubAccountWireIdMapper>();
+                    var venueAccountResolver = sp.GetService<IVenueAccountResolver>();
+                    var investorIdResolver = sp.GetService<IInvestorIdResolver>();
+                    var routingInstructionResolver = sp.GetService<IRoutingInstructionResolver>();
+                    var connectRollReactor = sp.GetService<IConnectSessionRollReactor>();
+                    var gatewayLogger = lf.CreateLogger("FirmGatewayConnector");
+                    return new B3EntryPointClientGateway(upstream, firm.FirmId, resumeVerId, gwLogger,
+                        venueDisconnectReactor: reactor,
+                        riskOptions: riskOpts,
+                        subAccountWireIdMapper: subAccountMapper,
+                        venueAccountResolver: venueAccountResolver,
+                        investorIdResolver: investorIdResolver,
+                        routingInstructionResolver: routingInstructionResolver,
+                        terminateOnShutdown: false,
+                        // #512. Read the SDK's effective verId off the SAME
+                        // options instance the client mutates on a cold-resume
+                        // fallback bump, and reap PendingNew if it advanced.
+                        effectiveSessionVerIdProvider: () => clientOpts.SessionVerId,
+                        connectSessionRollReactor: connectRollReactor,
+                        // #565. The SDK dials whatever IPEndPoint sits on
+                        // `clientOpts.Endpoint` and never re-resolves it
+                        // itself. Re-resolve the configured host:port fresh
+                        // before every reconnect attempt and mutate the SAME
+                        // options instance the client holds, so a matching
+                        // pod IP change (Kubernetes failover/reschedule) is
+                        // picked up without a trading-host restart. Bounded
+                        // to a short timeout (separate from `ct`, which is
+                        // shutdown-only) so a hung resolver can't stall the
+                        // reconnect loop or starve the thread pool during
+                        // exactly the kind of network incident this targets;
+                        // keep the last-known-good endpoint on timeout/
+                        // resolution failure (e.g. a brief CoreDNS blip)
+                        // rather than throwing out of the reconnect loop.
+                        reResolveEndpoint: async ct =>
+                        {
+                            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                            timeoutCts.CancelAfter(TimeSpan.FromSeconds(5));
+                            try
+                            {
+                                clientOpts.Endpoint = await FirmConfigValidation.ParseEndpointAsync(
+                                    firm.Endpoint, timeoutCts.Token).ConfigureAwait(false);
+                            }
+                            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                            {
+                                gatewayLogger.LogWarning(
+                                    "DNS re-resolve of endpoint '{Endpoint}' timed out for firm {Firm}; reusing last-known address {LastKnown}.",
+                                    firm.Endpoint, firm.FirmId, clientOpts.Endpoint);
+                            }
+                            catch (Exception ex) when (ex is not OperationCanceledException)
+                            {
+                                gatewayLogger.LogWarning(ex,
+                                    "DNS re-resolve of endpoint '{Endpoint}' failed for firm {Firm}; reusing last-known address {LastKnown}.",
+                                    firm.Endpoint, firm.FirmId, clientOpts.Endpoint);
+                            }
+                        });
                 });
                 return new FirmGatewayRegistry(gateways);
             });
