@@ -853,20 +853,21 @@ public class OrderModifyMarginAndProcessorTests
         var sinkCountAfterFirst = sink.Events.Count;
         Assert.Single(replaceCoord.Commits);
 
-        // Second Cancel ER (FIXP replay) — registry consumed; falls
-        // through. The 778 lookup finds the now-Working new order;
-        // MarkCancelled WILL apply to it (no terminal guard against
-        // Working). This is the documented v1 behaviour for replayed
-        // cancels arriving after the new order was hydrated; the more
-        // important assertion is no throw, no double-add, no reservation
-        // leak (no extra Commit/Abort on the coordinator).
+        // Second Cancel ER using the same (new, orig) shape — registry
+        // is already consumed, but the standard path still resolves
+        // Canceled(new, orig) back to the ORIGINAL order. That means
+        // this replay/audit-trail shape is a no-op against the already-
+        // Replaced original; it does NOT cancel the hydrated new order.
+        // The more important assertion here is still no throw, no
+        // double-add, no reservation leak (no extra Commit/Abort on the
+        // coordinator).
         var origStatusBefore = orig.Status;
         proc.Apply(778UL, ExecKind.Canceled, 0, 0, 0, 0m, null, origClOrdId: 777UL);
         Assert.Equal(origStatusBefore, orig.Status); // original untouched
         Assert.Single(replaceCoord.Commits); // no extra commit
         Assert.Empty(replaceCoord.Aborts);   // no leak
         Assert.True(book.TryGet(778UL, out var stillThere));
-        Assert.Same(newOrder, stillThere);   // not re-hydrated
+        Assert.Same(newOrder, stillThere);   // hydrated replacement untouched
         // Fan-out emitted at most one extra ER for the standard cancel path.
         Assert.InRange(sink.Events.Count - sinkCountAfterFirst, 0, 1);
     }

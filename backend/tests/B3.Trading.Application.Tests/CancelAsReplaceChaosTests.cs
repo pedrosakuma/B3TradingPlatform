@@ -162,10 +162,12 @@ public class CancelAsReplaceChaosTests
 
             case Scenario.PriorityLostHappy_FollowedByRealCancel:
                 harness.Proc.Apply(newId, ExecKind.Canceled, 0, 0, 0, 0m, null, origClOrdId: origId);
-                // After the intent is consumed, a real subsequent Cancel of the
-                // new (Working) order is a normal cancel: registry returns
-                // false, falls through to the standard cancel branch.
-                harness.Proc.Apply(newId, ExecKind.Canceled, 0, 0, 0, 0m, null, origClOrdId: origId);
+                // A real cancel of the now-Working replacement does not
+                // reuse the replacement ClOrdID. It uses a fresh cancel-side
+                // ID linked back to the current working order.
+                var cancelId = newId + 10;
+                harness.Ownership.RegisterCancelLink(cancelId, newId);
+                harness.Proc.Apply(cancelId, ExecKind.Canceled, 0, 0, 0, 0m, null, origClOrdId: 0);
                 break;
 
             case Scenario.ReplaceRejectedByVenue:
@@ -232,6 +234,18 @@ public class CancelAsReplaceChaosTests
             default:
                 Assert.True(hasNew, $"{scenario} should have hydrated new order");
                 AssertOrderArithmetic(newAfter!);
+                var newOk = scenario switch
+                {
+                    Scenario.PriorityLostHappy_FollowedByRealCancel
+                        => newAfter!.Status == OrderStatus.Cancelled,
+                    Scenario.PriorityLostHappy or
+                    Scenario.PriorityLostHappy_WithCancelReplay or
+                    Scenario.PriorityKept or
+                    Scenario.OriginalPartiallyFilled_ThenCancelAsReplace
+                        => newAfter!.Status is OrderStatus.Working or OrderStatus.Filled,
+                    _ => throw new InvalidOperationException($"Unhandled scenario {scenario}")
+                };
+                Assert.True(newOk, $"new status {newAfter!.Status} unexpected for {scenario}");
                 break;
         }
 

@@ -885,9 +885,28 @@ public class HistoryEndpointTests : IDisposable
             RejectReason: null,
             OrigClOrdId: 0));
 
-        // Second Canceled ER under newId — must be a regular cancel of the
-        // new (now Working) order, since the link has been consumed.
-        await InjectEr(http, adminToken, new { ClOrdId = newId, Type = "Canceled" });
+        // A real cancel of the now-Working replacement is a normal DELETE
+        // against the replacement order, which allocates a fresh cancel-side
+        // ClOrdID linked back to `newId`.
+        var cancelsBefore = mock.SubmittedCancels.Count;
+        var del = new HttpRequestMessage(HttpMethod.Delete, $"/orders/{newId}");
+        del.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var delResp = await http.SendAsync(del);
+        Assert.Equal(HttpStatusCode.NoContent, delResp.StatusCode);
+        var cancelReq = mock.SubmittedCancels.Skip(cancelsBefore).Single();
+
+        // Venue cancel ack for that cancel-side ID. OrigClOrdId may be 0;
+        // ExecutionReportProcessor resolves it through the cancel-link map
+        // recorded by OrderCancelService.
+        mock.EmitExecutionReport(new B3.Trading.Infrastructure.ExecutionReportEnvelope(
+            ClOrdId: cancelReq.ClOrdId,
+            ExecType: B3.Trading.Infrastructure.EpExecType.Canceled,
+            LeavesQuantity: 0,
+            CumulativeQuantity: 0,
+            LastQuantity: 0,
+            LastPrice: 0m,
+            RejectReason: null,
+            OrigClOrdId: 0));
 
         var page = await GetOrdersHistory(http, token);
         var byId = page.Items.ToDictionary(
