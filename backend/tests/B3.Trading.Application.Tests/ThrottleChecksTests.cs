@@ -3,6 +3,7 @@ using B3.Trading.Application.Risk;
 using B3.Trading.Application.Risk.Accounting;
 using B3.Trading.Application.Risk.Checks;
 using B3.Trading.Domain;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
 namespace B3.Trading.Application.Tests;
@@ -211,6 +212,51 @@ public class ThrottleChecksTests
         accountant.RecordAccepted(Ctx(owner: "alice", firm: "acme"));
         // Different end-client, same firm — firm cap blocks it.
         Assert.False(check.Check(Ctx(owner: "bob", firm: "acme")).Approved);
+    }
+
+    [Fact]
+    public async Task ThrottleLedgerSweeper_SweepsExpiredAlgoBuckets()
+    {
+        var opts = new RiskOptions
+        {
+            RollingNotional = new RollingNotionalOptions { WindowSeconds = 1 },
+            OrderRate = new OrderRateOptions { WindowSeconds = 1 },
+        };
+        var monitor = Wrap(opts);
+        var refPx = new StubRef(("PETR4", 30m));
+        var notional = new RollingNotionalAccountant(monitor, refPx, TimeProvider.System);
+        var rate = new OrderRateAccountant(monitor, TimeProvider.System);
+        var ctx = AlgoCtx("default", parentAlgoId: 7777UL, qty: 100, price: 30m);
+
+        notional.RecordAccepted(ctx);
+        rate.RecordAccepted(ctx);
+        Assert.Equal(1, notional.AlgoLedger.ActiveBucketCount);
+        Assert.Equal(1, rate.AlgoLedger.ActiveBucketCount);
+
+        await Task.Delay(TimeSpan.FromMilliseconds(1100));
+
+        var sweeper = new ThrottleLedgerSweeper(
+            notional,
+            rate,
+            monitor,
+            NullLogger<ThrottleLedgerSweeper>.Instance,
+            TimeProvider.System)
+        {
+            SweepInterval = TimeSpan.FromMilliseconds(25),
+        };
+
+        await sweeper.StartAsync(CancellationToken.None);
+        try
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(150));
+        }
+        finally
+        {
+            await sweeper.StopAsync(CancellationToken.None);
+        }
+
+        Assert.Equal(0, notional.AlgoLedger.ActiveBucketCount);
+        Assert.Equal(0, rate.AlgoLedger.ActiveBucketCount);
     }
 
     // ────────────────── MaxOpenOrdersCheck ──────────────────
