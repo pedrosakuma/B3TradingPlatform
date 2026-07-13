@@ -181,7 +181,10 @@ internal sealed class FixpOrderAdapter
 
         var req = new OrderSubmissionRequest(
             Owner: owner,
-            FirmId: "default",
+            // #431 — firm scope flows from the authenticated FIXP credential
+            // (set at credential creation time from the JWT firm claim);
+            // legacy credentials hydrate as "default" via the registry.
+            FirmId: scope.Principal.FirmId,
             Symbol: symbol,
             SecurityId: securityId,
             Side: side,

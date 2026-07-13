@@ -69,11 +69,20 @@ public sealed class EntryPointClientGateway : IExchangeGateway
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(original);
-        // Legacy adapter: OrderCancelReplaceRequest predates Q1.1 and
-        // does not carry TIF / StopPrice / GoodTillDate over the wire.
-        // The Q1.1 modify pipeline targets the B3EntryPointClientGateway
-        // (real adapter); this path is retained for the older
-        // IEntryPointClient seam used by tests and the demo driver.
+        // #437. The mock seam now carries TIF / StopPrice / GoodTillDate
+        // so test wire-mapping assertions stay faithful to the real
+        // adapter (B3EntryPointClientGateway.CancelReplaceAsync lines
+        // 232-288). Domain.Order.MergeReplacementOptionals enforces the
+        // invariants (StopPrice required iff Stop*; GTD required iff
+        // TIF==GoodTillDate; auto-clear when TIF moves away from GTD).
+        // Any violation throws ArgumentException which the caller
+        // (OrderModifyService) treats as a gateway-side failure and
+        // rolls back the same way it does any other replace dispatch
+        // failure.
+        var (effTif, effStop, effGtd) = Order.MergeReplacementOptionals(
+            original.Type, original.TimeInForce, original.StopPrice, original.GoodTillDate,
+            requestedTimeInForce, requestedStopPrice, requestedGoodTillDate);
+
         return _client.SubmitCancelReplaceAsync(
             new OrderCancelReplaceRequest(
                 original.ClOrdId, newClOrdId, original.SecurityId,
@@ -91,7 +100,10 @@ public sealed class EntryPointClientGateway : IExchangeGateway
                 // MinQty), mirroring the real SDK path.
                 MinQty: original.MinQty is { } omq
                     ? Math.Min(omq, newQuantity)
-                    : (long?)null),
+                    : (long?)null,
+                TimeInForce: effTif,
+                StopPrice: effStop,
+                GoodTillDate: effGtd),
             cancellationToken);
     }
 }
