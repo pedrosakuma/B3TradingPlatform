@@ -245,6 +245,128 @@ public class InMemoryUserBotCredentialRegistryTests
         Assert.NotNull(await consumer.TryAuthenticateAsync(c2.PlainToken, default));
     }
 
+    // ───────────────────────── #431 firm attribution ─────────────────────────
+
+    [Fact]
+    public async Task CreateAsync_DefaultFirmId_IsLegacyDefaultSentinel()
+    {
+        var r = Reg();
+        var c = await r.CreateAsync("alice", "x", default);
+        // Pre-#431 callers (and the omitted-argument case) must keep
+        // attributing to the legacy "default" sentinel — that is what
+        // the listener has always emitted and what PositionKeeper
+        // bookkeeping expects when only one firm is configured.
+        Assert.Equal("default", c.Credential.FirmId);
+    }
+
+    [Fact]
+    public async Task CreateAsync_ExplicitFirmId_PropagatesIntoCredentialAndEvent()
+    {
+        var store = new RecordingEventStore();
+        var dispatcher = new EventDispatcher(store);
+        var r = new InMemoryUserBotCredentialRegistry(dispatcher);
+
+        var c = await r.CreateAsync("alice", "x", default, firmId: "alpha");
+        Assert.Equal("alpha", c.Credential.FirmId);
+
+        var created = Assert.IsType<UserBotCredentialCreatedEvent>(Assert.Single(store.Events));
+        Assert.Equal("alpha", created.FirmId);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData(null)]
+    public async Task CreateAsync_BlankFirmId_Rejected(string? firmId)
+    {
+        var r = Reg();
+        await Assert.ThrowsAnyAsync<ArgumentException>(() =>
+            r.CreateAsync("alice", "x", default, firmId: firmId!));
+    }
+
+    [Fact]
+    public async Task SnapshotRoundTrip_PreservesFirmId_AndHydratesLegacyAsDefault()
+    {
+        var src = Reg();
+        var alpha = await src.CreateAsync("alice", "a", default, firmId: "alpha");
+        var beta = await src.CreateAsync("bob", "b", default, firmId: "beta");
+
+        var snap = src.Snapshot().ToList();
+        Assert.All(snap, row => Assert.NotNull(row.FirmId));
+
+        // Splice in a legacy snapshot row (FirmId=null) and ensure the
+        // restored credential hydrates as the legacy "default" sentinel
+        // — the back-compat invariant for pre-#431 builds.
+        snap.Add(new UserBotCredentialSnapshot(
+            Id: Guid.NewGuid(),
+            UserId: "carol",
+            CredShortId: "LEGACY1234",
+            Label: "legacy",
+            SecretHash: "$2a$12$" + new string('a', 53),
+            CreatedAtUtc: DateTimeOffset.UtcNow,
+            RevokedAtUtc: null,
+            FirmId: null));
+
+        var dst = Reg();
+        dst.Restore(snap);
+
+        Assert.Equal("alpha", Assert.Single(dst.ListByUser("alice")).FirmId);
+        Assert.Equal("beta", Assert.Single(dst.ListByUser("bob")).FirmId);
+        Assert.Equal("default", Assert.Single(dst.ListByUser("carol")).FirmId);
+    }
+
+    [Fact]
+    public async Task EventReplay_PreservesExplicitFirmId_AndHydratesLegacyNullAsDefault()
+    {
+        var store = new RecordingEventStore();
+        var dispatcher = new EventDispatcher(store);
+        var producer = new InMemoryUserBotCredentialRegistry(dispatcher);
+
+        var modern = await producer.CreateAsync("alice", "a", default, firmId: "alpha");
+
+        // Synthesize a legacy WAL event whose FirmId field was never set
+        // (the persisted JSON wouldn't carry the property at all).
+        var legacy = new UserBotCredentialCreatedEvent
+        {
+            Id = Guid.NewGuid(),
+            UserId = "bob",
+            CredShortId = "LEGACY9999",
+            Label = "legacy",
+            SecretHash = modern.Credential.SecretHash,
+            CreatedAtUtc = DateTimeOffset.UtcNow,
+            FirmId = null,
+        };
+
+        var consumer = new InMemoryUserBotCredentialRegistry();
+        foreach (var e in store.Events.Concat(new WalEvent[] { legacy }))
+        {
+            if (e is UserBotCredentialCreatedEvent c)
+            {
+                consumer.ApplyCreated(new UserBotCredential(
+                    c.Id, c.UserId, c.CredShortId, c.Label, c.SecretHash,
+                    c.CreatedAtUtc, RevokedAtUtc: null,
+                    FirmId: string.IsNullOrEmpty(c.FirmId) ? "default" : c.FirmId));
+            }
+        }
+
+        Assert.Equal("alpha", Assert.Single(consumer.ListByUser("alice")).FirmId);
+        Assert.Equal("default", Assert.Single(consumer.ListByUser("bob")).FirmId);
+    }
+
+    [Fact]
+    public async Task TryAuthenticate_RestoresFirmIdOnReturnedCredential()
+    {
+        // Sanity: the listener fishes BotSessionPrincipal.FirmId out of
+        // the row returned by TryAuthenticateAsync — that row must carry
+        // the firmId chosen at creation time, not the "default" sentinel.
+        var r = Reg();
+        var c = await r.CreateAsync("alice", "x", default, firmId: "alpha");
+
+        var resolved = await r.TryAuthenticateAsync(c.PlainToken, default);
+        Assert.NotNull(resolved);
+        Assert.Equal("alpha", resolved!.FirmId);
+    }
+
     // ─── Cert↔credential binding (sub-issue #540) ────────────────────────────
 
     private const string SampleThumbprint =
