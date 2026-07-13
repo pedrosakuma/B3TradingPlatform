@@ -60,12 +60,14 @@ public sealed class ThrottleLedgerSweeper : BackgroundService
             {
                 var n1 = _notional.EndClientLedger.SweepEmptyBuckets(notionalWindow);
                 var n2 = _notional.FirmLedger.SweepEmptyBuckets(notionalWindow);
-                var n3 = _rate.EndClientLedger.SweepEmptyBuckets(rateWindow);
-                var n4 = _rate.FirmLedger.SweepEmptyBuckets(rateWindow);
-                if (n1 + n2 + n3 + n4 > 0)
+                var n3 = _notional.AlgoLedger.SweepEmptyBuckets(notionalWindow);
+                var n4 = _rate.EndClientLedger.SweepEmptyBuckets(rateWindow);
+                var n5 = _rate.FirmLedger.SweepEmptyBuckets(rateWindow);
+                var n6 = _rate.AlgoLedger.SweepEmptyBuckets(rateWindow);
+                if (n1 + n2 + n3 + n4 + n5 + n6 > 0)
                     _logger.LogDebug(
                         "Throttle ledger sweep removed {Count} empty buckets",
-                        n1 + n2 + n3 + n4);
+                        n1 + n2 + n3 + n4 + n5 + n6);
             }
             catch (Exception ex)
             {

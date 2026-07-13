@@ -74,6 +74,15 @@ public sealed class RollingNotionalOptions
         new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, RollingNotionalLimit> PerFirm { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// #435. Per-algo-type (iceberg/twap/pegged/...) cap applied to
+    /// the per-(firm, parentAlgoId) ledger. Caps a runaway algo
+    /// without throttling the firm's other origins. When the type
+    /// has no entry, no per-algo cap is enforced (legacy behaviour).
+    /// </summary>
+    public Dictionary<string, RollingNotionalLimit> PerAlgoType { get; set; } =
+        new(StringComparer.OrdinalIgnoreCase);
 }
 
 public sealed class RollingNotionalLimit
@@ -94,6 +103,14 @@ public sealed class OrderRateOptions
     public Dictionary<string, OrderRateLimit> PerEndClient { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, OrderRateLimit> PerFirm { get; set; } =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// #435. Per-algo-type cap on submitted child orders within the
+    /// window. Resolved by lowercased <c>AlgoType</c> on the
+    /// <see cref="RiskContext"/>; no entry = no per-algo cap.
+    /// </summary>
+    public Dictionary<string, OrderRateLimit> PerAlgoType { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
 }
 

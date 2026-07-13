@@ -928,6 +928,17 @@ public static class MetricsRegistry
         _orderRateActiveBucketsFirm = firm;
     }
 
+    /// <summary>
+    /// #435. Per-scope throttle rejection counter. Tags:
+    /// <c>check</c> ∈ {rolling_notional, order_rate};
+    /// <c>scope</c> ∈ {end_client, firm, algo}. Lets dashboards
+    /// distinguish "firm-wide cap exhausted" from "runaway algo
+    /// capped" — both are throttles but only the latter is a
+    /// per-algo isolation event.
+    /// </summary>
+    public static readonly Counter<long> ThrottleRejected =
+        Meter.CreateCounter<long>("trading.risk.throttle.rejected_total");
+
     // Issue #234 — build-info gauges for perf-v0 tunables.
     //
     // Both gauges report the *runtime configured value* of the

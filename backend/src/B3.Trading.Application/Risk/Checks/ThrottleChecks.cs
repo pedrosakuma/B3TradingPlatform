@@ -34,8 +34,14 @@ public sealed class RollingNotionalCheck : IRiskCheck
         var firmCap = string.IsNullOrWhiteSpace(ctx.FirmId)
             ? null
             : ResolveCap(rolling.PerFirm, ctx.FirmId);
+        var algoCap = (ctx.ParentAlgoId.HasValue
+                       && !string.IsNullOrWhiteSpace(ctx.AlgoType)
+                       && !string.IsNullOrWhiteSpace(ctx.FirmId))
+            ? ResolveCap(rolling.PerAlgoType, ctx.AlgoType!)
+            : null;
 
-        if (!endClientCap.HasValue && !firmCap.HasValue) return RiskDecision.Approve;
+        if (!endClientCap.HasValue && !firmCap.HasValue && !algoCap.HasValue)
+            return RiskDecision.Approve;
 
         var notional = _accountant.NotionalFor(ctx);
         if (notional <= 0m) return RiskDecision.Approve; // bypass already metered
@@ -45,15 +51,39 @@ public sealed class RollingNotionalCheck : IRiskCheck
         {
             var current = _accountant.EndClientLedger.Sum(ctx.Owner.Value, window);
             if (current + notional > ecCap)
+            {
+                Observability.MetricsRegistry.ThrottleRejected.Add(1,
+                    new KeyValuePair<string, object?>("check", "rolling_notional"),
+                    new KeyValuePair<string, object?>("scope", "end_client"));
                 return RiskDecision.Reject(
                     $"rolling notional {current + notional:0.##} would exceed end-client cap {ecCap:0.##} over last {window.TotalSeconds:0}s");
+            }
         }
         if (firmCap is { } fmCap)
         {
             var current = _accountant.FirmLedger.Sum(ctx.FirmId!, window);
             if (current + notional > fmCap)
+            {
+                Observability.MetricsRegistry.ThrottleRejected.Add(1,
+                    new KeyValuePair<string, object?>("check", "rolling_notional"),
+                    new KeyValuePair<string, object?>("scope", "firm"));
                 return RiskDecision.Reject(
                     $"rolling notional {current + notional:0.##} would exceed firm cap {fmCap:0.##} over last {window.TotalSeconds:0}s");
+            }
+        }
+        if (algoCap is { } agCap)
+        {
+            var key = Accounting.RollingNotionalAccountant.AlgoKey(ctx.FirmId!, ctx.ParentAlgoId!.Value);
+            var current = _accountant.AlgoLedger.Sum(key, window);
+            if (current + notional > agCap)
+            {
+                Observability.MetricsRegistry.ThrottleRejected.Add(1,
+                    new KeyValuePair<string, object?>("check", "rolling_notional"),
+                    new KeyValuePair<string, object?>("scope", "algo"),
+                    new KeyValuePair<string, object?>("algoType", ctx.AlgoType));
+                return RiskDecision.Reject(
+                    $"rolling notional {current + notional:0.##} would exceed per-algo cap {agCap:0.##} over last {window.TotalSeconds:0}s");
+            }
         }
         return RiskDecision.Approve;
     }
@@ -90,8 +120,14 @@ public sealed class OrderRateLimitCheck : IRiskCheck
         var firmMax = string.IsNullOrWhiteSpace(ctx.FirmId)
             ? null
             : ResolveMax(rate.PerFirm, ctx.FirmId);
+        var algoMax = (ctx.ParentAlgoId.HasValue
+                       && !string.IsNullOrWhiteSpace(ctx.AlgoType)
+                       && !string.IsNullOrWhiteSpace(ctx.FirmId))
+            ? ResolveMax(rate.PerAlgoType, ctx.AlgoType!)
+            : null;
 
-        if (!endClientMax.HasValue && !firmMax.HasValue) return RiskDecision.Approve;
+        if (!endClientMax.HasValue && !firmMax.HasValue && !algoMax.HasValue)
+            return RiskDecision.Approve;
 
         var window = _accountant.Window;
 
@@ -99,15 +135,39 @@ public sealed class OrderRateLimitCheck : IRiskCheck
         {
             var current = _accountant.EndClientLedger.Count(ctx.Owner.Value, window);
             if (current + 1 > ecMax)
+            {
+                Observability.MetricsRegistry.ThrottleRejected.Add(1,
+                    new KeyValuePair<string, object?>("check", "order_rate"),
+                    new KeyValuePair<string, object?>("scope", "end_client"));
                 return RiskDecision.Reject(
                     $"order rate {current + 1} would exceed end-client cap {ecMax}/{window.TotalSeconds:0}s");
+            }
         }
         if (firmMax is { } fmMax)
         {
             var current = _accountant.FirmLedger.Count(ctx.FirmId!, window);
             if (current + 1 > fmMax)
+            {
+                Observability.MetricsRegistry.ThrottleRejected.Add(1,
+                    new KeyValuePair<string, object?>("check", "order_rate"),
+                    new KeyValuePair<string, object?>("scope", "firm"));
                 return RiskDecision.Reject(
                     $"order rate {current + 1} would exceed firm cap {fmMax}/{window.TotalSeconds:0}s");
+            }
+        }
+        if (algoMax is { } agMax)
+        {
+            var key = Accounting.RollingNotionalAccountant.AlgoKey(ctx.FirmId!, ctx.ParentAlgoId!.Value);
+            var current = _accountant.AlgoLedger.Count(key, window);
+            if (current + 1 > agMax)
+            {
+                Observability.MetricsRegistry.ThrottleRejected.Add(1,
+                    new KeyValuePair<string, object?>("check", "order_rate"),
+                    new KeyValuePair<string, object?>("scope", "algo"),
+                    new KeyValuePair<string, object?>("algoType", ctx.AlgoType));
+                return RiskDecision.Reject(
+                    $"order rate {current + 1} would exceed per-algo cap {agMax}/{window.TotalSeconds:0}s");
+            }
         }
         return RiskDecision.Approve;
     }
