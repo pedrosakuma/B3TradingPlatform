@@ -41,6 +41,10 @@ namespace B3.Trading.Api;
 /// index, so an indexed implementation can ship without a wire-shape
 /// change. TODO(history-index): indexed reader keyed by
 /// <c>(endclient, ts)</c>, tracked alongside the EOD materialiser.
+/// Design agreed in <c>docs/rfcs/history-index-v0.md</c> (#453,
+/// Option C — resolved per-day index emitted by the EOD pass);
+/// implementation deferred until the retention/latency trigger in
+/// that RFC's §7 fires.
 /// </para>
 /// </summary>
 public static class HistoryEndpoints

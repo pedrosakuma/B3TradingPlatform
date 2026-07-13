@@ -47,7 +47,26 @@ public static class FixpListenerMetrics
     public static readonly Counter<long> TlsHandshakeCompleted =
         Meter.CreateCounter<long>("fixp.handshake.tls.completed.total");
 
+    /// <summary>
+    /// TLS handshake duration in ms (#533). Recorded for both successful and
+    /// failed/rejected handshakes (tag: outcome=ok|tls|mtls), so a public
+    /// dashboard can chart latency and a flood shows up as p99 climbing
+    /// toward <c>Tls:HandshakeTimeout</c>.
+    /// </summary>
+    public static readonly Histogram<double> TlsHandshakeDurationMs =
+        Meter.CreateHistogram<double>("fixp.handshake.tls.duration_ms");
+
     /// <summary>Rejected connections. Tag: reason.</summary>
     public static readonly Counter<long> ConnectionsRejected =
         Meter.CreateCounter<long>("fixp.connections.rejected.total");
+
+    /// <summary>
+    /// Client-certificate (mTLS) validation outcomes during the TLS
+    /// handshake (RFC user-bot-fixp-mtls-v0 §6). Tag: outcome
+    /// (<c>ok</c>, <c>absent</c>, <c>reject:&lt;reason&gt;</c>). Lets
+    /// <c>Optional</c>-mode adoption be measured (watch <c>absent</c> fall to
+    /// zero) before flipping to <c>Required</c>.
+    /// </summary>
+    public static readonly Counter<long> MtlsClientCertsTotal =
+        Meter.CreateCounter<long>("entrypoint_listener.mtls_client_certs_total");
 }
