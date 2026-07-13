@@ -1,0 +1,29 @@
+apiVersion: v2
+name: b3-trading-host
+description: >-
+  B3TradingPlatform trading-host — the participant-side OMS/risk core.
+  Ships a single-writer StatefulSet (WAL on RWO Premium disk), an Azure Key
+  Vault CSI SecretProviderClass, a ClusterIP Service on 5000/TCP, and the
+  NetworkPolicy admitting only the frontend (see the companion
+  b3-trading-frontend chart).
+type: application
+# Chart version is released in lockstep with the image (see #568 versioning
+# contract): bump this whenever templates/values change, independent of
+# appVersion.
+version: 0.1.0
+# appVersion tracks the validated ghcr.io/pedrosakuma/b3-trading-host image
+# tag this chart was last verified against. Overridable per-release via
+# values.image.tag; this is metadata only (`helm.sh/chart` + `app.kubernetes.io/version`
+# labels), not a live default — .Chart.AppVersion IS used as the default image
+# tag when values.image.tag is empty, see templates/_helpers.tpl.
+appVersion: "0.1.0"
+home: https://github.com/pedrosakuma/B3TradingPlatform
+sources:
+  - https://github.com/pedrosakuma/B3TradingPlatform
+keywords:
+  - b3
+  - trading
+  - oms
+  - fixp
+maintainers:
+  - name: pedrosakuma

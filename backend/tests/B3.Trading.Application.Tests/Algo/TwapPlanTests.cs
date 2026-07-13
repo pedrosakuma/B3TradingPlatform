@@ -143,4 +143,94 @@ public class TwapPlanTests
         Assert.Equal(0, TwapPlan.FloorSliceQty(3, 4));
         Assert.Equal(0, TwapPlan.FloorSliceQty(100, 0));
     }
+
+    // ──────────────────── #518 lot-aware slicing ────────────────────
+
+    [Fact]
+    public void SliceQty_WithLot_DistributesInWholeLots()
+    {
+        // total 600, lot 100, 4 slices: 6 lots / 4 = floor 1 lot = 100 on
+        // slices 0..2, remainder 300 on the last → every slice a whole lot.
+        Assert.Equal(100, TwapPlan.SliceQty(600, 4, 0, lotSize: 100));
+        Assert.Equal(100, TwapPlan.SliceQty(600, 4, 1, lotSize: 100));
+        Assert.Equal(100, TwapPlan.SliceQty(600, 4, 2, lotSize: 100));
+        Assert.Equal(300, TwapPlan.SliceQty(600, 4, 3, lotSize: 100));
+    }
+
+    [Fact]
+    public void SliceQty_WithLot_NoInteriorSliceIsAnOddLot()
+    {
+        // The unrounded floor(300/4)=75 is an odd lot that MinLotSizeCheck
+        // would reject (issue #518). In lot units every emitted slice is a
+        // multiple of 100 and the sum still reconciles to the total.
+        long sum = 0;
+        for (var seq = 0; seq < 4; seq++)
+        {
+            var qty = TwapPlan.SliceQty(300, 4, seq, lotSize: 100);
+            Assert.Equal(0, qty % 100);
+            sum += qty;
+        }
+        Assert.Equal(300, sum);
+    }
+
+    [Fact]
+    public void SliceQty_LotOne_MatchesShareLevelFloor()
+    {
+        // lotSize == 1 must be byte-identical to the original share-level
+        // distribution so existing TWAPs are unaffected.
+        for (var seq = 0; seq < 3; seq++)
+            Assert.Equal(
+                TwapPlan.SliceQty(1003, 3, seq),
+                TwapPlan.SliceQty(1003, 3, seq, lotSize: 1));
+    }
+
+    [Fact]
+    public void SliceQty_WithLot_SumReconcilesAcrossCombinations()
+    {
+        const long lot = 100;
+        var totalLots = new long[] { 1, 3, 4, 7, 10, 123 };
+        var sliceCounts = new[] { 1, 2, 3, 4 };
+        foreach (var lots in totalLots)
+        {
+            var total = lots * lot;
+            foreach (var count in sliceCounts)
+            {
+                if (count > lots) continue; // endpoint rejects this up front
+                long sum = 0;
+                for (var seq = 0; seq < count; seq++)
+                {
+                    var qty = TwapPlan.SliceQty(total, count, seq, lot);
+                    Assert.Equal(0, qty % lot);
+                    sum += qty;
+                }
+                Assert.Equal(total, sum);
+            }
+        }
+    }
+
+    [Fact]
+    public void FloorSliceQty_WithLot_IsLotAligned()
+    {
+        // 300/4 in lot units → 0 (3 whole lots can't be split into 4),
+        // so the endpoint rejects sliceCount > available lots.
+        Assert.Equal(0, TwapPlan.FloorSliceQty(300, 4, lotSize: 100));
+        // 600/4 → 1 whole lot = 100.
+        Assert.Equal(100, TwapPlan.FloorSliceQty(600, 4, lotSize: 100));
+    }
+
+    [Fact]
+    public void SliceQty_WithLot_MoreSlicesThanLots_LastSliceCarriesRemainder()
+    {
+        // #518 defense-in-depth. The endpoint rejects sliceCount > lots at
+        // admission, but the lot table can become authoritative AFTER a TWAP
+        // was admitted (SDK SecurityDefinition overlay). When that happens
+        // the interior slices floor to zero in lot units and the last slice
+        // carries the whole residue — every slice stays lot-aligned and the
+        // sum still reconciles, so the engine works the order down (via the
+        // remainder-bearing last slice) instead of stranding it.
+        Assert.Equal(0, TwapPlan.SliceQty(300, 4, 0, lotSize: 100));
+        Assert.Equal(0, TwapPlan.SliceQty(300, 4, 1, lotSize: 100));
+        Assert.Equal(0, TwapPlan.SliceQty(300, 4, 2, lotSize: 100));
+        Assert.Equal(300, TwapPlan.SliceQty(300, 4, 3, lotSize: 100));
+    }
 }

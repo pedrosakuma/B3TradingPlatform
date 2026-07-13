@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using B3.Trading.Application.MarketData;
 using B3.Trading.Application.Observability;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Logging;
@@ -55,6 +56,7 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
     private readonly IOptionsMonitor<RiskOptions> _options;
     private readonly ILogger<ReserveOnSubmitMarginProvider> _logger;
     private readonly CashLedger? _cash;
+    private readonly IMarketValueCalculator _values;
 
     private readonly ConcurrentDictionary<ulong, ReservationEntry> _reservations = new();
     private readonly ConcurrentDictionary<string, decimal> _reserved =
@@ -64,11 +66,13 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
     public ReserveOnSubmitMarginProvider(
         IOptionsMonitor<RiskOptions> options,
         ILogger<ReserveOnSubmitMarginProvider> logger,
-        CashLedger? cash = null)
+        CashLedger? cash = null,
+        IMarketValueCalculator? values = null)
     {
         _options = options;
         _logger = logger;
         _cash = cash;
+        _values = values ?? EquityMarketValueCalculator.Instance;
     }
 
     public Task<RiskDecision> TryReserveAsync(ulong clOrdId, RiskContext ctx, CancellationToken ct)
@@ -94,7 +98,7 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
         if (!ctx.Type.IsMarginBearing())
             return Task.FromResult(RiskDecision.Approve);
 
-        var notional = ctx.Price.Value * ctx.Quantity;
+        var notional = _values.GetNotional(ctx.Symbol, ctx.Price.Value, ctx.Quantity);
         if (notional <= 0m)
             return Task.FromResult(RiskDecision.Approve);
 
@@ -210,7 +214,16 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
 
     private void ReleasePartial_Locked(ulong clOrdId, ReservationEntry entry, long lastQty)
     {
-        var amount = entry.Price * lastQty;
+        // OPT-B (#484). Release per-contract using the originally
+        // reserved per-unit notional (Price * multiplier for options,
+        // Price for equity). Recomputing from entry.Price * lastQty
+        // would under-release options by exactly the contract
+        // multiplier and leak reserved cash for the lifetime of the
+        // order.
+        var perUnit = entry.OriginalQty > 0
+            ? entry.OriginalNotional / entry.OriginalQty
+            : entry.Price;
+        var amount = perUnit * lastQty;
         if (amount <= 0m) return;
         var newRemaining = entry.RemainingNotional - amount;
         if (newRemaining < 0m)
@@ -493,5 +506,12 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
         }
     }
 
-    private sealed record ReservationEntry(string Owner, decimal Price, long OriginalQty, decimal RemainingNotional, bool IsSuspended = false);
+    private sealed record ReservationEntry(string Owner, decimal Price, long OriginalQty, decimal RemainingNotional, bool IsSuspended = false)
+    {
+        // OPT-B (#484). Snapshot of the notional reserved at submit
+        // (price * qty * multiplier). RemainingNotional shrinks with
+        // partial releases; OriginalNotional stays put so the
+        // per-contract release amount is derivable for partial fills.
+        public decimal OriginalNotional { get; init; } = RemainingNotional;
+    }
 }

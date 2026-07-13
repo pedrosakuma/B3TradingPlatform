@@ -1,5 +1,7 @@
 namespace B3.Trading.Application.Risk.Checks;
 
+using B3.Trading.Application.MarketData;
+
 /// <summary>
 /// Server-side fat-finger guard (slice 6 of pre-trade risk v2).
 ///
@@ -23,6 +25,15 @@ namespace B3.Trading.Application.Risk.Checks;
 /// </para>
 ///
 /// <para>
+/// #454 Fase 1. The active tick is now resolved through
+/// <see cref="ITickSizeProvider"/> so an SDK-backed impl (Fase 2,
+/// gated on upstream <c>pedrosakuma/B3MarketDataPlatform#55</c>) can
+/// be swapped in without touching this check. The directory-backed
+/// default still wraps <see cref="SymbolDirectory"/>, so band-aware
+/// reject reasons remain unchanged.
+/// </para>
+///
+/// <para>
 /// <b>Fail-open:</b> symbols missing from
 /// <see cref="SymbolDirectory.TryGetSpec"/> approve. The fat-finger
 /// checks are additive — never blocking on a symbol whose spec wasn't
@@ -37,7 +48,13 @@ namespace B3.Trading.Application.Risk.Checks;
 public sealed class MinTickSizeCheck : IRiskCheck
 {
     private readonly SymbolDirectory _directory;
-    public MinTickSizeCheck(SymbolDirectory directory) => _directory = directory;
+    private readonly ITickSizeProvider _ticks;
+
+    public MinTickSizeCheck(SymbolDirectory directory, ITickSizeProvider ticks)
+    {
+        _directory = directory;
+        _ticks = ticks;
+    }
 
     public int Order => 50; // run before max-quantity / collar so a malformed price fails fast
     public string Name => "min_tick_size";
@@ -45,25 +62,30 @@ public sealed class MinTickSizeCheck : IRiskCheck
     public RiskDecision Check(RiskContext ctx)
     {
         if (!ctx.Price.HasValue) return RiskDecision.Approve;
-        if (!_directory.TryGetSpec(ctx.Symbol, out var spec)) return RiskDecision.Approve;
-
         var price = ctx.Price.Value;
-        var tick = spec.ResolveTick(price);
-        if (tick is not { } t || t <= 0m) return RiskDecision.Approve;
+
+        // #454 Fase 1. Provider is the canonical source; the directory
+        // is only consulted to surface the band range in the reject
+        // reason (band metadata is not part of the seam — Fase 2 may
+        // add a richer overload if needed).
+        if (!_ticks.TryGetTickSize(ctx.Symbol, price, out var tick) || tick <= 0m)
+            return RiskDecision.Approve;
 
         // decimal arithmetic is exact for the values we care about
         // (tick sizes are 0.01 / 0.001 etc., prices have at most 4-6
         // decimals). decimal.Remainder avoids the FP precision trap
         // that would bite a double-based modulus.
-        if (decimal.Remainder(price, t) != 0m)
+        if (decimal.Remainder(price, tick) != 0m)
         {
             // #360. When a ladder is in play surface the band in the
             // reject reason so the trader sees *why* the tick changed
             // ("...in band [10,100)" vs the global flat "...0.05").
-            var band = spec.ResolveBand(price);
+            var band = _directory.TryGetSpec(ctx.Symbol, out var spec)
+                ? spec.ResolveBand(price)
+                : null;
             var reason = band is { } b
-                ? $"price {price} is not a multiple of tick size {t} (band [{b.LowerInclusive},{(b.UpperExclusive?.ToString() ?? "+inf")})) for {ctx.Symbol}"
-                : $"price {price} is not a multiple of tick size {t} for {ctx.Symbol}";
+                ? $"price {price} is not a multiple of tick size {tick} (band [{b.LowerInclusive},{(b.UpperExclusive?.ToString() ?? "+inf")})) for {ctx.Symbol}"
+                : $"price {price} is not a multiple of tick size {tick} for {ctx.Symbol}";
             return RiskDecision.Reject(RiskRejectCodes.MinTickSize, reason);
         }
         return RiskDecision.Approve;

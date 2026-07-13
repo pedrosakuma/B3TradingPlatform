@@ -44,7 +44,20 @@ public sealed record RiskContext(
     /// per-(firm, subAccount) caps are applied alongside the master
     /// caps. <c>null</c> means master-only (legacy semantics).
     /// </summary>
-    SubAccountId? SubAccountId = null);
+    SubAccountId? SubAccountId = null,
+    /// <summary>
+    /// #473. Routing instruction the gateway intends to stamp on the
+    /// outbound order (resolved via
+    /// <see cref="Routing.IRoutingInstructionResolver"/> by the
+    /// submit/modify caller before the pipeline runs). When non-null,
+    /// <see cref="Checks.RoutingInstructionAllowedCheck"/> enforces
+    /// the per-scope whitelist
+    /// (<see cref="RiskLimits.AllowedRoutingInstructions"/>) and
+    /// rejects pre-trade if the value is not permitted. Default null
+    /// = the resolver yielded nothing → wire field will stay omitted
+    /// → check is a no-op (legacy / unmigrated callers stay green).
+    /// </summary>
+    Routing.RoutingInstruction? RoutingInstruction = null);
 
 public sealed record RiskDecision(bool Approved, string? Reason, string? Code = null)
 {

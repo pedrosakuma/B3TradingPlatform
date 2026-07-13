@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using B3.Trading.Application;
+using B3.Trading.Application.Audit;
 
 namespace B3.Trading.Api.WebSockets.DropCopy;
 
@@ -82,10 +83,12 @@ public sealed class DropCopyManager
         new(StringComparer.Ordinal);
 
     private readonly WorkingOrderBook _orders;
+    private readonly IClOrdIdMasker _masker;
 
-    public DropCopyManager(WorkingOrderBook orders)
+    public DropCopyManager(WorkingOrderBook orders, IClOrdIdMasker masker)
     {
         _orders = orders;
+        _masker = masker;
     }
 
     private object LockFor(string firmId) =>
@@ -111,7 +114,8 @@ public sealed class DropCopyManager
                 (_, set) => set.Add(client));
 
             // Orders snapshot: every non-terminal working order in the firm.
-            var orderDtos = _orders.EnumerateForFirm(firmId).Select(o => o.ToDto()).ToArray();
+            // #435 Part B: drop-copy projection masks ClOrdId + ParentAlgoId.
+            var orderDtos = _orders.EnumerateForFirm(firmId).Select(o => o.ToDropCopyDto(_masker, firmId)).ToArray();
 
             if (client.Subscribe(DropCopyChannels.Orders))
                 client.Enqueue(new OutboundMessage("snapshot", DropCopyChannels.Orders, 0, orderDtos));
