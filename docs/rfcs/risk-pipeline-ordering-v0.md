@@ -2,9 +2,9 @@
 
 | Field    | Value                                                                                       |
 | -------- | ------------------------------------------------------------------------------------------- |
-| Status   | **Implemented** (audit gap closed by [#337](https://github.com/pedrosakuma/B3TradingPlatform/pull/337); asymmetry retained intentionally — see §1.3 update) |
+| Status   | **Partially implemented** ([#337](https://github.com/pedrosakuma/B3TradingPlatform/pull/337) closed the WAL/history/replay auditability gap for rejected modifies; drop-copy/CVM visibility remains open under [#429](https://github.com/pedrosakuma/B3TradingPlatform/issues/429)) |
 | Tracking | [#262](https://github.com/pedrosakuma/B3TradingPlatform/issues/262)                         |
-| Related  | [#261](https://github.com/pedrosakuma/B3TradingPlatform/issues/261) (gpt-5.5 review surfaced this), [#337](https://github.com/pedrosakuma/B3TradingPlatform/pull/337) (audit-gap fix), [#429](https://github.com/pedrosakuma/B3TradingPlatform/issues/429) (B3 compliance audit closed as already-fixed) |
+| Related  | [#261](https://github.com/pedrosakuma/B3TradingPlatform/issues/261) (gpt-5.5 review surfaced this), [#337](https://github.com/pedrosakuma/B3TradingPlatform/pull/337) (WAL/history/replay auditability fix), [#429](https://github.com/pedrosakuma/B3TradingPlatform/issues/429) (still-open drop-copy/CVM visibility gap for rejected modifies) |
 | Replaces | n/a — refines the v1 ordering from `pre-trade-risk-v2`                                     |
 
 ## 1. Context
@@ -55,10 +55,19 @@ Source of truth: `backend/src/B3.Trading.Application/OrderModifyService.cs:167�
 | WAL replay reconstructs the reject?   | Yes                            | Yes (replay is a no-op for book/ownership/margin; advances ClOrdId watermark — `StateSnapshotter.cs:1007`) |
 | Counter `OrdersRejectedByRisk`        | Bumped with `firmId` tag        | Bumped with `firmId` + `path:"modify"` tag           |
 
-The audit asymmetry was closed by [#337](https://github.com/pedrosakuma/B3TradingPlatform/pull/337): risk-rejected
-and margin-rejected modifies now dispatch `OrderReplaceRejectedEvent` to the WAL
-and emit a live `ExecutionEvent` in the same commit callback. Coverage:
+[#337](https://github.com/pedrosakuma/B3TradingPlatform/pull/337) closed the
+WAL/history/replay slice of the asymmetry: risk-rejected and margin-rejected
+modifies now dispatch `OrderReplaceRejectedEvent` to the WAL and emit a live
+`ExecutionEvent` in the same commit callback, which keeps
+`/executions/history`, FE executions rendering, and the ClOrdId replay
+watermark aligned. Coverage:
 `backend/tests/B3.Trading.Application.Tests/OrderReplaceRejectedEventTests.cs`.
+
+That did **not** fully close the broader compliance/distribution gap. The live
+event is published with the burned `newClOrdId`, so drop-copy still filters it
+out, and `CvmReportSource` still only maps fill ERs. TODO([#429](https://github.com/pedrosakuma/B3TradingPlatform/issues/429)):
+wire rejected-modify visibility through the drop-copy and CVM-report
+consumers separately from the WAL/history/replay fix.
 
 The remaining asymmetry — number of WAL rows (2 vs 1) and the source enum
 (`Synthetic ER` vs `OrderReplaceRejected`) — is intentional. The submit-path
@@ -163,13 +172,16 @@ They're already idempotent on the abort path
 - Add a code comment in `OrderModifyService.ModifyAsync` and
   `OrderSubmissionService.SubmitAsync` linking to this RFC and explaining the
   divergence so future readers don't "fix" one side and create a regression.
-- Track the modify-side **audit gap** as a separate sub-issue (currently a
-  rejected modify leaves no WAL footprint; that's worse than the submit
-  side's "burns one ID but keeps the audit row").
+- Track the remaining modify-side **distribution gap** as a separate sub-issue
+  under [#429](https://github.com/pedrosakuma/B3TradingPlatform/issues/429):
+  rejected modifies now have WAL/history/replay coverage, but drop-copy and
+  CVM consumers still miss them because the event is keyed by the burned
+  `newClOrdId` and CVM only maps fills today.
 
 **Pros:** zero risk, addresses the immediate confusion the gpt-5.5 review
 flagged.<br/>
-**Cons:** does not unify the pipeline; the modify-side audit gap remains.
+**Cons:** does not unify the pipeline; the modify-side drop-copy/CVM visibility
+gap remains.
 
 ### Option B — Make modify match submit (post-WAL evaluation everywhere)
 
@@ -181,8 +193,9 @@ flagged.<br/>
   the WAL. EventReplayer needs to know that a Requested followed by
   RequestedRejected at the next seq is a no-op intent.
 
-**Pros:** unifies on "rejected is an event"; closes the modify-side audit
-gap.<br/>
+**Pros:** unifies on "rejected is an event"; preserves the WAL/history/replay
+coverage from [#337](https://github.com/pedrosakuma/B3TradingPlatform/pull/337)
+and creates a clearer place to hook drop-copy/CVM visibility.<br/>
 **Cons:** more WAL rows under heavy reject volume; modest schema +
 EventReplayer change.
 
@@ -218,9 +231,8 @@ inflection point to anchor the split.
 
 ## 4. Recommendation
 
-**Adopt Option A now**, and open a follow-up sub-issue for **Option B** when
-audit completeness on the modify path becomes a concrete pain (compliance
-ticket, post-mortem, etc.).
+**Adopt Option A now**, and keep [#429](https://github.com/pedrosakuma/B3TradingPlatform/issues/429)
+open as the follow-up for the remaining drop-copy/CVM visibility work.
 
 Rationale:
 
@@ -230,29 +242,33 @@ Rationale:
   consume rejection rows uniformly. We don't want to weaken it.
 - The 64-bit ClOrdID space and the WAL's compaction/rotation make the
   "burn" and "extra row" costs negligible at any plausible reject volume.
-- The modify-side audit gap is a real bug, but solving it by appending an
-  `OrderReplaceRejectedEvent` (Option B) is strictly better than deleting
-  the submit-side audit row (Option C / Option D's hybrid).
+- The remaining modify-side drop-copy/CVM visibility gap is a real bug, but
+  [#337](https://github.com/pedrosakuma/B3TradingPlatform/pull/337) already
+  proved that preserving a WAL event is strictly better than deleting the
+  submit-side audit row (Option C / Option D's hybrid).
 - No live consumer is asking for pre-WAL synchronous gating today; the
   request originated as a design-review note, not an incident.
 
 ## 5. Decision (pending sign-off)
 
 > Decision: keep the current ordering on both submit and modify. Annotate the
-> two services with cross-references to this RFC. File a follow-up sub-issue
-> "modify: emit `OrderReplaceRejectedEvent` on risk reject" to close the
-> audit gap without touching the submit path's invariants.
+> two services with cross-references to this RFC. Keep [#429](https://github.com/pedrosakuma/B3TradingPlatform/issues/429)
+> open for the still-missing drop-copy / CVM-report visibility of rejected
+> modifies without touching the submit path's invariants.
 
-**Status update (#337 — modify audit gap closed):** the modify pipeline now
-dispatches an `OrderReplaceRejectedEvent` WAL row on both the risk-reject and
-the margin-reject branches (with `Source="risk"` / `Source="margin"`) and
-publishes a synthetic `ExecKind.Rejected` `ExecutionEvent` to the live sink
-for the FE blotter. Replay treats the event as audit-only (advances the
-ClOrdId watermark; no book/ownership/margin mutation), and
-`/executions/history` projects the row with `Kind="Rejected"`. The
-modify-side row of the asymmetry table in §1.3 (the three rows tagged "no
-WAL row / no FE notification / no /executions/history row") is therefore now
-on parity with the submit path.
+**Status update (#337 — WAL/history/replay gap closed, distribution gap still
+open):** the modify pipeline now dispatches an `OrderReplaceRejectedEvent` WAL
+row on both the risk-reject and the margin-reject branches (with
+`Source="risk"` / `Source="margin"`) and publishes a synthetic
+`ExecKind.Rejected` `ExecutionEvent` to the live sink for the FE blotter.
+Replay treats the event as audit-only (advances the ClOrdId watermark; no
+book/ownership/margin mutation), and `/executions/history` projects the row
+with `Kind="Rejected"`. That closes the "no WAL row / no
+`/executions/history` row / no replay watermark advance" part of the old
+modify-side asymmetry. It does **not** put rejected modifies on parity with
+submit for downstream consumers: drop-copy still drops the event because it
+cannot resolve the burned `newClOrdId`, and CVM reporting still ignores it
+because `CvmReportSource` only emits fills today.
 
 ## 6. Out of scope
 
