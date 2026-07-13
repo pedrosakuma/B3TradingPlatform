@@ -59,6 +59,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonSerializable(typeof(SubAccountCreatedEvent))]
 [JsonSerializable(typeof(SubAccountDeactivatedEvent))]
 [JsonSerializable(typeof(AuditLogEvent))]
+[JsonSerializable(typeof(BusinessRejectReceivedEvent))]
 [JsonSerializable(typeof(MarketData.BookTouchSnapshot))]
 public sealed partial class WalEventJsonContext : JsonSerializerContext
 {

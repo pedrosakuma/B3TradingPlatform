@@ -228,6 +228,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     public bool IsReconnecting => Volatile.Read(ref _reconnectingState) == 1;
 
     public event Action<ExecutionReportEnvelope>? ExecutionReportReceived;
+    public event Action<BusinessRejectEnvelope>? BusinessRejectReceived;
 
     /// <summary>
     /// Establish the FIXP session and start the inbound event loop. Idempotent;
@@ -878,7 +879,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 // automatic retransmit; if a gap nevertheless surfaces here,
                 // the metric flags it for ops and the ER processor's
                 // idempotency (#16) makes any subsequent replay safe.
-                switch (FixpGapDetector.Observe(ev.SeqNum, ref _lastInboundSeqNum))
+                var gapObservation = FixpGapDetector.Observe(ev.SeqNum, ref _lastInboundSeqNum);
+                switch (gapObservation)
                 {
                     case GapObservation.Gap:
                         MetricsRegistry.EntryPointGapDetected.Add(1, FirmTag());
@@ -893,6 +895,12 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                         break;
                 }
 
+                // BusinessReject lacks the ER processor's ClOrdID-keyed
+                // idempotency path, so a retransmitted duplicate must stop here
+                // rather than being re-counted / re-routed downstream.
+                if (gapObservation == GapObservation.Duplicate && ev is UpModels.BusinessReject)
+                    continue;
+
                 ExecutionReportEnvelope? envelope;
                 try
                 {
@@ -902,6 +910,32 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 {
                     MetricsRegistry.EntryPointTranslationErrors.Add(1, FirmTag());
                     _logger.LogError(ex, "Failed to translate upstream event {Event} for firm {Firm}", ev.GetType().Name, _firmId);
+                    continue;
+                }
+
+                // #432 — BusinessReject has no ClOrdID anchor and therefore
+                // no ExecutionReportEnvelope, but it must NOT be silently
+                // discarded: it indicates a structural rejection (malformed
+                // payload / unknown SecurityID / outside trading hours) for
+                // which the order request never produced an ER. Route via
+                // its own event channel + metric so the downstream router
+                // can persist it to the WAL for operator audit.
+                if (ev is UpModels.BusinessReject br)
+                {
+                    try
+                    {
+                        BusinessRejectReceived?.Invoke(new BusinessRejectEnvelope(
+                            FirmId: _firmId,
+                            RefSeqNum: br.RefSeqNum,
+                            RejectReason: br.RejectReason,
+                            Text: br.Text,
+                            SeqNum: br.SeqNum,
+                            SendingTime: br.SendingTime));
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "BusinessReject subscriber threw for firm {Firm}; continuing.", _firmId);
+                    }
                     continue;
                 }
 
@@ -1313,10 +1347,13 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
     // BusinessReject, also exposed for instrumentation hookup if a future
     // correlation map is added (RefSeqNum → ClOrdID).
-    internal static void RecordBusinessReject(string firmId, UpModels.BusinessReject br)
+    internal static void RecordBusinessReject(string firmId, UpModels.BusinessReject br) =>
+        RecordBusinessReject(firmId, br.RejectReason);
+
+    internal static void RecordBusinessReject(string firmId, int rejectReason)
     {
         MetricsRegistry.EntryPointBusinessRejects.Add(1,
             new KeyValuePair<string, object?>("firm", firmId),
-            new KeyValuePair<string, object?>("reason", br.RejectReason));
+            new KeyValuePair<string, object?>("reason", rejectReason));
     }
 }

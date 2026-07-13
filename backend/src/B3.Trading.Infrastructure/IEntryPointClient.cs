@@ -24,6 +24,18 @@ public interface IEntryPointClient
     /// implementation contract; consumers do not have to lock.
     /// </summary>
     event Action<ExecutionReportEnvelope>? ExecutionReportReceived;
+
+    /// <summary>
+    /// #432 — raised whenever the exchange pushes a <c>BusinessReject</c>
+    /// (structural rejection: malformed message, unknown SecurityID,
+    /// outside trading hours, etc.). These have no ClOrdID anchor so
+    /// they cannot piggy-back on the ER pipeline, but the platform must
+    /// still surface them: a venue BusinessReject means an order request
+    /// never produced an ExecutionReport, and the operator/trader needs
+    /// the audit trail to reconcile. Single-threaded by implementation
+    /// contract.
+    /// </summary>
+    event Action<BusinessRejectEnvelope>? BusinessRejectReceived;
 }
 
 public enum EpSide
@@ -147,3 +159,34 @@ public sealed record ExecutionReportEnvelope(
     /// unchanged — a null envelope FirmId skips the cross-firm check.
     /// </summary>
     string? FirmId = null);
+
+/// <summary>
+/// #432. Wire-layer envelope for a venue <c>BusinessReject</c> — a
+/// structural rejection of an inbound message that never produced an
+/// ExecutionReport (e.g. malformed payload, unknown <c>SecurityID</c>,
+/// outside trading hours). No ClOrdID anchor (the reject references the
+/// session seqnum, not a business id), so it travels on its own event
+/// channel rather than as a degraded
+/// <see cref="ExecutionReportEnvelope"/>.
+/// </summary>
+/// <param name="FirmId">Source firm the reject arrived on. Always
+/// populated by the gateway/mock; nullable only to stay symmetric with
+/// <see cref="ExecutionReportEnvelope"/>.</param>
+/// <param name="RefSeqNum">FIX <c>RefSeqNum</c> — session seqnum of the
+/// rejected inbound message. Anchors the reject to a request when the
+/// caller correlates by seqnum (see RFC outbound seqnum reservation).</param>
+/// <param name="RejectReason">FIX <c>BusinessRejectReason</c> code as
+/// emitted by the venue.</param>
+/// <param name="Text">Human-readable detail string from the venue —
+/// preserved verbatim for operator audit / log scraping.</param>
+/// <param name="SeqNum">Venue session inbound seqnum of the reject
+/// message itself.</param>
+/// <param name="SendingTime">Venue <c>SendingTime</c> from the reject
+/// envelope.</param>
+public sealed record BusinessRejectEnvelope(
+    string? FirmId,
+    ulong RefSeqNum,
+    int RejectReason,
+    string? Text,
+    ulong SeqNum,
+    DateTimeOffset SendingTime);
