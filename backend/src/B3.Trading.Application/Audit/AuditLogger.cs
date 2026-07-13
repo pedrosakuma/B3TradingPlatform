@@ -135,6 +135,7 @@ public sealed class AuditLogger : IAuditLogger
             // business-event-driven backpressure.
             MetricsRegistry.WalBackpressure.Add(1,
                 new KeyValuePair<string, object?>("call_site", "audit.log_or_fail"));
+            RecordDropMetric(evt, reason: "wal_backpressure");
             // We still account the emit attempt so the audit-throughput
             // metric reflects offered load. Outcome on the event is
             // whatever the call site chose (typically "success" for the

@@ -34,16 +34,15 @@ public class AuditLoggerDropMetricTests
             expectedCallSite: "totp");
 
     [Fact]
-    public void LogOrFail_WalBackpressure_Rethrows_AndDoesNotBumpDroppedCounter()
+    public void LogOrFail_WalBackpressure_Rethrows_AndBumpsDroppedCounter()
     {
         // Contract: on the fail-closed path, WAL backpressure must
         // surface to the caller (admin endpoint → HTTP 503). The
-        // dedicated audit-drop counter is NOT bumped: the broader
-        // wal.backpressure{call_site=audit.log_or_fail} counter and
-        // the propagated exception already make the loss observable
-        // to operators and to the caller, so an additional
-        // audit-drop tick would double-count from a dashboard
-        // perspective. RecordEmitMetric IS called (offered load).
+        // dedicated audit-drop counter IS also bumped so dashboards
+        // tracking lost audit coverage see fail-closed drops too.
+        // RecordEmitMetric IS still called (offered load), and the
+        // separate wal.backpressure counter remains useful for WAL
+        // saturation monitoring.
         var store = new WalBackpressureStore();
         var dispatcher = new EventDispatcher(store);
         var keeper = new AuditLogKeeper(Options.Create(new AuditLogOptions { Capacity = 16 }));
@@ -59,8 +58,11 @@ public class AuditLoggerDropMetricTests
             };
             Assert.Throws<WalBackpressureException>(() => logger.LogOrFail(evt));
 
-            Assert.False(capture.HasCounter("trading.audit.dropped_total"),
-                "LogOrFail must not bump trading.audit.dropped_total when WAL backpressure is rethrown.");
+            var inc = capture.GetSum("trading.audit.dropped_total",
+                ("call_site", "admin"),
+                ("event_type", "admin.config.change"),
+                ("reason", "wal_backpressure"));
+            Assert.Equal(1, inc);
             Assert.True(capture.HasCounter("trading.wal.backpressure"),
                 "LogOrFail must bump trading.wal.backpressure with the audit call_site tag.");
         }

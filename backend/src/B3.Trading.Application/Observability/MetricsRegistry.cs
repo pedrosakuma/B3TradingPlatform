@@ -142,7 +142,9 @@ public static class MetricsRegistry
 
     /// <summary>
     /// #438. First-class observable for audit envelopes that were
-    /// dropped by the best-effort <c>IAuditLogger.Log</c> path. Tags:
+    /// dropped before reaching the WAL on either the best-effort
+    /// <c>IAuditLogger.Log</c> path or the fail-closed
+    /// <c>IAuditLogger.LogOrFail</c> path. Tags:
     /// <c>call_site</c> (the caller's logical bucket — e.g.
     /// <c>auth.login</c>, <c>totp.verify</c>, <c>admin.fixp</c>,
     /// <c>simulator</c>); <c>event_type</c> (canonical hierarchical
