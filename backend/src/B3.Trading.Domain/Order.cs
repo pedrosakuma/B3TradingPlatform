@@ -182,7 +182,8 @@ public sealed class Order
         DateTimeOffset? goodTillDate = null,
         long? displayQty = null,
         DisplayResetPolicy? displayResetPolicy = null,
-        SubAccountId? subAccountId = null)
+        SubAccountId? subAccountId = null,
+        long? minQty = null)
     {
         if (clOrdId == 0)
             throw new ArgumentOutOfRangeException(nameof(clOrdId), "ClOrdID cannot be zero (reserved as null sentinel by EntryPoint).");
@@ -246,6 +247,25 @@ public sealed class Order
                 nameof(displayResetPolicy));
         }
 
+        // #457. Minimum execution quantity (FIX MinQty) — when set, the
+        // venue must fill at least this many contracts at submit time or
+        // reject the order (fill-or-none-on-arrival; partial fills above
+        // the minimum are allowed). Always-true invariants enforced here
+        // so WAL replay and snapshot hydrate cannot reconstitute illegal
+        // combinations (a "minimum" larger than the order is nonsensical;
+        // zero/negative is meaningless — use null for no-minimum).
+        if (minQty.HasValue)
+        {
+            if (minQty.Value <= 0)
+                throw new ArgumentException(
+                    "MinQty must be positive when set (use null for no minimum execution constraint).",
+                    nameof(minQty));
+            if (minQty.Value > quantity)
+                throw new ArgumentException(
+                    $"MinQty ({minQty.Value}) must not exceed order Quantity ({quantity}).",
+                    nameof(minQty));
+        }
+
         ClOrdId = clOrdId;
         Owner = owner;
         Symbol = symbol;
@@ -263,6 +283,7 @@ public sealed class Order
         DisplayQty = displayQty;
         DisplayResetPolicy = displayResetPolicy;
         SubAccountId = subAccountId;
+        MinQty = minQty;
         LeavesQuantity = quantity;
         Status = OrderStatus.PendingNew;
     }
@@ -349,6 +370,20 @@ public sealed class Order
     /// <c>SubAccountsRegistry</c>.
     /// </summary>
     public SubAccountId? SubAccountId { get; }
+
+    /// <summary>
+    /// #457. Minimum execution quantity (FIX MinQty) — when set, the
+    /// venue must fill at least this many contracts at submit time or
+    /// reject the order. <c>null</c> = no minimum (the only behaviour
+    /// every legacy submission produced). When set, must satisfy
+    /// <c>0 &lt; MinQty &lt;= Quantity</c> (enforced by the constructor);
+    /// once submitted, the venue may still partially fill above the
+    /// minimum — the constraint only governs the initial fill check on
+    /// arrival. Mapped natively via the SDK's
+    /// <c>NewOrderRequest.MinQty</c> /
+    /// <c>ReplaceOrderRequest.MinQty</c> (<c>ulong?</c>) on the wire.
+    /// </summary>
+    public long? MinQty { get; }
 
     public long LeavesQuantity { get; private set; }
     public long CumulativeQuantity { get; private set; }
@@ -528,10 +563,11 @@ public sealed class Order
         DateTimeOffset? goodTillDate = null,
         long? displayQty = null,
         DisplayResetPolicy? displayResetPolicy = null,
-        SubAccountId? subAccountId = null)
+        SubAccountId? subAccountId = null,
+        long? minQty = null)
     {
         var o = new Order(clOrdId, owner, symbol, securityId, side, type, quantity, price, firmId, parentAlgoId, algoSliceSeq,
-            timeInForce, stopPrice, goodTillDate, displayQty, displayResetPolicy, subAccountId);
+            timeInForce, stopPrice, goodTillDate, displayQty, displayResetPolicy, subAccountId, minQty);
         o.LeavesQuantity = leaves;
         o.CumulativeQuantity = cumQty;
         o.Status = status;
@@ -613,6 +649,17 @@ public sealed class Order
         if (effDisplayQty.HasValue && effDisplayQty.Value > newQuantity)
             effDisplayQty = newQuantity;
 
+        // #457. MinQty rides through cancel-replace the same way as
+        // DisplayQty: the modify pipeline does not (yet) expose an
+        // override for MinQty, so the replacement inherits the original's
+        // value. If the operator shrinks the order quantity below the
+        // original MinQty, clamp MinQty to the new quantity so the ctor
+        // invariant (MinQty <= Quantity) still holds. A future modify
+        // pipeline slice can plumb explicit MinQty overrides.
+        long? effMinQty = original.MinQty;
+        if (effMinQty.HasValue && effMinQty.Value > newQuantity)
+            effMinQty = newQuantity;
+
         return Hydrate(
             clOrdId: newClOrdId,
             owner: original.Owner,
@@ -638,7 +685,8 @@ public sealed class Order
             goodTillDate: effGtd,
             displayQty: effDisplayQty,
             displayResetPolicy: effPolicy,
-            subAccountId: original.SubAccountId);
+            subAccountId: original.SubAccountId,
+            minQty: effMinQty);
     }
 
     /// <summary>

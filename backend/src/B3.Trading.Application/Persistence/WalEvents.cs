@@ -158,6 +158,18 @@ public sealed record OrderSubmittedEvent : WalEvent
     /// silently poisoning the sub-account books.
     /// </summary>
     public string? SubAccountId { get; init; }
+
+    /// <summary>
+    /// #457. Minimum execution quantity (FIX MinQty) — when set, the
+    /// venue must fill at least this many contracts at submit time or
+    /// reject the order. Null = no minimum (every legacy WAL segment
+    /// without the field deserialises as null, matching the no-minimum
+    /// semantics those submissions actually carried). Validated as
+    /// <c>0 &lt; MinQty &lt;= Quantity</c> by <see cref="Domain.Order"/>'s
+    /// ctor on replay so corrupted segments surface as deserialisation /
+    /// hydrate errors rather than silently poisoning the venue.
+    /// </summary>
+    public long? MinQty { get; init; }
 }
 
 /// <summary>
