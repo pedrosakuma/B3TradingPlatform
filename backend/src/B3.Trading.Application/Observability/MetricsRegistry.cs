@@ -26,6 +26,16 @@ public static class MetricsRegistry
     public static readonly Counter<long> OrdersCancelRequested =
         Meter.CreateCounter<long>("trading.orders.cancel_requested");
     /// <summary>
+    /// #473. Counts every approved stamp of a routing instruction on
+    /// an outbound NewOrder / Replace. Tagged with <c>value</c>
+    /// (RetailLiquidityTaker / WaivedPriority / BrokerOnly /
+    /// BrokerOnlyRemoval) and <c>firmId</c>. Conflict-of-interest
+    /// sensitive (BrokerOnly especially) — downstream alerts can
+    /// pin a threshold on the BrokerOnly slice per firm.
+    /// </summary>
+    public static readonly Counter<long> RoutingInstructionStamped =
+        Meter.CreateCounter<long>("trading.orders.routing_instruction_stamped");
+    /// <summary>
     /// Q1.3 (#255). Counts every GTD expiry the scheduler dispatched.
     /// Tagged with <c>cancel_result</c> = the
     /// <see cref="OrderCancelResultKind"/> the cancel pipeline
@@ -49,6 +59,19 @@ public static class MetricsRegistry
     /// </summary>
     public static readonly Counter<long> OrdersIocNoResponse =
         Meter.CreateCounter<long>("trading.orders.ioc_no_response");
+
+    /// <summary>
+    /// OPT-F (#488). Surveillance counter for cabinet trades and
+    /// worthless out-of-the-money option closeouts that travel as
+    /// Limit Price=0 on the OPT channel (relaxed by OPT-C / #485 +
+    /// upstream B3MatchingPlatform#473). A small steady stream is
+    /// normal end-of-cycle hygiene; a sudden spike on a single
+    /// (symbol, firmId, put_call) tuple is a compliance signal
+    /// (off-market levelling, wash-out, mis-keyed price).
+    /// Tags: <c>symbol</c>, <c>side</c>, <c>firmId</c>, <c>put_call</c>.
+    /// </summary>
+    public static readonly Counter<long> OptionZeroPriceOrdersSubmitted =
+        Meter.CreateCounter<long>("trading.options.zero_price_orders_submitted");
 
     // Execution reports inbound
     public static readonly Counter<long> ExecutionReportsReceived =
@@ -221,24 +244,15 @@ public static class MetricsRegistry
     public static readonly Counter<long> RecoverySessionRolledFirms =
         Meter.CreateCounter<long>("trading.recovery.session_rolled_firms");
 
-    // #380 path B. Number of WorkingOrderBook entries eagerly retired
-    // (MarkCancelled) by the session-version guard. Tag `firm` carries
-    // the FirmId. Post-#419, this counter only ticks for PendingNew
-    // orders (never acked by the venue → safe to cancel); confirmed
-    // working orders go through the staleness overlay instead — see
-    // <see cref="RecoverySessionRolledOrdersStaled"/>.
+    // #380 path B, refined by #504. Number of WorkingOrderBook entries
+    // eagerly retired (MarkCancelled) by the session-version guard. Tag
+    // `firm` carries the FirmId. Per #504, only PendingNew orders are
+    // cancelled (never acked by the venue → safe to cancel). Confirmed
+    // Working/PartiallyFilled orders are NOT marked stale on session
+    // roll — the FIXP protocol handles synchronization via retransmission
+    // during recovery, so if no terminal ER arrives, the order is valid.
     public static readonly Counter<long> RecoverySessionRolledOrdersDropped =
         Meter.CreateCounter<long>("trading.recovery.session_rolled_orders_dropped");
-
-    // #419. Number of Working / PartiallyFilled orders flagged stale
-    // (Order.MarkStale) by the session-version guard. Tag `firm`
-    // carries the FirmId. The venue may still hold these orders
-    // (B3 persists the book across FIXP session rolls), so we keep
-    // them visible in the blotter and accounting but gate
-    // Cancel/Modify at the API until a real ER (or a future
-    // OrderMassStatusRequest reconciliation) confirms their fate.
-    public static readonly Counter<long> RecoverySessionRolledOrdersStaled =
-        Meter.CreateCounter<long>("trading.recovery.session_rolled_orders_staled");
 
     // Q2.3 (#270). Fee-keeper deterministic replay synth — surfaces the
     // crash window between ER append (seq N) and FeeAccruedEvent append
@@ -580,6 +594,19 @@ public static class MetricsRegistry
         Meter.CreateCounter<long>("trading.entrypoint.orders_auto_staled");
 
     /// <summary>
+    /// #380 / #503. Counts CONFIRMED session-roll reconciliations whose
+    /// Working/PartiallyFilled staling phase FAILED (e.g. a WAL append error
+    /// mid-bulk). PendingNew reaping is recovered by the restart boot reconcile,
+    /// but the boot path is conservative (PendingNew only), so a staling failure
+    /// can leave surviving Working/PartiallyFilled orders un-flagged. This is a
+    /// critical operator signal: surviving orders for the tagged <c>{firm}</c>
+    /// must be reconciled by hand via the admin <c>mark-stale</c> endpoint.
+    /// Tagged <c>{firm}</c>; one Add per failed reconciliation.
+    /// </summary>
+    public static readonly Counter<long> SessionRollStaleReconcileFailed =
+        Meter.CreateCounter<long>("trading.entrypoint.session_roll_stale_reconcile_failed");
+
+    /// <summary>
     /// #153. Counts cash-margin reservation Restore calls (admin
     /// clear-stale path) that pushed the per-owner reserved figure
     /// above the resolved base capacity. Restore intentionally never
@@ -774,6 +801,37 @@ public static class MetricsRegistry
     // the aggregate.
     public static readonly Counter<long> CollarBypassedNoReference =
         Meter.CreateCounter<long>("trading.risk.collar.bypassed_no_reference");
+
+    // ── OPT-E (#487) — venue-pushed price-band observability ─────────
+    //
+    // The new PriceBandCheck (Order=305, right after the static
+    // PriceCollarCheck at 300) consults PriceBandRegistry — fed by the
+    // upstream PriceBand WebSocket channel (SDK 0.6.0 /
+    // pedrosakuma/B3MarketDataPlatform#56). These three instruments
+    // give ops the same coverage signal the collar+refprice pair
+    // already provides:
+    //
+    //   * PriceBandRejects — actual hard-rejections (tagged by
+    //     symbol + side + reject reason "above" / "below" so a sudden
+    //     spike on one side hints at a venue band tightening into
+    //     existing flow).
+    //   * PriceBandAgeSeconds — per-symbol band staleness at the
+    //     moment of the check. A sustained climb on a single symbol
+    //     means the venue stopped re-publishing — same alert posture
+    //     as RefPriceStalenessSeconds.
+    //   * PriceBandBypassedNoBand — approvals that landed only
+    //     because the registry had no entry (pre-bootstrap window,
+    //     kill-switch off, or a symbol the venue never bands). Tag
+    //     is the symbol so coverage gaps don't get lost in the
+    //     aggregate.
+    public static readonly Counter<long> PriceBandRejects =
+        Meter.CreateCounter<long>("trading.risk.price_band.reject");
+
+    public static readonly Histogram<double> PriceBandAgeSeconds =
+        Meter.CreateHistogram<double>("trading.risk.price_band.age_seconds");
+
+    public static readonly Counter<long> PriceBandBypassedNoBand =
+        Meter.CreateCounter<long>("trading.risk.price_band.bypassed_no_band");
 
     // Q1.2 (#254). Counts the cases where StopTriggerCheck approved a
     // Stop* order purely because it could not obtain a reference price

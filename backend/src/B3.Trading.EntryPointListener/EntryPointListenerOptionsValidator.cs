@@ -39,6 +39,17 @@ public sealed class EntryPointListenerOptionsValidator : IValidateOptions<EntryP
         if (options.MaxSessionsPerUser <= 0)
             failures.Add("Trading:EntryPointListener:MaxSessionsPerUser must be > 0.");
 
+        // #529 public-hardening: caps + IP filter + handshake timeout
+        if (options.ConnectionCaps.MaxConcurrentTotal < 0)
+            failures.Add("Trading:EntryPointListener:ConnectionCaps:MaxConcurrentTotal must be >= 0.");
+        if (options.ConnectionCaps.MaxConcurrentPerIp < 0)
+            failures.Add("Trading:EntryPointListener:ConnectionCaps:MaxConcurrentPerIp must be >= 0.");
+        if (options.Tls.HandshakeTimeout <= TimeSpan.Zero)
+            failures.Add("Trading:EntryPointListener:Tls:HandshakeTimeout must be > 0.");
+        foreach (var ip in options.ConnectionCaps.AllowedIps.Concat(options.ConnectionCaps.DeniedIps))
+            if (!System.Net.IPAddress.TryParse(ip, out _))
+                failures.Add($"Trading:EntryPointListener:ConnectionCaps allow/deny entry '{ip}' is not a valid IP.");
+
         // TCP tunables (RFC §5.9 / P11)
         if (options.Tcp.SendBufferBytes <= 0)
             failures.Add("Trading:EntryPointListener:Tcp:SendBufferBytes must be > 0.");
@@ -56,6 +67,70 @@ public sealed class EntryPointListenerOptionsValidator : IValidateOptions<EntryP
                 failures.Add($"Trading:EntryPointListener:Tls:CertPath '{options.Tls.CertPath}' does not exist.");
             if (!string.IsNullOrWhiteSpace(options.Tls.KeyPath) && !File.Exists(options.Tls.KeyPath))
                 failures.Add($"Trading:EntryPointListener:Tls:KeyPath '{options.Tls.KeyPath}' does not exist.");
+        }
+
+        // mTLS / client-certificate validation (RFC user-bot-fixp-mtls-v0 §5.1)
+        if (options.Tls.MtlsEnabled)
+        {
+            if (!options.Tls.Required)
+                failures.Add(
+                    "Trading:EntryPointListener:Tls:ClientCertificateMode is " +
+                    $"'{options.Tls.ClientCertificateMode}' but Tls:Required=false. " +
+                    "mTLS requires TLS — set Tls:Required=true.");
+
+            if (options.Tls.ClientCa.ReloadInterval <= TimeSpan.Zero)
+                failures.Add("Trading:EntryPointListener:Tls:ClientCa:ReloadInterval must be > 0.");
+
+            if (string.IsNullOrWhiteSpace(options.Tls.ClientCa.BundlePath))
+            {
+                failures.Add(
+                    "Trading:EntryPointListener:Tls:ClientCa:BundlePath must be set when " +
+                    "Tls:ClientCertificateMode is Optional or Required.");
+            }
+            else
+            {
+                // Fail closed at boot on a missing / unparseable bundle, so a
+                // misconfigured trust anchor never reaches the handshake gate.
+                try
+                {
+                    _ = Mtls.ClientCaTrustProvider.LoadTrustAnchors(options.Tls.ClientCa.BundlePath);
+                }
+                catch (Exception ex)
+                {
+                    failures.Add(
+                        "Trading:EntryPointListener:Tls:ClientCa:BundlePath " +
+                        $"'{options.Tls.ClientCa.BundlePath}' is not a usable PEM CA bundle: {ex.Message}");
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.Tls.ClientCa.DenyListPath) &&
+                !File.Exists(options.Tls.ClientCa.DenyListPath))
+            {
+                failures.Add(
+                    "Trading:EntryPointListener:Tls:ClientCa:DenyListPath " +
+                    $"'{options.Tls.ClientCa.DenyListPath}' does not exist.");
+            }
+            else if (!string.IsNullOrWhiteSpace(options.Tls.ClientCa.DenyListPath))
+            {
+                // Fail closed at boot on a malformed deny-list so a typo'd or
+                // stale-SHA-1 thumbprint never silently fails to revoke.
+                try
+                {
+                    _ = Mtls.ClientCaTrustProvider.LoadDenyList(
+                        options.Tls.ClientCa.DenyListPath, out var invalidLines);
+                    if (invalidLines > 0)
+                        failures.Add(
+                            "Trading:EntryPointListener:Tls:ClientCa:DenyListPath " +
+                            $"'{options.Tls.ClientCa.DenyListPath}' has {invalidLines} malformed " +
+                            "entr(y/ies); each must be a 64-character SHA-256 hex thumbprint.");
+                }
+                catch (Exception ex)
+                {
+                    failures.Add(
+                        "Trading:EntryPointListener:Tls:ClientCa:DenyListPath " +
+                        $"'{options.Tls.ClientCa.DenyListPath}' could not be read: {ex.Message}");
+                }
+            }
         }
 
         if (failures.Count > 0)

@@ -1,5 +1,6 @@
 using System.Threading.Channels;
 using B3.Trading.Application;
+using B3.Trading.Application.Audit;
 using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
 using Microsoft.Extensions.Hosting;
@@ -47,6 +48,7 @@ public sealed class DropCopyExecutionEventSink : IExecutionFanOutSink, IExecutio
 
     private readonly DropCopyManager _manager;
     private readonly WorkingOrderBook _orders;
+    private readonly IClOrdIdMasker _masker;
     private readonly ILogger<DropCopyExecutionEventSink>? _logger;
     private readonly Channel<ExecutionEvent> _channel;
     private readonly CancellationTokenSource _cts = new();
@@ -56,10 +58,12 @@ public sealed class DropCopyExecutionEventSink : IExecutionFanOutSink, IExecutio
     public DropCopyExecutionEventSink(
         DropCopyManager manager,
         WorkingOrderBook orders,
+        IClOrdIdMasker masker,
         ILogger<DropCopyExecutionEventSink>? logger = null)
     {
         _manager = manager;
         _orders = orders;
+        _masker = masker;
         _logger = logger;
         _channel = Channel.CreateBounded<ExecutionEvent>(
             new BoundedChannelOptions(ChannelCapacity)
@@ -127,9 +131,15 @@ public sealed class DropCopyExecutionEventSink : IExecutionFanOutSink, IExecutio
                     try { PublishCore(ev); }
                     catch (Exception ex)
                     {
+                        // #435 Part B: mask the ClOrdId on the failure-log
+                        // path too — this line tails to centralized logging
+                        // which is itself an externally-observable surface.
+                        var maskedClOrdId = !string.IsNullOrEmpty(ev.FirmId)
+                            ? _masker.MaskClOrdId(ev.FirmId, ev.ClOrdId)
+                            : "<no-firm>";
                         _logger?.LogWarning(ex,
-                            "drop-copy fan-out publish failed for firmId={Firm} clOrdId={ClOrdId}",
-                            ev.FirmId, ev.ClOrdId);
+                            "drop-copy fan-out publish failed for firmId={Firm} clOrdId={MaskedClOrdId}",
+                            ev.FirmId, maskedClOrdId);
                     }
                 }
             }
@@ -153,16 +163,17 @@ public sealed class DropCopyExecutionEventSink : IExecutionFanOutSink, IExecutio
 
         // orders.* — current order state after mutation (skip if the
         // order is no longer in the book, same fall-through as orders.me).
+        // #435 Part B: drop-copy projection masks ClOrdId + ParentAlgoId.
         if (_orders.TryGet(ev.ClOrdId, out var order) && order is not null)
-            _manager.Publish(firmId, DropCopyManager.DropCopyChannels.Orders, order.ToDto());
+            _manager.Publish(firmId, DropCopyManager.DropCopyChannels.Orders, order.ToDropCopyDto(_masker, firmId));
 
         // fills.* — only economic fills.
         if (ev.Kind is ExecKind.Fill or ExecKind.PartialFill && ev.LastQuantity > 0)
-            _manager.Publish(firmId, DropCopyManager.DropCopyChannels.Fills, ev.ToDto());
+            _manager.Publish(firmId, DropCopyManager.DropCopyChannels.Fills, ev.ToDropCopyDto(_masker, firmId));
 
         // cancels.* — venue cancels (incl. GTD-expired). Replaces/rejects
         // are visible via the orders channel as state transitions.
         if (ev.Kind == ExecKind.Canceled)
-            _manager.Publish(firmId, DropCopyManager.DropCopyChannels.Cancels, ev.ToDto());
+            _manager.Publish(firmId, DropCopyManager.DropCopyChannels.Cancels, ev.ToDropCopyDto(_masker, firmId));
     }
 }

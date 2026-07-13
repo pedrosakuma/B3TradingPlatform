@@ -73,6 +73,9 @@ services:
       # demo overlay runs the host in Docker env, so set a fixed
       # placeholder so the host boots. Production must override.
       Trading__Reports__Cvm__OwnerHashSalt: "demo-only-cvm-salt-placeholder-DO-NOT-USE-IN-PROD"
+      # #435 Part B. Drop-copy ClOrdId masker salt — boot-guard throws
+      # if unset in non-Development. Placeholder for demo only.
+      Trading__DropCopy__ClOrdIdMaskSalt: "demo-only-clordid-mask-salt-placeholder-DO-NOT-USE-IN-PROD"
 
       # The demo bots produce Buys and Sells uniformly to populate
       # both sides of the book. With the naked-short gate enabled
