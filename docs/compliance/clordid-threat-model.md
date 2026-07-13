@@ -52,13 +52,25 @@ são gerados pela bolsa.
 
 ### 2.3 Drop-copy regulatório / auditoria
 
-Drop-copy B3 é **per-firm**: cada participante recebe drop-copy apenas das
-suas próprias ordens. Não há canal padrão pelo qual a firm A receba o
-`ClOrdID` da firm B.
+Drop-copy B3 (o canal per-firm ↔ bolsa) é **per-firm**: cada participante
+recebe drop-copy apenas das suas próprias ordens. Não há canal padrão pelo
+qual a firm A receba o `ClOrdID` da firm B nesse canal regulatório.
 
 O regulador (CVM) e a B3 podem acessar transaction logs cross-firm para
 auditoria, mas isso é controle operacional/regulatório — não threat model
 de "contraparte HFT correlacionando algos alheios".
+
+> **Nota (adicionada pós-#478, não parte da análise original de 25/05):** o
+> trabalho de mascaramento de `#435` Part B (PR #478) identificou e fechou
+> um leak **diferente e real**, não neste canal regulatório B3, mas na
+> **projeção `dropcopy.orders/fills/cancels` deste próprio backend** (o
+> WebSocket downstream que replica execuções para consumidores internos —
+> ver `IClOrdIdMasker`, `DropCopyExecutionEventSink`). Esse canal expunha
+> `ClOrdId`/`ParentAlgoId` crus a downstream consumers da plataforma. A
+> conclusão da Seção 3 abaixo ("não há benefício em mascarar") permanece
+> válida para a **wire FIXP/UMDF/B3 drop-copy** (o escopo original de #449),
+> mas **não deve ser lida como "não há nenhum leak em lugar nenhum"** — o
+> leak de #478 já era um segundo escopo distinto, tratado separadamente.
 
 ### 2.4 Operador B3 interno
 
@@ -75,7 +87,8 @@ ClOrdID.
 | Counterparty consegue inferir pacing/estratégia de algos nossos pelo `ClOrdID`?   | **Não** — não tem acesso ao `ClOrdID`               |
 | Firm vizinha vê nossos `ClOrdIDs` em drop-copy?                                   | **Não** — drop-copy é per-firm                      |
 | Regulador / B3 vêem `ClOrdIDs`?                                                   | Sim, mas mitigação é **operacional**, não criptográfica |
-| Há benefício compliance em mascarar `ClOrdID` na wire?                            | **Não materializado** — threat model não se sustenta |
+| Há benefício compliance em mascarar `ClOrdID` na wire (FIXP/UMDF/drop-copy B3)?     | **Não materializado** — threat model não se sustenta |
+| Há benefício em mascarar `ClOrdID`/`ParentAlgoId` na projeção `dropcopy.*` interna? | **Sim, já endereçado** — ver #478 (`IClOrdIdMasker`), fora do escopo desta análise |
 
 ## 4. Implicação técnica
 
@@ -90,11 +103,16 @@ O esquema atual de `ClOrdIdPrefixRegistry` —
 - ✅ Reversível por bit-mask → `AdvanceCounterTo` funciona trivialmente em WAL replay
 - ✅ Snapshot/restore via `(EndClientId, PrefixIdx, Counter)` tuples
 
-**Não há gap de compliance a fechar.** Qualquer trabalho de
-obfuscation/masking do `ClOrdID` (random base, random step, RFC 6528-style
-keyed hash, FPE) seria **complexidade sem benefício** — não fecha um threat
-model real, e introduz risco em invariantes críticas (`AdvanceCounterTo`,
-snapshot format).
+**Não há gap de compliance a fechar no esquema de geração do `ClOrdID` em si
+(wire FIXP/UMDF/drop-copy B3).** Qualquer trabalho de obfuscation/masking do
+valor gerado por `ClOrdIdPrefixRegistry` (random base, random step, RFC
+6528-style keyed hash, FPE) seria **complexidade sem benefício** nesse
+escopo — não fecha um threat model real, e introduz risco em invariantes
+críticas (`AdvanceCounterTo`, snapshot format).
+
+Isso é ortogonal ao gap real (já fechado) de **onde o valor cru era
+*exposto*** na projeção `dropcopy.*` interna deste backend — ver nota na
+seção 2.3 e #478.
 
 ## 5. Issues fechadas em consequência
 
