@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "b3-trading-host.fullname" . }}
+  labels:
+    {{- include "b3-trading-host.labels" . | nindent 4 }}
+spec:
+  # Headless: the StatefulSet is single-replica/single-writer (WAL on RWO
+  # Premium disk, #309) — no load-balancing story needed, just stable DNS
+  # for the (never scaled) pod.
+  clusterIP: None
+  selector:
+    {{- include "b3-trading-host.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      protocol: TCP

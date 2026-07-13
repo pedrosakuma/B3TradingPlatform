@@ -70,7 +70,7 @@ services:
     # matching-image-bump workflow for the bump cadence.
     # Devs can still override (e.g. MATCHING_IMAGE=ghcr.io/pedrosakuma/b3-matching:latest)
     # to test the bleeding edge locally.
-    image: ${MATCHING_IMAGE:-ghcr.io/pedrosakuma/b3-matching@sha256:0a5f6e77ec5895b0fd88ae49f7b3e051613ab77e20dc28c8f1f20e027bbbfda1}
+    image: ${MATCHING_IMAGE:-ghcr.io/pedrosakuma/b3-matching@sha256:4c6351ac113d0a0c8425bd7ac0686ab0e4333dc44f33ab3878f836817a8fdef5}
     container_name: b3-matching-platform
     restart: unless-stopped
     networks:
@@ -211,6 +211,11 @@ services:
       # The Mode=Unavailable overlay clears Mode + Firms__0__* + reverts
       # Auth__Users__{0,5}__Firm to "default".
       Trading__Exchange__Mode: Real
+      # CRITICAL: Mode=Real requires UseRealEntryPointClient=true to wire
+      # the B3.EntryPoint.Client SDK. Without this flag, appsettings.Docker
+      # defaults to MockEntryPointClient which accepts orders locally but
+      # never sends them to the matching-platform (#506).
+      Trading__Exchange__UseRealEntryPointClient: "true"
       # Single firm wired to matching's pre-#42 default session, matching
       # docker/real/exchange-simulator.bridge.json verbatim so the FIXP
       # Negotiate succeeds. Bridge auth.devMode=true ignores AccessKey,
@@ -258,12 +263,27 @@ services:
       Trading__SymbolDirectory__SecurityIds__PETR4: "900000000001"
       Trading__SymbolDirectory__SecurityIds__VALE3: "900000000002"
       Trading__SymbolDirectory__SecurityIds__ITUB4: "900000000003"
+      # LotSize and TickSize for the pre-trade MinLotSizeCheck and
+      # MinTickSizeCheck gates. Mirrors matching's instruments-eqt.json.
+      # Without these, orders with invalid lot/tick pass risk and get
+      # rejected by the venue with reject_code=11 (unsupported characteristic).
+      Trading__SymbolDirectory__Specs__PETR4__LotSize: "100"
+      Trading__SymbolDirectory__Specs__PETR4__TickSize: "0.01"
+      Trading__SymbolDirectory__Specs__VALE3__LotSize: "100"
+      Trading__SymbolDirectory__Specs__VALE3__TickSize: "0.01"
+      Trading__SymbolDirectory__Specs__ITUB4__LotSize: "100"
+      Trading__SymbolDirectory__Specs__ITUB4__TickSize: "0.01"
       # Static fallback prices for the price-collar check. Required so the
       # collar accepts cross prices below the live cache warms up. Live
       # ref-prices via the marketdata WS leg below displace these.
       Trading__Risk__ReferencePrices__PETR4: "32.50"
       Trading__Risk__ReferencePrices__VALE3: "65.00"
       Trading__Risk__ReferencePrices__ITUB4: "30.00"
+      # CVM report hashing salt. Required by boot guard. Use a proper secret
+      # in production; this placeholder is acceptable for local dev/test.
+      Trading__Reports__Cvm__OwnerHashSalt: ${TRADING_CVM_OWNER_HASH_SALT:-local-dev-cvm-salt-not-for-prod}
+      # ClOrdId masking salt for drop-copy compliance (#435). Required by boot guard.
+      Trading__DropCopy__ClOrdIdMaskSalt: ${TRADING_CLORDID_MASK_SALT:-local-dev-clordid-mask-salt-not-for-prod}
       # Opening positions seeded for the default dogfood accounts so
       # both alice and bob can sell out of the box without being blocked
       # by the NoNakedShortCheck gate. Quantities are expressed in

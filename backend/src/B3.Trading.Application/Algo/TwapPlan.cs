@@ -21,11 +21,15 @@ namespace B3.Trading.Application;
 /// </para>
 ///
 /// <para>
-/// <b>Quantity rounding.</b> Slices 0..n-2 each carry <c>floor(total/n)</c>
-/// and slice n-1 carries the remainder, so the parent total matches
-/// exactly. Lot-size rounding (RFC §4.8) is deferred until the lot-size
-/// table lands; v0 treats the floor as both the rounded and the unrounded
-/// value.
+/// <b>Quantity rounding.</b> Slices 0..n-2 each carry
+/// <c>floor(total/n)</c> and slice n-1 carries the remainder, so the
+/// parent total matches exactly. When a <c>lotSize &gt; 1</c> is supplied
+/// (issue #518) the distribution is computed in <b>lot units</b> instead:
+/// slices 0..n-2 carry <c>floor(totalLots/n) * lot</c> and the last slice
+/// carries the remainder, so every slice is a whole multiple of the
+/// instrument lot and <c>MinLotSizeCheck</c> never rejects an algo child.
+/// The caller (<c>POST /algo</c>) guarantees <c>total % lot == 0</c> and
+/// <c>total / lot &gt;= sliceCount</c>, so no slice rounds to zero.
 /// </para>
 /// </summary>
 public static class TwapPlan
@@ -57,8 +61,18 @@ public static class TwapPlan
     /// Quantity for slice <paramref name="sliceSeq"/>. All but the last
     /// slice get <c>floor(total/sliceCount)</c>; the last slice carries
     /// the remainder so the parent total reconciles exactly.
+    ///
+    /// <para>
+    /// When <paramref name="lotSize"/> is greater than 1 (issue #518) the
+    /// distribution is computed in lot units so every slice is a whole
+    /// multiple of the instrument lot: slices 0..n-2 carry
+    /// <c>floor(totalLots / sliceCount) * lotSize</c> and the last slice
+    /// carries the lot-valid remainder. The caller validates
+    /// <c>total % lot == 0</c> and <c>total / lot &gt;= sliceCount</c> at
+    /// submit time, so the floor never collapses an interior slice to zero.
+    /// </para>
     /// </summary>
-    public static long SliceQty(long totalQuantity, int sliceCount, int sliceSeq)
+    public static long SliceQty(long totalQuantity, int sliceCount, int sliceSeq, long lotSize = 1)
     {
         if (totalQuantity <= 0)
             throw new ArgumentOutOfRangeException(nameof(totalQuantity), "totalQuantity must be positive.");
@@ -67,8 +81,14 @@ public static class TwapPlan
         if (sliceSeq < 0 || sliceSeq >= sliceCount)
             throw new ArgumentOutOfRangeException(nameof(sliceSeq),
                 $"sliceSeq must be in [0,{sliceCount}).");
+        if (lotSize < 1)
+            throw new ArgumentOutOfRangeException(nameof(lotSize), "lotSize must be positive.");
 
-        var floorQty = totalQuantity / sliceCount;
+        // Lot-unit distribution (#518): floor in whole lots so no interior
+        // slice is an odd lot the venue's MinLotSizeCheck would reject.
+        // lotSize == 1 degenerates to the original share-level floor.
+        var totalLots = totalQuantity / lotSize;
+        var floorQty = (totalLots / sliceCount) * lotSize;
         if (sliceSeq < sliceCount - 1)
             return floorQty;
 
@@ -82,7 +102,18 @@ public static class TwapPlan
     /// Per-slice floor quantity (RFC §4.8); echoed in the
     /// <c>POST /algo</c> error body when validation rejects the
     /// parameters because the implied per-slice quantity is zero.
+    ///
+    /// <para>
+    /// When <paramref name="lotSize"/> is greater than 1 the floor is
+    /// computed in lot units (<c>floor(total/lot/sliceCount) * lot</c>),
+    /// matching <see cref="SliceQty"/> so the endpoint's zero-check sees
+    /// the same lot-aligned interior slice the engine will emit.
+    /// </para>
     /// </summary>
-    public static long FloorSliceQty(long totalQuantity, int sliceCount) =>
-        sliceCount <= 0 ? 0 : totalQuantity / sliceCount;
+    public static long FloorSliceQty(long totalQuantity, int sliceCount, long lotSize = 1)
+    {
+        if (sliceCount <= 0 || lotSize < 1) return 0;
+        var totalLots = totalQuantity / lotSize;
+        return (totalLots / sliceCount) * lotSize;
+    }
 }

@@ -1,0 +1,23 @@
+{{- if .Values.networkPolicy.enabled }}
+# frontend: public edge — admit HTTP from anywhere (the Standard L4 LB
+# terminates client connections upstream of this podSelector). Deploy the
+# companion default-deny-ingress NetworkPolicy at the namespace level (or via
+# your own baseline) — this chart only owns the frontend-scoped allow rule,
+# matching the b3deploy@3b4c1d9 topology this chart replaces.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "b3-trading-frontend.fullname" . }}-ingress
+  labels:
+    {{- include "b3-trading-frontend.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "b3-trading-frontend.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 80
+{{- end }}

@@ -21,13 +21,15 @@ import {
 // ── helpers ──────────────────────────────────────────────────────────
 
 function frame(type, payloadBytes) {
-  // header = 4 bytes (len LE u16, type LE u16); body = payloadBytes
-  const total = 4 + payloadBytes.length;
+  // v2 header = 8 bytes (len LE u32, type LE u16, headerFlags LE u16);
+  // body = payloadBytes
+  const total = 8 + payloadBytes.length;
   const buf = new ArrayBuffer(total);
   const v = new DataView(buf);
-  v.setUint16(0, total, true);
-  v.setUint16(2, type, true);
-  new Uint8Array(buf, 4).set(payloadBytes);
+  v.setUint32(0, total, true);
+  v.setUint16(4, type, true);
+  v.setUint16(6, 0, true); // headerFlags reserved
+  new Uint8Array(buf, 8).set(payloadBytes);
   return new Uint8Array(buf);
 }
 
@@ -102,30 +104,31 @@ test('SIDE.BID is 0 and SIDE.ASK is 1', () => {
 test('buildSubscribe defaults to TRADES|INFO', () => {
   const buf = buildSubscribe('PETR4');
   const v = new DataView(buf);
-  assert.equal(v.getUint16(0, true), buf.byteLength); // total length
-  assert.equal(v.getUint16(2, true), MSG.SUBSCRIBE);
-  assert.equal(v.getUint8(4), FLAGS.TRADES | FLAGS.INFO);
-  assert.equal(v.getUint8(5), 5); // 'PETR4' length
+  assert.equal(v.getUint32(0, true), buf.byteLength); // total length
+  assert.equal(v.getUint16(4, true), MSG.SUBSCRIBE);
+  assert.equal(v.getUint16(6, true), 0); // headerFlags reserved
+  assert.equal(v.getUint32(8, true), FLAGS.TRADES | FLAGS.INFO);
+  assert.equal(v.getUint8(12), 5); // 'PETR4' length
 });
 
 test('buildSubscribe accepts custom flags (e.g. INFO|TRADES|MBP)', () => {
   const buf = buildSubscribe('VALE3', FLAGS.TRADES | FLAGS.INFO | FLAGS.MBP);
   const v = new DataView(buf);
-  assert.equal(v.getUint8(4), FLAGS.TRADES | FLAGS.INFO | FLAGS.MBP);
+  assert.equal(v.getUint32(8, true), FLAGS.TRADES | FLAGS.INFO | FLAGS.MBP);
 });
 
 test('buildSubscribe normalises symbol to uppercase', () => {
   const buf = buildSubscribe('  petr4  ');
-  const sym = new TextDecoder().decode(new Uint8Array(buf, 6));
+  const sym = new TextDecoder().decode(new Uint8Array(buf, 13));
   assert.equal(sym, 'PETR4');
 });
 
-test('buildUnsubscribe encodes 12-byte frame with securityId', () => {
+test('buildUnsubscribe encodes 16-byte frame with securityId', () => {
   const buf = buildUnsubscribe(900_000_000_001n);
-  assert.equal(buf.byteLength, 12);
+  assert.equal(buf.byteLength, 16);
   const v = new DataView(buf);
-  assert.equal(v.getUint16(2, true), MSG.UNSUBSCRIBE);
-  assert.equal(v.getBigUint64(4, true), 900_000_000_001n);
+  assert.equal(v.getUint16(4, true), MSG.UNSUBSCRIBE);
+  assert.equal(v.getBigUint64(8, true), 900_000_000_001n);
 });
 
 // ── existing frames (regression) ─────────────────────────────────────
@@ -138,7 +141,7 @@ test('ServerStatus(ready=1) decodes', () => {
 test('SubscribeOk decodes securityId, flags, symbol', () => {
   const ev = parseSingle(frame(
     MSG.SUBSCRIBE_OK,
-    pack(u64(900_000_000_003n), u8(FLAGS.TRADES | FLAGS.INFO), strLen8('ITUB4'))
+    pack(u64(900_000_000_003n), u32(FLAGS.TRADES | FLAGS.INFO), strLen8('ITUB4'))
   ));
   assert.equal(ev.type, 'SubscribeOk');
   assert.equal(ev.securityId, 900_000_000_003n);
@@ -255,8 +258,9 @@ test('LevelSnapshot asymmetric: ask-only', () => {
 });
 
 test('LevelUpdate decodes side, price, qty, count', () => {
+  // v2 layout: secId, price, qty, count, side(u8) at the end.
   const ev = parseSingle(frame(MSG.LEVEL_UPDATE, pack(
-    u64(900n), u8(SIDE.BID), i64(305000), i64(150), u32(2)
+    u64(900n), i64(305000), i64(150), u32(2), u8(SIDE.BID)
   )));
   assert.deepEqual(ev, {
     type: 'LevelUpdate',
@@ -269,8 +273,9 @@ test('LevelUpdate decodes side, price, qty, count', () => {
 });
 
 test('LevelDeleted decodes side and price', () => {
+  // v2 layout: secId, price, side(u8) at the end.
   const ev = parseSingle(frame(MSG.LEVEL_DELETED, pack(
-    u64(900n), u8(SIDE.ASK), i64(305100)
+    u64(900n), i64(305100), u8(SIDE.ASK)
   )));
   assert.deepEqual(ev, {
     type: 'LevelDeleted',
@@ -352,7 +357,7 @@ test('CandleUpdate decodes single in-progress candle', () => {
 
 test('parseFrames decodes multiple coalesced frames in one buffer', () => {
   const f1 = frame(MSG.TRADE, pack(u64(900n), i64(305000), i64(100), i64(1)));
-  const f2 = frame(MSG.LEVEL_UPDATE, pack(u64(900n), u8(SIDE.BID), i64(304900), i64(50), u32(1)));
+  const f2 = frame(MSG.LEVEL_UPDATE, pack(u64(900n), i64(304900), i64(50), u32(1), u8(SIDE.BID)));
   const merged = pack(f1, f2);
   const ab = merged.buffer.slice(0);
   const events = parseFrames(ab);
@@ -373,10 +378,10 @@ test('parseFrames skips unknown message types (forward-compat)', () => {
 });
 
 test('parseFrames bails on truncated buffer (no throw)', () => {
-  // Frame claims length=20 but buffer only has 8 bytes.
+  // Frame claims length=32 but buffer only has the 8-byte header.
   const bad = new Uint8Array(8);
-  new DataView(bad.buffer).setUint16(0, 20, true);
-  new DataView(bad.buffer).setUint16(2, MSG.TRADE, true);
+  new DataView(bad.buffer).setUint32(0, 32, true);
+  new DataView(bad.buffer).setUint16(4, MSG.TRADE, true);
   const events = parseFrames(bad.buffer);
   assert.equal(events.length, 0);
 });

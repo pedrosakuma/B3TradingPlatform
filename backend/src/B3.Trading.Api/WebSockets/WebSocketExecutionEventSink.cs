@@ -52,6 +52,7 @@ public sealed class WebSocketExecutionEventSink : IExecutionEventSink, IExecutio
     private readonly PositionKeeper _positions;
     private readonly PnlKeeper? _pnl;
     private readonly Application.Risk.IReferencePrice? _refPrice;
+    private readonly SymbolDirectory? _symbols;
     private readonly ILogger<WebSocketExecutionEventSink>? _logger;
     private readonly Channel<ExecutionEvent> _channel;
     private readonly CancellationTokenSource _cts = new();
@@ -63,6 +64,7 @@ public sealed class WebSocketExecutionEventSink : IExecutionEventSink, IExecutio
         PositionKeeper positions,
         PnlKeeper? pnl = null,
         Application.Risk.IReferencePrice? refPrice = null,
+        SymbolDirectory? symbols = null,
         ILogger<WebSocketExecutionEventSink>? logger = null)
     {
         _subs = subs;
@@ -70,6 +72,7 @@ public sealed class WebSocketExecutionEventSink : IExecutionEventSink, IExecutio
         _positions = positions;
         _pnl = pnl;
         _refPrice = refPrice;
+        _symbols = symbols;
         _logger = logger;
         _channel = Channel.CreateBounded<ExecutionEvent>(
             new BoundedChannelOptions(ChannelCapacity)
@@ -79,6 +82,17 @@ public sealed class WebSocketExecutionEventSink : IExecutionEventSink, IExecutio
                 FullMode = BoundedChannelFullMode.DropOldest,
             },
             itemDropped: static _ => MetricsRegistry.WsHubFanOutDropped.Add(1));
+    }
+
+    /// <summary>
+    /// FE-OPT-1 (#497). Looks up option metadata for a symbol.
+    /// </summary>
+    private OptionMetadata? GetOptionMetadata(string? symbol)
+    {
+        if (_symbols is null || string.IsNullOrWhiteSpace(symbol)) return null;
+        if (_symbols.TryGetSpec(symbol, out var spec) && spec.SecurityType == SecurityType.Option)
+            return spec.Option;
+        return null;
     }
 
     /// <inheritdoc />
@@ -147,19 +161,22 @@ public sealed class WebSocketExecutionEventSink : IExecutionEventSink, IExecutio
         // firm's executions/orders/positions/pnl on its WS session.
         var firmId = ev.FirmId;
 
+        // FE-OPT-1 (#497). Look up option metadata once for all DTOs.
+        var optMeta = GetOptionMetadata(ev.Symbol);
+
         // executions.me — every ER becomes an execution event.
         _subs.Publish(ev.Owner, firmId, Channels.ExecutionsMe, ev.ToDto());
 
         // orders.me — current order state after mutation.
         if (_orders.TryGet(ev.ClOrdId, out var order) && order is not null)
-            _subs.Publish(ev.Owner, firmId, Channels.OrdersMe, order.ToDto());
+            _subs.Publish(ev.Owner, firmId, Channels.OrdersMe, order.ToDto(optMeta));
 
         // positions.me — only fills affect positions.
         if (ev.Kind is ExecKind.Fill or ExecKind.PartialFill && ev.LastQuantity > 0)
         {
             var positionFirm = firmId ?? PnlKeeper.DefaultFirmId;
             var position = _positions.GetOrCreate(positionFirm, ev.Owner, ev.Symbol);
-            _subs.Publish(ev.Owner, firmId, Channels.PositionsMe, position.ToDto());
+            _subs.Publish(ev.Owner, firmId, Channels.PositionsMe, position.ToDto(null, optMeta));
 
             if (_pnl is not null && _refPrice is not null)
             {

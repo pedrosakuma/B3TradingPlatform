@@ -245,6 +245,141 @@ public class InMemoryUserBotCredentialRegistryTests
         Assert.NotNull(await consumer.TryAuthenticateAsync(c2.PlainToken, default));
     }
 
+    // ─── Cert↔credential binding (sub-issue #540) ────────────────────────────
+
+    private const string SampleThumbprint =
+        "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789";
+
+    [Fact]
+    public async Task Create_WithPin_NormalizesAndStoresThumbprint()
+    {
+        var r = Reg();
+        // Lower-case + colon-separated input must canonicalize to upper-case 64-hex.
+        var pinned = await r.CreateAsync("alice", "pinned",
+            "ab:cd:ef:01:23:45:67:89:ab:cd:ef:01:23:45:67:89:ab:cd:ef:01:23:45:67:89:ab:cd:ef:01:23:45:67:89",
+            default);
+
+        Assert.Equal(SampleThumbprint, pinned.Credential.BoundCertThumbprint);
+    }
+
+    [Fact]
+    public async Task Create_Unpinned_HasNullThumbprint()
+    {
+        var r = Reg();
+        var c = await r.CreateAsync("alice", "x", default);
+        Assert.Null(c.Credential.BoundCertThumbprint);
+
+        var c2 = await r.CreateAsync("alice", "y", "   ", default);
+        Assert.Null(c2.Credential.BoundCertThumbprint);
+    }
+
+    [Theory]
+    [InlineData("deadbeef")]                                                   // too short
+    [InlineData("ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF012345678")] // 63
+    [InlineData("ZZCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789")] // non-hex
+    [InlineData("ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF01234567890")] // 65, too long
+    public async Task Create_WithMalformedPin_Throws(string bad)
+    {
+        var r = Reg();
+        await Assert.ThrowsAsync<ArgumentException>(() => r.CreateAsync("alice", "x", bad, default));
+    }
+
+    [Fact]
+    public async Task Create_WithOversizedPin_ThrowsWithoutStackOverflow()
+    {
+        // Guards against sizing a stackalloc buffer from untrusted input length.
+        var r = Reg();
+        var huge = new string('A', 10_000_000);
+        await Assert.ThrowsAsync<ArgumentException>(() => r.CreateAsync("alice", "x", huge, default));
+    }
+
+    [Fact]
+    public async Task SetBoundCertThumbprint_SetsRepinsAndClears()
+    {
+        var r = Reg();
+        var c = await r.CreateAsync("alice", "x", default);
+
+        Assert.True(await r.SetBoundCertThumbprintAsync("alice", c.Credential.Id, SampleThumbprint, default));
+        Assert.Equal(SampleThumbprint, r.ListByUser("alice").Single().BoundCertThumbprint);
+
+        var other = "0000000000000000000000000000000000000000000000000000000000000000";
+        Assert.True(await r.SetBoundCertThumbprintAsync("alice", c.Credential.Id, other, default));
+        Assert.Equal(other, r.ListByUser("alice").Single().BoundCertThumbprint);
+
+        Assert.True(await r.SetBoundCertThumbprintAsync("alice", c.Credential.Id, null, default));
+        Assert.Null(r.ListByUser("alice").Single().BoundCertThumbprint);
+    }
+
+    [Fact]
+    public async Task SetBoundCertThumbprint_CrossUserOrMissingOrRevoked_ReturnsFalse()
+    {
+        var r = Reg();
+        var c = await r.CreateAsync("alice", "x", default);
+
+        // Wrong user → indistinguishable from missing.
+        Assert.False(await r.SetBoundCertThumbprintAsync("bob", c.Credential.Id, SampleThumbprint, default));
+        // Unknown id.
+        Assert.False(await r.SetBoundCertThumbprintAsync("alice", Guid.NewGuid(), SampleThumbprint, default));
+
+        await r.RevokeAsync("alice", c.Credential.Id, default);
+        Assert.False(await r.SetBoundCertThumbprintAsync("alice", c.Credential.Id, SampleThumbprint, default));
+    }
+
+    [Fact]
+    public async Task SetBoundCertThumbprint_MalformedPin_Throws()
+    {
+        var r = Reg();
+        var c = await r.CreateAsync("alice", "x", default);
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            r.SetBoundCertThumbprintAsync("alice", c.Credential.Id, "not-a-thumbprint", default));
+    }
+
+    [Fact]
+    public async Task SnapshotRoundTrip_PreservesBoundCertThumbprint()
+    {
+        var src = Reg();
+        var pinned = await src.CreateAsync("alice", "pinned", SampleThumbprint, default);
+        var unpinned = await src.CreateAsync("alice", "unpinned", default);
+
+        var dst = Reg();
+        dst.Restore(src.Snapshot());
+
+        var rows = dst.ListByUser("alice");
+        Assert.Equal(SampleThumbprint, rows.Single(c => c.Id == pinned.Credential.Id).BoundCertThumbprint);
+        Assert.Null(rows.Single(c => c.Id == unpinned.Credential.Id).BoundCertThumbprint);
+    }
+
+    [Fact]
+    public async Task EventReplay_ReconstructsBoundCertThumbprint()
+    {
+        var store = new RecordingEventStore();
+        var dispatcher = new EventDispatcher(store);
+        var producer = new InMemoryUserBotCredentialRegistry(dispatcher);
+
+        var c = await producer.CreateAsync("alice", "pinned", SampleThumbprint, default);
+        var other = "1111111111111111111111111111111111111111111111111111111111111111";
+        await producer.SetBoundCertThumbprintAsync("alice", c.Credential.Id, other, default);
+
+        var consumer = new InMemoryUserBotCredentialRegistry();
+        foreach (var e in store.Events)
+        {
+            switch (e)
+            {
+                case UserBotCredentialCreatedEvent created:
+                    consumer.ApplyCreated(new UserBotCredential(
+                        created.Id, created.UserId, created.CredShortId, created.Label,
+                        created.SecretHash, created.CreatedAtUtc, RevokedAtUtc: null,
+                        BoundCertThumbprint: created.BoundCertThumbprint));
+                    break;
+                case UserBotCredentialCertBindingChangedEvent changed:
+                    consumer.ApplyCertBindingChanged(changed.Id, changed.BoundCertThumbprint);
+                    break;
+            }
+        }
+
+        Assert.Equal(other, consumer.ListByUser("alice").Single().BoundCertThumbprint);
+    }
+
     private sealed class RecordingEventStore : IEventStore
     {
         public List<WalEvent> Events { get; } = new();

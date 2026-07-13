@@ -954,6 +954,10 @@ public class PeggedAlgoEndpointTests
 
     // ──────────────── Pass-4 review (#296) regression tests ────────────────
 
+    // #345. The orphan-child / stale-cum root cause was the
+    // AlgoEngine.OnChildErAsync adoption-before-bookkeeping race fixed
+    // in #469 (LiveChildClOrdId reorder + lock fence). The test is fully
+    // poll-based (WaitForAlgoStatus / WaitFor), so no retry is needed.
     [Fact]
     public async Task Pegged_FillRacesRepegReplace_DelayInjectedFill_NoOrphanReplacementChildAndIntentReleased()
     {
