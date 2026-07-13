@@ -6,14 +6,12 @@ namespace B3.Trading.Application.Tests;
 
 /// <summary>
 /// #459 (spin-off de #441 / #436). Tripwire defensivo: a auditoria
-/// de compliance B3 (24/05/2026) identificou 3 campos FIX/B3 que a
+/// de compliance B3 (24/05/2026) identificou campos FIX/B3 que a
 /// plataforma deveria emitir/honrar no wire mas que o
-/// <c>B3.EntryPoint.Client 0.14.4</c> NÃO expõe no shape público
+/// <c>B3.EntryPoint.Client 0.16.1</c> ainda NÃO expõe no shape público
 /// de <see cref="Up.NewOrderRequest"/> e <see cref="Up.ReplaceOrderRequest"/>:
 ///
 /// <list type="bullet">
-///   <item><b>SubAccount</b> — tag FIX 1, sub-conta dentro do CBLC
-///   Account, usada para allocation/segregation.</item>
 ///   <item><b>ExecInst</b> — tag FIX 18, flags importantes
 ///   (STP mode, do-not-aggregate, work-up, AON, …).</item>
 ///   <item><b>DisplayResetPolicy</b> / <b>RefreshPolicy</b> —
@@ -36,8 +34,8 @@ namespace B3.Trading.Application.Tests;
 ///
 /// <para>
 /// O lookup é case-insensitive porque o SDK pode escolher
-/// capitalização ligeiramente diferente (e.g. <c>SubAccount</c> vs
-/// <c>SubAcct</c>); usar <see cref="StringComparison.OrdinalIgnoreCase"/>
+/// capitalização ligeiramente diferente (e.g. <c>ExecInst</c> vs
+/// <c>ExecutionInstruction</c>); usar <see cref="StringComparison.OrdinalIgnoreCase"/>
 /// + a substring evita um falso negativo onde só a capitalização
 /// muda. Caso o SDK exponha um nome inteiramente diferente
 /// (improvável dado o padrão FIX), o tripwire continuará verde e
@@ -46,16 +44,8 @@ namespace B3.Trading.Application.Tests;
 /// </summary>
 public class B3EntryPointSdkTripwireTests
 {
-    private static readonly string[] SubAccountAliases = ["SubAccount", "SubAcct", "SubaccountId"];
     private static readonly string[] ExecInstAliases = ["ExecInst", "ExecutionInstruction", "ExecutionInstructions"];
     private static readonly string[] DisplayPolicyAliases = ["DisplayResetPolicy", "RefreshPolicy", "DisplayRefreshPolicy"];
-
-    [Fact]
-    public void NewOrderRequest_StillLacks_SubAccount_AsOf_SdkVersion()
-    {
-        AssertSdkPropertyMissing(typeof(Up.NewOrderRequest), SubAccountAliases,
-            issueRef: "#441 (CBLC Account mapping) + #458");
-    }
 
     [Fact]
     public void NewOrderRequest_StillLacks_ExecInst_AsOf_SdkVersion()
@@ -69,13 +59,6 @@ public class B3EntryPointSdkTripwireTests
     {
         AssertSdkPropertyMissing(typeof(Up.NewOrderRequest), DisplayPolicyAliases,
             issueRef: "#298 / #436. When this trips: wire order.DisplayResetPolicy in B3EntryPointClientGateway.BuildNewOrderRequest AND drop the REST/risk guard in OrdersEndpoints + OrderSubmissionService that today restricts policy to Always.");
-    }
-
-    [Fact]
-    public void ReplaceOrderRequest_StillLacks_SubAccount_AsOf_SdkVersion()
-    {
-        AssertSdkPropertyMissing(typeof(Up.ReplaceOrderRequest), SubAccountAliases,
-            issueRef: "#441 / #458");
     }
 
     [Fact]
