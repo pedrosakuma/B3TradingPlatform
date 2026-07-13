@@ -62,10 +62,25 @@ public sealed class ConformanceFactAttribute : FactAttribute
     public bool RequiresAuthSigningKey { get; init; }
 
     /// <summary>
+    /// When true, the scenario also requires an operator-opted-in docker
+    /// control path (<c>B3T_DOCKER_CONTROL=true</c>) so the test process can
+    /// intentionally disconnect and reconnect the matching-platform network
+    /// leg. Used by real-stack transport fault-injection specs only.
+    /// </summary>
+    public bool RequiresDockerControl { get; init; }
+
+    /// <summary>
     /// When true, the scenario requires a running FIXP listener configured
     /// via <c>B3T_FIXP_ENDPOINT</c>. Skipped when the env var is not set.
     /// </summary>
     public bool RequiresFixpListener { get; init; }
+
+    /// <summary>
+    /// When true, the scenario requires an mTLS-enabled FIXP listener plus a
+    /// trusted client PFX (<c>B3T_FIXP_MTLS_CLIENT_PFX</c>) so the SDK-as-
+    /// client mTLS matrix can drive a real handshake. Skipped otherwise.
+    /// </summary>
+    public bool RequiresFixpMtls { get; init; }
 
     public ConformanceFactAttribute()
     {
@@ -110,10 +125,14 @@ public sealed class ConformanceFactAttribute : FactAttribute
                 return PlatformEndpoint.SimulatorSkipReason;
             if (RequiresSandboxMatching && !PlatformEndpoint.IsRealStackConformance())
                 return PlatformEndpoint.RealStackConformanceSkipReason;
+            if (RequiresDockerControl && !PlatformEndpoint.IsDockerControlEnabled())
+                return PlatformEndpoint.DockerControlSkipReason;
             if (RequiresAuthSigningKey && !PlatformEndpoint.IsAuthSigningKeyConfigured())
                 return PlatformEndpoint.AuthSigningKeySkipReason;
             if (RequiresFixpListener && !PlatformEndpoint.IsFixpListenerConfigured())
                 return PlatformEndpoint.FixpListenerSkipReason;
+            if (RequiresFixpMtls && !PlatformEndpoint.IsFixpMtlsConfigured())
+                return PlatformEndpoint.FixpMtlsSkipReason;
             return null;
         }
         set => base.Skip = value;

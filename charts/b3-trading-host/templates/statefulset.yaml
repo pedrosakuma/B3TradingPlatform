@@ -1,0 +1,190 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "b3-trading-host.fullname" . }}
+  labels:
+    {{- include "b3-trading-host.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "b3-trading-host.fullname" . }}
+  # Hardcoded to 1 — see values.yaml replicaCount comment. The WAL is
+  # single-writer; horizontal scale is not a supported failure mode.
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "b3-trading-host.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "b3-trading-host.labels" . | nindent 8 }}
+    spec:
+      # The image runs as non-root uid/gid 10001 (b3trading). The mounted
+      # Premium Disk PVC roots as root:root, so fsGroup makes the WAL volume
+      # group-owned + setgid-writable by that user (it creates dp-keys/ on
+      # boot). REQUIRED — see values.yaml securityContext comment (#568 M6).
+      securityContext:
+        fsGroup: {{ .Values.securityContext.fsGroup }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: trading-host
+          image: {{ include "b3-trading-host.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          env:
+            - name: ASPNETCORE_ENVIRONMENT
+              value: {{ .Values.aspnetcoreEnvironment | quote }}
+            - name: ASPNETCORE_URLS
+              value: {{ printf "http://+:%d" (.Values.service.port | int) | quote }}
+            # ── Auth ────────────────────────────────────────────────────────
+            - name: Trading__Auth__SigningKey
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "b3-trading-host.fullname" . }}-secrets
+                  key: signing-key
+            {{- range $i, $user := .Values.auth.users }}
+            - name: {{ printf "Trading__Auth__Users__%d__Username" $i }}
+              value: {{ $user.username | quote }}
+            - name: {{ printf "Trading__Auth__Users__%d__PasswordHash" $i }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "b3-trading-host.fullname" $ }}-secrets
+                  key: seed-password-hash
+            - name: {{ printf "Trading__Auth__Users__%d__Salt" $i }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "b3-trading-host.fullname" $ }}-secrets
+                  key: seed-password-salt
+            - name: {{ printf "Trading__Auth__Users__%d__Iterations" $i }}
+              value: {{ $user.iterations | quote }}
+            - name: {{ printf "Trading__Auth__Users__%d__Role" $i }}
+              value: {{ $user.role | quote }}
+            - name: {{ printf "Trading__Auth__Users__%d__Firm" $i }}
+              value: {{ $user.firm | quote }}
+            {{- end }}
+            # ── Real-mode wire (matching-platform / FIXP) ───────────────────
+            - name: Trading__Exchange__Mode
+              value: {{ .Values.mode | quote }}
+            - name: Trading__Exchange__UseRealEntryPointClient
+              value: {{ eq .Values.mode "Real" | quote }}
+            {{- range $i, $firm := .Values.exchange.firms }}
+            - name: {{ printf "Trading__Exchange__Firms__%d__FirmId" $i }}
+              value: {{ $firm.firmId | quote }}
+            - name: {{ printf "Trading__Exchange__Firms__%d__Endpoint" $i }}
+              value: {{ $firm.endpoint | quote }}
+            - name: {{ printf "Trading__Exchange__Firms__%d__SessionId" $i }}
+              value: {{ $firm.sessionId | quote }}
+            - name: {{ printf "Trading__Exchange__Firms__%d__SessionVerId" $i }}
+              value: {{ $firm.sessionVerId | quote }}
+            - name: {{ printf "Trading__Exchange__Firms__%d__EnteringFirm" $i }}
+              value: {{ $firm.enteringFirm | quote }}
+            - name: {{ printf "Trading__Exchange__Firms__%d__AccessKey" $i }}
+              value: {{ $firm.accessKey | quote }}
+            - name: {{ printf "Trading__Exchange__Firms__%d__SenderLocation" $i }}
+              value: {{ $firm.senderLocation | quote }}
+            - name: {{ printf "Trading__Exchange__Firms__%d__EnteringTrader" $i }}
+              value: {{ $firm.enteringTrader | quote }}
+            {{- end }}
+            # ── Symbol directory (mirror matching's instruments-eqt.json) ───
+            {{- range .Values.symbolDirectory.symbols }}
+            - name: {{ printf "Trading__SymbolDirectory__SecurityIds__%s" .symbol }}
+              value: {{ .securityId | quote }}
+            - name: {{ printf "Trading__SymbolDirectory__Specs__%s__LotSize" .symbol }}
+              value: {{ .lotSize | quote }}
+            - name: {{ printf "Trading__SymbolDirectory__Specs__%s__TickSize" .symbol }}
+              value: {{ .tickSize | quote }}
+            {{- end }}
+            # ── Risk fallback reference prices (collar warm-up) ─────────────
+            {{- range $symbol, $price := .Values.risk.referencePrices }}
+            - name: {{ printf "Trading__Risk__ReferencePrices__%s" $symbol }}
+              value: {{ $price | quote }}
+            {{- end }}
+            # ── Compliance salts (boot guards) ──────────────────────────────
+            - name: Trading__Reports__Cvm__OwnerHashSalt
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "b3-trading-host.fullname" . }}-secrets
+                  key: cvm-owner-hash-salt
+            - name: Trading__DropCopy__ClOrdIdMaskSalt
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "b3-trading-host.fullname" . }}-secrets
+                  key: clordid-mask-salt
+            # ── Opening positions (dogfood seeds) ───────────────────────────
+            {{- range $i, $seed := .Values.positionSeeds }}
+            - name: {{ printf "Trading__Positions__Seeds__%d__EndClientId" $i }}
+              value: {{ $seed.endClientId | quote }}
+            - name: {{ printf "Trading__Positions__Seeds__%d__Symbol" $i }}
+              value: {{ $seed.symbol | quote }}
+            - name: {{ printf "Trading__Positions__Seeds__%d__Quantity" $i }}
+              value: {{ $seed.quantity | quote }}
+            - name: {{ printf "Trading__Positions__Seeds__%d__AverageEntryPrice" $i }}
+              value: {{ $seed.averageEntryPrice | quote }}
+            - name: {{ printf "Trading__Positions__Seeds__%d__Firm" $i }}
+              value: {{ $seed.firm | quote }}
+            {{- end }}
+            # ── Live reference price via the marketdata WS leg ──────────────
+            - name: Trading__MarketData__WsUrl
+              value: {{ .Values.marketData.wsUrl | quote }}
+            {{- range $i, $symbol := .Values.marketData.symbols }}
+            - name: {{ printf "Trading__MarketData__Symbols__%d" $i }}
+              value: {{ $symbol | quote }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: {{ .Values.service.port }}
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: {{ .Values.service.port }}
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/b3trading
+            {{- if .Values.keyVault.name }}
+            - name: kv-secrets
+              mountPath: /mnt/secrets-store
+              readOnly: true
+            {{- end }}
+      {{- if .Values.keyVault.name }}
+      volumes:
+        # Mounting the CSI volume is what triggers the SecretProviderClass to
+        # sync the Key Vault secrets into the "<fullname>-secrets" Secret.
+        - name: kv-secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ include "b3-trading-host.fullname" . }}-secrets
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: {{ .Values.persistence.storageClassName }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
