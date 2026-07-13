@@ -1,0 +1,167 @@
+name: Helm Charts
+
+# Publishes the two per-service Helm charts (b3-trading-host,
+# b3-trading-frontend) as OCI artifacts alongside the images built by
+# docker.yml, per the deploy topology RFC (#557) M3 / #568. b3deploy
+# consumes them as `chart@version` + env values instead of hand-written
+# manifests.
+#
+# Versioning contract (#568): each chart's `version` (Chart.yaml) is bumped
+# independently of its `appVersion`; a push to main only republishes a chart
+# whose version actually changed (idempotent — `helm push` of an existing
+# tag would otherwise silently overwrite it). PRs only lint + template
+# (no push, no GHCR auth needed) so contributors without registry
+# credentials still get full validation.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "charts/**"
+      - ".github/workflows/helm-charts.yml"
+  pull_request:
+    paths:
+      - "charts/**"
+      - ".github/workflows/helm-charts.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: helm-charts-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  lint-and-template:
+    name: Lint + template (${{ matrix.chart }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        chart: [b3-trading-host, b3-trading-frontend]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+
+      - name: helm lint
+        run: helm lint charts/${{ matrix.chart }}
+
+      # Renders with the minimal values each chart requires to reach its
+      # "real" code paths (Key Vault wiring for the host chart; a
+      # Kubernetes-shaped upstream for the frontend chart) so the template
+      # step actually exercises every conditional block, not just the
+      # all-defaults happy path.
+      - name: helm template (defaults)
+        run: helm template ci charts/${{ matrix.chart }}
+
+      - name: helm template (Key Vault wired)
+        if: matrix.chart == 'b3-trading-host'
+        run: |
+          helm template ci charts/b3-trading-host \
+            --set keyVault.name=kv-ci-placeholder \
+            --set keyVault.clientId=00000000-0000-0000-0000-000000000000 \
+            --set keyVault.tenantId=00000000-0000-0000-0000-000000000000
+
+      - name: helm template (Kubernetes upstream)
+        if: matrix.chart == 'b3-trading-frontend'
+        run: |
+          helm template ci charts/b3-trading-frontend \
+            --set nginx.resolver=10.0.0.10 \
+            --set nginx.tradingUpstream=trading-host.b3-prod.svc.cluster.local:5000
+
+      # #574: a values/template-only chart change that lands without a
+      # Chart.yaml version bump silently fails to republish (the "Package +
+      # push" job treats OCI tags as immutable and only emits a
+      # ::notice::). Fail the PR up front instead, mirroring the digest/tag
+      # immutability checks used elsewhere in this repo's CI.
+      - name: Check Chart.yaml version bumped
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.sha }}"
+          base_sha="${{ github.event.pull_request.base.sha }}"
+
+          changed="$(git diff --name-only "$base_sha" HEAD -- "charts/${{ matrix.chart }}" \
+            | grep -v "^charts/${{ matrix.chart }}/Chart.yaml$" || true)"
+          if [ -z "$changed" ]; then
+            echo "No non-Chart.yaml changes under charts/${{ matrix.chart }}; skipping version check."
+            exit 0
+          fi
+
+          old_version="$(git show "$base_sha:charts/${{ matrix.chart }}/Chart.yaml" 2>/dev/null \
+            | awk '/^version:/ {print $2}' || true)"
+          new_version="$(awk '/^version:/ {print $2}' "charts/${{ matrix.chart }}/Chart.yaml")"
+
+          if [ -z "$old_version" ]; then
+            echo "No prior Chart.yaml on base ref; treating as new chart, skipping version check."
+            exit 0
+          fi
+
+          if [ "$old_version" = "$new_version" ]; then
+            echo "::error file=charts/${{ matrix.chart }}/Chart.yaml::charts/${{ matrix.chart }} has template/values changes but Chart.yaml's version ($new_version) was not bumped. Bump 'version' so CI republishes this chart."
+            exit 1
+          fi
+
+          echo "charts/${{ matrix.chart }} version bumped: $old_version -> $new_version"
+
+  publish:
+    name: Package + push (${{ matrix.chart }})
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: lint-and-template
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        chart: [b3-trading-host, b3-trading-frontend]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
+            --username ${{ github.actor }} --password-stdin
+
+      - name: Read chart version
+        id: chart
+        run: |
+          version="$(helm show chart charts/${{ matrix.chart }} | awk '/^version:/ {print $2}')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # Skip re-publishing a version that's already on GHCR — `helm push`
+      # would otherwise happily overwrite an existing OCI tag, which breaks
+      # the "chart@version is immutable" half of the pinning contract
+      # b3deploy relies on.
+      - name: Check if version already published
+        id: exists
+        run: |
+          if helm show chart "oci://ghcr.io/${{ github.repository_owner }}/charts/${{ matrix.chart }}" \
+              --version "${{ steps.chart.outputs.version }}" >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package chart
+        if: steps.exists.outputs.published == 'false'
+        run: helm package charts/${{ matrix.chart }} --destination /tmp/charts
+
+      - name: Push chart
+        if: steps.exists.outputs.published == 'false'
+        run: |
+          helm push "/tmp/charts/${{ matrix.chart }}-${{ steps.chart.outputs.version }}.tgz" \
+            "oci://ghcr.io/${{ github.repository_owner }}/charts"
+
+      - name: Skip (already published)
+        if: steps.exists.outputs.published == 'true'
+        run: |
+          echo "::notice::${{ matrix.chart }}@${{ steps.chart.outputs.version }} is already published; bump Chart.yaml's version to publish a new revision."

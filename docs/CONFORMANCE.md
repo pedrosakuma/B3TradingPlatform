@@ -45,6 +45,55 @@ dotnet test backend/tests/B3.Trading.Conformance --filter "Category=Conformance"
   possible end-to-end: platform up, JWT pipeline wired, user store
   loaded.
 
+### Real-stack recovery
+
+- **`Spec_FIXP_SessionRoll/SuspendedTimeoutBoundarySpecTests`** —
+  transport-fault boundary coverage for the venue FIXP suspend window:
+  disconnect the matching-platform TCP leg **within**
+  `SuspendedTimeoutMs` and assert the order re-syncs without a stale
+  flag; disconnect **past** the timeout and assert the surviving order
+  is flagged stale after renegotiation. Both recovery paths then submit
+  a fresh post-reconnect crossed pair and assert trading is genuinely
+  back: the new order becomes `Working` in `GET /orders`, then both legs
+  transition to `Filled` (note: `GET /orders` is full history, so
+  "leaves the book" is asserted as `Working` → terminal, not literal
+  disappearance from the response). Requires the real-stack sandbox
+  (`B3T_REAL_STACK_CONFORMANCE=true`) plus docker CLI/socket access for
+  the test process (`B3T_DOCKER_CONTROL=true`; the
+  `docker-compose.real-conformance.yml` overlay wires this automatically).
+- **`Spec_HTTP_MarketData/MarketDataOutageSpecTests`** — marketdata-leg
+  resilience on the real stack: sever the `b3-marketdata` container's
+  `b3-net` attachment, prove
+  `GET /admin/marketdata/reference-prices` stays on the last-known-good
+  live cache instead of crashing, prove `POST /orders` / matching fills
+  still work while the feed is down, then reconnect and assert a fresh
+  crossed trade advances the live ref-price again. Pairs with the
+  operational guidance in
+  [`docs/operations/runbook-failover-recovery.md`](operations/runbook-failover-recovery.md)
+  §1.8.
+- **`Spec_Recovery/TradingHostCrashRestartSpecTests`** — hard-crash
+  recovery coverage for the participant host itself: `docker kill -s
+  SIGKILL b3-trading-host`, wait for the host to be down, then restart it
+  and prove two
+  sibling contracts: (a) a pre-crash resting order still comes back with
+  the same working-state leaves/cum quantities, pre-crash
+  cash/position/realized-PnL state from a real fill survived WAL replay,
+  `/admin/firms` shows both FIRM01 and FIRM02 FIXP sessions back in
+  `established`, and a fresh post-restart crossed pair still trades
+  through to `Filled`; and (b) an external FIXP counterparty on session
+  `10102` can fill a trading-host-owned order **while the host is down**,
+  with the missed ER replayed on restart so `GET /orders` shows the
+  correct terminal fill instead of a stale `Working` snapshot. Also uses
+  the docker-control gate and real-stack sandbox overlay.
+- **`Spec_FIXP_SessionRoll/MatchingPlatformRestartSpecTests`** —
+  process-fault sibling of the scenario above: restart the
+  `matching-platform` container itself (not just its TCP leg), assert the
+  host is forced onto the `Renegotiated`/advanced-`SessionVerId` path and
+  stale-flags the pre-restart survivor, then contract-prove the venue's
+  book/WAL survived by crossing that stale survivor into a real `Filled`
+  terminal ER before finally asserting a fresh post-restart order round-trip
+  still trades through to `Filled`.
+
 ### Backlog (separate scenarios; add as the contract solidifies)
 
 - **`Spec_HTTP_Orders/`** — `POST /orders` happy path + validation
@@ -65,9 +114,6 @@ dotnet test backend/tests/B3.Trading.Conformance --filter "Category=Conformance"
   SIGTERM drain (`/ready` flips to 503; in-flight `POST /orders`
   completes; new `POST /orders` returns 503; WAL flushes; final
   snapshot lands).
-- **`Spec_Recovery/`** — kill the process mid-flight, restart, assert
-  the restored state matches what was last acknowledged on the wire
-  (working orders, positions, kill-switch).
 
 Add a new scenario by:
 

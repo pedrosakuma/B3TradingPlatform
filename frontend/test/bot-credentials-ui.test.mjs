@@ -29,6 +29,7 @@ installDomStub({
     "bot-credentials-refresh":         { tag: "button" },
     "bot-credentials-create-form":     { tag: "form" },
     "bot-credentials-label":           { tag: "input" },
+    "bot-credentials-cert-thumbprint": { tag: "input" },
     "bot-credentials-create-submit":   { tag: "button" },
     "bot-credentials-body":            { tag: "tbody" },
     "bot-credentials-feedback":        { tag: "p" },
@@ -43,6 +44,7 @@ installDomStub({
 });
 
 const mod = await import("../js/botCredentialsUi.js");
+mod.bindBotCredentialsUi();
 
 test("empty state copy renders when there are no credentials", () => {
   mod.setBotCredentialsRows([]);
@@ -79,6 +81,105 @@ test("active rows render badge + revoke button; revoked rows do not", () => {
   // Revoke button targets the active credential id.
   assert.match(html, /data-id="11111111-1111-1111-1111-111111111111"/);
   assert.doesNotMatch(html, /data-id="22222222-2222-2222-2222-222222222222"/);
+});
+
+test("cert binding renders pinned badge with full title and unpinned label", () => {
+  const thumbprint = "AB12" + "C".repeat(56) + "7F90";
+  mod.setBotCredentialsRows([
+    {
+      id: "11111111-1111-1111-1111-111111111111",
+      label: "pinned-bot",
+      credShortId: "AAAA1111",
+      createdAtUtc: "2025-01-02T03:04:05Z",
+      revokedAt: null,
+      boundCertThumbprint: thumbprint,
+    },
+    {
+      id: "22222222-2222-2222-2222-222222222222",
+      label: "plain-bot",
+      credShortId: "BBBB2222",
+      createdAtUtc: "2025-01-01T00:00:00Z",
+      revokedAt: null,
+      boundCertThumbprint: null,
+    },
+  ]);
+  const html = document.getElementById("bot-credentials-body").innerHTML;
+  assert.match(html, /pinned: <code>AB12…7F90<\/code>/);
+  assert.match(html, new RegExp(`title="${thumbprint}"`));
+  assert.match(html, /unpinned/);
+});
+
+test("create form passes normalized cert thumbprint", () => {
+  const labelEl = document.getElementById("bot-credentials-label");
+  const thumbprintEl = document.getElementById("bot-credentials-cert-thumbprint");
+  const form = document.getElementById("bot-credentials-create-form");
+  const calls = [];
+  mod.setBotCredentialsHandlers({
+    onCreate: (payload) => calls.push(payload),
+  });
+
+  labelEl.value = "new-bot";
+  thumbprintEl.value = "ab12:" + "cd ".repeat(28) + "7f90";
+  form.dispatchEvent({ type: "submit" });
+
+  assert.deepEqual(calls, [{
+    label: "new-bot",
+    boundCertThumbprint: "AB12" + "CD".repeat(28) + "7F90",
+  }]);
+});
+
+test("invalid create thumbprint shows feedback and does not submit", () => {
+  const labelEl = document.getElementById("bot-credentials-label");
+  const thumbprintEl = document.getElementById("bot-credentials-cert-thumbprint");
+  const form = document.getElementById("bot-credentials-create-form");
+  const feedback = document.getElementById("bot-credentials-feedback");
+  let submitted = false;
+  mod.setBotCredentialsHandlers({
+    onCreate: () => { submitted = true; },
+  });
+
+  labelEl.value = "bad-bot";
+  thumbprintEl.value = "not-a-thumbprint";
+  form.dispatchEvent({ type: "submit" });
+
+  assert.equal(submitted, false);
+  assert.equal(feedback.hidden, false);
+  assert.match(feedback.textContent, /64 hexadecimal/);
+  assert.match(feedback.className, /error/);
+});
+
+test("edit pin calls handler with normalized value and clears on empty", () => {
+  const body = document.getElementById("bot-credentials-body");
+  const calls = [];
+  const dataset = {
+    id: "11111111-1111-1111-1111-111111111111",
+    label: "edit-bot",
+    thumbprint: "AB12" + "CD".repeat(28) + "7F90",
+  };
+  const editTarget = {
+    closest: (selector) => selector === ".bot-cred-edit-pin" ? { dataset } : null,
+  };
+  mod.setBotCredentialsHandlers({
+    onSetCertBinding: (payload) => calls.push(payload),
+  });
+
+  window.prompt = () => " 0011:" + "aa".repeat(28) + "eeff ";
+  body.dispatchEvent({ type: "click", target: editTarget });
+  window.prompt = () => " \n ";
+  body.dispatchEvent({ type: "click", target: editTarget });
+
+  assert.deepEqual(calls, [
+    {
+      id: dataset.id,
+      label: dataset.label,
+      boundCertThumbprint: "0011" + "AA".repeat(28) + "EEFF",
+    },
+    {
+      id: dataset.id,
+      label: dataset.label,
+      boundCertThumbprint: null,
+    },
+  ]);
 });
 
 test("openBotCredentialsSecretModal exposes the PAT once and close drops it", () => {

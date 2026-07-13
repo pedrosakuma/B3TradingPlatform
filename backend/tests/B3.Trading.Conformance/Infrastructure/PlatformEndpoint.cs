@@ -36,6 +36,7 @@ public sealed record PlatformEndpoint(
     public const string EnvSimulatorMode = "B3T_SIMULATOR_MODE";
     public const string EnvErInjection = "B3T_ER_INJECTION";
     public const string EnvRealStackConformance = "B3T_REAL_STACK_CONFORMANCE";
+    public const string EnvDockerControl = "B3T_DOCKER_CONTROL";
     public const string EnvAuthSigningKey = "B3T_AUTH_SIGNING_KEY";
     public const string EnvAuthIssuer = "B3T_AUTH_ISSUER";
     public const string EnvAuthAudience = "B3T_AUTH_AUDIENCE";
@@ -44,6 +45,13 @@ public sealed record PlatformEndpoint(
     public const string EnvFixpEndpoint = "B3T_FIXP_ENDPOINT";
     public const string EnvFixpTls = "B3T_FIXP_TLS";
     public const string EnvFixpCredentialToken = "B3T_FIXP_CREDENTIAL";
+
+    // mTLS conformance env vars (sub-issue F / RFC §8). The operator points
+    // these at a listener configured for client-cert auth and supplies a
+    // trusted client PFX; the matrix rows that need wrong-CA/expired/denied
+    // material are exercised by the in-process listener suite instead.
+    public const string EnvFixpMtlsClientPfx = "B3T_FIXP_MTLS_CLIENT_PFX";
+    public const string EnvFixpMtlsClientPfxPass = "B3T_FIXP_MTLS_CLIENT_PFX_PASS";
 
     public static PlatformEndpoint? TryResolve()
     {
@@ -114,6 +122,18 @@ public sealed record PlatformEndpoint(
     }
 
     /// <summary>
+    /// True when the operator declared the test process may actively control
+    /// the dockerized real-stack transport (env var
+    /// <c>B3T_DOCKER_CONTROL=true</c>). Used by destructive session-roll
+    /// specs that intentionally sever the matching-platform TCP leg.
+    /// </summary>
+    public static bool IsDockerControlEnabled()
+    {
+        var v = Environment.GetEnvironmentVariable(EnvDockerControl);
+        return string.Equals(v, "true", StringComparison.OrdinalIgnoreCase) || v == "1";
+    }
+
+    /// <summary>
     /// True when the operator wired the host's HS256 JWT signing key into
     /// the conformance environment via <c>B3T_AUTH_SIGNING_KEY</c>. Tests
     /// that need to mint deterministic tokens (e.g. expired-JWT rejection
@@ -152,6 +172,9 @@ public sealed record PlatformEndpoint(
     public const string RealStackConformanceSkipReason =
         "Real-stack scenario skipped: B3T_REAL_STACK_CONFORMANCE=true not set (host is not the docker-compose real-stack sandbox).";
 
+    public const string DockerControlSkipReason =
+        "Docker-control scenario skipped: B3T_DOCKER_CONTROL=true not set (test process cannot sever/reconnect the matching-platform transport).";
+
     public const string AuthSigningKeySkipReason =
         "Signing-key scenario skipped: B3T_AUTH_SIGNING_KEY not set (operator must mirror the host's Trading:Auth:SigningKey to mint deterministic tokens).";
 
@@ -161,4 +184,15 @@ public sealed record PlatformEndpoint(
 
     public const string FixpListenerSkipReason =
         "FIXP listener scenario skipped: B3T_FIXP_ENDPOINT not set.";
+
+    /// <summary>
+    /// True when an mTLS-enabled FIXP endpoint plus a trusted client PFX are
+    /// configured, so the SDK-as-client mTLS conformance rows can run.
+    /// </summary>
+    public static bool IsFixpMtlsConfigured() =>
+        IsFixpListenerConfigured() &&
+        !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(EnvFixpMtlsClientPfx));
+
+    public const string FixpMtlsSkipReason =
+        "FIXP mTLS scenario skipped: set B3T_FIXP_ENDPOINT + B3T_FIXP_MTLS_CLIENT_PFX (trusted client PFX).";
 }

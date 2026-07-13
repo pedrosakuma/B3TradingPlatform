@@ -36,7 +36,20 @@ let stopped = false;
 let attempt = 0;
 let reconnectTimer = null;
 let serverReady = false;
-let subscribeFlags = FLAGS.TRADES | FLAGS.INFO | FLAGS.MBP;
+// `Book` must be included so the server delivers the initial
+// `CandleSnapshot` sequence on subscribe (see B3MarketDataPlatform
+// docs/WEBSOCKET-PROTOCOL.md: "On subscribe (with `Book` flag) the
+// entire window is delivered as a sequence of `CandleSnapshot`
+// frames"). Live `CandleUpdate` frames ride the `Mbp` channel and were
+// already arriving, but state.js drops every CandleUpdate until a
+// snapshot with `isLast` sets `entry.ready = true` — without `Book` the
+// chart was stuck on "no candle snapshot received" forever, even
+// though trades were executing (tape/DOB have their own gates and
+// were unaffected). `Book` also delivers `BookSnapshot`/`BookCleared`/
+// `OrderAdded`/`Updated`/`Deleted`; the MBO order frames have no
+// decoder case and are safely ignored (mdProtocol.js parseOne default
+// case, forward-compat).
+let subscribeFlags = FLAGS.TRADES | FLAGS.INFO | FLAGS.MBP | FLAGS.BOOK;
 
 // Subscribed symbols. Keys are normalized (UPPERCASE, trimmed) so set
 // arithmetic is straightforward. Value is the resolved securityId once

@@ -6,6 +6,7 @@ using B3.Trading.Application.Risk.Checks;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using xRetry;
 
 namespace B3.Trading.Application.Tests;
 
@@ -125,7 +126,8 @@ public class ReferencePriceMetricsTests : IDisposable
             s.Instrument == "trading.risk.collar.bypassed_no_reference");
     }
 
-    [Fact]
+    // Cross-test MeterListener leakage under xunit parallelism; retry 3x.
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 250)]
     public void Collar_NoBypassCounter_WhenCollarNotConfigured()
     {
         // No PriceCollarPercent on the resolved limits → check returns

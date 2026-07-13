@@ -158,7 +158,8 @@ public sealed class AlgoEngine : BackgroundService
         PeggedRepegBook? peggedRepeg = null,
         PendingReplacementRegistry? replacements = null,
         RiskPipeline? risk = null,
-        IReplaceMarginCoordinator? replaceMargin = null)
+        IReplaceMarginCoordinator? replaceMargin = null,
+        SymbolDirectory? symbols = null)
     {
         _queue = queue;
         _algos = algos;
@@ -180,6 +181,49 @@ public sealed class AlgoEngine : BackgroundService
         _replacements = replacements;
         _risk = risk;
         _replaceMargin = replaceMargin;
+        _symbols = symbols;
+    }
+
+    /// <summary>
+    /// #518. Instrument lot-size table (optional, null-tolerant for test
+    /// compositions). Used by <see cref="ResolveLotSize"/> /
+    /// <see cref="RoundDownToLot"/> so every algo child slice is a whole
+    /// multiple of the instrument lot — otherwise the pre-trade
+    /// <c>MinLotSizeCheck</c> rejects the child and terminally suspends the
+    /// parent on round-lot venues (every B3 equity has lot 100).
+    /// </summary>
+    private readonly SymbolDirectory? _symbols;
+
+    /// <summary>
+    /// #518. Resolves the instrument lot size for <paramref name="symbol"/>,
+    /// or 1 when unknown / unconstrained (fail-open, mirroring
+    /// <c>MinLotSizeCheck</c>'s posture for unconfigured symbols).
+    /// </summary>
+    private long ResolveLotSize(string symbol)
+    {
+        if (_symbols is not null
+            && _symbols.TryGetSpec(symbol, out var spec)
+            && spec.LotSize is { } lot
+            && lot > 1)
+        {
+            return lot;
+        }
+        return 1;
+    }
+
+    /// <summary>
+    /// #518. Rounds <paramref name="qty"/> down to the largest whole
+    /// multiple of the instrument lot size. A no-op when the lot is 1 /
+    /// unknown or <paramref name="qty"/> is already aligned. A positive
+    /// sub-lot quantity floors to zero, which the slice dispatcher treats
+    /// as "defer this tick" rather than submitting an odd lot the venue
+    /// would reject.
+    /// </summary>
+    private long RoundDownToLot(string symbol, long qty)
+    {
+        if (qty <= 0) return qty;
+        var lot = ResolveLotSize(symbol);
+        return lot > 1 ? qty - (qty % lot) : qty;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -229,20 +273,26 @@ public sealed class AlgoEngine : BackgroundService
     }
 
     /// <summary>
-    /// Test-only deterministic adoption probe (#329 fix). Returns the
-    /// parent's currently-adopted child ClOrdID — i.e. the value the
-    /// modify path will read from <c>rt.LiveChildClOrdId</c> when the
-    /// next operator-modify signal is dispatched. The book carrying
-    /// the new child does NOT guarantee adoption has happened: the
-    /// ER processor first hydrates the child (visible in the book)
-    /// then enqueues a <see cref="ChildExecutionObservedSignal"/>;
+    /// Test-only deterministic adoption probe (#329, #434). Returns
+    /// the parent's currently-adopted child ClOrdID — i.e. the value
+    /// the modify path will read from <c>rt.LiveChildClOrdId</c> when
+    /// the next operator-modify signal is dispatched. The book
+    /// carrying the new child does NOT guarantee adoption has
+    /// happened: the ER processor first hydrates the child (visible
+    /// in the book) then enqueues a <see cref="ChildExecutionObservedSignal"/>;
     /// the engine consumer task processes that signal asynchronously
-    /// and only then updates <c>LiveChildClOrdId</c>. Tests that drive
-    /// successive modify cycles MUST poll this before issuing the
-    /// next modify, otherwise the engine still sees the prior child
-    /// and dispatches a replace with the wrong OriginalClOrdId.
-    /// Returns null when the parent runtime hasn't been created yet
-    /// or has no live child (e.g. mid-terminal transition).
+    /// and only then updates <c>LiveChildClOrdId</c>. Tests that
+    /// drive successive modify cycles MUST poll this before issuing
+    /// the next modify, otherwise the engine still sees the prior
+    /// child and dispatches a replace with the wrong OriginalClOrdId.
+    /// #434 ordering guarantee: by the time this probe observes the
+    /// new ClOrdID, <see cref="AlgoParentRuntime.RetireChildSlot"/>,
+    /// the <c>AlgoModifyRetiredChildEvictedTotal</c> counter bump and
+    /// the pegged-repeg resolution dispatch are ALL already committed
+    /// — adoption is published via a lock-fenced setter so prior
+    /// bookkeeping is happens-before visible to readers that observe
+    /// the flip. Returns null when the parent runtime hasn't been
+    /// created yet or has no live child (e.g. mid-terminal transition).
     /// </summary>
     internal ulong? TryGetLiveChildClOrdId(string firmId, ulong algoId)
     {
@@ -654,7 +704,7 @@ public sealed class AlgoEngine : BackgroundService
                     return;
                 }
                 var (qty, _, _, _) = ComputeVwapSlice(algo, vp, dueAt);
-                if (qty > 0) break;
+                if (RoundDownToLot(algo.Symbol, qty) > 0) break;
                 rt.NextSliceSeq++;
             }
         }
@@ -676,7 +726,7 @@ public sealed class AlgoEngine : BackgroundService
                 if (now < dueAt) return;
                 if (dueAt >= pp.EndUtc) return;
                 var (qty, _, _) = ComputePovSlice(algo, pp, rt, dueAt);
-                if (qty > 0) break;
+                if (RoundDownToLot(algo.Symbol, qty) > 0) break;
                 rt.NextSliceSeq++;
             }
         }
@@ -719,7 +769,16 @@ public sealed class AlgoEngine : BackgroundService
             && _ownership.TryResolveOrig(child.ClOrdId, out var origOfNew)
             && origOfNew == oldLive)
         {
-            rt.LiveChildClOrdId = child.ClOrdId;
+            // #434: All adoption-side bookkeeping (ChildBookedCum
+            // seed, RetireChildSlot + eviction counter, pegged repeg
+            // resolution) is performed BEFORE the LiveChildClOrdId
+            // flip below. The flip then publishes via a lock-fenced
+            // setter so any cross-thread reader (notably tests
+            // gating on TryGetLiveChildClOrdId) that observes the
+            // new ClOrdID is also guaranteed to observe the prior
+            // bookkeeping — closing the #347 / #345 / #329 race
+            // class where a "next modify cycle" or "assert counter"
+            // gate fired before the side state was committed.
             rt.ChildBookedCum[child.ClOrdId] = child.CumulativeQuantity;
 
             // #300 retrofit. Discriminate operator-modify adoption vs
@@ -811,6 +870,14 @@ public sealed class AlgoEngine : BackgroundService
                         new KeyValuePair<string, object?>("call_site", "algo.pegged.repeg-resolved"));
                 }
             }
+
+            // #434: Publish the adoption LAST. The lock-fenced setter
+            // (AlgoParentRuntime.LiveChildClOrdId) ensures all prior
+            // writes in this block — ChildBookedCum seed,
+            // RetiredChildSlots enqueue, counter Add, repeg book
+            // Remove dispatch — are happens-before visible to any
+            // reader that observes the new ClOrdID.
+            rt.LiveChildClOrdId = child.ClOrdId;
         }
 
         // Book the cum-quantity delta. Child orders deliver fills via
@@ -1528,9 +1595,30 @@ public sealed class AlgoEngine : BackgroundService
 
     private async Task SubmitNextSliceAsync(Algo algo, AlgoParentRuntime rt, CancellationToken ct)
     {
-        var (sliceQty, slicePrice) = ComputeNextSlice(algo);
+        var (rawQty, slicePrice) = ComputeNextSlice(algo);
+        // #518. Final lot-size invariant: no algo child leaves the engine
+        // with an odd lot the venue's MinLotSizeCheck would reject (which
+        // would terminally suspend the parent). VWAP/POV gaps and any
+        // partial-fill residue are floored to a whole lot here; TWAP
+        // (lot-unit plan), Iceberg/Pegged (lot-valid total/residue) are
+        // already aligned so this is a no-op for them on the happy path.
+        var sliceQty = RoundDownToLot(algo.Symbol, rawQty);
         if (sliceQty <= 0)
         {
+            // A positive quantity that floored to zero is a sub-lot residue
+            // (or sub-lot curve gap). It is NOT "nothing owed": submitting
+            // it would be risk-rejected and completing would strand the
+            // residue. Defer — a later tick (curve growth / fills) presents
+            // a full lot, or the window-expiry path retires the parent.
+            if (rawQty > 0)
+            {
+                if (algo.Type == AlgoType.Vwap || algo.Type == AlgoType.Pov)
+                    rt.NextSliceSeq++;
+                _logger.LogDebug(
+                    "Algo {AlgoId}/{Firm} ({Type}) owed sub-lot residue {Residue} (lot {Lot}); deferring slice.",
+                    algo.AlgoId, algo.FirmId, algo.Type, rawQty, ResolveLotSize(algo.Symbol));
+                return;
+            }
             if (algo.Type == AlgoType.Vwap || algo.Type == AlgoType.Pov)
             {
                 // VWAP/POV: empty slot — the parent is ahead of the
@@ -1548,8 +1636,24 @@ public sealed class AlgoEngine : BackgroundService
                 // next tick; we just no-op until the cache warms.
                 return;
             }
-            // Should be unreachable (RemainingQuantity == 0 is checked by
-            // callers) — defensive log + complete.
+            if (algo.RemainingQuantity > 0)
+            {
+                // #518. rawQty == 0 but the parent still owes quantity. This
+                // is reachable for TWAP when the lot table becomes
+                // authoritative AFTER admission (SDK SecurityDefinition
+                // overlay): an interior slice floors to zero in lot units
+                // while the remainder-bearing last slice still carries the
+                // outstanding quantity. Advancing the slot index lets that
+                // final slice (or, failing that, window expiry) work the
+                // residue. Completing here would silently strand it.
+                if (algo.Type == AlgoType.Twap)
+                    rt.NextSliceSeq++;
+                _logger.LogDebug(
+                    "Algo {AlgoId}/{Firm} ({Type}) produced an empty slice with {Remaining} remaining (lot {Lot}); deferring.",
+                    algo.AlgoId, algo.FirmId, algo.Type, algo.RemainingQuantity, ResolveLotSize(algo.Symbol));
+                return;
+            }
+            // Genuinely nothing owed (RemainingQuantity == 0) — terminalize.
             await RecordTerminalAsync(algo, rt, AlgoStatus.Completed, AlgoTerminalReason.None).ConfigureAwait(false);
             return;
         }
@@ -1841,7 +1945,8 @@ public sealed class AlgoEngine : BackgroundService
                     // alone — no separate persisted plan.
                     var rt = _runtime[(algo.FirmId, algo.AlgoId)];
                     var seq = rt.NextSliceSeq;
-                    var planned = TwapPlan.SliceQty(algo.TotalQuantity, tp.SliceCount, seq);
+                    var lot = ResolveLotSize(algo.Symbol);
+                    var planned = TwapPlan.SliceQty(algo.TotalQuantity, tp.SliceCount, seq, lot);
                     // Cap at remaining: fills from earlier slices may
                     // partially-cancel a slice and shift residue forward,
                     // so the planned quantity can exceed what's actually
@@ -2541,11 +2646,30 @@ public sealed class AlgoEngine : BackgroundService
     /// <summary>
     /// Mutable per-parent runtime state. Lives only in memory (not
     /// snapshotted) — recovery rebuilds it from the order book on engine
-    /// start. Not thread-safe; only the single consumer task touches it.
+    /// start. The engine consumer task is the sole writer for every
+    /// field; <see cref="LiveChildClOrdId"/> additionally publishes via
+    /// a lock-fenced setter/getter so cross-thread readers (notably
+    /// tests gating on <see cref="AlgoEngine.TryGetLiveChildClOrdId"/>)
+    /// observe the adoption flip strictly after every prior write in
+    /// the adoption block (#434).
     /// </summary>
     internal sealed class AlgoParentRuntime
     {
-        public ulong? LiveChildClOrdId;
+        // #434: backing field for the lock-fenced LiveChildClOrdId
+        // property below. Single-writer (engine consumer task) +
+        // occasional cross-thread reader (tests). The lock acts as
+        // a release-store on write and acquire-load on read so any
+        // bookkeeping mutated by the writer BEFORE assigning this
+        // field becomes happens-before visible to a reader that
+        // observes the new value.
+        private ulong? _liveChildClOrdId;
+        private readonly object _liveChildLock = new();
+
+        public ulong? LiveChildClOrdId
+        {
+            get { lock (_liveChildLock) return _liveChildClOrdId; }
+            set { lock (_liveChildLock) _liveChildClOrdId = value; }
+        }
         public int NextSliceSeq;
         public int RetryAttempts;
         public Dictionary<ulong, long> ChildBookedCum { get; } = new();
