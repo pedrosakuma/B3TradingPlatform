@@ -15,6 +15,7 @@
     <Project Path="backend/tests/B3.Trading.SimulatorBot.Tests/B3.Trading.SimulatorBot.Tests.csproj" />
     <Project Path="backend/tests/B3.Trading.EntryPointListener.Tests/B3.Trading.EntryPointListener.Tests.csproj" />
     <Project Path="backend/tests/B3.Trading.Reconciliation.Tests/B3.Trading.Reconciliation.Tests.csproj" />
+    <Project Path="backend/tests/B3.Trading.Architecture.Tests/B3.Trading.Architecture.Tests.csproj" />
   </Folder>
   <Folder Name="/backend/bench/">
     <Project Path="backend/bench/B3.Trading.Benchmarks/B3.Trading.Benchmarks.csproj" />
