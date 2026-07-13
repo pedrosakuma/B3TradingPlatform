@@ -18,7 +18,8 @@ public interface IUserBotCredentialRegistry
     Task<CreatedUserBotCredential> CreateAsync(
         string userId,
         string label,
-        CancellationToken ct);
+        CancellationToken ct,
+        string firmId = "default");
 
     /// <summary>
     /// Mints a new PAT for <paramref name="userId"/> with an optional
@@ -35,7 +36,8 @@ public interface IUserBotCredentialRegistry
         string userId,
         string label,
         string? boundCertThumbprint,
-        CancellationToken ct);
+        CancellationToken ct,
+        string firmId = "default");
 
     /// <summary>
     /// Sets, re-pins, or clears the client-certificate thumbprint pin on an

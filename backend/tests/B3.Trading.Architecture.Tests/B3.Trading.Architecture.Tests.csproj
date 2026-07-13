@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+
+  <!--
+    The architecture-test project is the one place that is DELIBERATELY
+    allowed to reference every production assembly at once: it inspects
+    their metadata-level assembly references to enforce the layering
+    seam (Domain/Application must stay off the wire SDK, etc.). It is a
+    governance harness, not a layer in the dependency graph.
+
+    Host is intentionally NOT referenced — it is an executable (the
+    composition root) and is allowed to reference everything, so there is
+    nothing to assert about it.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\B3.Trading.Domain\B3.Trading.Domain.csproj" />
+    <ProjectReference Include="..\..\src\B3.Trading.Application\B3.Trading.Application.csproj" />
+    <ProjectReference Include="..\..\src\B3.Trading.Infrastructure\B3.Trading.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\B3.Trading.Api\B3.Trading.Api.csproj" />
+    <ProjectReference Include="..\..\src\B3.Trading.EntryPointListener\B3.Trading.EntryPointListener.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+</Project>

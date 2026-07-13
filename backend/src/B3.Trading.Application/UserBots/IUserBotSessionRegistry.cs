@@ -16,7 +16,8 @@ public sealed record BotSessionPrincipal(
     string UserId,
     Guid CredentialId,
     string CredShortId,
-    string Label);
+    string Label,
+    string FirmId = "default");
 
 /// <summary>
 /// Persistent per-credential state managed by
