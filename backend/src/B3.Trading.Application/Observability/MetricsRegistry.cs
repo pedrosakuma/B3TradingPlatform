@@ -843,6 +843,20 @@ public static class MetricsRegistry
     public static readonly Counter<long> StopCheckSkippedNoRef =
         Meter.CreateCounter<long>("trading.risk.stop_check_skipped_no_ref");
 
+    // #433. Self-trade rejections at the pre-trade gate. Tagged with:
+    //   - scope: same_firm | cross_firm
+    //     same_firm: the contra order belongs to the same (firm, owner)
+    //     cross_firm: the contra order belongs to a different firm
+    //                 mapped to the same beneficial owner via the
+    //                 BeneficialOwners registry (CVM 168 práticas
+    //                 equitativas guard rail).
+    //   - mode: block (the only mode supported today; CancelOldest /
+    //                  CancelBoth wait on B3.EntryPoint SDK exposing
+    //                  SelfTradePreventionInstruction — see RFC
+    //                  pre-trade-risk-v2 §STP).
+    public static readonly Counter<long> SelfTradeRejected =
+        Meter.CreateCounter<long>("trading.risk.stp.rejected_total");
+
     // Per-symbol age (seconds) of the last live MD update held in the
     // MarketDataReferencePrice cache. Sourced from a callback registered
     // by the provider on construction (singleton). Symbols that have

@@ -149,6 +149,7 @@ public static class TradingRiskServiceCollectionExtensions
         services.AddSingleton<IRiskCheck, MaxOpenOrdersCheck>();
         services.AddSingleton<IRiskCheck, SubAccountLimitsCheck>();
         services.AddSingleton<IRiskCheck, NoNakedShortCheck>();
+        services.TryAddSingleton<IBeneficialOwnerResolver, OptionsBeneficialOwnerResolver>();
         services.AddSingleton<IRiskCheck, SelfTradePreventionCheck>();
         services.AddSingleton<IRiskCheck, PriceCollarCheck>();
         services.AddSingleton<IRiskCheck, PriceBandCheck>();

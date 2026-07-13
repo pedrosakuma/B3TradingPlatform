@@ -49,6 +49,15 @@ public sealed class RiskOptions
     /// only, no per-symbol override.
     /// </summary>
     public OrderRateOptions OrderRate { get; set; } = new();
+
+    /// <summary>
+    /// #433. Optional <c>owner_id → beneficial_owner_id</c> mapping for
+    /// cross-firm self-trade prevention. See
+    /// <see cref="IBeneficialOwnerResolver"/> for semantics. Unset
+    /// entries collapse to <c>BO == owner</c> (back-compat).
+    /// </summary>
+    public Dictionary<string, string> BeneficialOwners { get; set; } =
+        new(StringComparer.OrdinalIgnoreCase);
 }
 
 /// <summary>
@@ -222,6 +231,21 @@ public sealed class RiskLimits
     public bool? AllowSelfTrade { get; set; }
 
     /// <summary>
+    /// #433. When <c>true</c>, the self-trade prevention check also
+    /// scans working orders that belong to <em>other firms</em> of the
+    /// same beneficial owner (as resolved by
+    /// <see cref="B3.Trading.Application.Risk.IBeneficialOwnerResolver"/>).
+    /// Compliance gap covered by Instrução CVM 168 (práticas equitativas):
+    /// a single beneficial owner trading through two firms on this
+    /// platform must not wash-trade across them. Default semantics
+    /// when unset everywhere in the precedence chain are conservative:
+    /// cross-firm STP is <b>off</b> (same-firm scope only) — opt in by
+    /// setting <c>true</c> per-firm / per-end-client. Has no effect when
+    /// <see cref="AllowSelfTrade"/> is <c>true</c> (the latter wins).
+    /// </summary>
+    public bool? EnforceCrossFirmStp { get; set; }
+
+    /// <summary>
     /// Slice of #108. When <c>true</c>, Market orders are rejected
     /// unless the reference-price lookup returns
     /// <see cref="ReferencePriceSource.Live"/> — i.e. the live MD feed
@@ -385,6 +409,7 @@ public static class RiskLimitsResolver
             MaxOpenOrders = Resolve(opts, endClient, firmId, symbol, l => l.MaxOpenOrders),
             AllowShortSell = Resolve(opts, endClient, firmId, symbol, l => l.AllowShortSell),
             AllowSelfTrade = Resolve(opts, endClient, firmId, symbol, l => l.AllowSelfTrade),
+            EnforceCrossFirmStp = Resolve(opts, endClient, firmId, symbol, l => l.EnforceCrossFirmStp),
             MarketRequiresLiveRef = Resolve(opts, endClient, firmId, symbol, l => l.MarketRequiresLiveRef),
             AllowedOrderTypes = ResolveRef(opts, endClient, firmId, symbol,
                 l => l.AllowedOrderTypes,
