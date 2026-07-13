@@ -5,7 +5,7 @@ import { defaultBackend, defaultMarketDataUrl, login, signup, submitOrder, cance
          getKillStatus, killFirm, reviveFirm, killEndClient, reviveEndClient,
          getHaltStatus, haltSymbol, resumeSymbol,
          runEod,
-         listUserBotCredentials, createUserBotCredential, deleteUserBotCredential,
+         listUserBotCredentials, createUserBotCredential, setUserBotCredentialCertBinding, deleteUserBotCredential,
          getOrdersHistory, getExecutionsHistory, getPnlToday,
          getStatement, downloadStatementCsv,
          searchAuditLog, getFillTouch, downloadCvmReport, buildDropCopyWebSocketUrl,
@@ -154,6 +154,7 @@ function init() {
     onBack:     () => handleSwitchView("trader"),
     onRefresh:  refreshBotCredentials,
     onCreate:   handleCreateBotCredential,
+    onSetCertBinding: handleSetCertBinding,
     onRevoke:   handleRevokeBotCredential,
   });
   historyUi.setHistoryHandlers({
@@ -796,7 +797,13 @@ function startMdWorker() {
   // #394. mdWorker is now the sole depth source — trades + info + MBP.
   // The trading-host book.${symbol} fan-out was removed; FE consumes
   // B3MarketDataPlatform directly.
-  const flags = FLAGS.TRADES | FLAGS.INFO | FLAGS.MBP;
+  // `Book` is required too: per B3MarketDataPlatform docs/WEBSOCKET-PROTOCOL.md,
+  // the initial CandleSnapshot sequence is only sent "on subscribe with
+  // the Book flag" (CandleUpdate itself rides Mbp, but state.js drops
+  // every update until a completed snapshot sets `entry.ready`). Without
+  // it the chart never leaves "no candle snapshot received" even though
+  // trades are executing.
+  const flags = FLAGS.TRADES | FLAGS.INFO | FLAGS.MBP | FLAGS.BOOK;
   mdWorker.postMessage({
     type: "start",
     url: mdConfig.url,
@@ -1576,13 +1583,18 @@ async function refreshBotCredentials() {
   }
 }
 
-async function handleCreateBotCredential({ label }) {
+async function handleCreateBotCredential({ label, boundCertThumbprint = null }) {
   if (!session) return;
   const captured = session;
   botCredentialsUi.setCreateSubmitting(true);
   botCredentialsUi.setBotCredentialsFeedback(null);
   try {
-    const created = await createUserBotCredential(captured.backend, captured.token, label);
+    const created = await createUserBotCredential(
+      captured.backend,
+      captured.token,
+      label,
+      boundCertThumbprint,
+    );
     // Critical: if the user logged out (or a new user signed in) while
     // the POST was in flight, drop the plaintext PAT on the floor —
     // surfacing it to whoever is now in front of the browser would
@@ -1609,6 +1621,32 @@ async function handleCreateBotCredential({ label }) {
     if (session === captured) {
       botCredentialsUi.setCreateSubmitting(false);
     }
+  }
+}
+
+async function handleSetCertBinding({ id, label, boundCertThumbprint }) {
+  if (!session) return;
+  const captured = session;
+  botCredentialsUi.setBotCredentialsFeedback(null);
+  try {
+    await setUserBotCredentialCertBinding(
+      captured.backend,
+      captured.token,
+      id,
+      boundCertThumbprint,
+    );
+    if (session !== captured) return;
+    botCredentialsUi.setBotCredentialsFeedback(
+      boundCertThumbprint
+        ? `Credential "${label}" cert pin updated.`
+        : `Credential "${label}" cert pin cleared.`,
+      "ok");
+    await refreshBotCredentials();
+  } catch (err) {
+    if (session !== captured) return;
+    if (err?.status === 401) { logout(); return; }
+    botCredentialsUi.setBotCredentialsFeedback(
+      err?.message || "Failed to update credential cert pin.", "error");
   }
 }
 

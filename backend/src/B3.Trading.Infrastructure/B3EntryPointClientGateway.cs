@@ -117,6 +117,26 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     // snapshot. Null → detection still syncs CurrentSessionVerId but
     // performs no reap.
     private readonly IConnectSessionRollReactor? _connectSessionRollReactor;
+    private readonly Func<Up.ReconnectMode, Func<uint, uint>, CancellationToken, Task<Up.ReconnectOutcome>>? _reconnectAsyncOverride;
+    private readonly Action? _connectedTestHook;
+    // #565. The upstream SDK dials whatever `IPEndPoint` is on the
+    // `EntryPointClientOptions` instance it was constructed with — it never
+    // re-resolves the configured hostname itself (see
+    // B3.EntryPoint.Client.EntryPointClient.ReconnectAsync, which reads
+    // `_options.Endpoint.Address` verbatim). On Kubernetes the peer's pod IP
+    // changes across a failover/reschedule, so without re-resolving DNS
+    // before each attempt the reconnect loop keeps dialing a dead IP
+    // forever. The composition root closes over the shared
+    // `EntryPointClientOptions` and the original `host:port` string and
+    // hands us this callback to refresh `Endpoint` in place immediately
+    // before every `ReconnectAsync` attempt. Async + cancellable (rather
+    // than a blocking `Action`) so a slow/hung resolver during exactly the
+    // network incident this feature targets can't starve the thread pool
+    // or ignore shutdown; the composition root uses
+    // `Dns.GetHostAddressesAsync` under a bounded timeout tied to `ct`.
+    // Null → legacy behaviour (matches direct-construction tests and Mock
+    // mode, where there is no DNS to re-resolve).
+    private readonly Func<CancellationToken, Task>? _reResolveEndpoint;
 
     public B3EntryPointClientGateway(
         Up.EntryPointClient client,
@@ -136,7 +156,10 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         IRoutingInstructionResolver? routingInstructionResolver = null,
         bool terminateOnShutdown = true,
         Func<uint>? effectiveSessionVerIdProvider = null,
-        IConnectSessionRollReactor? connectSessionRollReactor = null)
+        IConnectSessionRollReactor? connectSessionRollReactor = null,
+        Func<CancellationToken, Task>? reResolveEndpoint = null,
+        Func<Up.ReconnectMode, Func<uint, uint>, CancellationToken, Task<Up.ReconnectOutcome>>? reconnectAsyncOverride = null,
+        Action? connectedTestHook = null)
     {
         _terminateOnShutdown = terminateOnShutdown;
         _client = client ?? throw new ArgumentNullException(nameof(client));
@@ -156,6 +179,9 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         _routingInstructionResolver = routingInstructionResolver;
         _effectiveSessionVerIdProvider = effectiveSessionVerIdProvider;
         _connectSessionRollReactor = connectSessionRollReactor;
+        _reResolveEndpoint = reResolveEndpoint;
+        _reconnectAsyncOverride = reconnectAsyncOverride;
+        _connectedTestHook = connectedTestHook;
         _client.Terminated += OnTerminated;
         _client.InboundGapAtReconnect += OnInboundGapAtReconnect;
         MetricsRegistry.RecordSessionVerId(_firmId, _currentSessionVerId);
@@ -233,21 +259,9 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// </summary>
     internal void ReconcileConnectSessionRoll()
     {
-        if (_effectiveSessionVerIdProvider is null) return;
-
         var prior = Volatile.Read(ref _currentSessionVerId);
-        uint effective;
-        try
-        {
-            effective = _effectiveSessionVerIdProvider();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex,
-                "Failed to read effective SessionVerId after connect for firm {Firm}; skipping session-roll reconcile.",
-                _firmId);
+        if (!TryReadEffectiveSessionVerId("connect", out var effective))
             return;
-        }
 
         if (effective <= prior) return;
 
@@ -290,9 +304,13 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// before <see cref="OnConnected"/>.
     ///
     /// <para>
-    /// On a <see cref="Up.ReconnectKind.Renegotiated"/> outcome the SDK fell
-    /// back from Establish-reuse to a fresh Negotiate because the venue
-    /// REJECTED the reuse — a confirmed session roll: the venue discarded our
+    /// Any reconnect outcome whose effective <c>SessionVerId</c> advanced past
+    /// the gateway's last confirmed baseline is treated as a confirmed session
+    /// roll. The common path is <see cref="Up.ReconnectKind.Renegotiated"/>
+    /// (venue rejected Establish-reuse and forced a fresh Negotiate), but a
+    /// previous failed renegotiate can also leave the SDK's local retry state on
+    /// the bumped verId and allow a later <see cref="Up.ReconnectKind.Reattached"/>
+    /// to that already-rolled session. In both cases the venue discarded the old
     /// working set, so un-acked PendingNew cannot exist and surviving
     /// Working / PartiallyFilled orders are ghosts that FIXP retransmission
     /// cannot resurrect. We hand the roll to the Application reactor (reap
@@ -313,7 +331,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// </summary>
     internal void ReconcileReconnectSessionRoll(Up.ReconnectKind kind, uint priorVerId, uint effectiveVerId)
     {
-        var confirmedRoll = kind == Up.ReconnectKind.Renegotiated && effectiveVerId > priorVerId;
+        var confirmedRoll = effectiveVerId > priorVerId;
         if (!confirmedRoll)
         {
             // Reattach (or a defensive no-advance Renegotiate): mirror the
@@ -347,6 +365,11 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         if (Interlocked.Exchange(ref _connectedState, 1) == 0)
             MetricsRegistry.EntryPointConnected.Add(1, FirmTag());
         MetricsRegistry.RecordSessionVerId(_firmId, _currentSessionVerId);
+        if (_connectedTestHook is not null)
+        {
+            _connectedTestHook();
+            return;
+        }
         StartEventLoop();
     }
 
@@ -985,7 +1008,11 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// <see cref="_currentSessionVerId"/> so reattached cycles do NOT
     /// trigger downstream session-rolled bookkeeping (see PR #420 /
     /// <see cref="SnapshotService"/>). Exponential backoff with jitter
-    /// guards the retry; exits cleanly on shutdown CT. On success the
+    /// guards the retry; exits cleanly on shutdown CT. Immediately before
+    /// each <c>ReconnectAsync</c> attempt, <see cref="_reResolveEndpoint"/>
+    /// (if wired) re-resolves the peer hostname so a matching-side pod IP
+    /// change (Kubernetes failover/reschedule) is picked up without a
+    /// trading-host restart (#565). On success the
     /// inbound event-loop is restarted via <see cref="StartEventLoop"/>
     /// so ER replay (FIXP retransmit) lands on the existing
     /// <c>ExecutionReportReceived</c> subscribers.
@@ -1007,11 +1034,22 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 var priorVerId = Volatile.Read(ref _currentSessionVerId);
                 try
                 {
+                    // #565. Re-resolve the peer hostname immediately before
+                    // dialing so a matching-side pod IP change (Kubernetes
+                    // failover/reschedule) is picked up on THIS attempt
+                    // rather than requiring a trading-host restart. Resolver
+                    // failures/timeouts are swallowed by the callback itself
+                    // (logged there) and fall through to ReconnectAsync with
+                    // the last-known endpoint — the existing backoff/retry
+                    // loop still applies if that's also unreachable.
+                    if (_reResolveEndpoint is not null)
+                        await _reResolveEndpoint(ct).ConfigureAwait(false);
+
                     // Selector is invoked at most once per ReconnectAsync —
                     // only when the SDK falls back to Negotiate after a
                     // recoverable Establish-reject. Reattach path skips it
                     // entirely, preserving the SessionVerID.
-                    var outcome = await _client.ReconnectAsync(
+                    var outcome = await ReconnectAsyncCore(
                         Up.ReconnectMode.EstablishReuseThenNegotiate,
                         BumpSessionVerIdSelector,
                         ct).ConfigureAwait(false);
@@ -1050,18 +1088,16 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                         new KeyValuePair<string, object?>("reason", ex.GetType().Name));
                     _logger.LogWarning(ex, "EntryPoint reconnect failed for firm {Firm} (attempt {N}, priorSessionVerId={Prior}); will retry.",
                         _firmId, attempt, priorVerId);
-                    // Defensive bump: if the failure happened past Negotiate
-                    // the SDK has already burned the next value, so reuse
-                    // would race with the peer's strict-monotonic guard.
-                    // Cheap to skip a few. Reattach path doesn't burn the
-                    // current value (Establish is idempotent on SessionVerID)
-                    // so the +1 is safe either way.
-                    try { _currentSessionVerId = checked(priorVerId + 1); }
-                    catch (OverflowException)
-                    {
-                        _logger.LogError("SessionVerId overflow for firm {Firm}; giving up.", _firmId);
-                        return;
-                    }
+                    // Keep our published baseline pinned to the last CONFIRMED
+                    // venue sessionVerId until a reconnect actually succeeds.
+                    // The SDK mutates its own local SessionVerId while probing
+                    // reuse→negotiate fallbacks, but a failed attempt does not
+                    // prove the venue accepted that value. Advancing our mirror
+                    // here can make the eventual Renegotiated success look like
+                    // prior==effective and skip stale-on-session-roll
+                    // reconciliation (#516). The SDK retains whatever local
+                    // retry state it needs internally; _currentSessionVerId is
+                    // only advanced on confirmed success paths.
                     var delay = ComputeBackoff(attempt);
                     try { await Task.Delay(delay, ct).ConfigureAwait(false); }
                     catch (OperationCanceledException) { return; }
@@ -1075,6 +1111,17 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         }
     }
 
+    internal Task ReconnectLoopForTestsAsync(CancellationToken ct)
+        => ReconnectLoopAsync(ct);
+
+    private Task<Up.ReconnectOutcome> ReconnectAsyncCore(
+        Up.ReconnectMode mode,
+        Func<uint, uint> selector,
+        CancellationToken ct)
+        => _reconnectAsyncOverride is not null
+            ? _reconnectAsyncOverride(mode, selector, ct)
+            : _client.ReconnectAsync(mode, selector, ct);
+
     /// <summary>
     /// SessionVerID selector for the SDK v0.14.4 reconnect API. Invoked
     /// only on the renegotiate fallback (Reattach skips it). Returns
@@ -1082,6 +1129,26 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// to <see cref="ReconnectLoopAsync"/> which short-circuits the loop.
     /// </summary>
     private static uint BumpSessionVerIdSelector(uint prior) => checked(prior + 1);
+
+    private bool TryReadEffectiveSessionVerId(string phase, out uint effective)
+    {
+        effective = 0;
+        if (_effectiveSessionVerIdProvider is null)
+            return false;
+
+        try
+        {
+            effective = _effectiveSessionVerIdProvider();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to read effective SessionVerId after {Phase} for firm {Firm}; leaving current baseline unchanged.",
+                phase, _firmId);
+            return false;
+        }
+    }
 
     private static string ReconnectKindTag(Up.ReconnectKind kind) => kind switch
     {

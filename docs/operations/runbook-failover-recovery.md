@@ -434,17 +434,34 @@ is **not** a back-office query. The two regimes are:
 | ≤ `SuspendedTimeoutMs` | `Reattached` | Venue kept the session **Suspended**; `SessionVerId` preserved | SDK auto Establish-reattach + `RetransmitRequest` replays the venue's per-session `RetransmitBuffer` (`PossResend=1`); our gateway consumes the replay and the **idempotent ER processor** (#16) dedupes it. **Working orders re-sync with no operator action.** |
 | > `SuspendedTimeoutMs` | `Renegotiated` | Venue **reaped** the session; Establish-reuse **rejected**; fresh Negotiate with a **bumped `SessionVerId`** | Genuinely unrecoverable on the wire — the venue discarded its per-session state. The gateway reconciles via the session-roll reactor: un-acked `PendingNew` are reaped and surviving `Working`/`PartiallyFilled` orders are flagged **stale** (#380 / #515). |
 
-`SuspendedTimeoutMs` is a **venue-side / matching-platform** setting (not
-a `B3.Trading.*` option) — it is owned by the FIXP peer, not configurable
-from this repo's compose overlays.
+`SuspendedTimeoutMs` remains a **venue-side / matching-platform** setting
+(not a `B3.Trading.*` option), but the real-stack conformance overlay now
+mounts a dedicated matching bridge config with a shorter value so this
+boundary can be exercised deterministically in seconds during CI and local
+real-stack runs.
+
+Separately, a full matching-platform **process restart** is stricter than a
+mere TCP partition: upstream issue
+[`pedrosakuma/B3MatchingPlatform#405`](https://github.com/pedrosakuma/B3MatchingPlatform/issues/405)
+tracks that FIXP session state still lives in matching's process memory
+only, so `docker compose restart matching-platform` necessarily forces a
+fresh Negotiate / bumped `SessionVerId` even when the venue book + WAL are
+intact. Operators should therefore expect the same stale-on-roll behavior as
+the `> SuspendedTimeoutMs` row above, but with the venue's resting book still
+potentially alive underneath the advisory stale flags.
 
 **Detect.**
-- `Reattached` is silent and self-healing; look for
-  `EntryPoint reconnect ok … kind=Reattached` in trading-host logs and a
-  burst of duplicate-inbound metric (`EntryPointDuplicateInbound`,
-  expected during retransmit).
-- `Renegotiated` surfaces as `kind=Renegotiated`, a jump in
-  `RecordSessionVerId`, and the auto-stale counters
+- First classify by whether `RecordSessionVerId` advanced. Any reconnect that
+  comes back on a higher effective `SessionVerId` is a real session roll even
+  if the SDK labels the reconnect as `Reattached`; expect the same stale-on-roll
+  behavior as an explicit `Renegotiated`.
+- Non-advancing `Reattached` reconnects are the silent/self-healing case; look
+  for `EntryPoint reconnect ok … kind=Reattached` in trading-host logs and a
+  burst of duplicate-inbound metric (`EntryPointDuplicateInbound`, expected
+  during retransmit).
+- Advanced-session reconnects surface as either `kind=Renegotiated` or
+  `kind=Reattached` plus a `RecordSessionVerId` jump, together with the
+  auto-stale counters
   `trading.entrypoint.orders_auto_staled{reason=session_rolled}` /
   `trading.entrypoint.session_roll_stale_reconcile_failed`
   ([`MetricsRegistry.cs`](../../backend/src/B3.Trading.Application/Observability/MetricsRegistry.cs)).
@@ -453,10 +470,10 @@ from this repo's compose overlays.
   `GET /orders/history`.
 
 **Triage.**
-1. Confirm the `ReconnectKind` from the reconnect log line — this alone
-   tells you whether the orders were recoverable (Reattached) or are
-   genuine ghosts (Renegotiated).
-2. On `Renegotiated`, the stale flag is **expected and correct**, not a
+1. Confirm whether `SessionVerId` advanced across the reconnect. A bumped
+   effective version means the old working set is no longer authoritative,
+   regardless of whether the log line says `Reattached` or `Renegotiated`.
+2. On any advanced-version reconnect, the stale flag is **expected and correct**, not a
    bug: the venue reaped the session, so the platform cannot trust its
    working set without operator confirmation.
 3. If `session_roll_stale_reconcile_failed` fired, the staling phase hit
@@ -477,9 +494,25 @@ from this repo's compose overlays.
 
 **Verify.**
 - After `Reattached`: working orders present pre-disconnect are still
-  live and not flagged stale.
+  live and not flagged stale; the platform should also accept a fresh
+  order, surface it as `Working` in `GET /orders`, and let it execute to
+  `Filled`.
 - After `Renegotiated`: surviving `Working`/`PartiallyFilled` orders for
-  the rolled firm are flagged stale; un-acked `PendingNew` are cancelled.
+  the rolled firm are flagged stale; un-acked `PendingNew` are cancelled;
+  fresh post-reconnect orders should still trade through to `Filled`
+  even though the older survivors remain operator-review stale.
+- The real-stack contract is covered end-to-end by
+  [`backend/tests/B3.Trading.Conformance/Spec_FIXP_SessionRoll/SuspendedTimeoutBoundarySpecTests.cs`](../../backend/tests/B3.Trading.Conformance/Spec_FIXP_SessionRoll/SuspendedTimeoutBoundarySpecTests.cs)
+  (requires the docker-compose real-conformance overlay, which mounts the
+  docker CLI/socket into the conformance runner so the spec can
+  disconnect/reconnect the matching-platform network leg, then proves
+  both recovery paths still support a full post-reconnect order
+  round-trip), and by
+  [`backend/tests/B3.Trading.Conformance/Spec_FIXP_SessionRoll/MatchingPlatformRestartSpecTests.cs`](../../backend/tests/B3.Trading.Conformance/Spec_FIXP_SessionRoll/MatchingPlatformRestartSpecTests.cs)
+  which restarts the matching-platform process itself, proves that the host
+  takes the forced-`Renegotiated` stale path, and then contract-proves the
+  venue book survived the restart by filling the pre-restart stale survivor
+  after recovery before asserting a fresh post-restart trade round-trip.
 - The boundary policy is unit-covered by
   [`backend/tests/B3.Trading.Application.Tests/GatewayConnectSessionRollTests.cs`](../../backend/tests/B3.Trading.Application.Tests/GatewayConnectSessionRollTests.cs)
   (Reattached → no reactor; Renegotiated → reap + stale) and
@@ -851,9 +884,17 @@ boots a full compose stack and is too expensive to gate every PR.
 
 ### 6.4 Validation invariants
 
-The chaos drill checks operational symptoms. The deeper "no event
-loss across an ungraceful restart" invariant is also tested in pure
-.NET as
+The chaos drill checks operational symptoms. The real-stack API/WAL
+recovery contract is additionally covered by
+[`backend/tests/B3.Trading.Conformance/Spec_Recovery/TradingHostCrashRestartSpecTests.cs`](../../backend/tests/B3.Trading.Conformance/Spec_Recovery/TradingHostCrashRestartSpecTests.cs),
+which `docker kill -s SIGKILL`s `b3-trading-host`, waits for the host to
+be down, then restarts it and proves both that pre-crash working-order
+and cash/position/P&L state are still queryable **and** that a fill
+generated during the outage window by the independent FIXP counterparty
+session `10102` is replayed on recovery
+instead of being lost/stuck as `Working`.
+The deeper "no event loss across an ungraceful restart" invariant is
+also tested in pure .NET as
 `UngracefulStop_NoFlush_RecoversToLastFlushedSeq_NoTornWriteFalsePositives`
 in
 [`backend/tests/B3.Trading.Application.Tests/Persistence/RecoveryAndSnapshotTests.cs`](../../backend/tests/B3.Trading.Application.Tests/Persistence/RecoveryAndSnapshotTests.cs).

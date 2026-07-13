@@ -14,10 +14,24 @@ export function defaultBackend() {
 
 // Default WebSocket endpoint for the OPTIONAL B3MarketDataPlatform feed
 // (DOB / candles / trade prints). Distinct origin from the trader WS, so
-// it can't go through the nginx reverse-proxy. Convention: same host as
-// the page, port 8081, /ws path. Returns "" off-localhost so non-dev
-// deployments don't auto-attempt a guess that's likely wrong.
+// it can't go through the nginx reverse-proxy.
+//
+// Resolution order (#572):
+//   1. window.__B3_CONFIG__.marketDataWsUrl, if set — a deploy-time default
+//      rendered into js/env.js from the MARKETDATA_WS_URL env var (see
+//      env.js.template / 20-render-env-js.sh), the same pattern
+//      TRADING_UPSTREAM already uses for nginx.conf.template. Lets each
+//      orchestrator (docker-compose dev, b3deploy prod, ...) ship the
+//      correct host/port without every operator pasting it in by hand.
+//   2. The localhost/127.0.0.1 dev docker-compose convention: same host as
+//      the page, port 8081, /ws path.
+//   3. "" — non-dev deployments with no config shouldn't auto-attempt a
+//      guess that's likely wrong; the Market Data panel's manual override
+//      still works exactly as before.
 export function defaultMarketDataUrl() {
+  const configured = globalThis.window?.__B3_CONFIG__?.marketDataWsUrl;
+  if (typeof configured === "string" && configured !== "") return configured;
+
   if (location.protocol !== "http:" && location.protocol !== "https:") return "";
   if (location.hostname !== "localhost" && location.hostname !== "127.0.0.1") return "";
   const wsScheme = location.protocol === "https:" ? "wss:" : "ws:";
@@ -386,7 +400,7 @@ export async function downloadStatementCsv(backend, token, dayKey) {
 // scopes by JWT, so no user-id parameter is sent. Cross-user reads/writes
 // always 404, so the UI only ever sees its own caller's rows.
 
-// GET /api/user-bot-credentials -> [{ id, label, credShortId, createdAtUtc, revokedAt }]
+// GET /api/user-bot-credentials -> [{ id, label, credShortId, createdAtUtc, revokedAt, boundCertThumbprint }]
 // Read-side DTO; never includes the bearer secret.
 //
 // ── User-bot credentials (sub-issue #169 of RFC user-bot-fixp-listener-v0).
@@ -400,18 +414,43 @@ export async function listUserBotCredentials(backend, token) {
   return jsonOrThrow(resp);
 }
 
-// POST /api/user-bot-credentials { label } -> 201 with the same shape
-// PLUS a `plainSecret` field. This is the ONLY response that carries
+// POST /api/user-bot-credentials { label, boundCertThumbprint? } -> 201
+// with the same shape PLUS a `plainSecret` field. This is the ONLY response that carries
 // the plaintext PAT (`b3t_xxx_yyy`) — the platform discards the secret
 // after returning it, so callers MUST surface it to the user immediately.
+// `boundCertThumbprint` is a non-secret nullable SHA-256 client-cert pin
+// (64 uppercase hex chars) and may be omitted/empty to leave the credential
+// unpinned.
 // Never persist `plainSecret` to storage; keep it in component state and
 // drop it as soon as the user dismisses the "shown once" modal.
-export async function createUserBotCredential(backend, token, label) {
+export async function createUserBotCredential(backend, token, label, boundCertThumbprint = null) {
+  const body = { label };
+  const normalizedThumbprint = String(boundCertThumbprint ?? "").trim();
+  if (normalizedThumbprint) body.boundCertThumbprint = normalizedThumbprint;
   const resp = await fetch(`${backend}/api/user-bot-credentials`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ label }),
+    body: JSON.stringify(body),
   });
+  return jsonOrThrow(resp);
+}
+
+// PUT /api/user-bot-credentials/{id}/cert-binding { boundCertThumbprint }
+// -> 204 on success, 404 if the credential never belonged to this user,
+// 400 if the nullable non-secret SHA-256 client-cert pin is malformed.
+// Send null (or an empty value that normalizes to null here) to clear it.
+export async function setUserBotCredentialCertBinding(backend, token, id, boundCertThumbprint) {
+  const normalizedThumbprint = String(boundCertThumbprint ?? "").trim();
+  const resp = await fetch(
+    `${backend}/api/user-bot-credentials/${encodeURIComponent(id)}/cert-binding`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        boundCertThumbprint: normalizedThumbprint ? normalizedThumbprint : null,
+      }),
+    });
+  if (resp.status === 204) return null;
   return jsonOrThrow(resp);
 }
 

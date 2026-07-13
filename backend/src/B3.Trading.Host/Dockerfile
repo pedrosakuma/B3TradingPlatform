@@ -6,7 +6,14 @@
 # referenced projects all live there). Compose uses `context: ..`.
 
 # ---------- build ----------
-FROM mcr.microsoft.com/dotnet/sdk:10.0.201 AS build
+# Pin the build stage to the *builder's* native platform so the .NET SDK
+# never runs under QEMU emulation (that is 5-10x slower and flaky). We then
+# cross-publish for the requested target arch via `-a $TARGETARCH`: the SDK
+# maps the Docker arch names (amd64/arm64) to the matching linux-x64 /
+# linux-arm64 RID and pulls the correct runtime pack. The final `aspnet`
+# runtime image below is multi-arch, so buildx resolves the right variant.
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0.201 AS build
+ARG TARGETARCH
 WORKDIR /src
 
 # Copy the things that change rarely first so the restore layer caches well.
@@ -15,10 +22,10 @@ COPY backend/Directory.Packages.props ./backend/
 COPY backend/src ./backend/src
 
 WORKDIR /src/backend/src/B3.Trading.Host
-RUN dotnet restore --use-current-runtime
+RUN dotnet restore -a $TARGETARCH
 RUN dotnet publish \
         --configuration Release \
-        --use-current-runtime \
+        -a $TARGETARCH \
         --no-restore \
         --output /app/publish \
         -p:PublishSingleFile=false \
