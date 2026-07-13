@@ -47,7 +47,7 @@ namespace B3.Trading.Application.Tests;
 public class B3EntryPointSdkTripwireTests
 {
     private static readonly string[] SubAccountAliases = ["SubAccount", "SubAcct", "SubaccountId"];
-    private static readonly string[] ExecInstAliases   = ["ExecInst", "ExecutionInstruction", "ExecutionInstructions"];
+    private static readonly string[] ExecInstAliases = ["ExecInst", "ExecutionInstruction", "ExecutionInstructions"];
     private static readonly string[] DisplayPolicyAliases = ["DisplayResetPolicy", "RefreshPolicy", "DisplayRefreshPolicy"];
 
     [Fact]
