@@ -43,6 +43,16 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     private readonly EntryPointListenerOptions _options;
     private readonly TimeProvider _clock;
     private readonly string _connectionId;
+
+    /// <summary>
+    /// The validated client certificate captured during the TLS handshake
+    /// (RFC user-bot-fixp-mtls-v0 §4.3), or null when no cert was presented
+    /// (Optional mode) or mTLS is off. Consumed by the Negotiate-time
+    /// per-credential thumbprint pin check (sub-issue D / #540).
+    /// </summary>
+    internal System.Security.Cryptography.X509Certificates.X509Certificate2? ClientCertificate
+        => _clientCertificate;
+    private readonly System.Security.Cryptography.X509Certificates.X509Certificate2? _clientCertificate;
     private readonly FixpHandshakeStateMachine _sm = new();
 
     private long _nextExpectedInboundSeq = 1;
@@ -72,7 +82,8 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         EntryPointListenerOptions? options = null,
         TimeProvider? clock = null,
         RateLimiterRegistry? rateLimiter = null,
-        UserSessionCounter? sessionCounter = null)
+        UserSessionCounter? sessionCounter = null,
+        System.Security.Cryptography.X509Certificates.X509Certificate2? clientCertificate = null)
     {
         _tcpClient = tcpClient;
         _stream = stream;
@@ -86,6 +97,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         _options = options ?? new EntryPointListenerOptions();
         _clock = clock ?? TimeProvider.System;
         _logger = logger;
+        _clientCertificate = clientCertificate;
         _connectionId = Guid.NewGuid().ToString("N");
         _lastOutboundTicks = _clock.GetUtcNow().UtcTicks;
     }
@@ -104,10 +116,11 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         EntryPointListenerOptions? options = null,
         TimeProvider? clock = null,
         RateLimiterRegistry? rateLimiter = null,
-        UserSessionCounter? sessionCounter = null)
+        UserSessionCounter? sessionCounter = null,
+        System.Security.Cryptography.X509Certificates.X509Certificate2? clientCertificate = null)
         : this(tcpClient, tcpClient.GetStream(), credentials, sessions, logger,
                orders, connectionDirectory, outboundCoordinator, options, clock,
-               rateLimiter, sessionCounter)
+               rateLimiter, sessionCounter, clientCertificate)
     {
     }
 
@@ -502,6 +515,26 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
                 "fixp.negotiate.reject reason=CREDENTIALS remote={Remote}",
                 remote);
             FixpListenerMetrics.NegotiateTotal.Add(1, new KeyValuePair<string, object?>("outcome", "reject:credentials"));
+            await WriteNegotiateRejectAsync(stream, sessionId, sessionVerId,
+                NegotiationRejectCode.CREDENTIALS, ct).ConfigureAwait(false);
+            _sm.ForceTerminated();
+            return false;
+        }
+
+        // mTLS cert↔credential binding (RFC user-bot-fixp-mtls-v0 §4.3). When a
+        // credential is pinned, the client cert presented during the TLS
+        // handshake (stashed on the connection) must match by SHA-256
+        // thumbprint. Under Optional mode a certless connection is admissible,
+        // so the pin is enforced only when a cert was actually presented; under
+        // Required mode a cert is always present so the pin always applies.
+        if (credential.BoundCertThumbprint is { } pinnedThumbprint &&
+            _clientCertificate is not null &&
+            !ThumbprintMatches(_clientCertificate, pinnedThumbprint))
+        {
+            _logger.LogWarning(
+                "fixp.mtls.binding_mismatch credShortId={CredShortId} userId={UserId} remote={Remote}",
+                credential.CredShortId, credential.UserId, remote);
+            FixpListenerMetrics.NegotiateTotal.Add(1, new KeyValuePair<string, object?>("outcome", "reject:binding_mismatch"));
             await WriteNegotiateRejectAsync(stream, sessionId, sessionVerId,
                 NegotiationRejectCode.CREDENTIALS, ct).ConfigureAwait(false);
             _sm.ForceTerminated();
@@ -1274,6 +1307,54 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Constant-time check that <paramref name="certificate"/>'s SHA-256
+    /// thumbprint equals the credential's pinned <paramref name="expectedHex"/>
+    /// (RFC §4.3). <paramref name="expectedHex"/> is canonical upper-case
+    /// 64-hex (validated at the registry); a malformed pin can never match.
+    /// The comparison is done over the raw 32-byte hashes via
+    /// <see cref="System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(ReadOnlySpan{byte}, ReadOnlySpan{byte})"/>
+    /// so it does not leak via timing.
+    /// </summary>
+    private static bool ThumbprintMatches(
+        System.Security.Cryptography.X509Certificates.X509Certificate2 certificate,
+        string expectedHex)
+    {
+        if (expectedHex.Length != 64)
+            return false;
+
+        Span<byte> expected = stackalloc byte[32];
+        if (!TryParseHex(expectedHex, expected))
+            return false;
+
+        var actual = certificate.GetCertHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+        return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(actual, expected);
+    }
+
+    private static bool TryParseHex(ReadOnlySpan<char> hex, Span<byte> destination)
+    {
+        if (hex.Length != destination.Length * 2)
+            return false;
+
+        for (var i = 0; i < destination.Length; i++)
+        {
+            var hi = FromHexNibble(hex[i * 2]);
+            var lo = FromHexNibble(hex[(i * 2) + 1]);
+            if (hi < 0 || lo < 0)
+                return false;
+            destination[i] = (byte)((hi << 4) | lo);
+        }
+        return true;
+    }
+
+    private static int FromHexNibble(char c) => c switch
+    {
+        >= '0' and <= '9' => c - '0',
+        >= 'a' and <= 'f' => c - 'a' + 10,
+        >= 'A' and <= 'F' => c - 'A' + 10,
+        _ => -1,
+    };
 
     /// <summary>
     /// Extracts the <c>Credentials</c> var-data group that follows the

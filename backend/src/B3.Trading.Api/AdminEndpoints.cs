@@ -12,6 +12,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace B3.Trading.Api;
@@ -46,13 +47,23 @@ public static class AdminEndpoints
         // restart — losing a halt on crash would be the worst
         // possible default for a safety control.
         group.MapGet("/halts", (SymbolHaltService svc) =>
-            Results.Ok(new { Symbols = svc.ListHalted() }));
+            Results.Ok(new
+            {
+                // Back-compat: the flat symbol list pre-#370 callers
+                // (and existing tests) deserialise.
+                Symbols = svc.ListHalted(),
+                // #370 Stage A: additive per-symbol origin so the
+                // operator UI can label a halt "operator" vs "venue"
+                // vs both, and reason about who must clear it.
+                Halts = svc.ListHaltedWithOrigin()
+                    .Select(e => new { e.Symbol, Origin = HaltOriginLabel(e.Flags) }),
+            }));
 
-        group.MapPost("/halts/{symbol}", (string symbol, HttpContext ctx, SymbolHaltService svc, EventDispatcher dispatcher, IAuditLogger audit) =>
-            ToggleHalt(dispatcher, audit, symbol, halted: true, ctx, () => svc.Halt(symbol)));
+        group.MapPost("/halts/{symbol}", (string symbol, HttpContext ctx, SymbolHaltService svc, EventDispatcher dispatcher, IAuditLogger audit, ILoggerFactory loggerFactory) =>
+            ToggleHalt(dispatcher, audit, svc, loggerFactory, symbol, halted: true, ctx));
 
-        group.MapDelete("/halts/{symbol}", (string symbol, HttpContext ctx, SymbolHaltService svc, EventDispatcher dispatcher, IAuditLogger audit) =>
-            ToggleHalt(dispatcher, audit, symbol, halted: false, ctx, () => svc.Resume(symbol)));
+        group.MapDelete("/halts/{symbol}", (string symbol, HttpContext ctx, SymbolHaltService svc, EventDispatcher dispatcher, IAuditLogger audit, ILoggerFactory loggerFactory) =>
+            ToggleHalt(dispatcher, audit, svc, loggerFactory, symbol, halted: false, ctx));
 
         // ── Session phase (#108) ──────────────────────────────────
         // Per-symbol override + global default trading phase. Drives
@@ -585,10 +596,11 @@ public static class AdminEndpoints
     private static IResult ToggleHalt(
         EventDispatcher dispatcher,
         IAuditLogger audit,
+        SymbolHaltService svc,
+        ILoggerFactory loggerFactory,
         string symbol,
         bool halted,
-        HttpContext ctx,
-        Action mutate)
+        HttpContext ctx)
     {
         var actor = ctx.User.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
         try
@@ -606,12 +618,39 @@ public static class AdminEndpoints
                     Symbol = symbol,
                     Halted = halted,
                     ActorUserId = actor,
-                    Origin = B3.Trading.Application.MarketData.HaltOrigin.Operator,
+                    Origin = HaltOrigin.Operator,
                 },
-                mutate);
+                // The operator surface only ever touches the operator
+                // origin flag; a venue halt observed via market data is
+                // independent (see SymbolHaltService / HaltOrigin).
+                () =>
+                {
+                    if (halted) svc.Halt(symbol, HaltOrigin.Operator);
+                    else svc.Resume(symbol, HaltOrigin.Operator);
+                });
             MetricsRegistry.SymbolHaltToggled.Add(1,
                 new KeyValuePair<string, object?>("halted", halted),
                 new KeyValuePair<string, object?>("origin", "operator"));
+
+            // #370 Stage A exit criterion: an operator resume clears
+            // only the operator flag. If the venue still has the symbol
+            // halted, the symbol stays halted — warn loudly and tell the
+            // caller so nobody assumes the ticket is tradeable again.
+            if (!halted && svc.IsHaltedBy(symbol, HaltOrigin.Venue))
+            {
+                loggerFactory
+                    .CreateLogger("B3.Trading.Api.AdminEndpoints.Halts")
+                    .LogWarning(
+                        "Operator resume for {Symbol} cleared the operator halt, but the venue still has it halted; the symbol remains halted until the venue resumes.",
+                        symbol);
+                return Results.Ok(new
+                {
+                    symbol,
+                    resumed = false,
+                    stillHaltedBy = "venue",
+                    detail = "Operator halt cleared, but the venue still has this symbol halted. It remains halted until the venue resumes.",
+                });
+            }
             return Results.NoContent();
         }
         catch (WalBackpressureException ex)
@@ -622,6 +661,24 @@ public static class AdminEndpoints
                 new { error = "system busy (WAL backpressure)", detail = ex.Message },
                 statusCode: StatusCodes.Status503ServiceUnavailable);
         }
+    }
+
+    /// <summary>
+    /// Maps the <see cref="SymbolHaltEntry.Flags"/> bitmask
+    /// (Operator=1, Venue=2) to a stable label for the admin halt
+    /// listing. "operator+venue" means both origins hold the halt and
+    /// it stays halted until both clear.
+    /// </summary>
+    private static string HaltOriginLabel(byte flags)
+    {
+        var hasOperator = (flags & (1 << (int)HaltOrigin.Operator)) != 0;
+        var hasVenue = (flags & (1 << (int)HaltOrigin.Venue)) != 0;
+        return (hasOperator, hasVenue) switch
+        {
+            (true, true) => "operator+venue",
+            (false, true) => "venue",
+            _ => "operator",
+        };
     }
     private static IResult ChangeSessionPhase(
         EventDispatcher dispatcher,

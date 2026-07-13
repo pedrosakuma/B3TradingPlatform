@@ -802,6 +802,6 @@ the gateway.
   `UserBotCredential.FirmId`, multi-session-per-firm routing.
 - **user-bot-fixp-marketdata-v0** — adding MD over the same channel
   if bots demand it.
-- **user-bot-fixp-mtls-v0** — cert-based auth, CA management.
+- **user-bot-fixp-mtls-v0** — cert-based auth, CA management. ([RFC](./user-bot-fixp-mtls-v0.md), [#528](https://github.com/pedrosakuma/B3TradingPlatform/issues/528))
 - **user-bot-fixp-rotation-v0** — overlap-window credential rotation
   if revoke+regenerate cadence becomes operational pain.

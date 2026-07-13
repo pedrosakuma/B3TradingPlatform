@@ -382,7 +382,8 @@ public sealed class StateSnapshotter
         {
             var c = raw.UserBotCredentials[i];
             creds.Add(new UserBotCredentialSnapshot(
-                c.Id, c.UserId, c.CredShortId, c.Label, c.SecretHash, c.CreatedAtUtc, c.RevokedAtUtc));
+                c.Id, c.UserId, c.CredShortId, c.Label, c.SecretHash, c.CreatedAtUtc, c.RevokedAtUtc,
+                c.FirmId, c.BoundCertThumbprint));
         }
         // Match the legacy InMemoryUserBotCredentialRegistry.Snapshot()
         // ordering: stable by (CreatedAtUtc, Id) so snapshot diffs stay
@@ -1172,10 +1173,14 @@ public sealed class EventReplayer
                     ubc.CreatedAtUtc, RevokedAtUtc: null,
                     // #431 — events emitted before firm attribution rolled out
                     // hydrate as the legacy "default" sentinel.
-                    FirmId: string.IsNullOrEmpty(ubc.FirmId) ? "default" : ubc.FirmId));
+                    FirmId: string.IsNullOrEmpty(ubc.FirmId) ? "default" : ubc.FirmId,
+                    BoundCertThumbprint: ubc.BoundCertThumbprint));
                 break;
             case UserBotCredentialRevokedEvent ubr:
                 _userBotCredentials?.ApplyRevoked(ubr.Id, ubr.RevokedAtUtc);
+                break;
+            case UserBotCredentialCertBindingChangedEvent ubcb:
+                _userBotCredentials?.ApplyCertBindingChanged(ubcb.Id, ubcb.BoundCertThumbprint);
                 break;
             case BotSessionInitializedEvent bsi:
                 _userBotSessions?.ApplyInitialized(new BotSessionState(

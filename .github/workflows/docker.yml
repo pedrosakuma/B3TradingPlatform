@@ -24,12 +24,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -37,7 +40,7 @@ jobs:
 
       - name: Compute image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository_owner }}/b3-trading-host
           tags: |
@@ -49,10 +52,11 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: backend/src/B3.Trading.Host/Dockerfile
+          platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -67,12 +71,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -80,7 +87,7 @@ jobs:
 
       - name: Compute image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository_owner }}/b3-trading-frontend
           tags: |
@@ -92,10 +99,11 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: frontend
           file: frontend/Dockerfile
+          platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -145,6 +153,26 @@ jobs:
               -f docker/docker-compose.er-injection.yml \
               config --quiet
 
+      - name: docker compose config (public overlay)
+        # The public overlay (#531) fails closed: every secret/cert uses
+        # `${VAR:?}`. Set validate-only placeholders so the merged file
+        # parses. Validate-only — never boots the host.
+        env:
+          TRADING_AUTH_SIGNING_KEY: validate-only-placeholder-key-min-32-bytes-long-aaaaa
+          TRADING_SEED_PASSWORD_HASH: ZDzDHANAHq8NDQK3BWk/YZjybKLCMKdRzw0z9Da5wic=
+          TRADING_SEED_PASSWORD_SALT: rXA+be7/gEYYZQrQDsUr2g==
+          TRADING_CVM_OWNER_HASH_SALT: validate-only-cvm-salt
+          TRADING_CLORDID_MASK_SALT: validate-only-clordid-mask-salt
+          PUBLIC_FIXP_TLS_DIR: /tmp/fixp-tls
+          PUBLIC_FIXP_TLS_CERT: /etc/ssl/fixp/server.pfx
+          PUBLIC_FIXP_CA_BUNDLE: /etc/ssl/fixp/bot-ca-bundle.pem
+          PUBLIC_FIXP_CA_DENYLIST: /etc/ssl/fixp/bot-denylist.txt
+        run: |
+          docker compose \
+              -f docker/docker-compose.yml \
+              -f docker/docker-compose.public.yml \
+              config --quiet
+
   conformance:
     name: Run conformance suite against unavailable-mode stack
     runs-on: ubuntu-latest
@@ -154,7 +182,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Bring up trading-host
         env:
@@ -235,7 +263,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Bring up real stack (matching-platform + marketdata + trading-host)
         # docker-compose.real.yml flips trading-host to Mode=Real, adds

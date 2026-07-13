@@ -12,13 +12,50 @@ public interface IUserBotCredentialRegistry
     /// Mints a new PAT for <paramref name="userId"/>, persists the
     /// bcrypt hash + metadata to the WAL, and returns the plaintext
     /// secret exactly once. Caller must surface the secret to the
-    /// human user and not log it.
+    /// human user and not log it. Equivalent to the overload with a
+    /// <c>null</c> thumbprint (unpinned credential).
     /// </summary>
     Task<CreatedUserBotCredential> CreateAsync(
         string userId,
         string label,
         CancellationToken ct,
         string firmId = "default");
+
+    /// <summary>
+    /// Mints a new PAT for <paramref name="userId"/> with an optional
+    /// client-certificate thumbprint pin (RFC §4.3). When
+    /// <paramref name="boundCertThumbprint"/> is non-null the FIXP listener
+    /// requires the presented client cert's SHA-256 thumbprint to equal it at
+    /// Negotiate; <c>null</c> = unpinned (chain validation only).
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// When <paramref name="boundCertThumbprint"/> is non-empty but not a valid
+    /// 64-character hex SHA-256 thumbprint.
+    /// </exception>
+    Task<CreatedUserBotCredential> CreateAsync(
+        string userId,
+        string label,
+        string? boundCertThumbprint,
+        CancellationToken ct,
+        string firmId = "default");
+
+    /// <summary>
+    /// Sets, re-pins, or clears the client-certificate thumbprint pin on an
+    /// existing credential (RFC §4.3, sub-issue #540). Pass <c>null</c> (or an
+    /// empty/whitespace string) to clear the pin. Returns <c>false</c> when the
+    /// credential id does not exist, belongs to a different user, or is revoked
+    /// — indistinguishable from missing so the surface cannot be used as an
+    /// id oracle. The thumbprint is non-secret.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// When <paramref name="boundCertThumbprint"/> is non-empty but not a valid
+    /// 64-character hex SHA-256 thumbprint.
+    /// </exception>
+    Task<bool> SetBoundCertThumbprintAsync(
+        string userId,
+        Guid credentialId,
+        string? boundCertThumbprint,
+        CancellationToken ct);
 
     /// <summary>
     /// Soft-revoke (sets <c>RevokedAtUtc</c>). Returns <c>false</c>

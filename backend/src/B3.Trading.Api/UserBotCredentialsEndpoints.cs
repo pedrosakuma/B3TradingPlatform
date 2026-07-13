@@ -43,13 +43,26 @@ public static class UserBotCredentialsEndpoints
             if (label.Length > MaxLabelLength)
                 return Results.BadRequest(new { error = $"Label exceeds {MaxLabelLength} characters." });
 
-            var created = await registry.CreateAsync(sub, label, ct,
-                firmId: ctx.User.FindFirstValue(Auth.JwtIssuer.FirmClaim) ?? "default");
+            CreatedUserBotCredential created;
+            try
+            {
+                created = await registry.CreateAsync(
+                    sub,
+                    label,
+                    req.BoundCertThumbprint,
+                    ct,
+                    firmId: ctx.User.FindFirstValue(Auth.JwtIssuer.FirmClaim) ?? "default");
+            }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
             var dto = new CreatedUserBotCredentialDto(
                 Id: created.Credential.Id,
                 Label: created.Credential.Label,
                 CredShortId: created.Credential.CredShortId,
                 CreatedAtUtc: created.Credential.CreatedAtUtc,
+                BoundCertThumbprint: created.Credential.BoundCertThumbprint,
                 PlainSecret: created.PlainToken);
             return Results.Created($"/api/user-bot-credentials/{dto.Id}", dto);
         });
@@ -59,9 +72,32 @@ public static class UserBotCredentialsEndpoints
             var sub = RequireSub(ctx);
             var rows = registry.ListByUser(sub)
                 .Select(c => new UserBotCredentialDto(
-                    c.Id, c.Label, c.CredShortId, c.CreatedAtUtc, c.RevokedAtUtc))
+                    c.Id, c.Label, c.CredShortId, c.CreatedAtUtc, c.RevokedAtUtc, c.BoundCertThumbprint))
                 .ToList();
             return Results.Ok(rows);
+        });
+
+        group.MapPut("/{id:guid}/cert-binding", async (
+            Guid id,
+            HttpContext ctx,
+            SetCertBindingRequest req,
+            IUserBotCredentialRegistry registry,
+            CancellationToken ct) =>
+        {
+            var sub = RequireSub(ctx);
+            if (req is null) return Results.BadRequest(new { error = "Body required." });
+
+            bool ok;
+            try
+            {
+                ok = await registry.SetBoundCertThumbprintAsync(sub, id, req.BoundCertThumbprint, ct);
+            }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+
+            return ok ? Results.NoContent() : Results.NotFound();
         });
 
         group.MapDelete("/{id:guid}", async (
@@ -88,24 +124,29 @@ public static class UserBotCredentialsEndpoints
 }
 
 /// <summary>POST body for creating a credential.</summary>
-public sealed record CreateUserBotCredentialRequest(string Label);
+public sealed record CreateUserBotCredentialRequest(string Label, string? BoundCertThumbprint = null);
+
+/// <summary>PUT body for setting/clearing the cert-binding pin (null clears).</summary>
+public sealed record SetCertBindingRequest(string? BoundCertThumbprint);
 
 /// <summary>
 /// 201 response from POST. <c>PlainSecret</c> is the only place the
 /// platform ever returns the bearer half of the PAT — list/get never
-/// include it.
+/// include it. <c>BoundCertThumbprint</c> is non-secret.
 /// </summary>
 public sealed record CreatedUserBotCredentialDto(
     Guid Id,
     string Label,
     string CredShortId,
     DateTimeOffset CreatedAtUtc,
+    string? BoundCertThumbprint,
     string PlainSecret);
 
-/// <summary>Public read-side DTO. No secret material.</summary>
+/// <summary>Public read-side DTO. No secret material; the thumbprint is non-secret.</summary>
 public sealed record UserBotCredentialDto(
     Guid Id,
     string Label,
     string CredShortId,
     DateTimeOffset CreatedAtUtc,
-    DateTimeOffset? RevokedAt);
+    DateTimeOffset? RevokedAt,
+    string? BoundCertThumbprint);

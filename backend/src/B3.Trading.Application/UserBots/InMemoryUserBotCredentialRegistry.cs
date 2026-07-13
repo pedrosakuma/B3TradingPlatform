@@ -26,6 +26,9 @@ public sealed class InMemoryUserBotCredentialRegistry : IUserBotCredentialRegist
     /// <summary>RFC §4.5 — bcrypt cost factor. ≈250ms/op on commodity HW.</summary>
     internal const int BcryptCost = 12;
 
+    /// <summary>Hex length of a SHA-256 client-cert thumbprint pin (RFC §4.3).</summary>
+    internal const int Sha256HexChars = 64;
+
     private const string TokenPrefix = "b3t_";
 
     private readonly EventDispatcher? _dispatcher;
@@ -44,11 +47,17 @@ public sealed class InMemoryUserBotCredentialRegistry : IUserBotCredentialRegist
     }
 
     public Task<CreatedUserBotCredential> CreateAsync(
-        string userId, string label, CancellationToken ct, string firmId = "default")
+        string userId, string label, CancellationToken ct, string firmId = "default") =>
+        CreateAsync(userId, label, boundCertThumbprint: null, ct, firmId);
+
+    public Task<CreatedUserBotCredential> CreateAsync(
+        string userId, string label, string? boundCertThumbprint, CancellationToken ct, string firmId = "default")
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(userId);
         ArgumentException.ThrowIfNullOrWhiteSpace(label);
         ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+
+        var pin = NormalizeBoundThumbprint(boundCertThumbprint);
 
         var shortId = MintShortId();
         var secret = MintSecret();
@@ -62,7 +71,8 @@ public sealed class InMemoryUserBotCredentialRegistry : IUserBotCredentialRegist
             SecretHash: hash,
             CreatedAtUtc: DateTimeOffset.UtcNow,
             RevokedAtUtc: null,
-            FirmId: firmId);
+            FirmId: firmId,
+            BoundCertThumbprint: pin);
 
         var evt = new UserBotCredentialCreatedEvent
         {
@@ -73,6 +83,7 @@ public sealed class InMemoryUserBotCredentialRegistry : IUserBotCredentialRegist
             SecretHash = credential.SecretHash,
             CreatedAtUtc = credential.CreatedAtUtc,
             FirmId = credential.FirmId,
+            BoundCertThumbprint = credential.BoundCertThumbprint,
         };
 
         if (_dispatcher is not null)
@@ -82,6 +93,44 @@ public sealed class InMemoryUserBotCredentialRegistry : IUserBotCredentialRegist
 
         var plainToken = $"{TokenPrefix}{shortId}_{secret}";
         return Task.FromResult(new CreatedUserBotCredential(credential, plainToken));
+    }
+
+    public Task<bool> SetBoundCertThumbprintAsync(
+        string userId, Guid credentialId, string? boundCertThumbprint, CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(userId);
+
+        // Validate/normalize before the existence check so a malformed pin is
+        // a 400 regardless of whether the id exists (no id-oracle leak via the
+        // error-shape difference).
+        var pin = NormalizeBoundThumbprint(boundCertThumbprint);
+
+        lock (_gate)
+        {
+            if (!_byId.TryGetValue(credentialId, out var existing))
+                return Task.FromResult(false);
+            // Cross-user lookups must be indistinguishable from missing.
+            if (!string.Equals(existing.UserId, userId, StringComparison.Ordinal))
+                return Task.FromResult(false);
+            if (existing.RevokedAtUtc is not null)
+                return Task.FromResult(false);
+        }
+
+        var changedAt = DateTimeOffset.UtcNow;
+        var evt = new UserBotCredentialCertBindingChangedEvent
+        {
+            Id = credentialId,
+            UserId = userId,
+            ChangedAtUtc = changedAt,
+            BoundCertThumbprint = pin,
+        };
+
+        if (_dispatcher is not null)
+            _dispatcher.Dispatch(evt, () => ApplyCertBindingChanged(credentialId, pin));
+        else
+            ApplyCertBindingChanged(credentialId, pin);
+
+        return Task.FromResult(true);
     }
 
     public Task<bool> RevokeAsync(string userId, Guid credentialId, CancellationToken ct)
@@ -174,7 +223,7 @@ public sealed class InMemoryUserBotCredentialRegistry : IUserBotCredentialRegist
                 .ThenBy(c => c.Id)
                 .Select(c => new UserBotCredentialSnapshot(
                     c.Id, c.UserId, c.CredShortId, c.Label, c.SecretHash,
-                    c.CreatedAtUtc, c.RevokedAtUtc, c.FirmId))
+                    c.CreatedAtUtc, c.RevokedAtUtc, c.FirmId, c.BoundCertThumbprint))
                 .ToList();
         }
     }
@@ -215,7 +264,8 @@ public sealed class InMemoryUserBotCredentialRegistry : IUserBotCredentialRegist
                     // #431 — pre-existing snapshots have no FirmId; replay
                     // to the legacy "default" sentinel so attribution stays
                     // aligned with the old listener behavior.
-                    FirmId: string.IsNullOrEmpty(s.FirmId) ? "default" : s.FirmId);
+                    FirmId: string.IsNullOrEmpty(s.FirmId) ? "default" : s.FirmId,
+                    BoundCertThumbprint: s.BoundCertThumbprint);
                 _byId[c.Id] = c;
                 _byShortId[c.CredShortId] = c;
             }
@@ -242,6 +292,72 @@ public sealed class InMemoryUserBotCredentialRegistry : IUserBotCredentialRegist
             _byId[credentialId] = updated;
             _byShortId[updated.CredShortId] = updated;
         }
+    }
+
+    /// <summary>Replay hook for <see cref="UserBotCredentialCertBindingChangedEvent"/>.</summary>
+    internal void ApplyCertBindingChanged(Guid credentialId, string? boundCertThumbprint)
+    {
+        lock (_gate)
+        {
+            if (!_byId.TryGetValue(credentialId, out var existing)) return;
+            var updated = existing with { BoundCertThumbprint = boundCertThumbprint };
+            _byId[credentialId] = updated;
+            _byShortId[updated.CredShortId] = updated;
+        }
+    }
+
+    /// <summary>
+    /// Canonicalizes a caller-supplied pin to upper-case 64-hex, or returns
+    /// <c>null</c> for an empty/whitespace value (clear). Throws
+    /// <see cref="ArgumentException"/> for any non-empty value that is not a
+    /// valid SHA-256 thumbprint — colons and internal whitespace are stripped
+    /// first so PEM/openssl-style <c>AA:BB:…</c> input is accepted.
+    /// </summary>
+    internal static string? NormalizeBoundThumbprint(string? thumbprint)
+    {
+        if (string.IsNullOrWhiteSpace(thumbprint))
+            return null;
+
+        // Fixed-size buffer (never sized from untrusted input) — anything that
+        // produces more than Sha256HexChars significant characters is malformed.
+        Span<char> buffer = stackalloc char[Sha256HexChars];
+        var n = 0;
+        foreach (var ch in thumbprint)
+        {
+            if (ch is ':' or ' ' or '\t' or '\r' or '\n')
+                continue;
+            if (n >= Sha256HexChars)
+            {
+                throw new ArgumentException(
+                    "BoundCertThumbprint must be a 64-character hex SHA-256 thumbprint.",
+                    nameof(thumbprint));
+            }
+            buffer[n++] = char.ToUpperInvariant(ch);
+        }
+
+        if (n == 0)
+            return null;
+
+        var normalized = buffer[..n];
+        if (n != Sha256HexChars || !IsHex(normalized))
+        {
+            throw new ArgumentException(
+                "BoundCertThumbprint must be a 64-character hex SHA-256 thumbprint.",
+                nameof(thumbprint));
+        }
+
+        return new string(normalized);
+    }
+
+    private static bool IsHex(ReadOnlySpan<char> s)
+    {
+        foreach (var ch in s)
+        {
+            if (ch is (>= '0' and <= '9') or (>= 'A' and <= 'F'))
+                continue;
+            return false;
+        }
+        return true;
     }
 
     /// <summary>

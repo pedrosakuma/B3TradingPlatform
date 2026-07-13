@@ -5,6 +5,9 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using B3.Trading.Api.WebSockets;
+using B3.Trading.Application.MarketData;
+using B3.Trading.Application.Risk;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace B3.Trading.Api.Tests;
 
@@ -63,6 +66,72 @@ public class RiskAndAdminEndpointsTests : IClassFixture<TestAppFactory>
         var state = await admin.GetFromJsonAsync<HaltStateDto>("/admin/halts");
         Assert.Contains("ABEV3", state!.Symbols);
         await admin.DeleteAsync("/admin/halts/ABEV3");
+    }
+
+    [Fact]
+    public async Task AdminGetHalts_ExposesOriginPerSymbol()
+    {
+        using var admin = await _factory.CreateAuthedClientAsync("admin");
+        var halts = _factory.Services.GetRequiredService<SymbolHaltService>();
+        // Distinct symbol to avoid contaminating the shared factory.
+        halts.Resume("CSNA3", HaltOrigin.Venue);
+        await admin.DeleteAsync("/admin/halts/CSNA3");
+
+        // A venue halt observed via market data plus an operator halt.
+        halts.Halt("CSNA3", HaltOrigin.Venue);
+        await admin.PostAsync("/admin/halts/CSNA3", content: null);
+        try
+        {
+            var state = await admin.GetFromJsonAsync<HaltStateDto>("/admin/halts");
+            var entry = Assert.Single(state!.Halts, h => h.Symbol == "CSNA3");
+            Assert.Equal("operator+venue", entry.Origin);
+        }
+        finally
+        {
+            await admin.DeleteAsync("/admin/halts/CSNA3");
+            halts.Resume("CSNA3", HaltOrigin.Venue);
+        }
+    }
+
+    [Fact]
+    public async Task OperatorResume_WhileVenueStillHalted_StaysHaltedAndReportsResidualVenueHalt()
+    {
+        using var http = _factory.CreateClient();
+        var token = await _factory.LoginAsync(http, "bob");
+        using var admin = await _factory.CreateAuthedClientAsync("admin");
+        var halts = _factory.Services.GetRequiredService<SymbolHaltService>();
+        halts.Resume("USIM5", HaltOrigin.Venue);
+        await admin.DeleteAsync("/admin/halts/USIM5");
+
+        // Venue halts the symbol (observed via market data), operator
+        // also halts it manually.
+        halts.Halt("USIM5", HaltOrigin.Venue);
+        await admin.PostAsync("/admin/halts/USIM5", content: null);
+        try
+        {
+            // Operator clears their own halt — but the venue still
+            // holds it, so the endpoint must report the residual venue
+            // halt instead of a bare 204.
+            var resume = await admin.DeleteAsync("/admin/halts/USIM5");
+            Assert.Equal(HttpStatusCode.OK, resume.StatusCode);
+            var body = await resume.Content.ReadFromJsonAsync<ResumeResidualDto>();
+            Assert.False(body!.Resumed);
+            Assert.Equal("venue", body.StillHaltedBy);
+
+            // And the symbol genuinely stays halted on the order path.
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var ws = await OpenSubscribedAsync(token, Channels.ExecutionsMe);
+            var blocked = await PostAsync(http, token, "/orders",
+                new { Symbol = "USIM5", SecurityId = 7777UL, Side = "Buy", Type = "Limit", Quantity = 1, Price = 10m });
+            Assert.Equal(HttpStatusCode.Accepted, blocked.StatusCode);
+            var delta = await ReadJsonAsync(ws, cts.Token);
+            Assert.Equal("Rejected", delta.GetProperty("data").GetProperty("kind").GetString());
+            Assert.Contains("halted", delta.GetProperty("data").GetProperty("rejectReason").GetString());
+        }
+        finally
+        {
+            halts.Resume("USIM5", HaltOrigin.Venue);
+        }
     }
 
     [Fact]
@@ -247,6 +316,8 @@ public class RiskAndAdminEndpointsTests : IClassFixture<TestAppFactory>
     }
 
     private sealed record KillStateDto(string[] EndClients, string[] Firms);
-    private sealed record HaltStateDto(string[] Symbols);
+    private sealed record HaltStateDto(string[] Symbols, HaltOriginDto[] Halts);
+    private sealed record HaltOriginDto(string Symbol, string Origin);
+    private sealed record ResumeResidualDto(string Symbol, bool Resumed, string StillHaltedBy, string Detail);
     private sealed record SessionPhaseStateDto(string Default, Dictionary<string, string> Overrides);
 }

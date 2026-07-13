@@ -33,7 +33,8 @@ public sealed record UserBotCredential(
     string SecretHash,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset? RevokedAtUtc = null,
-    string FirmId = "default");
+    string FirmId = "default",
+    string? BoundCertThumbprint = null);
 
 /// <summary>
 /// One-shot DTO returned by <see cref="IUserBotCredentialRegistry.CreateAsync"/>.

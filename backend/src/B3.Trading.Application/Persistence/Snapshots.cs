@@ -366,7 +366,8 @@ public sealed record UserBotCredentialSnapshot(
     string SecretHash,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset? RevokedAtUtc,
-    string? FirmId = null);
+    string? FirmId = null,
+    string? BoundCertThumbprint = null);
 
 public sealed record OrderSnapshot(
     ulong ClOrdId,
