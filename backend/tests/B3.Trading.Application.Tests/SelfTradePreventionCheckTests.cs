@@ -352,6 +352,21 @@ public class SelfTradePreventionCheckTests
     }
 
     [Fact]
+    public void CrossFirm_SameFirmSiblingOwner_SharedBeneficialOwner_Approved()
+    {
+        // #446 P1: cross-firm scope must skip every same-firm sibling
+        // owner, not just the exact (firm, owner) tuple. Same-firm
+        // behavior is handled by the regular app-side check and/or venue-
+        // side STP; the cross-firm phase is strictly inter-firm only.
+        var (check, book) = BuildCrossFirm();
+        Assert.True(book.TryAdd(MakeFor(FirmA, OwnerB, clOrdId: 51, OrderSide.Sell, 32.40m)));
+
+        var decision = check.Check(CtxFor(FirmA, OwnerA, OrderSide.Buy, 32.50m));
+
+        Assert.True(decision.Approved);
+    }
+
+    [Fact]
     public void CrossFirm_NoBeneficialOwnerMap_CollapsesToOwnerSelf_NoFalseHit()
     {
         // With no BeneficialOwners entries, every owner is its own BO so
@@ -363,5 +378,65 @@ public class SelfTradePreventionCheckTests
         var decision = check.Check(CtxFor(FirmA, OwnerA, OrderSide.Buy, 32.50m));
 
         Assert.True(decision.Approved);
+    }
+
+    [Fact]
+    public void BeneficialOwnerResolver_OwnersFor_IncludesImplicitSelfAlongsideExplicitSiblings()
+    {
+        var monitor = Wrap(new RiskOptions
+        {
+            BeneficialOwners = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                [OwnerB] = OwnerA,
+            },
+        });
+        var resolver = new OptionsBeneficialOwnerResolver(monitor);
+
+        var owners = resolver.OwnersFor(OwnerA);
+
+        Assert.Equal(2, owners.Count);
+        Assert.Contains(new EndClientId(OwnerA), owners);
+        Assert.Contains(new EndClientId(OwnerB), owners);
+    }
+
+    [Fact]
+    public void BeneficialOwnerResolver_OwnersFor_DoesNotOverrideExplicitOwnerMapping()
+    {
+        var monitor = Wrap(new RiskOptions
+        {
+            BeneficialOwners = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                [OwnerB] = OwnerA,
+                [OwnerA] = "CPF-OTHER",
+            },
+        });
+        var resolver = new OptionsBeneficialOwnerResolver(monitor);
+
+        var owners = resolver.OwnersFor(OwnerA);
+
+        Assert.Single(owners);
+        Assert.Contains(new EndClientId(OwnerB), owners);
+        Assert.DoesNotContain(new EndClientId(OwnerA), owners);
+    }
+
+    [Fact]
+    public void CrossFirm_MixedExplicitImplicitOwners_CatchesBareOwnerInOtherFirm()
+    {
+        // Mixed configuration: alice_b explicitly maps to BO alice while
+        // bare alice relies on the implicit BO == owner default. The
+        // cross-firm fan-out must still include both owners.
+        var (check, book) = BuildCrossFirm(boMap: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            [OwnerB] = OwnerA,
+        });
+        Assert.True(book.TryAdd(MakeFor(FirmB, OwnerA, clOrdId: 99, OrderSide.Sell, 32.40m)));
+
+        var decision = check.Check(CtxFor(FirmA, OwnerB, OrderSide.Buy, 32.50m));
+
+        Assert.False(decision.Approved);
+        Assert.Contains("cross_firm", decision.Reason);
+        Assert.Contains($"beneficial_owner={OwnerA}", decision.Reason);
+        Assert.Contains($"contra_firm={FirmB}", decision.Reason);
+        Assert.Contains("clOrdId=99", decision.Reason);
     }
 }

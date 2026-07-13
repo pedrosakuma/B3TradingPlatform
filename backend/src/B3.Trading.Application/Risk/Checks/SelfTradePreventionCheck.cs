@@ -144,10 +144,10 @@ public sealed class SelfTradePreventionCheck : IRiskCheck
         {
             foreach (var existing in _orders.ForEndClient(siblingOwner))
             {
-                if (string.Equals(existing.FirmId, ctx.FirmId, StringComparison.Ordinal)
-                    && existing.Owner == ctx.Owner)
+                if (string.Equals(existing.FirmId, ctx.FirmId, StringComparison.Ordinal))
                 {
-                    // Already covered by Phase 1.
+                    // Already covered by Phase 1 or intentionally left to
+                    // same-firm / venue-side STP semantics.
                     continue;
                 }
                 if (existing.Side != oppositeSide) continue;

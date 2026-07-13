@@ -74,10 +74,14 @@ public sealed class OptionsBeneficialOwnerResolver : IBeneficialOwnerResolver
             }
         }
 
-        // Self-mapping fallback: when the BO id is not in the values of
-        // the map, it is implicitly the owner of the same name (the
-        // default-policy collapse described in <see cref="Resolve"/>).
-        if (owners.Count == 0 && seen.Add(beneficialOwnerId))
+        // Include the implicit self-mapping fallback whenever the BO id
+        // itself does not explicitly resolve somewhere else. This keeps
+        // mixed explicit/implicit sibling configurations complete
+        // without overriding an explicit owner -> different BO mapping.
+        if ((!map.TryGetValue(beneficialOwnerId, out var explicitBo)
+             || string.IsNullOrWhiteSpace(explicitBo)
+             || string.Equals(explicitBo, beneficialOwnerId, StringComparison.OrdinalIgnoreCase))
+            && seen.Add(beneficialOwnerId))
         {
             owners.Add(new EndClientId(beneficialOwnerId));
         }
