@@ -1,6 +1,11 @@
+using B3.Trading.Application.Investor;
 using B3.Trading.Application.Observability;
+using B3.Trading.Application.Routing;
+using B3.Trading.Application.Risk;
+using B3.Trading.Application.SubAccount;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Up = B3.EntryPoint.Client;
 using UpModels = B3.EntryPoint.Client.Models;
 
@@ -35,6 +40,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     private readonly TimeSpan _initialReconnectDelay;
     private readonly TimeSpan _maxReconnectDelay;
     private readonly TimeSpan _gracefulTerminateTimeout;
+    private readonly bool _terminateOnShutdown;
     private readonly TimeProvider _clock;
     private readonly OrderEntryLatencyProbe _latencyProbe;
     private Task? _eventLoop;
@@ -57,6 +63,80 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     private ulong _lastGapPriorSessionVerId;
     private string? _lastTerminationCode;
     private readonly IVenueDisconnectReactor? _reactor;
+    // #433 P1. Optional resolver for the venue-side STP instruction
+    // stamped on every outbound NewOrderRequest / ReplaceOrderRequest.
+    // Optional (rather than required) so legacy tests that construct
+    // the gateway directly stay green — a null resolver collapses to
+    // SelfTradePreventionInstruction.None and the wire behavior
+    // matches pre-#433.
+    private readonly IOptionsMonitor<RiskOptions>? _riskOptions;
+    // #471. Optional mapper from domain SubAccountId (string) to the
+    // numeric uint? carried in NewOrderRequest.TradingSubAccount /
+    // ReplaceOrderRequest.TradingSubAccount (SDK 0.15.0+). Null →
+    // no mapper wired → orders never stamp the field (legacy wire
+    // behavior, matches the pre-#471 contract). Production
+    // composition root always wires DeterministicSubAccountWireIdMapper.
+    private readonly ISubAccountWireIdMapper? _subAccountWireIdMapper;
+    // #458. Optional resolver for the CBLC Account number (ulong?)
+    // carried in NewOrderRequest.Account / ReplaceOrderRequest.Account.
+    // Default = NullVenueAccountResolver (always null) — wire field
+    // stays omitted and post-trade allocation continues via the
+    // broker's out-of-band matching. Operators that have configured
+    // a real mapping (lookup table, broker handshake) swap in a real
+    // impl at the composition root.
+    private readonly IVenueAccountResolver? _venueAccountResolver;
+    // #472. Optional resolver for the opaque InvestorId (Prefix,
+    // Document) carried in NewOrderRequest.InvestorId /
+    // ReplaceOrderRequest.InvestorId. Default = NullInvestorIdResolver
+    // (always null) — wire field stays omitted (pre-#472 behavior).
+    // The platform deliberately treats InvestorId as opaque (NOT
+    // CPF/CNPJ); operators wire a real resolver that hits their
+    // broker-issued registry, keeping PII off the wire and out of the
+    // WAL (LGPD posture — see IInvestorIdResolver doc).
+    private readonly IInvestorIdResolver? _investorIdResolver;
+    // #473. Optional resolver for the RoutingInstruction stamped on
+    // outbound NewOrderRequest / ReplaceOrderRequest. Default = null
+    // → resolver helper short-circuits to null → wire field stays
+    // omitted (pre-#473 behavior). Pre-trade gating happens at the
+    // caller (OrderSubmissionService / OrderModifyService) via
+    // RoutingInstructionAllowedCheck; the gateway re-resolves here
+    // to keep the BuildNewOrderRequest path SDK-self-contained, and
+    // resolvers MUST be deterministic per-Order so the two
+    // resolutions agree (see IRoutingInstructionResolver doc).
+    private readonly IRoutingInstructionResolver? _routingInstructionResolver;
+    // #512. Reads the SDK's EFFECTIVE SessionVerId after ConnectAsync
+    // returns. The SDK may have fallen back from Establish-reuse to a
+    // freshly negotiated session with a bumped verId (recoverable reuse
+    // reject); that mutation lands on the EntryPointClientOptions instance
+    // the composition root passed to the client, so the provider closes
+    // over the same instance. Null → no post-connect roll detection
+    // (legacy behaviour, matches direct-construction tests).
+    private readonly Func<uint>? _effectiveSessionVerIdProvider;
+    // #512. Hands a detected connect-time session roll to the Application
+    // layer to reap un-acked PendingNew BEFORE the event loop / first
+    // snapshot. Null → detection still syncs CurrentSessionVerId but
+    // performs no reap.
+    private readonly IConnectSessionRollReactor? _connectSessionRollReactor;
+    private readonly Func<Up.ReconnectMode, Func<uint, uint>, CancellationToken, Task<Up.ReconnectOutcome>>? _reconnectAsyncOverride;
+    private readonly Action? _connectedTestHook;
+    // #565. The upstream SDK dials whatever `IPEndPoint` is on the
+    // `EntryPointClientOptions` instance it was constructed with — it never
+    // re-resolves the configured hostname itself (see
+    // B3.EntryPoint.Client.EntryPointClient.ReconnectAsync, which reads
+    // `_options.Endpoint.Address` verbatim). On Kubernetes the peer's pod IP
+    // changes across a failover/reschedule, so without re-resolving DNS
+    // before each attempt the reconnect loop keeps dialing a dead IP
+    // forever. The composition root closes over the shared
+    // `EntryPointClientOptions` and the original `host:port` string and
+    // hands us this callback to refresh `Endpoint` in place immediately
+    // before every `ReconnectAsync` attempt. Async + cancellable (rather
+    // than a blocking `Action`) so a slow/hung resolver during exactly the
+    // network incident this feature targets can't starve the thread pool
+    // or ignore shutdown; the composition root uses
+    // `Dns.GetHostAddressesAsync` under a bounded timeout tied to `ct`.
+    // Null → legacy behaviour (matches direct-construction tests and Mock
+    // mode, where there is no DNS to re-resolve).
+    private readonly Func<CancellationToken, Task>? _reResolveEndpoint;
 
     public B3EntryPointClientGateway(
         Up.EntryPointClient client,
@@ -68,8 +148,20 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         TimeProvider? clock = null,
         OrderEntryLatencyProbe? latencyProbe = null,
         IVenueDisconnectReactor? venueDisconnectReactor = null,
-        TimeSpan? gracefulTerminateTimeout = null)
+        TimeSpan? gracefulTerminateTimeout = null,
+        IOptionsMonitor<RiskOptions>? riskOptions = null,
+        ISubAccountWireIdMapper? subAccountWireIdMapper = null,
+        IVenueAccountResolver? venueAccountResolver = null,
+        IInvestorIdResolver? investorIdResolver = null,
+        IRoutingInstructionResolver? routingInstructionResolver = null,
+        bool terminateOnShutdown = true,
+        Func<uint>? effectiveSessionVerIdProvider = null,
+        IConnectSessionRollReactor? connectSessionRollReactor = null,
+        Func<CancellationToken, Task>? reResolveEndpoint = null,
+        Func<Up.ReconnectMode, Func<uint, uint>, CancellationToken, Task<Up.ReconnectOutcome>>? reconnectAsyncOverride = null,
+        Action? connectedTestHook = null)
     {
+        _terminateOnShutdown = terminateOnShutdown;
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _firmId = firmId ?? throw new ArgumentNullException(nameof(firmId));
         _logger = logger;
@@ -80,6 +172,16 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         _clock = clock ?? TimeProvider.System;
         _latencyProbe = latencyProbe ?? new OrderEntryLatencyProbe(_clock);
         _reactor = venueDisconnectReactor;
+        _riskOptions = riskOptions;
+        _subAccountWireIdMapper = subAccountWireIdMapper;
+        _venueAccountResolver = venueAccountResolver;
+        _investorIdResolver = investorIdResolver;
+        _routingInstructionResolver = routingInstructionResolver;
+        _effectiveSessionVerIdProvider = effectiveSessionVerIdProvider;
+        _connectSessionRollReactor = connectSessionRollReactor;
+        _reResolveEndpoint = reResolveEndpoint;
+        _reconnectAsyncOverride = reconnectAsyncOverride;
+        _connectedTestHook = connectedTestHook;
         _client.Terminated += OnTerminated;
         _client.InboundGapAtReconnect += OnInboundGapAtReconnect;
         MetricsRegistry.RecordSessionVerId(_firmId, _currentSessionVerId);
@@ -134,7 +236,128 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     public async Task ConnectAsync(CancellationToken cancellationToken)
     {
         await _client.ConnectAsync(cancellationToken).ConfigureAwait(false);
+        ReconcileConnectSessionRoll();
         OnConnected();
+    }
+
+    /// <summary>
+    /// #512. Detect a deferred connect-time session-version bump and
+    /// reconcile it BEFORE the event loop / first snapshot starts.
+    ///
+    /// <para>
+    /// The #512 happy path resumes the persisted session via Establish-reuse
+    /// (verId unchanged) — this is a no-op. But when the venue rejects the
+    /// reuse with a recoverable reject, the SDK falls back to Negotiate with
+    /// a bumped verId inside the same <c>ConnectAsync</c>. The boot-time
+    /// #380/#504 baseline reconcile already ran against the OLD verId before
+    /// app start, so it never sees this bump. We read the SDK's effective
+    /// verId, sync <see cref="CurrentSessionVerId"/> (so the next snapshot
+    /// records the new baseline), and hand the roll to the Application reactor
+    /// to reap un-acked PendingNew. Mirrors the reconnect path which already
+    /// syncs the verId from the reconnect outcome.
+    /// </para>
+    /// </summary>
+    internal void ReconcileConnectSessionRoll()
+    {
+        var prior = Volatile.Read(ref _currentSessionVerId);
+        if (!TryReadEffectiveSessionVerId("connect", out var effective))
+            return;
+
+        if (effective <= prior) return;
+
+        // Order matters for the cross-restart backstop. The boot reconcile
+        // re-detects a roll only while the snapshot baseline still records
+        // the OLD verId. So we must REAP first and publish the bumped verId
+        // only after the reap succeeds: a snapshot interleaving between the
+        // reap (orders already cancelled under the dispatcher lock) and the
+        // verId publish records old-baseline + cancelled-orders — safe. If
+        // we published the verId first, a snapshot could seal
+        // baseline=bumped with the ghosts still present, and a crash before
+        // the next snapshot would make next-restart boot reconcile miss the
+        // roll (storedVerId == currentVerId) — the ghosts would survive
+        // permanently. Same reasoning is why a reactor failure must NOT
+        // publish the bumped verId: leaving the baseline old keeps the
+        // backstop armed.
+        try
+        {
+            _connectSessionRollReactor?.OnSessionRolled(_firmId, prior, effective);
+        }
+        catch (Exception ex)
+        {
+            // A reactor failure must never abort the connect — the session
+            // is established. Leave _currentSessionVerId at the old baseline
+            // so the next-restart boot reconcile still re-detects the roll
+            // and reaps the ghosts.
+            _logger.LogError(ex,
+                "Connect session-roll reactor failed for firm {Firm} (from={From} to={To}); leaving SessionVerId baseline at {Prior} to keep the restart backstop armed.",
+                _firmId, prior, effective, prior);
+            return;
+        }
+
+        Volatile.Write(ref _currentSessionVerId, effective);
+        MetricsRegistry.RecordSessionVerId(_firmId, effective);
+    }
+
+    /// <summary>
+    /// #380 / #503. Reconcile a live-reconnect session-version transition.
+    /// Called by <see cref="ReconnectLoopAsync"/> after a successful reconnect,
+    /// before <see cref="OnConnected"/>.
+    ///
+    /// <para>
+    /// Any reconnect outcome whose effective <c>SessionVerId</c> advanced past
+    /// the gateway's last confirmed baseline is treated as a confirmed session
+    /// roll. The common path is <see cref="Up.ReconnectKind.Renegotiated"/>
+    /// (venue rejected Establish-reuse and forced a fresh Negotiate), but a
+    /// previous failed renegotiate can also leave the SDK's local retry state on
+    /// the bumped verId and allow a later <see cref="Up.ReconnectKind.Reattached"/>
+    /// to that already-rolled session. In both cases the venue discarded the old
+    /// working set, so un-acked PendingNew cannot exist and surviving
+    /// Working / PartiallyFilled orders are ghosts that FIXP retransmission
+    /// cannot resurrect. We hand the roll to the Application reactor (reap
+    /// PendingNew + flag Working/PartiallyFilled stale) and publish the bumped
+    /// verId only AFTER the reactor succeeds. A reactor failure leaves
+    /// <see cref="CurrentSessionVerId"/> at the old baseline so the next
+    /// restart's boot reconcile re-detects the roll — identical backstop
+    /// reasoning to <see cref="ReconcileConnectSessionRoll"/>.
+    /// </para>
+    ///
+    /// <para>
+    /// On a <see cref="Up.ReconnectKind.Reattached"/> outcome the venue kept
+    /// our working set (verId preserved); we simply mirror the SDK's verId and
+    /// do no reconciliation. The conditional inbound-gap / peer-terminate
+    /// staleness for that case is handled separately by
+    /// <see cref="NotifyVenueDisconnectReactor"/>.
+    /// </para>
+    /// </summary>
+    internal void ReconcileReconnectSessionRoll(Up.ReconnectKind kind, uint priorVerId, uint effectiveVerId)
+    {
+        var confirmedRoll = effectiveVerId > priorVerId;
+        if (!confirmedRoll)
+        {
+            // Reattach (or a defensive no-advance Renegotiate): mirror the
+            // SDK's verId. No ghosts — venue kept our set.
+            Volatile.Write(ref _currentSessionVerId, effectiveVerId);
+            MetricsRegistry.RecordSessionVerId(_firmId, effectiveVerId);
+            return;
+        }
+
+        try
+        {
+            _connectSessionRollReactor?.OnSessionRolled(_firmId, priorVerId, effectiveVerId);
+        }
+        catch (Exception ex)
+        {
+            // A reactor failure must never abort the reconnect — the session
+            // is established. Leave _currentSessionVerId at the old baseline
+            // so the next-restart boot reconcile still re-detects the roll.
+            _logger.LogError(ex,
+                "Reconnect session-roll reactor failed for firm {Firm} (from={From} to={To}); leaving SessionVerId baseline at {Prior} to keep the restart backstop armed.",
+                _firmId, priorVerId, effectiveVerId, priorVerId);
+            return;
+        }
+
+        Volatile.Write(ref _currentSessionVerId, effectiveVerId);
+        MetricsRegistry.RecordSessionVerId(_firmId, effectiveVerId);
     }
 
     private void OnConnected()
@@ -142,6 +365,11 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         if (Interlocked.Exchange(ref _connectedState, 1) == 0)
             MetricsRegistry.EntryPointConnected.Add(1, FirmTag());
         MetricsRegistry.RecordSessionVerId(_firmId, _currentSessionVerId);
+        if (_connectedTestHook is not null)
+        {
+            _connectedTestHook();
+            return;
+        }
         StartEventLoop();
     }
 
@@ -165,7 +393,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         if (order.Quantity < 0)
             throw new ArgumentOutOfRangeException(nameof(order), "Quantity cannot be negative when submitted upstream.");
 
-        var req = BuildNewOrderRequest(order);
+        var req = BuildNewOrderRequest(order, ResolveStpInstruction(order), ResolveTradingSubAccount(order), ResolveVenueAccount(order), ResolveInvestorId(order), ResolveRoutingInstruction(order));
 
         return SendAsync(req.ClOrdID.Value, OrderEntryLatencyProbe.OpSubmit,
             ct => _client.SubmitAsync(req, ct), cancellationToken);
@@ -177,8 +405,51 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// tests without standing up a real <c>EntryPointClient</c>. Pure
     /// function: every field is read from the domain
     /// <see cref="Order"/> exactly once and there are no side effects.
+    ///
+    /// <para>
+    /// #433 P1. <paramref name="stpInstruction"/> is the venue-side
+    /// self-trade-prevention instruction (SDK 0.15.0+). Resolved by
+    /// the caller via <see cref="RiskLimitsResolver.ResolveSelfTradePreventionMode"/>
+    /// and mapped through <see cref="MapStpInstruction"/>; defaults
+    /// to <see cref="UpModels.SelfTradePreventionInstruction.None"/>
+    /// on the legacy overload below so existing tests stay green.
+    /// </para>
     /// </summary>
     internal static UpModels.NewOrderRequest BuildNewOrderRequest(Order order)
+        => BuildNewOrderRequest(order, UpModels.SelfTradePreventionInstruction.None, tradingSubAccount: null, venueAccount: null, investorId: null, routingInstruction: null);
+
+    internal static UpModels.NewOrderRequest BuildNewOrderRequest(
+        Order order, UpModels.SelfTradePreventionInstruction stpInstruction)
+        => BuildNewOrderRequest(order, stpInstruction, tradingSubAccount: null, venueAccount: null, investorId: null, routingInstruction: null);
+
+    internal static UpModels.NewOrderRequest BuildNewOrderRequest(
+        Order order,
+        UpModels.SelfTradePreventionInstruction stpInstruction,
+        uint? tradingSubAccount)
+        => BuildNewOrderRequest(order, stpInstruction, tradingSubAccount, venueAccount: null, investorId: null, routingInstruction: null);
+
+    internal static UpModels.NewOrderRequest BuildNewOrderRequest(
+        Order order,
+        UpModels.SelfTradePreventionInstruction stpInstruction,
+        uint? tradingSubAccount,
+        ulong? venueAccount)
+        => BuildNewOrderRequest(order, stpInstruction, tradingSubAccount, venueAccount, investorId: null, routingInstruction: null);
+
+    internal static UpModels.NewOrderRequest BuildNewOrderRequest(
+        Order order,
+        UpModels.SelfTradePreventionInstruction stpInstruction,
+        uint? tradingSubAccount,
+        ulong? venueAccount,
+        InvestorIdentity? investorId)
+        => BuildNewOrderRequest(order, stpInstruction, tradingSubAccount, venueAccount, investorId, routingInstruction: null);
+
+    internal static UpModels.NewOrderRequest BuildNewOrderRequest(
+        Order order,
+        UpModels.SelfTradePreventionInstruction stpInstruction,
+        uint? tradingSubAccount,
+        ulong? venueAccount,
+        InvestorIdentity? investorId,
+        RoutingInstruction? routingInstruction)
     {
         ArgumentNullException.ThrowIfNull(order);
         return new UpModels.NewOrderRequest
@@ -197,7 +468,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             // visible qty"). Domain.Order's ctor already validated
             // 0 < DisplayQty <= Quantity, so the cast is safe.
             // TODO(#298): DisplayResetPolicy is NOT plumbed to the SDK —
-            // B3.EntryPoint.Client 0.14.3 NewOrderRequest exposes no
+            // B3.EntryPoint.Client 0.15.0 NewOrderRequest exposes no
             // refresh-policy flag. To avoid the venue silently defaulting
             // to Always (which would break the OnPartialFill / Never
             // contracts), the REST + risk validation boundary REJECTS
@@ -214,6 +485,38 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             // ctor already validated 0 < MinQty <= Quantity so the cast
             // to ulong? is safe.
             MinQty = order.MinQty is { } mq ? (ulong)mq : (ulong?)null,
+            // #433 P1. Venue-side STP. Defense-in-depth pair with
+            // SelfTradePreventionCheck — see SelfTradePreventionMode
+            // doc comment for the rationale. The instruction value is
+            // resolved by the caller (gateway SubmitAsync) so this
+            // static stays pure.
+            SelfTradePreventionInstruction = stpInstruction,
+            // #471. Numeric wire id for the order's sub-account, when
+            // the order carries one. Null = no sub-account on the
+            // wire (SDK omits the field entirely) — matches the
+            // master-bucket semantics of Order.SubAccountId == null.
+            TradingSubAccount = tradingSubAccount,
+            // #458. CBLC Account number for clearing/allocation, when
+            // an operator has wired a real IVenueAccountResolver. Null
+            // = no mapping known → wire field stays omitted and the
+            // broker's out-of-band post-trade allocation continues to
+            // apply (pre-#458 wire behavior).
+            Account = venueAccount,
+            // #472. Opaque InvestorId (Prefix, Document) when an
+            // operator has wired a real IInvestorIdResolver. Null =
+            // wire field omitted (pre-#472 behavior). Translated from
+            // the domain InvestorIdentity record to the SDK struct at
+            // this boundary so Application/Domain stay SDK-free.
+            InvestorId = investorId is { } id
+                ? new UpModels.InvestorId { Prefix = id.Prefix, Document = id.Document }
+                : (UpModels.InvestorId?)null,
+            // #473. Routing instruction stamped when an operator has
+            // wired a real IRoutingInstructionResolver AND the
+            // resolved scope's RiskLimits.AllowedRoutingInstructions
+            // permits the value (gating happens upstream in
+            // RoutingInstructionAllowedCheck). Null = wire field
+            // omitted (pre-#473 behavior).
+            RoutingInstruction = MapRoutingInstructionToWire(routingInstruction),
         };
     }
 
@@ -324,6 +627,37 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             MinQty = original.MinQty is { } omq
                 ? (ulong)Math.Min(omq, newQuantity)
                 : (ulong?)null,
+            // #433 P1. Venue-side STP carried on the replace too —
+            // a modified order is a fresh book entry from the
+            // matching engine's perspective so the instruction must
+            // re-accompany it. Resolution scope is the original
+            // order's (owner, firm, symbol) — modify never changes
+            // those three.
+            SelfTradePreventionInstruction = ResolveStpInstruction(original),
+            // #471. Same rationale as STP above: from the matching
+            // engine's perspective a replace is a fresh order, so the
+            // TradingSubAccount wire id must re-accompany it. The
+            // domain sub-account on the original Order is preserved
+            // through every modify path (HydrateReplacement copies it
+            // verbatim), so resolving from `original` is correct.
+            TradingSubAccount = ResolveTradingSubAccount(original),
+            // #458. Same rationale: replace is a fresh book entry; the
+            // CBLC Account must re-accompany it. Resolving from
+            // `original` is correct because owner/firm/sub-account
+            // (the typical inputs to the resolver) are immutable
+            // across a modify.
+            Account = ResolveVenueAccount(original),
+            // #472. Same rationale: replace is a fresh book entry;
+            // the InvestorId must re-accompany it. Resolving from
+            // `original` is correct because owner/firm (the typical
+            // inputs to the resolver) are immutable across a modify.
+            InvestorId = MapInvestorIdToWire(ResolveInvestorId(original)),
+            // #473. Same rationale: replace is a fresh book entry,
+            // routing intent must re-accompany it. Resolved off the
+            // original since owner/firm (the typical inputs) are
+            // immutable across modify; pre-trade whitelist gating
+            // was already applied by OrderModifyService.
+            RoutingInstruction = MapRoutingInstructionToWire(ResolveRoutingInstruction(original)),
         };
     }
 
@@ -388,6 +722,127 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         TimeInForce.GoodForAuction => UpModels.TimeInForce.GoodForAuction,
         _ => throw new ArgumentOutOfRangeException(nameof(tif), tif, "Unmapped Domain.TimeInForce."),
     };
+
+    /// <summary>
+    /// #433 P1. Application → SDK STP-instruction mapping. Total over
+    /// every <see cref="SelfTradePreventionMode"/> value; throws on
+    /// unmapped values so adding a future variant without updating
+    /// this table fails loudly instead of silently sending
+    /// <c>None</c> on the wire.
+    /// </summary>
+    internal static UpModels.SelfTradePreventionInstruction MapStpInstruction(
+        SelfTradePreventionMode mode) => mode switch
+        {
+            SelfTradePreventionMode.None => UpModels.SelfTradePreventionInstruction.None,
+            SelfTradePreventionMode.CancelAggressorOrder => UpModels.SelfTradePreventionInstruction.CancelAggressorOrder,
+            SelfTradePreventionMode.CancelRestingOrder => UpModels.SelfTradePreventionInstruction.CancelRestingOrder,
+            SelfTradePreventionMode.CancelBothOrders => UpModels.SelfTradePreventionInstruction.CancelBothOrders,
+            _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, "Unmapped Application.SelfTradePreventionMode."),
+        };
+
+    /// <summary>
+    /// #433 P1. Resolve the STP instruction to stamp on an outbound
+    /// <c>NewOrderRequest</c> / <c>ReplaceOrderRequest</c> for a
+    /// given order. Falls back to
+    /// <see cref="UpModels.SelfTradePreventionInstruction.None"/>
+    /// when no <see cref="RiskOptions"/> monitor is wired (test
+    /// gateways that don't care about the field stay green); the
+    /// production composition root always passes one.
+    /// </summary>
+    private UpModels.SelfTradePreventionInstruction ResolveStpInstruction(Order order)
+    {
+        if (_riskOptions is null)
+            return UpModels.SelfTradePreventionInstruction.None;
+        var mode = RiskLimitsResolver.ResolveSelfTradePreventionMode(
+            _riskOptions.CurrentValue, order.Owner.Value, order.FirmId, order.Symbol);
+        return MapStpInstruction(mode);
+    }
+
+    /// <summary>
+    /// #471. Resolve the numeric <c>TradingSubAccount</c> stamped on
+    /// an outbound <c>NewOrderRequest</c> / <c>ReplaceOrderRequest</c>.
+    /// Returns <c>null</c> when no <see cref="ISubAccountWireIdMapper"/>
+    /// is wired (legacy gateways that don't care about the field stay
+    /// green) or when the order itself has no sub-account (master
+    /// bucket — wire field stays omitted). The production composition
+    /// root always wires <see cref="DeterministicSubAccountWireIdMapper"/>.
+    /// </summary>
+    private uint? ResolveTradingSubAccount(Order order)
+    {
+        if (_subAccountWireIdMapper is null) return null;
+        return _subAccountWireIdMapper.TryMap(order.FirmId, order.SubAccountId);
+    }
+
+    /// <summary>
+    /// #458. Resolve the CBLC <c>Account</c> stamped on an outbound
+    /// <c>NewOrderRequest</c> / <c>ReplaceOrderRequest</c>. Returns
+    /// <c>null</c> when no <see cref="IVenueAccountResolver"/> is
+    /// wired (legacy gateways stay green) or when the wired resolver
+    /// has no mapping for the order — in both cases the wire field
+    /// stays omitted and post-trade allocation continues via the
+    /// broker's out-of-band matching.
+    /// </summary>
+    private ulong? ResolveVenueAccount(Order order)
+    {
+        if (_venueAccountResolver is null) return null;
+        return _venueAccountResolver.TryResolve(order);
+    }
+
+    /// <summary>
+    /// #472. Resolve the opaque <see cref="InvestorIdentity"/>
+    /// stamped on an outbound <c>NewOrderRequest</c> /
+    /// <c>ReplaceOrderRequest</c>. Returns <c>null</c> when no
+    /// <see cref="IInvestorIdResolver"/> is wired (legacy gateways
+    /// stay green) or when the wired resolver has no mapping for the
+    /// order — in both cases the wire field stays omitted.
+    /// </summary>
+    private InvestorIdentity? ResolveInvestorId(Order order)
+    {
+        if (_investorIdResolver is null) return null;
+        return _investorIdResolver.TryResolve(order);
+    }
+
+    /// <summary>
+    /// Translate the domain <see cref="InvestorIdentity"/> to the SDK
+    /// wire struct. Kept private so the SDK type never leaks past the
+    /// gateway boundary.
+    /// </summary>
+    private static UpModels.InvestorId? MapInvestorIdToWire(InvestorIdentity? id)
+        => id is { } v
+            ? new UpModels.InvestorId { Prefix = v.Prefix, Document = v.Document }
+            : (UpModels.InvestorId?)null;
+
+    /// <summary>
+    /// #473. Resolve the <see cref="RoutingInstruction"/> stamped on
+    /// an outbound <c>NewOrderRequest</c> / <c>ReplaceOrderRequest</c>.
+    /// Returns <c>null</c> when no
+    /// <see cref="IRoutingInstructionResolver"/> is wired (legacy
+    /// gateways stay green) or when the wired resolver has no
+    /// instruction for the order. Pre-trade whitelist gating is the
+    /// caller's responsibility — the gateway trusts what the resolver
+    /// returns here.
+    /// </summary>
+    private RoutingInstruction? ResolveRoutingInstruction(Order order)
+    {
+        if (_routingInstructionResolver is null) return null;
+        return _routingInstructionResolver.TryResolve(order);
+    }
+
+    /// <summary>
+    /// Translate domain <see cref="RoutingInstruction"/> → SDK wire
+    /// enum. Kept private so the SDK type never leaks past the
+    /// gateway boundary.
+    /// </summary>
+    private static UpModels.RoutingInstruction? MapRoutingInstructionToWire(RoutingInstruction? value)
+        => value switch
+        {
+            RoutingInstruction.RetailLiquidityTaker => UpModels.RoutingInstruction.RetailLiquidityTaker,
+            RoutingInstruction.WaivedPriority => UpModels.RoutingInstruction.WaivedPriority,
+            RoutingInstruction.BrokerOnly => UpModels.RoutingInstruction.BrokerOnly,
+            RoutingInstruction.BrokerOnlyRemoval => UpModels.RoutingInstruction.BrokerOnlyRemoval,
+            null => null,
+            _ => throw new ArgumentOutOfRangeException(nameof(value), value, "Unknown RoutingInstruction"),
+        };
 
     // The IEntryPointClient submit-side surface is unused on the real adapter
     // (OrdersEndpoints calls IExchangeGateway directly). We implement it to
@@ -593,7 +1048,11 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// <see cref="_currentSessionVerId"/> so reattached cycles do NOT
     /// trigger downstream session-rolled bookkeeping (see PR #420 /
     /// <see cref="SnapshotService"/>). Exponential backoff with jitter
-    /// guards the retry; exits cleanly on shutdown CT. On success the
+    /// guards the retry; exits cleanly on shutdown CT. Immediately before
+    /// each <c>ReconnectAsync</c> attempt, <see cref="_reResolveEndpoint"/>
+    /// (if wired) re-resolves the peer hostname so a matching-side pod IP
+    /// change (Kubernetes failover/reschedule) is picked up without a
+    /// trading-host restart (#565). On success the
     /// inbound event-loop is restarted via <see cref="StartEventLoop"/>
     /// so ER replay (FIXP retransmit) lands on the existing
     /// <c>ExecutionReportReceived</c> subscribers.
@@ -615,21 +1074,38 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 var priorVerId = Volatile.Read(ref _currentSessionVerId);
                 try
                 {
+                    // #565. Re-resolve the peer hostname immediately before
+                    // dialing so a matching-side pod IP change (Kubernetes
+                    // failover/reschedule) is picked up on THIS attempt
+                    // rather than requiring a trading-host restart. Resolver
+                    // failures/timeouts are swallowed by the callback itself
+                    // (logged there) and fall through to ReconnectAsync with
+                    // the last-known endpoint — the existing backoff/retry
+                    // loop still applies if that's also unreachable.
+                    if (_reResolveEndpoint is not null)
+                        await _reResolveEndpoint(ct).ConfigureAwait(false);
+
                     // Selector is invoked at most once per ReconnectAsync —
                     // only when the SDK falls back to Negotiate after a
                     // recoverable Establish-reject. Reattach path skips it
                     // entirely, preserving the SessionVerID.
-                    var outcome = await _client.ReconnectAsync(
+                    var outcome = await ReconnectAsyncCore(
                         Up.ReconnectMode.EstablishReuseThenNegotiate,
                         BumpSessionVerIdSelector,
                         ct).ConfigureAwait(false);
-                    _currentSessionVerId = outcome.SessionVerId;
                     MetricsRegistry.EntryPointReconnectSucceeded.Add(1,
                         new KeyValuePair<string, object?>("firm", _firmId),
                         new KeyValuePair<string, object?>("kind", ReconnectKindTag(outcome.Kind)));
                     _logger.LogInformation(
                         "EntryPoint reconnect ok for firm {Firm} on attempt {N} (kind={Kind} sessionVerId={Ver} priorVerId={Prior} retransmitWindowReady={RetransmitReady}).",
                         _firmId, attempt, outcome.Kind, outcome.SessionVerId, priorVerId, outcome.RetransmitWindowReady);
+                    // Reconcile the session-version transition BEFORE restarting
+                    // the event loop (so the reap/stale lands ahead of ER replay)
+                    // and, on a confirmed roll, BEFORE publishing the bumped
+                    // verId (so a snapshot can't seal the new baseline with
+                    // ghosts still present — same backstop reasoning as the
+                    // connect path).
+                    ReconcileReconnectSessionRoll(outcome.Kind, priorVerId, outcome.SessionVerId);
                     OnConnected();
                     NotifyVenueDisconnectReactor();
                     return;
@@ -652,18 +1128,16 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                         new KeyValuePair<string, object?>("reason", ex.GetType().Name));
                     _logger.LogWarning(ex, "EntryPoint reconnect failed for firm {Firm} (attempt {N}, priorSessionVerId={Prior}); will retry.",
                         _firmId, attempt, priorVerId);
-                    // Defensive bump: if the failure happened past Negotiate
-                    // the SDK has already burned the next value, so reuse
-                    // would race with the peer's strict-monotonic guard.
-                    // Cheap to skip a few. Reattach path doesn't burn the
-                    // current value (Establish is idempotent on SessionVerID)
-                    // so the +1 is safe either way.
-                    try { _currentSessionVerId = checked(priorVerId + 1); }
-                    catch (OverflowException)
-                    {
-                        _logger.LogError("SessionVerId overflow for firm {Firm}; giving up.", _firmId);
-                        return;
-                    }
+                    // Keep our published baseline pinned to the last CONFIRMED
+                    // venue sessionVerId until a reconnect actually succeeds.
+                    // The SDK mutates its own local SessionVerId while probing
+                    // reuse→negotiate fallbacks, but a failed attempt does not
+                    // prove the venue accepted that value. Advancing our mirror
+                    // here can make the eventual Renegotiated success look like
+                    // prior==effective and skip stale-on-session-roll
+                    // reconciliation (#516). The SDK retains whatever local
+                    // retry state it needs internally; _currentSessionVerId is
+                    // only advanced on confirmed success paths.
                     var delay = ComputeBackoff(attempt);
                     try { await Task.Delay(delay, ct).ConfigureAwait(false); }
                     catch (OperationCanceledException) { return; }
@@ -677,6 +1151,17 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         }
     }
 
+    internal Task ReconnectLoopForTestsAsync(CancellationToken ct)
+        => ReconnectLoopAsync(ct);
+
+    private Task<Up.ReconnectOutcome> ReconnectAsyncCore(
+        Up.ReconnectMode mode,
+        Func<uint, uint> selector,
+        CancellationToken ct)
+        => _reconnectAsyncOverride is not null
+            ? _reconnectAsyncOverride(mode, selector, ct)
+            : _client.ReconnectAsync(mode, selector, ct);
+
     /// <summary>
     /// SessionVerID selector for the SDK v0.14.4 reconnect API. Invoked
     /// only on the renegotiate fallback (Reattach skips it). Returns
@@ -684,6 +1169,26 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// to <see cref="ReconnectLoopAsync"/> which short-circuits the loop.
     /// </summary>
     private static uint BumpSessionVerIdSelector(uint prior) => checked(prior + 1);
+
+    private bool TryReadEffectiveSessionVerId(string phase, out uint effective)
+    {
+        effective = 0;
+        if (_effectiveSessionVerIdProvider is null)
+            return false;
+
+        try
+        {
+            effective = _effectiveSessionVerIdProvider();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to read effective SessionVerId after {Phase} for firm {Firm}; leaving current baseline unchanged.",
+                phase, _firmId);
+            return false;
+        }
+    }
 
     private static string ReconnectKindTag(Up.ReconnectKind kind) => kind switch
     {
@@ -760,7 +1265,15 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         // raises Terminated(InitiatedByClient=true) from inside TerminateAsync,
         // and we want the existing handler to record the metric / log line
         // (the _disposed guard on line 527 ensures it skips the reconnect loop).
-        if (Volatile.Read(ref _connectedState) == 1)
+        // #512 cold-start resume: when the gateway is configured to SUSPEND on
+        // shutdown (terminateOnShutdown=false), we deliberately send NO
+        // Terminate(Finished). A Terminate(Finished) tells the venue the
+        // session is permanently finished and evicts session-scoped working
+        // order ownership — exactly the bug behind #507/#512. Suspending (clean
+        // TCP close, no Terminate) lets the next boot reattach via Establish-
+        // reuse and keep its resting orders. The SDK's own DisposeAsync Terminate
+        // is independently gated by EntryPointClientOptions.TerminateOnDispose.
+        if (_terminateOnShutdown && Volatile.Read(ref _connectedState) == 1)
         {
             try
             {

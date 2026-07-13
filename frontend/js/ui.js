@@ -45,6 +45,8 @@ const _modalReturnFocus = new Map();
 // module churn for what is a per-tab cosmetic preference.
 const POSITIONS_SORT_KEY = "b3tp.positions.sort";
 const EXEC_FILTER_KEY    = "b3tp.executions.symbolFilter";
+// FE-OPT-3 (#499). Group-by-underlying toggle for positions panel.
+const POSITIONS_GROUP_KEY = "b3tp.positions.grouped";
 
 // Default: largest absolute net first — the position that needs the
 // most attention. Click cycles ascending → descending → none (back to
@@ -53,6 +55,8 @@ const EXEC_FILTER_KEY    = "b3tp.executions.symbolFilter";
 const POSITIONS_SORT_DEFAULT = { col: "absNet", dir: "desc" };
 let _positionsSort = POSITIONS_SORT_DEFAULT;
 let _execSymbolFilter = "";
+// FE-OPT-3 (#499). Grouping state.
+let _positionsGrouped = false;
 
 function readPositionsSort() {
   try {
@@ -75,6 +79,17 @@ function writeExecSymbolFilter(v) {
   try {
     if (v) sessionStorage.setItem(EXEC_FILTER_KEY, v);
     else   sessionStorage.removeItem(EXEC_FILTER_KEY);
+  } catch { /* swallow */ }
+}
+// FE-OPT-3 (#499). Grouped positions persistence.
+function readPositionsGrouped() {
+  try { return sessionStorage.getItem(POSITIONS_GROUP_KEY) === "1"; }
+  catch { return false; }
+}
+function writePositionsGrouped(v) {
+  try {
+    if (v) sessionStorage.setItem(POSITIONS_GROUP_KEY, "1");
+    else   sessionStorage.removeItem(POSITIONS_GROUP_KEY);
   } catch { /* swallow */ }
 }
 
@@ -851,6 +866,80 @@ function renderCancelAllButton() {
   btn.textContent = `Cancel all (${n})`;
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// FE-OPT-2 (#498). Option chain picker
+// ═══════════════════════════════════════════════════════════════════
+
+let chainPickerOnSelect = null; // callback when user clicks a cell
+
+function openChainPicker(onSelect) {
+  chainPickerOnSelect = onSelect;
+  const modal = $("chain-picker-modal");
+  if (modal && typeof modal.showModal === "function") {
+   modal.showModal();
+  }
+}
+
+function closeChainPicker() {
+  const modal = $("chain-picker-modal");
+  if (modal && typeof modal.close === "function") {
+   modal.close();
+  }
+  chainPickerOnSelect = null;
+}
+
+function buildChainGrid(instruments) {
+  // Group by expiry (columns) and strike (rows)
+  const expiries = [...new Set(instruments.map(i => i.expirationDate))].sort();
+  const strikes = [...new Set(instruments.map(i => i.strikePrice))].sort((a, b) => a - b);
+  
+  // Build lookup: { "strike|expiry|putOrCall" => instrument }
+  const lookup = new Map();
+  for (const inst of instruments) {
+   lookup.set(`${inst.strikePrice}|${inst.expirationDate}|${inst.putOrCall}`, inst);
+  }
+  
+  // Build table HTML
+  let html = '<table class="chain-table"><thead><tr><th class="strike-col">Strike</th>';
+  for (const exp of expiries) {
+   // Show both C and P columns per expiry
+   html += `<th colspan="2">${exp}</th>`;
+  }
+  html += '</tr><tr><th></th>';
+  for (const exp of expiries) {
+   html += '<th>Call</th><th>Put</th>';
+  }
+  html += '</tr></thead><tbody>';
+  
+  for (const strike of strikes) {
+   html += `<tr><td class="strike-col">${strike.toFixed(2)}</td>`;
+   for (const exp of expiries) {
+     const call = lookup.get(`${strike}|${exp}|Call`);
+     const put = lookup.get(`${strike}|${exp}|Put`);
+     html += call 
+       ? `<td class="chain-cell chain-cell-call" data-symbol="${call.symbol}" data-security-id="${call.securityId}">C</td>`
+       : '<td class="chain-cell-empty">—</td>';
+     html += put
+       ? `<td class="chain-cell chain-cell-put" data-symbol="${put.symbol}" data-security-id="${put.securityId}">P</td>`
+       : '<td class="chain-cell-empty">—</td>';
+   }
+   html += '</tr>';
+  }
+  html += '</tbody></table>';
+  return html;
+}
+
+function handleChainCellClick(e) {
+  const cell = e.target.closest(".chain-cell");
+  if (!cell) return;
+  const symbol = cell.dataset.symbol;
+  const securityId = cell.dataset.securityId;
+  if (symbol && chainPickerOnSelect) {
+   chainPickerOnSelect(symbol, securityId);
+   closeChainPicker();
+  }
+}
+
 export function bindUi() {
   // Order ticket: enable/disable price field + show/hide stop-price +
   // good-till-date inputs based on type / TIF (Q1.4 #256).
@@ -889,6 +978,14 @@ export function bindUi() {
     el.addEventListener("input",  refreshTicketValidation);
     el.addEventListener("change", refreshTicketValidation);
   }
+
+  // Update notional preview when qty, price, or symbol changes.
+  // This provides live feedback of the estimated notional value accounting
+  // for option contract multipliers.
+  const symEl = $("ticket-symbol");
+  if (symEl) symEl.addEventListener("change", updateNotionalPreview);
+  if (qtyEl) qtyEl.addEventListener("input", updateNotionalPreview);
+  if (priceEl) priceEl.addEventListener("input", updateNotionalPreview);
 
   $("ticket-form").addEventListener("submit", (e) => {
     e.preventDefault();
@@ -953,7 +1050,6 @@ export function bindUi() {
 
   // Auto-uppercase the symbol field as the trader types so the visual
   // matches what we actually submit (we already toUpperCase on submit).
-  const symEl = $("ticket-symbol");
   if (symEl) {
     symEl.addEventListener("input", (e) => {
       // Don't fight IME composition; uppercase on compositionend instead.
@@ -1093,6 +1189,7 @@ export function bindUi() {
   // (|net| desc). Keyboard activation mirrors mouse for accessibility
   // since the headers are role="button".
   _positionsSort = readPositionsSort();
+  _positionsGrouped = readPositionsGrouped();
   document.querySelectorAll(".panel.positions th.sortable").forEach(th => {
     const cycle = () => {
       const key = th.getAttribute("data-sort-key");
@@ -1111,6 +1208,28 @@ export function bindUi() {
       if (e.key === "Enter" || e.key === " ") { e.preventDefault(); cycle(); }
     });
   });
+
+  // FE-OPT-3 (#499). Positions group-by-underlying toggle.
+  const posGroupToggle = $("positions-group-toggle");
+  if (posGroupToggle) {
+    posGroupToggle.addEventListener("click", () => {
+      _positionsGrouped = !_positionsGrouped;
+      writePositionsGrouped(_positionsGrouped);
+      renderPositions();
+    });
+  }
+
+  // FE-OPT-3 (#499). Expiry strip click handler (event delegation).
+  const expiryStrip = $("expiry-strip-items");
+  if (expiryStrip) {
+    expiryStrip.addEventListener("click", (e) => {
+      const chip = e.target.closest(".expiry-chip");
+      if (!chip) return;
+      const exp = chip.dataset.expiry;
+      _expiryFilter = exp || null; // empty string = "All" = null
+      renderPositions();
+    });
+  }
 
   // #342: Executions log symbol filter. Substring match, case-insensitive,
   // persisted per tab so the trader's last filter survives a page reload.
@@ -1251,6 +1370,50 @@ export function bindUi() {
     });
   }
 
+  // ═══════════════════════════════════════════════════════════════════
+  // FE-OPT-2 (#498). Option chain picker modal wiring
+  // ═══════════════════════════════════════════════════════════════════
+  const chainModal = $("chain-picker-modal");
+  const chainGrid = $("chain-picker-grid");
+  const chainUnderlyingInput = $("chain-underlying");
+  const chainLoadBtn = $("chain-load-btn");
+  const openChainBtn = $("open-chain-picker");
+  
+  if (chainModal) {
+    // Close on backdrop click (click on the dialog but not its content)
+    chainModal.addEventListener("click", (e) => {
+      if (e.target === chainModal) closeChainPicker();
+    });
+    // Close on X button (class or data attr varies, common patterns)
+    chainModal.querySelector(".modal-close")?.addEventListener("click", closeChainPicker);
+    chainModal.querySelector("[data-dismiss='modal']")?.addEventListener("click", closeChainPicker);
+    // Cell clicks inside the grid
+    if (chainGrid) {
+      chainGrid.addEventListener("click", handleChainCellClick);
+    }
+  }
+  
+  if (openChainBtn) {
+    openChainBtn.addEventListener("click", () => {
+      openChainPicker((symbol, securityId) => {
+        // Populate ticket with selected option
+        const symInput = $("ticket-symbol");
+        if (symInput) {
+          symInput.value = symbol;
+          symInput.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+      });
+    });
+  }
+
+  // Ctrl+O opens chain picker (Mac: Cmd+O)
+  document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "o") {
+      e.preventDefault();
+      openChainBtn?.click();
+    }
+  });
+
   subscribe(renderForSlice);
   renderAll();
 }
@@ -1267,6 +1430,44 @@ function ticketHasContent() {
     const el = $(id);
     return el && typeof el.value === "string" && el.value.trim() !== "";
   });
+}
+
+function updateNotionalPreview() {
+  const preview = $("ticket-notional-preview");
+  if (!preview) return;
+  
+  const qty = parseFloat($("ticket-qty")?.value) || 0;
+  const price = parseFloat($("ticket-price")?.value) || 0;
+  const symbol = $("ticket-symbol")?.value?.trim().toUpperCase();
+  
+  // Look up multiplier from state (positions or a symbol cache)
+  // For now, default to 1 (equity) unless we can detect it's an option
+  let multiplier = 1;
+  
+  // If we have a symbol, try to find it in positions to check if it's an option
+  if (symbol && getState().positions.has(symbol)) {
+    const position = getState().positions.get(symbol);
+    // optionContractMultiplier is present if it's an option (securityType === "Option")
+    if (position.optionContractMultiplier) {
+      multiplier = position.optionContractMultiplier;
+    }
+  }
+  
+  const notional = qty * price * multiplier;
+  
+  // Format with Brazilian locale (1000,00 format) but since we want R$ 1,000.00 format
+  // Let's use Intl for proper formatting
+  if (notional > 0) {
+    const formatted = new Intl.NumberFormat("pt-BR", {
+      style: "currency",
+      currency: "BRL",
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    }).format(notional);
+    preview.textContent = `≈ ${formatted}`;
+  } else {
+    preview.textContent = "";
+  }
 }
 
 function onGlobalKeydown(e) {
@@ -2616,10 +2817,13 @@ function orderRow(o, st) {
   const staleBadge = isStale
     ? `<span class="order-stale-badge" title="${escapeHtml(staleTitle)}">stale</span>`
     : "";
+  const optionBadge = o.securityType === "Option" ? optionBadgeHtml(o.optionPutOrCall) : "";
+  const optionTooltip = formatOptionTooltip(o);
+  const symbolTitle = optionTooltip ? ` title="${escapeHtml(optionTooltip)}"` : "";
   const actionTitle = isStale ? `disabled — ${staleTitle}` : "";
   return `<tr data-clordid="${escapeHtml(o.clOrdId)}"${cls ? ` class="${cls}"` : ""}>
     <td><code>${escapeHtml(o.clOrdId)}</code></td>
-    <td>${escapeHtml(o.symbol)}</td>
+    <td${symbolTitle}>${escapeHtml(o.symbol)}${optionBadge}</td>
     <td>${escapeHtml(o.side)}</td>
     <td>${typeChipHtml(o.type)}</td>
     <td>${escapeHtml(o.timeInForce ?? "")}</td>
@@ -2647,17 +2851,155 @@ function syncFilterInputs(filter) {
 
 function renderPositions() {
   const body = $("positions-body");
-  const positions = [...getState().positions.values()]
+  let positions = [...getState().positions.values()]
     .filter(p => p.netQuantity !== 0);
+  
+  // FE-OPT-3 (#499). Apply expiry filter if set.
+  if (_expiryFilter) {
+    positions = positions.filter(p => 
+      p.securityType === "Option" && p.optionExpirationDate === _expiryFilter
+    );
+  }
+  
   sortPositionsInPlace(positions, _positionsSort);
-  body.innerHTML = positions.length === 0
-    ? `<tr><td colspan="3" class="muted">No positions</td></tr>`
-    : positions.map(p => `<tr>
-        <td>${escapeHtml(p.symbol)}</td>
-        <td class="num">${fmtQty(p.netQuantity)}</td>
-        <td class="num">${fmtPx(p.averageEntryPrice)}</td>
-      </tr>`).join("");
+  
+  if (positions.length === 0) {
+    const msg = _expiryFilter 
+      ? `No positions for expiry ${formatExpiryChip(_expiryFilter)}`
+      : "No positions";
+    body.innerHTML = `<tr><td colspan="3" class="muted">${msg}</td></tr>`;
+    syncPositionsSortHeaders();
+    syncPositionsGroupToggle();
+    renderExpiryStrip();
+    return;
+  }
+  
+  if (_positionsGrouped) {
+    body.innerHTML = renderGroupedPositions(positions);
+  } else {
+    body.innerHTML = positions.map(p => renderPositionRow(p)).join("");
+  }
   syncPositionsSortHeaders();
+  syncPositionsGroupToggle();
+  renderExpiryStrip();
+}
+
+// FE-OPT-3 (#499). Render a single position row (used in flat and grouped views).
+function renderPositionRow(p, indent = false) {
+  const optionBadge = p.securityType === "Option" ? optionBadgeHtml(p.optionPutOrCall) : "";
+  const optionTooltip = formatOptionTooltip(p);
+  const symbolTitle = optionTooltip ? ` title="${escapeHtml(optionTooltip)}"` : "";
+  const indentClass = indent ? ' class="pos-indent"' : "";
+  return `<tr${indentClass}>
+    <td${symbolTitle}>${escapeHtml(p.symbol)}${optionBadge}</td>
+    <td class="num">${fmtQty(p.netQuantity)}</td>
+    <td class="num">${fmtPx(p.averageEntryPrice)}</td>
+  </tr>`;
+}
+
+// FE-OPT-3 (#499). Group positions by underlying symbol.
+function renderGroupedPositions(positions) {
+  // Group: options go under their underlyingSymbol, equities stand alone.
+  const groups = new Map();
+  for (const p of positions) {
+    const key = p.securityType === "Option" && p.optionUnderlyingSymbol
+      ? p.optionUnderlyingSymbol
+      : p.symbol;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(p);
+  }
+  
+  // Sort group keys alphabetically.
+  const sortedKeys = [...groups.keys()].sort((a, b) => a.localeCompare(b));
+  
+  let html = "";
+  for (const key of sortedKeys) {
+    const items = groups.get(key);
+    // Count total net contracts in group.
+    const totalNet = items.reduce((sum, p) => sum + (Number(p.netQuantity) || 0), 0);
+    // Check if this is a single equity (not a group of options).
+    const isSingleEquity = items.length === 1 && items[0].securityType !== "Option";
+    
+    if (isSingleEquity) {
+      // Render single equity without group header.
+      html += renderPositionRow(items[0]);
+    } else {
+      // Render group header row.
+      const netSign = totalNet > 0 ? "+" : "";
+      html += `<tr class="pos-group-header" data-underlying="${escapeHtml(key)}">
+        <td><strong>${escapeHtml(key)}</strong> <span class="muted">(${items.length})</span></td>
+        <td class="num"><strong>${netSign}${fmtQty(totalNet)}</strong></td>
+        <td></td>
+      </tr>`;
+      // Render items (options) indented under the header.
+      for (const p of items) {
+        html += renderPositionRow(p, true);
+      }
+    }
+  }
+  return html;
+}
+
+// FE-OPT-3 (#499). Sync the group toggle button state.
+function syncPositionsGroupToggle() {
+  const btn = $("positions-group-toggle");
+  if (!btn) return;
+  btn.setAttribute("aria-pressed", _positionsGrouped ? "true" : "false");
+  btn.classList.toggle("active", _positionsGrouped);
+}
+
+// FE-OPT-3 (#499). Render expiry strip showing upcoming option expirations.
+let _expiryFilter = null; // null = show all, else ISO date string
+function renderExpiryStrip() {
+  const strip = $("positions-expiry-strip");
+  const items = $("expiry-strip-items");
+  if (!strip || !items) return;
+  
+  const positions = [...getState().positions.values()]
+    .filter(p => p.netQuantity !== 0 && p.securityType === "Option" && p.optionExpirationDate);
+  
+  if (positions.length === 0) {
+    strip.hidden = true;
+    return;
+  }
+  
+  // Collect unique expiry dates and count positions per date.
+  const expiries = new Map();
+  for (const p of positions) {
+    const exp = p.optionExpirationDate;
+    expiries.set(exp, (expiries.get(exp) || 0) + 1);
+  }
+  
+  // Sort by date.
+  const sortedDates = [...expiries.keys()].sort();
+  
+  // Render chips.
+  items.innerHTML = sortedDates.map(exp => {
+    const count = expiries.get(exp);
+    const isActive = _expiryFilter === exp;
+    const label = formatExpiryChip(exp);
+    return `<button type="button" class="expiry-chip${isActive ? " active" : ""}" 
+            data-expiry="${escapeHtml(exp)}" title="${count} position(s)">
+      ${label} <span class="expiry-count">(${count})</span>
+    </button>`;
+  }).join("");
+  
+  // Add "All" chip.
+  const allActive = _expiryFilter === null;
+  items.innerHTML = `<button type="button" class="expiry-chip${allActive ? " active" : ""}" 
+    data-expiry="">All</button>` + items.innerHTML;
+  
+  strip.hidden = false;
+}
+
+// Format expiry date as short label (e.g., "Jun 20").
+function formatExpiryChip(isoDate) {
+  try {
+    const d = new Date(isoDate + "T12:00:00");
+    return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  } catch {
+    return isoDate;
+  }
 }
 
 // #342: pure sort helper so the column logic can be exercised without
@@ -2804,6 +3146,17 @@ export function typeChipHtml(type) {
   return `<span class="type-chip ${meta.cls}" title="${escapeHtml(type)}">${meta.label}</span>`;
 }
 
+// Render option badges ("C" for Calls, "P" for Puts) for option orders/positions.
+// Returns an empty string for non-options; renders a colored badge for options.
+function optionBadgeHtml(putOrCall) {
+  if (!putOrCall) return "";
+  const isCall = putOrCall === "Call";
+  const label = isCall ? "C" : "P";
+  const cls = isCall ? "option-call" : "option-put";
+  const title = isCall ? "Call" : "Put";
+  return ` <span class="option-badge ${cls}" title="${title}">${label}</span>`;
+}
+
 // Map ExecKind enum strings (as emitted by the backend `executions.me`
 // stream) to user-friendly display labels. PR #418 split the legacy
 // `Replaced` into two events: the original ClOrdID terminalises as
@@ -2831,6 +3184,17 @@ export function fmtGtd(iso) {
   // the trader sees the venue's wall clock, no locale surprises.
   const pad = (n) => String(n).padStart(2, "0");
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`;
+}
+
+// Format option tooltip for hover. Returns null for non-options; for options
+// returns a string like "PETR4 Call 35.00 @ 2026-06-20" (underlying putOrCall strike @ expiry).
+function formatOptionTooltip(order) {
+  if (order.securityType !== "Option") return null;
+  const side = order.optionPutOrCall || "?";
+  const strike = order.optionStrikePrice != null ? order.optionStrikePrice.toFixed(2) : "?";
+  const expiry = order.optionExpirationDate || "?";
+  const underlying = order.optionUnderlyingSymbol || "?";
+  return `${underlying} ${side} ${strike} @ ${expiry}`;
 }
 
 // Pure validator. Returns { valid, errors } where errors is a record
@@ -2957,4 +3321,4 @@ function refreshTicketValidation() {
   }
   return result;
 }
-export { refreshTicketValidation };
+export { refreshTicketValidation, openChainPicker, closeChainPicker, buildChainGrid, handleChainCellClick };

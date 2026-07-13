@@ -25,6 +25,18 @@ public class VwapAlgoEndpointTests
             ["Trading:SymbolDirectory:SecurityIds:PETR4"] = "4321",
         };
 
+    // #518. Same simulator but with a round-lot instrument (lot 100, every
+    // B3 equity) so the MinLotSizeCheck is active and the algo slicing must
+    // emit whole-lot children.
+    private static IDictionary<string, string?> SimulatorWithLot() =>
+        new Dictionary<string, string?>
+        {
+            ["Trading:Exchange:Mode"] = "Mock",
+            ["Trading:Exchange:AllowErInjection"] = "true",
+            ["Trading:SymbolDirectory:SecurityIds:PETR4"] = "4321",
+            ["Trading:SymbolDirectory:Specs:PETR4:LotSize"] = "100",
+        };
+
     private static object VwapBody(long total, DateTimeOffset start, DateTimeOffset end,
         double tickSeconds = 0.2, string childType = "Limit", decimal? childPrice = 30m,
         decimal? sliceMaxPct = null, decimal? participationCap = null, decimal? priceLimit = null) => new
@@ -119,6 +131,80 @@ public class VwapAlgoEndpointTests
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         var resp = await http.SendAsync(req);
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task PostAlgo_VwapOffLotTotal_Returns400_MinLotSize()
+    {
+        // #518. On a round-lot instrument (lot 100), a total that is not a
+        // whole number of lots is rejected up-front so the parent can never
+        // be admitted only to terminally suspend on the first off-lot slice.
+        using var f = TestAppFactory.WithOverrides(SimulatorWithLot());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+
+        var now = DateTimeOffset.UtcNow;
+        var req = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        {
+            Content = JsonContent.Create(
+                VwapBody(150, now.AddSeconds(-1), now.AddSeconds(60))),
+        };
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var resp = await http.SendAsync(req);
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("min_lot_size", body.GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task Vwap_LotConfigured_AllChildSlicesAreWholeLots()
+    {
+        // #518 regression. With a round-lot instrument (lot 100) the curve
+        // can target an off-lot gap (e.g. cdf≈0.5 of 300 ⇒ 150). Before the
+        // fix the engine submitted the raw 150, which the MinLotSizeCheck
+        // rejected, terminally suspending the parent. After the fix every
+        // child slice is floored to a whole lot, so the parent works the
+        // order down lot-by-lot and never suspends.
+        using var f = TestAppFactory.WithOverrides(SimulatorWithLot());
+        using var http = f.CreateClient();
+        var userToken = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var now = DateTimeOffset.UtcNow;
+        var algoId = await PostAlgo(http, userToken,
+            VwapBody(total: 300, start: now.AddSeconds(-1), end: now.AddSeconds(2),
+                tickSeconds: 0.2));
+
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var seenSeqs = new HashSet<int>();
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.Elapsed < TimeSpan.FromSeconds(10))
+        {
+            var snap = await GetAlgo(http, userToken, algoId);
+            var status = snap.GetProperty("status").GetString();
+            // The bug terminalized the parent as Suspended/RiskRejected;
+            // assert we never get there.
+            Assert.NotEqual("Suspended", status);
+            if (status == "Completed" || status == "Expired") break;
+
+            var next = book.EnumerateChildrenOf("default", ulong.Parse(algoId))
+                .FirstOrDefault(c => c.AlgoSliceSeq is { } s && seenSeqs.Add(s));
+            if (next is null) { await Task.Delay(20); continue; }
+
+            // Every child the engine submits must be a whole lot.
+            Assert.True(next.Quantity % 100 == 0,
+                $"child seq {next.AlgoSliceSeq} qty {next.Quantity} is not a whole lot");
+            await InjectEr(http, adminToken, next.ClOrdId, "Fill", lastQty: next.Quantity);
+        }
+
+        await WaitForAlgoStatus(http, userToken, algoId, "Completed", "Expired");
+        var algo = await GetAlgo(http, userToken, algoId);
+        Assert.NotEqual("Suspended", algo.GetProperty("status").GetString());
+        // Whatever was filled is itself lot-aligned (sum of whole lots).
+        var filledQty = algo.GetProperty("filledQuantity").GetInt64();
+        Assert.True(filledQty % 100 == 0, $"filled {filledQty} not lot-aligned");
     }
 
     // ───────────────────────── Happy-path slice firing ─────────────────────────

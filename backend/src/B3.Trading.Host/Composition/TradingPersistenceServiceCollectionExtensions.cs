@@ -67,6 +67,23 @@ public static class TradingPersistenceServiceCollectionExtensions
             sp.GetRequiredService<IEventStore>(),
             sp.GetServices<IExecutionFanOutSink>()));
 
+        // #512 / #380. Runtime session-roll reactor. On a CONFIRMED roll
+        // (Establish-reuse rejected → renegotiate, detected at connect or on a
+        // live Renegotiated reconnect) it reaps un-acked PendingNew under the
+        // dispatcher lock AND flags surviving Working/PartiallyFilled stale via
+        // OrderStalenessService (operator-clearable; WAL-durable). The boot
+        // reconcile stays conservative (PendingNew only) because it cannot tell
+        // a reuse-reject from a benign verId advance. EventDispatcher is always
+        // registered (NullEventStore when persistence is off); OrderStalenessService
+        // is optional so reduced/mock compositions degrade to reap-only (the
+        // reactor logs a warning).
+        services.AddSingleton<IConnectSessionRollReactor>(sp => new PendingNewReapingConnectRollReactor(
+            sp.GetRequiredService<WorkingOrderBook>(),
+            sp.GetRequiredService<EventDispatcher>(),
+            sp.GetRequiredService<ILogger<PendingNewReapingConnectRollReactor>>(),
+            sp.GetService<OrderStalenessService>(),
+            sp.GetService<TimeProvider>()));
+
         return services;
     }
 }

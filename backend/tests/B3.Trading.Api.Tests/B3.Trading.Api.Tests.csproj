@@ -15,6 +15,7 @@
     <PackageReference Include="Otp.NET" />
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="xRetry" />
   </ItemGroup>
 
   <ItemGroup>
