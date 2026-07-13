@@ -831,7 +831,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 // automatic retransmit; if a gap nevertheless surfaces here,
                 // the metric flags it for ops and the ER processor's
                 // idempotency (#16) makes any subsequent replay safe.
-                switch (FixpGapDetector.Observe(ev.SeqNum, ref _lastInboundSeqNum))
+                var gapObservation = FixpGapDetector.Observe(ev.SeqNum, ref _lastInboundSeqNum);
+                switch (gapObservation)
                 {
                     case GapObservation.Gap:
                         MetricsRegistry.EntryPointGapDetected.Add(1, FirmTag());
@@ -845,6 +846,12 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                         // FIXP retransmit.
                         break;
                 }
+
+                // BusinessReject lacks the ER processor's ClOrdID-keyed
+                // idempotency path, so a retransmitted duplicate must stop here
+                // rather than being re-counted / re-routed downstream.
+                if (gapObservation == GapObservation.Duplicate && ev is UpModels.BusinessReject)
+                    continue;
 
                 ExecutionReportEnvelope? envelope;
                 try
@@ -867,7 +874,6 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 // can persist it to the WAL for operator audit.
                 if (ev is UpModels.BusinessReject br)
                 {
-                    RecordBusinessReject(_firmId, br);
                     try
                     {
                         BusinessRejectReceived?.Invoke(new BusinessRejectEnvelope(
@@ -1293,10 +1299,13 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
     // BusinessReject, also exposed for instrumentation hookup if a future
     // correlation map is added (RefSeqNum → ClOrdID).
-    internal static void RecordBusinessReject(string firmId, UpModels.BusinessReject br)
+    internal static void RecordBusinessReject(string firmId, UpModels.BusinessReject br) =>
+        RecordBusinessReject(firmId, br.RejectReason);
+
+    internal static void RecordBusinessReject(string firmId, int rejectReason)
     {
         MetricsRegistry.EntryPointBusinessRejects.Add(1,
             new KeyValuePair<string, object?>("firm", firmId),
-            new KeyValuePair<string, object?>("reason", br.RejectReason));
+            new KeyValuePair<string, object?>("reason", rejectReason));
     }
 }

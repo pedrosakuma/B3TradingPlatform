@@ -1,5 +1,8 @@
+using System.Diagnostics.Metrics;
+
 using B3.Trading.Application.Risk;
 using B3.Trading.Application;
+using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Domain;
 using B3.Trading.Infrastructure;
@@ -190,6 +193,39 @@ public class EntryPointGatewayAndRouterTests
         Assert.Equal("default", br.FirmId);
     }
 
+    [Fact]
+    public void Router_OnBusinessReject_DuplicateSeqNum_AppendsAndCountsOnce()
+    {
+        var ownership = new OrderOwnershipMap();
+        var book = new WorkingOrderBook();
+        var positions = new PositionKeeper();
+        var sink = new TestSink();
+        var proc = new ExecutionReportProcessor(ownership, book, positions, sink, new NoOpMarginProvider(), NullLogger<ExecutionReportProcessor>.Instance);
+        var client = new MockEntryPointClient();
+        var store = new BrRecordingStore();
+        var dispatcher = new EventDispatcher(store, Array.Empty<IExecutionFanOutSink>());
+        using var listener = ListenBusinessRejectCounter("FIRM-DUP", 3, out var readBusinessRejects);
+        using var router = new EntryPointExecutionReportRouter(client, proc, dispatcher);
+
+        var reject = new BusinessRejectEnvelope(
+            FirmId: "FIRM-DUP",
+            RefSeqNum: 4242UL,
+            RejectReason: 3,
+            Text: "Unknown SecurityID",
+            SeqNum: 5000UL,
+            SendingTime: new DateTimeOffset(2026, 5, 24, 14, 30, 0, TimeSpan.Zero));
+
+        client.EmitBusinessReject(reject);
+        client.EmitBusinessReject(reject);
+
+        var (_, evt) = Assert.Single(store.Recorded);
+        var br = Assert.IsType<BusinessRejectReceivedEvent>(evt);
+        Assert.Equal("FIRM-DUP", br.FirmId);
+        Assert.Equal(5000UL, br.SeqNum);
+        Assert.Equal(1, readBusinessRejects());
+        Assert.Empty(sink.Events);
+    }
+
     private sealed class BrRecordingStore : IEventStore
     {
         public System.Collections.Concurrent.ConcurrentQueue<(long Seq, WalEvent Event)> Recorded { get; } = new();
@@ -218,5 +254,34 @@ public class EntryPointGatewayAndRouterTests
         public ExecutionFanOutTargets Target => ExecutionFanOutTargets.All;
         public void Publish(ExecutionEvent ev) { lock (Events) Events.Add(ev); }
         public void Enqueue(long seq, ExecutionEvent ev) { lock (Events) Events.Add(ev); }
+    }
+
+    private static MeterListener ListenBusinessRejectCounter(string firmId, int rejectReason, out Func<long> read)
+    {
+        long total = 0;
+        var listener = new MeterListener();
+        listener.InstrumentPublished = (inst, l) =>
+        {
+            if (inst.Meter.Name == "B3.Trading" && inst.Name == MetricsRegistry.EntryPointBusinessRejects.Name)
+                l.EnableMeasurementEvents(inst);
+        };
+        listener.SetMeasurementEventCallback<long>((_, value, tags, _) =>
+        {
+            string? seenFirm = null;
+            int? seenReason = null;
+            foreach (var tag in tags)
+            {
+                if (tag.Key == "firm")
+                    seenFirm = tag.Value as string;
+                else if (tag.Key == "reason" && tag.Value is int reason)
+                    seenReason = reason;
+            }
+
+            if (seenFirm == firmId && seenReason == rejectReason)
+                Interlocked.Add(ref total, value);
+        });
+        listener.Start();
+        read = () => Interlocked.Read(ref total);
+        return listener;
     }
 }

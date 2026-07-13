@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+
 using B3.Trading.Application;
 using B3.Trading.Application.MarketData;
 using B3.Trading.Application.Observability;
@@ -24,6 +26,7 @@ public sealed class EntryPointExecutionReportRouter : IDisposable
     // router persists them to the WAL for operator audit but does not
     // hand them to the ExecutionReportProcessor (no order state changes).
     private readonly Action<BusinessRejectEnvelope> _businessRejectHandler;
+    private readonly ConcurrentDictionary<(string FirmId, ulong SeqNum), byte> _seenBusinessRejects = new();
     // Q4.7 (#307). Both optional so the legacy two-arg test ctor keeps
     // working. When wired, the router captures a top-of-book snapshot
     // for every Fill / PartialFill and threads it through both the WAL
@@ -163,9 +166,15 @@ public sealed class EntryPointExecutionReportRouter : IDisposable
     // ordering vs ER is preserved by the WAL seqnum anyway.
     private void OnBusinessReject(BusinessRejectEnvelope br)
     {
+        var firmId = br.FirmId ?? "default";
+        if (!_seenBusinessRejects.TryAdd((firmId, br.SeqNum), 0))
+            return;
+
+        B3EntryPointClientGateway.RecordBusinessReject(firmId, br.RejectReason);
+
         var walEvent = new BusinessRejectReceivedEvent
         {
-            FirmId = br.FirmId ?? "default",
+            FirmId = firmId,
             RefSeqNum = br.RefSeqNum,
             RejectReason = br.RejectReason,
             Text = br.Text,
