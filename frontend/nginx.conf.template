@@ -5,10 +5,29 @@
 # browser doesn't trip on CORS and so frontend/js/protocol.js's
 # defaultBackend() (= location.origin for non-localhost) just works.
 #
-# Upstream is resolved via docker-compose service name. ${TRADING_HOST_UPSTREAM}
-# is set by the compose `frontend` service env (default: trading-host:5000).
-# We use a `resolver` so nginx doesn't cache a NXDOMAIN at startup if
-# trading-host isn't up yet.
+# Upstream is resolved via the platform's service-discovery DNS name
+# (docker-compose bridge: "trading-host"; Kubernetes: a Service name/FQDN,
+# configurable via TRADING_UPSTREAM). We use a `resolver` so nginx doesn't
+# cache a NXDOMAIN at startup if trading-host isn't up yet.
+#
+# nginx's `resolver` directive does NOT apply /etc/resolv.conf `search`
+# domains the way libc does, so a bare short name (e.g. "trading-host")
+# resolves fine under Docker's embedded DNS but is NXDOMAIN on Kubernetes,
+# where the Service is only reachable at its (partially-)qualified name
+# (e.g. "trading-host.<namespace>.svc.cluster.local"). Deployers set
+# TRADING_UPSTREAM to the FQDN:port in that case. See #564.
+#
+# This file is a template: the entrypoint script
+# (docker-entrypoint.d/25-render-nginx-conf.sh) envsubst's it into
+# /etc/nginx/nginx.conf at container start, substituting ${NGINX_RESOLVER}
+# and ${TRADING_UPSTREAM}.
+# `resolver local=on;` (NGINX Plus only) is NOT available in the open-source
+# nginx this image ships, so the resolver address must come from the
+# environment instead: default 127.0.0.11 (Docker's embedded DNS) for
+# docker-compose; Kubernetes/AKS deploys set NGINX_RESOLVER to the cluster
+# DNS ClusterIP (e.g. CoreDNS/kube-dns, discoverable from
+# /etc/resolv.conf inside any pod) — see #562. Do NOT hardcode 127.0.0.11
+# back into this file; that only exists on Docker's default bridge network.
 
 worker_processes auto;
 events { worker_connections 1024; }
@@ -19,8 +38,9 @@ http {
     sendfile      on;
     keepalive_timeout 65;
 
-    # docker's embedded DNS, valid for the lifetime of the resolution.
-    resolver 127.0.0.11 valid=10s ipv6=off;
+    # Resolver address is templated from $NGINX_RESOLVER at container start
+    # (default: 127.0.0.11, Docker's embedded DNS). See #562.
+    resolver ${NGINX_RESOLVER} valid=10s ipv6=off;
 
     # WebSocket upgrade switch. nginx default Connection header would close
     # the upgrade, this map preserves it when the client asked for one.
@@ -100,7 +120,7 @@ http {
         location ~ ^/__proxy(?<orig_path>/.*)$ {
             internal;
 
-            set $trading_upstream "trading-host:5000";
+            set $trading_upstream "${TRADING_UPSTREAM}";
 
             # WebSocket upgrade headers are harmless on plain HTTP responses,
             # so we set them unconditionally rather than branching on path.

@@ -1,3 +1,4 @@
+using B3.Trading.Application.MarketData;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Options;
@@ -33,17 +34,20 @@ public sealed class SubAccountLimitsCheck : IRiskCheck
     private readonly WorkingOrderBook _book;
     private readonly SubAccountPositionKeeper _positions;
     private readonly SubAccountsRegistry _registry;
+    private readonly IMarketValueCalculator _values;
 
     public SubAccountLimitsCheck(
         IOptionsMonitor<SubAccountRiskOptions> options,
         WorkingOrderBook book,
         SubAccountPositionKeeper positions,
-        SubAccountsRegistry registry)
+        SubAccountsRegistry registry,
+        IMarketValueCalculator? values = null)
     {
         _options = options;
         _book = book;
         _positions = positions;
         _registry = registry;
+        _values = values ?? EquityMarketValueCalculator.Instance;
     }
 
     public int Order => 175;
@@ -99,7 +103,10 @@ public sealed class SubAccountLimitsCheck : IRiskCheck
 
         if (limits.MaxNotional is { } notCap && ctx.Type == OrderType.Limit && ctx.Price is { } price)
         {
-            var notional = price * ctx.Quantity;
+            // OPT-B (#484): option qty is in contracts; apply
+            // contractMultiplier so MaxNotional caps options at the
+            // right BRL-equivalent (silent 100x bypass without this).
+            var notional = _values.GetNotional(ctx.Symbol, price, ctx.Quantity);
             if (notional > notCap)
                 return RiskDecision.Reject(
                     $"{LimitExceededPrefix}: notional {notional} would exceed sub-account cap {notCap} for {ctx.FirmId}:{sub.Value}");

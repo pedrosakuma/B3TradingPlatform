@@ -19,6 +19,7 @@ const $ = (id) => document.getElementById(id);
 
 let onCreate = () => {};
 let onRevoke = () => {};
+let onSetCertBinding = () => {};
 let onRefresh = () => {};
 let onBack = () => {};
 let onOpenView = () => {};
@@ -31,6 +32,7 @@ let loading = false;
 export function setBotCredentialsHandlers(handlers) {
   onCreate   = handlers.onCreate   ?? onCreate;
   onRevoke   = handlers.onRevoke   ?? onRevoke;
+  onSetCertBinding = handlers.onSetCertBinding ?? onSetCertBinding;
   onRefresh  = handlers.onRefresh  ?? onRefresh;
   onBack     = handlers.onBack     ?? onBack;
   onOpenView = handlers.onOpenView ?? onOpenView;
@@ -62,17 +64,47 @@ export function bindBotCredentialsUi() {
         setBotCredentialsFeedback("Label is required.", "error");
         return;
       }
-      onCreate({ label });
+      const thumbprintEl = $("bot-credentials-cert-thumbprint");
+      const normalizedThumbprint = normalizeCertThumbprint(thumbprintEl?.value ?? "");
+      if (normalizedThumbprint === false) {
+        setBotCredentialsFeedback(
+          "Client cert thumbprint must be 64 hexadecimal characters (colons and whitespace are allowed).",
+          "error");
+        return;
+      }
+      onCreate({ label, boundCertThumbprint: normalizedThumbprint });
     });
   }
 
   const body = $("bot-credentials-body");
   if (body) {
     body.addEventListener("click", (e) => {
-      const btn = e.target.closest(".bot-cred-revoke");
-      if (!btn) return;
-      const id = btn.dataset.id;
-      const label = btn.dataset.label || id;
+      const editBtn = e.target.closest(".bot-cred-edit-pin");
+      if (editBtn) {
+        const id = editBtn.dataset.id;
+        const label = editBtn.dataset.label || id;
+        const current = editBtn.dataset.thumbprint || "";
+        if (!id) return;
+        const next = window.prompt(
+          `Client cert SHA-256 thumbprint for ${label} (leave empty to clear):`,
+          current,
+        );
+        if (next === null) return;
+        const normalizedThumbprint = normalizeCertThumbprint(next);
+        if (normalizedThumbprint === false) {
+          setBotCredentialsFeedback(
+            "Client cert thumbprint must be 64 hexadecimal characters (colons and whitespace are allowed).",
+            "error");
+          return;
+        }
+        onSetCertBinding({ id, label, boundCertThumbprint: normalizedThumbprint });
+        return;
+      }
+
+      const revokeBtn = e.target.closest(".bot-cred-revoke");
+      if (!revokeBtn) return;
+      const id = revokeBtn.dataset.id;
+      const label = revokeBtn.dataset.label || id;
       if (!id) return;
       if (!window.confirm(
         `Revoke credential ${label}? This cannot be undone.`,
@@ -107,7 +139,9 @@ export function clearBotCredentials() {
 
 export function resetCreateForm() {
   const labelEl = $("bot-credentials-label");
+  const thumbprintEl = $("bot-credentials-cert-thumbprint");
   if (labelEl) labelEl.value = "";
+  if (thumbprintEl) thumbprintEl.value = "";
   setCreateSubmitting(false);
 }
 
@@ -131,13 +165,13 @@ function renderList() {
   const body = $("bot-credentials-body");
   if (!body) return;
   if (loading && rowsCache == null) {
-    body.innerHTML = `<tr><td colspan="5" class="muted">loading…</td></tr>`;
+    body.innerHTML = `<tr><td colspan="6" class="muted">loading…</td></tr>`;
     return;
   }
   const rows = rowsCache ?? [];
   if (rows.length === 0) {
     body.innerHTML =
-      `<tr><td colspan="5" class="muted">You have no bot credentials. Create one to get started.</td></tr>`;
+      `<tr><td colspan="6" class="muted">You have no bot credentials. Create one to get started.</td></tr>`;
     return;
   }
   // Active rows first, then revoked. Within each group, newest first.
@@ -156,9 +190,15 @@ function renderRow(c) {
   const statusBadge = revoked
     ? `<span class="killed-tag">Revoked</span>`
     : `<span class="status-pill status-connected">Active</span>`;
+  const certBinding = renderCertBinding(c.boundCertThumbprint);
   const actions = revoked
     ? ""
-    : `<button type="button" class="bot-cred-revoke danger-btn engage"
+    : `<button type="button" class="bot-cred-edit-pin link-button"
+               data-id="${escapeHtml(c.id)}" data-label="${escapeHtml(c.label)}"
+               data-thumbprint="${escapeHtml(c.boundCertThumbprint ?? "")}">
+         Edit pin
+       </button>
+       <button type="button" class="bot-cred-revoke danger-btn engage"
               data-id="${escapeHtml(c.id)}" data-label="${escapeHtml(c.label)}">
          Revoke
        </button>`;
@@ -166,9 +206,17 @@ function renderRow(c) {
     <td>${escapeHtml(c.label)}</td>
     <td><code>${escapeHtml(c.credShortId)}</code></td>
     <td>${escapeHtml(created)}</td>
+    <td>${certBinding}</td>
     <td>${statusBadge}</td>
     <td>${actions}</td>
   </tr>`;
+}
+
+function renderCertBinding(boundCertThumbprint) {
+  const value = String(boundCertThumbprint ?? "").trim();
+  if (!value) return `<span class="muted">unpinned</span>`;
+  const short = `${value.slice(0, 4)}…${value.slice(-4)}`;
+  return `<span class="status-pill" title="${escapeHtml(value)}">pinned: <code>${escapeHtml(short)}</code></span>`;
 }
 
 // ── "Shown once" secret modal ──────────────────────────────────────
@@ -282,4 +330,10 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => (
     { "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c]
   ));
+}
+
+function normalizeCertThumbprint(value) {
+  const normalized = String(value ?? "").replace(/[\s:]/g, "").toUpperCase();
+  if (!normalized) return null;
+  return /^[0-9A-F]{64}$/.test(normalized) ? normalized : false;
 }

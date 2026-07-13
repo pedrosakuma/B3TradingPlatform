@@ -382,7 +382,8 @@ public sealed class StateSnapshotter
         {
             var c = raw.UserBotCredentials[i];
             creds.Add(new UserBotCredentialSnapshot(
-                c.Id, c.UserId, c.CredShortId, c.Label, c.SecretHash, c.CreatedAtUtc, c.RevokedAtUtc));
+                c.Id, c.UserId, c.CredShortId, c.Label, c.SecretHash, c.CreatedAtUtc, c.RevokedAtUtc,
+                c.BoundCertThumbprint));
         }
         // Match the legacy InMemoryUserBotCredentialRegistry.Snapshot()
         // ordering: stable by (CreatedAtUtc, Id) so snapshot diffs stay
@@ -1169,10 +1170,13 @@ public sealed class EventReplayer
             case UserBotCredentialCreatedEvent ubc:
                 _userBotCredentials?.ApplyCreated(new UserBotCredential(
                     ubc.Id, ubc.UserId, ubc.CredShortId, ubc.Label, ubc.SecretHash,
-                    ubc.CreatedAtUtc, RevokedAtUtc: null));
+                    ubc.CreatedAtUtc, RevokedAtUtc: null, BoundCertThumbprint: ubc.BoundCertThumbprint));
                 break;
             case UserBotCredentialRevokedEvent ubr:
                 _userBotCredentials?.ApplyRevoked(ubr.Id, ubr.RevokedAtUtc);
+                break;
+            case UserBotCredentialCertBindingChangedEvent ubcb:
+                _userBotCredentials?.ApplyCertBindingChanged(ubcb.Id, ubcb.BoundCertThumbprint);
                 break;
             case BotSessionInitializedEvent bsi:
                 _userBotSessions?.ApplyInitialized(new BotSessionState(

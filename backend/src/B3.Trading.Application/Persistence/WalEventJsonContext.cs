@@ -47,6 +47,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonSerializable(typeof(OrderStaleClearedEvent))]
 [JsonSerializable(typeof(UserBotCredentialCreatedEvent))]
 [JsonSerializable(typeof(UserBotCredentialRevokedEvent))]
+[JsonSerializable(typeof(UserBotCredentialCertBindingChangedEvent))]
 [JsonSerializable(typeof(BotSessionInitializedEvent))]
 [JsonSerializable(typeof(BotSessionVerAdvancedEvent))]
 [JsonSerializable(typeof(BotSessionSeqAdvancedEvent))]

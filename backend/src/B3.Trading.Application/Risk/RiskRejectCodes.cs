@@ -32,4 +32,16 @@ public static class RiskRejectCodes
     /// multiple of the instrument's round lot.
     /// </summary>
     public const string MinLotSize = "min_lot_size";
+
+    /// <summary>
+    /// OPT-E (#487) — <see cref="Checks.PriceBandCheck"/> — order
+    /// price is outside the venue-published dynamic price band
+    /// (<c>PriceBand_22</c>). Maps to FIX-44
+    /// <c>OrderPriceExceedsCurrentPriceBand</c> family. Distinct from
+    /// <see cref="Checks.PriceCollarCheck"/> (static-config fat-finger
+    /// collar) because the band is authoritative and intraday — a
+    /// rejection here means the venue would have refused the order on
+    /// the wire.
+    /// </summary>
+    public const string PriceBand = "price_band";
 }

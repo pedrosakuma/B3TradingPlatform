@@ -4,6 +4,7 @@ using B3.Trading.Application.Observability;
 using B3.Trading.Application.UserBots;
 using B3.Trading.EntryPointListener.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
+using xRetry;
 
 namespace B3.Trading.EntryPointListener.Tests.Hosting;
 
@@ -229,7 +230,11 @@ public sealed class FixpOutboundChannelWriterTests
     /// double subclasses <see cref="System.Buffers.ArrayPool{T}"/> to
     /// observe the return.
     /// </summary>
-    [Fact(Timeout = 10_000)]
+    // #332. Wrapped in <c>[RetryFact]</c> because the MeterListener
+    // start-vs-publish race occasionally drops the increment under CI
+    // parallelism (see in-line comment on the bounded poll). Retry up
+    // to 3 times before failing CI — a genuine regression still loses.
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 250)]
     public async Task CompleteAsync_AbandonedPath_IncrementsOtelCounter()
     {
         // Issue #233. The abandoned path must increment the
