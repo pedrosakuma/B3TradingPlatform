@@ -1300,6 +1300,20 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
 }
 .settings-subpanel { margin-top: .5rem; }
 .settings-subpanel .admin-subbar { margin-bottom: .5rem; }
+.security-status-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: .15rem .55rem;
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: .75rem;
+  font-weight: 600;
+}
+.security-status-enrolled { background: rgba(54,196,111,.18); color: var(--green); }
+.security-status-not-enrolled { background: rgba(245,166,35,.18); color: var(--warn); }
+.security-status-pending { background: rgba(79,158,255,.18); color: var(--accent); }
+.security-status-unavailable { background: rgba(239,83,80,.18); color: var(--red); }
 
 /* ─────────────────────────────────────────────────────────────────
    Fase 4 (#400). Trader-view reflow: sub-tabs + lower-band tabs +

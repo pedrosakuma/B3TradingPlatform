@@ -9,7 +9,7 @@ import { defaultBackend, defaultMarketDataUrl, login, signup, submitOrder, cance
          getOrdersHistory, getExecutionsHistory, getPnlToday,
          getStatement, downloadStatementCsv,
          searchAuditLog, getFillTouch, downloadCvmReport, buildDropCopyWebSocketUrl,
-         verifyTotp, enrollTotp, disableTotp,
+         verifyTotp, enrollTotp, disableTotp, getTotpStatus,
          listAlgos, createAlgo, cancelAlgo, modifyAlgo,
          getInstruments } from "./protocol.js";
 import { validateCreateAlgo } from "./validation.js";
@@ -77,6 +77,7 @@ let gatewayPollTimer = null;
 // #303. State for the in-flight 2FA challenge between /auth/login and
 // /auth/2fa/verify. Cleared on success / cancel / refresh.
 let pendingTotp = null; // { backend, username, remember, totpChallengeToken }
+let securityStatusRefreshSeq = 0;
 
 function init() {
   document.getElementById("login-backend").placeholder = defaultBackend();
@@ -240,6 +241,12 @@ function init() {
     if (slice === "density" || slice === "all") {
       persistDensity(state.getState().density);
     }
+    if (slice === "currentView" || slice === "settingsSubTab" || slice === "all") {
+      const current = state.getState();
+      const securityVisible = current.currentView === "settings" && current.settingsSubTab === "security";
+      if (securityVisible) refreshSecurityPanel();
+      else if (slice !== "all") closeSecurityPanel();
+    }
   });
 
   // Fase 1 (#397). URL hash navigation. The tablist click handler
@@ -387,33 +394,78 @@ async function onTotpSubmit(e) {
 function openSecurityPanel() {
   if (!session) return;
   handleSwitchView("settings", "security");
-  setSecurityError(null);
-  // We can't distinguish "enrolled" vs "not enrolled" without a probe
-  // endpoint, so show both controls and let the user choose: enrolling
-  // when already enrolled returns 409 (caught + surfaced); disabling
-  // when not enrolled returns 400. Keeps the FE thin.
-  const start = document.getElementById("security-enroll-start");
-  const show  = document.getElementById("security-enroll-show");
-  const enrolled = document.getElementById("security-enrolled");
-  const status = document.getElementById("security-status");
-  if (start) start.hidden = false;
-  if (show)  show.hidden  = true;
-  if (enrolled) enrolled.hidden = false;
-  if (status) status.textContent =
-    "Enroll to add a second factor, or disable an existing enrollment.";
 }
 
 function closeSecurityPanel() {
+  securityStatusRefreshSeq += 1;
   // Wipe the recovery codes from the DOM as soon as the user dismisses.
   const pre = document.getElementById("security-recovery-codes");
   if (pre) pre.textContent = "";
+  const otpauthUri = document.getElementById("security-otpauth-uri");
+  if (otpauthUri) otpauthUri.value = "";
+  const secret = document.getElementById("security-secret");
+  if (secret) secret.value = "";
   const ack = document.getElementById("security-recovery-ack");
   if (ack) ack.checked = false;
   const confirm = document.getElementById("security-confirm");
   if (confirm) confirm.disabled = true;
+  const confirmCode = document.getElementById("security-confirm-code");
+  if (confirmCode) confirmCode.value = "";
+  const disableCode = document.getElementById("security-disable-code");
+  if (disableCode) disableCode.value = "";
   // #320: drop the rendered QR too — it encodes the otpauth secret.
   clearQr(document.getElementById("security-qr"));
   pendingEnrollSecret = null;
+  setSecurityError(null);
+}
+
+function setSecurityStatus(state) {
+  const el = document.getElementById("security-status");
+  if (!el) return;
+  el.classList.remove(
+    "security-status-enrolled",
+    "security-status-not-enrolled",
+    "security-status-pending",
+    "security-status-unavailable",
+  );
+  if (state === "enrolled") {
+    el.textContent = "Enrolled";
+    el.classList.add("security-status-enrolled");
+  } else if (state === "not-enrolled") {
+    el.textContent = "Not enrolled";
+    el.classList.add("security-status-not-enrolled");
+  } else if (state === "pending") {
+    el.textContent = "Pending confirmation";
+    el.classList.add("security-status-pending");
+  } else if (state === "unavailable") {
+    el.textContent = "Unavailable";
+    el.classList.add("security-status-unavailable");
+  } else {
+    el.textContent = "Checking…";
+  }
+}
+
+function renderSecurityPanel({ enrolled, pending }) {
+  document.getElementById("security-enroll-start").hidden = !!enrolled || !!pending;
+  document.getElementById("security-enroll-show").hidden = !pending;
+  document.getElementById("security-enrolled").hidden = !enrolled || !!pending;
+  setSecurityStatus(pending ? "pending" : (enrolled ? "enrolled" : "not-enrolled"));
+}
+
+async function refreshSecurityPanel() {
+  if (!session) return;
+  const refreshSeq = ++securityStatusRefreshSeq;
+  setSecurityStatus("checking");
+  try {
+    const status = await getTotpStatus(session.backend, session.token);
+    if (refreshSeq !== securityStatusRefreshSeq) return;
+    renderSecurityPanel({ enrolled: !!status?.enrolled, pending: !!pendingEnrollSecret });
+  } catch (err) {
+    if (refreshSeq !== securityStatusRefreshSeq) return;
+    if (err?.status === 401) { logout(); return; }
+    setSecurityStatus("unavailable");
+    setSecurityError(err?.message || "Unable to load 2FA status");
+  }
 }
 
 function setSecurityError(msg) {
@@ -438,10 +490,15 @@ async function onSecurityEnrollBegin() {
     renderQrInto(document.getElementById("security-qr"), resp.otpauthUri);
     document.getElementById("security-enroll-start").hidden = true;
     document.getElementById("security-enroll-show").hidden = false;
+    document.getElementById("security-enrolled").hidden = true;
     document.getElementById("security-recovery-ack").checked = false;
     document.getElementById("security-confirm").disabled = true;
+    document.getElementById("security-confirm-code").value = "";
+    setSecurityStatus("pending");
   } catch (err) {
     setSecurityError(err.message || "Enrollment failed");
+    if (err?.status === 401) { logout(); return; }
+    refreshSecurityPanel();
   }
 }
 
@@ -452,11 +509,13 @@ async function onSecurityEnrollConfirm() {
   setSecurityError(null);
   try {
     await verifyTotp(session.backend, { code, token: session.token });
-    document.getElementById("security-status").textContent = "2FA enrollment confirmed. Recovery codes are no longer recoverable — keep your saved copy.";
     document.getElementById("security-enroll-show").hidden = true;
+    document.getElementById("security-enrolled").hidden = false;
+    document.getElementById("security-disable-code").value = "";
     // #320: secret was committed — drop the QR (encodes the seed).
     clearQr(document.getElementById("security-qr"));
     pendingEnrollSecret = null;
+    setSecurityStatus("enrolled");
   } catch (err) {
     setSecurityError(err.message || "Verification failed");
   }
@@ -469,7 +528,8 @@ async function onSecurityDisable() {
   setSecurityError(null);
   try {
     await disableTotp(session.backend, session.token, code);
-    document.getElementById("security-status").textContent = "2FA disabled.";
+    document.getElementById("security-disable-code").value = "";
+    renderSecurityPanel({ enrolled: false, pending: false });
   } catch (err) {
     setSecurityError(err.message || "Disable failed");
   }
