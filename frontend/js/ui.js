@@ -1744,12 +1744,12 @@ function renderBalance() {
   if (bal == null || !Number.isFinite(bal.available)) {
     el.textContent = "R$ —";
     el.classList.remove("balance-negative");
-    el.title = "Saldo disponível — aguardando dados";
+    el.title = "Available balance — awaiting data";
     return;
   }
   el.textContent = BALANCE_FORMATTER.format(bal.available);
   el.classList.toggle("balance-negative", bal.available < 0);
-  el.title = `Saldo disponível: ${BALANCE_FORMATTER.format(bal.available)}`;
+  el.title = `Available balance: ${BALANCE_FORMATTER.format(bal.available)}`;
 }
 
 function applyCurrentView(view) {
@@ -2393,7 +2393,7 @@ export function renderTicketPhaseCoupling() {
     } else if (inAuction && tifEl.value === "Day") {
       hintEl.hidden = false;
       hintEl.className = "field-hint hint-warn";
-      hintEl.textContent = "Esta ordem ficará pending até a abertura.";
+      hintEl.textContent = "This order will remain pending until the open.";
     } else {
       hintEl.hidden = true;
       hintEl.textContent = "";

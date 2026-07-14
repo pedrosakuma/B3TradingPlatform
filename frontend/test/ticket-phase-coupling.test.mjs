@@ -84,7 +84,7 @@ test("Day in auction phase surfaces the soft pending warning", () => {
   ui.renderTicketPhaseCoupling();
   assert.equal(tifEl.value, "Day");
   assert.equal(hintEl.hidden, false);
-  assert.match(hintEl.textContent, /pending até a abertura/);
+  assert.match(hintEl.textContent, /pending until the open/);
   assert.match(hintEl.className, /hint-warn/);
 });
 

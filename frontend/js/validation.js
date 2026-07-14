@@ -178,11 +178,11 @@ function _validateChildTypeAndPrice(params, allowMarket = true) {
   const childType = params.childOrderType;
   const allowed = allowMarket ? ALGO_CHILD_TYPES_LIMIT_MARKET : ["Limit"];
   if (!allowed.includes(childType)) {
-    return _err(`childOrderType deve ser ${allowed.join(" ou ")}`);
+    return _err(`childOrderType must be ${allowed.join(" or ")}`);
   }
   if (childType === "Limit") {
     if (params.childPrice == null || !(params.childPrice > 0)) {
-      return _err("childPrice é obrigatório (> 0) quando childOrderType=Limit");
+      return _err("childPrice is required (> 0) when childOrderType=Limit");
     }
   }
   return null;
@@ -190,117 +190,117 @@ function _validateChildTypeAndPrice(params, allowMarket = true) {
 
 function _validateStartEnd(params) {
   if (!params.startUtc || !params.endUtc) {
-    return _err("startUtc e endUtc são obrigatórios");
+    return _err("startUtc and endUtc are required");
   }
   const s = Date.parse(params.startUtc);
   const e = Date.parse(params.endUtc);
   if (!Number.isFinite(s) || !Number.isFinite(e)) {
-    return _err("startUtc e endUtc devem ser datas ISO-8601 válidas");
+    return _err("startUtc and endUtc must be valid ISO-8601 timestamps");
   }
   if (e <= s) {
-    return _err("endUtc deve ser maior que startUtc");
+    return _err("endUtc must be greater than startUtc");
   }
   return null;
 }
 
 export function validateCreateAlgo(payload) {
-  if (!payload || typeof payload !== "object") return _err("payload inválido");
+  if (!payload || typeof payload !== "object") return _err("payload is invalid");
   const { symbol, side, type, totalQuantity, securityId } = payload;
-  if (!symbol || typeof symbol !== "string") return _err("symbol é obrigatório");
-  if (!ALGO_SIDES.includes(side)) return _err("side deve ser Buy ou Sell");
-  if (!ALGO_TYPES.includes(type)) return _err(`type deve ser um de ${ALGO_TYPES.join(", ")}`);
+  if (!symbol || typeof symbol !== "string") return _err("symbol is required");
+  if (!ALGO_SIDES.includes(side)) return _err("side must be Buy or Sell");
+  if (!ALGO_TYPES.includes(type)) return _err(`type must be one of ${ALGO_TYPES.join(", ")}`);
   if (!Number.isFinite(Number(totalQuantity)) || Number(totalQuantity) <= 0) {
-    return _err("totalQuantity deve ser positivo");
+    return _err("totalQuantity must be positive");
   }
   if (securityId == null || !(Number(securityId) > 0)) {
-    return _err("securityId é obrigatório (> 0)");
+    return _err("securityId is required (> 0)");
   }
 
   switch (type) {
     case "Iceberg": {
       const p = payload.iceberg;
-      if (!p) return _err("bloco iceberg é obrigatório");
+      if (!p) return _err("iceberg block is required");
       const dq = Number(p.displayQuantity);
-      if (!Number.isFinite(dq) || dq <= 0) return _err("displayQuantity deve ser positivo");
-      if (dq > Number(totalQuantity)) return _err("displayQuantity não pode exceder totalQuantity");
-      if (p.limitPrice != null && !(p.limitPrice > 0)) return _err("limitPrice deve ser positivo quando informado");
+      if (!Number.isFinite(dq) || dq <= 0) return _err("displayQuantity must be positive");
+      if (dq > Number(totalQuantity)) return _err("displayQuantity cannot exceed totalQuantity");
+      if (p.limitPrice != null && !(p.limitPrice > 0)) return _err("limitPrice must be positive when provided");
       return { ok: true };
     }
     case "Twap": {
       const p = payload.twap;
-      if (!p) return _err("bloco twap é obrigatório");
+      if (!p) return _err("twap block is required");
       const sliceCount = Number(p.sliceCount);
-      if (!Number.isFinite(sliceCount) || sliceCount <= 0) return _err("sliceCount deve ser positivo");
+      if (!Number.isFinite(sliceCount) || sliceCount <= 0) return _err("sliceCount must be positive");
       const childErr = _validateChildTypeAndPrice(p, true);
       if (childErr) return childErr;
       const seErr = _validateStartEnd(p);
       if (seErr) return seErr;
       const floor = Math.floor(Number(totalQuantity) / sliceCount);
       if (floor <= 0) {
-        return _err("totalQuantity / sliceCount deve ser ≥ 1", { impliedSliceQuantity: floor });
+        return _err("totalQuantity / sliceCount must be >= 1", { impliedSliceQuantity: floor });
       }
       return { ok: true };
     }
     case "Vwap": {
       const p = payload.vwap;
-      if (!p) return _err("bloco vwap é obrigatório");
+      if (!p) return _err("vwap block is required");
       const childErr = _validateChildTypeAndPrice(p, true);
       if (childErr) return childErr;
       const seErr = _validateStartEnd(p);
       if (seErr) return seErr;
       if (p.tickIntervalSeconds != null && !(p.tickIntervalSeconds > 0)) {
-        return _err("tickIntervalSeconds deve ser positivo");
+        return _err("tickIntervalSeconds must be positive");
       }
       if (p.sliceMaxPct != null && !(p.sliceMaxPct > 0 && p.sliceMaxPct <= 1)) {
-        return _err("sliceMaxPct deve estar em (0, 1]");
+        return _err("sliceMaxPct must be in (0, 1]");
       }
       if (p.participationCap != null && !(p.participationCap > 0 && p.participationCap <= 1)) {
-        return _err("participationCap deve estar em (0, 1]");
+        return _err("participationCap must be in (0, 1]");
       }
-      if (p.priceLimit != null && !(p.priceLimit > 0)) return _err("priceLimit deve ser positivo quando informado");
+      if (p.priceLimit != null && !(p.priceLimit > 0)) return _err("priceLimit must be positive when provided");
       return { ok: true };
     }
     case "Pov": {
       const p = payload.pov;
-      if (!p) return _err("bloco pov é obrigatório");
+      if (!p) return _err("pov block is required");
       const childErr = _validateChildTypeAndPrice(p, true);
       if (childErr) return childErr;
       const seErr = _validateStartEnd(p);
       if (seErr) return seErr;
       if (!(p.participationRate > 0 && p.participationRate <= 1)) {
-        return _err("participationRate é obrigatório em (0, 1]");
+        return _err("participationRate is required in (0, 1]");
       }
       if (p.tickIntervalSeconds != null && !(p.tickIntervalSeconds > 0)) {
-        return _err("tickIntervalSeconds deve ser positivo");
+        return _err("tickIntervalSeconds must be positive");
       }
       if (p.minSliceQty != null && !(p.minSliceQty >= 1)) {
-        return _err("minSliceQty deve ser ≥ 1");
+        return _err("minSliceQty must be >= 1");
       }
-      if (p.priceLimit != null && !(p.priceLimit > 0)) return _err("priceLimit deve ser positivo quando informado");
+      if (p.priceLimit != null && !(p.priceLimit > 0)) return _err("priceLimit must be positive when provided");
       return { ok: true };
     }
     case "Pegged": {
       const p = payload.pegged;
-      if (!p) return _err("bloco pegged é obrigatório");
+      if (!p) return _err("pegged block is required");
       const ref = typeof p.ref === "string" ? p.ref : "";
       const normalized = PEGGED_REFS.find(r => r.toLowerCase() === ref.toLowerCase());
-      if (!normalized) return _err(`ref deve ser ${PEGGED_REFS.join(" | ")}`);
+      if (!normalized) return _err(`ref must be ${PEGGED_REFS.join(" | ")}`);
       if (p.repegIntervalMs != null && !(p.repegIntervalMs > 0)) {
-        return _err("repegIntervalMs deve ser positivo");
+        return _err("repegIntervalMs must be positive");
       }
       if (p.tickSize != null && !(p.tickSize > 0)) {
-        return _err("tickSize deve ser positivo");
+        return _err("tickSize must be positive");
       }
       if (p.childOrderType != null && p.childOrderType !== "Limit") {
-        return _err("Pegged só aceita childOrderType=Limit");
+        return _err("Pegged only accepts childOrderType=Limit");
       }
       if (!Number.isFinite(Number(p.offsetTicks))) {
-        return _err("offsetTicks é obrigatório (inteiro)");
+        return _err("offsetTicks is required (integer)");
       }
-      if (p.priceLimit != null && !(p.priceLimit > 0)) return _err("priceLimit deve ser positivo quando informado");
+      if (p.priceLimit != null && !(p.priceLimit > 0)) return _err("priceLimit must be positive when provided");
       return { ok: true };
     }
     default:
-      return _err(`type desconhecido: ${type}`);
+      return _err(`unknown type: ${type}`);
   }
 }

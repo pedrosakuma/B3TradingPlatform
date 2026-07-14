@@ -519,7 +519,7 @@ async function onSignup(e) {
   const password = document.getElementById("signup-password").value;
   const confirm = document.getElementById("signup-password-confirm").value;
   if (!username || !password) { setSignupError("Preencha username e password."); return; }
-  if (password !== confirm) { setSignupError("As senhas não coincidem."); return; }
+  if (password !== confirm) { setSignupError("Passwords do not match."); return; }
   const submitBtn = document.getElementById("signup-submit");
   if (submitBtn) submitBtn.disabled = true;
   try {
@@ -1502,7 +1502,7 @@ async function refreshAlgosList() {
     state.applyAlgoSnapshot(Array.isArray(rows) ? rows : []);
   } catch (err) {
     console.warn("[algos] list failed", err);
-    algosUi.showBoletaError(`Falha ao carregar algos: ${err?.message || err}`);
+    algosUi.showBoletaError(`Failed to load algos: ${err?.message || err}`);
   }
 }
 
@@ -1515,13 +1515,13 @@ async function handleSubmitAlgo(payload) {
   }
   try {
     const created = await createAlgo(session.backend, session.token, payload);
-    algosUi.showBoletaSuccess(`Algo ${created?.algoId ?? ""} criado.`);
+    algosUi.showBoletaSuccess(`Algo ${created?.algoId ?? ""} created.`);
     // WS delta normally arrives within ms; fire a defensive refresh in
     // case the user opened the tab and hit submit before the snapshot
     // landed (algo.me subscribe + REST list both repopulate cleanly).
     refreshAlgosList();
   } catch (err) {
-    algosUi.showBoletaError(`Erro ao criar algo: ${err?.message || err}`);
+    algosUi.showBoletaError(`Error creating algo: ${err?.message || err}`);
   }
 }
 
@@ -1531,7 +1531,7 @@ async function handleCancelAlgo(algoId) {
   try {
     await cancelAlgo(session.backend, session.token, algoId);
   } catch (err) {
-    algosUi.showBoletaError(`Erro ao cancelar ${algoId}: ${err?.message || err}`);
+    algosUi.showBoletaError(`Error cancelling ${algoId}: ${err?.message || err}`);
   } finally {
     state.markAlgoCancelInflight(algoId, false);
   }
@@ -1542,9 +1542,9 @@ async function handleModifyAlgo(algoId, payload) {
   state.markAlgoModifyInflight(algoId, true);
   try {
     await modifyAlgo(session.backend, session.token, algoId, payload);
-    algosUi.showBoletaSuccess(`Modify enviado para ${algoId}.`);
+    algosUi.showBoletaSuccess(`Modify sent for ${algoId}.`);
   } catch (err) {
-    algosUi.showBoletaError(`Erro ao modificar ${algoId}: ${err?.message || err}`);
+    algosUi.showBoletaError(`Error modifying ${algoId}: ${err?.message || err}`);
   } finally {
     state.markAlgoModifyInflight(algoId, false);
   }

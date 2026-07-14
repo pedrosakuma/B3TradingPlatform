@@ -57,7 +57,7 @@ function renderList() {
     const td = document.createElement("td");
     td.colSpan = 7;
     td.className = "muted-line";
-    td.textContent = "Nenhum algo no momento.";
+    td.textContent = "No algos at the moment.";
     tr.appendChild(td);
     tbody.appendChild(tr);
     return;
@@ -95,7 +95,7 @@ function renderDetail() {
   if (!a) {
     const p = document.createElement("p");
     p.className = "muted-line";
-    p.textContent = "Selecione um algo na lista.";
+    p.textContent = "Select an algo from the list.";
     panel.appendChild(p);
     return;
   }
@@ -123,7 +123,7 @@ function renderDetail() {
   // Per-type params summary (best-effort — undefined blocks are skipped).
   const paramsBlock = a.iceberg || a.twap || a.vwap || a.pov || a.pegged;
   if (paramsBlock) {
-    const h4 = document.createElement("h4"); h4.textContent = "Parâmetros";
+    const h4 = document.createElement("h4"); h4.textContent = "Parameters";
     const pre = document.createElement("pre"); pre.className = "algos-params-pre";
     pre.textContent = JSON.stringify(paramsBlock, null, 2);
     panel.appendChild(h4); panel.appendChild(pre);
@@ -133,11 +133,11 @@ function renderDetail() {
   const form = document.createElement("form");
   form.className = "algos-modify-form";
   form.innerHTML = `
-    <h4>Modificar</h4>
-    <label>Nova quantidade <input type="number" name="newQuantity" min="1" step="1"></label>
-    <label>Novo preço <input type="number" name="newPrice" step="0.01"></label>
-    <button type="submit" class="primary">Modificar</button>
-    <p class="muted-line">Informe ao menos um dos dois campos.</p>
+    <h4>Modify</h4>
+    <label>New quantity <input type="number" name="newQuantity" min="1" step="1"></label>
+    <label>New price <input type="number" name="newPrice" step="0.01"></label>
+    <button type="submit" class="primary">Modify</button>
+    <p class="muted-line">Provide at least one of the two fields.</p>
   `;
   const cancelling = a.status === "Cancelling";
   const inflightMod = st.inflightAlgoModifies.has(a.algoId);
@@ -152,7 +152,7 @@ function renderDetail() {
     if (newQuantity !== "" && newQuantity != null) payload.newQuantity = Number(newQuantity);
     if (newPrice !== "" && newPrice != null) payload.newPrice = Number(newPrice);
     if (payload.newQuantity == null && payload.newPrice == null) {
-      _setStatus("Informe newQuantity e/ou newPrice", "error");
+      _setStatus("Provide newQuantity and/or newPrice", "error");
       return;
     }
     _actions.onModifyAlgo(a.algoId, payload);
@@ -162,7 +162,7 @@ function renderDetail() {
   const cancelBtn = document.createElement("button");
   cancelBtn.type = "button";
   cancelBtn.className = "danger";
-  cancelBtn.textContent = inflightCxl ? "Cancelando…" : "Cancelar algo";
+  cancelBtn.textContent = inflightCxl ? "Cancelling…" : "Cancel algo";
   cancelBtn.disabled = terminal || inflightCxl;
   cancelBtn.addEventListener("click", () => _actions.onCancelAlgo(a.algoId));
   panel.appendChild(cancelBtn);
