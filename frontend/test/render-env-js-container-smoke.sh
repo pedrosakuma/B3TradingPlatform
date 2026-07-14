@@ -76,4 +76,9 @@ run_case \
     "$(printf 'Line 1\nLine\t2\rLine 3\b\fDone')" \
     "$(printf 'wss://md.example/ws?line=1\nline=2\tend\r')"
 
+run_case \
+    'placeholder-token-cross-talk' \
+    '__MARKETDATA_WS_URL_JSON__' \
+    '__APP_TITLE_JSON__'
+
 printf 'render smoke passed for %s\n' "$IMAGE_TAG" >&2

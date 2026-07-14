@@ -49,11 +49,23 @@ js_string_literal() {
 marketdata_ws_url_json=$(js_string_literal "$MARKETDATA_WS_URL")
 app_title_json=$(js_string_literal "$APP_TITLE")
 
-marketdata_ws_url_json=$(printf '%s' "$marketdata_ws_url_json" | sed 's/[&|\\]/\\&/g')
-app_title_json=$(printf '%s' "$app_title_json" | sed 's/[&|\\]/\\&/g')
-
-sed \
-    -e "s|__MARKETDATA_WS_URL_JSON__|$marketdata_ws_url_json|g" \
-    -e "s|__APP_TITLE_JSON__|$app_title_json|g" \
-    /etc/nginx/env.js.template \
-    > /usr/share/nginx/html/js/env.js
+MARKETDATA_WS_URL_JSON="$marketdata_ws_url_json" \
+APP_TITLE_JSON="$app_title_json" \
+awk '
+    {
+        line = $0;
+        while (length(line) > 0) {
+            if (substr(line, 1, 26) == "__MARKETDATA_WS_URL_JSON__") {
+                printf "%s", ENVIRON["MARKETDATA_WS_URL_JSON"];
+                line = substr(line, 27);
+            } else if (substr(line, 1, 18) == "__APP_TITLE_JSON__") {
+                printf "%s", ENVIRON["APP_TITLE_JSON"];
+                line = substr(line, 19);
+            } else {
+                printf "%s", substr(line, 1, 1);
+                line = substr(line, 2);
+            }
+        }
+        printf "\n";
+    }
+' /etc/nginx/env.js.template > /usr/share/nginx/html/js/env.js
