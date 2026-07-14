@@ -152,7 +152,9 @@ test("downloadCvmReport builds /reports/cvm/{model}/{date} and saves cvm_<m>_<yy
   fetchCalls.length = 0;
   fetchResponse = {
     ok: true, status: 200,
-    headers: { get: () => null },
+    headers: {
+      get: (name) => (name.toLowerCase() === "content-type" ? "application/xml" : null),
+    },
     text: async () => "",
     blob: async () => ({ size: 1, type: "application/xml" }),
   };
@@ -166,7 +168,9 @@ test("downloadCvmReport builds /reports/cvm/{model}/{date} and saves cvm_<m>_<yy
   fetchCalls.length = 0;
   fetchResponse = {
     ok: true, status: 200,
-    headers: { get: () => null },
+    headers: {
+      get: (name) => (name.toLowerCase() === "content-type" ? "application/xml" : null),
+    },
     text: async () => "",
     blob: async () => ({ size: 1, type: "application/xml" }),
   };
@@ -189,6 +193,25 @@ test("downloadCvmReport surfaces a structured error on 404/429/503", async () =>
       (err) => err.status === status,
     );
   }
+  fetchResponse = null;
+});
+
+test("downloadCvmReport rejects a 200 HTML fallback response", async () => {
+  let blobCalled = false;
+  fetchCalls.length = 0;
+  fetchResponse = {
+    ok: true, status: 200,
+    headers: {
+      get: (name) => (name.toLowerCase() === "content-type" ? "text/html; charset=utf-8" : null),
+    },
+    text: async () => "",
+    blob: async () => { blobCalled = true; return { size: 1, type: "text/html" }; },
+  };
+  await assert.rejects(
+    () => protocol.downloadCvmReport("http://api", "tok", 35, "2025-01-15"),
+    /expected XML/i,
+  );
+  assert.equal(blobCalled, false);
   fetchResponse = null;
 });
 
