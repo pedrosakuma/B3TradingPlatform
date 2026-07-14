@@ -25,12 +25,19 @@ js_string_literal() {
     printf '%s' "$1" | awk '
         BEGIN { printf "\"" }
         {
-            gsub(/\\/, "\\\\");
-            gsub(/"/, "\\\"");
-            gsub(/\r/, "\\r");
-            gsub(/\t/, "\\t");
             if (NR > 1) printf "\\n";
-            printf "%s", $0;
+            # Escape character-by-character so the result is stable across
+            # both GNU awk and BusyBox awk (nginx:alpine at container boot).
+            for (i = 1; i <= length($0); i++) {
+                ch = substr($0, i, 1);
+                if (ch == "\\")      printf "\\\\";
+                else if (ch == "\"") printf "\\\"";
+                else if (ch == "\b") printf "\\b";
+                else if (ch == "\f") printf "\\f";
+                else if (ch == "\r") printf "\\r";
+                else if (ch == "\t") printf "\\t";
+                else                 printf "%s", ch;
+            }
         }
         END { printf "\"" }
     '
