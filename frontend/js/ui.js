@@ -1252,15 +1252,15 @@ export function bindUi() {
   if (prevBtn) prevBtn.addEventListener("click", () => onBlotterPage(-1));
   if (nextBtn) nextBtn.addEventListener("click", () => onBlotterPage(+1));
 
-  // Market data form: apply WS URL + watchlist atomically.
+  // Market data form: the WS URL is operator-configured and read-only;
+  // Apply persists only the watchlist symbols.
   $("md-form").addEventListener("submit", (e) => {
     e.preventDefault();
-    const url = $("md-url").value.trim();
     const symbols = $("md-symbols").value
       .split(/[,\s]+/)
       .map(s => s.trim().toUpperCase())
       .filter(Boolean);
-    onApplyMd({ url, symbols });
+    onApplyMd({ symbols });
   });
 
   // Market data settings now live inline as a sub-tab of Settings
