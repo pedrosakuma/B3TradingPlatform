@@ -872,6 +872,15 @@ function renderCancelAllButton() {
 
 let chainPickerOnSelect = null; // callback when user clicks a cell
 
+function setChainPickerStatus(message, kind = "info") {
+  const grid = $("chain-picker-grid");
+  if (!grid) return;
+  const cls = kind === "error"
+    ? "chain-placeholder chain-placeholder-error"
+    : "chain-placeholder";
+  grid.innerHTML = `<p class="${cls}">${escapeHtml(message ?? "")}</p>`;
+}
+
 function openChainPicker(onSelect) {
   chainPickerOnSelect = onSelect;
   const modal = $("chain-picker-modal");
@@ -916,11 +925,11 @@ function buildChainGrid(instruments) {
    for (const exp of expiries) {
      const call = lookup.get(`${strike}|${exp}|Call`);
      const put = lookup.get(`${strike}|${exp}|Put`);
-     html += call 
-       ? `<td class="chain-cell chain-cell-call" data-symbol="${call.symbol}" data-security-id="${call.securityId}">C</td>`
+     html += call
+       ? `<td class="chain-cell chain-cell-call" data-symbol="${call.symbol}" data-security-id="${call.securityId}" data-put-or-call="${call.putOrCall}">C</td>`
        : '<td class="chain-cell-empty">—</td>';
      html += put
-       ? `<td class="chain-cell chain-cell-put" data-symbol="${put.symbol}" data-security-id="${put.securityId}">P</td>`
+       ? `<td class="chain-cell chain-cell-put" data-symbol="${put.symbol}" data-security-id="${put.securityId}" data-put-or-call="${put.putOrCall}">P</td>`
        : '<td class="chain-cell-empty">—</td>';
    }
    html += '</tr>';
@@ -932,11 +941,54 @@ function buildChainGrid(instruments) {
 function handleChainCellClick(e) {
   const cell = e.target.closest(".chain-cell");
   if (!cell) return;
-  const symbol = cell.dataset.symbol;
-  const securityId = cell.dataset.securityId;
-  if (symbol && chainPickerOnSelect) {
-   chainPickerOnSelect(symbol, securityId);
+  const selection = {
+   symbol: cell.dataset.symbol,
+   securityId: cell.dataset.securityId,
+   putOrCall: cell.dataset.putOrCall,
+  };
+  if (selection.symbol && chainPickerOnSelect) {
+   chainPickerOnSelect(selection);
    closeChainPicker();
+  }
+}
+
+function populateTicketFromChainSelection(selection) {
+  const symbol = selection?.symbol ? String(selection.symbol).trim().toUpperCase() : "";
+  if (!symbol) return;
+
+  const stopPriceEl = $("ticket-stop-price");
+  if (stopPriceEl) stopPriceEl.value = "";
+
+  const symInput = $("ticket-symbol");
+  if (symInput) {
+   symInput.value = symbol;
+   symInput.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  const sideEl = $("ticket-side");
+  if (sideEl) {
+   sideEl.value = "Buy";
+   sideEl.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  const priceEl = $("ticket-price");
+  if (priceEl) {
+   priceEl.value = "";
+   priceEl.dispatchEvent(new Event("input", { bubbles: true }));
+   priceEl.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  setTicketFeedback(null);
+}
+
+export function toggleAuctionPanel() {
+  const st = getState();
+  if (st.auctionPanelSymbol) {
+    setAuctionPanelSymbol(null);
+    return;
+  }
+  if (st.selectedSymbol && isAuctionPhase(getPhase(st.selectedSymbol))) {
+    setAuctionPanelSymbol(st.selectedSymbol);
   }
 }
 
@@ -1360,14 +1412,7 @@ export function bindUi() {
   // current state).
   const auctionToggle = $("auction-toggle");
   if (auctionToggle) {
-    auctionToggle.addEventListener("click", () => {
-      const st = getState();
-      if (st.auctionPanelSymbol) {
-        setAuctionPanelSymbol(null);
-      } else if (st.selectedSymbol) {
-        setAuctionPanelSymbol(st.selectedSymbol);
-      }
-    });
+    auctionToggle.addEventListener("click", toggleAuctionPanel);
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -1395,13 +1440,8 @@ export function bindUi() {
   
   if (openChainBtn) {
     openChainBtn.addEventListener("click", () => {
-      openChainPicker((symbol, securityId) => {
-        // Populate ticket with selected option
-        const symInput = $("ticket-symbol");
-        if (symInput) {
-          symInput.value = symbol;
-          symInput.dispatchEvent(new Event("change", { bubbles: true }));
-        }
+      openChainPicker((selection) => {
+        populateTicketFromChainSelection(selection);
       });
     });
   }
@@ -1978,7 +2018,7 @@ export function renderForSlice(slice) {
     reconcileAuctionPanel();
     renderTicketPhaseCoupling();
   }
-  if (slice === "auction" || slice === "auctionPanelSymbol" || slice === "all") renderAuctionPanel();
+  if (slice === "auction" || slice === "auctionPanelSymbol" || slice === "selectedSymbol" || slice === "phases" || slice === "all") renderAuctionPanel();
   // Q1.4 (#256). The risk-policy slice flips the GTD horizon used by
   // validateTicketState, so a policy update must re-run ticket
   // validation — otherwise a late-arriving fetch leaves the submit
@@ -2264,33 +2304,29 @@ export function renderAuctionPanel() {
   const panel = $("auction-panel");
   if (!panel) return;
   const st = getState();
-  const sym = st.auctionPanelSymbol;
-  if (!sym) {
-    panel.hidden = true;
-    panel.classList.add("collapsed");
-    const body = $("auction-body");
-    if (body) body.hidden = true;
-    const toggle = $("auction-toggle");
-    if (toggle) toggle.setAttribute("aria-expanded", "false");
-    const caret = panel.querySelector(".auction-caret");
-    if (caret) caret.textContent = "▸";
-    return;
-  }
+  const sym = st.auctionPanelSymbol ?? st.selectedSymbol ?? null;
+  const hasLiveAuction = !!st.auctionPanelSymbol;
+  const body = $("auction-body");
+  const toggle = $("auction-toggle");
+  const tag = $("auction-symbol-tag");
+  const emptyEl = $("auction-empty-state");
+  const printsTitle = $("auction-prints-title");
+  const printsEl = $("auction-prints");
 
   panel.hidden = false;
   panel.classList.remove("collapsed");
-  panel.setAttribute("aria-label", `Auction state for ${sym}`);
-  const body = $("auction-body");
+  panel.setAttribute("aria-label", sym ? `Auction state for ${sym}` : "Auction state");
   if (body) body.hidden = false;
-  const toggle = $("auction-toggle");
   if (toggle) toggle.setAttribute("aria-expanded", "true");
   const caret = panel.querySelector(".auction-caret");
   if (caret) caret.textContent = "▾";
 
-  const tag = $("auction-symbol-tag");
-  if (tag) tag.textContent = sym;
+  if (tag) {
+    tag.textContent = sym ?? "—";
+    tag.classList.toggle("symbol-tag--muted", !sym);
+  }
 
-  const aux = getAuctionState(sym);
+  const aux = st.auctionPanelSymbol ? getAuctionState(st.auctionPanelSymbol) : null;
   const top = aux?.top ?? null;
   const prev = aux?.prevTop ?? null;
   const matchQty = aux?.indicativeMatchQty ?? null;
@@ -2334,8 +2370,33 @@ export function renderAuctionPanel() {
   const ttuEl = $("auction-ttu");
   if (ttuEl) ttuEl.textContent = "—";
 
-  const printsEl = $("auction-prints");
+  if (!hasLiveAuction) {
+    const selectedInAuction = st.selectedSymbol
+      ? isAuctionPhase(getPhase(st.selectedSymbol))
+      : false;
+    if (emptyEl) {
+      emptyEl.hidden = false;
+      emptyEl.textContent = !st.selectedSymbol
+        ? "Select a symbol from Watchlist to view its auction state."
+        : selectedInAuction
+          ? `${st.selectedSymbol} is currently in auction. Click the header to open live details.`
+          : `${st.selectedSymbol} is not currently in an auction.`;
+    }
+    if (printsTitle) printsTitle.hidden = true;
+    if (printsEl) {
+      printsEl.hidden = true;
+      printsEl.innerHTML = "";
+    }
+    return;
+  }
+
+  if (emptyEl) {
+    emptyEl.hidden = true;
+    emptyEl.textContent = "";
+  }
+  if (printsTitle) printsTitle.hidden = false;
   if (printsEl) {
+    printsEl.hidden = false;
     const prints = aux?.lastPrints ?? [];
     if (prints.length === 0) {
       printsEl.innerHTML = `<li class="muted-line">No prints yet</li>`;
@@ -3321,4 +3382,12 @@ function refreshTicketValidation() {
   }
   return result;
 }
-export { refreshTicketValidation, openChainPicker, closeChainPicker, buildChainGrid, handleChainCellClick };
+export {
+  refreshTicketValidation,
+  openChainPicker,
+  closeChainPicker,
+  buildChainGrid,
+  handleChainCellClick,
+  populateTicketFromChainSelection,
+  setChainPickerStatus,
+};

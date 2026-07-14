@@ -21,6 +21,8 @@ installDomStub({
     "auction-match-qty":   { tag: "span" },
     "auction-imbalance":   { tag: "span" },
     "auction-ttu":         { tag: "span" },
+    "auction-empty-state": { tag: "p", hidden: true },
+    "auction-prints-title": { tag: "h3" },
     "auction-prints":      { tag: "ol" },
   },
 });
@@ -34,6 +36,7 @@ function clearAuction() {
   // Reset by zeroing the per-symbol entry — clearAll touches too much.
   state.getState().auctionBySymbol.delete(SYM);
   state.setAuctionPanelSymbol(null);
+  state.setSelectedSymbol(null);
 }
 
 test("setAuctionPanelSymbol toggles the open state", () => {
@@ -97,12 +100,51 @@ test("applyAuctionFrame appends prints newest-first and caps at 5", () => {
   assert.equal(prints[4].price, 33);
 });
 
-test("renderAuctionPanel hides the panel when closed", () => {
+test("renderAuctionPanel shows a watchlist hint when no symbol is selected", () => {
   clearAuction();
   ui.renderAuctionPanel();
   const panel = document.getElementById("auction-panel");
-  assert.equal(panel.hidden, true);
-  assert.ok(panel.classList.contains("collapsed"));
+  assert.equal(panel.hidden, false);
+  assert.equal(document.getElementById("auction-symbol-tag").textContent, "—");
+  assert.equal(document.getElementById("auction-empty-state").hidden, false);
+  assert.match(document.getElementById("auction-empty-state").textContent, /Select a symbol from Watchlist/i);
+  assert.equal(document.getElementById("auction-prints-title").hidden, true);
+  assert.equal(document.getElementById("auction-prints").hidden, true);
+});
+
+test("renderAuctionPanel shows a non-auction message for the selected symbol", () => {
+  clearAuction();
+  state.setSelectedSymbol("PETR4");
+  ui.renderAuctionPanel();
+  assert.equal(document.getElementById("auction-symbol-tag").textContent, "PETR4");
+  assert.equal(document.getElementById("auction-empty-state").hidden, false);
+  assert.match(document.getElementById("auction-empty-state").textContent, /PETR4 is not currently in an auction/i);
+});
+
+test("toggleAuctionPanel ignores non-auction selected symbols", () => {
+  clearAuction();
+  state.applyPhaseFrame({ symbol: "PETR4", phase: "Open" });
+  state.setSelectedSymbol("PETR4");
+  ui.toggleAuctionPanel();
+  assert.equal(state.getState().auctionPanelSymbol, null);
+});
+
+test("renderForSlice updates the empty state when selectedSymbol changes", () => {
+  clearAuction();
+  ui.renderAuctionPanel();
+  state.setSelectedSymbol("PETR4");
+  ui.renderForSlice("selectedSymbol");
+  assert.match(document.getElementById("auction-empty-state").textContent, /PETR4 is not currently in an auction/i);
+});
+
+test("renderAuctionPanel keeps manual-close messaging truthful for auction symbols", () => {
+  clearAuction();
+  state.applyPhaseFrame({ symbol: "PETR4", phase: "OpeningCall" });
+  state.setSelectedSymbol("PETR4");
+  state.setAuctionPanelSymbol("PETR4");
+  ui.toggleAuctionPanel();
+  ui.renderAuctionPanel();
+  assert.match(document.getElementById("auction-empty-state").textContent, /PETR4 is currently in auction/i);
 });
 
 test("renderAuctionPanel shows TOP, match qty, imbalance and arrow direction", () => {
@@ -118,6 +160,9 @@ test("renderAuctionPanel shows TOP, match qty, imbalance and arrow direction", (
   const panel = document.getElementById("auction-panel");
   assert.equal(panel.hidden, false);
   assert.equal(document.getElementById("auction-symbol-tag").textContent, SYM);
+  assert.equal(document.getElementById("auction-empty-state").hidden, true);
+  assert.equal(document.getElementById("auction-prints-title").hidden, false);
+  assert.equal(document.getElementById("auction-prints").hidden, false);
   // Top price formatted via fmtPx (en-US dot decimal — #340).
   assert.equal(document.getElementById("auction-top-price").textContent, "30.50");
   // Up arrow because 30.50 > 30.00.

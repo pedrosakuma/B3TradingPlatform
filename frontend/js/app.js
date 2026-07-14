@@ -998,21 +998,23 @@ async function handleLoadChain() {
   if (!session) return;
   const underlying = document.getElementById("chain-underlying")?.value?.trim().toUpperCase();
   if (!underlying) {
-    document.getElementById("chain-picker-grid").innerHTML =
-      '<p class="chain-placeholder">Enter an underlying symbol (e.g., PETR4)</p>';
+    ui.setChainPickerStatus("Enter an underlying symbol (e.g. PETR4) and click Load.");
     return;
   }
   const grid = document.getElementById("chain-picker-grid");
-  if (grid) grid.innerHTML = '<p class="chain-placeholder">Loading…</p>';
+  ui.setChainPickerStatus(`Loading ${underlying} option chain…`);
   try {
     const instruments = await getInstruments(session.backend, session.token, { underlying });
     if (!instruments || instruments.length === 0) {
-      if (grid) grid.innerHTML = '<p class="chain-placeholder">No options found for this underlying</p>';
+      ui.setChainPickerStatus(`No listed options found for ${underlying}.`);
       return;
     }
     if (grid) grid.innerHTML = ui.buildChainGrid(instruments);
   } catch (err) {
-    if (grid) grid.innerHTML = `<p class="chain-placeholder" style="color:#dc2626">Error: ${err.message}</p>`;
+    const message = err?.status === 404 || err?.status === 400
+      ? `${underlying} is not a known underlying symbol.`
+      : `Could not load the option chain for ${underlying}.`;
+    ui.setChainPickerStatus(message, "error");
   }
 }
 

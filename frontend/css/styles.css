@@ -1005,6 +1005,9 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
   padding: 2rem;
   margin: 0;
 }
+.chain-placeholder-error {
+  color: #dc2626;
+}
 .chain-table {
   border-collapse: collapse;
   width: 100%;
