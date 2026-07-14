@@ -1359,8 +1359,9 @@
       <form id="md-form" class="panel admin-panel md-settings-card">
         <label>
           <span>WS URL</span>
-          <input id="md-url" type="url" placeholder="ws://localhost:8081/ws" />
+          <input id="md-url" type="url" readonly aria-describedby="md-url-hint" />
         </label>
+        <p id="md-url-hint" class="field-hint">Derived from deploy-time config (or the localhost dev fallback) — not user-editable.</p>
         <label>
           <span>Watchlist (comma-separated)</span>
           <input id="md-symbols" type="text" placeholder="PETR4,VALE3" />

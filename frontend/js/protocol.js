@@ -12,26 +12,20 @@ export function defaultBackend() {
   return "http://localhost:5000";
 }
 
-// Default WebSocket endpoint for the OPTIONAL B3MarketDataPlatform feed
-// (DOB / candles / trade prints). Distinct origin from the trader WS, so
-// it can't go through the nginx reverse-proxy.
-//
-// Resolution order (#572):
-//   1. window.__B3_CONFIG__.marketDataWsUrl, if set — a deploy-time default
-//      rendered into js/env.js from the MARKETDATA_WS_URL env var (see
-//      env.js.template / 20-render-env-js.sh), the same pattern
-//      TRADING_UPSTREAM already uses for nginx.conf.template. Lets each
-//      orchestrator (docker-compose dev, b3deploy prod, ...) ship the
-//      correct host/port without every operator pasting it in by hand.
-//   2. The localhost/127.0.0.1 dev docker-compose convention: same host as
-//      the page, port 8081, /ws path.
-//   3. "" — non-dev deployments with no config shouldn't auto-attempt a
-//      guess that's likely wrong; the Market Data panel's manual override
-//      still works exactly as before.
-export function defaultMarketDataUrl() {
+// Deploy-time WebSocket endpoint for the OPTIONAL B3MarketDataPlatform feed
+// (DOB / candles / trade prints). Rendered into js/env.js from the
+// MARKETDATA_WS_URL env var (see env.js.template / 20-render-env-js.sh).
+// This is operator-controlled config, not an end-user preference.
+export function configuredMarketDataUrl() {
   const configured = globalThis.window?.__B3_CONFIG__?.marketDataWsUrl;
-  if (typeof configured === "string" && configured !== "") return configured;
+  return typeof configured === "string" ? configured : "";
+}
 
+// Localhost/127.0.0.1 convenience guess retained for non-Settings callers
+// that explicitly want the old dev fallback behavior.
+export function defaultMarketDataUrl() {
+  const configured = configuredMarketDataUrl();
+  if (configured !== "") return configured;
   if (location.protocol !== "http:" && location.protocol !== "https:") return "";
   if (location.hostname !== "localhost" && location.hostname !== "127.0.0.1") return "";
   const wsScheme = location.protocol === "https:" ? "wss:" : "ws:";

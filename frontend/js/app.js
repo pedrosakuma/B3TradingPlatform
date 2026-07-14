@@ -1,6 +1,6 @@
 // App entry point: wires login → worker → state → UI together.
 
-import { defaultBackend, defaultMarketDataUrl, login, signup, submitOrder, cancelOrder, modifyOrder, getAdminFirms,
+import { defaultBackend, login, signup, submitOrder, cancelOrder, modifyOrder, getAdminFirms,
          validateSession, getRiskPolicy,
          getKillStatus, killFirm, reviveFirm, killEndClient, reviveEndClient,
          getHaltStatus, haltSymbol, resumeSymbol,
@@ -37,9 +37,9 @@ import { tabsForRole, defaultViewForRole } from "./complianceUi.js";
 import { FLAGS } from "./mdProtocol.js";
 import { renderQrInto, clearQr } from "./qrRender.js";
 import { applyRiskPolicyFetch } from "./riskPolicy.js";
+import { readMdConnectionConfig, readMdDisplayConfig, writeMdConfig, clearMdConfig } from "./marketDataSettings.js";
 
 const SESSION_KEY = "b3tp.session";
-const MD_KEY = "b3tp.md";
 const BLOTTER_FILTER_KEY = "b3tp.blotter.filter";
 const DEFAULT_WATCHLIST = ["PETR4", "VALE3"];
 const FIRMS_POLL_INTERVAL_MS = 5_000;
@@ -821,36 +821,12 @@ function restartWorker() {
   startWorker();
 }
 
-function defaultMdUrl() {
-  // Optional external B3MarketDataPlatform WS. Defaults to the dev port
-  // 8081 on localhost so the docker-compose stack works out of the box;
-  // returns empty for non-localhost deployments where the operator must
-  // configure an explicit endpoint via the Market Data panel.
-  return defaultMarketDataUrl();
-}
-
-function readMdConfig() {
-  try {
-    const raw = sessionStorage.getItem(MD_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed.url === "string" && Array.isArray(parsed.symbols)) {
-        return parsed;
-      }
-    }
-  } catch { /* fall through */ }
-  return { url: defaultMdUrl(), symbols: DEFAULT_WATCHLIST.slice() };
-}
-
-function writeMdConfig(cfg) { sessionStorage.setItem(MD_KEY, JSON.stringify(cfg)); }
-function clearMdConfig()    { sessionStorage.removeItem(MD_KEY); }
-
 function startMdWorker() {
-  mdConfig = readMdConfig();
-  ui.setMdInputs(mdConfig);
+  mdConfig = readMdConnectionConfig(sessionStorage, DEFAULT_WATCHLIST);
+  ui.setMdInputs(readMdDisplayConfig(sessionStorage, DEFAULT_WATCHLIST));
   state.setWatchlist(mdConfig.symbols);
   state.setMarketDataStatus("disconnected");
-  if (!mdConfig.url) return; // user hasn't configured an endpoint yet
+  if (!mdConfig.url) return; // no deploy-time URL and no localhost dev fallback
 
   mdWorker = new Worker(new URL("./mdWorker.js", import.meta.url), { type: "module" });
   mdWorker.onmessage = (ev) => onMdWorkerMessage(ev.data);
@@ -872,31 +848,20 @@ function startMdWorker() {
   });
 }
 
-function handleApplyMd({ url, symbols }) {
-  if (!url) {
-    ui.setMdFeedback("ws url required", "error");
-    return;
-  }
-  const next = { url, symbols };
-  // URL change forces a full restart (different endpoint = different
-  // session / securityIds). Symbol-only changes go via setSymbols so
-  // we don't blip the connection on every watchlist tweak.
-  const urlChanged = !mdConfig || mdConfig.url !== url;
+function handleApplyMd({ symbols }) {
+  const next = {
+    url: mdConfig?.url ?? "",
+    symbols,
+  };
   mdConfig = next;
-  writeMdConfig(next);
+  writeMdConfig(sessionStorage, symbols);
   state.setWatchlist(symbols);
 
-  if (urlChanged || !mdWorker) {
-    if (mdWorker) {
-      try { mdWorker.postMessage({ type: "stop" }); } catch { /* swallow */ }
-      mdWorker.terminate();
-      mdWorker = null;
+  if (!mdWorker) {
+    if (!mdConfig.url) {
+      ui.setMdFeedback(`watching ${symbols.length} symbol(s)`, "ok");
+      return;
     }
-    state.clearMarketData();
-    state.clearAllBooks();
-    state.clearAllCandles();
-    state.clearAllTape();
-    state.clearAllHeatmap();
     startMdWorker();
   } else {
     mdWorker.postMessage({ type: "setSymbols", symbols });
@@ -1303,7 +1268,7 @@ function logout() {
   mdConfig = null;
   closeComplianceDropCopy();
   clearSession();
-  clearMdConfig();
+  clearMdConfig(sessionStorage);
   // Fase 1 (#397). Drop the persisted tab so the next sign-in lands
   // on the role-default rather than reviving the previous user's
   // navigation state.
