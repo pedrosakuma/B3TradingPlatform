@@ -872,6 +872,15 @@ function renderCancelAllButton() {
 
 let chainPickerOnSelect = null; // callback when user clicks a cell
 
+function setChainPickerStatus(message, kind = "info") {
+  const grid = $("chain-picker-grid");
+  if (!grid) return;
+  const cls = kind === "error"
+    ? "chain-placeholder chain-placeholder-error"
+    : "chain-placeholder";
+  grid.innerHTML = `<p class="${cls}">${escapeHtml(message ?? "")}</p>`;
+}
+
 function openChainPicker(onSelect) {
   chainPickerOnSelect = onSelect;
   const modal = $("chain-picker-modal");
@@ -916,11 +925,11 @@ function buildChainGrid(instruments) {
    for (const exp of expiries) {
      const call = lookup.get(`${strike}|${exp}|Call`);
      const put = lookup.get(`${strike}|${exp}|Put`);
-     html += call 
-       ? `<td class="chain-cell chain-cell-call" data-symbol="${call.symbol}" data-security-id="${call.securityId}">C</td>`
+     html += call
+       ? `<td class="chain-cell chain-cell-call" data-symbol="${call.symbol}" data-security-id="${call.securityId}" data-put-or-call="${call.putOrCall}">C</td>`
        : '<td class="chain-cell-empty">—</td>';
      html += put
-       ? `<td class="chain-cell chain-cell-put" data-symbol="${put.symbol}" data-security-id="${put.securityId}">P</td>`
+       ? `<td class="chain-cell chain-cell-put" data-symbol="${put.symbol}" data-security-id="${put.securityId}" data-put-or-call="${put.putOrCall}">P</td>`
        : '<td class="chain-cell-empty">—</td>';
    }
    html += '</tr>';
@@ -932,11 +941,54 @@ function buildChainGrid(instruments) {
 function handleChainCellClick(e) {
   const cell = e.target.closest(".chain-cell");
   if (!cell) return;
-  const symbol = cell.dataset.symbol;
-  const securityId = cell.dataset.securityId;
-  if (symbol && chainPickerOnSelect) {
-   chainPickerOnSelect(symbol, securityId);
+  const selection = {
+   symbol: cell.dataset.symbol,
+   securityId: cell.dataset.securityId,
+   putOrCall: cell.dataset.putOrCall,
+  };
+  if (selection.symbol && chainPickerOnSelect) {
+   chainPickerOnSelect(selection);
    closeChainPicker();
+  }
+}
+
+function populateTicketFromChainSelection(selection) {
+  const symbol = selection?.symbol ? String(selection.symbol).trim().toUpperCase() : "";
+  if (!symbol) return;
+
+  const symInput = $("ticket-symbol");
+  if (symInput) {
+   symInput.value = symbol;
+   symInput.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  const sideEl = $("ticket-side");
+  if (sideEl) {
+   sideEl.value = "Buy";
+   sideEl.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  const priceEl = $("ticket-price");
+  if (priceEl) {
+   priceEl.value = "";
+   priceEl.dispatchEvent(new Event("input", { bubbles: true }));
+   priceEl.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  const stopPriceEl = $("ticket-stop-price");
+  if (stopPriceEl) stopPriceEl.value = "";
+
+  setTicketFeedback(null);
+}
+
+export function toggleAuctionPanel() {
+  const st = getState();
+  if (st.auctionPanelSymbol) {
+    setAuctionPanelSymbol(null);
+    return;
+  }
+  if (st.selectedSymbol && isAuctionPhase(getPhase(st.selectedSymbol))) {
+    setAuctionPanelSymbol(st.selectedSymbol);
   }
 }
 
@@ -1360,14 +1412,7 @@ export function bindUi() {
   // current state).
   const auctionToggle = $("auction-toggle");
   if (auctionToggle) {
-    auctionToggle.addEventListener("click", () => {
-      const st = getState();
-      if (st.auctionPanelSymbol) {
-        setAuctionPanelSymbol(null);
-      } else if (st.selectedSymbol) {
-        setAuctionPanelSymbol(st.selectedSymbol);
-      }
-    });
+    auctionToggle.addEventListener("click", toggleAuctionPanel);
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -1978,7 +2023,7 @@ export function renderForSlice(slice) {
     reconcileAuctionPanel();
     renderTicketPhaseCoupling();
   }
-  if (slice === "auction" || slice === "auctionPanelSymbol" || slice === "all") renderAuctionPanel();
+  if (slice === "auction" || slice === "auctionPanelSymbol" || slice === "selectedSymbol" || slice === "phases" || slice === "all") renderAuctionPanel();
   // Q1.4 (#256). The risk-policy slice flips the GTD horizon used by
   // validateTicketState, so a policy update must re-run ticket
   // validation — otherwise a late-arriving fetch leaves the submit
