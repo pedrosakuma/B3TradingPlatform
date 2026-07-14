@@ -15,7 +15,7 @@ test('happy path: Iceberg', () => {
 test('Iceberg: displayQuantity > totalQuantity rejected', () => {
   const r = validateCreateAlgo({ ...base, type: 'Iceberg', iceberg: { displayQuantity: 2000 } });
   assert.equal(r.ok, false);
-  assert.match(r.error, /exceder totalQuantity/);
+  assert.match(r.error, /cannot exceed totalQuantity/);
 });
 
 test('Iceberg: displayQuantity must be positive', () => {
@@ -55,7 +55,7 @@ test('TWAP: endUtc must be > startUtc', () => {
     },
   });
   assert.equal(r.ok, false);
-  assert.match(r.error, /endUtc deve ser maior/);
+  assert.match(r.error, /endUtc must be greater/);
 });
 
 test('TWAP: floor slice qty must be >= 1', () => {
@@ -141,7 +141,7 @@ test('Pegged: Market childOrderType rejected', () => {
     pegged: { ref: 'Mid', offsetTicks: 0, childOrderType: 'Market' },
   });
   assert.equal(r.ok, false);
-  assert.match(r.error, /Pegged só aceita childOrderType=Limit/);
+  assert.match(r.error, /Pegged only accepts childOrderType=Limit/);
 });
 
 test('common: totalQuantity must be positive', () => {
