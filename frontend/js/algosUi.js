@@ -70,6 +70,7 @@ const ALGO_PARAM_SECTIONS = {
       ["Offset ticks", "offsetTicks"],
       ["Repeg interval (ms)", "repegIntervalMs"],
       ["Tick size", "tickSize"],
+      ["Child order type", "childOrderType"],
       ["Price limit", "priceLimit", fmtPx],
     ],
   },

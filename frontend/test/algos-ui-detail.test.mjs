@@ -48,6 +48,29 @@ test("getAlgoDetailParamEntries skips empty values and preserves typed labels", 
   ]);
 });
 
+test("getAlgoDetailParamEntries includes Pegged child order type", () => {
+  const entries = getAlgoDetailParamEntries({
+    type: "Pegged",
+    pegged: {
+      ref: "Mid",
+      offsetTicks: -2,
+      repegIntervalMs: 500,
+      tickSize: 0.01,
+      childOrderType: "Limit",
+      priceLimit: 31.4,
+    },
+  });
+
+  assert.deepEqual(entries, [
+    ["Reference", "Mid"],
+    ["Offset ticks", "-2"],
+    ["Repeg interval (ms)", "500"],
+    ["Tick size", "0.01"],
+    ["Child order type", "Limit"],
+    ["Price limit", "31.40"],
+  ]);
+});
+
 test("getAlgoDetailParamEntries returns an empty list for unknown or missing blocks", () => {
   assert.deepEqual(getAlgoDetailParamEntries(null), []);
   assert.deepEqual(getAlgoDetailParamEntries({ type: "Pegged" }), []);
