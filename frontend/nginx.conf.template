@@ -69,7 +69,16 @@ http {
         ~^/auth(/|$)                         1;
         ~^/orders(/|$)                       1;
         ~^/positions(/|$)                    1;
+        ~^/policy(/|$)                       1;
+        ~^/algo(/|$)                         1;
         ~^/admin(/|$)                        1;
+        ~^/executions(/|$)                   1;
+        ~^/pnl(/|$)                          1;
+        ~^/statement(/|$)                    1;
+        ~^/api(/|$)                          1;
+        ~^/fills(/|$)                        1;
+        ~^/reports(/|$)                      1;
+        ~^/instruments(/|$)                  1;
         ~^/health(/|$)                       1;
         ~^/ready(/|$)                        1;
         ~^/live(/|$)                         1;

@@ -370,6 +370,20 @@ export function parseContentDispositionFilename(header) {
   return null;
 }
 
+function responseContentTypeMatches(header, expectedTypes) {
+  if (!header || typeof header !== "string") return false;
+  const actual = header.split(";")[0]?.trim().toLowerCase();
+  if (!actual) return false;
+  return expectedTypes.some((expected) => actual === String(expected).toLowerCase());
+}
+
+function throwUnexpectedDownloadContentType(resp, expectedLabel, expectedTypes) {
+  const actual = resp.headers.get("Content-Type");
+  if (responseContentTypeMatches(actual, expectedTypes)) return;
+  const suffix = actual ? `, got ${actual}` : "";
+  throw new Error(`unexpected response from server (expected ${expectedLabel}${suffix})`);
+}
+
 // Q2.6 (#273). CSV statement download. Returns `{ blob, filename }`
 // — the caller is responsible for wiring it through URL.createObjectURL
 // + a synthetic anchor click (kept here so unit tests can stub fetch
@@ -390,6 +404,7 @@ export async function downloadStatementCsv(backend, token, dayKey) {
     err.body = body;
     throw err;
   }
+  throwUnexpectedDownloadContentType(resp, "CSV", ["text/csv"]);
   const blob = await resp.blob();
   const filename = parseContentDispositionFilename(resp.headers.get("Content-Disposition"))
     || `statement-${dayKey}.csv`;
@@ -528,6 +543,7 @@ export async function downloadCvmReport(backend, token, model, dayKey) {
     err.body = body;
     throw err;
   }
+  throwUnexpectedDownloadContentType(resp, "XML", ["application/xml", "text/xml"]);
   const blob = await resp.blob();
   const compact = String(dayKey).replace(/-/g, "");
   const filename = parseContentDispositionFilename(resp.headers.get("Content-Disposition"))
