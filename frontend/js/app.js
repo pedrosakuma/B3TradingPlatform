@@ -518,7 +518,7 @@ async function onSignup(e) {
   const username = document.getElementById("signup-username").value.trim();
   const password = document.getElementById("signup-password").value;
   const confirm = document.getElementById("signup-password-confirm").value;
-  if (!username || !password) { setSignupError("Preencha username e password."); return; }
+  if (!username || !password) { setSignupError("Provide username and password."); return; }
   if (password !== confirm) { setSignupError("Passwords do not match."); return; }
   const submitBtn = document.getElementById("signup-submit");
   if (submitBtn) submitBtn.disabled = true;
@@ -538,7 +538,7 @@ async function onSignup(e) {
     writeSession(next);
     startSession(next);
   } catch (err) {
-    setSignupError(err.message || "Signup falhou");
+    setSignupError(err.message || "Signup failed");
   } finally {
     if (submitBtn) submitBtn.disabled = false;
   }

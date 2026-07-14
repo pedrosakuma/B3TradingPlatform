@@ -2408,7 +2408,7 @@ export function renderTicketPhaseCoupling() {
   const halted = phase === "Reserved";
   if (halted) {
     submitEl.dataset.haltDisabled = "1";
-    submitEl.setAttribute("title", "Instrumento halted");
+    submitEl.setAttribute("title", "Instrument halted");
   } else if (submitEl.dataset.haltDisabled === "1") {
     delete submitEl.dataset.haltDisabled;
     submitEl.removeAttribute("title");

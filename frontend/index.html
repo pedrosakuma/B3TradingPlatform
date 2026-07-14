@@ -34,8 +34,8 @@
       <button type="submit" id="login-submit">Sign in</button>
       <p id="login-error" class="error" role="alert" hidden></p>
       <p class="login-switch">
-        Sem conta?
-        <button type="button" id="login-go-signup" class="link-button">Criar conta</button>
+        No account?
+        <button type="button" id="login-go-signup" class="link-button">Create account</button>
       </p>
     </form>
 
@@ -58,7 +58,7 @@
     </form>
 
     <form id="signup-form" class="login-card" hidden>
-      <h1>Criar conta</h1>
+      <h1>Create account</h1>
       <p class="subtitle">Self-service · FIRM01</p>
       <label>
         <span>Username</span>
@@ -69,7 +69,7 @@
         <input id="signup-password" type="password" autocomplete="new-password" required minlength="6" />
       </label>
       <label>
-        <span>Confirmar password</span>
+        <span>Confirm password</span>
         <input id="signup-password-confirm" type="password" autocomplete="new-password" required minlength="6" />
       </label>
       <details class="login-advanced">
@@ -79,11 +79,11 @@
           <input id="signup-backend" type="url" placeholder="http://localhost:5000" />
         </label>
       </details>
-      <button type="submit" id="signup-submit">Criar e entrar</button>
+      <button type="submit" id="signup-submit">Create account and sign in</button>
       <p id="signup-error" class="error" role="alert" hidden></p>
       <p class="login-switch">
-        Já tem conta?
-        <button type="button" id="signup-go-login" class="link-button">Voltar para login</button>
+        Already have an account?
+        <button type="button" id="signup-go-login" class="link-button">Back to sign in</button>
       </p>
     </form>
   </section>
@@ -133,7 +133,7 @@
            Hidden when no session is mounted. Updated by `balance.me`
            WS frames (see WebSocketBalanceFanOut / #386). -->
       <span id="user-balance" class="user-balance" role="status" aria-live="polite"
-            aria-label="Saldo disponível" title="Saldo disponível" hidden>R$ —</span>
+            aria-label="Available balance" title="Available balance" hidden>R$ —</span>
       <button id="logout" class="link-button" type="button" aria-label="Logout">Logout</button>
     </div>
   </header>

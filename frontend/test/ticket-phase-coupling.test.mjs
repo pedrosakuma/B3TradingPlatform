@@ -7,7 +7,7 @@
 //   * TIF=Day in an auction phase shows the soft "pending until open"
 //     warning text.
 //   * Phase=Reserved disables the Submit button and exposes
-//     aria-disabled + the "Instrumento halted" tooltip.
+//     aria-disabled + the "Instrument halted" tooltip.
 //   * Leaving the auction phase reverts the auto-pick back to Day.
 
 import { test } from "node:test";
@@ -94,7 +94,7 @@ test("Reserved phase disables Submit with aria-disabled + tooltip", () => {
   ui.renderTicketPhaseCoupling();
   assert.equal(submitEl.disabled, true);
   assert.equal(submitEl.getAttribute("aria-disabled"), "true");
-  assert.equal(submitEl.getAttribute("title"), "Instrumento halted");
+  assert.equal(submitEl.getAttribute("title"), "Instrument halted");
   assert.equal(submitEl.dataset.haltDisabled, "1");
 });
 
