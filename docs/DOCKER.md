@@ -357,12 +357,22 @@ Wire it up against the bundled marketdata service:
 # .env additions
 TRADING_MARKETDATA_WS_URL=ws://marketdata:8080/ws
 TRADING_MARKETDATA_SYMBOL_0=PETR4
+MARKETDATA_WS_URL=ws://localhost:8081/ws
+APP_TITLE="Acme Trader"
 # extra symbols: TRADING_MARKETDATA_SYMBOL_1=VALE3, etc. (compose env
 # only forwards index 0; for more, add Trading__MarketData__Symbols__N
 # directly to docker-compose.yml or appsettings.Docker.json).
 
 docker compose --profile marketdata up -d
 ```
+
+The frontend container also renders `frontend/js/env.js` at boot from
+deploy-time env vars:
+
+| Variable | Default | Effect |
+| -------- | ------- | ------ |
+| `MARKETDATA_WS_URL` | empty | Seeds `window.__B3_CONFIG__.marketDataWsUrl` for the Market Data panel; empty preserves the localhost/off-localhost fallback chain in `frontend/js/protocol.js`. |
+| `APP_TITLE` | `B3TradingPlatform` | Seeds `window.__B3_CONFIG__.appTitle`, which `frontend/js/app.js` applies to the browser `<title>`, login heading, and topbar brand text. |
 
 Tunables (defaults shown):
 
