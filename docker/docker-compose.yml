@@ -345,6 +345,13 @@ services:
     depends_on:
       trading-host:
         condition: service_healthy
+    environment:
+      # Deploy-time defaults rendered into frontend/js/env.js at container
+      # boot. Empty MARKETDATA_WS_URL preserves the localhost/off-localhost
+      # fallback chain in js/protocol.js; APP_TITLE controls the browser title
+      # plus login/app-shell brand text. See #572 / #596.
+      MARKETDATA_WS_URL: ${MARKETDATA_WS_URL:-}
+      APP_TITLE: ${APP_TITLE:-B3TradingPlatform}
     networks:
       - b3-net
     ports:

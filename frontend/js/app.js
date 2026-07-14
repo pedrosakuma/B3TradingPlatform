@@ -33,6 +33,7 @@ import * as adminUi from "./adminUi.js";
 import * as botCredentialsUi from "./botCredentialsUi.js";
 import * as historyUi from "./historyUi.js";
 import * as complianceUi from "./complianceUi.js";
+import { applyAppTitle } from "./branding.js";
 import { tabsForRole, defaultViewForRole } from "./complianceUi.js";
 import { FLAGS } from "./mdProtocol.js";
 import { renderQrInto, clearQr } from "./qrRender.js";
@@ -80,6 +81,7 @@ let pendingTotp = null; // { backend, username, remember, totpChallengeToken }
 let securityStatusRefreshSeq = 0;
 
 function init() {
+  applyAppTitle();
   document.getElementById("login-backend").placeholder = defaultBackend();
   document.getElementById("login-form").addEventListener("submit", onLogin);
   const signupBackendInput = document.getElementById("signup-backend");

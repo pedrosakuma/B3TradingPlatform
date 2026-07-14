@@ -66,11 +66,20 @@ python3 -m http.server 8080 --directory frontend
 # Node (no install)
 npx --yes serve frontend -l 8080
 # Docker
-docker build -t b3trading-frontend frontend && docker run --rm -p 8080:80 b3trading-frontend
+docker build -t b3trading-frontend frontend && docker run --rm -p 8080:80 \
+  -e APP_TITLE='Acme Trader' \
+  b3trading-frontend
 ```
 
 Then visit <http://localhost:8080>. Default backend
 (`http://localhost:5000`) can be overridden in the login form.
+
+When served from the Docker image, `frontend/js/env.js` is rendered at
+container boot from deploy-time env vars. `MARKETDATA_WS_URL` optionally
+seeds the Market Data panel's default WebSocket endpoint, and `APP_TITLE`
+overrides the browser/login/app-shell brand text. Outside Docker, the
+checked-in `frontend/js/env.js` defaults to an empty market-data URL and
+the `B3TradingPlatform` title.
 
 CORS for the backend is configured by `Trading:Cors:AllowedOrigins` in
 `appsettings.json`; default ships with `http://localhost:8080` and
