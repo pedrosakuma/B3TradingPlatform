@@ -106,3 +106,27 @@ test("populateTicketFromChainSelection resets side/price defaults for the new op
   assert.equal(sideChanges, 1);
   assert.equal(priceInputs, 1);
 });
+
+test("populateTicketFromChainSelection clears stop price before validation-driving events fire", () => {
+  const symEl = document.getElementById("ticket-symbol");
+  const sideEl = document.getElementById("ticket-side");
+  const priceEl = document.getElementById("ticket-price");
+  const stopEl = document.getElementById("ticket-stop-price");
+
+  const observedStopValues = [];
+  const recordStopValue = () => { observedStopValues.push(stopEl.value); };
+  symEl.addEventListener("change", recordStopValue);
+  sideEl.addEventListener("change", recordStopValue);
+  priceEl.addEventListener("input", recordStopValue);
+  priceEl.addEventListener("change", recordStopValue);
+
+  symEl.value = "VALE3";
+  sideEl.value = "Sell";
+  priceEl.value = "12.34";
+  stopEl.value = "99.99";
+
+  ui.populateTicketFromChainSelection({ symbol: "petrc35", securityId: "101", putOrCall: "Call" });
+
+  assert.equal(stopEl.value, "");
+  assert.deepEqual(observedStopValues, ["", "", "", ""]);
+});

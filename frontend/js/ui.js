@@ -956,6 +956,9 @@ function populateTicketFromChainSelection(selection) {
   const symbol = selection?.symbol ? String(selection.symbol).trim().toUpperCase() : "";
   if (!symbol) return;
 
+  const stopPriceEl = $("ticket-stop-price");
+  if (stopPriceEl) stopPriceEl.value = "";
+
   const symInput = $("ticket-symbol");
   if (symInput) {
    symInput.value = symbol;
@@ -974,9 +977,6 @@ function populateTicketFromChainSelection(selection) {
    priceEl.dispatchEvent(new Event("input", { bubbles: true }));
    priceEl.dispatchEvent(new Event("change", { bubbles: true }));
   }
-
-  const stopPriceEl = $("ticket-stop-price");
-  if (stopPriceEl) stopPriceEl.value = "";
 
   setTicketFeedback(null);
 }
