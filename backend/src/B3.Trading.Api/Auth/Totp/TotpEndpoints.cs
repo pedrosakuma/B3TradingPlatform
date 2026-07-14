@@ -26,6 +26,21 @@ public static class TotpEndpoints
 {
     public static IEndpointRouteBuilder MapTotp(this IEndpointRouteBuilder app)
     {
+        app.MapGet("/auth/2fa/status", (
+            HttpContext http,
+            IUserStore users) =>
+        {
+            var subject = http.User?.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+            if (string.IsNullOrEmpty(subject))
+                return Results.Json(new { error = "unauthorized" }, statusCode: StatusCodes.Status401Unauthorized);
+
+            if (!users.TryGet(subject, out var user) || user is null)
+                return Results.Json(new { error = "unauthorized" }, statusCode: StatusCodes.Status401Unauthorized);
+
+            return Results.Ok(new TotpStatusResponse(
+                Enrolled: user.Totp is { EnrolledAt: not null }));
+        }).RequireAuthorization();
+
         app.MapPost("/auth/2fa/enroll", (
             HttpContext http,
             EnrollRequest? req,
@@ -423,6 +438,7 @@ internal static class TotpResultExtensions
 }
 
 public sealed record EnrollRequest(string? EnrollmentToken);
+public sealed record TotpStatusResponse(bool Enrolled);
 public sealed record EnrollResponse(string Secret, string OtpauthUri, IReadOnlyList<string> RecoveryCodes);
 public sealed record VerifyRequest(string Code, string? TotpChallengeToken);
 public sealed record DisableRequest(string Code);

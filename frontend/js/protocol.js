@@ -78,6 +78,13 @@ export async function verifyTotp(backend, { code, totpChallengeToken, token }) {
   return jsonOrThrow(resp);
 }
 
+export async function getTotpStatus(backend, token) {
+  const resp = await fetch(`${backend}/auth/2fa/status`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return jsonOrThrow(resp);
+}
+
 // Begin TOTP enrollment. Returns `{ secret, otpauthUri, recoveryCodes }`.
 // Recovery codes are shown ONCE — store them client-side until the user
 // acknowledges, then discard.
