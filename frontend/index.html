@@ -981,27 +981,27 @@
   </section>
 
   <!-- ALGOS VIEW (Fase 2 #398) ----------------------------------------
-       Layout em 3 colunas: lista de algos (esquerda), boleta com
-       seletor de tipo (centro), e detalhe + Modify/Cancel (direita).
+       Three-column layout: algo list (left), algo ticket with
+       type selector (center), and detail + Modify/Cancel (right).
        Subscribe to `algo.me` is gated on this view being active. -->
   <section id="algos-view" class="view algos-view" role="tabpanel" aria-labelledby="tab-algos" hidden>
     <header class="admin-subbar">
       <h2>Algos</h2>
       <div class="admin-subbar-actions">
         <label class="inline-field">
-          <span>Filtrar</span>
-          <input type="text" id="algos-filter-text" placeholder="symbol / id / tipo">
+          <span>Filter</span>
+          <input type="text" id="algos-filter-text" placeholder="symbol / id / type">
         </label>
         <label class="inline-field">
           <input type="checkbox" id="algos-filter-hide-terminal" checked>
-          <span>Ocultar terminais</span>
+          <span>Hide terminal algos</span>
         </label>
       </div>
     </header>
     <div class="algos-grid">
-      <!-- Lista -->
-      <section class="panel algos-list-panel" aria-label="Lista de algos">
-        <h3>Algos ativos</h3>
+      <!-- List -->
+      <section class="panel algos-list-panel" aria-label="Algo list">
+        <h3>Active algos</h3>
         <div class="table-scroll">
           <table class="data-table algos-list-table">
             <thead>
@@ -1015,111 +1015,209 @@
         </div>
       </section>
 
-      <!-- Boleta -->
-      <section class="panel algos-boleta-panel" id="algos-boleta" aria-label="Boleta de algo">
-        <h3>Nova boleta</h3>
-        <div class="algos-type-tabs" role="tablist" aria-label="Tipo de algo">
-          <button type="button" class="algos-type-tab active" data-algo-type="Iceberg" role="tab" aria-selected="true">Iceberg</button>
-          <button type="button" class="algos-type-tab" data-algo-type="Twap" role="tab" aria-selected="false">TWAP</button>
-          <button type="button" class="algos-type-tab" data-algo-type="Vwap" role="tab" aria-selected="false">VWAP</button>
-          <button type="button" class="algos-type-tab" data-algo-type="Pov" role="tab" aria-selected="false">POV</button>
-          <button type="button" class="algos-type-tab" data-algo-type="Pegged" role="tab" aria-selected="false">Pegged</button>
+      <!-- Ticket -->
+      <section class="panel algos-boleta-panel" id="algos-boleta" aria-label="Algo ticket">
+        <h3>New algo</h3>
+        <div class="algos-type-tabs" role="tablist" aria-label="Algo type">
+          <button type="button" class="algos-type-tab ticket-advanced-toggle active" data-algo-type="Iceberg" role="tab" aria-selected="true">Iceberg</button>
+          <button type="button" class="algos-type-tab ticket-advanced-toggle" data-algo-type="Twap" role="tab" aria-selected="false">TWAP</button>
+          <button type="button" class="algos-type-tab ticket-advanced-toggle" data-algo-type="Vwap" role="tab" aria-selected="false">VWAP</button>
+          <button type="button" class="algos-type-tab ticket-advanced-toggle" data-algo-type="Pov" role="tab" aria-selected="false">POV</button>
+          <button type="button" class="algos-type-tab ticket-advanced-toggle" data-algo-type="Pegged" role="tab" aria-selected="false">Pegged</button>
         </div>
         <form id="algos-boleta-form" class="algos-boleta-form">
-          <fieldset class="algos-boleta-common">
-            <legend>Comum</legend>
-            <label>Symbol <input type="text" name="symbol" required placeholder="PETR4"></label>
-            <label>SecurityId <input type="number" name="securityId" min="1" step="1" required></label>
-            <label>Side
-              <select name="side" required>
-                <option value="Buy">Buy</option>
-                <option value="Sell">Sell</option>
-              </select>
-            </label>
-            <label>Total quantity <input type="number" name="totalQuantity" min="1" step="1" required></label>
+          <fieldset class="algos-boleta-common algos-form-section">
+            <legend>Common</legend>
+            <div class="algos-form-grid">
+              <label class="ticket-field ticket-field-symbol">
+                <span>Symbol</span>
+                <input type="text" name="symbol" required placeholder="PETR4">
+              </label>
+              <label class="ticket-field">
+                <span>Security ID</span>
+                <input type="number" name="securityId" min="1" step="1" required>
+              </label>
+              <label class="ticket-field">
+                <span>Side</span>
+                <select name="side" required>
+                  <option value="Buy">Buy</option>
+                  <option value="Sell">Sell</option>
+                </select>
+              </label>
+              <label class="ticket-field">
+                <span>Total quantity</span>
+                <input type="number" name="totalQuantity" min="1" step="1" required>
+              </label>
+            </div>
           </fieldset>
 
           <!-- Iceberg -->
-          <fieldset class="algos-subform" data-algo-type="Iceberg">
+          <fieldset class="algos-subform algos-form-section" data-algo-type="Iceberg">
             <legend>Iceberg</legend>
-            <label>Display quantity <input type="number" name="ice.displayQuantity" min="1" step="1"></label>
-            <label>Limit price (opcional) <input type="number" name="ice.limitPrice" step="0.01"></label>
+            <div class="algos-form-grid">
+              <label class="ticket-field">
+                <span>Display quantity</span>
+                <input type="number" name="ice.displayQuantity" min="1" step="1">
+              </label>
+              <label class="ticket-field">
+                <span>Limit price (optional)</span>
+                <input type="number" name="ice.limitPrice" step="0.01">
+              </label>
+            </div>
           </fieldset>
           <!-- TWAP -->
-          <fieldset class="algos-subform" data-algo-type="Twap" hidden>
+          <fieldset class="algos-subform algos-form-section" data-algo-type="Twap" hidden>
             <legend>TWAP</legend>
-            <label>Start (UTC ISO) <input type="datetime-local" name="twap.startUtc"></label>
-            <label>End (UTC ISO) <input type="datetime-local" name="twap.endUtc"></label>
-            <label>Slice count <input type="number" name="twap.sliceCount" min="1" step="1"></label>
-            <label>Child order type
-              <select name="twap.childOrderType">
-                <option value="Limit">Limit</option>
-                <option value="Market">Market</option>
-              </select>
-            </label>
-            <label>Child price (se Limit) <input type="number" name="twap.childPrice" step="0.01"></label>
+            <div class="algos-form-grid">
+              <label class="ticket-field">
+                <span>Start (UTC ISO)</span>
+                <input type="datetime-local" name="twap.startUtc">
+              </label>
+              <label class="ticket-field">
+                <span>End (UTC ISO)</span>
+                <input type="datetime-local" name="twap.endUtc">
+              </label>
+              <label class="ticket-field">
+                <span>Slice count</span>
+                <input type="number" name="twap.sliceCount" min="1" step="1">
+              </label>
+              <label class="ticket-field">
+                <span>Child order type</span>
+                <select name="twap.childOrderType">
+                  <option value="Limit">Limit</option>
+                  <option value="Market">Market</option>
+                </select>
+              </label>
+              <label class="ticket-field">
+                <span>Child price (when Limit)</span>
+                <input type="number" name="twap.childPrice" step="0.01">
+              </label>
+            </div>
           </fieldset>
           <!-- VWAP -->
-          <fieldset class="algos-subform" data-algo-type="Vwap" hidden>
+          <fieldset class="algos-subform algos-form-section" data-algo-type="Vwap" hidden>
             <legend>VWAP</legend>
-            <label>Start (UTC ISO) <input type="datetime-local" name="vwap.startUtc"></label>
-            <label>End (UTC ISO) <input type="datetime-local" name="vwap.endUtc"></label>
-            <label>Child order type
-              <select name="vwap.childOrderType">
-                <option value="Limit">Limit</option>
-                <option value="Market">Market</option>
-              </select>
-            </label>
-            <label>Child price (se Limit) <input type="number" name="vwap.childPrice" step="0.01"></label>
-            <label>Tick interval (s, default 30) <input type="number" name="vwap.tickIntervalSeconds" min="0.1" step="0.1"></label>
-            <label>Slice max % (0..1) <input type="number" name="vwap.sliceMaxPct" min="0" max="1" step="0.01"></label>
-            <label>Participation cap (0..1) <input type="number" name="vwap.participationCap" min="0" max="1" step="0.01"></label>
-            <label>Price limit (opcional) <input type="number" name="vwap.priceLimit" step="0.01"></label>
+            <div class="algos-form-grid">
+              <label class="ticket-field">
+                <span>Start (UTC ISO)</span>
+                <input type="datetime-local" name="vwap.startUtc">
+              </label>
+              <label class="ticket-field">
+                <span>End (UTC ISO)</span>
+                <input type="datetime-local" name="vwap.endUtc">
+              </label>
+              <label class="ticket-field">
+                <span>Child order type</span>
+                <select name="vwap.childOrderType">
+                  <option value="Limit">Limit</option>
+                  <option value="Market">Market</option>
+                </select>
+              </label>
+              <label class="ticket-field">
+                <span>Child price (when Limit)</span>
+                <input type="number" name="vwap.childPrice" step="0.01">
+              </label>
+              <label class="ticket-field">
+                <span>Tick interval (s, default 30)</span>
+                <input type="number" name="vwap.tickIntervalSeconds" min="0.1" step="0.1">
+              </label>
+              <label class="ticket-field">
+                <span>Slice max % (0..1)</span>
+                <input type="number" name="vwap.sliceMaxPct" min="0" max="1" step="0.01">
+              </label>
+              <label class="ticket-field">
+                <span>Participation cap (0..1)</span>
+                <input type="number" name="vwap.participationCap" min="0" max="1" step="0.01">
+              </label>
+              <label class="ticket-field">
+                <span>Price limit (optional)</span>
+                <input type="number" name="vwap.priceLimit" step="0.01">
+              </label>
+            </div>
           </fieldset>
           <!-- POV -->
-          <fieldset class="algos-subform" data-algo-type="Pov" hidden>
+          <fieldset class="algos-subform algos-form-section" data-algo-type="Pov" hidden>
             <legend>POV</legend>
-            <label>Start (UTC ISO) <input type="datetime-local" name="pov.startUtc"></label>
-            <label>End (UTC ISO) <input type="datetime-local" name="pov.endUtc"></label>
-            <label>Child order type
-              <select name="pov.childOrderType">
-                <option value="Limit">Limit</option>
-                <option value="Market">Market</option>
-              </select>
-            </label>
-            <label>Child price (se Limit) <input type="number" name="pov.childPrice" step="0.01"></label>
-            <label>Participation rate (0..1) <input type="number" name="pov.participationRate" min="0.001" max="1" step="0.001" required></label>
-            <label>Tick interval (s, default 5) <input type="number" name="pov.tickIntervalSeconds" min="0.1" step="0.1"></label>
-            <label>Min slice qty (≥1) <input type="number" name="pov.minSliceQty" min="1" step="1"></label>
-            <label>Price limit (opcional) <input type="number" name="pov.priceLimit" step="0.01"></label>
+            <div class="algos-form-grid">
+              <label class="ticket-field">
+                <span>Start (UTC ISO)</span>
+                <input type="datetime-local" name="pov.startUtc">
+              </label>
+              <label class="ticket-field">
+                <span>End (UTC ISO)</span>
+                <input type="datetime-local" name="pov.endUtc">
+              </label>
+              <label class="ticket-field">
+                <span>Child order type</span>
+                <select name="pov.childOrderType">
+                  <option value="Limit">Limit</option>
+                  <option value="Market">Market</option>
+                </select>
+              </label>
+              <label class="ticket-field">
+                <span>Child price (when Limit)</span>
+                <input type="number" name="pov.childPrice" step="0.01">
+              </label>
+              <label class="ticket-field">
+                <span>Participation rate (0..1)</span>
+                <input type="number" name="pov.participationRate" min="0.001" max="1" step="0.001" required>
+              </label>
+              <label class="ticket-field">
+                <span>Tick interval (s, default 5)</span>
+                <input type="number" name="pov.tickIntervalSeconds" min="0.1" step="0.1">
+              </label>
+              <label class="ticket-field">
+                <span>Min slice qty (>=1)</span>
+                <input type="number" name="pov.minSliceQty" min="1" step="1">
+              </label>
+              <label class="ticket-field">
+                <span>Price limit (optional)</span>
+                <input type="number" name="pov.priceLimit" step="0.01">
+              </label>
+            </div>
           </fieldset>
           <!-- Pegged -->
-          <fieldset class="algos-subform" data-algo-type="Pegged" hidden>
+          <fieldset class="algos-subform algos-form-section" data-algo-type="Pegged" hidden>
             <legend>Pegged</legend>
-            <label>Ref
-              <select name="pegged.ref">
-                <option value="Mid">Mid</option>
-                <option value="Best">Best</option>
-                <option value="Last">Last</option>
-              </select>
-            </label>
-            <label>Offset ticks (pode ser negativo) <input type="number" name="pegged.offsetTicks" step="1" required></label>
-            <label>Repeg interval (ms, default 500) <input type="number" name="pegged.repegIntervalMs" min="1" step="1"></label>
-            <label>Tick size (default 0.01) <input type="number" name="pegged.tickSize" min="0.0001" step="0.0001"></label>
-            <label>Price limit (opcional) <input type="number" name="pegged.priceLimit" step="0.01"></label>
+            <div class="algos-form-grid">
+              <label class="ticket-field">
+                <span>Reference</span>
+                <select name="pegged.ref">
+                  <option value="Mid">Mid</option>
+                  <option value="Best">Best</option>
+                  <option value="Last">Last</option>
+                </select>
+              </label>
+              <label class="ticket-field">
+                <span>Offset ticks (can be negative)</span>
+                <input type="number" name="pegged.offsetTicks" step="1" required>
+              </label>
+              <label class="ticket-field">
+                <span>Repeg interval (ms, default 500)</span>
+                <input type="number" name="pegged.repegIntervalMs" min="1" step="1">
+              </label>
+              <label class="ticket-field">
+                <span>Tick size (default 0.01)</span>
+                <input type="number" name="pegged.tickSize" min="0.0001" step="0.0001">
+              </label>
+              <label class="ticket-field">
+                <span>Price limit (optional)</span>
+                <input type="number" name="pegged.priceLimit" step="0.01">
+              </label>
+            </div>
           </fieldset>
 
           <div class="algos-boleta-footer">
-            <button type="submit" class="primary">Enviar</button>
             <p id="algos-boleta-status" class="algos-boleta-status" role="status" aria-live="polite"></p>
+            <button type="submit" class="ticket-submit">Submit</button>
           </div>
         </form>
       </section>
 
-      <!-- Detalhe -->
-      <section class="panel algos-detail-panel" aria-label="Detalhe do algo">
-        <h3>Detalhe</h3>
-        <div id="algos-detail-body"></div>
+      <!-- Detail -->
+      <section class="panel algos-detail-panel" aria-label="Algo detail">
+        <h3>Detail</h3>
+        <div id="algos-detail-body" class="algos-detail-body"></div>
       </section>
     </div>
   </section>

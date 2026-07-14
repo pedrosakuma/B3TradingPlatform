@@ -19,6 +19,62 @@ let _actions = {
   onModifyAlgo: () => {},
 };
 
+const ALGO_PARAM_SECTIONS = {
+  Iceberg: {
+    block: "iceberg",
+    rows: [
+      ["Display quantity", "displayQuantity", fmtQty],
+      ["Limit price", "limitPrice", fmtPx],
+    ],
+  },
+  Twap: {
+    block: "twap",
+    rows: [
+      ["Start UTC", "startUtc"],
+      ["End UTC", "endUtc"],
+      ["Slice count", "sliceCount"],
+      ["Child order type", "childOrderType"],
+      ["Child price", "childPrice", fmtPx],
+    ],
+  },
+  Vwap: {
+    block: "vwap",
+    rows: [
+      ["Start UTC", "startUtc"],
+      ["End UTC", "endUtc"],
+      ["Child order type", "childOrderType"],
+      ["Child price", "childPrice", fmtPx],
+      ["Tick interval (s)", "tickIntervalSeconds"],
+      ["Slice max %", "sliceMaxPct"],
+      ["Participation cap", "participationCap"],
+      ["Price limit", "priceLimit", fmtPx],
+    ],
+  },
+  Pov: {
+    block: "pov",
+    rows: [
+      ["Start UTC", "startUtc"],
+      ["End UTC", "endUtc"],
+      ["Child order type", "childOrderType"],
+      ["Child price", "childPrice", fmtPx],
+      ["Participation rate", "participationRate"],
+      ["Tick interval (s)", "tickIntervalSeconds"],
+      ["Min slice qty", "minSliceQty", fmtQty],
+      ["Price limit", "priceLimit", fmtPx],
+    ],
+  },
+  Pegged: {
+    block: "pegged",
+    rows: [
+      ["Reference", "ref"],
+      ["Offset ticks", "offsetTicks"],
+      ["Repeg interval (ms)", "repegIntervalMs"],
+      ["Tick size", "tickSize"],
+      ["Price limit", "priceLimit", fmtPx],
+    ],
+  },
+};
+
 // Snapshot of the currently-selected algo type — drives which sub-form
 // is visible. Persisted to localStorage so the boleta survives reloads.
 let _selectedType = (typeof localStorage !== "undefined"
@@ -27,6 +83,25 @@ let _selectedType = (typeof localStorage !== "undefined"
 function _setType(t) {
   _selectedType = t;
   try { localStorage?.setItem("algos.lastType", t); } catch { /* no-op */ }
+}
+
+function _hasRenderableValue(value) {
+  return value !== null && value !== undefined && value !== "";
+}
+
+export function getAlgoDetailParamEntries(algo) {
+  if (!algo || typeof algo !== "object") return [];
+  const section = ALGO_PARAM_SECTIONS[algo.type];
+  if (!section) return [];
+  const block = algo[section.block];
+  if (!block || typeof block !== "object") return [];
+  return section.rows
+    .map(([label, key, formatter]) => {
+      const value = block[key];
+      if (!_hasRenderableValue(value)) return null;
+      return [label, formatter ? formatter(value) : String(value)];
+    })
+    .filter(Boolean);
 }
 
 // ── Render --------------------------------------------------------
@@ -120,24 +195,41 @@ function renderDetail() {
   }
   panel.appendChild(dl);
 
-  // Per-type params summary (best-effort — undefined blocks are skipped).
-  const paramsBlock = a.iceberg || a.twap || a.vwap || a.pov || a.pegged;
-  if (paramsBlock) {
-    const h4 = document.createElement("h4"); h4.textContent = "Parameters";
-    const pre = document.createElement("pre"); pre.className = "algos-params-pre";
-    pre.textContent = JSON.stringify(paramsBlock, null, 2);
-    panel.appendChild(h4); panel.appendChild(pre);
+  const paramEntries = getAlgoDetailParamEntries(a);
+  if (paramEntries.length > 0) {
+    const h4 = document.createElement("h4");
+    h4.className = "algos-section-title";
+    h4.textContent = "Parameters";
+    const paramsDl = document.createElement("dl");
+    paramsDl.className = "algos-detail-grid algos-params-grid";
+    for (const [k, v] of paramEntries) {
+      const dt = document.createElement("dt"); dt.textContent = k;
+      const dd = document.createElement("dd"); dd.textContent = String(v);
+      paramsDl.appendChild(dt); paramsDl.appendChild(dd);
+    }
+    panel.appendChild(h4);
+    panel.appendChild(paramsDl);
   }
 
   // Modify form (qty/price) — disabled when terminal/cancelling.
   const form = document.createElement("form");
-  form.className = "algos-modify-form";
+  form.className = "algos-modify-form ticket-form";
   form.innerHTML = `
-    <h4>Modify</h4>
-    <label>New quantity <input type="number" name="newQuantity" min="1" step="1"></label>
-    <label>New price <input type="number" name="newPrice" step="0.01"></label>
-    <button type="submit" class="primary">Modify</button>
-    <p class="muted-line">Provide at least one of the two fields.</p>
+    <h4 class="algos-section-title">Modify</h4>
+    <div class="algos-form-grid algos-modify-grid">
+      <label class="ticket-field">
+        <span>New quantity</span>
+        <input type="number" name="newQuantity" min="1" step="1">
+      </label>
+      <label class="ticket-field">
+        <span>New price</span>
+        <input type="number" name="newPrice" step="0.01">
+      </label>
+    </div>
+    <div class="algos-modify-actions">
+      <p class="muted-line">Provide at least one of the two fields.</p>
+      <button type="submit" class="ticket-submit">Modify</button>
+    </div>
   `;
   const cancelling = a.status === "Cancelling";
   const inflightMod = st.inflightAlgoModifies.has(a.algoId);
@@ -161,7 +253,7 @@ function renderDetail() {
 
   const cancelBtn = document.createElement("button");
   cancelBtn.type = "button";
-  cancelBtn.className = "danger";
+  cancelBtn.className = "danger-btn engage algos-cancel-btn";
   cancelBtn.textContent = inflightCxl ? "Cancelling…" : "Cancel algo";
   cancelBtn.disabled = terminal || inflightCxl;
   cancelBtn.addEventListener("click", () => _actions.onCancelAlgo(a.algoId));

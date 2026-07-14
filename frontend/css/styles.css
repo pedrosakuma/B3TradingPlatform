@@ -1229,50 +1229,149 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
 /* ── Fase 2 (#398). Algos tab. ─────────────────────────────────── */
 .algos-view .admin-subbar-actions { display: flex; gap: 1rem; align-items: center; }
 .algos-view .inline-field { display: inline-flex; gap: .35rem; align-items: center; font-size: .85rem; }
+.algos-view .inline-field input[type="text"] {
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: .35rem .5rem; font: inherit;
+}
+.algos-view .panel > h3 {
+  margin: 0;
+  font-size: .85rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
 .algos-grid {
   display: grid;
-  grid-template-columns: 1.4fr 1.2fr 1fr;
-  gap: .75rem;
-  padding: .5rem;
-  align-items: start;
+  grid-template-columns: minmax(20rem, 1.3fr) minmax(22rem, 1.1fr) minmax(18rem, 1fr);
+  gap: 8px;
+  padding: 8px;
+  align-items: stretch;
 }
 @media (max-width: 1200px) { .algos-grid { grid-template-columns: 1fr; } }
-.algos-list-panel .table-scroll { max-height: 60vh; overflow: auto; }
+.algos-list-panel,
+.algos-boleta-panel,
+.algos-detail-panel { gap: .75rem; }
+.algos-list-panel .table-scroll { max-height: 68vh; overflow: auto; flex: 1; }
 .algos-list-table tbody tr { cursor: pointer; }
 .algos-list-table tbody tr.selected { background: var(--row-selected, rgba(255,255,255,.08)); }
 .algos-list-table tbody tr:hover { background: var(--row-hover, rgba(255,255,255,.04)); }
-.algos-type-tabs { display: flex; gap: .25rem; margin-bottom: .5rem; flex-wrap: wrap; }
+.algos-type-tabs {
+  display: flex;
+  gap: .35rem;
+  flex-wrap: wrap;
+  padding-bottom: .5rem;
+  border-bottom: 1px solid var(--border, #444);
+}
 .algos-type-tab {
-  padding: .25rem .6rem;
-  background: transparent;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  font-size: .75rem;
+  font-weight: 600;
+}
+.algos-type-tab.active,
+.algos-type-tab[aria-selected="true"] {
+  background: var(--accent, #357);
+  color: white;
+  border-color: var(--accent, #357);
+}
+.algos-boleta-form {
+  display: flex;
+  flex-direction: column;
+  gap: .75rem;
+}
+.algos-form-section {
   border: 1px solid var(--border, #444);
-  color: inherit;
-  cursor: pointer;
-  border-radius: 4px;
-  font-size: .85rem;
+  padding: .65rem .75rem .75rem;
+  border-radius: 6px;
+  margin: 0;
 }
-.algos-type-tab.active { background: var(--accent, #357); color: white; border-color: var(--accent, #357); }
-.algos-boleta-form fieldset { border: 1px solid var(--border, #444); padding: .5rem .75rem; margin-bottom: .5rem; border-radius: 4px; }
-.algos-boleta-form legend { padding: 0 .35rem; font-size: .8rem; color: var(--muted, #999); }
-.algos-boleta-form label {
+.algos-form-section legend {
+  padding: 0 .35rem;
+  font-size: .7rem;
+  color: var(--muted, #999);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+.algos-form-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  align-items: center;
-  gap: .5rem;
-  margin-bottom: .35rem;
-  font-size: .85rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .6rem .75rem;
 }
-.algos-boleta-form input, .algos-boleta-form select { width: 100%; box-sizing: border-box; }
-.algos-boleta-footer { display: flex; gap: 1rem; align-items: center; }
-.algos-boleta-status { margin: 0; font-size: .85rem; }
+.algos-form-grid .ticket-field { min-width: 0; }
+.algos-form-grid .ticket-field > span { margin-bottom: .2rem; }
+.algos-form-grid .ticket-field > input,
+.algos-form-grid .ticket-field > select { width: 100%; }
+.algos-boleta-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  padding-top: .1rem;
+}
+.algos-boleta-status {
+  margin: 0;
+  font-size: .8rem;
+  min-height: 1.2em;
+}
 .algos-boleta-status.error { color: var(--danger, #d66); }
 .algos-boleta-status.success { color: var(--accent, #6c6); }
-.algos-detail-grid { display: grid; grid-template-columns: max-content 1fr; gap: .25rem .75rem; font-size: .85rem; margin: 0 0 .75rem; }
+.algos-detail-body {
+  display: flex;
+  flex-direction: column;
+  gap: .75rem;
+}
+.algos-detail-grid { display: grid; grid-template-columns: max-content 1fr; gap: .25rem .75rem; font-size: .85rem; margin: 0; }
 .algos-detail-grid dt { color: var(--muted, #999); }
 .algos-detail-grid dd { margin: 0; word-break: break-word; }
-.algos-params-pre { background: rgba(0,0,0,.25); padding: .5rem; border-radius: 4px; font-size: .75rem; overflow: auto; max-height: 14rem; }
-.algos-modify-form { display: grid; gap: .35rem; border-top: 1px solid var(--border, #444); padding-top: .5rem; margin-top: .5rem; }
-.algos-modify-form h4 { margin: 0; }
+.algos-section-title {
+  margin: 0;
+  font-size: .78rem;
+  font-weight: 600;
+  color: var(--muted, #999);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+.algos-params-grid {
+  padding: .55rem .65rem;
+  border: 1px solid var(--border, #444);
+  border-radius: 6px;
+  background: rgba(255,255,255,.02);
+}
+.algos-modify-form {
+  display: flex;
+  flex-direction: column;
+  gap: .6rem;
+  border-top: 1px solid var(--border, #444);
+  padding-top: .75rem;
+}
+.algos-modify-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.algos-modify-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+}
+.algos-modify-actions .muted-line { margin: 0; }
+.algos-cancel-btn { align-self: flex-start; }
+.algos-cancel-btn:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+
+@media (max-width: 900px) {
+  .algos-form-grid,
+  .algos-modify-grid {
+    grid-template-columns: 1fr;
+  }
+  .algos-boleta-footer,
+  .algos-modify-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .algos-cancel-btn { width: 100%; }
+}
 
 /* Fase 3 (#399). Settings sub-tabs — mirror the algos-type-tabs visual
    so the user sees the same primary/sub-tab idiom across the app. */
@@ -1463,6 +1562,11 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
 :root[data-density="compact"] table td { padding: .15rem .35rem; }
 :root[data-density="compact"] .ticket-row-quick { gap: .35rem; }
 :root[data-density="compact"] .ticket-advanced  { gap: .35rem; }
+:root[data-density="compact"] .algos-grid { gap: .35rem; padding: .35rem; }
+:root[data-density="compact"] .algos-type-tabs { gap: .25rem; padding-bottom: .35rem; }
+:root[data-density="compact"] .algos-boleta-form { gap: .5rem; }
+:root[data-density="compact"] .algos-form-grid,
+:root[data-density="compact"] .algos-modify-form { gap: .4rem .5rem; }
 :root[data-density="compact"] .topbar           { padding: .35rem .5rem; }
 
 /* Preferences panel: density toggle. */
