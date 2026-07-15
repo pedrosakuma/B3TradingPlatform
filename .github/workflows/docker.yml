@@ -63,6 +63,61 @@ jobs:
           cache-from: type=gha,scope=trading-host
           cache-to:   type=gha,scope=trading-host,mode=max
 
+  identity-directory-arm64-smoke:
+    name: ARM64 identity directory smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build linux/arm64 smoke image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: backend/src/B3.Trading.Host/Dockerfile
+          platforms: linux/arm64
+          load: true
+          tags: b3-trading-host:identity-arm64-smoke
+          cache-from: type=gha,scope=trading-host-arm64-smoke
+          cache-to:   type=gha,scope=trading-host-arm64-smoke,mode=max
+
+      - name: Boot and query SQLite identity directory
+        env:
+          TRADING_AUTH_SIGNING_KEY: ci-arm64-smoke-placeholder-key-min-32-bytes-long-aaaaa
+          TRADING_SEED_PASSWORD_HASH: ZDzDHANAHq8NDQK3BWk/YZjybKLCMKdRzw0z9Da5wic=
+          TRADING_SEED_PASSWORD_SALT: rXA+be7/gEYYZQrQDsUr2g==
+        run: |
+          set -euo pipefail
+          cid="$(docker run -d --platform linux/arm64 -p 18080:5000 \
+            -e Trading__Auth__SigningKey="$TRADING_AUTH_SIGNING_KEY" \
+            -e Trading__Auth__Users__0__Username=alice \
+            -e Trading__Auth__Users__0__PasswordHash="$TRADING_SEED_PASSWORD_HASH" \
+            -e Trading__Auth__Users__0__Salt="$TRADING_SEED_PASSWORD_SALT" \
+            -e Trading__Auth__Users__0__Iterations=600000 \
+            -e Trading__Auth__Users__0__Role=user \
+            -e Trading__Auth__Users__0__Firm=FIRM01 \
+            -e Trading__Reports__Cvm__OwnerHashSalt=ci-arm64-cvm-salt \
+            -e Trading__DropCopy__ClOrdIdMaskSalt=ci-arm64-clordid-mask-salt \
+            b3-trading-host:identity-arm64-smoke)"
+          trap 'docker logs "$cid" || true; docker rm -f "$cid" >/dev/null || true' EXIT
+          for i in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:18080/ready >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:18080/ready
+          curl --fail --silent http://127.0.0.1:18080/health | grep '"provider":"Sqlite"'
+          docker exec "$cid" test -f /var/lib/b3trading/identity/users.db
+          docker stats --no-stream --format 'identity-arm64-smoke cpu={{.CPUPerc}} memory={{.MemUsage}}' "$cid"
+
   frontend:
     name: Build frontend image
     runs-on: ubuntu-latest

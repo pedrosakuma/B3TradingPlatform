@@ -1,6 +1,8 @@
 using B3.Trading.Api.Lifecycle;
+using B3.Trading.Application.Identity;
 using B3.Trading.EntryPointListener;
 using B3.Trading.Infrastructure;
+using B3.Trading.Infrastructure.Identity;
 using B3.Trading.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -36,14 +38,20 @@ public static class HealthEndpoints
     {
         app.MapGet("/live", () => Results.Ok("alive"));
 
-        app.MapGet("/ready", (DrainState drain) =>
-            drain.IsDraining
-                ? Results.StatusCode(StatusCodes.Status503ServiceUnavailable)
-                : Results.Ok("ready"));
+        app.MapGet("/ready", async (DrainState drain, ITradingUserDirectory directory, CancellationToken ct) =>
+        {
+            if (drain.IsDraining)
+                return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+            var identity = await directory.CheckHealthAsync(ct);
+            return identity.Ready
+                ? Results.Ok("ready")
+                : Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+        });
 
-        app.MapGet("/health", (HttpContext ctx, DrainState drain, IOptions<PersistenceOptions> persist) =>
+        app.MapGet("/health", async (HttpContext ctx, DrainState drain, IOptions<PersistenceOptions> persist, IOptions<IdentityDirectoryOptions> identityOptions, ITradingUserDirectory directory, CancellationToken ct) =>
         {
             var p = persist.Value;
+            var identity = await directory.CheckHealthAsync(ct);
             var exchange = ctx.RequestServices.GetService<ExchangeStatus>();
             var sessions = ctx.RequestServices.GetService<IFirmSessionStatusProvider>();
 
@@ -72,6 +80,15 @@ public static class HealthEndpoints
                     firmId = p.FirmId,
                     dataDirectory = p.DataDirectory,
                     snapshotInterval = p.SnapshotInterval,
+                },
+                identityDirectory = new
+                {
+                    provider = identity.Provider,
+                    ready = identity.Ready,
+                    path = identity.Path,
+                    schemaVersion = identity.SchemaVersion,
+                    reason = identity.Reason,
+                    busyTimeoutMilliseconds = identityOptions.Value.BusyTimeoutMilliseconds,
                 },
                 exchange = exchange is null ? null : BuildExchangeBlock(exchange, sessions),
                 entryPointListener,

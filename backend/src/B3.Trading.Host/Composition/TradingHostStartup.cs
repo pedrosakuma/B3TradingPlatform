@@ -1,12 +1,14 @@
 using B3.Trading.Api.Auth;
 using B3.Trading.Api.Lifecycle;
 using B3.Trading.Application;
+using B3.Trading.Application.Identity;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.Risk.Accounting;
 using B3.Trading.Domain;
 using B3.Trading.EntryPointListener;
 using B3.Trading.Infrastructure;
+using B3.Trading.Infrastructure.Identity;
 using B3.Trading.Infrastructure.Persistence;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -58,6 +60,36 @@ internal static class TradingHostStartup
         var persistenceOpts = app.Services.GetRequiredService<IOptionsMonitor<PersistenceOptions>>();
         B3.Trading.Application.Observability.MetricsRegistry.RegisterGroupCommitMaxRecordsSource(
             () => persistenceOpts.CurrentValue.GroupCommitMaxRecords);
+    }
+
+    public static async Task RunIdentityDirectoryStartupAsync(WebApplication app)
+    {
+        using var scope = app.Services.CreateScope();
+        var directory = scope.ServiceProvider.GetRequiredService<ITradingUserDirectory>();
+        await directory.InitializeAsync();
+
+        var opts = scope.ServiceProvider.GetRequiredService<IOptions<IdentityDirectoryOptions>>().Value;
+        if (!opts.ImportLegacyUsersOnStartup)
+            return;
+
+        var legacy = scope.ServiceProvider.GetRequiredService<ILegacyUserSnapshotProvider>();
+        var imports = legacy.SnapshotUsers()
+            .Select(u => new LegacyTradingUserImport(
+                u.Username,
+                u.Username,
+                u.Firm,
+                u.Role))
+            .ToArray();
+        if (imports.Length == 0)
+            return;
+
+        var inserted = await directory.ImportLegacyUsersAsync(imports);
+        app.Services.GetRequiredService<ILoggerFactory>()
+            .CreateLogger("IdentityDirectory")
+            .LogInformation(
+                "Identity directory legacy import completed: {Inserted} inserted from {Seen} legacy user(s).",
+                inserted,
+                imports.Length);
     }
 
     /// <summary>

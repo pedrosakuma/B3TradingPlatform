@@ -37,6 +37,13 @@ persistence:
   storageClassName: managed-csi-premium
   size: 4Gi
 
+identityDirectory:
+  provider: Sqlite
+  busyTimeoutMilliseconds: 5000
+  migrateOnStartup: true
+  importLegacyUsersOnStartup: true
+  expectedWriterCount: 1
+
 resources:
   requests:
     cpu: 150m
@@ -46,12 +53,12 @@ resources:
 
 probes:
   readiness:
-    path: /health
+    path: /ready
     initialDelaySeconds: 10
     periodSeconds: 10
     failureThreshold: 12
   liveness:
-    path: /health
+    path: /live
     initialDelaySeconds: 30
     periodSeconds: 20
 

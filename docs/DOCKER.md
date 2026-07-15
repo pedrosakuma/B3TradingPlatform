@@ -391,17 +391,21 @@ this host and the matching engine surface there.
 ## Persistence
 
 The event store WAL + snapshots live in the named volume `b3-trading-data`
-mounted at `/var/lib/b3trading`. Backups: `docker run --rm -v
-b3-trading-data:/data -v $(pwd):/out alpine tar czf /out/b3-trading.tgz -C
-/data .` (or your usual volume backup tool).
+mounted at `/var/lib/b3trading`. The SQLite trading-user directory defaults to
+`/var/lib/b3trading/identity/users.db` and is opened in WAL mode with
+`synchronous=FULL`; use the application's online backup primitive rather than
+copying `users.db`, `users.db-wal` and `users.db-shm` separately while the host
+is live. Volume-level backups should still capture the WAL/snapshots,
+`users.json` during Hybrid/local migration, and `dp-keys`.
 
 ## Health & readiness
 
 - `GET /live` — process is up
-- `GET /ready` — process is up AND not draining (used by the container's
-  HEALTHCHECK and by orchestrators for rolling updates)
+- `GET /ready` — process is up, not draining, and the identity directory is
+  trustworthy (used by the container's HEALTHCHECK and by orchestrators for
+  rolling updates)
 - `GET /health` — full snapshot, including `exchange.{mode, readyForOrders, firmCount}`
-  and `persistence.{enabled, dataDirectory}`
+  `persistence.{enabled, dataDirectory}` and `identityDirectory.{provider, ready, schemaVersion}`
 
 Compose's `frontend` service waits for trading-host to be `service_healthy`
 before starting, so the UI is never served against a dead backend.

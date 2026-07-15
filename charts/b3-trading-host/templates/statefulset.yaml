@@ -48,6 +48,17 @@ spec:
               value: {{ .Values.aspnetcoreEnvironment | quote }}
             - name: ASPNETCORE_URLS
               value: {{ printf "http://+:%d" (.Values.service.port | int) | quote }}
+            # ── Identity directory (SQLite on the RWO data PVC) ──────────────
+            - name: Trading__IdentityDirectory__Provider
+              value: {{ .Values.identityDirectory.provider | quote }}
+            - name: Trading__IdentityDirectory__BusyTimeoutMilliseconds
+              value: {{ .Values.identityDirectory.busyTimeoutMilliseconds | quote }}
+            - name: Trading__IdentityDirectory__MigrateOnStartup
+              value: {{ .Values.identityDirectory.migrateOnStartup | quote }}
+            - name: Trading__IdentityDirectory__ImportLegacyUsersOnStartup
+              value: {{ .Values.identityDirectory.importLegacyUsersOnStartup | quote }}
+            - name: Trading__IdentityDirectory__ExpectedWriterCount
+              value: {{ .Values.identityDirectory.expectedWriterCount | quote }}
             # ── Auth ────────────────────────────────────────────────────────
             - name: Trading__Auth__SigningKey
               valueFrom:
