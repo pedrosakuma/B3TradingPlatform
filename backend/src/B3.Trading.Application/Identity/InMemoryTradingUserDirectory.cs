@@ -62,10 +62,10 @@ public sealed class InMemoryTradingUserDirectory : ITradingUserDirectory
             foreach (var import in users)
             {
                 var existingCollision = _users.Keys.FirstOrDefault(id =>
-                    string.Equals(id, import.TradingUserId, StringComparison.OrdinalIgnoreCase)
+                    string.Equals(ProjectOwnerId(id), ProjectOwnerId(import.TradingUserId), StringComparison.Ordinal)
                     && !string.Equals(id, import.TradingUserId, StringComparison.Ordinal));
                 if (existingCollision is not null)
-                    throw new TradingUserDirectoryValidationException("Legacy import would create a case-insensitive trading user ID collision.");
+                    throw new TradingUserDirectoryValidationException("Legacy import would create an end-client owner namespace collision.");
             }
 
             foreach (var import in users)
@@ -187,12 +187,12 @@ public sealed class InMemoryTradingUserDirectory : ITradingUserDirectory
 
     internal static void ValidateLegacyBatch(IEnumerable<LegacyTradingUserImport> imports)
     {
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seenOwners = new HashSet<string>(StringComparer.Ordinal);
         foreach (var import in imports)
         {
             ValidateTradingUserId(import.TradingUserId);
-            if (!seen.Add(import.TradingUserId))
-                throw new TradingUserDirectoryValidationException("Legacy import contains case-insensitive trading user ID collisions.");
+            if (!seenOwners.Add(ProjectOwnerId(import.TradingUserId)))
+                throw new TradingUserDirectoryValidationException("Legacy import contains end-client owner namespace collisions.");
             if (string.IsNullOrWhiteSpace(import.DisplayName))
                 throw new TradingUserDirectoryValidationException("Legacy import display name is required.");
             ValidateFirmAndRole(import.FirmId, import.Role);
@@ -205,6 +205,8 @@ public sealed class InMemoryTradingUserDirectory : ITradingUserDirectory
             || tradingUserId.Length > TradingUserDirectoryConstants.MaxTradingUserIdLength)
             throw new TradingUserDirectoryValidationException("Trading user ID must be non-empty and at most 64 characters.");
     }
+
+    internal static string ProjectOwnerId(string tradingUserId) => tradingUserId.ToLowerInvariant();
 
     internal static void ValidateFirmAndRole(string firmId, string role)
     {

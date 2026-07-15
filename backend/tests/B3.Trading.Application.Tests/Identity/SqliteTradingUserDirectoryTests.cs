@@ -63,6 +63,31 @@ public sealed class SqliteTradingUserDirectoryTests
     }
 
     [Fact]
+    public async Task ExistingUnicodeOwnerNamespaceCollision_FailsClosed()
+    {
+        using var workspace = TestWorkspace.Create(nameof(ExistingUnicodeOwnerNamespaceCollision_FailsClosed));
+        var db = System.IO.Path.Combine(workspace.Path, "users.db");
+        var directory = NewDirectory(db);
+        await directory.InitializeAsync();
+        await directory.ImportLegacyUsersAsync(new[]
+        {
+            new LegacyTradingUserImport("\u212A", "\u212A", "FIRM01", TradingUserDirectoryConstants.RoleUser),
+        });
+
+        await using (var connection = Open(db))
+        {
+            await ExecuteAsync(connection, """
+                INSERT INTO users (trading_user_id, display_name, firm_id, status, created_at, updated_at, row_version)
+                VALUES ('k', 'k', 'FIRM01', 'active', '2026-01-01T00:00:00.0000000Z', '2026-01-01T00:00:00.0000000Z', 1);
+                """);
+            await ExecuteAsync(connection, "INSERT INTO user_roles (trading_user_id, role) VALUES ('k', 'user');");
+        }
+
+        await Assert.ThrowsAsync<TradingUserDirectoryUnavailableException>(() =>
+            NewDirectory(db).InitializeAsync());
+    }
+
+    [Fact]
     public async Task OnlineBackup_RestoresToValidOfflineDirectory()
     {
         using var workspace = TestWorkspace.Create(nameof(OnlineBackup_RestoresToValidOfflineDirectory));

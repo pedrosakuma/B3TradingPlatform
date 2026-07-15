@@ -65,6 +65,12 @@ public sealed class TradingUserDirectoryContractTests
         await Assert.ThrowsAsync<TradingUserDirectoryValidationException>(() =>
             directory.ImportLegacyUsersAsync(new[]
             {
+                new LegacyTradingUserImport("\u212A", "\u212A", "FIRM01", TradingUserDirectoryConstants.RoleUser),
+                new LegacyTradingUserImport("k", "k", "FIRM01", TradingUserDirectoryConstants.RoleUser),
+            }));
+        await Assert.ThrowsAsync<TradingUserDirectoryValidationException>(() =>
+            directory.ImportLegacyUsersAsync(new[]
+            {
                 new LegacyTradingUserImport("charlie", "charlie", "", TradingUserDirectoryConstants.RoleUser),
             }));
         await Assert.ThrowsAsync<TradingUserDirectoryValidationException>(() =>
@@ -81,6 +87,16 @@ public sealed class TradingUserDirectoryContractTests
             directory.ImportLegacyUsersAsync(new[]
             {
                 new LegacyTradingUserImport("existing", "existing", "FIRM01", TradingUserDirectoryConstants.RoleUser),
+            }));
+
+        await directory.ImportLegacyUsersAsync(new[]
+        {
+            new LegacyTradingUserImport("\u212A-existing", "\u212A-existing", "FIRM01", TradingUserDirectoryConstants.RoleUser),
+        });
+        await Assert.ThrowsAsync<TradingUserDirectoryValidationException>(() =>
+            directory.ImportLegacyUsersAsync(new[]
+            {
+                new LegacyTradingUserImport("k-existing", "k-existing", "FIRM01", TradingUserDirectoryConstants.RoleUser),
             }));
     }
 

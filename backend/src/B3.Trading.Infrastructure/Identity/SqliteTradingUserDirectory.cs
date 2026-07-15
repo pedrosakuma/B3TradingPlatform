@@ -145,7 +145,7 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
         {
             await using var connection = OpenConnection();
             await using var tx = await connection.BeginTransactionAsync(IsolationLevel.Serializable, ct).ConfigureAwait(false);
-            await RejectExistingCaseInsensitiveCollisionsAsync(connection, tx, users, ct).ConfigureAwait(false);
+            await RejectExistingOwnerNamespaceCollisionsAsync(connection, tx, users, ct).ConfigureAwait(false);
             var inserted = 0;
             foreach (var user in users)
             {
@@ -412,6 +412,8 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
         if (invalidActiveUsers != 0)
             throw new TradingUserDirectoryUnavailableException("Identity directory contains active users without exactly one firm/role.");
 
+        await RejectStoredOwnerNamespaceCollisionsAsync(connection, ct).ConfigureAwait(false);
+
         return version;
     }
 
@@ -526,7 +528,7 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
         return await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false) is not null;
     }
 
-    private static async Task RejectExistingCaseInsensitiveCollisionsAsync(
+    private static async Task RejectExistingOwnerNamespaceCollisionsAsync(
         SqliteConnection connection,
         System.Data.Common.DbTransaction tx,
         IEnumerable<LegacyTradingUserImport> imports,
@@ -545,11 +547,34 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
         foreach (var import in imports)
         {
             if (existing.Any(id =>
-                string.Equals(id, import.TradingUserId, StringComparison.OrdinalIgnoreCase)
+                string.Equals(
+                    InMemoryTradingUserDirectory.ProjectOwnerId(id),
+                    InMemoryTradingUserDirectory.ProjectOwnerId(import.TradingUserId),
+                    StringComparison.Ordinal)
                 && !string.Equals(id, import.TradingUserId, StringComparison.Ordinal)))
             {
-                throw new TradingUserDirectoryValidationException("Legacy import would create a case-insensitive trading user ID collision.");
+                throw new TradingUserDirectoryValidationException("Legacy import would create an end-client owner namespace collision.");
             }
+        }
+    }
+
+    private static async Task RejectStoredOwnerNamespaceCollisionsAsync(SqliteConnection connection, CancellationToken ct)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT trading_user_id FROM users ORDER BY trading_user_id COLLATE BINARY;";
+        var seen = new Dictionary<string, string>(StringComparer.Ordinal);
+        await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            var id = reader.GetString(0);
+            var ownerId = InMemoryTradingUserDirectory.ProjectOwnerId(id);
+            if (seen.TryGetValue(ownerId, out var existing)
+                && !string.Equals(existing, id, StringComparison.Ordinal))
+            {
+                throw new TradingUserDirectoryUnavailableException("Identity directory contains end-client owner namespace collisions.");
+            }
+
+            seen[ownerId] = id;
         }
     }
 
