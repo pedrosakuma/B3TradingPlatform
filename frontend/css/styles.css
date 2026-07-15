@@ -1235,6 +1235,10 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
 }
 
 /* ── Fase 2 (#398). Algos tab. ─────────────────────────────────── */
+/* Match the .history-view / .compliance-view convention: the view
+   itself owns the outer margin so its content isn't flush against
+   the viewport edges like the trader tab's `.trader-layout` padding. */
+.algos-view { padding: 1rem 1.5rem; }
 .algos-view .admin-subbar-actions { display: flex; gap: 1rem; align-items: center; }
 .algos-view .inline-field { display: inline-flex; gap: .35rem; align-items: center; font-size: .85rem; }
 .algos-view .inline-field input[type="text"] {
@@ -1254,7 +1258,6 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
   display: grid;
   grid-template-columns: minmax(20rem, 1.3fr) minmax(22rem, 1.1fr) minmax(18rem, 1fr);
   gap: 8px;
-  padding: 8px;
   align-items: stretch;
 }
 @media (max-width: 1200px) { .algos-grid { grid-template-columns: 1fr; } }
@@ -1383,6 +1386,9 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
 
 /* Fase 3 (#399). Settings sub-tabs — mirror the algos-type-tabs visual
    so the user sees the same primary/sub-tab idiom across the app. */
+.settings-view {
+  padding: 1rem 1.5rem;
+}
 .settings-subtabs {
   display: flex;
   gap: .25rem;
@@ -1584,7 +1590,7 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
 :root[data-density="compact"] table td { padding: .15rem .35rem; }
 :root[data-density="compact"] .ticket-row-quick { gap: .35rem; }
 :root[data-density="compact"] .ticket-advanced  { gap: .35rem; }
-:root[data-density="compact"] .algos-grid { gap: .35rem; padding: .35rem; }
+:root[data-density="compact"] .algos-grid { gap: .35rem; }
 :root[data-density="compact"] .algos-type-tabs { gap: .25rem; padding-bottom: .35rem; }
 :root[data-density="compact"] .algos-boleta-form { gap: .5rem; }
 :root[data-density="compact"] .algos-form-grid,
