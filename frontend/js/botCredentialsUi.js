@@ -29,6 +29,10 @@ let onOpenView = () => {};
 let rowsCache = null;
 let loading = false;
 
+// Tracks whether a create request is currently in flight, so the ack
+// checkbox handler (below) never re-enables the submit button mid-request.
+let createSubmitting = false;
+
 export function setBotCredentialsHandlers(handlers) {
   onCreate   = handlers.onCreate   ?? onCreate;
   onRevoke   = handlers.onRevoke   ?? onRevoke;
@@ -54,10 +58,26 @@ export function bindBotCredentialsUi() {
     refreshBtn.addEventListener("click", () => onRefresh());
   }
 
+  // Sandbox/simulation acknowledgment gate (RFC user-bot-fixp-listener-v0,
+  // docs/SANDBOX-AND-LEGAL.md §3: "Gate credential issuance ... until an
+  // in-app ToS gate ships"). The checkbox is the client-side half of that
+  // gate — the create button stays disabled until it's checked.
+  const ackEl = $("bot-credentials-ack");
+  const createBtn = $("bot-credentials-create-submit");
+  if (ackEl && createBtn) {
+    ackEl.addEventListener("change", () => {
+      createBtn.disabled = createSubmitting || !ackEl.checked;
+    });
+  }
+
   const form = $("bot-credentials-create-form");
   if (form) {
     form.addEventListener("submit", (e) => {
       e.preventDefault();
+      if (ackEl && !ackEl.checked) {
+        setBotCredentialsFeedback("Please acknowledge the sandbox notice above first.", "error");
+        return;
+      }
       const labelEl = $("bot-credentials-label");
       const label = (labelEl?.value ?? "").trim();
       if (!label) {
@@ -148,8 +168,10 @@ export function resetCreateForm() {
 export function setCreateSubmitting(submitting) {
   const btn = $("bot-credentials-create-submit");
   if (!btn) return;
-  btn.disabled = !!submitting;
-  btn.textContent = submitting ? "Creating…" : "Create credential";
+  createSubmitting = !!submitting;
+  const ackEl = $("bot-credentials-ack");
+  btn.disabled = createSubmitting || !!(ackEl && !ackEl.checked);
+  btn.textContent = createSubmitting ? "Creating…" : "Create credential";
 }
 
 export function setBotCredentialsFeedback(message, kind) {

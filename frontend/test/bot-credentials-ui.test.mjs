@@ -31,6 +31,7 @@ installDomStub({
     "bot-credentials-label":           { tag: "input" },
     "bot-credentials-cert-thumbprint": { tag: "input" },
     "bot-credentials-create-submit":   { tag: "button" },
+    "bot-credentials-ack":             { tag: "input" },
     "bot-credentials-body":            { tag: "tbody" },
     "bot-credentials-feedback":        { tag: "p" },
     "bot-credentials-secret-modal":    { tag: "div", hidden: true },
@@ -112,12 +113,14 @@ test("cert binding renders pinned badge with full title and unpinned label", () 
 test("create form passes normalized cert thumbprint", () => {
   const labelEl = document.getElementById("bot-credentials-label");
   const thumbprintEl = document.getElementById("bot-credentials-cert-thumbprint");
+  const ackEl = document.getElementById("bot-credentials-ack");
   const form = document.getElementById("bot-credentials-create-form");
   const calls = [];
   mod.setBotCredentialsHandlers({
     onCreate: (payload) => calls.push(payload),
   });
 
+  ackEl.checked = true;
   labelEl.value = "new-bot";
   thumbprintEl.value = "ab12:" + "cd ".repeat(28) + "7f90";
   form.dispatchEvent({ type: "submit" });
@@ -131,6 +134,7 @@ test("create form passes normalized cert thumbprint", () => {
 test("invalid create thumbprint shows feedback and does not submit", () => {
   const labelEl = document.getElementById("bot-credentials-label");
   const thumbprintEl = document.getElementById("bot-credentials-cert-thumbprint");
+  const ackEl = document.getElementById("bot-credentials-ack");
   const form = document.getElementById("bot-credentials-create-form");
   const feedback = document.getElementById("bot-credentials-feedback");
   let submitted = false;
@@ -138,6 +142,7 @@ test("invalid create thumbprint shows feedback and does not submit", () => {
     onCreate: () => { submitted = true; },
   });
 
+  ackEl.checked = true;
   labelEl.value = "bad-bot";
   thumbprintEl.value = "not-a-thumbprint";
   form.dispatchEvent({ type: "submit" });
@@ -146,6 +151,65 @@ test("invalid create thumbprint shows feedback and does not submit", () => {
   assert.equal(feedback.hidden, false);
   assert.match(feedback.textContent, /64 hexadecimal/);
   assert.match(feedback.className, /error/);
+});
+
+test("submit is blocked with feedback when sandbox notice is not acknowledged", () => {
+  const labelEl = document.getElementById("bot-credentials-label");
+  const ackEl = document.getElementById("bot-credentials-ack");
+  const form = document.getElementById("bot-credentials-create-form");
+  const feedback = document.getElementById("bot-credentials-feedback");
+  let submitted = false;
+  mod.setBotCredentialsHandlers({
+    onCreate: () => { submitted = true; },
+  });
+
+  ackEl.checked = false;
+  labelEl.value = "unacked-bot";
+  form.dispatchEvent({ type: "submit" });
+
+  assert.equal(submitted, false);
+  assert.equal(feedback.hidden, false);
+  assert.match(feedback.textContent, /acknowledge/);
+});
+
+test("checking the sandbox ack checkbox enables the create submit button", () => {
+  const ackEl = document.getElementById("bot-credentials-ack");
+  const submitBtn = document.getElementById("bot-credentials-create-submit");
+
+  ackEl.checked = false;
+  mod.setCreateSubmitting(false);
+  assert.equal(submitBtn.disabled, true);
+
+  ackEl.checked = true;
+  ackEl.dispatchEvent({ type: "change" });
+  assert.equal(submitBtn.disabled, false);
+
+  ackEl.checked = false;
+  ackEl.dispatchEvent({ type: "change" });
+  assert.equal(submitBtn.disabled, true);
+});
+
+test("toggling ack mid-submit does not re-enable the button while a create request is in flight", () => {
+  const ackEl = document.getElementById("bot-credentials-ack");
+  const submitBtn = document.getElementById("bot-credentials-create-submit");
+
+  ackEl.checked = true;
+  ackEl.dispatchEvent({ type: "change" });
+  assert.equal(submitBtn.disabled, false);
+
+  mod.setCreateSubmitting(true);
+  assert.equal(submitBtn.disabled, true);
+  assert.equal(submitBtn.textContent, "Creating…");
+
+  ackEl.checked = false;
+  ackEl.dispatchEvent({ type: "change" });
+  ackEl.checked = true;
+  ackEl.dispatchEvent({ type: "change" });
+  assert.equal(submitBtn.disabled, true, "must stay disabled while a create request is in flight");
+
+  mod.setCreateSubmitting(false);
+  assert.equal(submitBtn.disabled, false);
+  assert.equal(submitBtn.textContent, "Create credential");
 });
 
 test("edit pin calls handler with normalized value and clears on empty", () => {

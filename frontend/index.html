@@ -1261,6 +1261,32 @@
       </header>
       <p id="bot-credentials-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
 
+      <!-- Integration quickstart: bot credentials authenticate a native
+           FIXP/SBE order-entry connection (a separate wire from the /ws
+           and market-data channels below) — see docs/rfcs/user-bot-fixp-listener-v0.md
+           and docs/operations/fixp-listener.md in the repo. -->
+      <section class="panel admin-panel integration-guide">
+        <h3>How to connect your bot</h3>
+        <p class="muted-line">
+          A credential here authenticates a native <strong>FIXP/SBE order-entry</strong>
+          connection — the same wire protocol B3 EntryPoint itself speaks, distinct
+          from the REST/WebSocket API this console uses. Point your bot's FIXP client
+          at the endpoint your operator configured
+          (<code>Trading:EntryPointListener:Endpoint</code>), present this credential
+          at logon, and it flows through the same pre-trade risk / persistence
+          pipeline as orders placed here.
+        </p>
+        <ul class="integration-links">
+          <li><a href="https://github.com/pedrosakuma/B3TradingPlatform/blob/main/docs/rfcs/user-bot-fixp-listener-v0.md" target="_blank" rel="noopener">Protocol &amp; design (RFC)</a></li>
+          <li><a href="https://github.com/pedrosakuma/B3TradingPlatform/blob/main/docs/operations/fixp-listener.md" target="_blank" rel="noopener">Connection &amp; TLS setup guide</a></li>
+        </ul>
+        <p class="field-hint hint-warn" id="bot-credentials-sandbox-notice">
+          <strong>This is a simulation.</strong> No real money, orders, or market
+          access — fills and positions are synthetic. Credentials are personal and
+          non-transferable; misuse leads to revocation.
+        </p>
+      </section>
+
       <section class="panel admin-panel">
         <h3>Create credential</h3>
         <form id="bot-credentials-create-form" class="admin-inline-form">
@@ -1269,8 +1295,12 @@
           <input id="bot-credentials-cert-thumbprint" type="text"
                  placeholder="client cert thumbprint (SHA-256, optional)"
                  maxlength="95" autocomplete="off" spellcheck="false" />
-          <button type="submit" id="bot-credentials-create-submit">Create credential</button>
+          <button type="submit" id="bot-credentials-create-submit" disabled>Create credential</button>
         </form>
+        <label class="row">
+          <input id="bot-credentials-ack" type="checkbox" />
+          <span>I understand this is a sandbox/simulation, not a real brokerage or market connection</span>
+        </label>
         <p class="muted-line">
           The plaintext token is shown only once, immediately after creation —
           copy it before dismissing the dialog.
@@ -1372,6 +1402,24 @@
           <button type="submit" id="md-apply">Apply</button>
         </div>
       </form>
+
+      <!-- Integration quickstart: this is a raw binary WS from the separate
+           B3MarketDataPlatform service, not the /ws channel documented in
+           docs/WEBSOCKET-PROTOCOL.md (that one is orders/executions/positions). -->
+      <section class="panel admin-panel integration-guide">
+        <h3>Consuming market data directly</h3>
+        <p class="muted-line">
+          This app connects to the WS URL above as a plain, <strong>unauthenticated</strong>
+          binary WebSocket — a separate service (<code>B3MarketDataPlatform</code>) from
+          the trading-host's own <code>/ws</code> order/execution stream. A bot or
+          algo can subscribe to the same endpoint directly instead of going through
+          this UI.
+        </p>
+        <ul class="integration-links">
+          <li><a href="https://github.com/pedrosakuma/B3MarketDataPlatform/blob/main/docs/WEBSOCKET-PROTOCOL.md" target="_blank" rel="noopener">Wire protocol reference (B3MarketDataPlatform)</a></li>
+          <li><a href="https://github.com/pedrosakuma/B3TradingPlatform/blob/main/docs/WEBSOCKET-PROTOCOL.md" target="_blank" rel="noopener">This app's own /ws channel (orders, executions, positions)</a></li>
+        </ul>
+      </section>
     </section>
 
     <!-- Preferences (Fase 5 / #401). Hosts the UI density toggle and a
