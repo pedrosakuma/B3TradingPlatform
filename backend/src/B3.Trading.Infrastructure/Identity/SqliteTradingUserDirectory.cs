@@ -381,7 +381,12 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
                 throw new TradingUserDirectoryUnsupportedSchemaException(max, CurrentSchemaVersion);
             if (max == CurrentSchemaVersion)
                 return;
+
+            throw new TradingUserDirectoryUnavailableException("Identity schema_migrations exists without a supported version.");
         }
+
+        if (await AnyManagedDataTableExistsAsync(connection, ct).ConfigureAwait(false))
+            throw new TradingUserDirectoryUnavailableException("Unversioned identity database contains pre-existing managed tables.");
 
         await ExecuteNonQueryAsync(connection, Migration001, ct: ct).ConfigureAwait(false);
     }
@@ -393,6 +398,10 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
         var version = await CurrentVersionAsync(connection, ct).ConfigureAwait(false);
         if (version > CurrentSchemaVersion)
             throw new TradingUserDirectoryUnsupportedSchemaException(version, CurrentSchemaVersion);
+        if (version != CurrentSchemaVersion)
+            throw new TradingUserDirectoryUnavailableException("Identity directory schema version is missing or unsupported.");
+
+        await VerifyManagedSchemaAsync(connection, ct).ConfigureAwait(false);
 
         var quickCheck = (string?)await ScalarAsync(connection, "PRAGMA quick_check;", ct).ConfigureAwait(false);
         if (!string.Equals(quickCheck, "ok", StringComparison.OrdinalIgnoreCase))
@@ -457,10 +466,145 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
         return result is not null;
     }
 
+    private static async Task<bool> AnyManagedDataTableExistsAsync(SqliteConnection connection, CancellationToken ct)
+    {
+        foreach (var table in new[] { "users", "external_identities", "user_roles" })
+        {
+            if (await TableExistsAsync(connection, table, ct).ConfigureAwait(false))
+                return true;
+        }
+
+        return false;
+    }
+
     private static async Task<int> CurrentVersionAsync(SqliteConnection connection, CancellationToken ct)
     {
         var result = await ScalarAsync(connection, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations;", ct).ConfigureAwait(false);
         return Convert.ToInt32(result);
+    }
+
+    private static async Task VerifyManagedSchemaAsync(SqliteConnection connection, CancellationToken ct)
+    {
+        await RequireColumnsAsync(connection, "schema_migrations", ct,
+            new RequiredColumn("version", "INTEGER", NotNull: false, PrimaryKey: true),
+            new RequiredColumn("applied_at", "TEXT", NotNull: true, PrimaryKey: false)).ConfigureAwait(false);
+        await RequireColumnsAsync(connection, "users", ct,
+            new RequiredColumn("trading_user_id", "TEXT", NotNull: true, PrimaryKey: true),
+            new RequiredColumn("display_name", "TEXT", NotNull: true, PrimaryKey: false),
+            new RequiredColumn("firm_id", "TEXT", NotNull: true, PrimaryKey: false),
+            new RequiredColumn("status", "TEXT", NotNull: true, PrimaryKey: false),
+            new RequiredColumn("created_at", "TEXT", NotNull: true, PrimaryKey: false),
+            new RequiredColumn("updated_at", "TEXT", NotNull: true, PrimaryKey: false),
+            new RequiredColumn("row_version", "INTEGER", NotNull: true, PrimaryKey: false)).ConfigureAwait(false);
+        await RequireColumnsAsync(connection, "external_identities", ct,
+            new RequiredColumn("id", "INTEGER", NotNull: false, PrimaryKey: true),
+            new RequiredColumn("issuer", "TEXT", NotNull: true, PrimaryKey: false),
+            new RequiredColumn("subject", "TEXT", NotNull: true, PrimaryKey: false),
+            new RequiredColumn("trading_user_id", "TEXT", NotNull: true, PrimaryKey: false),
+            new RequiredColumn("tenant_id", "TEXT", NotNull: false, PrimaryKey: false),
+            new RequiredColumn("object_id", "TEXT", NotNull: false, PrimaryKey: false),
+            new RequiredColumn("created_at", "TEXT", NotNull: true, PrimaryKey: false)).ConfigureAwait(false);
+        await RequireColumnsAsync(connection, "user_roles", ct,
+            new RequiredColumn("trading_user_id", "TEXT", NotNull: true, PrimaryKey: true),
+            new RequiredColumn("role", "TEXT", NotNull: true, PrimaryKey: false)).ConfigureAwait(false);
+
+        if (!await HasUniqueIndexAsync(connection, "external_identities", ct, "issuer", "subject").ConfigureAwait(false))
+            throw new TradingUserDirectoryUnavailableException("Identity schema is missing UNIQUE(issuer, subject).");
+        if (!await HasForeignKeyAsync(connection, "external_identities", "users", "trading_user_id", "trading_user_id", "RESTRICT", ct).ConfigureAwait(false))
+            throw new TradingUserDirectoryUnavailableException("Identity schema external_identities foreign key is invalid.");
+        if (!await HasForeignKeyAsync(connection, "user_roles", "users", "trading_user_id", "trading_user_id", "CASCADE", ct).ConfigureAwait(false))
+            throw new TradingUserDirectoryUnavailableException("Identity schema user_roles foreign key is invalid.");
+    }
+
+    private static async Task RequireColumnsAsync(
+        SqliteConnection connection,
+        string table,
+        CancellationToken ct,
+        params RequiredColumn[] required)
+    {
+        if (!await TableExistsAsync(connection, table, ct).ConfigureAwait(false))
+            throw new TradingUserDirectoryUnavailableException($"Identity schema table '{table}' is missing.");
+
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"SELECT name, upper(type), \"notnull\", pk FROM pragma_table_info('{table}');";
+        var columns = new Dictionary<string, (string Type, bool NotNull, bool PrimaryKey)>(StringComparer.Ordinal);
+        await using (var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false))
+        {
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            {
+                columns[reader.GetString(0)] = (
+                    reader.GetString(1),
+                    reader.GetInt32(2) != 0,
+                    reader.GetInt32(3) != 0);
+            }
+        }
+
+        foreach (var column in required)
+        {
+            if (!columns.TryGetValue(column.Name, out var actual)
+                || !string.Equals(actual.Type, column.Type, StringComparison.OrdinalIgnoreCase)
+                || actual.NotNull != column.NotNull
+                || actual.PrimaryKey != column.PrimaryKey)
+            {
+                throw new TradingUserDirectoryUnavailableException($"Identity schema column '{table}.{column.Name}' is invalid.");
+            }
+        }
+    }
+
+    private static async Task<bool> HasUniqueIndexAsync(
+        SqliteConnection connection,
+        string table,
+        CancellationToken ct,
+        params string[] expectedColumns)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"SELECT name FROM pragma_index_list('{table}') WHERE \"unique\" = 1;";
+        var indexNames = new List<string>();
+        await using (var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false))
+        {
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                indexNames.Add(reader.GetString(0));
+        }
+
+        foreach (var indexName in indexNames)
+        {
+            await using var info = connection.CreateCommand();
+            info.CommandText = $"SELECT name FROM pragma_index_info('{indexName.Replace("'", "''")}') ORDER BY seqno;";
+            var columns = new List<string>();
+            await using var reader = await info.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                columns.Add(reader.GetString(0));
+
+            if (columns.SequenceEqual(expectedColumns, StringComparer.Ordinal))
+                return true;
+        }
+
+        return false;
+    }
+
+    private static async Task<bool> HasForeignKeyAsync(
+        SqliteConnection connection,
+        string table,
+        string targetTable,
+        string fromColumn,
+        string toColumn,
+        string onDelete,
+        CancellationToken ct)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"""
+            SELECT 1
+            FROM pragma_foreign_key_list('{table}')
+            WHERE "table" = $targetTable
+              AND "from" = $fromColumn
+              AND "to" = $toColumn
+              AND upper(on_delete) = $onDelete;
+            """;
+        cmd.Parameters.AddWithValue("$targetTable", targetTable);
+        cmd.Parameters.AddWithValue("$fromColumn", fromColumn);
+        cmd.Parameters.AddWithValue("$toColumn", toColumn);
+        cmd.Parameters.AddWithValue("$onDelete", onDelete);
+        return await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false) is not null;
     }
 
     private async Task<TradingUser?> LoadUserAsync(SqliteConnection connection, string tradingUserId, CancellationToken ct)
@@ -653,13 +797,15 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
     private static DateTimeOffset ParseTimestamp(string value) =>
         DateTimeOffset.Parse(value, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal);
 
+    private sealed record RequiredColumn(string Name, string Type, bool NotNull, bool PrimaryKey);
+
     private const string Migration001 = """
-        CREATE TABLE IF NOT EXISTS schema_migrations (
+        CREATE TABLE schema_migrations (
             version       INTEGER PRIMARY KEY,
             applied_at    TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS users (
+        CREATE TABLE users (
             trading_user_id TEXT NOT NULL PRIMARY KEY COLLATE BINARY
                 CHECK (length(trading_user_id) BETWEEN 1 AND 64),
             display_name    TEXT NOT NULL CHECK (length(display_name) > 0),
@@ -670,7 +816,7 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
             row_version     INTEGER NOT NULL DEFAULT 1
         );
 
-        CREATE TABLE IF NOT EXISTS external_identities (
+        CREATE TABLE external_identities (
             id              INTEGER PRIMARY KEY,
             issuer          TEXT NOT NULL COLLATE BINARY CHECK (length(issuer) > 0),
             subject         TEXT NOT NULL COLLATE BINARY CHECK (length(subject) > 0),
@@ -683,7 +829,7 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
                 REFERENCES users(trading_user_id) ON DELETE RESTRICT
         );
 
-        CREATE TABLE IF NOT EXISTS user_roles (
+        CREATE TABLE user_roles (
             trading_user_id TEXT NOT NULL PRIMARY KEY
                 CHECK (length(trading_user_id) BETWEEN 1 AND 64),
             role            TEXT NOT NULL
