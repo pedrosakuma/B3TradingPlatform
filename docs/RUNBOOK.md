@@ -54,6 +54,34 @@ Repair/bind an Entra admin, verify exchange, return to `Entra`, and remove the
 temporary credential after the rollback window. Public signup/JIT provisioning
 is never used. Entra-managed factors supersede #319 for public human auth.
 
+### Identity directory backup and restore validation
+
+Create the SQLite artifact while trading-host remains live:
+
+```bash
+dotnet /app/tools/identity-maintenance/B3.Trading.IdentityMaintenance.dll backup \
+  --database /var/lib/b3trading/identity/users.db \
+  --destination /backup/users.db
+```
+
+The command uses SQLite's online backup API and emits one JSON metadata record
+with `destination`, `schemaVersion`, and `createdAtUtc`. Package that artifact
+with the matching Data Protection `dp-keys` through the deployment backup job;
+do not copy the live `users.db`, `users.db-wal`, or `users.db-shm` files.
+
+For a restore drill, keep the restored database offline and validate it before
+mounting it into trading-host:
+
+```bash
+dotnet /app/tools/identity-maintenance/B3.Trading.IdentityMaintenance.dll validate \
+  --database /restore/users.db
+```
+
+`validate` opens an existing file read-only and runs the supported-schema,
+managed-schema, full SQLite integrity, foreign-key, and identity invariant
+checks. A missing, corrupt, or unsupported database returns non-zero and is
+never created, migrated, or reset.
+
 ## 1. Perf hardening v0 — what to watch
 
 The perf-hardening v0 RFC ([`rfcs/perf-hardening-v0.md`](rfcs/perf-hardening-v0.md))
