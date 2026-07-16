@@ -108,12 +108,12 @@ jobs:
             b3-trading-host:identity-arm64-smoke)"
           trap 'docker logs "$cid" || true; docker rm -f "$cid" >/dev/null || true' EXIT
           for i in $(seq 1 60); do
-            if curl --fail --silent http://127.0.0.1:18080/ready >/dev/null; then
+            if curl --fail --silent http://127.0.0.1:18080/live >/dev/null; then
               break
             fi
             sleep 1
           done
-          curl --fail --silent http://127.0.0.1:18080/ready
+          curl --fail --silent http://127.0.0.1:18080/live
           curl --fail --silent http://127.0.0.1:18080/health | grep '"provider":"Sqlite"'
           docker exec "$cid" test -f /var/lib/b3trading/identity/users.db
           backup_metadata="$(docker exec "$cid" dotnet /app/tools/identity-maintenance/B3.Trading.IdentityMaintenance.dll backup \

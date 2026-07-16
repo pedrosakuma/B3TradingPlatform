@@ -127,7 +127,7 @@ public sealed class LoadTestRig : IAsyncDisposable
         var margin = new NoOpMarginProvider();
         var risk = new RiskPipeline(Array.Empty<IRiskCheck>());
         var accountant = new CompositeRiskAccountant(Array.Empty<IRiskAccountant>());
-        IDrainGate drain = new NeverDrainingGate();
+        IDrainController drain = new NeverDrainingGate();
 
         var processor = new ExecutionReportProcessor(
             ownership, book, positions, sink, margin,
@@ -337,8 +337,9 @@ public sealed class LoadTestRig : IAsyncDisposable
         }
     }
 
-    private sealed class NeverDrainingGate : IDrainGate
+    private sealed class NeverDrainingGate : IDrainController
     {
         public bool IsDraining => false;
+        public void BeginDrain(string reason) { }
     }
 }

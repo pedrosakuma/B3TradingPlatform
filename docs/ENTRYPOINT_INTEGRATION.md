@@ -145,13 +145,13 @@ as `host:port` and DNS-resolved at startup. Validation is enforced in
 
 See [OBSERVABILITY.md](OBSERVABILITY.md) for the meter shape.
 
+`/ready` blocks while any required firm session is missing, disconnected, or
+not established; `/live` remains process-only.
+
 ## Known follow-ups (issue #7)
 
 These are deliberately **not** in the v1 wiring:
 
-- **Readiness gating.** `/ready` does not yet block while a firm session
-  is `Disconnected`/`Connecting`. Submits to a disconnected firm surface
-  as gateway-unavailable rejections.
 - **Reconnect state machine.** `Terminated` increments a metric and logs
   loudly, but no automatic `ReconnectAsync` (with bumped `SessionVerId`)
   is scheduled. Operator restart is the recovery path for now.
