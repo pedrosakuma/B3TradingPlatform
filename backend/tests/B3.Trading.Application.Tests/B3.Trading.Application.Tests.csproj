@@ -17,6 +17,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\B3.Trading.Application\B3.Trading.Application.csproj" />
     <ProjectReference Include="..\..\src\B3.Trading.Infrastructure\B3.Trading.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\tools\B3.Trading.IdentityMaintenance\B3.Trading.IdentityMaintenance.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -62,6 +62,11 @@ public sealed record TradingUserDirectoryBackup(
     int SchemaVersion,
     DateTimeOffset CreatedAt);
 
+public sealed record TradingUserDirectoryValidation(
+    string Path,
+    int SchemaVersion,
+    DateTimeOffset ValidatedAt);
+
 public sealed record TradingUserDirectoryHealth(
     bool Ready,
     string Provider,

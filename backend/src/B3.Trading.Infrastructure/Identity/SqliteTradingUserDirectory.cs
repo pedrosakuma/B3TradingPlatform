@@ -454,30 +454,45 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
     {
         if (string.IsNullOrWhiteSpace(destinationPath))
             throw new TradingUserDirectoryValidationException("Backup destination path is required.");
+        if (!File.Exists(_options.Path))
+            throw new TradingUserDirectoryValidationException("Identity database does not exist.");
 
         await _writeGate.WaitAsync(ct).ConfigureAwait(false);
+        string? temporaryPath = null;
         try
         {
-            var dir = System.IO.Path.GetDirectoryName(destinationPath);
+            var sourcePath = System.IO.Path.GetFullPath(_options.Path!);
+            var finalPath = System.IO.Path.GetFullPath(destinationPath);
+            if (string.Equals(sourcePath, finalPath, StringComparison.Ordinal))
+                throw new TradingUserDirectoryValidationException("Backup destination must differ from the identity database.");
+
+            var dir = System.IO.Path.GetDirectoryName(finalPath);
             if (!string.IsNullOrWhiteSpace(dir))
                 Directory.CreateDirectory(dir);
+            temporaryPath = $"{finalPath}.{Guid.NewGuid():N}.tmp";
 
-            await using var source = OpenConnection();
-            await ExecuteNonQueryAsync(source, "PRAGMA wal_checkpoint(PASSIVE);", ct: ct).ConfigureAwait(false);
+            await using var source = OpenConnection(readOnly: true);
+            await RunIntegrityChecksAsync(source, ct).ConfigureAwait(false);
 
             var builder = new SqliteConnectionStringBuilder
             {
-                DataSource = destinationPath,
+                DataSource = temporaryPath,
                 Mode = SqliteOpenMode.ReadWriteCreate,
                 Cache = SqliteCacheMode.Default,
                 Pooling = false,
             };
-            await using var destination = new SqliteConnection(builder.ToString());
-            await destination.OpenAsync(ct).ConfigureAwait(false);
-            source.BackupDatabase(destination);
-            await ConfigureConnectionAsync(destination, ct).ConfigureAwait(false);
-            var version = await RunIntegrityChecksAsync(destination, ct).ConfigureAwait(false);
-            return new TradingUserDirectoryBackup(destinationPath, version, DateTimeOffset.UtcNow);
+            int version;
+            await using (var destination = new SqliteConnection(builder.ToString()))
+            {
+                await destination.OpenAsync(ct).ConfigureAwait(false);
+                await ConfigureValidationConnectionAsync(destination, queryOnly: false, ct).ConfigureAwait(false);
+                source.BackupDatabase(destination);
+                version = await RunIntegrityChecksAsync(destination, ct, fullIntegrityCheck: true).ConfigureAwait(false);
+            }
+
+            File.Move(temporaryPath, finalPath, overwrite: true);
+            temporaryPath = null;
+            return new TradingUserDirectoryBackup(finalPath, version, DateTimeOffset.UtcNow);
         }
         catch (Exception ex) when (ex is not TradingUserDirectoryException)
         {
@@ -485,7 +500,29 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
         }
         finally
         {
+            if (temporaryPath is not null)
+                File.Delete(temporaryPath);
             _writeGate.Release();
+        }
+    }
+
+    public async Task<TradingUserDirectoryValidation> ValidateOfflineAsync(CancellationToken ct = default)
+    {
+        if (!File.Exists(_options.Path))
+            throw new TradingUserDirectoryValidationException("Identity database does not exist.");
+
+        try
+        {
+            await using var connection = OpenConnection(readOnly: true);
+            var version = await RunIntegrityChecksAsync(connection, ct, fullIntegrityCheck: true).ConfigureAwait(false);
+            return new TradingUserDirectoryValidation(
+                System.IO.Path.GetFullPath(_options.Path!),
+                version,
+                DateTimeOffset.UtcNow);
+        }
+        catch (Exception ex) when (ex is not TradingUserDirectoryException)
+        {
+            throw new TradingUserDirectoryUnavailableException("SQLite identity validation failed.", ex);
         }
     }
 
@@ -536,7 +573,10 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
         await ExecuteNonQueryAsync(connection, Migration002, ct: ct).ConfigureAwait(false);
     }
 
-    private async Task<int> RunIntegrityChecksAsync(SqliteConnection connection, CancellationToken ct)
+    private async Task<int> RunIntegrityChecksAsync(
+        SqliteConnection connection,
+        CancellationToken ct,
+        bool fullIntegrityCheck = false)
     {
         if (!await TableExistsAsync(connection, "schema_migrations", ct).ConfigureAwait(false))
             throw new TradingUserDirectoryUnavailableException("Identity schema_migrations table is missing.");
@@ -548,9 +588,10 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
 
         await VerifyManagedSchemaAsync(connection, ct).ConfigureAwait(false);
 
-        var quickCheck = (string?)await ScalarAsync(connection, "PRAGMA quick_check;", ct).ConfigureAwait(false);
-        if (!string.Equals(quickCheck, "ok", StringComparison.OrdinalIgnoreCase))
-            throw new TradingUserDirectoryUnavailableException("SQLite quick_check failed.");
+        var integrityPragma = fullIntegrityCheck ? "integrity_check" : "quick_check";
+        var integrityResult = (string?)await ScalarAsync(connection, $"PRAGMA {integrityPragma};", ct).ConfigureAwait(false);
+        if (!string.Equals(integrityResult, "ok", StringComparison.OrdinalIgnoreCase))
+            throw new TradingUserDirectoryUnavailableException($"SQLite {integrityPragma} failed.");
 
         var foreignKeyFailures = Convert.ToInt64(await ScalarAsync(connection, "SELECT COUNT(*) FROM pragma_foreign_key_check;", ct).ConfigureAwait(false));
         if (foreignKeyFailures != 0)
@@ -584,7 +625,10 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
         try
         {
             connection.Open();
-            ConfigureConnectionAsync(connection, CancellationToken.None).GetAwaiter().GetResult();
+            if (readOnly)
+                ConfigureValidationConnectionAsync(connection, queryOnly: true, CancellationToken.None).GetAwaiter().GetResult();
+            else
+                ConfigureConnectionAsync(connection, CancellationToken.None).GetAwaiter().GetResult();
             return connection;
         }
         catch
@@ -600,6 +644,17 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
         await ExecuteNonQueryAsync(connection, $"PRAGMA busy_timeout = {Math.Max(1, _options.BusyTimeoutMilliseconds)};", ct: ct).ConfigureAwait(false);
         await ExecuteNonQueryAsync(connection, "PRAGMA journal_mode = WAL;", ct: ct).ConfigureAwait(false);
         await ExecuteNonQueryAsync(connection, "PRAGMA synchronous = FULL;", ct: ct).ConfigureAwait(false);
+    }
+
+    private async Task ConfigureValidationConnectionAsync(
+        SqliteConnection connection,
+        bool queryOnly,
+        CancellationToken ct)
+    {
+        await ExecuteNonQueryAsync(connection, "PRAGMA foreign_keys = ON;", ct: ct).ConfigureAwait(false);
+        await ExecuteNonQueryAsync(connection, $"PRAGMA busy_timeout = {Math.Max(1, _options.BusyTimeoutMilliseconds)};", ct: ct).ConfigureAwait(false);
+        if (queryOnly)
+            await ExecuteNonQueryAsync(connection, "PRAGMA query_only = ON;", ct: ct).ConfigureAwait(false);
     }
 
     private static async Task<bool> TableExistsAsync(SqliteConnection connection, string name, CancellationToken ct)

@@ -116,6 +116,15 @@ jobs:
           curl --fail --silent http://127.0.0.1:18080/ready
           curl --fail --silent http://127.0.0.1:18080/health | grep '"provider":"Sqlite"'
           docker exec "$cid" test -f /var/lib/b3trading/identity/users.db
+          backup_metadata="$(docker exec "$cid" dotnet /app/tools/identity-maintenance/B3.Trading.IdentityMaintenance.dll backup \
+            --database /var/lib/b3trading/identity/users.db \
+            --destination /tmp/identity-backup.db)"
+          echo "$backup_metadata" | grep '"command":"backup"'
+          echo "$backup_metadata" | grep '"schemaVersion":2'
+          validate_metadata="$(docker exec "$cid" dotnet /app/tools/identity-maintenance/B3.Trading.IdentityMaintenance.dll validate \
+            --database /tmp/identity-backup.db)"
+          echo "$validate_metadata" | grep '"command":"validate"'
+          echo "$validate_metadata" | grep '"schemaVersion":2'
           docker stats --no-stream --format 'identity-arm64-smoke cpu={{.CPUPerc}} memory={{.MemUsage}}' "$cid"
 
   frontend:
