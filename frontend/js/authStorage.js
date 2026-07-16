@@ -26,12 +26,18 @@ export function readStoredSession(store, now = Date.now()) {
 }
 
 export function readInternalSession({ authMode = "Local", sessionStorage, localStorage, now = Date.now() }) {
-  if (authMode === "Entra") safeRemove(localStorage, SESSION_KEY);
-  const fromTab = readStoredSession(sessionStorage, now);
-  if (fromTab) return { session: fromTab, preferredStore: "sessionStorage" };
   if (authMode === "Entra") {
+    safeRemove(localStorage, SESSION_KEY);
+    const fromTab = readStoredSession(sessionStorage, now);
+    if (fromTab?.authMode === "Entra") {
+      return { session: fromTab, preferredStore: "sessionStorage" };
+    }
+    if (fromTab) safeRemove(sessionStorage, SESSION_KEY);
     return { session: null, preferredStore: "sessionStorage" };
   }
+
+  const fromTab = readStoredSession(sessionStorage, now);
+  if (fromTab) return { session: fromTab, preferredStore: "sessionStorage" };
 
   const fromBoot = readStoredSession(localStorage, now);
   if (!fromBoot) return { session: null, preferredStore: "sessionStorage" };

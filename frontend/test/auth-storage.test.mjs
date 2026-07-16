@@ -45,6 +45,17 @@ test("Entra boot purges stale localStorage even when sessionStorage is valid", (
   assert.equal(ls.getItem(SESSION_KEY), null);
 });
 
+test("Entra mode rejects a valid local session left in sessionStorage", () => {
+  const ss = store();
+  const ls = store();
+  ss.setItem(SESSION_KEY, JSON.stringify({ token: "local-tab", expiresAt: future(), authMode: "Local" }));
+
+  const result = readInternalSession({ authMode: "Entra", sessionStorage: ss, localStorage: ls });
+
+  assert.equal(result.session, null);
+  assert.equal(ss.getItem(SESSION_KEY), null);
+});
+
 test("Local mode still seeds fresh tabs from remember-me localStorage", () => {
   const ss = store();
   const ls = store();
