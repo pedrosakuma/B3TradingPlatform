@@ -30,6 +30,12 @@ internal sealed class AuthOptionsValidator : IValidateOptions<AuthOptions>
             if (options.IsTotpEnabled())
                 failures.Add("Trading:Auth:TotpEnabled cannot be true in Entra mode.");
         }
+        else if (mode == AuthModeKind.Hybrid
+            && options.LocalLoginEnabled == false
+            && options.TotpEnabled == true)
+        {
+            failures.Add("Trading:Auth:TotpEnabled cannot be true when Trading:Auth:LocalLoginEnabled is false in Hybrid mode.");
+        }
 
         if (!string.Equals(options.ExternalIdentity.Scheme, ExternalIdentityOptions.DefaultScheme, StringComparison.Ordinal))
             failures.Add($"Trading:Auth:ExternalIdentity:Scheme must be exactly '{ExternalIdentityOptions.DefaultScheme}'.");

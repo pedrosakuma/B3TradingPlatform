@@ -92,6 +92,19 @@ public class AuthOptionsValidatorTests
         Assert.Contains(result.Failures, f => f.Contains("ExternalIdentity:Issuer", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void Validate_HybridRejectsTotpWhenLocalLoginDisabled()
+    {
+        var opts = ValidExternalOptions();
+        opts.LocalLoginEnabled = false;
+        opts.TotpEnabled = true;
+
+        var result = new AuthOptionsValidator().Validate(null, opts);
+
+        Assert.True(result.Failed);
+        Assert.Contains(result.Failures, f => f.Contains("TotpEnabled", StringComparison.Ordinal));
+    }
+
     private static AuthOptions ValidExternalOptions() => new()
     {
         SigningKey = "test-signing-key-must-be-at-least-32-bytes-long-okay",

@@ -64,6 +64,27 @@ public sealed class ExternalIdentityExchangeTests
     }
 
     [Fact]
+    public async Task HybridMode_LocalLoginDisabled_DoesNotMapTotp()
+    {
+        using var keys = new SigningKeys();
+        var config = HybridConfig();
+        config["Trading:Auth:LocalLoginEnabled"] = "false";
+        await using var factory = TestAppFactory.WithOverrides(config, services =>
+        {
+            services.RemoveAll<IExternalIdentityConfigurationProvider>();
+            services.AddSingleton<IExternalIdentityConfigurationProvider>(keys.Provider);
+        });
+        using var http = factory.CreateClient();
+
+        Assert.Equal(HttpStatusCode.NotFound,
+            (await http.PostAsJsonAsync("/auth/login", new LoginRequest("alice", "wonderland"))).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound,
+            (await http.GetAsync("/auth/2fa/status")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await http.PostAsync("/auth/exchange", null)).StatusCode);
+    }
+
+    [Fact]
     public async Task Exchange_ValidExternalToken_ReturnsInternalJwt_FromDirectoryOnly()
     {
         using var keys = new SigningKeys();

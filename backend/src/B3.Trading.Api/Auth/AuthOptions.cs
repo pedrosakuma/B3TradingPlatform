@@ -74,7 +74,7 @@ public sealed class AuthOptions
     public bool IsTotpEnabled() => ResolveMode() switch
     {
         AuthModeKind.Local => TotpEnabled ?? true,
-        AuthModeKind.Hybrid => TotpEnabled ?? true,
+        AuthModeKind.Hybrid => IsLocalLoginEnabled() && (TotpEnabled ?? true),
         AuthModeKind.Entra => TotpEnabled ?? false,
         _ => false,
     };
