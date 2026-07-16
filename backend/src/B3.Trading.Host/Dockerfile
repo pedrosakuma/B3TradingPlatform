@@ -20,6 +20,7 @@ WORKDIR /src
 COPY global.json Directory.Build.props B3TradingPlatform.slnx ./
 COPY backend/Directory.Packages.props ./backend/
 COPY backend/src ./backend/src
+COPY backend/tools ./backend/tools
 
 WORKDIR /src/backend/src/B3.Trading.Host
 RUN dotnet restore -a $TARGETARCH
@@ -28,6 +29,16 @@ RUN dotnet publish \
         -a $TARGETARCH \
         --no-restore \
         --output /app/publish \
+        -p:PublishSingleFile=false \
+        -p:UseAppHost=false
+
+WORKDIR /src/backend/tools/B3.Trading.IdentityMaintenance
+RUN dotnet restore -a $TARGETARCH
+RUN dotnet publish \
+        --configuration Release \
+        -a $TARGETARCH \
+        --no-restore \
+        --output /app/identity-maintenance \
         -p:PublishSingleFile=false \
         -p:UseAppHost=false
 
@@ -59,6 +70,7 @@ RUN mkdir -p /var/lib/b3trading \
 
 WORKDIR /app
 COPY --from=build /app/publish ./
+COPY --from=build /app/identity-maintenance ./tools/identity-maintenance/
 
 # Defaults consumed by Program.cs and AuthSigningKeyValidator. The empty
 # SigningKey forces a fail-fast unless the operator overrides via

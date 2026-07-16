@@ -233,7 +233,9 @@ For Entra rollout set `Trading__Auth__Mode=Hybrid` or `Entra` and configure
 `Trading__Auth__ExternalIdentity__Authority`, `Issuer`, `TenantId`,
 `Audience`, `RequiredScope` and `AllowedClientApplicationIds__0`. Local mode
 is still the default; external tokens are accepted only by `POST /auth/exchange`
-and are exchanged for the internal 10-minute trading JWT.
+and are exchanged for the internal 10-minute trading JWT. `Entra` mode also
+requires at least one active externally linked admin in the identity directory;
+use the Hybrid admin binding route and runbook before flipping the mode.
 | `TRADING_SEED_PASSWORD_HASH` | PBKDF2 hash of the seed user password | helper command (TBD: `backend/tools/PasswordHasher`) |
 | `TRADING_SEED_PASSWORD_SALT` | matching salt | same |
 

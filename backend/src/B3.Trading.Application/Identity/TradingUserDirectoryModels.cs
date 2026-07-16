@@ -67,7 +67,20 @@ public sealed record TradingUserDirectoryHealth(
     string Provider,
     string? Path,
     int? SchemaVersion,
-    string? Reason);
+    string? Reason,
+    bool? HasActiveExternallyLinkedAdmin = null);
+
+public sealed record RecoveryAdminRequest(
+    string TradingUserId,
+    string DisplayName,
+    string FirmId,
+    string Operator,
+    string ChangeTicket);
+
+public sealed record RecoveryAdminResult(
+    TradingUser User,
+    bool Created,
+    long MaintenanceEventId);
 
 public class TradingUserDirectoryException : Exception
 {
@@ -83,6 +96,11 @@ public sealed class TradingUserDirectoryValidationException : TradingUserDirecto
 public sealed class TradingUserDirectoryConflictException : TradingUserDirectoryException
 {
     public TradingUserDirectoryConflictException(string message) : base(message) { }
+}
+
+public sealed class TradingUserDirectoryLastAdminException : TradingUserDirectoryException
+{
+    public TradingUserDirectoryLastAdminException(string message) : base(message) { }
 }
 
 public sealed class TradingUserDirectoryConcurrencyException : TradingUserDirectoryException

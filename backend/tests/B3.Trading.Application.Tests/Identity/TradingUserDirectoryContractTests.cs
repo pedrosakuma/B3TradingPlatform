@@ -173,6 +173,93 @@ public sealed class TradingUserDirectoryContractTests
             directory.SetStatusAsync("alice", "locked", expectedRowVersion: 3));
     }
 
+    [Theory]
+    [MemberData(nameof(Providers))]
+    public async Task LastLinkedAdmin_GuardCoversDisableDowngradeUnlinkAndRaces(
+        string name,
+        Func<string, ITradingUserDirectory> factory)
+    {
+        using var workspace = TestWorkspace.Create(name);
+        var directory = factory(workspace.Path);
+        await directory.InitializeAsync();
+        await directory.ImportLegacyUsersAsync(new[]
+        {
+            new LegacyTradingUserImport("admin1", "admin1", "FIRM01", TradingUserDirectoryConstants.RoleAdmin),
+            new LegacyTradingUserImport("admin2", "admin2", "FIRM01", TradingUserDirectoryConstants.RoleAdmin),
+        });
+        var first = await directory.BindExternalIdentityAsync(
+            "admin1",
+            new ExternalIdentityBindingRequest("issuer", "subject-1"),
+            expectedRowVersion: 1);
+
+        Assert.True(await directory.HasActiveExternallyLinkedAdminAsync());
+        await Assert.ThrowsAsync<TradingUserDirectoryLastAdminException>(() =>
+            directory.SetStatusAsync("admin1", TradingUserDirectoryConstants.StatusDisabled, expectedRowVersion: 2));
+        await Assert.ThrowsAsync<TradingUserDirectoryLastAdminException>(() =>
+            directory.SetFirmAndRoleAsync("admin1", "FIRM01", TradingUserDirectoryConstants.RoleCompliance, expectedRowVersion: 2));
+        await Assert.ThrowsAsync<TradingUserDirectoryLastAdminException>(() =>
+            directory.UnbindExternalIdentityAsync("admin1", first.Id, expectedRowVersion: 2));
+
+        await directory.BindExternalIdentityAsync(
+            "admin2",
+            new ExternalIdentityBindingRequest("issuer", "subject-2"),
+            expectedRowVersion: 1);
+        var admin1 = await directory.GetUserAsync("admin1");
+        var admin2 = await directory.GetUserAsync("admin2");
+
+        var results = await Task.WhenAll(
+            TryDisableAsync(directory, "admin1", admin1!.RowVersion),
+            TryDisableAsync(directory, "admin2", admin2!.RowVersion));
+
+        Assert.Contains("ok", results);
+        Assert.Contains("last_admin_conflict", results);
+        Assert.True(await directory.HasActiveExternallyLinkedAdminAsync());
+    }
+
+    [Theory]
+    [MemberData(nameof(Providers))]
+    public async Task RecoveryAdmin_CreatesOrEnablesAdminWithoutPasswordMaterial(
+        string name,
+        Func<string, ITradingUserDirectory> factory)
+    {
+        using var workspace = TestWorkspace.Create(name);
+        var directory = factory(workspace.Path);
+        await directory.InitializeAsync();
+
+        var created = await directory.EnsureRecoveryAdminAsync(new RecoveryAdminRequest(
+            "breakglass",
+            "Break Glass",
+            "FIRM01",
+            "operator",
+            "INC-609"));
+        var enabled = await directory.EnsureRecoveryAdminAsync(new RecoveryAdminRequest(
+            "breakglass",
+            "Break Glass",
+            "FIRM01",
+            "operator",
+            "INC-610"));
+
+        Assert.True(created.Created);
+        Assert.False(enabled.Created);
+        Assert.Equal(TradingUserDirectoryConstants.RoleAdmin, enabled.User.Role);
+        Assert.Equal(TradingUserDirectoryConstants.StatusActive, enabled.User.Status);
+        Assert.Equal(2, enabled.User.RowVersion);
+        Assert.Empty(enabled.User.ExternalIdentities);
+    }
+
+    private static async Task<string> TryDisableAsync(ITradingUserDirectory directory, string id, long rowVersion)
+    {
+        try
+        {
+            await directory.SetStatusAsync(id, TradingUserDirectoryConstants.StatusDisabled, rowVersion);
+            return "ok";
+        }
+        catch (TradingUserDirectoryLastAdminException)
+        {
+            return "last_admin_conflict";
+        }
+    }
+
     private static SqliteTradingUserDirectory NewSqlite(string path) =>
         new(
             Options.Create(new IdentityDirectoryOptions

@@ -60,11 +60,51 @@ spec:
             - name: Trading__IdentityDirectory__ExpectedWriterCount
               value: {{ .Values.identityDirectory.expectedWriterCount | quote }}
             # ── Auth ────────────────────────────────────────────────────────
+            - name: Trading__Auth__Mode
+              value: {{ .Values.auth.mode | quote }}
+            {{- if ne .Values.auth.localLoginEnabled nil }}
+            - name: Trading__Auth__LocalLoginEnabled
+              value: {{ .Values.auth.localLoginEnabled | quote }}
+            {{- end }}
+            {{- if ne .Values.auth.signupEnabled nil }}
+            - name: Trading__Auth__SignupEnabled
+              value: {{ .Values.auth.signupEnabled | quote }}
+            {{- end }}
+            {{- if ne .Values.auth.totpEnabled nil }}
+            - name: Trading__Auth__TotpEnabled
+              value: {{ .Values.auth.totpEnabled | quote }}
+            {{- end }}
+            {{- if ne .Values.auth.exchangeEnabled nil }}
+            - name: Trading__Auth__ExchangeEnabled
+              value: {{ .Values.auth.exchangeEnabled | quote }}
+            {{- end }}
             - name: Trading__Auth__SigningKey
               valueFrom:
                 secretKeyRef:
                   name: {{ include "b3-trading-host.fullname" . }}-secrets
                   key: signing-key
+            - name: Trading__Auth__ExternalIdentity__IssuerAlias
+              value: {{ .Values.auth.externalIdentity.issuerAlias | quote }}
+            - name: Trading__Auth__ExternalIdentity__Authority
+              value: {{ .Values.auth.externalIdentity.authority | quote }}
+            - name: Trading__Auth__ExternalIdentity__MetadataAddress
+              value: {{ .Values.auth.externalIdentity.metadataAddress | quote }}
+            - name: Trading__Auth__ExternalIdentity__Issuer
+              value: {{ .Values.auth.externalIdentity.issuer | quote }}
+            - name: Trading__Auth__ExternalIdentity__TenantId
+              value: {{ .Values.auth.externalIdentity.tenantId | quote }}
+            - name: Trading__Auth__ExternalIdentity__RequireTenantId
+              value: {{ .Values.auth.externalIdentity.requireTenantId | quote }}
+            - name: Trading__Auth__ExternalIdentity__Audience
+              value: {{ .Values.auth.externalIdentity.audience | quote }}
+            - name: Trading__Auth__ExternalIdentity__RequiredScope
+              value: {{ .Values.auth.externalIdentity.requiredScope | quote }}
+            - name: Trading__Auth__ExternalIdentity__InternalTokenLifetimeMinutes
+              value: {{ .Values.auth.externalIdentity.internalTokenLifetimeMinutes | quote }}
+            {{- range $i, $clientId := .Values.auth.externalIdentity.allowedClientApplicationIds }}
+            - name: {{ printf "Trading__Auth__ExternalIdentity__AllowedClientApplicationIds__%d" $i }}
+              value: {{ $clientId | quote }}
+            {{- end }}
             {{- range $i, $user := .Values.auth.users }}
             - name: {{ printf "Trading__Auth__Users__%d__Username" $i }}
               value: {{ $user.username | quote }}

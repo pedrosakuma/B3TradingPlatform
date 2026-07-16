@@ -88,6 +88,7 @@ public static class HealthEndpoints
                     path = identity.Path,
                     schemaVersion = identity.SchemaVersion,
                     reason = identity.Reason,
+                    hasActiveExternallyLinkedAdmin = identity.HasActiveExternallyLinkedAdmin,
                     busyTimeoutMilliseconds = identityOptions.Value.BusyTimeoutMilliseconds,
                 },
                 exchange = exchange is null ? null : BuildExchangeBlock(exchange, sessions),

@@ -50,6 +50,21 @@ public sealed class ExternalIdentityExchangeTests
         {
             services.RemoveAll<IExternalIdentityConfigurationProvider>();
             services.AddSingleton<IExternalIdentityConfigurationProvider>(keys.Provider);
+            services.RemoveAll<ITradingUserDirectory>();
+            services.AddSingleton<ITradingUserDirectory>(_ =>
+            {
+                var directory = new InMemoryTradingUserDirectory();
+                directory.InitializeAsync().GetAwaiter().GetResult();
+                directory.ImportLegacyUsersAsync(new[]
+                {
+                    new LegacyTradingUserImport("admin", "admin", "default", TradingUserDirectoryConstants.RoleAdmin),
+                }).GetAwaiter().GetResult();
+                directory.BindExternalIdentityAsync(
+                    "admin",
+                    new ExternalIdentityBindingRequest(Issuer, Subject, TenantId, "object-id"),
+                    expectedRowVersion: 1).GetAwaiter().GetResult();
+                return directory;
+            });
         });
         using var http = factory.CreateClient();
 
@@ -61,6 +76,22 @@ public sealed class ExternalIdentityExchangeTests
             (await http.GetAsync("/auth/2fa/status")).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized,
             (await http.PostAsync("/auth/exchange", null)).StatusCode);
+    }
+
+    [Fact]
+    public void EntraMode_RefusesBootWithoutExternallyLinkedAdmin()
+    {
+        var config = HybridConfig();
+        config["Trading:Auth:Mode"] = "Entra";
+        using var keys = new SigningKeys();
+        using var factory = TestAppFactory.WithOverrides(config, services =>
+        {
+            services.RemoveAll<IExternalIdentityConfigurationProvider>();
+            services.AddSingleton<IExternalIdentityConfigurationProvider>(keys.Provider);
+        });
+
+        var ex = Assert.Throws<InvalidOperationException>(() => factory.CreateClient());
+        Assert.Contains("requires at least one active admin", ex.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -196,6 +227,78 @@ public sealed class ExternalIdentityExchangeTests
         Assert.Contains(jwt.Claims, c => c.Type == JwtIssuer.FirmClaim && c.Value == "FIRM77");
         Assert.Contains(jwt.Claims, c => c.Type == JwtIssuer.RoleClaim && c.Value == "admin");
         Assert.True(body.ExpiresAt <= DateTimeOffset.UtcNow.AddMinutes(11));
+    }
+
+    [Fact]
+    public async Task AdminIdentityEndpoints_BindAuditAndGuardLastLinkedAdmin()
+    {
+        using var keys = new SigningKeys();
+        await using var factory = HybridFactory(keys);
+        using var admin = await factory.CreateAuthedClientAsync("admin");
+
+        var list = await admin.GetAsync("/admin/identity/users");
+        Assert.Equal(HttpStatusCode.OK, list.StatusCode);
+        var users = await list.Content.ReadFromJsonAsync<JsonElement>();
+        var adminUser = users.GetProperty("users").EnumerateArray()
+            .Single(u => u.GetProperty("tradingUserId").GetString() == "admin");
+        var rowVersion = adminUser.GetProperty("rowVersion").GetInt64();
+
+        var bind = await admin.PostAsJsonAsync(
+            "/admin/identity/users/admin/external-bindings",
+            new { externalAccessToken = keys.IssueAccessToken(), expectedRowVersion = rowVersion });
+        Assert.Equal(HttpStatusCode.Created, bind.StatusCode);
+        var binding = await bind.Content.ReadFromJsonAsync<JsonElement>();
+        var bindingId = binding.GetProperty("id").GetInt64();
+
+        var afterBind = await factory.Services.GetRequiredService<ITradingUserDirectory>().GetUserAsync("admin");
+        Assert.NotNull(afterBind);
+        var disable = await admin.PutAsJsonAsync(
+            "/admin/identity/users/admin/status",
+            new { status = TradingUserDirectoryConstants.StatusDisabled, expectedRowVersion = afterBind!.RowVersion });
+        await AssertErrorAsync(disable, HttpStatusCode.Conflict, "last_admin_conflict");
+
+        var downgrade = await admin.PutAsJsonAsync(
+            "/admin/identity/users/admin/authorization",
+            new { firmId = "default", role = TradingUserDirectoryConstants.RoleCompliance, expectedRowVersion = afterBind.RowVersion });
+        await AssertErrorAsync(downgrade, HttpStatusCode.Conflict, "last_admin_conflict");
+
+        using var unlinkReq = new HttpRequestMessage(HttpMethod.Delete, $"/admin/identity/users/admin/external-bindings/{bindingId}")
+        {
+            Content = JsonContent.Create(new { expectedRowVersion = afterBind.RowVersion }),
+        };
+        var unlink = await admin.SendAsync(unlinkReq);
+        await AssertErrorAsync(unlink, HttpStatusCode.Conflict, "last_admin_conflict");
+    }
+
+    [Fact]
+    public async Task AdminIdentityEndpoints_RejectConflictsDisabledAndUnknownUsers()
+    {
+        using var keys = new SigningKeys();
+        await using var factory = HybridFactory(keys);
+        using var admin = await factory.CreateAuthedClientAsync("admin");
+        var directory = factory.Services.GetRequiredService<ITradingUserDirectory>();
+        var alice = await directory.GetUserAsync("alice");
+
+        var bind = await admin.PostAsJsonAsync(
+            "/admin/identity/users/alice/external-bindings",
+            new { externalAccessToken = keys.IssueAccessToken(), expectedRowVersion = alice!.RowVersion });
+        Assert.Equal(HttpStatusCode.Created, bind.StatusCode);
+
+        var bob = await directory.GetUserAsync("bob");
+        var conflict = await admin.PostAsJsonAsync(
+            "/admin/identity/users/bob/external-bindings",
+            new { externalAccessToken = keys.IssueAccessToken(), expectedRowVersion = bob!.RowVersion });
+        await AssertErrorAsync(conflict, HttpStatusCode.Conflict, "identity_binding_conflict");
+
+        var stale = await admin.PutAsJsonAsync(
+            "/admin/identity/users/alice/status",
+            new { status = TradingUserDirectoryConstants.StatusDisabled, expectedRowVersion = alice.RowVersion });
+        await AssertErrorAsync(stale, HttpStatusCode.Conflict, "row_version_conflict");
+
+        var missing = await admin.PostAsJsonAsync(
+            "/admin/identity/users/missing/external-bindings",
+            new { externalAccessToken = keys.IssueAccessToken(), expectedRowVersion = 1 });
+        await AssertErrorAsync(missing, HttpStatusCode.Conflict, "identity_binding_conflict");
     }
 
     [Fact]

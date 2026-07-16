@@ -18,6 +18,8 @@ public interface ITradingUserDirectory
 
     Task<IReadOnlyList<TradingUser>> ListUsersAsync(CancellationToken ct = default);
 
+    Task<bool> HasActiveExternallyLinkedAdminAsync(CancellationToken ct = default);
+
     Task<int> ImportLegacyUsersAsync(
         IReadOnlyCollection<LegacyTradingUserImport> users,
         CancellationToken ct = default);
@@ -45,6 +47,10 @@ public interface ITradingUserDirectory
         string firmId,
         string role,
         long expectedRowVersion,
+        CancellationToken ct = default);
+
+    Task<RecoveryAdminResult> EnsureRecoveryAdminAsync(
+        RecoveryAdminRequest request,
         CancellationToken ct = default);
 
     Task<TradingUserDirectoryBackup> CreateBackupAsync(
