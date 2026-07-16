@@ -33,12 +33,9 @@ namespace B3.Trading.Application.Risk;
 /// </para>
 ///
 /// <para>
-/// State is in-process, ephemeral, and not concurrency-safe across
-/// processes — same posture as <see cref="PositionKeeper"/>. ER replay
-/// after reconnect rebuilds positions; reservations for in-flight
-/// orders that crossed a restart are abandoned with the order itself
-/// (no orphaned holds because the reservation lives only as long as
-/// the working order).
+/// State is in-process and not concurrency-safe across processes — same
+/// posture as <see cref="PositionKeeper"/>. Persistence recovery rebuilds
+/// reservations from surviving working orders after replay.
 /// </para>
 ///
 /// <para>
@@ -210,6 +207,117 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
             if (_reservations.TryGetValue(clOrdId, out var entry))
                 ReleaseRemaining_Locked(clOrdId, entry);
         }
+    }
+
+    /// <summary>
+    /// Rebuilds the complete reservation ledger after snapshot restore,
+    /// WAL replay, and session-version reconciliation. Any temporary state
+    /// produced while replaying replace events is discarded in favour of
+    /// the final order book and pending-replacement registry.
+    /// </summary>
+    public (int Orders, int Replacements) RestoreRecoveryState(
+        IEnumerable<Persistence.OrderSnapshot> orders,
+        IEnumerable<PendingReplacementEntrySnapshot>? pendingReplacements = null)
+    {
+        ArgumentNullException.ThrowIfNull(orders);
+
+        var restoredOrders = 0;
+        var restoredReplacements = 0;
+        lock (_gate)
+        {
+            _reservations.Clear();
+            _reserved.Clear();
+            if (!_options.CurrentValue.Margin.Enabled)
+                return (0, 0);
+
+            foreach (var order in orders)
+            {
+                if (!Enum.TryParse<OrderStatus>(order.Status, ignoreCase: true, out var status)
+                    || status is not (OrderStatus.PendingNew or OrderStatus.Working or OrderStatus.PartiallyFilled)
+                    || !Enum.TryParse<OrderSide>(order.Side, ignoreCase: true, out var side)
+                    || side != OrderSide.Buy
+                    || !Enum.TryParse<OrderType>(order.Type, ignoreCase: true, out var type)
+                    || !type.IsMarginBearing()
+                    || order.Price is not { } price
+                    || order.LeavesQuantity <= 0)
+                {
+                    continue;
+                }
+
+                var remainingNotional = _values.GetNotional(order.Symbol, price, order.LeavesQuantity);
+                if (remainingNotional <= 0m)
+                    continue;
+
+                var owner = order.EndClientId;
+                _reservations[order.ClOrdId] = new ReservationEntry(
+                    owner,
+                    price,
+                    order.LeavesQuantity,
+                    remainingNotional,
+                    IsSuspended: order.IsStale);
+
+                if (!order.IsStale)
+                {
+                    AddRecoveredReservation_Locked(
+                        owner, remainingNotional, order.ClOrdId, "working_order");
+                }
+
+                restoredOrders++;
+            }
+
+            if (pendingReplacements is not null)
+            {
+                foreach (var pending in pendingReplacements)
+                {
+                    if (!pending.AmbiguousMarginHeld
+                        || _reservations.ContainsKey(pending.Intent.NewClOrdId))
+                    {
+                        continue;
+                    }
+
+                    var owner = pending.Intent.Owner.Value;
+                    var originalHeld = _reservations.TryGetValue(
+                            pending.Intent.OriginalClOrdId, out var original)
+                        && !original.IsSuspended
+                            ? original.RemainingNotional
+                            : 0m;
+                    var transientDelta = Math.Max(
+                        0m, pending.NewRemainingNotional - originalHeld);
+
+                    _reservations[pending.Intent.NewClOrdId] = new ReservationEntry(
+                        owner, 0m, 0L, transientDelta);
+                    if (transientDelta > 0m)
+                    {
+                        AddRecoveredReservation_Locked(
+                            owner,
+                            transientDelta,
+                            pending.Intent.NewClOrdId,
+                            "pending_replace");
+                    }
+                    restoredReplacements++;
+                }
+            }
+        }
+        return (restoredOrders, restoredReplacements);
+    }
+
+    private void AddRecoveredReservation_Locked(
+        string owner,
+        decimal amount,
+        ulong clOrdId,
+        string source)
+    {
+        var next = _reserved.GetValueOrDefault(owner, 0m) + amount;
+        var baseCap = ResolveBaseAvailable(owner);
+        if (next > baseCap)
+        {
+            _logger.LogWarning(
+                "Margin recovery for {ClOrdId} overcommits owner {Owner}: source={Source} restored reserved {Reserved} > base {Base}.",
+                clOrdId, owner, source, next, baseCap);
+            MetricsRegistry.MarginOvercommitOnRestore.Add(
+                1, new KeyValuePair<string, object?>("owner", owner));
+        }
+        _reserved[owner] = next;
     }
 
     private void ReleasePartial_Locked(ulong clOrdId, ReservationEntry entry, long lastQty)

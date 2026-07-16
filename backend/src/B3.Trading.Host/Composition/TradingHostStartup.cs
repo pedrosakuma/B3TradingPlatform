@@ -193,18 +193,64 @@ internal static class TradingHostStartup
     /// Synchronous recovery before any traffic is accepted: load latest
     /// snapshot, then replay every WAL event past it. Idempotent — safe to
     /// run on a fresh data dir, on the NullEventStore (no-op), or after a
-    /// graceful shutdown that already snapshotted. Position/cash seeds are
-    /// applied AFTER recovery so warm restarts always preserve the actual
-    /// fills and seeds only fill slots recovery left empty.
+    /// graceful shutdown that already snapshotted. Cash seeds are applied
+    /// after snapshot restore but before WAL replay; position seeds are applied
+    /// after recovery.
     /// </summary>
     public static async Task RunRecoveryAndSeedingAsync(WebApplication app)
     {
         using var scope = app.Services.CreateScope();
+        void ApplyCashSeeds()
+        {
+            var cashOpts = scope.ServiceProvider.GetRequiredService<IOptions<CashSeedOptions>>().Value;
+            if (cashOpts.Seeds.Count == 0)
+                return;
+
+            var ledger = scope.ServiceProvider.GetRequiredService<CashLedger>();
+            var cashLogger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("CashSeeder");
+            var applied = 0;
+            var skipped = 0;
+            foreach (var seed in cashOpts.Seeds)
+            {
+                if (string.IsNullOrWhiteSpace(seed.EndClientId))
+                {
+                    cashLogger.LogWarning("Skipping malformed CashSeed (empty EndClientId).");
+                    continue;
+                }
+                if (seed.InitialAvailable < 0m)
+                {
+                    cashLogger.LogWarning(
+                        "CashSeed for {Owner} has negative InitialAvailable={Balance} — applying anyway, but this is almost certainly a typo.",
+                        seed.EndClientId, seed.InitialAvailable);
+                }
+                var owner = new EndClientId(seed.EndClientId);
+                if (ledger.SeedIfAbsent(owner, seed.InitialAvailable))
+                {
+                    applied++;
+                    cashLogger.LogInformation(
+                        "Seeded opening cash {Owner} = {Balance}.",
+                        seed.EndClientId, seed.InitialAvailable);
+                }
+                else
+                {
+                    skipped++;
+                    cashLogger.LogInformation(
+                        "Skipped cash seed for {Owner}: balance already present from recovery.",
+                        seed.EndClientId);
+                }
+            }
+            cashLogger.LogInformation("CashSeeder finished: {Applied} applied, {Skipped} skipped.", applied, skipped);
+        }
+
         var opts = scope.ServiceProvider.GetRequiredService<IOptions<PersistenceOptions>>().Value;
         if (opts.Enabled)
         {
             var recovery = scope.ServiceProvider.GetRequiredService<PersistenceRecovery>();
-            await recovery.RunAsync();
+            await recovery.RunAsync(ApplyCashSeeds);
+        }
+        else
+        {
+            ApplyCashSeeds();
         }
 
         // Apply optional opening-position seeds AFTER recovery, so warm
@@ -289,51 +335,6 @@ internal static class TradingHostStartup
                 }
             }
             seedLogger.LogInformation("PositionSeeder finished: {Applied} applied, {Skipped} skipped.", applied, skipped);
-        }
-
-        // Cash balance seeds (#107 slice 1) — same lifecycle as position
-        // seeds: applied AFTER recovery so warm restarts preserve the
-        // settled-cash ledger and the seed only fills slots recovery left
-        // empty. Negative balances are accepted by the ledger but logged
-        // here as a warning so a config typo doesn't silently put a fresh
-        // dogfood account in the red.
-        var cashOpts = scope.ServiceProvider.GetRequiredService<IOptions<CashSeedOptions>>().Value;
-        if (cashOpts.Seeds.Count > 0)
-        {
-            var ledger = scope.ServiceProvider.GetRequiredService<CashLedger>();
-            var cashLogger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("CashSeeder");
-            var applied = 0;
-            var skipped = 0;
-            foreach (var seed in cashOpts.Seeds)
-            {
-                if (string.IsNullOrWhiteSpace(seed.EndClientId))
-                {
-                    cashLogger.LogWarning("Skipping malformed CashSeed (empty EndClientId).");
-                    continue;
-                }
-                if (seed.InitialAvailable < 0m)
-                {
-                    cashLogger.LogWarning(
-                        "CashSeed for {Owner} has negative InitialAvailable={Balance} — applying anyway, but this is almost certainly a typo.",
-                        seed.EndClientId, seed.InitialAvailable);
-                }
-                var owner = new EndClientId(seed.EndClientId);
-                if (ledger.SeedIfAbsent(owner, seed.InitialAvailable))
-                {
-                    applied++;
-                    cashLogger.LogInformation(
-                        "Seeded opening cash {Owner} = {Balance}.",
-                        seed.EndClientId, seed.InitialAvailable);
-                }
-                else
-                {
-                    skipped++;
-                    cashLogger.LogInformation(
-                        "Skipped cash seed for {Owner}: balance already present from recovery.",
-                        seed.EndClientId);
-                }
-            }
-            cashLogger.LogInformation("CashSeeder finished: {Applied} applied, {Skipped} skipped.", applied, skipped);
         }
 
         // Deprecation warning (#107 slice 4): Margin.Initial is the

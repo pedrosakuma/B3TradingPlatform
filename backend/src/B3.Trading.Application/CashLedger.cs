@@ -125,11 +125,6 @@ public sealed class CashLedger
     {
         foreach (var kv in _balances)
         {
-            // Skip exact-zero rows — they re-materialise the moment a
-            // fill arrives, and persisting them would bloat the snapshot
-            // for no behavioural difference. Negative balances ARE
-            // captured (debt is real state).
-            if (kv.Value.Available == 0m) continue;
             yield return new Persistence.CashBalanceSnapshot(kv.Key.Value, kv.Value.Available);
         }
     }
@@ -138,8 +133,9 @@ public sealed class CashLedger
     /// Phase-1 (lock-side) capture for the two-phase snapshot pipeline
     /// (RFC §5.8 / P6). Caller must hold
     /// <c>EventDispatcher.WithSnapshotLock</c> so the <c>Available</c>
-    /// reads reflect the snapshot's <c>seq</c> (RFC §4.3). Same flat-row
-    /// skip as <see cref="Snapshot"/>.
+    /// reads reflect the snapshot's <c>seq</c> (RFC §4.3). Materialised
+    /// zero balances are preserved because they prevent configured opening
+    /// seeds from being reapplied on restart.
     /// </summary>
     public Persistence.CashRaw[] RawSnapshot()
     {
@@ -150,13 +146,9 @@ public sealed class CashLedger
         for (var i = 0; i < pairs.Length; i++)
         {
             var bal = pairs[i].Value;
-            if (bal.Available == 0m) continue;
             buf[n++] = new Persistence.CashRaw(pairs[i].Key.Value, bal.Available);
         }
-        if (n == buf.Length) return buf;
-        var trimmed = new Persistence.CashRaw[n];
-        Array.Copy(buf, trimmed, n);
-        return trimmed;
+        return buf;
     }
 
     public void Restore(IEnumerable<Persistence.CashBalanceSnapshot> snaps)

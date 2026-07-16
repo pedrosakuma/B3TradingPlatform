@@ -3,6 +3,7 @@ using B3.Trading.Application;
 using B3.Trading.Application.Audit;
 using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
+using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -52,6 +53,8 @@ public sealed class PersistenceRecovery
     // an order whose first ER never returned to us cannot have a
     // matching record on the venue side under any session version.
     private readonly IFirmSessionStatusProvider? _firmSessionStatus;
+    private readonly ReserveOnSubmitMarginProvider? _marginProvider;
+    private readonly PendingReplacementRegistry? _replacements;
 
     public PersistenceRecovery(
         IEventStore store,
@@ -63,7 +66,9 @@ public sealed class PersistenceRecovery
         FillProjection? fillProjection = null,
         WorkingOrderBook? orders = null,
         OrderOwnershipMap? ownership = null,
-        IFirmSessionStatusProvider? firmSessionStatus = null)
+        IFirmSessionStatusProvider? firmSessionStatus = null,
+        ReserveOnSubmitMarginProvider? marginProvider = null,
+        PendingReplacementRegistry? replacements = null)
     {
         _store = store;
         _snapshotter = snapshotter;
@@ -75,9 +80,14 @@ public sealed class PersistenceRecovery
         _orders = orders;
         _ownership = ownership;
         _firmSessionStatus = firmSessionStatus;
+        _marginProvider = marginProvider;
+        _replacements = replacements;
     }
 
-    public async Task RunAsync(CancellationToken ct = default)
+    public Task RunAsync(CancellationToken ct = default) =>
+        RunAsync(initializeReplayBaselines: null, ct);
+
+    public async Task RunAsync(Action? initializeReplayBaselines, CancellationToken ct = default)
     {
         long since = 0;
         var snap = _snapshots.LoadLatest();
@@ -157,6 +167,12 @@ public sealed class PersistenceRecovery
             _logger.LogInformation("Persistence recovery: no snapshot found; full WAL replay.");
         }
 
+        // Configuration-backed opening balances are baselines rather than WAL
+        // events. Materialise any missing baseline after snapshot restore but
+        // before replay so a fill-only WAL cannot debit an implicit zero
+        // balance. SeedIfAbsent keeps restored snapshot balances authoritative.
+        initializeReplayBaselines?.Invoke();
+
         var replayed = 0;
         await foreach (var (seq, evt) in _store.ReadFromAsync(since, ct).ConfigureAwait(false))
         {
@@ -188,6 +204,17 @@ public sealed class PersistenceRecovery
         if (snap is not null && _firmSessionStatus is not null && _orders is not null)
         {
             ReconcileFirmSessionVerIds(snap);
+        }
+
+        if (_marginProvider is not null && _orders is not null)
+        {
+            var restoredReservations = _marginProvider.RestoreRecoveryState(
+                _orders.Snapshot(),
+                _replacements?.Snapshot());
+            _logger.LogInformation(
+                "Persistence recovery: restored {Orders} order margin reservations and {Replacements} pending-replace reservations.",
+                restoredReservations.Orders,
+                restoredReservations.Replacements);
         }
     }
 
