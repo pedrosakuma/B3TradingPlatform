@@ -15,13 +15,16 @@ the rules that make the design safe.
 > (`IEntryPointClient`) is the canonical source of truth for state.
 > The B3 replays missed ERs on FIXP recovery.
 
-The local WAL is therefore an **audit log + boot accelerator**, not a
-state recovery mechanism. This is what justifies *async* durability —
-losing the last ~10ms of writes on crash is acceptable because the ER
-stream will reconcile state on the next session.
+This applies to venue-derived order/execution state. The WAL now also contains
+local-only controls, credentials, cash, sub-accounts and algo lifecycle state
+that B3 cannot replay, so it is no longer universally only an audit log + boot
+accelerator. The proposed class-aware durability contract is
+[`durability-classes-fail-closed-v0`](rfcs/durability-classes-fail-closed-v0.md);
+this document continues to describe the current runtime until its
+implementation slices land.
 
-If/when this invariant changes (e.g. we accept commands the EP cannot
-reconstruct), the durability policy must be revisited.
+Every new event must therefore identify whether the venue can replay it or the
+platform is its only authority; the linked RFC defines that decision.
 
 ## Layout
 
@@ -67,16 +70,19 @@ during `ReadFromAsync(sinceSeqExclusive)`.
 
 ## Event stream
 
-Three `WalEvent` types are persisted (see
-`B3.Trading.Application.Persistence.WalEvents`):
+`WalEvent` types are declared in
+`B3.Trading.Application.Persistence.WalEvents`. Major families include:
 
-- `OrderSubmittedEvent` — risk-approved submit hitting `WorkingOrderBook`.
-- `ExecutionReportReceivedEvent` — every inbound ER plus synthetic
-  rejections published locally.
-- `KillSwitchToggledEvent` — admin kill / revive operations.
+- order submit/cancel/replace intent and terminal transitions;
+- inbound real and synthetic execution reports;
+- kill-switch, halt, session-phase and staleness controls;
+- algo lifecycle and scheduling progress;
+- bot credentials, session versions and sequence checkpoints;
+- cash, fees, realised P&L, sub-accounts and audit events.
 
-Cancel commands are **not** persisted as a separate event — the
-resulting cancel ER captures the user-visible terminal state.
+Cancel commands are persisted as `OrderCancelRequestedEvent` so ownership
+links, the ClOrdID watermark and bot mappings survive restart; the eventual
+cancel ER remains the authoritative terminal order transition.
 
 WebSocket fan-out frames are **not** persisted — they are projections
 recomputable from the WAL.
@@ -94,7 +100,7 @@ recomputable from the WAL.
 
 - A bounded `Channel<LogEntry>` (capacity =
   `Trading:Persistence:ChannelCapacity`, default 4096) buffers appends.
-- Group commit drains up to `GroupCommitMaxRecords` (default 64) or
+- Group commit drains up to `GroupCommitMaxRecords` (default 512) or
   waits up to `GroupCommitWindow` (default 10 ms), whichever first,
   then `FileStream.Flush(flushToDisk: true)` on the active segment.
 - Backpressure: if the channel is full, `Append` throws
@@ -106,8 +112,10 @@ recomputable from the WAL.
 | Synthetic rejection helper | Mutates state + publishes to sink (audit lost — ghost orders are worse). |
 | `EntryPointExecutionReportRouter` | Calls `processor.Apply(...)` anyway (state preserved, audit lost). |
 
-Crash window: ≤10 ms of buffered events. The next FIXP session
-replays the lost ERs from B3.
+Crash exposure includes the bounded channel plus the in-progress group-commit
+batch (at current defaults, at most 4096 + 512 admitted records). The 10 ms
+window bounds batching delay once the writer is draining normally; the next
+FIXP session can replay only the venue-recoverable subset.
 
 ## Consistency model
 
@@ -191,7 +199,7 @@ EP-side EOD report is a future hook; B3 does not expose one yet.
     "SegmentMaxBytes": 67108864,
     "ChannelCapacity": 4096,
     "GroupCommitWindow": "00:00:00.0100000",
-    "GroupCommitMaxRecords": 64
+    "GroupCommitMaxRecords": 512
   }
 }
 ```

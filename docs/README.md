@@ -17,6 +17,9 @@ Start here. This is the map for everything under `docs/` in
 
 ## RFCs (latest first)
 
+- [durability-classes-fail-closed-v0](rfcs/durability-classes-fail-closed-v0.md)
+  — event durability classes, ACK/append/`fsync` boundaries, fail-closed
+  readiness, venue ER replay and crash-test contract (#621 / parent #620).
 - [perf-hardening-v0](rfcs/perf-hardening-v0.md) — pre-production
   performance hardening: dispatcher lock narrowing, per-connection
   outbound writers, synchronous bot-ER router, pooled outbound
