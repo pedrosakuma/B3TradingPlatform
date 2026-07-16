@@ -165,8 +165,21 @@ public sealed class ReconciliationMarkerRecovery
 
     public int Apply()
     {
+        IReadOnlyList<ReconciliationMarker> markers;
+        try
+        {
+            markers = _store.Load();
+        }
+        catch (Exception ex)
+        {
+            _drain.BeginDrain("reconciliation_marker_store_invalid");
+            _logger.LogCritical(ex,
+                "Reconciliation marker store is corrupt or unreadable; ingress remains drained.");
+            return 1;
+        }
+
         var unresolved = 0;
-        foreach (var marker in _store.Load())
+        foreach (var marker in markers)
         {
             _clOrdIds.AdvanceCounterTo(
                 new EndClientId(marker.OwnerEndClientId),

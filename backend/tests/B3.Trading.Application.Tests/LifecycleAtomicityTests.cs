@@ -1,3 +1,4 @@
+using System.Text.Json;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.Risk.Accounting;
@@ -412,19 +413,25 @@ public sealed class LifecycleAtomicityTests
                 var markerPath = Path.Combine(directory, marker.Id + ".json");
                 if (durability.Calls == 1)
                 {
+                    Assert.False(File.Exists(markerPath));
+                    Assert.True(File.Exists(markerPath + ".writing"));
+                }
+                else if (durability.Calls == 2)
+                {
                     Assert.True(File.Exists(markerPath));
                     Assert.False(File.Exists(markerPath + ".writing"));
                 }
                 else
                 {
                     Assert.False(File.Exists(markerPath));
+                    Assert.False(File.Exists(markerPath + ".writing"));
                 }
             };
 
             store.Persist(marker);
             store.Remove(marker.Id);
 
-            Assert.Equal(2, durability.Calls);
+            Assert.Equal(3, durability.Calls);
         }
         finally
         {
@@ -545,6 +552,171 @@ public sealed class LifecycleAtomicityTests
             store.Persist(marker);
             durability.Failure = new IOException("delete fsync failed");
             Assert.Throws<IOException>(() => store.Remove(marker.Id));
+        }
+        finally
+        {
+            DeleteMarkerTestRoot(root);
+        }
+    }
+
+    [Fact]
+    public void FileReconciliationMarkerStore_ValidStagingOnlyRecoversAndForcesDrain()
+    {
+        var root = MarkerTestRoot();
+        var options = MarkerOptions(root);
+        var directory = Path.Combine(root, "FIRM", "reconciliation");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var marker = CancelMarker();
+            WriteMarkerArtifact(
+                Path.Combine(directory, marker.Id + ".json.writing"), marker);
+            var store = new FileReconciliationMarkerStore(
+                options, new RecordingDirectoryDurability());
+            var pending = new PendingCancelRegistry();
+            Assert.True(pending.TryAdd(
+                marker.OriginalClOrdId, marker.MutationClOrdId));
+            var ownership = new OrderOwnershipMap();
+            ownership.Register(marker.OriginalClOrdId, Owner);
+            ownership.RegisterCancelLink(
+                marker.MutationClOrdId, marker.OriginalClOrdId);
+            var drain = new NeverDrainController();
+            var recovery = CreateMarkerRecovery(
+                store,
+                new EventDispatcher(new NullEventStore()),
+                pending,
+                new PendingReplacementRegistry(),
+                ownership,
+                new ClOrdIdPrefixRegistry(),
+                drain);
+
+            Assert.Equal(1, recovery.Apply());
+            Assert.True(drain.IsDraining);
+            Assert.Equal(0, pending.CountForTesting);
+            Assert.Single(store.Load());
+        }
+        finally
+        {
+            DeleteMarkerTestRoot(root);
+        }
+    }
+
+    [Fact]
+    public void FileReconciliationMarkerStore_CorruptStagingForcesDrain()
+    {
+        var root = MarkerTestRoot();
+        var options = MarkerOptions(root);
+        var directory = Path.Combine(root, "FIRM", "reconciliation");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            File.WriteAllText(
+                Path.Combine(directory, "CancelPreSend-200.json.writing"),
+                "{\"kind\":");
+            var drain = new NeverDrainController();
+            var recovery = CreateMarkerRecovery(
+                new FileReconciliationMarkerStore(
+                    options, new RecordingDirectoryDurability()),
+                new EventDispatcher(new NullEventStore()),
+                new PendingCancelRegistry(),
+                new PendingReplacementRegistry(),
+                new OrderOwnershipMap(),
+                new ClOrdIdPrefixRegistry(),
+                drain);
+
+            Assert.Equal(1, recovery.Apply());
+            Assert.True(drain.IsDraining);
+        }
+        finally
+        {
+            DeleteMarkerTestRoot(root);
+        }
+    }
+
+    [Fact]
+    public void FileReconciliationMarkerStore_DuplicateEqualArtifactsChooseFinalAndDurablyCleanupStaging()
+    {
+        var root = MarkerTestRoot();
+        var options = MarkerOptions(root);
+        var directory = Path.Combine(root, "FIRM", "reconciliation");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var durability = new RecordingDirectoryDurability();
+            var store = new FileReconciliationMarkerStore(options, durability);
+            var marker = CancelMarker();
+            store.Persist(marker);
+            var final = Path.Combine(directory, marker.Id + ".json");
+            var staging = final + ".writing";
+            File.Copy(final, staging);
+            var callsBeforeLoad = durability.Calls;
+
+            Assert.Equal(marker, Assert.Single(store.Load()));
+            Assert.False(File.Exists(staging));
+            Assert.Equal(callsBeforeLoad + 1, durability.Calls);
+        }
+        finally
+        {
+            DeleteMarkerTestRoot(root);
+        }
+    }
+
+    [Fact]
+    public void FileReconciliationMarkerStore_ConflictingDuplicatesForceDrain()
+    {
+        var root = MarkerTestRoot();
+        var options = MarkerOptions(root);
+        var directory = Path.Combine(root, "FIRM", "reconciliation");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var store = new FileReconciliationMarkerStore(
+                options, new RecordingDirectoryDurability());
+            var marker = CancelMarker();
+            store.Persist(marker);
+            WriteMarkerArtifact(
+                Path.Combine(directory, marker.Id + ".json.writing"),
+                marker with { OwnerEndClientId = "different-owner" });
+            var drain = new NeverDrainController();
+
+            Assert.Equal(1, CreateMarkerRecovery(
+                store,
+                new EventDispatcher(new NullEventStore()),
+                new PendingCancelRegistry(),
+                new PendingReplacementRegistry(),
+                new OrderOwnershipMap(),
+                new ClOrdIdPrefixRegistry(),
+                drain).Apply());
+            Assert.True(drain.IsDraining);
+        }
+        finally
+        {
+            DeleteMarkerTestRoot(root);
+        }
+    }
+
+    [Fact]
+    public void FileReconciliationMarkerStore_UnexpectedArtifactForcesDrain()
+    {
+        var root = MarkerTestRoot();
+        var options = MarkerOptions(root);
+        var directory = Path.Combine(root, "FIRM", "reconciliation");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            File.WriteAllText(Path.Combine(directory, "ignored.tmp"), "unexpected");
+            var drain = new NeverDrainController();
+
+            Assert.Equal(1, CreateMarkerRecovery(
+                new FileReconciliationMarkerStore(
+                    options, new RecordingDirectoryDurability()),
+                new EventDispatcher(new NullEventStore()),
+                new PendingCancelRegistry(),
+                new PendingReplacementRegistry(),
+                new OrderOwnershipMap(),
+                new ClOrdIdPrefixRegistry(),
+                drain).Apply());
+            Assert.True(drain.IsDraining);
         }
         finally
         {
@@ -1067,6 +1239,15 @@ public sealed class LifecycleAtomicityTests
             OriginalClOrdId: 100,
             MutationClOrdId: 200,
             OwnerEndClientId: Owner.Value);
+
+    private static void WriteMarkerArtifact(
+        string path,
+        ReconciliationMarker marker) =>
+        File.WriteAllBytes(
+            path,
+            JsonSerializer.SerializeToUtf8Bytes(
+                marker,
+                new JsonSerializerOptions(JsonSerializerDefaults.Web)));
 
     private static void DeleteMarkerTestRoot(string root)
     {

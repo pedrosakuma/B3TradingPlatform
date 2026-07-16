@@ -56,6 +56,9 @@ public sealed class FileReconciliationMarkerStore : IReconciliationMarkerStore
                 stream.Write(payload);
                 stream.Flush(flushToDisk: true);
             }
+            // Publish the staging entry durably before rename. A crash at
+            // this boundary leaves a recoverable .json.writing marker.
+            _directoryDurability.Flush(_root);
             File.Move(staging, path, overwrite: true);
             _directoryDurability.Flush(_root);
         }
@@ -67,11 +70,20 @@ public sealed class FileReconciliationMarkerStore : IReconciliationMarkerStore
         lock (_lock)
         {
             var path = PathFor(markerId);
+            var staging = path + ".writing";
+            var deleted = false;
             if (File.Exists(path))
             {
                 File.Delete(path);
-                _directoryDurability.Flush(_root);
+                deleted = true;
             }
+            if (File.Exists(staging))
+            {
+                File.Delete(staging);
+                deleted = true;
+            }
+            if (deleted)
+                _directoryDurability.Flush(_root);
         }
     }
 
@@ -79,16 +91,96 @@ public sealed class FileReconciliationMarkerStore : IReconciliationMarkerStore
     {
         lock (_lock)
         {
-            var markers = new List<ReconciliationMarker>();
-            foreach (var path in Directory.EnumerateFiles(_root, "*.json"))
+            var artifacts = new Dictionary<string, MarkerArtifacts>(
+                StringComparer.Ordinal);
+            foreach (var path in Directory.EnumerateFileSystemEntries(_root))
             {
-                var marker = JsonSerializer.Deserialize<ReconciliationMarker>(
-                    File.ReadAllBytes(path), JsonOptions)
-                    ?? throw new InvalidDataException(
-                        $"Reconciliation marker '{path}' deserialized as null.");
-                markers.Add(marker);
+                if (Directory.Exists(path))
+                    throw new InvalidDataException(
+                        $"Unexpected directory in reconciliation store: '{path}'.");
+
+                var name = Path.GetFileName(path);
+                var isStaging = name.EndsWith(
+                    ".json.writing", StringComparison.Ordinal);
+                var isFinal = !isStaging
+                    && name.EndsWith(".json", StringComparison.Ordinal);
+                if (!isStaging && !isFinal)
+                    throw new InvalidDataException(
+                        $"Unexpected reconciliation artifact: '{path}'.");
+
+                var markerId = isStaging
+                    ? name[..^".json.writing".Length]
+                    : name[..^".json".Length];
+                _ = PathFor(markerId);
+                var marker = ReadMarker(path, markerId);
+                ref var entry = ref System.Runtime.InteropServices
+                    .CollectionsMarshal.GetValueRefOrAddDefault(
+                        artifacts, markerId, out _);
+                entry ??= new MarkerArtifacts();
+                if (isStaging)
+                {
+                    if (entry.Staging is not null)
+                        throw new InvalidDataException(
+                            $"Duplicate staging marker '{markerId}'.");
+                    entry.Staging = (path, marker);
+                }
+                else
+                {
+                    if (entry.Final is not null)
+                        throw new InvalidDataException(
+                            $"Duplicate final marker '{markerId}'.");
+                    entry.Final = (path, marker);
+                }
+            }
+
+            var markers = new List<ReconciliationMarker>(artifacts.Count);
+            foreach (var (markerId, entry) in artifacts.OrderBy(
+                static pair => pair.Key, StringComparer.Ordinal))
+            {
+                if (entry.Final is { } final && entry.Staging is { } staging)
+                {
+                    if (final.Marker != staging.Marker)
+                        throw new InvalidDataException(
+                            $"Conflicting final/staging reconciliation marker '{markerId}'.");
+                    File.Delete(staging.Path);
+                    _directoryDurability.Flush(_root);
+                    markers.Add(final.Marker);
+                }
+                else if (entry.Final is { } finalOnly)
+                {
+                    markers.Add(finalOnly.Marker);
+                }
+                else if (entry.Staging is { } stagingOnly)
+                {
+                    markers.Add(stagingOnly.Marker);
+                }
             }
             return markers;
+        }
+    }
+
+    private static ReconciliationMarker ReadMarker(
+        string path,
+        string expectedMarkerId)
+    {
+        try
+        {
+            var marker = JsonSerializer.Deserialize<ReconciliationMarker>(
+                File.ReadAllBytes(path), JsonOptions)
+                ?? throw new InvalidDataException(
+                    $"Reconciliation marker '{path}' deserialized as null.");
+            if (!string.Equals(
+                    marker.Id, expectedMarkerId, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    $"Reconciliation marker '{path}' id '{marker.Id}' does not match filename '{expectedMarkerId}'.");
+            }
+            return marker;
+        }
+        catch (JsonException ex)
+        {
+            throw new InvalidDataException(
+                $"Corrupt reconciliation marker '{path}'.", ex);
         }
     }
 
@@ -124,6 +216,12 @@ public sealed class FileReconciliationMarkerStore : IReconciliationMarkerStore
                     $"Cannot fsync parent of reconciliation directory '{directory}'.");
             _directoryDurability.Flush(parent);
         }
+    }
+
+    private sealed class MarkerArtifacts
+    {
+        public (string Path, ReconciliationMarker Marker)? Final { get; set; }
+        public (string Path, ReconciliationMarker Marker)? Staging { get; set; }
     }
 }
 

@@ -107,6 +107,10 @@ Marker publication fsyncs the marker file, renames it into place, then fsyncs
 the reconciliation directory; removal deletes the file and fsyncs the
 directory again. Unsupported directory-fsync platforms/filesystems fail
 explicitly rather than acknowledging false durability.
+The staging `<id>.json.writing` entry is itself directory-fsynced before
+rename and is a valid recovery artifact. Startup validates both final and
+staging files, deterministically deduplicates equal pairs, and drains on
+partial, conflicting, or unexpected artifacts instead of skipping them.
 On first use, each newly-created data/firm/reconciliation directory is followed
 by an fsync of its parent before the store becomes available, so the
 reconciliation directory entry itself also survives power loss.
