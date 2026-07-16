@@ -165,7 +165,7 @@ public sealed class OrderModifyService
 
         try
         {
-            Order.ValidatePriceForType(orig.Type, req.NewPrice);
+            Order.ValidatePriceForType(orig.Type, req.NewPrice ?? orig.Price);
         }
         catch (ArgumentException ex)
         {
@@ -179,7 +179,7 @@ public sealed class OrderModifyService
 
         try
         {
-            return await ModifyClaimedAsync(req, orig, ct).ConfigureAwait(false);
+            return await ModifyClaimedAsync(req, orig, req.NewPrice ?? orig.Price, ct).ConfigureAwait(false);
         }
         finally
         {
@@ -190,6 +190,7 @@ public sealed class OrderModifyService
     private async Task<OrderModifyResult> ModifyClaimedAsync(
         OrderModifyRequest req,
         Order orig,
+        decimal? effectivePrice,
         CancellationToken ct)
     {
         var newClOrdId = _clOrdIds.Generate(req.Owner);
@@ -250,7 +251,7 @@ public sealed class OrderModifyService
         // check no-ops on null and the sub-account gate is bypassed.
         var riskCtx = new RiskContext(
             req.Owner, orig.FirmId, orig.Symbol, orig.Side, orig.Type,
-            req.NewQuantity, req.NewPrice,
+            req.NewQuantity, effectivePrice,
             ReplaceOriginalClOrdId: req.OriginalClOrdId,
             EffectiveLeavesQuantity: effectiveLeaves,
             TimeInForce: effTif,
@@ -290,7 +291,7 @@ public sealed class OrderModifyService
         // coordinator no-ops on sells / markets / non-positive notionals.
         var newRemainingNotional = (orig.Side == OrderSide.Buy
                                     && orig.Type.IsMarginBearing()
-                                    && req.NewPrice is { } px)
+                                    && effectivePrice is { } px)
             ? px * effectiveLeaves
             : 0m;
         var marginDecision = await _replaceMargin.PrepareReplaceAsync(
@@ -322,7 +323,7 @@ public sealed class OrderModifyService
             Side: orig.Side,
             Type: orig.Type,
             NewQuantity: req.NewQuantity,
-            NewPrice: req.NewPrice,
+            NewPrice: effectivePrice,
             FirmId: orig.FirmId,
             ParentAlgoId: orig.ParentAlgoId,
             AlgoSliceSeq: orig.AlgoSliceSeq,
@@ -344,7 +345,7 @@ public sealed class OrderModifyService
                     Side = orig.Side.ToString(),
                     Type = orig.Type.ToString(),
                     NewQuantity = req.NewQuantity,
-                    NewPrice = req.NewPrice,
+                    NewPrice = effectivePrice,
                     ParentAlgoId = orig.ParentAlgoId,
                     AlgoSliceSeq = orig.AlgoSliceSeq,
                     RequestedTimeInForce = req.NewTimeInForce?.ToString(),
@@ -383,10 +384,11 @@ public sealed class OrderModifyService
         try
         {
             await _gateway.CancelReplaceAsync(
-                orig, newClOrdId, req.NewQuantity, req.NewPrice,
+                orig, newClOrdId, req.NewQuantity, effectivePrice,
                 req.NewTimeInForce, req.NewStopPrice, req.NewGoodTillDate, ct);
         }
-        catch (ExchangeGatewayPreSendException ex)
+        catch (Exception ex) when (
+            ex is ExchangeGatewayPreSendException || _gateway is IExchangeGatewayPreSendOnly)
         {
             MetricsRegistry.OrdersGatewayFailed.Add(1,
                 new KeyValuePair<string, object?>("path", "modify"),
@@ -518,9 +520,10 @@ public sealed class OrderModifyService
 /// Inputs for <see cref="OrderModifyService.ModifyAsync"/>.
 ///
 /// <para>
-/// Q1.1 (#253). The trailing optionals — <see cref="NewTimeInForce"/>,
+/// Q1.1 (#253). <see cref="NewPrice"/> and the trailing optionals —
+/// <see cref="NewTimeInForce"/>,
 /// <see cref="NewStopPrice"/>, <see cref="NewGoodTillDate"/> — follow
-/// the modify-pipeline override convention: <b>null = inherit the
+/// follow the modify-pipeline override convention: <b>null = inherit the
 /// original order's value</b> across the cancel-replace boundary;
 /// <b>non-null = replace it with the supplied value</b>. Domain
 /// invariants (StopPrice required iff Stop*; GoodTillDate required

@@ -50,6 +50,15 @@ public interface IExchangeGateway
 }
 
 /// <summary>
+/// Marker for gateways that cannot attempt a wire send. Any exception from
+/// such a gateway is therefore proven pre-send even when the gateway preserves
+/// a legacy public exception type.
+/// </summary>
+public interface IExchangeGatewayPreSendOnly
+{
+}
+
+/// <summary>
 /// Signals that the gateway proved no wire attempt occurred. Callers may
 /// durably terminalise the outbound intent instead of retaining it as an
 /// ambiguous send.

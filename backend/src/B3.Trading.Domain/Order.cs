@@ -292,12 +292,14 @@ public sealed class Order
 
     /// <summary>
     /// Enforces the economic price shape for every order ingress and replay.
-    /// Priced order types require a non-negative limit price (zero is valid
+    /// Limit/stop-limit orders require a non-negative price (zero is valid
     /// for option cabinet trades); pure market types must not carry one.
+    /// Market-with-leftover accepts an omitted price so pre-trade TIF
+    /// compatibility checks can produce their authoritative rejection.
     /// </summary>
     public static void ValidatePriceForType(OrderType type, decimal? price)
     {
-        if (type.IsMarginBearing())
+        if (type is OrderType.Limit or OrderType.StopLimit)
         {
             if (!price.HasValue || price.Value < 0m)
                 throw new ArgumentException(
@@ -306,9 +308,14 @@ public sealed class Order
             return;
         }
 
-        if (price.HasValue)
+        if ((type is OrderType.Market or OrderType.StopLoss) && price.HasValue)
             throw new ArgumentException(
                 $"Price must be null for OrderType.{type}.",
+                nameof(price));
+
+        if (type == OrderType.MarketWithLeftover && price is < 0m)
+            throw new ArgumentException(
+                $"Price must be non-negative when set for OrderType.{type}.",
                 nameof(price));
     }
 

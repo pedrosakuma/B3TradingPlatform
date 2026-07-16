@@ -1265,9 +1265,10 @@ public sealed class AlgoEngine : BackgroundService
             return false;
         }
 
+        var effectivePrice = newPrice ?? child.Price;
         try
         {
-            Order.ValidatePriceForType(child.Type, newPrice);
+            Order.ValidatePriceForType(child.Type, effectivePrice);
         }
         catch (ArgumentException ex)
         {
@@ -1291,7 +1292,7 @@ public sealed class AlgoEngine : BackgroundService
         try
         {
             return await TryReplaceClaimedChildAsync(
-                algo, rt, child, newQuantity, newPrice, reason, algoTypeTag, ct)
+                algo, rt, child, newQuantity, effectivePrice, reason, algoTypeTag, ct)
                 .ConfigureAwait(false);
         }
         finally
@@ -1464,7 +1465,8 @@ public sealed class AlgoEngine : BackgroundService
                 requestedTimeInForce: null, requestedStopPrice: null, requestedGoodTillDate: null,
                 ct).ConfigureAwait(false);
         }
-        catch (ExchangeGatewayPreSendException ex)
+        catch (Exception ex) when (
+            ex is ExchangeGatewayPreSendException || _gateway is IExchangeGatewayPreSendOnly)
         {
             MetricsRegistry.OrdersGatewayFailed.Add(1,
                 new KeyValuePair<string, object?>("path", "algo.modify"),

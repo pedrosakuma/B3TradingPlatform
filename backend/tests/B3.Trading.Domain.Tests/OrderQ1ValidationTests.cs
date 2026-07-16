@@ -85,7 +85,6 @@ public class OrderQ1ValidationTests
     [Theory]
     [InlineData(OrderType.Limit)]
     [InlineData(OrderType.StopLimit)]
-    [InlineData(OrderType.MarketWithLeftover)]
     public void PricedOrderType_RequiresNonNegativePrice(OrderType type)
     {
         Assert.Throws<ArgumentException>(() =>
@@ -94,6 +93,20 @@ public class OrderQ1ValidationTests
         Assert.Throws<ArgumentException>(() =>
             new Order(1UL, Owner, "PETR4", 4321UL, OrderSide.Buy, type, 100, -0.01m,
                 stopPrice: type == OrderType.StopLimit ? 29m : null));
+    }
+
+    [Fact]
+    public void MarketWithLeftover_AllowsOmittedPrice_ButRejectsNegativePrice()
+    {
+        var order = new Order(
+            1UL, Owner, "PETR4", 4321UL, OrderSide.Buy,
+            OrderType.MarketWithLeftover, 100, null);
+        Assert.Null(order.Price);
+
+        Assert.Throws<ArgumentException>(() =>
+            new Order(
+                2UL, Owner, "PETR4", 4321UL, OrderSide.Buy,
+                OrderType.MarketWithLeftover, 100, -0.01m));
     }
 
     [Theory]

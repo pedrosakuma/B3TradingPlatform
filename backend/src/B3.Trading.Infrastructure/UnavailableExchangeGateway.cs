@@ -16,20 +16,20 @@ namespace B3.Trading.Infrastructure;
 /// (which silently accepts) for anything resembling production.
 /// </para>
 /// </summary>
-public sealed class UnavailableExchangeGateway : IExchangeGateway
+public sealed class UnavailableExchangeGateway : IExchangeGateway, IExchangeGatewayPreSendOnly
 {
     /// <summary>Single canonical message; <c>OrdersEndpoints</c> maps it to <c>gateway_unavailable</c> + 502.</summary>
     public const string Reason = "exchange gateway unavailable (mode=Unavailable)";
 
     public Task SubmitAsync(Order order, CancellationToken cancellationToken) =>
-        throw new ExchangeGatewayPreSendException(Reason);
+        throw new InvalidOperationException(Reason);
 
     public Task CancelAsync(Order order, ulong newClOrdId, CancellationToken cancellationToken) =>
-        throw new ExchangeGatewayPreSendException(Reason);
+        throw new InvalidOperationException(Reason);
 
     public Task CancelReplaceAsync(
         Order order, ulong newClOrdId, long newQuantity, decimal? newPrice,
         TimeInForce? requestedTimeInForce, decimal? requestedStopPrice, DateTimeOffset? requestedGoodTillDate,
         CancellationToken cancellationToken) =>
-        throw new ExchangeGatewayPreSendException(Reason);
+        throw new InvalidOperationException(Reason);
 }

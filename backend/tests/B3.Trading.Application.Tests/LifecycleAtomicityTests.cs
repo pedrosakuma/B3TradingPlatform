@@ -2,6 +2,7 @@ using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.Risk.Accounting;
 using B3.Trading.Domain;
+using B3.Trading.Infrastructure;
 using B3.Trading.Infrastructure.Persistence;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -67,6 +68,21 @@ public sealed class LifecycleAtomicityTests
     }
 
     [Fact]
+    public async Task PreSendOnlyGateway_PreservesLegacyExceptionContract_AndTerminalisesReplace()
+    {
+        var store = new RecordingEventStore();
+        var harness = BuildModify(new UnavailableExchangeGateway(), store);
+
+        var result = await harness.Service.ModifyAsync(
+            new OrderModifyRequest(Owner, 100, 120, 31m), CancellationToken.None);
+
+        Assert.Equal(OrderModifyResultKind.GatewayFailed, result.Kind);
+        Assert.IsType<InvalidOperationException>(result.GatewayException);
+        Assert.False(harness.Replacements.IsOriginalInFlight(100));
+        Assert.IsType<OrderReplacePreSendFailedEvent>(store.Events[^1]);
+    }
+
+    [Fact]
     public async Task AmbiguousReplaceFailure_RemainsPendingAcrossReplay()
     {
         var store = new RecordingEventStore();
@@ -89,6 +105,21 @@ public sealed class LifecycleAtomicityTests
 
         Assert.True(recovered.Replacements.IsOriginalInFlight(100));
         Assert.True(Assert.Single(recovered.Replacements.Snapshot()).AmbiguousMarginHeld);
+    }
+
+    [Fact]
+    public async Task QuantityOnlyModify_InheritsOriginalPriceAcrossRiskWalAndGateway()
+    {
+        var gateway = new TestGateway();
+        var harness = BuildModify(gateway);
+
+        var result = await harness.Service.ModifyAsync(
+            new OrderModifyRequest(Owner, 100, 120, NewPrice: null),
+            CancellationToken.None);
+
+        Assert.Equal(OrderModifyResultKind.Accepted, result.Kind);
+        Assert.Equal(30m, gateway.LastReplacePrice);
+        Assert.Equal(30m, Assert.Single(harness.Replacements.Snapshot()).Intent.NewPrice);
     }
 
     [Fact]
@@ -226,7 +257,7 @@ public sealed class LifecycleAtomicityTests
     }
 
     private static ModifyHarness BuildModify(
-        TestGateway gateway,
+        IExchangeGateway gateway,
         IEventStore? store = null)
     {
         var ownership = new OrderOwnershipMap();
@@ -305,6 +336,7 @@ public sealed class LifecycleAtomicityTests
         public int ReplaceCalls;
         public bool BlockReplace;
         public Exception? ReplaceException;
+        public decimal? LastReplacePrice;
         public TaskCompletionSource ReplaceEntered { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ReleaseReplace { get; } =
@@ -333,6 +365,7 @@ public sealed class LifecycleAtomicityTests
             CancellationToken cancellationToken)
         {
             Interlocked.Increment(ref ReplaceCalls);
+            LastReplacePrice = newPrice;
             ReplaceEntered.TrySetResult();
             if (BlockReplace)
                 await ReleaseReplace.Task.WaitAsync(cancellationToken);
