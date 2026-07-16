@@ -539,7 +539,7 @@ async function renewEntraSession(current = session) {
     firm: session.firm,
   });
   restartWorker();
-  if (state.getState().currentView === "compliance") openComplianceDropCopy();
+  reconcileComplianceAfterRenewal();
   warningShown = false;
   scheduleExpiry();
   ui.closeSessionModal();
@@ -1031,7 +1031,7 @@ async function handleRenewSession(password) {
     // (the existing socket keeps working until the OLD JWT is rejected
     // server-side; restart guarantees the next reconnect is clean).
     restartWorker();
-    if (state.getState().currentView === "compliance") openComplianceDropCopy();
+    reconcileComplianceAfterRenewal();
     warningShown = false;
     scheduleExpiry();
     ui.closeSessionModal();
@@ -2251,6 +2251,18 @@ function openComplianceDropCopy() {
 
 function closeComplianceDropCopy() {
   complianceUi.closeDropCopyFeed();
+}
+
+function reconcileComplianceAfterRenewal() {
+  complianceUi.reconcileComplianceRenewal({
+    role: session?.role,
+    currentView: state.getState().currentView,
+    onReopen: openComplianceDropCopy,
+    onLeave: () => {
+      closeComplianceDropCopy();
+      handleSwitchView(defaultViewForRole(session?.role));
+    },
+  });
 }
 
 async function handleAuditSearch(opts) {

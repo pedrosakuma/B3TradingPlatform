@@ -472,3 +472,13 @@ export function tabsForRole(role) {
 export function defaultViewForRole(role) {
   return role === "compliance" ? "compliance" : "trader";
 }
+
+export function reconcileComplianceRenewal({ role, currentView, onReopen, onLeave }) {
+  if (currentView !== "compliance") return "unchanged";
+  if (tabsForRole(role).includes("compliance")) {
+    onReopen?.();
+    return "reopen";
+  }
+  onLeave?.();
+  return "leave";
+}

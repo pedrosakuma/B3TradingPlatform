@@ -98,6 +98,23 @@ test("defaultViewForRole lands compliance on its own console", () => {
   assert.equal(compliance.defaultViewForRole("user"), "trader");
 });
 
+test("session renewal only reopens drop-copy for authorized roles", () => {
+  const calls = [];
+  const reconcile = (role, currentView) => compliance.reconcileComplianceRenewal({
+    role,
+    currentView,
+    onReopen: () => calls.push("reopen"),
+    onLeave: () => calls.push("leave"),
+  });
+
+  assert.equal(reconcile("compliance", "compliance"), "reopen");
+  assert.equal(reconcile("admin", "compliance"), "reopen");
+  assert.equal(reconcile("user", "compliance"), "leave");
+  assert.equal(reconcile(undefined, "compliance"), "leave");
+  assert.equal(reconcile("user", "trader"), "unchanged");
+  assert.deepEqual(calls, ["reopen", "reopen", "leave", "leave"]);
+});
+
 test("drop-copy feed buffer caps at COMPLIANCE_FEED_CAP and keeps newest", () => {
   state.clearComplianceFeed();
   state.setComplianceFeedPaused(false);
