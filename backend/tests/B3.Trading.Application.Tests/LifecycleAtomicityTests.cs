@@ -402,6 +402,8 @@ public sealed class LifecycleAtomicityTests
         try
         {
             var options = MarkerOptions(root);
+            Directory.CreateDirectory(
+                Path.Combine(root, "FIRM", "reconciliation"));
             var durability = new RecordingDirectoryDurability();
             var store = new FileReconciliationMarkerStore(options, durability);
             var marker = CancelMarker();
@@ -431,11 +433,102 @@ public sealed class LifecycleAtomicityTests
     }
 
     [Fact]
+    public void FileReconciliationMarkerStore_FirstCreationFsyncsEachParentInOrder()
+    {
+        var root = MarkerTestRoot();
+        Directory.CreateDirectory(root);
+        try
+        {
+            var data = Path.Combine(root, "data");
+            var firm = Path.Combine(data, "FIRM");
+            var reconciliation = Path.Combine(firm, "reconciliation");
+            var durability = new RecordingDirectoryDurability();
+            durability.OnFlush = parent =>
+            {
+                var created = durability.Calls switch
+                {
+                    1 => data,
+                    2 => firm,
+                    3 => reconciliation,
+                    _ => throw new InvalidOperationException("unexpected fsync"),
+                };
+                Assert.True(Directory.Exists(created));
+            };
+
+            _ = new FileReconciliationMarkerStore(
+                new PersistenceOptions
+                {
+                    DataDirectory = data,
+                    FirmId = "FIRM",
+                },
+                durability);
+
+            Assert.Equal(
+                new[] { root, data, firm },
+                durability.Paths);
+        }
+        finally
+        {
+            DeleteMarkerTestRoot(root);
+        }
+    }
+
+    [Fact]
+    public void FileReconciliationMarkerStore_ExistingDirectoryDoesNotRequireCreationFsync()
+    {
+        var root = MarkerTestRoot();
+        var options = MarkerOptions(root);
+        Directory.CreateDirectory(Path.Combine(root, "FIRM", "reconciliation"));
+        try
+        {
+            var durability = new RecordingDirectoryDurability();
+
+            _ = new FileReconciliationMarkerStore(options, durability);
+
+            Assert.Equal(0, durability.Calls);
+        }
+        finally
+        {
+            DeleteMarkerTestRoot(root);
+        }
+    }
+
+    [Fact]
+    public void FileReconciliationMarkerStore_FirstCreationPropagatesParentFsyncFailure()
+    {
+        var root = MarkerTestRoot();
+        Directory.CreateDirectory(root);
+        try
+        {
+            var durability = new RecordingDirectoryDurability
+            {
+                Failure = new IOException("parent directory fsync failed"),
+            };
+
+            Assert.Throws<IOException>(() =>
+                new FileReconciliationMarkerStore(
+                    new PersistenceOptions
+                    {
+                        DataDirectory = Path.Combine(root, "data"),
+                        FirmId = "FIRM",
+                    },
+                    durability));
+            Assert.Equal(1, durability.Calls);
+        }
+        finally
+        {
+            DeleteMarkerTestRoot(root);
+        }
+    }
+
+    [Fact]
     public void FileReconciliationMarkerStore_PropagatesDirectoryFlushFailures()
     {
         var root = MarkerTestRoot();
         try
         {
+            Directory.CreateDirectory(
+                Path.Combine(root, "FIRM", "reconciliation"));
             var durability = new RecordingDirectoryDurability
             {
                 Failure = new IOException("directory fsync failed"),
@@ -1161,12 +1254,14 @@ public sealed class LifecycleAtomicityTests
         : IReconciliationDirectoryDurability
     {
         public int Calls { get; private set; }
+        public List<string> Paths { get; } = new();
         public Exception? Failure { get; set; }
         public Action<string>? OnFlush { get; set; }
 
         public void Flush(string directoryPath)
         {
             Calls++;
+            Paths.Add(directoryPath);
             OnFlush?.Invoke(directoryPath);
             if (Failure is not null)
                 throw Failure;

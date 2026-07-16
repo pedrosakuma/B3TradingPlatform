@@ -107,6 +107,9 @@ Marker publication fsyncs the marker file, renames it into place, then fsyncs
 the reconciliation directory; removal deletes the file and fsyncs the
 directory again. Unsupported directory-fsync platforms/filesystems fail
 explicitly rather than acknowledging false durability.
+On first use, each newly-created data/firm/reconciliation directory is followed
+by an fsync of its parent before the store becomes available, so the
+reconciliation directory entry itself also survives power loss.
 
 Proven pre-send cancel failures follow the same model. A durable
 `OrderCancelPreSendFailedEvent` consumes the pending cancel, removes its

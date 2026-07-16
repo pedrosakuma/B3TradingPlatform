@@ -36,9 +36,9 @@ public sealed class FileReconciliationMarkerStore : IReconciliationMarkerStore
     {
         _directoryDurability = directoryDurability
             ?? throw new ArgumentNullException(nameof(directoryDurability));
-        _root = Path.Combine(
-            options.DataDirectory, options.FirmId, "reconciliation");
-        Directory.CreateDirectory(_root);
+        _root = Path.GetFullPath(Path.Combine(
+            options.DataDirectory, options.FirmId, "reconciliation"));
+        CreateDirectoryPathDurably(_root);
     }
 
     public void Persist(ReconciliationMarker marker)
@@ -102,6 +102,28 @@ public sealed class FileReconciliationMarkerStore : IReconciliationMarkerStore
                     nameof(markerId));
         }
         return Path.Combine(_root, markerId + ".json");
+    }
+
+    private void CreateDirectoryPathDurably(string path)
+    {
+        var missing = new Stack<string>();
+        var current = path;
+        while (!Directory.Exists(current))
+        {
+            missing.Push(current);
+            current = Directory.GetParent(current)?.FullName
+                ?? throw new IOException(
+                    $"Cannot locate existing parent for reconciliation directory '{path}'.");
+        }
+
+        while (missing.TryPop(out var directory))
+        {
+            Directory.CreateDirectory(directory);
+            var parent = Directory.GetParent(directory)?.FullName
+                ?? throw new IOException(
+                    $"Cannot fsync parent of reconciliation directory '{directory}'.");
+            _directoryDurability.Flush(parent);
+        }
     }
 }
 
