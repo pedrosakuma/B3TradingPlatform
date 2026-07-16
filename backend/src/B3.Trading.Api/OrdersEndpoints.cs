@@ -238,6 +238,15 @@ public static class OrdersEndpoints
                     Results.Json(
                         new { error = "gateway send outcome ambiguous", clOrdId = result.NewClOrdId.ToString() },
                         statusCode: StatusCodes.Status502BadGateway),
+                OrderModifyResultKind.ReconciliationRequired =>
+                    Results.Json(
+                        new
+                        {
+                            error = "replace resolution requires reconciliation",
+                            detail = result.Reason,
+                            clOrdId = result.NewClOrdId.ToString(),
+                        },
+                        statusCode: StatusCodes.Status503ServiceUnavailable),
                 OrderModifyResultKind.WalBackpressure =>
                     Results.Json(
                         new { error = "system busy (WAL backpressure)", detail = result.Reason },

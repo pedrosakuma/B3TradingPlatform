@@ -108,6 +108,115 @@ public sealed class LifecycleAtomicityTests
     }
 
     [Fact]
+    public async Task PreSendResolutionWalBackpressure_DrainsAndDoesNotLeaveLivePendingIntent()
+    {
+        var store = new RecordingEventStore(
+            failOnAppend: 2,
+            failureFactory: static () => new WalBackpressureException("resolution lane full"));
+        var gateway = new TestGateway
+        {
+            ReplaceException = new ExchangeGatewayPreSendException("not connected"),
+        };
+        var harness = BuildModify(gateway, store);
+
+        var result = await harness.Service.ModifyAsync(
+            new OrderModifyRequest(Owner, 100, 120, 31m), CancellationToken.None);
+
+        Assert.Equal(OrderModifyResultKind.ReconciliationRequired, result.Kind);
+        Assert.Equal("pre_send_resolution_not_durable", result.Reason);
+        Assert.True(harness.Drain.IsDraining);
+        Assert.False(harness.Replacements.IsOriginalInFlight(100));
+        Assert.Single(harness.Margin.Aborted);
+        Assert.Single(store.Events);
+        Assert.IsType<OrderReplaceRequestedEvent>(store.Events[0]);
+    }
+
+    [Fact]
+    public async Task AmbiguousResolutionWalFault_DrainsAndMarksIntentInMemoryForTtl()
+    {
+        var store = new RecordingEventStore(
+            failOnAppend: 2,
+            failureFactory: static () => new WalFaultedException(
+                "resolution writer faulted", new IOException("disk full")));
+        var gateway = new TestGateway
+        {
+            ReplaceException = new IOException("wire outcome unknown"),
+        };
+        var harness = BuildModify(gateway, store);
+
+        var result = await harness.Service.ModifyAsync(
+            new OrderModifyRequest(Owner, 100, 120, 31m), CancellationToken.None);
+
+        Assert.Equal(OrderModifyResultKind.ReconciliationRequired, result.Kind);
+        Assert.Equal("ambiguous_resolution_not_durable", result.Reason);
+        Assert.True(harness.Drain.IsDraining);
+        var pending = Assert.Single(harness.Replacements.Snapshot());
+        Assert.True(pending.AmbiguousMarginHeld);
+        Assert.Empty(harness.Margin.Aborted);
+        Assert.Single(store.Events);
+        Assert.IsType<OrderReplaceRequestedEvent>(store.Events[0]);
+    }
+
+    [Fact]
+    public async Task AlgoAmbiguousResolutionWalFault_DrainsAndMarksIntentInMemory()
+    {
+        var store = new RecordingEventStore(
+            failOnAppend: 2,
+            failureFactory: static () => new WalFaultedException(
+                "resolution writer faulted", new IOException("disk full")));
+        var gateway = new TestGateway
+        {
+            ReplaceException = new IOException("wire outcome unknown"),
+        };
+        var drain = new NeverDrainController();
+        var replacements = new PendingReplacementRegistry();
+        var margin = new NoOpReplaceMargin();
+        var ownership = new OrderOwnershipMap();
+        var orders = new WorkingOrderBook();
+        var child = new Order(
+            100, Owner, "PETR4", 4321, OrderSide.Buy, OrderType.Limit,
+            100, 30m, "FIRM", parentAlgoId: 1, algoSliceSeq: 0);
+        child.MarkWorking();
+        Assert.True(orders.TryAdd(child));
+        ownership.Register(child.ClOrdId, Owner);
+        var dispatcher = new EventDispatcher(store);
+        var submitter = new OrderSubmissionService(
+            new ClOrdIdPrefixRegistry(), ownership, orders, gateway,
+            new RecordingSink(), new RiskPipeline(Array.Empty<IRiskCheck>()),
+            new NoOpMarginProvider(), new CompositeRiskAccountant(Array.Empty<IRiskAccountant>()),
+            dispatcher, drain, NullLogger<OrderSubmissionService>.Instance);
+        var engine = new B3.Trading.Application.AlgoEngine(
+            new AlgoSignalQueue(), new AlgoBook(), orders, submitter,
+            new ClOrdIdPrefixRegistry(), gateway, new NoOpAlgoEventSink(),
+            dispatcher, TimeProvider.System,
+            NullLogger<B3.Trading.Application.AlgoEngine>.Instance,
+            ownership, replacements: replacements,
+            risk: new RiskPipeline(Array.Empty<IRiskCheck>()),
+            replaceMargin: margin, reconciliationDrain: drain);
+        var now = DateTimeOffset.UtcNow;
+        var algo = new Algo(
+            1, Owner, "FIRM", "PETR4", 4321, OrderSide.Buy, AlgoType.Twap, 100,
+            new TwapParameters(now, now.AddMinutes(1), 1, OrderType.Limit, 30m), now);
+
+        var replaced = await engine.TryReplaceChildAsync(
+            algo, child, newQuantity: 120, newPrice: 31m,
+            reason: "test", CancellationToken.None);
+
+        Assert.False(replaced);
+        Assert.True(drain.IsDraining);
+        Assert.True(Assert.Single(replacements.Snapshot()).AmbiguousMarginHeld);
+        Assert.Empty(margin.Aborted);
+        Assert.Single(store.Events);
+        Assert.IsType<OrderReplaceRequestedEvent>(store.Events[0]);
+
+        var retried = await engine.TryReplaceChildAsync(
+            algo, child, newQuantity: 120, newPrice: 31m,
+            reason: "test", CancellationToken.None);
+        Assert.False(retried);
+        Assert.Equal(1, gateway.ReplaceCalls);
+    }
+
+    [Fact]
     public async Task QuantityOnlyModify_InheritsOriginalPriceAcrossRiskWalAndGateway()
     {
         var gateway = new TestGateway();
@@ -177,6 +286,57 @@ public sealed class LifecycleAtomicityTests
 
         Assert.False(claim.IsAcquired);
         Assert.Equal(200UL, claim.ExistingCancelClOrdId);
+    }
+
+    [Fact]
+    public async Task CancelOnlySnapshot_RestoresRetryIdempotencyAndAckRouting()
+    {
+        var sourceBook = new WorkingOrderBook();
+        Assert.True(sourceBook.TryAdd(Working()));
+        var sourceOwnership = new OrderOwnershipMap();
+        sourceOwnership.Register(100, Owner);
+        var sourcePending = new PendingCancelRegistry();
+        Assert.True(sourcePending.TryAdd(100, 200));
+        sourceOwnership.RegisterCancelLink(200, 100);
+        var snapshot = CreateSnapshotter(
+            sourceBook, sourceOwnership, sourcePending).Capture(seq: 5);
+        Assert.Empty(snapshot.PendingReplacements);
+        Assert.Single(snapshot.PendingCancels);
+
+        var restoredBook = new WorkingOrderBook();
+        var restoredOwnership = new OrderOwnershipMap();
+        var restoredPending = new PendingCancelRegistry();
+        CreateSnapshotter(restoredBook, restoredOwnership, restoredPending).Restore(snapshot);
+
+        var gateway = new TestGateway();
+        var retryService = new OrderCancelService(
+            new ClOrdIdPrefixRegistry(), restoredOwnership, restoredBook, gateway,
+            new EventDispatcher(new NullEventStore()),
+            NullLogger<OrderCancelService>.Instance,
+            pendingCancels: restoredPending);
+        var retry = await retryService.CancelAsync(Owner, 100, CancellationToken.None);
+        Assert.Equal(OrderCancelResultKind.Accepted, retry.Kind);
+        Assert.Equal(200UL, retry.CancelClOrdId);
+        Assert.Equal(0, gateway.CancelCalls);
+        Assert.True(restoredOwnership.TryResolveOrig(200, out var linked));
+        Assert.Equal(100UL, linked);
+
+        var processor = new ExecutionReportProcessor(
+            restoredOwnership, restoredBook, new PositionKeeper(), new RecordingSink(),
+            new NoOpMarginProvider(), NullLogger<ExecutionReportProcessor>.Instance,
+            pendingCancels: restoredPending);
+        processor.Apply(
+            clOrdId: 200,
+            kind: ExecKind.Canceled,
+            leaves: 0,
+            cumQty: 0,
+            lastQty: 0,
+            lastPx: 0m,
+            rejectReason: null);
+
+        Assert.True(restoredBook.TryGet(100, out var restoredOrder));
+        Assert.Equal(OrderStatus.Cancelled, restoredOrder!.Status);
+        Assert.Equal(0, restoredPending.CountForTesting);
     }
 
     [Fact]
@@ -265,12 +425,14 @@ public sealed class LifecycleAtomicityTests
         Assert.True(book.TryAdd(Working()));
         ownership.Register(100, Owner);
         var replacements = new PendingReplacementRegistry();
+        var margin = new NoOpReplaceMargin();
+        var drain = new NeverDrainController();
         var service = new OrderModifyService(
             new ClOrdIdPrefixRegistry(), ownership, book, gateway, new RecordingSink(),
-            new RiskPipeline(Array.Empty<IRiskCheck>()), new NoOpReplaceMargin(),
+            new RiskPipeline(Array.Empty<IRiskCheck>()), margin,
             replacements, new EventDispatcher(store ?? new NullEventStore()),
-            new NeverDrainController(), NullLogger<OrderModifyService>.Instance);
-        return new ModifyHarness(service, replacements);
+            drain, NullLogger<OrderModifyService>.Instance);
+        return new ModifyHarness(service, replacements, margin, drain);
     }
 
     private static OrderCancelService BuildCancel(
@@ -318,9 +480,29 @@ public sealed class LifecycleAtomicityTests
         return order;
     }
 
+    private static StateSnapshotter CreateSnapshotter(
+        WorkingOrderBook book,
+        OrderOwnershipMap ownership,
+        PendingCancelRegistry pendingCancels) =>
+        new(
+            book,
+            new PositionKeeper(),
+            new KillSwitchService(),
+            new SymbolHaltService(),
+            new SessionPhaseService(),
+            new ClOrdIdPrefixRegistry(),
+            ownership,
+            new AlgoBook(),
+            new AlgoIdRegistry(),
+            new CashLedger(),
+            replacements: new PendingReplacementRegistry(),
+            pendingCancels: pendingCancels);
+
     private sealed record ModifyHarness(
         OrderModifyService Service,
-        PendingReplacementRegistry Replacements);
+        PendingReplacementRegistry Replacements,
+        NoOpReplaceMargin Margin,
+        NeverDrainController Drain);
 
     private sealed record RecoveryHarness(
         EventReplayer Replayer,
@@ -376,6 +558,8 @@ public sealed class LifecycleAtomicityTests
 
     private sealed class NoOpReplaceMargin : IReplaceMarginCoordinator
     {
+        public List<ulong> Aborted { get; } = new();
+
         public Task<RiskDecision> PrepareReplaceAsync(
             ulong originalClOrdId,
             ulong newClOrdId,
@@ -384,7 +568,7 @@ public sealed class LifecycleAtomicityTests
             CancellationToken ct) => Task.FromResult(RiskDecision.Approve);
 
         public void CommitReplace(ulong originalClOrdId, ulong newClOrdId, decimal newRemainingNotional) { }
-        public void AbortReplace(ulong newClOrdId) { }
+        public void AbortReplace(ulong newClOrdId) => Aborted.Add(newClOrdId);
     }
 
     private sealed class RecordingSink : IExecutionEventSink
@@ -394,20 +578,39 @@ public sealed class LifecycleAtomicityTests
 
     private sealed class NeverDrainController : Lifecycle.IDrainController
     {
-        public bool IsDraining => false;
-        public void BeginDrain(string reason) { }
+        public bool IsDraining { get; private set; }
+        public string? Reason { get; private set; }
+        public void BeginDrain(string reason)
+        {
+            IsDraining = true;
+            Reason = reason;
+        }
     }
 
     private sealed class RecordingEventStore : IEventStore
     {
         private long _seq;
+        private readonly int? _failOnAppend;
+        private readonly Func<Exception>? _failureFactory;
         public List<WalEvent> Events { get; } = new();
         public long CurrentSeq => Interlocked.Read(ref _seq);
+
+        public RecordingEventStore(
+            int? failOnAppend = null,
+            Func<Exception>? failureFactory = null)
+        {
+            _failOnAppend = failOnAppend;
+            _failureFactory = failureFactory;
+        }
 
         public long Append(WalEvent evt) => Append(evt, ReadOnlyMemory<byte>.Empty);
 
         public long Append(WalEvent evt, ReadOnlyMemory<byte> preSerialisedPayload)
         {
+            var appendNumber = checked((int)CurrentSeq + 1);
+            if (_failOnAppend == appendNumber)
+                throw _failureFactory?.Invoke()
+                    ?? new WalBackpressureException("configured append failure");
             lock (Events)
                 Events.Add(evt);
             return Interlocked.Increment(ref _seq);

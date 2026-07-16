@@ -35,6 +35,7 @@ public sealed class OrderModifyService
     private readonly PendingReplacementRegistry _replacements;
     private readonly EventDispatcher _dispatcher;
     private readonly Lifecycle.IDrainGate _drain;
+    private readonly Lifecycle.IDrainController? _reconciliationDrain;
     private readonly Routing.IRoutingInstructionResolver? _routingResolver;
     private readonly CompositeRiskAccountant? _accountant;
     private readonly ILogger<OrderModifyService> _logger;
@@ -52,7 +53,8 @@ public sealed class OrderModifyService
         Lifecycle.IDrainGate drain,
         ILogger<OrderModifyService> logger,
         Routing.IRoutingInstructionResolver? routingInstructionResolver = null,
-        CompositeRiskAccountant? accountant = null)
+        CompositeRiskAccountant? accountant = null,
+        Lifecycle.IDrainController? reconciliationDrain = null)
     {
         _clOrdIds = clOrdIds;
         _ownership = ownership;
@@ -64,6 +66,7 @@ public sealed class OrderModifyService
         _replacements = replacements;
         _dispatcher = dispatcher;
         _drain = drain;
+        _reconciliationDrain = reconciliationDrain ?? drain as Lifecycle.IDrainController;
         _routingResolver = routingInstructionResolver;
         _accountant = accountant;
         _logger = logger;
@@ -396,27 +399,37 @@ public sealed class OrderModifyService
             _logger.LogError(ex,
                 "Gateway proved cancel-replace was not sent for orig {OrigClOrdId} new {NewClOrdId}; terminalising.",
                 req.OriginalClOrdId, newClOrdId);
-            _dispatcher.Dispatch(
-                new OrderReplacePreSendFailedEvent
-                {
-                    OriginalClOrdId = req.OriginalClOrdId,
-                    NewClOrdId = newClOrdId,
-                    EndClientId = req.Owner.Value,
-                    Reason = "gateway_unavailable",
-                },
-                () =>
-                {
-                    _replacements.TryConsume(newClOrdId, out _);
-                    _replaceMargin.AbortReplace(newClOrdId);
-                    _sink.Publish(new ExecutionEvent(
-                        req.Owner, newClOrdId, orig.Symbol, orig.Side,
-                        OrderStatus.Rejected, ExecKind.Rejected,
-                        LeavesQuantity: 0, CumulativeQuantity: 0,
-                        LastQuantity: 0, LastPrice: 0m,
-                        RejectReason: "gateway_unavailable",
-                        TimestampUtc: DateTimeOffset.UtcNow,
-                        FirmId: orig.FirmId));
-                });
+            try
+            {
+                _dispatcher.Dispatch(
+                    new OrderReplacePreSendFailedEvent
+                    {
+                        OriginalClOrdId = req.OriginalClOrdId,
+                        NewClOrdId = newClOrdId,
+                        EndClientId = req.Owner.Value,
+                        Reason = "gateway_unavailable",
+                    },
+                    () =>
+                    {
+                        _replacements.TryConsume(newClOrdId, out _);
+                        _replaceMargin.AbortReplace(newClOrdId);
+                        _sink.Publish(new ExecutionEvent(
+                            req.Owner, newClOrdId, orig.Symbol, orig.Side,
+                            OrderStatus.Rejected, ExecKind.Rejected,
+                            LeavesQuantity: 0, CumulativeQuantity: 0,
+                            LastQuantity: 0, LastPrice: 0m,
+                            RejectReason: "gateway_unavailable",
+                            TimestampUtc: DateTimeOffset.UtcNow,
+                            FirmId: orig.FirmId));
+                    });
+            }
+            catch (Exception resolutionEx) when (IsWalResolutionFailure(resolutionEx))
+            {
+                _replacements.TryConsume(newClOrdId, out _);
+                _replaceMargin.AbortReplace(newClOrdId);
+                return FailResolutionForReconciliation(
+                    newClOrdId, "pre_send_resolution_not_durable", resolutionEx);
+            }
             return OrderModifyResult.GatewayFailed(newClOrdId, ex);
         }
         catch (Exception ex)
@@ -429,17 +442,27 @@ public sealed class OrderModifyService
                 req.OriginalClOrdId, newClOrdId);
 
             var heldAt = DateTimeOffset.UtcNow;
-            _dispatcher.Dispatch(
-                new OrderReplaceAmbiguousMarginHeldEvent
-                {
-                    NewClOrdId = newClOrdId,
-                    OriginalClOrdId = req.OriginalClOrdId,
-                    EndClientId = req.Owner.Value,
-                    NewRemainingNotional = newRemainingNotional,
-                    HeldAtUtc = heldAt,
-                },
-                () => _replacements.MarkAmbiguousMarginHeld(
-                    newClOrdId, heldAt, newRemainingNotional));
+            try
+            {
+                _dispatcher.Dispatch(
+                    new OrderReplaceAmbiguousMarginHeldEvent
+                    {
+                        NewClOrdId = newClOrdId,
+                        OriginalClOrdId = req.OriginalClOrdId,
+                        EndClientId = req.Owner.Value,
+                        NewRemainingNotional = newRemainingNotional,
+                        HeldAtUtc = heldAt,
+                    },
+                    () => _replacements.MarkAmbiguousMarginHeld(
+                        newClOrdId, heldAt, newRemainingNotional));
+            }
+            catch (Exception resolutionEx) when (IsWalResolutionFailure(resolutionEx))
+            {
+                _replacements.MarkAmbiguousMarginHeld(
+                    newClOrdId, heldAt, newRemainingNotional);
+                return FailResolutionForReconciliation(
+                    newClOrdId, "ambiguous_resolution_not_durable", resolutionEx);
+            }
             return OrderModifyResult.GatewayAmbiguous(newClOrdId, ex);
         }
 
@@ -450,6 +473,26 @@ public sealed class OrderModifyService
 
         return OrderModifyResult.Accepted(newClOrdId);
     }
+
+    private OrderModifyResult FailResolutionForReconciliation(
+        ulong newClOrdId,
+        string reason,
+        Exception exception)
+    {
+        if (exception is WalBackpressureException)
+        {
+            MetricsRegistry.WalBackpressure.Add(1,
+                new KeyValuePair<string, object?>("call_site", "orders.modify.resolution"));
+        }
+        _reconciliationDrain?.BeginDrain("wal_replace_resolution_reconciliation_required");
+        _logger.LogCritical(exception,
+            "Replace resolution {Reason} for new ClOrdID {NewClOrdId}; ingress is draining and operator reconciliation is required.",
+            reason, newClOrdId);
+        return OrderModifyResult.ReconciliationRequired(newClOrdId, reason, exception);
+    }
+
+    private static bool IsWalResolutionFailure(Exception exception) =>
+        exception is WalBackpressureException or WalFaultedException;
 
     /// <summary>
     /// #337 — durable audit row for a modify rejected pre-WAL by the
@@ -586,6 +629,9 @@ public sealed class OrderModifyResult
         new(OrderModifyResultKind.GatewayFailed, newClOrdId, "gateway_unavailable", "gateway_unavailable", ex);
     public static OrderModifyResult GatewayAmbiguous(ulong newClOrdId, Exception ex) =>
         new(OrderModifyResultKind.GatewayAmbiguous, newClOrdId, "send_ambiguous", "send_ambiguous", ex);
+    public static OrderModifyResult ReconciliationRequired(
+        ulong newClOrdId, string reason, Exception ex) =>
+        new(OrderModifyResultKind.ReconciliationRequired, newClOrdId, reason, "reconciliation_required", ex);
     public static OrderModifyResult WalBackpressure(string detail) =>
         new(OrderModifyResultKind.WalBackpressure, 0, detail, "wal_backpressure", null);
     public static OrderModifyResult BadRequest(string reason) =>
@@ -615,6 +661,7 @@ public enum OrderModifyResultKind
     RiskRejected,
     GatewayFailed,
     GatewayAmbiguous,
+    ReconciliationRequired,
     WalBackpressure,
     Drained,
     DuplicateClOrdId,

@@ -711,15 +711,15 @@ public sealed class StateSnapshotter
                         .GetAwaiter().GetResult();
                 }
             }
-            if (_pendingCancels is not null)
+        }
+        if (_pendingCancels is not null)
+        {
+            _pendingCancels.Restore(snap.PendingCancels.Select(
+                static c => new PendingCancelSnapshotEntry(c.OriginalClOrdId, c.CancelClOrdId)));
+            foreach (var pending in snap.PendingCancels)
             {
-                _pendingCancels.Restore(snap.PendingCancels.Select(
-                    static c => new PendingCancelSnapshotEntry(c.OriginalClOrdId, c.CancelClOrdId)));
-                foreach (var pending in snap.PendingCancels)
-                {
-                    if (_ownership.TryResolve(pending.OriginalClOrdId, out _))
-                        _ownership.RegisterCancelLink(pending.CancelClOrdId, pending.OriginalClOrdId);
-                }
+                if (_ownership.TryResolve(pending.OriginalClOrdId, out _))
+                    _ownership.RegisterCancelLink(pending.CancelClOrdId, pending.OriginalClOrdId);
             }
         }
         // Q4.1 (#301). Restore the sub-account registry + parallel

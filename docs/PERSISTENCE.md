@@ -95,6 +95,14 @@ Wave 2 / #628: this slice does not blindly resend pending cancel/replace
 intents after restart. Durable attempted/sent substates, session-version proof
 and automated reconciliation remain owned by that RFC.
 
+If either replace-resolution append fails because the WAL is saturated or
+faulted, the platform enters drain with `reconciliation_required`. The live
+state takes the safest known posture (proven-unsent intents are removed and
+margin aborted; ambiguous intents retain margin and are TTL-marked), but no
+ordinary gateway-failure response is returned because the durable WAL still
+contains only the unresolved request. Operator reconciliation is required
+before ingress can reopen.
+
 WebSocket fan-out frames are **not** persisted — they are projections
 recomputable from the WAL.
 
