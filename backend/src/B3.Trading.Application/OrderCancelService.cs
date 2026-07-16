@@ -31,6 +31,7 @@ public sealed class OrderCancelService
     private readonly EventDispatcher _dispatcher;
     private readonly IUserBotOrderMappingRegistry? _botMappings;
     private readonly PendingCancelRegistry _pendingCancels;
+    private readonly Lifecycle.IDrainController? _reconciliationDrain;
     private readonly ILogger<OrderCancelService> _logger;
 
     public OrderCancelService(
@@ -41,7 +42,8 @@ public sealed class OrderCancelService
         EventDispatcher dispatcher,
         ILogger<OrderCancelService> logger,
         IUserBotOrderMappingRegistry? botMappings = null,
-        PendingCancelRegistry? pendingCancels = null)
+        PendingCancelRegistry? pendingCancels = null,
+        Lifecycle.IDrainController? reconciliationDrain = null)
     {
         _clOrdIds = clOrdIds;
         _ownership = ownership;
@@ -50,6 +52,7 @@ public sealed class OrderCancelService
         _dispatcher = dispatcher;
         _botMappings = botMappings;
         _pendingCancels = pendingCancels ?? new PendingCancelRegistry();
+        _reconciliationDrain = reconciliationDrain;
         _logger = logger;
     }
 
@@ -69,6 +72,10 @@ public sealed class OrderCancelService
         string? firmId = null)
     {
         ArgumentNullException.ThrowIfNull(owner);
+
+        if (_reconciliationDrain?.IsDraining == true)
+            return OrderCancelResult.ReconciliationRequired(
+                0, "service draining for reconciliation", null);
 
         if (!_book.TryGet(originalClOrdId, out var order) || order is null)
             return OrderCancelResult.NotFound;
@@ -155,6 +162,32 @@ public sealed class OrderCancelService
             // enqueued + the in-memory state is consistent.
             await _gateway.CancelAsync(order, cancelClOrdId, ct).ConfigureAwait(false);
         }
+        catch (Exception ex) when (
+            ex is ExchangeGatewayPreSendException || _gateway is IExchangeGatewayPreSendOnly)
+        {
+            _logger.LogError(ex,
+                "Gateway proved cancel was not sent for {ClOrdId} (orig {Orig}); terminalising cancel intent.",
+                cancelClOrdId, originalClOrdId);
+            try
+            {
+                _dispatcher.Dispatch(
+                    new OrderCancelPreSendFailedEvent
+                    {
+                        CancelClOrdId = cancelClOrdId,
+                        OriginalClOrdId = originalClOrdId,
+                        OwnerEndClientId = owner.Value,
+                        Reason = "gateway_unavailable",
+                    },
+                    () => ResolvePreSendFailure(cancelClOrdId));
+            }
+            catch (Exception resolutionEx) when (IsWalResolutionFailure(resolutionEx))
+            {
+                _dispatcher.RunExclusive(() => ResolvePreSendFailure(cancelClOrdId));
+                return FailResolutionForReconciliation(
+                    cancelClOrdId, "pre_send_cancel_resolution_not_durable", resolutionEx);
+            }
+            return OrderCancelResult.GatewayFailed(cancelClOrdId, ex);
+        }
         catch (Exception ex)
         {
             // The cancel WAL record is already durable; leaving it as
@@ -171,6 +204,33 @@ public sealed class OrderCancelService
             new KeyValuePair<string, object?>("firmId", order.FirmId));
         return OrderCancelResult.Accepted(cancelClOrdId);
     }
+
+    private void ResolvePreSendFailure(ulong cancelClOrdId)
+    {
+        _pendingCancels.TryConsumeByCancel(cancelClOrdId, out _);
+        _ownership.RemoveCancelLink(cancelClOrdId);
+        _botMappings?.ReapCancel(cancelClOrdId);
+    }
+
+    private OrderCancelResult FailResolutionForReconciliation(
+        ulong cancelClOrdId,
+        string reason,
+        Exception exception)
+    {
+        if (exception is WalBackpressureException)
+        {
+            MetricsRegistry.WalBackpressure.Add(1,
+                new KeyValuePair<string, object?>("call_site", "orders.cancel.resolution"));
+        }
+        _reconciliationDrain?.BeginDrain("wal_cancel_resolution_reconciliation_required");
+        _logger.LogCritical(exception,
+            "Cancel resolution {Reason} for ClOrdID {CancelClOrdId}; ingress is draining and operator reconciliation is required.",
+            reason, cancelClOrdId);
+        return OrderCancelResult.ReconciliationRequired(cancelClOrdId, reason, exception);
+    }
+
+    private static bool IsWalResolutionFailure(Exception exception) =>
+        exception is WalBackpressureException or WalFaultedException;
 }
 
 /// <summary>
@@ -205,6 +265,9 @@ public sealed class OrderCancelResult
         new(OrderCancelResultKind.WalBackpressure, 0, detail, null);
     public static OrderCancelResult GatewayFailed(ulong cancelClOrdId, Exception ex) =>
         new(OrderCancelResultKind.GatewayFailed, cancelClOrdId, "gateway_unavailable", ex);
+    public static OrderCancelResult ReconciliationRequired(
+        ulong cancelClOrdId, string reason, Exception? ex) =>
+        new(OrderCancelResultKind.ReconciliationRequired, cancelClOrdId, reason, ex);
 }
 
 public enum OrderCancelResultKind
@@ -215,4 +278,5 @@ public enum OrderCancelResultKind
     Conflict,
     WalBackpressure,
     GatewayFailed,
+    ReconciliationRequired,
 }

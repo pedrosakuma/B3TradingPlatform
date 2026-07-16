@@ -279,6 +279,10 @@ public static class HistoryEndpoints
                     cancelLinks[cr.CancelClOrdId] = cr.OriginalClOrdId;
                     break;
 
+                case OrderCancelPreSendFailedEvent cff:
+                    cancelLinks.Remove(cff.CancelClOrdId);
+                    break;
+
                 case ExecutionReportReceivedEvent er:
                     Enum.TryParse<ExecKind>(er.ExecKind, ignoreCase: true, out var kind);
                     // Resolve OrigClOrdId from the link maps when the venue
@@ -531,6 +535,9 @@ public static class HistoryEndpoints
                     break;
                 case OrderCancelRequestedEvent cr:
                     cancelLinks[cr.CancelClOrdId] = cr.OriginalClOrdId;
+                    break;
+                case OrderCancelPreSendFailedEvent cff:
+                    cancelLinks.Remove(cff.CancelClOrdId);
                     break;
                 case ExecutionReportReceivedEvent er:
                     if (er.TimestampUtc < from || er.TimestampUtc > to) break;

@@ -103,6 +103,14 @@ ordinary gateway-failure response is returned because the durable WAL still
 contains only the unresolved request. Operator reconciliation is required
 before ingress can reopen.
 
+Proven pre-send cancel failures follow the same model. A durable
+`OrderCancelPreSendFailedEvent` consumes the pending cancel, removes its
+cancel-side ownership/bot mappings, and leaves the original order working so a
+retry allocates a fresh ClOrdID and actually reattempts the venue mutation. If
+that resolution cannot append, live state is cleaned up, ingress drains, and
+the caller receives `reconciliation_required`; ordinary retries remain blocked
+until operator reconciliation.
+
 WebSocket fan-out frames are **not** persisted — they are projections
 recomputable from the WAL.
 

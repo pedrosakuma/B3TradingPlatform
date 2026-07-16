@@ -29,6 +29,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonSerializable(typeof(WalEvent))]
 [JsonSerializable(typeof(OrderSubmittedEvent))]
 [JsonSerializable(typeof(OrderCancelRequestedEvent))]
+[JsonSerializable(typeof(OrderCancelPreSendFailedEvent))]
 [JsonSerializable(typeof(OrderReplaceRequestedEvent))]
 [JsonSerializable(typeof(OrderReplacePreSendFailedEvent))]
 [JsonSerializable(typeof(OrderReplaceRejectedEvent))]

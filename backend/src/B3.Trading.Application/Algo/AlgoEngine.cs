@@ -1504,9 +1504,12 @@ public sealed class AlgoEngine : BackgroundService
             }
             catch (Exception resolutionEx) when (IsWalResolutionFailure(resolutionEx))
             {
-                replacements.TryConsume(newClOrdId, out _);
-                if (marginPrepared)
-                    _replaceMargin!.AbortReplace(newClOrdId);
+                _dispatcher.RunExclusive(() =>
+                {
+                    replacements.TryConsume(newClOrdId, out _);
+                    if (marginPrepared)
+                        _replaceMargin!.AbortReplace(newClOrdId);
+                });
                 BeginReplaceResolutionDrain(
                     newClOrdId, "pre_send_resolution_not_durable", resolutionEx);
             }
@@ -1579,8 +1582,9 @@ public sealed class AlgoEngine : BackgroundService
             }
             catch (Exception resolutionEx) when (IsWalResolutionFailure(resolutionEx))
             {
-                replacements.MarkAmbiguousMarginHeld(
-                    newClOrdId, heldAt, newRemainingNotional);
+                _dispatcher.RunExclusive(() =>
+                    replacements.MarkAmbiguousMarginHeld(
+                        newClOrdId, heldAt, newRemainingNotional));
                 BeginReplaceResolutionDrain(
                     newClOrdId, "ambiguous_resolution_not_durable", resolutionEx);
             }

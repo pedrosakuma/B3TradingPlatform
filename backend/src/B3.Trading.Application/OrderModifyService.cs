@@ -425,8 +425,11 @@ public sealed class OrderModifyService
             }
             catch (Exception resolutionEx) when (IsWalResolutionFailure(resolutionEx))
             {
-                _replacements.TryConsume(newClOrdId, out _);
-                _replaceMargin.AbortReplace(newClOrdId);
+                _dispatcher.RunExclusive(() =>
+                {
+                    _replacements.TryConsume(newClOrdId, out _);
+                    _replaceMargin.AbortReplace(newClOrdId);
+                });
                 return FailResolutionForReconciliation(
                     newClOrdId, "pre_send_resolution_not_durable", resolutionEx);
             }
@@ -458,8 +461,9 @@ public sealed class OrderModifyService
             }
             catch (Exception resolutionEx) when (IsWalResolutionFailure(resolutionEx))
             {
-                _replacements.MarkAmbiguousMarginHeld(
-                    newClOrdId, heldAt, newRemainingNotional);
+                _dispatcher.RunExclusive(() =>
+                    _replacements.MarkAmbiguousMarginHeld(
+                        newClOrdId, heldAt, newRemainingNotional));
                 return FailResolutionForReconciliation(
                     newClOrdId, "ambiguous_resolution_not_durable", resolutionEx);
             }

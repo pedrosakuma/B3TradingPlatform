@@ -1050,6 +1050,13 @@ public sealed class EventReplayer
                         credentialId: cbm.CredentialId,
                         externalCancelClOrdId: cbm.ExternalClOrdId);
                 break;
+            case OrderCancelPreSendFailedEvent ocf:
+                _pendingCancels?.TryConsumeByCancel(ocf.CancelClOrdId, out _);
+                _ownership.RemoveCancelLink(ocf.CancelClOrdId);
+                _userBotMappings?.ReapCancel(ocf.CancelClOrdId);
+                _clOrdIds.AdvanceCounterTo(
+                    new EndClientId(ocf.OwnerEndClientId), ocf.CancelClOrdId);
+                break;
             case OrderReplaceRequestedEvent rr:
                 // Slice 4 of #122. Re-register the in-flight intent and
                 // the new→orig link so a subsequent Replaced/Rejected ER

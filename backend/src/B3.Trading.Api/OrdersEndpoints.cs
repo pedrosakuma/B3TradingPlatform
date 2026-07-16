@@ -296,6 +296,17 @@ public static class OrdersEndpoints
                     Results.Json(
                         new { error = "gateway unavailable", clOrdId = result.CancelClOrdId.ToString() },
                         statusCode: StatusCodes.Status502BadGateway),
+                OrderCancelResultKind.ReconciliationRequired =>
+                    Results.Json(
+                        new
+                        {
+                            error = "cancel resolution requires reconciliation",
+                            detail = result.Reason,
+                            clOrdId = result.CancelClOrdId == 0
+                                ? null
+                                : result.CancelClOrdId.ToString(),
+                        },
+                        statusCode: StatusCodes.Status503ServiceUnavailable),
                 _ => Results.StatusCode(StatusCodes.Status500InternalServerError),
             };
         });

@@ -1,6 +1,7 @@
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.Risk.Accounting;
+using B3.Trading.Application.UserBots;
 using B3.Trading.Domain;
 using B3.Trading.Infrastructure;
 using B3.Trading.Infrastructure.Persistence;
@@ -247,6 +248,130 @@ public sealed class LifecycleAtomicityTests
         Assert.Equal(first.CancelClOrdId, duplicate.CancelClOrdId);
         Assert.Equal(first.CancelClOrdId + 1, nextAllocated);
         Assert.Equal(1, gateway.CancelCalls);
+    }
+
+    [Fact]
+    public async Task PreSendCancelFailure_ResolvesIntent_AndRetryAllocatesAndSendsFreshMutation()
+    {
+        var clOrdIds = new ClOrdIdPrefixRegistry();
+        var ownership = new OrderOwnershipMap();
+        var book = new WorkingOrderBook();
+        Assert.True(book.TryAdd(Working()));
+        ownership.Register(100, Owner);
+        var pending = new PendingCancelRegistry();
+        var store = new RecordingEventStore();
+        var dispatcher = new EventDispatcher(store);
+        var botMappings = new InMemoryUserBotOrderMappingRegistry();
+        var credentialId = Guid.NewGuid();
+        var firstService = new OrderCancelService(
+            clOrdIds, ownership, book, new UnavailableExchangeGateway(), dispatcher,
+            NullLogger<OrderCancelService>.Instance, botMappings, pending);
+
+        var failed = await firstService.CancelAsync(
+            Owner, 100, CancellationToken.None,
+            new BotOrigin(credentialId, ExternalClOrdId: 77));
+
+        Assert.Equal(OrderCancelResultKind.GatewayFailed, failed.Kind);
+        Assert.Equal(0, pending.CountForTesting);
+        Assert.False(ownership.TryResolveOrig(failed.CancelClOrdId, out _));
+        Assert.False(ownership.TryResolve(failed.CancelClOrdId, out _));
+        Assert.False(botMappings.TryGetCancelMapping(failed.CancelClOrdId, out _));
+        Assert.Collection(store.Events,
+            static e => Assert.IsType<OrderCancelRequestedEvent>(e),
+            static e => Assert.IsType<OrderCancelPreSendFailedEvent>(e));
+
+        var retryGateway = new TestGateway();
+        var retryService = new OrderCancelService(
+            clOrdIds, ownership, book, retryGateway, dispatcher,
+            NullLogger<OrderCancelService>.Instance, botMappings, pending);
+        var retry = await retryService.CancelAsync(Owner, 100, CancellationToken.None);
+
+        Assert.Equal(OrderCancelResultKind.Accepted, retry.Kind);
+        Assert.Equal(failed.CancelClOrdId + 1, retry.CancelClOrdId);
+        Assert.Equal(1, retryGateway.CancelCalls);
+    }
+
+    [Fact]
+    public async Task PreSendCancelResolution_ReplayAllowsFreshRetry_AndAckWithoutOrigRoutes()
+    {
+        var store = new RecordingEventStore();
+        var sourcePending = new PendingCancelRegistry();
+        var sourceOwnership = new OrderOwnershipMap();
+        var sourceBook = new WorkingOrderBook();
+        Assert.True(sourceBook.TryAdd(Working()));
+        sourceOwnership.Register(100, Owner);
+        var sourceService = new OrderCancelService(
+            new ClOrdIdPrefixRegistry(), sourceOwnership, sourceBook,
+            new UnavailableExchangeGateway(), new EventDispatcher(store),
+            NullLogger<OrderCancelService>.Instance,
+            pendingCancels: sourcePending);
+        var failed = await sourceService.CancelAsync(Owner, 100, CancellationToken.None);
+        Assert.Equal(OrderCancelResultKind.GatewayFailed, failed.Kind);
+
+        var recoveredPending = new PendingCancelRegistry();
+        var recovered = BuildRecoveryState(pendingCancels: recoveredPending);
+        foreach (var evt in store.Events)
+            recovered.Replayer.Apply(evt);
+        Assert.Equal(0, recoveredPending.CountForTesting);
+        Assert.False(recovered.Ownership.TryResolveOrig(failed.CancelClOrdId, out _));
+
+        var gateway = new TestGateway();
+        var retryService = new OrderCancelService(
+            recovered.ClOrdIds, recovered.Ownership, recovered.Book, gateway,
+            new EventDispatcher(new NullEventStore()),
+            NullLogger<OrderCancelService>.Instance,
+            pendingCancels: recoveredPending);
+        var retry = await retryService.CancelAsync(Owner, 100, CancellationToken.None);
+        Assert.Equal(OrderCancelResultKind.Accepted, retry.Kind);
+        Assert.Equal(failed.CancelClOrdId + 1, retry.CancelClOrdId);
+        Assert.Equal(1, gateway.CancelCalls);
+
+        var processor = new ExecutionReportProcessor(
+            recovered.Ownership, recovered.Book, new PositionKeeper(), new RecordingSink(),
+            new NoOpMarginProvider(), NullLogger<ExecutionReportProcessor>.Instance,
+            pendingCancels: recoveredPending);
+        processor.Apply(
+            retry.CancelClOrdId, ExecKind.Canceled,
+            leaves: 0, cumQty: 0, lastQty: 0, lastPx: 0m,
+            rejectReason: null);
+        Assert.True(recovered.Book.TryGet(100, out var original));
+        Assert.Equal(OrderStatus.Cancelled, original!.Status);
+    }
+
+    [Fact]
+    public async Task PreSendCancelResolutionWalFault_DrainsAndDoesNotStrandLivePendingState()
+    {
+        var store = new RecordingEventStore(
+            failOnAppend: 2,
+            failureFactory: static () => new WalFaultedException(
+                "cancel resolution writer faulted", new IOException("disk full")));
+        var clOrdIds = new ClOrdIdPrefixRegistry();
+        var ownership = new OrderOwnershipMap();
+        var book = new WorkingOrderBook();
+        Assert.True(book.TryAdd(Working()));
+        ownership.Register(100, Owner);
+        var pending = new PendingCancelRegistry();
+        var drain = new NeverDrainController();
+        var service = new OrderCancelService(
+            clOrdIds, ownership, book, new UnavailableExchangeGateway(),
+            new EventDispatcher(store), NullLogger<OrderCancelService>.Instance,
+            pendingCancels: pending, reconciliationDrain: drain);
+
+        var result = await service.CancelAsync(Owner, 100, CancellationToken.None);
+
+        Assert.Equal(OrderCancelResultKind.ReconciliationRequired, result.Kind);
+        Assert.Equal("pre_send_cancel_resolution_not_durable", result.Reason);
+        Assert.True(drain.IsDraining);
+        Assert.Equal(0, pending.CountForTesting);
+        Assert.False(ownership.TryResolveOrig(result.CancelClOrdId, out _));
+        Assert.Single(store.Events);
+        Assert.IsType<OrderCancelRequestedEvent>(store.Events[0]);
+        var snapshot = CreateSnapshotter(book, ownership, pending).Capture(seq: 1);
+        Assert.Empty(snapshot.PendingCancels);
+
+        var blockedRetry = await service.CancelAsync(Owner, 100, CancellationToken.None);
+        Assert.Equal(OrderCancelResultKind.ReconciliationRequired, blockedRetry.Kind);
+        Assert.Equal(result.CancelClOrdId + 1, clOrdIds.Generate(Owner));
     }
 
     [Fact]

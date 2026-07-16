@@ -51,6 +51,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(BotSessionVerAdvancedEvent), "userbot.session.ver-advanced")]
 [JsonDerivedType(typeof(BotSessionSeqAdvancedEvent), "userbot.session.seq-advanced")]
 [JsonDerivedType(typeof(OrderCancelRequestedEvent), "order.cancel-requested")]
+[JsonDerivedType(typeof(OrderCancelPreSendFailedEvent), "order.cancel-pre-send-failed")]
 [JsonDerivedType(typeof(OrderExpiredEvent), "order.expired")]
 [JsonDerivedType(typeof(CashLedgerEvent), "cash.ledger")]
 [JsonDerivedType(typeof(FeeAccruedEvent), "fee.accrued")]
@@ -206,6 +207,19 @@ public sealed record OrderCancelRequestedEvent : WalEvent
     public required ulong OriginalClOrdId { get; init; }
     public required string OwnerEndClientId { get; init; }
     public BotOrderMapping? BotMapping { get; init; }
+}
+
+/// <summary>
+/// Terminal resolution for a cancel intent when the gateway proves that no
+/// wire attempt occurred. The original order remains live and cancel retries
+/// must allocate a fresh ClOrdID.
+/// </summary>
+public sealed record OrderCancelPreSendFailedEvent : WalEvent
+{
+    public required ulong CancelClOrdId { get; init; }
+    public required ulong OriginalClOrdId { get; init; }
+    public required string OwnerEndClientId { get; init; }
+    public required string Reason { get; init; }
 }
 
 /// <summary>
