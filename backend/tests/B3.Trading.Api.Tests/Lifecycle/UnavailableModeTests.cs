@@ -38,13 +38,16 @@ public class UnavailableModeTests
     }
 
     [Fact]
-    public async Task Ready_Stays_Ok_So_Process_Is_Considered_Healthy()
+    public async Task Ready_Is503_While_Live_RemainsOk()
     {
         using var factory = MakeUnavailableFactory();
         using var client = factory.CreateClient();
 
         var resp = await client.GetAsync("/ready");
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, resp.StatusCode);
+
+        var live = await client.GetAsync("/live");
+        Assert.Equal(HttpStatusCode.OK, live.StatusCode);
     }
 
     [Fact]

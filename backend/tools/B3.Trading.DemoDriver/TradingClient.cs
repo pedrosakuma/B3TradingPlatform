@@ -53,6 +53,12 @@ internal sealed class TradingClient
         return await resp.Content.ReadFromJsonAsync<HealthResponse>(JsonOpts, ct);
     }
 
+    public async Task<bool> IsReadyAsync(CancellationToken ct)
+    {
+        using var resp = await _http.GetAsync("/ready", ct);
+        return resp.IsSuccessStatusCode;
+    }
+
     public async Task<SubmitResult> SubmitOrderAsync(string symbol, string side, long qty, decimal price, CancellationToken ct)
     {
         await EnsureAuthenticatedAsync(ct);
@@ -128,4 +134,3 @@ internal readonly record struct InjectResult(bool Success, long LeavesQuantity, 
     public static InjectResult Ok(long leaves, long cum) => new(true, leaves, cum, null);
     public static InjectResult Failed(string reason) => new(false, 0, 0, reason);
 }
-

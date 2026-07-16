@@ -1822,6 +1822,7 @@ public sealed class AlgoEngine : BackgroundService
                     return;
 
                 case OrderSubmissionResultKind.Drained:
+                case OrderSubmissionResultKind.ReconciliationRequired:
                     await RecordTerminalAsync(algo, rt, AlgoStatus.Suspended, AlgoTerminalReason.Drained).ConfigureAwait(false);
                     return;
 

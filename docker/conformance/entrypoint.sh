@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Conformance runner entrypoint.
 #
-# Validates env vars + readiness before invoking dotnet test, so
+# Validates env vars + process liveness before invoking dotnet test, so
 # misconfiguration fails loudly instead of producing a green run with
 # zero tests executed (the bare ConformanceFactAttribute would skip).
 #
@@ -35,27 +35,64 @@ require_env B3T_AUTH_PASS
 # any skip from this point is a config/contract drift we want to see.
 export B3T_REQUIRE_CONFIGURED=true
 
-# Strip a single trailing slash so $url/ready doesn't collapse into
+# Strip a single trailing slash so $url/live doesn't collapse into
 # // and trip the most paranoid reverse proxies.
 base_url=${B3T_BASE_URL%/}
+live_url=${B3T_LIVE_URL:-$base_url/live}
 ready_url=${B3T_READY_URL:-$base_url/ready}
+health_url=$base_url/health
 login_url=$base_url/auth/login
 
 echo "[conformance] target: $base_url"
-echo "[conformance] waiting for $ready_url ..."
+echo "[conformance] waiting for $live_url ..."
 
-# The trading-host /ready returns 200 when up + not draining, 503 when
-# draining. We treat anything 2xx as ready. Total wait budget: 60 s.
+# Process preflight must not require order-ingress readiness: Unavailable mode
+# intentionally returns 503 from /ready while remaining a healthy conformance
+# target. Individual specs assert /ready semantics. Total wait budget: 60 s.
 deadline=$((SECONDS + 60))
-until curl --silent --show-error --fail --max-time 3 -o /dev/null "$ready_url"; do
+until curl --silent --show-error --fail --max-time 3 -o /dev/null "$live_url"; do
     if (( SECONDS >= deadline )); then
-        echo "ERROR: $ready_url never became ready within 60s" >&2
+        echo "ERROR: $live_url never became live within 60s" >&2
         exit $EX_UNAVAILABLE
     fi
     sleep 1
 done
 
-echo "[conformance] /ready ok; preflight login as '$B3T_AUTH_USER' ..."
+echo "[conformance] /live ok."
+
+# Most conformance runs submit orders and therefore need order-ingress
+# readiness, not merely a live process. Unavailable-mode runs are the
+# exception: /ready is expected to stay 503 and the specs assert that.
+# B3T_REQUIRE_READY=true|false overrides auto-detection.
+require_ready=${B3T_REQUIRE_READY:-auto}
+if [[ $require_ready == auto ]]; then
+    health_json=$(curl --silent --show-error --fail --max-time 5 "$health_url" || true)
+    if [[ $health_json == *'"mode":"Unavailable"'* ]]; then
+        require_ready=false
+    else
+        require_ready=true
+    fi
+fi
+
+if [[ $require_ready == true ]]; then
+    echo "[conformance] waiting for order-ingress readiness at $ready_url ..."
+    deadline=$((SECONDS + 60))
+    until curl --silent --show-error --fail --max-time 3 -o /dev/null "$ready_url"; do
+        if (( SECONDS >= deadline )); then
+            echo "ERROR: $ready_url never became ready within 60s" >&2
+            exit $EX_UNAVAILABLE
+        fi
+        sleep 1
+    done
+    echo "[conformance] /ready ok."
+elif [[ $require_ready != false ]]; then
+    echo "ERROR: B3T_REQUIRE_READY must be true, false, or auto (got '$require_ready')" >&2
+    exit $EX_USAGE
+else
+    echo "[conformance] skipping /ready wait (Unavailable/process-only run)."
+fi
+
+echo "[conformance] preflight login as '$B3T_AUTH_USER' ..."
 
 # Preflight the login so a wrong password / missing seed user fails with
 # a clear EX_CONFIG (78) before we spin up the test runner. The actual

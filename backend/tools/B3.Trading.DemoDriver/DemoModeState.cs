@@ -4,8 +4,8 @@ namespace B3.Trading.DemoDriver;
 
 /// <summary>
 /// Hosted resolution of the trading-host's exchange mode + readiness, shared
-/// between the submitter and injector workers. Polls /health until the host
-/// is ready (or until cancellation), then exposes derived flags.
+/// between the submitter and injector workers. Polls /health for capability
+/// discovery, then /ready before enabling any submitting mode.
 ///
 /// Auto-detect uses <c>health.exchange.erInjectionEnabled</c> (Mock +
 /// AllowErInjection=true, after #163) to enable injects, NOT the legacy
@@ -44,8 +44,8 @@ internal sealed class DemoModeState
 
     public async Task BootstrapAsync(TradingClient probeClient, CancellationToken ct)
     {
-        // Wait for /health to return ready (or at least respond) — gives
-        // trading-host time to come up if compose started us in parallel.
+        // Wait for /health to respond so capabilities can be discovered.
+        // Order submission is gated separately on /ready below.
         var deadline = DateTime.UtcNow.AddMinutes(2);
         HealthResponse? health = null;
         while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
@@ -90,9 +90,38 @@ internal sealed class DemoModeState
                 break;
         }
 
+        if (SubmitsEnabled && !await WaitForOrderIngressReadyAsync(probeClient, deadline, ct))
+        {
+            _log.LogError(
+                "[mode] /ready never allowed order ingress for exchange={Mode}; disabling submits and injects.",
+                ExchangeMode);
+            SubmitsEnabled = false;
+            InjectsEnabled = false;
+        }
+
         _log.LogInformation("[mode] resolved exchange={Mode} submits={Submits} injects={Injects} (DEMO_MODE={Demo})",
             ExchangeMode, SubmitsEnabled, InjectsEnabled, explicitMode);
         _ready.TrySetResult();
+    }
+
+    private async Task<bool> WaitForOrderIngressReadyAsync(
+        TradingClient probeClient,
+        DateTime deadline,
+        CancellationToken ct)
+    {
+        while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
+        {
+            try
+            {
+                if (await probeClient.IsReadyAsync(ct)) return true;
+            }
+            catch (Exception ex)
+            {
+                _log.LogDebug(ex, "[mode] /ready probe failed; retrying");
+            }
+            await Task.Delay(TimeSpan.FromSeconds(2), ct);
+        }
+        return false;
     }
 
     private void ApplyAutoDetect()

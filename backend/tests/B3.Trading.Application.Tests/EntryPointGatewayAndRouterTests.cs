@@ -2,6 +2,7 @@ using System.Diagnostics.Metrics;
 
 using B3.Trading.Application.Risk;
 using B3.Trading.Application;
+using B3.Trading.Application.Lifecycle;
 using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Domain;
@@ -163,6 +164,52 @@ public class EntryPointGatewayAndRouterTests
     }
 
     [Fact]
+    public void Router_WalBackpressure_DoesNotApplyFillInMemory()
+    {
+        var ownership = new OrderOwnershipMap();
+        var book = new WorkingOrderBook();
+        var positions = new PositionKeeper();
+        var owner = new EndClientId("alice");
+        var order = new Order(1UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m);
+        book.TryAdd(order);
+        ownership.Register(1UL, owner);
+
+        var sink = new TestSink();
+        var proc = new ExecutionReportProcessor(
+            ownership, book, positions, sink, new NoOpMarginProvider(),
+            NullLogger<ExecutionReportProcessor>.Instance);
+        var client = new MockEntryPointClient();
+        var dispatcher = new EventDispatcher(new BackpressureStore(), new[] { (IExecutionFanOutSink)sink });
+        var drain = new TestDrainController();
+        using var router = new EntryPointExecutionReportRouter(
+            client, proc, dispatcher, orders: null, bookTop: null, drain: drain);
+
+        Assert.Throws<WalBackpressureException>(() =>
+            client.EmitExecutionReport(new ExecutionReportEnvelope(
+                1UL, EpExecType.Fill, 0, 100, 100, 30m, null)));
+
+        Assert.Equal(OrderStatus.PendingNew, order.Status);
+        Assert.Equal(0, order.CumulativeQuantity);
+        Assert.Empty(sink.Events);
+        Assert.True(drain.IsDraining);
+        Assert.Equal("wal_execution_report_rejected", drain.Reason);
+    }
+
+    [Fact]
+    public void RealGateway_WalSubscriberFailure_PropagatesInsteadOfContinuing()
+    {
+        var envelope = new ExecutionReportEnvelope(
+            1UL, EpExecType.Fill, 0, 100, 100, 30m, null);
+
+        Assert.Throws<WalBackpressureException>(() =>
+            B3EntryPointClientGateway.InvokeExecutionReportSubscribers(
+                _ => throw new WalBackpressureException("forced saturation"),
+                envelope,
+                "FIRM-A",
+                NullLogger<B3EntryPointClientGateway>.Instance));
+    }
+
+    [Fact]
     public void Router_OnBusinessReject_AppendsWalEvent_WithGatewayStampedFirm()
     {
         // #432. BusinessReject from the venue must reach the WAL so the
@@ -284,6 +331,35 @@ public class EntryPointGatewayAndRouterTests
             yield break;
         }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class BackpressureStore : IEventStore
+    {
+        public long CurrentSeq => 0;
+        public long Append(WalEvent evt) =>
+            throw new WalBackpressureException("forced saturation");
+        public long Append(WalEvent evt, ReadOnlyMemory<byte> preSerialisedPayload) =>
+            throw new WalBackpressureException("forced saturation");
+        public ValueTask FlushAsync(CancellationToken ct = default) => ValueTask.CompletedTask;
+        public async System.Collections.Generic.IAsyncEnumerable<(long Seq, WalEvent Event)> ReadFromAsync(
+            long sinceSeqExclusive,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class TestDrainController : IDrainController
+    {
+        public bool IsDraining { get; private set; }
+        public string? Reason { get; private set; }
+        public void BeginDrain(string reason)
+        {
+            IsDraining = true;
+            Reason = reason;
+        }
     }
 
     private sealed class TestSink : IExecutionEventSink, IExecutionFanOutSink

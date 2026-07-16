@@ -20,6 +20,7 @@ services:
   conformance:
     environment:
       B3T_REAL_STACK_CONFORMANCE: "true"
+      B3T_REQUIRE_READY: "true"
       B3T_DOCKER_CONTROL: "true"
       B3T_DOCKER_MATCHING_CONTAINER: b3-matching-platform
       B3T_DOCKER_PATH: /usr/bin/docker

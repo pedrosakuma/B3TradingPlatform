@@ -43,6 +43,8 @@ public static class TradingPersistenceServiceCollectionExtensions
                 ? new FileEventStore(o, sp.GetRequiredService<ILogger<FileEventStore>>())
                 : new NullEventStore();
         });
+        services.AddSingleton<IEventStoreHealth>(sp =>
+            (IEventStoreHealth)sp.GetRequiredService<IEventStore>());
         services.AddSingleton<StateSnapshotter>();
         services.AddSingleton<EventReplayer>();
         services.AddSingleton<PersistenceRecovery>();

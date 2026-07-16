@@ -86,10 +86,10 @@ VOLUME ["/var/lib/b3trading"]
 
 USER b3trading
 
-# /ready (not /live) is the right gate for orchestration: it flips to 503 once
-# graceful drain begins, so a rolling update sees the instance go unready
-# before the connection drops.
+# Container health is process-only. /ready is deliberately stricter and may
+# return 503 while a healthy process is drained, WAL-faulted, exchange-unready,
+# or intentionally running in Unavailable mode.
 HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \
-    CMD curl --fail --silent --show-error http://127.0.0.1:5000/ready || exit 1
+    CMD curl --fail --silent --show-error http://127.0.0.1:5000/live || exit 1
 
 ENTRYPOINT ["dotnet", "B3.Trading.Host.dll"]

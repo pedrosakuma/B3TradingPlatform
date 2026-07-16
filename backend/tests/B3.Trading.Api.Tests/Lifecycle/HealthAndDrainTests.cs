@@ -4,7 +4,9 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using B3.Trading.Api.Lifecycle;
 using B3.Trading.Application.Observability;
+using B3.Trading.Application.Persistence;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace B3.Trading.Api.Tests.Lifecycle;
 
@@ -42,6 +44,8 @@ public class HealthAndDrainTests : IClassFixture<TestAppFactory>
         Assert.True(root.TryGetProperty("uptime", out _));
         var p = root.GetProperty("persistence");
         Assert.False(p.GetProperty("enabled").GetBoolean()); // tests disable persistence
+        Assert.True(p.GetProperty("healthy").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, p.GetProperty("terminalFault").ValueKind);
     }
 
     [Fact]
@@ -90,6 +94,34 @@ public class HealthAndDrainTests : IClassFixture<TestAppFactory>
     }
 
     [Fact]
+    public async Task WalFault_Causes_Ready503_While_LiveRemainsOk()
+    {
+        using var factory = TestAppFactory.WithOverrides(
+            new Dictionary<string, string?>(),
+            services =>
+            {
+                services.RemoveAll<IEventStoreHealth>();
+                services.AddSingleton<IEventStoreHealth>(
+                    new FaultedEventStoreHealth(new IOException("disk full")));
+            });
+        using var client = factory.CreateClient();
+
+        var ready = await client.GetAsync("/ready");
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, ready.StatusCode);
+
+        var live = await client.GetAsync("/live");
+        Assert.Equal(HttpStatusCode.OK, live.StatusCode);
+
+        var health = await client.GetAsync("/health");
+        health.EnsureSuccessStatusCode();
+        using var doc = JsonDocument.Parse(await health.Content.ReadAsStringAsync());
+        Assert.Equal("unready", doc.RootElement.GetProperty("status").GetString());
+        var persistence = doc.RootElement.GetProperty("persistence");
+        Assert.False(persistence.GetProperty("healthy").GetBoolean());
+        Assert.Equal(nameof(IOException), persistence.GetProperty("terminalFault").GetString());
+    }
+
+    [Fact]
     public async Task Order_Submit_Increments_OrdersSubmitted_Counter()
     {
         using var factory = new TestAppFactory();
@@ -122,5 +154,11 @@ public class HealthAndDrainTests : IClassFixture<TestAppFactory>
         // OTel/Prometheus would scrape — guards against accidental rename.
         Assert.NotNull(MetricsRegistry.OrdersSubmitted);
         Assert.Equal("B3.Trading", MetricsRegistry.Meter.Name);
+    }
+
+    private sealed class FaultedEventStoreHealth(Exception terminalFault) : IEventStoreHealth
+    {
+        public bool IsHealthy => false;
+        public Exception? TerminalFault { get; } = terminalFault;
     }
 }

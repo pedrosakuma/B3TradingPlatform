@@ -154,7 +154,13 @@ public static class OrdersEndpoints
                         statusCode: StatusCodes.Status502BadGateway),
                 OrderSubmissionResultKind.WalBackpressure =>
                     Results.Json(
-                        new { error = "system busy (WAL backpressure)", detail = result.Reason },
+                        new
+                        {
+                            error = result.Code == "wal_faulted"
+                                ? "service unavailable (WAL faulted)"
+                                : "system busy (WAL backpressure)",
+                            detail = result.Reason,
+                        },
                         statusCode: StatusCodes.Status503ServiceUnavailable),
                 OrderSubmissionResultKind.Drained =>
                     Results.Json(
@@ -164,6 +170,15 @@ public static class OrdersEndpoints
                     Results.BadRequest(new { error = result.Reason }),
                 OrderSubmissionResultKind.DuplicateClOrdId =>
                     Results.Conflict(new { error = result.Reason, clOrdId = result.ClOrdId.ToString() }),
+                OrderSubmissionResultKind.ReconciliationRequired =>
+                    Results.Json(
+                        new
+                        {
+                            error = "WAL reconciliation required; service draining",
+                            clOrdId = result.ClOrdId.ToString(),
+                            code = result.Code,
+                        },
+                        statusCode: StatusCodes.Status503ServiceUnavailable),
                 _ => Results.StatusCode(StatusCodes.Status500InternalServerError),
             };
         });
@@ -334,4 +349,3 @@ public sealed record ModifyOrderRequest(
     decimal? StopPrice = null,
     /// <summary>Q1.1 (#253). Optional override; null = keep original (or auto-cleared when TIF is moved away from <c>GTD</c>). Required when changing TIF to <c>GTD</c>.</summary>
     DateTimeOffset? GoodTillDate = null);
-

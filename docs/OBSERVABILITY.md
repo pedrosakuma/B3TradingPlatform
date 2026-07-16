@@ -15,7 +15,7 @@ state machine, gap recovery — are deferred until the
 | Endpoint | Purpose | Status semantics |
 | --- | --- | --- |
 | `GET /live` | Liveness — is the process alive? | Always **200**. Used by orchestrator to decide whether to restart. |
-| `GET /ready` | Readiness — accepting traffic? | **200** while serving, **503** while draining or when the identity directory fails health checks. Used by load balancers to route requests. |
+| `GET /ready` | Readiness — can order ingress be accepted safely? | **200** only when not draining, identity and WAL are healthy, and required exchange sessions can accept orders. **503** in `Mode=Unavailable`. Used by load balancers to route requests. |
 | `GET /health` | Rich JSON for humans/dashboards | Always **200**. Body contains `status`, `uptime`, `startedAt`, `persistence` and `identityDirectory` blocks. |
 
 Sample `/health` body:

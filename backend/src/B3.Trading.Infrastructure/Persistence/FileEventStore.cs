@@ -38,7 +38,7 @@ namespace B3.Trading.Infrastructure.Persistence;
 /// <see cref="PersistenceOptions.SegmentMaxBytes"/>.
 /// </para>
 /// </summary>
-public sealed class FileEventStore : IEventStore
+public sealed class FileEventStore : IEventStore, IEventStoreHealth
 {
     private static readonly WalEventJsonContext JsonContext = WalEventJsonContext.Default;
 
@@ -56,6 +56,7 @@ public sealed class FileEventStore : IEventStore
     private string? _activeDay;
     private int _activeOrdinal;
     private bool _disposed;
+    private Exception? _terminalFault;
 
     public FileEventStore(IOptions<PersistenceOptions> opts, ILogger<FileEventStore> logger)
         : this(opts.Value, logger) { }
@@ -79,11 +80,14 @@ public sealed class FileEventStore : IEventStore
     }
 
     public long CurrentSeq { get { lock (_seqLock) return _seq; } }
+    public bool IsHealthy => Volatile.Read(ref _terminalFault) is null;
+    public Exception? TerminalFault => Volatile.Read(ref _terminalFault);
 
     public long Append(WalEvent evt)
     {
         ArgumentNullException.ThrowIfNull(evt);
         if (_disposed) throw new ObjectDisposedException(nameof(FileEventStore));
+        ThrowIfFaulted();
 
         var payload = JsonSerializer.SerializeToUtf8Bytes(evt, JsonContext.WalEvent);
         return AppendCore(evt, payload);
@@ -102,6 +106,7 @@ public sealed class FileEventStore : IEventStore
                 "Pre-serialised WAL payload must not be empty.", nameof(preSerialisedPayload));
         }
         if (_disposed) throw new ObjectDisposedException(nameof(FileEventStore));
+        ThrowIfFaulted();
 
         // Defensively copy the caller's bytes. The channel record owns
         // the buffer until the writer drains it (well past this call's
@@ -123,16 +128,28 @@ public sealed class FileEventStore : IEventStore
         // so the critical section stays tiny.
         lock (_seqLock)
         {
+            ThrowIfFaulted();
             var seq = ++_seq;
             var record = new PendingRecord(seq, payload, evt.TimestampUtc.ToUnixTimeMilliseconds());
             if (!_channel.Writer.TryWrite(record))
             {
                 // Roll back the seq so we don't leave a hole in the log.
                 _seq--;
+                ThrowIfFaulted();
                 MetricsRegistry.WalBackpressure.Add(1,
                     new KeyValuePair<string, object?>("call_site", "store.append"));
                 throw new WalBackpressureException(
                     $"WAL channel is full ({_opts.ChannelCapacity}); refusing append.");
+            }
+
+            // The writer publishes its terminal fault from an exception
+            // filter, before stack unwinding reaches the loop catch. Re-check
+            // after enqueue so an append racing that publication cannot
+            // report success and permit an in-memory mutation.
+            if (Volatile.Read(ref _terminalFault) is not null)
+            {
+                _seq--;
+                ThrowIfFaulted();
             }
             MetricsRegistry.WalAppended.Add(1);
             return seq;
@@ -141,12 +158,29 @@ public sealed class FileEventStore : IEventStore
 
     public async ValueTask FlushAsync(CancellationToken ct = default)
     {
+        ThrowIfFaulted();
         if (_disposed) return;
         // Inject a sentinel and wait for the writer to drain past it.
         var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var fence = new PendingRecord(-1, Array.Empty<byte>(), 0, tcs);
-        await _channel.Writer.WriteAsync(fence, ct).ConfigureAwait(false);
-        await tcs.Task.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await _channel.Writer.WriteAsync(fence, ct).ConfigureAwait(false);
+        }
+        catch (ChannelClosedException)
+        {
+            ThrowIfFaulted();
+            throw;
+        }
+
+        var completed = await Task.WhenAny(tcs.Task, _writerTask).WaitAsync(ct).ConfigureAwait(false);
+        if (completed == _writerTask)
+        {
+            await _writerTask.ConfigureAwait(false);
+            ThrowIfFaulted();
+            throw new InvalidOperationException("WAL writer stopped before completing the flush fence.");
+        }
+        await tcs.Task.ConfigureAwait(false);
     }
 
     public async IAsyncEnumerable<(long Seq, WalEvent Event)> ReadFromAsync(
@@ -456,17 +490,31 @@ public sealed class FileEventStore : IEventStore
             }
         }
         catch (OperationCanceledException) { /* expected on dispose */ }
-        catch (Exception ex)
+        catch (Exception ex) when (RecordTerminalFault(ex))
         {
-            _logger.LogCritical(ex, "FileEventStore writer loop crashed; subsequent appends will queue without ever being flushed.");
+            _logger.LogCritical(ex, "FileEventStore writer loop crashed; the WAL is permanently closed to appends.");
         }
         finally
         {
             try { _activeWriter?.Flush(); } catch { /* best-effort */ }
-            _activeWriter?.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            try { _activeWriter?.DisposeAsync().AsTask().GetAwaiter().GetResult(); } catch { /* best-effort */ }
             _activeWriter = null;
             _writerStopped.TrySetResult();
         }
+    }
+
+    private bool RecordTerminalFault(Exception fault)
+    {
+        if (Interlocked.CompareExchange(ref _terminalFault, fault, null) is null)
+            _channel.Writer.TryComplete(fault);
+        return true;
+    }
+
+    private void ThrowIfFaulted()
+    {
+        var fault = Volatile.Read(ref _terminalFault);
+        if (fault is not null)
+            throw new WalFaultedException("WAL writer is permanently faulted; refusing operation.", fault);
     }
 
     private void FlushBatch(List<PendingRecord> batch)

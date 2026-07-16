@@ -1,5 +1,6 @@
 using B3.Trading.Api.Lifecycle;
 using B3.Trading.Application.Identity;
+using B3.Trading.Application.Persistence;
 using B3.Trading.EntryPointListener;
 using B3.Trading.Infrastructure;
 using B3.Trading.Infrastructure.Identity;
@@ -18,8 +19,8 @@ namespace B3.Trading.Host.Lifecycle;
 /// <list type="bullet">
 ///   <item><c>/live</c> — process is up. Always 200 unless the runtime
 ///   has died. Used by liveness probes to decide whether to restart.</item>
-///   <item><c>/ready</c> — accepting traffic. 503 while draining. Used by
-///   readiness probes / load balancers to decide whether to route requests.</item>
+///   <item><c>/ready</c> — order ingress is safe: not draining, identity and
+///   WAL healthy, and every required exchange session established.</item>
 ///   <item><c>/health</c> — rich JSON for humans + dashboards. Includes
 ///   uptime, drain state, persistence config snapshot.</item>
 /// </list>
@@ -38,9 +39,16 @@ public static class HealthEndpoints
     {
         app.MapGet("/live", () => Results.Ok("alive"));
 
-        app.MapGet("/ready", async (DrainState drain, ITradingUserDirectory directory, CancellationToken ct) =>
+        app.MapGet("/ready", async (
+            HttpContext ctx,
+            DrainState drain,
+            ITradingUserDirectory directory,
+            IEventStoreHealth wal,
+            ExchangeStatus exchange,
+            CancellationToken ct) =>
         {
-            if (drain.IsDraining)
+            var sessions = ctx.RequestServices.GetService<IFirmSessionStatusProvider>();
+            if (drain.IsDraining || !wal.IsHealthy || !IsExchangeReady(exchange, sessions))
                 return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
             var identity = await directory.CheckHealthAsync(ct);
             return identity.Ready
@@ -48,7 +56,7 @@ public static class HealthEndpoints
                 : Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
         });
 
-        app.MapGet("/health", async (HttpContext ctx, DrainState drain, IOptions<PersistenceOptions> persist, IOptions<IdentityDirectoryOptions> identityOptions, ITradingUserDirectory directory, CancellationToken ct) =>
+        app.MapGet("/health", async (HttpContext ctx, DrainState drain, IOptions<PersistenceOptions> persist, IOptions<IdentityDirectoryOptions> identityOptions, ITradingUserDirectory directory, IEventStoreHealth wal, CancellationToken ct) =>
         {
             var p = persist.Value;
             var identity = await directory.CheckHealthAsync(ct);
@@ -71,7 +79,12 @@ public static class HealthEndpoints
 
             return Results.Json(new
             {
-                status = drain.IsDraining ? "draining" : "ready",
+                status = drain.IsDraining
+                    ? "draining"
+                    : identity.Ready && wal.IsHealthy && (exchange is null || IsExchangeReady(exchange, sessions))
+                        ? "ready"
+                        : "unready",
+                drainReason = drain.Reason,
                 uptime = drain.Uptime.ToString(@"hh\:mm\:ss"),
                 startedAt = drain.StartedAt,
                 persistence = new
@@ -80,6 +93,8 @@ public static class HealthEndpoints
                     firmId = p.FirmId,
                     dataDirectory = p.DataDirectory,
                     snapshotInterval = p.SnapshotInterval,
+                    healthy = wal.IsHealthy,
+                    terminalFault = wal.TerminalFault?.GetType().Name,
                 },
                 identityDirectory = new
                 {
@@ -103,8 +118,9 @@ public static class HealthEndpoints
     /// Compose the <c>exchange</c> block of <c>/health</c>. When live session
     /// state is available (Real mode), <c>readyForOrders</c> is the AND of
     /// the configuration-level <see cref="ExchangeStatus.ReadyForOrders"/>
-    /// and "every firm in <c>established</c>". A configured-but-disconnected
-    /// gateway therefore reports <c>readyForOrders=false</c>, fixing the
+    /// and "every configured firm has an <c>established</c> snapshot".
+    /// A configured firm with a disconnected or missing session therefore
+    /// reports <c>readyForOrders=false</c>, fixing the
     /// long-standing surfacing bug where the badge stayed green while
     /// submits were silently rejected by the SDK guard. Without a session
     /// provider we keep the legacy shape (no <c>firms[]</c>, ready by mode
@@ -124,7 +140,7 @@ public static class HealthEndpoints
         }
 
         var firms = sessions.Snapshot();
-        var allEstablished = firms.Count == 0 || firms.All(f => f.IsEstablished);
+        var allEstablished = HasAllRequiredSessions(exchange, firms);
         return new
         {
             mode = exchange.Mode.ToString(),
@@ -140,4 +156,15 @@ public static class HealthEndpoints
             }).ToArray(),
         };
     }
+
+    private static bool IsExchangeReady(ExchangeStatus exchange, IFirmSessionStatusProvider? sessions)
+    {
+        if (!exchange.ReadyForOrders) return false;
+        return sessions is null || HasAllRequiredSessions(exchange, sessions.Snapshot());
+    }
+
+    private static bool HasAllRequiredSessions(
+        ExchangeStatus exchange,
+        IReadOnlyList<FirmSessionStatus> firms) =>
+        firms.Count >= exchange.FirmCount && firms.All(f => f.IsEstablished);
 }

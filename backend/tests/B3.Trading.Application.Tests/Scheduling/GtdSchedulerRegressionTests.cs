@@ -695,9 +695,10 @@ public class GtdSchedulerRegressionTests
             DateTimeOffset? requestedGoodTillDate, CancellationToken ct) => Task.CompletedTask;
     }
 
-    private sealed class NeverDrainingGate : IDrainGate
+    private sealed class NeverDrainingGate : IDrainController
     {
         public bool IsDraining => false;
+        public void BeginDrain(string reason) { }
     }
 
     private sealed class NoOpExecutionEventSink : IExecutionEventSink

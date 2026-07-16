@@ -19,17 +19,23 @@ namespace B3.Trading.Api.Lifecycle;
 /// <c>/live</c> stays 200 throughout — the process is still healthy,
 /// just refusing new work.
 /// </summary>
-public sealed class DrainState : IDrainGate
+public sealed class DrainState : IDrainController
 {
     private readonly Stopwatch _uptime = Stopwatch.StartNew();
     private long _draining; // 0 = serving, 1 = draining
+    private string? _reason;
 
     public bool IsDraining => Interlocked.Read(ref _draining) == 1;
+    public string? Reason => Volatile.Read(ref _reason);
     public TimeSpan Uptime => _uptime.Elapsed;
     public DateTimeOffset StartedAt { get; } = DateTimeOffset.UtcNow;
 
-    public void BeginDrain()
+    public void BeginDrain() => BeginDrain("host_stopping");
+
+    public void BeginDrain(string reason)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+        Interlocked.CompareExchange(ref _reason, reason, null);
         Interlocked.Exchange(ref _draining, 1);
     }
 }
@@ -54,7 +60,8 @@ internal sealed class DrainHostedService : IHostedService
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
-        _registration = _lifetime.ApplicationStopping.Register(() => _state.BeginDrain());
+        _registration = _lifetime.ApplicationStopping.Register(
+            () => _state.BeginDrain("host_stopping"));
         return Task.CompletedTask;
     }
 
