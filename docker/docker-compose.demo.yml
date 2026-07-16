@@ -113,6 +113,8 @@ services:
     container_name: b3-trading-demo-driver
     restart: unless-stopped
     depends_on:
+      # Image health is process-only (/live). DemoModeState independently
+      # polls /ready before enabling submit/inject workers.
       trading-host:
         condition: service_healthy
     environment:

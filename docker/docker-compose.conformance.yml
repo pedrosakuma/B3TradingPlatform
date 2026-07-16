@@ -59,6 +59,9 @@ services:
     image: ${CONFORMANCE_IMAGE:-b3-trading-conformance:dev}
     profiles: ["conformance"]
     depends_on:
+      # Image health is process-only (/live). The entrypoint performs the
+      # explicit /ready wait for order-capable modes and skips it only for
+      # Unavailable contract runs.
       trading-host:
         condition: service_healthy
     environment:

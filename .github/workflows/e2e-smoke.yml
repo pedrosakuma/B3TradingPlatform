@@ -41,6 +41,17 @@ jobs:
               -f docker/docker-compose.e2e.yml \
               up -d --build --wait trading-host frontend
 
+      - name: Wait for order-ingress readiness
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:5000/ready >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          curl --fail --silent --show-error http://127.0.0.1:5000/ready
+
       - name: Set up Node
         uses: actions/setup-node@v5
         with:

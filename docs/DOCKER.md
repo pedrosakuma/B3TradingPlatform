@@ -110,6 +110,9 @@ console
 which:
 
 - logs in as `bot-clientA` and `bot-clientB` (role=user),
+- waits for order-ingress `/ready` before enabling submit/inject loops (important
+  when pointed at a Real-mode host whose HTTP process is live before FIXP
+  sessions establish),
 - submits random buy/sell limit orders around the configured reference
   prices at `DEMO_SUBMIT_RATE_HZ` (default 0.5 Hz per bot),
 - logs in as `demo-admin` (role=admin) and POSTs `/admin/simulator/er`
@@ -319,7 +322,9 @@ your `.env`):
 | `B3T_AUTH_PASS` | `${TRADING_SEED_PASSWORD:-wonderland}` | Plaintext that produced the host's hash/salt. |
 
 The entrypoint preflights the env, waits up to 60 s for process `/live`, and
-attempts a login before invoking `dotnet test`. Exit codes follow BSD
+then waits for `/ready` unless `/health` reports `Mode=Unavailable` (override
+with `B3T_REQUIRE_READY=true|false`). It attempts a login before invoking
+`dotnet test`. Exit codes follow BSD
 sysexits so failures are easy to distinguish:
 
 | Code | Meaning |
@@ -327,7 +332,7 @@ sysexits so failures are easy to distinguish:
 | `0` | All tests passed. |
 | `1` | A test failed (or `B3T_REQUIRE_CONFIGURED=true` and env is invalid — the runner image always sets this so a misconfig fails loudly instead of silently skipping). |
 | `64` | A required env var is missing. |
-| `69` | `B3T_BASE_URL/live` never came up within 60 s. |
+| `69` | `B3T_BASE_URL/live`, or required order-ingress `/ready`, never came up within 60 s. |
 | `78` | Preflight login was rejected (creds don't match the host's seed). |
 
 You can also point the same image at any deployed host (UAT / staging),

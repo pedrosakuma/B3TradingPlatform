@@ -39,6 +39,8 @@ export B3T_REQUIRE_CONFIGURED=true
 # // and trip the most paranoid reverse proxies.
 base_url=${B3T_BASE_URL%/}
 live_url=${B3T_LIVE_URL:-$base_url/live}
+ready_url=${B3T_READY_URL:-$base_url/ready}
+health_url=$base_url/health
 login_url=$base_url/auth/login
 
 echo "[conformance] target: $base_url"
@@ -56,7 +58,41 @@ until curl --silent --show-error --fail --max-time 3 -o /dev/null "$live_url"; d
     sleep 1
 done
 
-echo "[conformance] /live ok; preflight login as '$B3T_AUTH_USER' ..."
+echo "[conformance] /live ok."
+
+# Most conformance runs submit orders and therefore need order-ingress
+# readiness, not merely a live process. Unavailable-mode runs are the
+# exception: /ready is expected to stay 503 and the specs assert that.
+# B3T_REQUIRE_READY=true|false overrides auto-detection.
+require_ready=${B3T_REQUIRE_READY:-auto}
+if [[ $require_ready == auto ]]; then
+    health_json=$(curl --silent --show-error --fail --max-time 5 "$health_url" || true)
+    if [[ $health_json == *'"mode":"Unavailable"'* ]]; then
+        require_ready=false
+    else
+        require_ready=true
+    fi
+fi
+
+if [[ $require_ready == true ]]; then
+    echo "[conformance] waiting for order-ingress readiness at $ready_url ..."
+    deadline=$((SECONDS + 60))
+    until curl --silent --show-error --fail --max-time 3 -o /dev/null "$ready_url"; do
+        if (( SECONDS >= deadline )); then
+            echo "ERROR: $ready_url never became ready within 60s" >&2
+            exit $EX_UNAVAILABLE
+        fi
+        sleep 1
+    done
+    echo "[conformance] /ready ok."
+elif [[ $require_ready != false ]]; then
+    echo "ERROR: B3T_REQUIRE_READY must be true, false, or auto (got '$require_ready')" >&2
+    exit $EX_USAGE
+else
+    echo "[conformance] skipping /ready wait (Unavailable/process-only run)."
+fi
+
+echo "[conformance] preflight login as '$B3T_AUTH_USER' ..."
 
 # Preflight the login so a wrong password / missing seed user fails with
 # a clear EX_CONFIG (78) before we spin up the test runner. The actual

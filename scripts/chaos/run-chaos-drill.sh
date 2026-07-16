@@ -404,6 +404,12 @@ main() {
         bring_up_stack
     fi
 
+    log "waiting up to ${READY_TIMEOUT_S}s for initial /ready before scenario..."
+    if ! wait_for_ready "$READY_TIMEOUT_S"; then
+        log "FATAL: trading-host is live but order ingress never became ready."
+        exit 2
+    fi
+
     case "$scenario" in
         host-kill)         scenario_host_kill ;;
         marketdata-kill)   scenario_marketdata_kill ;;
