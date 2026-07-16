@@ -372,7 +372,7 @@ public sealed record LoginTwoFactorRequiredResponse(bool Requires2fa, string Tot
 /// <summary>
 /// Returned by <c>/auth/login</c> when the user has
 /// <c>Require2FA=true</c> but no active enrollment. The client must
-/// POST <c>{ enrollmentToken }</c> as <c>X-Enrollment-Token</c> (or
-/// body field) to <c>/auth/2fa/enroll</c> to bootstrap. (#303)
+/// POST <c>{ enrollmentToken }</c> to <c>/auth/2fa/enroll</c>, then confirm the returned
+/// TOTP challenge to receive a JWT. (#303)
 /// </summary>
 public sealed record LoginEnrollmentRequiredResponse(bool Requires2faEnrollment, string EnrollmentToken);

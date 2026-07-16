@@ -28,8 +28,13 @@ public class TotpEndpointTests
         return totp.ComputeTotp(when);
     }
 
-    private sealed record EnrollResponseDto(string Secret, string OtpauthUri, List<string> RecoveryCodes);
+    private sealed record EnrollResponseDto(
+        string Secret,
+        string OtpauthUri,
+        List<string> RecoveryCodes,
+        string? TotpChallengeToken = null);
     private sealed record LoginRequiresDto(bool Requires2fa, string TotpChallengeToken);
+    private sealed record LoginEnrollmentRequiredDto(bool Requires2faEnrollment, string EnrollmentToken);
     private sealed record TotpStatusDto(bool Enrolled);
 
     [Fact]
@@ -43,6 +48,144 @@ public class TotpEndpointTests
         Assert.True(body.TryGetProperty("token", out var tokenEl));
         Assert.False(string.IsNullOrEmpty(tokenEl.GetString()));
         Assert.False(body.TryGetProperty("requires2fa", out _));
+    }
+
+    [Fact]
+    public async Task MandatoryEnrollment_CompletesLogin_AndChallengesAreOneTime()
+    {
+        await using var factory = TestAppFactory.WithOverrides(new Dictionary<string, string?>
+        {
+            ["Trading:Auth:Users:0:Require2FA"] = "true",
+        });
+        var http = factory.CreateClient();
+
+        var login = await http.PostAsJsonAsync("/auth/login",
+            new { username = "alice", password = "wonderland" });
+        Assert.Equal(HttpStatusCode.OK, login.StatusCode);
+        var required = await login.Content.ReadFromJsonAsync<LoginEnrollmentRequiredDto>();
+        Assert.True(required!.Requires2faEnrollment);
+
+        var enrollResponse = await http.PostAsJsonAsync("/auth/2fa/enroll",
+            new { enrollmentToken = required.EnrollmentToken });
+        Assert.Equal(HttpStatusCode.OK, enrollResponse.StatusCode);
+        var enroll = await enrollResponse.Content.ReadFromJsonAsync<EnrollResponseDto>();
+        Assert.NotNull(enroll);
+        Assert.False(string.IsNullOrEmpty(enroll!.TotpChallengeToken));
+
+        var replayEnroll = await http.PostAsJsonAsync("/auth/2fa/enroll",
+            new { enrollmentToken = required.EnrollmentToken });
+        Assert.Equal(HttpStatusCode.Unauthorized, replayEnroll.StatusCode);
+
+        var verify = await http.PostAsJsonAsync("/auth/2fa/verify", new
+        {
+            code = ComputeCode(enroll.Secret),
+            totpChallengeToken = enroll.TotpChallengeToken,
+        });
+        Assert.Equal(HttpStatusCode.OK, verify.StatusCode);
+        var session = await verify.Content.ReadFromJsonAsync<LoginResponse>();
+        Assert.False(string.IsNullOrEmpty(session!.Token));
+
+        var replayVerify = await http.PostAsJsonAsync("/auth/2fa/verify", new
+        {
+            code = ComputeCode(enroll.Secret, stepOffset: 1),
+            totpChallengeToken = enroll.TotpChallengeToken,
+        });
+        Assert.Equal(HttpStatusCode.Unauthorized, replayVerify.StatusCode);
+    }
+
+    [Fact]
+    public async Task MandatoryEnrollmentChallenge_IsBoundToItsUser()
+    {
+        await using var factory = TestAppFactory.WithOverrides(new Dictionary<string, string?>
+        {
+            ["Trading:Auth:Users:0:Require2FA"] = "true",
+            ["Trading:Auth:Users:1:Require2FA"] = "true",
+        });
+        var http = factory.CreateClient();
+
+        var aliceRequired = (await (await http.PostAsJsonAsync("/auth/login",
+            new { username = "alice", password = "wonderland" }))
+            .Content.ReadFromJsonAsync<LoginEnrollmentRequiredDto>())!;
+        var aliceEnroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll",
+            new { enrollmentToken = aliceRequired.EnrollmentToken }))
+            .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
+
+        var bobRequired = (await (await http.PostAsJsonAsync("/auth/login",
+            new { username = "bob", password = "wonderland" }))
+            .Content.ReadFromJsonAsync<LoginEnrollmentRequiredDto>())!;
+        var bobEnroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll",
+            new { enrollmentToken = bobRequired.EnrollmentToken }))
+            .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
+
+        var aliceWindow = new HashSet<string>(
+            Enumerable.Range(-1, 3).Select(offset => ComputeCode(aliceEnroll.Secret, offset)));
+        var bobCode = Enumerable.Range(-1, 3)
+            .Select(offset => ComputeCode(bobEnroll.Secret, offset))
+            .First(code => !aliceWindow.Contains(code));
+        var crossed = await http.PostAsJsonAsync("/auth/2fa/verify", new
+        {
+            code = bobCode,
+            totpChallengeToken = aliceEnroll.TotpChallengeToken,
+        });
+        Assert.Equal(HttpStatusCode.Unauthorized, crossed.StatusCode);
+
+        var bobVerified = await http.PostAsJsonAsync("/auth/2fa/verify", new
+        {
+            code = bobCode,
+            totpChallengeToken = bobEnroll.TotpChallengeToken,
+        });
+        Assert.Equal(HttpStatusCode.OK, bobVerified.StatusCode);
+    }
+
+    [Fact]
+    public async Task MandatoryEnrollmentChallenge_Expires()
+    {
+        await using var factory = TestAppFactory.WithOverrides(new Dictionary<string, string?>
+        {
+            ["Trading:Auth:Users:0:Require2FA"] = "true",
+            ["Trading:Auth:Totp:ChallengeTokenTtl"] = "00:00:01",
+        });
+        var http = factory.CreateClient();
+        var required = (await (await http.PostAsJsonAsync("/auth/login",
+            new { username = "alice", password = "wonderland" }))
+            .Content.ReadFromJsonAsync<LoginEnrollmentRequiredDto>())!;
+        var enroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll",
+            new { enrollmentToken = required.EnrollmentToken }))
+            .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
+        await Task.Delay(1500);
+        var expired = await http.PostAsJsonAsync("/auth/2fa/verify", new
+        {
+            code = ComputeCode(enroll.Secret),
+            totpChallengeToken = enroll.TotpChallengeToken,
+        });
+        Assert.Equal(HttpStatusCode.Unauthorized, expired.StatusCode);
+    }
+
+    [Fact]
+    public async Task EnrolledUser_CanRenewSession_WithPasswordThenTotp()
+    {
+        await using var factory = new TestAppFactory();
+        var authed = await factory.CreateAuthedClientAsync();
+        var initialToken = authed.DefaultRequestHeaders.Authorization!.Parameter;
+        var enroll = (await (await authed.PostAsJsonAsync("/auth/2fa/enroll", new { }))
+            .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
+        await authed.PostAsJsonAsync("/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
+
+        var renewalClient = factory.CreateClient();
+        var passwordResponse = await renewalClient.PostAsJsonAsync("/auth/login",
+            new { username = "alice", password = "wonderland" });
+        var challenge = await passwordResponse.Content.ReadFromJsonAsync<LoginRequiresDto>();
+        Assert.True(challenge!.Requires2fa);
+
+        var renewedResponse = await renewalClient.PostAsJsonAsync("/auth/2fa/verify", new
+        {
+            code = ComputeCode(enroll.Secret, stepOffset: 1),
+            totpChallengeToken = challenge.TotpChallengeToken,
+        });
+        Assert.Equal(HttpStatusCode.OK, renewedResponse.StatusCode);
+        var renewed = await renewedResponse.Content.ReadFromJsonAsync<LoginResponse>();
+        Assert.False(string.IsNullOrEmpty(renewed!.Token));
+        Assert.NotEqual(initialToken, renewed.Token);
     }
 
     [Fact]
@@ -562,6 +705,29 @@ public class TotpEndpointTests
         // "alive" still consumable.
         Assert.True(store.TryConsume("alive", out var found));
         Assert.NotNull(found);
+    }
+
+    [Fact]
+    public void TotpChallengeStore_IsExpiringOneTimeAndUserBound()
+    {
+        var clock = new FakeClock(DateTimeOffset.UnixEpoch);
+        var opts = new TestOptionsMonitor<TotpOptions>(new TotpOptions
+        {
+            ChallengeTokenTtl = TimeSpan.FromMinutes(5),
+        });
+        var store = new InMemoryTotpChallengeStore(opts, clock);
+
+        var token = store.Issue("alice", TotpChallengeKind.VerifyEnrollment);
+        Assert.Equal("alice", store.Peek(token)!.Username);
+        Assert.False(store.TryConsume(token, TotpChallengeKind.Verify, out _));
+        Assert.True(store.TryConsume(token, TotpChallengeKind.VerifyEnrollment, out var consumed));
+        Assert.Equal("alice", consumed!.Username);
+        Assert.False(store.TryConsume(token, TotpChallengeKind.VerifyEnrollment, out _));
+
+        var expired = store.Issue("bob", TotpChallengeKind.Verify);
+        clock.Advance(TimeSpan.FromMinutes(6));
+        Assert.Null(store.Peek(expired));
+        Assert.False(store.TryConsume(expired, TotpChallengeKind.Verify, out _));
     }
 
     private sealed class FakeClock : TimeProvider
