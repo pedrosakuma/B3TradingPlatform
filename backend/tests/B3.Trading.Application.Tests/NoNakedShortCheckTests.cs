@@ -106,6 +106,23 @@ public class NoNakedShortCheckTests
     }
 
     [Fact]
+    public void Sell_OpenLeavesBeyondLongMaxValue_RejectsWithoutClampBypass()
+    {
+        var (check, positions, orders) = Build();
+        positions.ApplyFill(
+            DefaultFirm,
+            new EndClientId(DefaultOwner),
+            DefaultSymbol,
+            OrderSide.Buy,
+            long.MaxValue,
+            1m);
+        SubmitInto(orders, MakeSell(1UL, long.MaxValue));
+        SubmitInto(orders, MakeSell(2UL, 1));
+
+        Assert.False(check.Check(SellCtx(1)).Approved);
+    }
+
+    [Fact]
     public void Sell_OpenBuysDoNotCount_PessimisticProjection()
     {
         var (check, positions, orders) = Build();
