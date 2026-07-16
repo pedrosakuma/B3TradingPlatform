@@ -29,6 +29,11 @@ services:
       Trading__Auth__Users__4__Iterations: "600000"
       Trading__Auth__Users__4__Role: admin
       Trading__Auth__Users__4__Firm: default
+      # #416. Margin enforcement now defaults to ON. The conformance smoke
+      # user (alice by default) submits real Buy orders in multiple specs,
+      # so fund the account up front the same way an operator would.
+      Trading__Cash__Seeds__2__EndClientId: ${TRADING_SEED_USER:-alice}
+      Trading__Cash__Seeds__2__InitialAvailable: "100000.00"
       # Q4.4 (#304). The conformance suite authenticates from a single
       # container IP and issues many logins in rapid succession across
       # specs. With the default per-IP auth bucket (burst=3, 1/s refill)

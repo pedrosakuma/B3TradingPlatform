@@ -315,8 +315,15 @@ brittle; the metric + ops paging is the compromise.
   (null / empty dictionaries). Existing deployments need no config
   change to keep running with v1 behavior.
 - Adding `MarginCheck` to the pipeline is gated by
-  `Trading:Risk:Margin:Enabled` (default `false` for the first
-  release, flipped to `true` once the stub provider is documented).
+  `Trading:Risk:Margin:Enabled`. **Default flipped to `true` in #416**
+  (was `false` for the first releases): the trading-platform factory
+  default must be the safe posture, since `CashLedger.ApplyFill` is
+  non-blocking by design and the pre-trade guard lives in the margin
+  provider. Operators who genuinely want the permissive `NoOp` mode
+  (test compositions that don't seed cash, fixtures that don't model
+  accounts) opt out explicitly via `Trading:Risk:Margin:Enabled=false`;
+  the host emits a startup warning when this is disabled outside
+  `Development` so the drift is visible on dashboards.
 - `MinTickSize` / `MinLotSize` only enforce when the value is set on
   `RiskOptions`; absent values mean "no check" (matches today's
   schema convention).

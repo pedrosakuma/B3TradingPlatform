@@ -11,8 +11,7 @@ namespace B3.Trading.Host.Composition;
 /// <summary>
 /// Wires the event-sourced WAL + periodic snapshot pipeline plus the
 /// recovery + EOD materialiser surface. Position/cash seed options are
-/// bound here too — they are owned by the persistence lifecycle (applied
-/// AFTER recovery in <see cref="TradingHostStartup.RunRecoveryAndSeedingAsync"/>).
+/// bound here too — they are owned by the persistence lifecycle.
 /// </summary>
 public static class TradingPersistenceServiceCollectionExtensions
 {

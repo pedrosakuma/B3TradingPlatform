@@ -115,6 +115,15 @@ public class TestAppFactory : WebApplicationFactory<Program>
                 ["Trading:Risk:Default:PriceCollarPercent"] = "10",
                 ["Trading:Risk:Default:PositionLimit"] = "5000",
                 ["Trading:Risk:ReferencePrices:PETR4"] = "30.0",
+                // #416. The factory default for Margin:Enabled flipped to
+                // true so production hosts get a fail-safe posture. The
+                // broad API test suite generally does NOT seed cash and
+                // intentionally relies on the permissive (NoOp) provider
+                // so /orders happy-paths don't all fail with
+                // INSUFFICIENT_CASH. Tests that exercise the margin path
+                // opt back in via WithOverrides — see MarginCheckIntegrationTests
+                // and SignupCashSeedTests for the pattern.
+                ["Trading:Risk:Margin:Enabled"] = "false",
                 ["Trading:Persistence:Enabled"] = "false",
                 // Slice 2 of #97 ships rate limits enabled by default.
                 // The default suite hits /auth/login and /auth/signup

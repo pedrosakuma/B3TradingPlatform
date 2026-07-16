@@ -45,8 +45,6 @@ public class CashLedgerTests
     [Fact]
     public void SeedIfAbsent_AfterFill_DoesNotOverwrite()
     {
-        // Mirrors the production lifecycle: WAL replay/fill happens
-        // BEFORE the seed loop runs. Seed must never clobber real cash.
         var ledger = new CashLedger();
         var alice = new EndClientId("alice");
 
@@ -56,7 +54,7 @@ public class CashLedgerTests
     }
 
     [Fact]
-    public void Snapshot_SkipsZeroBalances_KeepsNegatives()
+    public void Snapshot_PreservesMaterialisedZeroAndNegativeBalances()
     {
         var ledger = new CashLedger();
         var alice = new EndClientId("alice");
@@ -64,15 +62,17 @@ public class CashLedgerTests
         var carol = new EndClientId("carol");
 
         ledger.SeedIfAbsent(alice, 1_000m);
-        ledger.SeedIfAbsent(bob, 0m);              // skipped
+        ledger.SeedIfAbsent(bob, 0m);
         ledger.SeedIfAbsent(carol, -250m);         // kept (debt is real)
 
         var snap = ledger.Snapshot().ToDictionary(s => s.EndClientId, s => s.Available);
+        var raw = ledger.RawSnapshot().ToDictionary(s => s.EndClientId, s => s.Available);
 
-        Assert.Equal(2, snap.Count);
+        Assert.Equal(3, snap.Count);
         Assert.Equal(1_000m, snap["alice"]);
+        Assert.Equal(0m, snap["bob"]);
         Assert.Equal(-250m, snap["carol"]);
-        Assert.False(snap.ContainsKey("bob"));
+        Assert.Equal(0m, raw["bob"]);
     }
 
     [Fact]

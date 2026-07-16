@@ -1,4 +1,5 @@
 using B3.Trading.Application.Risk;
+using B3.Trading.Application.Persistence;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -66,6 +67,50 @@ public class ReserveOnSubmitMarginProviderTests
         Assert.Equal(300m, p.AvailableForTesting("alice"));
         p.OnExecution(1, ExecKind.PartialFill, 20);
         Assert.Equal(500m, p.AvailableForTesting("alice"));
+    }
+
+    [Fact]
+    public void RecoveryState_RestoresLeavesAndOnlyTheReplaceUpsizeDelta()
+    {
+        var (p, _) = Build(initial: 1_000m);
+        var order = new OrderSnapshot(
+            1,
+            "alice",
+            "PETR4",
+            1234,
+            OrderSide.Buy.ToString(),
+            OrderType.Limit.ToString(),
+            100,
+            10m,
+            60,
+            40,
+            OrderStatus.PartiallyFilled.ToString(),
+            "FIRM");
+        var intent = new OrderReplacementIntent(
+            OriginalClOrdId: 1,
+            NewClOrdId: 2,
+            Owner: new EndClientId("alice"),
+            Symbol: "PETR4",
+            SecurityId: 1234,
+            Side: OrderSide.Buy,
+            Type: OrderType.Limit,
+            NewQuantity: 80,
+            NewPrice: 10m,
+            FirmId: "FIRM",
+            ParentAlgoId: null,
+            AlgoSliceSeq: null);
+        var pending = new PendingReplacementEntrySnapshot(
+            intent,
+            DateTimeOffset.UtcNow,
+            AmbiguousMarginHeld: true,
+            AmbiguousAt: DateTimeOffset.UtcNow,
+            NewRemainingNotional: 800m);
+
+        var restored = p.RestoreRecoveryState([order], [pending]);
+
+        Assert.Equal((1, 1), restored);
+        Assert.Equal(800m, p.ReservedForTesting("alice"));
+        Assert.Equal(200m, p.AvailableForTesting("alice"));
     }
 
     [Fact]

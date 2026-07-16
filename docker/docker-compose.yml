@@ -298,6 +298,13 @@ services:
       Trading__Reports__Cvm__OwnerHashSalt: ${TRADING_CVM_OWNER_HASH_SALT:-local-dev-cvm-salt-not-for-prod}
       # ClOrdId masking salt for drop-copy compliance (#435). Required by boot guard.
       Trading__DropCopy__ClOrdIdMaskSalt: ${TRADING_CLORDID_MASK_SALT:-local-dev-clordid-mask-salt-not-for-prod}
+      # #416. Margin enforcement now defaults to ON. Fund the default
+      # dogfood/recovery users that participate in real crossed-order
+      # flows so Buy submissions do not get risk-rejected on a cold stack.
+      Trading__Cash__Seeds__0__EndClientId: ${TRADING_SEED_USER_2:-bob}
+      Trading__Cash__Seeds__0__InitialAvailable: "100000.00"
+      Trading__Cash__Seeds__1__EndClientId: ${TRADING_SEED_USER_FIRM02:-bob-firm02}
+      Trading__Cash__Seeds__1__InitialAvailable: "100000.00"
       # Opening positions seeded for the default dogfood accounts so
       # both alice and bob can sell out of the box without being blocked
       # by the NoNakedShortCheck gate. Quantities are expressed in
