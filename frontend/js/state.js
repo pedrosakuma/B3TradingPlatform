@@ -997,7 +997,14 @@ export function setComplianceFeedPaused(paused) {
 }
 
 export function clearComplianceFeed() {
+  // Operator Clear action: keep the explicit pause/resume choice.
   state.complianceFeed = { paused: state.complianceFeed.paused, entries: [] };
+  notify("complianceFeed");
+}
+
+export function resetComplianceFeed() {
+  // Session boundary: a new principal must always receive frames.
+  state.complianceFeed = { paused: false, entries: [] };
   notify("complianceFeed");
 }
 

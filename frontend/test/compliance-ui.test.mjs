@@ -116,8 +116,7 @@ test("session renewal only reopens drop-copy for authorized roles", () => {
 });
 
 test("drop-copy feed buffer caps at COMPLIANCE_FEED_CAP and keeps newest", () => {
-  state.clearComplianceFeed();
-  state.setComplianceFeedPaused(false);
+  state.resetComplianceFeed();
   const cap = state.COMPLIANCE_FEED_CAP;
   // Overflow the ring by 50 — the oldest 50 must fall off the head.
   for (let i = 0; i < cap + 50; i++) {
@@ -131,12 +130,28 @@ test("drop-copy feed buffer caps at COMPLIANCE_FEED_CAP and keeps newest", () =>
 });
 
 test("paused feed drops appended frames on the floor", () => {
-  state.clearComplianceFeed();
+  state.resetComplianceFeed();
   state.setComplianceFeedPaused(true);
   state.appendComplianceFeed({ seq: 1, type: "fill" });
   state.appendComplianceFeed({ seq: 2, type: "fill" });
   assert.equal(state.getState().complianceFeed.entries.length, 0);
   state.setComplianceFeedPaused(false);
+  state.appendComplianceFeed({ seq: 3, type: "fill" });
+  assert.equal(state.getState().complianceFeed.entries.length, 1);
+});
+
+test("session reset clears pause while Clear preserves it", () => {
+  state.resetComplianceFeed();
+  state.appendComplianceFeed({ seq: 1, type: "fill" });
+  state.setComplianceFeedPaused(true);
+
+  state.clearComplianceFeed();
+  assert.deepEqual(state.getState().complianceFeed, { paused: true, entries: [] });
+  state.appendComplianceFeed({ seq: 2, type: "fill" });
+  assert.equal(state.getState().complianceFeed.entries.length, 0);
+
+  state.resetComplianceFeed();
+  assert.deepEqual(state.getState().complianceFeed, { paused: false, entries: [] });
   state.appendComplianceFeed({ seq: 3, type: "fill" });
   assert.equal(state.getState().complianceFeed.entries.length, 1);
 });

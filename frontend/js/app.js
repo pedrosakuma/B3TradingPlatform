@@ -859,6 +859,7 @@ function startSession(next) {
     next = { ...next, role: next.role ?? claims.role, firm: next.firm ?? claims.firm };
   }
   session = next;
+  state.resetComplianceFeed();
   state.setUser({
     username: next.username,
     expiresAt: next.expiresAt,
@@ -1535,7 +1536,7 @@ function logout({ broadcast = true, redirectEntra = true, clearEntraCache = fals
   session = null;
   mdConfig = null;
   closeComplianceDropCopy();
-  state.clearComplianceFeed();
+  state.resetComplianceFeed();
   clearSession();
   clearMdConfig(sessionStorage);
   // Fase 1 (#397). Drop the persisted tab so the next sign-in lands
