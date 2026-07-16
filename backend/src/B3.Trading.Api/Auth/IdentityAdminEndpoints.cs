@@ -56,6 +56,14 @@ public static class IdentityAdminEndpoints
 
             try
             {
+                AuditIdentityMutation(
+                    audit,
+                    http,
+                    AuditEventTypes.IdentityBindingCreate,
+                    "/admin/identity/users/{tradingUserId}/external-bindings",
+                    tradingUserId,
+                    before,
+                    IntendedSummary(before, rowVersionDelta: 1, bindingCountDelta: 1));
                 var binding = await directory.BindExternalIdentityAsync(
                     tradingUserId,
                     new ExternalIdentityBindingRequest(
@@ -65,19 +73,13 @@ public static class IdentityAdminEndpoints
                         validation.ObjectId),
                     req.ExpectedRowVersion,
                     ct);
-                var after = await SafeGetUserAsync(directory, tradingUserId, ct);
-                AuditIdentityMutation(
-                    audit,
-                    http,
-                    AuditEventTypes.IdentityBindingCreate,
-                    "/admin/identity/users/{tradingUserId}/external-bindings",
-                    tradingUserId,
-                    before,
-                    after,
-                    binding.Id);
                 return Results.Created(
                     $"/admin/identity/users/{Uri.EscapeDataString(tradingUserId)}/external-bindings/{binding.Id}",
                     ToDto(binding));
+            }
+            catch (WalBackpressureException)
+            {
+                return Error(StatusCodes.Status503ServiceUnavailable, "audit_backpressure");
             }
             catch (TradingUserDirectoryException ex)
             {
@@ -100,8 +102,6 @@ public static class IdentityAdminEndpoints
             var before = await SafeGetUserAsync(directory, tradingUserId, ct);
             try
             {
-                await directory.UnbindExternalIdentityAsync(tradingUserId, bindingId, req.ExpectedRowVersion, ct);
-                var after = await SafeGetUserAsync(directory, tradingUserId, ct);
                 AuditIdentityMutation(
                     audit,
                     http,
@@ -109,9 +109,14 @@ public static class IdentityAdminEndpoints
                     "/admin/identity/users/{tradingUserId}/external-bindings/{bindingId}",
                     tradingUserId,
                     before,
-                    after,
+                    IntendedSummary(before, rowVersionDelta: 1, bindingCountDelta: -1),
                     bindingId);
+                await directory.UnbindExternalIdentityAsync(tradingUserId, bindingId, req.ExpectedRowVersion, ct);
                 return Results.NoContent();
+            }
+            catch (WalBackpressureException)
+            {
+                return Error(StatusCodes.Status503ServiceUnavailable, "audit_backpressure");
             }
             catch (TradingUserDirectoryException ex)
             {
@@ -133,8 +138,6 @@ public static class IdentityAdminEndpoints
             var before = await SafeGetUserAsync(directory, tradingUserId, ct);
             try
             {
-                await directory.SetStatusAsync(tradingUserId, req.Status, req.ExpectedRowVersion, ct);
-                var after = await SafeGetUserAsync(directory, tradingUserId, ct);
                 AuditIdentityMutation(
                     audit,
                     http,
@@ -142,8 +145,14 @@ public static class IdentityAdminEndpoints
                     "/admin/identity/users/{tradingUserId}/status",
                     tradingUserId,
                     before,
-                    after);
+                    IntendedSummary(before, rowVersionDelta: 1, status: req.Status));
+                await directory.SetStatusAsync(tradingUserId, req.Status, req.ExpectedRowVersion, ct);
+                var after = await SafeGetUserAsync(directory, tradingUserId, ct);
                 return Results.Ok(ToDto(after!));
+            }
+            catch (WalBackpressureException)
+            {
+                return Error(StatusCodes.Status503ServiceUnavailable, "audit_backpressure");
             }
             catch (TradingUserDirectoryException ex)
             {
@@ -165,8 +174,6 @@ public static class IdentityAdminEndpoints
             var before = await SafeGetUserAsync(directory, tradingUserId, ct);
             try
             {
-                await directory.SetFirmAndRoleAsync(tradingUserId, req.FirmId, req.Role, req.ExpectedRowVersion, ct);
-                var after = await SafeGetUserAsync(directory, tradingUserId, ct);
                 AuditIdentityMutation(
                     audit,
                     http,
@@ -174,8 +181,14 @@ public static class IdentityAdminEndpoints
                     "/admin/identity/users/{tradingUserId}/authorization",
                     tradingUserId,
                     before,
-                    after);
+                    IntendedSummary(before, rowVersionDelta: 1, firmId: req.FirmId, role: req.Role));
+                await directory.SetFirmAndRoleAsync(tradingUserId, req.FirmId, req.Role, req.ExpectedRowVersion, ct);
+                var after = await SafeGetUserAsync(directory, tradingUserId, ct);
                 return Results.Ok(ToDto(after!));
+            }
+            catch (WalBackpressureException)
+            {
+                return Error(StatusCodes.Status503ServiceUnavailable, "audit_backpressure");
             }
             catch (TradingUserDirectoryException ex)
             {
@@ -199,14 +212,14 @@ public static class IdentityAdminEndpoints
         string resourcePath,
         string targetTradingUserId,
         TradingUser? before,
-        TradingUser? after,
+        string intendedAfter,
         long? bindingId = null)
     {
         var details = new Dictionary<string, string>
         {
             ["target_trading_user_id"] = targetTradingUserId,
             ["before"] = Summary(before),
-            ["after"] = Summary(after),
+            ["after"] = intendedAfter,
         };
         if (bindingId is not null)
             details["binding_id"] = bindingId.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -231,6 +244,23 @@ public static class IdentityAdminEndpoints
             : string.Create(
                 System.Globalization.CultureInfo.InvariantCulture,
                 $"row_version={user.RowVersion};status={user.Status};firm={user.FirmId};role={user.Role};bindings={user.ExternalIdentities.Count}");
+
+    private static string IntendedSummary(
+        TradingUser? before,
+        long rowVersionDelta,
+        int bindingCountDelta = 0,
+        string? status = null,
+        string? firmId = null,
+        string? role = null)
+    {
+        if (before is null)
+            return "missing";
+
+        var bindingCount = Math.Max(0, before.ExternalIdentities.Count + bindingCountDelta);
+        return string.Create(
+            System.Globalization.CultureInfo.InvariantCulture,
+            $"row_version={before.RowVersion + rowVersionDelta};status={status ?? before.Status};firm={firmId ?? before.FirmId};role={role ?? before.Role};bindings={bindingCount}");
+    }
 
     private static IResult DirectoryError(TradingUserDirectoryException ex) => ex switch
     {
