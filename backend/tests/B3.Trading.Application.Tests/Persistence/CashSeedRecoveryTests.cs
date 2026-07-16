@@ -242,7 +242,7 @@ public sealed class CashSeedRecoveryTests : IDisposable
             () =>
             {
                 ownership.Register(1, owner);
-                book.Add(new Order(
+                book.TryAdd(new Order(
                     1,
                     owner,
                     "PETR4",
@@ -281,15 +281,16 @@ public sealed class CashSeedRecoveryTests : IDisposable
                 CumulativeQuantity = cumulative,
                 LastQuantity = last,
                 LastPrice = 92.3852m,
+                Synthetic = false,
                 FirmId = "FIRM02",
             },
             () => processor.Apply(
                 1,
                 kind,
-                leavesQuantity: leaves,
-                cumulativeQuantity: cumulative,
-                lastQuantity: last,
-                lastPrice: 92.3852m,
+                leaves: leaves,
+                cumQty: cumulative,
+                lastQty: last,
+                lastPx: 92.3852m,
                 rejectReason: null,
                 origClOrdId: 0,
                 envelopeFirmId: "FIRM02"));
