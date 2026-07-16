@@ -89,6 +89,11 @@ public sealed class PlatformSnapshot
     /// or a fill arrives).
     /// </summary>
     public List<CashBalanceSnapshot> CashBalances { get; init; } = new();
+    /// <summary>
+    /// True when <see cref="CashBalances"/> carries an authoritative FirmId
+    /// dimension. False on snapshots written before #625.
+    /// </summary>
+    public bool CashBalancesFirmScoped { get; init; }
 
     /// <summary>
     /// Q2.2 (#269). Per-end-client cash balances projected from

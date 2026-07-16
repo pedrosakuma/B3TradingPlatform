@@ -73,7 +73,7 @@ public sealed class NoNakedShortCheck : IRiskCheck
         // owner trying to downsize a working Sell that was already
         // pinned at their inventory ceiling would be incorrectly
         // rejected as if both legs co-existed.
-        long projectionAdjustment = 0;
+        Int128 projectionAdjustment = 0;
         if (ctx.ReplaceOriginalClOrdId is { } origId
             && _orders.TryGet(origId, out var orig)
             && orig is not null
@@ -103,7 +103,8 @@ public sealed class NoNakedShortCheck : IRiskCheck
         // every open Sell fills and no open Buy does.
         // For modifies the new order is NOT yet in the book — the
         // adjustment above accounts for it explicitly.
-        var sellable = currentLong - (openSellLeaves + projectionAdjustment);
+        var sellable = (Int128)currentLong
+                       - ((Int128)openSellLeaves + projectionAdjustment);
         if (sellable < 0)
         {
             return RiskDecision.Reject(

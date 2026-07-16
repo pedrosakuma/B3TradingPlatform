@@ -168,7 +168,7 @@ public sealed class WorkingOrderBook
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(symbol);
         if (!_byOwner.TryGetValue(owner.Value, out var set)) return 0;
-        long total = 0;
+        Int128 total = 0;
         foreach (var clOrdId in set.Keys)
         {
             if (!_orders.TryGetValue(clOrdId, out var order)) continue;
@@ -176,9 +176,9 @@ public sealed class WorkingOrderBook
             if (!string.Equals(order.Symbol, symbol, StringComparison.Ordinal)) continue;
             if (IsTerminal(order.Status)) continue;
             if (order.IsStale) continue;
-            total += order.LeavesQuantity;
+            total = AddLeavesSaturating(total, order.LeavesQuantity);
         }
-        return total;
+        return total > long.MaxValue ? long.MaxValue : (long)total;
     }
 
     /// <summary>
@@ -210,13 +210,17 @@ public sealed class WorkingOrderBook
     /// firm bucket.
     /// </summary>
     public long SumOpenSellLeavesForSymbolAndFirm(string firmId, EndClientId owner, string symbol)
-        => SumOpenLeavesForSymbolAndFirm(firmId, owner, symbol, OrderSide.Sell);
+    {
+        var total = SumOpenLeavesForSymbolAndFirm(
+            firmId, owner, symbol, OrderSide.Sell);
+        return total > long.MaxValue ? long.MaxValue : (long)total;
+    }
 
     /// <summary>
     /// Sums executable leaves for one side in a firm/owner/symbol bucket.
     /// Stale and terminal orders are excluded.
     /// </summary>
-    public long SumOpenLeavesForSymbolAndFirm(
+    public Int128 SumOpenLeavesForSymbolAndFirm(
         string firmId,
         EndClientId owner,
         string symbol,
@@ -225,7 +229,7 @@ public sealed class WorkingOrderBook
         ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
         ArgumentException.ThrowIfNullOrWhiteSpace(symbol);
         if (!_byOwner.TryGetValue(owner.Value, out var set)) return 0;
-        long total = 0;
+        Int128 total = 0;
         foreach (var clOrdId in set.Keys)
         {
             if (!_orders.TryGetValue(clOrdId, out var order)) continue;
@@ -234,7 +238,7 @@ public sealed class WorkingOrderBook
             if (!string.Equals(order.FirmId, firmId, StringComparison.Ordinal)) continue;
             if (IsTerminal(order.Status)) continue;
             if (order.IsStale) continue;
-            total += order.LeavesQuantity;
+            total = AddLeavesSaturating(total, order.LeavesQuantity);
         }
         return total;
     }
@@ -242,7 +246,7 @@ public sealed class WorkingOrderBook
     /// <summary>
     /// Sub-account-scoped executable leaves for position-limit projection.
     /// </summary>
-    public long SumOpenLeavesForSubAccount(
+    public Int128 SumOpenLeavesForSubAccount(
         string firmId,
         EndClientId owner,
         SubAccountId subAccount,
@@ -253,7 +257,7 @@ public sealed class WorkingOrderBook
         ArgumentNullException.ThrowIfNull(subAccount);
         ArgumentException.ThrowIfNullOrWhiteSpace(symbol);
         if (!_byOwner.TryGetValue(owner.Value, out var set)) return 0;
-        long total = 0;
+        Int128 total = 0;
         foreach (var clOrdId in set.Keys)
         {
             if (!_orders.TryGetValue(clOrdId, out var order)) continue;
@@ -263,9 +267,17 @@ public sealed class WorkingOrderBook
             if (order.SubAccountId != subAccount) continue;
             if (IsTerminal(order.Status)) continue;
             if (order.IsStale) continue;
-            total += order.LeavesQuantity;
+            total = AddLeavesSaturating(total, order.LeavesQuantity);
         }
         return total;
+    }
+
+    private static Int128 AddLeavesSaturating(Int128 total, long leaves)
+    {
+        if (leaves <= 0) return total;
+        return Int128.MaxValue - total < leaves
+            ? Int128.MaxValue
+            : total + leaves;
     }
 
     /// <summary>

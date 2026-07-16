@@ -92,15 +92,25 @@ public sealed class SubAccountLimitsCheck : IRiskCheck
             var openLeaves = _book.SumOpenLeavesForSubAccount(
                 ctx.FirmId, ctx.Owner, sub, ctx.Symbol, ctx.Side);
             var adjustment = ProjectionAdjustment(ctx, sub);
-            var directionalExposure = openLeaves + adjustment;
-            long projectedNet;
-            lock (pos)
+            Int128 projectedNet;
+            Int128 projectedAbsolute;
+            try
             {
-                projectedNet = ctx.Side == OrderSide.Buy
-                    ? pos.NetQuantity + directionalExposure
-                    : pos.NetQuantity - directionalExposure;
+                var directionalExposure = checked(openLeaves + adjustment);
+                lock (pos)
+                {
+                    projectedNet = ctx.Side == OrderSide.Buy
+                        ? checked((Int128)pos.NetQuantity + directionalExposure)
+                        : checked((Int128)pos.NetQuantity - directionalExposure);
+                }
+                projectedAbsolute = Int128.Abs(projectedNet);
             }
-            if (Math.Abs(projectedNet) > posCap)
+            catch (OverflowException)
+            {
+                return RiskDecision.Reject(
+                    $"{LimitExceededPrefix}: projected position overflowed exposure range");
+            }
+            if (projectedAbsolute > posCap)
                 return RiskDecision.Reject(
                     $"{LimitExceededPrefix}: projected position {projectedNet} would exceed sub-account cap ±{posCap} for {ctx.FirmId}:{sub.Value} on {ctx.Symbol}");
         }
@@ -119,11 +129,11 @@ public sealed class SubAccountLimitsCheck : IRiskCheck
         return RiskDecision.Approve;
     }
 
-    private long ProjectionAdjustment(RiskContext ctx, SubAccountId subAccount)
+    private Int128 ProjectionAdjustment(RiskContext ctx, SubAccountId subAccount)
     {
         if (ctx.ReplaceOriginalClOrdId is { } originalClOrdId)
         {
-            long adjustment = ctx.ExecutableQuantity;
+            Int128 adjustment = ctx.ExecutableQuantity;
             if (_book.TryGet(originalClOrdId, out var original)
                 && original is not null
                 && original.Owner == ctx.Owner

@@ -37,22 +37,32 @@ public sealed class PositionLimitCheck : IRiskCheck
         var openLeaves = _orders.SumOpenLeavesForSymbolAndFirm(
             ctx.FirmId, ctx.Owner, ctx.Symbol, ctx.Side);
         var adjustment = ProjectionAdjustment(ctx);
-        var directionalExposure = openLeaves + adjustment;
-        var signed = ctx.Side == OrderSide.Buy
-            ? directionalExposure
-            : -directionalExposure;
-        var projected = Math.Abs(current + signed);
+        Int128 projected;
+        try
+        {
+            var directionalExposure = checked(openLeaves + adjustment);
+            var signed = ctx.Side == OrderSide.Buy
+                ? directionalExposure
+                : checked(-directionalExposure);
+            var projectedNet = checked((Int128)current + signed);
+            projected = Int128.Abs(projectedNet);
+        }
+        catch (OverflowException)
+        {
+            return RiskDecision.Reject(
+                "projected position overflowed exposure range");
+        }
         if (projected > limit.Value)
             return RiskDecision.Reject(
                 $"projected position {projected} exceeds limit {limit.Value}");
         return RiskDecision.Approve;
     }
 
-    private long ProjectionAdjustment(RiskContext ctx)
+    private Int128 ProjectionAdjustment(RiskContext ctx)
     {
         if (ctx.ReplaceOriginalClOrdId is { } originalClOrdId)
         {
-            long adjustment = ctx.ExecutableQuantity;
+            Int128 adjustment = ctx.ExecutableQuantity;
             if (_orders.TryGet(originalClOrdId, out var original)
                 && original is not null
                 && original.Owner == ctx.Owner

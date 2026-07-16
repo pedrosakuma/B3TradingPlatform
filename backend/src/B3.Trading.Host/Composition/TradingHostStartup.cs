@@ -203,11 +203,39 @@ internal static class TradingHostStartup
         void ApplyCashSeeds()
         {
             var cashOpts = scope.ServiceProvider.GetRequiredService<IOptions<CashSeedOptions>>().Value;
+            var ledger = scope.ServiceProvider.GetRequiredService<CashLedger>();
+            var cashLogger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("CashSeeder");
+            var authOpts = scope.ServiceProvider.GetRequiredService<IOptions<AuthOptions>>().Value;
+
+            foreach (var user in authOpts.Users)
+            {
+                if (string.IsNullOrWhiteSpace(user.Username)
+                    || string.IsNullOrWhiteSpace(user.Firm))
+                {
+                    continue;
+                }
+                ledger.ResolveLegacyBalances(new Dictionary<string, string>
+                {
+                    [user.Username] = user.Firm,
+                });
+            }
+            foreach (var seed in cashOpts.Seeds)
+            {
+                if (string.IsNullOrWhiteSpace(seed.EndClientId)
+                    || string.IsNullOrWhiteSpace(seed.FirmId))
+                {
+                    continue;
+                }
+                ledger.ResolveLegacyBalances(new Dictionary<string, string>
+                {
+                    [seed.EndClientId] = seed.FirmId,
+                });
+            }
+            ledger.EnsureNoUnmappedLegacyBalances();
+
             if (cashOpts.Seeds.Count == 0)
                 return;
 
-            var ledger = scope.ServiceProvider.GetRequiredService<CashLedger>();
-            var cashLogger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("CashSeeder");
             var applied = 0;
             var skipped = 0;
             foreach (var seed in cashOpts.Seeds)

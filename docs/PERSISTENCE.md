@@ -149,9 +149,12 @@ graceful shutdown. It captures:
 - `OrderOwnershipMap` (`ClOrdID → endClientId`)
 - `ClOrdIdPrefixRegistry` (`_nextPrefix` watermark + per-end-client
   counter watermarks)
-- `CashLedger` balances keyed by `(firmId, endClientId)`. Legacy snapshots
-  without `FirmId` restore into the `DEFAULT` bucket only; recovery never
-  duplicates one historical balance across every configured firm.
+- `CashLedger` balances keyed by `(firmId, endClientId)`. New snapshots set
+  `CashBalancesFirmScoped=true`. Legacy owner-only rows are migrated only when
+  exactly one firm can be inferred from recovered orders,
+  `Trading:Auth:Users`, or `Trading:Cash:Seeds`; conflicting or absent hints
+  fail startup. A seed used as the mapping never overwrites or adds to the
+  migrated balance.
 - operator deposit/withdrawal `CashKeeper` balances use the same firm scope.
   Their snapshot dictionary keys are `{firmId}|{endClientId}`; legacy plain
   keys also restore only into `DEFAULT`.

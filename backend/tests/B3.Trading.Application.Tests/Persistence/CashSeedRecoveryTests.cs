@@ -218,6 +218,58 @@ public sealed class CashSeedRecoveryTests : IDisposable
         }
     }
 
+    [Fact]
+    public void LegacySnapshotCash_MapsToSingleRecoveredOrderFirm_AndBlocksReseed()
+    {
+        var state = BuildState(new NullEventStore());
+        var owner = new EndClientId("bob");
+        var legacy = new PlatformSnapshot
+        {
+            CashBalances =
+            [
+                new CashBalanceSnapshot("bob", 750m),
+            ],
+            WorkingOrders =
+            [
+                new OrderSnapshot(
+                    1, "bob", "PETR4", 1234, "Buy", "Limit",
+                    10, 10m, 10, 0, "Working", "FIRM01"),
+            ],
+        };
+
+        state.Snapshotter.Restore(legacy);
+
+        Assert.False(state.Cash.SeedIfAbsent("FIRM01", owner, 10_000m));
+        Assert.Equal(750m, state.Cash.GetAvailable("FIRM01", owner));
+        Assert.Equal(0m, state.Cash.GetAvailable("DEFAULT", owner));
+    }
+
+    [Fact]
+    public void LegacySnapshotCash_WithOrdersAcrossFirmsFailsRecovery()
+    {
+        var state = BuildState(new NullEventStore());
+        var legacy = new PlatformSnapshot
+        {
+            CashBalances =
+            [
+                new CashBalanceSnapshot("bob", 750m),
+            ],
+            WorkingOrders =
+            [
+                new OrderSnapshot(
+                    1, "bob", "PETR4", 1234, "Buy", "Limit",
+                    10, 10m, 10, 0, "Working", "FIRM01"),
+                new OrderSnapshot(
+                    2, "bob", "VALE3", 5678, "Buy", "Limit",
+                    10, 10m, 10, 0, "Working", "FIRM02"),
+            ],
+        };
+
+        var error = Assert.Throws<InvalidOperationException>(
+            () => state.Snapshotter.Restore(legacy));
+        Assert.Contains("ambiguous", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     private PersistenceOptions Options() => new()
     {
         DataDirectory = _root,

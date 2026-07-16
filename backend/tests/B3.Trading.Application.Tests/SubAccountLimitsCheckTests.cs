@@ -139,6 +139,43 @@ public class SubAccountLimitsCheckTests
     }
 
     [Fact]
+    public void PositionCap_WorkingLeavesOverflowRejectsFailClosed()
+    {
+        var opts = new SubAccountRiskOptions
+        {
+            PerFirm = new()
+            {
+                [Firm] = new FirmSubAccountRiskOptions
+                {
+                    PerSubAccount = new()
+                    {
+                        [Sub] = new SubAccountRiskLimits
+                        {
+                            PositionLimit = long.MaxValue,
+                        },
+                    },
+                },
+            },
+        };
+        var (check, _, book, _) = Build(opts);
+        var owner = new EndClientId(Owner);
+        var sub = new SubAccountId(Sub);
+        foreach (var clOrdId in new[] { 1UL, 2UL })
+        {
+            var order = new Order(
+                clOrdId, owner, Symbol, 1234, OrderSide.Buy, OrderType.Limit,
+                long.MaxValue, 1m, Firm, subAccountId: sub);
+            book.TryAdd(order);
+            order.MarkWorking();
+        }
+
+        Assert.False(check.Check(Ctx(sub, qty: long.MaxValue) with
+        {
+            EvaluatedClOrdId = 2,
+        }).Approved);
+    }
+
+    [Fact]
     public void PerFirmDefault_AppliesWhenSubAccountNotListed()
     {
         var opts = new SubAccountRiskOptions

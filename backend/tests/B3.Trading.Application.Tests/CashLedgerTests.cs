@@ -160,16 +160,38 @@ public class CashLedgerTests
     }
 
     [Fact]
-    public void LegacySnapshotRow_RestoresOnlyIntoDefaultFirm()
+    public void LegacySnapshotRow_SeedMapsBalanceWithoutApplyingSeed()
     {
         var owner = new EndClientId("alice");
         var ledger = new CashLedger();
         ledger.Restore([
             new B3.Trading.Application.Persistence.CashBalanceSnapshot("alice", 500m),
-        ]);
+        ], firmScoped: false);
 
-        Assert.Equal(500m, ledger.GetAvailable("default", owner));
-        Assert.Equal(0m, ledger.GetAvailable("FIRM01", owner));
+        Assert.Throws<InvalidOperationException>(
+            ledger.EnsureNoUnmappedLegacyBalances);
+        Assert.False(ledger.SeedIfAbsent("FIRM01", owner, 10_000m));
+        Assert.Equal(500m, ledger.GetAvailable("FIRM01", owner));
+        Assert.Equal(0m, ledger.GetAvailable("default", owner));
+    }
+
+    [Fact]
+    public void LegacySnapshotRow_ConflictingFirmHintFailsClosed()
+    {
+        var ledger = new CashLedger();
+        ledger.Restore([
+            new B3.Trading.Application.Persistence.CashBalanceSnapshot("alice", 500m),
+        ], firmScoped: false);
+        ledger.ResolveLegacyBalances(new Dictionary<string, string>
+        {
+            ["alice"] = "FIRM01",
+        });
+
+        Assert.Throws<InvalidOperationException>(() =>
+            ledger.ResolveLegacyBalances(new Dictionary<string, string>
+            {
+                ["alice"] = "FIRM02",
+            }));
     }
 
     // ── #386 BalanceChanged event ────────────────────────────────────
