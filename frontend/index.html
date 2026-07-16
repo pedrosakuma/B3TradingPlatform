@@ -4,12 +4,13 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>B3TradingPlatform — Trader</title>
+  <link rel="stylesheet" href="css/design-system.css" />
   <link rel="stylesheet" href="css/styles.css" />
 </head>
 <body>
   <!-- LOGIN VIEW ------------------------------------------------------- -->
   <section id="login-view" class="view login-view">
-    <div id="auth-choice" class="login-card" hidden>
+    <div id="auth-choice" class="login-card form-surface" hidden>
       <h1 data-auth-title>B3TradingPlatform</h1>
       <p class="subtitle" data-auth-subtitle>Choose how to sign in.</p>
       <button type="button" id="entra-login">Continue with Microsoft Entra</button>
@@ -24,7 +25,7 @@
       <p id="auth-error" class="error" role="alert" hidden></p>
     </div>
 
-    <form id="login-form" class="login-card">
+    <form id="login-form" class="login-card form-surface">
       <h1>B3TradingPlatform</h1>
       <p class="subtitle">Participant trader console</p>
       <label>
@@ -50,17 +51,17 @@
       <p id="login-error" class="error" role="alert" hidden></p>
       <p id="login-signup-switch" class="login-switch">
         No account?
-        <button type="button" id="login-go-signup" class="link-button">Create account</button>
+        <button type="button" id="login-go-signup" class="btn btn-link">Create account</button>
       </p>
       <p id="login-choices-switch" class="login-switch" hidden>
-        <button type="button" id="login-go-choices" class="link-button">Back to sign-in choices</button>
+        <button type="button" id="login-go-choices" class="btn btn-link">Back to sign-in choices</button>
       </p>
     </form>
 
     <!-- #303. Second-factor step. Hidden until /auth/login returns
          requires2fa=true. Distinct card so the password fields aren't
          posted with the TOTP code. -->
-    <form id="totp-form" class="login-card" hidden>
+    <form id="totp-form" class="login-card form-surface" hidden>
       <h1>Two-factor authentication</h1>
       <p class="subtitle">Enter the 6-digit code from your authenticator app.</p>
       <label>
@@ -71,11 +72,11 @@
       <button type="submit" id="totp-submit">Verify</button>
       <p id="totp-error" class="error" role="alert" hidden></p>
       <p class="login-switch">
-        <button type="button" id="totp-cancel" class="link-button">Back to sign in</button>
+        <button type="button" id="totp-cancel" class="btn btn-link">Back to sign in</button>
       </p>
     </form>
 
-    <form id="signup-form" class="login-card" hidden>
+    <form id="signup-form" class="login-card form-surface" hidden>
       <h1>Create account</h1>
       <p class="subtitle">Self-service · FIRM01</p>
       <label>
@@ -101,7 +102,7 @@
       <p id="signup-error" class="error" role="alert" hidden></p>
       <p class="login-switch">
         Already have an account?
-        <button type="button" id="signup-go-login" class="link-button">Back to sign in</button>
+        <button type="button" id="signup-go-login" class="btn btn-link">Back to sign in</button>
       </p>
     </form>
   </section>
@@ -119,7 +120,7 @@
     <button id="mobile-nav-trigger" class="mobile-nav-trigger" type="button"
             aria-label="Open navigation menu" aria-expanded="false"
             aria-controls="mobile-nav-drawer">☰</button>
-    <div class="brand">B3TradingPlatform <span class="pill">trader</span></div>
+    <div class="brand">B3TradingPlatform <span class="pill badge badge-info">trader</span></div>
     <div class="status">
       <nav id="view-toggle" class="view-toggle" role="tablist" aria-label="Primary navigation">
         <button type="button" data-view="trader" class="active" role="tab"
@@ -141,18 +142,18 @@
           <option value="">— select —</option>
         </select>
       </label>
-      <span id="firms-health" class="firms-health" role="status" aria-live="polite" aria-label="Firms health" hidden></span>
-      <span id="gateway-status" class="status-pill status-disconnected" role="status" aria-live="polite" aria-label="Exchange gateway: unknown" title="Exchange gateway session state (FIXP)" hidden>gateway</span>
-      <span id="ws-status" class="status-pill status-disconnected" role="status" aria-live="polite" aria-label="WebSocket: disconnected" title="WebSocket connection">disconnected</span>
+      <span id="firms-health" class="firms-health badge badge-outline" role="status" aria-live="polite" aria-label="Firms health" hidden></span>
+      <span id="gateway-status" class="status-pill badge badge-uppercase status-disconnected" role="status" aria-live="polite" aria-label="Exchange gateway: unknown" title="Exchange gateway session state (FIXP)" hidden>gateway</span>
+      <span id="ws-status" class="status-pill badge badge-uppercase status-disconnected" role="status" aria-live="polite" aria-label="WebSocket: disconnected" title="WebSocket connection">disconnected</span>
       <span id="ws-reconnect" class="reconnect-countdown" hidden></span>
       <span id="user-label" class="user-label"></span>
-      <span id="user-role" class="role-badge" hidden></span>
+      <span id="user-role" class="role-badge badge badge-info badge-uppercase" hidden></span>
       <!-- #385. Live cash balance for the logged-in end-client.
            Hidden when no session is mounted. Updated by `balance.me`
            WS frames (see WebSocketBalanceFanOut / #386). -->
       <span id="user-balance" class="user-balance" role="status" aria-live="polite"
             aria-label="Available balance" title="Available balance" hidden>R$ —</span>
-      <button id="logout" class="link-button" type="button" aria-label="Logout">Logout</button>
+      <button id="logout" class="btn btn-link" type="button" aria-label="Logout">Logout</button>
     </div>
   </header>
 
@@ -190,7 +191,7 @@
            every IDs the existing ui.js / app.js handlers expect.
            ────────────────────────────────────────────────────────────── -->
       <section class="panel ticket ticket-compact">
-        <form id="ticket-form" class="ticket-form ticket-form-compact">
+        <form id="ticket-form" class="ticket-form ticket-form-compact form-surface">
           <div class="ticket-row-quick">
             <label class="ticket-field ticket-field-symbol">
               <span>Symbol</span>
@@ -223,12 +224,12 @@
               <input id="ticket-price" type="number" min="0" step="0.01" />
             </label>
             <span id="ticket-notional-preview" class="ticket-notional" title="Estimated notional value"></span>
-            <button type="submit" id="ticket-submit" class="ticket-submit">Submit</button>
+            <button type="submit" id="ticket-submit" class="ticket-submit btn btn-primary">Submit</button>
             <button type="button" id="open-chain-picker" class="btn btn-icon" title="Open option chain (Ctrl+O)" aria-label="Open option chain">
               ⛓
             </button>
             <button type="button" id="ticket-advanced-toggle"
-                    class="ticket-advanced-toggle" aria-expanded="false"
+                    class="ticket-advanced-toggle btn btn-secondary btn-sm" aria-expanded="false"
                     aria-controls="ticket-advanced"
                     title="Show advanced fields (TIF, Stop, GTD, Display qty)">
               <span class="ticket-advanced-caret" aria-hidden="true">▸</span>
@@ -287,12 +288,12 @@
            Markets / Watchlist / Auctions. Active sub-tab is persisted in
            sessionStorage and deep-linkable via #trading/<sub>.
            ────────────────────────────────────────────────────────────── -->
-      <div id="trader-subtabs" class="trader-subtabs" role="tablist" aria-label="Trader sub-tabs">
-        <button type="button" class="trader-subtab" data-trader-subtab="markets"
+      <div id="trader-subtabs" class="trader-subtabs tabs tabs-bordered" role="tablist" aria-label="Trader sub-tabs">
+        <button type="button" class="trader-subtab tab" data-trader-subtab="markets"
                 role="tab" aria-selected="true">Markets</button>
-        <button type="button" class="trader-subtab" data-trader-subtab="watchlist"
+        <button type="button" class="trader-subtab tab" data-trader-subtab="watchlist"
                 role="tab" aria-selected="false" tabindex="-1">Watchlist</button>
-        <button type="button" class="trader-subtab" data-trader-subtab="auctions"
+        <button type="button" class="trader-subtab tab" data-trader-subtab="auctions"
                 role="tab" aria-selected="false" tabindex="-1">Auctions</button>
       </div>
 
@@ -367,13 +368,13 @@
           <h2>
             <span class="md-title">
               Market data
-              <span id="md-status" class="status-pill status-disconnected" role="status" aria-live="polite" aria-label="Market data: disconnected" title="MarketData WebSocket connection">disconnected</span>
+              <span id="md-status" class="status-pill badge badge-uppercase status-disconnected" role="status" aria-live="polite" aria-label="Market data: disconnected" title="MarketData WebSocket connection">disconnected</span>
             </span>
             <span class="md-h2-controls">
               <!-- #71: Volume heatmap toggle — opt-in per the decision gate.
                    Persists in sessionStorage so a trader who relies on it
                    doesn't have to re-enable on every reload. -->
-              <button type="button" id="heatmap-toggle" class="icon-button"
+              <button type="button" id="heatmap-toggle" class="icon-button btn btn-secondary btn-icon btn-sm"
                       aria-pressed="false" aria-label="Toggle volume heatmap"
                       title="Toggle volume heatmap (10s rolling)">🔥</button>
             </span>
@@ -434,7 +435,7 @@
         <section id="auction-panel" class="panel auction-panel"
                  role="region" aria-label="Auction state">
           <h2>
-            <button type="button" id="auction-toggle" class="auction-toggle"
+            <button type="button" id="auction-toggle" class="auction-toggle btn btn-link"
                     aria-expanded="false" aria-controls="auction-body">
               <span class="auction-caret" aria-hidden="true">▸</span>
               Auction
@@ -479,11 +480,11 @@
            panel isn't active.
            ────────────────────────────────────────────────────────────── -->
       <section class="panel trader-bottom-band">
-        <div id="trader-bottom-tabs" class="trader-bottom-tabs" role="tablist"
+        <div id="trader-bottom-tabs" class="trader-bottom-tabs tabs tabs-bordered" role="tablist"
              aria-label="Lower-band toggle">
-          <button type="button" class="trader-bottom-tab" data-trader-bottom-tab="blotter"
+          <button type="button" class="trader-bottom-tab tab tab-sm" data-trader-bottom-tab="blotter"
                   role="tab" aria-selected="true">Working orders</button>
-          <button type="button" class="trader-bottom-tab" data-trader-bottom-tab="executions"
+          <button type="button" class="trader-bottom-tab tab tab-sm" data-trader-bottom-tab="executions"
                   role="tab" aria-selected="false" tabindex="-1">Executions</button>
         </div>
 
@@ -492,7 +493,7 @@
             <span class="blotter-title">
               Working orders <span id="blotter-count" class="count">0</span>
             </span>
-            <button type="button" id="cancel-all-btn" class="cancel-all-btn" hidden
+            <button type="button" id="cancel-all-btn" class="cancel-all-btn btn btn-outline-danger btn-sm" hidden
                     aria-label="Cancel all working orders">Cancel all</button>
           </div>
           <div class="blotter-filter">
@@ -523,9 +524,9 @@
             </table>
           </div>
           <div class="blotter-pagination" id="blotter-pagination" hidden>
-            <button type="button" id="blotter-prev" aria-label="Previous page">‹ Prev</button>
+            <button type="button" id="blotter-prev" class="btn btn-secondary btn-sm" aria-label="Previous page">‹ Prev</button>
             <span id="blotter-page-info" class="blotter-page-info">page 1 / 1</span>
-            <button type="button" id="blotter-next" aria-label="Next page">Next ›</button>
+            <button type="button" id="blotter-next" class="btn btn-secondary btn-sm" aria-label="Next page">Next ›</button>
           </div>
         </div>
 
@@ -547,7 +548,7 @@
     <header class="admin-subbar">
       <h2>Operator console — mode: <span id="admin-mode">—</span></h2>
       <div class="admin-actions">
-        <button id="admin-refresh" type="button" class="link-button">Refresh</button>
+        <button id="admin-refresh" type="button" class="btn btn-link">Refresh</button>
       </div>
     </header>
     <p id="admin-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
@@ -569,9 +570,9 @@
 
     <section class="panel admin-panel">
       <h3>End-clients (killed)</h3>
-      <form id="admin-add-ec-form" class="admin-inline-form">
+      <form id="admin-add-ec-form" class="admin-inline-form form-surface">
         <input id="admin-add-ec-id" type="text" placeholder="end-client id" maxlength="64" />
-        <button type="submit" class="danger-btn engage">Engage killswitch</button>
+        <button type="submit" class="btn btn-danger btn-sm">Engage killswitch</button>
       </form>
       <div class="table-scroll">
         <table>
@@ -583,9 +584,9 @@
 
     <section class="panel admin-panel">
       <h3>Symbols (halted)</h3>
-      <form id="admin-add-halt-form" class="admin-inline-form">
+      <form id="admin-add-halt-form" class="admin-inline-form form-surface">
         <input id="admin-add-halt-symbol" type="text" placeholder="symbol (e.g. PETR4)" maxlength="16" />
-        <button type="submit" class="danger-btn engage">Halt symbol</button>
+        <button type="submit" class="btn btn-danger btn-sm">Halt symbol</button>
       </form>
       <div class="table-scroll">
         <table>
@@ -597,7 +598,7 @@
 
     <section class="panel admin-panel">
       <h3>EOD materialisation</h3>
-      <button id="admin-eod-btn" type="button">Run EOD now</button>
+      <button id="admin-eod-btn" type="button" class="btn btn-secondary">Run EOD now</button>
       <pre id="admin-eod-output" class="admin-eod-output" hidden></pre>
     </section>
   </section>
@@ -608,7 +609,7 @@
 
   <!-- SESSION-EXPIRY MODAL -------------------------------------------- -->
   <div id="session-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="session-modal-title">
-    <form id="session-modal-form" class="modal-card">
+    <form id="session-modal-form" class="modal-card form-surface">
       <h2 id="session-modal-title">Session expiring</h2>
       <p id="session-modal-msg" class="muted-line">Re-enter your password to extend the session, or click outside to log out.</p>
       <label>
@@ -617,8 +618,8 @@
       </label>
       <p id="session-modal-error" class="error" hidden></p>
       <div class="modal-actions">
-        <button type="button" id="session-modal-logout" class="link-button">Logout</button>
-        <button type="submit" id="session-modal-submit">Renew session</button>
+        <button type="button" id="session-modal-logout" class="btn btn-link">Logout</button>
+        <button type="submit" id="session-modal-submit" class="btn btn-primary">Renew session</button>
       </div>
     </form>
   </div>
@@ -628,7 +629,7 @@
        row (or programmatically by app.js); pre-fills with the order's
        current quantity/price and routes through PUT /orders/{clOrdId}. -->
   <div id="modify-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="modify-modal-title">
-    <form id="modify-modal-form" class="modal-card">
+    <form id="modify-modal-form" class="modal-card form-surface">
       <h2 id="modify-modal-title">Modify order</h2>
       <p id="modify-modal-summary" class="muted-line"></p>
       <label>
@@ -642,8 +643,8 @@
       </label>
       <p id="modify-modal-error" class="error" hidden></p>
       <div class="modal-actions">
-        <button type="button" id="modify-modal-cancel" class="link-button">Cancel</button>
-        <button type="submit" id="modify-modal-submit">Send modify</button>
+        <button type="button" id="modify-modal-cancel" class="btn btn-link">Cancel</button>
+        <button type="submit" id="modify-modal-submit" class="btn btn-primary">Send modify</button>
       </div>
     </form>
   </div>
@@ -683,7 +684,7 @@
        arm submit, then the burst kicks off with progress. Only the
        Close button is enabled once the burst is running. -->
   <div id="cancel-all-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="cancel-all-title">
-    <form id="cancel-all-form" class="modal-card">
+    <form id="cancel-all-form" class="modal-card form-surface">
       <h2 id="cancel-all-title">Cancel all working orders</h2>
       <p id="cancel-all-summary" class="muted-line"></p>
       <label>
@@ -694,8 +695,8 @@
       <p id="cancel-all-progress" class="muted-line" hidden></p>
       <p id="cancel-all-error" class="error" hidden></p>
       <div class="modal-actions">
-        <button type="button" id="cancel-all-close" class="link-button">Close</button>
-        <button type="submit" id="cancel-all-submit" disabled>Cancel orders</button>
+        <button type="button" id="cancel-all-close" class="btn btn-link">Close</button>
+        <button type="submit" id="cancel-all-submit" class="btn btn-danger" disabled>Cancel orders</button>
       </div>
     </form>
   </div>
@@ -711,7 +712,7 @@
        the value from memory. -->
   <div id="bot-credentials-secret-modal" class="modal-backdrop" hidden role="dialog"
        aria-modal="true" aria-labelledby="bot-credentials-secret-title">
-    <form id="bot-credentials-secret-form" class="modal-card bot-credentials-secret-card">
+    <form id="bot-credentials-secret-form" class="modal-card bot-credentials-secret-card form-surface">
       <h2 id="bot-credentials-secret-title">New credential created</h2>
       <p class="muted-line">
         Label: <strong id="bot-credentials-secret-label"></strong>
@@ -726,8 +727,8 @@
       </label>
       <p id="bot-credentials-secret-copy-status" class="feedback" role="status" aria-live="polite" hidden></p>
       <div class="modal-actions">
-        <button type="button" id="bot-credentials-secret-copy">Copy to clipboard</button>
-        <button type="submit" id="bot-credentials-secret-done">Done</button>
+        <button type="button" id="bot-credentials-secret-copy" class="btn btn-secondary">Copy to clipboard</button>
+        <button type="submit" id="bot-credentials-secret-done" class="btn btn-primary">Done</button>
       </div>
     </form>
   </div>
@@ -769,8 +770,8 @@
     <header class="admin-subbar">
       <h2>History · P&amp;L · Statement</h2>
       <div class="admin-actions">
-        <button id="history-back" type="button" class="link-button">Back to trader</button>
-        <button id="history-refresh" type="button" class="link-button">Refresh</button>
+        <button id="history-back" type="button" class="btn btn-link">Back to trader</button>
+        <button id="history-refresh" type="button" class="btn btn-link">Refresh</button>
       </div>
     </header>
     <p id="history-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
@@ -810,7 +811,7 @@
 
     <section class="panel admin-panel statement-panel">
       <h3>Daily statement</h3>
-      <form id="statement-form" class="admin-inline-form">
+      <form id="statement-form" class="admin-inline-form form-surface">
         <label>
           <span>Date</span>
           <input id="statement-date" type="date" />
@@ -823,7 +824,7 @@
 
     <section class="panel admin-panel history-panel">
       <h3>History</h3>
-      <form id="history-filters" class="admin-inline-form history-filters">
+      <form id="history-filters" class="admin-inline-form history-filters form-surface">
         <label>
           <span>From</span>
           <input id="history-from" type="date" />
@@ -836,7 +837,7 @@
           <span>Symbol</span>
           <input id="history-symbol" type="text" maxlength="16" placeholder="all" />
         </label>
-        <button type="submit" id="history-apply">Apply</button>
+        <button type="submit" id="history-apply" class="btn btn-primary">Apply</button>
       </form>
 
       <h4>Orders</h4>
@@ -855,7 +856,7 @@
         </table>
       </div>
       <div class="history-more-row">
-        <button type="button" id="history-orders-more" class="link-button" hidden>Load more orders</button>
+        <button type="button" id="history-orders-more" class="btn btn-link" hidden>Load more orders</button>
       </div>
 
       <h4>Executions</h4>
@@ -874,7 +875,7 @@
         </table>
       </div>
       <div class="history-more-row">
-        <button type="button" id="history-executions-more" class="link-button" hidden>Load more executions</button>
+        <button type="button" id="history-executions-more" class="btn btn-link" hidden>Load more executions</button>
       </div>
     </section>
   </section>
@@ -911,8 +912,8 @@
     <section class="panel admin-panel compliance-feed">
       <h3>Drop-copy live feed</h3>
       <div class="compliance-feed-controls">
-        <button id="compliance-feed-pause" type="button">Pause</button>
-        <button id="compliance-feed-clear" type="button">Clear</button>
+        <button id="compliance-feed-pause" type="button" class="btn btn-secondary btn-sm">Pause</button>
+        <button id="compliance-feed-clear" type="button" class="btn btn-secondary btn-sm">Clear</button>
         <span id="compliance-feed-status" class="muted-line">0/200 entries</span>
       </div>
       <div class="table-scroll">
@@ -932,7 +933,7 @@
 
     <section class="panel admin-panel">
       <h3>Audit-log search</h3>
-      <form id="compliance-audit-form" class="compliance-audit-form">
+      <form id="compliance-audit-form" class="compliance-audit-form form-surface">
         <label>
           <span>Since</span>
           <input id="compliance-audit-since" type="datetime-local" />
@@ -958,7 +959,7 @@
             <option value="denied">denied</option>
           </select>
         </label>
-        <button type="submit">Search</button>
+        <button type="submit" class="btn btn-primary">Search</button>
       </form>
       <p id="compliance-audit-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
       <div class="table-scroll">
@@ -972,14 +973,14 @@
           <tbody id="compliance-audit-body"></tbody>
         </table>
       </div>
-      <button id="compliance-audit-next" type="button" class="link-button" hidden>Next page</button>
+      <button id="compliance-audit-next" type="button" class="btn btn-link" hidden>Next page</button>
     </section>
 
     <section class="panel admin-panel">
       <h3>Best-execution evidence (book touch)</h3>
-      <form id="compliance-touch-form" class="admin-inline-form">
+      <form id="compliance-touch-form" class="admin-inline-form form-surface">
         <input id="compliance-touch-id" type="text" placeholder="fill id (ClOrdId:cumQty)" maxlength="128" autocomplete="off" required />
-        <button type="submit">Lookup</button>
+        <button type="submit" class="btn btn-primary">Lookup</button>
       </form>
       <p id="compliance-touch-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
       <pre id="compliance-touch-output" class="admin-eod-output" hidden></pre>
@@ -987,13 +988,13 @@
 
     <section class="panel admin-panel">
       <h3>CVM report download</h3>
-      <div class="compliance-cvm-controls">
+      <div class="compliance-cvm-controls form-surface">
         <label>
           <span>Trade date</span>
           <input id="compliance-cvm-date" type="date" />
         </label>
-        <button id="compliance-cvm-35" type="button">Download model 35</button>
-        <button id="compliance-cvm-505" type="button">Download model 505</button>
+        <button id="compliance-cvm-35" type="button" class="btn btn-secondary">Download model 35</button>
+        <button id="compliance-cvm-505" type="button" class="btn btn-secondary">Download model 505</button>
       </div>
       <p id="compliance-cvm-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
     </section>
@@ -1037,14 +1038,14 @@
       <!-- Ticket -->
       <section class="panel algos-boleta-panel" id="algos-boleta" aria-label="Algo ticket">
         <h3>New algo</h3>
-        <div class="algos-type-tabs" role="tablist" aria-label="Algo type">
-          <button type="button" class="algos-type-tab ticket-advanced-toggle active" data-algo-type="Iceberg" role="tab" aria-selected="true">Iceberg</button>
-          <button type="button" class="algos-type-tab ticket-advanced-toggle" data-algo-type="Twap" role="tab" aria-selected="false">TWAP</button>
-          <button type="button" class="algos-type-tab ticket-advanced-toggle" data-algo-type="Vwap" role="tab" aria-selected="false">VWAP</button>
-          <button type="button" class="algos-type-tab ticket-advanced-toggle" data-algo-type="Pov" role="tab" aria-selected="false">POV</button>
-          <button type="button" class="algos-type-tab ticket-advanced-toggle" data-algo-type="Pegged" role="tab" aria-selected="false">Pegged</button>
+        <div class="algos-type-tabs tabs tabs-bordered" role="tablist" aria-label="Algo type">
+          <button type="button" class="algos-type-tab tab tab-sm active" data-algo-type="Iceberg" role="tab" aria-selected="true">Iceberg</button>
+          <button type="button" class="algos-type-tab tab tab-sm" data-algo-type="Twap" role="tab" aria-selected="false">TWAP</button>
+          <button type="button" class="algos-type-tab tab tab-sm" data-algo-type="Vwap" role="tab" aria-selected="false">VWAP</button>
+          <button type="button" class="algos-type-tab tab tab-sm" data-algo-type="Pov" role="tab" aria-selected="false">POV</button>
+          <button type="button" class="algos-type-tab tab tab-sm" data-algo-type="Pegged" role="tab" aria-selected="false">Pegged</button>
         </div>
-        <form id="algos-boleta-form" class="algos-boleta-form">
+        <form id="algos-boleta-form" class="algos-boleta-form form-surface">
           <fieldset class="algos-boleta-common algos-form-section">
             <legend>Common</legend>
             <div class="algos-form-grid">
@@ -1228,7 +1229,7 @@
 
           <div class="algos-boleta-footer">
             <p id="algos-boleta-status" class="algos-boleta-status" role="status" aria-live="polite"></p>
-            <button type="submit" class="ticket-submit">Submit</button>
+            <button type="submit" class="ticket-submit btn btn-primary">Submit</button>
           </div>
         </form>
       </section>
@@ -1252,18 +1253,18 @@
     <!-- Fase 3 (#399). Settings sub-tab nav. The four sub-panels
          below are mutually exclusive; settingsUi.js toggles `hidden`
          in response to the `settingsSubTab` state slice. -->
-    <div id="settings-subtabs" class="settings-subtabs" role="tablist"
+    <div id="settings-subtabs" class="settings-subtabs tabs tabs-bordered" role="tablist"
          aria-label="Settings sections">
-      <button type="button" class="settings-subtab" role="tab"
+      <button type="button" class="settings-subtab tab" role="tab"
               data-settings-subtab="bot-credentials"
               aria-controls="settings-panel-bot-credentials">Bot credentials</button>
-      <button type="button" class="settings-subtab" role="tab"
+      <button type="button" class="settings-subtab tab" role="tab"
               data-settings-subtab="security"
               aria-controls="settings-panel-security">Security (2FA)</button>
-      <button type="button" class="settings-subtab" role="tab"
+      <button type="button" class="settings-subtab tab" role="tab"
               data-settings-subtab="market-data"
               aria-controls="settings-panel-market-data">Market data</button>
-      <button type="button" class="settings-subtab" role="tab"
+      <button type="button" class="settings-subtab tab" role="tab"
               data-settings-subtab="preferences"
               aria-controls="settings-panel-preferences">Preferences</button>
     </div>
@@ -1274,7 +1275,7 @@
       <header class="admin-subbar">
         <h3>Bot credentials</h3>
         <div class="admin-actions">
-          <button id="bot-credentials-refresh" type="button" class="link-button">Refresh</button>
+          <button id="bot-credentials-refresh" type="button" class="btn btn-link">Refresh</button>
         </div>
       </header>
       <p id="bot-credentials-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
@@ -1307,13 +1308,13 @@
 
       <section class="panel admin-panel">
         <h3>Create credential</h3>
-        <form id="bot-credentials-create-form" class="admin-inline-form">
+        <form id="bot-credentials-create-form" class="admin-inline-form form-surface">
           <input id="bot-credentials-label" type="text" placeholder="label (e.g. my-bot)"
                  maxlength="128" autocomplete="off" required />
           <input id="bot-credentials-cert-thumbprint" type="text"
                  placeholder="client cert thumbprint (SHA-256, optional)"
                  maxlength="95" autocomplete="off" spellcheck="false" />
-          <button type="submit" id="bot-credentials-create-submit" disabled>Create credential</button>
+          <button type="submit" id="bot-credentials-create-submit" class="btn btn-primary" disabled>Create credential</button>
         </form>
         <label class="row">
           <input id="bot-credentials-ack" type="checkbox" />
@@ -1349,12 +1350,12 @@
       <header class="admin-subbar">
         <h3 id="security-title">Two-factor authentication</h3>
       </header>
-      <div id="security-body" class="panel admin-panel">
+      <div id="security-body" class="panel admin-panel form-surface">
         <p class="subtitle">Status: <span id="security-status" class="security-status-pill" role="status" aria-live="polite">Checking…</span></p>
 
         <div id="security-enroll-start" hidden>
           <p>2FA is not enrolled on this account. Click below to begin.</p>
-          <button type="button" id="security-enroll-begin">Enroll TOTP</button>
+          <button type="button" id="security-enroll-begin" class="btn btn-primary">Enroll TOTP</button>
         </div>
 
         <div id="security-enroll-show" hidden>
@@ -1381,7 +1382,7 @@
             <input id="security-confirm-code" type="text" inputmode="numeric"
                    autocomplete="one-time-code" maxlength="8" />
           </label>
-          <button type="button" id="security-confirm" disabled>Activate 2FA</button>
+          <button type="button" id="security-confirm" class="btn btn-primary" disabled>Activate 2FA</button>
         </div>
 
         <div id="security-enrolled" hidden>
@@ -1392,7 +1393,7 @@
             <input id="security-disable-code" type="text" inputmode="numeric"
                    autocomplete="one-time-code" maxlength="32" />
           </label>
-          <button type="button" id="security-disable">Disable 2FA</button>
+          <button type="button" id="security-disable" class="btn btn-danger">Disable 2FA</button>
         </div>
 
         <p id="security-error" class="error" role="alert" hidden></p>
@@ -1405,7 +1406,7 @@
       <header class="admin-subbar">
         <h3 id="md-settings-title">Market data</h3>
       </header>
-      <form id="md-form" class="panel admin-panel md-settings-card">
+      <form id="md-form" class="panel admin-panel md-settings-card form-surface">
         <label>
           <span>WS URL</span>
           <input id="md-url" type="url" readonly aria-describedby="md-url-hint" />
@@ -1417,7 +1418,7 @@
         </label>
         <p id="md-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
         <div class="form-actions">
-          <button type="submit" id="md-apply">Apply</button>
+          <button type="submit" id="md-apply" class="btn btn-primary">Apply</button>
         </div>
       </form>
 
@@ -1451,9 +1452,9 @@
         <div class="preference-row">
           <label class="preference-label" id="density-label">UI density</label>
           <div id="density-toggle" class="density-toggle" role="group" aria-labelledby="density-label">
-            <button type="button" class="density-option" data-density="comfortable"
+            <button type="button" class="density-option tab tab-sm" data-density="comfortable"
                     aria-pressed="true">Comfortable</button>
-            <button type="button" class="density-option" data-density="compact"
+            <button type="button" class="density-option tab tab-sm" data-density="compact"
                     aria-pressed="false">Compact</button>
           </div>
           <p class="field-hint">Compact reduces padding and font-size ~10% — useful on 1366×768 laptops.</p>

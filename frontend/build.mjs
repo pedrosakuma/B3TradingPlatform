@@ -11,6 +11,7 @@ await mkdir(join(dist, "js"), { recursive: true });
 
 await Promise.all([
   cp(join(root, "index.html"), join(dist, "index.html")),
+  cp(join(root, "design-system.html"), join(dist, "design-system.html")),
   cp(join(root, "env.js.template"), join(dist, "env.js.template")),
   cp(join(root, "nginx.conf.template"), join(dist, "nginx.conf.template")),
   cp(join(root, "20-render-env-js.sh"), join(dist, "20-render-env-js.sh")),

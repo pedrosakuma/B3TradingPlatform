@@ -596,10 +596,9 @@ function renderOrderDetailHeader(order, execs) {
   const qty = Number(order.quantity) || 0;
   const cum = Number(order.cumulativeQuantity) || 0;
   const leaves = Number(order.leavesQuantity) || 0;
-  const pct = qty > 0 ? Math.max(0, Math.min(100, (cum / qty) * 100)) : 0;
   const price = order.price == null ? "MKT" : fmtPx(order.price);
   const staleBadge = order.isStale
-    ? ` <span class="order-stale-badge" title="${escapeHtml(order.staleReason || "stale")}">stale</span>`
+    ? ` <span class="order-stale-badge badge badge-warning badge-outline badge-uppercase" title="${escapeHtml(order.staleReason || "stale")}">stale</span>`
     : "";
   const algoBlock = order.parentAlgoId
     ? `<div class="field"><span class="label">Parent algo</span><span class="value"><code>${escapeHtml(order.parentAlgoId)}</code>${order.algoSliceSeq != null ? ` · slice ${escapeHtml(order.algoSliceSeq)}` : ""}</span></div>`
@@ -618,9 +617,8 @@ function renderOrderDetailHeader(order, execs) {
     <div class="field field-wide">
       <span class="label">Qty / Cum / Leaves</span>
       <span class="value">${fmtQty(qty)} · ${fmtQty(cum)} · ${fmtQty(leaves)}</span>
-      <div class="modal-progress" role="progressbar" aria-valuenow="${cum}" aria-valuemin="0" aria-valuemax="${qty}">
-        <div class="modal-progress-fill" style="width: ${pct}%"></div>
-      </div>
+      <progress class="modal-progress" value="${cum}" max="${Math.max(qty, 1)}"
+                aria-label="Filled quantity progress"></progress>
     </div>
     ${algoBlock}
   `;
@@ -1726,7 +1724,7 @@ function syncTicketRules() {
 export function setStatusPill(status) {
   const el = $("ws-status");
   el.textContent = status;
-  el.className = `status-pill status-${status}`;
+  el.className = `status-pill badge badge-uppercase status-${status}`;
   el.setAttribute("aria-label", `WebSocket: ${status}`);
 }
 
@@ -1912,7 +1910,7 @@ function renderFirmsHealth() {
   const tone = anyReconnecting ? "warn" : (allEstablished ? "ok" : "muted");
   const summary = `${ranked.length} firm${ranked.length === 1 ? "" : "s"}`;
   el.hidden = false;
-  el.className = `firms-health firms-health-${tone}`;
+  el.className = `firms-health badge badge-outline firms-health-${tone}`;
   el.textContent = `${summary} · ${fh.mode}`;
   el.title = ranked.map(r => `${r.firmId}: ${r.state}${r.reconnecting ? " (reconnecting)" : ""}`).join("\n");
 }
@@ -1968,7 +1966,7 @@ function renderGatewayPill() {
       `${f.firmId}: ${f.state}${f.reconnecting ? " (reconnecting)" : ""} v${f.sessionVerId}`
     ).join("\n");
   }
-  el.className = `status-pill ${toneClass}`;
+  el.className = `status-pill badge badge-uppercase ${toneClass}`;
   el.textContent = label;
   el.setAttribute("aria-label", ariaLabel);
   el.title = tooltip;
@@ -2033,7 +2031,7 @@ export function renderForSlice(slice) {
 // "connected"`; panels fed by the MD WS go stale on
 // `state.marketDataStatus !== "connected"`. The visual cue is two-
 // part: a `panel--stale` class (dims the data area in CSS) + an
-// injected `<span class="stale-tag">stale · HH:MM:SS</span>` next to
+// injected warning badge next to
 // the panel's `<h2>` showing the last successful update timestamp.
 // The timestamp is captured at the moment of staleness, not animated,
 // so a frozen-but-still-mounted UI is unambiguous.
@@ -2063,7 +2061,7 @@ function renderStaleness(kind) {
       if (!h2) continue;
       if (!tag) {
         tag = document.createElement("span");
-        tag.className = "stale-tag";
+        tag.className = "stale-tag badge badge-warning";
         tag.setAttribute("role", "status");
         tag.setAttribute("aria-live", "polite");
         h2.appendChild(tag);
@@ -2100,7 +2098,7 @@ function setMdStatusPill(status) {
   const el = $("md-status");
   if (!el) return;
   el.textContent = status;
-  el.className = `status-pill status-${status}`;
+  el.className = `status-pill badge badge-uppercase status-${status}`;
   el.setAttribute("aria-label", `Market data: ${status}`);
 }
 
@@ -2265,7 +2263,7 @@ export function phaseBadgeHtml(symbol) {
   const meta = PHASE_LABELS[phase];
   if (!meta) return "";
   const aria = `${symbol} phase: ${meta.label}`;
-  return ` <span class="phase-badge ${meta.cls}" data-symbol="${escapeHtml(symbol)}" aria-label="${escapeHtml(aria)}">${meta.label}</span>`;
+  return ` <span class="phase-badge badge badge-outline badge-uppercase ${meta.cls}" data-symbol="${escapeHtml(symbol)}" aria-label="${escapeHtml(aria)}">${meta.label}</span>`;
 }
 
 // Auto-open / refresh the auction panel based on the selected symbol's
@@ -2863,7 +2861,7 @@ function orderRow(o, st) {
   ].filter(Boolean).join(" ");
   const cancelDisabled = terminal || cancelInflight || modifyInflight || isStale;
   const cancelLabel = cancelInflight ? "Cancelling…" : "Cancel";
-  const cancelCls = "cancel-btn" + (cancelInflight ? " cancelling" : "");
+  const cancelCls = "cancel-btn btn btn-outline-danger btn-sm" + (cancelInflight ? " cancelling" : "");
   // Slice 5 of #122. Modify button shares row-selection delegation
   // (data-clordid on the button so the click handler can map it back
   // to the order without walking the row). Disabled while terminal
@@ -2872,12 +2870,12 @@ function orderRow(o, st) {
   // gating client-side avoids the round-trip and keeps the UX honest.
   const modifyDisabled = terminal || modifyInflight || cancelInflight || isStale;
   const modifyLabel = modifyInflight ? "Modifying…" : "Modify";
-  const modifyCls = "modify-btn" + (modifyInflight ? " modifying" : "");
+  const modifyCls = "modify-btn btn btn-outline-primary btn-sm" + (modifyInflight ? " modifying" : "");
   const staleTitle = isStale
     ? `Stale: ${o.staleReason || "venue desync"}${o.staledAtUtc ? ` (${o.staledAtUtc})` : ""}`
     : "";
   const staleBadge = isStale
-    ? `<span class="order-stale-badge" title="${escapeHtml(staleTitle)}">stale</span>`
+    ? `<span class="order-stale-badge badge badge-warning badge-outline badge-uppercase" title="${escapeHtml(staleTitle)}">stale</span>`
     : "";
   const optionBadge = o.securityType === "Option" ? optionBadgeHtml(o.optionPutOrCall) : "";
   const optionTooltip = formatOptionTooltip(o);
@@ -3031,26 +3029,26 @@ function renderExpiryStrip() {
     const exp = p.optionExpirationDate;
     expiries.set(exp, (expiries.get(exp) || 0) + 1);
   }
-  
+
   // Sort by date.
   const sortedDates = [...expiries.keys()].sort();
-  
+
   // Render chips.
   items.innerHTML = sortedDates.map(exp => {
     const count = expiries.get(exp);
     const isActive = _expiryFilter === exp;
     const label = formatExpiryChip(exp);
-    return `<button type="button" class="expiry-chip${isActive ? " active" : ""}" 
+    return `<button type="button" class="expiry-chip tab tab-sm${isActive ? " active" : ""}"
             data-expiry="${escapeHtml(exp)}" title="${count} position(s)">
       ${label} <span class="expiry-count">(${count})</span>
     </button>`;
   }).join("");
-  
+
   // Add "All" chip.
   const allActive = _expiryFilter === null;
-  items.innerHTML = `<button type="button" class="expiry-chip${allActive ? " active" : ""}" 
+  items.innerHTML = `<button type="button" class="expiry-chip tab tab-sm${allActive ? " active" : ""}"
     data-expiry="">All</button>` + items.innerHTML;
-  
+
   strip.hidden = false;
 }
 
@@ -3205,7 +3203,7 @@ function escapeHtml(s) {
 export function typeChipHtml(type) {
   const meta = ORDER_TYPE_CHIP[type];
   if (!meta) return escapeHtml(type ?? "");
-  return `<span class="type-chip ${meta.cls}" title="${escapeHtml(type)}">${meta.label}</span>`;
+  return `<span class="type-chip badge badge-square ${meta.cls}" title="${escapeHtml(type)}">${meta.label}</span>`;
 }
 
 // Render option badges ("C" for Calls, "P" for Puts) for option orders/positions.
@@ -3216,7 +3214,7 @@ function optionBadgeHtml(putOrCall) {
   const label = isCall ? "C" : "P";
   const cls = isCall ? "option-call" : "option-put";
   const title = isCall ? "Call" : "Put";
-  return ` <span class="option-badge ${cls}" title="${title}">${label}</span>`;
+  return ` <span class="option-badge badge badge-square ${cls}" title="${title}">${label}</span>`;
 }
 
 // Map ExecKind enum strings (as emitted by the backend `executions.me`

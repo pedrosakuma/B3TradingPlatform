@@ -104,6 +104,9 @@ jobs:
         working-directory: frontend
         run: npm run build
 
+      - name: Verify design-system catalog is packaged
+        run: test -f frontend/dist/design-system.html
+
       - name: Smoke-test env.js rendering directly
         run: ./frontend/test/render-env-js-direct-smoke.sh
 

@@ -21,7 +21,7 @@ test("typeChipHtml maps each OrderType to its abbreviation + class", () => {
   for (const [type, label, cls] of cases) {
     const html = typeChipHtml(type);
     assert.match(html, new RegExp(`>${label}<`), `chip label for ${type}`);
-    assert.match(html, new RegExp(`class="type-chip ${cls}"`), `chip class for ${type}`);
+    assert.match(html, new RegExp(`class="[^"]*\\btype-chip\\b[^"]*\\b${cls}\\b[^"]*"`), `chip class for ${type}`);
     assert.match(html, new RegExp(`title="${type}"`), `chip title for ${type}`);
   }
 });
