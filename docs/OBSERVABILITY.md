@@ -15,8 +15,8 @@ state machine, gap recovery — are deferred until the
 | Endpoint | Purpose | Status semantics |
 | --- | --- | --- |
 | `GET /live` | Liveness — is the process alive? | Always **200**. Used by orchestrator to decide whether to restart. |
-| `GET /ready` | Readiness — accepting traffic? | **200** while serving, **503** while draining. Used by load balancers to route requests. |
-| `GET /health` | Rich JSON for humans/dashboards | Always **200**. Body contains `status`, `uptime`, `startedAt`, `persistence` block. |
+| `GET /ready` | Readiness — accepting traffic? | **200** while serving, **503** while draining or when the identity directory fails health checks. Used by load balancers to route requests. |
+| `GET /health` | Rich JSON for humans/dashboards | Always **200**. Body contains `status`, `uptime`, `startedAt`, `persistence` and `identityDirectory` blocks. |
 
 Sample `/health` body:
 
@@ -30,6 +30,14 @@ Sample `/health` body:
     "firmId": "default",
     "dataDirectory": "data",
     "snapshotInterval": "00:05:00"
+  },
+  "identityDirectory": {
+    "provider": "Sqlite",
+    "ready": true,
+    "path": "data/identity/users.db",
+    "schemaVersion": 1,
+    "reason": null,
+    "busyTimeoutMilliseconds": 5000
   }
 }
 ```

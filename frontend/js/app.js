@@ -1,6 +1,6 @@
 // App entry point: wires login → worker → state → UI together.
 
-import { defaultBackend, defaultMarketDataUrl, login, signup, submitOrder, cancelOrder, modifyOrder, getAdminFirms,
+import { defaultBackend, login, signup, submitOrder, cancelOrder, modifyOrder, getAdminFirms,
          validateSession, getRiskPolicy,
          getKillStatus, killFirm, reviveFirm, killEndClient, reviveEndClient,
          getHaltStatus, haltSymbol, resumeSymbol,
@@ -9,9 +9,21 @@ import { defaultBackend, defaultMarketDataUrl, login, signup, submitOrder, cance
          getOrdersHistory, getExecutionsHistory, getPnlToday,
          getStatement, downloadStatementCsv,
          searchAuditLog, getFillTouch, downloadCvmReport, buildDropCopyWebSocketUrl,
-         verifyTotp, enrollTotp, disableTotp,
+         verifyTotp, enrollTotp, disableTotp, getTotpStatus,
+         exchangeExternalToken,
          listAlgos, createAlgo, cancelAlgo, modifyAlgo,
          getInstruments } from "./protocol.js";
+import { readPublicConfig, validateEntraConfig } from "./authConfig.js";
+import { createEntraAuth, isInteractionRequiredError } from "./auth.js";
+import {
+  readInternalSession,
+  writeInternalSession,
+  clearInternalSession,
+  rememberAuthBackend,
+  readAuthBackend,
+  clearAuthBackend,
+  createLogoutChannel,
+} from "./authStorage.js";
 import { validateCreateAlgo } from "./validation.js";
 import * as algosUi from "./algosUi.js";
 import * as settingsUi from "./settingsUi.js";
@@ -33,13 +45,13 @@ import * as adminUi from "./adminUi.js";
 import * as botCredentialsUi from "./botCredentialsUi.js";
 import * as historyUi from "./historyUi.js";
 import * as complianceUi from "./complianceUi.js";
+import { applyAppTitle } from "./branding.js";
 import { tabsForRole, defaultViewForRole } from "./complianceUi.js";
 import { FLAGS } from "./mdProtocol.js";
 import { renderQrInto, clearQr } from "./qrRender.js";
 import { applyRiskPolicyFetch } from "./riskPolicy.js";
+import { readMdConnectionConfig, readMdDisplayConfig, writeMdConfig, clearMdConfig } from "./marketDataSettings.js";
 
-const SESSION_KEY = "b3tp.session";
-const MD_KEY = "b3tp.md";
 const BLOTTER_FILTER_KEY = "b3tp.blotter.filter";
 const DEFAULT_WATCHLIST = ["PETR4", "VALE3"];
 const FIRMS_POLL_INTERVAL_MS = 5_000;
@@ -63,6 +75,11 @@ const GATEWAY_POLL_INTERVAL_MS = 5_000;
 let sessionStore = sessionStorage; // mutates if "remember me" was selected at login
 let renewInflight = false;
 let warningShown = false;
+const publicConfig = readPublicConfig();
+const authConfig = publicConfig.auth;
+let entraAuth = null;
+let logoutChannel = null;
+let authConfigError = null;
 
 const SESSION_WARNING_LEAD_MS = 60_000;
 
@@ -77,33 +94,43 @@ let gatewayPollTimer = null;
 // #303. State for the in-flight 2FA challenge between /auth/login and
 // /auth/2fa/verify. Cleared on success / cancel / refresh.
 let pendingTotp = null; // { backend, username, remember, totpChallengeToken }
+let securityStatusRefreshSeq = 0;
 
-function init() {
-  document.getElementById("login-backend").placeholder = defaultBackend();
-  document.getElementById("login-form").addEventListener("submit", onLogin);
+async function init() {
+  applyAppTitle();
+  configureAuthUi();
+  settingsUi.configureSettingsSubTabs({ securityEnabled: authConfig.totpEnabled });
+  document.getElementById("login-backend")?.setAttribute("placeholder", defaultBackend());
+  document.getElementById("auth-backend")?.setAttribute("placeholder", defaultBackend());
+  document.getElementById("login-form")?.addEventListener("submit", onLogin);
+  document.getElementById("entra-login")?.addEventListener("click", onEntraLogin);
+  document.getElementById("auth-use-local")?.addEventListener("click", () => showLocalLoginCard());
+  document.getElementById("login-go-choices")?.addEventListener("click", () => showAuthEntry());
   const signupBackendInput = document.getElementById("signup-backend");
   if (signupBackendInput) signupBackendInput.placeholder = defaultBackend();
   const signupForm = document.getElementById("signup-form");
   if (signupForm) signupForm.addEventListener("submit", onSignup);
   document.getElementById("login-go-signup")?.addEventListener("click", () => showSignupCard(true));
   document.getElementById("signup-go-login")?.addEventListener("click", () => showSignupCard(false));
-  // #303. 2FA second-factor step + Security panel.
-  document.getElementById("totp-form")?.addEventListener("submit", onTotpSubmit);
-  document.getElementById("totp-cancel")?.addEventListener("click", () => {
-    pendingTotp = null;
-    showTotpCard(false);
-  });
-  // Fase 3 (#399). The legacy Security button + modal collapsed into
-  // the Settings > Security sub-tab. `openSecurityPanel` is now a
-  // sub-tab navigation; the close/reset behaviour that used to live
-  // on the modal's × button has no analogue (the sub-tab is reset
-  // every time it's re-entered via openSecurityPanel).
-  document.getElementById("security-enroll-begin")?.addEventListener("click", onSecurityEnrollBegin);
-  document.getElementById("security-recovery-ack")?.addEventListener("change", (e) => {
-    document.getElementById("security-confirm").disabled = !e.target.checked;
-  });
-  document.getElementById("security-confirm")?.addEventListener("click", onSecurityEnrollConfirm);
-  document.getElementById("security-disable")?.addEventListener("click", onSecurityDisable);
+  if (authConfig.totpEnabled) {
+    // #303. 2FA second-factor step + Security panel.
+    document.getElementById("totp-form")?.addEventListener("submit", onTotpSubmit);
+    document.getElementById("totp-cancel")?.addEventListener("click", () => {
+      pendingTotp = null;
+      showTotpCard(false);
+    });
+    // Fase 3 (#399). The legacy Security button + modal collapsed into
+    // the Settings > Security sub-tab. `openSecurityPanel` is now a
+    // sub-tab navigation; the close/reset behaviour that used to live
+    // on the modal's × button has no analogue (the sub-tab is reset
+    // every time it's re-entered via openSecurityPanel).
+    document.getElementById("security-enroll-begin")?.addEventListener("click", onSecurityEnrollBegin);
+    document.getElementById("security-recovery-ack")?.addEventListener("change", (e) => {
+      document.getElementById("security-confirm").disabled = !e.target.checked;
+    });
+    document.getElementById("security-confirm")?.addEventListener("click", onSecurityEnrollConfirm);
+    document.getElementById("security-disable")?.addEventListener("click", onSecurityDisable);
+  }
   ui.bindUi();
   adminUi.bindAdminUi();
   botCredentialsUi.bindBotCredentialsUi();
@@ -240,6 +267,12 @@ function init() {
     if (slice === "density" || slice === "all") {
       persistDensity(state.getState().density);
     }
+    if (slice === "currentView" || slice === "settingsSubTab" || slice === "all") {
+      const current = state.getState();
+      const securityVisible = authConfig.totpEnabled && current.currentView === "settings" && current.settingsSubTab === "security";
+      if (securityVisible) refreshSecurityPanel();
+      else if (slice !== "all") closeSecurityPanel();
+    }
   });
 
   // Fase 1 (#397). URL hash navigation. The tablist click handler
@@ -255,38 +288,146 @@ function init() {
     if (route?.view) handleSwitchView(route.view, route.subTab);
   });
 
+  logoutChannel = createLogoutChannel();
+  logoutChannel.subscribe(() => logout({ broadcast: false, redirectEntra: false, clearEntraCache: true }));
+
+  await bootAuth();
+}
+
+function configureAuthUi() {
+  document.body?.setAttribute("data-auth-mode", authConfig.mode.toLowerCase());
+
+  if (authConfig.mode === "Entra") {
+    document.getElementById("login-form")?.remove();
+    document.getElementById("signup-form")?.remove();
+    document.getElementById("totp-form")?.remove();
+  }
+
+  const choice = document.getElementById("auth-choice");
+  if (choice) {
+    choice.dataset.defaultVisible = authConfig.entraEnabled ? "true" : "false";
+    const title = choice.querySelector("[data-auth-title]");
+    if (title) title.textContent = authConfig.mode === "Hybrid" ? "Choose sign-in method" : "Sign in with Microsoft Entra";
+    const subtitle = choice.querySelector("[data-auth-subtitle]");
+    if (subtitle) {
+      subtitle.textContent = authConfig.mode === "Hybrid"
+        ? "Use Entra for migrated accounts, or local credentials during the migration window."
+        : "Your organization manages authentication and MFA with Microsoft Entra External ID.";
+    }
+  }
+
+  const localBtn = document.getElementById("auth-use-local");
+  if (localBtn) localBtn.hidden = !(authConfig.mode === "Hybrid" && authConfig.localLoginEnabled);
+  const entraBtn = document.getElementById("entra-login");
+  if (entraBtn) entraBtn.hidden = !authConfig.entraEnabled;
+  const remember = document.querySelector(".remember");
+  if (remember) remember.hidden = authConfig.mode !== "Local";
+  const signupSwitch = document.getElementById("login-signup-switch");
+  if (signupSwitch) signupSwitch.hidden = !authConfig.signupEnabled;
+  const choicesSwitch = document.getElementById("login-choices-switch");
+  if (choicesSwitch) choicesSwitch.hidden = authConfig.mode !== "Hybrid";
+
+  if (authConfig.entraEnabled) {
+    try {
+      validateEntraConfig(authConfig);
+      entraAuth = createEntraAuth(authConfig);
+    } catch (err) {
+      authConfigError = err?.message || "Entra login is not configured.";
+      setAuthError(authConfigError);
+    }
+  }
+}
+
+async function bootAuth() {
+  if (entraAuth) {
+    try {
+      const redirect = await entraAuth.handleRedirectPromise();
+      if (redirect?.accessToken) {
+        await finishEntraLogin(redirect.accessToken);
+        return;
+      }
+    } catch (err) {
+      clearSession();
+      ui.showLogin();
+      showAuthEntry();
+      setAuthError(formatAuthError(err));
+      return;
+    }
+  }
+
   const stored = readSession();
   if (stored) {
-    // Boot guard: if the stored session is already inside the warning
-    // window (or past its expiry), don't even attempt to adopt it.
-    // Showing the "session expiring" modal as the very first thing the
-    // user sees on page load is confusing — they have no context. Treat
-    // it as expired and require a fresh login.
     const expiresAtMs = Date.parse(stored.expiresAt || "");
     const remaining = Number.isFinite(expiresAtMs) ? expiresAtMs - Date.now() : -1;
     if (remaining <= SESSION_WARNING_LEAD_MS) {
-      clearSession();
+      if (stored.authMode === "Entra" && entraAuth) {
+        try {
+          const token = await entraAuth.acquireTokenSilent();
+          if (token?.redirected) return;
+          const next = await exchangeEntraAccessToken(token.accessToken, stored.backend);
+          writeSession(next);
+          startSession(next);
+          return;
+        } catch {
+          clearSession();
+        }
+      } else {
+        clearSession();
+      }
       ui.showLogin();
+      showAuthEntry();
       return;
     }
-    // Probe before we commit: a token that survived a host signing-key
-    // rotation will look fresh client-side (expiresAt in the future)
-    // but be rejected by the backend on the very first WS upgrade.
-    // Showing the "session expiring" modal in that case is confusing
-    // because the user never logged in this run. Drop silently and
-    // fall back to login if the probe fails. On network error we ALSO
-    // drop — the optimistic path used to fall through here, but if the
-    // stored backend URL is stale/wrong the user lands in a half-open
-    // UI with no way out. Re-login is cheap; bias toward correctness.
     validateSession(stored.backend, stored.token)
       .then((ok) => {
         if (ok) startSession(stored);
-        else { clearSession(); ui.showLogin(); }
+        else { clearSession(); ui.showLogin(); showAuthEntry(); }
       })
-      .catch(() => { clearSession(); ui.showLogin(); });
+      .catch(() => { clearSession(); ui.showLogin(); showAuthEntry(); });
   } else {
     ui.showLogin();
+    showAuthEntry();
   }
+}
+
+function showAuthEntry() {
+  const choice = document.getElementById("auth-choice");
+  const showChoice = authConfig.entraEnabled;
+  if (choice) choice.hidden = !showChoice;
+  const loginCard = document.getElementById("login-form");
+  if (loginCard) loginCard.hidden = showChoice;
+  const signupCard = document.getElementById("signup-form");
+  if (signupCard) signupCard.hidden = true;
+  const totpCard = document.getElementById("totp-form");
+  if (totpCard) totpCard.hidden = true;
+  setAuthError(showChoice ? authConfigError : null);
+  if (showChoice) document.getElementById("entra-login")?.focus();
+}
+
+function isSettingsSubTabAllowed(subTab) {
+  return SETTINGS_SUB_TABS.has(subTab) && settingsUi.isSettingsSubTabEnabled(subTab);
+}
+
+function defaultSettingsSubTab() {
+  return settingsUi.isSettingsSubTabEnabled("bot-credentials") ? "bot-credentials" : "preferences";
+}
+
+function showLocalLoginCard() {
+  setAuthError(null);
+  const choice = document.getElementById("auth-choice");
+  if (choice) choice.hidden = true;
+  const loginCard = document.getElementById("login-form");
+  if (loginCard) loginCard.hidden = false;
+  document.getElementById("login-username")?.focus();
+}
+
+function setAuthError(message) {
+  const el = document.getElementById("auth-error");
+  if (el) {
+    if (!message) { el.hidden = true; el.textContent = ""; }
+    else { el.hidden = false; el.textContent = message; }
+  }
+  if (authConfig.mode === "Entra") ui.setLoginError(message);
 }
 
 async function onLogin(e) {
@@ -302,11 +443,19 @@ async function onLogin(e) {
     // #303. Server may demand a TOTP code or a forced first-time
     // enrollment before issuing a JWT. Stash context and switch cards.
     if (resp && resp.requires2fa && resp.totpChallengeToken) {
+      if (!authConfig.totpEnabled) {
+        ui.setLoginError("Two-factor authentication is disabled in this frontend configuration.");
+        return;
+      }
       pendingTotp = { backend, username, remember, totpChallengeToken: resp.totpChallengeToken };
       showTotpCard(true);
       return;
     }
     if (resp && resp.requires2faEnrollment && resp.enrollmentToken) {
+      if (!authConfig.totpEnabled) {
+        ui.setLoginError("Two-factor enrollment is disabled in this frontend configuration.");
+        return;
+      }
       // Force-enroll path: open enrollment immediately. We don't have a
       // JWT yet, so we pass the enrollment token through to /auth/2fa/enroll.
       pendingTotp = { backend, username, remember, enrollmentToken: resp.enrollmentToken };
@@ -321,23 +470,116 @@ async function onLogin(e) {
   }
 }
 
-function finishLoginWithToken(resp, { backend, username, remember }) {
+async function onEntraLogin() {
+  setAuthError(null);
+  if (!entraAuth) {
+    setAuthError(authConfigError || "Entra login is not configured.");
+    return;
+  }
+  const backend = (document.getElementById("auth-backend")?.value || defaultBackend()).replace(/\/+$/, "");
+  rememberAuthBackend(backend, { sessionStorage });
+  const btn = document.getElementById("entra-login");
+  if (btn) btn.disabled = true;
+  try {
+    await entraAuth.loginRedirect();
+  } catch (err) {
+    setAuthError(formatAuthError(err));
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function sessionFromInternalToken(resp, { backend, authMode, remember = false }) {
   const claims = claimsFromToken(resp.token);
-  const next = {
+  return {
     token: resp.token,
     expiresAt: resp.expiresAt,
-    username,
+    username: claims.sub || claims.name || "trader",
     backend,
     role: claims.role,
     firm: claims.firm,
     remember,
+    authMode,
   };
+}
+
+async function exchangeEntraAccessToken(accessToken, backend) {
+  const resp = await exchangeExternalToken(backend, accessToken);
+  return sessionFromInternalToken(resp, { backend, authMode: "Entra", remember: false });
+}
+
+async function finishEntraLogin(accessToken) {
+  const backend = (readAuthBackend({ sessionStorage }) || defaultBackend()).replace(/\/+$/, "");
+  try {
+    const next = await exchangeEntraAccessToken(accessToken, backend);
+    clearAuthBackend({ sessionStorage });
+    sessionStore = sessionStorage;
+    writeSession(next);
+    startSession(next);
+  } catch (err) {
+    clearSession();
+    ui.showLogin();
+    showAuthEntry();
+    setAuthError(formatAuthError(err));
+  }
+}
+
+async function renewEntraSession(current = session) {
+  if (!entraAuth || !current) throw new Error("Entra login is not available.");
+  const token = await entraAuth.acquireTokenSilent();
+  if (token?.redirected) return null;
+  const next = await exchangeEntraAccessToken(token.accessToken, current.backend);
+  session = { ...current, ...next, authMode: "Entra", remember: false };
+  writeSession(session);
+  state.setUser({
+    username: session.username,
+    expiresAt: session.expiresAt,
+    backend: session.backend,
+    role: session.role,
+    firm: session.firm,
+  });
+  restartWorker();
+  warningShown = false;
+  scheduleExpiry();
+  ui.closeSessionModal();
+  return session;
+}
+
+function formatAuthError(err) {
+  const code = err?.body?.error || err?.errorCode || err?.error || err?.message;
+  switch (code) {
+    case "account_not_provisioned":
+      return "This Entra account is not provisioned for trading. Ask an administrator to bind it before signing in.";
+    case "account_disabled":
+      return "This trading account is disabled. Contact an administrator.";
+    case "account_incomplete":
+      return "This trading account is missing firm or role authorization. Contact an administrator.";
+    case "identity_provider_unavailable":
+      return "Microsoft Entra is temporarily unavailable. Existing sessions may continue until expiry; try again later.";
+    case "identity_directory_unavailable":
+      return "The trading identity directory is unavailable. Try again later.";
+    case "invalid_external_token":
+      return "The Entra sign-in response could not be validated. Sign in again.";
+    case "interaction_required":
+    case "login_required":
+    case "consent_required":
+      return "Interactive Entra sign-in is required. Continue with Microsoft Entra.";
+    default:
+      if (isInteractionRequiredError(err)) return "Interactive Entra sign-in is required. Continue with Microsoft Entra.";
+      return err?.message || "Authentication failed.";
+  }
+}
+
+function finishLoginWithToken(resp, { backend, username, remember }) {
+  const next = sessionFromInternalToken(resp, { backend, authMode: "Local", remember });
+  next.username = username;
   sessionStore = remember ? localStorage : sessionStorage;
   writeSession(next);
   startSession(next);
 }
 
 function showTotpCard(show) {
+  if (!authConfig.totpEnabled) return;
   const loginCard = document.getElementById("login-form");
   const signupCard = document.getElementById("signup-form");
   const totpCard = document.getElementById("totp-form");
@@ -356,6 +598,7 @@ function showTotpCard(show) {
 
 async function onTotpSubmit(e) {
   e.preventDefault();
+  if (!authConfig.totpEnabled) return;
   if (!pendingTotp || !pendingTotp.totpChallengeToken) return;
   const code = document.getElementById("totp-code").value.trim();
   const errEl = document.getElementById("totp-error");
@@ -385,38 +628,89 @@ async function onTotpSubmit(e) {
 // session reset) wipes the recovery codes + QR so secret material
 // leaves the DOM as soon as the sub-tab is dismissed.
 function openSecurityPanel() {
+  if (!authConfig.totpEnabled) return;
   if (!session) return;
   handleSwitchView("settings", "security");
-  setSecurityError(null);
-  // We can't distinguish "enrolled" vs "not enrolled" without a probe
-  // endpoint, so show both controls and let the user choose: enrolling
-  // when already enrolled returns 409 (caught + surfaced); disabling
-  // when not enrolled returns 400. Keeps the FE thin.
-  const start = document.getElementById("security-enroll-start");
-  const show  = document.getElementById("security-enroll-show");
-  const enrolled = document.getElementById("security-enrolled");
-  const status = document.getElementById("security-status");
-  if (start) start.hidden = false;
-  if (show)  show.hidden  = true;
-  if (enrolled) enrolled.hidden = false;
-  if (status) status.textContent =
-    "Enroll to add a second factor, or disable an existing enrollment.";
 }
 
 function closeSecurityPanel() {
+  if (!authConfig.totpEnabled) return;
+  securityStatusRefreshSeq += 1;
   // Wipe the recovery codes from the DOM as soon as the user dismisses.
   const pre = document.getElementById("security-recovery-codes");
   if (pre) pre.textContent = "";
+  const otpauthUri = document.getElementById("security-otpauth-uri");
+  if (otpauthUri) otpauthUri.value = "";
+  const secret = document.getElementById("security-secret");
+  if (secret) secret.value = "";
   const ack = document.getElementById("security-recovery-ack");
   if (ack) ack.checked = false;
   const confirm = document.getElementById("security-confirm");
   if (confirm) confirm.disabled = true;
+  const confirmCode = document.getElementById("security-confirm-code");
+  if (confirmCode) confirmCode.value = "";
+  const disableCode = document.getElementById("security-disable-code");
+  if (disableCode) disableCode.value = "";
   // #320: drop the rendered QR too — it encodes the otpauth secret.
   clearQr(document.getElementById("security-qr"));
   pendingEnrollSecret = null;
+  setSecurityError(null);
+}
+
+function setSecurityStatus(state) {
+  if (!authConfig.totpEnabled) return;
+  const el = document.getElementById("security-status");
+  if (!el) return;
+  el.classList.remove(
+    "security-status-enrolled",
+    "security-status-not-enrolled",
+    "security-status-pending",
+    "security-status-unavailable",
+  );
+  if (state === "enrolled") {
+    el.textContent = "Enrolled";
+    el.classList.add("security-status-enrolled");
+  } else if (state === "not-enrolled") {
+    el.textContent = "Not enrolled";
+    el.classList.add("security-status-not-enrolled");
+  } else if (state === "pending") {
+    el.textContent = "Pending confirmation";
+    el.classList.add("security-status-pending");
+  } else if (state === "unavailable") {
+    el.textContent = "Unavailable";
+    el.classList.add("security-status-unavailable");
+  } else {
+    el.textContent = "Checking…";
+  }
+}
+
+function renderSecurityPanel({ enrolled, pending }) {
+  if (!authConfig.totpEnabled) return;
+  document.getElementById("security-enroll-start").hidden = !!enrolled || !!pending;
+  document.getElementById("security-enroll-show").hidden = !pending;
+  document.getElementById("security-enrolled").hidden = !enrolled || !!pending;
+  setSecurityStatus(pending ? "pending" : (enrolled ? "enrolled" : "not-enrolled"));
+}
+
+async function refreshSecurityPanel() {
+  if (!authConfig.totpEnabled) return;
+  if (!session) return;
+  const refreshSeq = ++securityStatusRefreshSeq;
+  setSecurityStatus("checking");
+  try {
+    const status = await getTotpStatus(session.backend, session.token);
+    if (refreshSeq !== securityStatusRefreshSeq) return;
+    renderSecurityPanel({ enrolled: !!status?.enrolled, pending: !!pendingEnrollSecret });
+  } catch (err) {
+    if (refreshSeq !== securityStatusRefreshSeq) return;
+    if (err?.status === 401) { logout(); return; }
+    setSecurityStatus("unavailable");
+    setSecurityError(err?.message || "Unable to load 2FA status");
+  }
 }
 
 function setSecurityError(msg) {
+  if (!authConfig.totpEnabled) return;
   const el = document.getElementById("security-error");
   if (!el) return;
   if (!msg) { el.hidden = true; el.textContent = ""; return; }
@@ -426,6 +720,7 @@ function setSecurityError(msg) {
 let pendingEnrollSecret = null; // base32, only kept until confirm/cancel
 
 async function onSecurityEnrollBegin() {
+  if (!authConfig.totpEnabled) return;
   if (!session) return;
   setSecurityError(null);
   try {
@@ -438,44 +733,55 @@ async function onSecurityEnrollBegin() {
     renderQrInto(document.getElementById("security-qr"), resp.otpauthUri);
     document.getElementById("security-enroll-start").hidden = true;
     document.getElementById("security-enroll-show").hidden = false;
+    document.getElementById("security-enrolled").hidden = true;
     document.getElementById("security-recovery-ack").checked = false;
     document.getElementById("security-confirm").disabled = true;
+    document.getElementById("security-confirm-code").value = "";
+    setSecurityStatus("pending");
   } catch (err) {
     setSecurityError(err.message || "Enrollment failed");
+    if (err?.status === 401) { logout(); return; }
+    refreshSecurityPanel();
   }
 }
 
 async function onSecurityEnrollConfirm() {
+  if (!authConfig.totpEnabled) return;
   if (!session) return;
   const code = document.getElementById("security-confirm-code").value.trim();
   if (!code) { setSecurityError("Code required"); return; }
   setSecurityError(null);
   try {
     await verifyTotp(session.backend, { code, token: session.token });
-    document.getElementById("security-status").textContent = "2FA enrollment confirmed. Recovery codes are no longer recoverable — keep your saved copy.";
     document.getElementById("security-enroll-show").hidden = true;
+    document.getElementById("security-enrolled").hidden = false;
+    document.getElementById("security-disable-code").value = "";
     // #320: secret was committed — drop the QR (encodes the seed).
     clearQr(document.getElementById("security-qr"));
     pendingEnrollSecret = null;
+    setSecurityStatus("enrolled");
   } catch (err) {
     setSecurityError(err.message || "Verification failed");
   }
 }
 
 async function onSecurityDisable() {
+  if (!authConfig.totpEnabled) return;
   if (!session) return;
   const code = document.getElementById("security-disable-code").value.trim();
   if (!code) { setSecurityError("Code required"); return; }
   setSecurityError(null);
   try {
     await disableTotp(session.backend, session.token, code);
-    document.getElementById("security-status").textContent = "2FA disabled.";
+    document.getElementById("security-disable-code").value = "";
+    renderSecurityPanel({ enrolled: false, pending: false });
   } catch (err) {
     setSecurityError(err.message || "Disable failed");
   }
 }
 
 async function beginForcedEnrollment() {
+  if (!authConfig.totpEnabled) return;
   if (!pendingTotp || !pendingTotp.enrollmentToken) return;
   try {
     const resp = await enrollTotp(pendingTotp.backend, null, pendingTotp.enrollmentToken);
@@ -518,8 +824,8 @@ async function onSignup(e) {
   const username = document.getElementById("signup-username").value.trim();
   const password = document.getElementById("signup-password").value;
   const confirm = document.getElementById("signup-password-confirm").value;
-  if (!username || !password) { setSignupError("Preencha username e password."); return; }
-  if (password !== confirm) { setSignupError("As senhas não coincidem."); return; }
+  if (!username || !password) { setSignupError("Provide username and password."); return; }
+  if (password !== confirm) { setSignupError("Passwords do not match."); return; }
   const submitBtn = document.getElementById("signup-submit");
   if (submitBtn) submitBtn.disabled = true;
   try {
@@ -533,12 +839,13 @@ async function onSignup(e) {
       role: claims.role,
       firm: claims.firm,
       remember: false,
+      authMode: "Local",
     };
     sessionStore = sessionStorage;
     writeSession(next);
     startSession(next);
   } catch (err) {
-    setSignupError(err.message || "Signup falhou");
+    setSignupError(err.message || "Signup failed");
   } finally {
     if (submitBtn) submitBtn.disabled = false;
   }
@@ -594,7 +901,8 @@ function startSession(next) {
       try { subTab = sessionStorage.getItem(SETTINGS_SUB_TAB_KEY); }
       catch { /* private mode */ }
     }
-    if (SETTINGS_SUB_TABS.has(subTab)) state.setSettingsSubTab(subTab);
+    if (isSettingsSubTabAllowed(subTab)) state.setSettingsSubTab(subTab);
+    else state.setSettingsSubTab(defaultSettingsSubTab());
   }
   // Fase 4 (#400). Restore trader sub-tab from hash → sessionStorage.
   if (initialView === "trader") {
@@ -624,7 +932,7 @@ function startSession(next) {
   } catch { /* private mode */ }
   persistActiveTab(initialView);
   syncUrlHash(initialView, /*replace*/ true,
-    initialView === "settings" ? state.getState().settingsSubTab :
+    initialView === "settings" && isSettingsSubTabAllowed(state.getState().settingsSubTab) ? state.getState().settingsSubTab :
     initialView === "trader"   ? state.getState().traderSubTab   :
     undefined);
   if (initialView === "compliance") {
@@ -683,6 +991,10 @@ function scheduleExpiry() {
 function showSessionWarning() {
   if (!session || warningShown) return;
   warningShown = true;
+  if (session.authMode === "Entra") {
+    handleRenewSession();
+    return;
+  }
   ui.openSessionModal({
     onRenew: handleRenewSession,
     onLogout: logout,
@@ -693,6 +1005,10 @@ async function handleRenewSession(password) {
   if (!session || renewInflight) return;
   renewInflight = true;
   try {
+    if (session.authMode === "Entra") {
+      await renewEntraSession(session);
+      return;
+    }
     const resp = await login(session.backend, session.username, password);
     const claims = claimsFromToken(resp.token);
     session = {
@@ -718,7 +1034,14 @@ async function handleRenewSession(password) {
     scheduleExpiry();
     ui.closeSessionModal();
   } catch (err) {
-    ui.setSessionModalError(err.message || "renew failed");
+    if (session?.authMode === "Entra") {
+      if (!isInteractionRequiredError(err)) {
+        logout({ redirectEntra: false });
+        setAuthError(formatAuthError(err));
+      }
+    } else {
+      ui.setSessionModalError(err.message || "renew failed");
+    }
   } finally {
     renewInflight = false;
   }
@@ -761,36 +1084,12 @@ function restartWorker() {
   startWorker();
 }
 
-function defaultMdUrl() {
-  // Optional external B3MarketDataPlatform WS. Defaults to the dev port
-  // 8081 on localhost so the docker-compose stack works out of the box;
-  // returns empty for non-localhost deployments where the operator must
-  // configure an explicit endpoint via the Market Data panel.
-  return defaultMarketDataUrl();
-}
-
-function readMdConfig() {
-  try {
-    const raw = sessionStorage.getItem(MD_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed.url === "string" && Array.isArray(parsed.symbols)) {
-        return parsed;
-      }
-    }
-  } catch { /* fall through */ }
-  return { url: defaultMdUrl(), symbols: DEFAULT_WATCHLIST.slice() };
-}
-
-function writeMdConfig(cfg) { sessionStorage.setItem(MD_KEY, JSON.stringify(cfg)); }
-function clearMdConfig()    { sessionStorage.removeItem(MD_KEY); }
-
 function startMdWorker() {
-  mdConfig = readMdConfig();
-  ui.setMdInputs(mdConfig);
+  mdConfig = readMdConnectionConfig(sessionStorage, DEFAULT_WATCHLIST);
+  ui.setMdInputs(readMdDisplayConfig(sessionStorage, DEFAULT_WATCHLIST));
   state.setWatchlist(mdConfig.symbols);
   state.setMarketDataStatus("disconnected");
-  if (!mdConfig.url) return; // user hasn't configured an endpoint yet
+  if (!mdConfig.url) return; // no deploy-time URL and no localhost dev fallback
 
   mdWorker = new Worker(new URL("./mdWorker.js", import.meta.url), { type: "module" });
   mdWorker.onmessage = (ev) => onMdWorkerMessage(ev.data);
@@ -812,31 +1111,20 @@ function startMdWorker() {
   });
 }
 
-function handleApplyMd({ url, symbols }) {
-  if (!url) {
-    ui.setMdFeedback("ws url required", "error");
-    return;
-  }
-  const next = { url, symbols };
-  // URL change forces a full restart (different endpoint = different
-  // session / securityIds). Symbol-only changes go via setSymbols so
-  // we don't blip the connection on every watchlist tweak.
-  const urlChanged = !mdConfig || mdConfig.url !== url;
+function handleApplyMd({ symbols }) {
+  const next = {
+    url: mdConfig?.url ?? "",
+    symbols,
+  };
   mdConfig = next;
-  writeMdConfig(next);
+  writeMdConfig(sessionStorage, symbols);
   state.setWatchlist(symbols);
 
-  if (urlChanged || !mdWorker) {
-    if (mdWorker) {
-      try { mdWorker.postMessage({ type: "stop" }); } catch { /* swallow */ }
-      mdWorker.terminate();
-      mdWorker = null;
+  if (!mdWorker) {
+    if (!mdConfig.url) {
+      ui.setMdFeedback(`watching ${symbols.length} symbol(s)`, "ok");
+      return;
     }
-    state.clearMarketData();
-    state.clearAllBooks();
-    state.clearAllCandles();
-    state.clearAllTape();
-    state.clearAllHeatmap();
     startMdWorker();
   } else {
     mdWorker.postMessage({ type: "setSymbols", symbols });
@@ -973,21 +1261,23 @@ async function handleLoadChain() {
   if (!session) return;
   const underlying = document.getElementById("chain-underlying")?.value?.trim().toUpperCase();
   if (!underlying) {
-    document.getElementById("chain-picker-grid").innerHTML =
-      '<p class="chain-placeholder">Enter an underlying symbol (e.g., PETR4)</p>';
+    ui.setChainPickerStatus("Enter an underlying symbol (e.g. PETR4) and click Load.");
     return;
   }
   const grid = document.getElementById("chain-picker-grid");
-  if (grid) grid.innerHTML = '<p class="chain-placeholder">Loading…</p>';
+  ui.setChainPickerStatus(`Loading ${underlying} option chain…`);
   try {
     const instruments = await getInstruments(session.backend, session.token, { underlying });
     if (!instruments || instruments.length === 0) {
-      if (grid) grid.innerHTML = '<p class="chain-placeholder">No options found for this underlying</p>';
+      ui.setChainPickerStatus(`No listed options found for ${underlying}.`);
       return;
     }
     if (grid) grid.innerHTML = ui.buildChainGrid(instruments);
   } catch (err) {
-    if (grid) grid.innerHTML = `<p class="chain-placeholder" style="color:#dc2626">Error: ${err.message}</p>`;
+    const message = err?.status === 404 || err?.status === 400
+      ? `${underlying} is not a known underlying symbol.`
+      : `Could not load the option chain for ${underlying}.`;
+    ui.setChainPickerStatus(message, "error");
   }
 }
 
@@ -1222,7 +1512,8 @@ function readBlotterFilter() {
 }
 function writeBlotterFilter(f) { sessionStorage.setItem(BLOTTER_FILTER_KEY, JSON.stringify(f)); }
 
-function logout() {
+function logout({ broadcast = true, redirectEntra = true, clearEntraCache = false } = {}) {
+  const shouldRedirectEntra = redirectEntra && (session?.authMode === "Entra" || authConfig.mode === "Entra") && !!entraAuth;
   if (expiryTimer) { clearTimeout(expiryTimer); expiryTimer = null; }
   if (warningTimer) { clearTimeout(warningTimer); warningTimer = null; }
   warningShown = false;
@@ -1243,7 +1534,7 @@ function logout() {
   mdConfig = null;
   closeComplianceDropCopy();
   clearSession();
-  clearMdConfig();
+  clearMdConfig(sessionStorage);
   // Fase 1 (#397). Drop the persisted tab so the next sign-in lands
   // on the role-default rather than reviving the previous user's
   // navigation state.
@@ -1267,6 +1558,14 @@ function logout() {
   state.clearMarketData();
   state.setWatchlist([]);
   ui.showLogin();
+  showAuthEntry();
+  if (broadcast) logoutChannel?.broadcast();
+  if (clearEntraCache && entraAuth) {
+    entraAuth.clearCache().catch((err) => console.warn("[auth] MSAL cache clear failed", err));
+  }
+  if (shouldRedirectEntra) {
+    entraAuth.logoutRedirect().catch((err) => setAuthError(formatAuthError(err)));
+  }
 }
 
 // ── Admin firms poll ───────────────────────────────────────────────
@@ -1442,9 +1741,18 @@ function handleSwitchView(view, subTab) {
   // Fase 3 (#399). Settings sub-tab is applied BEFORE setCurrentView
   // so the subscriber that toggles panel visibility sees the right
   // sub-tab on the same render pass that mounts the view.
-  if (view === "settings" && subTab && SETTINGS_SUB_TABS.has(subTab)) {
+  if (view === "settings" && subTab && isSettingsSubTabAllowed(subTab)) {
     state.setSettingsSubTab(subTab);
     persistSettingsSubTab(subTab);
+  } else if (view === "settings" && subTab && SETTINGS_SUB_TABS.has(subTab)) {
+    const fallback = defaultSettingsSubTab();
+    state.setSettingsSubTab(fallback);
+    persistSettingsSubTab(fallback);
+  }
+  if (view === "settings" && !isSettingsSubTabAllowed(state.getState().settingsSubTab)) {
+    const fallback = defaultSettingsSubTab();
+    state.setSettingsSubTab(fallback);
+    persistSettingsSubTab(fallback);
   }
   // Fase 4 (#400). Same dance for the trader sub-tab.
   if (view === "trader" && subTab && TRADER_SUB_TABS.has(subTab)) {
@@ -1455,7 +1763,9 @@ function handleSwitchView(view, subTab) {
   persistActiveTab(view);
   let effectiveSub;
   if (view === "settings") {
-    effectiveSub = SETTINGS_SUB_TABS.has(subTab) ? subTab : state.getState().settingsSubTab;
+    effectiveSub = isSettingsSubTabAllowed(subTab)
+      ? subTab
+      : (isSettingsSubTabAllowed(state.getState().settingsSubTab) ? state.getState().settingsSubTab : defaultSettingsSubTab());
   } else if (view === "trader") {
     effectiveSub = TRADER_SUB_TABS.has(subTab) ? subTab : state.getState().traderSubTab;
   }
@@ -1502,7 +1812,7 @@ async function refreshAlgosList() {
     state.applyAlgoSnapshot(Array.isArray(rows) ? rows : []);
   } catch (err) {
     console.warn("[algos] list failed", err);
-    algosUi.showBoletaError(`Falha ao carregar algos: ${err?.message || err}`);
+    algosUi.showBoletaError(`Failed to load algos: ${err?.message || err}`);
   }
 }
 
@@ -1515,13 +1825,13 @@ async function handleSubmitAlgo(payload) {
   }
   try {
     const created = await createAlgo(session.backend, session.token, payload);
-    algosUi.showBoletaSuccess(`Algo ${created?.algoId ?? ""} criado.`);
+    algosUi.showBoletaSuccess(`Algo ${created?.algoId ?? ""} created.`);
     // WS delta normally arrives within ms; fire a defensive refresh in
     // case the user opened the tab and hit submit before the snapshot
     // landed (algo.me subscribe + REST list both repopulate cleanly).
     refreshAlgosList();
   } catch (err) {
-    algosUi.showBoletaError(`Erro ao criar algo: ${err?.message || err}`);
+    algosUi.showBoletaError(`Error creating algo: ${err?.message || err}`);
   }
 }
 
@@ -1531,7 +1841,7 @@ async function handleCancelAlgo(algoId) {
   try {
     await cancelAlgo(session.backend, session.token, algoId);
   } catch (err) {
-    algosUi.showBoletaError(`Erro ao cancelar ${algoId}: ${err?.message || err}`);
+    algosUi.showBoletaError(`Error cancelling ${algoId}: ${err?.message || err}`);
   } finally {
     state.markAlgoCancelInflight(algoId, false);
   }
@@ -1542,9 +1852,9 @@ async function handleModifyAlgo(algoId, payload) {
   state.markAlgoModifyInflight(algoId, true);
   try {
     await modifyAlgo(session.backend, session.token, algoId, payload);
-    algosUi.showBoletaSuccess(`Modify enviado para ${algoId}.`);
+    algosUi.showBoletaSuccess(`Modify sent for ${algoId}.`);
   } catch (err) {
-    algosUi.showBoletaError(`Erro ao modificar ${algoId}: ${err?.message || err}`);
+    algosUi.showBoletaError(`Error modifying ${algoId}: ${err?.message || err}`);
   } finally {
     state.markAlgoModifyInflight(algoId, false);
   }
@@ -1903,59 +2213,25 @@ async function handleRunEod() {
   }
 }
 
-function readStoredSession(store) {
-  try {
-    const raw = store.getItem(SESSION_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (!parsed.token || !parsed.expiresAt) return null;
-    if (new Date(parsed.expiresAt).getTime() <= Date.now()) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
 function readSession() {
-  // sessionStorage is the per-tab anchor: once a tab has its own
-  // session pinned there, no other tab can hijack it via localStorage.
-  // localStorage is consulted only as a "boot seed" for fresh tabs
-  // that don't yet have their own pinned session — that's how
-  // "Remember me" survives a full browser close. Issue #104:
-  // previously we picked the freshest of either store, which let a
-  // remember-me login in tab B silently take over tab A on reload.
-  const fromTab = readStoredSession(sessionStorage);
-  if (fromTab) {
-    sessionStore = sessionStorage;
-    return fromTab;
-  }
-  const fromBoot = readStoredSession(localStorage);
-  if (fromBoot) {
-    // Pin the boot seed into this tab so subsequent reloads/writes
-    // stay isolated from other tabs.
-    try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(fromBoot)); } catch { /* swallow */ }
-    sessionStore = fromBoot.remember ? localStorage : sessionStorage;
-    return fromBoot;
-  }
-  return null;
+  const { session: stored, preferredStore } = readInternalSession({
+    authMode: authConfig.mode,
+    sessionStorage,
+    localStorage,
+  });
+  sessionStore = preferredStore === "localStorage" ? localStorage : sessionStorage;
+  return stored;
 }
 function writeSession(s) {
-  // Always pin in sessionStorage so the tab owns its identity going
-  // forward. Mirror to localStorage only when remember-me is on, so
-  // a fresh browser launch can recover the session via the boot seed
-  // path in readSession(). We deliberately do NOT clear the "other"
-  // store here: another tab may legitimately have a remember-me
-  // session in localStorage that this tab's write must not erase
-  // (issue #104).
-  try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch { /* swallow */ }
-  if (s.remember) {
-    try { localStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch { /* swallow */ }
-  }
-  sessionStore = s.remember ? localStorage : sessionStorage;
+  const preferredStore = writeInternalSession(s, {
+    authMode: s.authMode === "Entra" ? "Entra" : authConfig.mode,
+    sessionStorage,
+    localStorage,
+  });
+  sessionStore = preferredStore === "localStorage" ? localStorage : sessionStorage;
 }
 function clearSession() {
-  try { localStorage.removeItem(SESSION_KEY); } catch { /* swallow */ }
-  try { sessionStorage.removeItem(SESSION_KEY); } catch { /* swallow */ }
+  clearInternalSession({ sessionStorage, localStorage });
 }
 
 // ── Q4.14 (#314). Compliance handlers ──────────────────────────────

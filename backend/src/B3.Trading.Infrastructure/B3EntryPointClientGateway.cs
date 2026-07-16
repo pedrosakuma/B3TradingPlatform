@@ -228,6 +228,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     public bool IsReconnecting => Volatile.Read(ref _reconnectingState) == 1;
 
     public event Action<ExecutionReportEnvelope>? ExecutionReportReceived;
+    public event Action<BusinessRejectEnvelope>? BusinessRejectReceived;
 
     /// <summary>
     /// Establish the FIXP session and start the inbound event loop. Idempotent;
@@ -479,6 +480,12 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             // wire order.DisplayResetPolicy here and drop the validation
             // guard in OrdersEndpoints.cs + OrderSubmissionService.cs.
             MaxFloor = order.DisplayQty is { } dq ? (ulong)dq : (ulong?)null,
+            // #457. Native MinQty (FIX). When the trader sets a minimum
+            // execution quantity, the venue must fill at least this many
+            // contracts at submit time or reject the order. Domain.Order's
+            // ctor already validated 0 < MinQty <= Quantity so the cast
+            // to ulong? is safe.
+            MinQty = order.MinQty is { } mq ? (ulong)mq : (ulong?)null,
             // #433 P1. Venue-side STP. Defense-in-depth pair with
             // SelfTradePreventionCheck — see SelfTradePreventionMode
             // doc comment for the rationale. The instruction value is
@@ -560,7 +567,44 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             original.Type, original.TimeInForce, original.StopPrice, original.GoodTillDate,
             requestedTimeInForce, requestedStopPrice, requestedGoodTillDate);
 
-        var req = new UpModels.ReplaceOrderRequest
+        var req = BuildReplaceOrderRequest(original, newClOrdId, newQuantity, newPrice,
+            requestedTimeInForce, requestedStopPrice, requestedGoodTillDate,
+            ResolveStpInstruction(original), ResolveTradingSubAccount(original),
+            ResolveVenueAccount(original), ResolveInvestorId(original),
+            ResolveRoutingInstruction(original));
+
+        return SendAsync(newClOrdId, OrderEntryLatencyProbe.OpReplace,
+            ct => _client.ReplaceAsync(req, ct), cancellationToken);
+    }
+
+    /// <summary>
+    /// #457. Extracted from <see cref="CancelReplaceAsync"/> so the outbound
+    /// <c>ReplaceOrderRequest</c> mapping (including the FIX MinQty / MaxFloor
+    /// inheritance + clamp) can be pinned by unit tests without standing up a
+    /// real <c>EntryPointClient</c>. Pure function: every field is read from
+    /// the original domain <see cref="Order"/> and the modify-call arguments,
+    /// with no side effects.
+    /// </summary>
+    internal static UpModels.ReplaceOrderRequest BuildReplaceOrderRequest(
+        Order original,
+        ulong newClOrdId,
+        long newQuantity,
+        decimal? newPrice,
+        TimeInForce? requestedTimeInForce,
+        decimal? requestedStopPrice,
+        DateTimeOffset? requestedGoodTillDate,
+        UpModels.SelfTradePreventionInstruction selfTradePreventionInstruction = UpModels.SelfTradePreventionInstruction.None,
+        uint? tradingSubAccount = null,
+        ulong? account = null,
+        InvestorIdentity? investorId = null,
+        RoutingInstruction? routingInstruction = null)
+    {
+        ArgumentNullException.ThrowIfNull(original);
+        var (effTif, effStop, effGtd) = Order.MergeReplacementOptionals(
+            original.Type, original.TimeInForce, original.StopPrice, original.GoodTillDate,
+            requestedTimeInForce, requestedStopPrice, requestedGoodTillDate);
+
+        return new UpModels.ReplaceOrderRequest
         {
             ClOrdID = new UpModels.ClOrdID(newClOrdId),
             OrigClOrdID = new UpModels.ClOrdID(original.ClOrdId),
@@ -584,41 +628,46 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             MaxFloor = original.DisplayQty is { } odq
                 ? (ulong)Math.Min(odq, newQuantity)
                 : (ulong?)null,
+            // #457. Replace inherits the original's MinQty (clamped to
+            // newQuantity if the new order qty would otherwise be below
+            // MinQty), mirroring the DisplayQty handling above and
+            // Order.HydrateReplacement. A future modify-pipeline slice
+            // can plumb explicit MinQty overrides.
+            MinQty = original.MinQty is { } omq
+                ? (ulong)Math.Min(omq, newQuantity)
+                : (ulong?)null,
             // #433 P1. Venue-side STP carried on the replace too —
             // a modified order is a fresh book entry from the
             // matching engine's perspective so the instruction must
             // re-accompany it. Resolution scope is the original
             // order's (owner, firm, symbol) — modify never changes
             // those three.
-            SelfTradePreventionInstruction = ResolveStpInstruction(original),
+            SelfTradePreventionInstruction = selfTradePreventionInstruction,
             // #471. Same rationale as STP above: from the matching
             // engine's perspective a replace is a fresh order, so the
             // TradingSubAccount wire id must re-accompany it. The
             // domain sub-account on the original Order is preserved
             // through every modify path (HydrateReplacement copies it
             // verbatim), so resolving from `original` is correct.
-            TradingSubAccount = ResolveTradingSubAccount(original),
+            TradingSubAccount = tradingSubAccount,
             // #458. Same rationale: replace is a fresh book entry; the
             // CBLC Account must re-accompany it. Resolving from
             // `original` is correct because owner/firm/sub-account
             // (the typical inputs to the resolver) are immutable
             // across a modify.
-            Account = ResolveVenueAccount(original),
+            Account = account,
             // #472. Same rationale: replace is a fresh book entry;
             // the InvestorId must re-accompany it. Resolving from
             // `original` is correct because owner/firm (the typical
             // inputs to the resolver) are immutable across a modify.
-            InvestorId = MapInvestorIdToWire(ResolveInvestorId(original)),
+            InvestorId = MapInvestorIdToWire(investorId),
             // #473. Same rationale: replace is a fresh book entry,
             // routing intent must re-accompany it. Resolved off the
             // original since owner/firm (the typical inputs) are
             // immutable across modify; pre-trade whitelist gating
             // was already applied by OrderModifyService.
-            RoutingInstruction = MapRoutingInstructionToWire(ResolveRoutingInstruction(original)),
+            RoutingInstruction = MapRoutingInstructionToWire(routingInstruction),
         };
-
-        return SendAsync(newClOrdId, OrderEntryLatencyProbe.OpReplace,
-            ct => _client.ReplaceAsync(req, ct), cancellationToken);
     }
 
     /// <summary>
@@ -830,7 +879,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 // automatic retransmit; if a gap nevertheless surfaces here,
                 // the metric flags it for ops and the ER processor's
                 // idempotency (#16) makes any subsequent replay safe.
-                switch (FixpGapDetector.Observe(ev.SeqNum, ref _lastInboundSeqNum))
+                var gapObservation = FixpGapDetector.Observe(ev.SeqNum, ref _lastInboundSeqNum);
+                switch (gapObservation)
                 {
                     case GapObservation.Gap:
                         MetricsRegistry.EntryPointGapDetected.Add(1, FirmTag());
@@ -845,6 +895,12 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                         break;
                 }
 
+                // BusinessReject lacks the ER processor's ClOrdID-keyed
+                // idempotency path, so a retransmitted duplicate must stop here
+                // rather than being re-counted / re-routed downstream.
+                if (gapObservation == GapObservation.Duplicate && ev is UpModels.BusinessReject)
+                    continue;
+
                 ExecutionReportEnvelope? envelope;
                 try
                 {
@@ -854,6 +910,32 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 {
                     MetricsRegistry.EntryPointTranslationErrors.Add(1, FirmTag());
                     _logger.LogError(ex, "Failed to translate upstream event {Event} for firm {Firm}", ev.GetType().Name, _firmId);
+                    continue;
+                }
+
+                // #432 — BusinessReject has no ClOrdID anchor and therefore
+                // no ExecutionReportEnvelope, but it must NOT be silently
+                // discarded: it indicates a structural rejection (malformed
+                // payload / unknown SecurityID / outside trading hours) for
+                // which the order request never produced an ER. Route via
+                // its own event channel + metric so the downstream router
+                // can persist it to the WAL for operator audit.
+                if (ev is UpModels.BusinessReject br)
+                {
+                    try
+                    {
+                        BusinessRejectReceived?.Invoke(new BusinessRejectEnvelope(
+                            FirmId: _firmId,
+                            RefSeqNum: br.RefSeqNum,
+                            RejectReason: br.RejectReason,
+                            Text: br.Text,
+                            SeqNum: br.SeqNum,
+                            SendingTime: br.SendingTime));
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "BusinessReject subscriber threw for firm {Firm}; continuing.", _firmId);
+                    }
                     continue;
                 }
 
@@ -1265,10 +1347,13 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
     // BusinessReject, also exposed for instrumentation hookup if a future
     // correlation map is added (RefSeqNum → ClOrdID).
-    internal static void RecordBusinessReject(string firmId, UpModels.BusinessReject br)
+    internal static void RecordBusinessReject(string firmId, UpModels.BusinessReject br) =>
+        RecordBusinessReject(firmId, br.RejectReason);
+
+    internal static void RecordBusinessReject(string firmId, int rejectReason)
     {
         MetricsRegistry.EntryPointBusinessRejects.Add(1,
             new KeyValuePair<string, object?>("firm", firmId),
-            new KeyValuePair<string, object?>("reason", br.RejectReason));
+            new KeyValuePair<string, object?>("reason", rejectReason));
     }
 }

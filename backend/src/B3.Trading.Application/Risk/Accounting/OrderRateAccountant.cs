@@ -11,6 +11,7 @@ public sealed class OrderRateAccountant : IRiskAccountant
 {
     private readonly SlidingWindowLedger _perEndClient;
     private readonly SlidingWindowLedger _perFirm;
+    private readonly SlidingWindowLedger _perAlgo;
     private readonly IOptionsMonitor<RiskOptions> _options;
 
     public OrderRateAccountant(IOptionsMonitor<RiskOptions> options, TimeProvider clock)
@@ -18,10 +19,14 @@ public sealed class OrderRateAccountant : IRiskAccountant
         _options = options;
         _perEndClient = new SlidingWindowLedger(clock);
         _perFirm = new SlidingWindowLedger(clock);
+        _perAlgo = new SlidingWindowLedger(clock);
     }
 
     public SlidingWindowLedger EndClientLedger => _perEndClient;
     public SlidingWindowLedger FirmLedger => _perFirm;
+
+    /// <summary>#435. Per-(firm, parentAlgoId) ledger.</summary>
+    public SlidingWindowLedger AlgoLedger => _perAlgo;
 
     public TimeSpan Window => TimeSpan.FromSeconds(
         Math.Max(1, _options.CurrentValue.OrderRate.WindowSeconds));
@@ -31,5 +36,7 @@ public sealed class OrderRateAccountant : IRiskAccountant
         _perEndClient.Append(ctx.Owner.Value, 1m);
         if (!string.IsNullOrWhiteSpace(ctx.FirmId))
             _perFirm.Append(ctx.FirmId, 1m);
+        if (ctx.ParentAlgoId is { } algoId && !string.IsNullOrWhiteSpace(ctx.FirmId))
+            _perAlgo.Append(RollingNotionalAccountant.AlgoKey(ctx.FirmId, algoId), 1m);
     }
 }

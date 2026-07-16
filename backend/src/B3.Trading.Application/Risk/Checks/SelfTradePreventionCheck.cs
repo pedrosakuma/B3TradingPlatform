@@ -1,3 +1,4 @@
+using B3.Trading.Application.Observability;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Options;
 
@@ -67,11 +68,27 @@ public sealed class SelfTradePreventionCheck : IRiskCheck
 {
     private readonly IOptionsMonitor<RiskOptions> _options;
     private readonly WorkingOrderBook _orders;
+    private readonly IBeneficialOwnerResolver _beneficialOwners;
 
-    public SelfTradePreventionCheck(IOptionsMonitor<RiskOptions> options, WorkingOrderBook orders)
+    public SelfTradePreventionCheck(
+        IOptionsMonitor<RiskOptions> options,
+        WorkingOrderBook orders,
+        IBeneficialOwnerResolver beneficialOwners)
     {
         _options = options;
         _orders = orders;
+        _beneficialOwners = beneficialOwners;
+    }
+
+    // Back-compat ctor for tests + legacy DI that don't wire the
+    // beneficial-owner resolver yet. Cross-firm scope is unreachable
+    // when constructed this way (the resolver collapses BO == owner
+    // and only ever returns the input owner from OwnersFor).
+    public SelfTradePreventionCheck(
+        IOptionsMonitor<RiskOptions> options,
+        WorkingOrderBook orders)
+        : this(options, orders, new DefaultBeneficialOwnerResolver())
+    {
     }
 
     // Ordered just after no_naked_short (180) and before position
@@ -90,29 +107,75 @@ public sealed class SelfTradePreventionCheck : IRiskCheck
         if (allow == true) return RiskDecision.Approve;
 
         var oppositeSide = ctx.Side == OrderSide.Buy ? OrderSide.Sell : OrderSide.Buy;
+
+        // Phase 1 — same-firm scope (pre-#433 behavior, unchanged).
         // PR #316 P2: scope the contra-order scan to the caller's firm
         // so an opposite-side working order in FIRM02 cannot reject a
         // FIRM01 order from the same JWT sub. Self-trading is a venue-
         // session concern (the matching engine groups orders by firm
-        // session, not by end-client), so cross-firm pairs of the same
-        // owner can never wash-trade through this platform.
+        // session, not by end-client), so same-firm same-owner pairs
+        // ARE the wash trade.
         foreach (var existing in _orders.ForEndClientAndFirm(ctx.FirmId, ctx.Owner))
         {
             if (existing.Side != oppositeSide) continue;
             if (!string.Equals(existing.Symbol, ctx.Symbol, StringComparison.Ordinal)) continue;
             if (!IsStillRestable(existing)) continue;
 
-            // Presence-based: do NOT consult prices. Any opposite-side
-            // working order in the same symbol is enough to reject.
-            return RiskDecision.Reject(
-                $"self_trade_prevention: own opposite-side {existing.Side} order " +
-                $"{existing.LeavesQuantity}@" +
-                $"{(existing.Price.HasValue ? existing.Price.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "MKT")} " +
-                $"is working on {ctx.Symbol} (clOrdId={existing.ClOrdId}); " +
-                $"set AllowSelfTrade=true to opt out");
+            MetricsRegistry.SelfTradeRejected.Add(1,
+                new KeyValuePair<string, object?>("scope", "same_firm"),
+                new KeyValuePair<string, object?>("mode", "block"));
+            return RiskDecision.Reject(BuildReason("same_firm", existing, ctx));
+        }
+
+        // Phase 2 — cross-firm beneficial-owner scope (#433).
+        // CVM 168 práticas equitativas: a single beneficial owner cannot
+        // wash-trade across firms. Opt-in via EnforceCrossFirmStp so
+        // single-firm and same-BO-on-purpose deployments retain the
+        // pre-existing semantics. The matching engine on B3 isolates by
+        // firm session, so a cross-firm contra pair is allowed to fill
+        // at the venue — which is exactly the wash-trade vector the
+        // platform must close on its side.
+        var enforceCrossFirm = RiskLimitsResolver.Resolve(
+            opts, ctx.Owner.Value, ctx.FirmId, ctx.Symbol, l => l.EnforceCrossFirmStp);
+        if (enforceCrossFirm != true) return RiskDecision.Approve;
+
+        var beneficialOwnerId = _beneficialOwners.Resolve(ctx.Owner);
+        foreach (var siblingOwner in _beneficialOwners.OwnersFor(beneficialOwnerId))
+        {
+            foreach (var existing in _orders.ForEndClient(siblingOwner))
+            {
+                if (string.Equals(existing.FirmId, ctx.FirmId, StringComparison.Ordinal))
+                {
+                    // Already covered by Phase 1 or intentionally left to
+                    // same-firm / venue-side STP semantics.
+                    continue;
+                }
+                if (existing.Side != oppositeSide) continue;
+                if (!string.Equals(existing.Symbol, ctx.Symbol, StringComparison.Ordinal)) continue;
+                if (!IsStillRestable(existing)) continue;
+
+                MetricsRegistry.SelfTradeRejected.Add(1,
+                    new KeyValuePair<string, object?>("scope", "cross_firm"),
+                    new KeyValuePair<string, object?>("mode", "block"));
+                return RiskDecision.Reject(BuildReason("cross_firm", existing, ctx, beneficialOwnerId));
+            }
         }
 
         return RiskDecision.Approve;
+    }
+
+    private static string BuildReason(string scope, Order existing, RiskContext ctx, string? beneficialOwnerId = null)
+    {
+        var price = existing.Price.HasValue
+            ? existing.Price.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            : "MKT";
+        var boHint = beneficialOwnerId is null
+            ? ""
+            : $" (beneficial_owner={beneficialOwnerId}, contra_firm={existing.FirmId})";
+        return
+            $"self_trade_prevention[{scope}]: own opposite-side {existing.Side} order " +
+            $"{existing.LeavesQuantity}@{price} is working on {ctx.Symbol} " +
+            $"(clOrdId={existing.ClOrdId}){boHint}; set AllowSelfTrade=true to opt out";
     }
 
     // "Still restable" = order is on the book and has unfilled quantity.
@@ -133,4 +196,15 @@ public sealed class SelfTradePreventionCheck : IRiskCheck
                        and not OrderStatus.Cancelled
                        and not OrderStatus.Rejected
                        and not OrderStatus.Replaced;
+
+    // Used only by the legacy two-arg ctor for back-compat: collapses
+    // every owner to its own BO so cross-firm scope can't fire even
+    // if EnforceCrossFirmStp is set, when wired through a host that
+    // didn't register the real resolver yet.
+    private sealed class DefaultBeneficialOwnerResolver : IBeneficialOwnerResolver
+    {
+        public string Resolve(EndClientId owner) => owner.Value;
+        public IReadOnlyCollection<EndClientId> OwnersFor(string beneficialOwnerId) =>
+            new[] { new EndClientId(beneficialOwnerId) };
+    }
 }

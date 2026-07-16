@@ -20,6 +20,7 @@ if (corsOrigins.Length > 0)
 
 builder.Services.AddEntryPointListener(builder.Configuration);
 builder.Services.AddTradingAuth(builder.Configuration);
+builder.Services.AddTradingIdentityDirectory(builder.Configuration);
 builder.Services.AddTradingApplicationCore(builder.Configuration);
 builder.Services.AddTradingPersistence(builder.Configuration);
 builder.Services.AddTradingRisk(builder.Configuration);
@@ -32,6 +33,7 @@ var app = builder.Build();
 
 TradingHostStartup.RegisterMetricsSources(app);
 TradingHostStartup.ValidateBootGuards(app);
+await TradingHostStartup.RunIdentityDirectoryStartupAsync(app);
 await TradingHostStartup.RunRecoveryAndSeedingAsync(app);
 
 if (corsOrigins.Length > 0)

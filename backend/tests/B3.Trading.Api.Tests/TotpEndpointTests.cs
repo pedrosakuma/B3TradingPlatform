@@ -30,6 +30,7 @@ public class TotpEndpointTests
 
     private sealed record EnrollResponseDto(string Secret, string OtpauthUri, List<string> RecoveryCodes);
     private sealed record LoginRequiresDto(bool Requires2fa, string TotpChallengeToken);
+    private sealed record TotpStatusDto(bool Enrolled);
 
     [Fact]
     public async Task NonEnrolledLogin_BehavesAsBefore_NoRequires2fa()
@@ -168,6 +169,44 @@ public class TotpEndpointTests
     }
 
     [Fact]
+    public async Task EnrollmentConfirm_InvalidCode_Rejected_ThenValidCodeStillEnrolls()
+    {
+        await using var factory = new TestAppFactory();
+        var http = await factory.CreateAuthedClientAsync();
+
+        var enroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll", new { }))
+            .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
+
+        var invalid = await http.PostAsJsonAsync("/auth/2fa/verify", new { code = "000000" });
+        Assert.Equal(HttpStatusCode.Unauthorized, invalid.StatusCode);
+
+        var valid = await http.PostAsJsonAsync("/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
+        Assert.Equal(HttpStatusCode.OK, valid.StatusCode);
+
+        var status = await http.GetFromJsonAsync<TotpStatusDto>("/auth/2fa/status");
+        Assert.NotNull(status);
+        Assert.True(status!.Enrolled);
+    }
+
+    [Fact]
+    public async Task Disable_AcceptsRecoveryCode()
+    {
+        await using var factory = new TestAppFactory();
+        var http = await factory.CreateAuthedClientAsync();
+
+        var enroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll", new { }))
+            .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
+        await http.PostAsJsonAsync("/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
+
+        var disable = await http.PostAsJsonAsync("/auth/2fa/disable", new { code = enroll.RecoveryCodes[0] });
+        Assert.Equal(HttpStatusCode.OK, disable.StatusCode);
+
+        var status = await http.GetFromJsonAsync<TotpStatusDto>("/auth/2fa/status");
+        Assert.NotNull(status);
+        Assert.False(status!.Enrolled);
+    }
+
+    [Fact]
     public async Task ReEnrollBlockedWhenAlreadyEnrolled()
     {
         await using var factory = new TestAppFactory();
@@ -195,6 +234,32 @@ public class TotpEndpointTests
         var verify = await http.PostAsJsonAsync("/auth/2fa/verify",
             new { code = ComputeCode(enroll.Secret) });
         Assert.Equal(HttpStatusCode.BadRequest, verify.StatusCode);
+    }
+
+    [Fact]
+    public async Task Status_TracksEnrollAndDisableJourney()
+    {
+        await using var factory = new TestAppFactory();
+        var http = await factory.CreateAuthedClientAsync();
+
+        var initial = await http.GetFromJsonAsync<TotpStatusDto>("/auth/2fa/status");
+        Assert.NotNull(initial);
+        Assert.False(initial!.Enrolled);
+
+        var enroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll", new { }))
+            .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
+        await http.PostAsJsonAsync("/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
+
+        var enrolled = await http.GetFromJsonAsync<TotpStatusDto>("/auth/2fa/status");
+        Assert.NotNull(enrolled);
+        Assert.True(enrolled!.Enrolled);
+
+        var disable = await http.PostAsJsonAsync("/auth/2fa/disable", new { code = ComputeCode(enroll.Secret, stepOffset: 1) });
+        Assert.Equal(HttpStatusCode.OK, disable.StatusCode);
+
+        var disabled = await http.GetFromJsonAsync<TotpStatusDto>("/auth/2fa/status");
+        Assert.NotNull(disabled);
+        Assert.False(disabled!.Enrolled);
     }
 
     [Fact]

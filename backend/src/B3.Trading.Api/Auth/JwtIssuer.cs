@@ -30,9 +30,26 @@ public sealed class JwtIssuer
     }
 
     public (string Token, DateTimeOffset ExpiresAt) Issue(string subject, string role, string firm = "default")
+        => Issue(subject, role, firm, TimeSpan.FromMinutes(_options.TokenLifetimeMinutes), additionalClaims: null, includeIssuedAt: false);
+
+    public (string Token, DateTimeOffset ExpiresAt) Issue(
+        string subject,
+        string role,
+        string firm,
+        TimeSpan lifetime,
+        IEnumerable<Claim>? additionalClaims = null)
+        => Issue(subject, role, firm, lifetime, additionalClaims, includeIssuedAt: true);
+
+    private (string Token, DateTimeOffset ExpiresAt) Issue(
+        string subject,
+        string role,
+        string firm,
+        TimeSpan lifetime,
+        IEnumerable<Claim>? additionalClaims,
+        bool includeIssuedAt)
     {
         var now = DateTimeOffset.UtcNow;
-        var expires = now.AddMinutes(_options.TokenLifetimeMinutes);
+        var expires = now.Add(lifetime);
 
         var claims = new List<Claim>
         {
@@ -41,6 +58,15 @@ public sealed class JwtIssuer
             new(RoleClaim, role),
             new(FirmClaim, firm),
         };
+        if (includeIssuedAt)
+        {
+            claims.Add(new Claim(
+                JwtRegisteredClaimNames.Iat,
+                now.ToUnixTimeSeconds().ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ClaimValueTypes.Integer64));
+        }
+        if (additionalClaims is not null)
+            claims.AddRange(additionalClaims);
 
         var token = new JwtSecurityToken(
             issuer: _options.Issuer,

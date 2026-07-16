@@ -315,6 +315,7 @@ public sealed class WorkingOrderBook
                 DisplayQty = o.DisplayQty,
                 DisplayResetPolicy = o.DisplayResetPolicy?.ToString(),
                 SubAccountId = o.SubAccountId?.Value,
+                MinQty = o.MinQty,
             };
         }
     }
@@ -375,7 +376,8 @@ public sealed class WorkingOrderBook
                 isStale: s.IsStale, staleReason: s.StaleReason, staledAtUtc: s.StaledAtUtc,
                 timeInForce: tif, stopPrice: s.StopPrice, goodTillDate: s.GoodTillDate,
                 displayQty: s.DisplayQty, displayResetPolicy: policy,
-                subAccountId: subAccount);
+                subAccountId: subAccount,
+                minQty: s.MinQty);
             var firmSet = _byFirm.GetOrAdd(s.FirmId, static _ => new ConcurrentDictionary<ulong, byte>());
             firmSet.TryAdd(s.ClOrdId, 0);
             var ownerSet = _byOwner.GetOrAdd(s.EndClientId, static _ => new ConcurrentDictionary<ulong, byte>());

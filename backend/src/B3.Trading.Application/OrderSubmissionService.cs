@@ -146,7 +146,8 @@ public sealed class OrderSubmissionService
                 parentAlgoId: req.ParentAlgoId, algoSliceSeq: req.AlgoSliceSeq,
                 timeInForce: req.TimeInForce, stopPrice: req.StopPrice, goodTillDate: req.GoodTillDate,
                 displayQty: req.DisplayQty, displayResetPolicy: req.DisplayResetPolicy,
-                subAccountId: req.SubAccountId);
+                subAccountId: req.SubAccountId,
+                minQty: req.MinQty);
         }
         catch (ArgumentException ex)
         {
@@ -192,6 +193,7 @@ public sealed class OrderSubmissionService
                     DisplayQty = order.DisplayQty,
                     DisplayResetPolicy = order.DisplayResetPolicy?.ToString(),
                     SubAccountId = order.SubAccountId?.Value,
+                    MinQty = order.MinQty,
                 },
                 () =>
                 {
@@ -290,7 +292,11 @@ public sealed class OrderSubmissionService
             // ever sees the order. The gateway will resolve again at
             // stamp time — resolvers MUST be deterministic per-Order
             // (see IRoutingInstructionResolver doc).
-            RoutingInstruction: _routingResolver?.TryResolve(order));
+            RoutingInstruction: _routingResolver?.TryResolve(order),
+            ParentAlgoId: req.Source == OrderSubmissionSource.Algo ? req.ParentAlgoId : null,
+            AlgoType: req.Source == OrderSubmissionSource.Algo
+                ? req.AlgoTypeTag
+                : null);
         var decision = _risk.Evaluate(riskCtx);
         var marginReserved = false;
         if (decision.Approved)
@@ -431,7 +437,21 @@ public sealed record OrderSubmissionRequest(
     /// per-sub-account risk gates ON TOP OF the existing master ones
     /// — reject-on-either-fail (see <c>SubAccountLimitsCheck</c>).
     /// </summary>
-    SubAccountId? SubAccountId = null)
+    SubAccountId? SubAccountId = null,
+    /// <summary>
+    /// #457. Optional minimum execution quantity (FIX MinQty). Null
+    /// = no minimum. Validated by <see cref="Order"/>'s constructor:
+    /// <c>0 &lt; MinQty &lt;= Quantity</c>.
+    /// </summary>
+    long? MinQty = null,
+    /// <summary>
+    /// #435. Lowercase algo-type label (iceberg/twap/pegged/...) when
+    /// <see cref="Source"/> is <see cref="OrderSubmissionSource.Algo"/>.
+    /// Forwarded to <c>RiskContext.AlgoType</c> so the throttle checks
+    /// can resolve <c>RiskOptions.RollingNotional.PerAlgoType</c> and
+    /// <c>RiskOptions.OrderRate.PerAlgoType</c> per algo strategy.
+    /// </summary>
+    string? AlgoTypeTag = null)
 {
     /// <summary>
     /// Sub-issue #171 (E). When non-null, the request originates from

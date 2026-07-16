@@ -47,6 +47,14 @@ public sealed class AuthRateLimitOptions
         PermitLimit = 20,
         WindowSeconds = 300,
     };
+
+    /// <summary>Per-IP throttle for <c>POST /auth/exchange</c>.</summary>
+    public RateLimitPolicyOptions ExchangePerIp { get; set; } = new()
+    {
+        Enabled = true,
+        PermitLimit = 30,
+        WindowSeconds = 300,
+    };
 }
 
 public sealed class RateLimitPolicyOptions

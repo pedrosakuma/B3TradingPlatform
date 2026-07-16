@@ -143,11 +143,13 @@ only depends on the small POCO contract declared alongside the interface.
 
 The participant-side platform exposes three inbound channels:
 
-- **REST + JWT.** `POST /auth/login` against a local user store
-  (PBKDF2-SHA256, 600k iterations by default; per-user iteration count
-  stored alongside the hash). Issues an HS256-signed JWT with `sub` =
-  username, plus a `role` claim. The signing key must be at least 256
-  bits — `JwtIssuer` fails fast at startup otherwise.
+- **REST + internal JWT.** Local mode keeps `POST /auth/login` against
+  the local user store (PBKDF2-SHA256, 600k iterations by default). Hybrid
+  and Entra add `POST /auth/exchange`, which validates a Microsoft Entra
+  External ID **access token** under the named `EntraExternal` scheme, then
+  issues the existing HS256 internal JWT from the SQLite trading-user
+  directory. External tokens never authenticate REST or WebSocket routes
+  directly; the default bearer scheme remains the internal JWT.
 - **WebSocket hub at `/ws`.** Same JWT, accepted via either the standard
   `Authorization: Bearer` header or `?access_token=` (for browsers,
   which can't attach headers on a WS upgrade). Query-string acceptance
@@ -185,12 +187,19 @@ replay on (re)connect. Revisit when the matching side does.
 
 ### 4. Two auth layers
 
-- **End-client ↔ platform.** Phase 2: local user store + HS256 JWT
-  (`POST /auth/login`). PBKDF2-HMAC-SHA256 hashes (600k iterations),
-  per-user iteration count stored in config. No OIDC, no refresh
-  tokens — short-lived tokens (default 60 min) and re-login. Operators
-  must provide `Trading:Auth:SigningKey` ≥ 32 bytes via
-  environment / user-secrets in production.
+- **End-client ↔ platform.** `Trading:Auth:Mode=Local` preserves local
+  password/TOTP + HS256 JWTs (default 60 min). `Hybrid` keeps local login
+  only as a migration bridge but reads firm/role/status from
+  `ITradingUserDirectory`; `Entra` maps only `/auth/exchange`. Hybrid/Entra
+  internal sessions are 10 minutes, have no refresh token, and must be
+  renewed by exchanging a valid Entra access token again. Operators must
+  provide `Trading:Auth:SigningKey` ≥ 32 bytes via environment /
+  user-secrets in production.
+  The static frontend mirrors the same modes: Local remains the default,
+  Hybrid presents explicit Entra/local choices, and Entra hides all public
+  local password/signup/TOTP controls while using MSAL Browser
+  Authorization Code + PKCE and storing only the exchanged internal JWT in
+  `sessionStorage`.
 - **Platform ↔ exchange.** FIXP credentials per firm, in config, mirrors
   `B3EntryPointClient`'s API. Lands when that lib is wired in.
 

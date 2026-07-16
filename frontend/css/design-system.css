@@ -1,0 +1,336 @@
+/*
+ * B3TradingPlatform design-system foundation.
+ *
+ * Keep product identity and low-level primitives here. Screen-specific
+ * layout and exceptional states remain in styles.css.
+ */
+:root {
+  /* Palette */
+  --color-canvas: #0f1218;
+  --color-surface: #1a1f2a;
+  --color-surface-raised: #232a39;
+  --color-border: #2a3242;
+  --color-text: #d6dce8;
+  --color-text-muted: #8a93a6;
+  --color-accent: #4f9eff;
+  --color-on-accent: #0b1320;
+  --color-success: #36c46f;
+  --color-info: #38b2ac;
+  --color-danger: #ef5350;
+  --color-neutral: #6b7280;
+  --color-warning: #f5a623;
+
+  /* Backward-compatible semantic aliases */
+  --bg: var(--color-canvas);
+  --panel: var(--color-surface);
+  --panel-2: var(--color-surface-raised);
+  --panel-3: #2b3446;
+  --border: var(--color-border);
+  --text: var(--color-text);
+  --muted: var(--color-text-muted);
+  --accent: var(--color-accent);
+  --green: var(--color-success);
+  --teal: var(--color-info);
+  --red: var(--color-danger);
+  --gray: var(--color-neutral);
+  --warn: var(--color-warning);
+
+  /* Compatibility aliases used by the option-chain surface */
+  --border-color: var(--color-border);
+  --header-bg: var(--color-surface-raised);
+  --hover-bg: rgba(79, 158, 255, .12);
+
+  /* Spacing */
+  --space-1: .125rem;
+  --space-2: .25rem;
+  --space-3: .375rem;
+  --space-4: .5rem;
+  --space-5: .75rem;
+  --space-6: 1rem;
+  --space-7: 1.5rem;
+  --space-8: 2rem;
+
+  /* Shape and controls */
+  --radius-sm: 3px;
+  --radius-md: 4px;
+  --radius-lg: 6px;
+  --radius-xl: 8px;
+  --radius-pill: 999px;
+  --control-height-sm: 1.75rem;
+  --control-height-md: 2rem;
+  --focus-ring: 0 0 0 2px var(--color-canvas), 0 0 0 4px var(--color-accent);
+}
+
+/* Buttons */
+.btn {
+  min-height: var(--control-height-md);
+  padding: var(--space-2) var(--space-6);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: .8rem;
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.btn:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.btn:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+  filter: none;
+}
+
+.btn-primary {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-on-accent);
+}
+
+.btn-secondary {
+  background: var(--color-surface-raised);
+}
+
+.btn-outline-primary {
+  background: transparent;
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.btn-outline-danger {
+  background: transparent;
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+.btn-outline-primary:hover:not(:disabled) {
+  background: rgba(79, 158, 255, .12);
+}
+
+.btn-outline-danger:hover:not(:disabled) {
+  background: rgba(239, 83, 80, .12);
+}
+
+.btn-danger {
+  background: rgba(239, 83, 80, .16);
+  border-color: rgba(239, 83, 80, .55);
+  color: var(--color-danger);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: rgba(239, 83, 80, .26);
+}
+
+.btn-success {
+  background: rgba(54, 196, 111, .16);
+  border-color: rgba(54, 196, 111, .55);
+  color: var(--color-success);
+}
+
+.btn-success:hover:not(:disabled) {
+  background: rgba(54, 196, 111, .26);
+}
+
+.btn-link {
+  min-height: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-accent);
+  font-weight: inherit;
+}
+
+.btn-link:hover:not(:disabled) {
+  filter: brightness(1.2);
+  text-decoration: underline;
+}
+
+.btn-sm {
+  min-height: var(--control-height-sm);
+  padding: var(--space-1) var(--space-4);
+  font-size: .75rem;
+}
+
+.btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-height-md);
+  min-width: var(--control-height-md);
+  padding: var(--space-2);
+}
+
+.btn-sm.btn-icon {
+  width: var(--control-height-sm);
+  min-width: var(--control-height-sm);
+  min-height: var(--control-height-sm);
+}
+
+/* Tabs */
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.tabs-bordered {
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.tab {
+  min-height: var(--control-height-md);
+  padding: var(--space-2) var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text);
+  font: inherit;
+  font-size: .9rem;
+  cursor: pointer;
+}
+
+.tab-sm {
+  min-height: var(--control-height-sm);
+  padding: var(--space-1) var(--space-4);
+  font-size: .8rem;
+}
+
+.tab:hover:not(:disabled):not(.active):not([aria-selected="true"]):not([aria-pressed="true"]) {
+  border-color: var(--color-accent);
+}
+
+.tab.active,
+.tab[aria-selected="true"],
+.tab[aria-pressed="true"] {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-on-accent);
+}
+
+.tab:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+
+/* Form and composition primitives */
+.form-field {
+  display: grid;
+  gap: var(--space-2);
+  color: var(--color-text-muted);
+  font-size: .8rem;
+}
+
+.control,
+.form-surface :where(
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  select,
+  textarea
+) {
+  width: 100%;
+  min-width: 0;
+  min-height: var(--control-height-md);
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  font: inherit;
+}
+
+.control::placeholder,
+.form-surface :where(input, textarea)::placeholder {
+  color: var(--color-text-muted);
+  opacity: .8;
+}
+
+.control:disabled,
+.form-surface :where(input, select, textarea):disabled {
+  opacity: .55;
+  cursor: not-allowed;
+}
+
+.control[readonly],
+.form-surface :where(input, textarea)[readonly] {
+  background: var(--color-canvas);
+  color: var(--color-text-muted);
+}
+
+.btn:focus-visible,
+.control:focus-visible,
+.form-surface :where(input, select, textarea):focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.card {
+  padding: var(--space-5) var(--space-6);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--stack-space, var(--space-4));
+}
+
+.cluster {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--cluster-space, var(--space-4));
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-pill);
+  font-size: .7rem;
+  line-height: 1.2;
+}
+
+.badge-square {
+  border-radius: var(--radius-sm);
+}
+
+.badge-uppercase {
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.badge-outline {
+  border: 1px solid currentColor;
+}
+
+.badge-info {
+  background: rgba(79, 158, 255, .15);
+  color: var(--color-accent);
+}
+
+.badge-success {
+  background: rgba(54, 196, 111, .16);
+  color: var(--color-success);
+}
+
+.badge-warning {
+  background: rgba(245, 166, 35, .16);
+  color: var(--color-warning);
+}
+
+.badge-danger {
+  background: rgba(239, 83, 80, .16);
+  color: var(--color-danger);
+}
+
+.badge-neutral {
+  background: var(--color-surface-raised);
+  color: var(--color-text-muted);
+}

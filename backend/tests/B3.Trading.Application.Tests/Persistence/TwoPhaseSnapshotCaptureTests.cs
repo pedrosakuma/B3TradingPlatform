@@ -316,7 +316,8 @@ public class TwoPhaseSnapshotCaptureTests
         var alice = new EndClientId("alice");
         var bob = new EndClientId("bob");
 
-        book.TryAdd(new Order(1UL, alice, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m));
+        book.TryAdd(new Order(1UL, alice, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 30m,
+            minQty: 25));
         book.TryAdd(new Order(2UL, bob, "VALE3", 5555UL, OrderSide.Sell, OrderType.Limit, 50, 80m));
         ownership.Register(1UL, alice);
         ownership.Register(2UL, bob);
@@ -357,8 +358,9 @@ public class TwoPhaseSnapshotCaptureTests
             clOrdIds2, ownership2, algos2, algoIds2, cash2, creds2, sessions2, maps2);
         snapshotter2.Restore(snapBack);
 
-        Assert.True(book2.TryGet(1UL, out _));
+        Assert.True(book2.TryGet(1UL, out var restoredWithMinQty));
         Assert.True(book2.TryGet(2UL, out _));
+        Assert.Equal(25, restoredWithMinQty!.MinQty);
         Assert.True(killSwitch2.IsFirmKilled("EVIL"));
         Assert.True(killSwitch2.IsEndClientKilled(bob));
         Assert.True(halts2.IsHalted("PETR4"));

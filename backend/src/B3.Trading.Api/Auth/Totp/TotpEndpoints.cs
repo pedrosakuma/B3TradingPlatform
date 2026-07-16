@@ -5,6 +5,7 @@ using B3.Trading.Application.Persistence;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 
 namespace B3.Trading.Api.Auth.Totp;
@@ -26,6 +27,25 @@ public static class TotpEndpoints
 {
     public static IEndpointRouteBuilder MapTotp(this IEndpointRouteBuilder app)
     {
+        var authOptions = app.ServiceProvider.GetRequiredService<IOptions<AuthOptions>>().Value;
+        if (!authOptions.IsTotpEnabled())
+            return app;
+
+        app.MapGet("/auth/2fa/status", (
+            HttpContext http,
+            IUserStore users) =>
+        {
+            var subject = http.User?.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+            if (string.IsNullOrEmpty(subject))
+                return Results.Json(new { error = "unauthorized" }, statusCode: StatusCodes.Status401Unauthorized);
+
+            if (!users.TryGet(subject, out var user) || user is null)
+                return Results.Json(new { error = "unauthorized" }, statusCode: StatusCodes.Status401Unauthorized);
+
+            return Results.Ok(new TotpStatusResponse(
+                Enrolled: user.Totp is { EnrolledAt: not null }));
+        }).RequireAuthorization();
+
         app.MapPost("/auth/2fa/enroll", (
             HttpContext http,
             EnrollRequest? req,
@@ -95,18 +115,18 @@ public static class TotpEndpoints
                 RecoveryCodes: codes));
         });
 
-        app.MapPost("/auth/2fa/verify", (
+        app.MapPost("/auth/2fa/verify", async (
             HttpContext http,
             VerifyRequest req,
             IUserStore users,
-            JwtIssuer issuer,
+            ITradingSessionIssuer sessionIssuer,
             IPendingTotpEnrollmentStore pending,
             ITotpChallengeStore challenges,
             ITotpAttemptTracker lockout,
             ITotpService totp,
             ITotpSecretProtector protector,
-            EndClientRegistry registry,
-            IAuditLogger audit) =>
+            IAuditLogger audit,
+            CancellationToken ct) =>
         {
             if (req is null || string.IsNullOrWhiteSpace(req.Code))
                 return Results.BadRequest(new { error = "code required" });
@@ -206,22 +226,36 @@ public static class TotpEndpoints
                 lockout.RecordSuccess(ch.Username);
                 challenges.Invalidate(req.TotpChallengeToken);
 
-                registry.Register(user.Username);
-                var (jwt, expires) = issuer.Issue(user.Username, user.Role, user.Firm);
+                var session = await sessionIssuer.IssueForLocalUserAsync(user, ct);
+                if (!session.Succeeded)
+                {
+                    challenges.Invalidate(req.TotpChallengeToken);
+                    audit.Log(new AuditLogEvent
+                    {
+                        EventType = AuditEventTypes.AuthTwoFactorVerifyFailure,
+                        Outcome = session.StatusCode == StatusCodes.Status403Forbidden ? AuditOutcomes.Denied : AuditOutcomes.Failure,
+                        ActorUserId = user.Username,
+                        ActorUsername = user.Username,
+                        SourceIp = http.Connection.RemoteIpAddress?.ToString(),
+                        ResourcePath = "/auth/2fa/verify",
+                        ReasonCode = session.ErrorCode,
+                    });
+                    return AuthEndpoints.Error(session.StatusCode, session.ErrorCode ?? "identity_directory_unavailable");
+                }
                 audit.Log(new AuditLogEvent
                 {
                     EventType = recoveryOk
                         ? AuditEventTypes.AuthTwoFactorRecoveryCodeConsumed
                         : AuditEventTypes.AuthTwoFactorVerifySuccess,
                     Outcome = AuditOutcomes.Success,
-                    ActorUserId = user.Username,
-                    ActorUsername = user.Username,
-                    ActorFirm = user.Firm,
-                    ActorRole = user.Role,
+                    ActorUserId = session.TradingUserId,
+                    ActorUsername = session.TradingUserId,
+                    ActorFirm = session.Firm,
+                    ActorRole = session.Role,
                     SourceIp = http.Connection.RemoteIpAddress?.ToString(),
                     ResourcePath = "/auth/2fa/verify",
                 });
-                return Results.Ok(new LoginResponse(jwt, expires));
+                return Results.Ok(new LoginResponse(session.Token!, session.ExpiresAt!.Value));
             }
 
             // Mode (a): confirm a pending enrollment. Requires JWT.
@@ -423,6 +457,7 @@ internal static class TotpResultExtensions
 }
 
 public sealed record EnrollRequest(string? EnrollmentToken);
+public sealed record TotpStatusResponse(bool Enrolled);
 public sealed record EnrollResponse(string Secret, string OtpauthUri, IReadOnlyList<string> RecoveryCodes);
 public sealed record VerifyRequest(string Code, string? TotpChallengeToken);
 public sealed record DisableRequest(string Code);

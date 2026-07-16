@@ -28,6 +28,8 @@ public static class TradingEndpointsExtensions
 
         app.MapAuth();
         app.MapTotp();
+        app.MapExternalIdentityExchange();
+        app.MapIdentityAdmin();
         app.MapOrders();
         app.MapHistory();
         app.MapFills();

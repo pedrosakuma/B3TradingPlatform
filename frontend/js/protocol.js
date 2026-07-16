@@ -12,26 +12,20 @@ export function defaultBackend() {
   return "http://localhost:5000";
 }
 
-// Default WebSocket endpoint for the OPTIONAL B3MarketDataPlatform feed
-// (DOB / candles / trade prints). Distinct origin from the trader WS, so
-// it can't go through the nginx reverse-proxy.
-//
-// Resolution order (#572):
-//   1. window.__B3_CONFIG__.marketDataWsUrl, if set — a deploy-time default
-//      rendered into js/env.js from the MARKETDATA_WS_URL env var (see
-//      env.js.template / 20-render-env-js.sh), the same pattern
-//      TRADING_UPSTREAM already uses for nginx.conf.template. Lets each
-//      orchestrator (docker-compose dev, b3deploy prod, ...) ship the
-//      correct host/port without every operator pasting it in by hand.
-//   2. The localhost/127.0.0.1 dev docker-compose convention: same host as
-//      the page, port 8081, /ws path.
-//   3. "" — non-dev deployments with no config shouldn't auto-attempt a
-//      guess that's likely wrong; the Market Data panel's manual override
-//      still works exactly as before.
-export function defaultMarketDataUrl() {
+// Deploy-time WebSocket endpoint for the OPTIONAL B3MarketDataPlatform feed
+// (DOB / candles / trade prints). Rendered into js/env.js from the
+// MARKETDATA_WS_URL env var (see env.js.template / 20-render-env-js.sh).
+// This is operator-controlled config, not an end-user preference.
+export function configuredMarketDataUrl() {
   const configured = globalThis.window?.__B3_CONFIG__?.marketDataWsUrl;
-  if (typeof configured === "string" && configured !== "") return configured;
+  return typeof configured === "string" ? configured : "";
+}
 
+// Localhost/127.0.0.1 convenience guess retained for non-Settings callers
+// that explicitly want the old dev fallback behavior.
+export function defaultMarketDataUrl() {
+  const configured = configuredMarketDataUrl();
+  if (configured !== "") return configured;
   if (location.protocol !== "http:" && location.protocol !== "https:") return "";
   if (location.hostname !== "localhost" && location.hostname !== "127.0.0.1") return "";
   const wsScheme = location.protocol === "https:" ? "wss:" : "ws:";
@@ -61,6 +55,14 @@ export async function login(backend, username, password) {
   return jsonOrThrow(resp);
 }
 
+export async function exchangeExternalToken(backend, accessToken) {
+  const resp = await fetch(`${backend}/auth/exchange`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  return jsonOrThrow(resp);
+}
+
 // #303. Submits a 2FA verification: either a TOTP code or a recovery
 // code (server detects via length/shape). When `totpChallengeToken` is
 // supplied this finishes the login flow and returns `{ token, expiresAt }`;
@@ -74,6 +76,13 @@ export async function verifyTotp(backend, { code, totpChallengeToken, token }) {
     method: "POST",
     headers,
     body: JSON.stringify(body),
+  });
+  return jsonOrThrow(resp);
+}
+
+export async function getTotpStatus(backend, token) {
+  const resp = await fetch(`${backend}/auth/2fa/status`, {
+    headers: { Authorization: `Bearer ${token}` },
   });
   return jsonOrThrow(resp);
 }
@@ -370,6 +379,20 @@ export function parseContentDispositionFilename(header) {
   return null;
 }
 
+function responseContentTypeMatches(header, expectedTypes) {
+  if (!header || typeof header !== "string") return false;
+  const actual = header.split(";")[0]?.trim().toLowerCase();
+  if (!actual) return false;
+  return expectedTypes.some((expected) => actual === String(expected).toLowerCase());
+}
+
+function throwUnexpectedDownloadContentType(resp, expectedLabel, expectedTypes) {
+  const actual = resp.headers.get("Content-Type");
+  if (responseContentTypeMatches(actual, expectedTypes)) return;
+  const suffix = actual ? `, got ${actual}` : "";
+  throw new Error(`unexpected response from server (expected ${expectedLabel}${suffix})`);
+}
+
 // Q2.6 (#273). CSV statement download. Returns `{ blob, filename }`
 // — the caller is responsible for wiring it through URL.createObjectURL
 // + a synthetic anchor click (kept here so unit tests can stub fetch
@@ -390,6 +413,7 @@ export async function downloadStatementCsv(backend, token, dayKey) {
     err.body = body;
     throw err;
   }
+  throwUnexpectedDownloadContentType(resp, "CSV", ["text/csv"]);
   const blob = await resp.blob();
   const filename = parseContentDispositionFilename(resp.headers.get("Content-Disposition"))
     || `statement-${dayKey}.csv`;
@@ -528,6 +552,7 @@ export async function downloadCvmReport(backend, token, model, dayKey) {
     err.body = body;
     throw err;
   }
+  throwUnexpectedDownloadContentType(resp, "XML", ["application/xml", "text/xml"]);
   const blob = await resp.blob();
   const compact = String(dayKey).replace(/-/g, "");
   const filename = parseContentDispositionFilename(resp.headers.get("Content-Disposition"))

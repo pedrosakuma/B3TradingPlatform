@@ -70,9 +70,12 @@ test("downloadStatementCsv fetches CSV with bearer auth and returns blob + filen
       ok: true,
       status: 200,
       headers: {
-        get: (name) => (name.toLowerCase() === "content-disposition"
-          ? `attachment; filename="statement-2025-01-15.csv"`
-          : null),
+        get: (name) => {
+          const lower = name.toLowerCase();
+          if (lower === "content-disposition") return `attachment; filename="statement-2025-01-15.csv"`;
+          if (lower === "content-type") return "text/csv; charset=utf-8";
+          return null;
+        },
       },
       blob: async () => new Blob(["dayKey,foo\n2025-01-15,1\n"]),
     };
@@ -89,11 +92,30 @@ test("downloadStatementCsv falls back to a synthesised filename when header is a
   globalThis.fetch = async () => ({
     ok: true,
     status: 200,
-    headers: { get: () => null },
+    headers: {
+      get: (name) => (name.toLowerCase() === "content-type" ? "text/csv; charset=utf-8" : null),
+    },
     blob: async () => new Blob(["x"]),
   });
   const { filename } = await downloadStatementCsv("http://host", "tok", "2025-02-03");
   assert.equal(filename, "statement-2025-02-03.csv");
+});
+
+test("downloadStatementCsv rejects a 200 HTML fallback response", async () => {
+  let blobCalled = false;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    headers: {
+      get: (name) => (name.toLowerCase() === "content-type" ? "text/html; charset=utf-8" : null),
+    },
+    blob: async () => { blobCalled = true; return new Blob(["<html></html>"]); },
+  });
+  await assert.rejects(
+    () => downloadStatementCsv("http://host", "tok", "2025-01-15"),
+    /expected CSV/i,
+  );
+  assert.equal(blobCalled, false);
 });
 
 test("downloadStatementCsv surfaces non-2xx as an Error with .status", async () => {

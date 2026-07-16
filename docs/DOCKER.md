@@ -228,6 +228,14 @@ a real environment.
 | Var | What | Generate |
 |---|---|---|
 | `TRADING_AUTH_SIGNING_KEY` | JWT HS256 signing key, >=32 UTF-8 bytes, not the dev default | `openssl rand -base64 48` |
+
+For Entra rollout set `Trading__Auth__Mode=Hybrid` or `Entra` and configure
+`Trading__Auth__ExternalIdentity__Authority`, `Issuer`, `TenantId`,
+`Audience`, `RequiredScope` and `AllowedClientApplicationIds__0`. Local mode
+is still the default; external tokens are accepted only by `POST /auth/exchange`
+and are exchanged for the internal 10-minute trading JWT. `Entra` mode also
+requires at least one active externally linked admin in the identity directory;
+use the Hybrid admin binding route and runbook before flipping the mode.
 | `TRADING_SEED_PASSWORD_HASH` | PBKDF2 hash of the seed user password | helper command (TBD: `backend/tools/PasswordHasher`) |
 | `TRADING_SEED_PASSWORD_SALT` | matching salt | same |
 
@@ -357,12 +365,61 @@ Wire it up against the bundled marketdata service:
 # .env additions
 TRADING_MARKETDATA_WS_URL=ws://marketdata:8080/ws
 TRADING_MARKETDATA_SYMBOL_0=PETR4
+MARKETDATA_WS_URL=ws://localhost:8081/ws
+APP_TITLE="Acme Trader"
 # extra symbols: TRADING_MARKETDATA_SYMBOL_1=VALE3, etc. (compose env
 # only forwards index 0; for more, add Trading__MarketData__Symbols__N
 # directly to docker-compose.yml or appsettings.Docker.json).
 
 docker compose --profile marketdata up -d
 ```
+
+The frontend container also renders `frontend/js/env.js` at boot from
+deploy-time env vars:
+
+| Variable | Default | Effect |
+| -------- | ------- | ------ |
+| `MARKETDATA_WS_URL` | empty | Seeds `window.__B3_CONFIG__.marketDataWsUrl` for the Market Data panel; empty preserves the localhost/off-localhost fallback chain in `frontend/js/protocol.js`. |
+| `APP_TITLE` | `B3TradingPlatform` | Seeds `window.__B3_CONFIG__.appTitle`, which `frontend/js/app.js` applies to the browser `<title>`, login heading, and topbar brand text. |
+| `AUTH_MODE` | `Local` | Shared frontend + trading-host auth mode: `Local`, `Hybrid`, or `Entra`. Local preserves password/TOTP/signup compatibility and leaves `/auth/exchange` absent. |
+| `AUTH_LOCAL_LOGIN_ENABLED` | empty | Optional override for showing local password login in Hybrid; Entra mode should leave this disabled. |
+| `AUTH_SIGNUP_ENABLED` | empty | Optional override for local signup. Defaults: Local on, Hybrid/Entra off. |
+| `AUTH_TOTP_ENABLED` | empty | Optional override for local TOTP controls. Entra mode hides them. |
+| `AUTH_AUTHORITY` | empty | Tenant-specific Entra External ID authority, e.g. `https://tenant.ciamlogin.com/<tenant-id>/v2.0`. |
+| `AUTH_ISSUER` | empty | Backend exact issuer expected after trusted metadata validation. Required by host validation in Hybrid/Entra. |
+| `AUTH_TENANT_ID` | empty | Backend `tid` claim requirement for the configured tenant. Required in Hybrid/Entra unless host config opts out. |
+| `AUTH_CLIENT_ID` | empty | Public SPA client id. This is not a secret. |
+| `AUTH_API_SCOPE` | empty | Delegated API scope requested by MSAL, usually `api://<api-app-id-uri>/<scope-name>`. |
+| `AUTH_API_AUDIENCE` | empty | Backend exact access-token audience, usually the API application ID URI. Required by host validation in Hybrid/Entra. |
+| `AUTH_REQUIRED_SCOPE` | empty | Backend exact delegated `scp` value, usually the scope name (for example `access_as_user`). Required by host validation in Hybrid/Entra. |
+| `AUTH_REDIRECT_URI` / `AUTH_LOGOUT_URI` | empty | SPA redirect and post-logout URLs. Empty falls back to the current page URL for non-container local dev. |
+| `AUTH_KNOWN_AUTHORITIES` | empty | Comma-separated authority hosts for MSAL, e.g. `tenant.ciamlogin.com`. |
+
+The same variables are wired into the trading-host as `Trading:Auth:*`; if
+`AUTH_MODE=Hybrid` or `AUTH_MODE=Entra` and any backend external-identity value
+is missing, the host options validator fails closed at startup rather than
+silently serving Local auth.
+
+Example Hybrid/Entra settings:
+
+```bash
+AUTH_MODE=Hybrid
+AUTH_AUTHORITY=https://your-tenant.ciamlogin.com/your-tenant-id/v2.0
+AUTH_ISSUER=https://your-tenant.ciamlogin.com/your-tenant-id/v2.0
+AUTH_TENANT_ID=your-tenant-id
+AUTH_CLIENT_ID=00000000-0000-0000-0000-000000000000
+AUTH_API_SCOPE=api://your-trading-api-client-id/access_as_user
+AUTH_API_AUDIENCE=api://your-trading-api-client-id
+AUTH_REQUIRED_SCOPE=access_as_user
+AUTH_REDIRECT_URI=https://trader.example.com/
+AUTH_LOGOUT_URI=https://trader.example.com/
+AUTH_KNOWN_AUTHORITIES=your-tenant.ciamlogin.com
+```
+
+The frontend image never accepts or renders a client secret. CSP `connect-src`
+and `frame-src` are rendered from the configured authority/known-authority
+origins plus the configured market-data WebSocket origin; no wildcard or broad
+`ws:`/`wss:` source is added.
 
 Tunables (defaults shown):
 
@@ -381,17 +438,21 @@ this host and the matching engine surface there.
 ## Persistence
 
 The event store WAL + snapshots live in the named volume `b3-trading-data`
-mounted at `/var/lib/b3trading`. Backups: `docker run --rm -v
-b3-trading-data:/data -v $(pwd):/out alpine tar czf /out/b3-trading.tgz -C
-/data .` (or your usual volume backup tool).
+mounted at `/var/lib/b3trading`. The SQLite trading-user directory defaults to
+`/var/lib/b3trading/identity/users.db` and is opened in WAL mode with
+`synchronous=FULL`; use the application's online backup primitive rather than
+copying `users.db`, `users.db-wal` and `users.db-shm` separately while the host
+is live. Volume-level backups should still capture the WAL/snapshots,
+`users.json` during Hybrid/local migration, and `dp-keys`.
 
 ## Health & readiness
 
 - `GET /live` — process is up
-- `GET /ready` — process is up AND not draining (used by the container's
-  HEALTHCHECK and by orchestrators for rolling updates)
+- `GET /ready` — process is up, not draining, and the identity directory is
+  trustworthy (used by the container's HEALTHCHECK and by orchestrators for
+  rolling updates)
 - `GET /health` — full snapshot, including `exchange.{mode, readyForOrders, firmCount}`
-  and `persistence.{enabled, dataDirectory}`
+  `persistence.{enabled, dataDirectory}` and `identityDirectory.{provider, ready, schemaVersion}`
 
 Compose's `frontend` service waits for trading-host to be `service_healthy`
 before starting, so the UI is never served against a dead backend.

@@ -208,6 +208,7 @@ function setViewToggleVisible(visible, current) {
 
 export function setLoginError(message) {
   const el = $("login-error");
+  if (!el) return;
   if (!message) { el.hidden = true; el.textContent = ""; return; }
   el.hidden = false; el.textContent = message;
 }
@@ -595,10 +596,9 @@ function renderOrderDetailHeader(order, execs) {
   const qty = Number(order.quantity) || 0;
   const cum = Number(order.cumulativeQuantity) || 0;
   const leaves = Number(order.leavesQuantity) || 0;
-  const pct = qty > 0 ? Math.max(0, Math.min(100, (cum / qty) * 100)) : 0;
   const price = order.price == null ? "MKT" : fmtPx(order.price);
   const staleBadge = order.isStale
-    ? ` <span class="order-stale-badge" title="${escapeHtml(order.staleReason || "stale")}">stale</span>`
+    ? ` <span class="order-stale-badge badge badge-warning badge-outline badge-uppercase" title="${escapeHtml(order.staleReason || "stale")}">stale</span>`
     : "";
   const algoBlock = order.parentAlgoId
     ? `<div class="field"><span class="label">Parent algo</span><span class="value"><code>${escapeHtml(order.parentAlgoId)}</code>${order.algoSliceSeq != null ? ` · slice ${escapeHtml(order.algoSliceSeq)}` : ""}</span></div>`
@@ -617,9 +617,8 @@ function renderOrderDetailHeader(order, execs) {
     <div class="field field-wide">
       <span class="label">Qty / Cum / Leaves</span>
       <span class="value">${fmtQty(qty)} · ${fmtQty(cum)} · ${fmtQty(leaves)}</span>
-      <div class="modal-progress" role="progressbar" aria-valuenow="${cum}" aria-valuemin="0" aria-valuemax="${qty}">
-        <div class="modal-progress-fill" style="width: ${pct}%"></div>
-      </div>
+      <progress class="modal-progress" value="${cum}" max="${Math.max(qty, 1)}"
+                aria-label="Filled quantity progress"></progress>
     </div>
     ${algoBlock}
   `;
@@ -872,6 +871,15 @@ function renderCancelAllButton() {
 
 let chainPickerOnSelect = null; // callback when user clicks a cell
 
+function setChainPickerStatus(message, kind = "info") {
+  const grid = $("chain-picker-grid");
+  if (!grid) return;
+  const cls = kind === "error"
+    ? "chain-placeholder chain-placeholder-error"
+    : "chain-placeholder";
+  grid.innerHTML = `<p class="${cls}">${escapeHtml(message ?? "")}</p>`;
+}
+
 function openChainPicker(onSelect) {
   chainPickerOnSelect = onSelect;
   const modal = $("chain-picker-modal");
@@ -916,11 +924,11 @@ function buildChainGrid(instruments) {
    for (const exp of expiries) {
      const call = lookup.get(`${strike}|${exp}|Call`);
      const put = lookup.get(`${strike}|${exp}|Put`);
-     html += call 
-       ? `<td class="chain-cell chain-cell-call" data-symbol="${call.symbol}" data-security-id="${call.securityId}">C</td>`
+     html += call
+       ? `<td class="chain-cell chain-cell-call" data-symbol="${call.symbol}" data-security-id="${call.securityId}" data-put-or-call="${call.putOrCall}">C</td>`
        : '<td class="chain-cell-empty">—</td>';
      html += put
-       ? `<td class="chain-cell chain-cell-put" data-symbol="${put.symbol}" data-security-id="${put.securityId}">P</td>`
+       ? `<td class="chain-cell chain-cell-put" data-symbol="${put.symbol}" data-security-id="${put.securityId}" data-put-or-call="${put.putOrCall}">P</td>`
        : '<td class="chain-cell-empty">—</td>';
    }
    html += '</tr>';
@@ -932,11 +940,54 @@ function buildChainGrid(instruments) {
 function handleChainCellClick(e) {
   const cell = e.target.closest(".chain-cell");
   if (!cell) return;
-  const symbol = cell.dataset.symbol;
-  const securityId = cell.dataset.securityId;
-  if (symbol && chainPickerOnSelect) {
-   chainPickerOnSelect(symbol, securityId);
+  const selection = {
+   symbol: cell.dataset.symbol,
+   securityId: cell.dataset.securityId,
+   putOrCall: cell.dataset.putOrCall,
+  };
+  if (selection.symbol && chainPickerOnSelect) {
+   chainPickerOnSelect(selection);
    closeChainPicker();
+  }
+}
+
+function populateTicketFromChainSelection(selection) {
+  const symbol = selection?.symbol ? String(selection.symbol).trim().toUpperCase() : "";
+  if (!symbol) return;
+
+  const stopPriceEl = $("ticket-stop-price");
+  if (stopPriceEl) stopPriceEl.value = "";
+
+  const symInput = $("ticket-symbol");
+  if (symInput) {
+   symInput.value = symbol;
+   symInput.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  const sideEl = $("ticket-side");
+  if (sideEl) {
+   sideEl.value = "Buy";
+   sideEl.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  const priceEl = $("ticket-price");
+  if (priceEl) {
+   priceEl.value = "";
+   priceEl.dispatchEvent(new Event("input", { bubbles: true }));
+   priceEl.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  setTicketFeedback(null);
+}
+
+export function toggleAuctionPanel() {
+  const st = getState();
+  if (st.auctionPanelSymbol) {
+    setAuctionPanelSymbol(null);
+    return;
+  }
+  if (st.selectedSymbol && isAuctionPhase(getPhase(st.selectedSymbol))) {
+    setAuctionPanelSymbol(st.selectedSymbol);
   }
 }
 
@@ -1252,15 +1303,15 @@ export function bindUi() {
   if (prevBtn) prevBtn.addEventListener("click", () => onBlotterPage(-1));
   if (nextBtn) nextBtn.addEventListener("click", () => onBlotterPage(+1));
 
-  // Market data form: apply WS URL + watchlist atomically.
+  // Market data form: the WS URL is operator-configured and read-only;
+  // Apply persists only the watchlist symbols.
   $("md-form").addEventListener("submit", (e) => {
     e.preventDefault();
-    const url = $("md-url").value.trim();
     const symbols = $("md-symbols").value
       .split(/[,\s]+/)
       .map(s => s.trim().toUpperCase())
       .filter(Boolean);
-    onApplyMd({ url, symbols });
+    onApplyMd({ symbols });
   });
 
   // Market data settings now live inline as a sub-tab of Settings
@@ -1360,14 +1411,7 @@ export function bindUi() {
   // current state).
   const auctionToggle = $("auction-toggle");
   if (auctionToggle) {
-    auctionToggle.addEventListener("click", () => {
-      const st = getState();
-      if (st.auctionPanelSymbol) {
-        setAuctionPanelSymbol(null);
-      } else if (st.selectedSymbol) {
-        setAuctionPanelSymbol(st.selectedSymbol);
-      }
-    });
+    auctionToggle.addEventListener("click", toggleAuctionPanel);
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -1395,13 +1439,8 @@ export function bindUi() {
   
   if (openChainBtn) {
     openChainBtn.addEventListener("click", () => {
-      openChainPicker((symbol, securityId) => {
-        // Populate ticket with selected option
-        const symInput = $("ticket-symbol");
-        if (symInput) {
-          symInput.value = symbol;
-          symInput.dispatchEvent(new Event("change", { bubbles: true }));
-        }
+      openChainPicker((selection) => {
+        populateTicketFromChainSelection(selection);
       });
     });
   }
@@ -1685,7 +1724,7 @@ function syncTicketRules() {
 export function setStatusPill(status) {
   const el = $("ws-status");
   el.textContent = status;
-  el.className = `status-pill status-${status}`;
+  el.className = `status-pill badge badge-uppercase status-${status}`;
   el.setAttribute("aria-label", `WebSocket: ${status}`);
 }
 
@@ -1744,12 +1783,12 @@ function renderBalance() {
   if (bal == null || !Number.isFinite(bal.available)) {
     el.textContent = "R$ —";
     el.classList.remove("balance-negative");
-    el.title = "Saldo disponível — aguardando dados";
+    el.title = "Available balance — awaiting data";
     return;
   }
   el.textContent = BALANCE_FORMATTER.format(bal.available);
   el.classList.toggle("balance-negative", bal.available < 0);
-  el.title = `Saldo disponível: ${BALANCE_FORMATTER.format(bal.available)}`;
+  el.title = `Available balance: ${BALANCE_FORMATTER.format(bal.available)}`;
 }
 
 function applyCurrentView(view) {
@@ -1871,7 +1910,7 @@ function renderFirmsHealth() {
   const tone = anyReconnecting ? "warn" : (allEstablished ? "ok" : "muted");
   const summary = `${ranked.length} firm${ranked.length === 1 ? "" : "s"}`;
   el.hidden = false;
-  el.className = `firms-health firms-health-${tone}`;
+  el.className = `firms-health badge badge-outline firms-health-${tone}`;
   el.textContent = `${summary} · ${fh.mode}`;
   el.title = ranked.map(r => `${r.firmId}: ${r.state}${r.reconnecting ? " (reconnecting)" : ""}`).join("\n");
 }
@@ -1927,7 +1966,7 @@ function renderGatewayPill() {
       `${f.firmId}: ${f.state}${f.reconnecting ? " (reconnecting)" : ""} v${f.sessionVerId}`
     ).join("\n");
   }
-  el.className = `status-pill ${toneClass}`;
+  el.className = `status-pill badge badge-uppercase ${toneClass}`;
   el.textContent = label;
   el.setAttribute("aria-label", ariaLabel);
   el.title = tooltip;
@@ -1978,7 +2017,7 @@ export function renderForSlice(slice) {
     reconcileAuctionPanel();
     renderTicketPhaseCoupling();
   }
-  if (slice === "auction" || slice === "auctionPanelSymbol" || slice === "all") renderAuctionPanel();
+  if (slice === "auction" || slice === "auctionPanelSymbol" || slice === "selectedSymbol" || slice === "phases" || slice === "all") renderAuctionPanel();
   // Q1.4 (#256). The risk-policy slice flips the GTD horizon used by
   // validateTicketState, so a policy update must re-run ticket
   // validation — otherwise a late-arriving fetch leaves the submit
@@ -1992,7 +2031,7 @@ export function renderForSlice(slice) {
 // "connected"`; panels fed by the MD WS go stale on
 // `state.marketDataStatus !== "connected"`. The visual cue is two-
 // part: a `panel--stale` class (dims the data area in CSS) + an
-// injected `<span class="stale-tag">stale · HH:MM:SS</span>` next to
+// injected warning badge next to
 // the panel's `<h2>` showing the last successful update timestamp.
 // The timestamp is captured at the moment of staleness, not animated,
 // so a frozen-but-still-mounted UI is unambiguous.
@@ -2022,7 +2061,7 @@ function renderStaleness(kind) {
       if (!h2) continue;
       if (!tag) {
         tag = document.createElement("span");
-        tag.className = "stale-tag";
+        tag.className = "stale-tag badge badge-warning";
         tag.setAttribute("role", "status");
         tag.setAttribute("aria-live", "polite");
         h2.appendChild(tag);
@@ -2059,7 +2098,7 @@ function setMdStatusPill(status) {
   const el = $("md-status");
   if (!el) return;
   el.textContent = status;
-  el.className = `status-pill status-${status}`;
+  el.className = `status-pill badge badge-uppercase status-${status}`;
   el.setAttribute("aria-label", `Market data: ${status}`);
 }
 
@@ -2224,7 +2263,7 @@ export function phaseBadgeHtml(symbol) {
   const meta = PHASE_LABELS[phase];
   if (!meta) return "";
   const aria = `${symbol} phase: ${meta.label}`;
-  return ` <span class="phase-badge ${meta.cls}" data-symbol="${escapeHtml(symbol)}" aria-label="${escapeHtml(aria)}">${meta.label}</span>`;
+  return ` <span class="phase-badge badge badge-outline badge-uppercase ${meta.cls}" data-symbol="${escapeHtml(symbol)}" aria-label="${escapeHtml(aria)}">${meta.label}</span>`;
 }
 
 // Auto-open / refresh the auction panel based on the selected symbol's
@@ -2264,33 +2303,29 @@ export function renderAuctionPanel() {
   const panel = $("auction-panel");
   if (!panel) return;
   const st = getState();
-  const sym = st.auctionPanelSymbol;
-  if (!sym) {
-    panel.hidden = true;
-    panel.classList.add("collapsed");
-    const body = $("auction-body");
-    if (body) body.hidden = true;
-    const toggle = $("auction-toggle");
-    if (toggle) toggle.setAttribute("aria-expanded", "false");
-    const caret = panel.querySelector(".auction-caret");
-    if (caret) caret.textContent = "▸";
-    return;
-  }
+  const sym = st.auctionPanelSymbol ?? st.selectedSymbol ?? null;
+  const hasLiveAuction = !!st.auctionPanelSymbol;
+  const body = $("auction-body");
+  const toggle = $("auction-toggle");
+  const tag = $("auction-symbol-tag");
+  const emptyEl = $("auction-empty-state");
+  const printsTitle = $("auction-prints-title");
+  const printsEl = $("auction-prints");
 
   panel.hidden = false;
   panel.classList.remove("collapsed");
-  panel.setAttribute("aria-label", `Auction state for ${sym}`);
-  const body = $("auction-body");
+  panel.setAttribute("aria-label", sym ? `Auction state for ${sym}` : "Auction state");
   if (body) body.hidden = false;
-  const toggle = $("auction-toggle");
   if (toggle) toggle.setAttribute("aria-expanded", "true");
   const caret = panel.querySelector(".auction-caret");
   if (caret) caret.textContent = "▾";
 
-  const tag = $("auction-symbol-tag");
-  if (tag) tag.textContent = sym;
+  if (tag) {
+    tag.textContent = sym ?? "—";
+    tag.classList.toggle("symbol-tag--muted", !sym);
+  }
 
-  const aux = getAuctionState(sym);
+  const aux = st.auctionPanelSymbol ? getAuctionState(st.auctionPanelSymbol) : null;
   const top = aux?.top ?? null;
   const prev = aux?.prevTop ?? null;
   const matchQty = aux?.indicativeMatchQty ?? null;
@@ -2334,8 +2369,33 @@ export function renderAuctionPanel() {
   const ttuEl = $("auction-ttu");
   if (ttuEl) ttuEl.textContent = "—";
 
-  const printsEl = $("auction-prints");
+  if (!hasLiveAuction) {
+    const selectedInAuction = st.selectedSymbol
+      ? isAuctionPhase(getPhase(st.selectedSymbol))
+      : false;
+    if (emptyEl) {
+      emptyEl.hidden = false;
+      emptyEl.textContent = !st.selectedSymbol
+        ? "Select a symbol from Watchlist to view its auction state."
+        : selectedInAuction
+          ? `${st.selectedSymbol} is currently in auction. Click the header to open live details.`
+          : `${st.selectedSymbol} is not currently in an auction.`;
+    }
+    if (printsTitle) printsTitle.hidden = true;
+    if (printsEl) {
+      printsEl.hidden = true;
+      printsEl.innerHTML = "";
+    }
+    return;
+  }
+
+  if (emptyEl) {
+    emptyEl.hidden = true;
+    emptyEl.textContent = "";
+  }
+  if (printsTitle) printsTitle.hidden = false;
   if (printsEl) {
+    printsEl.hidden = false;
     const prints = aux?.lastPrints ?? [];
     if (prints.length === 0) {
       printsEl.innerHTML = `<li class="muted-line">No prints yet</li>`;
@@ -2393,7 +2453,7 @@ export function renderTicketPhaseCoupling() {
     } else if (inAuction && tifEl.value === "Day") {
       hintEl.hidden = false;
       hintEl.className = "field-hint hint-warn";
-      hintEl.textContent = "Esta ordem ficará pending até a abertura.";
+      hintEl.textContent = "This order will remain pending until the open.";
     } else {
       hintEl.hidden = true;
       hintEl.textContent = "";
@@ -2408,7 +2468,7 @@ export function renderTicketPhaseCoupling() {
   const halted = phase === "Reserved";
   if (halted) {
     submitEl.dataset.haltDisabled = "1";
-    submitEl.setAttribute("title", "Instrumento halted");
+    submitEl.setAttribute("title", "Instrument halted");
   } else if (submitEl.dataset.haltDisabled === "1") {
     delete submitEl.dataset.haltDisabled;
     submitEl.removeAttribute("title");
@@ -2801,7 +2861,7 @@ function orderRow(o, st) {
   ].filter(Boolean).join(" ");
   const cancelDisabled = terminal || cancelInflight || modifyInflight || isStale;
   const cancelLabel = cancelInflight ? "Cancelling…" : "Cancel";
-  const cancelCls = "cancel-btn" + (cancelInflight ? " cancelling" : "");
+  const cancelCls = "cancel-btn btn btn-outline-danger btn-sm" + (cancelInflight ? " cancelling" : "");
   // Slice 5 of #122. Modify button shares row-selection delegation
   // (data-clordid on the button so the click handler can map it back
   // to the order without walking the row). Disabled while terminal
@@ -2810,12 +2870,12 @@ function orderRow(o, st) {
   // gating client-side avoids the round-trip and keeps the UX honest.
   const modifyDisabled = terminal || modifyInflight || cancelInflight || isStale;
   const modifyLabel = modifyInflight ? "Modifying…" : "Modify";
-  const modifyCls = "modify-btn" + (modifyInflight ? " modifying" : "");
+  const modifyCls = "modify-btn btn btn-outline-primary btn-sm" + (modifyInflight ? " modifying" : "");
   const staleTitle = isStale
     ? `Stale: ${o.staleReason || "venue desync"}${o.staledAtUtc ? ` (${o.staledAtUtc})` : ""}`
     : "";
   const staleBadge = isStale
-    ? `<span class="order-stale-badge" title="${escapeHtml(staleTitle)}">stale</span>`
+    ? `<span class="order-stale-badge badge badge-warning badge-outline badge-uppercase" title="${escapeHtml(staleTitle)}">stale</span>`
     : "";
   const optionBadge = o.securityType === "Option" ? optionBadgeHtml(o.optionPutOrCall) : "";
   const optionTooltip = formatOptionTooltip(o);
@@ -2969,26 +3029,26 @@ function renderExpiryStrip() {
     const exp = p.optionExpirationDate;
     expiries.set(exp, (expiries.get(exp) || 0) + 1);
   }
-  
+
   // Sort by date.
   const sortedDates = [...expiries.keys()].sort();
-  
+
   // Render chips.
   items.innerHTML = sortedDates.map(exp => {
     const count = expiries.get(exp);
     const isActive = _expiryFilter === exp;
     const label = formatExpiryChip(exp);
-    return `<button type="button" class="expiry-chip${isActive ? " active" : ""}" 
+    return `<button type="button" class="expiry-chip tab tab-sm${isActive ? " active" : ""}"
             data-expiry="${escapeHtml(exp)}" title="${count} position(s)">
       ${label} <span class="expiry-count">(${count})</span>
     </button>`;
   }).join("");
-  
+
   // Add "All" chip.
   const allActive = _expiryFilter === null;
-  items.innerHTML = `<button type="button" class="expiry-chip${allActive ? " active" : ""}" 
+  items.innerHTML = `<button type="button" class="expiry-chip tab tab-sm${allActive ? " active" : ""}"
     data-expiry="">All</button>` + items.innerHTML;
-  
+
   strip.hidden = false;
 }
 
@@ -3143,7 +3203,7 @@ function escapeHtml(s) {
 export function typeChipHtml(type) {
   const meta = ORDER_TYPE_CHIP[type];
   if (!meta) return escapeHtml(type ?? "");
-  return `<span class="type-chip ${meta.cls}" title="${escapeHtml(type)}">${meta.label}</span>`;
+  return `<span class="type-chip badge badge-square ${meta.cls}" title="${escapeHtml(type)}">${meta.label}</span>`;
 }
 
 // Render option badges ("C" for Calls, "P" for Puts) for option orders/positions.
@@ -3154,7 +3214,7 @@ function optionBadgeHtml(putOrCall) {
   const label = isCall ? "C" : "P";
   const cls = isCall ? "option-call" : "option-put";
   const title = isCall ? "Call" : "Put";
-  return ` <span class="option-badge ${cls}" title="${title}">${label}</span>`;
+  return ` <span class="option-badge badge badge-square ${cls}" title="${title}">${label}</span>`;
 }
 
 // Map ExecKind enum strings (as emitted by the backend `executions.me`
@@ -3321,4 +3381,12 @@ function refreshTicketValidation() {
   }
   return result;
 }
-export { refreshTicketValidation, openChainPicker, closeChainPicker, buildChainGrid, handleChainCellClick };
+export {
+  refreshTicketValidation,
+  openChainPicker,
+  closeChainPicker,
+  buildChainGrid,
+  handleChainCellClick,
+  populateTicketFromChainSelection,
+  setChainPickerStatus,
+};

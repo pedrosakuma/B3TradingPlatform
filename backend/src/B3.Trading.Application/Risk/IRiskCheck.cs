@@ -57,7 +57,22 @@ public sealed record RiskContext(
     /// = the resolver yielded nothing → wire field will stay omitted
     /// → check is a no-op (legacy / unmigrated callers stay green).
     /// </summary>
-    Routing.RoutingInstruction? RoutingInstruction = null);
+    Routing.RoutingInstruction? RoutingInstruction = null,
+    /// <summary>
+    /// #435. When non-null, the request is a child order produced by
+    /// the algo engine for the named parent. Throttle checks
+    /// (rolling-notional, order-rate) apply a third per-algo bucket
+    /// alongside the existing per-end-client / per-firm buckets, so a
+    /// runaway algo can be capped without consuming the firm's entire
+    /// quota. <c>null</c> = manual / non-algo origin.
+    /// </summary>
+    ulong? ParentAlgoId = null,
+    /// <summary>
+    /// #435. Algo type tag (lowercase enum name: iceberg/twap/pegged/...)
+    /// used to resolve per-algo-type limits in <c>RiskOptions</c>.
+    /// Only meaningful when <see cref="ParentAlgoId"/> is set.
+    /// </summary>
+    string? AlgoType = null);
 
 public sealed record RiskDecision(bool Approved, string? Reason, string? Code = null)
 {

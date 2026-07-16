@@ -35,6 +35,7 @@ public static class TradingAuthServiceCollectionExtensions
             configuration.GetSection(TotpOptions.SectionName));
         services.Configure<TotpLockoutOptions>(
             configuration.GetSection(TotpLockoutOptions.SectionName));
+        services.AddSingleton<IValidateOptions<AuthOptions>, AuthOptionsValidator>();
         services.AddSingleton<ILoginAttemptTracker, InMemoryLoginAttemptTracker>();
         services.AddSingleton<ITotpAttemptTracker, InMemoryTotpAttemptTracker>();
         services.AddSingleton<ITotpService, TotpService>();
@@ -69,15 +70,21 @@ public static class TradingAuthServiceCollectionExtensions
                 ? ActivatorUtilities.CreateInstance<FileBackedUserStore>(sp)
                 : ActivatorUtilities.CreateInstance<InMemoryUserStore>(sp);
         });
+        services.AddSingleton<ILegacyUserSnapshotProvider>(sp =>
+            (ILegacyUserSnapshotProvider)sp.GetRequiredService<IUserStore>());
 
         services.AddSingleton<JwtIssuer>();
+        services.AddSingleton<ITradingSessionIssuer, TradingSessionIssuer>();
+        services.AddSingleton<IExternalIdentityConfigurationProvider, ExternalIdentityConfigurationProvider>();
+        services.AddSingleton<IExternalIdentityTokenValidator, ExternalIdentityTokenValidator>();
 
         // Auth: JWT bearer with explicit claim mapping. We disable the legacy
         // inbound mapping so 'sub' stays 'sub' (not ClaimTypes.NameIdentifier),
         // matching what JwtIssuer emits.
         JwtSecurityTokenHandler.DefaultMapInboundClaims = false;
         services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-            .AddJwtBearer();
+            .AddJwtBearer()
+            .AddJwtBearer(ExternalIdentityOptions.DefaultScheme);
         // Configure JwtBearerOptions through the options pipeline so test-time
         // AuthOptions overrides (in-memory config) propagate end-to-end.
         services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
@@ -112,6 +119,32 @@ public static class TradingAuthServiceCollectionExtensions
                         }
                         return Task.CompletedTask;
                     },
+                };
+            });
+        services.AddOptions<JwtBearerOptions>(ExternalIdentityOptions.DefaultScheme)
+            .Configure<IOptions<AuthOptions>>((options, authHolder) =>
+            {
+                var external = authHolder.Value.ExternalIdentity;
+                options.MapInboundClaims = false;
+                if (!string.IsNullOrWhiteSpace(external.Authority))
+                    options.Authority = external.Authority;
+                if (!string.IsNullOrWhiteSpace(external.MetadataAddress))
+                    options.MetadataAddress = external.MetadataAddress;
+                options.RequireHttpsMetadata = true;
+                options.TokenValidationParameters = new TokenValidationParameters
+                {
+                    ValidateIssuer = true,
+                    ValidateAudience = true,
+                    ValidateLifetime = true,
+                    ValidateIssuerSigningKey = true,
+                    RequireSignedTokens = true,
+                    RequireExpirationTime = true,
+                    ValidIssuer = external.Issuer,
+                    ValidAudience = external.Audience,
+                    ValidAlgorithms = new[] { SecurityAlgorithms.RsaSha256 },
+                    NameClaimType = JwtRegisteredClaimNames.Sub,
+                    RoleClaimType = JwtIssuer.RoleClaim,
+                    ClockSkew = TimeSpan.FromSeconds(30),
                 };
             });
         services.AddAuthorization(options =>

@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>B3TradingPlatform Design System</title>
+  <link rel="stylesheet" href="css/design-system.css" />
+  <link rel="stylesheet" href="css/design-system-catalog.css" />
+</head>
+<body class="catalog">
+  <main class="catalog-shell stack">
+    <header class="stack">
+      <p class="catalog-eyebrow">B3TradingPlatform</p>
+      <h1>Design system</h1>
+      <p class="catalog-intro">Shared visual tokens and opt-in primitives for the vanilla frontend.</p>
+    </header>
+
+    <section class="card stack">
+      <h2>Color tokens</h2>
+      <div class="catalog-swatches">
+        <div class="catalog-swatch"><span class="catalog-color-accent"></span><code>--color-accent</code></div>
+        <div class="catalog-swatch"><span class="catalog-color-success"></span><code>--color-success</code></div>
+        <div class="catalog-swatch"><span class="catalog-color-warning"></span><code>--color-warning</code></div>
+        <div class="catalog-swatch"><span class="catalog-color-danger"></span><code>--color-danger</code></div>
+        <div class="catalog-swatch"><span class="catalog-color-muted"></span><code>--color-text-muted</code></div>
+      </div>
+    </section>
+
+    <section class="card stack">
+      <h2>Buttons</h2>
+      <div class="cluster">
+        <button class="btn btn-primary" type="button">Primary</button>
+        <button class="btn btn-secondary" type="button">Secondary</button>
+        <button class="btn btn-outline-primary" type="button">Outline</button>
+        <button class="btn btn-danger" type="button">Danger</button>
+        <button class="btn btn-outline-danger" type="button">Outline danger</button>
+        <button class="btn btn-success" type="button">Success</button>
+        <button class="btn btn-link" type="button">Link action</button>
+        <button class="btn btn-secondary" type="button" disabled>Disabled</button>
+      </div>
+    </section>
+
+    <section class="card stack">
+      <h2>Tabs</h2>
+      <div class="tabs tabs-bordered" role="tablist" aria-label="Example tabs">
+        <button class="tab active" type="button" role="tab" aria-selected="true">Markets</button>
+        <button class="tab" type="button" role="tab" aria-selected="false">Watchlist</button>
+        <button class="tab" type="button" role="tab" aria-selected="false">Auctions</button>
+      </div>
+    </section>
+
+    <section class="card stack">
+      <h2>Form controls</h2>
+      <form class="form-surface catalog-form">
+        <label class="form-field">
+          <span>Symbol</span>
+          <input type="text" placeholder="PETR4" />
+        </label>
+        <label class="form-field">
+          <span>Order type</span>
+          <select>
+            <option>Limit</option>
+            <option>Market</option>
+          </select>
+        </label>
+        <label class="form-field">
+          <span>Read-only value</span>
+          <input type="text" value="FIRM01" readonly />
+        </label>
+      </form>
+    </section>
+
+    <section class="card stack">
+      <h2>Badges and composition</h2>
+      <div class="cluster">
+        <span class="badge badge-success">Connected</span>
+        <span class="badge badge-warning">Pending</span>
+        <span class="badge badge-danger">Rejected</span>
+        <span class="badge badge-info badge-outline">Information</span>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

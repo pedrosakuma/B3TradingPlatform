@@ -29,6 +29,10 @@ let onOpenView = () => {};
 let rowsCache = null;
 let loading = false;
 
+// Tracks whether a create request is currently in flight, so the ack
+// checkbox handler (below) never re-enables the submit button mid-request.
+let createSubmitting = false;
+
 export function setBotCredentialsHandlers(handlers) {
   onCreate   = handlers.onCreate   ?? onCreate;
   onRevoke   = handlers.onRevoke   ?? onRevoke;
@@ -54,10 +58,26 @@ export function bindBotCredentialsUi() {
     refreshBtn.addEventListener("click", () => onRefresh());
   }
 
+  // Sandbox/simulation acknowledgment gate (RFC user-bot-fixp-listener-v0,
+  // docs/SANDBOX-AND-LEGAL.md §3: "Gate credential issuance ... until an
+  // in-app ToS gate ships"). The checkbox is the client-side half of that
+  // gate — the create button stays disabled until it's checked.
+  const ackEl = $("bot-credentials-ack");
+  const createBtn = $("bot-credentials-create-submit");
+  if (ackEl && createBtn) {
+    ackEl.addEventListener("change", () => {
+      createBtn.disabled = createSubmitting || !ackEl.checked;
+    });
+  }
+
   const form = $("bot-credentials-create-form");
   if (form) {
     form.addEventListener("submit", (e) => {
       e.preventDefault();
+      if (ackEl && !ackEl.checked) {
+        setBotCredentialsFeedback("Please acknowledge the sandbox notice above first.", "error");
+        return;
+      }
       const labelEl = $("bot-credentials-label");
       const label = (labelEl?.value ?? "").trim();
       if (!label) {
@@ -148,8 +168,10 @@ export function resetCreateForm() {
 export function setCreateSubmitting(submitting) {
   const btn = $("bot-credentials-create-submit");
   if (!btn) return;
-  btn.disabled = !!submitting;
-  btn.textContent = submitting ? "Creating…" : "Create credential";
+  createSubmitting = !!submitting;
+  const ackEl = $("bot-credentials-ack");
+  btn.disabled = createSubmitting || !!(ackEl && !ackEl.checked);
+  btn.textContent = createSubmitting ? "Creating…" : "Create credential";
 }
 
 export function setBotCredentialsFeedback(message, kind) {
@@ -188,17 +210,17 @@ function renderRow(c) {
   const revoked = !!c.revokedAt;
   const created = formatDate(c.createdAtUtc);
   const statusBadge = revoked
-    ? `<span class="killed-tag">Revoked</span>`
-    : `<span class="status-pill status-connected">Active</span>`;
+    ? `<span class="killed-tag badge badge-danger badge-square badge-uppercase">Revoked</span>`
+    : `<span class="status-pill badge badge-uppercase status-connected">Active</span>`;
   const certBinding = renderCertBinding(c.boundCertThumbprint);
   const actions = revoked
     ? ""
-    : `<button type="button" class="bot-cred-edit-pin link-button"
+    : `<button type="button" class="bot-cred-edit-pin btn btn-link"
                data-id="${escapeHtml(c.id)}" data-label="${escapeHtml(c.label)}"
                data-thumbprint="${escapeHtml(c.boundCertThumbprint ?? "")}">
          Edit pin
        </button>
-       <button type="button" class="bot-cred-revoke danger-btn engage"
+       <button type="button" class="bot-cred-revoke btn btn-danger btn-sm"
               data-id="${escapeHtml(c.id)}" data-label="${escapeHtml(c.label)}">
          Revoke
        </button>`;
@@ -216,7 +238,7 @@ function renderCertBinding(boundCertThumbprint) {
   const value = String(boundCertThumbprint ?? "").trim();
   if (!value) return `<span class="muted">unpinned</span>`;
   const short = `${value.slice(0, 4)}…${value.slice(-4)}`;
-  return `<span class="status-pill" title="${escapeHtml(value)}">pinned: <code>${escapeHtml(short)}</code></span>`;
+  return `<span class="status-pill badge badge-neutral" title="${escapeHtml(value)}">pinned: <code>${escapeHtml(short)}</code></span>`;
 }
 
 // ── "Shown once" secret modal ──────────────────────────────────────

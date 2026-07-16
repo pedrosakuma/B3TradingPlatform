@@ -1295,7 +1295,9 @@ public sealed class AlgoEngine : BackgroundService
                 EffectiveLeavesQuantity: effectiveLeaves,
                 TimeInForce: child.TimeInForce,
                 StopPrice: child.StopPrice,
-                GoodTillDate: child.GoodTillDate);
+                GoodTillDate: child.GoodTillDate,
+                ParentAlgoId: algo.AlgoId,
+                AlgoType: algoTypeTag);
             var riskDecision = _risk.Evaluate(riskCtx);
             if (!riskDecision.Approved)
             {
@@ -1716,7 +1718,8 @@ public sealed class AlgoEngine : BackgroundService
                 Price: slicePrice,
                 Source: OrderSubmissionSource.Algo,
                 ParentAlgoId: algo.AlgoId,
-                AlgoSliceSeq: sliceSeq);
+                AlgoSliceSeq: sliceSeq,
+                AlgoTypeTag: algo.Type.ToString().ToLowerInvariant());
 
             OrderSubmissionResult result;
             try

@@ -48,10 +48,14 @@ class FakeElement {
   }
   dispatchEvent(event) {
     const e = event ?? {};
-    e.type = e.type ?? "";
-    e.target = e.target ?? this;
-    e.preventDefault = e.preventDefault ?? (() => {});
-    for (const fn of this._listeners.get(e.type) ?? []) fn(e);
+    const type = typeof e.type === "string" ? e.type : "";
+    if (!("target" in e) || e.target == null) {
+      try { Object.defineProperty(e, "target", { value: this, configurable: true }); } catch {}
+    }
+    if (typeof e.preventDefault !== "function") {
+      try { Object.defineProperty(e, "preventDefault", { value: () => {}, configurable: true }); } catch {}
+    }
+    for (const fn of this._listeners.get(type) ?? []) fn(e);
     return true;
   }
   setAttribute(name, value) { this._attributes.set(String(name), String(value)); }
@@ -76,6 +80,8 @@ export function installDomStub({ ids = {} } = {}) {
 
   const documentStub = {
     getElementById: (id) => elements.get(id) ?? null,
+    querySelector: () => null,
+    querySelectorAll: () => [],
     addEventListener: () => {},
     removeEventListener: () => {},
     execCommand: () => false,

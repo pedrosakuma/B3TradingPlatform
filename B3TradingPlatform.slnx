@@ -25,5 +25,6 @@
     <Project Path="backend/tools/B3.Trading.DemoDriver/B3.Trading.DemoDriver.csproj" />
     <Project Path="backend/tools/B3.Trading.SimulatorBot/B3.Trading.SimulatorBot.csproj" />
     <Project Path="backend/tools/B3.Trading.Reconciliation/B3.Trading.Reconciliation.csproj" />
+    <Project Path="backend/tools/B3.Trading.IdentityMaintenance/B3.Trading.IdentityMaintenance.csproj" />
   </Folder>
 </Solution>

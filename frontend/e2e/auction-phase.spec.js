@@ -83,7 +83,7 @@ test.describe("Auction phase + panel + ticket coupling (#258)", () => {
     await injectPhase(page, SYM, "Reserved");
     await expect(page.locator(`.phase-badge[data-symbol="${SYM}"]`)).toHaveText("RESERVED");
     await expect(page.locator("#ticket-submit")).toBeDisabled();
-    await expect(page.locator("#ticket-submit")).toHaveAttribute("title", "Instrumento halted");
+    await expect(page.locator("#ticket-submit")).toHaveAttribute("title", "Instrument halted");
 
     // 5. Back to Open — Submit re-enabled, panel collapses.
     await injectPhase(page, SYM, "Open");

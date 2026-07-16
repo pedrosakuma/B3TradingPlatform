@@ -11,7 +11,7 @@ namespace B3.Trading.Api.Auth;
 /// Both are case-insensitive (matches <see cref="AuthEndpoints"/> login
 /// behaviour pre-refactor).
 /// </summary>
-public sealed class InMemoryUserStore : IUserStore
+public sealed class InMemoryUserStore : IUserStore, ILegacyUserSnapshotProvider
 {
     private readonly Dictionary<string, UserConfig> _seeded;
     private readonly ConcurrentDictionary<string, UserConfig> _runtime =
@@ -151,4 +151,16 @@ public sealed class InMemoryUserStore : IUserStore
 
     private object LockFor(string username)
         => _userLocks.GetOrAdd(username, _ => new object());
+
+    public IReadOnlyList<UserConfig> SnapshotUsers()
+    {
+        lock (_seeded)
+        {
+            return _seeded.Values
+                .Concat(_runtime.Values)
+                .Where(u => !string.IsNullOrWhiteSpace(u.Username))
+                .OrderBy(u => u.Username, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+    }
 }

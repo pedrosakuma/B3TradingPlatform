@@ -1,18 +1,3 @@
-:root {
-  --bg: #0f1218;
-  --panel: #1a1f2a;
-  --panel-2: #232a39;
-  --border: #2a3242;
-  --text: #d6dce8;
-  --muted: #8a93a6;
-  --accent: #4f9eff;
-  --green: #36c46f;
-  --teal: #38b2ac;
-  --red: #ef5350;
-  --gray: #6b7280;
-  --warn: #f5a623;
-}
-
 * { box-sizing: border-box; }
 /* The `hidden` HTML attribute must always win, even on elements that
    declare a custom `display` (grid/flex/etc) further down. Without
@@ -42,8 +27,8 @@ body {
 .login-card {
   background: var(--panel);
   border: 1px solid var(--border);
-  padding: 2rem;
-  border-radius: 8px;
+  padding: var(--space-8);
+  border-radius: var(--radius-xl);
   width: min(360px, 90vw);
   display: flex; flex-direction: column; gap: .9rem;
 }
@@ -53,11 +38,14 @@ body {
 .login-card label.row { font-size: .7rem; }
 .login-card input, .login-card select {
   background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
-  border-radius: 4px; padding: .5rem .6rem; font: inherit;
+  border-radius: var(--radius-md); padding: var(--space-4) .6rem; font: inherit;
 }
 .login-card button {
   background: var(--accent); color: #0b1320; border: 0; padding: .6rem; border-radius: 4px;
   font-weight: 600; cursor: pointer; font: inherit;
+}
+.login-card button.secondary-button {
+  background: transparent; color: var(--accent); border: 1px solid var(--accent);
 }
 .login-card button:hover { filter: brightness(1.1); }
 .login-card button[disabled] { opacity: .6; cursor: not-allowed; filter: none; }
@@ -69,11 +57,10 @@ body {
 .login-switch {
   font-size: .8rem; color: var(--muted); margin: .2rem 0 0; text-align: center;
 }
-.login-switch .link-button {
-  background: none; color: var(--accent); border: 0; padding: 0; cursor: pointer;
-  font: inherit; text-decoration: underline;
+.login-switch .btn-link {
+  min-height: 0; padding: 0; background: none; color: var(--accent);
+  border: 0; text-decoration: underline;
 }
-.login-switch .link-button:hover { filter: brightness(1.2); }
 
 /* ---------- Trader shell ---------- */
 /* `min-height: 100vh` + no overflow trap: at viewports tall enough to
@@ -91,13 +78,11 @@ body {
 }
 .brand { font-weight: 600; }
 .pill {
-  background: #2a3a55; color: #cfe1ff; padding: .1rem .5rem;
-  border-radius: 999px; font-size: .7rem; margin-left: .4rem;
+  font-size: .7rem; margin-left: var(--space-3);
 }
 .status { display: flex; align-items: center; gap: .8rem; }
 .status-pill {
-  padding: .15rem .55rem; border-radius: 999px; font-size: .75rem;
-  text-transform: uppercase; letter-spacing: .04em;
+  padding: var(--space-1) var(--space-4); font-size: .75rem;
 }
 .status-connected    { background: rgba(54,196,111,.18); color: var(--green); }
 .status-connecting   { background: rgba(245,166,35,.18); color: var(--warn); }
@@ -160,10 +145,6 @@ body {
   text-transform: uppercase; letter-spacing: .04em;
 }
 .tape-all-toggle input { margin: 0; }
-.link-button {
-  background: transparent; border: 0; color: var(--accent); cursor: pointer; font: inherit;
-}
-
 /* ---------- Trader layout (Fase 4 / #400) ----------
    Vertical shell stacking the Quick ticket strip, the sub-tab band
    (Markets / Watchlist / Auctions) and the lower-band (Working orders
@@ -172,11 +153,11 @@ body {
 .trader-layout {
   flex: 1;
   display: flex; flex-direction: column;
-  gap: 8px; padding: 8px; min-height: 0;
+  gap: var(--space-4); padding: var(--space-4); min-height: 0;
 }
 .panel {
-  background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
-  padding: .8rem; display: flex; flex-direction: column;
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-lg);
+  padding: var(--space-5); display: flex; flex-direction: column;
   min-height: 0; min-width: 0;
 }
 .panel > table,
@@ -197,14 +178,8 @@ body {
    bright the trader hits it by accident. Hidden via [hidden] when
    there's nothing to cancel. */
 .cancel-all-btn {
-  background: transparent; color: #ff6a6a;
-  border: 1px solid #c53030; border-radius: 4px;
-  padding: .15rem .55rem; font-size: .7rem; font-weight: 600;
-  letter-spacing: .04em; text-transform: uppercase; cursor: pointer;
-  line-height: 1.4;
+  letter-spacing: .04em; text-transform: uppercase;
 }
-.cancel-all-btn:hover { background: rgba(197, 48, 48, .15); }
-.cancel-all-btn:disabled { opacity: .5; cursor: not-allowed; }
 .blotter h2 .blotter-title { display: inline-flex; align-items: center; gap: .5rem; }
 /* Stale-data overlay (T2). Dim the data area but keep the header
    readable so the trader can still see the panel title + the bright
@@ -220,10 +195,8 @@ body {
   opacity: .5; pointer-events: none; transition: opacity .15s ease-in;
 }
 .stale-tag {
-  margin-left: .5rem; padding: 0 .5rem;
-  background: var(--warn, #c97a1a); color: #fff;
-  border-radius: 999px; font-size: .7rem; font-weight: 600;
-  letter-spacing: .04em; text-transform: none; line-height: 1.4;
+  margin-left: var(--space-4); font-size: .7rem; font-weight: 600;
+  letter-spacing: .04em;
 }
 /* Fase 4 (#400). The legacy `grid-template-areas` rules previously laid
    out every trader panel in a fixed 3×4 grid; the new shell instead
@@ -392,11 +365,6 @@ body {
   min-width: 0;
 }
 .ticket-form .row-two { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; }
-.ticket-form button {
-  margin-top: .3rem; background: var(--accent); color: #0b1320; border: 0;
-  padding: .5rem; border-radius: 4px; font-weight: 600; cursor: pointer; font: inherit;
-}
-.ticket-form button:disabled { opacity: .5; cursor: progress; }
 .feedback { margin: .3rem 0 0; font-size: .8rem; }
 .feedback.ok    { color: var(--green); }
 .feedback.error { color: var(--red); }
@@ -410,17 +378,7 @@ th {
 }
 td { padding: .35rem .5rem; border-bottom: 1px solid #20283a; }
 .num { text-align: right; font-variant-numeric: tabular-nums; }
-.cancel-btn {
-  background: transparent; border: 1px solid var(--red); color: var(--red);
-  padding: .15rem .5rem; border-radius: 3px; cursor: pointer; font: inherit; font-size: .75rem;
-}
-.cancel-btn:disabled { opacity: .35; cursor: not-allowed; }
 .cancel-btn.cancelling { opacity: .55; cursor: progress; }
-.modify-btn {
-  background: transparent; border: 1px solid var(--accent); color: var(--accent);
-  padding: .15rem .5rem; border-radius: 3px; cursor: pointer; font: inherit; font-size: .75rem;
-}
-.modify-btn:disabled { opacity: .35; cursor: not-allowed; }
 .modify-btn.modifying { opacity: .55; cursor: progress; }
 .md-cell-stale { color: var(--warn); }
 .status-cell-Working   { color: var(--green); }
@@ -440,16 +398,9 @@ td { padding: .35rem .5rem; border-bottom: 1px solid #20283a; }
 tr.row-stale > td { opacity: .55; }
 tr.row-stale > td.row-stale-actions { opacity: 1; }
 .order-stale-badge {
-  display: inline-block;
   margin-left: .35rem;
-  padding: 0 .35rem;
-  border: 1px solid var(--warn);
-  border-radius: 3px;
-  color: var(--warn);
   font-size: .65rem;
   font-weight: 600;
-  letter-spacing: .03em;
-  text-transform: uppercase;
   vertical-align: middle;
   cursor: help;
 }
@@ -489,10 +440,6 @@ tr.row-stale > td.row-stale-actions { opacity: 1; }
 
 /* ---------- Q1.4 (#256) Working-orders type chip ---------- */
 .type-chip {
-  display: inline-block;
-  padding: 0 .35em;
-  border-radius: .25em;
-  font-size: .7rem;
   font-weight: 700;
   letter-spacing: .03em;
   vertical-align: baseline;
@@ -507,11 +454,8 @@ tr.row-stale > td.row-stale-actions { opacity: 1; }
 
 /* Option badges for Call/Put labels (#497) */
 .option-badge {
- display: inline-block;
  font-size: 0.75rem;
  font-weight: 600;
- padding: 0 4px;
- border-radius: 3px;
  margin-left: 4px;
  vertical-align: middle;
 }
@@ -559,8 +503,6 @@ tr.row-stale > td.row-stale-actions { opacity: 1; }
 }
 .market-data h2 .md-title { display: inline-flex; align-items: center; gap: .55rem; }
 .icon-button {
-  background: transparent; border: 1px solid var(--border); color: var(--muted);
-  border-radius: 4px; padding: .05rem .4rem; cursor: pointer; font: inherit;
   font-size: .9rem; line-height: 1;
 }
 .icon-button:hover { color: var(--text); border-color: var(--accent); }
@@ -576,13 +518,11 @@ tr.row-stale > td.row-stale-actions { opacity: 1; }
   font-size: .7rem; color: var(--warn); font-variant-numeric: tabular-nums;
 }
 .role-badge {
-  background: rgba(79,158,255,.15); color: var(--accent);
-  padding: .1rem .45rem; border-radius: 999px; font-size: .65rem;
-  text-transform: uppercase; letter-spacing: .04em;
+  font-size: .65rem;
 }
 .firms-health {
-  padding: .15rem .55rem; border-radius: 999px; font-size: .7rem;
-  border: 1px solid var(--border); cursor: help;
+  padding: var(--space-1) var(--space-4); font-size: .7rem;
+  border-color: var(--border); cursor: help;
 }
 .firms-health-ok    { background: rgba(54,196,111,.12); color: var(--green); border-color: rgba(54,196,111,.35); }
 .firms-health-warn  { background: rgba(245,166,35,.12); color: var(--warn);  border-color: rgba(245,166,35,.35); }
@@ -603,15 +543,20 @@ tr.row-stale > td.row-stale-actions { opacity: 1; }
 .view-toggle button.active { background: var(--accent); color: #0b1320; }
 .view-toggle button:not(.active):hover { color: var(--text); }
 
-.admin-view { display: flex; flex-direction: column; height: 100vh; overflow: auto; padding: 1rem; gap: 1rem; }
+.admin-view { display: flex; flex-direction: column; height: 100vh; overflow: auto; padding: var(--space-6); gap: var(--space-6); }
 .admin-subbar {
   display: flex; justify-content: space-between; align-items: center;
   padding: .5rem 0; border-bottom: 1px solid var(--border);
 }
 .admin-subbar h2 { margin: 0; font-size: 1rem; font-weight: 600; }
 .admin-subbar #admin-mode { color: var(--accent); font-weight: 600; }
-.admin-panel { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: .75rem 1rem; }
+.admin-panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: var(--space-5) var(--space-6); }
 .admin-panel h3 { margin: 0 0 .6rem; font-size: .9rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+.integration-guide { border-style: dashed; }
+.integration-guide p { margin: 0 0 .5rem; font-size: .82rem; line-height: 1.4; }
+.integration-guide p:last-child { margin-bottom: 0; }
+.integration-links { list-style: none; margin: 0 0 .6rem; padding: 0; display: flex; flex-direction: column; gap: .3rem; font-size: .82rem; }
+.integration-links a { color: var(--accent); }
 .admin-inline-form { display: flex; gap: .5rem; margin-bottom: .6rem; }
 .admin-inline-form input {
   flex: 1; background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
@@ -622,19 +567,8 @@ tr.row-stale > td.row-stale-actions { opacity: 1; }
   border-radius: 4px; font: 11px/1.4 ui-monospace, Menlo, Consolas, monospace;
   white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto;
 }
-.danger-btn {
-  border: 0; padding: .35rem .75rem; border-radius: 4px; cursor: pointer; font: inherit; font-size: .75rem;
-  text-transform: uppercase; letter-spacing: .04em; font-weight: 600;
-}
-.danger-btn.engage { background: rgba(239,83,80,.18); color: var(--red); }
-.danger-btn.engage:hover { background: rgba(239,83,80,.32); }
-.danger-btn.revive { background: rgba(54,196,111,.18); color: var(--green); }
-.danger-btn.revive:hover { background: rgba(54,196,111,.32); }
 .killed-tag {
-  display: inline-block; padding: .05rem .4rem; border-radius: 3px;
-  background: rgba(239,83,80,.18); color: var(--red);
-  font-size: .65rem; text-transform: uppercase; letter-spacing: .04em;
-  margin-right: .35rem;
+  font-size: .65rem; margin-right: var(--space-3);
 }
 /* Firms admin: highlight rows whose FIXP session is not Established or
  * is mid-reconnect so the worst row is visible at a glance (#342). */
@@ -662,17 +596,6 @@ tr.firm-row-bad > td { background: rgba(239,83,80,.10); }
 .blotter-pagination {
   display: flex; align-items: center; justify-content: flex-end;
   gap: .5rem; margin-top: .4rem; font-size: .8rem;
-}
-.blotter-pagination button {
-  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
-  border-radius: 4px; padding: .25rem .55rem; font: inherit; font-size: .8rem;
-  cursor: pointer;
-}
-.blotter-pagination button:disabled {
-  opacity: .4; cursor: default;
-}
-.blotter-pagination button:not(:disabled):hover {
-  background: rgba(255,255,255,.05);
 }
 .blotter-page-info { color: var(--muted); font-variant-numeric: tabular-nums; }
 
@@ -732,23 +655,9 @@ tr.firm-row-bad > td { background: rgba(239,83,80,.10); }
   flex-wrap: wrap;
 }
 .expiry-chip {
-  background: var(--panel-2, #1e1e1e);
-  border: 1px solid var(--border, #333);
-  border-radius: 4px;
-  padding: 0.2rem 0.5rem;
   font-size: 0.7rem;
-  cursor: pointer;
   white-space: nowrap;
   transition: background 0.15s, border-color 0.15s;
-}
-.expiry-chip:hover {
-  background: var(--panel-3, #2a2a2a);
-  border-color: var(--accent, #4aa3ff);
-}
-.expiry-chip.active {
-  background: var(--accent, #4aa3ff);
-  color: #fff;
-  border-color: var(--accent, #4aa3ff);
 }
 .expiry-count {
   opacity: 0.7;
@@ -824,7 +733,7 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
   display: grid; place-items: center; z-index: 1000;
 }
 .modal-card {
-  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-xl);
   padding: 1.25rem 1.5rem; width: min(360px, 90vw);
   display: flex; flex-direction: column; gap: .8rem;
 }
@@ -835,12 +744,6 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
   border-radius: 4px; padding: .45rem .55rem; font: inherit;
 }
 .modal-actions { display: flex; justify-content: space-between; align-items: center; gap: .5rem; }
-.modal-actions button[type="submit"] {
-  background: var(--accent); color: #0b1320; border: 0; padding: .45rem .9rem;
-  border-radius: 4px; font-weight: 600; cursor: pointer; font: inherit;
-}
-.modal-actions button[type="submit"]:hover { filter: brightness(1.1); }
-
 /*
  * Modify-modal helper line.
  *
@@ -871,14 +774,6 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
   background: rgba(245,166,35,.12); border: 1px solid var(--warn);
   color: var(--warn); font-size: .8rem;
 }
-.bot-credentials-secret-card .modal-actions button[type="button"] {
-  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
-  border-radius: 4px; padding: .4rem .8rem; font: inherit; font-size: .8rem; cursor: pointer;
-}
-.bot-credentials-secret-card .modal-actions button[type="button"]:hover {
-  background: rgba(255,255,255,.05);
-}
-
 /* ---------- Order detail modal (#245) ---------- */
 .order-detail-backdrop { align-items: start; padding-top: 4vh; }
 .order-detail-card {
@@ -913,14 +808,13 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
 }
 .order-detail-body .field.field-wide { grid-column: 1 / -1; }
 .modal-progress {
-  position: relative;
-  height: 6px; border-radius: 3px; background: var(--panel-2);
-  overflow: hidden; margin-top: .25rem;
+  display: block; width: 100%; height: 6px; margin-top: .25rem;
+  border: 0; border-radius: 3px; overflow: hidden;
+  appearance: none; background: var(--panel-2);
 }
-.modal-progress > .modal-progress-fill {
-  position: absolute; top: 0; left: 0; bottom: 0;
-  background: var(--accent);
-}
+.modal-progress::-webkit-progress-bar { background: var(--panel-2); }
+.modal-progress::-webkit-progress-value { background: var(--accent); }
+.modal-progress::-moz-progress-bar { background: var(--accent); }
 .order-detail-exec-scroll { max-height: 50vh; overflow: auto; }
 .order-detail-table {
   width: 100%; border-collapse: collapse;
@@ -1005,6 +899,7 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
   padding: 2rem;
   margin: 0;
 }
+.chain-placeholder-error { color: var(--red); }
 .chain-table {
   border-collapse: collapse;
   width: 100%;
@@ -1042,36 +937,6 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
   padding: 1rem;
   border-top: 1px solid var(--border-color, #e5e7eb);
 }
-.btn {
-  padding: 0.5rem 1rem;
-  border: 1px solid var(--border-color, #e5e7eb);
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: .8rem;
-  background: var(--panel);
-  color: var(--text);
-}
-.btn:hover {
-  filter: brightness(1.1);
-}
-.btn-primary {
-  background: var(--accent);
-  color: white;
-  border-color: var(--accent);
-}
-.btn-secondary {
-  background: var(--panel-2);
-  border-color: var(--border-color, #e5e7eb);
-}
-.btn-icon {
-  padding: 0.5rem;
-  width: 2rem;
-  height: 2rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
 /* Mobile: full screen */
 @media (max-width: 768px) {
   .chain-picker-modal {
@@ -1090,12 +955,8 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
    table. Color tokens reuse the global --green / --warn / --red /
    --gray surface so the palette stays consistent with status-cell-*. */
 .phase-badge {
-  display: inline-block;
   margin-left: .35rem;
-  padding: .05rem .35rem;
   font-size: .65rem; font-weight: 600;
-  letter-spacing: .03em; text-transform: uppercase;
-  border-radius: 999px; border: 1px solid currentColor;
   vertical-align: middle;
   font-variant-numeric: tabular-nums;
 }
@@ -1112,8 +973,7 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
 .auction-panel.collapsed { padding-bottom: .45rem; }
 .auction-toggle {
   display: inline-flex; align-items: center; gap: .35rem;
-  background: transparent; border: 0; color: var(--text);
-  font: inherit; font-weight: 600; cursor: pointer; padding: 0;
+  color: var(--text); font-weight: 600;
 }
 .auction-toggle:hover { color: var(--accent); }
 .auction-caret { display: inline-block; width: .9em; color: var(--muted); }
@@ -1227,79 +1087,170 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
 }
 
 /* ── Fase 2 (#398). Algos tab. ─────────────────────────────────── */
+/* Match the .history-view / .compliance-view convention: the view
+   itself owns the outer margin so its content isn't flush against
+   the viewport edges like the trader tab's `.trader-layout` padding. */
+.algos-view { padding: 1rem 1.5rem; }
 .algos-view .admin-subbar-actions { display: flex; gap: 1rem; align-items: center; }
 .algos-view .inline-field { display: inline-flex; gap: .35rem; align-items: center; font-size: .85rem; }
+.algos-view .inline-field input[type="text"] {
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: .35rem .5rem; font: inherit;
+}
+.algos-view .panel > h3 {
+  margin: 0;
+  font-size: .85rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
 .algos-grid {
   display: grid;
-  grid-template-columns: 1.4fr 1.2fr 1fr;
-  gap: .75rem;
-  padding: .5rem;
-  align-items: start;
+  grid-template-columns: minmax(20rem, 1.3fr) minmax(22rem, 1.1fr) minmax(18rem, 1fr);
+  gap: 8px;
+  align-items: stretch;
 }
 @media (max-width: 1200px) { .algos-grid { grid-template-columns: 1fr; } }
-.algos-list-panel .table-scroll { max-height: 60vh; overflow: auto; }
+.algos-list-panel,
+.algos-boleta-panel,
+.algos-detail-panel { gap: .75rem; }
+.algos-list-panel .table-scroll { max-height: 68vh; overflow: auto; flex: 1; }
 .algos-list-table tbody tr { cursor: pointer; }
 .algos-list-table tbody tr.selected { background: var(--row-selected, rgba(255,255,255,.08)); }
 .algos-list-table tbody tr:hover { background: var(--row-hover, rgba(255,255,255,.04)); }
-.algos-type-tabs { display: flex; gap: .25rem; margin-bottom: .5rem; flex-wrap: wrap; }
+.algos-type-tabs {
+  padding-bottom: var(--space-4);
+  border-bottom: 1px solid var(--border, #444);
+}
 .algos-type-tab {
-  padding: .25rem .6rem;
-  background: transparent;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  font-size: .75rem;
+  font-weight: 600;
+}
+.algos-boleta-form {
+  display: flex;
+  flex-direction: column;
+  gap: .75rem;
+}
+.algos-form-section {
   border: 1px solid var(--border, #444);
-  color: inherit;
-  cursor: pointer;
-  border-radius: 4px;
-  font-size: .85rem;
+  padding: .65rem .75rem .75rem;
+  border-radius: 6px;
+  margin: 0;
 }
-.algos-type-tab.active { background: var(--accent, #357); color: white; border-color: var(--accent, #357); }
-.algos-boleta-form fieldset { border: 1px solid var(--border, #444); padding: .5rem .75rem; margin-bottom: .5rem; border-radius: 4px; }
-.algos-boleta-form legend { padding: 0 .35rem; font-size: .8rem; color: var(--muted, #999); }
-.algos-boleta-form label {
+.algos-form-section legend {
+  padding: 0 .35rem;
+  font-size: .7rem;
+  color: var(--muted, #999);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+.algos-form-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  align-items: center;
-  gap: .5rem;
-  margin-bottom: .35rem;
-  font-size: .85rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .6rem .75rem;
 }
-.algos-boleta-form input, .algos-boleta-form select { width: 100%; box-sizing: border-box; }
-.algos-boleta-footer { display: flex; gap: 1rem; align-items: center; }
-.algos-boleta-status { margin: 0; font-size: .85rem; }
+.algos-form-grid .ticket-field { min-width: 0; }
+.algos-form-grid .ticket-field > span { margin-bottom: .2rem; }
+.algos-form-grid .ticket-field > input,
+.algos-form-grid .ticket-field > select { width: 100%; }
+.algos-boleta-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  padding-top: .1rem;
+}
+.algos-boleta-status {
+  margin: 0;
+  font-size: .8rem;
+  min-height: 1.2em;
+}
 .algos-boleta-status.error { color: var(--danger, #d66); }
 .algos-boleta-status.success { color: var(--accent, #6c6); }
-.algos-detail-grid { display: grid; grid-template-columns: max-content 1fr; gap: .25rem .75rem; font-size: .85rem; margin: 0 0 .75rem; }
+.algos-detail-body {
+  display: flex;
+  flex-direction: column;
+  gap: .75rem;
+}
+.algos-detail-grid { display: grid; grid-template-columns: max-content 1fr; gap: .25rem .75rem; font-size: .85rem; margin: 0; }
 .algos-detail-grid dt { color: var(--muted, #999); }
 .algos-detail-grid dd { margin: 0; word-break: break-word; }
-.algos-params-pre { background: rgba(0,0,0,.25); padding: .5rem; border-radius: 4px; font-size: .75rem; overflow: auto; max-height: 14rem; }
-.algos-modify-form { display: grid; gap: .35rem; border-top: 1px solid var(--border, #444); padding-top: .5rem; margin-top: .5rem; }
-.algos-modify-form h4 { margin: 0; }
+.algos-section-title {
+  margin: 0;
+  font-size: .78rem;
+  font-weight: 600;
+  color: var(--muted, #999);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+.algos-params-grid {
+  padding: .55rem .65rem;
+  border: 1px solid var(--border, #444);
+  border-radius: 6px;
+  background: rgba(255,255,255,.02);
+}
+.algos-modify-form {
+  display: flex;
+  flex-direction: column;
+  gap: .6rem;
+  border-top: 1px solid var(--border, #444);
+  padding-top: .75rem;
+}
+.algos-modify-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.algos-modify-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+}
+.algos-modify-actions .muted-line { margin: 0; }
+.algos-cancel-btn { align-self: flex-start; }
+.algos-cancel-btn:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+
+@media (max-width: 900px) {
+  .algos-form-grid,
+  .algos-modify-grid {
+    grid-template-columns: 1fr;
+  }
+  .algos-boleta-footer,
+  .algos-modify-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .algos-cancel-btn { width: 100%; }
+}
 
 /* Fase 3 (#399). Settings sub-tabs — mirror the algos-type-tabs visual
    so the user sees the same primary/sub-tab idiom across the app. */
+.settings-view {
+  padding: 1rem 1.5rem;
+}
 .settings-subtabs {
-  display: flex;
-  gap: .25rem;
   margin: .5rem 0 .75rem;
-  flex-wrap: wrap;
-  border-bottom: 1px solid var(--border, #444);
-  padding-bottom: .5rem;
-}
-.settings-subtab {
-  padding: .35rem .75rem;
-  background: transparent;
-  border: 1px solid var(--border, #444);
-  color: inherit;
-  cursor: pointer;
-  border-radius: 4px;
-  font-size: .9rem;
-}
-.settings-subtab.active {
-  background: var(--accent, #357);
-  color: white;
-  border-color: var(--accent, #357);
 }
 .settings-subpanel { margin-top: .5rem; }
 .settings-subpanel .admin-subbar { margin-bottom: .5rem; }
+.security-status-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: .15rem .55rem;
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: .75rem;
+  font-weight: 600;
+}
+.security-status-enrolled { background: rgba(54,196,111,.18); color: var(--green); }
+.security-status-not-enrolled { background: rgba(245,166,35,.18); color: var(--warn); }
+.security-status-pending { background: rgba(79,158,255,.18); color: var(--accent); }
+.security-status-unavailable { background: rgba(239,83,80,.18); color: var(--red); }
 
 /* ─────────────────────────────────────────────────────────────────
    Fase 4 (#400). Trader-view reflow: sub-tabs + lower-band tabs +
@@ -1309,23 +1260,6 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
    ───────────────────────────────────────────────────────────────── */
 
 /* Sub-tab navigation (Markets / Watchlist / Auctions). */
-.trader-subtabs {
-  display: flex; gap: .25rem; flex-wrap: wrap;
-  border-bottom: 1px solid var(--border, #444);
-  padding-bottom: .35rem;
-}
-.trader-subtab {
-  padding: .35rem .75rem;
-  background: transparent;
-  border: 1px solid var(--border, #444);
-  color: inherit; cursor: pointer;
-  border-radius: 4px; font-size: .9rem;
-}
-.trader-subtab.active {
-  background: var(--accent, #357); color: white;
-  border-color: var(--accent, #357);
-}
-
 /* Active sub-panel — fills the remaining trader-layout space. Each
    sub-tab uses its own internal grid; auctions is full-width. */
 .trader-subpanel {
@@ -1352,20 +1286,7 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
   display: flex; flex-direction: column;
 }
 .trader-bottom-tabs {
-  display: flex; gap: .25rem; flex-wrap: wrap;
-  border-bottom: 1px solid var(--border, #444);
-  padding-bottom: .35rem; margin-bottom: .5rem;
-}
-.trader-bottom-tab {
-  padding: .3rem .65rem;
-  background: transparent;
-  border: 1px solid var(--border, #444);
-  color: inherit; cursor: pointer;
-  border-radius: 4px; font-size: .85rem;
-}
-.trader-bottom-tab.active {
-  background: var(--accent, #357); color: white;
-  border-color: var(--accent, #357);
+  margin-bottom: var(--space-4);
 }
 .trader-bottom-subpanel {
   flex: 1; min-height: 0;
@@ -1405,18 +1326,12 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
 }
 .ticket-field > input, .ticket-field > select {
   background: var(--panel-2); color: var(--text);
-  border: 1px solid var(--border); border-radius: 4px;
+  border: 1px solid var(--border); border-radius: var(--radius-md);
   padding: .35rem .4rem; font: inherit; font-size: .85rem;
   min-width: 0;
 }
 .ticket-field-symbol > input { min-width: 7.5rem; }
-.ticket-submit {
-  padding: .5rem 1rem; font: inherit; font-size: .85rem;
-  background: var(--accent, #357); color: white;
-  border: 1px solid var(--accent, #357); border-radius: 4px;
-  cursor: pointer; font-weight: 600;
-}
-.ticket-submit:hover { filter: brightness(1.1); }
+.ticket-submit { font-size: .85rem; }
 .ticket-notional {
   font-size: .875rem;
   color: var(--gray);
@@ -1424,12 +1339,6 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
   white-space: nowrap;
   align-self: flex-end;
   padding-bottom: .35rem;
-}
-.ticket-advanced-toggle {
-  padding: .35rem .65rem; font: inherit; font-size: .8rem;
-  background: transparent; color: inherit;
-  border: 1px solid var(--border); border-radius: 4px;
-  cursor: pointer;
 }
 .ticket-advanced-toggle.active {
   background: var(--panel-2);
@@ -1463,6 +1372,11 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
 :root[data-density="compact"] table td { padding: .15rem .35rem; }
 :root[data-density="compact"] .ticket-row-quick { gap: .35rem; }
 :root[data-density="compact"] .ticket-advanced  { gap: .35rem; }
+:root[data-density="compact"] .algos-grid { gap: .35rem; }
+:root[data-density="compact"] .algos-type-tabs { gap: .25rem; padding-bottom: .35rem; }
+:root[data-density="compact"] .algos-boleta-form { gap: .5rem; }
+:root[data-density="compact"] .algos-form-grid,
+:root[data-density="compact"] .algos-modify-form { gap: .4rem .5rem; }
 :root[data-density="compact"] .topbar           { padding: .35rem .5rem; }
 
 /* Preferences panel: density toggle. */
@@ -1478,16 +1392,6 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
   margin: .25rem 0 0; font-size: .8rem; color: var(--muted, #888);
 }
 .density-toggle { display: inline-flex; gap: .25rem; }
-.density-option {
-  padding: .35rem .75rem; font: inherit; font-size: .85rem;
-  background: transparent; color: inherit;
-  border: 1px solid var(--border); border-radius: 4px;
-  cursor: pointer;
-}
-.density-option.active {
-  background: var(--accent, #357); color: white;
-  border-color: var(--accent, #357);
-}
 .keyboard-shortcuts {
   margin: .25rem 0 0; padding-left: 1.25rem; font-size: .85rem;
   line-height: 1.6;
