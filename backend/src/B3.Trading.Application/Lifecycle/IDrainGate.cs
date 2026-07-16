@@ -11,3 +11,12 @@ public interface IDrainGate
 {
     bool IsDraining { get; }
 }
+
+/// <summary>
+/// Fail-closed write side for infrastructure/application components that
+/// detect a condition requiring order ingress to stop immediately.
+/// </summary>
+public interface IDrainController : IDrainGate
+{
+    void BeginDrain(string reason);
+}

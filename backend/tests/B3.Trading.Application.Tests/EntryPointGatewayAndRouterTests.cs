@@ -2,6 +2,7 @@ using System.Diagnostics.Metrics;
 
 using B3.Trading.Application.Risk;
 using B3.Trading.Application;
+using B3.Trading.Application.Lifecycle;
 using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Domain;
@@ -179,7 +180,9 @@ public class EntryPointGatewayAndRouterTests
             NullLogger<ExecutionReportProcessor>.Instance);
         var client = new MockEntryPointClient();
         var dispatcher = new EventDispatcher(new BackpressureStore(), new[] { (IExecutionFanOutSink)sink });
-        using var router = new EntryPointExecutionReportRouter(client, proc, dispatcher);
+        var drain = new TestDrainController();
+        using var router = new EntryPointExecutionReportRouter(
+            client, proc, dispatcher, orders: null, bookTop: null, drain: drain);
 
         Assert.Throws<WalBackpressureException>(() =>
             client.EmitExecutionReport(new ExecutionReportEnvelope(
@@ -188,6 +191,22 @@ public class EntryPointGatewayAndRouterTests
         Assert.Equal(OrderStatus.PendingNew, order.Status);
         Assert.Equal(0, order.CumulativeQuantity);
         Assert.Empty(sink.Events);
+        Assert.True(drain.IsDraining);
+        Assert.Equal("wal_execution_report_rejected", drain.Reason);
+    }
+
+    [Fact]
+    public void RealGateway_WalSubscriberFailure_PropagatesInsteadOfContinuing()
+    {
+        var envelope = new ExecutionReportEnvelope(
+            1UL, EpExecType.Fill, 0, 100, 100, 30m, null);
+
+        Assert.Throws<WalBackpressureException>(() =>
+            B3EntryPointClientGateway.InvokeExecutionReportSubscribers(
+                _ => throw new WalBackpressureException("forced saturation"),
+                envelope,
+                "FIRM-A",
+                NullLogger<B3EntryPointClientGateway>.Instance));
     }
 
     [Fact]
@@ -330,6 +349,17 @@ public class EntryPointGatewayAndRouterTests
             yield break;
         }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class TestDrainController : IDrainController
+    {
+        public bool IsDraining { get; private set; }
+        public string? Reason { get; private set; }
+        public void BeginDrain(string reason)
+        {
+            IsDraining = true;
+            Reason = reason;
+        }
     }
 
     private sealed class TestSink : IExecutionEventSink, IExecutionFanOutSink

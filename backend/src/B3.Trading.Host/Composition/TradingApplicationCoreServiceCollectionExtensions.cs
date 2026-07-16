@@ -314,6 +314,8 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         services.AddSingleton<DrainState>();
         services.AddSingleton<B3.Trading.Application.Lifecycle.IDrainGate>(
             sp => sp.GetRequiredService<DrainState>());
+        services.AddSingleton<B3.Trading.Application.Lifecycle.IDrainController>(
+            sp => sp.GetRequiredService<DrainState>());
         services.AddHostedService<DrainHostedService>();
 
         return services;

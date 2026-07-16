@@ -16,6 +16,7 @@ public class OrderSubmissionFailClosedTests
         var dispatcher = new EventDispatcher(store);
         var book = new WorkingOrderBook();
         var sink = new RecordingSink();
+        var drain = new TestDrainController();
         var submitter = new OrderSubmissionService(
             new ClOrdIdPrefixRegistry(),
             new OrderOwnershipMap(),
@@ -26,7 +27,7 @@ public class OrderSubmissionFailClosedTests
             new NoOpMarginProvider(),
             new CompositeRiskAccountant(Array.Empty<IRiskAccountant>()),
             dispatcher,
-            new NeverDrainingGate(),
+            drain,
             NullLogger<OrderSubmissionService>.Instance);
 
         var result = await submitter.SubmitAsync(
@@ -35,13 +36,16 @@ public class OrderSubmissionFailClosedTests
                 OrderSide.Buy, OrderType.Limit, 100, 30m),
             CancellationToken.None);
 
-        Assert.Equal(OrderSubmissionResultKind.WalBackpressure, result.Kind);
-        Assert.Equal("wal_backpressure", result.Code);
-        Assert.True(book.TryGet(1UL, out var order));
+        Assert.Equal(OrderSubmissionResultKind.ReconciliationRequired, result.Kind);
+        Assert.Equal("wal_reconciliation_required", result.Code);
+        Assert.NotEqual(0UL, result.ClOrdId);
+        Assert.True(book.TryGet(result.ClOrdId, out var order));
         Assert.NotNull(order);
         Assert.Equal(OrderStatus.PendingNew, order!.Status);
         Assert.Empty(sink.Events);
         Assert.IsType<OrderSubmittedEvent>(Assert.Single(store.Appended));
+        Assert.True(drain.IsDraining);
+        Assert.Equal("wal_synthetic_terminal_reconciliation_required", drain.Reason);
     }
 
     private sealed class SaturatingAfterFirstAppendStore : IEventStore
@@ -94,8 +98,14 @@ public class OrderSubmissionFailClosedTests
         public void Publish(ExecutionEvent ev) => Events.Add(ev);
     }
 
-    private sealed class NeverDrainingGate : IDrainGate
+    private sealed class TestDrainController : IDrainController
     {
-        public bool IsDraining => false;
+        public bool IsDraining { get; private set; }
+        public string? Reason { get; private set; }
+        public void BeginDrain(string reason)
+        {
+            IsDraining = true;
+            Reason = reason;
+        }
     }
 }

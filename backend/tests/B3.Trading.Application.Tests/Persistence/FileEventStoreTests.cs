@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Infrastructure.Persistence;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace B3.Trading.Application.Tests.Persistence;
@@ -438,6 +439,36 @@ public class FileEventStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task WriterFault_IsPublishedBeforeWriterLoopCatchCompletes()
+    {
+        var opts = OptsForTest();
+        var eventTime = new DateTimeOffset(2032, 3, 4, 5, 6, 7, TimeSpan.Zero);
+        var walRoot = Path.Combine(_root, "test", "wal");
+        Directory.CreateDirectory(walRoot);
+        File.WriteAllText(Path.Combine(walRoot, "2032-03-04"), "not a directory");
+
+        var logger = new BlockingCriticalLogger();
+        await using var store = new FileEventStore(opts, logger);
+        store.Append(NewOrder(0) with { TimestampUtc = eventTime });
+        var flush = store.FlushAsync().AsTask();
+
+        Assert.True(logger.Entered.Wait(TimeSpan.FromSeconds(5)),
+            "writer did not reach its terminal-fault catch");
+        try
+        {
+            Assert.False(store.IsHealthy);
+            Assert.NotNull(store.TerminalFault);
+            Assert.Throws<WalFaultedException>(() => store.Append(NewOrder(1)));
+        }
+        finally
+        {
+            logger.Release.Set();
+        }
+
+        await Assert.ThrowsAsync<WalFaultedException>(() => flush);
+    }
+
+    [Fact]
     public async Task DayRotation_CreatesPerDaySubdirectory()
     {
         // Two events on different timestamps land in different day dirs.
@@ -760,4 +791,25 @@ public class FileEventStoreTests : IDisposable
         Quantity = 100,
         Price = 30m,
     };
+
+    private sealed class BlockingCriticalLogger : ILogger<FileEventStore>
+    {
+        public ManualResetEventSlim Entered { get; } = new();
+        public ManualResetEventSlim Release { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel != LogLevel.Critical) return;
+            Entered.Set();
+            Release.Wait(TimeSpan.FromSeconds(10));
+        }
+    }
 }

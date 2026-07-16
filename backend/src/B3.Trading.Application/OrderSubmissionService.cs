@@ -35,7 +35,7 @@ public sealed class OrderSubmissionService
     private readonly IMarginProvider _margin;
     private readonly CompositeRiskAccountant _accountant;
     private readonly EventDispatcher _dispatcher;
-    private readonly Lifecycle.IDrainGate _drain;
+    private readonly Lifecycle.IDrainController _drain;
     private readonly IUserBotOrderMappingRegistry? _botMappings;
     private readonly Scheduling.GtdExpirationScheduler? _gtdScheduler;
     private readonly Scheduling.IocFokWatchdog? _iocWatchdog;
@@ -53,7 +53,7 @@ public sealed class OrderSubmissionService
         IMarginProvider margin,
         CompositeRiskAccountant accountant,
         EventDispatcher dispatcher,
-        Lifecycle.IDrainGate drain,
+        Lifecycle.IDrainController drain,
         ILogger<OrderSubmissionService> logger,
         IUserBotOrderMappingRegistry? botMappings = null,
         Scheduling.GtdExpirationScheduler? gtdScheduler = null,
@@ -396,15 +396,21 @@ public sealed class OrderSubmissionService
         }
         catch (WalBackpressureException ex)
         {
-            return OrderSubmissionResult.WalBackpressure(ex.Message);
+            return FailDrainForReconciliation(order, ex);
         }
         catch (WalFaultedException ex)
         {
-            _logger.LogCritical(ex,
-                "WAL fault prevented durable synthetic rejection for {ClOrdId}; leaving order non-terminal.",
-                order.ClOrdId);
-            return OrderSubmissionResult.WalFaulted(ex.Message);
+            return FailDrainForReconciliation(order, ex);
         }
+    }
+
+    private OrderSubmissionResult FailDrainForReconciliation(Order order, Exception exception)
+    {
+        _drain.BeginDrain("wal_synthetic_terminal_reconciliation_required");
+        _logger.LogCritical(exception,
+            "Durable synthetic rejection failed for {ClOrdId}; ingress is draining and operator reconciliation is required.",
+            order.ClOrdId);
+        return OrderSubmissionResult.ReconciliationRequired(order.ClOrdId);
     }
 }
 
@@ -526,6 +532,13 @@ public sealed class OrderSubmissionResult
         new(OrderSubmissionResultKind.WalBackpressure, 0, detail, "wal_backpressure", null);
     public static OrderSubmissionResult WalFaulted(string detail) =>
         new(OrderSubmissionResultKind.WalBackpressure, 0, detail, "wal_faulted", null);
+    public static OrderSubmissionResult ReconciliationRequired(ulong clOrdId) =>
+        new(
+            OrderSubmissionResultKind.ReconciliationRequired,
+            clOrdId,
+            "durable terminal transition failed; operator reconciliation required",
+            "wal_reconciliation_required",
+            null);
     public static OrderSubmissionResult BadRequest(string reason) =>
         new(OrderSubmissionResultKind.BadRequest, 0, reason, "bad_request", null);
     public static OrderSubmissionResult Drained { get; } =
@@ -551,4 +564,5 @@ public enum OrderSubmissionResultKind
     BadRequest,
     Drained,
     DuplicateClOrdId,
+    ReconciliationRequired,
 }

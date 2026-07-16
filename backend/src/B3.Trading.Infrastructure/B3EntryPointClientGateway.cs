@@ -1,5 +1,6 @@
 using B3.Trading.Application.Investor;
 using B3.Trading.Application.Observability;
+using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Routing;
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.SubAccount;
@@ -922,20 +923,17 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 // can persist it to the WAL for operator audit.
                 if (ev is UpModels.BusinessReject br)
                 {
-                    try
-                    {
-                        BusinessRejectReceived?.Invoke(new BusinessRejectEnvelope(
+                    InvokeBusinessRejectSubscribers(
+                        BusinessRejectReceived,
+                        new BusinessRejectEnvelope(
                             FirmId: _firmId,
                             RefSeqNum: br.RefSeqNum,
                             RejectReason: br.RejectReason,
                             Text: br.Text,
                             SeqNum: br.SeqNum,
-                            SendingTime: br.SendingTime));
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "BusinessReject subscriber threw for firm {Firm}; continuing.", _firmId);
-                    }
+                            SendingTime: br.SendingTime),
+                        _firmId,
+                        _logger);
                     continue;
                 }
 
@@ -946,25 +944,55 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 // subscriber can't lose the sample.
                 _latencyProbe.OnExecutionReport(envelope.ClOrdId);
 
-                try
-                {
-                    ExecutionReportReceived?.Invoke(envelope);
-                }
-                catch (Exception ex)
-                {
-                    // Subscriber raised — never let it kill the loop, otherwise
-                    // we'd silently stop translating ERs for this firm.
-                    _logger.LogError(ex, "ER subscriber threw for firm {Firm}; continuing.", _firmId);
-                }
+                InvokeExecutionReportSubscribers(
+                    ExecutionReportReceived, envelope, _firmId, _logger);
             }
         }
         catch (OperationCanceledException)
         {
             // expected on shutdown
         }
+        catch (Exception ex) when (ex is WalBackpressureException or WalFaultedException)
+        {
+            _logger.LogCritical(ex,
+                "EntryPoint event loop for firm {Firm} stopped because an inbound event could not be persisted; order ingress is draining.",
+                _firmId);
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "EntryPoint event loop for firm {Firm} terminated unexpectedly.", _firmId);
+        }
+    }
+
+    internal static void InvokeExecutionReportSubscribers(
+        Action<ExecutionReportEnvelope>? subscribers,
+        ExecutionReportEnvelope envelope,
+        string firmId,
+        ILogger<B3EntryPointClientGateway> logger)
+    {
+        try
+        {
+            subscribers?.Invoke(envelope);
+        }
+        catch (Exception ex) when (ex is not WalBackpressureException and not WalFaultedException)
+        {
+            logger.LogError(ex, "ER subscriber threw for firm {Firm}; continuing.", firmId);
+        }
+    }
+
+    internal static void InvokeBusinessRejectSubscribers(
+        Action<BusinessRejectEnvelope>? subscribers,
+        BusinessRejectEnvelope envelope,
+        string firmId,
+        ILogger<B3EntryPointClientGateway> logger)
+    {
+        try
+        {
+            subscribers?.Invoke(envelope);
+        }
+        catch (Exception ex) when (ex is not WalBackpressureException and not WalFaultedException)
+        {
+            logger.LogError(ex, "BusinessReject subscriber threw for firm {Firm}; continuing.", firmId);
         }
     }
 

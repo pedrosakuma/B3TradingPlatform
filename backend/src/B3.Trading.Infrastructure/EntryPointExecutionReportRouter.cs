@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 
 using B3.Trading.Application;
+using B3.Trading.Application.Lifecycle;
 using B3.Trading.Application.MarketData;
 using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
@@ -33,12 +34,13 @@ public sealed class EntryPointExecutionReportRouter : IDisposable
     // ER event (for replay) and the processor (for the live ExecutionEvent).
     private readonly WorkingOrderBook? _orders;
     private readonly PegBookTopCache? _bookTop;
+    private readonly IDrainController? _drain;
 
     public EntryPointExecutionReportRouter(
         IEntryPointClient client,
         ExecutionReportProcessor processor,
         EventDispatcher dispatcher)
-        : this(client, processor, dispatcher, orders: null, bookTop: null)
+        : this(client, processor, dispatcher, orders: null, bookTop: null, drain: null)
     {
     }
 
@@ -47,13 +49,15 @@ public sealed class EntryPointExecutionReportRouter : IDisposable
         ExecutionReportProcessor processor,
         EventDispatcher dispatcher,
         WorkingOrderBook? orders,
-        PegBookTopCache? bookTop)
+        PegBookTopCache? bookTop,
+        IDrainController? drain = null)
     {
         _client = client;
         _processor = processor;
         _dispatcher = dispatcher;
         _orders = orders;
         _bookTop = bookTop;
+        _drain = drain;
         _handler = OnExecutionReport;
         _businessRejectHandler = OnBusinessReject;
         _client.ExecutionReportReceived += _handler;
@@ -115,23 +119,31 @@ public sealed class EntryPointExecutionReportRouter : IDisposable
         //
         // WAL rejection deliberately propagates. Applying an ER without
         // its durable event would make a Fill visible only in memory.
-        _dispatcher.Dispatch(
-            new ExecutionReportReceivedEvent
-            {
-                ClOrdId = er.ClOrdId,
-                ExecKind = kind.ToString(),
-                LeavesQuantity = er.LeavesQuantity,
-                CumulativeQuantity = er.CumulativeQuantity,
-                LastQuantity = er.LastQuantity,
-                LastPrice = er.LastPrice,
-                RejectReason = er.RejectReason,
-                Synthetic = false,
-                OrigClOrdId = er.OrigClOrdId,
-                FirmId = er.FirmId,
-                BookTouch = bookTouch,
-            },
-            fanOut => _processor.Apply(er.ClOrdId, kind, er.LeavesQuantity, er.CumulativeQuantity,
-                er.LastQuantity, er.LastPrice, er.RejectReason, er.OrigClOrdId, fanOut, envelopeFirmId: er.FirmId, bookTouch: bookTouch));
+        try
+        {
+            _dispatcher.Dispatch(
+                new ExecutionReportReceivedEvent
+                {
+                    ClOrdId = er.ClOrdId,
+                    ExecKind = kind.ToString(),
+                    LeavesQuantity = er.LeavesQuantity,
+                    CumulativeQuantity = er.CumulativeQuantity,
+                    LastQuantity = er.LastQuantity,
+                    LastPrice = er.LastPrice,
+                    RejectReason = er.RejectReason,
+                    Synthetic = false,
+                    OrigClOrdId = er.OrigClOrdId,
+                    FirmId = er.FirmId,
+                    BookTouch = bookTouch,
+                },
+                fanOut => _processor.Apply(er.ClOrdId, kind, er.LeavesQuantity, er.CumulativeQuantity,
+                    er.LastQuantity, er.LastPrice, er.RejectReason, er.OrigClOrdId, fanOut, envelopeFirmId: er.FirmId, bookTouch: bookTouch));
+        }
+        catch (Exception ex) when (ex is WalBackpressureException or WalFaultedException)
+        {
+            _drain?.BeginDrain("wal_execution_report_rejected");
+            throw;
+        }
     }
 
     // #432. BusinessReject is replay-inert (no order state mutation), so the

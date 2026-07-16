@@ -84,6 +84,7 @@ public static class HealthEndpoints
                     : identity.Ready && wal.IsHealthy && (exchange is null || IsExchangeReady(exchange, sessions))
                         ? "ready"
                         : "unready",
+                drainReason = drain.Reason,
                 uptime = drain.Uptime.ToString(@"hh\:mm\:ss"),
                 startedAt = drain.StartedAt,
                 persistence = new

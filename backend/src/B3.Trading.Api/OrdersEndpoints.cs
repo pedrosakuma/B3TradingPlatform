@@ -170,6 +170,15 @@ public static class OrdersEndpoints
                     Results.BadRequest(new { error = result.Reason }),
                 OrderSubmissionResultKind.DuplicateClOrdId =>
                     Results.Conflict(new { error = result.Reason, clOrdId = result.ClOrdId.ToString() }),
+                OrderSubmissionResultKind.ReconciliationRequired =>
+                    Results.Json(
+                        new
+                        {
+                            error = "WAL reconciliation required; service draining",
+                            clOrdId = result.ClOrdId.ToString(),
+                            code = result.Code,
+                        },
+                        statusCode: StatusCodes.Status503ServiceUnavailable),
                 _ => Results.StatusCode(StatusCodes.Status500InternalServerError),
             };
         });

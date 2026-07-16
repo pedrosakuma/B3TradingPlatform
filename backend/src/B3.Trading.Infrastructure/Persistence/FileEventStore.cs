@@ -135,10 +135,21 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
             {
                 // Roll back the seq so we don't leave a hole in the log.
                 _seq--;
+                ThrowIfFaulted();
                 MetricsRegistry.WalBackpressure.Add(1,
                     new KeyValuePair<string, object?>("call_site", "store.append"));
                 throw new WalBackpressureException(
                     $"WAL channel is full ({_opts.ChannelCapacity}); refusing append.");
+            }
+
+            // The writer publishes its terminal fault from an exception
+            // filter, before stack unwinding reaches the loop catch. Re-check
+            // after enqueue so an append racing that publication cannot
+            // report success and permit an in-memory mutation.
+            if (Volatile.Read(ref _terminalFault) is not null)
+            {
+                _seq--;
+                ThrowIfFaulted();
             }
             MetricsRegistry.WalAppended.Add(1);
             return seq;
@@ -479,9 +490,8 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
             }
         }
         catch (OperationCanceledException) { /* expected on dispose */ }
-        catch (Exception ex)
+        catch (Exception ex) when (RecordTerminalFault(ex))
         {
-            RecordTerminalFault(ex);
             _logger.LogCritical(ex, "FileEventStore writer loop crashed; the WAL is permanently closed to appends.");
         }
         finally
@@ -493,14 +503,11 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
         }
     }
 
-    private void RecordTerminalFault(Exception fault)
+    private bool RecordTerminalFault(Exception fault)
     {
-        lock (_seqLock)
-        {
-            if (_terminalFault is not null) return;
-            Volatile.Write(ref _terminalFault, fault);
+        if (Interlocked.CompareExchange(ref _terminalFault, fault, null) is null)
             _channel.Writer.TryComplete(fault);
-        }
+        return true;
     }
 
     private void ThrowIfFaulted()

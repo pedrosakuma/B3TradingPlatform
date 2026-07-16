@@ -212,6 +212,7 @@ internal sealed class FixpOrderAdapter
             OrderSubmissionResultKind.DuplicateClOrdId => RejectReason.DuplicateClOrdId,
             OrderSubmissionResultKind.Rejected => RejectReason.RiskRejected,
             OrderSubmissionResultKind.GatewayFailed => RejectReason.GatewayFailed,
+            OrderSubmissionResultKind.ReconciliationRequired => RejectReason.WalBackpressure,
             _ => RejectReason.BadRequest,
         };
 

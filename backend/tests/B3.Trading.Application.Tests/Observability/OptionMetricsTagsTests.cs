@@ -284,10 +284,10 @@ public class OptionMetricsTagsTests
             DateTimeOffset? requestedGoodTillDate, CancellationToken ct) => Task.CompletedTask;
     }
 
-    private sealed class NeverDrainingGate : IDrainGate
+    private sealed class NeverDrainingGate : IDrainController
     {
         public bool IsDraining => false;
-        public Task BeginDrainAsync(CancellationToken ct) => Task.CompletedTask;
+        public void BeginDrain(string reason) { }
         public Task CompleteDrainAsync(CancellationToken ct) => Task.CompletedTask;
     }
 }
