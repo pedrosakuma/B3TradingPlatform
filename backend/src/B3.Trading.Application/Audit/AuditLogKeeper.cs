@@ -32,6 +32,12 @@ public static class AuditEventTypes
     public const string AuthTwoFactorVerifyFailure = "auth.2fa.verify.failure";
     public const string AuthTwoFactorDisable = "auth.2fa.disable";
     public const string AuthTwoFactorRecoveryCodeConsumed = "auth.2fa.recovery_code_consumed";
+    public const string AuthExchangeSuccess = "auth.exchange.success";
+    public const string AuthExchangeFailure = "auth.exchange.failure";
+    public const string IdentityBindingCreate = "identity.binding.create";
+    public const string IdentityBindingDelete = "identity.binding.delete";
+    public const string IdentityUserStatusChange = "identity.user.status_change";
+    public const string IdentityUserAuthorizationChange = "identity.user.authorization_change";
 
     public const string AdminConfigChange = "admin.config.change";
     public const string AdminSubAccountCreate = "admin.subaccount.create";

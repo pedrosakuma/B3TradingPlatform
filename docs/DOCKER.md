@@ -228,6 +228,12 @@ a real environment.
 | Var | What | Generate |
 |---|---|---|
 | `TRADING_AUTH_SIGNING_KEY` | JWT HS256 signing key, >=32 UTF-8 bytes, not the dev default | `openssl rand -base64 48` |
+
+For Entra rollout set `Trading__Auth__Mode=Hybrid` or `Entra` and configure
+`Trading__Auth__ExternalIdentity__Authority`, `Issuer`, `TenantId`,
+`Audience`, `RequiredScope` and `AllowedClientApplicationIds__0`. Local mode
+is still the default; external tokens are accepted only by `POST /auth/exchange`
+and are exchanged for the internal 10-minute trading JWT.
 | `TRADING_SEED_PASSWORD_HASH` | PBKDF2 hash of the seed user password | helper command (TBD: `backend/tools/PasswordHasher`) |
 | `TRADING_SEED_PASSWORD_SALT` | matching salt | same |
 

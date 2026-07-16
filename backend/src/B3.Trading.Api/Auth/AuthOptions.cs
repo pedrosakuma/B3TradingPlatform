@@ -2,9 +2,9 @@ namespace B3.Trading.Api.Auth;
 
 /// <summary>
 /// Auth + JWT configuration. Bound from <c>Trading:Auth</c> in
-/// <c>appsettings.json</c>. v1 is intentionally local-only: no OIDC, no
-/// refresh tokens. Operators must supply a 256-bit signing key via
-/// environment / user-secrets in production.
+/// <c>appsettings.json</c>. Local remains the compatibility default; Hybrid
+/// and Entra add a dedicated external-token exchange without changing the
+/// internal JWT bearer scheme.
 /// </summary>
 public sealed class AuthOptions
 {
@@ -15,7 +15,13 @@ public sealed class AuthOptions
     public string SigningKey { get; set; } = string.Empty;
     public int TokenLifetimeMinutes { get; set; } = 60;
     public int Pbkdf2Iterations { get; set; } = 600_000;
+    public string Mode { get; set; } = AuthModes.Local;
+    public bool? LocalLoginEnabled { get; set; }
+    public bool? SignupEnabled { get; set; }
+    public bool? TotpEnabled { get; set; }
+    public bool? ExchangeEnabled { get; set; }
     public List<UserConfig> Users { get; set; } = new();
+    public ExternalIdentityOptions ExternalIdentity { get; set; } = new();
 
     /// <summary>
     /// Password policy applied at signup only. Login intentionally does not
@@ -45,6 +51,94 @@ public sealed class AuthOptions
     {
         "bot-", "bot_", "demo-", "demo_",
     };
+
+    public AuthModeKind ResolveMode() =>
+        AuthModes.Parse(Mode);
+
+    public bool IsLocalLoginEnabled() => ResolveMode() switch
+    {
+        AuthModeKind.Local => LocalLoginEnabled ?? true,
+        AuthModeKind.Hybrid => LocalLoginEnabled ?? true,
+        AuthModeKind.Entra => LocalLoginEnabled ?? false,
+        _ => false,
+    };
+
+    public bool IsSignupEnabled() => ResolveMode() switch
+    {
+        AuthModeKind.Local => SignupEnabled ?? true,
+        AuthModeKind.Hybrid => SignupEnabled ?? false,
+        AuthModeKind.Entra => SignupEnabled ?? false,
+        _ => false,
+    };
+
+    public bool IsTotpEnabled() => ResolveMode() switch
+    {
+        AuthModeKind.Local => TotpEnabled ?? true,
+        AuthModeKind.Hybrid => TotpEnabled ?? true,
+        AuthModeKind.Entra => TotpEnabled ?? false,
+        _ => false,
+    };
+
+    public bool IsExchangeEnabled() => ResolveMode() switch
+    {
+        AuthModeKind.Local => ExchangeEnabled ?? false,
+        AuthModeKind.Hybrid => ExchangeEnabled ?? true,
+        AuthModeKind.Entra => ExchangeEnabled ?? true,
+        _ => false,
+    };
+}
+
+public enum AuthModeKind
+{
+    Local,
+    Hybrid,
+    Entra,
+}
+
+public static class AuthModes
+{
+    public const string Local = "Local";
+    public const string Hybrid = "Hybrid";
+    public const string Entra = "Entra";
+
+    public static AuthModeKind Parse(string? value)
+    {
+        if (string.Equals(value, Local, StringComparison.OrdinalIgnoreCase))
+            return AuthModeKind.Local;
+        if (string.Equals(value, Hybrid, StringComparison.OrdinalIgnoreCase))
+            return AuthModeKind.Hybrid;
+        if (string.Equals(value, Entra, StringComparison.OrdinalIgnoreCase))
+            return AuthModeKind.Entra;
+        throw new InvalidOperationException($"{AuthOptions.SectionName}:Mode must be Local, Hybrid or Entra.");
+    }
+}
+
+public sealed class ExternalIdentityOptions
+{
+    public const string DefaultScheme = "EntraExternal";
+    public const int DefaultInternalTokenLifetimeMinutes = 10;
+
+    public string Scheme { get; set; } = DefaultScheme;
+    public string IssuerAlias { get; set; } = "entra";
+    public string Authority { get; set; } = string.Empty;
+    public string? MetadataAddress { get; set; }
+    public string Issuer { get; set; } = string.Empty;
+    public string TenantId { get; set; } = string.Empty;
+    public bool RequireTenantId { get; set; } = true;
+    public string Audience { get; set; } = string.Empty;
+    public string RequiredScope { get; set; } = string.Empty;
+    public List<string> AllowedClientApplicationIds { get; set; } = new();
+    public int InternalTokenLifetimeMinutes { get; set; } = DefaultInternalTokenLifetimeMinutes;
+
+    public TimeSpan InternalTokenLifetime =>
+        TimeSpan.FromMinutes(InternalTokenLifetimeMinutes > 0
+            ? InternalTokenLifetimeMinutes
+            : DefaultInternalTokenLifetimeMinutes);
+
+    public string EffectiveMetadataAddress =>
+        !string.IsNullOrWhiteSpace(MetadataAddress)
+            ? MetadataAddress
+            : $"{Authority.TrimEnd('/')}/.well-known/openid-configuration";
 }
 
 public sealed class PasswordPolicyOptions

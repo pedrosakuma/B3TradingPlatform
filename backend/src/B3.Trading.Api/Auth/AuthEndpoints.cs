@@ -1,12 +1,14 @@
 using B3.Trading.Api.Auth.Totp;
 using B3.Trading.Application;
 using B3.Trading.Application.Audit;
+using B3.Trading.Application.Identity;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -32,15 +34,18 @@ public static class AuthEndpoints
 
     public static IEndpointRouteBuilder MapAuth(this IEndpointRouteBuilder app)
     {
-        app.MapPost("/auth/login", (
+        var authOptions = app.ServiceProvider.GetRequiredService<IOptions<AuthOptions>>().Value;
+        if (authOptions.IsLocalLoginEnabled())
+        {
+            app.MapPost("/auth/login", async (
             HttpContext http,
             LoginRequest req,
             IUserStore users,
-            JwtIssuer issuer,
-            EndClientRegistry registry,
+            ITradingSessionIssuer sessionIssuer,
             ILoginAttemptTracker lockout,
             ITotpChallengeStore totpChallenges,
-            IAuditLogger audit) =>
+            IAuditLogger audit,
+            CancellationToken ct) =>
         {
             var sourceIp = http.Connection.RemoteIpAddress?.ToString();
             if (req is null || string.IsNullOrWhiteSpace(req.Username) || string.IsNullOrWhiteSpace(req.Password))
@@ -147,36 +152,52 @@ public static class AuthEndpoints
                     EnrollmentToken: token));
             }
 
-            // Pre-register so subsequent ER routing / WS subscribe work
-            // immediately even before the first business call.
-            registry.Register(user.Username);
+            var session = await sessionIssuer.IssueForLocalUserAsync(user, ct);
+            if (!session.Succeeded)
+            {
+                audit.Log(new AuditLogEvent
+                {
+                    EventType = AuditEventTypes.AuthLoginFailure,
+                    Outcome = session.StatusCode == StatusCodes.Status403Forbidden ? AuditOutcomes.Denied : AuditOutcomes.Failure,
+                    ActorUserId = user.Username,
+                    ActorUsername = user.Username,
+                    SourceIp = sourceIp,
+                    ResourcePath = "/auth/login",
+                    ReasonCode = session.ErrorCode,
+                });
+                return Error(session.StatusCode, session.ErrorCode ?? "identity_directory_unavailable");
+            }
 
-            var (jwt, expires) = issuer.Issue(user.Username, user.Role, user.Firm);
             audit.Log(new AuditLogEvent
             {
                 EventType = AuditEventTypes.AuthLoginSuccess,
                 Outcome = AuditOutcomes.Success,
-                ActorUserId = user.Username,
-                ActorUsername = user.Username,
-                ActorFirm = user.Firm,
-                ActorRole = user.Role,
+                ActorUserId = session.TradingUserId,
+                ActorUsername = session.TradingUserId,
+                ActorFirm = session.Firm,
+                ActorRole = session.Role,
                 SourceIp = sourceIp,
                 ResourcePath = "/auth/login",
             });
-            return Results.Ok(new LoginResponse(jwt, expires));
+            return Results.Ok(new LoginResponse(session.Token!, session.ExpiresAt!.Value));
         });
+        }
 
-        app.MapPost("/auth/signup", (
+        if (authOptions.IsSignupEnabled())
+        {
+            app.MapPost("/auth/signup", async (
             SignupRequest req,
             IUserStore users,
             IOptions<AuthOptions> opts,
             IOptions<CashSeedOptions> cashOpts,
-            JwtIssuer issuer,
+            ITradingUserDirectory directory,
+            ITradingSessionIssuer sessionIssuer,
             EndClientRegistry registry,
             PositionKeeper positions,
             CashLedger cash,
             IReferencePrice refPrice,
-            ILoggerFactory loggerFactory) =>
+            ILoggerFactory loggerFactory,
+            CancellationToken ct) =>
         {
             if (req is null
                 || string.IsNullOrWhiteSpace(req.Username)
@@ -201,6 +222,21 @@ public static class AuthEndpoints
 
             if (!users.TryAdd(newUser))
                 return Results.Conflict(new { error = "username already taken" });
+
+            if (opts.Value.ResolveMode() != AuthModeKind.Local)
+            {
+                try
+                {
+                    await directory.ImportLegacyUsersAsync(new[]
+                    {
+                        new LegacyTradingUserImport(newUser.Username, newUser.Username, newUser.Firm, newUser.Role),
+                    }, ct);
+                }
+                catch (TradingUserDirectoryException)
+                {
+                    return Error(StatusCodes.Status503ServiceUnavailable, "identity_directory_unavailable");
+                }
+            }
 
             var endClientId = registry.Register(newUser.Username);
 
@@ -247,9 +283,13 @@ public static class AuthEndpoints
                 "Self-service signup: user={Username} firm={Firm} role={Role} positionsSeeded=true cashSeeded={CashSeeded} initialCash={InitialCash}.",
                 newUser.Username, newUser.Firm, newUser.Role, cashSeeded, cashSeeded ? initialCash : 0m);
 
-            var (token, expires) = issuer.Issue(newUser.Username, newUser.Role, newUser.Firm);
-            return Results.Created($"/auth/users/{newUser.Username}", new LoginResponse(token, expires));
+            var session = await sessionIssuer.IssueForLocalUserAsync(newUser, ct);
+            if (!session.Succeeded)
+                return Error(session.StatusCode, session.ErrorCode ?? "identity_directory_unavailable");
+
+            return Results.Created($"/auth/users/{newUser.Username}", new LoginResponse(session.Token!, session.ExpiresAt!.Value));
         });
+        }
 
         return app;
     }
@@ -313,6 +353,9 @@ public static class AuthEndpoints
             return "password does not meet policy: must contain a letter";
         return null;
     }
+
+    internal static IResult Error(int statusCode, string code) =>
+        Results.Json(new { error = code }, statusCode: statusCode, contentType: "application/json");
 }
 
 public sealed record LoginRequest(string Username, string Password);

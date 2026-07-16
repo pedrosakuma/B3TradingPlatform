@@ -124,6 +124,7 @@ public class TestAppFactory : WebApplicationFactory<Program>
                 ["Trading:Auth:RateLimit:SignupPerIp:Enabled"] = "false",
                 ["Trading:Auth:RateLimit:SignupGlobal:Enabled"] = "false",
                 ["Trading:Auth:RateLimit:LoginPerIp:Enabled"] = "false",
+                ["Trading:Auth:RateLimit:ExchangePerIp:Enabled"] = "false",
                 // Slice 3 of #97: keep tests on the in-memory user store
                 // so they don't write a users.json into the repo. Tests
                 // exercising the file-backed store opt in via WithOverrides.
