@@ -508,8 +508,8 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
             new RequiredColumn("trading_user_id", "TEXT", NotNull: true, PrimaryKey: true),
             new RequiredColumn("role", "TEXT", NotNull: true, PrimaryKey: false)).ConfigureAwait(false);
 
-        if (!await HasUniqueIndexAsync(connection, "external_identities", ct, "issuer", "subject").ConfigureAwait(false))
-            throw new TradingUserDirectoryUnavailableException("Identity schema is missing UNIQUE(issuer, subject).");
+        if (!await HasBinaryNonPartialUniqueIndexAsync(connection, "external_identities", ct, "issuer", "subject").ConfigureAwait(false))
+            throw new TradingUserDirectoryUnavailableException("Identity schema is missing non-partial BINARY UNIQUE(issuer, subject).");
         if (!await HasForeignKeyAsync(connection, "external_identities", "users", "trading_user_id", "trading_user_id", "RESTRICT", ct).ConfigureAwait(false))
             throw new TradingUserDirectoryUnavailableException("Identity schema external_identities foreign key is invalid.");
         if (!await HasForeignKeyAsync(connection, "user_roles", "users", "trading_user_id", "trading_user_id", "CASCADE", ct).ConfigureAwait(false))
@@ -551,14 +551,14 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
         }
     }
 
-    private static async Task<bool> HasUniqueIndexAsync(
+    private static async Task<bool> HasBinaryNonPartialUniqueIndexAsync(
         SqliteConnection connection,
         string table,
         CancellationToken ct,
         params string[] expectedColumns)
     {
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"SELECT name FROM pragma_index_list('{table}') WHERE \"unique\" = 1;";
+        cmd.CommandText = $"SELECT name FROM pragma_index_list('{table}') WHERE \"unique\" = 1 AND partial = 0;";
         var indexNames = new List<string>();
         await using (var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false))
         {
@@ -569,14 +569,27 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
         foreach (var indexName in indexNames)
         {
             await using var info = connection.CreateCommand();
-            info.CommandText = $"SELECT name FROM pragma_index_info('{indexName.Replace("'", "''")}') ORDER BY seqno;";
-            var columns = new List<string>();
+            info.CommandText = $"SELECT name, coll FROM pragma_index_xinfo('{indexName.Replace("'", "''")}') WHERE key = 1 ORDER BY seqno;";
+            var columns = new List<(string Name, string Collation)>();
+            var invalidKeyColumn = false;
             await using var reader = await info.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
-                columns.Add(reader.GetString(0));
+            {
+                if (reader.IsDBNull(0) || reader.IsDBNull(1))
+                {
+                    invalidKeyColumn = true;
+                    continue;
+                }
+                columns.Add((reader.GetString(0), reader.GetString(1)));
+            }
 
-            if (columns.SequenceEqual(expectedColumns, StringComparer.Ordinal))
+            if (!invalidKeyColumn
+                && columns.Count == expectedColumns.Length
+                && columns.Select(c => c.Name).SequenceEqual(expectedColumns, StringComparer.Ordinal)
+                && columns.All(c => string.Equals(c.Collation, "BINARY", StringComparison.OrdinalIgnoreCase)))
+            {
                 return true;
+            }
         }
 
         return false;

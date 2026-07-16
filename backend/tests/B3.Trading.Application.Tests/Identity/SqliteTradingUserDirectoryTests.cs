@@ -122,6 +122,45 @@ public sealed class SqliteTradingUserDirectoryTests
     }
 
     [Fact]
+    public async Task VersionedSchemaWithPartialIssuerSubjectUniqueIndex_FailsClosed()
+    {
+        using var workspace = TestWorkspace.Create(nameof(VersionedSchemaWithPartialIssuerSubjectUniqueIndex_FailsClosed));
+        var db = System.IO.Path.Combine(workspace.Path, "users.db");
+        Directory.CreateDirectory(workspace.Path);
+        await using (var connection = Open(db))
+        {
+            await CreateVersionedSchemaAsync(connection);
+            await ExecuteAsync(connection, """
+                CREATE UNIQUE INDEX ux_external_identities_issuer_subject_partial
+                ON external_identities (issuer COLLATE BINARY, subject COLLATE BINARY)
+                WHERE tenant_id IS NOT NULL;
+                """);
+        }
+
+        await Assert.ThrowsAsync<TradingUserDirectoryUnavailableException>(() =>
+            NewDirectory(db).InitializeAsync());
+    }
+
+    [Fact]
+    public async Task VersionedSchemaWithNoCaseIssuerSubjectUniqueIndex_FailsClosed()
+    {
+        using var workspace = TestWorkspace.Create(nameof(VersionedSchemaWithNoCaseIssuerSubjectUniqueIndex_FailsClosed));
+        var db = System.IO.Path.Combine(workspace.Path, "users.db");
+        Directory.CreateDirectory(workspace.Path);
+        await using (var connection = Open(db))
+        {
+            await CreateVersionedSchemaAsync(connection);
+            await ExecuteAsync(connection, """
+                CREATE UNIQUE INDEX ux_external_identities_issuer_subject_nocase
+                ON external_identities (issuer COLLATE NOCASE, subject COLLATE BINARY);
+                """);
+        }
+
+        await Assert.ThrowsAsync<TradingUserDirectoryUnavailableException>(() =>
+            NewDirectory(db).InitializeAsync());
+    }
+
+    [Fact]
     public async Task ExistingUnicodeOwnerNamespaceCollision_FailsClosed()
     {
         using var workspace = TestWorkspace.Create(nameof(ExistingUnicodeOwnerNamespaceCollision_FailsClosed));
@@ -246,5 +285,43 @@ public sealed class SqliteTradingUserDirectoryTests
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = sql;
         await cmd.ExecuteNonQueryAsync();
+    }
+
+    private static async Task CreateVersionedSchemaAsync(SqliteConnection connection)
+    {
+        await ExecuteAsync(connection, "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);");
+        await ExecuteAsync(connection, "INSERT INTO schema_migrations (version, applied_at) VALUES (1, '2026-01-01T00:00:00Z');");
+        await ExecuteAsync(connection, """
+            CREATE TABLE users (
+                trading_user_id TEXT NOT NULL PRIMARY KEY COLLATE BINARY CHECK (length(trading_user_id) BETWEEN 1 AND 64),
+                display_name    TEXT NOT NULL CHECK (length(display_name) > 0),
+                firm_id         TEXT NOT NULL CHECK (length(firm_id) > 0),
+                status          TEXT NOT NULL CHECK (status IN ('active', 'disabled')),
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL,
+                row_version     INTEGER NOT NULL DEFAULT 1
+            );
+            """);
+        await ExecuteAsync(connection, """
+            CREATE TABLE external_identities (
+                id              INTEGER PRIMARY KEY,
+                issuer          TEXT NOT NULL COLLATE BINARY CHECK (length(issuer) > 0),
+                subject         TEXT NOT NULL COLLATE BINARY CHECK (length(subject) > 0),
+                trading_user_id TEXT NOT NULL CHECK (length(trading_user_id) BETWEEN 1 AND 64),
+                tenant_id       TEXT NULL,
+                object_id       TEXT NULL,
+                created_at      TEXT NOT NULL,
+                FOREIGN KEY (trading_user_id)
+                    REFERENCES users(trading_user_id) ON DELETE RESTRICT
+            );
+            """);
+        await ExecuteAsync(connection, """
+            CREATE TABLE user_roles (
+                trading_user_id TEXT NOT NULL PRIMARY KEY CHECK (length(trading_user_id) BETWEEN 1 AND 64),
+                role            TEXT NOT NULL CHECK (role IN ('user', 'compliance', 'admin')),
+                FOREIGN KEY (trading_user_id)
+                    REFERENCES users(trading_user_id) ON DELETE CASCADE
+            );
+            """);
     }
 }
