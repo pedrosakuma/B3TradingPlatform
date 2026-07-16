@@ -83,27 +83,43 @@ export MARKETDATA_WS_URL_JSON APP_TITLE_JSON AUTH_MODE_JSON \
     AUTH_AUTHORITY_JSON AUTH_CLIENT_ID_JSON AUTH_API_SCOPE_JSON \
     AUTH_REDIRECT_URI_JSON AUTH_LOGOUT_URI_JSON AUTH_KNOWN_AUTHORITIES_JSON
 
+: "${ENV_JS_TEMPLATE:=/etc/nginx/env.js.template}"
+: "${ENV_JS_OUTPUT:=/usr/share/nginx/html/js/env.js}"
+
 awk '
-    function replace_all(line, token, value) {
-        while (index(line, token) > 0) {
-            line = substr(line, 1, index(line, token) - 1) value substr(line, index(line, token) + length(token));
-        }
-        return line;
+    BEGIN {
+        tokens[1] = "__MARKETDATA_WS_URL_JSON__"; values[tokens[1]] = ENVIRON["MARKETDATA_WS_URL_JSON"];
+        tokens[2] = "__APP_TITLE_JSON__"; values[tokens[2]] = ENVIRON["APP_TITLE_JSON"];
+        tokens[3] = "__AUTH_MODE_JSON__"; values[tokens[3]] = ENVIRON["AUTH_MODE_JSON"];
+        tokens[4] = "__AUTH_LOCAL_LOGIN_ENABLED_JSON__"; values[tokens[4]] = ENVIRON["AUTH_LOCAL_LOGIN_ENABLED_JSON"];
+        tokens[5] = "__AUTH_SIGNUP_ENABLED_JSON__"; values[tokens[5]] = ENVIRON["AUTH_SIGNUP_ENABLED_JSON"];
+        tokens[6] = "__AUTH_TOTP_ENABLED_JSON__"; values[tokens[6]] = ENVIRON["AUTH_TOTP_ENABLED_JSON"];
+        tokens[7] = "__AUTH_AUTHORITY_JSON__"; values[tokens[7]] = ENVIRON["AUTH_AUTHORITY_JSON"];
+        tokens[8] = "__AUTH_CLIENT_ID_JSON__"; values[tokens[8]] = ENVIRON["AUTH_CLIENT_ID_JSON"];
+        tokens[9] = "__AUTH_API_SCOPE_JSON__"; values[tokens[9]] = ENVIRON["AUTH_API_SCOPE_JSON"];
+        tokens[10] = "__AUTH_REDIRECT_URI_JSON__"; values[tokens[10]] = ENVIRON["AUTH_REDIRECT_URI_JSON"];
+        tokens[11] = "__AUTH_LOGOUT_URI_JSON__"; values[tokens[11]] = ENVIRON["AUTH_LOGOUT_URI_JSON"];
+        tokens[12] = "__AUTH_KNOWN_AUTHORITIES_JSON__"; values[tokens[12]] = ENVIRON["AUTH_KNOWN_AUTHORITIES_JSON"];
+        token_count = 12;
     }
     {
         line = $0;
-        line = replace_all(line, "__MARKETDATA_WS_URL_JSON__", ENVIRON["MARKETDATA_WS_URL_JSON"]);
-        line = replace_all(line, "__APP_TITLE_JSON__", ENVIRON["APP_TITLE_JSON"]);
-        line = replace_all(line, "__AUTH_MODE_JSON__", ENVIRON["AUTH_MODE_JSON"]);
-        line = replace_all(line, "__AUTH_LOCAL_LOGIN_ENABLED_JSON__", ENVIRON["AUTH_LOCAL_LOGIN_ENABLED_JSON"]);
-        line = replace_all(line, "__AUTH_SIGNUP_ENABLED_JSON__", ENVIRON["AUTH_SIGNUP_ENABLED_JSON"]);
-        line = replace_all(line, "__AUTH_TOTP_ENABLED_JSON__", ENVIRON["AUTH_TOTP_ENABLED_JSON"]);
-        line = replace_all(line, "__AUTH_AUTHORITY_JSON__", ENVIRON["AUTH_AUTHORITY_JSON"]);
-        line = replace_all(line, "__AUTH_CLIENT_ID_JSON__", ENVIRON["AUTH_CLIENT_ID_JSON"]);
-        line = replace_all(line, "__AUTH_API_SCOPE_JSON__", ENVIRON["AUTH_API_SCOPE_JSON"]);
-        line = replace_all(line, "__AUTH_REDIRECT_URI_JSON__", ENVIRON["AUTH_REDIRECT_URI_JSON"]);
-        line = replace_all(line, "__AUTH_LOGOUT_URI_JSON__", ENVIRON["AUTH_LOGOUT_URI_JSON"]);
-        line = replace_all(line, "__AUTH_KNOWN_AUTHORITIES_JSON__", ENVIRON["AUTH_KNOWN_AUTHORITIES_JSON"]);
-        print line;
+        for (i = 1; i <= length(line); ) {
+            matched = 0;
+            for (t = 1; t <= token_count; t++) {
+                token = tokens[t];
+                if (substr(line, i, length(token)) == token) {
+                    printf "%s", values[token];
+                    i += length(token);
+                    matched = 1;
+                    break;
+                }
+            }
+            if (!matched) {
+                printf "%s", substr(line, i, 1);
+                i++;
+            }
+        }
+        printf "\n";
     }
-' /etc/nginx/env.js.template > /usr/share/nginx/html/js/env.js
+' "$ENV_JS_TEMPLATE" > "$ENV_JS_OUTPUT"

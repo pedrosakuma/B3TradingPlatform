@@ -104,6 +104,9 @@ jobs:
         working-directory: frontend
         run: npm run build
 
+      - name: Smoke-test env.js rendering directly
+        run: ./frontend/test/render-env-js-direct-smoke.sh
+
       - name: Smoke-test env.js rendering inside the real frontend container
         run: ./frontend/test/render-env-js-container-smoke.sh
 
