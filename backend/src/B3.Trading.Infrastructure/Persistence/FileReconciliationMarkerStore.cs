@@ -1,3 +1,5 @@
+using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using B3.Trading.Application.Persistence;
 using Microsoft.Extensions.Options;
@@ -16,6 +18,7 @@ public sealed class FileReconciliationMarkerStore : IReconciliationMarkerStore
 
     private readonly string _root;
     private readonly object _lock = new();
+    private readonly IReconciliationDirectoryDurability _directoryDurability;
 
     public FileReconciliationMarkerStore(IOptions<PersistenceOptions> options)
         : this(options.Value)
@@ -23,7 +26,16 @@ public sealed class FileReconciliationMarkerStore : IReconciliationMarkerStore
     }
 
     public FileReconciliationMarkerStore(PersistenceOptions options)
+        : this(options, ReconciliationDirectoryDurability.Instance)
     {
+    }
+
+    public FileReconciliationMarkerStore(
+        PersistenceOptions options,
+        IReconciliationDirectoryDurability directoryDurability)
+    {
+        _directoryDurability = directoryDurability
+            ?? throw new ArgumentNullException(nameof(directoryDurability));
         _root = Path.Combine(
             options.DataDirectory, options.FirmId, "reconciliation");
         Directory.CreateDirectory(_root);
@@ -45,6 +57,7 @@ public sealed class FileReconciliationMarkerStore : IReconciliationMarkerStore
                 stream.Flush(flushToDisk: true);
             }
             File.Move(staging, path, overwrite: true);
+            _directoryDurability.Flush(_root);
         }
     }
 
@@ -55,7 +68,10 @@ public sealed class FileReconciliationMarkerStore : IReconciliationMarkerStore
         {
             var path = PathFor(markerId);
             if (File.Exists(path))
+            {
                 File.Delete(path);
+                _directoryDurability.Flush(_root);
+            }
         }
     }
 
@@ -87,4 +103,60 @@ public sealed class FileReconciliationMarkerStore : IReconciliationMarkerStore
         }
         return Path.Combine(_root, markerId + ".json");
     }
+}
+
+public interface IReconciliationDirectoryDurability
+{
+    void Flush(string directoryPath);
+}
+
+internal sealed class ReconciliationDirectoryDurability
+    : IReconciliationDirectoryDurability
+{
+    public static ReconciliationDirectoryDurability Instance { get; } = new();
+
+    public void Flush(string directoryPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(directoryPath);
+        if (!OperatingSystem.IsLinux()
+            && !OperatingSystem.IsMacOS()
+            && !OperatingSystem.IsFreeBSD())
+        {
+            throw new PlatformNotSupportedException(
+                "Durable reconciliation markers require directory fsync support.");
+        }
+
+        var fd = Open(directoryPath, flags: 0);
+        if (fd < 0)
+            throw NativeIOException("open", directoryPath);
+        try
+        {
+            if (Fsync(fd) != 0)
+                throw NativeIOException("fsync", directoryPath);
+        }
+        finally
+        {
+            if (Close(fd) != 0)
+                throw NativeIOException("close", directoryPath);
+        }
+    }
+
+    private static IOException NativeIOException(string operation, string path)
+    {
+        var error = Marshal.GetLastPInvokeError();
+        return new IOException(
+            $"{operation} failed for directory '{path}': " +
+            new Win32Exception(error).Message);
+    }
+
+    [DllImport("libc", EntryPoint = "open", SetLastError = true)]
+    private static extern int Open(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+        int flags);
+
+    [DllImport("libc", EntryPoint = "fsync", SetLastError = true)]
+    private static extern int Fsync(int fd);
+
+    [DllImport("libc", EntryPoint = "close", SetLastError = true)]
+    private static extern int Close(int fd);
 }

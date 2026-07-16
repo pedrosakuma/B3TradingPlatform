@@ -103,6 +103,10 @@ then applies the safest known posture and begins drain instead of treating the
 request as an ordinary pending mutation. Proven-unsent intents are removed
 (and replace margin aborted); ambiguous replaces retain margin and are
 TTL-marked. Operator reconciliation is required before ingress can reopen.
+Marker publication fsyncs the marker file, renames it into place, then fsyncs
+the reconciliation directory; removal deletes the file and fsyncs the
+directory again. Unsupported directory-fsync platforms/filesystems fail
+explicitly rather than acknowledging false durability.
 
 Proven pre-send cancel failures follow the same model. A durable
 `OrderCancelPreSendFailedEvent` consumes the pending cancel, removes its

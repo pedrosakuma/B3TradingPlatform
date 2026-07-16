@@ -396,6 +396,70 @@ public sealed class LifecycleAtomicityTests
     }
 
     [Fact]
+    public void FileReconciliationMarkerStore_FlushesDirectoryAfterRenameAndDelete()
+    {
+        var root = MarkerTestRoot();
+        try
+        {
+            var options = MarkerOptions(root);
+            var durability = new RecordingDirectoryDurability();
+            var store = new FileReconciliationMarkerStore(options, durability);
+            var marker = CancelMarker();
+            durability.OnFlush = directory =>
+            {
+                var markerPath = Path.Combine(directory, marker.Id + ".json");
+                if (durability.Calls == 1)
+                {
+                    Assert.True(File.Exists(markerPath));
+                    Assert.False(File.Exists(markerPath + ".writing"));
+                }
+                else
+                {
+                    Assert.False(File.Exists(markerPath));
+                }
+            };
+
+            store.Persist(marker);
+            store.Remove(marker.Id);
+
+            Assert.Equal(2, durability.Calls);
+        }
+        finally
+        {
+            DeleteMarkerTestRoot(root);
+        }
+    }
+
+    [Fact]
+    public void FileReconciliationMarkerStore_PropagatesDirectoryFlushFailures()
+    {
+        var root = MarkerTestRoot();
+        try
+        {
+            var durability = new RecordingDirectoryDurability
+            {
+                Failure = new IOException("directory fsync failed"),
+            };
+            var store = new FileReconciliationMarkerStore(
+                MarkerOptions(root), durability);
+            var marker = CancelMarker();
+
+            Assert.Throws<IOException>(() => store.Persist(marker));
+            durability.Failure = null;
+            Assert.Single(store.Load());
+            store.Remove(marker.Id);
+
+            store.Persist(marker);
+            durability.Failure = new IOException("delete fsync failed");
+            Assert.Throws<IOException>(() => store.Remove(marker.Id));
+        }
+        finally
+        {
+            DeleteMarkerTestRoot(root);
+        }
+    }
+
+    [Fact]
     public void StartupMarkerWithoutRequestStillBurnsMutationIdBeforeClearingSafePreSendMarker()
     {
         var markers = new InMemoryReconciliationMarkerStore();
@@ -891,6 +955,32 @@ public sealed class LifecycleAtomicityTests
             failureFactory: static () => new WalFaultedException(
                 "resolution fault", new IOException("disk full")));
 
+    private static string MarkerTestRoot() =>
+        Path.Combine(
+            Environment.CurrentDirectory,
+            "TestResults",
+            "reconciliation-markers-" + Guid.NewGuid().ToString("N"));
+
+    private static PersistenceOptions MarkerOptions(string root) =>
+        new()
+        {
+            DataDirectory = root,
+            FirmId = "FIRM",
+        };
+
+    private static ReconciliationMarker CancelMarker() =>
+        new(
+            ReconciliationMarkerKind.CancelPreSend,
+            OriginalClOrdId: 100,
+            MutationClOrdId: 200,
+            OwnerEndClientId: Owner.Value);
+
+    private static void DeleteMarkerTestRoot(string root)
+    {
+        if (Directory.Exists(root))
+            Directory.Delete(root, recursive: true);
+    }
+
     private static Order Working()
     {
         var order = new Order(
@@ -1065,5 +1155,21 @@ public sealed class LifecycleAtomicityTests
         }
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class RecordingDirectoryDurability
+        : IReconciliationDirectoryDurability
+    {
+        public int Calls { get; private set; }
+        public Exception? Failure { get; set; }
+        public Action<string>? OnFlush { get; set; }
+
+        public void Flush(string directoryPath)
+        {
+            Calls++;
+            OnFlush?.Invoke(directoryPath);
+            if (Failure is not null)
+                throw Failure;
+        }
     }
 }
