@@ -29,7 +29,8 @@ namespace B3.Trading.EntryPointListener.Hosting;
 /// registries. The adapter holds only the cross-connection singletons
 /// it dispatches into. <c>Handle...Async</c> takes the
 /// <see cref="NetworkStream"/> from <see cref="FixpSessionConnection"/>
-/// to write the synchronous transport-level reject paths.</para>
+/// to write synchronous reject paths and returns a disposition when the
+/// owning session must close for reconciliation.</para>
 /// </summary>
 internal sealed class FixpOrderAdapter
 {
@@ -56,6 +57,7 @@ internal sealed class FixpOrderAdapter
         public const uint GatewayFailed = 1008;
         public const uint BadRequest = 1009;
         public const uint StaleOrder = 1010;
+        public const uint ReconciliationRequired = 1011;
     }
 
     private readonly SymbolDirectory _symbols;
@@ -81,11 +83,11 @@ internal sealed class FixpOrderAdapter
     /// <summary>
     /// Decode an inbound <c>NewOrderSingle</c> (id=102) and dispatch it
     /// through <see cref="OrderSubmissionService.SubmitAsync"/>. Returns
-    /// <c>true</c> to keep the connection alive; the only failures that
-    /// terminate the session are framing-level (those are handled by the
-    /// caller, not here).
+    /// a disposition telling the owning connection whether it may continue.
+    /// An unreconciled durable terminal failure emits a non-terminal
+    /// <c>BusinessMessageReject</c> and requests session close.
     /// </summary>
-    public Task HandleNewOrderSingleAsync(
+    public async Task<FixpOrderHandlingResult> HandleNewOrderSingleAsync(
         Stream stream,
         ReadOnlyMemory<byte> payload,
         FixpConnectionScope scope,
@@ -97,12 +99,13 @@ internal sealed class FixpOrderAdapter
         // `in DecodedNewOrderSingle` overload below (RFC §5.6 / P10).
         if (!InboundDecoders.TryDecodeNewOrderSingle(payload.Span, out var decoded))
         {
-            return WriteBusinessMessageRejectAsync(stream,
+            await WriteBusinessMessageRejectAsync(stream,
                 refMsgType: MessageType.NewOrderSingle,
                 refSeqNum: 0, businessRejectRefID: 0,
-                reason: RejectReason.InvalidShape, ct);
+                reason: RejectReason.InvalidShape, ct).ConfigureAwait(false);
+            return FixpOrderHandlingResult.Keep;
         }
-        return HandleNewOrderSingleAsync(stream, decoded, scope, ct);
+        return await HandleNewOrderSingleAsync(stream, decoded, scope, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -110,7 +113,7 @@ internal sealed class FixpOrderAdapter
     /// already decoded the SBE block into <paramref name="decoded"/>;
     /// no <c>byte[]</c> survives across the awaits below.
     /// </summary>
-    public async Task HandleNewOrderSingleAsync(
+    public async Task<FixpOrderHandlingResult> HandleNewOrderSingleAsync(
         Stream stream,
         DecodedNewOrderSingle decoded,
         FixpConnectionScope scope,
@@ -131,7 +134,7 @@ internal sealed class FixpOrderAdapter
             await WriteBusinessMessageRejectAsync(stream,
                 MessageType.NewOrderSingle, refSeqNum, externalClOrdId,
                 RejectReason.UnknownSecurity, ct).ConfigureAwait(false);
-            return;
+            return FixpOrderHandlingResult.Keep;
         }
 
         // 2. Validate side/ordType + TIF up-front so a malformed wire
@@ -148,7 +151,7 @@ internal sealed class FixpOrderAdapter
             await WriteBusinessMessageRejectAsync(stream,
                 MessageType.NewOrderSingle, refSeqNum, externalClOrdId,
                 RejectReason.InvalidShape, ct).ConfigureAwait(false);
-            return;
+            return FixpOrderHandlingResult.Keep;
         }
 
         // 3. Pre-emptive duplicate check — a bot retrying the same
@@ -161,7 +164,7 @@ internal sealed class FixpOrderAdapter
             await WriteBusinessMessageRejectAsync(stream,
                 MessageType.NewOrderSingle, refSeqNum, externalClOrdId,
                 RejectReason.DuplicateClOrdId, ct).ConfigureAwait(false);
-            return;
+            return FixpOrderHandlingResult.Keep;
         }
 
         var owner = OwnerFor(scope);
@@ -199,11 +202,28 @@ internal sealed class FixpOrderAdapter
         };
 
         var result = await _submit.SubmitAsync(req, ct).ConfigureAwait(false);
-        if (result.Kind == OrderSubmissionResultKind.Accepted) return;
+        if (result.Kind == OrderSubmissionResultKind.Accepted)
+            return FixpOrderHandlingResult.Keep;
 
-        // RFC §4.7 — submit-time rejections produce a synthetic
+        if (result.Kind == OrderSubmissionResultKind.ReconciliationRequired)
+        {
+            _logger.LogCritical(
+                "fixp.order.reconciliation-required cred={Cred} externalClOrdId={ExternalClOrdId} internalClOrdId={InternalClOrdId}; sending non-terminal BMR and closing session",
+                scope.Principal.CredShortId, externalClOrdId, result.ClOrdId);
+            await WriteBusinessMessageRejectAsync(
+                stream,
+                MessageType.NewOrderSingle,
+                refSeqNum,
+                externalClOrdId,
+                RejectReason.ReconciliationRequired,
+                ct).ConfigureAwait(false);
+            return FixpOrderHandlingResult.CloseForReconciliation(result.ClOrdId);
+        }
+
+        // RFC §4.7 — ordinary submit-time rejections produce a synthetic
         // ExecutionReport_Reject so the bot sees the same shape it would
-        // have seen for a venue-side reject (consistent ER stream).
+        // have seen for a venue-side reject. ReconciliationRequired was
+        // handled above because its order is deliberately non-terminal.
         var reason = result.Kind switch
         {
             OrderSubmissionResultKind.Drained => RejectReason.Drained,
@@ -212,7 +232,6 @@ internal sealed class FixpOrderAdapter
             OrderSubmissionResultKind.DuplicateClOrdId => RejectReason.DuplicateClOrdId,
             OrderSubmissionResultKind.Rejected => RejectReason.RiskRejected,
             OrderSubmissionResultKind.GatewayFailed => RejectReason.GatewayFailed,
-            OrderSubmissionResultKind.ReconciliationRequired => RejectReason.WalBackpressure,
             _ => RejectReason.BadRequest,
         };
 
@@ -231,6 +250,7 @@ internal sealed class FixpOrderAdapter
             ordRejReason: reason,
             cxlRejResponseTo: CxlRejResponseTo.NEW,
             ct).ConfigureAwait(false);
+        return FixpOrderHandlingResult.Keep;
     }
 
     /// <summary>
@@ -336,6 +356,19 @@ internal sealed class FixpOrderAdapter
             case Side.BUY: side = OrderSide.Buy; return true;
             case Side.SELL: side = OrderSide.Sell; return true;
             default: side = default; return false;
+        }
+    }
+
+    internal readonly record struct FixpOrderHandlingResult(
+        bool ShouldKeepSession,
+        ulong ReconciliationClOrdId)
+    {
+        public static FixpOrderHandlingResult Keep { get; } = new(true, 0);
+
+        public static FixpOrderHandlingResult CloseForReconciliation(ulong clOrdId)
+        {
+            if (clOrdId == 0) throw new ArgumentOutOfRangeException(nameof(clOrdId));
+            return new FixpOrderHandlingResult(false, clOrdId);
         }
     }
 

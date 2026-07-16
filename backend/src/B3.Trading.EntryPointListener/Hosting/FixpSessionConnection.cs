@@ -409,9 +409,25 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
                     await _writeMutex.WaitAsync(ct).ConfigureAwait(false);
                     try
                     {
-                        await _orders!.HandleNewOrderSingleAsync(stream, frame.Payload, _scope!, ct)
+                        var outcome = await _orders!.HandleNewOrderSingleAsync(
+                                stream, frame.Payload, _scope!, ct)
                             .ConfigureAwait(false);
                         TouchOutbound();
+                        if (!outcome.ShouldKeepSession)
+                        {
+                            _logger.LogCritical(
+                                "fixp.order.reconciliation-close connectionId={ConnectionId} internalClOrdId={ClOrdId}",
+                                _connectionId, outcome.ReconciliationClOrdId);
+                            await WriteTerminateAsync(
+                                    stream,
+                                    _scope!.SessionState.SessionId,
+                                    _scope.SessionState.CurrentVer,
+                                    TerminationCode.UNSPECIFIED,
+                                    ct)
+                                .ConfigureAwait(false);
+                            TouchOutbound();
+                            return false;
+                        }
                     }
                     finally { _writeMutex.Release(); }
                 }
@@ -919,9 +935,24 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         await _writeMutex.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            await _orders!.HandleNewOrderSingleAsync(stream, decoded, _scope!, ct)
+            var outcome = await _orders!.HandleNewOrderSingleAsync(stream, decoded, _scope!, ct)
                 .ConfigureAwait(false);
             TouchOutbound();
+            if (!outcome.ShouldKeepSession)
+            {
+                _logger.LogCritical(
+                    "fixp.order.reconciliation-close connectionId={ConnectionId} internalClOrdId={ClOrdId}",
+                    _connectionId, outcome.ReconciliationClOrdId);
+                await WriteTerminateAsync(
+                        stream,
+                        _scope!.SessionState.SessionId,
+                        _scope.SessionState.CurrentVer,
+                        TerminationCode.UNSPECIFIED,
+                        ct)
+                    .ConfigureAwait(false);
+                TouchOutbound();
+                return false;
+            }
         }
         finally { _writeMutex.Release(); }
         return true;
