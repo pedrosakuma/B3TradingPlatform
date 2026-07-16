@@ -45,6 +45,15 @@ public static class TradingPersistenceServiceCollectionExtensions
         });
         services.AddSingleton<IEventStoreHealth>(sp =>
             (IEventStoreHealth)sp.GetRequiredService<IEventStore>());
+        services.AddSingleton<IReconciliationMarkerStore>(sp =>
+        {
+            var o = sp.GetRequiredService<IOptions<PersistenceOptions>>().Value;
+            return o.Enabled
+                ? new FileReconciliationMarkerStore(o)
+                : new InMemoryReconciliationMarkerStore();
+        });
+        services.AddSingleton<ReconciliationResolutionWriter>();
+        services.AddSingleton<ReconciliationMarkerRecovery>();
         services.AddSingleton<StateSnapshotter>();
         services.AddSingleton<EventReplayer>();
         services.AddSingleton<PersistenceRecovery>();

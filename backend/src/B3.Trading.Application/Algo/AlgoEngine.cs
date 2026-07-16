@@ -134,6 +134,7 @@ public sealed class AlgoEngine : BackgroundService
     private readonly IReplaceMarginCoordinator? _replaceMargin;
     private readonly CompositeRiskAccountant? _accountant;
     private readonly Lifecycle.IDrainController? _reconciliationDrain;
+    private readonly ReconciliationResolutionWriter _resolutionWriter;
 
     // Per-parent runtime state. Owned by the consumer task; the
     // ConcurrentDictionary is only used because TryAdd/TryGetValue are
@@ -164,7 +165,8 @@ public sealed class AlgoEngine : BackgroundService
         IReplaceMarginCoordinator? replaceMargin = null,
         SymbolDirectory? symbols = null,
         CompositeRiskAccountant? accountant = null,
-        Lifecycle.IDrainController? reconciliationDrain = null)
+        Lifecycle.IDrainController? reconciliationDrain = null,
+        ReconciliationResolutionWriter? resolutionWriter = null)
     {
         _queue = queue;
         _algos = algos;
@@ -189,6 +191,11 @@ public sealed class AlgoEngine : BackgroundService
         _symbols = symbols;
         _accountant = accountant;
         _reconciliationDrain = reconciliationDrain;
+        _resolutionWriter = resolutionWriter ?? new ReconciliationResolutionWriter(
+            new InMemoryReconciliationMarkerStore(),
+            dispatcher,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<
+                ReconciliationResolutionWriter>.Instance);
     }
 
     /// <summary>
@@ -1485,9 +1492,16 @@ public sealed class AlgoEngine : BackgroundService
             _logger.LogWarning(ex,
                 "AlgoEngine modify was proven unsent for algo {Firm}/{AlgoId} child {Child}; terminalising intent.",
                 algo.FirmId, algo.AlgoId, child.ClOrdId);
+            var marker = new ReconciliationMarker(
+                ReconciliationMarkerKind.ReplacePreSend,
+                child.ClOrdId,
+                newClOrdId,
+                child.Owner.Value);
+            ReconciliationResolutionResult resolution;
             try
             {
-                _dispatcher.Dispatch(
+                resolution = await _resolutionWriter.ResolveAsync(
+                    marker,
                     new OrderReplacePreSendFailedEvent
                     {
                         OriginalClOrdId = child.ClOrdId,
@@ -1498,20 +1512,36 @@ public sealed class AlgoEngine : BackgroundService
                     () =>
                     {
                         replacements.TryConsume(newClOrdId, out _);
+                        _ownership.RemoveCancelLink(newClOrdId);
                         if (marginPrepared)
                             _replaceMargin!.AbortReplace(newClOrdId);
-                    });
+                    }).ConfigureAwait(false);
             }
-            catch (Exception resolutionEx) when (IsWalResolutionFailure(resolutionEx))
+            catch (Exception resolutionEx)
             {
                 _dispatcher.RunExclusive(() =>
                 {
                     replacements.TryConsume(newClOrdId, out _);
+                    _ownership.RemoveCancelLink(newClOrdId);
                     if (marginPrepared)
                         _replaceMargin!.AbortReplace(newClOrdId);
                 });
                 BeginReplaceResolutionDrain(
                     newClOrdId, "pre_send_resolution_not_durable", resolutionEx);
+                return false;
+            }
+            if (!resolution.Durable)
+            {
+                _dispatcher.RunExclusive(() =>
+                {
+                    replacements.TryConsume(newClOrdId, out _);
+                    _ownership.RemoveCancelLink(newClOrdId);
+                    if (marginPrepared)
+                        _replaceMargin!.AbortReplace(newClOrdId);
+                });
+                BeginReplaceResolutionDrain(
+                    newClOrdId, "pre_send_resolution_not_durable",
+                    resolution.Failure!);
             }
             return false;
         }
@@ -1566,9 +1596,18 @@ public sealed class AlgoEngine : BackgroundService
             // reservation. The cash invariant is preserved either
             // way.
             var heldAt = _clock.GetUtcNow();
+            var marker = new ReconciliationMarker(
+                ReconciliationMarkerKind.ReplaceAmbiguous,
+                child.ClOrdId,
+                newClOrdId,
+                child.Owner.Value,
+                newRemainingNotional,
+                heldAt);
+            ReconciliationResolutionResult resolution;
             try
             {
-                _dispatcher.Dispatch(
+                resolution = await _resolutionWriter.ResolveAsync(
+                    marker,
                     new OrderReplaceAmbiguousMarginHeldEvent
                     {
                         NewClOrdId = newClOrdId,
@@ -1578,15 +1617,26 @@ public sealed class AlgoEngine : BackgroundService
                         HeldAtUtc = heldAt,
                     },
                     () => replacements.MarkAmbiguousMarginHeld(
-                        newClOrdId, heldAt, newRemainingNotional));
+                        newClOrdId, heldAt, newRemainingNotional))
+                    .ConfigureAwait(false);
             }
-            catch (Exception resolutionEx) when (IsWalResolutionFailure(resolutionEx))
+            catch (Exception resolutionEx)
             {
                 _dispatcher.RunExclusive(() =>
                     replacements.MarkAmbiguousMarginHeld(
                         newClOrdId, heldAt, newRemainingNotional));
                 BeginReplaceResolutionDrain(
                     newClOrdId, "ambiguous_resolution_not_durable", resolutionEx);
+                return false;
+            }
+            if (!resolution.Durable)
+            {
+                _dispatcher.RunExclusive(() =>
+                    replacements.MarkAmbiguousMarginHeld(
+                        newClOrdId, heldAt, newRemainingNotional));
+                BeginReplaceResolutionDrain(
+                    newClOrdId, "ambiguous_resolution_not_durable",
+                    resolution.Failure!);
             }
             return false;
         }
@@ -1658,9 +1708,6 @@ public sealed class AlgoEngine : BackgroundService
             "Algo replace resolution {Reason} for new ClOrdID {NewClOrdId}; ingress is draining and operator reconciliation is required.",
             reason, newClOrdId);
     }
-
-    private static bool IsWalResolutionFailure(Exception exception) =>
-        exception is WalBackpressureException or WalFaultedException;
 
     private async Task OnCancelRequestedAsync(Algo algo, AlgoParentRuntime rt, CancellationToken ct)
     {

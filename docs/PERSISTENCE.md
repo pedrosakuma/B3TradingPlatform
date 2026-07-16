@@ -95,21 +95,22 @@ Wave 2 / #628: this slice does not blindly resend pending cancel/replace
 intents after restart. Durable attempted/sent substates, session-version proof
 and automated reconciliation remain owned by that RFC.
 
-If either replace-resolution append fails because the WAL is saturated or
-faulted, the platform enters drain with `reconciliation_required`. The live
-state takes the safest known posture (proven-unsent intents are removed and
-margin aborted; ambiguous intents retain margin and are TTL-marked), but no
-ordinary gateway-failure response is returned because the durable WAL still
-contains only the unresolved request. Operator reconciliation is required
-before ingress can reopen.
+Before appending a cancel/replace resolution, the platform fsyncs an
+out-of-band marker under `<data>/<firm>/reconciliation/`. WAL backpressure is
+retried and the resolution is flushed before the marker is removed. If the WAL
+remains saturated/faulted, the marker survives process crash; startup replay
+then applies the safest known posture and begins drain instead of treating the
+request as an ordinary pending mutation. Proven-unsent intents are removed
+(and replace margin aborted); ambiguous replaces retain margin and are
+TTL-marked. Operator reconciliation is required before ingress can reopen.
 
 Proven pre-send cancel failures follow the same model. A durable
 `OrderCancelPreSendFailedEvent` consumes the pending cancel, removes its
 cancel-side ownership/bot mappings, and leaves the original order working so a
 retry allocates a fresh ClOrdID and actually reattempts the venue mutation. If
-that resolution cannot append, live state is cleaned up, ingress drains, and
-the caller receives `reconciliation_required`; ordinary retries remain blocked
-until operator reconciliation.
+that resolution cannot append/flush, the sidecar remains, live state is cleaned
+up, ingress drains, and the caller receives `reconciliation_required`;
+ordinary retries remain blocked until operator reconciliation.
 
 WebSocket fan-out frames are **not** persisted — they are projections
 recomputable from the WAL.

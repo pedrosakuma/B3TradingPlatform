@@ -1098,6 +1098,7 @@ public sealed class EventReplayer
                 break;
             case OrderReplacePreSendFailedEvent rpf:
                 _replacements?.TryConsume(rpf.NewClOrdId, out _);
+                _ownership.RemoveCancelLink(rpf.NewClOrdId);
                 _replaceMargin?.AbortReplace(rpf.NewClOrdId);
                 _clOrdIds.AdvanceCounterTo(new EndClientId(rpf.EndClientId), rpf.NewClOrdId);
                 break;

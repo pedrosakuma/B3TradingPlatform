@@ -234,6 +234,10 @@ public sealed class PendingReplacementRegistry
     public bool IsOriginalInFlight(ulong originalClOrdId) =>
         _byOriginalClOrdId.ContainsKey(originalClOrdId);
 
+    public bool IsAmbiguous(ulong newClOrdId) =>
+        _byNewClOrdId.TryGetValue(newClOrdId, out var entry)
+        && entry.AmbiguousMarginHeld;
+
     /// <summary>
     /// Pass-4 review (#299) P1. Mark the entry under
     /// <paramref name="newClOrdId"/> as having a still-held margin

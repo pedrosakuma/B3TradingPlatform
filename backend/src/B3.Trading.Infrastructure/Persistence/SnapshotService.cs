@@ -57,6 +57,7 @@ public sealed class PersistenceRecovery
     private readonly ReserveOnSubmitMarginProvider? _marginProvider;
     private readonly PendingReplacementRegistry? _replacements;
     private readonly IRiskRecoveryFence[] _riskRecoveryFences;
+    private readonly ReconciliationMarkerRecovery? _reconciliationMarkers;
 
     public PersistenceRecovery(
         IEventStore store,
@@ -71,7 +72,8 @@ public sealed class PersistenceRecovery
         IFirmSessionStatusProvider? firmSessionStatus = null,
         ReserveOnSubmitMarginProvider? marginProvider = null,
         PendingReplacementRegistry? replacements = null,
-        IEnumerable<IRiskRecoveryFence>? riskRecoveryFences = null)
+        IEnumerable<IRiskRecoveryFence>? riskRecoveryFences = null,
+        ReconciliationMarkerRecovery? reconciliationMarkers = null)
     {
         _store = store;
         _snapshotter = snapshotter;
@@ -87,6 +89,7 @@ public sealed class PersistenceRecovery
         _replacements = replacements;
         _riskRecoveryFences = riskRecoveryFences?.ToArray()
             ?? Array.Empty<IRiskRecoveryFence>();
+        _reconciliationMarkers = reconciliationMarkers;
     }
 
     public Task RunAsync(CancellationToken ct = default) =>
@@ -198,6 +201,14 @@ public sealed class PersistenceRecovery
         }
         MetricsRegistry.RecoveryEventsReplayed.Add(replayed);
         _logger.LogInformation("Persistence recovery: replayed {Count} events past seq={Since}.", replayed, since);
+
+        var unresolvedMarkers = _reconciliationMarkers?.Apply() ?? 0;
+        if (unresolvedMarkers > 0)
+        {
+            _logger.LogCritical(
+                "Persistence recovery found {Count} unresolved outbound reconciliation markers; readiness remains closed.",
+                unresolvedMarkers);
+        }
 
         // #380 path B. Session-version guard. Compares the snapshot's
         // per-firm SessionVerId record against each gateway's current

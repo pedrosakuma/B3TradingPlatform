@@ -133,6 +133,29 @@ public sealed class LifecycleAtomicityTests
     }
 
     [Fact]
+    public async Task PreSendResolutionTransientBackpressure_RetriesAndFlushesBeforeReturning()
+    {
+        var store = new RecordingEventStore(
+            failOnAppend: 2,
+            failureFactory: static () => new WalBackpressureException("transient"),
+            failureCount: 1);
+        var gateway = new TestGateway
+        {
+            ReplaceException = new ExchangeGatewayPreSendException("not connected"),
+        };
+        var harness = BuildModify(gateway, store);
+
+        var result = await harness.Service.ModifyAsync(
+            new OrderModifyRequest(Owner, 100, 120, 31m), CancellationToken.None);
+
+        Assert.Equal(OrderModifyResultKind.GatewayFailed, result.Kind);
+        Assert.False(harness.Drain.IsDraining);
+        Assert.Empty(harness.Markers.Load());
+        Assert.Equal(2, store.Events.Count);
+        Assert.True(store.FlushCalls > 0);
+    }
+
+    [Fact]
     public async Task AmbiguousResolutionWalFault_DrainsAndMarksIntentInMemoryForTtl()
     {
         var store = new RecordingEventStore(
@@ -215,6 +238,213 @@ public sealed class LifecycleAtomicityTests
             reason: "test", CancellationToken.None);
         Assert.False(retried);
         Assert.Equal(1, gateway.ReplaceCalls);
+    }
+
+    [Fact]
+    public async Task CrashBeforeSnapshot_CancelPreSendMarkerCleansReplayAndKeepsStartupDrained()
+    {
+        var markers = new InMemoryReconciliationMarkerStore();
+        var store = new RecordingEventStore(
+            failOnAppend: 2,
+            failureFactory: static () => new WalFaultedException(
+                "resolution fault", new IOException("disk full")));
+        var dispatcher = new EventDispatcher(store);
+        var pending = new PendingCancelRegistry();
+        var ownership = new OrderOwnershipMap();
+        var book = new WorkingOrderBook();
+        Assert.True(book.TryAdd(Working()));
+        ownership.Register(100, Owner);
+        var drain = new NeverDrainController();
+        var service = new OrderCancelService(
+            new ClOrdIdPrefixRegistry(), ownership, book,
+            new UnavailableExchangeGateway(), dispatcher,
+            NullLogger<OrderCancelService>.Instance,
+            pendingCancels: pending,
+            reconciliationDrain: drain,
+            resolutionWriter: new ReconciliationResolutionWriter(
+                markers, dispatcher,
+                NullLogger<ReconciliationResolutionWriter>.Instance));
+
+        var result = await service.CancelAsync(Owner, 100, CancellationToken.None);
+        Assert.Equal(OrderCancelResultKind.ReconciliationRequired, result.Kind);
+        Assert.Single(markers.Load());
+        Assert.Single(store.Events);
+
+        var recovered = BuildRecoveryState();
+        foreach (var evt in store.Events)
+            recovered.Replayer.Apply(evt);
+        Assert.True(recovered.PendingCancels.TryGetByCancel(
+            result.CancelClOrdId, out _));
+        var startupDrain = new NeverDrainController();
+        var startup = CreateMarkerRecovery(
+            markers, recovered.Dispatcher, recovered.PendingCancels,
+            recovered.Replacements, recovered.Ownership, recovered.ClOrdIds,
+            startupDrain);
+
+        Assert.Equal(1, startup.Apply());
+        Assert.True(startupDrain.IsDraining);
+        Assert.Equal(0, recovered.PendingCancels.CountForTesting);
+        Assert.False(recovered.Ownership.TryResolveOrig(
+            result.CancelClOrdId, out _));
+        Assert.Single(markers.Load());
+
+        var retryGateway = new TestGateway();
+        var blockedRetry = new OrderCancelService(
+            recovered.ClOrdIds, recovered.Ownership, recovered.Book, retryGateway,
+            recovered.Dispatcher, NullLogger<OrderCancelService>.Instance,
+            pendingCancels: recovered.PendingCancels,
+            reconciliationDrain: startupDrain);
+        Assert.Equal(
+            OrderCancelResultKind.ReconciliationRequired,
+            (await blockedRetry.CancelAsync(Owner, 100, CancellationToken.None)).Kind);
+        Assert.Equal(0, retryGateway.CancelCalls);
+    }
+
+    [Fact]
+    public async Task CrashBeforeSnapshot_ReplacePreSendMarkerConsumesReplayAndDrainsStartup()
+    {
+        var markers = new InMemoryReconciliationMarkerStore();
+        var store = PermanentResolutionFaultStore();
+        var gateway = new TestGateway
+        {
+            ReplaceException = new ExchangeGatewayPreSendException("not connected"),
+        };
+        var runtime = BuildModify(gateway, store, markers);
+        var result = await runtime.Service.ModifyAsync(
+            new OrderModifyRequest(Owner, 100, 120, 31m), CancellationToken.None);
+        Assert.Equal(OrderModifyResultKind.ReconciliationRequired, result.Kind);
+        Assert.Single(markers.Load());
+
+        var recovered = BuildRecoveryState();
+        foreach (var evt in store.Events)
+            recovered.Replayer.Apply(evt);
+        Assert.True(recovered.Replacements.IsOriginalInFlight(100));
+        var startupDrain = new NeverDrainController();
+
+        Assert.Equal(1, CreateMarkerRecovery(
+            markers, recovered.Dispatcher, recovered.PendingCancels,
+            recovered.Replacements, recovered.Ownership, recovered.ClOrdIds,
+            startupDrain).Apply());
+        Assert.True(startupDrain.IsDraining);
+        Assert.False(recovered.Replacements.IsOriginalInFlight(100));
+        Assert.False(recovered.Ownership.TryResolveOrig(
+            result.NewClOrdId, out _));
+        Assert.Single(markers.Load());
+    }
+
+    [Fact]
+    public async Task CrashBeforeSnapshot_ReplaceAmbiguousMarkerRestoresTtlStateAndDrainsStartup()
+    {
+        var markers = new InMemoryReconciliationMarkerStore();
+        var store = PermanentResolutionFaultStore();
+        var gateway = new TestGateway
+        {
+            ReplaceException = new IOException("wire outcome unknown"),
+        };
+        var runtime = BuildModify(gateway, store, markers);
+        var result = await runtime.Service.ModifyAsync(
+            new OrderModifyRequest(Owner, 100, 120, 31m), CancellationToken.None);
+        Assert.Equal(OrderModifyResultKind.ReconciliationRequired, result.Kind);
+
+        var recovered = BuildRecoveryState();
+        foreach (var evt in store.Events)
+            recovered.Replayer.Apply(evt);
+        Assert.False(Assert.Single(
+            recovered.Replacements.Snapshot()).AmbiguousMarginHeld);
+        var startupDrain = new NeverDrainController();
+
+        Assert.Equal(1, CreateMarkerRecovery(
+            markers, recovered.Dispatcher, recovered.PendingCancels,
+            recovered.Replacements, recovered.Ownership, recovered.ClOrdIds,
+            startupDrain).Apply());
+        Assert.True(startupDrain.IsDraining);
+        Assert.True(Assert.Single(
+            recovered.Replacements.Snapshot()).AmbiguousMarginHeld);
+        Assert.Single(markers.Load());
+    }
+
+    [Fact]
+    public void FileReconciliationMarkerStore_SurvivesStoreRecreation()
+    {
+        var root = Path.Combine(
+            Environment.CurrentDirectory,
+            "TestResults",
+            "reconciliation-markers-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var options = new PersistenceOptions
+            {
+                DataDirectory = root,
+                FirmId = "FIRM",
+            };
+            var marker = new ReconciliationMarker(
+                ReconciliationMarkerKind.CancelPreSend,
+                OriginalClOrdId: 100,
+                MutationClOrdId: 200,
+                OwnerEndClientId: Owner.Value);
+            new FileReconciliationMarkerStore(options).Persist(marker);
+
+            var recovered = Assert.Single(
+                new FileReconciliationMarkerStore(options).Load());
+            Assert.Equal(marker, recovered);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void StartupMarkerWithoutRequestStillBurnsMutationIdBeforeClearingSafePreSendMarker()
+    {
+        var markers = new InMemoryReconciliationMarkerStore();
+        markers.Persist(new ReconciliationMarker(
+            ReconciliationMarkerKind.CancelPreSend,
+            OriginalClOrdId: 100,
+            MutationClOrdId: 200,
+            OwnerEndClientId: Owner.Value));
+        var clOrdIds = new ClOrdIdPrefixRegistry();
+        var drain = new NeverDrainController();
+        var recovery = CreateMarkerRecovery(
+            markers,
+            new EventDispatcher(new NullEventStore()),
+            new PendingCancelRegistry(),
+            new PendingReplacementRegistry(),
+            new OrderOwnershipMap(),
+            clOrdIds,
+            drain);
+
+        Assert.Equal(0, recovery.Apply());
+        Assert.False(drain.IsDraining);
+        Assert.Empty(markers.Load());
+        Assert.Equal(201UL, clOrdIds.Generate(Owner));
+    }
+
+    [Fact]
+    public void StartupAmbiguousMarkerWithoutRequestFailsClosed()
+    {
+        var markers = new InMemoryReconciliationMarkerStore();
+        markers.Persist(new ReconciliationMarker(
+            ReconciliationMarkerKind.ReplaceAmbiguous,
+            OriginalClOrdId: 100,
+            MutationClOrdId: 200,
+            OwnerEndClientId: Owner.Value,
+            NewRemainingNotional: 3100m,
+            AmbiguousAtUtc: DateTimeOffset.UtcNow));
+        var drain = new NeverDrainController();
+        var recovery = CreateMarkerRecovery(
+            markers,
+            new EventDispatcher(new NullEventStore()),
+            new PendingCancelRegistry(),
+            new PendingReplacementRegistry(),
+            new OrderOwnershipMap(),
+            new ClOrdIdPrefixRegistry(),
+            drain);
+
+        Assert.Equal(1, recovery.Apply());
+        Assert.True(drain.IsDraining);
+        Assert.Single(markers.Load());
     }
 
     [Fact]
@@ -372,6 +602,41 @@ public sealed class LifecycleAtomicityTests
         var blockedRetry = await service.CancelAsync(Owner, 100, CancellationToken.None);
         Assert.Equal(OrderCancelResultKind.ReconciliationRequired, blockedRetry.Kind);
         Assert.Equal(result.CancelClOrdId + 1, clOrdIds.Generate(Owner));
+    }
+
+    [Fact]
+    public async Task PreSendCancelResolutionTransientBackpressure_RetriesAndFlushes()
+    {
+        var markers = new InMemoryReconciliationMarkerStore();
+        var store = new RecordingEventStore(
+            failOnAppend: 2,
+            failureFactory: static () => new WalBackpressureException("transient"),
+            failureCount: 1);
+        var dispatcher = new EventDispatcher(store);
+        var pending = new PendingCancelRegistry();
+        var ownership = new OrderOwnershipMap();
+        var book = new WorkingOrderBook();
+        Assert.True(book.TryAdd(Working()));
+        ownership.Register(100, Owner);
+        var drain = new NeverDrainController();
+        var service = new OrderCancelService(
+            new ClOrdIdPrefixRegistry(), ownership, book,
+            new UnavailableExchangeGateway(), dispatcher,
+            NullLogger<OrderCancelService>.Instance,
+            pendingCancels: pending,
+            reconciliationDrain: drain,
+            resolutionWriter: new ReconciliationResolutionWriter(
+                markers, dispatcher,
+                NullLogger<ReconciliationResolutionWriter>.Instance));
+
+        var result = await service.CancelAsync(Owner, 100, CancellationToken.None);
+
+        Assert.Equal(OrderCancelResultKind.GatewayFailed, result.Kind);
+        Assert.False(drain.IsDraining);
+        Assert.Equal(0, pending.CountForTesting);
+        Assert.Empty(markers.Load());
+        Assert.Equal(2, store.Events.Count);
+        Assert.True(store.FlushCalls > 0);
     }
 
     [Fact]
@@ -543,7 +808,8 @@ public sealed class LifecycleAtomicityTests
 
     private static ModifyHarness BuildModify(
         IExchangeGateway gateway,
-        IEventStore? store = null)
+        IEventStore? store = null,
+        IReconciliationMarkerStore? markerStore = null)
     {
         var ownership = new OrderOwnershipMap();
         var book = new WorkingOrderBook();
@@ -552,12 +818,18 @@ public sealed class LifecycleAtomicityTests
         var replacements = new PendingReplacementRegistry();
         var margin = new NoOpReplaceMargin();
         var drain = new NeverDrainController();
+        var dispatcher = new EventDispatcher(store ?? new NullEventStore());
+        var markers = markerStore ?? new InMemoryReconciliationMarkerStore();
+        var resolutionWriter = new ReconciliationResolutionWriter(
+            markers, dispatcher,
+            NullLogger<ReconciliationResolutionWriter>.Instance);
         var service = new OrderModifyService(
             new ClOrdIdPrefixRegistry(), ownership, book, gateway, new RecordingSink(),
             new RiskPipeline(Array.Empty<IRiskCheck>()), margin,
-            replacements, new EventDispatcher(store ?? new NullEventStore()),
-            drain, NullLogger<OrderModifyService>.Instance);
-        return new ModifyHarness(service, replacements, margin, drain);
+            replacements, dispatcher,
+            drain, NullLogger<OrderModifyService>.Instance,
+            resolutionWriter: resolutionWriter);
+        return new ModifyHarness(service, replacements, margin, drain, markers, dispatcher);
     }
 
     private static OrderCancelService BuildCancel(
@@ -576,6 +848,7 @@ public sealed class LifecycleAtomicityTests
 
     private static RecoveryHarness BuildRecoveryState(PendingCancelRegistry? pendingCancels = null)
     {
+        pendingCancels ??= new PendingCancelRegistry();
         var ownership = new OrderOwnershipMap();
         var book = new WorkingOrderBook();
         Assert.True(book.TryAdd(Working()));
@@ -583,6 +856,7 @@ public sealed class LifecycleAtomicityTests
         var replacements = new PendingReplacementRegistry();
         var margin = new NoOpReplaceMargin();
         var clOrdIds = new ClOrdIdPrefixRegistry();
+        var dispatcher = new EventDispatcher(new NullEventStore());
         var processor = new ExecutionReportProcessor(
             ownership, book, new PositionKeeper(), new RecordingSink(),
             new NoOpMarginProvider(), NullLogger<ExecutionReportProcessor>.Instance,
@@ -594,8 +868,28 @@ public sealed class LifecycleAtomicityTests
             new AlgoIdRegistry(), replacements: replacements,
             replaceMargin: margin, pendingCancels: pendingCancels);
         return new RecoveryHarness(
-            replayer, replacements, clOrdIds, ownership, book);
+            replayer, replacements, pendingCancels, clOrdIds, ownership, book,
+            dispatcher);
     }
+
+    private static ReconciliationMarkerRecovery CreateMarkerRecovery(
+        IReconciliationMarkerStore markers,
+        EventDispatcher dispatcher,
+        PendingCancelRegistry pendingCancels,
+        PendingReplacementRegistry replacements,
+        OrderOwnershipMap ownership,
+        ClOrdIdPrefixRegistry clOrdIds,
+        NeverDrainController drain) =>
+        new(
+            markers, dispatcher, pendingCancels, replacements, ownership,
+            clOrdIds, drain,
+            NullLogger<ReconciliationMarkerRecovery>.Instance);
+
+    private static RecordingEventStore PermanentResolutionFaultStore() =>
+        new(
+            failOnAppend: 2,
+            failureFactory: static () => new WalFaultedException(
+                "resolution fault", new IOException("disk full")));
 
     private static Order Working()
     {
@@ -627,14 +921,18 @@ public sealed class LifecycleAtomicityTests
         OrderModifyService Service,
         PendingReplacementRegistry Replacements,
         NoOpReplaceMargin Margin,
-        NeverDrainController Drain);
+        NeverDrainController Drain,
+        IReconciliationMarkerStore Markers,
+        EventDispatcher Dispatcher);
 
     private sealed record RecoveryHarness(
         EventReplayer Replayer,
         PendingReplacementRegistry Replacements,
+        PendingCancelRegistry PendingCancels,
         ClOrdIdPrefixRegistry ClOrdIds,
         OrderOwnershipMap Ownership,
-        WorkingOrderBook Book);
+        WorkingOrderBook Book,
+        EventDispatcher Dispatcher);
 
     private sealed class TestGateway : IExchangeGateway
     {
@@ -717,15 +1015,19 @@ public sealed class LifecycleAtomicityTests
         private long _seq;
         private readonly int? _failOnAppend;
         private readonly Func<Exception>? _failureFactory;
+        private int _failuresRemaining;
+        public int FlushCalls { get; private set; }
         public List<WalEvent> Events { get; } = new();
         public long CurrentSeq => Interlocked.Read(ref _seq);
 
         public RecordingEventStore(
             int? failOnAppend = null,
-            Func<Exception>? failureFactory = null)
+            Func<Exception>? failureFactory = null,
+            int failureCount = int.MaxValue)
         {
             _failOnAppend = failOnAppend;
             _failureFactory = failureFactory;
+            _failuresRemaining = failureCount;
         }
 
         public long Append(WalEvent evt) => Append(evt, ReadOnlyMemory<byte>.Empty);
@@ -733,15 +1035,22 @@ public sealed class LifecycleAtomicityTests
         public long Append(WalEvent evt, ReadOnlyMemory<byte> preSerialisedPayload)
         {
             var appendNumber = checked((int)CurrentSeq + 1);
-            if (_failOnAppend == appendNumber)
+            if (_failOnAppend == appendNumber && _failuresRemaining > 0)
+            {
+                _failuresRemaining--;
                 throw _failureFactory?.Invoke()
                     ?? new WalBackpressureException("configured append failure");
+            }
             lock (Events)
                 Events.Add(evt);
             return Interlocked.Increment(ref _seq);
         }
 
-        public ValueTask FlushAsync(CancellationToken ct = default) => ValueTask.CompletedTask;
+        public ValueTask FlushAsync(CancellationToken ct = default)
+        {
+            FlushCalls++;
+            return ValueTask.CompletedTask;
+        }
 
         public async IAsyncEnumerable<(long Seq, WalEvent Event)> ReadFromAsync(
             long sinceSeqExclusive,

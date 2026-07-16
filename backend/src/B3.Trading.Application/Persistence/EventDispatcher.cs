@@ -71,6 +71,9 @@ public sealed class EventDispatcher
         get { lock (_lock) return _store.CurrentSeq; }
     }
 
+    public ValueTask FlushAsync(CancellationToken cancellationToken = default) =>
+        _store.FlushAsync(cancellationToken);
+
     /// <summary>
     /// Persists <paramref name="evt"/> then runs <paramref name="apply"/>
     /// under the same lock. Throws (and skips the mutation) if the WAL

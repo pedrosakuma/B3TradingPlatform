@@ -32,6 +32,7 @@ public sealed class OrderCancelService
     private readonly IUserBotOrderMappingRegistry? _botMappings;
     private readonly PendingCancelRegistry _pendingCancels;
     private readonly Lifecycle.IDrainController? _reconciliationDrain;
+    private readonly ReconciliationResolutionWriter _resolutionWriter;
     private readonly ILogger<OrderCancelService> _logger;
 
     public OrderCancelService(
@@ -43,7 +44,8 @@ public sealed class OrderCancelService
         ILogger<OrderCancelService> logger,
         IUserBotOrderMappingRegistry? botMappings = null,
         PendingCancelRegistry? pendingCancels = null,
-        Lifecycle.IDrainController? reconciliationDrain = null)
+        Lifecycle.IDrainController? reconciliationDrain = null,
+        ReconciliationResolutionWriter? resolutionWriter = null)
     {
         _clOrdIds = clOrdIds;
         _ownership = ownership;
@@ -53,6 +55,11 @@ public sealed class OrderCancelService
         _botMappings = botMappings;
         _pendingCancels = pendingCancels ?? new PendingCancelRegistry();
         _reconciliationDrain = reconciliationDrain;
+        _resolutionWriter = resolutionWriter ?? new ReconciliationResolutionWriter(
+            new InMemoryReconciliationMarkerStore(),
+            dispatcher,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<
+                ReconciliationResolutionWriter>.Instance);
         _logger = logger;
     }
 
@@ -168,9 +175,16 @@ public sealed class OrderCancelService
             _logger.LogError(ex,
                 "Gateway proved cancel was not sent for {ClOrdId} (orig {Orig}); terminalising cancel intent.",
                 cancelClOrdId, originalClOrdId);
+            var marker = new ReconciliationMarker(
+                ReconciliationMarkerKind.CancelPreSend,
+                originalClOrdId,
+                cancelClOrdId,
+                owner.Value);
+            ReconciliationResolutionResult resolution;
             try
             {
-                _dispatcher.Dispatch(
+                resolution = await _resolutionWriter.ResolveAsync(
+                    marker,
                     new OrderCancelPreSendFailedEvent
                     {
                         CancelClOrdId = cancelClOrdId,
@@ -178,13 +192,21 @@ public sealed class OrderCancelService
                         OwnerEndClientId = owner.Value,
                         Reason = "gateway_unavailable",
                     },
-                    () => ResolvePreSendFailure(cancelClOrdId));
+                    () => ResolvePreSendFailure(cancelClOrdId))
+                    .ConfigureAwait(false);
             }
-            catch (Exception resolutionEx) when (IsWalResolutionFailure(resolutionEx))
+            catch (Exception resolutionEx)
             {
                 _dispatcher.RunExclusive(() => ResolvePreSendFailure(cancelClOrdId));
                 return FailResolutionForReconciliation(
                     cancelClOrdId, "pre_send_cancel_resolution_not_durable", resolutionEx);
+            }
+            if (!resolution.Durable)
+            {
+                _dispatcher.RunExclusive(() => ResolvePreSendFailure(cancelClOrdId));
+                return FailResolutionForReconciliation(
+                    cancelClOrdId, "pre_send_cancel_resolution_not_durable",
+                    resolution.Failure!);
             }
             return OrderCancelResult.GatewayFailed(cancelClOrdId, ex);
         }
@@ -229,8 +251,6 @@ public sealed class OrderCancelService
         return OrderCancelResult.ReconciliationRequired(cancelClOrdId, reason, exception);
     }
 
-    private static bool IsWalResolutionFailure(Exception exception) =>
-        exception is WalBackpressureException or WalFaultedException;
 }
 
 /// <summary>
