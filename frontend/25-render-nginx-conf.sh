@@ -1,27 +1,73 @@
 #!/bin/sh
-# Renders /etc/nginx/nginx.conf from the checked-in template, substituting
-# only ${NGINX_RESOLVER} (default 127.0.0.11, Docker's embedded DNS). Runs as
-# part of the stock nginx image's /docker-entrypoint.d/ hook chain, so it
-# executes on every `docker run` / Kubernetes pod start before nginx boots.
-#
-# Numbered 25- (before the stock 30-tune-worker-processes.sh) so that
-# NGINX_ENTRYPOINT_WORKER_PROCESSES_AUTOTUNE, if set, still gets to sed-patch
-# `worker_processes` in the *rendered* nginx.conf instead of a nonexistent
-# file — see code review on #562/#563.
-#
-# NGINX_RESOLVER lets non-Docker orchestrators (e.g. Kubernetes/AKS, whose
-# cluster DNS is a ClusterIP such as CoreDNS/kube-dns, not 127.0.0.11) point
-# nginx at the right resolver without patching nginx.conf. See #562.
-#
-# TRADING_UPSTREAM lets non-Docker orchestrators set the trading-host
-# upstream as an FQDN (e.g. "trading-host.<namespace>.svc.cluster.local:5000")
-# instead of the bare short name that only Docker's embedded DNS can resolve
-# via nginx's `resolver` directive. See #564.
+# Renders /etc/nginx/nginx.conf from the checked-in template.
 set -e
+
+origin_from_url() {
+    value=$1
+    [ -z "$value" ] && return 0
+    case "$value" in
+        http://*|https://*|ws://*|wss://*) ;;
+        *) return 0 ;;
+    esac
+    printf '%s' "$value" | sed -E 's#^([a-zA-Z][a-zA-Z0-9+.-]*://[^/?#]+).*$#\1#'
+}
+
+https_origin_from_host() {
+    value=$(printf '%s' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    [ -z "$value" ] && return 0
+    case "$value" in
+        http://*|https://*) origin_from_url "$value" ;;
+        *://*) return 0 ;;
+        *) printf 'https://%s' "$value" ;;
+    esac
+}
+
+append_source() {
+    list=$1
+    source=$2
+    [ -z "$source" ] && { printf '%s' "$list"; return; }
+    case " $list " in
+        *" $source "*) printf '%s' "$list" ;;
+        *) printf '%s %s' "$list" "$source" ;;
+    esac
+}
 
 : "${NGINX_RESOLVER:=127.0.0.11}"
 : "${TRADING_UPSTREAM:=trading-host:5000}"
+: "${MARKETDATA_WS_URL:=}"
+: "${AUTH_AUTHORITY:=}"
+: "${AUTH_KNOWN_AUTHORITIES:=}"
 
-envsubst '${NGINX_RESOLVER} ${TRADING_UPSTREAM}' \
+CSP_CONNECT_SOURCES=""
+CSP_FRAME_SOURCES=""
+
+market_origin=$(origin_from_url "$MARKETDATA_WS_URL")
+if [ -n "$market_origin" ]; then
+    CSP_CONNECT_SOURCES=$(append_source "$CSP_CONNECT_SOURCES" "$market_origin")
+elif [ -z "$MARKETDATA_WS_URL" ]; then
+    CSP_CONNECT_SOURCES=$(append_source "$CSP_CONNECT_SOURCES" "ws://localhost:8081")
+    CSP_CONNECT_SOURCES=$(append_source "$CSP_CONNECT_SOURCES" "ws://127.0.0.1:8081")
+fi
+
+auth_origin=$(origin_from_url "$AUTH_AUTHORITY")
+if [ -n "$auth_origin" ]; then
+    CSP_CONNECT_SOURCES=$(append_source "$CSP_CONNECT_SOURCES" "$auth_origin")
+    CSP_FRAME_SOURCES=$(append_source "$CSP_FRAME_SOURCES" "$auth_origin")
+fi
+
+old_ifs=$IFS
+IFS=','
+for host in $AUTH_KNOWN_AUTHORITIES; do
+    known_origin=$(https_origin_from_host "$host")
+    if [ -n "$known_origin" ]; then
+        CSP_CONNECT_SOURCES=$(append_source "$CSP_CONNECT_SOURCES" "$known_origin")
+        CSP_FRAME_SOURCES=$(append_source "$CSP_FRAME_SOURCES" "$known_origin")
+    fi
+done
+IFS=$old_ifs
+
+export NGINX_RESOLVER TRADING_UPSTREAM CSP_CONNECT_SOURCES CSP_FRAME_SOURCES
+
+envsubst '${NGINX_RESOLVER} ${TRADING_UPSTREAM} ${CSP_CONNECT_SOURCES} ${CSP_FRAME_SOURCES}' \
     < /etc/nginx/nginx.conf.template \
     > /etc/nginx/nginx.conf

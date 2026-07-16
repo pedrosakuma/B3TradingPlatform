@@ -159,6 +159,20 @@ services:
       # committed dev default). AuthSigningKeyValidator fails the boot
       # otherwise. Reading from .env keeps the secret out of the YAML.
       Trading__Auth__SigningKey: ${TRADING_AUTH_SIGNING_KEY:?Set TRADING_AUTH_SIGNING_KEY in .env (>= 32 chars, not the dev default)}
+      # Auth mode must match the public frontend AUTH_MODE below. Local is the
+      # compatibility default; Hybrid/Entra enable /auth/exchange and the host
+      # options validator fails closed if any ExternalIdentity value below is
+      # missing or malformed.
+      Trading__Auth__Mode: ${AUTH_MODE:-Local}
+      Trading__Auth__LocalLoginEnabled: ${AUTH_LOCAL_LOGIN_ENABLED:-}
+      Trading__Auth__SignupEnabled: ${AUTH_SIGNUP_ENABLED:-}
+      Trading__Auth__TotpEnabled: ${AUTH_TOTP_ENABLED:-}
+      Trading__Auth__ExternalIdentity__Authority: ${AUTH_AUTHORITY:-}
+      Trading__Auth__ExternalIdentity__Issuer: ${AUTH_ISSUER:-}
+      Trading__Auth__ExternalIdentity__TenantId: ${AUTH_TENANT_ID:-}
+      Trading__Auth__ExternalIdentity__Audience: ${AUTH_API_AUDIENCE:-}
+      Trading__Auth__ExternalIdentity__RequiredScope: ${AUTH_REQUIRED_SCOPE:-}
+      Trading__Auth__ExternalIdentity__AllowedClientApplicationIds__0: ${AUTH_CLIENT_ID:-}
       # Seed at least one user so the frontend can log in. Override in .env
       # or by mounting a custom appsettings.Production.json.
       Trading__Auth__Users__0__Username: ${TRADING_SEED_USER:-alice}
@@ -352,6 +366,19 @@ services:
       # plus login/app-shell brand text. See #572 / #596.
       MARKETDATA_WS_URL: ${MARKETDATA_WS_URL:-}
       APP_TITLE: ${APP_TITLE:-B3TradingPlatform}
+      # Public browser auth config. Local remains the compatibility default.
+      # Hybrid/Entra use MSAL Authorization Code + PKCE and must never include
+      # a client secret in this image or compose environment.
+      AUTH_MODE: ${AUTH_MODE:-Local}
+      AUTH_LOCAL_LOGIN_ENABLED: ${AUTH_LOCAL_LOGIN_ENABLED:-}
+      AUTH_SIGNUP_ENABLED: ${AUTH_SIGNUP_ENABLED:-}
+      AUTH_TOTP_ENABLED: ${AUTH_TOTP_ENABLED:-}
+      AUTH_AUTHORITY: ${AUTH_AUTHORITY:-}
+      AUTH_CLIENT_ID: ${AUTH_CLIENT_ID:-}
+      AUTH_API_SCOPE: ${AUTH_API_SCOPE:-}
+      AUTH_REDIRECT_URI: ${AUTH_REDIRECT_URI:-}
+      AUTH_LOGOUT_URI: ${AUTH_LOGOUT_URI:-}
+      AUTH_KNOWN_AUTHORITIES: ${AUTH_KNOWN_AUTHORITIES:-}
     networks:
       - b3-net
     ports:

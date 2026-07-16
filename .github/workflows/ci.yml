@@ -89,23 +89,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      # The frontend is currently vanilla HTML+JS (no build step), mirroring
-      # B3MarketDataPlatform. This job exists so the CI surface is in place
-      # for when a real build/lint is added; for now it just sanity-checks
-      # the entry point is present.
-      - name: Verify frontend entry point exists
-        run: test -f frontend/index.html
-
-      - name: Set up Node (for decoder unit tests)
+      - name: Set up Node
         uses: actions/setup-node@v5
         with:
           node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund
+
+      - name: Build static frontend bundle
+        working-directory: frontend
+        run: npm run build
+
+      - name: Smoke-test env.js rendering directly
+        run: ./frontend/test/render-env-js-direct-smoke.sh
 
       - name: Smoke-test env.js rendering inside the real frontend container
         run: ./frontend/test/render-env-js-container-smoke.sh
 
-      - name: Run state reducer tests (no deps, node:test)
-        run: node --test frontend/test/decoder.test.mjs frontend/test/market-data-url.test.mjs frontend/test/branding.test.mjs frontend/test/market-data-settings.test.mjs frontend/test/state-modify.test.mjs frontend/test/state-staleness.test.mjs frontend/test/state-book.test.mjs frontend/test/cancel-all.test.mjs frontend/test/validation-rules.test.mjs frontend/test/pretrade-guards.test.mjs frontend/test/bot-credentials-ui.test.mjs frontend/test/phase-badge.test.mjs frontend/test/auction-panel.test.mjs frontend/test/chain-picker.test.mjs frontend/test/ticket-phase-coupling.test.mjs frontend/test/ticket-validation.test.mjs frontend/test/ticket-form-conditionals.test.mjs frontend/test/working-orders-render.test.mjs frontend/test/order-detail-q14.test.mjs frontend/test/executions-expired-badge.test.mjs frontend/test/expired-status-surfaces.test.mjs frontend/test/history-tab.test.mjs frontend/test/pnl-panel.test.mjs frontend/test/statement-download.test.mjs frontend/test/state-clear-races.test.mjs frontend/test/compliance-ui.test.mjs frontend/test/qr-render.test.mjs frontend/test/algos-state.test.mjs frontend/test/algos-validation.test.mjs frontend/test/algos-ui-detail.test.mjs frontend/test/settings-subtab.test.mjs frontend/test/trader-subtab.test.mjs frontend/test/keyboard.test.mjs frontend/test/density.test.mjs frontend/test/virtual-list.test.mjs frontend/test/mobile-drawer.test.mjs
+      - name: Run frontend unit tests (explicit file list)
+        run: npm --prefix frontend test
 
   frontend-a11y:
     # Fase 5 follow-up (#407). axe-core + Lighthouse CI gate against
@@ -142,6 +148,11 @@ jobs:
         # Chromium into ~/.cache/puppeteer (cache-hit reuses it).
         run: npm ci --no-audit --no-fund
 
+      - name: Build frontend bundle for audit
+        run: |
+          npm --prefix .. ci --no-audit --no-fund
+          npm --prefix .. run build
+
       - name: Resolve Puppeteer Chromium for Lighthouse
         # lhci uses chrome-launcher, which honours $CHROME_PATH. Point it
         # at the same Chromium puppeteer downloaded so both audits run
@@ -153,7 +164,7 @@ jobs:
 
       - name: Serve frontend on :8088
         run: |
-          nohup npx http-server .. -p 8088 -c-1 -s >/tmp/http-server.log 2>&1 &
+          nohup npx http-server ../dist -p 8088 -c-1 -s >http-server.log 2>&1 &
           echo "HTTP_PID=$!" >>"$GITHUB_ENV"
           # Wait until the server actually answers (max 20s).
           for i in $(seq 1 40); do
@@ -162,7 +173,7 @@ jobs:
             fi
             sleep 0.5
           done
-          echo "::error::http-server never came up"; cat /tmp/http-server.log; exit 1
+          echo "::error::http-server never came up"; cat http-server.log; exit 1
 
       - name: axe-core (WCAG 2.1 AA)
         # Wrapper script launches puppeteer with --no-sandbox so Chrome
@@ -175,7 +186,7 @@ jobs:
 
       - name: Tail http-server log on failure
         if: failure()
-        run: tail -200 /tmp/http-server.log || true
+        run: tail -200 http-server.log || true
 
       - name: Stop http-server
         if: always()
