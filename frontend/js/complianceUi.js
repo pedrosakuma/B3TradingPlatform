@@ -40,6 +40,7 @@ import {
   appendComplianceFeed,
   setComplianceFeedPaused,
   clearComplianceFeed,
+  setComplianceConnection,
   COMPLIANCE_FEED_CAP,
 } from "./state.js";
 
@@ -149,6 +150,7 @@ function readAuditFormOpts() {
 
 function renderForSlice(slice) {
   if (slice === "complianceFeed" || slice === "all") renderFeed();
+  if (slice === "complianceConnection" || slice === "all") renderConnection();
   if (slice === "currentView" || slice === "user" || slice === "all") {
     applyComplianceVisibility();
   }
@@ -190,16 +192,32 @@ function renderFeed() {
   body.innerHTML = rows.join("");
 }
 
+function renderConnection() {
+  const el = $("compliance-feed-connection");
+  if (!el) return;
+  const connection = getState().complianceConnection ?? { status: "disconnected", retryInMs: null };
+  const retrySeconds = connection.retryInMs == null ? null : Math.max(1, Math.ceil(connection.retryInMs / 1000));
+  const labels = {
+    connected: "Connected",
+    connecting: "Connecting…",
+    reconnecting: retrySeconds == null ? "Reconnecting…" : `Reconnecting in ${retrySeconds}s…`,
+    error: "Connection error",
+    disconnected: "Disconnected",
+  };
+  el.textContent = labels[connection.status] ?? labels.disconnected;
+  el.dataset.state = connection.status;
+}
+
 function rowHtml(entry) {
   const t = entry.timestamp ? new Date(entry.timestamp).toISOString().slice(11, 19) : "";
   const type = escapeHtml(entry.type ?? "");
-  const user = escapeHtml(entry.user ?? "");
+  const status = escapeHtml(entry.status ?? "");
   const sym  = escapeHtml(entry.symbol ?? "");
   const side = escapeHtml(entry.side ?? "");
   const qty  = entry.qty != null ? String(entry.qty) : "";
   const px   = entry.price != null ? String(entry.price) : "";
   const cl   = escapeHtml(entry.clOrdId ?? "");
-  return `<tr><td>${escapeHtml(t)}</td><td>${type}</td><td>${user}</td>` +
+  return `<tr><td>${escapeHtml(t)}</td><td>${type}</td><td>${status}</td>` +
          `<td>${sym}</td><td>${side}</td><td class="num">${qty}</td>` +
          `<td class="num">${px}</td><td>${cl}</td></tr>`;
 }
@@ -267,54 +285,148 @@ export function setCvmFeedback(message, kind) {
 
 // ── Drop-copy WS lifecycle (called from app.js) ──────────────────
 
+const DROP_COPY_CHANNELS = new Set([
+  "dropcopy.orders",
+  "dropcopy.fills",
+  "dropcopy.cancels",
+]);
+const DROP_COPY_RECONNECT_BASE_MS = 1_000;
+const DROP_COPY_RECONNECT_MAX_MS = 30_000;
+
 let dropCopySocket = null;
+let dropCopyUrl = null;
+let dropCopyActive = false;
+let dropCopyGeneration = 0;
+let dropCopyReconnectTimer = null;
+let dropCopyReconnectAttempt = 0;
 
 export function openDropCopyFeed(url) {
-  closeDropCopyFeed();
+  if (!url || typeof url !== "string") return null;
   if (typeof WebSocket === "undefined") return null;
+  if (dropCopyActive && dropCopyUrl === url) return dropCopySocket;
+
+  closeDropCopyFeed();
+  dropCopyActive = true;
+  dropCopyUrl = url;
+  dropCopyGeneration += 1;
+  dropCopyReconnectAttempt = 0;
+  return connectDropCopy(dropCopyGeneration);
+}
+
+export function closeDropCopyFeed() {
+  dropCopyActive = false;
+  dropCopyUrl = null;
+  dropCopyGeneration += 1;
+  if (dropCopyReconnectTimer != null) {
+    clearTimeout(dropCopyReconnectTimer);
+    dropCopyReconnectTimer = null;
+  }
+  const ws = dropCopySocket;
+  dropCopySocket = null;
+  if (ws) {
+    try { ws.close(1000, "compliance view closed"); } catch { /* noop */ }
+  }
+  setComplianceConnection("disconnected");
+}
+
+function connectDropCopy(generation) {
+  if (!dropCopyActive || generation !== dropCopyGeneration || !dropCopyUrl) return null;
+  setComplianceConnection(dropCopyReconnectAttempt === 0 ? "connecting" : "reconnecting");
   try {
-    const ws = new WebSocket(url);
+    const ws = new WebSocket(dropCopyUrl);
+    const snapshotChannels = new Set();
+    let snapshotStarted = false;
+
+    ws.addEventListener("open", () => {
+      if (!isCurrentDropCopySocket(ws, generation)) return;
+      setComplianceConnection("connected");
+    });
     ws.addEventListener("message", (e) => {
+      if (!isCurrentDropCopySocket(ws, generation)) return;
       try {
         const msg = JSON.parse(e.data);
-        const entry = normaliseDropCopyMessage(msg);
-        if (entry) appendComplianceFeed(entry);
-      } catch { /* ignore malformed frames — the WAL is the source of truth */ }
+        const entries = normaliseDropCopyEnvelope(msg);
+        if (!entries) return;
+        if (msg.type === "snapshot") {
+          if (!snapshotStarted) {
+            clearComplianceFeed();
+            snapshotStarted = true;
+          }
+          snapshotChannels.add(msg.channel);
+          if (snapshotChannels.size === DROP_COPY_CHANNELS.size) {
+            dropCopyReconnectAttempt = 0;
+          }
+        }
+        for (const entry of entries) appendComplianceFeed(entry);
+      } catch { /* ignore malformed frames — reconnect will re-snapshot */ }
+    });
+    ws.addEventListener("error", () => {
+      if (isCurrentDropCopySocket(ws, generation)) setComplianceConnection("error");
+    });
+    ws.addEventListener("close", () => {
+      if (!isCurrentDropCopySocket(ws, generation)) return;
+      dropCopySocket = null;
+      scheduleDropCopyReconnect(generation);
     });
     dropCopySocket = ws;
     return ws;
   } catch (err) {
     console.warn("[compliance/dropcopy] open failed", err);
+    setComplianceConnection("error");
+    scheduleDropCopyReconnect(generation);
     return null;
   }
 }
 
-export function closeDropCopyFeed() {
-  if (dropCopySocket) {
-    try { dropCopySocket.close(); } catch { /* noop */ }
-    dropCopySocket = null;
-  }
+function isCurrentDropCopySocket(ws, generation) {
+  return dropCopyActive && generation === dropCopyGeneration && dropCopySocket === ws;
 }
 
-// Map the heterogeneous drop-copy frame shapes (order / cancel /
-// execution-report) to the flat row the table renders. Exported for
-// the unit test. Returns null for envelopes the UI doesn't care
-// about (snapshot headers, heartbeats, etc.).
-export function normaliseDropCopyMessage(msg) {
+function scheduleDropCopyReconnect(generation) {
+  if (!dropCopyActive || generation !== dropCopyGeneration || dropCopyReconnectTimer != null) return;
+  const delay = dropCopyReconnectDelayMs(dropCopyReconnectAttempt);
+  dropCopyReconnectAttempt += 1;
+  setComplianceConnection("reconnecting", delay);
+  dropCopyReconnectTimer = setTimeout(() => {
+    dropCopyReconnectTimer = null;
+    connectDropCopy(generation);
+  }, delay);
+}
+
+export function dropCopyReconnectDelayMs(attempt) {
+  const exponent = Math.max(0, Math.floor(Number(attempt) || 0));
+  return Math.min(DROP_COPY_RECONNECT_MAX_MS, DROP_COPY_RECONNECT_BASE_MS * (2 ** exponent));
+}
+
+// Convert the backend OutboundMessage JSON contract
+// `{type, channel, seq, data}` into zero or more table rows. Snapshot
+// data is an array; delta data is one DTO.
+export function normaliseDropCopyEnvelope(msg) {
   if (!msg || typeof msg !== "object") return null;
-  const type = msg.type ?? msg.Type;
-  if (!type) return null;
-  if (type === "heartbeat" || type === "snapshot.start" || type === "snapshot.end") return null;
-  const payload = msg.payload ?? msg.Payload ?? msg;
+  if ((msg.type !== "snapshot" && msg.type !== "delta") || !DROP_COPY_CHANNELS.has(msg.channel)) return null;
+  const payloads = msg.type === "snapshot"
+    ? (Array.isArray(msg.data) ? msg.data : null)
+    : (msg.data && typeof msg.data === "object" && !Array.isArray(msg.data) ? [msg.data] : null);
+  if (!payloads) return null;
+  return payloads.map((payload) => normaliseDropCopyRow(msg.channel, msg.seq, payload));
+}
+
+function normaliseDropCopyRow(channel, seq, payload) {
+  const isOrder = channel === "dropcopy.orders";
+  const type = isOrder
+    ? "Order"
+    : (payload.kind ?? (channel === "dropcopy.fills" ? "Fill" : "Canceled"));
   return {
-    timestamp: payload.timestamp ?? payload.Timestamp ?? msg.timestamp ?? Date.now(),
+    timestamp: payload.timestampUtc ?? Date.now(),
     type,
-    user: payload.user ?? payload.User ?? payload.endClient ?? payload.EndClient ?? "",
-    symbol: payload.symbol ?? payload.Symbol ?? "",
-    side: payload.side ?? payload.Side ?? "",
-    qty: payload.qty ?? payload.Qty ?? payload.lastQty ?? payload.LastQty ?? null,
-    price: payload.price ?? payload.Price ?? payload.lastPx ?? payload.LastPx ?? null,
-    clOrdId: payload.clOrdId ?? payload.ClOrdId ?? "",
+    status: payload.status ?? "",
+    symbol: payload.symbol ?? "",
+    side: payload.side ?? "",
+    qty: isOrder ? (payload.quantity ?? null) : (payload.lastQuantity ?? null),
+    price: isOrder ? (payload.price ?? null) : (payload.lastPrice ?? null),
+    clOrdId: payload.clOrdId ?? "",
+    channel,
+    seq,
   };
 }
 

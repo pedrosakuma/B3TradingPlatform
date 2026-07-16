@@ -914,13 +914,15 @@
       <div class="compliance-feed-controls">
         <button id="compliance-feed-pause" type="button" class="btn btn-secondary btn-sm">Pause</button>
         <button id="compliance-feed-clear" type="button" class="btn btn-secondary btn-sm">Clear</button>
+        <span id="compliance-feed-connection" class="compliance-connection-status"
+              data-state="disconnected" role="status" aria-live="polite">Disconnected</span>
         <span id="compliance-feed-status" class="muted-line">0/200 entries</span>
       </div>
       <div class="table-scroll">
         <table>
           <thead>
             <tr>
-              <th>Time</th><th>Type</th><th>User</th>
+              <th>Time</th><th>Type</th><th>Status</th>
               <th>Symbol</th><th>Side</th>
               <th class="num">Qty</th><th class="num">Px</th>
               <th>ClOrdId</th>

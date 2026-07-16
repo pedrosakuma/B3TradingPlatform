@@ -539,6 +539,7 @@ async function renewEntraSession(current = session) {
     firm: session.firm,
   });
   restartWorker();
+  if (state.getState().currentView === "compliance") openComplianceDropCopy();
   warningShown = false;
   scheduleExpiry();
   ui.closeSessionModal();
@@ -1030,6 +1031,7 @@ async function handleRenewSession(password) {
     // (the existing socket keeps working until the OLD JWT is rejected
     // server-side; restart guarantees the next reconnect is clean).
     restartWorker();
+    if (state.getState().currentView === "compliance") openComplianceDropCopy();
     warningShown = false;
     scheduleExpiry();
     ui.closeSessionModal();
@@ -1533,6 +1535,7 @@ function logout({ broadcast = true, redirectEntra = true, clearEntraCache = fals
   session = null;
   mdConfig = null;
   closeComplianceDropCopy();
+  state.clearComplianceFeed();
   clearSession();
   clearMdConfig(sessionStorage);
   // Fase 1 (#397). Drop the persisted tab so the next sign-in lands

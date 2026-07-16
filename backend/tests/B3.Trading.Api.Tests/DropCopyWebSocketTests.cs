@@ -134,10 +134,22 @@ public class DropCopyWebSocketTests
         using var ws = await ConnectDropCopyAsync(factory, token);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         var snaps = await ReadSnapshotsAsync(ws, 3, cts.Token);
-        var snapItems = snaps[DropCopyManager.DropCopyChannels.Orders].GetProperty("data").EnumerateArray().ToArray();
+        var ordersSnapshot = snaps[DropCopyManager.DropCopyChannels.Orders];
+        Assert.Equal("snapshot", ordersSnapshot.GetProperty("type").GetString());
+        Assert.Equal(DropCopyManager.DropCopyChannels.Orders, ordersSnapshot.GetProperty("channel").GetString());
+        Assert.Equal(JsonValueKind.Array, ordersSnapshot.GetProperty("data").ValueKind);
+        Assert.False(ordersSnapshot.TryGetProperty("payload", out _));
+        var snapItems = ordersSnapshot.GetProperty("data").EnumerateArray().ToArray();
         Assert.Equal(N, snapItems.Length);
         // snapshot frame seq is 0
-        Assert.Equal(0, snaps[DropCopyManager.DropCopyChannels.Orders].GetProperty("seq").GetInt64());
+        Assert.Equal(0, ordersSnapshot.GetProperty("seq").GetInt64());
+        Assert.All(snapItems, item =>
+        {
+            Assert.True(item.TryGetProperty("clOrdId", out _));
+            Assert.True(item.TryGetProperty("symbol", out _));
+            Assert.True(item.TryGetProperty("quantity", out _));
+            Assert.True(item.TryGetProperty("status", out _));
+        });
 
         // Push M more orders post-connect — each will fan-out one orders delta + one fills delta.
         for (var i = 0; i < M; i++)
@@ -162,6 +174,8 @@ public class DropCopyWebSocketTests
             catch (OperationCanceledException) { continue; }
             if (msg.GetProperty("type").GetString() != "delta") continue;
             if (msg.GetProperty("channel").GetString() != DropCopyManager.DropCopyChannels.Orders) continue;
+            Assert.Equal(JsonValueKind.Object, msg.GetProperty("data").ValueKind);
+            Assert.False(msg.TryGetProperty("payload", out _));
             orderSeqs.Add(msg.GetProperty("seq").GetInt64());
             orderClOrdIds.Add(msg.GetProperty("data").GetProperty("clOrdId").GetString()!);
         }

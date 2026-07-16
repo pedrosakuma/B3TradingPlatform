@@ -133,6 +133,7 @@ const state = {
   // close the underlying WebSocket — the compliance user can resume
   // and not miss the tail-end of a high-volume burst.
   complianceFeed: { paused: false, entries: [] },
+  complianceConnection: { status: "disconnected", retryInMs: null },
   // Blotter UX (section 3 of #30).
   blotterFilter: { text: "", status: "", hideTerminal: true }, // { text, status, hideTerminal }
   // Per-ClOrdID monotonic arrival sequence. Newly-seen orders get the
@@ -397,10 +398,9 @@ export function clearAll() {
   state.phaseBySymbol.clear();
   state.phaseAtBySymbol.clear();
   state.auctionBySymbol.clear();
-  // Q4.14 (#314). Drop-copy feed is per-session — drop it on logout
-  // so the next user doesn't inherit the previous compliance
-  // operator's tail.
-  state.complianceFeed = { paused: false, entries: [] };
+  // Drop-copy has its own socket lifecycle. Do not clear it when the
+  // unrelated trader WS reconnects; logout closes and clears it
+  // explicitly in app.js.
   // Q1.4 (#256). Risk policy is per-session — the cap is sourced from
   // the backend via `GET /policy/risk` on session start. Carrying a
   // previous session's value across logout/reconnect risks validating
@@ -1001,6 +1001,17 @@ export function clearComplianceFeed() {
   notify("complianceFeed");
 }
 
+export function setComplianceConnection(status, retryInMs = null) {
+  const next = {
+    status,
+    retryInMs: Number.isFinite(retryInMs) ? retryInMs : null,
+  };
+  const current = state.complianceConnection;
+  if (current.status === next.status && current.retryInMs === next.retryInMs) return;
+  state.complianceConnection = next;
+  notify("complianceConnection");
+}
+
 // ── Blotter UX slices (section 3 of #30) ───────────────────────────
 
 export function setBlotterFilter(filter) {
@@ -1329,4 +1340,3 @@ export function clearStatementJson() {
   state.statement = { ...state.statement, lastJson: null };
   notify("statement");
 }
-
