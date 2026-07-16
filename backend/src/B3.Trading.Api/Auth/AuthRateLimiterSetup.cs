@@ -38,6 +38,7 @@ internal static class AuthRateLimiterSetup
 {
     private const string SignupPath = "/auth/signup";
     private const string LoginPath = "/auth/login";
+    private const string ExchangePath = "/auth/exchange";
 
     public static void AddAuthRateLimiter(this IServiceCollection services)
     {
@@ -67,14 +68,18 @@ internal static class AuthRateLimiterSetup
                     http.Request.Path.Value,
                     retryAfterSeconds);
 
+                var error = http.Request.Path.StartsWithSegments(ExchangePath, StringComparison.OrdinalIgnoreCase)
+                    ? "rate_limited"
+                    : "too many requests";
                 await http.Response.WriteAsync(
-                    $"{{\"error\":\"too many requests\",\"retryAfterSeconds\":{retryAfterSeconds.ToString(CultureInfo.InvariantCulture)}}}",
+                    $"{{\"error\":\"{error}\",\"retryAfterSeconds\":{retryAfterSeconds.ToString(CultureInfo.InvariantCulture)}}}",
                     cancellationToken);
             };
 
             options.GlobalLimiter = PartitionedRateLimiter.CreateChained(
                 BuildPathPolicy(SignupPath, opts => opts.SignupPerIp, partitionByIp: true),
                 BuildPathPolicy(LoginPath, opts => opts.LoginPerIp, partitionByIp: true),
+                BuildPathPolicy(ExchangePath, opts => opts.ExchangePerIp, partitionByIp: true),
                 BuildPathPolicy(SignupPath, opts => opts.SignupGlobal, partitionByIp: false));
         });
     }

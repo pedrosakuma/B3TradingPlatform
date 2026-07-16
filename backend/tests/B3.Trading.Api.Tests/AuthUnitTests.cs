@@ -65,3 +65,58 @@ public class JwtIssuerTests
         Assert.Contains(jwt.Claims, c => c.Type == JwtIssuer.RoleClaim && c.Value == "user");
     }
 }
+
+public class AuthOptionsValidatorTests
+{
+    [Fact]
+    public void Validate_EntraRejectsLocalEndpoints()
+    {
+        var opts = ValidExternalOptions();
+        opts.Mode = AuthModes.Entra;
+        opts.LocalLoginEnabled = true;
+
+        var result = new AuthOptionsValidator().Validate(null, opts);
+
+        Assert.True(result.Failed);
+        Assert.Contains(result.Failures, f => f.Contains("LocalLoginEnabled", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Validate_HybridRequiresExternalIdentity()
+    {
+        var opts = new AuthOptions { Mode = AuthModes.Hybrid };
+
+        var result = new AuthOptionsValidator().Validate(null, opts);
+
+        Assert.True(result.Failed);
+        Assert.Contains(result.Failures, f => f.Contains("ExternalIdentity:Issuer", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Validate_HybridRejectsTotpWhenLocalLoginDisabled()
+    {
+        var opts = ValidExternalOptions();
+        opts.LocalLoginEnabled = false;
+        opts.TotpEnabled = true;
+
+        var result = new AuthOptionsValidator().Validate(null, opts);
+
+        Assert.True(result.Failed);
+        Assert.Contains(result.Failures, f => f.Contains("TotpEnabled", StringComparison.Ordinal));
+    }
+
+    private static AuthOptions ValidExternalOptions() => new()
+    {
+        SigningKey = "test-signing-key-must-be-at-least-32-bytes-long-okay",
+        Mode = AuthModes.Hybrid,
+        ExternalIdentity = new ExternalIdentityOptions
+        {
+            Authority = "https://tenant.ciamlogin.com/tenant/v2.0",
+            Issuer = "https://tenant.ciamlogin.com/tenant/v2.0",
+            TenantId = "tenant",
+            Audience = "api://trading",
+            RequiredScope = "Trading.Access",
+            AllowedClientApplicationIds = new() { "spa" },
+        },
+    };
+}
