@@ -34,7 +34,7 @@ namespace B3.Trading.Api.Auth;
 /// the warning and either restore from backup or delete the file.
 /// </para>
 /// </remarks>
-public sealed class FileBackedUserStore : IUserStore
+public sealed class FileBackedUserStore : IUserStore, ILegacyUserSnapshotProvider
 {
     private readonly Dictionary<string, UserConfig> _seeded;
     private readonly ConcurrentDictionary<string, UserConfig> _runtime =
@@ -348,6 +348,18 @@ public sealed class FileBackedUserStore : IUserStore
             stream.Flush(true);
         }
         File.Move(tmp, _filePath, overwrite: true);
+    }
+
+    public IReadOnlyList<UserConfig> SnapshotUsers()
+    {
+        lock (_writeGate)
+        {
+            return _seeded.Values
+                .Concat(_runtime.Values)
+                .Where(u => !string.IsNullOrWhiteSpace(u.Username))
+                .OrderBy(u => u.Username, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
     }
 
     private sealed class UserStoreFileEnvelope

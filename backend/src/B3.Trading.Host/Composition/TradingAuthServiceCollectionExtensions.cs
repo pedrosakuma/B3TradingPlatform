@@ -69,6 +69,8 @@ public static class TradingAuthServiceCollectionExtensions
                 ? ActivatorUtilities.CreateInstance<FileBackedUserStore>(sp)
                 : ActivatorUtilities.CreateInstance<InMemoryUserStore>(sp);
         });
+        services.AddSingleton<ILegacyUserSnapshotProvider>(sp =>
+            (ILegacyUserSnapshotProvider)sp.GetRequiredService<IUserStore>());
 
         services.AddSingleton<JwtIssuer>();
 

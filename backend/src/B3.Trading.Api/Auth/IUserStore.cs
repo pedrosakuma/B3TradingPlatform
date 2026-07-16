@@ -66,6 +66,17 @@ public interface IUserStore
 }
 
 /// <summary>
+/// Explicit export seam for the SQLite trading-user directory bootstrap.
+/// Password/TOTP material remains owned by <see cref="IUserStore"/>; import
+/// callers use this snapshot only for the existing username/firm/role
+/// authorization tuple.
+/// </summary>
+public interface ILegacyUserSnapshotProvider
+{
+    IReadOnlyList<UserConfig> SnapshotUsers();
+}
+
+/// <summary>
 /// Outcome of <see cref="IUserStore.TryConsumeRecoveryCode"/>. The
 /// distinction matters at the endpoint layer: a <see cref="NotFound"/>
 /// is a wrong-code attempt (lockout counter must tick), while an
