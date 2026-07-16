@@ -70,7 +70,10 @@ internal static class TradingHostStartup
 
         var opts = scope.ServiceProvider.GetRequiredService<IOptions<IdentityDirectoryOptions>>().Value;
         if (!opts.ImportLegacyUsersOnStartup)
+        {
+            await ValidateEntraModeHasLinkedAdminAsync(app, directory);
             return;
+        }
 
         var legacy = scope.ServiceProvider.GetRequiredService<ILegacyUserSnapshotProvider>();
         var imports = legacy.SnapshotUsers()
@@ -81,7 +84,10 @@ internal static class TradingHostStartup
                 u.Role))
             .ToArray();
         if (imports.Length == 0)
+        {
+            await ValidateEntraModeHasLinkedAdminAsync(app, directory);
             return;
+        }
 
         var inserted = await directory.ImportLegacyUsersAsync(imports);
         app.Services.GetRequiredService<ILoggerFactory>()
@@ -90,6 +96,21 @@ internal static class TradingHostStartup
                 "Identity directory legacy import completed: {Inserted} inserted from {Seen} legacy user(s).",
                 inserted,
                 imports.Length);
+        await ValidateEntraModeHasLinkedAdminAsync(app, directory);
+    }
+
+    private static async Task ValidateEntraModeHasLinkedAdminAsync(WebApplication app, ITradingUserDirectory directory)
+    {
+        var auth = app.Services.GetRequiredService<IOptions<AuthOptions>>().Value;
+        if (auth.ResolveMode() != AuthModeKind.Entra)
+            return;
+
+        if (!await directory.HasActiveExternallyLinkedAdminAsync())
+        {
+            throw new InvalidOperationException(
+                "Trading:Auth:Mode=Entra requires at least one active admin with an explicit external identity binding. " +
+                "Use the documented Hybrid bootstrap or offline recovery procedure before switching to Entra.");
+        }
     }
 
     /// <summary>

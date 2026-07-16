@@ -50,6 +50,14 @@ public sealed class InMemoryTradingUserDirectory : ITradingUserDirectory
         }
     }
 
+    public Task<bool> HasActiveExternallyLinkedAdminAsync(CancellationToken ct = default)
+    {
+        lock (_gate)
+        {
+            return Task.FromResult(_users.Values.Any(IsUsableAdmin));
+        }
+    }
+
     public Task<int> ImportLegacyUsersAsync(IReadOnlyCollection<LegacyTradingUserImport> users, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(users);
@@ -131,6 +139,8 @@ public sealed class InMemoryTradingUserDirectory : ITradingUserDirectory
             var idx = user.Bindings.FindIndex(b => b.Id == bindingId);
             if (idx < 0)
                 throw new TradingUserDirectoryConflictException("External identity binding does not exist for the user.");
+            if (IsUsableAdmin(user) && user.Bindings.Count == 1 && CountUsableAdmins() <= 1)
+                throw new TradingUserDirectoryLastAdminException("Cannot unlink the last active externally linked admin.");
             var binding = user.Bindings[idx];
             user.Bindings.RemoveAt(idx);
             _bindingIds.Remove((binding.Issuer, binding.Subject));
@@ -150,6 +160,12 @@ public sealed class InMemoryTradingUserDirectory : ITradingUserDirectory
         lock (_gate)
         {
             var user = RequireUserAndVersion(tradingUserId, expectedRowVersion);
+            if (string.Equals(status, TradingUserDirectoryConstants.StatusDisabled, StringComparison.Ordinal)
+                && IsUsableAdmin(user)
+                && CountUsableAdmins() <= 1)
+            {
+                throw new TradingUserDirectoryLastAdminException("Cannot disable the last active externally linked admin.");
+            }
             user.Status = status;
             user.RowVersion++;
             user.UpdatedAt = DateTimeOffset.UtcNow;
@@ -171,6 +187,12 @@ public sealed class InMemoryTradingUserDirectory : ITradingUserDirectory
         lock (_gate)
         {
             var user = RequireUserAndVersion(tradingUserId, expectedRowVersion);
+            if (!string.Equals(role, TradingUserDirectoryConstants.RoleAdmin, StringComparison.Ordinal)
+                && IsUsableAdmin(user)
+                && CountUsableAdmins() <= 1)
+            {
+                throw new TradingUserDirectoryLastAdminException("Cannot downgrade the last active externally linked admin.");
+            }
             user.FirmId = firmId;
             user.Role = role;
             user.RowVersion++;
@@ -178,6 +200,49 @@ public sealed class InMemoryTradingUserDirectory : ITradingUserDirectory
         }
 
         return Task.CompletedTask;
+    }
+
+    public Task<RecoveryAdminResult> EnsureRecoveryAdminAsync(RecoveryAdminRequest request, CancellationToken ct = default)
+    {
+        ValidateRecoveryRequest(request);
+        lock (_gate)
+        {
+            var existingCollision = _users.Keys.FirstOrDefault(id =>
+                string.Equals(ProjectOwnerId(id), ProjectOwnerId(request.TradingUserId), StringComparison.Ordinal)
+                && !string.Equals(id, request.TradingUserId, StringComparison.Ordinal));
+            if (existingCollision is not null)
+                throw new TradingUserDirectoryValidationException("Recovery admin would create an end-client owner namespace collision.");
+
+            var now = DateTimeOffset.UtcNow;
+            var created = false;
+            if (!_users.TryGetValue(request.TradingUserId, out var user))
+            {
+                user = new MutableUser
+                {
+                    TradingUserId = request.TradingUserId,
+                    DisplayName = request.DisplayName,
+                    FirmId = request.FirmId,
+                    Status = TradingUserDirectoryConstants.StatusActive,
+                    Role = TradingUserDirectoryConstants.RoleAdmin,
+                    CreatedAt = now,
+                    UpdatedAt = now,
+                    RowVersion = 1,
+                };
+                _users.Add(request.TradingUserId, user);
+                created = true;
+            }
+            else
+            {
+                user.DisplayName = request.DisplayName;
+                user.FirmId = request.FirmId;
+                user.Status = TradingUserDirectoryConstants.StatusActive;
+                user.Role = TradingUserDirectoryConstants.RoleAdmin;
+                user.RowVersion++;
+                user.UpdatedAt = now;
+            }
+
+            return Task.FromResult(new RecoveryAdminResult(Snapshot(user), created, 0));
+        }
     }
 
     public Task<TradingUserDirectoryBackup> CreateBackupAsync(string destinationPath, CancellationToken ct = default)
@@ -216,6 +281,19 @@ public sealed class InMemoryTradingUserDirectory : ITradingUserDirectory
             throw new TradingUserDirectoryValidationException("Invalid trading user role.");
     }
 
+    internal static void ValidateRecoveryRequest(RecoveryAdminRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ValidateTradingUserId(request.TradingUserId);
+        if (string.IsNullOrWhiteSpace(request.DisplayName))
+            throw new TradingUserDirectoryValidationException("Recovery admin display name is required.");
+        ValidateFirmAndRole(request.FirmId, TradingUserDirectoryConstants.RoleAdmin);
+        if (string.IsNullOrWhiteSpace(request.Operator))
+            throw new TradingUserDirectoryValidationException("Recovery admin operator is required.");
+        if (string.IsNullOrWhiteSpace(request.ChangeTicket))
+            throw new TradingUserDirectoryValidationException("Recovery admin change ticket is required.");
+    }
+
     internal static void ValidateBinding(ExternalIdentityBindingRequest binding)
     {
         ArgumentNullException.ThrowIfNull(binding);
@@ -251,6 +329,13 @@ public sealed class InMemoryTradingUserDirectory : ITradingUserDirectory
             user.Bindings.OrderBy(b => b.Id).ToArray());
 
     private static string? BlankToNull(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
+
+    private long CountUsableAdmins() => _users.Values.LongCount(IsUsableAdmin);
+
+    private static bool IsUsableAdmin(MutableUser user) =>
+        string.Equals(user.Status, TradingUserDirectoryConstants.StatusActive, StringComparison.Ordinal)
+        && string.Equals(user.Role, TradingUserDirectoryConstants.RoleAdmin, StringComparison.Ordinal)
+        && user.Bindings.Count > 0;
 
     private sealed class MutableUser
     {

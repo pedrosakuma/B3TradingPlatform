@@ -29,6 +29,8 @@ internal sealed class AuthOptionsValidator : IValidateOptions<AuthOptions>
                 failures.Add("Trading:Auth:SignupEnabled cannot be true in Entra mode.");
             if (options.IsTotpEnabled())
                 failures.Add("Trading:Auth:TotpEnabled cannot be true in Entra mode.");
+            if (!options.IsExchangeEnabled())
+                failures.Add("Trading:Auth:ExchangeEnabled cannot be false in Entra mode.");
         }
         else if (mode == AuthModeKind.Hybrid
             && options.LocalLoginEnabled == false

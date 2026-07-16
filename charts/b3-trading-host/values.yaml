@@ -95,6 +95,25 @@ keyVault:
 # (shared across all seeded users, matching the b3deploy prod convention of
 # one shared seed password across dogfood accounts).
 auth:
+  # Local preserves pre-Entra behavior. Roll production through Hybrid, bind at
+  # least one admin, then switch to Entra; the app boot-guards Entra without an
+  # active externally linked admin.
+  mode: Local
+  localLoginEnabled: null
+  signupEnabled: null
+  totpEnabled: null
+  exchangeEnabled: null
+  externalIdentity:
+    issuerAlias: entra
+    authority: ""
+    metadataAddress: ""
+    issuer: ""
+    tenantId: ""
+    requireTenantId: true
+    audience: ""
+    requiredScope: ""
+    allowedClientApplicationIds: []
+    internalTokenLifetimeMinutes: 10
   users:
     - username: alice
       role: user

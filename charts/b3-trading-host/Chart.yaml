@@ -10,7 +10,7 @@ type: application
 # Chart version is released in lockstep with the image (see #568 versioning
 # contract): bump this whenever templates/values change, independent of
 # appVersion.
-version: 0.1.1
+version: 0.1.2
 # appVersion tracks the validated ghcr.io/pedrosakuma/b3-trading-host image
 # tag this chart was last verified against. Overridable per-release via
 # values.image.tag; this is metadata only (`helm.sh/chart` + `app.kubernetes.io/version`

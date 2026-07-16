@@ -1,4 +1,5 @@
 using System.Data;
+using System.Text.Json;
 using B3.Trading.Application.Identity;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
@@ -8,7 +9,7 @@ namespace B3.Trading.Infrastructure.Identity;
 
 public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
 {
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
 
     private readonly IdentityDirectoryOptions _options;
     private readonly ILogger<SqliteTradingUserDirectory> _logger;
@@ -58,7 +59,8 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
             }
 
             var version = await RunIntegrityChecksAsync(connection, ct).ConfigureAwait(false);
-            _lastHealth = new TradingUserDirectoryHealth(true, ProviderName, _options.Path, version, null);
+            var hasAdmin = await HasActiveExternallyLinkedAdminAsync(connection, null, ct).ConfigureAwait(false);
+            _lastHealth = new TradingUserDirectoryHealth(true, ProviderName, _options.Path, version, null, hasAdmin);
             _logger.LogInformation("SQLite identity directory ready at {Path} schema_version={SchemaVersion}.", _options.Path, version);
         }
         catch (Exception ex) when (ex is not TradingUserDirectoryUnsupportedSchemaException)
@@ -78,7 +80,8 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
         {
             await using var connection = OpenConnection(readOnly: true);
             var version = await RunIntegrityChecksAsync(connection, ct).ConfigureAwait(false);
-            _lastHealth = new TradingUserDirectoryHealth(true, ProviderName, _options.Path, version, null);
+            var hasAdmin = await HasActiveExternallyLinkedAdminAsync(connection, null, ct).ConfigureAwait(false);
+            _lastHealth = new TradingUserDirectoryHealth(true, ProviderName, _options.Path, version, null, hasAdmin);
         }
         catch (Exception ex)
         {
@@ -133,6 +136,12 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
         }
 
         return users;
+    }
+
+    public async Task<bool> HasActiveExternallyLinkedAdminAsync(CancellationToken ct = default)
+    {
+        await using var connection = OpenConnection(readOnly: true);
+        return await HasActiveExternallyLinkedAdminAsync(connection, null, ct).ConfigureAwait(false);
     }
 
     public async Task<int> ImportLegacyUsersAsync(IReadOnlyCollection<LegacyTradingUserImport> users, CancellationToken ct = default)
@@ -252,6 +261,8 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
             await using var connection = OpenConnection();
             await using var tx = await connection.BeginTransactionAsync(IsolationLevel.Serializable, ct).ConfigureAwait(false);
             await AdvanceRowVersionAsync(connection, tx, tradingUserId, expectedRowVersion, ct).ConfigureAwait(false);
+            if (await RemovingBindingWouldRemoveLastAdminAsync(connection, tx, tradingUserId, bindingId, ct).ConfigureAwait(false))
+                throw new TradingUserDirectoryLastAdminException("Cannot unlink the last active externally linked admin.");
             await using var cmd = connection.CreateCommand();
             cmd.Transaction = (SqliteTransaction)tx;
             cmd.CommandText = "DELETE FROM external_identities WHERE id = $id AND trading_user_id = $tradingUserId;";
@@ -274,7 +285,26 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
         if (!TradingUserDirectoryConstants.IsValidStatus(status))
             throw new TradingUserDirectoryValidationException("Invalid trading user status.");
 
-        await MutateUserAsync(tradingUserId, expectedRowVersion, "status = $value", ("$value", status), ct).ConfigureAwait(false);
+        await _writeGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await using var connection = OpenConnection();
+            await using var tx = await connection.BeginTransactionAsync(IsolationLevel.Serializable, ct).ConfigureAwait(false);
+            await EnsureUserVersionAsync(connection, tx, tradingUserId, expectedRowVersion, ct).ConfigureAwait(false);
+            if (string.Equals(status, TradingUserDirectoryConstants.StatusDisabled, StringComparison.Ordinal)
+                && await IsUserUsableAdminAsync(connection, tx, tradingUserId, ct).ConfigureAwait(false)
+                && await CountUsableAdminsAsync(connection, tx, ct).ConfigureAwait(false) <= 1)
+            {
+                throw new TradingUserDirectoryLastAdminException("Cannot disable the last active externally linked admin.");
+            }
+
+            await AdvanceRowVersionAsync(connection, tx, tradingUserId, expectedRowVersion, "status = $value", ("$value", status), ct).ConfigureAwait(false);
+            await tx.CommitAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _writeGate.Release();
+        }
     }
 
     public async Task SetFirmAndRoleAsync(string tradingUserId, string firmId, string role, long expectedRowVersion, CancellationToken ct = default)
@@ -287,6 +317,14 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
         {
             await using var connection = OpenConnection();
             await using var tx = await connection.BeginTransactionAsync(IsolationLevel.Serializable, ct).ConfigureAwait(false);
+            await EnsureUserVersionAsync(connection, tx, tradingUserId, expectedRowVersion, ct).ConfigureAwait(false);
+            if (!string.Equals(role, TradingUserDirectoryConstants.RoleAdmin, StringComparison.Ordinal)
+                && await IsUserUsableAdminAsync(connection, tx, tradingUserId, ct).ConfigureAwait(false)
+                && await CountUsableAdminsAsync(connection, tx, ct).ConfigureAwait(false) <= 1)
+            {
+                throw new TradingUserDirectoryLastAdminException("Cannot downgrade the last active externally linked admin.");
+            }
+
             await AdvanceRowVersionAsync(connection, tx, tradingUserId, expectedRowVersion, ct).ConfigureAwait(false);
 
             await using var roleCmd = connection.CreateCommand();
@@ -304,6 +342,107 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
             firmCmd.Parameters.AddWithValue("$id", tradingUserId);
             await firmCmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             await tx.CommitAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _writeGate.Release();
+        }
+    }
+
+    public async Task<RecoveryAdminResult> EnsureRecoveryAdminAsync(RecoveryAdminRequest request, CancellationToken ct = default)
+    {
+        InMemoryTradingUserDirectory.ValidateRecoveryRequest(request);
+
+        await _writeGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await using var connection = OpenConnection();
+            await using var tx = await connection.BeginTransactionAsync(IsolationLevel.Serializable, ct).ConfigureAwait(false);
+            await RejectExistingOwnerNamespaceCollisionsAsync(connection, tx, new[]
+            {
+                new LegacyTradingUserImport(
+                    request.TradingUserId,
+                    request.DisplayName,
+                    request.FirmId,
+                    TradingUserDirectoryConstants.RoleAdmin),
+            }, ct).ConfigureAwait(false);
+            var now = FormatTimestamp(DateTimeOffset.UtcNow);
+            var created = !await UserExistsAsync(connection, tx, request.TradingUserId, ct).ConfigureAwait(false);
+            if (created)
+            {
+                await using var insert = connection.CreateCommand();
+                insert.Transaction = (SqliteTransaction)tx;
+                insert.CommandText = """
+                    INSERT INTO users (trading_user_id, display_name, firm_id, status, created_at, updated_at, row_version)
+                    VALUES ($id, $display, $firm, 'active', $created, $updated, 1);
+                    """;
+                insert.Parameters.AddWithValue("$id", request.TradingUserId);
+                insert.Parameters.AddWithValue("$display", request.DisplayName);
+                insert.Parameters.AddWithValue("$firm", request.FirmId);
+                insert.Parameters.AddWithValue("$created", now);
+                insert.Parameters.AddWithValue("$updated", now);
+                await insert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+
+                await using var role = connection.CreateCommand();
+                role.Transaction = (SqliteTransaction)tx;
+                role.CommandText = "INSERT INTO user_roles (trading_user_id, role) VALUES ($id, 'admin');";
+                role.Parameters.AddWithValue("$id", request.TradingUserId);
+                await role.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+            else
+            {
+                await using var update = connection.CreateCommand();
+                update.Transaction = (SqliteTransaction)tx;
+                update.CommandText = """
+                    UPDATE users
+                    SET display_name = $display,
+                        firm_id = $firm,
+                        status = 'active',
+                        row_version = row_version + 1,
+                        updated_at = $updated
+                    WHERE trading_user_id = $id COLLATE BINARY;
+                    """;
+                update.Parameters.AddWithValue("$display", request.DisplayName);
+                update.Parameters.AddWithValue("$firm", request.FirmId);
+                update.Parameters.AddWithValue("$updated", now);
+                update.Parameters.AddWithValue("$id", request.TradingUserId);
+                await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+
+                await using var role = connection.CreateCommand();
+                role.Transaction = (SqliteTransaction)tx;
+                role.CommandText = """
+                    INSERT INTO user_roles (trading_user_id, role)
+                    VALUES ($id, 'admin')
+                    ON CONFLICT(trading_user_id) DO UPDATE SET role = 'admin';
+                    """;
+                role.Parameters.AddWithValue("$id", request.TradingUserId);
+                await role.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+
+            var metadata = JsonSerializer.Serialize(new
+            {
+                created,
+                firm_id = request.FirmId,
+                display_name = request.DisplayName,
+            });
+            var eventId = await InsertMaintenanceEventAsync(
+                connection,
+                tx,
+                "identity.recovery_admin.ensure",
+                request.Operator,
+                request.ChangeTicket,
+                request.TradingUserId,
+                metadata,
+                ct).ConfigureAwait(false);
+
+            var user = await LoadUserAsync(connection, request.TradingUserId, ct).ConfigureAwait(false)
+                ?? throw new TradingUserDirectoryUnavailableException("Recovery admin row was not readable after mutation.");
+            await tx.CommitAsync(ct).ConfigureAwait(false);
+            return new RecoveryAdminResult(user, created, eventId);
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 19)
+        {
+            throw new TradingUserDirectoryConflictException("Recovery admin violates directory constraints.");
         }
         finally
         {
@@ -381,6 +520,11 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
                 throw new TradingUserDirectoryUnsupportedSchemaException(max, CurrentSchemaVersion);
             if (max == CurrentSchemaVersion)
                 return;
+            if (max == 1)
+            {
+                await ExecuteNonQueryAsync(connection, Migration002, ct: ct).ConfigureAwait(false);
+                return;
+            }
 
             throw new TradingUserDirectoryUnavailableException("Identity schema_migrations exists without a supported version.");
         }
@@ -389,6 +533,7 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
             throw new TradingUserDirectoryUnavailableException("Unversioned identity database contains pre-existing managed tables.");
 
         await ExecuteNonQueryAsync(connection, Migration001, ct: ct).ConfigureAwait(false);
+        await ExecuteNonQueryAsync(connection, Migration002, ct: ct).ConfigureAwait(false);
     }
 
     private async Task<int> RunIntegrityChecksAsync(SqliteConnection connection, CancellationToken ct)
@@ -468,7 +613,7 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
 
     private static async Task<bool> AnyManagedDataTableExistsAsync(SqliteConnection connection, CancellationToken ct)
     {
-        foreach (var table in new[] { "users", "external_identities", "user_roles" })
+        foreach (var table in new[] { "users", "external_identities", "user_roles", "maintenance_events" })
         {
             if (await TableExistsAsync(connection, table, ct).ConfigureAwait(false))
                 return true;
@@ -507,6 +652,14 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
         await RequireColumnsAsync(connection, "user_roles", ct,
             new RequiredColumn("trading_user_id", "TEXT", NotNull: true, PrimaryKey: true),
             new RequiredColumn("role", "TEXT", NotNull: true, PrimaryKey: false)).ConfigureAwait(false);
+        await RequireColumnsAsync(connection, "maintenance_events", ct,
+            new RequiredColumn("id", "INTEGER", NotNull: false, PrimaryKey: true),
+            new RequiredColumn("event_type", "TEXT", NotNull: true, PrimaryKey: false),
+            new RequiredColumn("operator_id", "TEXT", NotNull: true, PrimaryKey: false),
+            new RequiredColumn("change_ticket", "TEXT", NotNull: true, PrimaryKey: false),
+            new RequiredColumn("target_trading_user_id", "TEXT", NotNull: true, PrimaryKey: false),
+            new RequiredColumn("metadata_json", "TEXT", NotNull: true, PrimaryKey: false),
+            new RequiredColumn("created_at", "TEXT", NotNull: true, PrimaryKey: false)).ConfigureAwait(false);
 
         if (!await HasBinaryNonPartialUniqueIndexAsync(connection, "external_identities", ct, "issuer", "subject").ConfigureAwait(false))
             throw new TradingUserDirectoryUnavailableException("Identity schema is missing non-partial BINARY UNIQUE(issuer, subject).");
@@ -735,6 +888,119 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
         }
     }
 
+    private static async Task<bool> HasActiveExternallyLinkedAdminAsync(
+        SqliteConnection connection,
+        System.Data.Common.DbTransaction? tx,
+        CancellationToken ct) =>
+        await CountUsableAdminsAsync(connection, tx, ct).ConfigureAwait(false) > 0;
+
+    private static async Task<long> CountUsableAdminsAsync(
+        SqliteConnection connection,
+        System.Data.Common.DbTransaction? tx,
+        CancellationToken ct)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.Transaction = (SqliteTransaction?)tx;
+        cmd.CommandText = """
+            SELECT COUNT(DISTINCT u.trading_user_id)
+            FROM users u
+            JOIN user_roles r ON r.trading_user_id = u.trading_user_id
+            JOIN external_identities e ON e.trading_user_id = u.trading_user_id
+            WHERE u.status = 'active'
+              AND r.role = 'admin';
+            """;
+        return Convert.ToInt64(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false));
+    }
+
+    private static async Task<bool> IsUserUsableAdminAsync(
+        SqliteConnection connection,
+        System.Data.Common.DbTransaction tx,
+        string tradingUserId,
+        CancellationToken ct)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.Transaction = (SqliteTransaction)tx;
+        cmd.CommandText = """
+            SELECT 1
+            FROM users u
+            JOIN user_roles r ON r.trading_user_id = u.trading_user_id
+            WHERE u.trading_user_id = $id COLLATE BINARY
+              AND u.status = 'active'
+              AND r.role = 'admin'
+              AND EXISTS (
+                  SELECT 1 FROM external_identities e
+                  WHERE e.trading_user_id = u.trading_user_id
+              );
+            """;
+        cmd.Parameters.AddWithValue("$id", tradingUserId);
+        return await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false) is not null;
+    }
+
+    private static async Task<bool> RemovingBindingWouldRemoveLastAdminAsync(
+        SqliteConnection connection,
+        System.Data.Common.DbTransaction tx,
+        string tradingUserId,
+        long bindingId,
+        CancellationToken ct)
+    {
+        if (!await IsUserUsableAdminAsync(connection, tx, tradingUserId, ct).ConfigureAwait(false))
+            return false;
+
+        await using var bindingCount = connection.CreateCommand();
+        bindingCount.Transaction = (SqliteTransaction)tx;
+        bindingCount.CommandText = """
+            SELECT COUNT(*)
+            FROM external_identities
+            WHERE trading_user_id = $id COLLATE BINARY;
+            """;
+        bindingCount.Parameters.AddWithValue("$id", tradingUserId);
+        var count = Convert.ToInt64(await bindingCount.ExecuteScalarAsync(ct).ConfigureAwait(false));
+        if (count != 1)
+            return false;
+
+        await using var bindingExists = connection.CreateCommand();
+        bindingExists.Transaction = (SqliteTransaction)tx;
+        bindingExists.CommandText = """
+            SELECT 1
+            FROM external_identities
+            WHERE id = $bindingId
+              AND trading_user_id = $id COLLATE BINARY;
+            """;
+        bindingExists.Parameters.AddWithValue("$bindingId", bindingId);
+        bindingExists.Parameters.AddWithValue("$id", tradingUserId);
+        if (await bindingExists.ExecuteScalarAsync(ct).ConfigureAwait(false) is null)
+            return false;
+
+        return await CountUsableAdminsAsync(connection, tx, ct).ConfigureAwait(false) <= 1;
+    }
+
+    private static async Task<long> InsertMaintenanceEventAsync(
+        SqliteConnection connection,
+        System.Data.Common.DbTransaction tx,
+        string eventType,
+        string operatorId,
+        string changeTicket,
+        string targetTradingUserId,
+        string metadataJson,
+        CancellationToken ct)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.Transaction = (SqliteTransaction)tx;
+        cmd.CommandText = """
+            INSERT INTO maintenance_events
+                (event_type, operator_id, change_ticket, target_trading_user_id, metadata_json, created_at)
+            VALUES ($eventType, $operator, $ticket, $target, $metadata, $createdAt)
+            RETURNING id;
+            """;
+        cmd.Parameters.AddWithValue("$eventType", eventType);
+        cmd.Parameters.AddWithValue("$operator", operatorId);
+        cmd.Parameters.AddWithValue("$ticket", changeTicket);
+        cmd.Parameters.AddWithValue("$target", targetTradingUserId);
+        cmd.Parameters.AddWithValue("$metadata", metadataJson);
+        cmd.Parameters.AddWithValue("$createdAt", FormatTimestamp(DateTimeOffset.UtcNow));
+        return Convert.ToInt64(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false));
+    }
+
     private static async Task AdvanceRowVersionAsync(
         SqliteConnection connection,
         System.Data.Common.DbTransaction tx,
@@ -744,6 +1010,24 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
         string? additionalSet = null)
     {
         await AdvanceRowVersionAsync(connection, tx, tradingUserId, expectedRowVersion, additionalSet, default, ct).ConfigureAwait(false);
+    }
+
+    private static async Task EnsureUserVersionAsync(
+        SqliteConnection connection,
+        System.Data.Common.DbTransaction tx,
+        string tradingUserId,
+        long expectedRowVersion,
+        CancellationToken ct)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.Transaction = (SqliteTransaction)tx;
+        cmd.CommandText = "SELECT row_version FROM users WHERE trading_user_id = $id COLLATE BINARY;";
+        cmd.Parameters.AddWithValue("$id", tradingUserId);
+        var rowVersion = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
+        if (rowVersion is null)
+            throw new TradingUserDirectoryConflictException("Trading user does not exist.");
+        if (Convert.ToInt64(rowVersion) != expectedRowVersion)
+            throw new TradingUserDirectoryConcurrencyException("Trading user row version is stale.");
     }
 
     private static async Task AdvanceRowVersionAsync(
@@ -853,5 +1137,20 @@ public sealed class SqliteTradingUserDirectory : ITradingUserDirectory
 
         INSERT OR IGNORE INTO schema_migrations (version, applied_at)
         VALUES (1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+        """;
+
+    private const string Migration002 = """
+        CREATE TABLE IF NOT EXISTS maintenance_events (
+            id                     INTEGER PRIMARY KEY,
+            event_type             TEXT NOT NULL CHECK (length(event_type) > 0),
+            operator_id            TEXT NOT NULL CHECK (length(operator_id) > 0),
+            change_ticket          TEXT NOT NULL CHECK (length(change_ticket) > 0),
+            target_trading_user_id TEXT NOT NULL CHECK (length(target_trading_user_id) BETWEEN 1 AND 64),
+            metadata_json          TEXT NOT NULL CHECK (length(metadata_json) > 0),
+            created_at             TEXT NOT NULL
+        );
+
+        INSERT OR IGNORE INTO schema_migrations (version, applied_at)
+        VALUES (2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
         """;
 }

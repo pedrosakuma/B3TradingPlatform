@@ -21,6 +21,39 @@ For alert rules in Prometheus / AlertManager YAML form see
 
 ---
 
+## 0. Entra identity provisioning and local-auth retirement (#609)
+
+### Hybrid rollout
+
+1. Keep `Trading:Auth:Mode=Local` until the SQLite directory imports current
+   `alice`/`bob`/admin owner IDs and `/health.identityDirectory.ready=true`.
+2. If no admin is seeded, add one temporary legacy admin through Key Vault
+   `Trading:Auth:Users` password hash/salt, not signup. Start once in Local so
+   import preserves the exact `tradingUserId`.
+3. Switch to `Hybrid` with signup disabled. Login with the local admin and call
+   `POST /admin/identity/users/{id}/external-bindings` with the internal admin
+   JWT in `Authorization` and the Entra access token in JSON body.
+4. Exchange with `/auth/exchange`, bind existing `alice`/`bob`, verify their
+   orders/positions/history remain under the same owner IDs, then disable local
+   login/TOTP and switch to `Entra`.
+
+### Break-glass
+
+There is no HTTP break-glass endpoint. Restrict ingress, scale the writer down,
+then run the same-image CLI against the PVC:
+
+```bash
+dotnet /app/tools/identity-maintenance/B3.Trading.IdentityMaintenance.dll recover-admin \
+  --database /var/lib/b3trading/identity/users.db \
+  --trading-user-id admin --display-name "Recovery admin" --firm-id FIRM01 \
+  --operator <operator> --change-ticket <ticket>
+```
+
+Inject the matching temporary password only via Key Vault legacy auth config.
+Repair/bind an Entra admin, verify exchange, return to `Entra`, and remove the
+temporary credential after the rollback window. Public signup/JIT provisioning
+is never used. Entra-managed factors supersede #319 for public human auth.
+
 ## 1. Perf hardening v0 — what to watch
 
 The perf-hardening v0 RFC ([`rfcs/perf-hardening-v0.md`](rfcs/perf-hardening-v0.md))
