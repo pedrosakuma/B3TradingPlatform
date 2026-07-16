@@ -26,8 +26,9 @@ public interface IEventStore : IAsyncDisposable
     /// Synchronously assigns a sequence number to <paramref name="evt"/> and
     /// queues it for the background writer. Throws
     /// <see cref="WalBackpressureException"/> when the bounded queue is
-    /// full — callers should surface that as a structured "system busy"
-    /// rejection rather than block.
+    /// full, or <see cref="WalFaultedException"/> after a terminal writer
+    /// failure. Callers should fail closed rather than mutate state without
+    /// the durable event.
     /// </summary>
     long Append(WalEvent evt);
 
@@ -62,7 +63,23 @@ public interface IEventStore : IAsyncDisposable
     IAsyncEnumerable<(long Seq, WalEvent Event)> ReadFromAsync(long sinceSeqExclusive, CancellationToken ct = default);
 }
 
+/// <summary>
+/// Read-only health surface for the active WAL implementation.
+/// A terminal writer fault is permanent for the lifetime of the store.
+/// </summary>
+public interface IEventStoreHealth
+{
+    bool IsHealthy { get; }
+    Exception? TerminalFault { get; }
+}
+
 public sealed class WalBackpressureException : Exception
 {
     public WalBackpressureException(string message) : base(message) { }
+}
+
+public sealed class WalFaultedException : IOException
+{
+    public WalFaultedException(string message, Exception innerException)
+        : base(message, innerException) { }
 }

@@ -103,59 +103,35 @@ public sealed class EntryPointExecutionReportRouter : IDisposable
                 bookTouch = BookTouchSnapshot.Capture(_bookTop, symbol, DateTimeOffset.UtcNow);
         }
 
-        try
-        {
-            // RFC §5.2 (F2). Use the outcome-capture Dispatch overload:
-            // the apply callback records the resulting ExecutionEvent(s)
-            // onto the supplied writer, and the dispatcher TryWrites
-            // each entry into every per-sink fan-out channel WHILE
-            // STILL HOLDING the dispatcher lock. Per-sink drain order
-            // therefore matches WAL append order even though the
-            // expensive publish work (subscriber walk + DTO build for
-            // the WS hub; SBE encode + outbound enqueue for the bot
-            // router) runs OFF the lock on each sink's drain thread.
-            _dispatcher.Dispatch(
-                new ExecutionReportReceivedEvent
-                {
-                    ClOrdId = er.ClOrdId,
-                    ExecKind = kind.ToString(),
-                    LeavesQuantity = er.LeavesQuantity,
-                    CumulativeQuantity = er.CumulativeQuantity,
-                    LastQuantity = er.LastQuantity,
-                    LastPrice = er.LastPrice,
-                    RejectReason = er.RejectReason,
-                    Synthetic = false,
-                    OrigClOrdId = er.OrigClOrdId,
-                    FirmId = er.FirmId,
-                    BookTouch = bookTouch,
-                },
-                fanOut => _processor.Apply(er.ClOrdId, kind, er.LeavesQuantity, er.CumulativeQuantity,
-                    er.LastQuantity, er.LastPrice, er.RejectReason, er.OrigClOrdId, fanOut, envelopeFirmId: er.FirmId, bookTouch: bookTouch));
-        }
-        catch (WalBackpressureException)
-        {
-            MetricsRegistry.WalBackpressure.Add(1,
-                new KeyValuePair<string, object?>("call_site", "er.router"));
-            // ER inbound is single-direction — losing audit on backpressure
-            // is preferable to dropping the state mutation. Apply directly
-            // (legacy synchronous-publish path: no fanOut writer); this is
-            // a "log dropped, state intact" branch and shows up in metrics
-            // as a backpressure event.
-            //
-            // Pass-2 review (#278) P1#1. Take the dispatcher lock for the
-            // whole fallback Apply via RunExclusive so the same
-            // serialisation discipline that the regular Dispatch path
-            // gives us still holds: nested Dispatch calls for derived
-            // fee/PnL events (reentrant on this thread) interleave
-            // safely with concurrent live ER dispatches on other
-            // threads, and there is no AB-BA inversion against any
-            // downstream lock the keepers take. The WAL append is
-            // intentionally skipped here — we are at backpressure —
-            // so holding the dispatcher lock involves no I/O.
-            _dispatcher.RunExclusive(() =>
-                _processor.Apply(er.ClOrdId, kind, er.LeavesQuantity, er.CumulativeQuantity,
-                    er.LastQuantity, er.LastPrice, er.RejectReason, er.OrigClOrdId, envelopeFirmId: er.FirmId, bookTouch: bookTouch));
-        }
+        // RFC §5.2 (F2). Use the outcome-capture Dispatch overload:
+        // the apply callback records the resulting ExecutionEvent(s)
+        // onto the supplied writer, and the dispatcher TryWrites
+        // each entry into every per-sink fan-out channel WHILE
+        // STILL HOLDING the dispatcher lock. Per-sink drain order
+        // therefore matches WAL append order even though the
+        // expensive publish work (subscriber walk + DTO build for
+        // the WS hub; SBE encode + outbound enqueue for the bot
+        // router) runs OFF the lock on each sink's drain thread.
+        //
+        // WAL rejection deliberately propagates. Applying an ER without
+        // its durable event would make a Fill visible only in memory.
+        _dispatcher.Dispatch(
+            new ExecutionReportReceivedEvent
+            {
+                ClOrdId = er.ClOrdId,
+                ExecKind = kind.ToString(),
+                LeavesQuantity = er.LeavesQuantity,
+                CumulativeQuantity = er.CumulativeQuantity,
+                LastQuantity = er.LastQuantity,
+                LastPrice = er.LastPrice,
+                RejectReason = er.RejectReason,
+                Synthetic = false,
+                OrigClOrdId = er.OrigClOrdId,
+                FirmId = er.FirmId,
+                BookTouch = bookTouch,
+            },
+            fanOut => _processor.Apply(er.ClOrdId, kind, er.LeavesQuantity, er.CumulativeQuantity,
+                er.LastQuantity, er.LastPrice, er.RejectReason, er.OrigClOrdId, fanOut, envelopeFirmId: er.FirmId, bookTouch: bookTouch));
     }
 
     // #432. BusinessReject is replay-inert (no order state mutation), so the

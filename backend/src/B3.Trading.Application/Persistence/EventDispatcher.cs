@@ -226,27 +226,10 @@ public sealed class EventDispatcher
     }
 
     /// <summary>
-    /// Pass-2 review (#278) P1#1. Runs <paramref name="body"/> under the
-    /// dispatcher lock without an accompanying WAL append. Used by the
-    /// ER router's WAL-backpressure fallback path: when the regular
-    /// <see cref="Dispatch(WalEvent, Action{ExecutionFanOut})"/> throws
-    /// <see cref="WalBackpressureException"/>, the lock has already
-    /// been released, so re-invoking <see cref="ExecutionReportProcessor.Apply"/>
-    /// directly would mutate state — and may itself nest a
-    /// <see cref="Dispatch(WalEvent, Action)"/> for fees / realised
-    /// P&amp;L — without dispatcher serialisation. That opens an AB-BA
-    /// deadlock window against any per-key lock taken inside the
-    /// nested dispatch (and a running-total race even without
-    /// per-key locks).
-    ///
-    /// <para>
-    /// The lock is reentrant (<see cref="System.Threading.Monitor"/>),
-    /// so the nested <c>Dispatch</c> calls inside the body re-acquire
-    /// it on the same thread without blocking. Holding the lock here
-    /// is safe because no I/O happens — the WAL append is being
-    /// SKIPPED on the fallback path; we are only mutating in-memory
-    /// state and may nest channel TryWrites for derived events.
-    /// </para>
+    /// Runs <paramref name="body"/> under the dispatcher lock without an
+    /// accompanying WAL append. Reserved for consistent read/capture work
+    /// and recovery coordination; durable live mutations must use
+    /// <see cref="Dispatch(WalEvent, Action)"/>.
     /// </summary>
     public void RunExclusive(Action body)
     {

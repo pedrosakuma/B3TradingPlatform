@@ -154,7 +154,13 @@ public static class OrdersEndpoints
                         statusCode: StatusCodes.Status502BadGateway),
                 OrderSubmissionResultKind.WalBackpressure =>
                     Results.Json(
-                        new { error = "system busy (WAL backpressure)", detail = result.Reason },
+                        new
+                        {
+                            error = result.Code == "wal_faulted"
+                                ? "service unavailable (WAL faulted)"
+                                : "system busy (WAL backpressure)",
+                            detail = result.Reason,
+                        },
                         statusCode: StatusCodes.Status503ServiceUnavailable),
                 OrderSubmissionResultKind.Drained =>
                     Results.Json(
@@ -334,4 +340,3 @@ public sealed record ModifyOrderRequest(
     decimal? StopPrice = null,
     /// <summary>Q1.1 (#253). Optional override; null = keep original (or auto-cleared when TIF is moved away from <c>GTD</c>). Required when changing TIF to <c>GTD</c>.</summary>
     DateTimeOffset? GoodTillDate = null);
-

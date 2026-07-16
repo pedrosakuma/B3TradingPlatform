@@ -231,6 +231,11 @@ public sealed class OrderSubmissionService
                 new KeyValuePair<string, object?>("firmId", req.FirmId));
             return OrderSubmissionResult.WalBackpressure(ex.Message);
         }
+        catch (WalFaultedException ex)
+        {
+            _logger.LogCritical(ex, "WAL is faulted; refusing order submit for firm {FirmId}.", req.FirmId);
+            return OrderSubmissionResult.WalFaulted(ex.Message);
+        }
 
         // OPT-F (#488). Classify the symbol so equity vs option flow
         // can be split on dashboards. SymbolDirectory is optional —
@@ -313,7 +318,8 @@ public sealed class OrderSubmissionService
                 new KeyValuePair<string, object?>("reason", reason),
                 new KeyValuePair<string, object?>("code", code),
                 new KeyValuePair<string, object?>("firmId", req.FirmId));
-            PublishSyntheticRejection(order, reason);
+            var walFailure = PublishSyntheticRejection(order, reason);
+            if (walFailure is not null) return walFailure;
             return OrderSubmissionResult.Rejected(clOrdId, reason, code);
         }
 
@@ -327,9 +333,12 @@ public sealed class OrderSubmissionService
         {
             MetricsRegistry.OrdersGatewayFailed.Add(1,
                 new KeyValuePair<string, object?>("firmId", req.FirmId));
-            _logger.LogError(ex, "Gateway submit failed for {ClOrdId}; synthesizing rejection.", clOrdId);
+            _logger.LogError(ex,
+                "Gateway submit failed for {ClOrdId}; attempting durable synthetic rejection.",
+                clOrdId);
             if (marginReserved) _margin.ReleaseReservation(clOrdId);
-            PublishSyntheticRejection(order, "gateway_unavailable");
+            var walFailure = PublishSyntheticRejection(order, "gateway_unavailable");
+            if (walFailure is not null) return walFailure;
             return OrderSubmissionResult.GatewayFailed(clOrdId, ex);
         }
 
@@ -359,7 +368,7 @@ public sealed class OrderSubmissionService
         return OrderSubmissionResult.Accepted(clOrdId);
     }
 
-    private void PublishSyntheticRejection(Order order, string reason)
+    private OrderSubmissionResult? PublishSyntheticRejection(Order order, string reason)
     {
         try
         {
@@ -383,14 +392,18 @@ public sealed class OrderSubmissionService
                         order.LeavesQuantity, order.CumulativeQuantity, 0, 0m,
                         reason, DateTimeOffset.UtcNow, IsNativeStp: false, FirmId: order.FirmId));
                 });
+            return null;
         }
-        catch (WalBackpressureException)
+        catch (WalBackpressureException ex)
         {
-            order.MarkRejected();
-            _sink.Publish(new ExecutionEvent(
-                order.Owner, order.ClOrdId, order.Symbol, order.Side, order.Status, ExecKind.Rejected,
-                order.LeavesQuantity, order.CumulativeQuantity, 0, 0m,
-                reason, DateTimeOffset.UtcNow, IsNativeStp: false, FirmId: order.FirmId));
+            return OrderSubmissionResult.WalBackpressure(ex.Message);
+        }
+        catch (WalFaultedException ex)
+        {
+            _logger.LogCritical(ex,
+                "WAL fault prevented durable synthetic rejection for {ClOrdId}; leaving order non-terminal.",
+                order.ClOrdId);
+            return OrderSubmissionResult.WalFaulted(ex.Message);
         }
     }
 }
@@ -511,6 +524,8 @@ public sealed class OrderSubmissionResult
         new(OrderSubmissionResultKind.GatewayFailed, clOrdId, "gateway_unavailable", "gateway_unavailable", ex);
     public static OrderSubmissionResult WalBackpressure(string detail) =>
         new(OrderSubmissionResultKind.WalBackpressure, 0, detail, "wal_backpressure", null);
+    public static OrderSubmissionResult WalFaulted(string detail) =>
+        new(OrderSubmissionResultKind.WalBackpressure, 0, detail, "wal_faulted", null);
     public static OrderSubmissionResult BadRequest(string reason) =>
         new(OrderSubmissionResultKind.BadRequest, 0, reason, "bad_request", null);
     public static OrderSubmissionResult Drained { get; } =

@@ -1,4 +1,5 @@
 using System.Net.Http.Json;
+using System.Net;
 using System.Text.Json;
 using B3.Trading.Infrastructure;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -73,6 +74,9 @@ public class HealthSessionStatusTests
         Assert.Equal("established", firms[0].GetProperty("state").GetString());
         Assert.False(firms[0].GetProperty("reconnecting").GetBoolean());
         Assert.Equal(7u, firms[0].GetProperty("sessionVerId").GetUInt32());
+
+        var ready = await client.GetAsync("/ready");
+        Assert.Equal(HttpStatusCode.OK, ready.StatusCode);
     }
 
     [Fact]
@@ -97,15 +101,17 @@ public class HealthSessionStatusTests
         var firms = exchange.GetProperty("firms");
         Assert.Equal("suspended", firms[1].GetProperty("state").GetString());
         Assert.True(firms[1].GetProperty("reconnecting").GetBoolean());
+
+        var ready = await client.GetAsync("/ready");
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, ready.StatusCode);
+
+        var live = await client.GetAsync("/live");
+        Assert.Equal(HttpStatusCode.OK, live.StatusCode);
     }
 
     [Fact]
-    public async Task EmptyFirmList_ReadyTrue_DoesNotBlockOnVacuouslyTrueAnd()
+    public async Task EmptyFirmList_IsNotReady_WhenConfiguredFirmSessionIsMissing()
     {
-        // Defensive: a registered provider that happens to return zero
-        // firms (transient registration race or a future per-firm
-        // reload) should not flip readyForOrders to false. The AND over
-        // an empty set is vacuously true, matching the no-provider path.
         using var factory = WithProvider(new FakeProvider());
         using var client = factory.CreateClient();
 
@@ -113,7 +119,10 @@ public class HealthSessionStatusTests
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
         var exchange = doc.RootElement.GetProperty("exchange");
 
-        Assert.True(exchange.GetProperty("readyForOrders").GetBoolean());
+        Assert.False(exchange.GetProperty("readyForOrders").GetBoolean());
         Assert.Equal(0, exchange.GetProperty("firms").GetArrayLength());
+
+        var ready = await client.GetAsync("/ready");
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, ready.StatusCode);
     }
 }

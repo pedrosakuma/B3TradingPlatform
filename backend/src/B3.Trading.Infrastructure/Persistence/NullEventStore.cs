@@ -8,11 +8,13 @@ namespace B3.Trading.Infrastructure.Persistence;
 /// integration tests, ephemeral demos, and the existing
 /// <c>WebApplicationFactory</c>-based suite stay file-system free.
 /// </summary>
-public sealed class NullEventStore : IEventStore
+public sealed class NullEventStore : IEventStore, IEventStoreHealth
 {
     private long _seq;
 
     public long CurrentSeq => Interlocked.Read(ref _seq);
+    public bool IsHealthy => true;
+    public Exception? TerminalFault => null;
 
     public long Append(WalEvent evt) => Interlocked.Increment(ref _seq);
 
