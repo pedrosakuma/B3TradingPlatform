@@ -75,6 +75,14 @@ public static class TotpEndpoints
             if (user.Totp is { EnrolledAt: not null })
                 return Results.Conflict(new { error = "2fa already enrolled; disable first" });
 
+            if (enrollmentToken is not null
+                && (!challenges.TryConsume(enrollmentToken, TotpChallengeKind.ForceEnroll, out var consumed)
+                    || consumed is null
+                    || !string.Equals(consumed.Username, user.Username, StringComparison.OrdinalIgnoreCase)))
+            {
+                return Results.Json(new { error = "unauthorized" }, statusCode: StatusCodes.Status401Unauthorized);
+            }
+
             var options = opts.Value;
             var secret = totp.GenerateBase32Secret();
             var uri = totp.BuildOtpAuthUri(options.Issuer, user.Username, secret);
@@ -87,12 +95,9 @@ public static class TotpEndpoints
                 RecoveryCodeHashes: hashes,
                 CreatedAt: TimeProviderFor(http).GetUtcNow()));
 
-            // ForceEnroll token is consumed once enroll is issued —
-            // client must keep the JWT-less ride going via the standard
-            // /auth/2fa/verify (JWT mode is the alternative for already-
-            // logged-in users).
-            if (enrollmentToken is not null)
-                challenges.Invalidate(enrollmentToken);
+            var verificationToken = enrollmentToken is null
+                ? null
+                : challenges.Issue(user.Username, TotpChallengeKind.VerifyEnrollment);
 
             audit.Log(new AuditLogEvent
             {
@@ -112,7 +117,8 @@ public static class TotpEndpoints
             return Results.Ok(new EnrollResponse(
                 Secret: secret,
                 OtpauthUri: uri,
-                RecoveryCodes: codes));
+                RecoveryCodes: codes,
+                TotpChallengeToken: verificationToken));
         });
 
         app.MapPost("/auth/2fa/verify", async (
@@ -137,7 +143,18 @@ public static class TotpEndpoints
             if (!string.IsNullOrEmpty(req.TotpChallengeToken))
             {
                 var ch = challenges.Peek(req.TotpChallengeToken);
-                if (ch is null || ch.Kind != TotpChallengeKind.Verify)
+                if (ch is null)
+                    return Results.Json(new { error = "invalid or expired challenge" },
+                        statusCode: StatusCodes.Status401Unauthorized);
+
+                if (ch.Kind == TotpChallengeKind.VerifyEnrollment)
+                {
+                    return await CompleteForcedEnrollmentAsync(
+                        http, req, ch, users, sessionIssuer, pending, challenges,
+                        lockout, totp, protector, audit, ct);
+                }
+
+                if (ch.Kind != TotpChallengeKind.Verify)
                     return Results.Json(new { error = "invalid or expired challenge" },
                         statusCode: StatusCodes.Status401Unauthorized);
 
@@ -166,32 +183,13 @@ public static class TotpEndpoints
                 }
 
                 var (totpOk, matchedStep) = totp.Verify(base32, req.Code);
-                if (totpOk)
-                {
-                    // Atomic replay guard: persist matchedStep only if it
-                    // is strictly greater than the prior step. Two
-                    // concurrent verifies presenting the same valid code
-                    // race here; exactly one wins, the loser is treated
-                    // as an invalid-code attempt (lockout counter ticks).
-                    if (!users.TryRecordTotpUse(ch.Username, matchedStep, out _))
-                    {
-                        lockout.RecordFailure(ch.Username);
-                        return Results.Json(new { error = "invalid code" },
-                            statusCode: StatusCodes.Status401Unauthorized);
-                    }
-                }
+                var recoveryHash = totpOk ? null : totp.HashRecoveryCode(req.Code);
+                var recoveryCandidate = recoveryHash is not null
+                    && user.Totp.RecoveryCodes.Contains(recoveryHash, StringComparer.Ordinal);
+                var recoveryAlreadyConsumed = recoveryHash is not null
+                    && user.Totp.ConsumedRecoveryCodes.Contains(recoveryHash, StringComparer.Ordinal);
 
-                var recoveryOk = false;
-                var recoveryAlreadyConsumed = false;
-                if (!totpOk)
-                {
-                    var consumeResult = users.TryConsumeRecoveryCode(
-                        user.Username, totp.HashRecoveryCode(req.Code), out _);
-                    recoveryOk = consumeResult == RecoveryCodeConsumeResult.Consumed;
-                    recoveryAlreadyConsumed = consumeResult == RecoveryCodeConsumeResult.AlreadyConsumed;
-                }
-
-                if (!totpOk && !recoveryOk)
+                if (!totpOk && !recoveryCandidate)
                 {
                     // Race-loser / replay-after-success: the hash WAS a
                     // real recovery code for this user, just not anymore.
@@ -223,13 +221,52 @@ public static class TotpEndpoints
                         statusCode: StatusCodes.Status401Unauthorized);
                 }
 
+                if (!challenges.TryConsume(req.TotpChallengeToken, TotpChallengeKind.Verify, out var consumedChallenge)
+                    || consumedChallenge is null
+                    || !string.Equals(consumedChallenge.Username, ch.Username, StringComparison.OrdinalIgnoreCase))
+                {
+                    return Results.Json(new { error = "invalid or expired challenge" },
+                        statusCode: StatusCodes.Status401Unauthorized);
+                }
+
+                var recoveryOk = false;
+                if (totpOk)
+                {
+                    if (!users.TryRecordTotpUse(ch.Username, matchedStep, out _))
+                    {
+                        lockout.RecordFailure(ch.Username);
+                        return Results.Json(new { error = "invalid code" },
+                            statusCode: StatusCodes.Status401Unauthorized);
+                    }
+                }
+                else
+                {
+                    recoveryOk = users.TryConsumeRecoveryCode(
+                        user.Username, recoveryHash!, out _) == RecoveryCodeConsumeResult.Consumed;
+                    if (!recoveryOk)
+                    {
+                        audit.Log(new AuditLogEvent
+                        {
+                            EventType = AuditEventTypes.AuthTwoFactorVerifyFailure,
+                            Outcome = AuditOutcomes.Failure,
+                            ActorUserId = user.Username,
+                            ActorUsername = user.Username,
+                            ActorFirm = user.Firm,
+                            ActorRole = user.Role,
+                            SourceIp = http.Connection.RemoteIpAddress?.ToString(),
+                            ResourcePath = "/auth/2fa/verify",
+                            ReasonCode = "recovery_code_replayed",
+                        });
+                        return Results.Json(new { error = "invalid code" },
+                            statusCode: StatusCodes.Status401Unauthorized);
+                    }
+                }
+
                 lockout.RecordSuccess(ch.Username);
-                challenges.Invalidate(req.TotpChallengeToken);
 
                 var session = await sessionIssuer.IssueForLocalUserAsync(user, ct);
                 if (!session.Succeeded)
                 {
-                    challenges.Invalidate(req.TotpChallengeToken);
                     audit.Log(new AuditLogEvent
                     {
                         EventType = AuditEventTypes.AuthTwoFactorVerifyFailure,
@@ -392,6 +429,115 @@ public static class TotpEndpoints
         return app;
     }
 
+    private static async Task<IResult> CompleteForcedEnrollmentAsync(
+        HttpContext http,
+        VerifyRequest req,
+        TotpChallenge challenge,
+        IUserStore users,
+        ITradingSessionIssuer sessionIssuer,
+        IPendingTotpEnrollmentStore pending,
+        ITotpChallengeStore challenges,
+        ITotpAttemptTracker lockout,
+        ITotpService totp,
+        ITotpSecretProtector protector,
+        IAuditLogger audit,
+        CancellationToken ct)
+    {
+        if (lockout.IsLocked(challenge.Username, out var retry))
+            return TooManyRequests(retry);
+
+        if (!users.TryGet(challenge.Username, out var user) || user is null || !user.Require2FA
+            || user.Totp is { EnrolledAt: not null })
+        {
+            challenges.Invalidate(req.TotpChallengeToken!);
+            return Results.Json(new { error = "invalid or expired challenge" },
+                statusCode: StatusCodes.Status401Unauthorized);
+        }
+
+        if (!pending.TryConsume(user.Username, out var enrollment) || enrollment is null)
+            return Results.BadRequest(new { error = "no pending enrollment (expired or never started)" });
+
+        var (ok, matchedStep) = totp.Verify(enrollment.Base32Secret, req.Code);
+        if (!ok)
+        {
+            pending.Put(user.Username, enrollment);
+            lockout.RecordFailure(user.Username);
+            audit.Log(new AuditLogEvent
+            {
+                EventType = AuditEventTypes.AuthTwoFactorVerifyFailure,
+                Outcome = AuditOutcomes.Failure,
+                ActorUserId = user.Username,
+                ActorUsername = user.Username,
+                ActorFirm = user.Firm,
+                ActorRole = user.Role,
+                SourceIp = http.Connection.RemoteIpAddress?.ToString(),
+                ResourcePath = "/auth/2fa/verify",
+                ReasonCode = "2fa_wrong_code",
+            });
+            return Results.Json(new { error = "invalid code" },
+                statusCode: StatusCodes.Status401Unauthorized);
+        }
+
+        if (!challenges.TryConsume(req.TotpChallengeToken!, TotpChallengeKind.VerifyEnrollment, out var consumed)
+            || consumed is null
+            || !string.Equals(consumed.Username, user.Username, StringComparison.OrdinalIgnoreCase))
+        {
+            return Results.Json(new { error = "invalid or expired challenge" },
+                statusCode: StatusCodes.Status401Unauthorized);
+        }
+
+        lockout.RecordSuccess(user.Username);
+        user.Totp = new UserTotpConfig
+        {
+            SharedSecret = protector.Protect(enrollment.Base32Secret),
+            EnrolledAt = TimeProviderFor(http).GetUtcNow(),
+            RecoveryCodes = enrollment.RecoveryCodeHashes.ToList(),
+            LastUsedTimeStep = matchedStep,
+        };
+        users.TryUpdate(user);
+        audit.Log(new AuditLogEvent
+        {
+            EventType = AuditEventTypes.AuthTwoFactorEnrollConfirm,
+            Outcome = AuditOutcomes.Success,
+            ActorUserId = user.Username,
+            ActorUsername = user.Username,
+            ActorFirm = user.Firm,
+            ActorRole = user.Role,
+            SourceIp = http.Connection.RemoteIpAddress?.ToString(),
+            ResourcePath = "/auth/2fa/verify",
+            Details = new Dictionary<string, string> { ["mode"] = "force_enroll_token" },
+        });
+
+        var session = await sessionIssuer.IssueForLocalUserAsync(user, ct);
+        if (!session.Succeeded)
+        {
+            audit.Log(new AuditLogEvent
+            {
+                EventType = AuditEventTypes.AuthTwoFactorVerifyFailure,
+                Outcome = session.StatusCode == StatusCodes.Status403Forbidden ? AuditOutcomes.Denied : AuditOutcomes.Failure,
+                ActorUserId = user.Username,
+                ActorUsername = user.Username,
+                SourceIp = http.Connection.RemoteIpAddress?.ToString(),
+                ResourcePath = "/auth/2fa/verify",
+                ReasonCode = session.ErrorCode,
+            });
+            return AuthEndpoints.Error(session.StatusCode, session.ErrorCode ?? "identity_directory_unavailable");
+        }
+
+        audit.Log(new AuditLogEvent
+        {
+            EventType = AuditEventTypes.AuthTwoFactorVerifySuccess,
+            Outcome = AuditOutcomes.Success,
+            ActorUserId = session.TradingUserId,
+            ActorUsername = session.TradingUserId,
+            ActorFirm = session.Firm,
+            ActorRole = session.Role,
+            SourceIp = http.Connection.RemoteIpAddress?.ToString(),
+            ResourcePath = "/auth/2fa/verify",
+        });
+        return Results.Ok(new LoginResponse(session.Token!, session.ExpiresAt!.Value));
+    }
+
     private static bool TryResolveActor(
         HttpContext http,
         string? enrollmentToken,
@@ -458,6 +604,10 @@ internal static class TotpResultExtensions
 
 public sealed record EnrollRequest(string? EnrollmentToken);
 public sealed record TotpStatusResponse(bool Enrolled);
-public sealed record EnrollResponse(string Secret, string OtpauthUri, IReadOnlyList<string> RecoveryCodes);
+public sealed record EnrollResponse(
+    string Secret,
+    string OtpauthUri,
+    IReadOnlyList<string> RecoveryCodes,
+    string? TotpChallengeToken);
 public sealed record VerifyRequest(string Code, string? TotpChallengeToken);
 public sealed record DisableRequest(string Code);

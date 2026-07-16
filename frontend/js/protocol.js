@@ -87,7 +87,9 @@ export async function getTotpStatus(backend, token) {
   return jsonOrThrow(resp);
 }
 
-// Begin TOTP enrollment. Returns `{ secret, otpauthUri, recoveryCodes }`.
+// Begin TOTP enrollment. Returns `{ secret, otpauthUri, recoveryCodes,
+// totpChallengeToken }`; the challenge is present for mandatory enrollment
+// before the user owns a JWT.
 // Recovery codes are shown ONCE — store them client-side until the user
 // acknowledges, then discard.
 export async function enrollTotp(backend, token, enrollmentToken) {

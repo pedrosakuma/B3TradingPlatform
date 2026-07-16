@@ -616,6 +616,10 @@
         <span>Password</span>
         <input id="session-modal-password" type="password" autocomplete="current-password" required />
       </label>
+      <label id="session-modal-totp-label" hidden>
+        <span>Authenticator or recovery code</span>
+        <input id="session-modal-totp" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="32" />
+      </label>
       <p id="session-modal-error" class="error" hidden></p>
       <div class="modal-actions">
         <button type="button" id="session-modal-logout" class="btn btn-link">Logout</button>

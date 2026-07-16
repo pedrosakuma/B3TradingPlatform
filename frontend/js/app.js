@@ -51,6 +51,7 @@ import { FLAGS } from "./mdProtocol.js";
 import { renderQrInto, clearQr } from "./qrRender.js";
 import { applyRiskPolicyFetch } from "./riskPolicy.js";
 import { readMdConnectionConfig, readMdDisplayConfig, writeMdConfig, clearMdConfig } from "./marketDataSettings.js";
+import { classifyAuthResponse, requireEnrollmentResponse } from "./authJourney.js";
 
 const BLOTTER_FILTER_KEY = "b3tp.blotter.filter";
 const DEFAULT_WATCHLIST = ["PETR4", "VALE3"];
@@ -94,6 +95,7 @@ let gatewayPollTimer = null;
 // #303. State for the in-flight 2FA challenge between /auth/login and
 // /auth/2fa/verify. Cleared on success / cancel / refresh.
 let pendingTotp = null; // { backend, username, remember, totpChallengeToken }
+let pendingRenewalTotp = null;
 let securityStatusRefreshSeq = 0;
 
 async function init() {
@@ -440,29 +442,30 @@ async function onLogin(e) {
   ui.setLoginSubmitting(true);
   try {
     const resp = await login(backend, username, password);
+    const nextStep = classifyAuthResponse(resp);
     // #303. Server may demand a TOTP code or a forced first-time
     // enrollment before issuing a JWT. Stash context and switch cards.
-    if (resp && resp.requires2fa && resp.totpChallengeToken) {
+    if (nextStep.kind === "totp") {
       if (!authConfig.totpEnabled) {
         ui.setLoginError("Two-factor authentication is disabled in this frontend configuration.");
         return;
       }
-      pendingTotp = { backend, username, remember, totpChallengeToken: resp.totpChallengeToken };
+      pendingTotp = { backend, username, remember, totpChallengeToken: nextStep.totpChallengeToken };
       showTotpCard(true);
       return;
     }
-    if (resp && resp.requires2faEnrollment && resp.enrollmentToken) {
+    if (nextStep.kind === "enrollment") {
       if (!authConfig.totpEnabled) {
         ui.setLoginError("Two-factor enrollment is disabled in this frontend configuration.");
         return;
       }
       // Force-enroll path: open enrollment immediately. We don't have a
       // JWT yet, so we pass the enrollment token through to /auth/2fa/enroll.
-      pendingTotp = { backend, username, remember, enrollmentToken: resp.enrollmentToken };
+      pendingTotp = { backend, username, remember, enrollmentToken: nextStep.enrollmentToken };
       await beginForcedEnrollment();
       return;
     }
-    finishLoginWithToken(resp, { backend, username, remember });
+    finishLoginWithToken(nextStep.response, { backend, username, remember });
   } catch (err) {
     ui.setLoginError(err.message || "Login failed");
   } finally {
@@ -610,10 +613,12 @@ async function onTotpSubmit(e) {
       code,
       totpChallengeToken: pendingTotp.totpChallengeToken,
     });
+    const nextStep = classifyAuthResponse(resp);
+    if (nextStep.kind !== "session") throw new Error("Two-factor verification did not return a session.");
     const ctx = pendingTotp;
     pendingTotp = null;
     showTotpCard(false);
-    finishLoginWithToken(resp, { backend: ctx.backend, username: ctx.username, remember: ctx.remember });
+    finishLoginWithToken(nextStep.response, { backend: ctx.backend, username: ctx.username, remember: ctx.remember });
   } catch (err) {
     if (errEl) { errEl.hidden = false; errEl.textContent = err.message || "Invalid code"; }
   } finally {
@@ -659,37 +664,14 @@ function closeSecurityPanel() {
 
 function setSecurityStatus(state) {
   if (!authConfig.totpEnabled) return;
-  const el = document.getElementById("security-status");
-  if (!el) return;
-  el.classList.remove(
-    "security-status-enrolled",
-    "security-status-not-enrolled",
-    "security-status-pending",
-    "security-status-unavailable",
-  );
-  if (state === "enrolled") {
-    el.textContent = "Enrolled";
-    el.classList.add("security-status-enrolled");
-  } else if (state === "not-enrolled") {
-    el.textContent = "Not enrolled";
-    el.classList.add("security-status-not-enrolled");
-  } else if (state === "pending") {
-    el.textContent = "Pending confirmation";
-    el.classList.add("security-status-pending");
-  } else if (state === "unavailable") {
-    el.textContent = "Unavailable";
-    el.classList.add("security-status-unavailable");
-  } else {
-    el.textContent = "Checking…";
-  }
+  settingsUi.renderSecurityPanelState({ status: state });
 }
 
 function renderSecurityPanel({ enrolled, pending }) {
   if (!authConfig.totpEnabled) return;
-  document.getElementById("security-enroll-start").hidden = !!enrolled || !!pending;
-  document.getElementById("security-enroll-show").hidden = !pending;
-  document.getElementById("security-enrolled").hidden = !enrolled || !!pending;
-  setSecurityStatus(pending ? "pending" : (enrolled ? "enrolled" : "not-enrolled"));
+  settingsUi.renderSecurityPanelState({
+    status: pending ? "pending" : (enrolled ? "enrolled" : "not-enrolled"),
+  });
 }
 
 async function refreshSecurityPanel() {
@@ -784,15 +766,21 @@ async function beginForcedEnrollment() {
   if (!authConfig.totpEnabled) return;
   if (!pendingTotp || !pendingTotp.enrollmentToken) return;
   try {
-    const resp = await enrollTotp(pendingTotp.backend, null, pendingTotp.enrollmentToken);
+    const resp = requireEnrollmentResponse(
+      await enrollTotp(pendingTotp.backend, null, pendingTotp.enrollmentToken)
+    );
     alert(
       "Two-factor authentication is required on this account.\n\n" +
       "Set up your authenticator with this URI:\n" + resp.otpauthUri + "\n\n" +
       "Recovery codes (save now — shown ONCE):\n" + resp.recoveryCodes.join("\n") + "\n\n" +
-      "Then sign in again — you'll be asked for a 6-digit code."
+      "Enter a current code to finish signing in."
     );
-    pendingTotp = null;
-    showTotpCard(false);
+    pendingTotp = {
+      ...pendingTotp,
+      enrollmentToken: undefined,
+      totpChallengeToken: resp.totpChallengeToken,
+    };
+    showTotpCard(true);
   } catch (err) {
     ui.setLoginError(err.message || "Forced enrollment failed");
   }
@@ -1001,7 +989,7 @@ function showSessionWarning() {
   });
 }
 
-async function handleRenewSession(password) {
+async function handleRenewSession(credentials = {}) {
   if (!session || renewInflight) return;
   renewInflight = true;
   try {
@@ -1009,15 +997,38 @@ async function handleRenewSession(password) {
       await renewEntraSession(session);
       return;
     }
-    const resp = await login(session.backend, session.username, password);
-    const claims = claimsFromToken(resp.token);
+
+    let authResponse;
+    if (pendingRenewalTotp) {
+      authResponse = await verifyTotp(session.backend, {
+        code: credentials.code,
+        totpChallengeToken: pendingRenewalTotp.totpChallengeToken,
+      });
+    } else {
+      authResponse = await login(session.backend, session.username, credentials.password);
+    }
+
+    const nextStep = classifyAuthResponse(authResponse);
+    if (nextStep.kind === "totp") {
+      pendingRenewalTotp = { totpChallengeToken: nextStep.totpChallengeToken };
+      ui.setSessionModalTotpRequired(true);
+      ui.setSessionModalError(null);
+      return;
+    }
+    if (nextStep.kind === "enrollment") {
+      throw new Error("Two-factor enrollment is required. Log out and sign in again to enroll.");
+    }
+
+    const renewed = nextStep.response;
+    const claims = claimsFromToken(renewed.token);
     session = {
       ...session,
-      token: resp.token,
-      expiresAt: resp.expiresAt,
+      token: renewed.token,
+      expiresAt: renewed.expiresAt,
       role: claims.role ?? session.role,
       firm: claims.firm ?? session.firm,
     };
+    pendingRenewalTotp = null;
     writeSession(session);
     state.setUser({
       username: session.username,
@@ -1040,6 +1051,10 @@ async function handleRenewSession(password) {
         setAuthError(formatAuthError(err));
       }
     } else {
+      if (err?.body?.error === "invalid or expired challenge") {
+        pendingRenewalTotp = null;
+        ui.setSessionModalTotpRequired(false);
+      }
       ui.setSessionModalError(err.message || "renew failed");
     }
   } finally {
@@ -1517,6 +1532,7 @@ function logout({ broadcast = true, redirectEntra = true, clearEntraCache = fals
   if (expiryTimer) { clearTimeout(expiryTimer); expiryTimer = null; }
   if (warningTimer) { clearTimeout(warningTimer); warningTimer = null; }
   warningShown = false;
+  pendingRenewalTotp = null;
   ui.closeSessionModal();
   stopFirmsPoll();
   stopGatewayPoll();

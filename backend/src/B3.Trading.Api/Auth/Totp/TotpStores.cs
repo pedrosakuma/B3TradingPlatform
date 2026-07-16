@@ -104,6 +104,12 @@ public interface ITotpChallengeStore
     /// </summary>
     TotpChallenge? Peek(string token);
 
+    /// <summary>
+    /// Atomically consume a challenge of the expected kind. Exactly one
+    /// concurrent caller can succeed.
+    /// </summary>
+    bool TryConsume(string token, TotpChallengeKind expectedKind, out TotpChallenge? challenge);
+
     /// <summary>Permanently invalidate a challenge (e.g. on successful 2FA).</summary>
     void Invalidate(string token);
 }
@@ -115,6 +121,9 @@ public enum TotpChallengeKind
 
     /// <summary>User has <see cref="UserConfig.Require2FA"/> set but hasn't enrolled — client must POST /auth/2fa/enroll using this token.</summary>
     ForceEnroll = 1,
+
+    /// <summary>User started mandatory enrollment and must confirm its pending secret before a JWT is issued.</summary>
+    VerifyEnrollment = 2,
 }
 
 public sealed record TotpChallenge(
@@ -124,7 +133,10 @@ public sealed record TotpChallenge(
 
 internal sealed class InMemoryTotpChallengeStore : ITotpChallengeStore
 {
-    private readonly ConcurrentDictionary<string, TotpChallenge> _entries = new(StringComparer.Ordinal);
+    private const int MaxTrackedChallenges = 50_000;
+
+    private readonly Dictionary<string, TotpChallenge> _entries = new(StringComparer.Ordinal);
+    private readonly object _gate = new();
     private readonly IOptionsMonitor<TotpOptions> _options;
     private readonly TimeProvider _clock;
 
@@ -136,29 +148,77 @@ internal sealed class InMemoryTotpChallengeStore : ITotpChallengeStore
 
     public string Issue(string username, TotpChallengeKind kind)
     {
-        // 32 bytes of CSPRNG → base64url (43 chars). Indistinguishable
-        // from session-token shape, intentionally opaque to clients.
-        var token = WebEncoders.Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
-        _entries[token] = new TotpChallenge(username, kind, _clock.GetUtcNow());
-        return token;
+        lock (_gate)
+        {
+            PurgeExpired();
+            while (_entries.Count >= MaxTrackedChallenges)
+            {
+                var oldest = _entries.MinBy(static kvp => kvp.Value.IssuedAt);
+                _entries.Remove(oldest.Key);
+            }
+
+            // 32 bytes of CSPRNG → base64url (43 chars). Indistinguishable
+            // from session-token shape, intentionally opaque to clients.
+            var token = WebEncoders.Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
+            _entries[token] = new TotpChallenge(username, kind, _clock.GetUtcNow());
+            return token;
+        }
     }
 
     public TotpChallenge? Peek(string token)
     {
         if (string.IsNullOrEmpty(token)) return null;
-        if (!_entries.TryGetValue(token, out var ch)) return null;
-        if (_clock.GetUtcNow() - ch.IssuedAt > _options.CurrentValue.ChallengeTokenTtl)
+        lock (_gate)
         {
-            _entries.TryRemove(token, out _);
-            return null;
+            if (!_entries.TryGetValue(token, out var ch)) return null;
+            if (IsExpired(ch))
+            {
+                _entries.Remove(token);
+                return null;
+            }
+            return ch;
         }
-        return ch;
+    }
+
+    public bool TryConsume(string token, TotpChallengeKind expectedKind, out TotpChallenge? challenge)
+    {
+        challenge = null;
+        if (string.IsNullOrEmpty(token)) return false;
+        lock (_gate)
+        {
+            if (!_entries.TryGetValue(token, out var found)) return false;
+            if (IsExpired(found) || found.Kind != expectedKind)
+            {
+                if (IsExpired(found)) _entries.Remove(token);
+                return false;
+            }
+            _entries.Remove(token);
+            challenge = found;
+            return true;
+        }
     }
 
     public void Invalidate(string token)
     {
         if (string.IsNullOrEmpty(token)) return;
-        _entries.TryRemove(token, out _);
+        lock (_gate)
+        {
+            _entries.Remove(token);
+        }
+    }
+
+    private bool IsExpired(TotpChallenge challenge) =>
+        _clock.GetUtcNow() - challenge.IssuedAt > _options.CurrentValue.ChallengeTokenTtl;
+
+    private void PurgeExpired()
+    {
+        foreach (var token in _entries
+            .Where(kvp => IsExpired(kvp.Value))
+            .Select(static kvp => kvp.Key)
+            .ToArray())
+        {
+            _entries.Remove(token);
+        }
     }
 }
 

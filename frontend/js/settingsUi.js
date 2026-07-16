@@ -63,6 +63,35 @@ export function bindSettingsUi() {
   // Initial render so the default sub-tab is visible the first time
   // Settings is mounted, even before any state change fires.
   applySubTab(getState().settingsSubTab);
+  renderSecurityPanelState({ status: "checking" });
+}
+
+export function renderSecurityPanelState({ status = "checking" } = {}) {
+  const statusEl = document.getElementById("security-status");
+  const enroll = document.getElementById("security-enroll-start");
+  const pending = document.getElementById("security-enroll-show");
+  const enrolled = document.getElementById("security-enrolled");
+  if (!statusEl || !enroll || !pending || !enrolled) return;
+
+  statusEl.classList.remove(
+    "security-status-enrolled",
+    "security-status-not-enrolled",
+    "security-status-pending",
+    "security-status-unavailable",
+  );
+  const labels = {
+    checking: "Checking…",
+    enrolled: "Enrolled",
+    "not-enrolled": "Not enrolled",
+    pending: "Pending confirmation",
+    unavailable: "Unavailable",
+  };
+  statusEl.textContent = labels[status] ?? labels.checking;
+  if (status !== "checking") statusEl.classList.add(`security-status-${status}`);
+
+  enroll.hidden = status !== "not-enrolled";
+  pending.hidden = status !== "pending";
+  enrolled.hidden = status !== "enrolled";
 }
 
 export { SUB_TABS as SETTINGS_SUB_TABS };

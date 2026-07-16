@@ -230,11 +230,14 @@ export function openSessionModal({ onRenew, onLogout }) {
   const modal = $("session-modal");
   const form  = $("session-modal-form");
   const pwd   = $("session-modal-password");
+  const totp  = $("session-modal-totp");
   const logoutBtn = $("session-modal-logout");
   if (!modal || !form || !pwd) return;
   rememberFocusForModal("session-modal");
   setSessionModalError(null);
   pwd.value = "";
+  if (totp) totp.value = "";
+  setSessionModalTotpRequired(false);
   modal.hidden = false;
   // Replace handlers (idempotent across multiple opens).
   if (sessionModalSubmit) form.removeEventListener("submit", sessionModalSubmit);
@@ -243,9 +246,16 @@ export function openSessionModal({ onRenew, onLogout }) {
   if (sessionModalKey) document.removeEventListener("keydown", sessionModalKey);
   sessionModalSubmit = (e) => {
     e.preventDefault();
-    const value = pwd.value;
-    if (!value) { setSessionModalError("password required"); return; }
-    onRenew?.(value);
+    const totpLabel = $("session-modal-totp-label");
+    const totpRequired = totpLabel ? !totpLabel.hidden : false;
+    if (totpRequired) {
+      const code = totp?.value.trim() ?? "";
+      if (!code) { setSessionModalError("authenticator code required"); return; }
+      onRenew?.({ code });
+      return;
+    }
+    if (!pwd.value) { setSessionModalError("password required"); return; }
+    onRenew?.({ password: pwd.value });
   };
   sessionModalLogout = () => onLogout?.();
   // Click on the backdrop (anywhere outside the modal-card) = logout.
@@ -277,6 +287,9 @@ export function closeSessionModal() {
   setSessionModalError(null);
   const pwd = $("session-modal-password");
   if (pwd) pwd.value = "";
+  const totp = $("session-modal-totp");
+  if (totp) totp.value = "";
+  setSessionModalTotpRequired(false);
   if (sessionModalKey) {
     document.removeEventListener("keydown", sessionModalKey);
     sessionModalKey = null;
@@ -289,6 +302,30 @@ export function setSessionModalError(message) {
   if (!el) return;
   if (!message) { el.hidden = true; el.textContent = ""; return; }
   el.hidden = false; el.textContent = message;
+}
+
+export function setSessionModalTotpRequired(required) {
+  const enabled = !!required;
+  const label = $("session-modal-totp-label");
+  const totp = $("session-modal-totp");
+  const pwd = $("session-modal-password");
+  const message = $("session-modal-msg");
+  if (label) label.hidden = !enabled;
+  if (totp) {
+    totp.required = enabled;
+    if (!enabled) totp.value = "";
+  }
+  if (pwd) {
+    pwd.required = !enabled;
+    pwd.closest?.("label")?.toggleAttribute?.("hidden", enabled);
+    if (enabled) pwd.value = "";
+  }
+  if (message) {
+    message.textContent = enabled
+      ? "Enter your authenticator or recovery code to finish renewing this session."
+      : "Re-enter your password to extend the session, or click outside to log out.";
+  }
+  if (enabled) requestAnimationFrame(() => totp?.focus());
 }
 
 // ── Modify-order modal (slice 5 of #122) ───────────────────────────
