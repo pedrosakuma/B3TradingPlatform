@@ -210,17 +210,17 @@ function renderRow(c) {
   const revoked = !!c.revokedAt;
   const created = formatDate(c.createdAtUtc);
   const statusBadge = revoked
-    ? `<span class="killed-tag">Revoked</span>`
-    : `<span class="status-pill status-connected">Active</span>`;
+    ? `<span class="killed-tag badge badge-danger badge-square badge-uppercase">Revoked</span>`
+    : `<span class="status-pill badge badge-uppercase status-connected">Active</span>`;
   const certBinding = renderCertBinding(c.boundCertThumbprint);
   const actions = revoked
     ? ""
-    : `<button type="button" class="bot-cred-edit-pin link-button"
+    : `<button type="button" class="bot-cred-edit-pin btn btn-link"
                data-id="${escapeHtml(c.id)}" data-label="${escapeHtml(c.label)}"
                data-thumbprint="${escapeHtml(c.boundCertThumbprint ?? "")}">
          Edit pin
        </button>
-       <button type="button" class="bot-cred-revoke danger-btn engage"
+       <button type="button" class="bot-cred-revoke btn btn-danger btn-sm"
               data-id="${escapeHtml(c.id)}" data-label="${escapeHtml(c.label)}">
          Revoke
        </button>`;
@@ -238,7 +238,7 @@ function renderCertBinding(boundCertThumbprint) {
   const value = String(boundCertThumbprint ?? "").trim();
   if (!value) return `<span class="muted">unpinned</span>`;
   const short = `${value.slice(0, 4)}…${value.slice(-4)}`;
-  return `<span class="status-pill" title="${escapeHtml(value)}">pinned: <code>${escapeHtml(short)}</code></span>`;
+  return `<span class="status-pill badge badge-neutral" title="${escapeHtml(value)}">pinned: <code>${escapeHtml(short)}</code></span>`;
 }
 
 // ── "Shown once" secret modal ──────────────────────────────────────

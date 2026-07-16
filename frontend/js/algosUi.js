@@ -214,7 +214,7 @@ function renderDetail() {
 
   // Modify form (qty/price) — disabled when terminal/cancelling.
   const form = document.createElement("form");
-  form.className = "algos-modify-form ticket-form";
+  form.className = "algos-modify-form ticket-form form-surface";
   form.innerHTML = `
     <h4 class="algos-section-title">Modify</h4>
     <div class="algos-form-grid algos-modify-grid">
@@ -229,7 +229,7 @@ function renderDetail() {
     </div>
     <div class="algos-modify-actions">
       <p class="muted-line">Provide at least one of the two fields.</p>
-      <button type="submit" class="ticket-submit">Modify</button>
+      <button type="submit" class="ticket-submit btn btn-primary">Modify</button>
     </div>
   `;
   const cancelling = a.status === "Cancelling";
@@ -254,7 +254,7 @@ function renderDetail() {
 
   const cancelBtn = document.createElement("button");
   cancelBtn.type = "button";
-  cancelBtn.className = "danger-btn engage algos-cancel-btn";
+  cancelBtn.className = "btn btn-danger algos-cancel-btn";
   cancelBtn.textContent = inflightCxl ? "Cancelling…" : "Cancel algo";
   cancelBtn.disabled = terminal || inflightCxl;
   cancelBtn.addEventListener("click", () => _actions.onCancelAlgo(a.algoId));

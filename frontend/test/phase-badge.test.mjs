@@ -30,7 +30,7 @@ for (const [phase, label] of cases) {
   test(`phase badge renders ${label} for ${phase}`, () => {
     state.applyPhaseFrame({ symbol: "PETR4", phase, at: "2026-01-01T00:00:00Z" });
     const html = ui.phaseBadgeHtml("PETR4");
-    assert.match(html, new RegExp(`class="phase-badge ${label}"`),
+    assert.match(html, new RegExp(`class="[^"]*\\bphase-badge\\b[^"]*\\b${label}\\b[^"]*"`),
       `expected class fragment for ${phase}`);
     assert.match(html, new RegExp(`>${label}</span>$`),
       `expected label text ${label}`);

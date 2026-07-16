@@ -159,7 +159,7 @@ function renderFirms() {
     const reconn = f.reconnecting ? "yes" : "no";
     const action = killed ? "revive" : "engage";
     const btnLabel = killed ? "Revive" : "Killswitch";
-    const btnClass = killed ? "danger-btn revive" : "danger-btn engage";
+    const btnClass = killed ? "btn btn-success btn-sm" : "btn btn-danger btn-sm";
     // Visually flag firms that are not in a healthy "Established &
     // not-reconnecting" state so the admin's eye lands on the row that
     // needs attention without scanning the whole table (#342). Killed
@@ -173,7 +173,7 @@ function renderFirms() {
       <td>${escapeHtml(stateLabel)}</td>
       <td class="num">${escapeHtml(String(verId))}</td>
       <td>${reconn}</td>
-      <td>${killed ? `<span class="killed-tag">KILLED</span>` : ""}
+      <td>${killed ? `<span class="killed-tag badge badge-danger badge-square badge-uppercase">KILLED</span>` : ""}
         <button type="button" class="firm-toggle ${btnClass}"
                 data-firm="${escapeHtml(f.firmId)}" data-action="${action}">
           ${btnLabel}
@@ -197,7 +197,7 @@ function renderEndClients() {
   }
   body.innerHTML = list.map(id => `<tr>
     <td><code>${escapeHtml(id)}</code></td>
-    <td><button type="button" class="ec-revive danger-btn revive" data-ec="${escapeHtml(id)}">Revive</button></td>
+    <td><button type="button" class="ec-revive btn btn-success btn-sm" data-ec="${escapeHtml(id)}">Revive</button></td>
   </tr>`).join("");
 }
 
@@ -216,7 +216,7 @@ function renderHalts() {
   }
   body.innerHTML = list.map(sym => `<tr>
     <td><code>${escapeHtml(sym)}</code></td>
-    <td><button type="button" class="halt-resume danger-btn revive" data-symbol="${escapeHtml(sym)}">Resume</button></td>
+    <td><button type="button" class="halt-resume btn btn-success btn-sm" data-symbol="${escapeHtml(sym)}">Resume</button></td>
   </tr>`).join("");
 }
 
