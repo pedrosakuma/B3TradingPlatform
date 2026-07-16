@@ -379,23 +379,36 @@ deploy-time env vars:
 | -------- | ------- | ------ |
 | `MARKETDATA_WS_URL` | empty | Seeds `window.__B3_CONFIG__.marketDataWsUrl` for the Market Data panel; empty preserves the localhost/off-localhost fallback chain in `frontend/js/protocol.js`. |
 | `APP_TITLE` | `B3TradingPlatform` | Seeds `window.__B3_CONFIG__.appTitle`, which `frontend/js/app.js` applies to the browser `<title>`, login heading, and topbar brand text. |
-| `AUTH_MODE` | `Local` | Frontend auth mode: `Local`, `Hybrid`, or `Entra`. Local preserves password/TOTP/signup compatibility. |
+| `AUTH_MODE` | `Local` | Shared frontend + trading-host auth mode: `Local`, `Hybrid`, or `Entra`. Local preserves password/TOTP/signup compatibility and leaves `/auth/exchange` absent. |
 | `AUTH_LOCAL_LOGIN_ENABLED` | empty | Optional override for showing local password login in Hybrid; Entra mode should leave this disabled. |
 | `AUTH_SIGNUP_ENABLED` | empty | Optional override for local signup. Defaults: Local on, Hybrid/Entra off. |
 | `AUTH_TOTP_ENABLED` | empty | Optional override for local TOTP controls. Entra mode hides them. |
 | `AUTH_AUTHORITY` | empty | Tenant-specific Entra External ID authority, e.g. `https://tenant.ciamlogin.com/<tenant-id>/v2.0`. |
+| `AUTH_ISSUER` | empty | Backend exact issuer expected after trusted metadata validation. Required by host validation in Hybrid/Entra. |
+| `AUTH_TENANT_ID` | empty | Backend `tid` claim requirement for the configured tenant. Required in Hybrid/Entra unless host config opts out. |
 | `AUTH_CLIENT_ID` | empty | Public SPA client id. This is not a secret. |
-| `AUTH_API_SCOPE` | empty | Delegated API scope requested by MSAL and exchanged at `/auth/exchange`. |
+| `AUTH_API_SCOPE` | empty | Delegated API scope requested by MSAL, usually `api://<api-app-id-uri>/<scope-name>`. |
+| `AUTH_API_AUDIENCE` | empty | Backend exact access-token audience, usually the API application ID URI. Required by host validation in Hybrid/Entra. |
+| `AUTH_REQUIRED_SCOPE` | empty | Backend exact delegated `scp` value, usually the scope name (for example `access_as_user`). Required by host validation in Hybrid/Entra. |
 | `AUTH_REDIRECT_URI` / `AUTH_LOGOUT_URI` | empty | SPA redirect and post-logout URLs. Empty falls back to the current page URL for non-container local dev. |
 | `AUTH_KNOWN_AUTHORITIES` | empty | Comma-separated authority hosts for MSAL, e.g. `tenant.ciamlogin.com`. |
 
-Example Hybrid/Entra frontend settings (paired with matching `Trading:Auth` host settings from #607):
+The same variables are wired into the trading-host as `Trading:Auth:*`; if
+`AUTH_MODE=Hybrid` or `AUTH_MODE=Entra` and any backend external-identity value
+is missing, the host options validator fails closed at startup rather than
+silently serving Local auth.
+
+Example Hybrid/Entra settings:
 
 ```bash
 AUTH_MODE=Hybrid
 AUTH_AUTHORITY=https://your-tenant.ciamlogin.com/your-tenant-id/v2.0
+AUTH_ISSUER=https://your-tenant.ciamlogin.com/your-tenant-id/v2.0
+AUTH_TENANT_ID=your-tenant-id
 AUTH_CLIENT_ID=00000000-0000-0000-0000-000000000000
 AUTH_API_SCOPE=api://your-trading-api-client-id/access_as_user
+AUTH_API_AUDIENCE=api://your-trading-api-client-id
+AUTH_REQUIRED_SCOPE=access_as_user
 AUTH_REDIRECT_URI=https://trader.example.com/
 AUTH_LOGOUT_URI=https://trader.example.com/
 AUTH_KNOWN_AUTHORITIES=your-tenant.ciamlogin.com

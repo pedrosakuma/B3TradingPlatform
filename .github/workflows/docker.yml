@@ -187,6 +187,37 @@ jobs:
           docker compose -f docker/docker-compose.yml -f docker/docker-compose.conformance.yml config --quiet
           docker compose -f docker/docker-compose.yml -f docker/docker-compose.demo.yml config --quiet
 
+      - name: docker compose auth mode wiring smoke
+        run: python3 docker/test/compose-auth-config-smoke.py
+
+      - name: docker compose config (Hybrid auth mapping)
+        env:
+          TRADING_AUTH_SIGNING_KEY: validate-only-placeholder-key-min-32-bytes-long-aaaaa
+          TRADING_SEED_PASSWORD_HASH: ZDzDHANAHq8NDQK3BWk/YZjybKLCMKdRzw0z9Da5wic=
+          TRADING_SEED_PASSWORD_SALT: rXA+be7/gEYYZQrQDsUr2g==
+          AUTH_MODE: Hybrid
+          AUTH_AUTHORITY: https://tenant.ciamlogin.com/tenant-id/v2.0
+          AUTH_ISSUER: https://tenant.ciamlogin.com/tenant-id/v2.0
+          AUTH_TENANT_ID: tenant-id
+          AUTH_CLIENT_ID: spa-client-id
+          AUTH_API_SCOPE: api://trading/access_as_user
+          AUTH_API_AUDIENCE: api://trading
+          AUTH_REQUIRED_SCOPE: access_as_user
+          AUTH_REDIRECT_URI: http://localhost:8080/
+          AUTH_LOGOUT_URI: http://localhost:8080/
+          AUTH_KNOWN_AUTHORITIES: tenant.ciamlogin.com
+        run: |
+          set -euo pipefail
+          rendered="$(docker compose -f docker/docker-compose.yml config)"
+          printf '%s\n' "$rendered" | grep -q 'Trading__Auth__Mode: Hybrid'
+          printf '%s\n' "$rendered" | grep -q 'AUTH_MODE: Hybrid'
+          printf '%s\n' "$rendered" | grep -q 'Trading__Auth__ExternalIdentity__Authority: https://tenant.ciamlogin.com/tenant-id/v2.0'
+          printf '%s\n' "$rendered" | grep -q 'Trading__Auth__ExternalIdentity__Issuer: https://tenant.ciamlogin.com/tenant-id/v2.0'
+          printf '%s\n' "$rendered" | grep -q 'Trading__Auth__ExternalIdentity__TenantId: tenant-id'
+          printf '%s\n' "$rendered" | grep -q 'Trading__Auth__ExternalIdentity__Audience: api://trading'
+          printf '%s\n' "$rendered" | grep -q 'Trading__Auth__ExternalIdentity__RequiredScope: access_as_user'
+          printf '%s\n' "$rendered" | grep -q 'Trading__Auth__ExternalIdentity__AllowedClientApplicationIds__0: spa-client-id'
+
       - name: docker compose config (er-injection overlay)
         # The er-injection overlay (#259, Q1.7) requires a per-run admin
         # PBKDF2 triple via `${VAR:?}` interpolation (see

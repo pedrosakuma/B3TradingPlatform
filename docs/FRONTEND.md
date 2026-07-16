@@ -122,8 +122,10 @@ config is rendered from:
 | --- | --- |
 | `AUTH_MODE` | `Local` (default), `Hybrid`, or `Entra`. |
 | `AUTH_AUTHORITY` | Tenant-specific Entra External ID authority. |
+| `AUTH_ISSUER`, `AUTH_TENANT_ID` | Backend exact issuer and tenant checks; required with Hybrid/Entra compose deployments. |
 | `AUTH_CLIENT_ID` | Public SPA application client id. |
 | `AUTH_API_SCOPE` | Delegated trading API scope requested by MSAL. |
+| `AUTH_API_AUDIENCE`, `AUTH_REQUIRED_SCOPE` | Backend access-token audience and exact `scp` value for `/auth/exchange`. |
 | `AUTH_REDIRECT_URI` / `AUTH_LOGOUT_URI` | SPA redirect and post-logout URLs. |
 | `AUTH_KNOWN_AUTHORITIES` | Comma-separated trusted authority hosts for MSAL. |
 
