@@ -26,9 +26,12 @@ export function readStoredSession(store, now = Date.now()) {
 }
 
 export function readInternalSession({ authMode = "Local", sessionStorage, localStorage, now = Date.now() }) {
+  if (authMode === "Entra") safeRemove(localStorage, SESSION_KEY);
   const fromTab = readStoredSession(sessionStorage, now);
   if (fromTab) return { session: fromTab, preferredStore: "sessionStorage" };
-  if (authMode === "Entra") return { session: null, preferredStore: "sessionStorage" };
+  if (authMode === "Entra") {
+    return { session: null, preferredStore: "sessionStorage" };
+  }
 
   const fromBoot = readStoredSession(localStorage, now);
   if (!fromBoot) return { session: null, preferredStore: "sessionStorage" };
@@ -39,6 +42,7 @@ export function readInternalSession({ authMode = "Local", sessionStorage, localS
 export function writeInternalSession(session, { authMode = "Local", sessionStorage, localStorage }) {
   const record = authMode === "Entra" ? { ...session, remember: false, authMode: "Entra" } : session;
   safeSet(sessionStorage, SESSION_KEY, JSON.stringify(record));
+  if (authMode === "Entra") safeRemove(localStorage, SESSION_KEY);
   if (authMode !== "Entra" && record.remember) safeSet(localStorage, SESSION_KEY, JSON.stringify(record));
   return authMode !== "Entra" && record.remember ? "localStorage" : "sessionStorage";
 }

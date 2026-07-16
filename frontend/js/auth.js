@@ -149,11 +149,20 @@ export function createEntraAuth(authConfig, deps = {}) {
     });
   }
 
+  async function clearCache() {
+    await initialize();
+    const app = await getInstance();
+    if (typeof app.clearCache !== "function") return;
+    const account = accountFrom(app);
+    await app.clearCache({ account });
+  }
+
   return Object.freeze({
     initialize,
     handleRedirectPromise,
     loginRedirect,
     acquireTokenSilent,
+    clearCache,
     logoutRedirect,
     _getInstance: getInstance,
   });

@@ -21,16 +21,28 @@ test("Entra mode reads and writes only sessionStorage for internal JWT", () => {
   ls.setItem(SESSION_KEY, JSON.stringify({ token: "local", expiresAt: future(), remember: true }));
   let result = readInternalSession({ authMode: "Entra", sessionStorage: ss, localStorage: ls });
   assert.equal(result.session, null);
+  assert.equal(ls.getItem(SESSION_KEY), null);
 
+  ls.setItem(SESSION_KEY, JSON.stringify({ token: "stale-local", expiresAt: future(), remember: true }));
   writeInternalSession({ token: "entra", expiresAt: future(), remember: true }, {
     authMode: "Entra", sessionStorage: ss, localStorage: ls,
   });
   assert.equal(JSON.parse(ss.getItem(SESSION_KEY)).token, "entra");
   assert.equal(JSON.parse(ss.getItem(SESSION_KEY)).remember, false);
-  assert.equal(JSON.parse(ls.getItem(SESSION_KEY)).token, "local");
+  assert.equal(ls.getItem(SESSION_KEY), null);
 
   result = readInternalSession({ authMode: "Entra", sessionStorage: ss, localStorage: ls });
   assert.equal(result.session.token, "entra");
+});
+
+test("Entra boot purges stale localStorage even when sessionStorage is valid", () => {
+  const ss = store();
+  const ls = store();
+  ss.setItem(SESSION_KEY, JSON.stringify({ token: "entra-tab", expiresAt: future(), authMode: "Entra" }));
+  ls.setItem(SESSION_KEY, JSON.stringify({ token: "stale-local", expiresAt: future(), remember: true }));
+  const result = readInternalSession({ authMode: "Entra", sessionStorage: ss, localStorage: ls });
+  assert.equal(result.session.token, "entra-tab");
+  assert.equal(ls.getItem(SESSION_KEY), null);
 });
 
 test("Local mode still seeds fresh tabs from remember-me localStorage", () => {

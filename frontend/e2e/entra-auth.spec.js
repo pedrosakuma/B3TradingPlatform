@@ -43,6 +43,7 @@ async function installFakeMsal(page, { redirectResult = null, silentResult = nul
           getAllAccounts() { return active ? [active] : []; },
           async loginRedirect(request) { window.__B3_TEST_MSAL_LOGIN__ = request; },
           async acquireTokenSilent() { window.__B3_TEST_MSAL_LOG__.push("acquireTokenSilent"); return silentResult || { accessToken: "silent-access", account: active }; },
+          async clearCache(request) { window.__B3_TEST_MSAL_CLEAR__ = request; window.__B3_TEST_MSAL_LOG__.push("clearCache"); },
           async logoutRedirect(request) { window.__B3_TEST_MSAL_LOGOUT__ = request; },
         };
       },
@@ -140,5 +141,66 @@ test.describe("Entra External ID frontend harness", () => {
     await page.click("#logout");
     await expect.poll(() => page.evaluate(() => window.__B3_TEST_MSAL_LOGOUT__?.postLogoutRedirectUri)).toBe("http://localhost:8080/");
     expect(await page.evaluate(() => sessionStorage.getItem("b3tp.session"))).toBeNull();
+  });
+
+  test("Entra mode hides Security 2FA subtab and ignores #settings/security", async ({ page }) => {
+    await serveConfig(page, entraAuth);
+    await installFakeMsal(page, { redirectResult: { accessToken: "external-access", account: { homeAccountId: "a" } } });
+    await page.route("**/auth/exchange", async (route) => {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          token: internalJwt({ sub: "internal-admin", role: "admin", firm: "FIRM01" }),
+          expiresAt: new Date(Date.now() + 600_000).toISOString(),
+        }),
+      });
+    });
+    await page.goto("/?code=abc&state=opaque#settings/security");
+    await expect(page.locator("#settings-view")).toBeVisible();
+    await expect(page.locator('[data-settings-subtab="security"]')).toBeHidden();
+    await expect(page.locator("#settings-panel-security")).toBeHidden();
+    expect(page.url()).not.toContain("#settings/security");
+  });
+
+  test("Entra boot purges stale localStorage session", async ({ page }) => {
+    await serveConfig(page, entraAuth);
+    await installFakeMsal(page);
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await page.evaluate(() => {
+      localStorage.setItem("b3tp.session", JSON.stringify({
+        token: "stale-local",
+        expiresAt: new Date(Date.now() + 600_000).toISOString(),
+        remember: true,
+      }));
+    });
+    await page.reload();
+    await expect(page.locator("#auth-choice")).toBeVisible();
+    expect(await page.evaluate(() => localStorage.getItem("b3tp.session"))).toBeNull();
+  });
+
+  test("broadcast logout clears recipient tab MSAL/session cache without redirect loop", async ({ page, context }) => {
+    const other = await context.newPage();
+    for (const p of [page, other]) {
+      await serveConfig(p, entraAuth);
+      await installFakeMsal(p, { redirectResult: { accessToken: "external-access", account: { homeAccountId: "a" } } });
+      await p.route("**/auth/exchange", async (route) => {
+        await route.fulfill({
+          contentType: "application/json",
+          body: JSON.stringify({
+            token: internalJwt({ sub: "internal-bob", role: "user", firm: "FIRM01" }),
+            expiresAt: new Date(Date.now() + 600_000).toISOString(),
+          }),
+        });
+      });
+      await p.goto("/?code=abc&state=opaque");
+      await expect(p.locator("#trader-view")).toBeVisible();
+    }
+
+    await page.click("#logout");
+    await expect.poll(() => page.evaluate(() => window.__B3_TEST_MSAL_LOGOUT__?.postLogoutRedirectUri)).toBe("http://localhost:8080/");
+    await expect.poll(() => other.evaluate(() => window.__B3_TEST_MSAL_LOG__.includes("clearCache"))).toBe(true);
+    expect(await other.evaluate(() => window.__B3_TEST_MSAL_LOGOUT__ ?? null)).toBeNull();
+    expect(await other.evaluate(() => sessionStorage.getItem("b3tp.session"))).toBeNull();
+    await expect(other.locator("#auth-choice")).toBeVisible();
   });
 });

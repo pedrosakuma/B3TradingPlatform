@@ -13,24 +13,37 @@
 import { getState, setSettingsSubTab, subscribe } from "./state.js";
 
 const SUB_TABS = ["bot-credentials", "security", "market-data", "preferences"];
+let enabledSubTabs = [...SUB_TABS];
 
 function isValid(name) {
-  return SUB_TABS.includes(name);
+  return enabledSubTabs.includes(name);
 }
 
 function applySubTab(name) {
-  const target = isValid(name) ? name : "bot-credentials";
+  const target = isValid(name) ? name : enabledSubTabs[0];
   for (const sub of SUB_TABS) {
     const panel = document.getElementById(`settings-panel-${sub}`);
-    if (panel) panel.hidden = sub !== target;
+    if (panel) panel.hidden = sub !== target || !enabledSubTabs.includes(sub);
   }
   const tabs = document.querySelectorAll("#settings-subtabs .settings-subtab");
   tabs.forEach((tab) => {
-    const active = tab.dataset.settingsSubtab === target;
+    const enabled = enabledSubTabs.includes(tab.dataset.settingsSubtab);
+    const active = enabled && tab.dataset.settingsSubtab === target;
+    tab.hidden = !enabled;
+    tab.disabled = !enabled;
     tab.classList.toggle("active", active);
     tab.setAttribute("aria-selected", active ? "true" : "false");
+    tab.setAttribute("aria-disabled", enabled ? "false" : "true");
     tab.tabIndex = active ? 0 : -1;
   });
+}
+
+export function configureSettingsSubTabs({ securityEnabled = true } = {}) {
+  enabledSubTabs = SUB_TABS.filter((sub) => securityEnabled || sub !== "security");
+}
+
+export function isSettingsSubTabEnabled(name) {
+  return isValid(name);
 }
 
 export function bindSettingsUi() {

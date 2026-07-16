@@ -80,6 +80,21 @@ test("logoutRedirect passes configured post-logout URI", async () => {
   assert.equal(logoutRequest.account.homeAccountId, "a");
 });
 
+test("clearCache clears local MSAL cache without logout redirect", async () => {
+  let clearRequest;
+  let logoutCalled = false;
+  const instance = {
+    async initialize() {},
+    getActiveAccount() { return { homeAccountId: "a" }; },
+    async clearCache(req) { clearRequest = req; },
+    async logoutRedirect() { logoutCalled = true; },
+  };
+  const auth = createEntraAuth(authConfig(), { window: fakeWindow("https://app.example/"), msalFactory: () => instance });
+  await auth.clearCache();
+  assert.equal(clearRequest.account.homeAccountId, "a");
+  assert.equal(logoutCalled, false);
+});
+
 test("scrubAuthResponseFromUrl removes callback error hash", () => {
   const win = fakeWindow("https://app.example/#error=access_denied&state=abc");
   scrubAuthResponseFromUrl(win);

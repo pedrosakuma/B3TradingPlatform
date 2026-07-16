@@ -99,6 +99,7 @@ let securityStatusRefreshSeq = 0;
 async function init() {
   applyAppTitle();
   configureAuthUi();
+  settingsUi.configureSettingsSubTabs({ securityEnabled: authConfig.totpEnabled });
   document.getElementById("login-backend")?.setAttribute("placeholder", defaultBackend());
   document.getElementById("auth-backend")?.setAttribute("placeholder", defaultBackend());
   document.getElementById("login-form")?.addEventListener("submit", onLogin);
@@ -111,23 +112,25 @@ async function init() {
   if (signupForm) signupForm.addEventListener("submit", onSignup);
   document.getElementById("login-go-signup")?.addEventListener("click", () => showSignupCard(true));
   document.getElementById("signup-go-login")?.addEventListener("click", () => showSignupCard(false));
-  // #303. 2FA second-factor step + Security panel.
-  document.getElementById("totp-form")?.addEventListener("submit", onTotpSubmit);
-  document.getElementById("totp-cancel")?.addEventListener("click", () => {
-    pendingTotp = null;
-    showTotpCard(false);
-  });
-  // Fase 3 (#399). The legacy Security button + modal collapsed into
-  // the Settings > Security sub-tab. `openSecurityPanel` is now a
-  // sub-tab navigation; the close/reset behaviour that used to live
-  // on the modal's × button has no analogue (the sub-tab is reset
-  // every time it's re-entered via openSecurityPanel).
-  document.getElementById("security-enroll-begin")?.addEventListener("click", onSecurityEnrollBegin);
-  document.getElementById("security-recovery-ack")?.addEventListener("change", (e) => {
-    document.getElementById("security-confirm").disabled = !e.target.checked;
-  });
-  document.getElementById("security-confirm")?.addEventListener("click", onSecurityEnrollConfirm);
-  document.getElementById("security-disable")?.addEventListener("click", onSecurityDisable);
+  if (authConfig.totpEnabled) {
+    // #303. 2FA second-factor step + Security panel.
+    document.getElementById("totp-form")?.addEventListener("submit", onTotpSubmit);
+    document.getElementById("totp-cancel")?.addEventListener("click", () => {
+      pendingTotp = null;
+      showTotpCard(false);
+    });
+    // Fase 3 (#399). The legacy Security button + modal collapsed into
+    // the Settings > Security sub-tab. `openSecurityPanel` is now a
+    // sub-tab navigation; the close/reset behaviour that used to live
+    // on the modal's × button has no analogue (the sub-tab is reset
+    // every time it's re-entered via openSecurityPanel).
+    document.getElementById("security-enroll-begin")?.addEventListener("click", onSecurityEnrollBegin);
+    document.getElementById("security-recovery-ack")?.addEventListener("change", (e) => {
+      document.getElementById("security-confirm").disabled = !e.target.checked;
+    });
+    document.getElementById("security-confirm")?.addEventListener("click", onSecurityEnrollConfirm);
+    document.getElementById("security-disable")?.addEventListener("click", onSecurityDisable);
+  }
   ui.bindUi();
   adminUi.bindAdminUi();
   botCredentialsUi.bindBotCredentialsUi();
@@ -266,7 +269,7 @@ async function init() {
     }
     if (slice === "currentView" || slice === "settingsSubTab" || slice === "all") {
       const current = state.getState();
-      const securityVisible = current.currentView === "settings" && current.settingsSubTab === "security";
+      const securityVisible = authConfig.totpEnabled && current.currentView === "settings" && current.settingsSubTab === "security";
       if (securityVisible) refreshSecurityPanel();
       else if (slice !== "all") closeSecurityPanel();
     }
@@ -286,7 +289,7 @@ async function init() {
   });
 
   logoutChannel = createLogoutChannel();
-  logoutChannel.subscribe(() => logout({ broadcast: false, redirectEntra: false }));
+  logoutChannel.subscribe(() => logout({ broadcast: false, redirectEntra: false, clearEntraCache: true }));
 
   await bootAuth();
 }
@@ -401,6 +404,14 @@ function showAuthEntry() {
   if (showChoice) document.getElementById("entra-login")?.focus();
 }
 
+function isSettingsSubTabAllowed(subTab) {
+  return SETTINGS_SUB_TABS.has(subTab) && settingsUi.isSettingsSubTabEnabled(subTab);
+}
+
+function defaultSettingsSubTab() {
+  return settingsUi.isSettingsSubTabEnabled("bot-credentials") ? "bot-credentials" : "preferences";
+}
+
 function showLocalLoginCard() {
   setAuthError(null);
   const choice = document.getElementById("auth-choice");
@@ -432,11 +443,19 @@ async function onLogin(e) {
     // #303. Server may demand a TOTP code or a forced first-time
     // enrollment before issuing a JWT. Stash context and switch cards.
     if (resp && resp.requires2fa && resp.totpChallengeToken) {
+      if (!authConfig.totpEnabled) {
+        ui.setLoginError("Two-factor authentication is disabled in this frontend configuration.");
+        return;
+      }
       pendingTotp = { backend, username, remember, totpChallengeToken: resp.totpChallengeToken };
       showTotpCard(true);
       return;
     }
     if (resp && resp.requires2faEnrollment && resp.enrollmentToken) {
+      if (!authConfig.totpEnabled) {
+        ui.setLoginError("Two-factor enrollment is disabled in this frontend configuration.");
+        return;
+      }
       // Force-enroll path: open enrollment immediately. We don't have a
       // JWT yet, so we pass the enrollment token through to /auth/2fa/enroll.
       pendingTotp = { backend, username, remember, enrollmentToken: resp.enrollmentToken };
@@ -560,6 +579,7 @@ function finishLoginWithToken(resp, { backend, username, remember }) {
 }
 
 function showTotpCard(show) {
+  if (!authConfig.totpEnabled) return;
   const loginCard = document.getElementById("login-form");
   const signupCard = document.getElementById("signup-form");
   const totpCard = document.getElementById("totp-form");
@@ -578,6 +598,7 @@ function showTotpCard(show) {
 
 async function onTotpSubmit(e) {
   e.preventDefault();
+  if (!authConfig.totpEnabled) return;
   if (!pendingTotp || !pendingTotp.totpChallengeToken) return;
   const code = document.getElementById("totp-code").value.trim();
   const errEl = document.getElementById("totp-error");
@@ -607,11 +628,13 @@ async function onTotpSubmit(e) {
 // session reset) wipes the recovery codes + QR so secret material
 // leaves the DOM as soon as the sub-tab is dismissed.
 function openSecurityPanel() {
+  if (!authConfig.totpEnabled) return;
   if (!session) return;
   handleSwitchView("settings", "security");
 }
 
 function closeSecurityPanel() {
+  if (!authConfig.totpEnabled) return;
   securityStatusRefreshSeq += 1;
   // Wipe the recovery codes from the DOM as soon as the user dismisses.
   const pre = document.getElementById("security-recovery-codes");
@@ -635,6 +658,7 @@ function closeSecurityPanel() {
 }
 
 function setSecurityStatus(state) {
+  if (!authConfig.totpEnabled) return;
   const el = document.getElementById("security-status");
   if (!el) return;
   el.classList.remove(
@@ -661,6 +685,7 @@ function setSecurityStatus(state) {
 }
 
 function renderSecurityPanel({ enrolled, pending }) {
+  if (!authConfig.totpEnabled) return;
   document.getElementById("security-enroll-start").hidden = !!enrolled || !!pending;
   document.getElementById("security-enroll-show").hidden = !pending;
   document.getElementById("security-enrolled").hidden = !enrolled || !!pending;
@@ -668,6 +693,7 @@ function renderSecurityPanel({ enrolled, pending }) {
 }
 
 async function refreshSecurityPanel() {
+  if (!authConfig.totpEnabled) return;
   if (!session) return;
   const refreshSeq = ++securityStatusRefreshSeq;
   setSecurityStatus("checking");
@@ -684,6 +710,7 @@ async function refreshSecurityPanel() {
 }
 
 function setSecurityError(msg) {
+  if (!authConfig.totpEnabled) return;
   const el = document.getElementById("security-error");
   if (!el) return;
   if (!msg) { el.hidden = true; el.textContent = ""; return; }
@@ -693,6 +720,7 @@ function setSecurityError(msg) {
 let pendingEnrollSecret = null; // base32, only kept until confirm/cancel
 
 async function onSecurityEnrollBegin() {
+  if (!authConfig.totpEnabled) return;
   if (!session) return;
   setSecurityError(null);
   try {
@@ -718,6 +746,7 @@ async function onSecurityEnrollBegin() {
 }
 
 async function onSecurityEnrollConfirm() {
+  if (!authConfig.totpEnabled) return;
   if (!session) return;
   const code = document.getElementById("security-confirm-code").value.trim();
   if (!code) { setSecurityError("Code required"); return; }
@@ -737,6 +766,7 @@ async function onSecurityEnrollConfirm() {
 }
 
 async function onSecurityDisable() {
+  if (!authConfig.totpEnabled) return;
   if (!session) return;
   const code = document.getElementById("security-disable-code").value.trim();
   if (!code) { setSecurityError("Code required"); return; }
@@ -751,6 +781,7 @@ async function onSecurityDisable() {
 }
 
 async function beginForcedEnrollment() {
+  if (!authConfig.totpEnabled) return;
   if (!pendingTotp || !pendingTotp.enrollmentToken) return;
   try {
     const resp = await enrollTotp(pendingTotp.backend, null, pendingTotp.enrollmentToken);
@@ -870,7 +901,8 @@ function startSession(next) {
       try { subTab = sessionStorage.getItem(SETTINGS_SUB_TAB_KEY); }
       catch { /* private mode */ }
     }
-    if (SETTINGS_SUB_TABS.has(subTab)) state.setSettingsSubTab(subTab);
+    if (isSettingsSubTabAllowed(subTab)) state.setSettingsSubTab(subTab);
+    else state.setSettingsSubTab(defaultSettingsSubTab());
   }
   // Fase 4 (#400). Restore trader sub-tab from hash → sessionStorage.
   if (initialView === "trader") {
@@ -900,7 +932,7 @@ function startSession(next) {
   } catch { /* private mode */ }
   persistActiveTab(initialView);
   syncUrlHash(initialView, /*replace*/ true,
-    initialView === "settings" ? state.getState().settingsSubTab :
+    initialView === "settings" && isSettingsSubTabAllowed(state.getState().settingsSubTab) ? state.getState().settingsSubTab :
     initialView === "trader"   ? state.getState().traderSubTab   :
     undefined);
   if (initialView === "compliance") {
@@ -1480,7 +1512,7 @@ function readBlotterFilter() {
 }
 function writeBlotterFilter(f) { sessionStorage.setItem(BLOTTER_FILTER_KEY, JSON.stringify(f)); }
 
-function logout({ broadcast = true, redirectEntra = true } = {}) {
+function logout({ broadcast = true, redirectEntra = true, clearEntraCache = false } = {}) {
   const shouldRedirectEntra = redirectEntra && (session?.authMode === "Entra" || authConfig.mode === "Entra") && !!entraAuth;
   if (expiryTimer) { clearTimeout(expiryTimer); expiryTimer = null; }
   if (warningTimer) { clearTimeout(warningTimer); warningTimer = null; }
@@ -1528,6 +1560,9 @@ function logout({ broadcast = true, redirectEntra = true } = {}) {
   ui.showLogin();
   showAuthEntry();
   if (broadcast) logoutChannel?.broadcast();
+  if (clearEntraCache && entraAuth) {
+    entraAuth.clearCache().catch((err) => console.warn("[auth] MSAL cache clear failed", err));
+  }
   if (shouldRedirectEntra) {
     entraAuth.logoutRedirect().catch((err) => setAuthError(formatAuthError(err)));
   }
@@ -1706,9 +1741,18 @@ function handleSwitchView(view, subTab) {
   // Fase 3 (#399). Settings sub-tab is applied BEFORE setCurrentView
   // so the subscriber that toggles panel visibility sees the right
   // sub-tab on the same render pass that mounts the view.
-  if (view === "settings" && subTab && SETTINGS_SUB_TABS.has(subTab)) {
+  if (view === "settings" && subTab && isSettingsSubTabAllowed(subTab)) {
     state.setSettingsSubTab(subTab);
     persistSettingsSubTab(subTab);
+  } else if (view === "settings" && subTab && SETTINGS_SUB_TABS.has(subTab)) {
+    const fallback = defaultSettingsSubTab();
+    state.setSettingsSubTab(fallback);
+    persistSettingsSubTab(fallback);
+  }
+  if (view === "settings" && !isSettingsSubTabAllowed(state.getState().settingsSubTab)) {
+    const fallback = defaultSettingsSubTab();
+    state.setSettingsSubTab(fallback);
+    persistSettingsSubTab(fallback);
   }
   // Fase 4 (#400). Same dance for the trader sub-tab.
   if (view === "trader" && subTab && TRADER_SUB_TABS.has(subTab)) {
@@ -1719,7 +1763,9 @@ function handleSwitchView(view, subTab) {
   persistActiveTab(view);
   let effectiveSub;
   if (view === "settings") {
-    effectiveSub = SETTINGS_SUB_TABS.has(subTab) ? subTab : state.getState().settingsSubTab;
+    effectiveSub = isSettingsSubTabAllowed(subTab)
+      ? subTab
+      : (isSettingsSubTabAllowed(state.getState().settingsSubTab) ? state.getState().settingsSubTab : defaultSettingsSubTab());
   } else if (view === "trader") {
     effectiveSub = TRADER_SUB_TABS.has(subTab) ? subTab : state.getState().traderSubTab;
   }
