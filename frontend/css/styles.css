@@ -1059,6 +1059,26 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
 .compliance-cvm-controls {
   display: flex; gap: .5rem; align-items: center; margin-bottom: .6rem; flex-wrap: wrap;
 }
+.compliance-connection-status {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: .15rem .5rem;
+  font-size: .75rem;
+  color: var(--muted);
+}
+.compliance-connection-status[data-state="connected"] {
+  border-color: var(--green);
+  color: var(--green);
+}
+.compliance-connection-status[data-state="reconnecting"],
+.compliance-connection-status[data-state="connecting"] {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+.compliance-connection-status[data-state="error"] {
+  border-color: var(--red);
+  color: var(--red);
+}
 .compliance-audit-form {
   display: flex; gap: .5rem; flex-wrap: wrap; align-items: flex-end; margin-bottom: .6rem;
 }

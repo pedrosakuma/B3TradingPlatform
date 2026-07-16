@@ -1,0 +1,119 @@
+{
+  "ordersSnapshot": {
+    "type": "snapshot",
+    "channel": "dropcopy.orders",
+    "seq": 0,
+    "data": [
+      {
+        "clOrdId": "0B52A6F9D43E7C10",
+        "symbol": "PETR4",
+        "securityId": 9001,
+        "side": "Buy",
+        "type": "Limit",
+        "quantity": 100,
+        "leavesQuantity": 100,
+        "cumulativeQuantity": 0,
+        "price": 30.5,
+        "status": "Working",
+        "parentAlgoId": null,
+        "algoSliceSeq": null,
+        "isStale": false,
+        "staleReason": null,
+        "staledAtUtc": null,
+        "timeInForce": "Day",
+        "stopPrice": null,
+        "goodTillDate": null,
+        "displayQty": null,
+        "displayResetPolicy": null,
+        "subAccountId": null,
+        "securityType": null,
+        "optionStrikePrice": null,
+        "optionExpirationDate": null,
+        "optionPutOrCall": null,
+        "optionUnderlyingSymbol": null,
+        "optionContractMultiplier": null
+      },
+      {
+        "clOrdId": "4F81C2D93A607BE5",
+        "symbol": "VALE3",
+        "securityId": 9002,
+        "side": "Sell",
+        "type": "Limit",
+        "quantity": 200,
+        "leavesQuantity": 150,
+        "cumulativeQuantity": 50,
+        "price": 60.25,
+        "status": "PartiallyFilled",
+        "parentAlgoId": null,
+        "algoSliceSeq": null,
+        "isStale": false,
+        "staleReason": null,
+        "staledAtUtc": null,
+        "timeInForce": "Day",
+        "stopPrice": null,
+        "goodTillDate": null,
+        "displayQty": null,
+        "displayResetPolicy": null,
+        "subAccountId": "BOOK-A",
+        "securityType": null,
+        "optionStrikePrice": null,
+        "optionExpirationDate": null,
+        "optionPutOrCall": null,
+        "optionUnderlyingSymbol": null,
+        "optionContractMultiplier": null
+      }
+    ]
+  },
+  "fillsSnapshot": {
+    "type": "snapshot",
+    "channel": "dropcopy.fills",
+    "seq": 0,
+    "data": []
+  },
+  "cancelsSnapshot": {
+    "type": "snapshot",
+    "channel": "dropcopy.cancels",
+    "seq": 0,
+    "data": []
+  },
+  "fillDelta": {
+    "type": "delta",
+    "channel": "dropcopy.fills",
+    "seq": 1,
+    "data": {
+      "clOrdId": "0B52A6F9D43E7C10",
+      "symbol": "PETR4",
+      "side": "Buy",
+      "status": "Filled",
+      "kind": "Fill",
+      "leavesQuantity": 0,
+      "cumulativeQuantity": 100,
+      "lastQuantity": 100,
+      "lastPrice": 30.5,
+      "rejectReason": null,
+      "timestampUtc": "2026-07-16T17:00:00+00:00",
+      "isNativeStp": false,
+      "bookTouch": null
+    }
+  },
+  "cancelDelta": {
+    "type": "delta",
+    "channel": "dropcopy.cancels",
+    "seq": 1,
+    "data": {
+      "clOrdId": "4F81C2D93A607BE5",
+      "symbol": "VALE3",
+      "side": "Sell",
+      "status": "Cancelled",
+      "kind": "Canceled",
+      "leavesQuantity": 0,
+      "cumulativeQuantity": 50,
+      "lastQuantity": 0,
+      "lastPrice": 0,
+      "rejectReason": null,
+      "timestampUtc": "2026-07-16T17:01:00+00:00",
+      "isNativeStp": false,
+      "bookTouch": null
+    }
+  }
+}

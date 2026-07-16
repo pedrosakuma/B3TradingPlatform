@@ -542,6 +542,7 @@ async function renewEntraSession(current = session) {
     firm: session.firm,
   });
   restartWorker();
+  reconcileComplianceAfterRenewal();
   warningShown = false;
   scheduleExpiry();
   ui.closeSessionModal();
@@ -846,6 +847,7 @@ function startSession(next) {
     next = { ...next, role: next.role ?? claims.role, firm: next.firm ?? claims.firm };
   }
   session = next;
+  state.resetComplianceFeed();
   state.setUser({
     username: next.username,
     expiresAt: next.expiresAt,
@@ -1041,6 +1043,7 @@ async function handleRenewSession(credentials = {}) {
     // (the existing socket keeps working until the OLD JWT is rejected
     // server-side; restart guarantees the next reconnect is clean).
     restartWorker();
+    reconcileComplianceAfterRenewal();
     warningShown = false;
     scheduleExpiry();
     ui.closeSessionModal();
@@ -1549,6 +1552,7 @@ function logout({ broadcast = true, redirectEntra = true, clearEntraCache = fals
   session = null;
   mdConfig = null;
   closeComplianceDropCopy();
+  state.resetComplianceFeed();
   clearSession();
   clearMdConfig(sessionStorage);
   // Fase 1 (#397). Drop the persisted tab so the next sign-in lands
@@ -2264,6 +2268,18 @@ function openComplianceDropCopy() {
 
 function closeComplianceDropCopy() {
   complianceUi.closeDropCopyFeed();
+}
+
+function reconcileComplianceAfterRenewal() {
+  complianceUi.reconcileComplianceRenewal({
+    role: session?.role,
+    currentView: state.getState().currentView,
+    onReopen: openComplianceDropCopy,
+    onLeave: () => {
+      closeComplianceDropCopy();
+      handleSwitchView(defaultViewForRole(session?.role));
+    },
+  });
 }
 
 async function handleAuditSearch(opts) {

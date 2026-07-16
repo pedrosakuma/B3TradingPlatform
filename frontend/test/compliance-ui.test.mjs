@@ -18,15 +18,17 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import { installDomStub } from "./dom-stub.mjs";
 
-installDomStub({
+const { elements } = installDomStub({
   ids: {
     "compliance-view":              { tag: "section", hidden: true },
     "compliance-feed-body":         { tag: "tbody" },
     "compliance-feed-pause":        { tag: "button" },
     "compliance-feed-clear":        { tag: "button" },
+    "compliance-feed-connection":   { tag: "span" },
     "compliance-feed-status":       { tag: "span" },
     "compliance-audit-form":        { tag: "form" },
     "compliance-audit-since":       { tag: "input" },
@@ -68,6 +70,11 @@ globalThis.fetch = async (url, init) => {
 const compliance = await import("../js/complianceUi.js");
 const protocol = await import("../js/protocol.js");
 const state = await import("../js/state.js");
+const envelopes = JSON.parse(readFileSync(
+  new URL("./fixtures/dropcopy-envelopes.json", import.meta.url),
+  "utf8",
+));
+compliance.bindComplianceUi();
 
 test("tabsForRole gates the nav tabs per JWT role", () => {
   // Fase 1 (#397): primary tablist is Trading / Algos / History /
@@ -91,9 +98,25 @@ test("defaultViewForRole lands compliance on its own console", () => {
   assert.equal(compliance.defaultViewForRole("user"), "trader");
 });
 
+test("session renewal only reopens drop-copy for authorized roles", () => {
+  const calls = [];
+  const reconcile = (role, currentView) => compliance.reconcileComplianceRenewal({
+    role,
+    currentView,
+    onReopen: () => calls.push("reopen"),
+    onLeave: () => calls.push("leave"),
+  });
+
+  assert.equal(reconcile("compliance", "compliance"), "reopen");
+  assert.equal(reconcile("admin", "compliance"), "reopen");
+  assert.equal(reconcile("user", "compliance"), "leave");
+  assert.equal(reconcile(undefined, "compliance"), "leave");
+  assert.equal(reconcile("user", "trader"), "unchanged");
+  assert.deepEqual(calls, ["reopen", "reopen", "leave", "leave"]);
+});
+
 test("drop-copy feed buffer caps at COMPLIANCE_FEED_CAP and keeps newest", () => {
-  state.clearComplianceFeed();
-  state.setComplianceFeedPaused(false);
+  state.resetComplianceFeed();
   const cap = state.COMPLIANCE_FEED_CAP;
   // Overflow the ring by 50 — the oldest 50 must fall off the head.
   for (let i = 0; i < cap + 50; i++) {
@@ -107,12 +130,28 @@ test("drop-copy feed buffer caps at COMPLIANCE_FEED_CAP and keeps newest", () =>
 });
 
 test("paused feed drops appended frames on the floor", () => {
-  state.clearComplianceFeed();
+  state.resetComplianceFeed();
   state.setComplianceFeedPaused(true);
   state.appendComplianceFeed({ seq: 1, type: "fill" });
   state.appendComplianceFeed({ seq: 2, type: "fill" });
   assert.equal(state.getState().complianceFeed.entries.length, 0);
   state.setComplianceFeedPaused(false);
+  state.appendComplianceFeed({ seq: 3, type: "fill" });
+  assert.equal(state.getState().complianceFeed.entries.length, 1);
+});
+
+test("session reset clears pause while Clear preserves it", () => {
+  state.resetComplianceFeed();
+  state.appendComplianceFeed({ seq: 1, type: "fill" });
+  state.setComplianceFeedPaused(true);
+
+  state.clearComplianceFeed();
+  assert.deepEqual(state.getState().complianceFeed, { paused: true, entries: [] });
+  state.appendComplianceFeed({ seq: 2, type: "fill" });
+  assert.equal(state.getState().complianceFeed.entries.length, 0);
+
+  state.resetComplianceFeed();
+  assert.deepEqual(state.getState().complianceFeed, { paused: false, entries: [] });
   state.appendComplianceFeed({ seq: 3, type: "fill" });
   assert.equal(state.getState().complianceFeed.entries.length, 1);
 });
@@ -235,28 +274,145 @@ test("buildDropCopyWebSocketUrl upgrades https → wss", () => {
   assert.match(url, /^wss:\/\//);
 });
 
-test("normaliseDropCopyMessage flattens the WS frame into a row entry", () => {
-  const row = compliance.normaliseDropCopyMessage({
-    type: "fill",
-    payload: {
-      timestamp: "2025-01-15T12:00:00Z",
-      user: "alice", symbol: "PETR4", side: "Buy",
-      lastQty: 100, lastPx: 30.5, clOrdId: "42",
-    },
-  });
-  assert.equal(row.type, "fill");
-  assert.equal(row.user, "alice");
+test("normaliseDropCopyEnvelope expands backend snapshot arrays", () => {
+  const rows = compliance.normaliseDropCopyEnvelope(envelopes.ordersSnapshot);
+  assert.equal(rows.length, 2);
+  const row = rows[0];
+  assert.equal(row.type, "Order");
+  assert.equal(row.status, "Working");
   assert.equal(row.symbol, "PETR4");
   assert.equal(row.qty, 100);
   assert.equal(row.price, 30.5);
-  assert.equal(row.clOrdId, "42");
+  assert.equal(row.clOrdId, "0B52A6F9D43E7C10");
+  assert.equal(row.channel, "dropcopy.orders");
+  assert.equal(row.seq, 0);
 });
 
-test("normaliseDropCopyMessage drops heartbeats / snapshot boundaries", () => {
-  assert.equal(compliance.normaliseDropCopyMessage({ type: "heartbeat" }), null);
-  assert.equal(compliance.normaliseDropCopyMessage({ type: "snapshot.start" }), null);
-  assert.equal(compliance.normaliseDropCopyMessage({}), null);
-  assert.equal(compliance.normaliseDropCopyMessage(null), null);
+test("normaliseDropCopyEnvelope routes fill and cancel deltas by channel", () => {
+  const [fill] = compliance.normaliseDropCopyEnvelope(envelopes.fillDelta);
+  assert.equal(fill.type, "Fill");
+  assert.equal(fill.status, "Filled");
+  assert.equal(fill.qty, 100);
+  assert.equal(fill.price, 30.5);
+  assert.equal(fill.timestamp, "2026-07-16T17:00:00+00:00");
+
+  const [cancel] = compliance.normaliseDropCopyEnvelope(envelopes.cancelDelta);
+  assert.equal(cancel.type, "Canceled");
+  assert.equal(cancel.status, "Cancelled");
+  assert.equal(cancel.qty, 0);
+  assert.equal(cancel.channel, "dropcopy.cancels");
+});
+
+test("normaliseDropCopyEnvelope rejects fabricated and malformed shapes", () => {
+  assert.equal(compliance.normaliseDropCopyEnvelope({ type: "fill", payload: {} }), null);
+  assert.equal(compliance.normaliseDropCopyEnvelope({ type: "snapshot", channel: "dropcopy.orders", data: {} }), null);
+  assert.equal(compliance.normaliseDropCopyEnvelope({}), null);
+  assert.equal(compliance.normaliseDropCopyEnvelope(null), null);
+});
+
+test("drop-copy reconnect is single, bounded, resnapshots, and stops cleanly", () => {
+  class FakeWebSocket {
+    static instances = [];
+    constructor(url) {
+      this.url = url;
+      this.listeners = new Map();
+      this.closeCalls = [];
+      FakeWebSocket.instances.push(this);
+    }
+    addEventListener(type, fn) {
+      if (!this.listeners.has(type)) this.listeners.set(type, []);
+      this.listeners.get(type).push(fn);
+    }
+    emit(type, event = {}) {
+      for (const fn of this.listeners.get(type) ?? []) fn(event);
+    }
+    sendJson(value) {
+      this.emit("message", { data: JSON.stringify(value) });
+    }
+    close(code, reason) {
+      this.closeCalls.push({ code, reason });
+      this.emit("close");
+    }
+  }
+
+  const originalWebSocket = globalThis.WebSocket;
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const timers = [];
+  globalThis.WebSocket = FakeWebSocket;
+  globalThis.setTimeout = (fn, delay) => {
+    const timer = { fn, delay, cancelled: false };
+    timers.push(timer);
+    return timer;
+  };
+  globalThis.clearTimeout = (timer) => { timer.cancelled = true; };
+
+  try {
+    state.clearComplianceFeed();
+    state.setComplianceFeedPaused(false);
+    const url = "wss://api.example/ws/dropcopy?access_token=token";
+    const first = compliance.openDropCopyFeed(url);
+    assert.equal(FakeWebSocket.instances.length, 1);
+    assert.equal(state.getState().complianceConnection.status, "connecting");
+
+    first.emit("open");
+    assert.equal(state.getState().complianceConnection.status, "connected");
+    assert.equal(elements.get("compliance-feed-connection").textContent, "Connected");
+
+    first.sendJson(envelopes.ordersSnapshot);
+    first.sendJson(envelopes.fillsSnapshot);
+    first.sendJson(envelopes.cancelsSnapshot);
+    first.sendJson(envelopes.fillDelta);
+    assert.equal(state.getState().complianceFeed.entries.length, 3);
+    assert.match(elements.get("compliance-feed-body").innerHTML, /Working/);
+    assert.match(elements.get("compliance-feed-body").innerHTML, /Filled/);
+
+    state.clearAll();
+    assert.equal(state.getState().complianceFeed.entries.length, 3);
+    assert.equal(state.getState().complianceConnection.status, "connected");
+
+    first.emit("error");
+    assert.equal(state.getState().complianceConnection.status, "error");
+    assert.equal(elements.get("compliance-feed-connection").textContent, "Connection error");
+    first.emit("close");
+    first.emit("close");
+    compliance.openDropCopyFeed(url);
+    assert.equal(timers.filter((timer) => !timer.cancelled).length, 1);
+    assert.equal(FakeWebSocket.instances.length, 1);
+    assert.equal(timers[0].delay, 1_000);
+    assert.equal(state.getState().complianceConnection.status, "reconnecting");
+
+    timers[0].fn();
+    const second = FakeWebSocket.instances[1];
+    assert.ok(second);
+    second.emit("open");
+    second.sendJson({
+      ...envelopes.ordersSnapshot,
+      data: [envelopes.ordersSnapshot.data[1]],
+    });
+    second.sendJson(envelopes.fillsSnapshot);
+    second.sendJson(envelopes.cancelsSnapshot);
+    assert.equal(state.getState().complianceFeed.entries.length, 1);
+    assert.equal(state.getState().complianceFeed.entries[0].clOrdId, "4F81C2D93A607BE5");
+
+    compliance.closeDropCopyFeed();
+    assert.equal(second.closeCalls.length, 1);
+    assert.equal(state.getState().complianceConnection.status, "disconnected");
+    assert.equal(elements.get("compliance-feed-connection").textContent, "Disconnected");
+    assert.equal(timers.filter((timer) => !timer.cancelled).length, 1);
+  } finally {
+    compliance.closeDropCopyFeed();
+    globalThis.WebSocket = originalWebSocket;
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
+});
+
+test("drop-copy reconnect backoff is exponential and capped", () => {
+  assert.equal(compliance.dropCopyReconnectDelayMs(0), 1_000);
+  assert.equal(compliance.dropCopyReconnectDelayMs(4), 16_000);
+  assert.equal(compliance.dropCopyReconnectDelayMs(5), 30_000);
+  assert.equal(compliance.dropCopyReconnectDelayMs(100), 30_000);
 });
 
 test("yesterdayBrt returns a yyyy-MM-dd string for the day before in UTC-3", () => {
