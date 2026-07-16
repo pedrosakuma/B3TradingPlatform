@@ -373,7 +373,7 @@ public sealed class ExecutionReportProcessor
                     // the position. Buys debit, Sells credit; T+0 settle.
                     // Null when the host hasn't wired CashLedger yet
                     // (test contexts only — production DI always injects).
-                    _cash?.ApplyFill(owner, order.Side, delta, lastPx);
+                    _cash?.ApplyFill(order.FirmId, owner, order.Side, delta, lastPx);
                     // Q2.3 (#270). Fees are computed off the fill delta
                     // (NOT the cumulative quantity) using the live
                     // FeeOptions snapshot. The breakdown is deterministic
@@ -427,7 +427,7 @@ public sealed class ExecutionReportProcessor
                             // documented above).
                             _feeKeeper.RegisterPendingReplaySynth(
                                 executionId, owner.Value, order.Symbol, order.Side,
-                                delta, lastPx, nowUtc);
+                                delta, lastPx, nowUtc, order.FirmId);
                         }
                         else
                         {
@@ -437,6 +437,7 @@ public sealed class ExecutionReportProcessor
                                 ClOrdId = lookupId,
                                 ExecutionId = executionId,
                                 EndClientId = owner.Value,
+                                FirmId = order.FirmId,
                                 Symbol = order.Symbol,
                                 Side = order.Side.ToString(),
                                 FillQuantity = delta,

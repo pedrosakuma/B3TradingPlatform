@@ -89,12 +89,16 @@ public sealed class SubAccountLimitsCheck : IRiskCheck
         if (limits.PositionLimit is { } posCap)
         {
             var pos = _positions.GetOrCreate(ctx.FirmId, ctx.Owner, sub, ctx.Symbol);
+            var openLeaves = _book.SumOpenLeavesForSubAccount(
+                ctx.FirmId, ctx.Owner, sub, ctx.Symbol, ctx.Side);
+            var adjustment = ProjectionAdjustment(ctx, sub);
+            var directionalExposure = openLeaves + adjustment;
             long projectedNet;
             lock (pos)
             {
                 projectedNet = ctx.Side == OrderSide.Buy
-                    ? pos.NetQuantity + ctx.Quantity
-                    : pos.NetQuantity - ctx.Quantity;
+                    ? pos.NetQuantity + directionalExposure
+                    : pos.NetQuantity - directionalExposure;
             }
             if (Math.Abs(projectedNet) > posCap)
                 return RiskDecision.Reject(
@@ -106,12 +110,46 @@ public sealed class SubAccountLimitsCheck : IRiskCheck
             // OPT-B (#484): option qty is in contracts; apply
             // contractMultiplier so MaxNotional caps options at the
             // right BRL-equivalent (silent 100x bypass without this).
-            var notional = _values.GetNotional(ctx.Symbol, price, ctx.Quantity);
+            var notional = _values.GetNotional(ctx.Symbol, price, ctx.ExecutableQuantity);
             if (notional > notCap)
                 return RiskDecision.Reject(
                     $"{LimitExceededPrefix}: notional {notional} would exceed sub-account cap {notCap} for {ctx.FirmId}:{sub.Value}");
         }
 
         return RiskDecision.Approve;
+    }
+
+    private long ProjectionAdjustment(RiskContext ctx, SubAccountId subAccount)
+    {
+        if (ctx.ReplaceOriginalClOrdId is { } originalClOrdId)
+        {
+            long adjustment = ctx.ExecutableQuantity;
+            if (_book.TryGet(originalClOrdId, out var original)
+                && original is not null
+                && original.Owner == ctx.Owner
+                && original.Side == ctx.Side
+                && original.SubAccountId == subAccount
+                && string.Equals(original.FirmId, ctx.FirmId, StringComparison.Ordinal)
+                && string.Equals(original.Symbol, ctx.Symbol, StringComparison.Ordinal)
+                && !original.IsStale
+                && original.Status is not (OrderStatus.Filled or OrderStatus.Cancelled
+                    or OrderStatus.Rejected or OrderStatus.Replaced))
+            {
+                adjustment -= original.LeavesQuantity;
+            }
+            return adjustment;
+        }
+
+        if (ctx.EvaluatedClOrdId is { } clOrdId
+            && _book.TryGet(clOrdId, out var evaluated)
+            && evaluated is not null
+            && !evaluated.IsStale
+            && evaluated.Status is not (OrderStatus.Filled or OrderStatus.Cancelled
+                or OrderStatus.Rejected or OrderStatus.Replaced))
+        {
+            return 0;
+        }
+
+        return ctx.ExecutableQuantity;
     }
 }

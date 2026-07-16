@@ -223,20 +223,27 @@ internal static class TradingHostStartup
                         "CashSeed for {Owner} has negative InitialAvailable={Balance} — applying anyway, but this is almost certainly a typo.",
                         seed.EndClientId, seed.InitialAvailable);
                 }
+                if (string.IsNullOrWhiteSpace(seed.FirmId))
+                {
+                    cashLogger.LogWarning(
+                        "Skipping malformed CashSeed for {Owner} (empty FirmId).",
+                        seed.EndClientId);
+                    continue;
+                }
                 var owner = new EndClientId(seed.EndClientId);
-                if (ledger.SeedIfAbsent(owner, seed.InitialAvailable))
+                if (ledger.SeedIfAbsent(seed.FirmId, owner, seed.InitialAvailable))
                 {
                     applied++;
                     cashLogger.LogInformation(
-                        "Seeded opening cash {Owner} = {Balance}.",
-                        seed.EndClientId, seed.InitialAvailable);
+                        "Seeded opening cash {Firm}/{Owner} = {Balance}.",
+                        seed.FirmId, seed.EndClientId, seed.InitialAvailable);
                 }
                 else
                 {
                     skipped++;
                     cashLogger.LogInformation(
-                        "Skipped cash seed for {Owner}: balance already present from recovery.",
-                        seed.EndClientId);
+                        "Skipped cash seed for {Firm}/{Owner}: balance already present from recovery.",
+                        seed.FirmId, seed.EndClientId);
                 }
             }
             cashLogger.LogInformation("CashSeeder finished: {Applied} applied, {Skipped} skipped.", applied, skipped);

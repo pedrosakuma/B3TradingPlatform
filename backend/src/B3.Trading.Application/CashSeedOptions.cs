@@ -19,7 +19,7 @@ public sealed class CashSeedOptions
     public const string SectionName = "Trading:Cash";
 
     /// <summary>
-    /// Per-end-client opening balance. List shape (rather than nested
+    /// Per-(firm, end-client) opening balance. List shape (rather than nested
     /// dict) keeps env-var binding ergonomic:
     /// <c>Trading__Cash__Seeds__0__EndClientId=alice</c>.
     /// </summary>
@@ -36,6 +36,13 @@ public sealed class CashSeedOptions
 
 public sealed class CashSeed
 {
+    /// <summary>
+    /// Firm bucket to fund. Defaults to the legacy single-firm bucket so
+    /// existing configuration remains loadable without duplicating cash into
+    /// every configured firm.
+    /// </summary>
+    public string FirmId { get; set; } = CashLedger.DefaultFirmId;
+
     public string EndClientId { get; set; } = string.Empty;
 
     /// <summary>

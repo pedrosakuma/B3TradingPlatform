@@ -19,6 +19,17 @@ public interface IRiskAccountant
 }
 
 /// <summary>
+/// Conservative restart barrier for in-memory sliding windows. Recovery
+/// activates the fence when prior durable state exists; checks reject until
+/// their configured window has elapsed from recovery time.
+/// </summary>
+public interface IRiskRecoveryFence
+{
+    bool IsRecoveryFenced { get; }
+    void EnterRecoveryFence();
+}
+
+/// <summary>
 /// Fans <see cref="IRiskAccountant.RecordAccepted"/> out to every
 /// registered accountant. A single composite is what the endpoint
 /// depends on, so adding a new accountant is a DI-only change.

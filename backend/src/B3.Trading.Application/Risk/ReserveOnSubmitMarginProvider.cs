@@ -40,7 +40,7 @@ namespace B3.Trading.Application.Risk;
 ///
 /// <para>
 /// <b>Cash source (slice 2 of #107):</b> when a <see cref="CashLedger"/>
-/// is wired in, the per-owner base capacity is read from the ledger's
+/// is wired in, the per-(firm, owner) base capacity is read from the ledger's
 /// settled-cash balance — this is the post-fill number, so a Buy that
 /// just executed correctly reduces the available figure for the next
 /// reservation. When the ledger has no entry for the owner, the
@@ -56,8 +56,8 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
     private readonly IMarketValueCalculator _values;
 
     private readonly ConcurrentDictionary<ulong, ReservationEntry> _reservations = new();
-    private readonly ConcurrentDictionary<string, decimal> _reserved =
-        new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<MarginAccountKey, decimal> _reserved =
+        new(MarginAccountKeyComparer.Instance);
     private readonly object _gate = new();
 
     public ReserveOnSubmitMarginProvider(
@@ -100,22 +100,24 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
             return Task.FromResult(RiskDecision.Approve);
 
         var owner = ctx.Owner.Value;
-        var baseAvailable = ResolveBaseAvailable(owner);
+        var account = MarginAccountKey.Create(ctx.FirmId, owner);
+        var baseAvailable = ResolveBaseAvailable(account);
 
         // Atomic check+reserve: take the gate, snapshot reserved,
         // verify capacity, mutate. The provider is a singleton so the
         // gate scope covers all races for the same owner.
         lock (_gate)
         {
-            var reserved = _reserved.GetValueOrDefault(owner, 0m);
+            var reserved = _reserved.GetValueOrDefault(account, 0m);
             var available = baseAvailable - reserved;
             if (notional > available)
             {
                 return Task.FromResult(RiskDecision.Reject(
-                    $"insufficient margin: notional {notional} exceeds available {available} for end-client '{owner}'"));
+                    $"insufficient margin: notional {notional} exceeds available {available} for firm/end-client '{ctx.FirmId}/{owner}'"));
             }
-            _reserved[owner] = reserved + notional;
-            _reservations[clOrdId] = new ReservationEntry(owner, ctx.Price.Value, ctx.Quantity, notional);
+            _reserved[account] = reserved + notional;
+            _reservations[clOrdId] = new ReservationEntry(
+                ctx.FirmId, owner, ctx.Price.Value, ctx.Quantity, notional);
         }
 
         return Task.FromResult(RiskDecision.Approve);
@@ -161,7 +163,7 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
                     // is a no-op (the flag prevents double-decrement).
                     if (!entry.IsSuspended && entry.RemainingNotional > 0m)
                     {
-                        DecrementReserved(entry.Owner, entry.RemainingNotional);
+                        DecrementReserved(entry.Account, entry.RemainingNotional);
                     }
                     _reservations[clOrdId] = entry with { IsSuspended = true };
                     break;
@@ -177,18 +179,18 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
                     // stale orders.
                     if (entry.IsSuspended && entry.RemainingNotional > 0m)
                     {
-                        var current = _reserved.GetValueOrDefault(entry.Owner, 0m);
+                        var current = _reserved.GetValueOrDefault(entry.Account, 0m);
                         var next = current + entry.RemainingNotional;
-                        var baseCap = ResolveBaseAvailable(entry.Owner);
+                        var baseCap = ResolveBaseAvailable(entry.Account);
                         if (next > baseCap)
                         {
                             _logger.LogWarning(
-                                "Margin restore for {ClOrdId} overcommits owner {Owner}: reserved {Current} + restored {Restored} > base {Base}.",
-                                clOrdId, entry.Owner, current, entry.RemainingNotional, baseCap);
+                                "Margin restore for {ClOrdId} overcommits {Firm}/{Owner}: reserved {Current} + restored {Restored} > base {Base}.",
+                                clOrdId, entry.FirmId, entry.Owner, current, entry.RemainingNotional, baseCap);
                             MetricsRegistry.MarginOvercommitOnRestore.Add(
                                 1, new KeyValuePair<string, object?>("owner", entry.Owner));
                         }
-                        _reserved[entry.Owner] = next;
+                        _reserved[entry.Account] = next;
                     }
                     _reservations[clOrdId] = entry with { IsSuspended = false };
                     break;
@@ -250,6 +252,7 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
 
                 var owner = order.EndClientId;
                 _reservations[order.ClOrdId] = new ReservationEntry(
+                    order.FirmId,
                     owner,
                     price,
                     order.LeavesQuantity,
@@ -259,7 +262,11 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
                 if (!order.IsStale)
                 {
                     AddRecoveredReservation_Locked(
-                        owner, remainingNotional, order.ClOrdId, "working_order");
+                        order.FirmId,
+                        owner,
+                        remainingNotional,
+                        order.ClOrdId,
+                        "working_order");
                 }
 
                 restoredOrders++;
@@ -285,10 +292,11 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
                         0m, pending.NewRemainingNotional - originalHeld);
 
                     _reservations[pending.Intent.NewClOrdId] = new ReservationEntry(
-                        owner, 0m, 0L, transientDelta);
+                        pending.Intent.FirmId, owner, 0m, 0L, transientDelta);
                     if (transientDelta > 0m)
                     {
                         AddRecoveredReservation_Locked(
+                            pending.Intent.FirmId,
                             owner,
                             transientDelta,
                             pending.Intent.NewClOrdId,
@@ -302,22 +310,24 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
     }
 
     private void AddRecoveredReservation_Locked(
+        string firmId,
         string owner,
         decimal amount,
         ulong clOrdId,
         string source)
     {
-        var next = _reserved.GetValueOrDefault(owner, 0m) + amount;
-        var baseCap = ResolveBaseAvailable(owner);
+        var account = MarginAccountKey.Create(firmId, owner);
+        var next = _reserved.GetValueOrDefault(account, 0m) + amount;
+        var baseCap = ResolveBaseAvailable(account);
         if (next > baseCap)
         {
             _logger.LogWarning(
-                "Margin recovery for {ClOrdId} overcommits owner {Owner}: source={Source} restored reserved {Reserved} > base {Base}.",
-                clOrdId, owner, source, next, baseCap);
+                "Margin recovery for {ClOrdId} overcommits {Firm}/{Owner}: source={Source} restored reserved {Reserved} > base {Base}.",
+                clOrdId, firmId, owner, source, next, baseCap);
             MetricsRegistry.MarginOvercommitOnRestore.Add(
                 1, new KeyValuePair<string, object?>("owner", owner));
         }
-        _reserved[owner] = next;
+        _reserved[account] = next;
     }
 
     private void ReleasePartial_Locked(ulong clOrdId, ReservationEntry entry, long lastQty)
@@ -351,7 +361,7 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
         // post-fill leaves) WITHOUT decrementing _reserved again.
         if (!entry.IsSuspended)
         {
-            DecrementReserved(entry.Owner, amount);
+            DecrementReserved(entry.Account, amount);
         }
         _reservations[clOrdId] = entry with { RemainingNotional = newRemaining };
     }
@@ -364,20 +374,20 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
         // remove the tracking entry, do not double-decrement.
         if (!entry.IsSuspended)
         {
-            DecrementReserved(entry.Owner, entry.RemainingNotional);
+            DecrementReserved(entry.Account, entry.RemainingNotional);
         }
     }
 
-    private void DecrementReserved(string owner, decimal amount)
+    private void DecrementReserved(MarginAccountKey account, decimal amount)
     {
-        var reserved = _reserved.GetValueOrDefault(owner, 0m);
+        var reserved = _reserved.GetValueOrDefault(account, 0m);
         var next = reserved - amount;
         if (next < 0m) next = 0m;
-        _reserved[owner] = next;
+        _reserved[account] = next;
     }
 
     /// <summary>
-    /// Resolves the per-owner base capacity that the reservation ledger
+    /// Resolves the per-(firm, owner) base capacity that the reservation ledger
     /// debits against. Slice 2 of #107 introduces a CashLedger fallback:
     /// when the ledger has an entry for the owner (seeded or built up
     /// from fills) it is the authoritative settled-cash figure; the
@@ -391,9 +401,11 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
     /// see the post-settlement number, not the original allowance.
     /// </para>
     /// </summary>
-    private decimal ResolveBaseAvailable(string owner)
+    private decimal ResolveBaseAvailable(MarginAccountKey account)
     {
-        if (_cash is not null && _cash.TryGet(new EndClientId(owner), out var balance) && balance is not null)
+        if (_cash is not null
+            && _cash.TryGet(account.FirmId, new EndClientId(account.Owner), out var balance)
+            && balance is not null)
         {
             return balance.Available;
         }
@@ -402,16 +414,33 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
         // until a follow-up removes the property. The startup warning
         // in Program.cs nudges operators to migrate.
 #pragma warning disable CS0618 // Type or member is obsolete
-        return _options.CurrentValue.Margin.Initial.GetValueOrDefault(owner, 0m);
+        return _options.CurrentValue.Margin.Initial.GetValueOrDefault(account.Owner, 0m);
 #pragma warning restore CS0618
     }
 
     /// <summary>Test/observability helper: returns the currently reserved amount for an owner.</summary>
-    internal decimal ReservedForTesting(string owner) => _reserved.GetValueOrDefault(owner, 0m);
+    internal decimal ReservedForTesting(string owner) =>
+        _reserved.Where(kv => string.Equals(kv.Key.Owner, owner, StringComparison.Ordinal))
+            .Sum(kv => kv.Value);
+
+    internal decimal ReservedForTesting(string firmId, string owner) =>
+        _reserved.GetValueOrDefault(MarginAccountKey.Create(firmId, owner), 0m);
 
     /// <summary>Test/observability helper: returns the currently available amount for an owner.</summary>
-    internal decimal AvailableForTesting(string owner) =>
-        ResolveBaseAvailable(owner) - ReservedForTesting(owner);
+    internal decimal AvailableForTesting(string owner)
+    {
+        var account = _reserved.Keys.FirstOrDefault(
+            key => string.Equals(key.Owner, owner, StringComparison.Ordinal));
+        if (string.IsNullOrEmpty(account.FirmId))
+            account = MarginAccountKey.Create(CashLedger.DefaultFirmId, owner);
+        return ResolveBaseAvailable(account) - ReservedForTesting(owner);
+    }
+
+    internal decimal AvailableForTesting(string firmId, string owner)
+    {
+        var account = MarginAccountKey.Create(firmId, owner);
+        return ResolveBaseAvailable(account) - _reserved.GetValueOrDefault(account, 0m);
+    }
 
     /// <summary>
     /// Memory-growth observability for the suspended-reservation
@@ -450,6 +479,26 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
         decimal newRemainingNotional,
         CancellationToken ct)
     {
+        var firmId = _reservations.TryGetValue(originalClOrdId, out var original)
+            ? original.FirmId
+            : CashLedger.DefaultFirmId;
+        return PrepareReplaceAsync(
+            originalClOrdId,
+            newClOrdId,
+            owner,
+            firmId,
+            newRemainingNotional,
+            ct);
+    }
+
+    public Task<RiskDecision> PrepareReplaceAsync(
+        ulong originalClOrdId,
+        ulong newClOrdId,
+        EndClientId owner,
+        string firmId,
+        decimal newRemainingNotional,
+        CancellationToken ct)
+    {
         // Margin globally disabled: the DI container points
         // IMarginProvider at the NoOp variant and never reserves on
         // submit. The replace coordinator, however, is always wired
@@ -465,6 +514,7 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
             return Task.FromResult(RiskDecision.Approve);
 
         var ownerKey = owner.Value;
+        var account = MarginAccountKey.Create(firmId, ownerKey);
         lock (_gate)
         {
             // #153. A suspended original held no cash in _reserved, so
@@ -489,22 +539,24 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
                 // Track the in-flight intent with a zero-notional entry
                 // so AbortReplace has something to remove and Commit
                 // knows the Prepare ran. No effect on _reserved.
-                _reservations[newClOrdId] = new ReservationEntry(ownerKey, 0m, 0L, 0m);
+                _reservations[newClOrdId] = new ReservationEntry(
+                    firmId, ownerKey, 0m, 0L, 0m);
                 return Task.FromResult(RiskDecision.Approve);
             }
 
-            var reserved = _reserved.GetValueOrDefault(ownerKey, 0m);
-            var available = ResolveBaseAvailable(ownerKey) - reserved;
+            var reserved = _reserved.GetValueOrDefault(account, 0m);
+            var available = ResolveBaseAvailable(account) - reserved;
             if (delta > available)
             {
                 return Task.FromResult(RiskDecision.Reject(
-                    $"insufficient margin for replace upsize: delta {delta} exceeds available {available} for end-client '{ownerKey}'"));
+                    $"insufficient margin for replace upsize: delta {delta} exceeds available {available} for firm/end-client '{firmId}/{ownerKey}'"));
             }
 
-            _reserved[ownerKey] = reserved + delta;
+            _reserved[account] = reserved + delta;
             // The transient reservation under newClOrdId carries only
             // the delta — Commit will top it up to confirmedRemainingNotional.
-            _reservations[newClOrdId] = new ReservationEntry(ownerKey, 0m, 0L, delta);
+            _reservations[newClOrdId] = new ReservationEntry(
+                firmId, ownerKey, 0m, 0L, delta);
             return Task.FromResult(RiskDecision.Approve);
         }
     }
@@ -530,11 +582,11 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
             // RemainingNotional is the upsize delta we already reserved
             // (or zero for downsize/same).
             decimal transientDelta = 0m;
-            string? owner = null;
+            ReservationEntry? accountEntry = null;
             if (_reservations.TryRemove(newClOrdId, out var transient))
             {
                 transientDelta = transient.RemainingNotional;
-                owner = transient.Owner;
+                accountEntry = transient;
             }
 
             // Release the original entry entirely (returns oldRemaining).
@@ -547,10 +599,10 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
             {
                 if (!origEntry.IsSuspended)
                     oldRemaining = origEntry.RemainingNotional;
-                owner ??= origEntry.Owner;
+                accountEntry ??= origEntry;
             }
 
-            if (owner is null)
+            if (accountEntry is null)
             {
                 // No reservation existed on either side. If margin is
                 // currently disabled, this is the legitimate "started
@@ -583,22 +635,28 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
             // Combined: confirmedRemainingNotional - oldRemaining - transientDelta
             // (which equals zero for the upsize/same Prepare-then-Commit sequence
             // when the venue confirms the qty we asked for).
-            var reserved = _reserved.GetValueOrDefault(owner, 0m);
+            var account = accountEntry.Account;
+            var reserved = _reserved.GetValueOrDefault(account, 0m);
             var adjustment = confirmedRemainingNotional - oldRemaining - transientDelta;
             var next = reserved + adjustment;
             if (next < 0m)
             {
                 _logger.LogWarning(
                     "CommitReplace adjustment for owner {Owner} would push reserved below zero ({Reserved} + {Adjustment}); clamping to zero.",
-                    owner, reserved, adjustment);
+                    account.Owner, reserved, adjustment);
                 next = 0m;
             }
-            _reserved[owner] = next;
+            _reserved[account] = next;
 
             if (confirmedRemainingNotional > 0m)
             {
                 _reservations[newClOrdId] =
-                    new ReservationEntry(owner, 0m, 0L, confirmedRemainingNotional);
+                    new ReservationEntry(
+                        account.FirmId,
+                        account.Owner,
+                        0m,
+                        0L,
+                        confirmedRemainingNotional);
             }
         }
     }
@@ -614,12 +672,44 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
         }
     }
 
-    private sealed record ReservationEntry(string Owner, decimal Price, long OriginalQty, decimal RemainingNotional, bool IsSuspended = false)
+    private sealed record ReservationEntry(
+        string FirmId,
+        string Owner,
+        decimal Price,
+        long OriginalQty,
+        decimal RemainingNotional,
+        bool IsSuspended = false)
     {
+        public MarginAccountKey Account => MarginAccountKey.Create(FirmId, Owner);
+
         // OPT-B (#484). Snapshot of the notional reserved at submit
         // (price * qty * multiplier). RemainingNotional shrinks with
         // partial releases; OriginalNotional stays put so the
         // per-contract release amount is derivable for partial fills.
         public decimal OriginalNotional { get; init; } = RemainingNotional;
+    }
+
+    private readonly record struct MarginAccountKey(string FirmId, string Owner)
+    {
+        public static MarginAccountKey Create(string firmId, string owner)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+            ArgumentException.ThrowIfNullOrWhiteSpace(owner);
+            return new MarginAccountKey(firmId, owner);
+        }
+    }
+
+    private sealed class MarginAccountKeyComparer : IEqualityComparer<MarginAccountKey>
+    {
+        public static readonly MarginAccountKeyComparer Instance = new();
+
+        public bool Equals(MarginAccountKey x, MarginAccountKey y) =>
+            string.Equals(x.FirmId, y.FirmId, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(x.Owner, y.Owner, StringComparison.Ordinal);
+
+        public int GetHashCode(MarginAccountKey obj) =>
+            HashCode.Combine(
+                StringComparer.OrdinalIgnoreCase.GetHashCode(obj.FirmId),
+                StringComparer.Ordinal.GetHashCode(obj.Owner));
     }
 }

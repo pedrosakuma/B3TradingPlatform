@@ -15,7 +15,7 @@ public class BalanceWebSocketChannelTests
     {
         var cash = new CashLedger();
         var owner = new EndClientId("alice");
-        cash.SeedIfAbsent(owner, 1_000m);
+        cash.SeedIfAbsent("FIRM01", owner, 1_000m);
 
         var subs = new SubscriptionManager(
             new WorkingOrderBook(), new PositionKeeper(), new AlgoBook(), cash: cash);
@@ -52,7 +52,7 @@ public class BalanceWebSocketChannelTests
     {
         var cash = new CashLedger();
         var owner = new EndClientId("alice");
-        cash.SeedIfAbsent(owner, 10_000m);
+        cash.SeedIfAbsent("FIRM01", owner, 10_000m);
 
         var subs = new SubscriptionManager(
             new WorkingOrderBook(), new PositionKeeper(), new AlgoBook(), cash: cash);
@@ -64,7 +64,7 @@ public class BalanceWebSocketChannelTests
         subs.SubscribeWithSnapshot(client, Channels.BalanceMe);
         client.Reader.TryRead(out _); // discard snapshot
 
-        cash.ApplyFill(owner, OrderSide.Buy, 100, 30m); // -3000
+        cash.ApplyFill("FIRM01", owner, OrderSide.Buy, 100, 30m); // -3000
 
         var delta = await ReadWithTimeoutAsync(client);
         Assert.Equal("delta", delta!.Type);
@@ -81,7 +81,7 @@ public class BalanceWebSocketChannelTests
     {
         var cash = new CashLedger();
         var owner = new EndClientId("alice");
-        cash.SeedIfAbsent(owner, 500m);
+        cash.SeedIfAbsent("FIRM01", owner, 500m);
 
         var subs = new SubscriptionManager(
             new WorkingOrderBook(), new PositionKeeper(), new AlgoBook(), cash: cash);
@@ -93,7 +93,7 @@ public class BalanceWebSocketChannelTests
         subs.SubscribeWithSnapshot(client, Channels.BalanceMe);
         client.Reader.TryRead(out _); // snapshot
 
-        cash.ApplyFee(owner, 12.34m);
+        cash.ApplyFee("FIRM01", owner, 12.34m);
 
         var delta = await ReadWithTimeoutAsync(client);
         var dto = Assert.IsType<BalanceDto>(delta!.Data);
@@ -107,7 +107,7 @@ public class BalanceWebSocketChannelTests
     {
         var cash = new CashLedger();
         var owner = new EndClientId("alice");
-        cash.SeedIfAbsent(owner, 100m);
+        cash.SeedIfAbsent("FIRM01", owner, 100m);
 
         var subs = new SubscriptionManager(
             new WorkingOrderBook(), new PositionKeeper(), new AlgoBook(), cash: cash);
@@ -125,9 +125,9 @@ public class BalanceWebSocketChannelTests
         // distinct Available values so neither is coalesced. To test the
         // coalesce path, fire two mutations that DO collapse: two
         // ApplyFee(0) calls (no-op, no event) followed by one real fee.
-        cash.ApplyFee(owner, 0m);
-        cash.ApplyFee(owner, 0m);
-        cash.ApplyFee(owner, 25m);
+        cash.ApplyFee("FIRM01", owner, 0m);
+        cash.ApplyFee("FIRM01", owner, 0m);
+        cash.ApplyFee("FIRM01", owner, 25m);
 
         var delta = await ReadWithTimeoutAsync(client);
         Assert.Equal(75m, ((BalanceDto)delta!.Data!).Available);
@@ -145,8 +145,8 @@ public class BalanceWebSocketChannelTests
         var cash = new CashLedger();
         var alice = new EndClientId("alice");
         var bob = new EndClientId("bob");
-        cash.SeedIfAbsent(alice, 1_000m);
-        cash.SeedIfAbsent(bob, 2_000m);
+        cash.SeedIfAbsent("FIRM01", alice, 1_000m);
+        cash.SeedIfAbsent("FIRM01", bob, 2_000m);
 
         var subs = new SubscriptionManager(
             new WorkingOrderBook(), new PositionKeeper(), new AlgoBook(), cash: cash);
@@ -158,11 +158,34 @@ public class BalanceWebSocketChannelTests
         subs.SubscribeWithSnapshot(bobClient, Channels.BalanceMe);
         bobClient.Reader.TryRead(out _); // snapshot
 
-        cash.ApplyFee(alice, 50m); // alice mutates; bob must not see it
+        cash.ApplyFee("FIRM01", alice, 50m); // alice mutates; bob must not see it
 
         await Task.Delay(100);
         Assert.False(bobClient.Reader.TryRead(out _));
 
+        await fan.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task FanOut_FirmScoped_DoesNotLeakSameOwnerAcrossFirms()
+    {
+        var cash = new CashLedger();
+        var owner = new EndClientId("alice");
+        cash.SeedIfAbsent("FIRM01", owner, 1_000m);
+        cash.SeedIfAbsent("FIRM02", owner, 2_000m);
+        var subs = new SubscriptionManager(
+            new WorkingOrderBook(), new PositionKeeper(), new AlgoBook(), cash: cash);
+        await using var fan = new WebSocketBalanceFanOut(cash, subs);
+        await fan.StartAsync(CancellationToken.None);
+        var client = new SubscribedClient(owner, "FIRM01");
+        subs.Add(client);
+        subs.SubscribeWithSnapshot(client, Channels.BalanceMe);
+        client.Reader.TryRead(out _);
+
+        cash.ApplyFee("FIRM02", owner, 100m);
+
+        await Task.Delay(100);
+        Assert.False(client.Reader.TryRead(out _));
         await fan.StopAsync(CancellationToken.None);
     }
 

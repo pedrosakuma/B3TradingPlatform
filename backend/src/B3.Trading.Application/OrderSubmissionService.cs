@@ -301,7 +301,8 @@ public sealed class OrderSubmissionService
             ParentAlgoId: req.Source == OrderSubmissionSource.Algo ? req.ParentAlgoId : null,
             AlgoType: req.Source == OrderSubmissionSource.Algo
                 ? req.AlgoTypeTag
-                : null);
+                : null,
+            EvaluatedClOrdId: clOrdId);
         var decision = _risk.Evaluate(riskCtx);
         var marginReserved = false;
         if (decision.Approved)

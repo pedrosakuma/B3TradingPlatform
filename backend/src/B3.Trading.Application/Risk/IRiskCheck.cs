@@ -72,7 +72,20 @@ public sealed record RiskContext(
     /// used to resolve per-algo-type limits in <c>RiskOptions</c>.
     /// Only meaningful when <see cref="ParentAlgoId"/> is set.
     /// </summary>
-    string? AlgoType = null);
+    string? AlgoType = null,
+    /// <summary>
+    /// ClOrdID of a fresh submit already inserted into the working book before
+    /// risk evaluation. Null for direct/unit callers and cancel-replace, whose
+    /// new ClOrdID is not in the book yet.
+    /// </summary>
+    ulong? EvaluatedClOrdId = null)
+{
+    /// <summary>
+    /// Quantity that can still execute after this request. Fresh submits use
+    /// total quantity; partially-filled replacements use newQty-origCumQty.
+    /// </summary>
+    public long ExecutableQuantity => EffectiveLeavesQuantity ?? Quantity;
+}
 
 public sealed record RiskDecision(bool Approved, string? Reason, string? Code = null)
 {

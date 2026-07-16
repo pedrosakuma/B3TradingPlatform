@@ -113,7 +113,8 @@ public sealed class SubscriptionManager
                 Channels.PnlMe => (_pnl is not null && _refPrice is not null)
                     ? PnlProjection.Build(client.Owner, client.FirmId, _pnl, _positions, _refPrice)
                     : null,
-                Channels.BalanceMe => new BalanceDto(_cash?.GetAvailable(client.Owner) ?? 0m),
+                Channels.BalanceMe => new BalanceDto(
+                    _cash?.GetAvailable(client.FirmId, client.Owner) ?? 0m),
                 _ => null,
             };
 

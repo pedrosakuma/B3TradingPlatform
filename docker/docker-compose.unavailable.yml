@@ -80,6 +80,8 @@ services:
       # firm that has no gateway registered.
       Trading__Auth__Users__6__Firm: default
       Trading__Auth__Users__7__Firm: default
+      Trading__Cash__Seeds__0__FirmId: default
+      Trading__Cash__Seeds__1__FirmId: default
       # PR #316 P2: when the user firm reverts to "default" the position
       # seeds must follow, otherwise the FIRM01-tagged seeds from the
       # base compose file are invisible to the now-default users and

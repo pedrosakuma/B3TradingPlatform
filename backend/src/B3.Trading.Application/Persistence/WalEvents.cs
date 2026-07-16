@@ -962,6 +962,7 @@ public sealed record OrderExpiredEvent : WalEvent
 public sealed record CashLedgerEvent : WalEvent
 {
     public required string EndClientId { get; init; }
+    public string FirmId { get; init; } = CashLedger.DefaultFirmId;
     /// <summary>
     /// <c>"Deposit"</c> or <c>"Withdrawal"</c>. Property is named
     /// <c>Operation</c> (not <c>Kind</c>) so it does not collide with
@@ -1024,6 +1025,11 @@ public sealed record FeeAccruedEvent : WalEvent
     public required string ExecutionId { get; init; }
 
     public required string EndClientId { get; init; }
+    /// <summary>
+    /// Firm cash bucket charged by this fee. Additive for compatibility:
+    /// legacy events hydrate into the legacy default bucket.
+    /// </summary>
+    public string FirmId { get; init; } = CashLedger.DefaultFirmId;
     public required string Symbol { get; init; }
 
     /// <summary>

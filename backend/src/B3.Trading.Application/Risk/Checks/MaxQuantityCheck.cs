@@ -45,7 +45,8 @@ public sealed class MaxNotionalCheck : IRiskCheck
             return RiskDecision.Approve; // no cap, or market order — let venue handle
         // OPT-B (#484): _values applies contractMultiplier for option
         // symbols; equity stays price * qty (Equity fallback).
-        var notional = _values.GetNotional(ctx.Symbol, ctx.Price.Value, ctx.Quantity);
+        var notional = _values.GetNotional(
+            ctx.Symbol, ctx.Price.Value, ctx.ExecutableQuantity);
         if (notional > max.Value)
             return RiskDecision.Reject($"notional {notional} exceeds max {max.Value}");
         return RiskDecision.Approve;
@@ -117,7 +118,8 @@ public sealed class MinNotionalCheck : IRiskCheck
 
         // OPT-B (#484): notional is in BRL (price * qty * multiplier
         // for options); fee/dust math compares apples-to-apples.
-        var notional = _values.GetNotional(ctx.Symbol, ctx.Price.Value, ctx.Quantity);
+        var notional = _values.GetNotional(
+            ctx.Symbol, ctx.Price.Value, ctx.ExecutableQuantity);
         if (notional < min.Value)
             return RiskDecision.Reject($"notional {notional} below min {min.Value}");
         return RiskDecision.Approve;

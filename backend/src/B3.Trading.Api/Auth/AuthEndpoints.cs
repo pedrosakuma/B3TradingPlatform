@@ -275,7 +275,7 @@ public static class AuthEndpoints
             var cashSeeded = false;
             if (initialCash > 0m)
             {
-                cashSeeded = cash.SeedIfAbsent(endClientId, initialCash);
+                cashSeeded = cash.SeedIfAbsent(newUser.Firm, endClientId, initialCash);
             }
 
             var log = loggerFactory.CreateLogger("AuthEndpoints");

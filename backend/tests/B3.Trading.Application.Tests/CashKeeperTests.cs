@@ -148,4 +148,18 @@ public class CashKeeperTests
         Assert.Equal(800m, restored.GetAvailable(new EndClientId("alice")));
         Assert.Equal(500m, restored.GetAvailable(new EndClientId("bob")));
     }
+
+    [Fact]
+    public void SameOwner_BalancesAreFirmScoped()
+    {
+        var owner = new EndClientId("alice");
+        var keeper = new CashKeeper();
+        keeper.ApplyDeposit("FIRM01", owner, 1_000m);
+        keeper.ApplyDeposit("FIRM02", owner, 500m);
+
+        Assert.False(keeper.TryWithdraw("FIRM02", owner, 600m));
+        Assert.True(keeper.TryWithdraw("FIRM01", owner, 600m));
+        Assert.Equal(400m, keeper.GetAvailable("FIRM01", owner));
+        Assert.Equal(500m, keeper.GetAvailable("FIRM02", owner));
+    }
 }

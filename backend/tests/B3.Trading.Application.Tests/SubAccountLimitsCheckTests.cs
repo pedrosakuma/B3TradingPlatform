@@ -104,6 +104,41 @@ public class SubAccountLimitsCheckTests
     }
 
     [Fact]
+    public void PositionCap_IncludesJointWorkingOrderExposure()
+    {
+        var opts = new SubAccountRiskOptions
+        {
+            PerFirm = new()
+            {
+                [Firm] = new FirmSubAccountRiskOptions
+                {
+                    PerSubAccount = new()
+                    {
+                        [Sub] = new SubAccountRiskLimits { PositionLimit = 100 },
+                    },
+                },
+            },
+        };
+        var (check, _, book, _) = Build(opts);
+        var owner = new EndClientId(Owner);
+        var sub = new SubAccountId(Sub);
+
+        var first = new Order(
+            1, owner, Symbol, 1234, OrderSide.Buy, OrderType.Limit,
+            60, 10m, Firm, subAccountId: sub);
+        book.TryAdd(first);
+        first.MarkWorking();
+        Assert.True(check.Check(Ctx(sub, qty: 60) with { EvaluatedClOrdId = 1 }).Approved);
+
+        var second = new Order(
+            2, owner, Symbol, 1234, OrderSide.Buy, OrderType.Limit,
+            50, 10m, Firm, subAccountId: sub);
+        book.TryAdd(second);
+        second.MarkWorking();
+        Assert.False(check.Check(Ctx(sub, qty: 50) with { EvaluatedClOrdId = 2 }).Approved);
+    }
+
+    [Fact]
     public void PerFirmDefault_AppliesWhenSubAccountNotListed()
     {
         var opts = new SubAccountRiskOptions

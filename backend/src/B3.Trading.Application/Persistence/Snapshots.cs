@@ -96,7 +96,8 @@ public sealed class PlatformSnapshot
     /// <c>CashKeeper</c>. Additive field; older snapshots that pre-date
     /// it deserialise with an empty dictionary, which matches the
     /// "no operator activity recorded" semantics they actually carried.
-    /// Init-only and default-empty so callers cannot accidentally null
+    /// Keys are <c>{firmId}|{endClientId}</c>. Legacy plain end-client
+    /// keys restore into the DEFAULT firm only. Init-only and default-empty so callers cannot accidentally null
     /// it out post-deserialisation. Dict (not list) by spec — keyed on
     /// end-client id, value is the running balance.
     /// </summary>
@@ -512,7 +513,8 @@ public sealed record PositionSnapshot(
 
 public sealed record CashBalanceSnapshot(
     string EndClientId,
-    decimal Available);
+    decimal Available,
+    string FirmId = B3.Trading.Application.CashLedger.DefaultFirmId);
 
 /// <summary>
 /// Q2.4 (#271). Avg-cost basis row persisted alongside

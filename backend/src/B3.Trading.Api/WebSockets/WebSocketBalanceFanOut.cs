@@ -9,7 +9,7 @@ namespace B3.Trading.Api.WebSockets;
 
 /// <summary>
 /// #386. Bridges <see cref="CashLedger.BalanceChanged"/> to the
-/// <c>balance.me</c> WS channel. One delta per (owner, Available)
+/// <c>balance.me</c> WS channel. One delta per (firm, owner, Available)
 /// change reaches subscribed clients; repeated mutations that leave
 /// <c>Available</c> unchanged are coalesced out so a fee that debits
 /// 0 (which is a no-op in the ledger anyway) cannot trigger a
@@ -19,18 +19,16 @@ namespace B3.Trading.Api.WebSockets;
 /// <b>Lock ordering.</b> The keeper raises the event while holding
 /// the per-balance lock (so subscribers observe a consistent value).
 /// To avoid the WS hub's per-owner publish lock nesting under the
-/// ledger lock, the handler only ENQUEUES (owner, available) onto a
+/// ledger lock, the handler only ENQUEUES (firm, owner, available) onto a
 /// channel; a dedicated drain task pumps the queue and calls
 /// <see cref="SubscriptionManager.Publish(EndClientId, string?, string, object)"/>
 /// out from under the keeper lock.
 /// </para>
 ///
 /// <para>
-/// <b>Firm scope.</b> <see cref="CashLedger"/> is keyed only by
-/// <see cref="EndClientId"/>; the balance for a given owner is the
-/// same regardless of which firm authenticated the WS session. The
-/// publish therefore passes <c>firmId: null</c> and fans out to every
-/// subscribed client of the owner.
+/// <b>Firm scope.</b> The concrete firm is carried from the ledger event
+/// through the channel and into <see cref="SubscriptionManager.Publish"/>,
+/// so a shared end-client identity cannot observe another firm's cash.
 /// </para>
 /// </summary>
 public sealed class WebSocketBalanceFanOut : IHostedService, IAsyncDisposable
@@ -39,10 +37,10 @@ public sealed class WebSocketBalanceFanOut : IHostedService, IAsyncDisposable
     private readonly SubscriptionManager _subs;
     private readonly ILogger<WebSocketBalanceFanOut>? _logger;
 
-    private readonly ConcurrentDictionary<EndClientId, decimal> _lastSent = new();
+    private readonly ConcurrentDictionary<(string FirmId, EndClientId Owner), decimal> _lastSent = new();
 
-    private readonly Channel<(EndClientId Owner, decimal Available)> _channel =
-        Channel.CreateUnbounded<(EndClientId, decimal)>(
+    private readonly Channel<(string FirmId, EndClientId Owner, decimal Available)> _channel =
+        Channel.CreateUnbounded<(string, EndClientId, decimal)>(
             new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
 
     private readonly CancellationTokenSource _cts = new();
@@ -84,10 +82,10 @@ public sealed class WebSocketBalanceFanOut : IHostedService, IAsyncDisposable
         _cts.Dispose();
     }
 
-    private void OnBalanceChanged(EndClientId owner, decimal available)
+    private void OnBalanceChanged(string firmId, EndClientId owner, decimal available)
     {
         // Enqueue under the keeper lock; the drain runs outside it.
-        _channel.Writer.TryWrite((owner, available));
+        _channel.Writer.TryWrite((firmId, owner, available));
     }
 
     private async Task DrainAsync()
@@ -99,11 +97,12 @@ public sealed class WebSocketBalanceFanOut : IHostedService, IAsyncDisposable
             {
                 while (reader.TryRead(out var item))
                 {
-                    try { PublishIfChanged(item.Owner, item.Available); }
+                    try { PublishIfChanged(item.FirmId, item.Owner, item.Available); }
                     catch (Exception ex)
                     {
                         _logger?.LogWarning(ex,
-                            "balance.me fan-out failed for owner={Owner}", item.Owner.Value);
+                            "balance.me fan-out failed for firm={Firm} owner={Owner}",
+                            item.FirmId, item.Owner.Value);
                     }
                 }
             }
@@ -111,23 +110,24 @@ public sealed class WebSocketBalanceFanOut : IHostedService, IAsyncDisposable
         catch (OperationCanceledException) { /* shutdown */ }
     }
 
-    private void PublishIfChanged(EndClientId owner, decimal available)
+    private void PublishIfChanged(string firmId, EndClientId owner, decimal available)
     {
+        var key = (firmId, owner);
         // Coalesce: skip when the most recently published Available for
-        // this owner is identical. Decimals compare by value (not scale),
+        // this firm/owner is identical. Decimals compare by value (not scale),
         // which is what we want — 0 == 0.00.
-        if (_lastSent.TryGetValue(owner, out var prev) && prev == available)
+        if (_lastSent.TryGetValue(key, out var prev) && prev == available)
             return;
 
         if (_subs.CountFor(owner) == 0)
         {
             // No subscribers — still update _lastSent so the first publish
             // after a subscriber attaches reflects the snapshot baseline.
-            _lastSent[owner] = available;
+            _lastSent[key] = available;
             return;
         }
 
-        _subs.Publish(owner, firmId: null, Channels.BalanceMe, new BalanceDto(available));
-        _lastSent[owner] = available;
+        _subs.Publish(owner, firmId, Channels.BalanceMe, new BalanceDto(available));
+        _lastSent[key] = available;
     }
 }

@@ -210,6 +210,17 @@ public sealed class WorkingOrderBook
     /// firm bucket.
     /// </summary>
     public long SumOpenSellLeavesForSymbolAndFirm(string firmId, EndClientId owner, string symbol)
+        => SumOpenLeavesForSymbolAndFirm(firmId, owner, symbol, OrderSide.Sell);
+
+    /// <summary>
+    /// Sums executable leaves for one side in a firm/owner/symbol bucket.
+    /// Stale and terminal orders are excluded.
+    /// </summary>
+    public long SumOpenLeavesForSymbolAndFirm(
+        string firmId,
+        EndClientId owner,
+        string symbol,
+        OrderSide side)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
         ArgumentException.ThrowIfNullOrWhiteSpace(symbol);
@@ -218,9 +229,38 @@ public sealed class WorkingOrderBook
         foreach (var clOrdId in set.Keys)
         {
             if (!_orders.TryGetValue(clOrdId, out var order)) continue;
-            if (order.Side != OrderSide.Sell) continue;
+            if (order.Side != side) continue;
             if (!string.Equals(order.Symbol, symbol, StringComparison.Ordinal)) continue;
             if (!string.Equals(order.FirmId, firmId, StringComparison.Ordinal)) continue;
+            if (IsTerminal(order.Status)) continue;
+            if (order.IsStale) continue;
+            total += order.LeavesQuantity;
+        }
+        return total;
+    }
+
+    /// <summary>
+    /// Sub-account-scoped executable leaves for position-limit projection.
+    /// </summary>
+    public long SumOpenLeavesForSubAccount(
+        string firmId,
+        EndClientId owner,
+        SubAccountId subAccount,
+        string symbol,
+        OrderSide side)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        ArgumentNullException.ThrowIfNull(subAccount);
+        ArgumentException.ThrowIfNullOrWhiteSpace(symbol);
+        if (!_byOwner.TryGetValue(owner.Value, out var set)) return 0;
+        long total = 0;
+        foreach (var clOrdId in set.Keys)
+        {
+            if (!_orders.TryGetValue(clOrdId, out var order)) continue;
+            if (order.Side != side) continue;
+            if (!string.Equals(order.Symbol, symbol, StringComparison.Ordinal)) continue;
+            if (!string.Equals(order.FirmId, firmId, StringComparison.Ordinal)) continue;
+            if (order.SubAccountId != subAccount) continue;
             if (IsTerminal(order.Status)) continue;
             if (order.IsStale) continue;
             total += order.LeavesQuantity;

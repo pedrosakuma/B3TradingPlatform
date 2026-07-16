@@ -1,6 +1,7 @@
 using B3.Trading.Application;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
+using B3.Trading.Application.Risk.Accounting;
 using B3.Trading.Domain;
 using B3.Trading.Infrastructure.Persistence;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -28,10 +29,10 @@ public sealed class CashSeedRecoveryTests : IDisposable
         await using (var store = new FileEventStore(options, NullLogger<FileEventStore>.Instance))
         {
             var state = BuildState(store);
-            state.Cash.SeedIfAbsent(owner, 100_000m);
+            state.Cash.SeedIfAbsent("FIRM02", owner, 100_000m);
             DispatchSubmit(state.Dispatcher, state.Book, state.Ownership, owner);
             DispatchFill(state.Dispatcher, state.Processor);
-            Assert.Equal(90_761.48m, state.Cash.GetAvailable(owner));
+            Assert.Equal(90_761.48m, state.Cash.GetAvailable("FIRM02", owner));
             await store.FlushAsync();
         }
 
@@ -55,9 +56,10 @@ public sealed class CashSeedRecoveryTests : IDisposable
                 new SnapshotStore(_root, "test"),
                 NullLogger<PersistenceRecovery>.Instance);
 
-            await recovery.RunAsync(() => state.Cash.SeedIfAbsent(owner, 100_000m));
+            await recovery.RunAsync(() =>
+                state.Cash.SeedIfAbsent("FIRM02", owner, 100_000m));
 
-            Assert.Equal(90_761.48m, state.Cash.GetAvailable(owner));
+            Assert.Equal(90_761.48m, state.Cash.GetAvailable("FIRM02", owner));
         }
     }
 
@@ -73,7 +75,7 @@ public sealed class CashSeedRecoveryTests : IDisposable
         await using (var store = new FileEventStore(options, NullLogger<FileEventStore>.Instance))
         {
             var state = BuildState(store);
-            state.Cash.SeedIfAbsent(owner, restoredBalance);
+            state.Cash.SeedIfAbsent("FIRM02", owner, restoredBalance);
             PlatformSnapshot? snapshot = null;
             state.Dispatcher.WithSnapshotLock(seq => snapshot = state.Snapshotter.Capture(seq));
             new SnapshotStore(_root, "test").Write(snapshot!);
@@ -100,9 +102,10 @@ public sealed class CashSeedRecoveryTests : IDisposable
                 new SnapshotStore(_root, "test"),
                 NullLogger<PersistenceRecovery>.Instance);
 
-            await recovery.RunAsync(() => state.Cash.SeedIfAbsent(owner, 100_000m));
+            await recovery.RunAsync(() =>
+                state.Cash.SeedIfAbsent("FIRM02", owner, 100_000m));
 
-            Assert.Equal(restoredBalance, state.Cash.GetAvailable(owner));
+            Assert.Equal(restoredBalance, state.Cash.GetAvailable("FIRM02", owner));
         }
     }
 
@@ -115,7 +118,7 @@ public sealed class CashSeedRecoveryTests : IDisposable
         await using (var store = new FileEventStore(options, NullLogger<FileEventStore>.Instance))
         {
             var state = BuildState(store);
-            state.Cash.SeedIfAbsent(owner, 100_000m);
+            state.Cash.SeedIfAbsent("FIRM02", owner, 100_000m);
             DispatchSubmit(state.Dispatcher, state.Book, state.Ownership, owner);
             DispatchExecution(
                 state.Dispatcher,
@@ -149,11 +152,69 @@ public sealed class CashSeedRecoveryTests : IDisposable
                 orders: state.Book,
                 marginProvider: state.Margin);
 
-            await recovery.RunAsync(() => state.Cash.SeedIfAbsent(owner, 100_000m));
+            await recovery.RunAsync(() =>
+                state.Cash.SeedIfAbsent("FIRM02", owner, 100_000m));
 
-            Assert.Equal(97_228.444m, state.Cash.GetAvailable(owner));
-            Assert.Equal(6_466.964m, state.Margin.ReservedForTesting(owner.Value));
-            Assert.Equal(90_761.48m, state.Margin.AvailableForTesting(owner.Value));
+            Assert.Equal(97_228.444m, state.Cash.GetAvailable("FIRM02", owner));
+            Assert.Equal(6_466.964m, state.Margin.ReservedForTesting("FIRM02", owner.Value));
+            Assert.Equal(90_761.48m, state.Margin.AvailableForTesting("FIRM02", owner.Value));
+        }
+    }
+
+    [Fact]
+    public async Task SnapshotRecovery_ActivatesConservativeThrottleFences()
+    {
+        var options = Options();
+        await using (var store = new FileEventStore(
+                         options, NullLogger<FileEventStore>.Instance))
+        {
+            var state = BuildState(store);
+            PlatformSnapshot? snapshot = null;
+            state.Dispatcher.WithSnapshotLock(seq =>
+                snapshot = state.Snapshotter.Capture(seq));
+            new SnapshotStore(_root, "test").Write(snapshot!);
+            await store.FlushAsync();
+        }
+
+        await using (var store = new FileEventStore(
+                         options, NullLogger<FileEventStore>.Instance))
+        {
+            var state = BuildState(store);
+            var replayer = new EventReplayer(
+                state.Book,
+                state.Ownership,
+                state.KillSwitch,
+                state.SymbolHalts,
+                state.SessionPhases,
+                state.Processor,
+                state.Algos,
+                state.ClOrdIds,
+                state.AlgoIds);
+            var clock = new ManualTimeProvider(DateTimeOffset.UtcNow);
+            var risk = new RiskOptions
+            {
+                RollingNotional = new RollingNotionalOptions { WindowSeconds = 60 },
+                OrderRate = new OrderRateOptions { WindowSeconds = 60 },
+            };
+            var monitor = new StaticOptionsMonitor<RiskOptions>(risk);
+            var notional = new RollingNotionalAccountant(
+                monitor, new MissingReferencePrice(), clock);
+            var rate = new OrderRateAccountant(monitor, clock);
+            var recovery = new PersistenceRecovery(
+                store,
+                state.Snapshotter,
+                replayer,
+                new SnapshotStore(_root, "test"),
+                NullLogger<PersistenceRecovery>.Instance,
+                riskRecoveryFences: [notional, rate]);
+
+            await recovery.RunAsync();
+
+            Assert.True(notional.IsRecoveryFenced);
+            Assert.True(rate.IsRecoveryFenced);
+            clock.Advance(TimeSpan.FromSeconds(61));
+            Assert.False(notional.IsRecoveryFenced);
+            Assert.False(rate.IsRecoveryFenced);
         }
     }
 
@@ -299,6 +360,22 @@ public sealed class CashSeedRecoveryTests : IDisposable
     private sealed class NullSink : IExecutionEventSink
     {
         public void Publish(ExecutionEvent evt) { }
+    }
+
+    private sealed class MissingReferencePrice : IReferencePrice
+    {
+        public bool TryGet(string symbol, out decimal price)
+        {
+            price = 0m;
+            return false;
+        }
+    }
+
+    private sealed class ManualTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        private DateTimeOffset _now = now;
+        public override DateTimeOffset GetUtcNow() => _now;
+        public void Advance(TimeSpan by) => _now += by;
     }
 
     private sealed record State(
