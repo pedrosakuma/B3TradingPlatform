@@ -115,6 +115,11 @@ If sidecar publication fails before that first directory fsync, the engine
 attempts the WAL resolution directly. When both channels fail, it retains the
 original unresolved pending intent in memory and drains; cleanup/TTL marking
 is applied only when either the WAL resolution or sidecar is known durable.
+After every cold snapshot+WAL+sidecar replay, any remaining pending cancel or
+replace is treated as lacking current-process send proof. Recovery preserves
+its ClOrdID/ownership state but begins drain before readiness opens; Wave 1
+never converts such intents into idempotent success or blind resend. Venue or
+operator reconciliation remains the #628 boundary.
 On first use, each newly-created data/firm/reconciliation directory is followed
 by an fsync of its parent before the store becomes available, so the
 reconciliation directory entry itself also survives power loss.

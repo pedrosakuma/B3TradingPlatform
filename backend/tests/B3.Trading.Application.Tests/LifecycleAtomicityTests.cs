@@ -180,6 +180,12 @@ public sealed class LifecycleAtomicityTests
         foreach (var evt in store.Events)
             recovered.Replayer.Apply(evt);
         Assert.True(recovered.Replacements.IsOriginalInFlight(100));
+        var startupDrain = new NeverDrainController();
+        Assert.Equal(1, CreateColdStartGuard(
+            recovered.PendingCancels, recovered.Replacements,
+            startupDrain).Apply());
+        Assert.True(startupDrain.IsDraining);
+        Assert.True(recovered.Replacements.IsOriginalInFlight(100));
     }
 
     [Fact]
@@ -203,6 +209,17 @@ public sealed class LifecycleAtomicityTests
             runtime.Replacements.Snapshot()).AmbiguousMarginHeld);
         Assert.Empty(runtime.Margin.Aborted);
         Assert.Empty(markers.Load());
+
+        var recovered = BuildRecoveryState();
+        foreach (var evt in store.Events)
+            recovered.Replayer.Apply(evt);
+        var startupDrain = new NeverDrainController();
+        Assert.Equal(1, CreateColdStartGuard(
+            recovered.PendingCancels, recovered.Replacements,
+            startupDrain).Apply());
+        Assert.True(startupDrain.IsDraining);
+        Assert.False(Assert.Single(
+            recovered.Replacements.Snapshot()).AmbiguousMarginHeld);
     }
 
     [Fact]
@@ -1191,6 +1208,133 @@ public sealed class LifecycleAtomicityTests
             recovered.Replayer.Apply(evt);
         Assert.True(recovered.PendingCancels.TryGetByCancel(
             result.CancelClOrdId, out _));
+        var startupDrain = new NeverDrainController();
+        Assert.Equal(1, CreateColdStartGuard(
+            recovered.PendingCancels, recovered.Replacements,
+            startupDrain).Apply());
+        Assert.True(startupDrain.IsDraining);
+        Assert.True(recovered.PendingCancels.TryGetByCancel(
+            result.CancelClOrdId, out _));
+        Assert.True(recovered.Ownership.TryResolveOrig(
+            result.CancelClOrdId, out _));
+    }
+
+    [Fact]
+    public async Task OrdinaryAmbiguousReplace_RestartFailsClosedWithoutBlindResend()
+    {
+        var store = new RecordingEventStore();
+        var gateway = new TestGateway
+        {
+            ReplaceException = new IOException("wire outcome unknown"),
+        };
+        var runtime = BuildModify(gateway, store);
+        Assert.Equal(
+            OrderModifyResultKind.GatewayAmbiguous,
+            (await runtime.Service.ModifyAsync(
+                new OrderModifyRequest(Owner, 100, 120, 31m),
+                CancellationToken.None)).Kind);
+
+        var recovered = BuildRecoveryState();
+        foreach (var evt in store.Events)
+            recovered.Replayer.Apply(evt);
+        Assert.True(Assert.Single(
+            recovered.Replacements.Snapshot()).AmbiguousMarginHeld);
+        var drain = new NeverDrainController();
+
+        Assert.Equal(1, CreateColdStartGuard(
+            recovered.PendingCancels, recovered.Replacements, drain).Apply());
+        Assert.True(drain.IsDraining);
+        Assert.Equal(1, gateway.ReplaceCalls);
+    }
+
+    [Fact]
+    public async Task CleanResolvedWal_RestartDoesNotTriggerColdStartFence()
+    {
+        var store = new RecordingEventStore();
+        var gateway = new TestGateway
+        {
+            ReplaceException = new ExchangeGatewayPreSendException("not connected"),
+        };
+        var runtime = BuildModify(gateway, store);
+        Assert.Equal(
+            OrderModifyResultKind.GatewayFailed,
+            (await runtime.Service.ModifyAsync(
+                new OrderModifyRequest(Owner, 100, 120, 31m),
+                CancellationToken.None)).Kind);
+
+        var recovered = BuildRecoveryState();
+        foreach (var evt in store.Events)
+            recovered.Replayer.Apply(evt);
+        var drain = new NeverDrainController();
+
+        Assert.Equal(0, CreateColdStartGuard(
+            recovered.PendingCancels, recovered.Replacements, drain).Apply());
+        Assert.False(drain.IsDraining);
+    }
+
+    [Fact]
+    public void SnapshotPendingCancelResolvedByWalTail_DoesNotTriggerColdStartFence()
+    {
+        var recovered = BuildRecoveryState(
+            pendingCancels: new PendingCancelRegistry());
+        Assert.True(recovered.PendingCancels.TryAdd(100, 200));
+        recovered.Ownership.RegisterCancelLink(200, 100);
+        recovered.Replayer.Apply(new OrderCancelPreSendFailedEvent
+        {
+            CancelClOrdId = 200,
+            OriginalClOrdId = 100,
+            OwnerEndClientId = Owner.Value,
+            Reason = "gateway_unavailable",
+        });
+        var drain = new NeverDrainController();
+
+        Assert.Equal(0, CreateColdStartGuard(
+            recovered.PendingCancels, recovered.Replacements, drain).Apply());
+        Assert.False(drain.IsDraining);
+        Assert.Equal(0, recovered.PendingCancels.CountForTesting);
+        Assert.False(recovered.Ownership.TryResolveOrig(200, out _));
+    }
+
+    [Fact]
+    public async Task PersistenceRecovery_UnresolvedWalIntentBeginsDrainBeforeReadiness()
+    {
+        var root = MarkerTestRoot();
+        try
+        {
+            var store = new RecordingEventStore();
+            store.Append(new OrderCancelRequestedEvent
+            {
+                CancelClOrdId = 200,
+                OriginalClOrdId = 100,
+                OwnerEndClientId = Owner.Value,
+            });
+            var recovered = BuildRecoveryState();
+            var drain = new NeverDrainController();
+            var guard = CreateColdStartGuard(
+                recovered.PendingCancels, recovered.Replacements, drain);
+            var recovery = new PersistenceRecovery(
+                store,
+                CreateSnapshotter(
+                    recovered.Book,
+                    recovered.Ownership,
+                    recovered.PendingCancels),
+                recovered.Replayer,
+                new SnapshotStore(root, "FIRM"),
+                NullLogger<PersistenceRecovery>.Instance,
+                coldStartLifecycleGuard: guard);
+
+            await recovery.RunAsync();
+
+            Assert.True(drain.IsDraining);
+            Assert.Equal(
+                "cold_start_unresolved_lifecycle_intents",
+                drain.Reason);
+            Assert.True(recovered.PendingCancels.TryGetByCancel(200, out _));
+        }
+        finally
+        {
+            DeleteMarkerTestRoot(root);
+        }
     }
 
     [Fact]
@@ -1438,6 +1582,16 @@ public sealed class LifecycleAtomicityTests
             markers, dispatcher, pendingCancels, replacements, ownership,
             clOrdIds, drain,
             NullLogger<ReconciliationMarkerRecovery>.Instance);
+
+    private static ColdStartLifecycleGuard CreateColdStartGuard(
+        PendingCancelRegistry pendingCancels,
+        PendingReplacementRegistry replacements,
+        NeverDrainController drain) =>
+        new(
+            pendingCancels,
+            replacements,
+            drain,
+            NullLogger<ColdStartLifecycleGuard>.Instance);
 
     private static RecordingEventStore PermanentResolutionFaultStore() =>
         new(

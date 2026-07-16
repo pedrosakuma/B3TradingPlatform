@@ -54,6 +54,7 @@ public static class TradingPersistenceServiceCollectionExtensions
         });
         services.AddSingleton<ReconciliationResolutionWriter>();
         services.AddSingleton<ReconciliationMarkerRecovery>();
+        services.AddSingleton<ColdStartLifecycleGuard>();
         services.AddSingleton<StateSnapshotter>();
         services.AddSingleton<EventReplayer>();
         services.AddSingleton<PersistenceRecovery>();

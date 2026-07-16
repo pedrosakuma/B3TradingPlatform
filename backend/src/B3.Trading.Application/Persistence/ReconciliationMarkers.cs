@@ -271,3 +271,43 @@ public sealed class ReconciliationMarkerRecovery
         }
     }
 }
+
+/// <summary>
+/// Conservative cold-start fence for Wave 1. Any cancel/replace intent still
+/// unresolved after snapshot + WAL + sidecar recovery has no current-process
+/// send proof, so ingress remains closed pending operator/venue reconciliation.
+/// </summary>
+public sealed class ColdStartLifecycleGuard
+{
+    private readonly PendingCancelRegistry _pendingCancels;
+    private readonly PendingReplacementRegistry _replacements;
+    private readonly IDrainController _drain;
+    private readonly ILogger<ColdStartLifecycleGuard> _logger;
+
+    public ColdStartLifecycleGuard(
+        PendingCancelRegistry pendingCancels,
+        PendingReplacementRegistry replacements,
+        IDrainController drain,
+        ILogger<ColdStartLifecycleGuard> logger)
+    {
+        _pendingCancels = pendingCancels;
+        _replacements = replacements;
+        _drain = drain;
+        _logger = logger;
+    }
+
+    public int Apply()
+    {
+        var cancelCount = _pendingCancels.Snapshot().Count;
+        var replaceCount = _replacements.Snapshot().Count;
+        var unresolved = cancelCount + replaceCount;
+        if (unresolved == 0)
+            return 0;
+
+        _drain.BeginDrain("cold_start_unresolved_lifecycle_intents");
+        _logger.LogCritical(
+            "Cold recovery retained {CancelCount} cancel and {ReplaceCount} replace intents without current-process send proof; readiness remains closed.",
+            cancelCount, replaceCount);
+        return unresolved;
+    }
+}

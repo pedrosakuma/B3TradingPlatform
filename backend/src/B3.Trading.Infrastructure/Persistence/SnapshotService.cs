@@ -58,6 +58,7 @@ public sealed class PersistenceRecovery
     private readonly PendingReplacementRegistry? _replacements;
     private readonly IRiskRecoveryFence[] _riskRecoveryFences;
     private readonly ReconciliationMarkerRecovery? _reconciliationMarkers;
+    private readonly ColdStartLifecycleGuard? _coldStartLifecycleGuard;
 
     public PersistenceRecovery(
         IEventStore store,
@@ -73,7 +74,8 @@ public sealed class PersistenceRecovery
         ReserveOnSubmitMarginProvider? marginProvider = null,
         PendingReplacementRegistry? replacements = null,
         IEnumerable<IRiskRecoveryFence>? riskRecoveryFences = null,
-        ReconciliationMarkerRecovery? reconciliationMarkers = null)
+        ReconciliationMarkerRecovery? reconciliationMarkers = null,
+        ColdStartLifecycleGuard? coldStartLifecycleGuard = null)
     {
         _store = store;
         _snapshotter = snapshotter;
@@ -90,6 +92,7 @@ public sealed class PersistenceRecovery
         _riskRecoveryFences = riskRecoveryFences?.ToArray()
             ?? Array.Empty<IRiskRecoveryFence>();
         _reconciliationMarkers = reconciliationMarkers;
+        _coldStartLifecycleGuard = coldStartLifecycleGuard;
     }
 
     public Task RunAsync(CancellationToken ct = default) =>
@@ -208,6 +211,13 @@ public sealed class PersistenceRecovery
             _logger.LogCritical(
                 "Persistence recovery found {Count} unresolved outbound reconciliation markers; readiness remains closed.",
                 unresolvedMarkers);
+        }
+        var unresolvedLifecycle = _coldStartLifecycleGuard?.Apply() ?? 0;
+        if (unresolvedLifecycle > 0)
+        {
+            _logger.LogCritical(
+                "Persistence recovery retained {Count} unresolved lifecycle intents; readiness remains closed.",
+                unresolvedLifecycle);
         }
 
         // #380 path B. Session-version guard. Compares the snapshot's
