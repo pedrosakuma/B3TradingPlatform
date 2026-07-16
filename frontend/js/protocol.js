@@ -55,6 +55,14 @@ export async function login(backend, username, password) {
   return jsonOrThrow(resp);
 }
 
+export async function exchangeExternalToken(backend, accessToken) {
+  const resp = await fetch(`${backend}/auth/exchange`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  return jsonOrThrow(resp);
+}
+
 // #303. Submits a 2FA verification: either a TOTP code or a recovery
 // code (server detects via length/shape). When `totpChallengeToken` is
 // supplied this finishes the login flow and returns `{ token, expiresAt }`;

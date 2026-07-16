@@ -1,24 +1,6 @@
 #!/bin/sh
-# Renders /usr/share/nginx/html/js/env.js from the checked-in template,
-# substituting JSON-escaped ${MARKETDATA_WS_URL} and ${APP_TITLE}. Runs as
-# part of the stock nginx image's
-# /docker-entrypoint.d/ hook chain, so it executes on every `docker run` /
-# Kubernetes pod start before nginx boots.
-#
-# Numbered 20- (before 25-render-nginx-conf.sh) purely for readability —
-# the two scripts render unrelated files (a JS config vs nginx.conf) and
-# have no ordering dependency on each other.
-#
-# MARKETDATA_WS_URL lets non-Docker orchestrators (e.g. Kubernetes/AKS,
-# where the marketdata WS is exposed on a shared LB IP + distinct port, not
-# the dev docker-compose convention's <host>:8081) ship a correct
-# out-of-the-box default for the "Market Data" panel instead of every
-# operator pasting the URL in by hand. See #572. Defaults to "", which
-# preserves today's behavior (js/protocol.js's defaultMarketDataUrl() falls
-# back to its localhost/127.0.0.1 dev guess, then "").
-#
-# APP_TITLE lets deployers override the browser/login/app-shell brand text
-# without rebuilding the static frontend. Defaults to "B3TradingPlatform".
+# Renders /usr/share/nginx/html/js/env.js from the checked-in template.
+# Values are public browser config only; never add client secrets here.
 set -e
 
 js_string_literal() {
@@ -26,8 +8,6 @@ js_string_literal() {
         BEGIN { printf "\"" }
         {
             if (NR > 1) printf "\\n";
-            # Escape character-by-character so the result is stable across
-            # both GNU awk and BusyBox awk (nginx:alpine at container boot).
             for (i = 1; i <= length($0); i++) {
                 ch = substr($0, i, 1);
                 if (ch == "\\")      printf "\\\\";
@@ -43,29 +23,87 @@ js_string_literal() {
     '
 }
 
+js_bool_or_null() {
+    case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+        true|1|yes|on) printf 'true' ;;
+        false|0|no|off) printf 'false' ;;
+        *) printf 'null' ;;
+    esac
+}
+
+js_csv_array() {
+    value=$1
+    if [ -z "$value" ]; then
+        printf '[]'
+        return
+    fi
+    printf '['
+    first=1
+    old_ifs=$IFS
+    IFS=','
+    for item in $value; do
+        trimmed=$(printf '%s' "$item" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [ -z "$trimmed" ] && continue
+        if [ "$first" -eq 0 ]; then printf ','; fi
+        js_string_literal "$trimmed"
+        first=0
+    done
+    IFS=$old_ifs
+    printf ']'
+}
+
 : "${MARKETDATA_WS_URL:=}"
 : "${APP_TITLE:=B3TradingPlatform}"
+: "${AUTH_MODE:=Local}"
+: "${AUTH_LOCAL_LOGIN_ENABLED:=}"
+: "${AUTH_SIGNUP_ENABLED:=}"
+: "${AUTH_TOTP_ENABLED:=}"
+: "${AUTH_AUTHORITY:=}"
+: "${AUTH_CLIENT_ID:=}"
+: "${AUTH_API_SCOPE:=}"
+: "${AUTH_REDIRECT_URI:=}"
+: "${AUTH_LOGOUT_URI:=}"
+: "${AUTH_KNOWN_AUTHORITIES:=}"
 
-marketdata_ws_url_json=$(js_string_literal "$MARKETDATA_WS_URL")
-app_title_json=$(js_string_literal "$APP_TITLE")
+MARKETDATA_WS_URL_JSON=$(js_string_literal "$MARKETDATA_WS_URL")
+APP_TITLE_JSON=$(js_string_literal "$APP_TITLE")
+AUTH_MODE_JSON=$(js_string_literal "$AUTH_MODE")
+AUTH_LOCAL_LOGIN_ENABLED_JSON=$(js_bool_or_null "$AUTH_LOCAL_LOGIN_ENABLED")
+AUTH_SIGNUP_ENABLED_JSON=$(js_bool_or_null "$AUTH_SIGNUP_ENABLED")
+AUTH_TOTP_ENABLED_JSON=$(js_bool_or_null "$AUTH_TOTP_ENABLED")
+AUTH_AUTHORITY_JSON=$(js_string_literal "$AUTH_AUTHORITY")
+AUTH_CLIENT_ID_JSON=$(js_string_literal "$AUTH_CLIENT_ID")
+AUTH_API_SCOPE_JSON=$(js_string_literal "$AUTH_API_SCOPE")
+AUTH_REDIRECT_URI_JSON=$(js_string_literal "$AUTH_REDIRECT_URI")
+AUTH_LOGOUT_URI_JSON=$(js_string_literal "$AUTH_LOGOUT_URI")
+AUTH_KNOWN_AUTHORITIES_JSON=$(js_csv_array "$AUTH_KNOWN_AUTHORITIES")
 
-MARKETDATA_WS_URL_JSON="$marketdata_ws_url_json" \
-APP_TITLE_JSON="$app_title_json" \
+export MARKETDATA_WS_URL_JSON APP_TITLE_JSON AUTH_MODE_JSON \
+    AUTH_LOCAL_LOGIN_ENABLED_JSON AUTH_SIGNUP_ENABLED_JSON AUTH_TOTP_ENABLED_JSON \
+    AUTH_AUTHORITY_JSON AUTH_CLIENT_ID_JSON AUTH_API_SCOPE_JSON \
+    AUTH_REDIRECT_URI_JSON AUTH_LOGOUT_URI_JSON AUTH_KNOWN_AUTHORITIES_JSON
+
 awk '
+    function replace_all(line, token, value) {
+        while (index(line, token) > 0) {
+            line = substr(line, 1, index(line, token) - 1) value substr(line, index(line, token) + length(token));
+        }
+        return line;
+    }
     {
         line = $0;
-        while (length(line) > 0) {
-            if (substr(line, 1, 26) == "__MARKETDATA_WS_URL_JSON__") {
-                printf "%s", ENVIRON["MARKETDATA_WS_URL_JSON"];
-                line = substr(line, 27);
-            } else if (substr(line, 1, 18) == "__APP_TITLE_JSON__") {
-                printf "%s", ENVIRON["APP_TITLE_JSON"];
-                line = substr(line, 19);
-            } else {
-                printf "%s", substr(line, 1, 1);
-                line = substr(line, 2);
-            }
-        }
-        printf "\n";
+        line = replace_all(line, "__MARKETDATA_WS_URL_JSON__", ENVIRON["MARKETDATA_WS_URL_JSON"]);
+        line = replace_all(line, "__APP_TITLE_JSON__", ENVIRON["APP_TITLE_JSON"]);
+        line = replace_all(line, "__AUTH_MODE_JSON__", ENVIRON["AUTH_MODE_JSON"]);
+        line = replace_all(line, "__AUTH_LOCAL_LOGIN_ENABLED_JSON__", ENVIRON["AUTH_LOCAL_LOGIN_ENABLED_JSON"]);
+        line = replace_all(line, "__AUTH_SIGNUP_ENABLED_JSON__", ENVIRON["AUTH_SIGNUP_ENABLED_JSON"]);
+        line = replace_all(line, "__AUTH_TOTP_ENABLED_JSON__", ENVIRON["AUTH_TOTP_ENABLED_JSON"]);
+        line = replace_all(line, "__AUTH_AUTHORITY_JSON__", ENVIRON["AUTH_AUTHORITY_JSON"]);
+        line = replace_all(line, "__AUTH_CLIENT_ID_JSON__", ENVIRON["AUTH_CLIENT_ID_JSON"]);
+        line = replace_all(line, "__AUTH_API_SCOPE_JSON__", ENVIRON["AUTH_API_SCOPE_JSON"]);
+        line = replace_all(line, "__AUTH_REDIRECT_URI_JSON__", ENVIRON["AUTH_REDIRECT_URI_JSON"]);
+        line = replace_all(line, "__AUTH_LOGOUT_URI_JSON__", ENVIRON["AUTH_LOGOUT_URI_JSON"]);
+        line = replace_all(line, "__AUTH_KNOWN_AUTHORITIES_JSON__", ENVIRON["AUTH_KNOWN_AUTHORITIES_JSON"]);
+        print line;
     }
 ' /etc/nginx/env.js.template > /usr/share/nginx/html/js/env.js

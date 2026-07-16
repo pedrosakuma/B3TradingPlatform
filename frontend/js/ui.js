@@ -208,6 +208,7 @@ function setViewToggleVisible(visible, current) {
 
 export function setLoginError(message) {
   const el = $("login-error");
+  if (!el) return;
   if (!message) { el.hidden = true; el.textContent = ""; return; }
   el.hidden = false; el.textContent = message;
 }

@@ -195,6 +195,11 @@ replay on (re)connect. Revisit when the matching side does.
   renewed by exchanging a valid Entra access token again. Operators must
   provide `Trading:Auth:SigningKey` ≥ 32 bytes via environment /
   user-secrets in production.
+  The static frontend mirrors the same modes: Local remains the default,
+  Hybrid presents explicit Entra/local choices, and Entra hides all public
+  local password/signup/TOTP controls while using MSAL Browser
+  Authorization Code + PKCE and storing only the exchanged internal JWT in
+  `sessionStorage`.
 - **Platform ↔ exchange.** FIXP credentials per firm, in config, mirrors
   `B3EntryPointClient`'s API. Lands when that lib is wired in.
 

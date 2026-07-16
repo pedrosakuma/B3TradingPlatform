@@ -1,8 +1,9 @@
 # Frontend (Phase 5)
 
 Vanilla JS + Web Worker trader console for the B3TradingPlatform.
-Mirrors the layout convention of `B3MarketDataPlatform/frontend`. No
-build step, no framework, no bundler.
+The runtime is still static nginx-served HTML/CSS/JS, but the source is bundled
+with esbuild so the maintained `@azure/msal-browser` package can be used for
+Authorization Code + PKCE.
 
 ## Layout
 
@@ -16,7 +17,9 @@ frontend/
     state.js        # main-thread cache + subscriber bus
     ui.js           # DOM rendering + user-action hooks
     worker.js       # Web Worker: WebSocket, snapshot/delta merge, reconnect
-  Dockerfile        # nginx:alpine static server
+  package.json      # pinned MSAL + esbuild build/test scripts
+  build.mjs         # bundles app/worker entries into dist/
+  Dockerfile        # multi-stage build, small nginx:alpine runtime
 ```
 
 ## Message flow
@@ -58,14 +61,15 @@ than enough and keeps the rendering code synchronous.
 
 ## Run locally
 
-The frontend can be served from any static HTTP server. Two easy options:
+Build once, then serve the generated static files from any HTTP server:
 
 ```bash
-# Python
-python3 -m http.server 8080 --directory frontend
-# Node (no install)
-npx --yes serve frontend -l 8080
-# Docker
+cd frontend
+npm ci
+npm run build
+python3 -m http.server 8080 --directory dist
+
+# Docker (builds with Node, runs on nginx:alpine)
 docker build -t b3trading-frontend frontend && docker run --rm -p 8080:80 \
   -e APP_TITLE='Acme Trader' \
   b3trading-frontend
@@ -76,9 +80,10 @@ Then visit <http://localhost:8080>. Default backend
 
 When served from the Docker image, `frontend/js/env.js` is rendered at
 container boot from deploy-time env vars. `MARKETDATA_WS_URL` optionally
-seeds the Market Data panel's default WebSocket endpoint, and `APP_TITLE`
-overrides the browser/login/app-shell brand text. Outside Docker, the
-checked-in `frontend/js/env.js` defaults to an empty market-data URL and
+seeds the Market Data panel's default WebSocket endpoint, `APP_TITLE`
+overrides the browser/login/app-shell brand text, and the `AUTH_*` variables
+configure Local/Hybrid/Entra login. Outside Docker, the checked-in
+`frontend/js/env.js` defaults to Local mode, an empty market-data URL and
 the `B3TradingPlatform` title.
 
 CORS for the backend is configured by `Trading:Cors:AllowedOrigins` in
@@ -103,15 +108,36 @@ frontend elsewhere.
 
 ## Auth
 
-Login uses `POST /auth/login`; the JWT + expiry land in
-`sessionStorage` (cleared on tab close). The worker passes the token
-via `?access_token=` because browsers cannot attach `Authorization`
-headers on the WebSocket handshake. See
-[`docs/WEBSOCKET-PROTOCOL.md`](./WEBSOCKET-PROTOCOL.md) for the
-log-hygiene caveat.
+Local mode (the default) uses `POST /auth/login`; the internal JWT + expiry
+land in `sessionStorage`, with the legacy remember-me option mirroring only
+local sessions into `localStorage`. The worker passes the internal token via
+`?access_token=` because browsers cannot attach `Authorization` headers on the
+WebSocket handshake. See [`docs/WEBSOCKET-PROTOCOL.md`](./WEBSOCKET-PROTOCOL.md)
+for the log-hygiene caveat.
 
-A timer fires `logout()` automatically when the token expiry passes;
-returning a `401` from REST also triggers logout.
+Hybrid/Entra mode uses MSAL Browser with Authorization Code + PKCE. Public
+config is rendered from:
+
+| Variable | Meaning |
+| --- | --- |
+| `AUTH_MODE` | `Local` (default), `Hybrid`, or `Entra`. |
+| `AUTH_AUTHORITY` | Tenant-specific Entra External ID authority. |
+| `AUTH_CLIENT_ID` | Public SPA application client id. |
+| `AUTH_API_SCOPE` | Delegated trading API scope requested by MSAL. |
+| `AUTH_REDIRECT_URI` / `AUTH_LOGOUT_URI` | SPA redirect and post-logout URLs. |
+| `AUTH_KNOWN_AUTHORITIES` | Comma-separated trusted authority hosts for MSAL. |
+
+No client secret is present in the SPA, image or compose examples. The Entra
+access token is used only for `POST /auth/exchange`; the existing REST and `/ws`
+modules consume only the returned internal JWT. Entra mode removes local
+password/signup/TOTP/remember-me controls, ignores internal JWTs in
+`localStorage`, stores the internal JWT in `sessionStorage`, and renews by
+`acquireTokenSilent` + exchange. Firm/role UI continues to decode only the
+internal token.
+
+A timer renews Entra sessions before internal-token expiry when possible, or
+falls back to an interactive MSAL redirect. Logout clears local state and then
+invokes MSAL logout redirect without broadcasting token material between tabs.
 
 ## What's intentionally out of scope (v1)
 

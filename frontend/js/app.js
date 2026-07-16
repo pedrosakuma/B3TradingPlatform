@@ -10,8 +10,20 @@ import { defaultBackend, login, signup, submitOrder, cancelOrder, modifyOrder, g
          getStatement, downloadStatementCsv,
          searchAuditLog, getFillTouch, downloadCvmReport, buildDropCopyWebSocketUrl,
          verifyTotp, enrollTotp, disableTotp, getTotpStatus,
+         exchangeExternalToken,
          listAlgos, createAlgo, cancelAlgo, modifyAlgo,
          getInstruments } from "./protocol.js";
+import { readPublicConfig, validateEntraConfig } from "./authConfig.js";
+import { createEntraAuth, isInteractionRequiredError } from "./auth.js";
+import {
+  readInternalSession,
+  writeInternalSession,
+  clearInternalSession,
+  rememberAuthBackend,
+  readAuthBackend,
+  clearAuthBackend,
+  createLogoutChannel,
+} from "./authStorage.js";
 import { validateCreateAlgo } from "./validation.js";
 import * as algosUi from "./algosUi.js";
 import * as settingsUi from "./settingsUi.js";
@@ -40,7 +52,6 @@ import { renderQrInto, clearQr } from "./qrRender.js";
 import { applyRiskPolicyFetch } from "./riskPolicy.js";
 import { readMdConnectionConfig, readMdDisplayConfig, writeMdConfig, clearMdConfig } from "./marketDataSettings.js";
 
-const SESSION_KEY = "b3tp.session";
 const BLOTTER_FILTER_KEY = "b3tp.blotter.filter";
 const DEFAULT_WATCHLIST = ["PETR4", "VALE3"];
 const FIRMS_POLL_INTERVAL_MS = 5_000;
@@ -64,6 +75,11 @@ const GATEWAY_POLL_INTERVAL_MS = 5_000;
 let sessionStore = sessionStorage; // mutates if "remember me" was selected at login
 let renewInflight = false;
 let warningShown = false;
+const publicConfig = readPublicConfig();
+const authConfig = publicConfig.auth;
+let entraAuth = null;
+let logoutChannel = null;
+let authConfigError = null;
 
 const SESSION_WARNING_LEAD_MS = 60_000;
 
@@ -80,10 +96,15 @@ let gatewayPollTimer = null;
 let pendingTotp = null; // { backend, username, remember, totpChallengeToken }
 let securityStatusRefreshSeq = 0;
 
-function init() {
+async function init() {
   applyAppTitle();
-  document.getElementById("login-backend").placeholder = defaultBackend();
-  document.getElementById("login-form").addEventListener("submit", onLogin);
+  configureAuthUi();
+  document.getElementById("login-backend")?.setAttribute("placeholder", defaultBackend());
+  document.getElementById("auth-backend")?.setAttribute("placeholder", defaultBackend());
+  document.getElementById("login-form")?.addEventListener("submit", onLogin);
+  document.getElementById("entra-login")?.addEventListener("click", onEntraLogin);
+  document.getElementById("auth-use-local")?.addEventListener("click", () => showLocalLoginCard());
+  document.getElementById("login-go-choices")?.addEventListener("click", () => showAuthEntry());
   const signupBackendInput = document.getElementById("signup-backend");
   if (signupBackendInput) signupBackendInput.placeholder = defaultBackend();
   const signupForm = document.getElementById("signup-form");
@@ -264,38 +285,138 @@ function init() {
     if (route?.view) handleSwitchView(route.view, route.subTab);
   });
 
+  logoutChannel = createLogoutChannel();
+  logoutChannel.subscribe(() => logout({ broadcast: false, redirectEntra: false }));
+
+  await bootAuth();
+}
+
+function configureAuthUi() {
+  document.body?.setAttribute("data-auth-mode", authConfig.mode.toLowerCase());
+
+  if (authConfig.mode === "Entra") {
+    document.getElementById("login-form")?.remove();
+    document.getElementById("signup-form")?.remove();
+    document.getElementById("totp-form")?.remove();
+  }
+
+  const choice = document.getElementById("auth-choice");
+  if (choice) {
+    choice.dataset.defaultVisible = authConfig.entraEnabled ? "true" : "false";
+    const title = choice.querySelector("[data-auth-title]");
+    if (title) title.textContent = authConfig.mode === "Hybrid" ? "Choose sign-in method" : "Sign in with Microsoft Entra";
+    const subtitle = choice.querySelector("[data-auth-subtitle]");
+    if (subtitle) {
+      subtitle.textContent = authConfig.mode === "Hybrid"
+        ? "Use Entra for migrated accounts, or local credentials during the migration window."
+        : "Your organization manages authentication and MFA with Microsoft Entra External ID.";
+    }
+  }
+
+  const localBtn = document.getElementById("auth-use-local");
+  if (localBtn) localBtn.hidden = !(authConfig.mode === "Hybrid" && authConfig.localLoginEnabled);
+  const entraBtn = document.getElementById("entra-login");
+  if (entraBtn) entraBtn.hidden = !authConfig.entraEnabled;
+  const remember = document.querySelector(".remember");
+  if (remember) remember.hidden = authConfig.mode !== "Local";
+  const signupSwitch = document.getElementById("login-signup-switch");
+  if (signupSwitch) signupSwitch.hidden = !authConfig.signupEnabled;
+  const choicesSwitch = document.getElementById("login-choices-switch");
+  if (choicesSwitch) choicesSwitch.hidden = authConfig.mode !== "Hybrid";
+
+  if (authConfig.entraEnabled) {
+    try {
+      validateEntraConfig(authConfig);
+      entraAuth = createEntraAuth(authConfig);
+    } catch (err) {
+      authConfigError = err?.message || "Entra login is not configured.";
+      setAuthError(authConfigError);
+    }
+  }
+}
+
+async function bootAuth() {
+  if (entraAuth) {
+    try {
+      const redirect = await entraAuth.handleRedirectPromise();
+      if (redirect?.accessToken) {
+        await finishEntraLogin(redirect.accessToken);
+        return;
+      }
+    } catch (err) {
+      clearSession();
+      ui.showLogin();
+      showAuthEntry();
+      setAuthError(formatAuthError(err));
+      return;
+    }
+  }
+
   const stored = readSession();
   if (stored) {
-    // Boot guard: if the stored session is already inside the warning
-    // window (or past its expiry), don't even attempt to adopt it.
-    // Showing the "session expiring" modal as the very first thing the
-    // user sees on page load is confusing — they have no context. Treat
-    // it as expired and require a fresh login.
     const expiresAtMs = Date.parse(stored.expiresAt || "");
     const remaining = Number.isFinite(expiresAtMs) ? expiresAtMs - Date.now() : -1;
     if (remaining <= SESSION_WARNING_LEAD_MS) {
-      clearSession();
+      if (stored.authMode === "Entra" && entraAuth) {
+        try {
+          const token = await entraAuth.acquireTokenSilent();
+          if (token?.redirected) return;
+          const next = await exchangeEntraAccessToken(token.accessToken, stored.backend);
+          writeSession(next);
+          startSession(next);
+          return;
+        } catch {
+          clearSession();
+        }
+      } else {
+        clearSession();
+      }
       ui.showLogin();
+      showAuthEntry();
       return;
     }
-    // Probe before we commit: a token that survived a host signing-key
-    // rotation will look fresh client-side (expiresAt in the future)
-    // but be rejected by the backend on the very first WS upgrade.
-    // Showing the "session expiring" modal in that case is confusing
-    // because the user never logged in this run. Drop silently and
-    // fall back to login if the probe fails. On network error we ALSO
-    // drop — the optimistic path used to fall through here, but if the
-    // stored backend URL is stale/wrong the user lands in a half-open
-    // UI with no way out. Re-login is cheap; bias toward correctness.
     validateSession(stored.backend, stored.token)
       .then((ok) => {
         if (ok) startSession(stored);
-        else { clearSession(); ui.showLogin(); }
+        else { clearSession(); ui.showLogin(); showAuthEntry(); }
       })
-      .catch(() => { clearSession(); ui.showLogin(); });
+      .catch(() => { clearSession(); ui.showLogin(); showAuthEntry(); });
   } else {
     ui.showLogin();
+    showAuthEntry();
   }
+}
+
+function showAuthEntry() {
+  const choice = document.getElementById("auth-choice");
+  const showChoice = authConfig.entraEnabled;
+  if (choice) choice.hidden = !showChoice;
+  const loginCard = document.getElementById("login-form");
+  if (loginCard) loginCard.hidden = showChoice;
+  const signupCard = document.getElementById("signup-form");
+  if (signupCard) signupCard.hidden = true;
+  const totpCard = document.getElementById("totp-form");
+  if (totpCard) totpCard.hidden = true;
+  setAuthError(showChoice ? authConfigError : null);
+  if (showChoice) document.getElementById("entra-login")?.focus();
+}
+
+function showLocalLoginCard() {
+  setAuthError(null);
+  const choice = document.getElementById("auth-choice");
+  if (choice) choice.hidden = true;
+  const loginCard = document.getElementById("login-form");
+  if (loginCard) loginCard.hidden = false;
+  document.getElementById("login-username")?.focus();
+}
+
+function setAuthError(message) {
+  const el = document.getElementById("auth-error");
+  if (el) {
+    if (!message) { el.hidden = true; el.textContent = ""; }
+    else { el.hidden = false; el.textContent = message; }
+  }
+  if (authConfig.mode === "Entra") ui.setLoginError(message);
 }
 
 async function onLogin(e) {
@@ -330,17 +451,109 @@ async function onLogin(e) {
   }
 }
 
-function finishLoginWithToken(resp, { backend, username, remember }) {
+async function onEntraLogin() {
+  setAuthError(null);
+  if (!entraAuth) {
+    setAuthError(authConfigError || "Entra login is not configured.");
+    return;
+  }
+  const backend = (document.getElementById("auth-backend")?.value || defaultBackend()).replace(/\/+$/, "");
+  rememberAuthBackend(backend, { sessionStorage });
+  const btn = document.getElementById("entra-login");
+  if (btn) btn.disabled = true;
+  try {
+    await entraAuth.loginRedirect();
+  } catch (err) {
+    setAuthError(formatAuthError(err));
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function sessionFromInternalToken(resp, { backend, authMode, remember = false }) {
   const claims = claimsFromToken(resp.token);
-  const next = {
+  return {
     token: resp.token,
     expiresAt: resp.expiresAt,
-    username,
+    username: claims.sub || claims.name || "trader",
     backend,
     role: claims.role,
     firm: claims.firm,
     remember,
+    authMode,
   };
+}
+
+async function exchangeEntraAccessToken(accessToken, backend) {
+  const resp = await exchangeExternalToken(backend, accessToken);
+  return sessionFromInternalToken(resp, { backend, authMode: "Entra", remember: false });
+}
+
+async function finishEntraLogin(accessToken) {
+  const backend = (readAuthBackend({ sessionStorage }) || defaultBackend()).replace(/\/+$/, "");
+  try {
+    const next = await exchangeEntraAccessToken(accessToken, backend);
+    clearAuthBackend({ sessionStorage });
+    sessionStore = sessionStorage;
+    writeSession(next);
+    startSession(next);
+  } catch (err) {
+    clearSession();
+    ui.showLogin();
+    showAuthEntry();
+    setAuthError(formatAuthError(err));
+  }
+}
+
+async function renewEntraSession(current = session) {
+  if (!entraAuth || !current) throw new Error("Entra login is not available.");
+  const token = await entraAuth.acquireTokenSilent();
+  if (token?.redirected) return null;
+  const next = await exchangeEntraAccessToken(token.accessToken, current.backend);
+  session = { ...current, ...next, authMode: "Entra", remember: false };
+  writeSession(session);
+  state.setUser({
+    username: session.username,
+    expiresAt: session.expiresAt,
+    backend: session.backend,
+    role: session.role,
+    firm: session.firm,
+  });
+  restartWorker();
+  warningShown = false;
+  scheduleExpiry();
+  ui.closeSessionModal();
+  return session;
+}
+
+function formatAuthError(err) {
+  const code = err?.body?.error || err?.errorCode || err?.error || err?.message;
+  switch (code) {
+    case "account_not_provisioned":
+      return "This Entra account is not provisioned for trading. Ask an administrator to bind it before signing in.";
+    case "account_disabled":
+      return "This trading account is disabled. Contact an administrator.";
+    case "account_incomplete":
+      return "This trading account is missing firm or role authorization. Contact an administrator.";
+    case "identity_provider_unavailable":
+      return "Microsoft Entra is temporarily unavailable. Existing sessions may continue until expiry; try again later.";
+    case "identity_directory_unavailable":
+      return "The trading identity directory is unavailable. Try again later.";
+    case "invalid_external_token":
+      return "The Entra sign-in response could not be validated. Sign in again.";
+    case "interaction_required":
+    case "login_required":
+    case "consent_required":
+      return "Interactive Entra sign-in is required. Continue with Microsoft Entra.";
+    default:
+      if (isInteractionRequiredError(err)) return "Interactive Entra sign-in is required. Continue with Microsoft Entra.";
+      return err?.message || "Authentication failed.";
+  }
+}
+
+function finishLoginWithToken(resp, { backend, username, remember }) {
+  const next = sessionFromInternalToken(resp, { backend, authMode: "Local", remember });
+  next.username = username;
   sessionStore = remember ? localStorage : sessionStorage;
   writeSession(next);
   startSession(next);
@@ -595,6 +808,7 @@ async function onSignup(e) {
       role: claims.role,
       firm: claims.firm,
       remember: false,
+      authMode: "Local",
     };
     sessionStore = sessionStorage;
     writeSession(next);
@@ -745,6 +959,10 @@ function scheduleExpiry() {
 function showSessionWarning() {
   if (!session || warningShown) return;
   warningShown = true;
+  if (session.authMode === "Entra") {
+    handleRenewSession();
+    return;
+  }
   ui.openSessionModal({
     onRenew: handleRenewSession,
     onLogout: logout,
@@ -755,6 +973,10 @@ async function handleRenewSession(password) {
   if (!session || renewInflight) return;
   renewInflight = true;
   try {
+    if (session.authMode === "Entra") {
+      await renewEntraSession(session);
+      return;
+    }
     const resp = await login(session.backend, session.username, password);
     const claims = claimsFromToken(resp.token);
     session = {
@@ -780,7 +1002,14 @@ async function handleRenewSession(password) {
     scheduleExpiry();
     ui.closeSessionModal();
   } catch (err) {
-    ui.setSessionModalError(err.message || "renew failed");
+    if (session?.authMode === "Entra") {
+      if (!isInteractionRequiredError(err)) {
+        logout({ redirectEntra: false });
+        setAuthError(formatAuthError(err));
+      }
+    } else {
+      ui.setSessionModalError(err.message || "renew failed");
+    }
   } finally {
     renewInflight = false;
   }
@@ -1251,7 +1480,8 @@ function readBlotterFilter() {
 }
 function writeBlotterFilter(f) { sessionStorage.setItem(BLOTTER_FILTER_KEY, JSON.stringify(f)); }
 
-function logout() {
+function logout({ broadcast = true, redirectEntra = true } = {}) {
+  const shouldRedirectEntra = redirectEntra && (session?.authMode === "Entra" || authConfig.mode === "Entra") && !!entraAuth;
   if (expiryTimer) { clearTimeout(expiryTimer); expiryTimer = null; }
   if (warningTimer) { clearTimeout(warningTimer); warningTimer = null; }
   warningShown = false;
@@ -1296,6 +1526,11 @@ function logout() {
   state.clearMarketData();
   state.setWatchlist([]);
   ui.showLogin();
+  showAuthEntry();
+  if (broadcast) logoutChannel?.broadcast();
+  if (shouldRedirectEntra) {
+    entraAuth.logoutRedirect().catch((err) => setAuthError(formatAuthError(err)));
+  }
 }
 
 // ── Admin firms poll ───────────────────────────────────────────────
@@ -1932,59 +2167,25 @@ async function handleRunEod() {
   }
 }
 
-function readStoredSession(store) {
-  try {
-    const raw = store.getItem(SESSION_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (!parsed.token || !parsed.expiresAt) return null;
-    if (new Date(parsed.expiresAt).getTime() <= Date.now()) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
 function readSession() {
-  // sessionStorage is the per-tab anchor: once a tab has its own
-  // session pinned there, no other tab can hijack it via localStorage.
-  // localStorage is consulted only as a "boot seed" for fresh tabs
-  // that don't yet have their own pinned session — that's how
-  // "Remember me" survives a full browser close. Issue #104:
-  // previously we picked the freshest of either store, which let a
-  // remember-me login in tab B silently take over tab A on reload.
-  const fromTab = readStoredSession(sessionStorage);
-  if (fromTab) {
-    sessionStore = sessionStorage;
-    return fromTab;
-  }
-  const fromBoot = readStoredSession(localStorage);
-  if (fromBoot) {
-    // Pin the boot seed into this tab so subsequent reloads/writes
-    // stay isolated from other tabs.
-    try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(fromBoot)); } catch { /* swallow */ }
-    sessionStore = fromBoot.remember ? localStorage : sessionStorage;
-    return fromBoot;
-  }
-  return null;
+  const { session: stored, preferredStore } = readInternalSession({
+    authMode: authConfig.mode,
+    sessionStorage,
+    localStorage,
+  });
+  sessionStore = preferredStore === "localStorage" ? localStorage : sessionStorage;
+  return stored;
 }
 function writeSession(s) {
-  // Always pin in sessionStorage so the tab owns its identity going
-  // forward. Mirror to localStorage only when remember-me is on, so
-  // a fresh browser launch can recover the session via the boot seed
-  // path in readSession(). We deliberately do NOT clear the "other"
-  // store here: another tab may legitimately have a remember-me
-  // session in localStorage that this tab's write must not erase
-  // (issue #104).
-  try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch { /* swallow */ }
-  if (s.remember) {
-    try { localStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch { /* swallow */ }
-  }
-  sessionStore = s.remember ? localStorage : sessionStorage;
+  const preferredStore = writeInternalSession(s, {
+    authMode: s.authMode === "Entra" ? "Entra" : authConfig.mode,
+    sessionStorage,
+    localStorage,
+  });
+  sessionStore = preferredStore === "localStorage" ? localStorage : sessionStorage;
 }
 function clearSession() {
-  try { localStorage.removeItem(SESSION_KEY); } catch { /* swallow */ }
-  try { sessionStorage.removeItem(SESSION_KEY); } catch { /* swallow */ }
+  clearInternalSession({ sessionStorage, localStorage });
 }
 
 // ── Q4.14 (#314). Compliance handlers ──────────────────────────────

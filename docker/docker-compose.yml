@@ -352,6 +352,19 @@ services:
       # plus login/app-shell brand text. See #572 / #596.
       MARKETDATA_WS_URL: ${MARKETDATA_WS_URL:-}
       APP_TITLE: ${APP_TITLE:-B3TradingPlatform}
+      # Public browser auth config. Local remains the compatibility default.
+      # Hybrid/Entra use MSAL Authorization Code + PKCE and must never include
+      # a client secret in this image or compose environment.
+      AUTH_MODE: ${AUTH_MODE:-Local}
+      AUTH_LOCAL_LOGIN_ENABLED: ${AUTH_LOCAL_LOGIN_ENABLED:-}
+      AUTH_SIGNUP_ENABLED: ${AUTH_SIGNUP_ENABLED:-}
+      AUTH_TOTP_ENABLED: ${AUTH_TOTP_ENABLED:-}
+      AUTH_AUTHORITY: ${AUTH_AUTHORITY:-}
+      AUTH_CLIENT_ID: ${AUTH_CLIENT_ID:-}
+      AUTH_API_SCOPE: ${AUTH_API_SCOPE:-}
+      AUTH_REDIRECT_URI: ${AUTH_REDIRECT_URI:-}
+      AUTH_LOGOUT_URI: ${AUTH_LOGOUT_URI:-}
+      AUTH_KNOWN_AUTHORITIES: ${AUTH_KNOWN_AUTHORITIES:-}
     networks:
       - b3-net
     ports:

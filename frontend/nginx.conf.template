@@ -98,13 +98,13 @@ http {
         # the server level. CSP is intentionally strict:
         #   - no inline scripts (we use ES modules served as files)
         #   - no inline styles (refactored to CSS classes)
-        #   - connect-src allows ws:/wss: anywhere because the trader
-        #     can configure a market-data endpoint on a different port
-        #     (8081) which 'self' wouldn't cover; HTTP fetches stay on
-        #     'self' (proxied via nginx).
-        # Operators that lock down the market-data origin can tighten
-        # connect-src further.
-        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; worker-src 'self'; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'" always;
+        #   - connect-src is rendered from same-origin plus configured Entra and
+        #     market-data origins; no broad wildcard or ws:/wss: scheme source
+        #     is added. Empty MARKETDATA_WS_URL keeps only the documented
+        #     localhost dev websocket origins.
+        #   - frame-src is limited to self plus configured Entra authority
+        #     origins for MSAL silent token renewal.
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; worker-src 'self'; connect-src 'self' ${CSP_CONNECT_SOURCES}; frame-src 'self' ${CSP_FRAME_SOURCES}; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header X-Frame-Options "DENY" always;
         add_header Referrer-Policy "same-origin" always;

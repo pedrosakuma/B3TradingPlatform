@@ -9,6 +9,21 @@
 <body>
   <!-- LOGIN VIEW ------------------------------------------------------- -->
   <section id="login-view" class="view login-view">
+    <div id="auth-choice" class="login-card" hidden>
+      <h1 data-auth-title>B3TradingPlatform</h1>
+      <p class="subtitle" data-auth-subtitle>Choose how to sign in.</p>
+      <button type="button" id="entra-login">Continue with Microsoft Entra</button>
+      <button type="button" id="auth-use-local" class="secondary-button" hidden>Use local password</button>
+      <details class="login-advanced">
+        <summary>Advanced</summary>
+        <label class="row">
+          <span>Backend</span>
+          <input id="auth-backend" type="url" placeholder="http://localhost:5000" />
+        </label>
+      </details>
+      <p id="auth-error" class="error" role="alert" hidden></p>
+    </div>
+
     <form id="login-form" class="login-card">
       <h1>B3TradingPlatform</h1>
       <p class="subtitle">Participant trader console</p>
@@ -33,9 +48,12 @@
       </details>
       <button type="submit" id="login-submit">Sign in</button>
       <p id="login-error" class="error" role="alert" hidden></p>
-      <p class="login-switch">
+      <p id="login-signup-switch" class="login-switch">
         No account?
         <button type="button" id="login-go-signup" class="link-button">Create account</button>
+      </p>
+      <p id="login-choices-switch" class="login-switch" hidden>
+        <button type="button" id="login-go-choices" class="link-button">Back to sign-in choices</button>
       </p>
     </form>
 
