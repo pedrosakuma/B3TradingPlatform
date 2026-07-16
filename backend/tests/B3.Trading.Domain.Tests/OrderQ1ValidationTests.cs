@@ -81,4 +81,28 @@ public class OrderQ1ValidationTests
         Assert.Equal(TimeInForce.GTD, o.TimeInForce);
         Assert.Equal(when, o.GoodTillDate);
     }
+
+    [Theory]
+    [InlineData(OrderType.Limit)]
+    [InlineData(OrderType.StopLimit)]
+    [InlineData(OrderType.MarketWithLeftover)]
+    public void PricedOrderType_RequiresNonNegativePrice(OrderType type)
+    {
+        Assert.Throws<ArgumentException>(() =>
+            new Order(1UL, Owner, "PETR4", 4321UL, OrderSide.Buy, type, 100, null,
+                stopPrice: type == OrderType.StopLimit ? 29m : null));
+        Assert.Throws<ArgumentException>(() =>
+            new Order(1UL, Owner, "PETR4", 4321UL, OrderSide.Buy, type, 100, -0.01m,
+                stopPrice: type == OrderType.StopLimit ? 29m : null));
+    }
+
+    [Theory]
+    [InlineData(OrderType.Market)]
+    [InlineData(OrderType.StopLoss)]
+    public void UnpricedOrderType_RejectsPrice(OrderType type)
+    {
+        Assert.Throws<ArgumentException>(() =>
+            new Order(1UL, Owner, "PETR4", 4321UL, OrderSide.Buy, type, 100, 30m,
+                stopPrice: type == OrderType.StopLoss ? 29m : null));
+    }
 }

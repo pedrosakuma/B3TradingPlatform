@@ -166,6 +166,8 @@ public sealed class RawPlatformSnapshot
     /// </summary>
     public PendingReplacementRaw[] PendingReplacements { get; init; } = Array.Empty<PendingReplacementRaw>();
 
+    public PendingCancelRaw[] PendingCancels { get; init; } = Array.Empty<PendingCancelRaw>();
+
     /// <summary>
     /// Q4.1 (#301). Per-firm registry of sub-accounts. Empty on
     /// snapshots pre-dating the field (additive); rebuilt entirely
@@ -388,3 +390,7 @@ public readonly record struct PendingReplacementRaw(
     bool AmbiguousMarginHeld,
     DateTimeOffset? AmbiguousAtUtc,
     decimal NewRemainingNotional);
+
+public readonly record struct PendingCancelRaw(
+    ulong OriginalClOrdId,
+    ulong CancelClOrdId);

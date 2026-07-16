@@ -249,6 +249,27 @@ public static class HistoryEndpoints
                     if (inWindow) hadEventInWindow.Add(rr.NewClOrdId);
                     break;
 
+                case OrderReplacePreSendFailedEvent rpf:
+                    replaceLinks.Remove(rpf.NewClOrdId);
+                    if (byClOrdId.TryGetValue(rpf.NewClOrdId, out var failedReplace))
+                    {
+                        failedReplace.ApplyEr(seq, new ExecutionReportReceivedEvent
+                        {
+                            ClOrdId = rpf.NewClOrdId,
+                            ExecKind = nameof(ExecKind.Rejected),
+                            LeavesQuantity = 0,
+                            CumulativeQuantity = 0,
+                            LastQuantity = 0,
+                            LastPrice = 0m,
+                            RejectReason = rpf.Reason,
+                            Synthetic = true,
+                            OrigClOrdId = rpf.OriginalClOrdId,
+                            TimestampUtc = rpf.TimestampUtc,
+                        });
+                        if (inWindow) hadEventInWindow.Add(rpf.NewClOrdId);
+                    }
+                    break;
+
                 case OrderCancelRequestedEvent cr:
                     // No projection row for cancel-side ClOrdIDs (they
                     // never become an Order in the runtime book either).
@@ -455,6 +476,25 @@ public static class HistoryEndpoints
                 case OrderReplaceRequestedEvent rr:
                     ownerByClOrdId[rr.NewClOrdId] = (rr.EndClientId, rr.Symbol, rr.Side);
                     replaceLinks[rr.NewClOrdId] = new ReplaceIntent(rr.OriginalClOrdId, rr.NewQuantity);
+                    break;
+                case OrderReplacePreSendFailedEvent rpf:
+                    replaceLinks.Remove(rpf.NewClOrdId);
+                    if (rpf.TimestampUtc < from || rpf.TimestampUtc > to) break;
+                    if (!ownerByClOrdId.TryGetValue(rpf.NewClOrdId, out var failedMeta)) break;
+                    if (!OwnerMatches(failedMeta.Owner, owner)) break;
+                    if (symbol is not null && !failedMeta.Symbol.Equals(symbol, StringComparison.Ordinal)) break;
+                    result.Add(new ExecutionProjection(
+                        Seq: seq,
+                        ClOrdId: rpf.NewClOrdId,
+                        Symbol: failedMeta.Symbol,
+                        Side: failedMeta.Side,
+                        Kind: nameof(ExecKind.Rejected),
+                        LeavesQuantity: 0,
+                        CumulativeQuantity: 0,
+                        LastQuantity: 0,
+                        LastPrice: 0m,
+                        RejectReason: rpf.Reason,
+                        TimestampUtc: rpf.TimestampUtc));
                     break;
                 case OrderReplaceRejectedEvent rrj:
                     // #337 — surface the rejected modify so it shows up

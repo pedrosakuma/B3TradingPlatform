@@ -234,6 +234,10 @@ public static class OrdersEndpoints
                     Results.Json(
                         new { error = "gateway unavailable", clOrdId = result.NewClOrdId.ToString() },
                         statusCode: StatusCodes.Status502BadGateway),
+                OrderModifyResultKind.GatewayAmbiguous =>
+                    Results.Json(
+                        new { error = "gateway send outcome ambiguous", clOrdId = result.NewClOrdId.ToString() },
+                        statusCode: StatusCodes.Status502BadGateway),
                 OrderModifyResultKind.WalBackpressure =>
                     Results.Json(
                         new { error = "system busy (WAL backpressure)", detail = result.Reason },
@@ -273,6 +277,8 @@ public static class OrdersEndpoints
                 OrderCancelResultKind.NotFound => Results.NotFound(),
                 OrderCancelResultKind.Stale =>
                     Results.Conflict(new { error = "order is marked stale", reason = result.Reason }),
+                OrderCancelResultKind.Conflict =>
+                    Results.Conflict(new { error = result.Reason }),
                 OrderCancelResultKind.WalBackpressure =>
                     Results.Json(
                         new { error = "system busy (WAL backpressure)", detail = result.Reason },

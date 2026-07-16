@@ -275,6 +275,12 @@ public sealed class PlatformSnapshot
     public List<PendingReplacementSnapshot> PendingReplacements { get; init; } = new();
 
     /// <summary>
+    /// WAL-backed cancel intents that have not yet received a terminal venue
+    /// outcome. Additive for compatibility with older snapshots.
+    /// </summary>
+    public List<PendingCancelSnapshot> PendingCancels { get; init; } = new();
+
+    /// <summary>
     /// Q4.1 (#301). Per-firm registry of known sub-accounts (active
     /// + soft-deleted). Empty on snapshots pre-dating the field;
     /// rebuilt entirely from <see cref="SubAccountCreatedEvent"/> /
@@ -617,6 +623,10 @@ public sealed record PendingReplacementSnapshot(
     bool AmbiguousMarginHeld,
     DateTimeOffset? AmbiguousAtUtc,
     decimal NewRemainingNotional);
+
+public sealed record PendingCancelSnapshot(
+    ulong OriginalClOrdId,
+    ulong CancelClOrdId);
 
 public sealed class ClOrdIdRegistrySnapshot
 {

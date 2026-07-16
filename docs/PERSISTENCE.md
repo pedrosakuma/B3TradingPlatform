@@ -81,8 +81,19 @@ during `ReadFromAsync(sinceSeqExclusive)`.
 - cash, fees, realised P&L, sub-accounts and audit events.
 
 Cancel commands are persisted as `OrderCancelRequestedEvent` so ownership
-links, the ClOrdID watermark and bot mappings survive restart; the eventual
-cancel ER remains the authoritative terminal order transition.
+links, the ClOrdID watermark, bot mappings and the one-per-original pending
+cancel registry survive restart. A retry observes the existing cancel ClOrdID
+and does not allocate or send another mutation. The eventual cancel/reject ER
+remains the authoritative resolution.
+
+Replace intents distinguish two gateway failure classes. A proven pre-send
+failure appends `OrderReplacePreSendFailedEvent`, terminally removing the
+pending intent so replay cannot resurrect it. An unclassified exception is
+recorded as `OrderReplaceAmbiguousMarginHeldEvent`; the intent and ownership
+link remain available for a late venue ER. This is deliberately narrower than
+Wave 2 / #628: this slice does not blindly resend pending cancel/replace
+intents after restart. Durable attempted/sent substates, session-version proof
+and automated reconciliation remain owned by that RFC.
 
 WebSocket fan-out frames are **not** persisted — they are projections
 recomputable from the WAL.

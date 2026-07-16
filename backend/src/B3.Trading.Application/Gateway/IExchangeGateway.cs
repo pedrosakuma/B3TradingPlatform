@@ -48,3 +48,15 @@ public interface IExchangeGateway
         DateTimeOffset? requestedGoodTillDate,
         CancellationToken cancellationToken);
 }
+
+/// <summary>
+/// Signals that the gateway proved no wire attempt occurred. Callers may
+/// durably terminalise the outbound intent instead of retaining it as an
+/// ambiguous send.
+/// </summary>
+public sealed class ExchangeGatewayPreSendException : Exception
+{
+    public ExchangeGatewayPreSendException(string message) : base(message) { }
+    public ExchangeGatewayPreSendException(string message, Exception innerException)
+        : base(message, innerException) { }
+}

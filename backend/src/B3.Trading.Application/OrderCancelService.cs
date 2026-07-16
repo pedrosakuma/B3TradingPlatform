@@ -30,6 +30,7 @@ public sealed class OrderCancelService
     private readonly IExchangeGateway _gateway;
     private readonly EventDispatcher _dispatcher;
     private readonly IUserBotOrderMappingRegistry? _botMappings;
+    private readonly PendingCancelRegistry _pendingCancels;
     private readonly ILogger<OrderCancelService> _logger;
 
     public OrderCancelService(
@@ -39,7 +40,8 @@ public sealed class OrderCancelService
         IExchangeGateway gateway,
         EventDispatcher dispatcher,
         ILogger<OrderCancelService> logger,
-        IUserBotOrderMappingRegistry? botMappings = null)
+        IUserBotOrderMappingRegistry? botMappings = null,
+        PendingCancelRegistry? pendingCancels = null)
     {
         _clOrdIds = clOrdIds;
         _ownership = ownership;
@@ -47,6 +49,7 @@ public sealed class OrderCancelService
         _gateway = gateway;
         _dispatcher = dispatcher;
         _botMappings = botMappings;
+        _pendingCancels = pendingCancels ?? new PendingCancelRegistry();
         _logger = logger;
     }
 
@@ -54,8 +57,9 @@ public sealed class OrderCancelService
     /// Cancels the order owned by <paramref name="owner"/> with id
     /// <paramref name="originalClOrdId"/>. Returns the platform-allocated
     /// cancel-side internal ClOrdID on accept, or a discriminated failure
-    /// otherwise. The caller (REST endpoint or FIXP listener) translates
-    /// the result into its own transport response.
+    /// otherwise. A retry while the cancel is pending returns the same
+    /// ClOrdID without another allocation or gateway call. The caller (REST
+    /// endpoint or FIXP listener) translates the result into its transport.
     /// </summary>
     public async Task<OrderCancelResult> CancelAsync(
         EndClientId owner,
@@ -75,8 +79,17 @@ public sealed class OrderCancelService
         // not leaked across the firm boundary.
         if (firmId is not null && !string.Equals(order.FirmId, firmId, StringComparison.Ordinal))
             return OrderCancelResult.NotFound;
+        if (order.Status is OrderStatus.Filled or OrderStatus.Cancelled
+            or OrderStatus.Rejected or OrderStatus.Replaced)
+        {
+            return OrderCancelResult.Conflict("order is terminal");
+        }
         if (order.IsStale)
             return OrderCancelResult.Stale(order.StaleReason ?? "stale");
+
+        var claim = _pendingCancels.Claim(originalClOrdId);
+        if (!claim.IsAcquired)
+            return OrderCancelResult.Accepted(claim.ExistingCancelClOrdId);
 
         var cancelClOrdId = _clOrdIds.Generate(owner);
         BotOrderMapping? botMapping = botOrigin is { } o
@@ -85,7 +98,7 @@ public sealed class OrderCancelService
 
         try
         {
-            _dispatcher.Dispatch(
+            var dispatched = _dispatcher.DispatchIf(
                 new OrderCancelRequestedEvent
                 {
                     CancelClOrdId = cancelClOrdId,
@@ -93,10 +106,15 @@ public sealed class OrderCancelService
                     OwnerEndClientId = owner.Value,
                     BotMapping = botMapping,
                 },
+                () => order.Status is not (OrderStatus.Filled or OrderStatus.Cancelled
+                    or OrderStatus.Rejected or OrderStatus.Replaced),
                 () =>
                 {
                     // RFC §4.6 step 3 — synchronous in-memory mutations
                     // only. Three things in lockstep with the WAL append:
+                    if (!_pendingCancels.CompleteClaim(originalClOrdId, cancelClOrdId))
+                        throw new InvalidOperationException(
+                            $"Original ClOrdID {originalClOrdId} was not exclusively claimed for cancel.");
                     _ownership.RegisterCancelLink(cancelClOrdId, originalClOrdId);
                     // Watermark advance so a post-restart Generate cannot
                     // re-allocate this cancel-side id (#157 invariant for
@@ -111,12 +129,23 @@ public sealed class OrderCancelService
                             externalCancelClOrdId: botMapping.ExternalClOrdId);
                     }
                 });
+            if (!dispatched.Applied)
+            {
+                _pendingCancels.ReleaseClaim(originalClOrdId);
+                return OrderCancelResult.Conflict("order is terminal");
+            }
         }
         catch (WalBackpressureException ex)
         {
+            _pendingCancels.ReleaseClaim(originalClOrdId);
             MetricsRegistry.WalBackpressure.Add(1,
                 new KeyValuePair<string, object?>("call_site", "orders.cancel"));
             return OrderCancelResult.WalBackpressure(ex.Message);
+        }
+        catch
+        {
+            _pendingCancels.ReleaseClaim(originalClOrdId);
+            throw;
         }
 
         try
@@ -170,6 +199,8 @@ public sealed class OrderCancelResult
         new(OrderCancelResultKind.NotFound, 0, null, null);
     public static OrderCancelResult Stale(string reason) =>
         new(OrderCancelResultKind.Stale, 0, reason, null);
+    public static OrderCancelResult Conflict(string reason) =>
+        new(OrderCancelResultKind.Conflict, 0, reason, null);
     public static OrderCancelResult WalBackpressure(string detail) =>
         new(OrderCancelResultKind.WalBackpressure, 0, detail, null);
     public static OrderCancelResult GatewayFailed(ulong cancelClOrdId, Exception ex) =>
@@ -181,6 +212,7 @@ public enum OrderCancelResultKind
     Accepted,
     NotFound,
     Stale,
+    Conflict,
     WalBackpressure,
     GatewayFailed,
 }

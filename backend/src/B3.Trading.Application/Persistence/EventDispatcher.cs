@@ -94,6 +94,27 @@ public sealed class EventDispatcher
     }
 
     /// <summary>
+    /// Atomically re-validates a live-state predicate, appends the event, and
+    /// applies its mutation under the dispatcher lock. A false predicate
+    /// performs neither append nor apply.
+    /// </summary>
+    public DispatchOutcome DispatchIf(WalEvent evt, Func<bool> condition, Action apply)
+    {
+        ArgumentNullException.ThrowIfNull(evt);
+        ArgumentNullException.ThrowIfNull(condition);
+        ArgumentNullException.ThrowIfNull(apply);
+        var payload = JsonSerializer.SerializeToUtf8Bytes(evt, WalEventJsonContext.Default.WalEvent);
+        lock (_lock)
+        {
+            if (!condition())
+                return new DispatchOutcome(false, 0);
+            var seq = _store.Append(evt, payload);
+            apply();
+            return new DispatchOutcome(true, seq);
+        }
+    }
+
+    /// <summary>
     /// RFC §5.2 (F2). Outcome-capture overload. <paramref name="applyAndCapture"/>
     /// runs under the dispatcher lock — same as the legacy <see cref="Dispatch(WalEvent, Action)"/> —
     /// but instead of synchronously fanning out to subscribers it adds

@@ -43,6 +43,7 @@ public sealed class ExecutionReportProcessor
     private readonly SubAccountPnlKeeper? _subAccountPnl;
     private readonly Persistence.EventDispatcher? _dispatcher;
     private readonly PendingReplacementRegistry? _replacements;
+    private readonly PendingCancelRegistry? _pendingCancels;
     private readonly Risk.IReplaceMarginCoordinator? _replaceMargin;
     private readonly IBotErRouter? _botErRouter;
     private readonly Scheduling.GtdExpirationScheduler? _gtdScheduler;
@@ -69,7 +70,8 @@ public sealed class ExecutionReportProcessor
         SubAccountPositionKeeper? subAccountPositions = null,
         SubAccountPnlKeeper? subAccountPnl = null,
         FillProjection? fillProjection = null,
-        Scheduling.IocFokWatchdog? iocWatchdog = null)
+        Scheduling.IocFokWatchdog? iocWatchdog = null,
+        PendingCancelRegistry? pendingCancels = null)
     {
         _ownership = ownership;
         _orders = orders;
@@ -91,6 +93,7 @@ public sealed class ExecutionReportProcessor
         _subAccountPnl = subAccountPnl;
         _fillProjection = fillProjection;
         _iocWatchdog = iocWatchdog;
+        _pendingCancels = pendingCancels;
     }
 
     /// <summary>
@@ -148,6 +151,14 @@ public sealed class ExecutionReportProcessor
             {
                 expectedFirmId = pendingIntent.FirmId;
             }
+            else if (_pendingCancels is not null
+                && kind == ExecKind.Rejected
+                && _pendingCancels.TryGetByCancel(clOrdId, out var pendingCancelOrig)
+                && _orders.TryGet(pendingCancelOrig, out var pendingCancelOrder)
+                && pendingCancelOrder is not null)
+            {
+                expectedFirmId = pendingCancelOrder.FirmId;
+            }
             else
             {
                 // Mirror the main-path resolution (origClOrdId fallback
@@ -203,6 +214,7 @@ public sealed class ExecutionReportProcessor
                 ApplyReplaceRejected(clOrdId, rejectedIntent, rejectReason, fanOut);
                 return;
             }
+
             if (kind == ExecKind.Replaced
                 && _replacements.TryConsume(clOrdId, out var replaceIntent)
                 && replaceIntent is not null)
@@ -235,6 +247,37 @@ public sealed class ExecutionReportProcessor
                     fanOut: fanOut);
                 return;
             }
+        }
+
+        if (kind == ExecKind.Rejected
+            && _pendingCancels is not null
+            && _pendingCancels.TryGetByCancel(clOrdId, out var rejectedCancelOrig)
+            && _orders.TryGet(rejectedCancelOrig, out var rejectedCancelOrder)
+            && rejectedCancelOrder is not null
+            && _pendingCancels.TryConsumeByCancel(clOrdId, out _))
+        {
+            var cancelRejected = new ExecutionEvent(
+                rejectedCancelOrder.Owner,
+                clOrdId,
+                rejectedCancelOrder.Symbol,
+                rejectedCancelOrder.Side,
+                OrderStatus.Rejected,
+                ExecKind.Rejected,
+                LeavesQuantity: rejectedCancelOrder.LeavesQuantity,
+                CumulativeQuantity: rejectedCancelOrder.CumulativeQuantity,
+                LastQuantity: 0,
+                LastPrice: 0m,
+                RejectReason: rejectReason,
+                TimestampUtc: eventTimestampUtc ?? DateTimeOffset.UtcNow,
+                FirmId: rejectedCancelOrder.FirmId);
+            if (fanOut is not null)
+                fanOut.Add(cancelRejected);
+            else
+            {
+                _sink.Publish(cancelRejected);
+                _botErRouter?.Route(cancelRejected);
+            }
+            return;
         }
 
         // For cancel/replace acks, the meaningful identity is the original
@@ -722,6 +765,7 @@ public sealed class ExecutionReportProcessor
         if (order.Status is OrderStatus.Filled or OrderStatus.Cancelled
             or OrderStatus.Rejected or OrderStatus.Replaced)
         {
+            _pendingCancels?.TryConsumeByOriginal(lookupId, out _);
             _gtdScheduler?.OnOrderTerminal(lookupId);
             // #351 — Cancel the IOC/FOK watchdog timer (if any). The
             // expected happy-path: a fill / cancel / reject ER lands

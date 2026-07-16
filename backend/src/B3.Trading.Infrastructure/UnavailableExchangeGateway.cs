@@ -22,14 +22,14 @@ public sealed class UnavailableExchangeGateway : IExchangeGateway
     public const string Reason = "exchange gateway unavailable (mode=Unavailable)";
 
     public Task SubmitAsync(Order order, CancellationToken cancellationToken) =>
-        throw new InvalidOperationException(Reason);
+        throw new ExchangeGatewayPreSendException(Reason);
 
     public Task CancelAsync(Order order, ulong newClOrdId, CancellationToken cancellationToken) =>
-        throw new InvalidOperationException(Reason);
+        throw new ExchangeGatewayPreSendException(Reason);
 
     public Task CancelReplaceAsync(
         Order order, ulong newClOrdId, long newQuantity, decimal? newPrice,
         TimeInForce? requestedTimeInForce, decimal? requestedStopPrice, DateTimeOffset? requestedGoodTillDate,
         CancellationToken cancellationToken) =>
-        throw new InvalidOperationException(Reason);
+        throw new ExchangeGatewayPreSendException(Reason);
 }

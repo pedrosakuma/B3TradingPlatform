@@ -1265,7 +1265,22 @@ public sealed class AlgoEngine : BackgroundService
             return false;
         }
 
-        if (_replacements.IsOriginalInFlight(child.ClOrdId))
+        try
+        {
+            Order.ValidatePriceForType(child.Type, newPrice);
+        }
+        catch (ArgumentException ex)
+        {
+            MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
+                new KeyValuePair<string, object?>("algoType", algoTypeTag),
+                new KeyValuePair<string, object?>("reason", "invalid_price"));
+            _logger.LogInformation(ex,
+                "AlgoEngine modify rejected invalid price/type for algo {Firm}/{AlgoId} child {Child}.",
+                algo.FirmId, algo.AlgoId, child.ClOrdId);
+            return false;
+        }
+
+        if (!_replacements.TryClaimOriginal(child.ClOrdId))
         {
             MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
                 new KeyValuePair<string, object?>("algoType", algoTypeTag),
@@ -1273,6 +1288,29 @@ public sealed class AlgoEngine : BackgroundService
             return false;
         }
 
+        try
+        {
+            return await TryReplaceClaimedChildAsync(
+                algo, rt, child, newQuantity, newPrice, reason, algoTypeTag, ct)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            _replacements.ReleaseOriginalClaim(child.ClOrdId);
+        }
+    }
+
+    private async Task<bool> TryReplaceClaimedChildAsync(
+        Algo algo,
+        AlgoParentRuntime rt,
+        Order child,
+        long newQuantity,
+        decimal? newPrice,
+        string reason,
+        string algoTypeTag,
+        CancellationToken ct)
+    {
+        var replacements = _replacements!;
         var newClOrdId = _clOrdIds.Generate(child.Owner);
 
         // Pass-3 review (#299) P1. Run the same pre-trade gates the
@@ -1365,7 +1403,7 @@ public sealed class AlgoEngine : BackgroundService
         var atUtc = _clock.GetUtcNow();
         try
         {
-            _dispatcher.Dispatch(
+            var dispatched = _dispatcher.DispatchIf(
                 new OrderReplaceRequestedEvent
                 {
                     OriginalClOrdId = child.ClOrdId,
@@ -1381,14 +1419,25 @@ public sealed class AlgoEngine : BackgroundService
                     ParentAlgoId = child.ParentAlgoId,
                     AlgoSliceSeq = child.AlgoSliceSeq,
                 },
+                () => child.Status is not (OrderStatus.Filled or OrderStatus.Cancelled
+                    or OrderStatus.Rejected or OrderStatus.Replaced)
+                    && newQuantity > child.CumulativeQuantity,
                 () =>
                 {
                     // Pass-4 review (#299) P1. Stamp the registry entry
                     // with the current clock so the AlgoScheduler TTL
                     // sweep can bound any ambiguous-send leak below.
-                    _replacements.TryAdd(intent, _clock.GetUtcNow());
+                    if (!replacements.TryAddClaimed(intent, _clock.GetUtcNow()))
+                        throw new InvalidOperationException(
+                            $"Original ClOrdID {child.ClOrdId} was not exclusively claimed.");
                     _ownership.RegisterReplaceLink(child.ClOrdId, newClOrdId);
                 });
+            if (!dispatched.Applied)
+            {
+                if (marginPrepared)
+                    _replaceMargin!.AbortReplace(newClOrdId);
+                return false;
+            }
         }
         catch (WalBackpressureException)
         {
@@ -1414,6 +1463,33 @@ public sealed class AlgoEngine : BackgroundService
                 child, newClOrdId, newQuantity, newPrice,
                 requestedTimeInForce: null, requestedStopPrice: null, requestedGoodTillDate: null,
                 ct).ConfigureAwait(false);
+        }
+        catch (ExchangeGatewayPreSendException ex)
+        {
+            MetricsRegistry.OrdersGatewayFailed.Add(1,
+                new KeyValuePair<string, object?>("path", "algo.modify"),
+                new KeyValuePair<string, object?>("firmId", algo.FirmId));
+            MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
+                new KeyValuePair<string, object?>("algoType", algoTypeTag),
+                new KeyValuePair<string, object?>("reason", "gateway_pre_send"));
+            _logger.LogWarning(ex,
+                "AlgoEngine modify was proven unsent for algo {Firm}/{AlgoId} child {Child}; terminalising intent.",
+                algo.FirmId, algo.AlgoId, child.ClOrdId);
+            _dispatcher.Dispatch(
+                new OrderReplacePreSendFailedEvent
+                {
+                    OriginalClOrdId = child.ClOrdId,
+                    NewClOrdId = newClOrdId,
+                    EndClientId = child.Owner.Value,
+                    Reason = "gateway_unavailable",
+                },
+                () =>
+                {
+                    replacements.TryConsume(newClOrdId, out _);
+                    if (marginPrepared)
+                        _replaceMargin!.AbortReplace(newClOrdId);
+                });
+            return false;
         }
         catch (Exception ex)
         {
@@ -1491,7 +1567,7 @@ public sealed class AlgoEngine : BackgroundService
                             NewRemainingNotional = newRemainingNotional,
                             HeldAtUtc = heldAt,
                         },
-                        () => _replacements.MarkAmbiguousMarginHeld(newClOrdId, heldAt, newRemainingNotional));
+                        () => replacements.MarkAmbiguousMarginHeld(newClOrdId, heldAt, newRemainingNotional));
                 }
                 catch (WalBackpressureException walEx)
                 {
@@ -1500,7 +1576,7 @@ public sealed class AlgoEngine : BackgroundService
                     _logger.LogWarning(walEx,
                         "AlgoEngine could not persist ambiguous-margin-held event for new ClOrdID {NewClOrdId}; live in-memory mark still applied (post-restart recovery would not re-establish this reservation).",
                         newClOrdId);
-                    _replacements.MarkAmbiguousMarginHeld(newClOrdId, heldAt, newRemainingNotional);
+                    replacements.MarkAmbiguousMarginHeld(newClOrdId, heldAt, newRemainingNotional);
                 }
             }
             return false;
