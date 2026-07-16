@@ -1519,26 +1519,22 @@ public sealed class AlgoEngine : BackgroundService
             }
             catch (Exception resolutionEx)
             {
-                _dispatcher.RunExclusive(() =>
-                {
-                    replacements.TryConsume(newClOrdId, out _);
-                    _ownership.RemoveCancelLink(newClOrdId);
-                    if (marginPrepared)
-                        _replaceMargin!.AbortReplace(newClOrdId);
-                });
                 BeginReplaceResolutionDrain(
                     newClOrdId, "pre_send_resolution_not_durable", resolutionEx);
                 return false;
             }
             if (!resolution.Durable)
             {
-                _dispatcher.RunExclusive(() =>
+                if (resolution.MarkerDurable)
                 {
-                    replacements.TryConsume(newClOrdId, out _);
-                    _ownership.RemoveCancelLink(newClOrdId);
-                    if (marginPrepared)
-                        _replaceMargin!.AbortReplace(newClOrdId);
-                });
+                    _dispatcher.RunExclusive(() =>
+                    {
+                        replacements.TryConsume(newClOrdId, out _);
+                        _ownership.RemoveCancelLink(newClOrdId);
+                        if (marginPrepared)
+                            _replaceMargin!.AbortReplace(newClOrdId);
+                    });
+                }
                 BeginReplaceResolutionDrain(
                     newClOrdId, "pre_send_resolution_not_durable",
                     resolution.Failure!);
@@ -1622,18 +1618,18 @@ public sealed class AlgoEngine : BackgroundService
             }
             catch (Exception resolutionEx)
             {
-                _dispatcher.RunExclusive(() =>
-                    replacements.MarkAmbiguousMarginHeld(
-                        newClOrdId, heldAt, newRemainingNotional));
                 BeginReplaceResolutionDrain(
                     newClOrdId, "ambiguous_resolution_not_durable", resolutionEx);
                 return false;
             }
             if (!resolution.Durable)
             {
-                _dispatcher.RunExclusive(() =>
-                    replacements.MarkAmbiguousMarginHeld(
-                        newClOrdId, heldAt, newRemainingNotional));
+                if (resolution.MarkerDurable)
+                {
+                    _dispatcher.RunExclusive(() =>
+                        replacements.MarkAmbiguousMarginHeld(
+                            newClOrdId, heldAt, newRemainingNotional));
+                }
                 BeginReplaceResolutionDrain(
                     newClOrdId, "ambiguous_resolution_not_durable",
                     resolution.Failure!);

@@ -440,23 +440,20 @@ public sealed class OrderModifyService
             }
             catch (Exception resolutionEx)
             {
-                _dispatcher.RunExclusive(() =>
-                {
-                    _replacements.TryConsume(newClOrdId, out _);
-                    _ownership.RemoveCancelLink(newClOrdId);
-                    _replaceMargin.AbortReplace(newClOrdId);
-                });
                 return FailResolutionForReconciliation(
                     newClOrdId, "pre_send_resolution_not_durable", resolutionEx);
             }
             if (!resolution.Durable)
             {
-                _dispatcher.RunExclusive(() =>
+                if (resolution.MarkerDurable)
                 {
-                    _replacements.TryConsume(newClOrdId, out _);
-                    _ownership.RemoveCancelLink(newClOrdId);
-                    _replaceMargin.AbortReplace(newClOrdId);
-                });
+                    _dispatcher.RunExclusive(() =>
+                    {
+                        _replacements.TryConsume(newClOrdId, out _);
+                        _ownership.RemoveCancelLink(newClOrdId);
+                        _replaceMargin.AbortReplace(newClOrdId);
+                    });
+                }
                 return FailResolutionForReconciliation(
                     newClOrdId, "pre_send_resolution_not_durable",
                     resolution.Failure!);
@@ -499,17 +496,17 @@ public sealed class OrderModifyService
             }
             catch (Exception resolutionEx)
             {
-                _dispatcher.RunExclusive(() =>
-                    _replacements.MarkAmbiguousMarginHeld(
-                        newClOrdId, heldAt, newRemainingNotional));
                 return FailResolutionForReconciliation(
                     newClOrdId, "ambiguous_resolution_not_durable", resolutionEx);
             }
             if (!resolution.Durable)
             {
-                _dispatcher.RunExclusive(() =>
-                    _replacements.MarkAmbiguousMarginHeld(
-                        newClOrdId, heldAt, newRemainingNotional));
+                if (resolution.MarkerDurable)
+                {
+                    _dispatcher.RunExclusive(() =>
+                        _replacements.MarkAmbiguousMarginHeld(
+                            newClOrdId, heldAt, newRemainingNotional));
+                }
                 return FailResolutionForReconciliation(
                     newClOrdId, "ambiguous_resolution_not_durable",
                     resolution.Failure!);

@@ -197,13 +197,16 @@ public sealed class OrderCancelService
             }
             catch (Exception resolutionEx)
             {
-                _dispatcher.RunExclusive(() => ResolvePreSendFailure(cancelClOrdId));
                 return FailResolutionForReconciliation(
                     cancelClOrdId, "pre_send_cancel_resolution_not_durable", resolutionEx);
             }
             if (!resolution.Durable)
             {
-                _dispatcher.RunExclusive(() => ResolvePreSendFailure(cancelClOrdId));
+                if (resolution.MarkerDurable)
+                {
+                    _dispatcher.RunExclusive(() =>
+                        ResolvePreSendFailure(cancelClOrdId));
+                }
                 return FailResolutionForReconciliation(
                     cancelClOrdId, "pre_send_cancel_resolution_not_durable",
                     resolution.Failure!);

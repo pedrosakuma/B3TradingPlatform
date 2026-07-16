@@ -111,6 +111,10 @@ The staging `<id>.json.writing` entry is itself directory-fsynced before
 rename and is a valid recovery artifact. Startup validates both final and
 staging files, deterministically deduplicates equal pairs, and drains on
 partial, conflicting, or unexpected artifacts instead of skipping them.
+If sidecar publication fails before that first directory fsync, the engine
+attempts the WAL resolution directly. When both channels fail, it retains the
+original unresolved pending intent in memory and drains; cleanup/TTL marking
+is applied only when either the WAL resolution or sidecar is known durable.
 On first use, each newly-created data/firm/reconciliation directory is followed
 by an fsync of its parent before the store becomes available, so the
 reconciliation directory entry itself also survives power loss.

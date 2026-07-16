@@ -157,6 +157,77 @@ public sealed class LifecycleAtomicityTests
     }
 
     [Fact]
+    public async Task ReplacePreSend_WhenMarkerAndWalBothFail_RetainsUnresolvedIntentAcrossRestart()
+    {
+        var markers = new FaultingMarkerStore(durablyPublished: false);
+        var store = PermanentResolutionFaultStore();
+        var gateway = new TestGateway
+        {
+            ReplaceException = new ExchangeGatewayPreSendException("not connected"),
+        };
+        var runtime = BuildModify(gateway, store, markers);
+
+        var result = await runtime.Service.ModifyAsync(
+            new OrderModifyRequest(Owner, 100, 120, 31m), CancellationToken.None);
+
+        Assert.Equal(OrderModifyResultKind.ReconciliationRequired, result.Kind);
+        Assert.True(runtime.Drain.IsDraining);
+        Assert.True(runtime.Replacements.IsOriginalInFlight(100));
+        Assert.Empty(runtime.Margin.Aborted);
+        Assert.Empty(markers.Load());
+
+        var recovered = BuildRecoveryState();
+        foreach (var evt in store.Events)
+            recovered.Replayer.Apply(evt);
+        Assert.True(recovered.Replacements.IsOriginalInFlight(100));
+    }
+
+    [Fact]
+    public async Task ReplaceAmbiguous_WhenMarkerAndWalBothFail_RetainsPlainUnresolvedIntent()
+    {
+        var markers = new FaultingMarkerStore(durablyPublished: false);
+        var store = PermanentResolutionFaultStore();
+        var gateway = new TestGateway
+        {
+            ReplaceException = new IOException("wire outcome unknown"),
+        };
+        var runtime = BuildModify(gateway, store, markers);
+
+        var result = await runtime.Service.ModifyAsync(
+            new OrderModifyRequest(Owner, 100, 120, 31m), CancellationToken.None);
+
+        Assert.Equal(OrderModifyResultKind.ReconciliationRequired, result.Kind);
+        Assert.True(runtime.Drain.IsDraining);
+        Assert.True(runtime.Replacements.IsOriginalInFlight(100));
+        Assert.False(Assert.Single(
+            runtime.Replacements.Snapshot()).AmbiguousMarginHeld);
+        Assert.Empty(runtime.Margin.Aborted);
+        Assert.Empty(markers.Load());
+    }
+
+    [Fact]
+    public async Task ReplacePreSend_WhenMarkerFailsButWalSucceeds_UsesWalResolution()
+    {
+        var markers = new FaultingMarkerStore(durablyPublished: false);
+        var store = new RecordingEventStore();
+        var gateway = new TestGateway
+        {
+            ReplaceException = new ExchangeGatewayPreSendException("not connected"),
+        };
+        var runtime = BuildModify(gateway, store, markers);
+
+        var result = await runtime.Service.ModifyAsync(
+            new OrderModifyRequest(Owner, 100, 120, 31m), CancellationToken.None);
+
+        Assert.Equal(OrderModifyResultKind.GatewayFailed, result.Kind);
+        Assert.False(runtime.Drain.IsDraining);
+        Assert.False(runtime.Replacements.IsOriginalInFlight(100));
+        Assert.Collection(store.Events,
+            static e => Assert.IsType<OrderReplaceRequestedEvent>(e),
+            static e => Assert.IsType<OrderReplacePreSendFailedEvent>(e));
+    }
+
+    [Fact]
     public async Task AmbiguousResolutionWalFault_DrainsAndMarksIntentInMemoryForTtl()
     {
         var store = new RecordingEventStore(
@@ -544,7 +615,9 @@ public sealed class LifecycleAtomicityTests
                 MarkerOptions(root), durability);
             var marker = CancelMarker();
 
-            Assert.Throws<IOException>(() => store.Persist(marker));
+            var persistFailure = Assert.Throws<ReconciliationMarkerPersistException>(
+                () => store.Persist(marker));
+            Assert.False(persistFailure.DurablyPublished);
             durability.Failure = null;
             Assert.Single(store.Load());
             store.Remove(marker.Id);
@@ -552,6 +625,121 @@ public sealed class LifecycleAtomicityTests
             store.Persist(marker);
             durability.Failure = new IOException("delete fsync failed");
             Assert.Throws<IOException>(() => store.Remove(marker.Id));
+        }
+        finally
+        {
+            DeleteMarkerTestRoot(root);
+        }
+    }
+
+    [Fact]
+    public void FileReconciliationMarkerStore_WriteFailureIsNotDurablyPublished()
+    {
+        var root = MarkerTestRoot();
+        Directory.CreateDirectory(Path.Combine(root, "FIRM", "reconciliation"));
+        try
+        {
+            var fileOperations = new RecordingMarkerFileOperations
+            {
+                FailWrite = true,
+            };
+            var store = new FileReconciliationMarkerStore(
+                MarkerOptions(root),
+                new RecordingDirectoryDurability(),
+                fileOperations);
+
+            var failure = Assert.Throws<ReconciliationMarkerPersistException>(
+                () => store.Persist(CancelMarker()));
+
+            Assert.False(failure.DurablyPublished);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(
+                Path.Combine(root, "FIRM", "reconciliation")));
+        }
+        finally
+        {
+            DeleteMarkerTestRoot(root);
+        }
+    }
+
+    [Fact]
+    public void FileReconciliationMarkerStore_StagingDirectoryFsyncFailureIsNotKnownDurable()
+    {
+        var root = MarkerTestRoot();
+        var directory = Path.Combine(root, "FIRM", "reconciliation");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var durability = new RecordingDirectoryDurability
+            {
+                Failure = new IOException("staging fsync failed"),
+                FailOnCall = 1,
+            };
+            var store = new FileReconciliationMarkerStore(
+                MarkerOptions(root), durability);
+
+            var failure = Assert.Throws<ReconciliationMarkerPersistException>(
+                () => store.Persist(CancelMarker()));
+
+            Assert.False(failure.DurablyPublished);
+            Assert.Single(Directory.EnumerateFiles(
+                directory, "*.json.writing"));
+        }
+        finally
+        {
+            DeleteMarkerTestRoot(root);
+        }
+    }
+
+    [Fact]
+    public void FileReconciliationMarkerStore_RenameFailureReportsDurableStaging()
+    {
+        var root = MarkerTestRoot();
+        var directory = Path.Combine(root, "FIRM", "reconciliation");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var fileOperations = new RecordingMarkerFileOperations
+            {
+                FailMove = true,
+            };
+            var store = new FileReconciliationMarkerStore(
+                MarkerOptions(root),
+                new RecordingDirectoryDurability(),
+                fileOperations);
+
+            var failure = Assert.Throws<ReconciliationMarkerPersistException>(
+                () => store.Persist(CancelMarker()));
+
+            Assert.True(failure.DurablyPublished);
+            Assert.Equal(CancelMarker(), Assert.Single(store.Load()));
+        }
+        finally
+        {
+            DeleteMarkerTestRoot(root);
+        }
+    }
+
+    [Fact]
+    public void FileReconciliationMarkerStore_FinalDirectoryFsyncFailureReportsDurableMarker()
+    {
+        var root = MarkerTestRoot();
+        var directory = Path.Combine(root, "FIRM", "reconciliation");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var durability = new RecordingDirectoryDurability
+            {
+                Failure = new IOException("final fsync failed"),
+                FailOnCall = 2,
+            };
+            var store = new FileReconciliationMarkerStore(
+                MarkerOptions(root), durability);
+
+            var failure = Assert.Throws<ReconciliationMarkerPersistException>(
+                () => store.Persist(CancelMarker()));
+
+            Assert.True(failure.DurablyPublished);
+            Assert.Equal(CancelMarker(), Assert.Single(store.Load()));
         }
         finally
         {
@@ -966,6 +1154,43 @@ public sealed class LifecycleAtomicityTests
         Assert.Empty(markers.Load());
         Assert.Equal(2, store.Events.Count);
         Assert.True(store.FlushCalls > 0);
+    }
+
+    [Fact]
+    public async Task CancelPreSend_WhenMarkerAndWalBothFail_RetainsPendingIntentAcrossRestart()
+    {
+        var markers = new FaultingMarkerStore(durablyPublished: false);
+        var store = PermanentResolutionFaultStore();
+        var dispatcher = new EventDispatcher(store);
+        var pending = new PendingCancelRegistry();
+        var ownership = new OrderOwnershipMap();
+        var book = new WorkingOrderBook();
+        Assert.True(book.TryAdd(Working()));
+        ownership.Register(100, Owner);
+        var drain = new NeverDrainController();
+        var service = new OrderCancelService(
+            new ClOrdIdPrefixRegistry(), ownership, book,
+            new UnavailableExchangeGateway(), dispatcher,
+            NullLogger<OrderCancelService>.Instance,
+            pendingCancels: pending,
+            reconciliationDrain: drain,
+            resolutionWriter: new ReconciliationResolutionWriter(
+                markers, dispatcher,
+                NullLogger<ReconciliationResolutionWriter>.Instance));
+
+        var result = await service.CancelAsync(Owner, 100, CancellationToken.None);
+
+        Assert.Equal(OrderCancelResultKind.ReconciliationRequired, result.Kind);
+        Assert.True(drain.IsDraining);
+        Assert.True(pending.TryGetByCancel(result.CancelClOrdId, out _));
+        Assert.True(ownership.TryResolveOrig(result.CancelClOrdId, out _));
+        Assert.Empty(markers.Load());
+
+        var recovered = BuildRecoveryState();
+        foreach (var evt in store.Events)
+            recovered.Replayer.Apply(evt);
+        Assert.True(recovered.PendingCancels.TryGetByCancel(
+            result.CancelClOrdId, out _));
     }
 
     [Fact]
@@ -1437,6 +1662,7 @@ public sealed class LifecycleAtomicityTests
         public int Calls { get; private set; }
         public List<string> Paths { get; } = new();
         public Exception? Failure { get; set; }
+        public int? FailOnCall { get; set; }
         public Action<string>? OnFlush { get; set; }
 
         public void Flush(string directoryPath)
@@ -1444,8 +1670,64 @@ public sealed class LifecycleAtomicityTests
             Calls++;
             Paths.Add(directoryPath);
             OnFlush?.Invoke(directoryPath);
-            if (Failure is not null)
+            if (Failure is not null
+                && (FailOnCall is null || FailOnCall == Calls))
                 throw Failure;
         }
+    }
+
+    private sealed class RecordingMarkerFileOperations
+        : IReconciliationMarkerFileOperations
+    {
+        public bool FailWrite { get; set; }
+        public bool FailMove { get; set; }
+
+        public void WriteAndFlush(string path, byte[] payload)
+        {
+            if (FailWrite)
+                throw new IOException("staging file flush failed");
+            using var stream = new FileStream(
+                path, FileMode.Create, FileAccess.Write, FileShare.None,
+                bufferSize: 4096, FileOptions.WriteThrough);
+            stream.Write(payload);
+            stream.Flush(flushToDisk: true);
+        }
+
+        public void Move(string source, string destination)
+        {
+            if (FailMove)
+                throw new IOException("rename failed");
+            File.Move(source, destination, overwrite: true);
+        }
+    }
+
+    private sealed class FaultingMarkerStore : IReconciliationMarkerStore
+    {
+        private readonly bool _durablyPublished;
+        private ReconciliationMarker? _marker;
+
+        public FaultingMarkerStore(bool durablyPublished) =>
+            _durablyPublished = durablyPublished;
+
+        public void Persist(ReconciliationMarker marker)
+        {
+            if (_durablyPublished)
+                _marker = marker;
+            throw new ReconciliationMarkerPersistException(
+                "configured marker persistence failure",
+                _durablyPublished,
+                new IOException("sidecar unavailable"));
+        }
+
+        public void Remove(string markerId)
+        {
+            if (_marker?.Id == markerId)
+                _marker = null;
+        }
+
+        public IReadOnlyList<ReconciliationMarker> Load() =>
+            _marker is null
+                ? Array.Empty<ReconciliationMarker>()
+                : new[] { _marker! };
     }
 }

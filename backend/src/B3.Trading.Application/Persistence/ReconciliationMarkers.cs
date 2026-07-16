@@ -35,6 +35,20 @@ public interface IReconciliationMarkerStore
     IReadOnlyList<ReconciliationMarker> Load();
 }
 
+public sealed class ReconciliationMarkerPersistException : IOException
+{
+    public bool DurablyPublished { get; }
+
+    public ReconciliationMarkerPersistException(
+        string message,
+        bool durablyPublished,
+        Exception innerException)
+        : base(message, innerException)
+    {
+        DurablyPublished = durablyPublished;
+    }
+}
+
 public sealed class InMemoryReconciliationMarkerStore : IReconciliationMarkerStore
 {
     private readonly ConcurrentDictionary<string, ReconciliationMarker> _markers =
@@ -47,6 +61,7 @@ public sealed class InMemoryReconciliationMarkerStore : IReconciliationMarkerSto
 
 public readonly record struct ReconciliationResolutionResult(
     bool Durable,
+    bool MarkerDurable,
     Exception? Failure);
 
 /// <summary>
@@ -75,7 +90,22 @@ public sealed class ReconciliationResolutionWriter
         WalEvent resolutionEvent,
         Action apply)
     {
-        _markers.Persist(marker);
+        var markerDurable = false;
+        Exception? markerFailure = null;
+        try
+        {
+            _markers.Persist(marker);
+            markerDurable = true;
+        }
+        catch (ReconciliationMarkerPersistException ex)
+        {
+            markerDurable = ex.DurablyPublished;
+            markerFailure = ex;
+        }
+        catch (Exception ex)
+        {
+            markerFailure = ex;
+        }
 
         for (var attempt = 1; attempt <= BackpressureAttempts; attempt++)
         {
@@ -89,10 +119,10 @@ public sealed class ReconciliationResolutionWriter
                     .ConfigureAwait(false);
                 continue;
             }
-            catch (Exception ex) when (
-                ex is WalBackpressureException or WalFaultedException)
+            catch (Exception ex)
             {
-                return new ReconciliationResolutionResult(false, ex);
+                return new ReconciliationResolutionResult(
+                    false, markerDurable, Combine(markerFailure, ex));
             }
 
             try
@@ -100,10 +130,10 @@ public sealed class ReconciliationResolutionWriter
                 await _dispatcher.FlushAsync(CancellationToken.None)
                     .ConfigureAwait(false);
             }
-            catch (Exception ex) when (
-                ex is WalBackpressureException or WalFaultedException)
+            catch (Exception ex)
             {
-                return new ReconciliationResolutionResult(false, ex);
+                return new ReconciliationResolutionResult(
+                    false, markerDurable, Combine(markerFailure, ex));
             }
 
             try
@@ -118,11 +148,16 @@ public sealed class ReconciliationResolutionWriter
                     "Durable resolution {MarkerId} committed but sidecar cleanup failed.",
                     marker.Id);
             }
-            return new ReconciliationResolutionResult(true, null);
+            return new ReconciliationResolutionResult(true, markerDurable, null);
         }
 
         throw new InvalidOperationException("Resolution retry loop exhausted unexpectedly.");
     }
+
+    private static Exception Combine(Exception? markerFailure, Exception walFailure) =>
+        markerFailure is null
+            ? walFailure
+            : new AggregateException(markerFailure, walFailure);
 }
 
 /// <summary>

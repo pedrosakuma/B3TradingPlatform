@@ -19,6 +19,7 @@ public sealed class FileReconciliationMarkerStore : IReconciliationMarkerStore
     private readonly string _root;
     private readonly object _lock = new();
     private readonly IReconciliationDirectoryDurability _directoryDurability;
+    private readonly IReconciliationMarkerFileOperations _fileOperations;
 
     public FileReconciliationMarkerStore(IOptions<PersistenceOptions> options)
         : this(options.Value)
@@ -26,16 +27,32 @@ public sealed class FileReconciliationMarkerStore : IReconciliationMarkerStore
     }
 
     public FileReconciliationMarkerStore(PersistenceOptions options)
-        : this(options, ReconciliationDirectoryDurability.Instance)
+        : this(
+            options,
+            ReconciliationDirectoryDurability.Instance,
+            ReconciliationMarkerFileOperations.Instance)
     {
     }
 
     public FileReconciliationMarkerStore(
         PersistenceOptions options,
         IReconciliationDirectoryDurability directoryDurability)
+        : this(
+            options,
+            directoryDurability,
+            ReconciliationMarkerFileOperations.Instance)
+    {
+    }
+
+    public FileReconciliationMarkerStore(
+        PersistenceOptions options,
+        IReconciliationDirectoryDurability directoryDurability,
+        IReconciliationMarkerFileOperations fileOperations)
     {
         _directoryDurability = directoryDurability
             ?? throw new ArgumentNullException(nameof(directoryDurability));
+        _fileOperations = fileOperations
+            ?? throw new ArgumentNullException(nameof(fileOperations));
         _root = Path.GetFullPath(Path.Combine(
             options.DataDirectory, options.FirmId, "reconciliation"));
         CreateDirectoryPathDurably(_root);
@@ -48,19 +65,25 @@ public sealed class FileReconciliationMarkerStore : IReconciliationMarkerStore
         {
             var path = PathFor(marker.Id);
             var staging = path + ".writing";
-            var payload = JsonSerializer.SerializeToUtf8Bytes(marker, JsonOptions);
-            using (var stream = new FileStream(
-                staging, FileMode.Create, FileAccess.Write, FileShare.None,
-                bufferSize: 4096, FileOptions.WriteThrough))
+            var durablyPublished = false;
+            try
             {
-                stream.Write(payload);
-                stream.Flush(flushToDisk: true);
+                var payload = JsonSerializer.SerializeToUtf8Bytes(marker, JsonOptions);
+                _fileOperations.WriteAndFlush(staging, payload);
+                // Publish the staging entry durably before rename. A crash at
+                // this boundary leaves a recoverable .json.writing marker.
+                _directoryDurability.Flush(_root);
+                durablyPublished = true;
+                _fileOperations.Move(staging, path);
+                _directoryDurability.Flush(_root);
             }
-            // Publish the staging entry durably before rename. A crash at
-            // this boundary leaves a recoverable .json.writing marker.
-            _directoryDurability.Flush(_root);
-            File.Move(staging, path, overwrite: true);
-            _directoryDurability.Flush(_root);
+            catch (Exception ex)
+            {
+                throw new ReconciliationMarkerPersistException(
+                    $"Failed to durably publish reconciliation marker '{marker.Id}'.",
+                    durablyPublished,
+                    ex);
+            }
         }
     }
 
@@ -223,6 +246,30 @@ public sealed class FileReconciliationMarkerStore : IReconciliationMarkerStore
         public (string Path, ReconciliationMarker Marker)? Final { get; set; }
         public (string Path, ReconciliationMarker Marker)? Staging { get; set; }
     }
+}
+
+public interface IReconciliationMarkerFileOperations
+{
+    void WriteAndFlush(string path, byte[] payload);
+    void Move(string source, string destination);
+}
+
+internal sealed class ReconciliationMarkerFileOperations
+    : IReconciliationMarkerFileOperations
+{
+    public static ReconciliationMarkerFileOperations Instance { get; } = new();
+
+    public void WriteAndFlush(string path, byte[] payload)
+    {
+        using var stream = new FileStream(
+            path, FileMode.Create, FileAccess.Write, FileShare.None,
+            bufferSize: 4096, FileOptions.WriteThrough);
+        stream.Write(payload);
+        stream.Flush(flushToDisk: true);
+    }
+
+    public void Move(string source, string destination) =>
+        File.Move(source, destination, overwrite: true);
 }
 
 public interface IReconciliationDirectoryDurability
