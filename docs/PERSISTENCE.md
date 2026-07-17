@@ -18,10 +18,10 @@ the rules that make the design safe.
 This applies to venue-derived order/execution state. The WAL now also contains
 local-only controls, credentials, cash, sub-accounts and algo lifecycle state
 that B3 cannot replay, so it is no longer universally only an audit log + boot
-accelerator. The proposed class-aware durability contract is
+accelerator. The class-aware durability contract is
 [`durability-classes-fail-closed-v0`](rfcs/durability-classes-fail-closed-v0.md);
-this document continues to describe the current runtime until its
-implementation slices land.
+the committed-prefix substrate described below is implemented, while later
+Class L/V/O business-flow slices remain staged separately.
 
 Every new event must therefore identify whether the venue can replay it or the
 platform is its only authority; the linked RFC defines that decision.
@@ -34,8 +34,10 @@ Per firm, under `Trading:Persistence:DataDirectory`:
 data/{firm}/wal/2026-05-01/
   000.log    # data segment, append-only
   000.idx    # sparse index, fixed 24-byte records
+  000.log.firstseq # generation-bound segment sequence metadata
   001.log
   001.idx
+data/{firm}/wal/commit.marker # checksum-protected committed prefix + generation
 data/{firm}/snapshots/
   snap-000042.json
   latest.txt          # plain decimal snapshot seq hint
@@ -67,6 +69,34 @@ Fixed 24-byte records, written every 64 events or every 4 KiB of log:
 
 Rebuildable from the `.log` if missing or corrupt. Used to skip ahead
 during `ReadFromAsync(sinceSeqExclusive)`.
+
+### Committed prefix
+
+Admission, frame append, log fsync and commit are separate boundaries.
+`FlushThroughAsync(N)` completes only after the checksum-protected marker
+publishes a contiguous segment manifest through sequence `N`, using staged
+file fsync, atomic replacement and WAL-directory fsync. Recovery validates only
+that marker generation and manifest. Complete frames beyond it are uncommitted
+survivors and are truncated; missing or corrupt data at/below it fails startup
+closed.
+
+Whole survivor segments are removed metadata-first: index, first-sequence,
+temporary and migration companions are deleted and the day directory fsynced
+before the `.log` is deleted. The child is fsynced again, then an empty day
+directory may be removed and the WAL root fsynced. Recognized companions left
+orphaned by an older/interrupted cleanup are removed through the same durable
+sequence before ordinals may be reused; unknown artifacts fail startup closed.
+
+A non-empty legacy WAL without `commit.marker` is never promoted from its
+highest CRC-valid frame automatically. The default
+`LegacyWalStartupMode=RejectUnknownShutdown` requires reconciliation. Set
+`ControlledCleanShutdown` only for the one-time upgrade after draining ingress,
+successfully flushing the old process and stopping it without further
+admission; the new process fsyncs that quiesced prefix and publishes its first
+generation marker. Generation-bound segment metadata is staged and directory-
+fsynced before marker publication, then promoted afterward; a crash at any
+boundary resumes from legacy metadata before the marker or from validated
+staging metadata after it.
 
 ## Event stream
 
@@ -232,6 +262,13 @@ graceful shutdown. It captures:
   Their snapshot dictionary keys are `{firmId}|{endClientId}`; legacy plain
   keys also restore only into `DEFAULT`.
 
+After the raw state is captured under the dispatcher lock, the lock is released
+and `SnapshotService` awaits `FlushThroughAsync(snapshotSeq)`. Projection and
+publication happen only after the marker proves that complete prefix durable;
+failure or cancellation publishes nothing. Recovery ignores a snapshot whose
+sequence is ahead of `LastCommittedSeq` and falls back to full committed-WAL
+replay. Generation/lineage metadata remains the follow-up scope of #638.
+
 Write is atomic via temp file + `File.Move(overwrite: true)`. The
 `latest.txt` pointer is then updated; if it is missing or corrupt at
 boot, `SnapshotStore.LoadLatest()` falls back to the highest-numbered
@@ -267,12 +304,19 @@ would just be noise.
 
 ## EOD reconciliation
 
-`POST /admin/eod` (admin-only) walks the day's WAL directory and writes
+`POST /admin/eod` (admin-only) validates the persisted marker generation and
+complete committed segment manifest, reads each segment only through its
+recorded `EndOffset`, and writes
 `data/{firm}/eod/eod-{date}.json`:
 
 - Counts per `WalEvent` kind.
 - SHA-256 over concatenated payloads (content checksum for diffing).
 - File path of the materialised summary.
+
+CRC-valid survivor frames beyond the marker never enter the report. A missing
+or inconsistent marker/segment/metadata tuple fails closed. Pre-marker WAL is
+read only when `LegacyWalStartupMode=ControlledCleanShutdown`, using the same
+full-prefix validation as controlled migration.
 
 Returns **409** if persistence is disabled. Comparison against an
 EP-side EOD report is a future hook; B3 does not expose one yet.

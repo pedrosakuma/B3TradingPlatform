@@ -40,6 +40,7 @@ public class FileEventStoreTests : IDisposable
         IndexEveryNRecords = 2,
         IndexEveryNBytes = 256,
         FsyncOnFlush = false, // tests don't need fsync; Linux tmpfs is volatile anyway
+        LegacyWalStartupMode = LegacyWalStartupMode.ControlledCleanShutdown,
     };
 
     [Fact]
@@ -159,7 +160,7 @@ public class FileEventStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task ReadFromAsync_OperatorRecoveryFromMissingKind_TruncateBadRecordAndReplay()
+    public async Task ReadFromAsync_OperatorTruncationOfCommittedCorruption_RemainsFailClosed()
     {
         // Pass-4 review (#296) P2. Documents the operator recovery
         // pattern for a corrupted-WAL halt. When ReadFromAsync hits a
@@ -222,13 +223,9 @@ public class FileEventStoreTests : IDisposable
             });
         }
 
-        // Step 2: operator truncates the bad record. Test simulates by
-        // rewriting the segment without the missing-kind line; in
-        // production this is a manual offline edit. Anything written
-        // after the corruption is discarded — here that means seq=3
-        // is also dropped to mimic the realistic "we can't trust
-        // anything past a torn write" rule. The runbook accepts the
-        // data loss as the price of converging on a clean state.
+        // Once a commit marker exists, manual truncation cannot silently
+        // redefine the durable prefix. Rewriting the segment shorter than
+        // the marker must fail startup closed.
         File.Delete(logPath);
         File.Delete(idxPath);
         await using (var writer = new SegmentWriter(logPath, idxPath,
@@ -238,18 +235,8 @@ public class FileEventStoreTests : IDisposable
             writer.Flush();
         }
 
-        // Step 3: replay re-succeeds; the surviving record round-
-        // trips. No exception, no stuck recovery.
-        await using var recoveredStore = new FileEventStore(opts, NullLogger<FileEventStore>.Instance);
-        var seenSeqs = new List<long>();
-        var seenClOrdIds = new List<ulong>();
-        await foreach (var (seq, evt) in recoveredStore.ReadFromAsync(0))
-        {
-            seenSeqs.Add(seq);
-            seenClOrdIds.Add(Assert.IsType<OrderSubmittedEvent>(evt).ClOrdId);
-        }
-        Assert.Equal(new long[] { 1 }, seenSeqs.ToArray());
-        Assert.Equal(new ulong[] { 1 }, seenClOrdIds.ToArray());
+        Assert.Throws<WalRecoveryException>(
+            () => new FileEventStore(opts, NullLogger<FileEventStore>.Instance));
     }
 
     [Fact]
@@ -360,7 +347,7 @@ public class FileEventStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task CrcMismatch_StopsReplayAtCorruptRecord()
+    public async Task CrcMismatch_InCommittedPrefix_FailsStartupClosed()
     {
         await using (var store = new FileEventStore(OptsForTest(), NullLogger<FileEventStore>.Instance))
         {
@@ -375,10 +362,8 @@ public class FileEventStoreTests : IDisposable
         bytes[bytes.Length / 2] ^= 0xFF;
         await File.WriteAllBytesAsync(segLog, bytes);
 
-        await using var reopened = new FileEventStore(OptsForTest(), NullLogger<FileEventStore>.Instance);
-        var seen = new List<long>();
-        await foreach (var (seq, _) in reopened.ReadFromAsync(0)) seen.Add(seq);
-        Assert.True(seen.Count < 3, "CRC corruption should stop replay before the corrupted record.");
+        Assert.Throws<WalRecoveryException>(
+            () => new FileEventStore(OptsForTest(), NullLogger<FileEventStore>.Instance));
     }
 
     [Fact]
@@ -410,10 +395,9 @@ public class FileEventStoreTests : IDisposable
         var eventTime = new DateTimeOffset(2031, 2, 3, 4, 5, 6, TimeSpan.Zero);
         var walRoot = Path.Combine(_root, "test", "wal");
         var blockedDayPath = Path.Combine(walRoot, "2031-02-03");
+        await using var store = new FileEventStore(opts, NullLogger<FileEventStore>.Instance);
         Directory.CreateDirectory(walRoot);
         File.WriteAllText(blockedDayPath, "not a directory");
-
-        await using var store = new FileEventStore(opts, NullLogger<FileEventStore>.Instance);
         store.Append(NewOrder(0) with { TimestampUtc = eventTime });
 
         var flushFailure = await Assert.ThrowsAsync<WalFaultedException>(
@@ -444,11 +428,10 @@ public class FileEventStoreTests : IDisposable
         var opts = OptsForTest();
         var eventTime = new DateTimeOffset(2032, 3, 4, 5, 6, 7, TimeSpan.Zero);
         var walRoot = Path.Combine(_root, "test", "wal");
-        Directory.CreateDirectory(walRoot);
-        File.WriteAllText(Path.Combine(walRoot, "2032-03-04"), "not a directory");
-
         var logger = new BlockingCriticalLogger();
         await using var store = new FileEventStore(opts, logger);
+        Directory.CreateDirectory(walRoot);
+        File.WriteAllText(Path.Combine(walRoot, "2032-03-04"), "not a directory");
         store.Append(NewOrder(0) with { TimestampUtc = eventTime });
         var flush = store.FlushAsync().AsTask();
 

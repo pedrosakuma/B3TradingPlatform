@@ -50,4 +50,19 @@ public sealed class PersistenceOptions
 
     /// <summary>If true, fsync the segment file on every group-commit boundary.</summary>
     public bool FsyncOnFlush { get; set; } = true;
+
+    /// <summary>
+    /// One-time migration policy for a non-empty pre-marker WAL. The safe
+    /// default rejects an unknown shutdown. Operators may select
+    /// <see cref="LegacyWalStartupMode.ControlledCleanShutdown"/> only after
+    /// completing the controlled drain/flush/stop procedure in RFC #621.
+    /// </summary>
+    public LegacyWalStartupMode LegacyWalStartupMode { get; set; } =
+        LegacyWalStartupMode.RejectUnknownShutdown;
+}
+
+public enum LegacyWalStartupMode
+{
+    RejectUnknownShutdown = 0,
+    ControlledCleanShutdown = 1,
 }

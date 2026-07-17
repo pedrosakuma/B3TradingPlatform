@@ -46,6 +46,11 @@ public class HealthAndDrainTests : IClassFixture<TestAppFactory>
         Assert.False(p.GetProperty("enabled").GetBoolean()); // tests disable persistence
         Assert.True(p.GetProperty("healthy").GetBoolean());
         Assert.Equal(JsonValueKind.Null, p.GetProperty("terminalFault").ValueKind);
+        Assert.NotEqual(Guid.Empty, p.GetProperty("walGeneration").GetGuid());
+        Assert.Equal(0, p.GetProperty("lastAdmittedSeq").GetInt64());
+        Assert.Equal(0, p.GetProperty("lastAppendedSeq").GetInt64());
+        Assert.Equal(0, p.GetProperty("lastLogFsyncedSeq").GetInt64());
+        Assert.Equal(0, p.GetProperty("lastCommittedSeq").GetInt64());
     }
 
     [Fact]

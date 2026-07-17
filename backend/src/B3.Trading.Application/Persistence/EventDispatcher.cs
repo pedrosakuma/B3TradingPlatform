@@ -75,6 +75,14 @@ public sealed class EventDispatcher
         _store.FlushAsync(cancellationToken);
 
     /// <summary>
+    /// Awaits proof that <paramref name="seq"/> and every earlier WAL record
+    /// are marker-committed. Intended as the commit-before-side-effect fence
+    /// for ordered Class O coordinators.
+    /// </summary>
+    public ValueTask FlushThroughAsync(long seq, CancellationToken cancellationToken = default) =>
+        _store.FlushThroughAsync(seq, cancellationToken);
+
+    /// <summary>
     /// Persists <paramref name="evt"/> then runs <paramref name="apply"/>
     /// under the same lock. Throws (and skips the mutation) if the WAL
     /// rejects the append — the caller is expected to surface a
