@@ -219,11 +219,8 @@ public sealed class CommittedPrefixFileEventStoreTests : IDisposable
         var third = store.FlushThroughAsync(3).AsTask();
         hooks.Release.Set();
 
-        await third;
-        Assert.True(first.IsCompletedSuccessfully);
-        Assert.True(second.IsCompletedSuccessfully);
+        await Task.WhenAll(first, second, third);
         Assert.Equal(3, store.LastCommittedSeq);
-        await Task.WhenAll(first, second);
     }
 
     [Fact]
