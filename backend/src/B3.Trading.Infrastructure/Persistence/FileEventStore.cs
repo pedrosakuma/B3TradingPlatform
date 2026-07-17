@@ -146,15 +146,13 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
                 seq, payload, evt.TimestampUtc.ToUnixTimeMilliseconds());
             if (!_channel.Writer.TryWrite(record))
             {
-                ThrowIfFaulted();
+                ThrowIfUnavailable();
                 MetricsRegistry.WalBackpressure.Add(1,
                     new KeyValuePair<string, object?>("call_site", "store.append"));
                 throw new WalBackpressureException(
                     $"WAL channel is full ({_opts.ChannelCapacity}); refusing append.");
             }
             _seq = seq;
-            if (Volatile.Read(ref _terminalFault) is not null)
-                ThrowIfFaulted();
             MetricsRegistry.WalAppended.Add(1);
             return seq;
         }
@@ -177,6 +175,7 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
         ct.ThrowIfCancellationRequested();
         lock (_seqLock)
         {
+            ThrowIfUnavailable();
             if (seq < 0 || seq > _seq)
                 throw new ArgumentOutOfRangeException(nameof(seq));
         }
@@ -450,17 +449,24 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
 
     private bool RecordTerminalFault(Exception fault)
     {
-        if (Interlocked.CompareExchange(ref _terminalFault, fault, null) is null)
+        var firstFault = false;
+        lock (_seqLock)
         {
-            _channel.Writer.TryComplete(fault);
-            FailAllWaiters(fault);
+            if (Volatile.Read(ref _terminalFault) is null)
+            {
+                Volatile.Write(ref _terminalFault, fault);
+                _channel.Writer.TryComplete(fault);
+                firstFault = true;
+            }
         }
+        if (firstFault)
+            FailAllWaiters(fault);
         return true;
     }
 
     private void ThrowIfUnavailable()
     {
-        if (_disposed)
+        if (Volatile.Read(ref _disposed))
             throw new ObjectDisposedException(nameof(FileEventStore));
         ThrowIfFaulted();
     }
@@ -1035,10 +1041,14 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
 
     public async ValueTask DisposeAsync()
     {
-        if (_disposed)
-            return;
-        _disposed = true;
-        _channel.Writer.TryComplete();
+        lock (_seqLock)
+        {
+            if (!_disposed)
+            {
+                Volatile.Write(ref _disposed, true);
+                _channel.Writer.TryComplete();
+            }
+        }
         await _writerStopped.Task.ConfigureAwait(false);
     }
 

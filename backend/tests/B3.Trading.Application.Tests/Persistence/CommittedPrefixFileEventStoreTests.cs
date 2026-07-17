@@ -56,13 +56,20 @@ public sealed class CommittedPrefixFileEventStoreTests : IDisposable
         WalCommitBoundary boundary)
     {
         var options = Options("post-publish-" + boundary);
-        var hooks = new ThrowAtBoundaryHooks(boundary);
+        var hooks = new BlockingBoundaryHooks(boundary, throwOnRelease: true);
         await using (var store = NewStore(options, hooks))
         {
             var seq = store.Append(NewOrder(1));
+            Assert.True(hooks.Entered.Wait(TimeSpan.FromSeconds(5)));
+            var firstFence = store.FlushThroughAsync(seq).AsTask();
+            var secondFence = store.FlushThroughAsync(seq).AsTask();
+            hooks.Release.Set();
             await Assert.ThrowsAsync<WalFaultedException>(
-                () => store.FlushThroughAsync(seq).AsTask());
+                () => firstFence);
+            await Assert.ThrowsAsync<WalFaultedException>(
+                () => secondFence);
             Assert.Equal(0, store.LastCommittedSeq);
+            Assert.False(store.IsHealthy);
         }
 
         await using var reopened = NewStore(options);
@@ -220,19 +227,114 @@ public sealed class CommittedPrefixFileEventStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task ClassOCaller_CanAdmitThenAwaitCommittedPrefixProof()
+    public async Task ClassOCaller_SnapshotIncludesProjectionBeforeCommittedPrefixProof()
     {
         var options = Options("dispatcher-proof");
-        await using var store = NewStore(options);
+        var hooks = new BlockingBoundaryHooks(WalCommitBoundary.BeforeMarkerStage);
+        await using var store = NewStore(options, hooks);
         var dispatcher = new EventDispatcher(store);
+        var projection = 0;
 
-        var seq = dispatcher.Admit(NewOrder(0));
+        var seq = dispatcher.Dispatch(NewOrder(0), () => projection = 1);
         Assert.Equal(1, seq);
         Assert.Equal(0, store.LastCommittedSeq);
+        Assert.True(hooks.Entered.Wait(TimeSpan.FromSeconds(5)));
 
-        await dispatcher.FlushThroughAsync(seq);
+        long snapshotSeq = -1;
+        var projectedAtCapture = 0;
+        dispatcher.WithSnapshotLock(capturedSeq =>
+        {
+            snapshotSeq = capturedSeq;
+            projectedAtCapture = projection;
+        });
+
+        Assert.Equal(seq, snapshotSeq);
+        Assert.Equal(1, projectedAtCapture);
+
+        var fence = dispatcher.FlushThroughAsync(seq).AsTask();
+        hooks.Release.Set();
+        await fence;
         Assert.Equal(seq, store.LastCommittedSeq);
         Assert.Equal(new ulong[] { 1 }, await ReplayIds(store));
+    }
+
+    [Fact]
+    public async Task AppendAndTerminalFaultPublication_AreLinearizableAcrossRestart()
+    {
+        var options = Options("append-fault-race");
+        var hooks = new BlockingBoundaryHooks(
+            WalCommitBoundary.MarkerDirectoryFsynced,
+            targetSeq: 1,
+            throwOnRelease: true);
+        var liveProjection = new List<ulong>();
+
+        await using (var store = NewStore(options, hooks))
+        {
+            var dispatcher = new EventDispatcher(store);
+            var first = dispatcher.Dispatch(
+                NewOrder(0),
+                () => liveProjection.Add(1));
+            Assert.Equal(1, first);
+            Assert.True(hooks.Entered.Wait(TimeSpan.FromSeconds(5)));
+
+            // The second enqueue wins the same sequence/fault lock before the
+            // writer is released to publish its terminal fault. It must return
+            // success exactly once rather than enqueue and then throw.
+            var second = dispatcher.Dispatch(
+                NewOrder(1),
+                () => liveProjection.Add(2));
+            Assert.Equal(2, second);
+            Assert.Equal(new ulong[] { 1, 2 }, liveProjection);
+
+            hooks.Release.Set();
+            await Assert.ThrowsAsync<WalFaultedException>(
+                () => dispatcher.FlushThroughAsync(second).AsTask());
+            Assert.False(store.IsHealthy);
+            Assert.Equal(2, store.LastAdmittedSeq);
+            Assert.Equal(1, store.LastAppendedSeq);
+            Assert.Equal(0, store.LastCommittedSeq);
+
+            var projectionBeforeRejectedAppend = liveProjection.Count;
+            Assert.Throws<WalFaultedException>(() => dispatcher.Dispatch(
+                NewOrder(2),
+                () => liveProjection.Add(3)));
+            Assert.Equal(projectionBeforeRejectedAppend, liveProjection.Count);
+            Assert.Equal(2, store.LastAdmittedSeq);
+        }
+
+        // The first marker rename survived the injected post-directory-fsync
+        // fault. The concurrently admitted second record never reached append
+        // and therefore is absent after restart.
+        await using var reopened = NewStore(options);
+        Assert.Equal(1, reopened.LastCommittedSeq);
+        Assert.Equal(new ulong[] { 1 }, await ReplayIds(reopened));
+    }
+
+    [Fact]
+    public async Task AppendAndDispose_AreLinearizableAcrossRestart()
+    {
+        var options = Options("append-dispose-race");
+        var hooks = new BlockingBoundaryHooks(WalCommitBoundary.BeforeMarkerStage);
+        var store = NewStore(options, hooks);
+        var dispatcher = new EventDispatcher(store);
+        var projection = 0;
+
+        dispatcher.Dispatch(NewOrder(0), () => projection++);
+        Assert.True(hooks.Entered.Wait(TimeSpan.FromSeconds(5)));
+
+        var dispose = store.DisposeAsync().AsTask();
+        Assert.Throws<ObjectDisposedException>(() => dispatcher.Dispatch(
+            NewOrder(1),
+            () => projection++));
+        Assert.Equal(1, projection);
+        Assert.Equal(1, store.LastAdmittedSeq);
+
+        hooks.Release.Set();
+        await dispose;
+
+        await using var reopened = NewStore(options);
+        Assert.Equal(1, reopened.LastCommittedSeq);
+        Assert.Equal(new ulong[] { 1 }, await ReplayIds(reopened));
     }
 
     [Fact]
@@ -446,7 +548,10 @@ public sealed class CommittedPrefixFileEventStoreTests : IDisposable
         }
     }
 
-    private sealed class BlockingBoundaryHooks(WalCommitBoundary target)
+    private sealed class BlockingBoundaryHooks(
+        WalCommitBoundary target,
+        long? targetSeq = null,
+        bool throwOnRelease = false)
         : IWalCommitBoundaryHooks
     {
         public ManualResetEventSlim Entered { get; } = new();
@@ -454,11 +559,14 @@ public sealed class CommittedPrefixFileEventStoreTests : IDisposable
 
         public void OnBoundary(WalCommitBoundary boundary, long seq)
         {
-            if (boundary != target)
+            if (boundary != target || (targetSeq is not null && targetSeq != seq))
                 return;
             Entered.Set();
             if (!Release.Wait(TimeSpan.FromSeconds(10)))
                 throw new TimeoutException("Timed out waiting to release injected WAL boundary.");
+            if (throwOnRelease)
+                throw new IOException(
+                    $"Injected WAL boundary fault at {boundary} for seq {seq}.");
         }
     }
 

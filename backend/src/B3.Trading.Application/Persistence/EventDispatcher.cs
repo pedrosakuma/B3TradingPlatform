@@ -83,23 +83,6 @@ public sealed class EventDispatcher
         _store.FlushThroughAsync(seq, cancellationToken);
 
     /// <summary>
-    /// Admits an event in total dispatcher order without applying business
-    /// state. Class O coordinators use this primitive, await
-    /// <see cref="FlushThroughAsync"/>, then enter the irreversible external
-    /// side-effect boundary under their own ordered workflow.
-    /// </summary>
-    public long Admit(WalEvent evt)
-    {
-        ArgumentNullException.ThrowIfNull(evt);
-        var payload = JsonSerializer.SerializeToUtf8Bytes(
-            evt, WalEventJsonContext.Default.WalEvent);
-        lock (_lock)
-        {
-            return _store.Append(evt, payload);
-        }
-    }
-
-    /// <summary>
     /// Persists <paramref name="evt"/> then runs <paramref name="apply"/>
     /// under the same lock. Throws (and skips the mutation) if the WAL
     /// rejects the append — the caller is expected to surface a
