@@ -12,7 +12,7 @@
 //
 // Reconnect: exponential backoff capped at 15s. v1 has no replay buffer,
 // so on every (re)connect we drop our caches and let the snapshots refill
-// them. The main thread mirrors that via `clear` messages.
+// them. The main thread mirrors that via `clear.realtime` messages.
 
 let ws = null;
 let backendUrl = null;
@@ -77,7 +77,7 @@ function connect() {
   reconnectTimer = null;
 
   // Drop any stale cached state on each fresh connect.
-  post({ type: "clear" });
+  post({ type: "clear.realtime" });
 
   let socket;
   try { socket = new WebSocket(wsUrl()); }
@@ -228,6 +228,8 @@ self.onmessage = (ev) => {
     case "start":
       backendUrl = msg.backend;
       token = msg.token;
+      wantPnl = !!msg.pnlSubscribed;
+      wantAlgo = !!msg.algoSubscribed;
       stopped = false;
       attempt = 0;
       connect();

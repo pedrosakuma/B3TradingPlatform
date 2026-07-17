@@ -24,15 +24,42 @@ const DEFAULTS = {
 const PER_SYMBOL = {
   // Example: "BOVA11": { tickSize: 0.01, lotSize: 10 }
 };
+const DYNAMIC_RULES = {};
+
+export function setInstrumentRules(instrument) {
+  const symbol = String(instrument?.symbol ?? "").trim().toUpperCase();
+  const tickSize = Number(instrument?.tickSize);
+  const lotSize = Number(instrument?.lotSize);
+  if (!symbol || !Number.isFinite(tickSize) || tickSize <= 0
+      || !Number.isInteger(lotSize) || lotSize <= 0) return false;
+  DYNAMIC_RULES[symbol] = {
+    tickSize,
+    lotSize,
+    contractMultiplier: Number(instrument?.contractMultiplier) > 0
+      ? Number(instrument.contractMultiplier)
+      : 1,
+    securityId: Number(instrument?.securityId) > 0 ? Number(instrument.securityId) : null,
+    securityType: instrument?.securityType ?? null,
+  };
+  return true;
+}
+
+export function clearInstrumentRules() {
+  for (const symbol of Object.keys(DYNAMIC_RULES)) delete DYNAMIC_RULES[symbol];
+}
 
 export function rulesFor(symbol) {
-  const o = PER_SYMBOL[symbol?.toUpperCase()] ?? {};
+  const key = symbol?.toUpperCase();
+  const o = DYNAMIC_RULES[key] ?? PER_SYMBOL[key] ?? {};
   return {
     tickSize:              o.tickSize              ?? DEFAULTS.tickSize,
     lotSize:               o.lotSize               ?? DEFAULTS.lotSize,
     fatFingerThreshold:    o.fatFingerThreshold    ?? DEFAULTS.fatFingerThreshold,
     maxQuantityLotMultiple: o.maxQuantityLotMultiple ?? DEFAULTS.maxQuantityLotMultiple,
     marketNotionalConfirm: o.marketNotionalConfirm ?? DEFAULTS.marketNotionalConfirm,
+    contractMultiplier:     o.contractMultiplier     ?? 1,
+    securityId:             o.securityId             ?? null,
+    securityType:           o.securityType           ?? null,
   };
 }
 
@@ -60,7 +87,8 @@ export function validateOrder(payload, lastPrice) {
   // validated in the ticket UI's validateTicketState).
   if (payload.type === "Limit" || payload.type === "StopLimit" || payload.type === "MarketWithLeftover") {
     const px = Number(payload.price);
-    if (!Number.isFinite(px) || px <= 0)
+    const minAllowed = rules.securityType === "Option" ? 0 : Number.EPSILON;
+    if (!Number.isFinite(px) || px < minAllowed)
       return { code: "price_required", message: "limit price required" };
 
     // Tick alignment: avoid floating-point drift by comparing
@@ -122,7 +150,7 @@ export function marketNotionalCheck(payload, lastPrice) {
   if (!Number.isFinite(lastPrice) || lastPrice <= 0) return null;
 
   const rules = rulesFor(payload.symbol);
-  const notional = qty * lastPrice;
+  const notional = qty * lastPrice * rules.contractMultiplier;
   if (notional < rules.marketNotionalConfirm) return null;
   return { warn: true, notional, lastPrice, threshold: rules.marketNotionalConfirm };
 }

@@ -26,7 +26,19 @@ export function setAdminHandlers(handlers) {
 }
 
 export function bindAdminUi() {
-  $("admin-refresh").addEventListener("click", () => onRefresh());
+  $("admin-refresh").addEventListener("click", async () => {
+    const button = $("admin-refresh");
+    button.disabled = true;
+    setAdminFeedback("Refreshing operator state…", "info");
+    try {
+      await onRefresh();
+      setAdminFeedback("Operator state refreshed.", "ok");
+    } catch (error) {
+      setAdminFeedback(error?.message || "Refresh failed.", "error");
+    } finally {
+      button.disabled = false;
+    }
+  });
 
   $("admin-firms-body").addEventListener("click", (e) => {
     const btn = e.target.closest(".firm-toggle");
@@ -236,7 +248,7 @@ export function setAdminFeedback(message, kind) {
   if (!message) { el.hidden = true; el.textContent = ""; return; }
   el.hidden = false;
   el.textContent = message;
-  el.className = `feedback ${kind === "ok" ? "ok" : "error"}`;
+  el.className = `feedback ${kind === "ok" ? "ok" : kind === "error" ? "error" : ""}`;
 }
 
 function setText(id, text) {

@@ -219,6 +219,14 @@
               <span>Quantity</span>
               <input id="ticket-qty" type="number" min="100" step="100" required />
             </label>
+            <label class="ticket-field">
+              <span>Subaccount</span>
+              <select id="ticket-subaccount" aria-describedby="subaccount-ticket-hint">
+                <option value="">Master account</option>
+              </select>
+            </label>
+            <button id="ticket-subaccount-refresh" type="button" class="btn btn-icon"
+                    title="Refresh subaccounts" aria-label="Refresh subaccounts">↻</button>
             <label class="ticket-field" id="ticket-price-label">
               <span>Price</span>
               <input id="ticket-price" type="number" min="0" step="0.01" />
@@ -276,6 +284,7 @@
             </label>
           </div>
           <p id="ticket-tif-hint" class="field-hint" role="status" aria-live="polite" hidden></p>
+          <p id="subaccount-ticket-hint" class="field-hint">Orders are booked to the selected firm subaccount.</p>
           <p id="ticket-rules-hint" class="field-hint" aria-live="polite">lot 100 · tick 0.01</p>
           <p id="ticket-validation" class="field-hint hint-warn" role="status" aria-live="polite" hidden></p>
           <p id="ticket-inflight" class="inflight" hidden></p>
@@ -600,6 +609,83 @@
       <h3>EOD materialisation</h3>
       <button id="admin-eod-btn" type="button" class="btn btn-secondary">Run EOD now</button>
       <pre id="admin-eod-output" class="admin-eod-output" hidden></pre>
+    </section>
+
+    <p id="operations-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
+
+    <section class="panel admin-panel">
+      <h3>Firm subaccounts</h3>
+      <form id="subaccount-create-form" class="admin-inline-form form-surface">
+        <input id="subaccount-id" required maxlength="64" placeholder="subaccount id" aria-label="Subaccount id" />
+        <input id="subaccount-name" maxlength="128" placeholder="display name (optional)" aria-label="Subaccount display name" />
+        <button type="submit" class="btn btn-primary btn-sm">Create</button>
+      </form>
+      <div class="table-scroll"><table>
+        <thead><tr><th>ID</th><th>Name</th><th>Status</th><th></th></tr></thead>
+        <tbody id="subaccount-rows" aria-live="polite"></tbody>
+      </table></div>
+    </section>
+
+    <section class="panel admin-panel">
+      <h3>Session phase</h3>
+      <form id="session-phase-form" class="admin-inline-form form-surface">
+        <input id="session-phase-symbol" maxlength="16" placeholder="symbol (blank = default)" aria-label="Session phase symbol; blank changes default" />
+        <select id="session-phase-value" aria-label="Session phase">
+          <option>Continuous</option><option>PreOpening</option>
+          <option>OpeningAuction</option><option>ClosingAuction</option>
+          <option>AfterHours</option><option>Closed</option>
+        </select>
+        <button type="submit" class="btn btn-primary btn-sm">Apply</button>
+        <button id="session-phase-clear" type="button" class="btn btn-secondary btn-sm">Clear override</button>
+      </form>
+      <pre id="session-phase-output" class="admin-eod-output" aria-live="polite">Not loaded.</pre>
+    </section>
+
+    <section class="panel admin-panel">
+      <h3>Risk limits</h3>
+      <form id="risk-query-form" class="admin-inline-form form-surface">
+        <input id="risk-end-client" maxlength="64" placeholder="end-client" aria-label="Risk query end-client" />
+        <input id="risk-firm" maxlength="64" placeholder="firm" aria-label="Risk query firm" />
+        <input id="risk-symbol" maxlength="16" placeholder="symbol" aria-label="Risk query symbol" />
+        <button type="submit" class="btn btn-secondary btn-sm">Resolve</button>
+        <button id="risk-reload" type="button" class="btn btn-primary btn-sm">Reload config</button>
+      </form>
+      <pre id="risk-output" class="admin-eod-output" aria-live="polite">Not loaded.</pre>
+    </section>
+
+    <section class="panel admin-panel">
+      <h3>Reference prices</h3>
+      <form id="reference-price-form" class="admin-inline-form form-surface">
+        <input id="reference-symbols" placeholder="symbols, comma separated (blank = all)" aria-label="Reference-price symbols" />
+        <button type="submit" class="btn btn-secondary btn-sm">Load</button>
+      </form>
+      <div class="table-scroll"><table>
+        <thead><tr><th>Symbol</th><th>Effective</th><th>Source</th><th>Live</th><th>Fallback</th></tr></thead>
+        <tbody id="reference-price-rows" aria-live="polite"></tbody>
+      </table></div>
+    </section>
+
+    <section class="panel admin-panel">
+      <h3>Cash ledger</h3>
+      <form id="cash-form" class="admin-inline-form form-surface">
+        <input id="cash-end-client" required maxlength="64" placeholder="end-client" aria-label="Cash end-client" />
+        <select id="cash-kind" aria-label="Cash operation"><option>Deposit</option><option>Withdrawal</option></select>
+        <input id="cash-amount" required type="number" min="0.01" step="0.01" placeholder="BRL amount" aria-label="Cash amount in BRL" />
+        <input id="cash-reference" maxlength="128" placeholder="reference (optional)" aria-label="Cash reference" />
+        <button type="submit" class="btn btn-primary btn-sm">Post cash entry</button>
+      </form>
+      <p id="cash-result" class="feedback" role="status" aria-live="polite" hidden></p>
+    </section>
+
+    <section class="panel admin-panel">
+      <h3>Stale order control</h3>
+      <form id="stale-order-form" class="admin-inline-form form-surface">
+        <input id="stale-firm" required maxlength="64" placeholder="firm" aria-label="Stale-order firm" />
+        <input id="stale-clordid" required inputmode="numeric" pattern="[0-9]+" placeholder="ClOrdID" aria-label="Stale-order ClOrdID" />
+        <select id="stale-action" aria-label="Stale-order action"><option value="mark">Mark stale</option><option value="clear">Clear stale</option></select>
+        <input id="stale-reason" maxlength="256" placeholder="reason" aria-label="Stale-order reason" />
+        <button type="submit" class="btn btn-danger btn-sm">Apply</button>
+      </form>
     </section>
   </section>
 

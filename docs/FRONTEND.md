@@ -102,9 +102,27 @@ frontend elsewhere.
   accumulated locally on a frame-level snapshot so that re-subscribe
   doesn't visibly clear the log mid-session, while a full reconnect
   clears all caches and refills from snapshots.
-- On reconnect (any disconnect: network, server restart, token expiry),
-  the worker drops all caches and re-subscribes; the UI resets, then
-  refills from fresh snapshots. v1 has no replay buffer.
+- On reconnect, only trader-WebSocket slices (orders, positions, executions,
+  balance, phase and auction snapshots) reset before re-subscribe. REST,
+  history, compliance, risk-policy, algorithm and operator-console state stays
+  visible and is marked independently by its own loading/stale/error state.
+- Deep-link startup passes the desired `pnl.me` / `algo.me` subscriptions in
+  the worker start message, so the first socket open subscribes without
+  requiring a tab-navigation side effect.
+
+## Operator and account controls
+
+The authenticated ticket loads the caller's firm-scoped `/sub-accounts/` list;
+admins can create or deactivate those same firm-scoped accounts in **Admin**.
+The Admin console also exposes the existing authorized backend controls for
+session phases, stale-order marking, resolved risk limits and reload, reference
+prices, and cash deposits/withdrawals. Each mutation renders pending,
+success/error feedback and refreshes its read model where the API provides one.
+
+Option-chain selection carries the serialized instrument `securityId`,
+`lotSize`, `tickSize`, and `contractMultiplier` into ticket validation and the
+order payload. Missing metadata disables the series cell; selected metadata
+older than five minutes must be refreshed before submit.
 
 ## Auth
 

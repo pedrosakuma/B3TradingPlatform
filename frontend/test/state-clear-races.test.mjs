@@ -2,9 +2,8 @@
 //
 //   1. clearAll() must bump BOTH _pnlEpoch and _historyGeneration.
 //      Otherwise a pre-reconnect in-flight REST P&L or history
-//      response can land AFTER clearAll() (triggered by the worker
-//      reconnect path in app.js onWorkerMessage "clear") and
-//      repopulate stale rows under the now-clean state.
+//      response can land AFTER clearAll() at a logout/session boundary
+//      and repopulate stale rows under the now-clean state.
 //
 //   2. refreshPnl() bumps the pnl epoch BEFORE issuing the fetch, so
 //      two concurrent REST refreshes never capture the same epoch.
@@ -61,7 +60,7 @@ test("stale REST pnl snapshot captured before clearAll is dropped on apply", asy
   const s = await freshState();
   // 1. refreshPnl() captures epoch N at request-issue time.
   const epochAtRequest = s.getPnlEpoch();
-  // 2. Worker reconnect arrives — onWorkerMessage("clear") -> clearAll.
+  // 2. A logout/session boundary clears all per-user state.
   s.clearAll();
   assert.equal(s.getState().pnl, null, "state cleared after clearAll");
   // 3. The pre-reconnect REST response now resolves with stale data.

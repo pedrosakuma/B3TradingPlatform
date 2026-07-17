@@ -12,7 +12,11 @@ import { defaultBackend, login, signup, submitOrder, cancelOrder, modifyOrder, g
          verifyTotp, enrollTotp, disableTotp, getTotpStatus,
          exchangeExternalToken,
          listAlgos, createAlgo, cancelAlgo, modifyAlgo,
-         getInstruments } from "./protocol.js";
+         getInstruments,
+         listSubAccounts, createSubAccount, deactivateSubAccount,
+         getSessionPhase, setSessionPhase, clearSessionPhase,
+         getAdminRiskLimits, reloadAdminRisk, getReferencePrices,
+         mutateCash, setOrderStale } from "./protocol.js";
 import { readPublicConfig, validateEntraConfig } from "./authConfig.js";
 import { createEntraAuth, isInteractionRequiredError } from "./auth.js";
 import {
@@ -37,7 +41,7 @@ import {
   TRADER_SUB_TABS,
 } from "./hashRouter.js";
 import { claimsFromToken } from "./jwt.js";
-import { validateOrder, pretradeWarnings, payloadKey } from "./validation.js";
+import { validateOrder, pretradeWarnings, payloadKey, clearInstrumentRules } from "./validation.js";
 import * as state from "./state.js";
 import { isTerminalOrderStatus } from "./state.js";
 import * as ui from "./ui.js";
@@ -45,6 +49,7 @@ import * as adminUi from "./adminUi.js";
 import * as botCredentialsUi from "./botCredentialsUi.js";
 import * as historyUi from "./historyUi.js";
 import * as complianceUi from "./complianceUi.js";
+import * as operationsUi from "./operationsUi.js";
 import { applyAppTitle } from "./branding.js";
 import { tabsForRole, defaultViewForRole } from "./complianceUi.js";
 import { FLAGS } from "./mdProtocol.js";
@@ -135,6 +140,7 @@ async function init() {
   }
   ui.bindUi();
   adminUi.bindAdminUi();
+  operationsUi.bindOperationsUi();
   botCredentialsUi.bindBotCredentialsUi();
   historyUi.bindHistoryUi();
   complianceUi.bindComplianceUi();
@@ -177,6 +183,18 @@ async function init() {
     onAddHalt:         handleAddHalt,
     onRunEod:          handleRunEod,
     onRefresh:         refreshAdminData,
+  });
+  operationsUi.setOperationsHandlers({
+    onRefreshSubAccounts: refreshSubAccounts,
+    onCreateSubAccount: handleCreateSubAccount,
+    onDeactivateSubAccount: handleDeactivateSubAccount,
+    onSetPhase: handleSetSessionPhase,
+    onClearPhase: handleClearSessionPhase,
+    onLoadRisk: loadAdminRisk,
+    onReloadRisk: handleReloadRisk,
+    onLoadReferences: loadReferencePrices,
+    onCash: handleCashMutation,
+    onSetOrderStale: handleSetOrderStale,
   });
   botCredentialsUi.setBotCredentialsHandlers({
     onOpenView: () => handleSwitchView("settings", "bot-credentials"),
@@ -856,6 +874,8 @@ function startSession(next) {
     firm: next.firm,
   });
   state.clearAll();
+  clearInstrumentRules();
+  ui.clearTicket();
   state.setStatus("connecting");
   state.setSubmitInflight(null);
   state.setWsReconnect(null);
@@ -864,6 +884,8 @@ function startSession(next) {
   state.setKillStatus(null);
   state.setHaltStatus(null);
   state.setEodReport(null);
+  operationsUi.resetOperations();
+  operationsUi.setOperationsRole(next.role);
   // Hide login + neighbouring sub-views; applyCurrentView (subscribed
   // to setCurrentView below) then toggles the right view-section
   // visible. showTrader() runs first so the brief flash is the
@@ -948,6 +970,8 @@ function startSession(next) {
   startGatewayPoll();
   scheduleExpiry();
   loadRiskPolicy();
+  refreshSubAccounts();
+  if (initialView === "admin") refreshAdminOperations();
 }
 
 // Q1.4 (#256). Fetch the effective risk policy on session start so the
@@ -1068,7 +1092,14 @@ async function handleRenewSession(credentials = {}) {
 function startWorker() {
   worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
   worker.onmessage = (ev) => onWorkerMessage(ev.data);
-  worker.postMessage({ type: "start", backend: session.backend, token: session.token });
+  const currentView = state.getState().currentView;
+  worker.postMessage({
+    type: "start",
+    backend: session.backend,
+    token: session.token,
+    pnlSubscribed: currentView === "history",
+    algoSubscribed: currentView === "algos",
+  });
   // Q1.6 (#258). Push the current public-channel set immediately so the
   // worker has it queued by the time the WS opens. Idempotent — same
   // hook fires on watchlist / auctionPanelSymbol slice changes below.
@@ -1221,7 +1252,7 @@ function onWorkerMessage(msg) {
     case "reconnect.scheduled":
       state.setWsReconnect(msg.nextAt ? { nextAt: msg.nextAt } : null);
       break;
-    case "clear":               state.clearAll(); break;
+    case "clear.realtime":      state.clearRealtime(); break;
     case "orders.snapshot":     state.applyOrdersSnapshot(msg.data); break;
     case "orders.delta":        state.applyOrdersDelta(msg.data); break;
     case "positions.snapshot":  state.applyPositionsSnapshot(msg.data); break;
@@ -1575,6 +1606,9 @@ function logout({ broadcast = true, redirectEntra = true, clearEntraCache = fals
   state.setSelectedOrder(null);
   state.setPendingFatFinger(null);
   state.clearAll();
+  clearInstrumentRules();
+  ui.clearTicket();
+  operationsUi.resetOperations();
   state.clearMarketData();
   state.setWatchlist([]);
   ui.showLogin();
@@ -1881,7 +1915,124 @@ async function handleModifyAlgo(algoId, payload) {
 }
 
 async function refreshAdminData() {
-  await pollFirmsOnce();
+  await Promise.all([pollFirmsOnce(), refreshSubAccounts(), refreshAdminOperations()]);
+}
+
+async function refreshSubAccounts() {
+  if (!session) return;
+  const captured = session;
+  operationsUi.setSubAccountsResource({ status: "loading", error: null });
+  try {
+    const rows = await listSubAccounts(captured.backend, captured.token, {
+      includeDeactivated: captured.role === "admin",
+    });
+    if (session !== captured) return;
+    operationsUi.setSubAccountsResource({
+      status: "ready",
+      data: Array.isArray(rows) ? rows : [],
+      fetchedAt: Date.now(),
+      error: null,
+    });
+  } catch (error) {
+    if (session !== captured) return;
+    if (error?.status === 401) { logout(); return; }
+    operationsUi.setSubAccountsResource({ status: "error", data: [], error: error.message });
+  }
+}
+
+async function refreshAdminOperations() {
+  if (!session || session.role !== "admin") return;
+  await Promise.all([
+    loadSessionPhase(),
+    loadAdminRisk({ firmId: session.firm }),
+    loadReferencePrices(""),
+  ]);
+}
+
+async function loadSessionPhase() {
+  const captured = session;
+  if (!captured || captured.role !== "admin") return;
+  operationsUi.setPhaseResource({ status: "loading", error: null });
+  try {
+    const data = await getSessionPhase(captured.backend, captured.token);
+    if (session !== captured) return;
+    operationsUi.setPhaseResource({ status: "ready", data, fetchedAt: Date.now(), error: null });
+  } catch (error) {
+    if (session !== captured) return;
+    operationsUi.setPhaseResource({ status: "error", data: null, error: error.message });
+  }
+}
+
+async function loadAdminRisk(query = {}) {
+  const captured = session;
+  if (!captured || captured.role !== "admin") return;
+  operationsUi.setRiskResource({ status: "loading", error: null });
+  try {
+    const data = await getAdminRiskLimits(captured.backend, captured.token, query);
+    if (session !== captured) return;
+    operationsUi.setRiskResource({ status: "ready", data, fetchedAt: Date.now(), error: null });
+  } catch (error) {
+    if (session !== captured) return;
+    operationsUi.setRiskResource({ status: "error", data: null, error: error.message });
+  }
+}
+
+async function loadReferencePrices(symbols = "") {
+  const captured = session;
+  if (!captured || captured.role !== "admin") return;
+  operationsUi.setReferenceResource({ status: "loading", error: null });
+  try {
+    const data = await getReferencePrices(captured.backend, captured.token, symbols);
+    if (session !== captured) return;
+    operationsUi.setReferenceResource({ status: "ready", data, fetchedAt: Date.now(), error: null });
+  } catch (error) {
+    if (session !== captured) return;
+    operationsUi.setReferenceResource({ status: "error", data: null, error: error.message });
+  }
+}
+
+async function handleCreateSubAccount(payload) {
+  if (!payload?.id) throw new Error("Subaccount id is required.");
+  await createSubAccount(session.backend, session.token, payload);
+  await refreshSubAccounts();
+  return `Subaccount ${payload.id} created.`;
+}
+
+async function handleDeactivateSubAccount(id) {
+  await deactivateSubAccount(session.backend, session.token, id);
+  await refreshSubAccounts();
+  return `Subaccount ${id} deactivated.`;
+}
+
+async function handleSetSessionPhase(payload) {
+  await setSessionPhase(session.backend, session.token, payload);
+  await loadSessionPhase();
+  return payload.symbol
+    ? `${payload.symbol} phase set to ${payload.phase}.`
+    : `Default phase set to ${payload.phase}.`;
+}
+
+async function handleClearSessionPhase(symbol) {
+  await clearSessionPhase(session.backend, session.token, symbol);
+  await loadSessionPhase();
+  return `${symbol} phase override cleared.`;
+}
+
+async function handleReloadRisk() {
+  await reloadAdminRisk(session.backend, session.token);
+  await loadAdminRisk({ firmId: session.firm });
+  return "Risk configuration reloaded and limits refreshed.";
+}
+
+async function handleCashMutation(payload) {
+  const result = await mutateCash(session.backend, session.token, payload);
+  return `${result.kind} accepted. Available ${result.currency}: ${result.available}.`;
+}
+
+async function handleSetOrderStale(payload) {
+  if (!payload.firmId || !payload.clOrdId) throw new Error("Firm and ClOrdID are required.");
+  await setOrderStale(session.backend, session.token, payload);
+  return `Order ${payload.clOrdId} ${payload.stale ? "marked stale" : "cleared"}.`;
 }
 
 // ── User-bot credentials (sub-issue #169) ──────────────────────────

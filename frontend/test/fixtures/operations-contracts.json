@@ -1,0 +1,54 @@
+{
+  "subAccounts": [
+    { "id": "BOOK-A", "displayName": "Agency book", "active": true },
+    { "id": "OLD", "displayName": null, "active": false }
+  ],
+  "sessionPhase": {
+    "default": "Continuous",
+    "overrides": { "PETR4": "OpeningAuction" }
+  },
+  "risk": {
+    "query": { "endClient": "alice", "firmId": "default", "symbol": "PETR4" },
+    "limits": {
+      "maxQuantity": 1000,
+      "maxNotional": 1000000,
+      "minNotional": null,
+      "priceCollarPercent": 10,
+      "priceCollarAbsolute": null,
+      "positionLimit": 5000,
+      "maxOpenOrders": 100
+    }
+  },
+  "referencePrices": {
+    "mode": "Mock",
+    "marketDataEnabled": true,
+    "symbols": [
+      {
+        "symbol": "PETR4",
+        "effectivePrice": 30.25,
+        "effectiveSource": "Live",
+        "live": { "price": 30.25, "updatedUtc": "2026-07-17T16:40:00Z" },
+        "fallbackPrice": 30
+      }
+    ]
+  },
+  "cash": {
+    "endclient": "alice",
+    "kind": "Deposit",
+    "amount": 1000,
+    "currency": "BRL",
+    "available": 1250
+  },
+  "instrument": {
+    "symbol": "PETRA300",
+    "securityId": 902001,
+    "securityType": "Option",
+    "tickSize": 0.05,
+    "lotSize": 1,
+    "strikePrice": 30,
+    "expirationDate": "2026-08-21",
+    "putOrCall": "Call",
+    "underlyingSymbol": "PETR4",
+    "contractMultiplier": 100
+  }
+}

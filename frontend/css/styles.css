@@ -557,7 +557,7 @@ tr.row-stale > td.row-stale-actions { opacity: 1; }
 .integration-guide p:last-child { margin-bottom: 0; }
 .integration-links { list-style: none; margin: 0 0 .6rem; padding: 0; display: flex; flex-direction: column; gap: .3rem; font-size: .82rem; }
 .integration-links a { color: var(--accent); }
-.admin-inline-form { display: flex; gap: .5rem; margin-bottom: .6rem; }
+.admin-inline-form { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: .6rem; }
 .admin-inline-form input {
   flex: 1; background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
   border-radius: 4px; padding: .35rem .5rem; font: inherit;
@@ -928,6 +928,8 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
 .chain-cell:hover {
   background: var(--hover-bg, #e0f2fe);
 }
+.chain-cell:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.chain-cell-unavailable { color: var(--muted); cursor: not-allowed; }
 .chain-cell-call { color: #16a34a; }
 .chain-cell-put { color: #dc2626; }
 .modal-footer {
