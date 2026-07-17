@@ -90,7 +90,7 @@ test('clearAlgos drops the slice + selection + inflight sets', async () => {
   assert.equal(s.getState().inflightAlgoModifies.size, 0);
 });
 
-test('clearAll() (logout / WS reconnect) drops algos too', async () => {
+test('clearAll() at a session boundary drops algos too', async () => {
   const s = await freshState();
   s.applyAlgoSnapshot([dto(1), dto(2)]);
   s.setSelectedAlgoId('1');

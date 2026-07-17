@@ -156,3 +156,40 @@ test("payloadKey: changing only GoodTillDate yields a different key", () => {
   const b = payloadKey({ ...BASE, timeInForce: "GTD", goodTillDate: "2026-01-20" });
   assert.notEqual(a, b);
 });
+
+test("payloadKey: warning confirmation is scoped to the selected subaccount", () => {
+  const bookA = payloadKey({ ...BASE, subAccountId: "BOOK-A" });
+  const bookB = payloadKey({ ...BASE, subAccountId: "BOOK-B" });
+  const master = payloadKey({ ...BASE, subAccountId: null });
+
+  assert.notEqual(bookA, bookB);
+  assert.notEqual(bookA, master);
+});
+
+test("payloadKey: routed SecurityId and reserve semantics cannot reuse an override", () => {
+  const base = payloadKey({
+    ...BASE,
+    securityId: 902001,
+    displayQty: 10,
+    displayResetPolicy: "Always",
+  });
+
+  assert.notEqual(base, payloadKey({
+    ...BASE,
+    securityId: 902002,
+    displayQty: 10,
+    displayResetPolicy: "Always",
+  }));
+  assert.notEqual(base, payloadKey({
+    ...BASE,
+    securityId: 902001,
+    displayQty: 20,
+    displayResetPolicy: "Always",
+  }));
+  assert.notEqual(base, payloadKey({
+    ...BASE,
+    securityId: 902001,
+    displayQty: 10,
+    displayResetPolicy: "OnPartialFill",
+  }));
+});

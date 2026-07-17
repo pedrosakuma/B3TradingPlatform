@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { installDomStub } from "./dom-stub.mjs";
 installDomStub({ ids: {} });
 
-const { sortPositionsInPlace } = await import("../js/ui.js");
+const { sortPositionsInPlace, reconcilePositionExpiryFilter } = await import("../js/ui.js");
 
 const rows = () => [
   { symbol: "PETR4", netQuantity:  300, averageEntryPrice: 32.10 },
@@ -37,4 +37,27 @@ test("price column sorts by averageEntryPrice", () => {
   const r = rows();
   sortPositionsInPlace(r, { col: "price", dir: "asc" });
   assert.deepEqual(r.map(p => p.symbol), ["ITUB4", "PETR4", "VALE3"]);
+});
+
+test("stale option expiry filter resets when matching positions disappear", () => {
+  const positions = [
+    { symbol: "PETR4", securityType: "Equity", netQuantity: 100 },
+    {
+      symbol: "PETRA300",
+      securityType: "Option",
+      optionExpirationDate: "2026-09-18",
+      netQuantity: 1,
+    },
+  ];
+
+  assert.equal(
+    reconcilePositionExpiryFilter(positions, "2026-08-21"),
+    null,
+    "an expiry with no live option position must not hide the equity row",
+  );
+  assert.equal(
+    reconcilePositionExpiryFilter(positions, "2026-09-18"),
+    "2026-09-18",
+    "a current option expiry remains selected",
+  );
 });

@@ -7,7 +7,7 @@ import {
   isStopOrderType, isGtdTif, ORDER_TYPE_CHIP,
   computeHeatmapVolumes, HEATMAP_WINDOW_MS,
 } from "./state.js";
-import { rulesFor } from "./validation.js";
+import { rulesFor, setInstrumentRules } from "./validation.js";
 import { tabsForRole } from "./complianceUi.js";
 import { createVirtualList } from "./virtualList.js";
 import { bindMobileDrawer } from "./mobileDrawer.js";
@@ -934,21 +934,26 @@ function closeChainPicker() {
 }
 
 function buildChainGrid(instruments) {
+  const rows = (Array.isArray(instruments) ? instruments : []).filter((instrument) =>
+    Number.isFinite(Number(instrument?.strikePrice))
+    && typeof instrument?.expirationDate === "string"
+    && instrument.expirationDate.length > 0);
   // Group by expiry (columns) and strike (rows)
-  const expiries = [...new Set(instruments.map(i => i.expirationDate))].sort();
-  const strikes = [...new Set(instruments.map(i => i.strikePrice))].sort((a, b) => a - b);
+  const expiries = [...new Set(rows.map(i => i.expirationDate))].sort();
+  const strikes = [...new Set(rows.map(i => Number(i.strikePrice)))].sort((a, b) => a - b);
   
   // Build lookup: { "strike|expiry|putOrCall" => instrument }
   const lookup = new Map();
-  for (const inst of instruments) {
-   lookup.set(`${inst.strikePrice}|${inst.expirationDate}|${inst.putOrCall}`, inst);
+  for (const inst of rows) {
+   setInstrumentRules(inst);
+   lookup.set(`${Number(inst.strikePrice)}|${inst.expirationDate}|${inst.putOrCall}`, inst);
   }
   
   // Build table HTML
   let html = '<table class="chain-table"><thead><tr><th class="strike-col">Strike</th>';
   for (const exp of expiries) {
    // Show both C and P columns per expiry
-   html += `<th colspan="2">${exp}</th>`;
+   html += `<th colspan="2">${escapeHtml(exp)}</th>`;
   }
   html += '</tr><tr><th></th>';
   for (const exp of expiries) {
@@ -961,17 +966,40 @@ function buildChainGrid(instruments) {
    for (const exp of expiries) {
      const call = lookup.get(`${strike}|${exp}|Call`);
      const put = lookup.get(`${strike}|${exp}|Put`);
-     html += call
-       ? `<td class="chain-cell chain-cell-call" data-symbol="${call.symbol}" data-security-id="${call.securityId}" data-put-or-call="${call.putOrCall}">C</td>`
+     html += call && hasOrderMetadata(call)
+       ? chainCell(call, "call", "C")
+       : call
+         ? '<td class="chain-cell-unavailable" title="SecurityId, lot or tick metadata unavailable">!</td>'
        : '<td class="chain-cell-empty">—</td>';
-     html += put
-       ? `<td class="chain-cell chain-cell-put" data-symbol="${put.symbol}" data-security-id="${put.securityId}" data-put-or-call="${put.putOrCall}">P</td>`
+     html += put && hasOrderMetadata(put)
+       ? chainCell(put, "put", "P")
+       : put
+         ? '<td class="chain-cell-unavailable" title="SecurityId, lot or tick metadata unavailable">!</td>'
        : '<td class="chain-cell-empty">—</td>';
    }
    html += '</tr>';
   }
   html += '</tbody></table>';
   return html;
+}
+
+function hasOrderMetadata(instrument) {
+  return Number(instrument?.securityId) > 0
+    && Number(instrument?.lotSize) > 0
+    && Number(instrument?.tickSize) > 0;
+}
+
+function chainCell(instrument, side, label) {
+  const accessible = `${instrument.symbol} ${instrument.putOrCall}, strike ${instrument.strikePrice}, expires ${instrument.expirationDate}`;
+  return `<td class="chain-cell chain-cell-${side}" role="button" tabindex="0"
+    aria-label="${escapeHtml(accessible)}"
+    data-symbol="${escapeHtml(instrument.symbol)}"
+    data-security-id="${escapeHtml(instrument.securityId)}"
+    data-put-or-call="${escapeHtml(instrument.putOrCall)}"
+    data-lot-size="${escapeHtml(instrument.lotSize)}"
+    data-tick-size="${escapeHtml(instrument.tickSize)}"
+    data-contract-multiplier="${escapeHtml(instrument.contractMultiplier ?? 1)}"
+    data-security-type="${escapeHtml(instrument.securityType ?? "Option")}">${label}</td>`;
 }
 
 function handleChainCellClick(e) {
@@ -981,6 +1009,10 @@ function handleChainCellClick(e) {
    symbol: cell.dataset.symbol,
    securityId: cell.dataset.securityId,
    putOrCall: cell.dataset.putOrCall,
+   lotSize: cell.dataset.lotSize,
+   tickSize: cell.dataset.tickSize,
+   contractMultiplier: cell.dataset.contractMultiplier,
+   securityType: cell.dataset.securityType,
   };
   if (selection.symbol && chainPickerOnSelect) {
    chainPickerOnSelect(selection);
@@ -998,6 +1030,10 @@ function populateTicketFromChainSelection(selection) {
   const symInput = $("ticket-symbol");
   if (symInput) {
    symInput.value = symbol;
+   symInput.dataset.securityId = String(selection.securityId);
+   symInput.dataset.instrumentSymbol = symbol;
+   symInput.dataset.metadataFetchedAt = String(Date.now());
+   setInstrumentRules({ ...selection, symbol });
    symInput.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
@@ -1071,7 +1107,20 @@ export function bindUi() {
   // This provides live feedback of the estimated notional value accounting
   // for option contract multipliers.
   const symEl = $("ticket-symbol");
-  if (symEl) symEl.addEventListener("change", updateNotionalPreview);
+  if (symEl) {
+    const clearMismatchedInstrument = () => {
+      const symbol = symEl.value.trim().toUpperCase();
+      if (symEl.dataset.instrumentSymbol && symEl.dataset.instrumentSymbol !== symbol) {
+        delete symEl.dataset.securityId;
+        delete symEl.dataset.instrumentSymbol;
+        delete symEl.dataset.metadataFetchedAt;
+      }
+      syncTicketRules();
+      updateNotionalPreview();
+    };
+    symEl.addEventListener("input", clearMismatchedInstrument);
+    symEl.addEventListener("change", clearMismatchedInstrument);
+  }
   if (qtyEl) qtyEl.addEventListener("input", updateNotionalPreview);
   if (priceEl) priceEl.addEventListener("input", updateNotionalPreview);
 
@@ -1108,6 +1157,16 @@ export function bindUi() {
       stopPrice:    stopHidden || !stopPriceEl || stopPriceEl.value === "" ? null : Number(stopPriceEl.value),
       goodTillDate: gtdHidden  || !gtdEl       || gtdEl.value       === "" ? null : new Date(gtdEl.value).toISOString(),
     };
+    const routed = addTicketRouting(payload, {
+      instrument: selectedTicketInstrument(),
+      subAccountId: $("ticket-subaccount")?.value,
+      subAccountAvailable: $("ticket-subaccount")?.dataset.available !== "0",
+    });
+    if (routed.error) {
+      setTicketFeedback(routed.error, "error");
+      return;
+    }
+    Object.assign(payload, routed.payload);
     // Q3.4 (#284). Native iceberg / reserve display-qty. An empty
     // Display qty input means full disclosure (no reserve) — we
     // omit both display fields from the payload so the backend
@@ -1471,6 +1530,12 @@ export function bindUi() {
     // Cell clicks inside the grid
     if (chainGrid) {
       chainGrid.addEventListener("click", handleChainCellClick);
+      chainGrid.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        if (!event.target.closest(".chain-cell")) return;
+        event.preventDefault();
+        handleChainCellClick(event);
+      });
     }
   }
   
@@ -1516,18 +1581,7 @@ function updateNotionalPreview() {
   const price = parseFloat($("ticket-price")?.value) || 0;
   const symbol = $("ticket-symbol")?.value?.trim().toUpperCase();
   
-  // Look up multiplier from state (positions or a symbol cache)
-  // For now, default to 1 (equity) unless we can detect it's an option
-  let multiplier = 1;
-  
-  // If we have a symbol, try to find it in positions to check if it's an option
-  if (symbol && getState().positions.has(symbol)) {
-    const position = getState().positions.get(symbol);
-    // optionContractMultiplier is present if it's an option (securityType === "Option")
-    if (position.optionContractMultiplier) {
-      multiplier = position.optionContractMultiplier;
-    }
-  }
+  const multiplier = rulesFor(symbol).contractMultiplier;
   
   const notional = qty * price * multiplier;
   
@@ -1717,7 +1771,11 @@ export function setTicketSubmitting(submitting) {
 }
 
 export function clearTicket() {
-  $("ticket-symbol").value = "";
+  const symbol = $("ticket-symbol");
+  symbol.value = "";
+  delete symbol.dataset.securityId;
+  delete symbol.dataset.instrumentSymbol;
+  delete symbol.dataset.metadataFetchedAt;
   $("ticket-qty").value = "";
   $("ticket-price").value = "";
   // Q1.4 (#256). Reset the conditional inputs too so a subsequent
@@ -1754,8 +1812,34 @@ function syncTicketRules() {
     pxEl.step = String(r.tickSize);
   }
   if (hint) {
-    hint.textContent = `lot ${r.lotSize} · tick ${r.tickSize}`;
+    const selected = selectedTicketInstrument();
+    hint.textContent = `lot ${r.lotSize} · tick ${r.tickSize}`
+      + (r.contractMultiplier !== 1 ? ` · multiplier ${r.contractMultiplier}` : "")
+      + (selected?.stale ? " · metadata stale" : "");
   }
+}
+
+export function selectedTicketInstrument(now = Date.now()) {
+  const el = $("ticket-symbol");
+  if (!el?.dataset.securityId || el.dataset.instrumentSymbol !== el.value.trim().toUpperCase()) return null;
+  const fetchedAt = Number(el.dataset.metadataFetchedAt);
+  return {
+    securityId: Number(el.dataset.securityId),
+    stale: !Number.isFinite(fetchedAt) || now - fetchedAt > 5 * 60_000,
+  };
+}
+
+export function addTicketRouting(payload, { instrument, subAccountId, subAccountAvailable = true } = {}) {
+  if (instrument?.stale) {
+    return { error: "Option metadata is stale. Reload the option chain before submitting." };
+  }
+  if (subAccountId && !subAccountAvailable) {
+    return { error: "Subaccount data is unavailable or stale. Refresh before submitting." };
+  }
+  const next = { ...payload };
+  if (Number(instrument?.securityId) > 0) next.securityId = Number(instrument.securityId);
+  if (subAccountId) next.subAccountId = String(subAccountId);
+  return { payload: next, error: null };
 }
 
 export function setStatusPill(status) {
@@ -2017,6 +2101,19 @@ export function renderForSlice(slice) {
   // phase Esc/Tab listener still live. Close it before any panel
   // re-render so subsequent renders run against a clean slate.
   if (slice === "all") closeOrderDetail();
+  if (slice === "realtime") {
+    closeOrderDetail();
+    renderBlotter();
+    renderCancelAllButton();
+    renderPositions();
+    renderExecutions();
+    renderBalance();
+    renderMarketData();
+    renderTicketPhaseCoupling();
+    renderAuctionPanel();
+    renderStaleness("ws");
+    return;
+  }
   if (slice === "orders" || slice === "all" || slice === "blotterFilter" || slice === "blotterPage" || slice === "selectedOrder") renderBlotter();
   if (slice === "orders" || slice === "all") renderCancelAllButton();
   if (slice === "positions" || slice === "all") renderPositions();
@@ -2950,14 +3047,16 @@ function renderPositions() {
   const body = $("positions-body");
   let positions = [...getState().positions.values()]
     .filter(p => p.netQuantity !== 0);
-  
+
+  _expiryFilter = reconcilePositionExpiryFilter(positions, _expiryFilter);
+
   // FE-OPT-3 (#499). Apply expiry filter if set.
   if (_expiryFilter) {
     positions = positions.filter(p => 
       p.securityType === "Option" && p.optionExpirationDate === _expiryFilter
     );
   }
-  
+
   sortPositionsInPlace(positions, _positionsSort);
   
   if (positions.length === 0) {
@@ -2979,6 +3078,15 @@ function renderPositions() {
   syncPositionsSortHeaders();
   syncPositionsGroupToggle();
   renderExpiryStrip();
+}
+
+export function reconcilePositionExpiryFilter(positions, selectedExpiry) {
+  if (!selectedExpiry) return null;
+  const stillPresent = (positions ?? []).some((position) =>
+    position?.netQuantity !== 0
+    && position?.securityType === "Option"
+    && position?.optionExpirationDate === selectedExpiry);
+  return stillPresent ? selectedExpiry : null;
 }
 
 // FE-OPT-3 (#499). Render a single position row (used in flat and grouped views).
@@ -3309,6 +3417,7 @@ export function validateTicketState(formState) {
     priceHidden, stopPriceHidden, gtdHidden,
     now,
     maxGtdHorizonDays,
+    allowZeroPrice,
   } = formState ?? {};
   const errors = {};
 
@@ -3324,7 +3433,7 @@ export function validateTicketState(formState) {
   // Sell ⇒ price ≤ stopPrice (mirrors the backend trigger semantics).
   if (type === "StopLimit") {
     const px = Number(price);
-    if (!priceHidden && (!Number.isFinite(px) || px <= 0)) {
+    if (!priceHidden && (!Number.isFinite(px) || (allowZeroPrice ? px < 0 : px <= 0))) {
       errors.price = "limit price required";
     } else if (!stopPriceHidden && !errors.stopPrice && !errors.price) {
       const sp = Number(stopPrice);
@@ -3397,6 +3506,7 @@ function refreshTicketValidation() {
     gtdHidden:       gtdLabel  ? !!gtdLabel.hidden  : !!gtdEl?.disabled,
     now: Date.now(),
     maxGtdHorizonDays: getState().riskPolicy?.maxGtdHorizonDays,
+    allowZeroPrice: rulesFor($("ticket-symbol")?.value).securityType === "Option",
   });
 
   if (errEl) {

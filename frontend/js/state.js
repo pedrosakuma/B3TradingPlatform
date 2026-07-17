@@ -379,6 +379,27 @@ export function markAlgoModifyInflight(id, value) {
 }
 
 export function clearAll() {
+  clearRealtime();
+  // Session-bound REST/admin state is cleared only at a real identity
+  // boundary. Trader WebSocket reconnects call clearRealtime() instead.
+  state.riskPolicy = null;
+  bumpRiskPolicyGeneration();
+  state.pnl = null;
+  state.historyOrders     = { items: [], nextCursor: null, loading: false };
+  state.historyExecutions = { items: [], nextCursor: null, loading: false };
+  state.historyFilters    = { from: "", to: "", symbol: "" };
+  state.statement = { lastDownload: null, lastJson: null, busy: false, error: null };
+  state.algos.clear();
+  state.inflightAlgoCancels.clear();
+  state.inflightAlgoModifies.clear();
+  state.selectedAlgoId = null;
+  state.lastMdActivity = null;
+  _pnlEpoch += 1;
+  _historyGeneration += 1;
+  notify("all");
+}
+
+export function clearRealtime() {
   state.orders.clear();
   state.positions.clear();
   state.executions = [];
@@ -391,55 +412,15 @@ export function clearAll() {
   state.inflightCancels.clear();
   state.inflightModifies.clear();
   state.lastWsActivity = null;
-  state.lastMdActivity = null;
   // Q1.6 (#258). Phase + auction caches survive market-data restarts
   // but die with the trader-WS reconnect (which is what triggers
   // clearAll) — the server replays snapshots after the (re)subscribe.
   state.phaseBySymbol.clear();
   state.phaseAtBySymbol.clear();
   state.auctionBySymbol.clear();
-  // Drop-copy has its own socket lifecycle. Do not clear it when the
-  // unrelated trader WS reconnects; logout closes and clears it
-  // explicitly in app.js.
-  // Q1.4 (#256). Risk policy is per-session — the cap is sourced from
-  // the backend via `GET /policy/risk` on session start. Carrying a
-  // previous session's value across logout/reconnect risks validating
-  // the next trader against the wrong horizon, so reset to null and
-  // let the next loadRiskPolicy() refill (readers fall back to the
-  // documented 30d client-side default in the meantime).
-  state.riskPolicy = null;
-  // Invalidate any in-flight applyRiskPolicyFetch() started under the
-  // previous session — without this, a delayed response from the prior
-  // backend could resolve after the new session has loaded its own
-  // policy and overwrite (or null out) the newer value.
-  bumpRiskPolicyGeneration();
-  // Q2.6 (#273). P&L / history caches are per-session — drop on logout
-  // or trader-WS reconnect so the next session can't read the previous
-  // user's data while waiting for its own snapshot.
-  state.pnl = null;
-  // #385. Cash balance is per-session — drop on logout / WS reconnect
-  // so the next session can't render the previous user's number while
-  // waiting for its own snapshot.
+  // balance.me is realtime and gets a fresh snapshot after subscribe.
   state.balance = null;
-  state.historyOrders     = { items: [], nextCursor: null, loading: false };
-  state.historyExecutions = { items: [], nextCursor: null, loading: false };
-  state.historyFilters    = { from: "", to: "", symbol: "" };
-  state.statement = { lastDownload: null, lastJson: null, busy: false, error: null };
-  // Fase 2 (#398). Algos are per-session — drop on logout / trader-WS
-  // reconnect so the next session can't read the previous user's algos
-  // while waiting for the algo.me snapshot.
-  state.algos.clear();
-  state.inflightAlgoCancels.clear();
-  state.inflightAlgoModifies.clear();
-  state.selectedAlgoId = null;
-  // Treat clearAll() as an authoritative generation/epoch advance —
-  // same semantics as a WS delta or filter change. Any in-flight REST
-  // P&L or history responses captured the previous epoch/generation
-  // and must resolve into a no-op, or they would repopulate stale
-  // rows under the now-clean state right after a WS reconnect.
-  _pnlEpoch += 1;
-  _historyGeneration += 1;
-  notify("all");
+  notify("realtime");
 }
 
 // ── Market data slice ──────────────────────────────────────────────

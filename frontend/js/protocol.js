@@ -295,6 +295,111 @@ async function toggleHalt(backend, token, symbol, halt) {
 export const haltSymbol   = (b, t, sym) => toggleHalt(b, t, sym, true);
 export const resumeSymbol = (b, t, sym) => toggleHalt(b, t, sym, false);
 
+export async function listSubAccounts(backend, token, { includeDeactivated = false } = {}) {
+  const url = new URL(`${backend}/sub-accounts/`);
+  if (includeDeactivated) url.searchParams.set("includeDeactivated", "true");
+  const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  return jsonOrThrow(resp);
+}
+
+export async function createSubAccount(backend, token, payload) {
+  const resp = await fetch(`${backend}/sub-accounts/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+  return jsonOrThrow(resp);
+}
+
+export async function deactivateSubAccount(backend, token, id) {
+  const resp = await fetch(`${backend}/sub-accounts/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (resp.status === 204) return null;
+  return jsonOrThrow(resp);
+}
+
+export async function getSessionPhase(backend, token) {
+  const resp = await fetch(`${backend}/admin/session-phase`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return jsonOrThrow(resp);
+}
+
+export async function setSessionPhase(backend, token, { symbol, phase }) {
+  const path = symbol
+    ? `/admin/session-phase/${encodeURIComponent(symbol)}`
+    : "/admin/session-phase/default";
+  const resp = await fetch(`${backend}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ phase }),
+  });
+  if (resp.status === 204) return null;
+  return jsonOrThrow(resp);
+}
+
+export async function clearSessionPhase(backend, token, symbol) {
+  const resp = await fetch(`${backend}/admin/session-phase/${encodeURIComponent(symbol)}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (resp.status === 204) return null;
+  return jsonOrThrow(resp);
+}
+
+export async function getAdminRiskLimits(backend, token, query = {}) {
+  const url = new URL(`${backend}/admin/risk/limits`);
+  for (const key of ["endClient", "firmId", "symbol"]) {
+    if (query[key]) url.searchParams.set(key, query[key]);
+  }
+  const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  return jsonOrThrow(resp);
+}
+
+export async function reloadAdminRisk(backend, token) {
+  const resp = await fetch(`${backend}/admin/risk/reload`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (resp.status === 204) return null;
+  return jsonOrThrow(resp);
+}
+
+export async function getReferencePrices(backend, token, symbols) {
+  const url = new URL(`${backend}/admin/marketdata/reference-prices`);
+  if (symbols) url.searchParams.set("symbols", symbols);
+  const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  return jsonOrThrow(resp);
+}
+
+export async function mutateCash(backend, token, payload) {
+  const resp = await fetch(`${backend}/admin/cash`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+  return jsonOrThrow(resp);
+}
+
+export async function setOrderStale(backend, token, { firmId, clOrdId, stale, reason }) {
+  const action = stale ? "mark-stale" : "clear-stale";
+  const resp = await fetch(
+    `${backend}/admin/firms/${encodeURIComponent(firmId)}/orders/${encodeURIComponent(clOrdId)}/${action}`,
+    {
+      method: "POST",
+      headers: {
+        ...(stale ? { "Content-Type": "application/json" } : {}),
+        Authorization: `Bearer ${token}`,
+      },
+      body: stale ? JSON.stringify({ reason }) : undefined,
+    },
+  );
+  if (resp.status === 204) return null;
+  return jsonOrThrow(resp);
+}
+
 // Admin-only: trigger EOD materialisation. Returns the report or 409
 // when persistence is disabled.
 export async function runEod(backend, token) {
