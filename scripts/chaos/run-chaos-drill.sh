@@ -17,6 +17,8 @@ readonly TRADING_CONTAINER="${TRADING_CONTAINER:-b3-trading-host}"
 readonly MARKETDATA_CONTAINER="${MARKETDATA_CONTAINER:-b3-marketdata}"
 readonly DOCKER_NETWORK="${DOCKER_NETWORK:-b3-net}"
 readonly TRADING_BASE_URL="${TRADING_BASE_URL:-http://localhost:5000}"
+readonly TRADING_USER="${TRADING_SEED_USER:-alice}"
+readonly TRADING_PASSWORD="${TRADING_SEED_PASSWORD:-wonderland}"
 readonly READY_TIMEOUT_S="${READY_TIMEOUT_S:-60}"
 readonly PARTITION_HOLD_S="${PARTITION_HOLD_S:-10}"
 readonly POST_KILL_WAIT_S="${POST_KILL_WAIT_S:-5}"
@@ -32,9 +34,8 @@ Usage: $0 --scenario <name> [--up]
 
 Scenarios:
   host-kill           SIGKILL trading-host, restart, assert /ready and WAL seq monotonic.
-  marketdata-kill     SIGKILL marketdata, assert trading-host stays healthy (degraded ok).
+  marketdata-kill     SIGKILL marketdata, restart it, assert exchange readiness and a fresh trade.
   network-partition   Disconnect trading-host from ${DOCKER_NETWORK} for ${PARTITION_HOLD_S}s, reconnect, assert no event loss.
-  wal-backpressure    Drive synthetic submit load, assert trading_wal_backpressure_total moves (optional, best-effort).
 
 Options:
   --up                Bring the compose stack up before the scenario.
@@ -138,6 +139,75 @@ wait_for_ready() {
     done
 }
 
+assert_exchange_ready() {
+    local health
+    health="$(curl -fsS --max-time 5 "${TRADING_BASE_URL}/health")" || return 1
+    python3 -c '
+import json,sys
+h=json.load(sys.stdin)
+exchange=h.get("exchange") or {}
+assert exchange.get("readyForOrders") is True, h
+firms=exchange.get("firms") or []
+assert firms and all(str(f.get("state","")).lower()=="established" for f in firms), h
+' <<<"$health"
+}
+
+login_token() {
+    curl -fsS --max-time 5 \
+        -H 'Content-Type: application/json' \
+        -d "{\"username\":\"${TRADING_USER}\",\"password\":\"${TRADING_PASSWORD}\"}" \
+        "${TRADING_BASE_URL}/auth/login" \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])'
+}
+
+submit_order() {
+    local token="$1" side="$2" price="$3"
+    curl -fsS --max-time 10 \
+        -H "Authorization: Bearer ${token}" \
+        -H 'Content-Type: application/json' \
+        -d "{\"symbol\":\"PETR4\",\"side\":\"${side}\",\"type\":\"Limit\",\"quantity\":100,\"price\":${price}}" \
+        "${TRADING_BASE_URL}/orders" \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["clOrdId"])'
+}
+
+assert_post_recovery_trade() {
+    local token price buy sell deadline orders
+    token="$(login_token)"
+    price="$(python3 -c 'import time; print(f"{31.00 + (int(time.time()) % 50) / 100:.2f}")')"
+    buy="$(submit_order "$token" Buy "$price")"
+    sell="$(submit_order "$token" Sell "$price")"
+    deadline=$((SECONDS + 30))
+    while (( SECONDS < deadline )); do
+        orders="$(curl -fsS --max-time 5 -H "Authorization: Bearer ${token}" "${TRADING_BASE_URL}/orders")"
+        if BUY="$buy" SELL="$sell" python3 -c '
+import json,os,sys
+orders=json.load(sys.stdin)
+by_id={str(o.get("clOrdId")):o for o in orders}
+for key in (os.environ["BUY"], os.environ["SELL"]):
+    order=by_id.get(key)
+    assert order and order.get("status")=="Filled" and order.get("cumulativeQuantity")==100
+' <<<"$orders" 2>/dev/null; then
+            log "post-recovery real trade filled (buy=${buy}, sell=${sell}, price=${price})"
+            return 0
+        fi
+        sleep 1
+    done
+    log "FAIL: post-recovery orders did not both reach Filled (buy=${buy}, sell=${sell})"
+    return 1
+}
+
+assert_recovered_and_trading() {
+    if ! wait_for_ready "$READY_TIMEOUT_S"; then
+        log "FAIL: /ready did not recover within ${READY_TIMEOUT_S}s"
+        return 1
+    fi
+    if ! assert_exchange_ready; then
+        log "FAIL: /health does not show readyForOrders=true with every firm Established"
+        return 1
+    fi
+    assert_post_recovery_trade
+}
+
 extract_firm() {
     local file="$1"
     grep -oE '"firmId"[[:space:]]*:[[:space:]]*"[^"]*"' "$file" | head -n1 | sed -E 's/.*"firmId"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/'
@@ -235,13 +305,11 @@ scenario_host_kill() {
     log "restarting ${TRADING_CONTAINER}..."
     docker start "$TRADING_CONTAINER" >/dev/null
 
-    log "waiting up to ${READY_TIMEOUT_S}s for /ready..."
-    if ! wait_for_ready "$READY_TIMEOUT_S"; then
-        log "FAIL: /ready did not return 200 within ${READY_TIMEOUT_S}s"
+    log "waiting for exchange readiness and post-recovery trading..."
+    if ! assert_recovered_and_trading; then
         banner_end "$scenario" "FAIL"
         return 1
     fi
-    log "/ready healthy."
     post="$(capture_state post "$scenario")"
 
     if ! assert_health_block "$pre" "$post"; then
@@ -268,7 +336,7 @@ scenario_marketdata_kill() {
     docker kill -s SIGKILL "$MARKETDATA_CONTAINER" >/dev/null
     sleep "$POST_KILL_WAIT_S"
 
-    # Trading-host must still answer /health (degraded surface ok).
+    # Trading-host must still answer /health while the read-side feed is down.
     if ! curl -fsS --max-time 5 "${TRADING_BASE_URL}/health" >/dev/null; then
         log "FAIL: trading-host /health unreachable after marketdata kill"
         banner_end "$scenario" "FAIL"
@@ -278,7 +346,11 @@ scenario_marketdata_kill() {
 
     # Bring marketdata back so subsequent scenarios are sane.
     log "restarting ${MARKETDATA_CONTAINER}..."
-    docker start "$MARKETDATA_CONTAINER" >/dev/null || log "(non-fatal) failed to restart ${MARKETDATA_CONTAINER}"
+    docker start "$MARKETDATA_CONTAINER" >/dev/null
+    if ! assert_recovered_and_trading; then
+        banner_end "$scenario" "FAIL"
+        return 1
+    fi
     post="$(capture_state post "$scenario")"
 
     if ! assert_health_block "$pre" "$post"; then
@@ -303,9 +375,8 @@ scenario_network_partition() {
     log "reconnecting..."
     docker network connect "$DOCKER_NETWORK" "$TRADING_CONTAINER" >/dev/null
 
-    log "waiting up to ${READY_TIMEOUT_S}s for /ready after reconnect..."
-    if ! wait_for_ready "$READY_TIMEOUT_S"; then
-        log "FAIL: /ready did not recover within ${READY_TIMEOUT_S}s after reconnect"
+    log "waiting for exchange readiness and post-recovery trading after reconnect..."
+    if ! assert_recovered_and_trading; then
         banner_end "$scenario" "FAIL"
         return 1
     fi
@@ -357,31 +428,6 @@ scenario_network_partition() {
     return 0
 }
 
-scenario_wal_backpressure() {
-    local scenario="wal-backpressure"
-    banner_start "$scenario"
-    ensure_container_running "$TRADING_CONTAINER"
-    local pre post
-    pre="$(capture_state pre "$scenario")"
-
-    # Best-effort: hammer /health (auth-free) in a tight loop to keep
-    # the host busy while we capture metrics. A real backpressure trip
-    # needs authenticated /orders submissions wired against a known
-    # seed user; that is environment-specific and intentionally not
-    # baked into the script. Mark the scenario INCONCLUSIVE rather
-    # than FAIL when we cannot observe the counter moving.
-    local i
-    for i in $(seq 1 200); do
-        curl -fsS --max-time 1 "${TRADING_BASE_URL}/health" >/dev/null 2>&1 || true
-    done
-    sleep 2
-    post="$(capture_state post "$scenario")"
-    log "NOTE: wal-backpressure scenario is best-effort without an authenticated submit harness."
-    log "      See docs/operations/runbook-failover-recovery.md §1.5 for the production-side checks."
-    banner_end "$scenario" "PASS (best-effort)"
-    return 0
-}
-
 main() {
     local scenario=""
     local do_up=0
@@ -399,6 +445,7 @@ main() {
 
     require_cmd docker
     require_cmd curl
+    require_cmd python3
 
     if (( do_up == 1 )); then
         bring_up_stack
@@ -409,12 +456,15 @@ main() {
         log "FATAL: trading-host is live but order ingress never became ready."
         exit 2
     fi
+    if ! assert_exchange_ready || ! assert_post_recovery_trade; then
+        log "FATAL: pre-drill exchange readiness/trading probe failed."
+        exit 2
+    fi
 
     case "$scenario" in
         host-kill)         scenario_host_kill ;;
         marketdata-kill)   scenario_marketdata_kill ;;
         network-partition) scenario_network_partition ;;
-        wal-backpressure)  scenario_wal_backpressure ;;
         *) log "unknown scenario: ${scenario}"; usage ;;
     esac
 }

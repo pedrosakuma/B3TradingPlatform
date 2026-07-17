@@ -1,0 +1,32 @@
+rule_files:
+  - b3-trading.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'b3_synthetic_alert{subsystem="operations-gate",run_id="rule-test-123"}'
+        values: '0 1 1'
+      - series: 'trading_fixp_outbound_drain_shutdown_abandoned_total{instance="host-a"}'
+        values: '0 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: B3SyntheticAlert
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              subsystem: operations-gate
+              run_id: rule-test-123
+            exp_annotations:
+              summary: "Synthetic alert delivery probe"
+              description: "The versioned Prometheus rule and Alertmanager receiver path are operational."
+      - eval_time: 2m
+        alertname: FixpOutboundDrainShutdownAbandoned
+        exp_alerts:
+          - exp_labels:
+              instance: host-a
+              severity: page
+              subsystem: fixp-listener
+            exp_annotations:
+              summary: "FIXP outbound drain was abandoned during shutdown"

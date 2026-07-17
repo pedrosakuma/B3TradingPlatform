@@ -44,6 +44,13 @@ public class UserBotCredentialsEndpointsTests : IClassFixture<TestAppFactory>
         Assert.Equal("morning bot", created.Label);
         Assert.Contains(created.CredShortId, created.PlainSecret);
 
+        var sessionResponse = await client.PostAsync(
+            $"/api/user-bot-credentials/{created.Id}/session", content: null);
+        var session = await sessionResponse.Content.ReadFromJsonAsync<UserBotSessionDto>();
+        Assert.NotNull(session);
+        Assert.NotEqual(0u, session!.SessionId);
+        Assert.Equal(1ul, session.SessionVerId);
+
         var list = await client.GetFromJsonAsync<List<UserBotCredentialDto>>("/api/user-bot-credentials");
         Assert.NotNull(list);
         var entry = Assert.Single(list!);
@@ -53,6 +60,9 @@ public class UserBotCredentialsEndpointsTests : IClassFixture<TestAppFactory>
 
         var del = await client.DeleteAsync($"/api/user-bot-credentials/{created.Id}");
         Assert.Equal(HttpStatusCode.NoContent, del.StatusCode);
+        var revokedSession = await client.PostAsync(
+            $"/api/user-bot-credentials/{created.Id}/session", content: null);
+        Assert.Equal(HttpStatusCode.NotFound, revokedSession.StatusCode);
 
         var afterRevoke = await client.GetFromJsonAsync<List<UserBotCredentialDto>>("/api/user-bot-credentials");
         Assert.NotNull(afterRevoke!.Single().RevokedAt);
@@ -95,6 +105,9 @@ public class UserBotCredentialsEndpointsTests : IClassFixture<TestAppFactory>
 
         var bobRevokeAttempt = await bob.DeleteAsync($"/api/user-bot-credentials/{aliceCred!.Id}");
         Assert.Equal(HttpStatusCode.NotFound, bobRevokeAttempt.StatusCode);
+        var bobSessionAttempt = await bob.PostAsync(
+            $"/api/user-bot-credentials/{aliceCred.Id}/session", content: null);
+        Assert.Equal(HttpStatusCode.NotFound, bobSessionAttempt.StatusCode);
 
         var registry = factory.Services.GetRequiredService<IUserBotCredentialRegistry>();
         Assert.NotNull(await registry.TryAuthenticateAsync(aliceCred.PlainSecret, default));

@@ -95,8 +95,14 @@ public static class EntryPointListenerServiceCollectionExtensions
             // per-connection writer (full → leave in buffer for
             // retransmit). Per-bot ordering = WAL append order by
             // construction (single chain, no async hop).
-            services.AddSingleton<B3.Trading.Application.Persistence.IExecutionFanOutSink>(
-                sp => sp.GetRequiredService<BotErMultiplexer>());
+            // Do not resolve BotErMultiplexer while EventDispatcher is being
+            // constructed. The session registry depends on the dispatcher,
+            // while the multiplexer depends on the session registry; eagerly
+            // binding the multiplexer here deadlocks the production host before
+            // Kestrel/listener startup. The adapter resolves it only on the
+            // first execution fan-out, after startup composition is complete.
+            services.AddSingleton<B3.Trading.Application.Persistence.IExecutionFanOutSink,
+                Hosting.LazyBotExecutionFanOutSink>();
             services.AddHostedService(sp => sp.GetRequiredService<BotErMultiplexer>());
 
             services.AddSingleton<BotSessionSeqCheckpointer>();

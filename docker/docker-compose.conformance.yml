@@ -52,6 +52,15 @@ services:
       # #435 Part B. Drop-copy ClOrdId masker salt — boot-guard throws
       # if unset in non-Development. Placeholder for conformance only.
       Trading__DropCopy__ClOrdIdMaskSalt: "conformance-only-clordid-mask-salt-placeholder-DO-NOT-USE-IN-PROD"
+      # #629. Drive the public FIXP contract over actual SOFH/SBE frames.
+      # Plain TCP is deliberate inside the private compose bridge; the
+      # separate mTLS conformance matrix owns transport security.
+      Trading__EntryPointListener__Enabled: "true"
+      Trading__EntryPointListener__Endpoint: "0.0.0.0:5001"
+      Trading__EntryPointListener__RateLimit__NegotiatesPerMinutePerIp: "1000"
+      Trading__EntryPointListener__RateLimit__NegotiatesPerMinutePerUsername: "2"
+    expose:
+      - "5001"
 
   conformance:
     build:
@@ -84,5 +93,7 @@ services:
       # the same key the host validates against. Without this, those
       # scenarios skip cleanly — they're optional, not gated.
       B3T_AUTH_SIGNING_KEY: ${TRADING_AUTH_SIGNING_KEY:-}
+      B3T_FIXP_ENDPOINT: trading-host:5001
+      B3T_FIXP_NEGOTIATE_BURST: "2"
     networks:
       - b3-net

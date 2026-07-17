@@ -1,7 +1,3 @@
-# Local Prometheus for the obs profile. Single scrape target: the
-# otel-collector's prometheus exporter. The trading-host itself never
-# exposes /metrics — see docs/METRICS.md for why we pin one wire format.
-
 global:
   scrape_interval: 5s
   evaluation_interval: 15s
@@ -24,10 +20,13 @@ scrape_configs:
           source: otel-collector
 
   - job_name: otel-collector-self
-    # The collector emits its own internal telemetry on :8888 (Go runtime,
-    # receiver/exporter metrics). Useful for spotting export drops.
     static_configs:
       - targets:
           - otel-collector:8888
         labels:
           source: otel-collector-self
+
+  - job_name: synthetic-alert-smoke
+    static_configs:
+      - targets:
+          - synthetic-alert-source:8080

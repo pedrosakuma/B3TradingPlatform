@@ -413,7 +413,12 @@ public overlay is in `docs/operations/fixp-listener.md` and
    "boundCertThumbprint": "<sha256 hex|null>" }`. The plaintext PAT
    (`b3t_<shortId>_<secret>`) is shown **once** — hand it to the bot, never
    logged. Pin a cert thumbprint (mTLS, #540) for a second factor.
-3. The bot connects FIXP, Negotiates with the PAT, presents its client leaf.
+3. Allocate/read the durable FIXP identity with
+   `POST /api/user-bot-credentials/{id}/session`; the response carries
+   `sessionId` and `sessionVerId` and returns 404 for another user or a revoked
+   credential.
+4. The bot connects FIXP, Negotiates with the PAT and those session values,
+   then Establishes and presents its client leaf.
 
 ### 3.2 Rotate / revoke
 

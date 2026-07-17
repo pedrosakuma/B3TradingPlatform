@@ -45,6 +45,7 @@ public sealed record PlatformEndpoint(
     public const string EnvFixpEndpoint = "B3T_FIXP_ENDPOINT";
     public const string EnvFixpTls = "B3T_FIXP_TLS";
     public const string EnvFixpCredentialToken = "B3T_FIXP_CREDENTIAL";
+    public const string EnvFixpNegotiateBurst = "B3T_FIXP_NEGOTIATE_BURST";
 
     // mTLS conformance env vars (sub-issue F / RFC §8). The operator points
     // these at a listener configured for client-cert auth and supplies a
@@ -184,6 +185,12 @@ public sealed record PlatformEndpoint(
 
     public const string FixpListenerSkipReason =
         "FIXP listener scenario skipped: B3T_FIXP_ENDPOINT not set.";
+
+    public static int GetFixpNegotiateBurst()
+    {
+        var value = Environment.GetEnvironmentVariable(EnvFixpNegotiateBurst);
+        return int.TryParse(value, out var parsed) && parsed > 0 ? parsed : 10;
+    }
 
     /// <summary>
     /// True when an mTLS-enabled FIXP endpoint plus a trusted client PFX are

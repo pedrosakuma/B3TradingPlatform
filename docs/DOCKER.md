@@ -174,12 +174,12 @@ The trading-host has four exchange modes, configured via
 | `Stub` | Silently accepts every order | Local dev only — never honest |
 | `Mock` | Fakes execution reports in-process | Demo of the working-orders + positions UI |
 | `Real` | Wires `B3.EntryPoint.Client` against `Firms[]` | Production / UAT |
-| `Unavailable` | Fail-closed: every submit/cancel returns 502 | **Container default** |
+| `Unavailable` | Fail-closed: every submit/cancel returns 502 | Standalone image default / unavailable overlay |
 
-The Docker layer sets `Mode=Unavailable` because shipping `Stub` would be
-a lie (orders silently succeed without any broker), and shipping `Real`
-without configured firms throws on boot. `Unavailable` is what an honest
-"no broker connected" state looks like:
+The standalone image's `appsettings.Docker.json` defaults to
+`Mode=Unavailable`. The family `docker/docker-compose.yml` intentionally
+overrides it to `Mode=Real` and supplies matching-platform plus three firm
+sessions. Use `docker-compose.unavailable.yml` for the honest no-broker mode:
 
 - `GET /health` returns `exchange.mode=Unavailable` and `readyForOrders=false`.
 - `POST /orders` returns `502 BadGateway` with `reason: gateway unavailable`.
@@ -255,9 +255,9 @@ collector-only smoke test recipe.
 
 ### Bundled obs stack
 
-An overlay file ships otel-collector + Prometheus + Grafana with a
-provisioned datasource and a starter dashboard ("B3 Trading — Process
-Up"). Bring it up alongside the base stack:
+An overlay file ships otel-collector, Prometheus with versioned rules,
+Alertmanager with a local inspectable receiver, and Grafana. Bring it up
+alongside the base stack:
 
 ```bash
 docker compose \
@@ -276,6 +276,8 @@ Default ports:
 | trading-host   | http://localhost:5000        | `alice` / `wonderland` |
 | frontend       | http://localhost:8080        | (proxy to host)   |
 | Prometheus     | http://localhost:9090        | —                 |
+| Alertmanager   | http://localhost:9093        | —                 |
+| Alert receiver | http://localhost:18093/received | local smoke only |
 | Grafana        | http://localhost:3000        | `admin` / `admin` (change at first login) |
 | otel-collector | (internal: 4317 OTLP, 8889 prom expo) | — |
 
@@ -291,8 +293,7 @@ Tear down (keeping data volumes):
 docker compose -f docker/docker-compose.yml -f docker/docker-compose.observability.yml down
 ```
 
-Use `down -v` to also drop the Prometheus/Grafana volumes
-(`b3-prometheus-data`, `b3-grafana-data`).
+Use `down -v` to also drop Prometheus, Alertmanager, and Grafana volumes.
 
 ## Running conformance
 
@@ -445,10 +446,22 @@ this host and the matching engine surface there.
 The event store WAL + snapshots live in the named volume `b3-trading-data`
 mounted at `/var/lib/b3trading`. The SQLite trading-user directory defaults to
 `/var/lib/b3trading/identity/users.db` and is opened in WAL mode with
-`synchronous=FULL`; use the application's online backup primitive rather than
-copying `users.db`, `users.db-wal` and `users.db-shm` separately while the host
-is live. Volume-level backups should still capture the WAL/snapshots,
-`users.json` during Hybrid/local migration, and `dp-keys`.
+`synchronous=FULL`. Never copy selected files while the host is live. Run
+`scripts/backup/backup-and-restore-drill.sh`: it gracefully quiesces the host,
+archives the whole volume, verifies a file manifest, and boots an isolated
+real-mode restore. The drill also proves a seeded durable bot credential
+survives and a fresh trade fills before the original host resumes.
+
+## Image release gates
+
+`.github/workflows/docker.yml` builds PR images without publishing. On `main`
+or a `v*.*.*` tag it first publishes candidate multi-arch manifests and records
+their immutable digests. Recovery, unavailable-mode conformance, real-stack
+conformance, and ARM64 identity runtime then pull the exact host digest (compose
+builds are disabled). Promotion reuses those same digests, boots the exact
+host/frontend manifests on AMD64 and ARM64, and only then attaches `sha-*`,
+semver, branch, and `latest` tags. A failed or skipped required job cannot move
+a release tag.
 
 ## Health & readiness
 
