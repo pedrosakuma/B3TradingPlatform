@@ -196,6 +196,8 @@ public sealed class Order
         if (algoSliceSeq is < 0)
             throw new ArgumentOutOfRangeException(nameof(algoSliceSeq));
 
+        ValidatePriceForType(type, price);
+
         // Q1.1 (#253) — StopPrice/GoodTillDate cross-field invariants.
         // Always-true invariants checked here (so WAL replay and snapshot
         // hydrate cannot reconstitute illegal combinations). The wallclock
@@ -286,6 +288,35 @@ public sealed class Order
         MinQty = minQty;
         LeavesQuantity = quantity;
         Status = OrderStatus.PendingNew;
+    }
+
+    /// <summary>
+    /// Enforces the economic price shape for every order ingress and replay.
+    /// Limit/stop-limit orders require a non-negative price (zero is valid
+    /// for option cabinet trades); pure market types must not carry one.
+    /// Market-with-leftover accepts an omitted price so pre-trade TIF
+    /// compatibility checks can produce their authoritative rejection.
+    /// </summary>
+    public static void ValidatePriceForType(OrderType type, decimal? price)
+    {
+        if (type is OrderType.Limit or OrderType.StopLimit)
+        {
+            if (!price.HasValue || price.Value < 0m)
+                throw new ArgumentException(
+                    $"Price is required and must be non-negative for OrderType.{type}.",
+                    nameof(price));
+            return;
+        }
+
+        if ((type is OrderType.Market or OrderType.StopLoss) && price.HasValue)
+            throw new ArgumentException(
+                $"Price must be null for OrderType.{type}.",
+                nameof(price));
+
+        if (type == OrderType.MarketWithLeftover && price is < 0m)
+            throw new ArgumentException(
+                $"Price must be non-negative when set for OrderType.{type}.",
+                nameof(price));
     }
 
     public ulong ClOrdId { get; }

@@ -71,6 +71,9 @@ public sealed class EventDispatcher
         get { lock (_lock) return _store.CurrentSeq; }
     }
 
+    public ValueTask FlushAsync(CancellationToken cancellationToken = default) =>
+        _store.FlushAsync(cancellationToken);
+
     /// <summary>
     /// Persists <paramref name="evt"/> then runs <paramref name="apply"/>
     /// under the same lock. Throws (and skips the mutation) if the WAL
@@ -90,6 +93,27 @@ public sealed class EventDispatcher
             var seq = _store.Append(evt, payload);
             apply();
             return seq;
+        }
+    }
+
+    /// <summary>
+    /// Atomically re-validates a live-state predicate, appends the event, and
+    /// applies its mutation under the dispatcher lock. A false predicate
+    /// performs neither append nor apply.
+    /// </summary>
+    public DispatchOutcome DispatchIf(WalEvent evt, Func<bool> condition, Action apply)
+    {
+        ArgumentNullException.ThrowIfNull(evt);
+        ArgumentNullException.ThrowIfNull(condition);
+        ArgumentNullException.ThrowIfNull(apply);
+        var payload = JsonSerializer.SerializeToUtf8Bytes(evt, WalEventJsonContext.Default.WalEvent);
+        lock (_lock)
+        {
+            if (!condition())
+                return new DispatchOutcome(false, 0);
+            var seq = _store.Append(evt, payload);
+            apply();
+            return new DispatchOutcome(true, seq);
         }
     }
 

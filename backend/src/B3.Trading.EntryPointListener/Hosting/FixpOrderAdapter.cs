@@ -319,8 +319,10 @@ internal sealed class FixpOrderAdapter
         {
             OrderCancelResultKind.NotFound => RejectReason.UnknownOrder,
             OrderCancelResultKind.Stale => RejectReason.StaleOrder,
+            OrderCancelResultKind.Conflict => RejectReason.BadRequest,
             OrderCancelResultKind.WalBackpressure => RejectReason.WalBackpressure,
             OrderCancelResultKind.GatewayFailed => RejectReason.GatewayFailed,
+            OrderCancelResultKind.ReconciliationRequired => RejectReason.ReconciliationRequired,
             _ => RejectReason.BadRequest,
         };
 

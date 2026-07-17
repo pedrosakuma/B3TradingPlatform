@@ -74,6 +74,7 @@ public sealed class StateSnapshotter
     /// has both the registry entry and the held reservation.
     /// </summary>
     private readonly PendingReplacementRegistry? _replacements;
+    private readonly PendingCancelRegistry? _pendingCancels;
     private readonly IReplaceMarginCoordinator? _replaceMargin;
     private readonly SubAccountsRegistry? _subAccounts;
     private readonly SubAccountPositionKeeper? _subAccountPositions;
@@ -110,7 +111,8 @@ public sealed class StateSnapshotter
         SubAccountsRegistry? subAccounts = null,
         SubAccountPositionKeeper? subAccountPositions = null,
         SubAccountPnlKeeper? subAccountPnl = null,
-        IFirmSessionStatusProvider? firmSessionStatus = null)
+        IFirmSessionStatusProvider? firmSessionStatus = null,
+        PendingCancelRegistry? pendingCancels = null)
     {
         _orders = orders;
         _positions = positions;
@@ -137,6 +139,7 @@ public sealed class StateSnapshotter
         _subAccountPositions = subAccountPositions;
         _subAccountPnl = subAccountPnl;
         _firmSessionStatus = firmSessionStatus;
+        _pendingCancels = pendingCancels;
     }
 
     public PlatformSnapshot Capture(long seq) => Project(CaptureRaw(seq));
@@ -229,6 +232,11 @@ public sealed class StateSnapshotter
                     AmbiguousMarginHeld: s.AmbiguousMarginHeld,
                     AmbiguousAtUtc: s.AmbiguousAt,
                     NewRemainingNotional: s.NewRemainingNotional))
+                .ToArray(),
+        PendingCancels = _pendingCancels is null
+            ? Array.Empty<PendingCancelRaw>()
+            : _pendingCancels.Snapshot()
+                .Select(static s => new PendingCancelRaw(s.OriginalClOrdId, s.CancelClOrdId))
                 .ToArray(),
         SubAccounts = _subAccounts?.Snapshot() ?? Array.Empty<SubAccountSnapshot>(),
         SubAccountPositions = _subAccountPositions?.Snapshot() ?? Array.Empty<SubAccountPositionSnapshot>(),
@@ -476,6 +484,14 @@ public sealed class StateSnapshotter
         }
         pendingReplacements.Sort(static (a, b) => a.NewClOrdId.CompareTo(b.NewClOrdId));
 
+        var pendingCancels = new List<PendingCancelSnapshot>(raw.PendingCancels.Length);
+        for (var i = 0; i < raw.PendingCancels.Length; i++)
+        {
+            var c = raw.PendingCancels[i];
+            pendingCancels.Add(new PendingCancelSnapshot(c.OriginalClOrdId, c.CancelClOrdId));
+        }
+        pendingCancels.Sort(static (a, b) => a.CancelClOrdId.CompareTo(b.CancelClOrdId));
+
         return new PlatformSnapshot
         {
             Seq = raw.Seq,
@@ -514,6 +530,7 @@ public sealed class StateSnapshotter
             PeggedRepegPending = peggedRepeg,
             PeggedRepegHistory = peggedRepegHistory,
             PendingReplacements = pendingReplacements,
+            PendingCancels = pendingCancels,
             SubAccounts = raw.SubAccounts.ToList(),
             SubAccountPositions = raw.SubAccountPositions.ToList(),
             SubAccountPnl = raw.SubAccountPnl.ToList(),
@@ -695,6 +712,16 @@ public sealed class StateSnapshotter
                 }
             }
         }
+        if (_pendingCancels is not null)
+        {
+            _pendingCancels.Restore(snap.PendingCancels.Select(
+                static c => new PendingCancelSnapshotEntry(c.OriginalClOrdId, c.CancelClOrdId)));
+            foreach (var pending in snap.PendingCancels)
+            {
+                if (_ownership.TryResolve(pending.OriginalClOrdId, out _))
+                    _ownership.RegisterCancelLink(pending.CancelClOrdId, pending.OriginalClOrdId);
+            }
+        }
         // Q4.1 (#301). Restore the sub-account registry + parallel
         // keepers BEFORE WAL replay starts. EventReplayer's
         // SubAccountCreated/Deactivated branches and the
@@ -797,6 +824,7 @@ public sealed class EventReplayer
     private readonly ClOrdIdPrefixRegistry _clOrdIds;
     private readonly AlgoIdRegistry _algoIds;
     private readonly PendingReplacementRegistry? _replacements;
+    private readonly PendingCancelRegistry? _pendingCancels;
     private readonly IReplaceMarginCoordinator? _replaceMargin;
     private readonly InMemoryUserBotCredentialRegistry? _userBotCredentials;
     private readonly InMemoryUserBotSessionRegistry? _userBotSessions;
@@ -889,7 +917,8 @@ public sealed class EventReplayer
         // Q4.5 (#305). Optional. When wired, replay of
         // <see cref="AuditLogEvent"/> folds the envelope into the
         // in-memory ring-buffer keeper that backs GET /admin/audit.
-        AuditLogKeeper? auditKeeper = null)
+        AuditLogKeeper? auditKeeper = null,
+        PendingCancelRegistry? pendingCancels = null)
     {
         _orders = orders;
         _ownership = ownership;
@@ -916,6 +945,7 @@ public sealed class EventReplayer
         _subAccountPositions = subAccountPositions;
         _subAccountPnl = subAccountPnl;
         _auditKeeper = auditKeeper;
+        _pendingCancels = pendingCancels;
     }
 
     /// <summary>
@@ -1011,6 +1041,7 @@ public sealed class EventReplayer
                 // and the operator/bot will retry).
                 var ocrOwner = new EndClientId(ocr.OwnerEndClientId);
                 _ownership.RegisterCancelLink(ocr.CancelClOrdId, ocr.OriginalClOrdId);
+                _pendingCancels?.TryAdd(ocr.OriginalClOrdId, ocr.CancelClOrdId);
                 _clOrdIds.AdvanceCounterTo(ocrOwner, ocr.CancelClOrdId);
                 if (ocr.BotMapping is { } cbm && _userBotMappings is not null)
                     _userBotMappings.RegisterCancelInternal(
@@ -1018,6 +1049,13 @@ public sealed class EventReplayer
                         originalInternalClOrdId: ocr.OriginalClOrdId,
                         credentialId: cbm.CredentialId,
                         externalCancelClOrdId: cbm.ExternalClOrdId);
+                break;
+            case OrderCancelPreSendFailedEvent ocf:
+                _pendingCancels?.TryConsumeByCancel(ocf.CancelClOrdId, out _);
+                _ownership.RemoveCancelLink(ocf.CancelClOrdId);
+                _userBotMappings?.ReapCancel(ocf.CancelClOrdId);
+                _clOrdIds.AdvanceCounterTo(
+                    new EndClientId(ocf.OwnerEndClientId), ocf.CancelClOrdId);
                 break;
             case OrderReplaceRequestedEvent rr:
                 // Slice 4 of #122. Re-register the in-flight intent and
@@ -1057,6 +1095,12 @@ public sealed class EventReplayer
                 // must advance the watermark even if the replacement
                 // intent itself wasn't re-registered (orig already gone).
                 _clOrdIds.AdvanceCounterTo(new EndClientId(rr.EndClientId), rr.NewClOrdId);
+                break;
+            case OrderReplacePreSendFailedEvent rpf:
+                _replacements?.TryConsume(rpf.NewClOrdId, out _);
+                _ownership.RemoveCancelLink(rpf.NewClOrdId);
+                _replaceMargin?.AbortReplace(rpf.NewClOrdId);
+                _clOrdIds.AdvanceCounterTo(new EndClientId(rpf.EndClientId), rpf.NewClOrdId);
                 break;
             case OrderReplaceRejectedEvent rrj:
                 // #337 — pure-audit event. Replay does NOT mutate the

@@ -16,7 +16,7 @@ namespace B3.Trading.Infrastructure;
 /// (which silently accepts) for anything resembling production.
 /// </para>
 /// </summary>
-public sealed class UnavailableExchangeGateway : IExchangeGateway
+public sealed class UnavailableExchangeGateway : IExchangeGateway, IExchangeGatewayPreSendOnly
 {
     /// <summary>Single canonical message; <c>OrdersEndpoints</c> maps it to <c>gateway_unavailable</c> + 502.</summary>
     public const string Reason = "exchange gateway unavailable (mode=Unavailable)";

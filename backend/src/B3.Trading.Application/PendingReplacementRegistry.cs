@@ -94,6 +94,26 @@ public sealed class PendingReplacementRegistry
     private long _lastSweepInspectedCount;
 
     /// <summary>
+    /// Atomically claims an original order before the modify pipeline allocates
+    /// a ClOrdID or runs risk/margin work. The zero value is an internal
+    /// transient marker only; platform ClOrdIDs can never be zero.
+    /// </summary>
+    public bool TryClaimOriginal(ulong originalClOrdId)
+    {
+        if (originalClOrdId == 0)
+            throw new ArgumentOutOfRangeException(nameof(originalClOrdId));
+        return _byOriginalClOrdId.TryAdd(originalClOrdId, 0);
+    }
+
+    /// <summary>
+    /// Releases a transient claim that never became a WAL-backed replacement.
+    /// Does not remove a registered in-flight intent.
+    /// </summary>
+    public bool ReleaseOriginalClaim(ulong originalClOrdId) =>
+        ((ICollection<KeyValuePair<ulong, ulong>>)_byOriginalClOrdId)
+            .Remove(new KeyValuePair<ulong, ulong>(originalClOrdId, 0));
+
+    /// <summary>
     /// Records an in-flight modify. Returns <c>false</c> when an intent
     /// for the same <paramref name="intent"/>.<see cref="OrderReplacementIntent.NewClOrdId"/>
     /// is already tracked OR when there's already an in-flight modify
@@ -125,6 +145,23 @@ public sealed class PendingReplacementRegistry
             return false;
         }
         return true;
+    }
+
+    /// <summary>
+    /// Converts a transient original-order claim into a durable in-flight
+    /// replacement. Called only from the OrderReplaceRequestedEvent apply
+    /// callback, after the WAL append has succeeded.
+    /// </summary>
+    public bool TryAddClaimed(OrderReplacementIntent intent, DateTimeOffset createdAt = default)
+    {
+        ArgumentNullException.ThrowIfNull(intent);
+        var entry = new Entry(intent, createdAt);
+        if (!_byNewClOrdId.TryAdd(intent.NewClOrdId, entry))
+            return false;
+        if (_byOriginalClOrdId.TryUpdate(intent.OriginalClOrdId, intent.NewClOrdId, 0))
+            return true;
+        _byNewClOrdId.TryRemove(intent.NewClOrdId, out _);
+        return false;
     }
 
     /// <summary>
@@ -196,6 +233,10 @@ public sealed class PendingReplacementRegistry
     /// </summary>
     public bool IsOriginalInFlight(ulong originalClOrdId) =>
         _byOriginalClOrdId.ContainsKey(originalClOrdId);
+
+    public bool IsAmbiguous(ulong newClOrdId) =>
+        _byNewClOrdId.TryGetValue(newClOrdId, out var entry)
+        && entry.AmbiguousMarginHeld;
 
     /// <summary>
     /// Pass-4 review (#299) P1. Mark the entry under

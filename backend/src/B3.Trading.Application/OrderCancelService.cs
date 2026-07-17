@@ -30,6 +30,9 @@ public sealed class OrderCancelService
     private readonly IExchangeGateway _gateway;
     private readonly EventDispatcher _dispatcher;
     private readonly IUserBotOrderMappingRegistry? _botMappings;
+    private readonly PendingCancelRegistry _pendingCancels;
+    private readonly Lifecycle.IDrainController? _reconciliationDrain;
+    private readonly ReconciliationResolutionWriter _resolutionWriter;
     private readonly ILogger<OrderCancelService> _logger;
 
     public OrderCancelService(
@@ -39,7 +42,10 @@ public sealed class OrderCancelService
         IExchangeGateway gateway,
         EventDispatcher dispatcher,
         ILogger<OrderCancelService> logger,
-        IUserBotOrderMappingRegistry? botMappings = null)
+        IUserBotOrderMappingRegistry? botMappings = null,
+        PendingCancelRegistry? pendingCancels = null,
+        Lifecycle.IDrainController? reconciliationDrain = null,
+        ReconciliationResolutionWriter? resolutionWriter = null)
     {
         _clOrdIds = clOrdIds;
         _ownership = ownership;
@@ -47,6 +53,13 @@ public sealed class OrderCancelService
         _gateway = gateway;
         _dispatcher = dispatcher;
         _botMappings = botMappings;
+        _pendingCancels = pendingCancels ?? new PendingCancelRegistry();
+        _reconciliationDrain = reconciliationDrain;
+        _resolutionWriter = resolutionWriter ?? new ReconciliationResolutionWriter(
+            new InMemoryReconciliationMarkerStore(),
+            dispatcher,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<
+                ReconciliationResolutionWriter>.Instance);
         _logger = logger;
     }
 
@@ -54,8 +67,9 @@ public sealed class OrderCancelService
     /// Cancels the order owned by <paramref name="owner"/> with id
     /// <paramref name="originalClOrdId"/>. Returns the platform-allocated
     /// cancel-side internal ClOrdID on accept, or a discriminated failure
-    /// otherwise. The caller (REST endpoint or FIXP listener) translates
-    /// the result into its own transport response.
+    /// otherwise. A retry while the cancel is pending returns the same
+    /// ClOrdID without another allocation or gateway call. The caller (REST
+    /// endpoint or FIXP listener) translates the result into its transport.
     /// </summary>
     public async Task<OrderCancelResult> CancelAsync(
         EndClientId owner,
@@ -66,6 +80,10 @@ public sealed class OrderCancelService
     {
         ArgumentNullException.ThrowIfNull(owner);
 
+        if (_reconciliationDrain?.IsDraining == true)
+            return OrderCancelResult.ReconciliationRequired(
+                0, "service draining for reconciliation", null);
+
         if (!_book.TryGet(originalClOrdId, out var order) || order is null)
             return OrderCancelResult.NotFound;
         if (order.Owner != owner)
@@ -75,8 +93,17 @@ public sealed class OrderCancelService
         // not leaked across the firm boundary.
         if (firmId is not null && !string.Equals(order.FirmId, firmId, StringComparison.Ordinal))
             return OrderCancelResult.NotFound;
+        if (order.Status is OrderStatus.Filled or OrderStatus.Cancelled
+            or OrderStatus.Rejected or OrderStatus.Replaced)
+        {
+            return OrderCancelResult.Conflict("order is terminal");
+        }
         if (order.IsStale)
             return OrderCancelResult.Stale(order.StaleReason ?? "stale");
+
+        var claim = _pendingCancels.Claim(originalClOrdId);
+        if (!claim.IsAcquired)
+            return OrderCancelResult.Accepted(claim.ExistingCancelClOrdId);
 
         var cancelClOrdId = _clOrdIds.Generate(owner);
         BotOrderMapping? botMapping = botOrigin is { } o
@@ -85,7 +112,7 @@ public sealed class OrderCancelService
 
         try
         {
-            _dispatcher.Dispatch(
+            var dispatched = _dispatcher.DispatchIf(
                 new OrderCancelRequestedEvent
                 {
                     CancelClOrdId = cancelClOrdId,
@@ -93,10 +120,15 @@ public sealed class OrderCancelService
                     OwnerEndClientId = owner.Value,
                     BotMapping = botMapping,
                 },
+                () => order.Status is not (OrderStatus.Filled or OrderStatus.Cancelled
+                    or OrderStatus.Rejected or OrderStatus.Replaced),
                 () =>
                 {
                     // RFC §4.6 step 3 — synchronous in-memory mutations
                     // only. Three things in lockstep with the WAL append:
+                    if (!_pendingCancels.CompleteClaim(originalClOrdId, cancelClOrdId))
+                        throw new InvalidOperationException(
+                            $"Original ClOrdID {originalClOrdId} was not exclusively claimed for cancel.");
                     _ownership.RegisterCancelLink(cancelClOrdId, originalClOrdId);
                     // Watermark advance so a post-restart Generate cannot
                     // re-allocate this cancel-side id (#157 invariant for
@@ -111,12 +143,23 @@ public sealed class OrderCancelService
                             externalCancelClOrdId: botMapping.ExternalClOrdId);
                     }
                 });
+            if (!dispatched.Applied)
+            {
+                _pendingCancels.ReleaseClaim(originalClOrdId);
+                return OrderCancelResult.Conflict("order is terminal");
+            }
         }
         catch (WalBackpressureException ex)
         {
+            _pendingCancels.ReleaseClaim(originalClOrdId);
             MetricsRegistry.WalBackpressure.Add(1,
                 new KeyValuePair<string, object?>("call_site", "orders.cancel"));
             return OrderCancelResult.WalBackpressure(ex.Message);
+        }
+        catch
+        {
+            _pendingCancels.ReleaseClaim(originalClOrdId);
+            throw;
         }
 
         try
@@ -125,6 +168,50 @@ public sealed class OrderCancelService
             // — Dispatch has already returned and the WAL record is
             // enqueued + the in-memory state is consistent.
             await _gateway.CancelAsync(order, cancelClOrdId, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (
+            ex is ExchangeGatewayPreSendException || _gateway is IExchangeGatewayPreSendOnly)
+        {
+            _logger.LogError(ex,
+                "Gateway proved cancel was not sent for {ClOrdId} (orig {Orig}); terminalising cancel intent.",
+                cancelClOrdId, originalClOrdId);
+            var marker = new ReconciliationMarker(
+                ReconciliationMarkerKind.CancelPreSend,
+                originalClOrdId,
+                cancelClOrdId,
+                owner.Value);
+            ReconciliationResolutionResult resolution;
+            try
+            {
+                resolution = await _resolutionWriter.ResolveAsync(
+                    marker,
+                    new OrderCancelPreSendFailedEvent
+                    {
+                        CancelClOrdId = cancelClOrdId,
+                        OriginalClOrdId = originalClOrdId,
+                        OwnerEndClientId = owner.Value,
+                        Reason = "gateway_unavailable",
+                    },
+                    () => ResolvePreSendFailure(cancelClOrdId))
+                    .ConfigureAwait(false);
+            }
+            catch (Exception resolutionEx)
+            {
+                return FailResolutionForReconciliation(
+                    cancelClOrdId, "pre_send_cancel_resolution_not_durable", resolutionEx);
+            }
+            if (!resolution.Durable)
+            {
+                if (resolution.MarkerDurable)
+                {
+                    _dispatcher.RunExclusive(() =>
+                        ResolvePreSendFailure(cancelClOrdId));
+                }
+                return FailResolutionForReconciliation(
+                    cancelClOrdId, "pre_send_cancel_resolution_not_durable",
+                    resolution.Failure!);
+            }
+            return OrderCancelResult.GatewayFailed(cancelClOrdId, ex);
         }
         catch (Exception ex)
         {
@@ -142,6 +229,31 @@ public sealed class OrderCancelService
             new KeyValuePair<string, object?>("firmId", order.FirmId));
         return OrderCancelResult.Accepted(cancelClOrdId);
     }
+
+    private void ResolvePreSendFailure(ulong cancelClOrdId)
+    {
+        _pendingCancels.TryConsumeByCancel(cancelClOrdId, out _);
+        _ownership.RemoveCancelLink(cancelClOrdId);
+        _botMappings?.ReapCancel(cancelClOrdId);
+    }
+
+    private OrderCancelResult FailResolutionForReconciliation(
+        ulong cancelClOrdId,
+        string reason,
+        Exception exception)
+    {
+        if (exception is WalBackpressureException)
+        {
+            MetricsRegistry.WalBackpressure.Add(1,
+                new KeyValuePair<string, object?>("call_site", "orders.cancel.resolution"));
+        }
+        _reconciliationDrain?.BeginDrain("wal_cancel_resolution_reconciliation_required");
+        _logger.LogCritical(exception,
+            "Cancel resolution {Reason} for ClOrdID {CancelClOrdId}; ingress is draining and operator reconciliation is required.",
+            reason, cancelClOrdId);
+        return OrderCancelResult.ReconciliationRequired(cancelClOrdId, reason, exception);
+    }
+
 }
 
 /// <summary>
@@ -170,10 +282,15 @@ public sealed class OrderCancelResult
         new(OrderCancelResultKind.NotFound, 0, null, null);
     public static OrderCancelResult Stale(string reason) =>
         new(OrderCancelResultKind.Stale, 0, reason, null);
+    public static OrderCancelResult Conflict(string reason) =>
+        new(OrderCancelResultKind.Conflict, 0, reason, null);
     public static OrderCancelResult WalBackpressure(string detail) =>
         new(OrderCancelResultKind.WalBackpressure, 0, detail, null);
     public static OrderCancelResult GatewayFailed(ulong cancelClOrdId, Exception ex) =>
         new(OrderCancelResultKind.GatewayFailed, cancelClOrdId, "gateway_unavailable", ex);
+    public static OrderCancelResult ReconciliationRequired(
+        ulong cancelClOrdId, string reason, Exception? ex) =>
+        new(OrderCancelResultKind.ReconciliationRequired, cancelClOrdId, reason, ex);
 }
 
 public enum OrderCancelResultKind
@@ -181,6 +298,8 @@ public enum OrderCancelResultKind
     Accepted,
     NotFound,
     Stale,
+    Conflict,
     WalBackpressure,
     GatewayFailed,
+    ReconciliationRequired,
 }

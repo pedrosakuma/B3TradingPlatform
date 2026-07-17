@@ -133,6 +133,8 @@ public sealed class AlgoEngine : BackgroundService
     private readonly RiskPipeline? _risk;
     private readonly IReplaceMarginCoordinator? _replaceMargin;
     private readonly CompositeRiskAccountant? _accountant;
+    private readonly Lifecycle.IDrainController? _reconciliationDrain;
+    private readonly ReconciliationResolutionWriter _resolutionWriter;
 
     // Per-parent runtime state. Owned by the consumer task; the
     // ConcurrentDictionary is only used because TryAdd/TryGetValue are
@@ -162,7 +164,9 @@ public sealed class AlgoEngine : BackgroundService
         RiskPipeline? risk = null,
         IReplaceMarginCoordinator? replaceMargin = null,
         SymbolDirectory? symbols = null,
-        CompositeRiskAccountant? accountant = null)
+        CompositeRiskAccountant? accountant = null,
+        Lifecycle.IDrainController? reconciliationDrain = null,
+        ReconciliationResolutionWriter? resolutionWriter = null)
     {
         _queue = queue;
         _algos = algos;
@@ -186,6 +190,12 @@ public sealed class AlgoEngine : BackgroundService
         _replaceMargin = replaceMargin;
         _symbols = symbols;
         _accountant = accountant;
+        _reconciliationDrain = reconciliationDrain;
+        _resolutionWriter = resolutionWriter ?? new ReconciliationResolutionWriter(
+            new InMemoryReconciliationMarkerStore(),
+            dispatcher,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<
+                ReconciliationResolutionWriter>.Instance);
     }
 
     /// <summary>
@@ -1223,7 +1233,7 @@ public sealed class AlgoEngine : BackgroundService
             return;
         }
 
-        await TryReplaceChildAsync(algo, rt, child, newQty, newPrice, sig.Reason, ct).ConfigureAwait(false);
+        await TryReplaceChildAsync(algo, child, newQty, newPrice, sig.Reason, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1248,11 +1258,17 @@ public sealed class AlgoEngine : BackgroundService
     /// only the <c>algo.modify_rejected_total</c> counter with
     /// reason=<c>risk_rejected</c> / <c>margin_rejected</c>.
     /// </summary>
-    private async Task<bool> TryReplaceChildAsync(
-        Algo algo, AlgoParentRuntime rt, Order child,
+    internal async Task<bool> TryReplaceChildAsync(
+        Algo algo, Order child,
         long newQuantity, decimal? newPrice, string reason, CancellationToken ct)
     {
         var algoTypeTag = algo.Type.ToString().ToLowerInvariant();
+        if (_reconciliationDrain?.IsDraining == true)
+        {
+            MetricsRegistry.DrainRejections.Add(1,
+                new KeyValuePair<string, object?>("route", "algo.modify"));
+            return false;
+        }
         if (_replacements is null)
         {
             // Defensive: the test composition that omits the registry
@@ -1265,7 +1281,23 @@ public sealed class AlgoEngine : BackgroundService
             return false;
         }
 
-        if (_replacements.IsOriginalInFlight(child.ClOrdId))
+        var effectivePrice = newPrice ?? child.Price;
+        try
+        {
+            Order.ValidatePriceForType(child.Type, effectivePrice);
+        }
+        catch (ArgumentException ex)
+        {
+            MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
+                new KeyValuePair<string, object?>("algoType", algoTypeTag),
+                new KeyValuePair<string, object?>("reason", "invalid_price"));
+            _logger.LogInformation(ex,
+                "AlgoEngine modify rejected invalid price/type for algo {Firm}/{AlgoId} child {Child}.",
+                algo.FirmId, algo.AlgoId, child.ClOrdId);
+            return false;
+        }
+
+        if (!_replacements.TryClaimOriginal(child.ClOrdId))
         {
             MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
                 new KeyValuePair<string, object?>("algoType", algoTypeTag),
@@ -1273,6 +1305,28 @@ public sealed class AlgoEngine : BackgroundService
             return false;
         }
 
+        try
+        {
+            return await TryReplaceClaimedChildAsync(
+                algo, child, newQuantity, effectivePrice, reason, algoTypeTag, ct)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            _replacements.ReleaseOriginalClaim(child.ClOrdId);
+        }
+    }
+
+    private async Task<bool> TryReplaceClaimedChildAsync(
+        Algo algo,
+        Order child,
+        long newQuantity,
+        decimal? newPrice,
+        string reason,
+        string algoTypeTag,
+        CancellationToken ct)
+    {
+        var replacements = _replacements!;
         var newClOrdId = _clOrdIds.Generate(child.Owner);
 
         // Pass-3 review (#299) P1. Run the same pre-trade gates the
@@ -1365,7 +1419,7 @@ public sealed class AlgoEngine : BackgroundService
         var atUtc = _clock.GetUtcNow();
         try
         {
-            _dispatcher.Dispatch(
+            var dispatched = _dispatcher.DispatchIf(
                 new OrderReplaceRequestedEvent
                 {
                     OriginalClOrdId = child.ClOrdId,
@@ -1381,14 +1435,25 @@ public sealed class AlgoEngine : BackgroundService
                     ParentAlgoId = child.ParentAlgoId,
                     AlgoSliceSeq = child.AlgoSliceSeq,
                 },
+                () => child.Status is not (OrderStatus.Filled or OrderStatus.Cancelled
+                    or OrderStatus.Rejected or OrderStatus.Replaced)
+                    && newQuantity > child.CumulativeQuantity,
                 () =>
                 {
                     // Pass-4 review (#299) P1. Stamp the registry entry
                     // with the current clock so the AlgoScheduler TTL
                     // sweep can bound any ambiguous-send leak below.
-                    _replacements.TryAdd(intent, _clock.GetUtcNow());
+                    if (!replacements.TryAddClaimed(intent, _clock.GetUtcNow()))
+                        throw new InvalidOperationException(
+                            $"Original ClOrdID {child.ClOrdId} was not exclusively claimed.");
                     _ownership.RegisterReplaceLink(child.ClOrdId, newClOrdId);
                 });
+            if (!dispatched.Applied)
+            {
+                if (marginPrepared)
+                    _replaceMargin!.AbortReplace(newClOrdId);
+                return false;
+            }
         }
         catch (WalBackpressureException)
         {
@@ -1414,6 +1479,67 @@ public sealed class AlgoEngine : BackgroundService
                 child, newClOrdId, newQuantity, newPrice,
                 requestedTimeInForce: null, requestedStopPrice: null, requestedGoodTillDate: null,
                 ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (
+            ex is ExchangeGatewayPreSendException || _gateway is IExchangeGatewayPreSendOnly)
+        {
+            MetricsRegistry.OrdersGatewayFailed.Add(1,
+                new KeyValuePair<string, object?>("path", "algo.modify"),
+                new KeyValuePair<string, object?>("firmId", algo.FirmId));
+            MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
+                new KeyValuePair<string, object?>("algoType", algoTypeTag),
+                new KeyValuePair<string, object?>("reason", "gateway_pre_send"));
+            _logger.LogWarning(ex,
+                "AlgoEngine modify was proven unsent for algo {Firm}/{AlgoId} child {Child}; terminalising intent.",
+                algo.FirmId, algo.AlgoId, child.ClOrdId);
+            var marker = new ReconciliationMarker(
+                ReconciliationMarkerKind.ReplacePreSend,
+                child.ClOrdId,
+                newClOrdId,
+                child.Owner.Value);
+            ReconciliationResolutionResult resolution;
+            try
+            {
+                resolution = await _resolutionWriter.ResolveAsync(
+                    marker,
+                    new OrderReplacePreSendFailedEvent
+                    {
+                        OriginalClOrdId = child.ClOrdId,
+                        NewClOrdId = newClOrdId,
+                        EndClientId = child.Owner.Value,
+                        Reason = "gateway_unavailable",
+                    },
+                    () =>
+                    {
+                        replacements.TryConsume(newClOrdId, out _);
+                        _ownership.RemoveCancelLink(newClOrdId);
+                        if (marginPrepared)
+                            _replaceMargin!.AbortReplace(newClOrdId);
+                    }).ConfigureAwait(false);
+            }
+            catch (Exception resolutionEx)
+            {
+                BeginReplaceResolutionDrain(
+                    newClOrdId, "pre_send_resolution_not_durable", resolutionEx);
+                return false;
+            }
+            if (!resolution.Durable)
+            {
+                if (resolution.MarkerDurable)
+                {
+                    _dispatcher.RunExclusive(() =>
+                    {
+                        replacements.TryConsume(newClOrdId, out _);
+                        _ownership.RemoveCancelLink(newClOrdId);
+                        if (marginPrepared)
+                            _replaceMargin!.AbortReplace(newClOrdId);
+                    });
+                }
+                BeginReplaceResolutionDrain(
+                    newClOrdId, "pre_send_resolution_not_durable",
+                    resolution.Failure!);
+            }
+            return false;
         }
         catch (Exception ex)
         {
@@ -1465,43 +1591,48 @@ public sealed class AlgoEngine : BackgroundService
             // new TryConsumeByOriginal arm which also releases the
             // reservation. The cash invariant is preserved either
             // way.
-            if (marginPrepared)
+            var heldAt = _clock.GetUtcNow();
+            var marker = new ReconciliationMarker(
+                ReconciliationMarkerKind.ReplaceAmbiguous,
+                child.ClOrdId,
+                newClOrdId,
+                child.Owner.Value,
+                newRemainingNotional,
+                heldAt);
+            ReconciliationResolutionResult resolution;
+            try
             {
-                // Pass-5 review (#299) P1. Persist the ambiguous-held
-                // state via a dedicated WAL event so a crash between
-                // here and the next snapshot cannot lose the flag.
-                // Replay re-calls PrepareReplaceAsync to re-establish
-                // the held reservation and re-marks the registry entry
-                // with the same HeldAtUtc stamp the pre-crash sweep
-                // would have aged from. On success the in-memory mark
-                // also runs (inside the apply callback) so steady-state
-                // behaviour is unchanged. WAL backpressure here is
-                // best-effort logged — if the event cannot be appended
-                // we fall back to the pre-pass-5 in-memory-only mark so
-                // the live TTL sweep still bounds the leak.
-                var heldAt = _clock.GetUtcNow();
-                try
+                resolution = await _resolutionWriter.ResolveAsync(
+                    marker,
+                    new OrderReplaceAmbiguousMarginHeldEvent
+                    {
+                        NewClOrdId = newClOrdId,
+                        OriginalClOrdId = child.ClOrdId,
+                        EndClientId = child.Owner.Value,
+                        NewRemainingNotional = newRemainingNotional,
+                        HeldAtUtc = heldAt,
+                    },
+                    () => replacements.MarkAmbiguousMarginHeld(
+                        newClOrdId, heldAt, newRemainingNotional))
+                    .ConfigureAwait(false);
+            }
+            catch (Exception resolutionEx)
+            {
+                BeginReplaceResolutionDrain(
+                    newClOrdId, "ambiguous_resolution_not_durable", resolutionEx);
+                return false;
+            }
+            if (!resolution.Durable)
+            {
+                if (resolution.MarkerDurable)
                 {
-                    _dispatcher.Dispatch(
-                        new OrderReplaceAmbiguousMarginHeldEvent
-                        {
-                            NewClOrdId = newClOrdId,
-                            OriginalClOrdId = child.ClOrdId,
-                            EndClientId = child.Owner.Value,
-                            NewRemainingNotional = newRemainingNotional,
-                            HeldAtUtc = heldAt,
-                        },
-                        () => _replacements.MarkAmbiguousMarginHeld(newClOrdId, heldAt, newRemainingNotional));
+                    _dispatcher.RunExclusive(() =>
+                        replacements.MarkAmbiguousMarginHeld(
+                            newClOrdId, heldAt, newRemainingNotional));
                 }
-                catch (WalBackpressureException walEx)
-                {
-                    MetricsRegistry.WalBackpressure.Add(1,
-                        new KeyValuePair<string, object?>("call_site", "algo.modify.ambiguous-held"));
-                    _logger.LogWarning(walEx,
-                        "AlgoEngine could not persist ambiguous-margin-held event for new ClOrdID {NewClOrdId}; live in-memory mark still applied (post-restart recovery would not re-establish this reservation).",
-                        newClOrdId);
-                    _replacements.MarkAmbiguousMarginHeld(newClOrdId, heldAt, newRemainingNotional);
-                }
+                BeginReplaceResolutionDrain(
+                    newClOrdId, "ambiguous_resolution_not_durable",
+                    resolution.Failure!);
             }
             return false;
         }
@@ -1556,6 +1687,22 @@ public sealed class AlgoEngine : BackgroundService
         // child's CumulativeQuantity is the venue's authoritative carry-
         // over baseline.
         return true;
+    }
+
+    private void BeginReplaceResolutionDrain(
+        ulong newClOrdId,
+        string reason,
+        Exception exception)
+    {
+        if (exception is WalBackpressureException)
+        {
+            MetricsRegistry.WalBackpressure.Add(1,
+                new KeyValuePair<string, object?>("call_site", "algo.modify.resolution"));
+        }
+        _reconciliationDrain?.BeginDrain("wal_replace_resolution_reconciliation_required");
+        _logger.LogCritical(exception,
+            "Algo replace resolution {Reason} for new ClOrdID {NewClOrdId}; ingress is draining and operator reconciliation is required.",
+            reason, newClOrdId);
     }
 
     private async Task OnCancelRequestedAsync(Algo algo, AlgoParentRuntime rt, CancellationToken ct)
@@ -2401,7 +2548,7 @@ public sealed class AlgoEngine : BackgroundService
         try
         {
             replaced = await TryReplaceChildAsync(
-                algo, rt, child, child.Quantity, target.Value,
+                algo, child, child.Quantity, target.Value,
                 reason: "AlgoInternal", ct).ConfigureAwait(false);
         }
         catch (Exception ex)

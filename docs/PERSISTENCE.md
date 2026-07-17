@@ -81,8 +81,56 @@ during `ReadFromAsync(sinceSeqExclusive)`.
 - cash, fees, realised P&L, sub-accounts and audit events.
 
 Cancel commands are persisted as `OrderCancelRequestedEvent` so ownership
-links, the ClOrdID watermark and bot mappings survive restart; the eventual
-cancel ER remains the authoritative terminal order transition.
+links, the ClOrdID watermark, bot mappings and the one-per-original pending
+cancel registry survive restart. A retry observes the existing cancel ClOrdID
+and does not allocate or send another mutation. The eventual cancel/reject ER
+remains the authoritative resolution.
+
+Replace intents distinguish two gateway failure classes. A proven pre-send
+failure appends `OrderReplacePreSendFailedEvent`, terminally removing the
+pending intent so replay cannot resurrect it. An unclassified exception is
+recorded as `OrderReplaceAmbiguousMarginHeldEvent`; the intent and ownership
+link remain available for a late venue ER. This is deliberately narrower than
+Wave 2 / #628: this slice does not blindly resend pending cancel/replace
+intents after restart. Durable attempted/sent substates, session-version proof
+and automated reconciliation remain owned by that RFC.
+
+Before appending a cancel/replace resolution, the platform fsyncs an
+out-of-band marker under `<data>/<firm>/reconciliation/`. WAL backpressure is
+retried and the resolution is flushed before the marker is removed. If the WAL
+remains saturated/faulted, the marker survives process crash; startup replay
+then applies the safest known posture and begins drain instead of treating the
+request as an ordinary pending mutation. Proven-unsent intents are removed
+(and replace margin aborted); ambiguous replaces retain margin and are
+TTL-marked. Operator reconciliation is required before ingress can reopen.
+Marker publication fsyncs the marker file, renames it into place, then fsyncs
+the reconciliation directory; removal deletes the file and fsyncs the
+directory again. Unsupported directory-fsync platforms/filesystems fail
+explicitly rather than acknowledging false durability.
+The staging `<id>.json.writing` entry is itself directory-fsynced before
+rename and is a valid recovery artifact. Startup validates both final and
+staging files, deterministically deduplicates equal pairs, and drains on
+partial, conflicting, or unexpected artifacts instead of skipping them.
+If sidecar publication fails before that first directory fsync, the engine
+attempts the WAL resolution directly. When both channels fail, it retains the
+original unresolved pending intent in memory and drains; cleanup/TTL marking
+is applied only when either the WAL resolution or sidecar is known durable.
+After every cold snapshot+WAL+sidecar replay, any remaining pending cancel or
+replace is treated as lacking current-process send proof. Recovery preserves
+its ClOrdID/ownership state but begins drain before readiness opens; Wave 1
+never converts such intents into idempotent success or blind resend. Venue or
+operator reconciliation remains the #628 boundary.
+On first use, each newly-created data/firm/reconciliation directory is followed
+by an fsync of its parent before the store becomes available, so the
+reconciliation directory entry itself also survives power loss.
+
+Proven pre-send cancel failures follow the same model. A durable
+`OrderCancelPreSendFailedEvent` consumes the pending cancel, removes its
+cancel-side ownership/bot mappings, and leaves the original order working so a
+retry allocates a fresh ClOrdID and actually reattempts the venue mutation. If
+that resolution cannot append/flush, the sidecar remains, live state is cleaned
+up, ingress drains, and the caller receives `reconciliation_required`;
+ordinary retries remain blocked until operator reconciliation.
 
 WebSocket fan-out frames are **not** persisted — they are projections
 recomputable from the WAL.

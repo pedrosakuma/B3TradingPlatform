@@ -122,6 +122,7 @@ public static class TradingRiskServiceCollectionExtensions
         // disabled the coordinator's Commit/Abort are harmless no-ops on an
         // empty ledger.
         services.AddSingleton<PendingReplacementRegistry>();
+        services.AddSingleton<PendingCancelRegistry>();
         services.AddSingleton<IReplaceMarginCoordinator>(sp =>
             sp.GetRequiredService<ReserveOnSubmitMarginProvider>());
         services.AddSingleton<IRiskCheck, KillSwitchCheck>();

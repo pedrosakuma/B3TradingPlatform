@@ -35,6 +35,8 @@ public sealed class OrderModifyService
     private readonly PendingReplacementRegistry _replacements;
     private readonly EventDispatcher _dispatcher;
     private readonly Lifecycle.IDrainGate _drain;
+    private readonly Lifecycle.IDrainController? _reconciliationDrain;
+    private readonly ReconciliationResolutionWriter _resolutionWriter;
     private readonly Routing.IRoutingInstructionResolver? _routingResolver;
     private readonly CompositeRiskAccountant? _accountant;
     private readonly ILogger<OrderModifyService> _logger;
@@ -52,7 +54,9 @@ public sealed class OrderModifyService
         Lifecycle.IDrainGate drain,
         ILogger<OrderModifyService> logger,
         Routing.IRoutingInstructionResolver? routingInstructionResolver = null,
-        CompositeRiskAccountant? accountant = null)
+        CompositeRiskAccountant? accountant = null,
+        Lifecycle.IDrainController? reconciliationDrain = null,
+        ReconciliationResolutionWriter? resolutionWriter = null)
     {
         _clOrdIds = clOrdIds;
         _ownership = ownership;
@@ -64,6 +68,12 @@ public sealed class OrderModifyService
         _replacements = replacements;
         _dispatcher = dispatcher;
         _drain = drain;
+        _reconciliationDrain = reconciliationDrain ?? drain as Lifecycle.IDrainController;
+        _resolutionWriter = resolutionWriter ?? new ReconciliationResolutionWriter(
+            new InMemoryReconciliationMarkerStore(),
+            dispatcher,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<
+                ReconciliationResolutionWriter>.Instance);
         _routingResolver = routingInstructionResolver;
         _accountant = accountant;
         _logger = logger;
@@ -88,12 +98,10 @@ public sealed class OrderModifyService
     ///   <item>Persist the WAL event AND mutate the registry +
     ///     ownership map in a single dispatch — both happen or
     ///     neither does.</item>
-    ///   <item>Dispatch to the gateway. On exception, abort margin +
-    ///     remove the in-flight intent and synthesize a rejection so
-    ///     the trader sees the failure in the blotter; the WAL
-    ///     event stays (replay tolerates "intent without resolution"
-    ///     the same way a synthetic-rejected ER terminates the orig
-    ///     today).</item>
+    ///   <item>Dispatch to the gateway. A proven pre-send failure is
+    ///     terminalised by a second WAL event before returning failure.
+    ///     An unclassified exception remains a durable ambiguous intent
+    ///     for late-ER reconciliation.</item>
     /// </list>
     /// </summary>
     public async Task<OrderModifyResult> ModifyAsync(OrderModifyRequest req, CancellationToken ct)
@@ -165,11 +173,36 @@ public sealed class OrderModifyService
                 $"new quantity ({req.NewQuantity}) must exceed already-filled quantity ({orig.CumulativeQuantity})");
         }
 
-        if (_replacements.IsOriginalInFlight(req.OriginalClOrdId))
+        try
+        {
+            Order.ValidatePriceForType(orig.Type, req.NewPrice ?? orig.Price);
+        }
+        catch (ArgumentException ex)
+        {
+            return OrderModifyResult.BadRequest(ex.Message);
+        }
+
+        if (!_replacements.TryClaimOriginal(req.OriginalClOrdId))
         {
             return OrderModifyResult.Conflict("a modify for this order is already in flight");
         }
 
+        try
+        {
+            return await ModifyClaimedAsync(req, orig, req.NewPrice ?? orig.Price, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _replacements.ReleaseOriginalClaim(req.OriginalClOrdId);
+        }
+    }
+
+    private async Task<OrderModifyResult> ModifyClaimedAsync(
+        OrderModifyRequest req,
+        Order orig,
+        decimal? effectivePrice,
+        CancellationToken ct)
+    {
         var newClOrdId = _clOrdIds.Generate(req.Owner);
         // #108 — DuplicateClOrdID defensive guard. The new ID must
         // be unique against BOTH the working book AND in-flight
@@ -228,7 +261,7 @@ public sealed class OrderModifyService
         // check no-ops on null and the sub-account gate is bypassed.
         var riskCtx = new RiskContext(
             req.Owner, orig.FirmId, orig.Symbol, orig.Side, orig.Type,
-            req.NewQuantity, req.NewPrice,
+            req.NewQuantity, effectivePrice,
             ReplaceOriginalClOrdId: req.OriginalClOrdId,
             EffectiveLeavesQuantity: effectiveLeaves,
             TimeInForce: effTif,
@@ -268,7 +301,7 @@ public sealed class OrderModifyService
         // coordinator no-ops on sells / markets / non-positive notionals.
         var newRemainingNotional = (orig.Side == OrderSide.Buy
                                     && orig.Type.IsMarginBearing()
-                                    && req.NewPrice is { } px)
+                                    && effectivePrice is { } px)
             ? px * effectiveLeaves
             : 0m;
         var marginDecision = await _replaceMargin.PrepareReplaceAsync(
@@ -300,7 +333,7 @@ public sealed class OrderModifyService
             Side: orig.Side,
             Type: orig.Type,
             NewQuantity: req.NewQuantity,
-            NewPrice: req.NewPrice,
+            NewPrice: effectivePrice,
             FirmId: orig.FirmId,
             ParentAlgoId: orig.ParentAlgoId,
             AlgoSliceSeq: orig.AlgoSliceSeq,
@@ -310,7 +343,7 @@ public sealed class OrderModifyService
 
         try
         {
-            _dispatcher.Dispatch(
+            var dispatched = _dispatcher.DispatchIf(
                 new OrderReplaceRequestedEvent
                 {
                     OriginalClOrdId = req.OriginalClOrdId,
@@ -322,18 +355,28 @@ public sealed class OrderModifyService
                     Side = orig.Side.ToString(),
                     Type = orig.Type.ToString(),
                     NewQuantity = req.NewQuantity,
-                    NewPrice = req.NewPrice,
+                    NewPrice = effectivePrice,
                     ParentAlgoId = orig.ParentAlgoId,
                     AlgoSliceSeq = orig.AlgoSliceSeq,
                     RequestedTimeInForce = req.NewTimeInForce?.ToString(),
                     RequestedStopPrice = req.NewStopPrice,
                     RequestedGoodTillDate = req.NewGoodTillDate,
                 },
+                () => orig.Status is not (OrderStatus.Filled or OrderStatus.Cancelled
+                    or OrderStatus.Rejected or OrderStatus.Replaced)
+                    && req.NewQuantity > orig.CumulativeQuantity,
                 () =>
                 {
-                    _replacements.TryAdd(intent);
+                    if (!_replacements.TryAddClaimed(intent))
+                        throw new InvalidOperationException(
+                            $"Original ClOrdID {req.OriginalClOrdId} was not exclusively claimed.");
                     _ownership.RegisterReplaceLink(req.OriginalClOrdId, newClOrdId);
                 });
+            if (!dispatched.Applied)
+            {
+                _replaceMargin.AbortReplace(newClOrdId);
+                return OrderModifyResult.Conflict("order became terminal or changed while modify was processing");
+            }
         }
         catch (WalBackpressureException ex)
         {
@@ -351,33 +394,124 @@ public sealed class OrderModifyService
         try
         {
             await _gateway.CancelReplaceAsync(
-                orig, newClOrdId, req.NewQuantity, req.NewPrice,
+                orig, newClOrdId, req.NewQuantity, effectivePrice,
                 req.NewTimeInForce, req.NewStopPrice, req.NewGoodTillDate, ct);
+        }
+        catch (Exception ex) when (
+            ex is ExchangeGatewayPreSendException || _gateway is IExchangeGatewayPreSendOnly)
+        {
+            MetricsRegistry.OrdersGatewayFailed.Add(1,
+                new KeyValuePair<string, object?>("path", "modify"),
+                new KeyValuePair<string, object?>("firmId", orig.FirmId));
+            _logger.LogError(ex,
+                "Gateway proved cancel-replace was not sent for orig {OrigClOrdId} new {NewClOrdId}; terminalising.",
+                req.OriginalClOrdId, newClOrdId);
+            var marker = new ReconciliationMarker(
+                ReconciliationMarkerKind.ReplacePreSend,
+                req.OriginalClOrdId,
+                newClOrdId,
+                req.Owner.Value);
+            ReconciliationResolutionResult resolution;
+            try
+            {
+                resolution = await _resolutionWriter.ResolveAsync(
+                    marker,
+                    new OrderReplacePreSendFailedEvent
+                    {
+                        OriginalClOrdId = req.OriginalClOrdId,
+                        NewClOrdId = newClOrdId,
+                        EndClientId = req.Owner.Value,
+                        Reason = "gateway_unavailable",
+                    },
+                    () =>
+                    {
+                        _replacements.TryConsume(newClOrdId, out _);
+                        _ownership.RemoveCancelLink(newClOrdId);
+                        _replaceMargin.AbortReplace(newClOrdId);
+                        _sink.Publish(new ExecutionEvent(
+                            req.Owner, newClOrdId, orig.Symbol, orig.Side,
+                            OrderStatus.Rejected, ExecKind.Rejected,
+                            LeavesQuantity: 0, CumulativeQuantity: 0,
+                            LastQuantity: 0, LastPrice: 0m,
+                            RejectReason: "gateway_unavailable",
+                            TimestampUtc: DateTimeOffset.UtcNow,
+                            FirmId: orig.FirmId));
+                    }).ConfigureAwait(false);
+            }
+            catch (Exception resolutionEx)
+            {
+                return FailResolutionForReconciliation(
+                    newClOrdId, "pre_send_resolution_not_durable", resolutionEx);
+            }
+            if (!resolution.Durable)
+            {
+                if (resolution.MarkerDurable)
+                {
+                    _dispatcher.RunExclusive(() =>
+                    {
+                        _replacements.TryConsume(newClOrdId, out _);
+                        _ownership.RemoveCancelLink(newClOrdId);
+                        _replaceMargin.AbortReplace(newClOrdId);
+                    });
+                }
+                return FailResolutionForReconciliation(
+                    newClOrdId, "pre_send_resolution_not_durable",
+                    resolution.Failure!);
+            }
+            return OrderModifyResult.GatewayFailed(newClOrdId, ex);
         }
         catch (Exception ex)
         {
             MetricsRegistry.OrdersGatewayFailed.Add(1,
                 new KeyValuePair<string, object?>("path", "modify"),
                 new KeyValuePair<string, object?>("firmId", orig.FirmId));
-            _logger.LogError(ex,
-                "Gateway CancelReplaceAsync failed for orig {OrigClOrdId} new {NewClOrdId}; rolling back.",
+            _logger.LogWarning(ex,
+                "Gateway cancel-replace outcome is ambiguous for orig {OrigClOrdId} new {NewClOrdId}; retaining intent.",
                 req.OriginalClOrdId, newClOrdId);
-            // Roll back: drop intent, abort margin delta. Original
-            // order keeps its pre-modify state (Working /
-            // PartiallyFilled). Surface a synthetic Rejected ER under
-            // the new ClOrdID so the trader's blotter shows the
-            // failure rather than a phantom "modify pending forever".
-            _replacements.TryConsume(newClOrdId, out _);
-            _replaceMargin.AbortReplace(newClOrdId);
-            _sink.Publish(new ExecutionEvent(
-                req.Owner, newClOrdId, orig.Symbol, orig.Side,
-                OrderStatus.Rejected, ExecKind.Rejected,
-                LeavesQuantity: 0, CumulativeQuantity: 0,
-                LastQuantity: 0, LastPrice: 0m,
-                RejectReason: "gateway_unavailable",
-                TimestampUtc: DateTimeOffset.UtcNow,
-                FirmId: orig.FirmId));
-            return OrderModifyResult.GatewayFailed(newClOrdId, ex);
+
+            var heldAt = DateTimeOffset.UtcNow;
+            var marker = new ReconciliationMarker(
+                ReconciliationMarkerKind.ReplaceAmbiguous,
+                req.OriginalClOrdId,
+                newClOrdId,
+                req.Owner.Value,
+                newRemainingNotional,
+                heldAt);
+            ReconciliationResolutionResult resolution;
+            try
+            {
+                resolution = await _resolutionWriter.ResolveAsync(
+                    marker,
+                    new OrderReplaceAmbiguousMarginHeldEvent
+                    {
+                        NewClOrdId = newClOrdId,
+                        OriginalClOrdId = req.OriginalClOrdId,
+                        EndClientId = req.Owner.Value,
+                        NewRemainingNotional = newRemainingNotional,
+                        HeldAtUtc = heldAt,
+                    },
+                    () => _replacements.MarkAmbiguousMarginHeld(
+                        newClOrdId, heldAt, newRemainingNotional))
+                    .ConfigureAwait(false);
+            }
+            catch (Exception resolutionEx)
+            {
+                return FailResolutionForReconciliation(
+                    newClOrdId, "ambiguous_resolution_not_durable", resolutionEx);
+            }
+            if (!resolution.Durable)
+            {
+                if (resolution.MarkerDurable)
+                {
+                    _dispatcher.RunExclusive(() =>
+                        _replacements.MarkAmbiguousMarginHeld(
+                            newClOrdId, heldAt, newRemainingNotional));
+                }
+                return FailResolutionForReconciliation(
+                    newClOrdId, "ambiguous_resolution_not_durable",
+                    resolution.Failure!);
+            }
+            return OrderModifyResult.GatewayAmbiguous(newClOrdId, ex);
         }
 
         MetricsRegistry.OrdersModifyRequested.Add(1,
@@ -386,6 +520,23 @@ public sealed class OrderModifyService
             new KeyValuePair<string, object?>("firmId", orig.FirmId));
 
         return OrderModifyResult.Accepted(newClOrdId);
+    }
+
+    private OrderModifyResult FailResolutionForReconciliation(
+        ulong newClOrdId,
+        string reason,
+        Exception exception)
+    {
+        if (exception is WalBackpressureException)
+        {
+            MetricsRegistry.WalBackpressure.Add(1,
+                new KeyValuePair<string, object?>("call_site", "orders.modify.resolution"));
+        }
+        _reconciliationDrain?.BeginDrain("wal_replace_resolution_reconciliation_required");
+        _logger.LogCritical(exception,
+            "Replace resolution {Reason} for new ClOrdID {NewClOrdId}; ingress is draining and operator reconciliation is required.",
+            reason, newClOrdId);
+        return OrderModifyResult.ReconciliationRequired(newClOrdId, reason, exception);
     }
 
     /// <summary>
@@ -457,9 +608,10 @@ public sealed class OrderModifyService
 /// Inputs for <see cref="OrderModifyService.ModifyAsync"/>.
 ///
 /// <para>
-/// Q1.1 (#253). The trailing optionals — <see cref="NewTimeInForce"/>,
+/// Q1.1 (#253). <see cref="NewPrice"/> and the trailing optionals —
+/// <see cref="NewTimeInForce"/>,
 /// <see cref="NewStopPrice"/>, <see cref="NewGoodTillDate"/> — follow
-/// the modify-pipeline override convention: <b>null = inherit the
+/// follow the modify-pipeline override convention: <b>null = inherit the
 /// original order's value</b> across the cancel-replace boundary;
 /// <b>non-null = replace it with the supplied value</b>. Domain
 /// invariants (StopPrice required iff Stop*; GoodTillDate required
@@ -520,6 +672,11 @@ public sealed class OrderModifyResult
         new(OrderModifyResultKind.RiskRejected, 0, reason, code, null);
     public static OrderModifyResult GatewayFailed(ulong newClOrdId, Exception ex) =>
         new(OrderModifyResultKind.GatewayFailed, newClOrdId, "gateway_unavailable", "gateway_unavailable", ex);
+    public static OrderModifyResult GatewayAmbiguous(ulong newClOrdId, Exception ex) =>
+        new(OrderModifyResultKind.GatewayAmbiguous, newClOrdId, "send_ambiguous", "send_ambiguous", ex);
+    public static OrderModifyResult ReconciliationRequired(
+        ulong newClOrdId, string reason, Exception ex) =>
+        new(OrderModifyResultKind.ReconciliationRequired, newClOrdId, reason, "reconciliation_required", ex);
     public static OrderModifyResult WalBackpressure(string detail) =>
         new(OrderModifyResultKind.WalBackpressure, 0, detail, "wal_backpressure", null);
     public static OrderModifyResult BadRequest(string reason) =>
@@ -548,6 +705,8 @@ public enum OrderModifyResultKind
     BadRequest,
     RiskRejected,
     GatewayFailed,
+    GatewayAmbiguous,
+    ReconciliationRequired,
     WalBackpressure,
     Drained,
     DuplicateClOrdId,

@@ -96,6 +96,17 @@ public sealed class OrderOwnershipMap
     public bool TryResolveOrig(ulong newClOrdId, out ulong originalClOrdId) =>
         _cancelToOrig.TryGetValue(newClOrdId, out originalClOrdId);
 
+    /// <summary>
+    /// Removes a cancel-side identity after a proven pre-send failure. The
+    /// original order ownership remains untouched.
+    /// </summary>
+    public bool RemoveCancelLink(ulong cancelClOrdId)
+    {
+        var removedLink = _cancelToOrig.TryRemove(cancelClOrdId, out _);
+        var removedOwner = _byClOrdId.TryRemove(cancelClOrdId, out _);
+        return removedLink || removedOwner;
+    }
+
     public IEnumerable<Persistence.OwnershipMappingSnapshot> Snapshot()
     {
         foreach (var kv in _byClOrdId)

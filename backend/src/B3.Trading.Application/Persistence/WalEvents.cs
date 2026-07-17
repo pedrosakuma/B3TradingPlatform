@@ -26,6 +26,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "kind")]
 [JsonDerivedType(typeof(OrderSubmittedEvent), "order.submitted")]
 [JsonDerivedType(typeof(OrderReplaceRequestedEvent), "order.replace-requested")]
+[JsonDerivedType(typeof(OrderReplacePreSendFailedEvent), "order.replace-pre-send-failed")]
 [JsonDerivedType(typeof(OrderReplaceRejectedEvent), "order.replace-rejected")]
 [JsonDerivedType(typeof(OrderReplaceAmbiguousMarginHeldEvent), "order.replace-ambiguous-margin-held")]
 [JsonDerivedType(typeof(ExecutionReportReceivedEvent), "er.received")]
@@ -50,6 +51,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(BotSessionVerAdvancedEvent), "userbot.session.ver-advanced")]
 [JsonDerivedType(typeof(BotSessionSeqAdvancedEvent), "userbot.session.seq-advanced")]
 [JsonDerivedType(typeof(OrderCancelRequestedEvent), "order.cancel-requested")]
+[JsonDerivedType(typeof(OrderCancelPreSendFailedEvent), "order.cancel-pre-send-failed")]
 [JsonDerivedType(typeof(OrderExpiredEvent), "order.expired")]
 [JsonDerivedType(typeof(CashLedgerEvent), "cash.ledger")]
 [JsonDerivedType(typeof(FeeAccruedEvent), "fee.accrued")]
@@ -208,6 +210,19 @@ public sealed record OrderCancelRequestedEvent : WalEvent
 }
 
 /// <summary>
+/// Terminal resolution for a cancel intent when the gateway proves that no
+/// wire attempt occurred. The original order remains live and cancel retries
+/// must allocate a fresh ClOrdID.
+/// </summary>
+public sealed record OrderCancelPreSendFailedEvent : WalEvent
+{
+    public required ulong CancelClOrdId { get; init; }
+    public required ulong OriginalClOrdId { get; init; }
+    public required string OwnerEndClientId { get; init; }
+    public required string Reason { get; init; }
+}
+
+/// <summary>
 /// Slice 4 of #122. Recorded the moment <c>PUT /orders/{clOrdId}</c>
 /// reaches the modify pipeline (post-validation, post-risk, after
 /// margin Prepare succeeded but before the gateway dispatch).
@@ -250,6 +265,19 @@ public sealed record OrderReplaceRequestedEvent : WalEvent
     public string? RequestedTimeInForce { get; init; }
     public decimal? RequestedStopPrice { get; init; }
     public DateTimeOffset? RequestedGoodTillDate { get; init; }
+}
+
+/// <summary>
+/// Terminal resolution for a WAL-backed replace intent when the gateway proves
+/// that no wire attempt occurred. Replay removes the matching pending intent;
+/// unclassified gateway exceptions remain ambiguous and never emit this event.
+/// </summary>
+public sealed record OrderReplacePreSendFailedEvent : WalEvent
+{
+    public required ulong OriginalClOrdId { get; init; }
+    public required ulong NewClOrdId { get; init; }
+    public required string EndClientId { get; init; }
+    public required string Reason { get; init; }
 }
 
 /// <summary>
