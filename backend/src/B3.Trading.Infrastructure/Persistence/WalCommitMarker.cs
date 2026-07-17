@@ -155,12 +155,16 @@ internal interface IWalCommitBoundaryHooks
 
 internal enum WalCommitBoundary
 {
+    MigrationMetadataStaged,
+    MigrationMetadataStagedAndFsynced,
     RecordAppended,
     LogFsynced,
     BeforeMarkerStage,
     MarkerStagedAndFsynced,
     MarkerPublished,
     MarkerDirectoryFsynced,
+    MigrationMetadataPublished,
+    MigrationMetadataDirectoryFsynced,
 }
 
 internal sealed class NoOpWalCommitBoundaryHooks : IWalCommitBoundaryHooks

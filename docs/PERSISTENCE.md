@@ -86,7 +86,10 @@ highest CRC-valid frame automatically. The default
 `ControlledCleanShutdown` only for the one-time upgrade after draining ingress,
 successfully flushing the old process and stopping it without further
 admission; the new process fsyncs that quiesced prefix and publishes its first
-generation marker.
+generation marker. Generation-bound segment metadata is staged and directory-
+fsynced before marker publication, then promoted afterward; a crash at any
+boundary resumes from legacy metadata before the marker or from validated
+staging metadata after it.
 
 ## Event stream
 
@@ -294,12 +297,19 @@ would just be noise.
 
 ## EOD reconciliation
 
-`POST /admin/eod` (admin-only) walks the day's WAL directory and writes
+`POST /admin/eod` (admin-only) validates the persisted marker generation and
+complete committed segment manifest, reads each segment only through its
+recorded `EndOffset`, and writes
 `data/{firm}/eod/eod-{date}.json`:
 
 - Counts per `WalEvent` kind.
 - SHA-256 over concatenated payloads (content checksum for diffing).
 - File path of the materialised summary.
+
+CRC-valid survivor frames beyond the marker never enter the report. A missing
+or inconsistent marker/segment/metadata tuple fails closed. Pre-marker WAL is
+read only when `LegacyWalStartupMode=ControlledCleanShutdown`, using the same
+full-prefix validation as controlled migration.
 
 Returns **409** if persistence is disabled. Comparison against an
 EP-side EOD report is a future hook; B3 does not expose one yet.

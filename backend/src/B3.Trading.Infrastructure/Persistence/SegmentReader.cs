@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.IO.Hashing;
+using B3.Trading.Application.Persistence;
 
 namespace B3.Trading.Infrastructure.Persistence;
 
@@ -105,6 +106,46 @@ internal sealed class SegmentReader : IDisposable
         }
 
         return new SegmentScanResult(count, _log.Position, _log.Position == requiredEnd, null);
+    }
+
+    public IReadOnlyList<byte[]> ReadAllThrough(long requiredEnd)
+    {
+        if (requiredEnd < 0 || requiredEnd > _log.Length)
+            throw new WalRecoveryException(
+                $"Committed WAL boundary {requiredEnd} is outside log length {_log.Length}.");
+
+        _log.Position = 0;
+        var records = new List<byte[]>();
+        var header = new byte[SegmentWriter.RecordHeaderBytes];
+        while (_log.Position < requiredEnd)
+        {
+            var pos = _log.Position;
+            if (_log.Read(header, 0, header.Length) != header.Length)
+                throw new WalRecoveryException(
+                    $"Committed WAL has a torn record header at offset {pos}.");
+
+            var length = BinaryPrimitives.ReadUInt32LittleEndian(header);
+            var expectedCrc = BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(4));
+            var recordEnd = checked(pos + SegmentWriter.RecordHeaderBytes + length);
+            if (length == 0 || recordEnd > requiredEnd)
+                throw new WalRecoveryException(
+                    $"Committed WAL record at offset {pos} crosses marker boundary {requiredEnd}.");
+
+            var payload = new byte[length];
+            if (_log.Read(payload, 0, payload.Length) != payload.Length)
+                throw new WalRecoveryException(
+                    $"Committed WAL has a torn record payload at offset {pos}.");
+            if (Crc32.HashToUInt32(payload) != expectedCrc)
+                throw new WalRecoveryException(
+                    $"Committed WAL record at offset {pos} failed CRC validation.");
+            records.Add(payload);
+            LastValidEnd = _log.Position;
+        }
+
+        if (_log.Position != requiredEnd)
+            throw new WalRecoveryException(
+                $"Committed WAL scan ended at {_log.Position}, expected {requiredEnd}.");
+        return records;
     }
 
     public void Dispose()

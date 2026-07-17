@@ -17,8 +17,9 @@ namespace B3.Trading.Infrastructure.Persistence;
 /// </summary>
 public sealed class FileEventStore : IEventStore, IEventStoreHealth
 {
-    private const string MarkerFileName = "commit.marker";
-    private const string MarkerStagingFileName = "commit.marker.writing";
+    internal const string MarkerFileName = "commit.marker";
+    internal const string MarkerStagingFileName = "commit.marker.writing";
+    internal const string MigrationMetadataSuffix = ".migrating";
     private static readonly WalEventJsonContext JsonContext = WalEventJsonContext.Default;
 
     private readonly PersistenceOptions _opts;
@@ -589,6 +590,7 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
         if (markerExists)
         {
             var marker = ReadMarker(_markerPath);
+            CompletePendingMigrationMetadata(marker, physicalSegments);
             RecoverCommittedPrefix(marker, physicalSegments);
             if (stagingExists)
             {
@@ -617,8 +619,9 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
                 "Non-empty legacy WAL has no commit marker. Refusing to promote CRC-valid survivors after an unknown shutdown; perform the controlled #621 migration or reconciliation.");
         }
 
-        var migrated = MigrateControlledLegacyWal(physicalSegments);
-        PublishMarker(migrated, invokeHooks: false);
+        var migrated = PrepareControlledLegacyMigration(physicalSegments);
+        PublishMarker(migrated, invokeHooks: true);
+        CompletePendingMigrationMetadata(migrated, physicalSegments);
         if (stagingExists && File.Exists(_markerStagingPath))
         {
             File.Delete(_markerStagingPath);
@@ -627,7 +630,7 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
         return migrated;
     }
 
-    private WalCommitMarker MigrateControlledLegacyWal(
+    private WalCommitMarker PrepareControlledLegacyMigration(
         IReadOnlyDictionary<string, string> physicalSegments)
     {
         var generation = Guid.NewGuid();
@@ -670,15 +673,89 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
                 throw new WalRecoveryException(
                     $"Legacy WAL sequence sidecar for '{segment.Path}' expected {nextSeq} but contained {hinted}.");
 
-            WriteSegmentMetadata(segment.Path, generation, nextSeq);
-            FlushFile(segment.Path);
             var lastSeq = checked(nextSeq + scan.RecordCount - 1);
+            WriteMigrationSegmentMetadata(segment.Path, generation, nextSeq);
+            FlushFile(segment.Path);
             manifest.Add(new WalCommittedSegment(
                 segment.SegmentId, nextSeq, lastSeq, length));
+            _hooks.OnBoundary(
+                WalCommitBoundary.MigrationMetadataStaged,
+                lastSeq);
             nextSeq = checked(lastSeq + 1);
         }
         FlushDirtyDirectories();
+        _hooks.OnBoundary(
+            WalCommitBoundary.MigrationMetadataStagedAndFsynced,
+            nextSeq - 1);
         return new WalCommitMarker(generation, nextSeq - 1, manifest);
+    }
+
+    private void CompletePendingMigrationMetadata(
+        WalCommitMarker marker,
+        IReadOnlyDictionary<string, string> physicalSegments)
+    {
+        var changed = false;
+        foreach (var segment in marker.Segments)
+        {
+            if (!physicalSegments.TryGetValue(segment.SegmentId, out var logPath))
+                throw new WalRecoveryException(
+                    $"Committed WAL segment '{segment.SegmentId}' is missing during metadata publication.");
+
+            var finalPath = logPath + SegmentWriter.FirstSeqSidecarSuffix;
+            var migrationPath = finalPath + MigrationMetadataSuffix;
+            _dirtyDirectories.Add(Path.GetDirectoryName(logPath)!);
+            if (File.Exists(finalPath))
+            {
+                var finalBytes = File.ReadAllBytes(finalPath);
+                if (finalBytes.Length == SegmentMetadata.EncodedLength)
+                {
+                    var metadata = SegmentMetadata.Decode(finalBytes, finalPath);
+                    if (metadata.Generation != marker.Generation
+                        || metadata.FirstSeq != segment.FirstSeq)
+                    {
+                        throw new WalRecoveryException(
+                            $"Committed WAL metadata '{finalPath}' does not match its marker.");
+                    }
+                    if (File.Exists(migrationPath))
+                    {
+                        File.Delete(migrationPath);
+                        _dirtyDirectories.Add(Path.GetDirectoryName(logPath)!);
+                        changed = true;
+                    }
+                    continue;
+                }
+                if (finalBytes.Length != 8)
+                    throw new WalRecoveryException(
+                        $"Committed WAL metadata '{finalPath}' has an unsupported format.");
+            }
+
+            if (!File.Exists(migrationPath))
+                throw new WalRecoveryException(
+                    $"Committed WAL metadata staging file '{migrationPath}' is missing.");
+            var staged = SegmentMetadata.Decode(
+                File.ReadAllBytes(migrationPath), migrationPath);
+            if (staged.Generation != marker.Generation
+                || staged.FirstSeq != segment.FirstSeq)
+            {
+                throw new WalRecoveryException(
+                    $"Committed WAL metadata staging file '{migrationPath}' does not match its marker.");
+            }
+
+            File.Move(migrationPath, finalPath, overwrite: true);
+            _dirtyDirectories.Add(Path.GetDirectoryName(logPath)!);
+            changed = true;
+            _hooks.OnBoundary(
+                WalCommitBoundary.MigrationMetadataPublished,
+                segment.LastSeq);
+        }
+
+        FlushDirtyDirectories();
+        if (changed)
+        {
+            _hooks.OnBoundary(
+                WalCommitBoundary.MigrationMetadataDirectoryFsynced,
+                marker.LastDurableSeq);
+        }
     }
 
     private void RecoverCommittedPrefix(
@@ -820,7 +897,10 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
                 }
                 else if (!name.EndsWith(".idx", StringComparison.Ordinal)
                          && !name.EndsWith(".log.firstseq", StringComparison.Ordinal)
-                         && !name.EndsWith(".log.firstseq.tmp", StringComparison.Ordinal))
+                         && !name.EndsWith(".log.firstseq.tmp", StringComparison.Ordinal)
+                         && !name.EndsWith(
+                             ".log.firstseq" + MigrationMetadataSuffix,
+                             StringComparison.Ordinal))
                 {
                     throw new WalRecoveryException($"Unexpected WAL segment artifact: '{artifact}'.");
                 }
@@ -829,22 +909,23 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
         return segments;
     }
 
-    private void WriteSegmentMetadata(string logPath, Guid generation, long firstSeq)
+    private void WriteMigrationSegmentMetadata(
+        string logPath,
+        Guid generation,
+        long firstSeq)
     {
-        var sidecar = logPath + SegmentWriter.FirstSeqSidecarSuffix;
-        var staging = sidecar + ".tmp";
-        using (var stream = new FileStream(
-                   staging,
-                   FileMode.Create,
-                   FileAccess.Write,
-                   FileShare.None,
-                   bufferSize: SegmentMetadata.EncodedLength,
-                   _opts.FsyncOnFlush ? FileOptions.WriteThrough : FileOptions.None))
-        {
-            stream.Write(SegmentMetadata.Encode(generation, firstSeq));
-            stream.Flush(_opts.FsyncOnFlush);
-        }
-        File.Move(staging, sidecar, overwrite: true);
+        var path = logPath
+            + SegmentWriter.FirstSeqSidecarSuffix
+            + MigrationMetadataSuffix;
+        using var stream = new FileStream(
+            path,
+            FileMode.Create,
+            FileAccess.Write,
+            FileShare.None,
+            bufferSize: SegmentMetadata.EncodedLength,
+            _opts.FsyncOnFlush ? FileOptions.WriteThrough : FileOptions.None);
+        stream.Write(SegmentMetadata.Encode(generation, firstSeq));
+        stream.Flush(_opts.FsyncOnFlush);
         _dirtyDirectories.Add(Path.GetDirectoryName(logPath)!);
     }
 
@@ -854,6 +935,8 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
         DeleteIfExists(Path.ChangeExtension(logPath, ".idx"));
         DeleteIfExists(logPath + SegmentWriter.FirstSeqSidecarSuffix);
         DeleteIfExists(logPath + SegmentWriter.FirstSeqSidecarSuffix + ".tmp");
+        DeleteIfExists(
+            logPath + SegmentWriter.FirstSeqSidecarSuffix + MigrationMetadataSuffix);
         _dirtyDirectories.Add(Path.GetDirectoryName(logPath)!);
     }
 
@@ -958,11 +1041,14 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
     }
 
     private string SegmentPath(string segmentId)
+        => ResolveSegmentPath(_walRoot, segmentId);
+
+    internal static string ResolveSegmentPath(string walRoot, string segmentId)
     {
         ValidateSegmentId(segmentId);
         var parts = segmentId.Split('/');
-        var path = Path.GetFullPath(Path.Combine(_walRoot, parts[0], parts[1]));
-        var relative = Path.GetRelativePath(_walRoot, path);
+        var path = Path.GetFullPath(Path.Combine(walRoot, parts[0], parts[1]));
+        var relative = Path.GetRelativePath(walRoot, path);
         if (Path.IsPathRooted(relative)
             || relative == ".."
             || relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
@@ -980,7 +1066,7 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
         return relative;
     }
 
-    private static void ValidateSegmentId(string segmentId)
+    internal static void ValidateSegmentId(string segmentId)
     {
         var parts = segmentId.Split('/');
         if (parts.Length != 2
@@ -998,7 +1084,7 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
         }
     }
 
-    private static void RejectReparsePoint(string path)
+    internal static void RejectReparsePoint(string path)
     {
         if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
             throw new WalRecoveryException($"WAL path must not be a symbolic link or reparse point: '{path}'.");

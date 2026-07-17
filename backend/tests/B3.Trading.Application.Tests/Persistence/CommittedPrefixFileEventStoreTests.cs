@@ -431,6 +431,65 @@ public sealed class CommittedPrefixFileEventStoreTests : IDisposable
         Assert.Equal(1, reopened.LastCommittedSeq);
     }
 
+    [Theory]
+    [InlineData(WalCommitBoundary.MigrationMetadataStaged)]
+    [InlineData(WalCommitBoundary.MigrationMetadataStagedAndFsynced)]
+    [InlineData(WalCommitBoundary.BeforeMarkerStage)]
+    [InlineData(WalCommitBoundary.MarkerStagedAndFsynced)]
+    [InlineData(WalCommitBoundary.MarkerPublished)]
+    [InlineData(WalCommitBoundary.MarkerDirectoryFsynced)]
+    [InlineData(WalCommitBoundary.MigrationMetadataPublished)]
+    [InlineData(WalCommitBoundary.MigrationMetadataDirectoryFsynced)]
+    internal async Task ControlledLegacyMigration_CrashAtEveryPublicationBoundary_IsRestartSafe(
+        WalCommitBoundary boundary)
+    {
+        var options = Options("legacy-crash-" + boundary);
+        options.LegacyWalStartupMode = LegacyWalStartupMode.ControlledCleanShutdown;
+        var day = Path.Combine(WalRoot(options), "2026-01-01");
+        Directory.CreateDirectory(day);
+        await WriteLegacySegment(options, day, ordinal: 0, seq: 1, NewOrder(0));
+        await WriteLegacySegment(options, day, ordinal: 1, seq: 2, NewOrder(1));
+
+        Assert.Throws<IOException>(() => NewStore(
+            options,
+            new ThrowAtBoundaryHooks(boundary)));
+
+        var markerExists = File.Exists(
+            Path.Combine(WalRoot(options), FileEventStore.MarkerFileName));
+        if (!markerExists)
+        {
+            options.LegacyWalStartupMode =
+                LegacyWalStartupMode.RejectUnknownShutdown;
+            Assert.Throws<WalLegacyMigrationRequiredException>(
+                () => NewStore(options));
+            options.LegacyWalStartupMode =
+                LegacyWalStartupMode.ControlledCleanShutdown;
+        }
+        else
+        {
+            // Once the marker is published, restart must complete any
+            // partially-promoted metadata without relying on legacy mode.
+            options.LegacyWalStartupMode =
+                LegacyWalStartupMode.RejectUnknownShutdown;
+        }
+
+        await using var recovered = NewStore(options);
+        Assert.Equal(2, recovered.LastCommittedSeq);
+        Assert.Equal(new ulong[] { 1, 2 }, await ReplayIds(recovered));
+        Assert.All(
+            Directory.EnumerateFiles(
+                WalRoot(options),
+                "*.log.firstseq",
+                SearchOption.AllDirectories),
+            path => Assert.Equal(
+                SegmentMetadata.EncodedLength,
+                File.ReadAllBytes(path).Length));
+        Assert.Empty(Directory.EnumerateFiles(
+            WalRoot(options),
+            "*.migrating",
+            SearchOption.AllDirectories));
+    }
+
     [Fact]
     public async Task CorruptOrMissingMarker_OnMarkerFormatWal_FailsClosed()
     {
@@ -516,6 +575,24 @@ public sealed class CommittedPrefixFileEventStoreTests : IDisposable
         await foreach (var (_, evt) in store.ReadFromAsync(0))
             ids.Add(Assert.IsType<OrderSubmittedEvent>(evt).ClOrdId);
         return ids.ToArray();
+    }
+
+    private static async Task WriteLegacySegment(
+        PersistenceOptions options,
+        string dayDirectory,
+        int ordinal,
+        long seq,
+        WalEvent evt)
+    {
+        var log = Path.Combine(dayDirectory, $"{ordinal:D3}.log");
+        await using var writer = new SegmentWriter(
+            log,
+            Path.Combine(dayDirectory, $"{ordinal:D3}.idx"),
+            options.IndexEveryNRecords,
+            options.IndexEveryNBytes,
+            fsyncOnFlush: false);
+        writer.Append(seq, Payload(evt), evt.TimestampUtc.ToUnixTimeMilliseconds());
+        writer.Flush();
     }
 
     private static OrderSubmittedEvent NewOrder(int i) => new()
