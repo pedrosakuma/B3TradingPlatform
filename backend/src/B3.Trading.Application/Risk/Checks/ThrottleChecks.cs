@@ -42,6 +42,9 @@ public sealed class RollingNotionalCheck : IRiskCheck
 
         if (!endClientCap.HasValue && !firmCap.HasValue && !algoCap.HasValue)
             return RiskDecision.Approve;
+        if (_accountant.IsRecoveryFenced)
+            return RiskDecision.Reject(
+                "rolling notional unavailable during conservative restart fence");
 
         var notional = _accountant.NotionalFor(ctx);
         if (notional <= 0m) return RiskDecision.Approve; // bypass already metered
@@ -128,6 +131,9 @@ public sealed class OrderRateLimitCheck : IRiskCheck
 
         if (!endClientMax.HasValue && !firmMax.HasValue && !algoMax.HasValue)
             return RiskDecision.Approve;
+        if (_accountant.IsRecoveryFenced)
+            return RiskDecision.Reject(
+                "order rate unavailable during conservative restart fence");
 
         var window = _accountant.Window;
 

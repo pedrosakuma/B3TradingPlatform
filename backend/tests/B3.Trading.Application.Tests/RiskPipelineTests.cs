@@ -738,6 +738,102 @@ public class RiskPipelineTests
         Assert.True(check.Check(Ctx(qty: 900, side: OrderSide.Sell)).Approved);  // |400-900|=500
     }
 
+    [Fact]
+    public void PositionLimit_IncludesJointWorkingOrderExposure()
+    {
+        var owner = new EndClientId("alice");
+        var book = new WorkingOrderBook();
+        var check = new PositionLimitCheck(
+            Wrap(new RiskOptions { Default = new RiskLimits { PositionLimit = 100 } }),
+            new PositionKeeper(),
+            book);
+
+        var first = new Order(
+            1, owner, "PETR4", 1234, OrderSide.Buy, OrderType.Limit,
+            60, 10m, "default");
+        book.TryAdd(first);
+        first.MarkWorking();
+        Assert.True(check.Check(Ctx(qty: 60) with { EvaluatedClOrdId = 1 }).Approved);
+
+        var second = new Order(
+            2, owner, "PETR4", 1234, OrderSide.Buy, OrderType.Limit,
+            50, 10m, "default");
+        book.TryAdd(second);
+        second.MarkWorking();
+        Assert.False(check.Check(Ctx(qty: 50) with { EvaluatedClOrdId = 2 }).Approved);
+    }
+
+    [Fact]
+    public void PositionLimit_ReplaceUsesExecutableLeaves_NotNewTotalQuantity()
+    {
+        var owner = new EndClientId("alice");
+        var positions = new PositionKeeper();
+        positions.ApplyFill("default", owner, "PETR4", OrderSide.Buy, 20, 10m);
+        var original = new Order(
+            1, owner, "PETR4", 1234, OrderSide.Buy, OrderType.Limit,
+            100, 10m, "default");
+        original.MarkWorking();
+        original.ApplyFill(60); // 40 leaves
+        var book = new WorkingOrderBook();
+        book.TryAdd(original);
+        var check = new PositionLimitCheck(
+            Wrap(new RiskOptions { Default = new RiskLimits { PositionLimit = 100 } }),
+            positions,
+            book);
+
+        var replacement = new RiskContext(
+            owner, "default", "PETR4", OrderSide.Buy, OrderType.Limit,
+            Quantity: 120, Price: 10m,
+            ReplaceOriginalClOrdId: 1,
+            EffectiveLeavesQuantity: 60);
+
+        Assert.True(check.Check(replacement).Approved); // 20 current + 60 executable = 80
+    }
+
+    [Fact]
+    public void PositionLimit_WorkingLeavesOverflowRejectsFailClosed()
+    {
+        var owner = new EndClientId("alice");
+        var book = new WorkingOrderBook();
+        foreach (var clOrdId in new[] { 1UL, 2UL })
+        {
+            var order = new Order(
+                clOrdId, owner, "PETR4", 1234, OrderSide.Buy, OrderType.Limit,
+                long.MaxValue, 1m, "default");
+            book.TryAdd(order);
+            order.MarkWorking();
+        }
+        var check = new PositionLimitCheck(
+            Wrap(new RiskOptions
+            {
+                Default = new RiskLimits { PositionLimit = long.MaxValue },
+            }),
+            new PositionKeeper(),
+            book);
+
+        Assert.False(check.Check(Ctx(qty: long.MaxValue) with
+        {
+            EvaluatedClOrdId = 2,
+        }).Approved);
+    }
+
+    [Fact]
+    public void PositionLimit_ProjectedExposureOverflowRejectsFailClosed()
+    {
+        var owner = new EndClientId("alice");
+        var positions = new PositionKeeper();
+        positions.ApplyFill(
+            "default", owner, "PETR4", OrderSide.Buy, long.MaxValue, 1m);
+        var check = new PositionLimitCheck(
+            Wrap(new RiskOptions
+            {
+                Default = new RiskLimits { PositionLimit = long.MaxValue },
+            }),
+            positions);
+
+        Assert.False(check.Check(Ctx(qty: long.MaxValue)).Approved);
+    }
+
     private sealed class SpyCheck : IRiskCheck
     {
         private readonly Func<RiskContext, RiskDecision> _impl;

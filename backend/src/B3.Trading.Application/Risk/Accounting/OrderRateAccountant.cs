@@ -7,16 +7,19 @@ namespace B3.Trading.Application.Risk.Accounting;
 /// <see cref="Checks.OrderRateLimitCheck"/>. Each accepted submit
 /// counts as a single entry of value 1 in both ledgers.
 /// </summary>
-public sealed class OrderRateAccountant : IRiskAccountant
+public sealed class OrderRateAccountant : IRiskAccountant, IRiskRecoveryFence
 {
     private readonly SlidingWindowLedger _perEndClient;
     private readonly SlidingWindowLedger _perFirm;
     private readonly SlidingWindowLedger _perAlgo;
     private readonly IOptionsMonitor<RiskOptions> _options;
+    private readonly TimeProvider _clock;
+    private DateTimeOffset? _recoveredAt;
 
     public OrderRateAccountant(IOptionsMonitor<RiskOptions> options, TimeProvider clock)
     {
         _options = options;
+        _clock = clock;
         _perEndClient = new SlidingWindowLedger(clock);
         _perFirm = new SlidingWindowLedger(clock);
         _perAlgo = new SlidingWindowLedger(clock);
@@ -30,6 +33,12 @@ public sealed class OrderRateAccountant : IRiskAccountant
 
     public TimeSpan Window => TimeSpan.FromSeconds(
         Math.Max(1, _options.CurrentValue.OrderRate.WindowSeconds));
+
+    public bool IsRecoveryFenced =>
+        _recoveredAt is { } recoveredAt
+        && _clock.GetUtcNow() < recoveredAt + Window;
+
+    public void EnterRecoveryFence() => _recoveredAt = _clock.GetUtcNow();
 
     public void RecordAccepted(RiskContext ctx)
     {

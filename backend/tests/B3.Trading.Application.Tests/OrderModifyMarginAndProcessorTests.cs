@@ -368,8 +368,16 @@ public class OrderModifyMarginAndProcessorTests
 
     private sealed class NeverDrain : Lifecycle.IDrainGate { public bool IsDraining => false; }
 
+    private sealed class CapturingAccountant : Risk.Accounting.IRiskAccountant
+    {
+        public List<Risk.RiskContext> Contexts { get; } = new();
+        public void RecordAccepted(Risk.RiskContext ctx) => Contexts.Add(ctx);
+    }
+
     private static (OrderModifyService svc, CapturingGateway gw, WorkingOrderBook book, PendingReplacementRegistry reg)
-        BuildModifyService(Order seedOrder)
+        BuildModifyService(
+            Order seedOrder,
+            Risk.Accounting.CompositeRiskAccountant? accountant = null)
     {
         var owner = seedOrder.Owner;
         var clOrdIds = new ClOrdIdPrefixRegistry();
@@ -385,7 +393,8 @@ public class OrderModifyMarginAndProcessorTests
         var dispatcher = new EventDispatcher(new NullEventStore());
         var svc = new OrderModifyService(
             clOrdIds, ownership, book, gateway, sink, risk, margin, replacements, dispatcher,
-            new NeverDrain(), NullLogger<OrderModifyService>.Instance);
+            new NeverDrain(), NullLogger<OrderModifyService>.Instance,
+            accountant: accountant);
         return (svc, gateway, book, replacements);
     }
 
@@ -408,6 +417,29 @@ public class OrderModifyMarginAndProcessorTests
         Assert.Equal(28.25m, call.Stop);
         Assert.Null(call.Tif);
         Assert.Null(call.Gtd);
+    }
+
+    [Fact]
+    public async Task AcceptedModify_IsRecordedWithExecutableLeaves()
+    {
+        var owner = new EndClientId("alice");
+        var original = new Order(
+            1_000_010UL, owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit,
+            100, 30m, "FIRM");
+        original.MarkWorking();
+        original.ApplyFill(60);
+        var capture = new CapturingAccountant();
+        var composite = new Risk.Accounting.CompositeRiskAccountant([capture]);
+        var (svc, _, _, _) = BuildModifyService(original, composite);
+
+        var result = await svc.ModifyAsync(
+            new OrderModifyRequest(owner, original.ClOrdId, 120, 31m, FirmId: "FIRM"),
+            CancellationToken.None);
+
+        Assert.Equal(OrderModifyResultKind.Accepted, result.Kind);
+        var ctx = Assert.Single(capture.Contexts);
+        Assert.Equal(60, ctx.ExecutableQuantity);
+        Assert.Equal(original.ClOrdId, ctx.ReplaceOriginalClOrdId);
     }
 
     [Fact]
@@ -724,7 +756,7 @@ public class OrderModifyMarginAndProcessorTests
         var replaceCoord = new RecordingReplaceCoordinator();
         var botRouter = new RecordingBotErRouter();
         var reg = new PendingReplacementRegistry();
-        cash.SeedIfAbsent(new EndClientId("bob"), 100_000m);
+        cash.SeedIfAbsent("FIRM", new EndClientId("bob"), 100_000m);
 
         var proc = new ExecutionReportProcessor(
             ownership, book, positions, sink, marginProvider,
@@ -796,7 +828,7 @@ public class OrderModifyMarginAndProcessorTests
         Assert.Equal(100, pos.NetQuantity);
         Assert.Equal(32.50m, pos.AverageEntryPrice);
         // Cash debited (Buy: available drops by notional).
-        Assert.Equal(100_000m - (32.50m * 100), cash.GetAvailable(bob));
+        Assert.Equal(100_000m - (32.50m * 100), cash.GetAvailable("FIRM", bob));
         // Fill ER published on sink + routed to bot.
         Assert.Equal(3, sink.Events.Count);
         var fillEv = sink.Events[2];

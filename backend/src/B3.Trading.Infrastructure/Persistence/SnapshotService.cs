@@ -4,6 +4,7 @@ using B3.Trading.Application.Audit;
 using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
+using B3.Trading.Application.Risk.Accounting;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -55,6 +56,7 @@ public sealed class PersistenceRecovery
     private readonly IFirmSessionStatusProvider? _firmSessionStatus;
     private readonly ReserveOnSubmitMarginProvider? _marginProvider;
     private readonly PendingReplacementRegistry? _replacements;
+    private readonly IRiskRecoveryFence[] _riskRecoveryFences;
 
     public PersistenceRecovery(
         IEventStore store,
@@ -68,7 +70,8 @@ public sealed class PersistenceRecovery
         OrderOwnershipMap? ownership = null,
         IFirmSessionStatusProvider? firmSessionStatus = null,
         ReserveOnSubmitMarginProvider? marginProvider = null,
-        PendingReplacementRegistry? replacements = null)
+        PendingReplacementRegistry? replacements = null,
+        IEnumerable<IRiskRecoveryFence>? riskRecoveryFences = null)
     {
         _store = store;
         _snapshotter = snapshotter;
@@ -82,6 +85,8 @@ public sealed class PersistenceRecovery
         _firmSessionStatus = firmSessionStatus;
         _marginProvider = marginProvider;
         _replacements = replacements;
+        _riskRecoveryFences = riskRecoveryFences?.ToArray()
+            ?? Array.Empty<IRiskRecoveryFence>();
     }
 
     public Task RunAsync(CancellationToken ct = default) =>
@@ -215,6 +220,17 @@ public sealed class PersistenceRecovery
                 "Persistence recovery: restored {Orders} order margin reservations and {Replacements} pending-replace reservations.",
                 restoredReservations.Orders,
                 restoredReservations.Replacements);
+        }
+
+        if (snap is not null || replayed > 0)
+        {
+            foreach (var fence in _riskRecoveryFences)
+                fence.EnterRecoveryFence();
+            if (_riskRecoveryFences.Length > 0)
+            {
+                _logger.LogWarning(
+                    "Persistence recovery: activated conservative order-rate and rolling-notional restart fences.");
+            }
         }
     }
 

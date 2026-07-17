@@ -443,6 +443,7 @@ public static class AdminEndpoints
 
         var owner = new EndClientId(req.Endclient);
         var operatorId = ctx.User.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+        var firmId = ctx.User.FindFirstValue(JwtIssuer.FirmClaim) ?? "default";
 
         try
         {
@@ -459,6 +460,7 @@ public static class AdminEndpoints
             EmitAdminConfigChange(audit, ctx, "/admin/cash", AuditOutcomes.Success, new()
             {
                 ["endclient"] = req.Endclient!,
+                ["firmId"] = firmId,
                 ["kind"] = kind,
                 ["amount"] = req.Amount.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 ["currency"] = currency,
@@ -480,21 +482,22 @@ public static class AdminEndpoints
                     new CashLedgerEvent
                     {
                         EndClientId = req.Endclient,
+                        FirmId = firmId,
                         Operation = kind,
                         Amount = req.Amount,
                         Currency = currency,
                         Reference = req.Reference,
                         OperatorId = operatorId,
                     },
-                    preApply: () => keeper.TryWithdraw(owner, req.Amount),
-                    rollback: () => keeper.ApplyDeposit(owner, req.Amount));
+                    preApply: () => keeper.TryWithdraw(firmId, owner, req.Amount),
+                    rollback: () => keeper.ApplyDeposit(firmId, owner, req.Amount));
 
                 if (!outcome.Applied)
                 {
                     return Results.UnprocessableEntity(new
                     {
                         error = "insufficient_funds",
-                        available = keeper.GetAvailable(owner),
+                        available = keeper.GetAvailable(firmId, owner),
                         requested = req.Amount,
                     });
                 }
@@ -505,22 +508,24 @@ public static class AdminEndpoints
                     new CashLedgerEvent
                     {
                         EndClientId = req.Endclient,
+                        FirmId = firmId,
                         Operation = kind,
                         Amount = req.Amount,
                         Currency = currency,
                         Reference = req.Reference,
                         OperatorId = operatorId,
                     },
-                    () => keeper.ApplyDeposit(owner, req.Amount));
+                    () => keeper.ApplyDeposit(firmId, owner, req.Amount));
             }
 
             return Results.Ok(new
             {
                 endclient = req.Endclient,
+                firmId,
                 kind,
                 amount = req.Amount,
                 currency,
-                available = keeper.GetAvailable(owner),
+                available = keeper.GetAvailable(firmId, owner),
             });
         }
         catch (WalBackpressureException ex)

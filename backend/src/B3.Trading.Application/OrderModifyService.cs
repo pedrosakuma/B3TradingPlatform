@@ -36,6 +36,7 @@ public sealed class OrderModifyService
     private readonly EventDispatcher _dispatcher;
     private readonly Lifecycle.IDrainGate _drain;
     private readonly Routing.IRoutingInstructionResolver? _routingResolver;
+    private readonly CompositeRiskAccountant? _accountant;
     private readonly ILogger<OrderModifyService> _logger;
 
     public OrderModifyService(
@@ -50,7 +51,8 @@ public sealed class OrderModifyService
         EventDispatcher dispatcher,
         Lifecycle.IDrainGate drain,
         ILogger<OrderModifyService> logger,
-        Routing.IRoutingInstructionResolver? routingInstructionResolver = null)
+        Routing.IRoutingInstructionResolver? routingInstructionResolver = null,
+        CompositeRiskAccountant? accountant = null)
     {
         _clOrdIds = clOrdIds;
         _ownership = ownership;
@@ -63,6 +65,7 @@ public sealed class OrderModifyService
         _dispatcher = dispatcher;
         _drain = drain;
         _routingResolver = routingInstructionResolver;
+        _accountant = accountant;
         _logger = logger;
     }
 
@@ -269,7 +272,12 @@ public sealed class OrderModifyService
             ? px * effectiveLeaves
             : 0m;
         var marginDecision = await _replaceMargin.PrepareReplaceAsync(
-            req.OriginalClOrdId, newClOrdId, req.Owner, newRemainingNotional, ct);
+            req.OriginalClOrdId,
+            newClOrdId,
+            req.Owner,
+            orig.FirmId,
+            newRemainingNotional,
+            ct);
         if (!marginDecision.Approved)
         {
             var reason = marginDecision.Reason ?? "margin_rejected";
@@ -337,6 +345,8 @@ public sealed class OrderModifyService
                 new KeyValuePair<string, object?>("firmId", orig.FirmId));
             return OrderModifyResult.WalBackpressure(ex.Message);
         }
+
+        _accountant?.RecordAccepted(riskCtx);
 
         try
         {

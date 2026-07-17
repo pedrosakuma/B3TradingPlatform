@@ -90,8 +90,12 @@ public class CashKeeperRecoveryTests : IDisposable
             snapSeq = snap!.Seq;
 
             // Snapshot dict carries both balances at point-in-time.
-            Assert.Equal(1_000m, snap.CashByEndclient["alice"]);
-            Assert.Equal(200m, snap.CashByEndclient["bob"]);
+            Assert.Equal(
+                1_000m,
+                snap.CashByEndclient[CashKeeper.FormatSnapshotKey("DEFAULT", "alice")]);
+            Assert.Equal(
+                200m,
+                snap.CashByEndclient[CashKeeper.FormatSnapshotKey("DEFAULT", "bob")]);
 
             // Tail: more events past the snapshot seq.
             DispatchCash(dispatcher, keeper, "alice", "Withdrawal", 300m);
@@ -118,12 +122,55 @@ public class CashKeeperRecoveryTests : IDisposable
         }
     }
 
-    private static void DispatchCash(EventDispatcher d, CashKeeper k, string ec, string kind, decimal amount)
+    [Fact]
+    public async Task SnapshotAndReplay_SegregatesSameOwnerAcrossFirms()
+    {
+        await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
+        {
+            var keeper = new CashKeeper();
+            var dispatcher = new EventDispatcher(store);
+            DispatchCash(dispatcher, keeper, "alice", "Deposit", 1_000m, "FIRM01");
+            DispatchCash(dispatcher, keeper, "alice", "Deposit", 2_000m, "FIRM02");
+            var (snapshotter, _) = BuildSnapshotterAndReplayer(keeper);
+            PlatformSnapshot? snapshot = null;
+            dispatcher.WithSnapshotLock(seq => snapshot = snapshotter.Capture(seq));
+            new SnapshotStore(_root, "test").Write(snapshot!);
+            DispatchCash(dispatcher, keeper, "alice", "Withdrawal", 250m, "FIRM01");
+            await store.FlushAsync();
+        }
+
+        await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
+        {
+            var keeper = new CashKeeper();
+            var (snapshotter, replayer) = BuildSnapshotterAndReplayer(keeper);
+            var recovery = new PersistenceRecovery(
+                store,
+                snapshotter,
+                replayer,
+                new SnapshotStore(_root, "test"),
+                NullLogger<PersistenceRecovery>.Instance);
+            await recovery.RunAsync();
+
+            var owner = new EndClientId("alice");
+            Assert.Equal(750m, keeper.GetAvailable("FIRM01", owner));
+            Assert.Equal(2_000m, keeper.GetAvailable("FIRM02", owner));
+            Assert.Equal(0m, keeper.GetAvailable("FIRM03", owner));
+        }
+    }
+
+    private static void DispatchCash(
+        EventDispatcher d,
+        CashKeeper k,
+        string ec,
+        string kind,
+        decimal amount,
+        string firmId = CashLedger.DefaultFirmId)
     {
         var owner = new EndClientId(ec);
         var evt = new CashLedgerEvent
         {
             EndClientId = ec,
+            FirmId = firmId,
             Operation = kind,
             Amount = amount,
             Currency = "BRL",
@@ -132,14 +179,14 @@ public class CashKeeperRecoveryTests : IDisposable
         };
         if (kind == "Deposit")
         {
-            d.Dispatch(evt, () => k.ApplyDeposit(owner, amount));
+            d.Dispatch(evt, () => k.ApplyDeposit(firmId, owner, amount));
         }
         else
         {
             d.DispatchWithPreApply(
                 evt,
-                preApply: () => k.TryWithdraw(owner, amount),
-                rollback: () => k.ApplyDeposit(owner, amount));
+                preApply: () => k.TryWithdraw(firmId, owner, amount),
+                rollback: () => k.ApplyDeposit(firmId, owner, amount));
         }
     }
 

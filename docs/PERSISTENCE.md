@@ -149,6 +149,15 @@ graceful shutdown. It captures:
 - `OrderOwnershipMap` (`ClOrdID → endClientId`)
 - `ClOrdIdPrefixRegistry` (`_nextPrefix` watermark + per-end-client
   counter watermarks)
+- `CashLedger` balances keyed by `(firmId, endClientId)`. New snapshots set
+  `CashBalancesFirmScoped=true`. Legacy owner-only rows are migrated only when
+  exactly one firm can be inferred from recovered orders,
+  `Trading:Auth:Users`, or `Trading:Cash:Seeds`; conflicting or absent hints
+  fail startup. A seed used as the mapping never overwrites or adds to the
+  migrated balance.
+- operator deposit/withdrawal `CashKeeper` balances use the same firm scope.
+  Their snapshot dictionary keys are `{firmId}|{endClientId}`; legacy plain
+  keys also restore only into `DEFAULT`.
 
 Write is atomic via temp file + `File.Move(overwrite: true)`. The
 `latest.txt` pointer is then updated; if it is missing or corrupt at
@@ -170,6 +179,14 @@ Synchronous, runs once between `app.Build()` and `app.Run()` in
    `EventReplayer.Apply(evt)` reapplies it.
 3. CRC failures truncate the active segment at the last valid record
    (`SegmentReader.LastValidEnd`). Earlier segments are read-only.
+
+After snapshot + WAL replay, margin reservations are rebuilt from every
+non-terminal, non-stale Buy order using its executable leaves. Because the
+order-rate and rolling-notional ledgers are intentionally in-memory, recovery
+activates a conservative fence for each configured window: throttled submits
+and modifies are rejected until that window has elapsed from restart. This
+prevents restart from restoring risk capacity without adding throttle entries
+to the persistence schema.
 
 `EventReplayer` does **not** publish to `IExecutionEventSink` during
 replay — there are no live subscribers and replaying historical ERs

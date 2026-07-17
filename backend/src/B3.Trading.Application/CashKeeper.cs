@@ -5,7 +5,7 @@ using B3.Trading.Domain;
 namespace B3.Trading.Application;
 
 /// <summary>
-/// Q2.2 (#269). Per-end-client cash balance projected from the
+/// Q2.2 (#269). Per-(firm, end-client) cash balance projected from the
 /// <see cref="CashLedgerEvent"/> WAL stream — i.e. operator-driven
 /// deposits and withdrawals only. Single-currency in v0 (BRL); the
 /// ledger here intentionally does NOT fold ER fills into the same
@@ -22,17 +22,25 @@ namespace B3.Trading.Application;
 /// </summary>
 public sealed class CashKeeper
 {
-    private readonly ConcurrentDictionary<EndClientId, decimal> _balances = new();
+    private readonly ConcurrentDictionary<AccountKey, decimal> _balances =
+        new(AccountKeyComparer.Instance);
+
+    public decimal GetAvailable(string firmId, EndClientId owner) =>
+        _balances.TryGetValue(AccountKey.Create(firmId, owner), out var b) ? b : 0m;
 
     public decimal GetAvailable(EndClientId owner) =>
-        _balances.TryGetValue(owner, out var b) ? b : 0m;
+        GetAvailable(CashLedger.DefaultFirmId, owner);
 
-    public void ApplyDeposit(EndClientId owner, decimal amount)
+    public void ApplyDeposit(string firmId, EndClientId owner, decimal amount)
     {
         if (amount <= 0m)
             throw new ArgumentOutOfRangeException(nameof(amount), "deposit amount must be > 0");
-        _balances.AddOrUpdate(owner, amount, (_, current) => current + amount);
+        _balances.AddOrUpdate(
+            AccountKey.Create(firmId, owner), amount, (_, current) => current + amount);
     }
+
+    public void ApplyDeposit(EndClientId owner, decimal amount) =>
+        ApplyDeposit(CashLedger.DefaultFirmId, owner, amount);
 
     /// <summary>
     /// Atomically debits <paramref name="amount"/> iff the balance is
@@ -41,21 +49,25 @@ public sealed class CashKeeper
     /// expected to surface a 422 to the operator. Idempotent on the
     /// failure path (no allocation, no entry creation).
     /// </summary>
-    public bool TryWithdraw(EndClientId owner, decimal amount)
+    public bool TryWithdraw(string firmId, EndClientId owner, decimal amount)
     {
         if (amount <= 0m)
             throw new ArgumentOutOfRangeException(nameof(amount), "withdrawal amount must be > 0");
+        var key = AccountKey.Create(firmId, owner);
         while (true)
         {
-            if (!_balances.TryGetValue(owner, out var current))
+            if (!_balances.TryGetValue(key, out var current))
                 return false;
             if (current < amount)
                 return false;
             var next = current - amount;
-            if (_balances.TryUpdate(owner, next, current))
+            if (_balances.TryUpdate(key, next, current))
                 return true;
         }
     }
+
+    public bool TryWithdraw(EndClientId owner, decimal amount) =>
+        TryWithdraw(CashLedger.DefaultFirmId, owner, amount);
 
     /// <summary>
     /// Replay-time apply: mirrors the live admin path exactly. Unknown
@@ -68,20 +80,24 @@ public sealed class CashKeeper
     /// is intentionally allowed to propagate (no clamp) so it surfaces
     /// in observability instead of being masked.
     /// </summary>
-    public void Apply(string kind, EndClientId owner, decimal amount)
+    public void Apply(string firmId, string kind, EndClientId owner, decimal amount)
     {
+        var key = AccountKey.Create(firmId, owner);
         if (string.Equals(kind, "Deposit", StringComparison.Ordinal))
         {
-            _balances.AddOrUpdate(owner, amount, (_, current) => current + amount);
+            _balances.AddOrUpdate(key, amount, (_, current) => current + amount);
             return;
         }
         if (string.Equals(kind, "Withdrawal", StringComparison.Ordinal))
         {
-            _balances.AddOrUpdate(owner, -amount, (_, current) => current - amount);
+            _balances.AddOrUpdate(key, -amount, (_, current) => current - amount);
             return;
         }
         throw new InvalidOperationException($"Unknown CashLedgerEvent kind: {kind}");
     }
+
+    public void Apply(string kind, EndClientId owner, decimal amount) =>
+        Apply(CashLedger.DefaultFirmId, kind, owner, amount);
 
     /// <summary>
     /// Phase-1 (lock-side) capture for the two-phase snapshot pipeline
@@ -96,7 +112,8 @@ public sealed class CashKeeper
         for (var i = 0; i < pairs.Length; i++)
         {
             if (pairs[i].Value == 0m) continue;
-            buf[n++] = new CashKeeperRaw(pairs[i].Key.Value, pairs[i].Value);
+            buf[n++] = new CashKeeperRaw(
+                pairs[i].Key.Owner.Value, pairs[i].Value, pairs[i].Key.FirmId);
         }
         if (n == buf.Length) return buf;
         var trimmed = new CashKeeperRaw[n];
@@ -109,6 +126,44 @@ public sealed class CashKeeper
         ArgumentNullException.ThrowIfNull(snap);
         _balances.Clear();
         foreach (var kv in snap)
-            _balances[new EndClientId(kv.Key)] = kv.Value;
+        {
+            var (firmId, endClientId) = ParseSnapshotKey(kv.Key);
+            var owner = new EndClientId(endClientId);
+            _balances[AccountKey.Create(firmId, owner)] = kv.Value;
+        }
+    }
+
+    public static string FormatSnapshotKey(string firmId, string endClientId) =>
+        $"{firmId}|{endClientId}";
+
+    private static (string FirmId, string EndClientId) ParseSnapshotKey(string key)
+    {
+        var separator = key.IndexOf('|');
+        return separator > 0 && separator < key.Length - 1
+            ? (key[..separator], key[(separator + 1)..])
+            : (CashLedger.DefaultFirmId, key);
+    }
+
+    private readonly record struct AccountKey(string FirmId, EndClientId Owner)
+    {
+        public static AccountKey Create(string firmId, EndClientId owner)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+            return new AccountKey(firmId, owner);
+        }
+    }
+
+    private sealed class AccountKeyComparer : IEqualityComparer<AccountKey>
+    {
+        public static readonly AccountKeyComparer Instance = new();
+
+        public bool Equals(AccountKey x, AccountKey y) =>
+            string.Equals(x.FirmId, y.FirmId, StringComparison.OrdinalIgnoreCase)
+            && x.Owner == y.Owner;
+
+        public int GetHashCode(AccountKey obj) =>
+            HashCode.Combine(
+                StringComparer.OrdinalIgnoreCase.GetHashCode(obj.FirmId),
+                obj.Owner);
     }
 }

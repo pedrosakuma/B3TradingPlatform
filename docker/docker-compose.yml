@@ -302,8 +302,10 @@ services:
       # dogfood/recovery users that participate in real crossed-order
       # flows so Buy submissions do not get risk-rejected on a cold stack.
       Trading__Cash__Seeds__0__EndClientId: ${TRADING_SEED_USER_2:-bob}
+      Trading__Cash__Seeds__0__FirmId: FIRM01
       Trading__Cash__Seeds__0__InitialAvailable: "100000.00"
       Trading__Cash__Seeds__1__EndClientId: ${TRADING_SEED_USER_FIRM02:-bob-firm02}
+      Trading__Cash__Seeds__1__FirmId: FIRM02
       Trading__Cash__Seeds__1__InitialAvailable: "100000.00"
       # Opening positions seeded for the default dogfood accounts so
       # both alice and bob can sell out of the box without being blocked

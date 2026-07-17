@@ -20,8 +20,8 @@ public static class Channels
     /// a single <see cref="BalanceDto"/> at subscribe time; deltas are
     /// pushed by <c>WebSocketBalanceFanOut</c> whenever
     /// <see cref="CashLedger.BalanceChanged"/> fires (fills, fees,
-    /// opening-balance seed). Not firm-scoped — the underlying
-    /// <see cref="CashLedger"/> is keyed only by end-client owner.
+    /// opening-balance seed). Snapshot and deltas are scoped to the
+    /// authenticated firm's cash bucket.
     /// </summary>
     public const string BalanceMe = "balance.me";
 

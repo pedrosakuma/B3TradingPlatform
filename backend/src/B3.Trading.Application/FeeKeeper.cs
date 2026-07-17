@@ -66,7 +66,7 @@ public sealed class FeeKeeper
     /// <see cref="FeeAccruedEvent"/> arrived in the meantime.
     /// </summary>
     private readonly record struct PendingReplaySynth(
-        string EndClientId, string Symbol, B3.Trading.Domain.OrderSide Side,
+        string FirmId, string EndClientId, string Symbol, B3.Trading.Domain.OrderSide Side,
         long FillQuantity, decimal FillPrice, DateTimeOffset TimestampUtc);
 
     public decimal GetDayTotal(string endClient, DateOnly day) =>
@@ -105,7 +105,10 @@ public sealed class FeeKeeper
         // so replay (FeeAccruedEvent re-applied on WAL drain) is a
         // no-op for cash too. Optional dep — when null, only totals
         // advance (test contexts / statement-only deployments).
-        _cash?.ApplyFee(new B3.Trading.Domain.EndClientId(evt.EndClientId), evt.Total);
+        _cash?.ApplyFee(
+            evt.FirmId,
+            new B3.Trading.Domain.EndClientId(evt.EndClientId),
+            evt.Total);
         return true;
     }
 
@@ -126,12 +129,14 @@ public sealed class FeeKeeper
     public void RegisterPendingReplaySynth(
         string executionId, string endClientId, string symbol,
         B3.Trading.Domain.OrderSide side, long fillQuantity, decimal fillPrice,
-        DateTimeOffset timestampUtc)
+        DateTimeOffset timestampUtc,
+        string firmId = CashLedger.DefaultFirmId)
     {
         ArgumentNullException.ThrowIfNull(executionId);
         if (_seenExecutionIds.ContainsKey(executionId)) return;
         _pendingReplaySynths.TryAdd(executionId,
-            new PendingReplaySynth(endClientId, symbol, side, fillQuantity, fillPrice, timestampUtc));
+            new PendingReplaySynth(
+                firmId, endClientId, symbol, side, fillQuantity, fillPrice, timestampUtc));
     }
 
     /// <summary>
@@ -168,7 +173,10 @@ public sealed class FeeKeeper
             // is the idempotency gate — a fee that was already in the
             // snapshot (loaded via Restore + seen-set) never reaches
             // here.
-            _cash?.ApplyFee(new B3.Trading.Domain.EndClientId(p.EndClientId), breakdown.Total);
+            _cash?.ApplyFee(
+                p.FirmId,
+                new B3.Trading.Domain.EndClientId(p.EndClientId),
+                breakdown.Total);
             Observability.MetricsRegistry.FeeReplaySynth.Add(1,
                 new KeyValuePair<string, object?>("reconciled", false));
             materialised++;

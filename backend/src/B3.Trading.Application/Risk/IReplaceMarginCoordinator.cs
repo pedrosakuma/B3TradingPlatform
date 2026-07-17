@@ -46,6 +46,25 @@ public interface IReplaceMarginCoordinator
         CancellationToken ct);
 
     /// <summary>
+    /// Firm-aware overload. The default implementation preserves source
+    /// compatibility for test doubles; production providers override it so
+    /// replace capacity is checked in the original order's firm bucket.
+    /// </summary>
+    Task<RiskDecision> PrepareReplaceAsync(
+        ulong originalClOrdId,
+        ulong newClOrdId,
+        EndClientId owner,
+        string firmId,
+        decimal newRemainingNotional,
+        CancellationToken ct) =>
+        PrepareReplaceAsync(
+            originalClOrdId,
+            newClOrdId,
+            owner,
+            newRemainingNotional,
+            ct);
+
+    /// <summary>
     /// Called from the ER processor on a successful Replaced ack.
     /// Atomically releases the original reservation and finalizes the
     /// replacement reservation at <paramref name="confirmedRemainingNotional"/>

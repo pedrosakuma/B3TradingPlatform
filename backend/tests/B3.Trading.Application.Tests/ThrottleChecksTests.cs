@@ -168,6 +168,46 @@ public class ThrottleChecksTests
         Assert.True(check.Check(Ctx(qty: 100, price: null, type: OrderType.Market)).Approved);
     }
 
+    [Fact]
+    public void RollingNotional_ReplaceChargesExecutableLeaves()
+    {
+        var opts = new RiskOptions
+        {
+            RollingNotional = new RollingNotionalOptions
+            {
+                Default = new RollingNotionalLimit { Cap = 1_000m },
+            },
+        };
+        var (check, _, _) = BuildRollingNotional(opts);
+        var replace = Ctx(qty: 200, price: 10m) with
+        {
+            ReplaceOriginalClOrdId = 1,
+            EffectiveLeavesQuantity = 50,
+        };
+
+        Assert.True(check.Check(replace).Approved); // 50 * 10, not 200 * 10
+    }
+
+    [Fact]
+    public void RollingNotional_RecoveryFenceRejectsUntilWindowElapses()
+    {
+        var clock = new TestClock(DateTimeOffset.UtcNow);
+        var opts = new RiskOptions
+        {
+            RollingNotional = new RollingNotionalOptions
+            {
+                WindowSeconds = 60,
+                Default = new RollingNotionalLimit { Cap = 10_000m },
+            },
+        };
+        var (check, accountant, _) = BuildRollingNotional(opts, clock);
+        accountant.EnterRecoveryFence();
+
+        Assert.False(check.Check(Ctx()).Approved);
+        clock.Advance(TimeSpan.FromSeconds(61));
+        Assert.True(check.Check(Ctx()).Approved);
+    }
+
     // ────────────────── OrderRateLimitCheck ──────────────────
 
     [Fact]
@@ -212,6 +252,26 @@ public class ThrottleChecksTests
         accountant.RecordAccepted(Ctx(owner: "alice", firm: "acme"));
         // Different end-client, same firm — firm cap blocks it.
         Assert.False(check.Check(Ctx(owner: "bob", firm: "acme")).Approved);
+    }
+
+    [Fact]
+    public void OrderRate_RecoveryFenceRejectsUntilWindowElapses()
+    {
+        var clock = new TestClock(DateTimeOffset.UtcNow);
+        var opts = new RiskOptions
+        {
+            OrderRate = new OrderRateOptions
+            {
+                WindowSeconds = 10,
+                Default = new OrderRateLimit { Max = 100 },
+            },
+        };
+        var (check, accountant) = BuildOrderRate(opts, clock);
+        accountant.EnterRecoveryFence();
+
+        Assert.False(check.Check(Ctx()).Approved);
+        clock.Advance(TimeSpan.FromSeconds(11));
+        Assert.True(check.Check(Ctx()).Approved);
     }
 
     [Fact]

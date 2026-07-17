@@ -277,6 +277,19 @@ A `ThrottleLedgerSweeper` BackgroundService prunes empty buckets
 periodically (default 60s) so distinct end-client/firm churn doesn't
 leak unbounded memory.
 
+Restart behavior (#625): the sliding-window queues are not persisted. A host
+that restores any snapshot or WAL state enters a conservative restart fence
+for the full currently configured order-rate and rolling-notional windows.
+Checks with configured caps reject during the fence; uncapped scopes remain
+unchanged. Accepted cancel-replaces are recorded through the same accountants
+as fresh submits, using replacement executable leaves
+(`newQty - originalCumQty`) for notional.
+
+Position-limit checks also project same-side executable leaves from working
+orders. Fresh submits are already in the book when checked; modifies replace
+the original leaves with the proposed effective leaves. Master and sub-account
+projections are both firm-scoped and do not net opposite-side working orders.
+
 ## 5. Alternatives considered
 
 ### A. Persist limits in a database now

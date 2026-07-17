@@ -44,7 +44,7 @@ public class SignupCashSeedTests
 
         // And the ledger snapshot now contains the new owner.
         var ledger = factory.Services.GetRequiredService<CashLedger>();
-        Assert.Equal(50_000m, ledger.GetAvailable(new EndClientId(username)));
+        Assert.Equal(50_000m, ledger.GetAvailable("FIRM01", new EndClientId(username)));
     }
 
     [Fact]
@@ -107,6 +107,6 @@ public class SignupCashSeedTests
         await SignupAsync(client, username);
 
         var ledger = factory.Services.GetRequiredService<CashLedger>();
-        Assert.Equal(1000m, ledger.GetAvailable(new EndClientId(username)));
+        Assert.Equal(1000m, ledger.GetAvailable("FIRM01", new EndClientId(username)));
     }
 }

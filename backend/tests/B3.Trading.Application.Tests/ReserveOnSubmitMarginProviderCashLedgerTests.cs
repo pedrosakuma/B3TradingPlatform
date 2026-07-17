@@ -1,4 +1,5 @@
 using B3.Trading.Application.Risk;
+using B3.Trading.Application.Persistence;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -40,7 +41,7 @@ public class ReserveOnSubmitMarginProviderCashLedgerTests
     {
         // Config says 1M but ledger seeded at 500: ledger wins.
         var (p, ledger) = Build(configInitial: 1_000_000m);
-        ledger.SeedIfAbsent(new EndClientId("alice"), 500m);
+        ledger.SeedIfAbsent("FIRM", new EndClientId("alice"), 500m);
 
         Assert.True((await p.TryReserveAsync(1, Buy("alice", 10m, 50), default)).Approved);
         var rejected = await p.TryReserveAsync(2, Buy("alice", 10m, 1), default);
@@ -73,12 +74,12 @@ public class ReserveOnSubmitMarginProviderCashLedgerTests
         // reduce the ledger, so the NEXT Buy sees less capacity.
         var (p, ledger) = Build();
         var alice = new EndClientId("alice");
-        ledger.SeedIfAbsent(alice, 1_000m);
+        ledger.SeedIfAbsent("FIRM", alice, 1_000m);
 
         // First Buy reserved, then filled — production wires
         // CashLedger.ApplyFill via ER processor; we simulate it here.
         Assert.True((await p.TryReserveAsync(10, Buy("alice", 10m, 100), default)).Approved);
-        ledger.ApplyFill(alice, OrderSide.Buy, 100, 10m);   // -1000 → balance 0
+        ledger.ApplyFill("FIRM", alice, OrderSide.Buy, 100, 10m);   // -1000 → balance 0
         p.OnExecution(10, ExecKind.Fill, lastQty: 100);     // releases the reservation
 
         // Next Buy must see zero available, even though the original
@@ -92,11 +93,11 @@ public class ReserveOnSubmitMarginProviderCashLedgerTests
     {
         var (p, ledger) = Build();
         var alice = new EndClientId("alice");
-        ledger.SeedIfAbsent(alice, 0m);
+        ledger.SeedIfAbsent("FIRM", alice, 0m);
 
         // Selling inventory we already own credits cash, lifting the
         // ceiling for subsequent Buys.
-        ledger.ApplyFill(alice, OrderSide.Sell, 10, 50m);   // +500
+        ledger.ApplyFill("FIRM", alice, OrderSide.Sell, 10, 50m);   // +500
 
         Assert.True((await p.TryReserveAsync(20, Buy("alice", 10m, 50), default)).Approved);
         Assert.False((await p.TryReserveAsync(21, Buy("alice", 10m, 1), default)).Approved);
@@ -109,8 +110,50 @@ public class ReserveOnSubmitMarginProviderCashLedgerTests
         // every Buy must reject — we don't want the config fallback to
         // mask a real overdraft.
         var (p, ledger) = Build(configInitial: 1_000_000m);
-        ledger.SeedIfAbsent(new EndClientId("alice"), -10m);
+        ledger.SeedIfAbsent("FIRM", new EndClientId("alice"), -10m);
 
         Assert.False((await p.TryReserveAsync(1, Buy("alice", 1m, 1), default)).Approved);
+    }
+
+    [Fact]
+    public async Task SameOwner_CannotConsumeAnotherFirmsCashOrReservations()
+    {
+        var (p, ledger) = Build();
+        var owner = new EndClientId("alice");
+        ledger.SeedIfAbsent("FIRM01", owner, 1_000m);
+        ledger.SeedIfAbsent("FIRM02", owner, 100m);
+
+        var f1 = Buy("alice", 10m, 100) with { FirmId = "FIRM01" };
+        var f2 = Buy("alice", 10m, 11) with { FirmId = "FIRM02" };
+
+        Assert.True((await p.TryReserveAsync(1, f1, default)).Approved);
+        Assert.False((await p.TryReserveAsync(2, f2, default)).Approved);
+        Assert.Equal(1_000m, p.ReservedForTesting("FIRM01", "alice"));
+        Assert.Equal(0m, p.ReservedForTesting("FIRM02", "alice"));
+    }
+
+    [Fact]
+    public void Recovery_RebuildsReservationsPerFirmForSameOwner()
+    {
+        var (p, ledger) = Build();
+        var owner = new EndClientId("alice");
+        ledger.SeedIfAbsent("FIRM01", owner, 1_000m);
+        ledger.SeedIfAbsent("FIRM02", owner, 500m);
+        var orders = new[]
+        {
+            new OrderSnapshot(
+                1, "alice", "PETR4", 1234, "Buy", "Limit",
+                100, 10m, 80, 20, "PartiallyFilled", "FIRM01"),
+            new OrderSnapshot(
+                2, "alice", "PETR4", 1234, "Buy", "Limit",
+                50, 10m, 40, 10, "PartiallyFilled", "FIRM02"),
+        };
+
+        p.RestoreRecoveryState(orders);
+
+        Assert.Equal(800m, p.ReservedForTesting("FIRM01", "alice"));
+        Assert.Equal(400m, p.ReservedForTesting("FIRM02", "alice"));
+        Assert.Equal(200m, p.AvailableForTesting("FIRM01", "alice"));
+        Assert.Equal(100m, p.AvailableForTesting("FIRM02", "alice"));
     }
 }

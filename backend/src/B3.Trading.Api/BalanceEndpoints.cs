@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using B3.Trading.Api.WebSockets;
+using B3.Trading.Api.Auth;
 using B3.Trading.Application;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
@@ -17,7 +18,8 @@ public static class BalanceEndpoints
             var sub = ctx.User.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)
                       ?? throw new InvalidOperationException("Authenticated request missing sub claim.");
             var owner = registry.Register(sub);
-            return Results.Ok(new BalanceDto(cash.GetAvailable(owner)));
+            var firm = ctx.User.FindFirstValue(JwtIssuer.FirmClaim) ?? "default";
+            return Results.Ok(new BalanceDto(cash.GetAvailable(firm, owner)));
         });
 
         return app;

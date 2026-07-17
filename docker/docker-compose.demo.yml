@@ -81,8 +81,10 @@ services:
       # both accounts up front so default-on margin never degrades the
       # flow into asymmetric sell-only traffic.
       Trading__Cash__Seeds__3__EndClientId: ${DEMO_BOT_A_USER:-bot-clientA}
+      Trading__Cash__Seeds__3__FirmId: FIRM01
       Trading__Cash__Seeds__3__InitialAvailable: "100000.00"
       Trading__Cash__Seeds__4__EndClientId: ${DEMO_BOT_B_USER:-bot-clientB}
+      Trading__Cash__Seeds__4__FirmId: FIRM01
       Trading__Cash__Seeds__4__InitialAvailable: "100000.00"
 
       # The demo bots produce Buys and Sells uniformly to populate

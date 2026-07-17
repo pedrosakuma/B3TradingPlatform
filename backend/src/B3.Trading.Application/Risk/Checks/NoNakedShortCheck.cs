@@ -26,8 +26,8 @@ namespace B3.Trading.Application.Risk.Checks;
 ///     book by the time the pipeline runs (see
 ///     <see cref="WorkingOrderBook.SumOpenSellLeavesForSymbol"/>
 ///     remarks), so the sum already includes it. The reject
-///     condition is therefore <c>sellable &lt; 0</c>, not
-///     <c>incoming &gt; sellable</c>.
+///     condition is therefore projected sell exposure greater than current
+///     long inventory, not a second addition of the incoming quantity.
 /// </summary>
 public sealed class NoNakedShortCheck : IRiskCheck
 {
@@ -62,7 +62,8 @@ public sealed class NoNakedShortCheck : IRiskCheck
         if (allow == true) return RiskDecision.Approve;
 
         var currentLong = _positions.GetOrCreate(ctx.FirmId, ctx.Owner, ctx.Symbol).NetQuantity;
-        var openSellLeaves = _orders.SumOpenSellLeavesForSymbolAndFirm(ctx.FirmId, ctx.Owner, ctx.Symbol);
+        var openSellLeaves = _orders.SumOpenLeavesForSymbolAndFirm(
+            ctx.FirmId, ctx.Owner, ctx.Symbol, OrderSide.Sell);
 
         // Modify (cancel-replace) projection — slice 3 of #122. The
         // original order is still in the book until the venue's
@@ -73,7 +74,7 @@ public sealed class NoNakedShortCheck : IRiskCheck
         // owner trying to downsize a working Sell that was already
         // pinned at their inventory ceiling would be incorrectly
         // rejected as if both legs co-existed.
-        long projectionAdjustment = 0;
+        Int128 projectionAdjustment = 0;
         if (ctx.ReplaceOriginalClOrdId is { } origId
             && _orders.TryGet(origId, out var orig)
             && orig is not null
@@ -99,12 +100,21 @@ public sealed class NoNakedShortCheck : IRiskCheck
         }
         // The incoming Sell is already counted in openSellLeaves
         // because OrderSubmissionService.TryAdd runs before risk
-        // evaluation. So `sellable` is the projected net assuming
+        // evaluation. So the aggregate is the projected sell exposure assuming
         // every open Sell fills and no open Buy does.
         // For modifies the new order is NOT yet in the book — the
         // adjustment above accounts for it explicitly.
-        var sellable = currentLong - (openSellLeaves + projectionAdjustment);
-        if (sellable < 0)
+        Int128 projectedSellExposure;
+        try
+        {
+            projectedSellExposure = checked(openSellLeaves + projectionAdjustment);
+        }
+        catch (OverflowException)
+        {
+            return RiskDecision.Reject(
+                "naked short blocked: projected sell exposure overflowed");
+        }
+        if (projectedSellExposure < 0 || projectedSellExposure > currentLong)
         {
             return RiskDecision.Reject(
                 $"naked short blocked: current long={currentLong}, open sell leaves={openSellLeaves} " +

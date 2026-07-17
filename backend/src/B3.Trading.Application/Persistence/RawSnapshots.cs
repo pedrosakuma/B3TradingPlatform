@@ -277,7 +277,10 @@ public readonly record struct OwnershipRaw(ulong ClOrdId, string EndClientId);
 
 public readonly record struct SessionPhaseOverrideRaw(string Symbol, SessionPhase Phase);
 
-public readonly record struct CashRaw(string EndClientId, decimal Available);
+public readonly record struct CashRaw(
+    string EndClientId,
+    decimal Available,
+    string FirmId = B3.Trading.Application.CashLedger.DefaultFirmId);
 
 /// <summary>
 /// Q2.2 (#269). Raw lock-side capture of one row from
@@ -286,7 +289,10 @@ public readonly record struct CashRaw(string EndClientId, decimal Available);
 /// <see cref="B3.Trading.Application.CashLedger"/>) so the two
 /// projections can evolve independently.
 /// </summary>
-public readonly record struct CashKeeperRaw(string EndClientId, decimal Available);
+public readonly record struct CashKeeperRaw(
+    string EndClientId,
+    decimal Available,
+    string FirmId = B3.Trading.Application.CashLedger.DefaultFirmId);
 
 /// <summary>
 /// Q2.3 (#270). Raw lock-side capture of one row from

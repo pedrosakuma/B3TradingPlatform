@@ -306,7 +306,10 @@ public sealed class StateSnapshotter
 
         var cash = new List<CashBalanceSnapshot>(raw.CashBalances.Length);
         for (var i = 0; i < raw.CashBalances.Length; i++)
-            cash.Add(new CashBalanceSnapshot(raw.CashBalances[i].EndClientId, raw.CashBalances[i].Available));
+            cash.Add(new CashBalanceSnapshot(
+                raw.CashBalances[i].EndClientId,
+                raw.CashBalances[i].Available,
+                raw.CashBalances[i].FirmId));
 
         // Q2.2 (#269). Project the CashKeeper's raw rows into the
         // persisted dict shape. Dictionary (vs list) is mandated by the
@@ -314,7 +317,9 @@ public sealed class StateSnapshotter
         // index by end-client id).
         var cashByEndclient = new Dictionary<string, decimal>(raw.CashByEndclient.Length);
         for (var i = 0; i < raw.CashByEndclient.Length; i++)
-            cashByEndclient[raw.CashByEndclient[i].EndClientId] = raw.CashByEndclient[i].Available;
+            cashByEndclient[CashKeeper.FormatSnapshotKey(
+                raw.CashByEndclient[i].FirmId,
+                raw.CashByEndclient[i].EndClientId)] = raw.CashByEndclient[i].Available;
 
         // Q2.3 (#270). FeeKeeper rows projected into the
         // <c>{endClientId}|{yyyy-MM-dd} → total</c> dict shape; same
@@ -492,6 +497,7 @@ public sealed class StateSnapshotter
             Algos = algos,
             AlgoIds = algoIds,
             CashBalances = cash,
+            CashBalancesFirmScoped = true,
             CashByEndclient = cashByEndclient,
             FeesByEndclientDay = feesByEndclientDay,
             FeeSeenExecutionIds = feeSeen,
@@ -546,7 +552,11 @@ public sealed class StateSnapshotter
         _ownership.Restore(snap.Ownership);
         _algos.Restore(snap.Algos);
         _algoIds.Restore(snap.AlgoIds);
-        _cash.Restore(snap.CashBalances);
+        var legacyCashFirmHints = BuildLegacyCashFirmHints(snap);
+        _cash.Restore(
+            snap.CashBalances,
+            firmScoped: snap.CashBalancesFirmScoped,
+            legacyFirmHints: legacyCashFirmHints);
         _cashKeeper?.Restore(snap.CashByEndclient);
         _feeKeeper?.Restore(snap.FeesByEndclientDay, snap.FeeSeenExecutionIds);
         _pnlKeeper?.Restore(snap.PnlRealizedByEndclientSymbolDay, snap.PnlAvgCost, snap.PnlSeenExecutionIds, snap.PnlUnknownBasis);
@@ -582,6 +592,7 @@ public sealed class StateSnapshotter
         {
             _pnlKeeper.SeedAvgCostFromLegacyPositions(snap.Positions);
         }
+
         _userBotCredentials?.Restore(snap.UserBotCredentials);
         _userBotSessions?.Restore(snap.BotSessions);
         _userBotMappings?.Restore(snap.BotOrderMappings, snap.BotCancelMappings);
@@ -677,6 +688,7 @@ public sealed class StateSnapshotter
                         p.OriginalClOrdId,
                         p.NewClOrdId,
                         new EndClientId(p.OwnerEndClientId),
+                        p.FirmId,
                         p.NewRemainingNotional,
                         CancellationToken.None)
                         .GetAwaiter().GetResult();
@@ -724,6 +736,45 @@ public sealed class StateSnapshotter
         {
             _subAccountPnl.SeedBucketBasisFromLegacyPositions(snap.Positions, snap.SubAccountPositions);
         }
+    }
+
+    private static IReadOnlyDictionary<string, string> BuildLegacyCashFirmHints(
+        PlatformSnapshot snap)
+    {
+        if (snap.CashBalancesFirmScoped)
+            return new Dictionary<string, string>();
+
+        var legacyOwners = snap.CashBalances
+            .Where(static cash => string.Equals(
+                cash.FirmId,
+                CashLedger.DefaultFirmId,
+                StringComparison.OrdinalIgnoreCase))
+            .Select(static cash => cash.EndClientId)
+            .ToHashSet(StringComparer.Ordinal);
+        if (legacyOwners.Count == 0)
+            return new Dictionary<string, string>();
+
+        var hints = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var group in snap.WorkingOrders
+                     .Where(order => legacyOwners.Contains(order.EndClientId))
+                     .GroupBy(
+                     static order => order.EndClientId,
+                     StringComparer.Ordinal))
+        {
+            var firms = group.Select(static order => order.FirmId)
+                .Where(static firm => !string.IsNullOrWhiteSpace(firm))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (firms.Length > 1)
+            {
+                throw new InvalidOperationException(
+                    $"Legacy cash snapshot for end-client '{group.Key}' is ambiguous " +
+                    $"across order firms: {string.Join(", ", firms)}.");
+            }
+            if (firms.Length == 1)
+                hints[group.Key] = firms[0];
+        }
+        return hints;
     }
 }
 
@@ -1031,6 +1082,11 @@ public sealed class EventReplayer
                 // they didn't wire (the other side still applies).
                 if (_replaceMargin is not null)
                 {
+                    var firmId = _replacements is not null
+                        && _replacements.TryGet(amh.NewClOrdId, out var pending)
+                        && pending is not null
+                            ? pending.FirmId
+                            : CashLedger.DefaultFirmId;
                     // PrepareReplaceAsync's production implementation
                     // (ReserveOnSubmitMarginProvider) is synchronous
                     // under a lock and returns a completed task — the
@@ -1041,6 +1097,7 @@ public sealed class EventReplayer
                         amh.OriginalClOrdId,
                         amh.NewClOrdId,
                         new EndClientId(amh.EndClientId),
+                        firmId,
                         amh.NewRemainingNotional,
                         CancellationToken.None)
                         .GetAwaiter().GetResult();
@@ -1209,7 +1266,11 @@ public sealed class EventReplayer
                 // Q2.2 (#269). Replay folds the deposit/withdrawal into
                 // CashKeeper. Null-tolerant for compositions/tests that
                 // don't wire the keeper.
-                _cashKeeper?.Apply(cle.Operation, new EndClientId(cle.EndClientId), cle.Amount);
+                _cashKeeper?.Apply(
+                    cle.FirmId,
+                    cle.Operation,
+                    new EndClientId(cle.EndClientId),
+                    cle.Amount);
                 break;
             case FeeAccruedEvent fae:
                 // Q2.3 (#270). Forward the accrual to FeeKeeper. The
@@ -1217,6 +1278,15 @@ public sealed class EventReplayer
                 // whose totals already include this event is left
                 // untouched (FeeSeenExecutionIds restored alongside the
                 // totals — see StateSnapshotter.Restore).
+                if (string.Equals(
+                        fae.FirmId,
+                        CashLedger.DefaultFirmId,
+                        StringComparison.OrdinalIgnoreCase)
+                    && _orders.TryGet(fae.ClOrdId, out var feeOrder)
+                    && feeOrder is not null)
+                {
+                    fae = fae with { FirmId = feeOrder.FirmId };
+                }
                 _feeKeeper?.Apply(fae);
                 break;
             case RealizedPnlEvent rpe:

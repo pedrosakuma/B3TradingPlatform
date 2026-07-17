@@ -3,6 +3,7 @@ using B3.Trading.Application.MarketData;
 using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
+using B3.Trading.Application.Risk.Accounting;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -131,6 +132,7 @@ public sealed class AlgoEngine : BackgroundService
     /// </summary>
     private readonly RiskPipeline? _risk;
     private readonly IReplaceMarginCoordinator? _replaceMargin;
+    private readonly CompositeRiskAccountant? _accountant;
 
     // Per-parent runtime state. Owned by the consumer task; the
     // ConcurrentDictionary is only used because TryAdd/TryGetValue are
@@ -159,7 +161,8 @@ public sealed class AlgoEngine : BackgroundService
         PendingReplacementRegistry? replacements = null,
         RiskPipeline? risk = null,
         IReplaceMarginCoordinator? replaceMargin = null,
-        SymbolDirectory? symbols = null)
+        SymbolDirectory? symbols = null,
+        CompositeRiskAccountant? accountant = null)
     {
         _queue = queue;
         _algos = algos;
@@ -182,6 +185,7 @@ public sealed class AlgoEngine : BackgroundService
         _risk = risk;
         _replaceMargin = replaceMargin;
         _symbols = symbols;
+        _accountant = accountant;
     }
 
     /// <summary>
@@ -1286,18 +1290,19 @@ public sealed class AlgoEngine : BackgroundService
         // / Stop / GTD are inherited from the original (the algo
         // modify path does not surface them as overrides).
         var effectiveLeaves = newQuantity - child.CumulativeQuantity;
+        var riskCtx = new RiskContext(
+            child.Owner, child.FirmId, child.Symbol, child.Side, child.Type,
+            newQuantity, newPrice,
+            ReplaceOriginalClOrdId: child.ClOrdId,
+            EffectiveLeavesQuantity: effectiveLeaves,
+            TimeInForce: child.TimeInForce,
+            StopPrice: child.StopPrice,
+            GoodTillDate: child.GoodTillDate,
+            SubAccountId: child.SubAccountId,
+            ParentAlgoId: algo.AlgoId,
+            AlgoType: algoTypeTag);
         if (_risk is not null)
         {
-            var riskCtx = new RiskContext(
-                child.Owner, child.FirmId, child.Symbol, child.Side, child.Type,
-                newQuantity, newPrice,
-                ReplaceOriginalClOrdId: child.ClOrdId,
-                EffectiveLeavesQuantity: effectiveLeaves,
-                TimeInForce: child.TimeInForce,
-                StopPrice: child.StopPrice,
-                GoodTillDate: child.GoodTillDate,
-                ParentAlgoId: algo.AlgoId,
-                AlgoType: algoTypeTag);
             var riskDecision = _risk.Evaluate(riskCtx);
             if (!riskDecision.Approved)
             {
@@ -1324,7 +1329,12 @@ public sealed class AlgoEngine : BackgroundService
         if (_replaceMargin is not null)
         {
             var marginDecision = await _replaceMargin.PrepareReplaceAsync(
-                child.ClOrdId, newClOrdId, child.Owner, newRemainingNotional, ct).ConfigureAwait(false);
+                child.ClOrdId,
+                newClOrdId,
+                child.Owner,
+                child.FirmId,
+                newRemainingNotional,
+                ct).ConfigureAwait(false);
             if (!marginDecision.Approved)
             {
                 MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
@@ -1395,6 +1405,8 @@ public sealed class AlgoEngine : BackgroundService
                 _replaceMargin!.AbortReplace(newClOrdId);
             return false;
         }
+
+        _accountant?.RecordAccepted(riskCtx);
 
         try
         {

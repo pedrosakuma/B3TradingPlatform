@@ -103,6 +103,23 @@ public class MultiFirmSnapshotIsolationTests : IDisposable
         Assert.Equal(31m, bobF2.AverageEntryPrice);
     }
 
+    [Fact]
+    public void CashLedger_SnapshotRestore_PreservesSameOwnerFirmSlices()
+    {
+        var owner = new EndClientId("shared-user");
+        var source = new CashLedger();
+        source.SeedIfAbsent("FIRM01", owner, 1_000m);
+        source.SeedIfAbsent("FIRM02", owner, 2_000m);
+        source.ApplyFill("FIRM01", owner, OrderSide.Buy, 10, 25m);
+
+        var restored = new CashLedger();
+        restored.Restore(source.Snapshot());
+
+        Assert.Equal(750m, restored.GetAvailable("FIRM01", owner));
+        Assert.Equal(2_000m, restored.GetAvailable("FIRM02", owner));
+        Assert.Equal(0m, restored.GetAvailable("FIRM03", owner));
+    }
+
     /// <summary>
     /// Integration: real WAL + snapshot + recovery across FIRM01/02/03.
     /// Asserts that after a snapshot + tail-append + cold-boot from

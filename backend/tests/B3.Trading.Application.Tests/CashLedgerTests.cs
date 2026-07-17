@@ -139,6 +139,61 @@ public class CashLedgerTests
             ledger.ApplyFee(new EndClientId("alice"), -1m));
     }
 
+    [Fact]
+    public void SameOwner_IsFirmSegregated_ThroughSnapshotRestore()
+    {
+        var owner = new EndClientId("alice");
+        var ledger = new CashLedger();
+        ledger.SeedIfAbsent("FIRM01", owner, 1_000m);
+        ledger.SeedIfAbsent("FIRM02", owner, 200m);
+        ledger.ApplyFill("FIRM01", owner, OrderSide.Buy, 10, 30m);
+
+        Assert.Equal(700m, ledger.GetAvailable("FIRM01", owner));
+        Assert.Equal(200m, ledger.GetAvailable("FIRM02", owner));
+
+        var restored = new CashLedger();
+        restored.Restore(ledger.Snapshot());
+
+        Assert.Equal(700m, restored.GetAvailable("FIRM01", owner));
+        Assert.Equal(200m, restored.GetAvailable("FIRM02", owner));
+        Assert.Equal(0m, restored.GetAvailable("FIRM03", owner));
+    }
+
+    [Fact]
+    public void LegacySnapshotRow_SeedMapsBalanceWithoutApplyingSeed()
+    {
+        var owner = new EndClientId("alice");
+        var ledger = new CashLedger();
+        ledger.Restore([
+            new B3.Trading.Application.Persistence.CashBalanceSnapshot("alice", 500m),
+        ], firmScoped: false);
+
+        Assert.Throws<InvalidOperationException>(
+            ledger.EnsureNoUnmappedLegacyBalances);
+        Assert.False(ledger.SeedIfAbsent("FIRM01", owner, 10_000m));
+        Assert.Equal(500m, ledger.GetAvailable("FIRM01", owner));
+        Assert.Equal(0m, ledger.GetAvailable("default", owner));
+    }
+
+    [Fact]
+    public void LegacySnapshotRow_ConflictingFirmHintFailsClosed()
+    {
+        var ledger = new CashLedger();
+        ledger.Restore([
+            new B3.Trading.Application.Persistence.CashBalanceSnapshot("alice", 500m),
+        ], firmScoped: false);
+        ledger.ResolveLegacyBalances(new Dictionary<string, string>
+        {
+            ["alice"] = "FIRM01",
+        });
+
+        Assert.Throws<InvalidOperationException>(() =>
+            ledger.ResolveLegacyBalances(new Dictionary<string, string>
+            {
+                ["alice"] = "FIRM02",
+            }));
+    }
+
     // ── #386 BalanceChanged event ────────────────────────────────────
 
     [Fact]
@@ -147,7 +202,7 @@ public class CashLedgerTests
         var ledger = new CashLedger();
         var owner = new EndClientId("alice");
         (EndClientId Owner, decimal Available)? observed = null;
-        ledger.BalanceChanged += (o, a) => observed = (o, a);
+        ledger.BalanceChanged += (_, o, a) => observed = (o, a);
 
         ledger.SeedIfAbsent(owner, 1_000m);
 
@@ -163,7 +218,7 @@ public class CashLedgerTests
         var owner = new EndClientId("alice");
         ledger.SeedIfAbsent(owner, 500m);
         var captured = new List<decimal>();
-        ledger.BalanceChanged += (_, a) => captured.Add(a);
+        ledger.BalanceChanged += (_, _, a) => captured.Add(a);
 
         ledger.ApplyFill(owner, OrderSide.Buy, 10, 25m); // -250
 
@@ -178,7 +233,7 @@ public class CashLedgerTests
         var owner = new EndClientId("alice");
         ledger.SeedIfAbsent(owner, 100m);
         var captured = new List<decimal>();
-        ledger.BalanceChanged += (_, a) => captured.Add(a);
+        ledger.BalanceChanged += (_, _, a) => captured.Add(a);
 
         ledger.ApplyFee(owner, 7.50m);
 
@@ -193,7 +248,7 @@ public class CashLedgerTests
         var owner = new EndClientId("alice");
         ledger.SeedIfAbsent(owner, 100m);
         var fireCount = 0;
-        ledger.BalanceChanged += (_, _) => fireCount++;
+        ledger.BalanceChanged += (_, _, _) => fireCount++;
 
         ledger.ApplyFee(owner, 0m);
 
@@ -205,7 +260,7 @@ public class CashLedgerTests
     {
         var ledger = new CashLedger();
         var owner = new EndClientId("alice");
-        ledger.BalanceChanged += (_, _) => throw new InvalidOperationException("bad subscriber");
+        ledger.BalanceChanged += (_, _, _) => throw new InvalidOperationException("bad subscriber");
 
         // Must not throw out of the ledger.
         ledger.SeedIfAbsent(owner, 100m);

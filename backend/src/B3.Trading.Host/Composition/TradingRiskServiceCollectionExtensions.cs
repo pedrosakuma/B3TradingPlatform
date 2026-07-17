@@ -173,6 +173,10 @@ public static class TradingRiskServiceCollectionExtensions
         services.AddSingleton<OrderRateAccountant>();
         services.AddSingleton<IRiskAccountant>(sp => sp.GetRequiredService<RollingNotionalAccountant>());
         services.AddSingleton<IRiskAccountant>(sp => sp.GetRequiredService<OrderRateAccountant>());
+        services.AddSingleton<IRiskRecoveryFence>(sp =>
+            sp.GetRequiredService<RollingNotionalAccountant>());
+        services.AddSingleton<IRiskRecoveryFence>(sp =>
+            sp.GetRequiredService<OrderRateAccountant>());
         services.AddSingleton<CompositeRiskAccountant>();
         services.AddHostedService<ThrottleLedgerSweeper>();
 

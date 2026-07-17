@@ -10,7 +10,7 @@ namespace B3.Trading.Application.Risk.Accounting;
 /// <see cref="IRiskAccountant"/> so accepted submits feed both
 /// ledgers.
 /// </summary>
-public sealed class RollingNotionalAccountant : IRiskAccountant
+public sealed class RollingNotionalAccountant : IRiskAccountant, IRiskRecoveryFence
 {
     private readonly SlidingWindowLedger _perEndClient;
     private readonly SlidingWindowLedger _perFirm;
@@ -18,6 +18,8 @@ public sealed class RollingNotionalAccountant : IRiskAccountant
     private readonly IOptionsMonitor<RiskOptions> _options;
     private readonly IReferencePrice _refPrice;
     private readonly IMarketValueCalculator _values;
+    private readonly TimeProvider _clock;
+    private DateTimeOffset? _recoveredAt;
 
     public RollingNotionalAccountant(
         IOptionsMonitor<RiskOptions> options,
@@ -27,6 +29,7 @@ public sealed class RollingNotionalAccountant : IRiskAccountant
     {
         _options = options;
         _refPrice = refPrice;
+        _clock = clock;
         _values = values ?? EquityMarketValueCalculator.Instance;
         _perEndClient = new SlidingWindowLedger(clock);
         _perFirm = new SlidingWindowLedger(clock);
@@ -67,11 +70,12 @@ public sealed class RollingNotionalAccountant : IRiskAccountant
     /// </summary>
     public decimal NotionalFor(RiskContext ctx)
     {
-        if (ctx.Price is { } px) return _values.GetNotional(ctx.Symbol, px, ctx.Quantity);
+        if (ctx.Price is { } px)
+            return _values.GetNotional(ctx.Symbol, px, ctx.ExecutableQuantity);
 
         var lookup = _refPrice.Lookup(ctx.Symbol);
         if (lookup.Found && lookup.Price > 0m)
-            return _values.GetNotional(ctx.Symbol, lookup.Price, ctx.Quantity);
+            return _values.GetNotional(ctx.Symbol, lookup.Price, ctx.ExecutableQuantity);
 
         MetricsRegistry.RollingNotionalBypassedNoReference.Add(1,
             new KeyValuePair<string, object?>("symbol", ctx.Symbol));
@@ -80,6 +84,12 @@ public sealed class RollingNotionalAccountant : IRiskAccountant
 
     public TimeSpan Window => TimeSpan.FromSeconds(
         Math.Max(1, _options.CurrentValue.RollingNotional.WindowSeconds));
+
+    public bool IsRecoveryFenced =>
+        _recoveredAt is { } recoveredAt
+        && _clock.GetUtcNow() < recoveredAt + Window;
+
+    public void EnterRecoveryFence() => _recoveredAt = _clock.GetUtcNow();
 
     public void RecordAccepted(RiskContext ctx)
     {
