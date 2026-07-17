@@ -65,7 +65,10 @@ public static class EntryPointListenerServiceCollectionExtensions
             // Sub-issue #172 (F): outbound ER multiplexer wiring.
             services
                 .AddOptions<BotErMultiplexerOptions>()
-                .Bind(configuration.GetSection(BotErMultiplexerOptions.SectionName));
+                .Bind(configuration.GetSection(BotErMultiplexerOptions.SectionName))
+                .ValidateOnStart();
+            services.AddSingleton<IValidateOptions<BotErMultiplexerOptions>,
+                BotErMultiplexerOptionsValidator>();
 
             // The mapping registry is the lookup key for routing ERs to
             // the originating bot.

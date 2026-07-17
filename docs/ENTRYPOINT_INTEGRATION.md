@@ -120,7 +120,11 @@ single subscriber.
           "AccessKey": "redacted-utf8-token",
           "SenderLocation": "SP01",   // ≤ 10 chars
           "EnteringTrader": "TR01",   // ≤ 5 chars
-          "KeepAliveIntervalMs": 1000
+          "KeepAliveIntervalMs": 1000,
+          "InitialReconnectDelay": "00:00:01",
+          "MaxReconnectDelay": "00:00:30",
+          "DnsResolutionTimeout": "00:00:05",
+          "GracefulTerminateTimeout": "00:00:02"
         }
       ]
     }
@@ -128,9 +132,11 @@ single subscriber.
 }
 ```
 
-`AccessKey` is wrapped via `Credentials.FromUtf8`. `Endpoint` is parsed
-as `host:port` and DNS-resolved at startup. Validation is enforced in
-`FirmConfigValidation.ValidateFirm` and fails fast on `Host` start.
+`AccessKey` is wrapped via `Credentials.FromUtf8`. `Endpoint` shape and all
+timeouts are validated at host startup. DNS resolution is asynchronous and
+runs inside each serialized cold-connect/reconnect attempt, so a resolver
+failure follows the normal retry/backoff path instead of blocking service
+construction.
 
 ## Observability
 
@@ -152,13 +158,14 @@ not established; `/live` remains process-only.
 
 These are deliberately **not** in the v1 wiring:
 
-- **Reconnect state machine.** `Terminated` increments a metric and logs
-  loudly, but no automatic `ReconnectAsync` (with bumped `SessionVerId`)
-  is scheduled. Operator restart is the recovery path for now.
-- **`BusinessReject` correlation.** Currently metric-only because the
-  upstream package does not yet expose a `RefSeqNum → ClOrdID`
-  correlation map. When it does, `OrdersEndpoints` will be able to
-  synthesize a rejection for the affected order.
+- **Reconnect state machine.** Peer termination or an unexpected event-stream
+  stop marks the firm disconnected immediately and schedules the single-flight
+  reconnect loop. Cold connect and reconnect share one serialization fence.
+- **`BusinessReject` correlation.** Rejects are translated to a firm-scoped
+  envelope, deduplicated by inbound sequence, counted, and persisted to the WAL
+  for operator reconciliation. The upstream package still does not expose a
+  `RefSeqNum → ClOrdID` map, so the platform does not synthesize an order-level
+  rejection.
 - **In-process FIXP test peer.** Once upstream ships an in-memory peer,
   integration tests can exercise the real adapter end-to-end without
   TCP.

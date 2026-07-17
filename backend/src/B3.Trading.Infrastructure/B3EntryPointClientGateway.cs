@@ -37,7 +37,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     private readonly string _firmId;
     private readonly ILogger<B3EntryPointClientGateway> _logger;
     private readonly CancellationTokenSource _shutdownCts = new();
-    private readonly SemaphoreSlim _reconnectLock = new(1, 1);
+    private readonly SemaphoreSlim _connectionLock = new(1, 1);
     private readonly TimeSpan _initialReconnectDelay;
     private readonly TimeSpan _maxReconnectDelay;
     private readonly TimeSpan _gracefulTerminateTimeout;
@@ -45,10 +45,12 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     private readonly TimeProvider _clock;
     private readonly OrderEntryLatencyProbe _latencyProbe;
     private Task? _eventLoop;
+    private Task? _reconnectLoop;
     private uint _currentSessionVerId;
     private int _connectedState; // 0 = disconnected, 1 = connected (matches UpDownCounter increments)
     private int _reconnectingState; // 0 = idle, 1 = reconnect loop active (observable gauge)
     private ulong _lastInboundSeqNum;
+    private int _reconnectScheduled;
     private volatile bool _disposed;
 
     // Slice 2 of #132. Captured by the SDK's InboundGapAtReconnect handler
@@ -119,6 +121,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     // performs no reap.
     private readonly IConnectSessionRollReactor? _connectSessionRollReactor;
     private readonly Func<Up.ReconnectMode, Func<uint, uint>, CancellationToken, Task<Up.ReconnectOutcome>>? _reconnectAsyncOverride;
+    private readonly Func<CancellationToken, Task>? _connectAsyncOverride;
+    private readonly Func<CancellationToken, IAsyncEnumerable<UpModels.EntryPointEvent>>? _eventStreamOverride;
     private readonly Action? _connectedTestHook;
     // #565. The upstream SDK dials whatever `IPEndPoint` is on the
     // `EntryPointClientOptions` instance it was constructed with — it never
@@ -160,7 +164,9 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         IConnectSessionRollReactor? connectSessionRollReactor = null,
         Func<CancellationToken, Task>? reResolveEndpoint = null,
         Func<Up.ReconnectMode, Func<uint, uint>, CancellationToken, Task<Up.ReconnectOutcome>>? reconnectAsyncOverride = null,
-        Action? connectedTestHook = null)
+        Action? connectedTestHook = null,
+        Func<CancellationToken, Task>? connectAsyncOverride = null,
+        Func<CancellationToken, IAsyncEnumerable<UpModels.EntryPointEvent>>? eventStreamOverride = null)
     {
         _terminateOnShutdown = terminateOnShutdown;
         _client = client ?? throw new ArgumentNullException(nameof(client));
@@ -183,6 +189,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         _reResolveEndpoint = reResolveEndpoint;
         _reconnectAsyncOverride = reconnectAsyncOverride;
         _connectedTestHook = connectedTestHook;
+        _connectAsyncOverride = connectAsyncOverride;
+        _eventStreamOverride = eventStreamOverride;
         _client.Terminated += OnTerminated;
         _client.InboundGapAtReconnect += OnInboundGapAtReconnect;
         MetricsRegistry.RecordSessionVerId(_firmId, _currentSessionVerId);
@@ -191,7 +199,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         // a stale dashboard and a dropped-update race against fast Terminated
         // → Reconnecting → Established cycles.
         MetricsRegistry.RegisterSessionStateSource(_firmId,
-            () => FixpStateGaugeProjector.Project(_client.State));
+            () => FixpStateGaugeProjector.Project(OperationalState));
         MetricsRegistry.RegisterReconnectingSource(_firmId,
             () => Volatile.Read(ref _reconnectingState));
     }
@@ -220,7 +228,12 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// per-firm status read by the <c>/admin/firms</c> endpoint.
     /// </summary>
     public string SessionStateTag =>
-        FixpStateGaugeProjector.Project(_client.State).Single(r => r.Value == 1).Key;
+        FixpStateGaugeProjector.Project(OperationalState).Single(r => r.Value == 1).Key;
+
+    private Up.Fixp.FixpClientState OperationalState =>
+        Volatile.Read(ref _connectedState) == 1
+            ? _client.State
+            : Up.Fixp.FixpClientState.Disconnected;
 
     /// <summary>Last <c>SessionVerId</c> the gateway has tried to use (in-memory; persisted via SDK's <c>SessionStateStore</c>).</summary>
     public uint CurrentSessionVerId => Volatile.Read(ref _currentSessionVerId);
@@ -237,9 +250,28 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// </summary>
     public async Task ConnectAsync(CancellationToken cancellationToken)
     {
-        await _client.ConnectAsync(cancellationToken).ConfigureAwait(false);
-        ReconcileConnectSessionRoll();
-        OnConnected();
+        await _connectionLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (Volatile.Read(ref _connectedState) == 1
+                && _eventLoop is { IsCompleted: false })
+                return;
+
+            if (_reResolveEndpoint is not null)
+                await _reResolveEndpoint(cancellationToken).ConfigureAwait(false);
+
+            if (_connectAsyncOverride is not null)
+                await _connectAsyncOverride(cancellationToken).ConfigureAwait(false);
+            else
+                await _client.ConnectAsync(cancellationToken).ConfigureAwait(false);
+            ReconcileConnectSessionRoll();
+            OnConnected();
+        }
+        finally
+        {
+            _connectionLock.Release();
+        }
     }
 
     /// <summary>
@@ -362,7 +394,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         MetricsRegistry.RecordSessionVerId(_firmId, effectiveVerId);
     }
 
-    private void OnConnected()
+    private void OnConnected(bool startEventLoop = true)
     {
         if (Interlocked.Exchange(ref _connectedState, 1) == 0)
             MetricsRegistry.EntryPointConnected.Add(1, FirmTag());
@@ -372,7 +404,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             _connectedTestHook();
             return;
         }
-        StartEventLoop();
+        if (startEventLoop)
+            StartEventLoop();
     }
 
     /// <summary>
@@ -867,9 +900,13 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
     private async Task RunEventLoopAsync(CancellationToken ct)
     {
+        var recover = true;
         try
         {
-            await foreach (var ev in _client.Events(ct).ConfigureAwait(false))
+            var events = _eventStreamOverride is not null
+                ? _eventStreamOverride(ct)
+                : _client.Events(ct);
+            await foreach (var ev in events.ConfigureAwait(false))
             {
                 MetricsRegistry.EntryPointEventsReceived.Add(1,
                     new KeyValuePair<string, object?>("firm", _firmId),
@@ -951,9 +988,11 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         catch (OperationCanceledException)
         {
             // expected on shutdown
+            recover = false;
         }
         catch (Exception ex) when (ex is WalBackpressureException or WalFaultedException)
         {
+            recover = false;
             _logger.LogCritical(ex,
                 "EntryPoint event loop for firm {Firm} stopped because an inbound event could not be persisted; order ingress is draining.",
                 _firmId);
@@ -961,6 +1000,17 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         catch (Exception ex)
         {
             _logger.LogError(ex, "EntryPoint event loop for firm {Firm} terminated unexpectedly.", _firmId);
+        }
+        finally
+        {
+            if (recover && !_disposed && !_shutdownCts.IsCancellationRequested)
+            {
+                _logger.LogWarning(
+                    "EntryPoint event loop for firm {Firm} stopped while the gateway was expected to be operational; scheduling recovery.",
+                    _firmId);
+                MarkDisconnected();
+                ScheduleReconnect();
+            }
         }
     }
 
@@ -1074,7 +1124,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             RejectReason: r.Reason ?? $"reject_code={r.RejectCode}",
             FirmId: firmId),
 
-        UpModels.BusinessReject br => null, // surfaced as metric only — no ClOrdID to anchor an envelope to
+        UpModels.BusinessReject br => null, // surfaced on the dedicated BusinessReject channel
         _ => null,
     };
 
@@ -1084,8 +1134,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             new KeyValuePair<string, object?>("firm", _firmId),
             new KeyValuePair<string, object?>("code", e.Code.ToString()),
             new KeyValuePair<string, object?>("initiated_by_client", e.InitiatedByClient));
-        if (Interlocked.Exchange(ref _connectedState, 0) == 1)
-            MetricsRegistry.EntryPointConnected.Add(-1, FirmTag());
+        MarkDisconnected();
         _logger.LogWarning("EntryPoint session terminated for firm {Firm}: code={Code} reason={Reason} byClient={ByClient}",
             _firmId, e.Code, e.Reason, e.InitiatedByClient);
 
@@ -1101,7 +1150,39 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
         // Detach from the inbound thread so the event-loop can drain
         // cleanly; the reconnect loop owns its own lifecycle.
-        _ = Task.Run(() => ReconnectLoopAsync(_shutdownCts.Token));
+        ScheduleReconnect();
+    }
+
+    private void MarkDisconnected()
+    {
+        if (Interlocked.Exchange(ref _connectedState, 0) == 1)
+            MetricsRegistry.EntryPointConnected.Add(-1, FirmTag());
+    }
+
+    private void ScheduleReconnect()
+    {
+        if (_disposed || _shutdownCts.IsCancellationRequested)
+            return;
+        if (Interlocked.CompareExchange(ref _reconnectScheduled, 1, 0) != 0)
+            return;
+
+        _reconnectLoop = Task.Run(async () =>
+        {
+            try
+            {
+                await ReconnectLoopAsync(_shutdownCts.Token).ConfigureAwait(false);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _reconnectScheduled, 0);
+            }
+
+            if (Volatile.Read(ref _connectedState) == 1
+                && _connectedTestHook is null
+                && !_disposed
+                && !_shutdownCts.IsCancellationRequested)
+                StartEventLoop();
+        });
     }
 
     /// <summary>
@@ -1129,8 +1210,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// </summary>
     private async Task ReconnectLoopAsync(CancellationToken ct)
     {
-        if (!await _reconnectLock.WaitAsync(0, ct).ConfigureAwait(false))
-            return; // already reconnecting
+        await _connectionLock.WaitAsync(ct).ConfigureAwait(false);
         Interlocked.Exchange(ref _reconnectingState, 1);
         try
         {
@@ -1148,10 +1228,9 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                     // dialing so a matching-side pod IP change (Kubernetes
                     // failover/reschedule) is picked up on THIS attempt
                     // rather than requiring a trading-host restart. Resolver
-                    // failures/timeouts are swallowed by the callback itself
-                    // (logged there) and fall through to ReconnectAsync with
-                    // the last-known endpoint — the existing backoff/retry
-                    // loop still applies if that's also unreachable.
+                    // failures/timeouts reuse the last-known endpoint after
+                    // the first successful resolution. Before that first
+                    // resolution they propagate into this retry/backoff loop.
                     if (_reResolveEndpoint is not null)
                         await _reResolveEndpoint(ct).ConfigureAwait(false);
 
@@ -1176,7 +1255,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                     // ghosts still present — same backstop reasoning as the
                     // connect path).
                     ReconcileReconnectSessionRoll(outcome.Kind, priorVerId, outcome.SessionVerId);
-                    OnConnected();
+                    OnConnected(startEventLoop: false);
                     NotifyVenueDisconnectReactor();
                     return;
                 }
@@ -1217,7 +1296,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         finally
         {
             Interlocked.Exchange(ref _reconnectingState, 0);
-            _reconnectLock.Release();
+            _connectionLock.Release();
         }
     }
 
@@ -1320,6 +1399,10 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         {
             try { await _eventLoop.ConfigureAwait(false); } catch { /* event loop swallows, but be defensive */ }
         }
+        if (_reconnectLoop is not null)
+        {
+            try { await _reconnectLoop.ConfigureAwait(false); } catch { /* reconnect loop handles failures */ }
+        }
 
         // Graceful FIXP Terminate(Finished) before tearing down the SDK so the
         // peer flushes our session promptly and our next boot doesn't trip
@@ -1368,9 +1451,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         _client.InboundGapAtReconnect -= OnInboundGapAtReconnect;
         await _client.DisposeAsync().ConfigureAwait(false);
         _shutdownCts.Dispose();
-        _reconnectLock.Dispose();
-        if (Interlocked.Exchange(ref _connectedState, 0) == 1)
-            MetricsRegistry.EntryPointConnected.Add(-1, FirmTag());
+        _connectionLock.Dispose();
+        MarkDisconnected();
     }
 
     // BusinessReject, also exposed for instrumentation hookup if a future

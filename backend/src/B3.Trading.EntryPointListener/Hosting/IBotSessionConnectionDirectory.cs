@@ -14,11 +14,13 @@ public interface IBotSessionConnectionDirectory
     /// <summary>
     /// Registers <paramref name="sender"/> as the active outbound channel
     /// for <paramref name="credentialId"/>. If a different sender is
-    /// already registered, it is evicted (caller's responsibility — by
-    /// the time we get here, the squatter-kick or version-bump path has
-    /// already terminated the prior connection's session-level state).
+    /// already registered, the directory atomically publishes the replacement
+    /// and closes the displaced sender.
     /// </summary>
-    void Register(Guid credentialId, IBotSessionOutboundSender sender);
+    void Register(
+        Guid credentialId,
+        string connectionId,
+        IBotSessionOutboundSender sender);
 
     /// <summary>
     /// Removes <paramref name="sender"/> from the directory, but only if
@@ -34,6 +36,19 @@ public interface IBotSessionConnectionDirectory
     /// ER multiplexer.
     /// </summary>
     bool TryGet(Guid credentialId, out IBotSessionOutboundSender sender);
+
+    /// <summary>
+    /// Atomically removes and closes the currently registered connection for
+    /// <paramref name="credentialId"/>. Used after a durable session-version
+    /// bump invalidates the old lease.
+    /// </summary>
+    bool TryForceTerminate(Guid credentialId);
+
+    /// <summary>
+    /// Removes and closes the connection only when it still matches
+    /// <paramref name="connectionId"/>. A newer replacement is left intact.
+    /// </summary>
+    bool TryForceTerminate(Guid credentialId, string connectionId);
 }
 
 /// <summary>

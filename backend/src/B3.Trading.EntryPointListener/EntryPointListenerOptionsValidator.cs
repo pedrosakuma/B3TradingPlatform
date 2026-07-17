@@ -38,6 +38,8 @@ public sealed class EntryPointListenerOptionsValidator : IValidateOptions<EntryP
         // MaxSessionsPerUser validation
         if (options.MaxSessionsPerUser <= 0)
             failures.Add("Trading:EntryPointListener:MaxSessionsPerUser must be > 0.");
+        if (options.RetransmitTimeoutMs <= 0)
+            failures.Add("Trading:EntryPointListener:RetransmitTimeoutMs must be > 0.");
 
         // #529 public-hardening: caps + IP filter + handshake timeout
         if (options.ConnectionCaps.MaxConcurrentTotal < 0)
@@ -46,6 +48,10 @@ public sealed class EntryPointListenerOptionsValidator : IValidateOptions<EntryP
             failures.Add("Trading:EntryPointListener:ConnectionCaps:MaxConcurrentPerIp must be >= 0.");
         if (options.Tls.HandshakeTimeout <= TimeSpan.Zero)
             failures.Add("Trading:EntryPointListener:Tls:HandshakeTimeout must be > 0.");
+        if (options.AcceptRateLimit.ConnectionsPerSecondPerIp < 0)
+            failures.Add("Trading:EntryPointListener:AcceptRateLimit:ConnectionsPerSecondPerIp must be >= 0.");
+        if (options.AcceptRateLimit.BurstPerIp <= 0)
+            failures.Add("Trading:EntryPointListener:AcceptRateLimit:BurstPerIp must be > 0.");
         foreach (var ip in options.ConnectionCaps.AllowedIps.Concat(options.ConnectionCaps.DeniedIps))
             if (!System.Net.IPAddress.TryParse(ip, out _))
                 failures.Add($"Trading:EntryPointListener:ConnectionCaps allow/deny entry '{ip}' is not a valid IP.");
@@ -55,6 +61,14 @@ public sealed class EntryPointListenerOptionsValidator : IValidateOptions<EntryP
             failures.Add("Trading:EntryPointListener:Tcp:SendBufferBytes must be > 0.");
         if (options.Tcp.ReceiveBufferBytes <= 0)
             failures.Add("Trading:EntryPointListener:Tcp:ReceiveBufferBytes must be > 0.");
+        if (options.Buffers.OutboundRingSize <= 0)
+            failures.Add("Trading:EntryPointListener:Buffers:OutboundRingSize must be > 0.");
+        if (options.Buffers.MappingReapAfter <= TimeSpan.Zero)
+            failures.Add("Trading:EntryPointListener:Buffers:MappingReapAfter must be > 0.");
+        if (options.Buffers.OutboundChannelCapacity <= 0)
+            failures.Add("Trading:EntryPointListener:Buffers:OutboundChannelCapacity must be > 0.");
+        if (options.Buffers.OutboundDrainShutdownTimeout <= TimeSpan.Zero)
+            failures.Add("Trading:EntryPointListener:Buffers:OutboundDrainShutdownTimeout must be > 0.");
 
         // TLS validation
         if (options.Tls.Required)

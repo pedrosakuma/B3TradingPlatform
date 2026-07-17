@@ -59,7 +59,7 @@ internal sealed class FirmGatewayConnector : IHostedService
     /// <summary>
     /// Background retry of <see cref="B3EntryPointClientGateway.ConnectAsync"/>
     /// with exponential backoff + jitter. Singleflight-safe per firm
-    /// because the gateway's own <c>_reconnectLock</c> prevents the
+    /// because the gateway's own connection fence prevents the
     /// hot-path Terminated-driven loop from racing with us if the SDK
     /// happens to fire Terminated mid-attempt.
     /// </summary>

@@ -45,6 +45,8 @@ public sealed class FixpListenerHostedService : BackgroundService
     private X509Certificate2? _tlsCert;
     private readonly AcceptConnectionRateLimiter _acceptLimiter;
     private readonly ConnectionGate _connectionGate;
+    private readonly object _activeConnectionsGate = new();
+    private readonly HashSet<Task> _activeConnections = new();
 
     public FixpListenerHostedService(
         IOptions<EntryPointListenerOptions> opts,
@@ -216,13 +218,61 @@ public sealed class FixpListenerHostedService : BackgroundService
                 // skip the delegate entirely, leaking the cap lease + socket.
                 // The handler always runs and releases the lease in finally;
                 // the token still flows into the connection for cancellation.
-                _ = Task.Run(() => HandleAcceptedClientAsync(client, capLease, stoppingToken));
+                var connectionTask = Task.Run(
+                    () => HandleAcceptedClientAsync(client, capLease, stoppingToken));
+                TrackConnection(connectionTask);
             }
         }
         finally
         {
             _listener.Stop();
+            await AwaitActiveConnectionsAsync().ConfigureAwait(false);
             _tlsCert?.Dispose();
+        }
+    }
+
+    internal int ActiveConnectionTaskCount
+    {
+        get
+        {
+            lock (_activeConnectionsGate)
+                return _activeConnections.Count;
+        }
+    }
+
+    private void TrackConnection(Task connectionTask)
+    {
+        lock (_activeConnectionsGate)
+            _activeConnections.Add(connectionTask);
+
+        _ = connectionTask.ContinueWith(
+            completed =>
+            {
+                lock (_activeConnectionsGate)
+                    _activeConnections.Remove(completed);
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    private async Task AwaitActiveConnectionsAsync()
+    {
+        Task[] active;
+        lock (_activeConnectionsGate)
+            active = _activeConnections.ToArray();
+
+        if (active.Length == 0)
+            return;
+
+        try
+        {
+            await Task.WhenAll(active).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex,
+                "FIXP listener shutdown observed a faulted connection task.");
         }
     }
 

@@ -678,13 +678,20 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
             // would otherwise have to discover via a fresh Negotiate; a
             // second bot attempt with the now-stale ver will fail the
             // version check above without further bumping.
-            var bumpedVer = await _sessions.BumpVersionAsync(credentialId, "single-active-violation", ct)
+            var advance = await _sessions.BumpVersionAsync(credentialId, "single-active-violation", ct)
                 .ConfigureAwait(false);
+
+            // BumpVersionAsync atomically invalidates the prior lease. Close
+            // the corresponding live socket before replying so the old bot
+            // cannot remain operational under a stale version.
+            if (advance.DisplacedConnectionId is { } displacedConnectionId)
+                _connectionDirectory?.TryForceTerminate(
+                    credentialId, displacedConnectionId);
 
             _logger.LogInformation(
                 "fixp.establish.reject reason=SESSION_BLOCKED credShortId={CredShortId} cause=single-active-violation oldVer={OldVer} newVer={NewVer}",
-                _scope.Principal.CredShortId, requestedVer, bumpedVer);
-            await WriteEstablishRejectAsync(stream, requestedSid, bumpedVer,
+                _scope.Principal.CredShortId, requestedVer, advance.NewVersion);
+            await WriteEstablishRejectAsync(stream, requestedSid, advance.NewVersion,
                 EstablishRejectCode.SESSION_BLOCKED, ct).ConfigureAwait(false);
             _sm.ForceTerminated();
             return false;
@@ -711,11 +718,11 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
             // multiplexer push lands on a live writer (no race where
             // TryGet returns us but the writer is not yet wired).
             _outboundWriter = new FixpOutboundChannelWriter(
-                capacity: Math.Max(1, _options.Buffers.OutboundChannelCapacity),
+                capacity: _options.Buffers.OutboundChannelCapacity,
                 writeAsync: WriteOutboundFromDrainLoopAsync,
                 connectionId: _connectionId,
                 logger: _logger);
-            _connectionDirectory.Register(credentialId, this);
+            _connectionDirectory.Register(credentialId, _connectionId, this);
             _registeredInDirectory = true;
         }
 

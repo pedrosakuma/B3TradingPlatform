@@ -46,6 +46,25 @@ public class ExchangeOptionsValidatorTests
     }
 
     [Fact]
+    public void Real_InvalidConnectionTimeouts_FailStartupValidation()
+    {
+        var firm = ValidFirm();
+        firm.InitialReconnectDelay = TimeSpan.Zero;
+        firm.MaxReconnectDelay = TimeSpan.FromMilliseconds(-1);
+        firm.DnsResolutionTimeout = TimeSpan.Zero;
+        firm.GracefulTerminateTimeout = TimeSpan.Zero;
+
+        var result = Sut().Validate(null, Real(firm));
+
+        Assert.False(result.Succeeded);
+        var failures = string.Join(";", result.Failures!);
+        Assert.Contains("InitialReconnectDelay", failures);
+        Assert.Contains("MaxReconnectDelay", failures);
+        Assert.Contains("DnsResolutionTimeout", failures);
+        Assert.Contains("GracefulTerminateTimeout", failures);
+    }
+
+    [Fact]
     public void Real_SingleValidFirm_Succeeds()
     {
         Assert.True(Sut().Validate(null, Real(ValidFirm())).Succeeded);

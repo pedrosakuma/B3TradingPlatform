@@ -27,7 +27,8 @@ public class FixpListenerIntegrationTests
         IHost Host,
         FixpListenerHostedService Listener,
         InMemoryUserBotCredentialRegistry Credentials,
-        InMemoryUserBotSessionRegistry Sessions);
+        InMemoryUserBotSessionRegistry Sessions,
+        BotSessionConnectionDirectory Connections);
 
     private static HostBundle BuildHost()
     {
@@ -58,7 +59,8 @@ public class FixpListenerIntegrationTests
             host,
             host.Services.GetRequiredService<FixpListenerHostedService>(),
             host.Services.GetRequiredService<InMemoryUserBotCredentialRegistry>(),
-            host.Services.GetRequiredService<InMemoryUserBotSessionRegistry>());
+            host.Services.GetRequiredService<InMemoryUserBotSessionRegistry>(),
+            host.Services.GetRequiredService<BotSessionConnectionDirectory>());
     }
 
     // ─── Wire helpers ────────────────────────────────────────────────────
@@ -239,10 +241,10 @@ public class FixpListenerIntegrationTests
         }
     }
 
-    [Fact(Timeout = 15_000)]
-    public async Task SimultaneousEstablish_SecondRejectsAndBumpsVersion()
+    [Fact(Timeout = 30_000)]
+    public async Task SessionTakeover_ClosesOldConnection_AndReplacementEstablishes()
     {
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(25));
         var bundle = BuildHost();
         try
         {
@@ -283,27 +285,23 @@ public class FixpListenerIntegrationTests
             // Server advanced the version durably (RFC §4.8 fence) before sending the reject.
             var afterBump = await bundle.Sessions.GetOrCreateAsync(created.Credential.Id, cts.Token);
             Assert.Equal(state.CurrentVer + 1, afterBump.CurrentVer);
+            await WaitForClosedAsync(firstStream, cts.Token);
 
-            // A third attempt from yet another connection that still uses the
-            // pre-bump ver also fails — but with INVALID_SESSIONVERID this time
-            // (the version is now stale, not duplicate).
+            // The replacement retries with the post-bump version and can claim
+            // immediately; the stale connection's delayed finally-release
+            // cannot evict the replacement lease.
             using var third = await ConnectAsync(endpoint, cts.Token);
             var thirdStream = third.GetStream();
             var thirdReader = new SofhFrameReader();
-            await thirdStream.WriteAsync(BuildNegotiateFrame(state.SessionId, state.CurrentVer, created.PlainToken), cts.Token);
+            await thirdStream.WriteAsync(BuildNegotiateFrame(state.SessionId, afterBump.CurrentVer, created.PlainToken), cts.Token);
             _ = await ReadFrameAsync(thirdReader, thirdStream, cts.Token);
-            await thirdStream.WriteAsync(BuildEstablishFrame(state.SessionId, state.CurrentVer), cts.Token);
+            await thirdStream.WriteAsync(BuildEstablishFrame(state.SessionId, afterBump.CurrentVer), cts.Token);
             var thirdEst = await ReadFrameAsync(thirdReader, thirdStream, cts.Token);
-            Assert.Equal((ushort)EstablishRejectData.MESSAGE_ID, thirdEst.TemplateId);
-            var thirdReject = MemoryMarshal.Read<EstablishRejectData>(thirdEst.Payload);
-            Assert.Equal(EstablishRejectCode.INVALID_SESSIONVERID, thirdReject.EstablishmentRejectCode);
-            // Stale-ver reject also echoes the server-current ver so the
-            // bot can resync. After the bump, that's `state.CurrentVer + 1`.
-            Assert.Equal((ulong)(SessionVerID)(state.CurrentVer + 1), (ulong)thirdReject.SessionVerID);
+            Assert.Equal((ushort)EstablishAckData.MESSAGE_ID, thirdEst.TemplateId);
+            Assert.Equal(1, bundle.Connections.ActiveCount);
 
-            // Stale-ver path must NOT have bumped again.
-            var afterStale = await bundle.Sessions.GetOrCreateAsync(created.Credential.Id, cts.Token);
-            Assert.Equal(afterBump.CurrentVer, afterStale.CurrentVer);
+            var final = await bundle.Sessions.GetOrCreateAsync(created.Credential.Id, cts.Token);
+            Assert.Equal(afterBump.CurrentVer, final.CurrentVer);
         }
         finally
         {
@@ -435,6 +433,35 @@ public class FixpListenerIntegrationTests
         }
     }
 
+    [Fact(Timeout = 10_000)]
+    public async Task StopAsync_AwaitsAllActiveConnectionTasks()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        var bundle = BuildHost();
+        var stopped = false;
+        try
+        {
+            await bundle.Host.StartAsync(cts.Token);
+            var endpoint = await bundle.Listener.WhenBound.WaitAsync(TimeSpan.FromSeconds(5), cts.Token);
+            using var tcp = await ConnectAsync(endpoint, cts.Token);
+
+            for (var i = 0; i < 100 && bundle.Listener.ActiveConnectionTaskCount == 0; i++)
+                await Task.Delay(10, cts.Token);
+            Assert.Equal(1, bundle.Listener.ActiveConnectionTaskCount);
+
+            await bundle.Host.StopAsync(cts.Token);
+            stopped = true;
+
+            Assert.Equal(0, bundle.Listener.ActiveConnectionTaskCount);
+        }
+        finally
+        {
+            if (!stopped)
+                await bundle.Host.StopAsync(CancellationToken.None);
+            bundle.Host.Dispose();
+        }
+    }
+
     /// <summary>
     /// Polls until the single-active slot is released. The release path
     /// runs in the listener's connection task <c>finally</c> block, which
@@ -455,5 +482,21 @@ public class FixpListenerIntegrationTests
             await Task.Delay(20, ct).ConfigureAwait(false);
         }
         throw new TimeoutException("Single-active slot never released after Terminate.");
+    }
+
+    private static async Task WaitForClosedAsync(NetworkStream stream, CancellationToken ct)
+    {
+        var buffer = new byte[4096];
+        try
+        {
+            while (await stream.ReadAsync(buffer, ct).ConfigureAwait(false) != 0)
+            {
+                // Drain any heartbeat already queued before force-close.
+            }
+        }
+        catch (IOException)
+        {
+            // A force-close may surface as EOF or a connection reset.
+        }
     }
 }

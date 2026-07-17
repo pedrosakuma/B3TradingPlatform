@@ -72,6 +72,7 @@ public sealed class BotErMultiplexer : BackgroundService, IBotErRouter, IExecuti
     private readonly BotOutboundCoordinator _outbound;
     private readonly ILogger<BotErMultiplexer> _logger;
     private readonly Channel<Guid> _overflowChannel;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, byte> _pendingOverflows = new();
 
     public BotErMultiplexer(
         IUserBotOrderMappingRegistry mappings,
@@ -102,19 +103,7 @@ public sealed class BotErMultiplexer : BackgroundService, IBotErRouter, IExecuti
         // Wire the buffer's overflow callback once. The coordinator
         // creates buffers lazily per credential, each carrying our
         // OnOverflow.
-        _outbound.OnBufferOverflow = credentialId =>
-        {
-            // Best-effort enqueue. If the overflow channel itself is
-            // backlogged we still log — overflow handling is rare and
-            // a missed signal would just delay the inevitable Bump on
-            // the next router pass.
-            if (!_overflowChannel.Writer.TryWrite(credentialId))
-            {
-                _logger.LogWarning(
-                    "fixp.outbound.overflow.signal-dropped credentialId={CredentialId}",
-                    credentialId);
-            }
-        };
+        _outbound.OnBufferOverflow = SignalOverflow;
     }
 
     /// <inheritdoc />
@@ -274,12 +263,7 @@ public sealed class BotErMultiplexer : BackgroundService, IBotErRouter, IExecuti
                 _logger.LogWarning(
                     "fixp.outbound.send.backpressure-or-race credentialId={CredentialId} seq={Seq}",
                     mapping.CredentialId, seq);
-                if (!_overflowChannel.Writer.TryWrite(mapping.CredentialId))
-                {
-                    _logger.LogWarning(
-                        "fixp.outbound.overflow.signal-dropped credentialId={CredentialId}",
-                        mapping.CredentialId);
-                }
+                SignalOverflow(mapping.CredentialId);
             }
         }
         // else: bot offline, message is buffered for G's retransmit.
@@ -301,6 +285,10 @@ public sealed class BotErMultiplexer : BackgroundService, IBotErRouter, IExecuti
                         "fixp.outbound.overflow.handle.error credentialId={CredentialId}",
                         credentialId);
                 }
+                finally
+                {
+                    _pendingOverflows.TryRemove(credentialId, out _);
+                }
             }
         }
         catch (OperationCanceledException) { /* shutdown */ }
@@ -314,12 +302,13 @@ public sealed class BotErMultiplexer : BackgroundService, IBotErRouter, IExecuti
         // bump do we evict the in-flight sender so any racing TryEnqueue
         // returns false and the corresponding ER falls into the cleared
         // buffer (no replay, no rollback).
-        var newVer = await _sessions.BumpVersionAsync(credentialId, "overflow", ct).ConfigureAwait(false);
+        var advance = await _sessions.BumpVersionAsync(
+            credentialId, "overflow", ct).ConfigureAwait(false);
         _logger.LogWarning(
             "fixp.outbound.overflow.bump credentialId={CredentialId} newVer={NewVer}",
-            credentialId, newVer);
+            credentialId, advance.NewVersion);
 
-        if (_directory.TryGet(credentialId, out var sender))
+        if (advance.DisplacedConnectionId is { } displacedConnectionId)
         {
             // Force-close the live connection. The directory deregister
             // happens on the connection's own close path (finally block
@@ -327,12 +316,18 @@ public sealed class BotErMultiplexer : BackgroundService, IBotErRouter, IExecuti
             // makes the read loop unblock with 0 bytes / IOException.
             try
             {
-                if (sender is IDisposable d) d.Dispose();
+                _directory.TryForceTerminate(credentialId, displacedConnectionId);
             }
             catch (Exception ex)
             {
                 _logger.LogDebug(ex, "fixp.outbound.overflow.close.error credentialId={CredentialId}", credentialId);
             }
+        }
+        else
+        {
+            // Defensive recovery for an inconsistent directory-only sender
+            // (possible in direct tests or after partial legacy wiring).
+            _directory.TryForceTerminate(credentialId);
         }
 
         // Reset the buffer so the next legitimate session starts clean.
@@ -340,5 +335,22 @@ public sealed class BotErMultiplexer : BackgroundService, IBotErRouter, IExecuti
         // TryEnqueue from another router pass sees the cleared buffer
         // and returns false, not a partial state.
         _outbound.GetOrCreateBuffer(credentialId).Reset();
+    }
+
+    private void SignalOverflow(Guid credentialId)
+    {
+        // Buffer overflow and writer-channel backpressure can both report the
+        // same episode. Only the first signal owns the durable bump/close;
+        // subsequent signals are coalesced until handling completes.
+        if (!_pendingOverflows.TryAdd(credentialId, 0))
+            return;
+
+        if (_overflowChannel.Writer.TryWrite(credentialId))
+            return;
+
+        _pendingOverflows.TryRemove(credentialId, out _);
+        _logger.LogWarning(
+            "fixp.outbound.overflow.signal-dropped credentialId={CredentialId}",
+            credentialId);
     }
 }

@@ -101,6 +101,18 @@ public sealed class FirmConfig
 
     /// <summary>FIXP keep-alive interval requested by the client (ms).</summary>
     public uint KeepAliveIntervalMs { get; set; } = 1000u;
+
+    /// <summary>Initial reconnect backoff after a failed FIXP attempt.</summary>
+    public TimeSpan InitialReconnectDelay { get; set; } = TimeSpan.FromSeconds(1);
+
+    /// <summary>Maximum reconnect backoff.</summary>
+    public TimeSpan MaxReconnectDelay { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>Maximum time allowed for asynchronous endpoint DNS resolution.</summary>
+    public TimeSpan DnsResolutionTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>Bound for graceful Terminate during shutdown.</summary>
+    public TimeSpan GracefulTerminateTimeout { get; set; } = TimeSpan.FromSeconds(2);
 }
 
 /// <summary>
