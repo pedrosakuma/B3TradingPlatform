@@ -8,8 +8,9 @@ Verified against: `B3.EntryPoint.Client 0.16.1` (13/07/2026).
 
 RFC
 [`durable-outbound-mutations-v0`](rfcs/durable-outbound-mutations-v0.md)
-requires a durable pre-write attempt boundary and later sequence-based
-correlation. The 0.16.1 package and upstream `main` at
+requires two durable boundaries: a platform-owned attempt intent before gateway
+entry, then an SDK callback after sequence reservation/encoding but before the
+first possible transport write. The 0.16.1 package and upstream `main` at
 `1fe35a318ae3d546e5e75e7207ad9808028878fc` (latest release 0.16.2) do not yet
 expose that contract.
 
@@ -17,15 +18,19 @@ Current high-level `SubmitAsync` / `ReplaceAsync` return the ClOrdID and
 `CancelAsync` returns `Task`. Upstream `main` reserves the outbound
 `MsgSeqNum`, encodes and writes inside a private serialized helper, then
 persists its SDK session-state delta. The public result does not bind the
-business call to `SessionVerId`, outbound `MsgSeqNum`, encoded-frame identity or
-a typed no-write/write-completed stage. `NotAppliedReceived` exposes a sequence
-range, but the platform cannot correlate that range to a specific request.
+business call to `SessionId`, `SessionVerId`, outbound `MsgSeqNum`,
+encoded-frame identity or a typed no-write/write-completed stage.
+`NotAppliedReceived` exposes a sequence range, but the platform cannot correlate
+that range to the full `(firmId, SessionId, SessionVerId, outboundSeqNum)`
+attempt identity.
 There is no public exact-original-sequence replay operation.
 
 Tracked upstream:
 [B3EntryPointClient#223](https://github.com/pedrosakuma/B3EntryPointClient/issues/223).
-Until that contract exists, #628's v0 policy is no automatic resend after any
-ambiguous gateway entry or dead process epoch.
+Until that contract exists, #628 cannot enable the transport-writing pipeline.
+After it exists, an intent-only dead epoch with no committed SDK callback is
+proven not written; a dead epoch at/after the callback is ambiguous and never
+automatically resent.
 
 This is not an order-status-query request. B3 EntryPoint 8.4.2 has no
 MassStatus/OrderStatus template; upstream
