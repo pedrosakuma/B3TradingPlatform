@@ -252,6 +252,13 @@ graceful shutdown. It captures:
   Their snapshot dictionary keys are `{firmId}|{endClientId}`; legacy plain
   keys also restore only into `DEFAULT`.
 
+After the raw state is captured under the dispatcher lock, the lock is released
+and `SnapshotService` awaits `FlushThroughAsync(snapshotSeq)`. Projection and
+publication happen only after the marker proves that complete prefix durable;
+failure or cancellation publishes nothing. Recovery ignores a snapshot whose
+sequence is ahead of `LastCommittedSeq` and falls back to full committed-WAL
+replay. Generation/lineage metadata remains the follow-up scope of #638.
+
 Write is atomic via temp file + `File.Move(overwrite: true)`. The
 `latest.txt` pointer is then updated; if it is missing or corrupt at
 boot, `SnapshotStore.LoadLatest()` falls back to the highest-numbered

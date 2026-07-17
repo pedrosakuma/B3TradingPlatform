@@ -102,6 +102,14 @@ public sealed class PersistenceRecovery
     {
         long since = 0;
         var snap = _snapshots.LoadLatest();
+        if (snap is not null && snap.Seq > _store.LastCommittedSeq)
+        {
+            _logger.LogError(
+                "Persistence recovery rejected snapshot seq={SnapshotSeq} ahead of committed WAL seq={CommittedSeq}; full committed-WAL replay will be used.",
+                snap.Seq,
+                _store.LastCommittedSeq);
+            snap = null;
+        }
         if (snap is not null)
         {
             _snapshotter.Restore(snap);
@@ -345,17 +353,21 @@ public sealed class SnapshotService : Microsoft.Extensions.Hosting.BackgroundSer
                 }
                 catch (OperationCanceledException) { break; }
 
-                TryTakeSnapshot();
+                await TryTakeSnapshotAsync(stoppingToken).ConfigureAwait(false);
             }
         }
         finally
         {
             // Final snapshot on graceful shutdown so the next boot is fast.
-            TryTakeSnapshot();
+            await TryTakeSnapshotAsync(CancellationToken.None).ConfigureAwait(false);
         }
     }
 
-    public void TryTakeSnapshot()
+    public void TryTakeSnapshot() =>
+        _ = TryTakeSnapshotAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+    public async Task<bool> TryTakeSnapshotAsync(
+        CancellationToken cancellationToken = default)
     {
         var sw = Stopwatch.StartNew();
         try
@@ -378,18 +390,37 @@ public sealed class SnapshotService : Microsoft.Extensions.Hosting.BackgroundSer
             // the disk write.
             RawPlatformSnapshot? raw = null;
             _dispatcher.WithSnapshotLock(seq => raw = _snapshotter.CaptureRaw(seq));
-            if (raw is null) return;
+            if (raw is null) return false;
+
+            // The lock is deliberately released before awaiting disk
+            // durability. Dispatch/projection can continue and the WAL writer
+            // can advance the marker without any dispatcher↔writer deadlock.
+            // A failed or cancelled fence publishes no snapshot.
+            await _dispatcher.FlushThroughAsync(raw.Seq, cancellationToken)
+                .ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+
             var snap = StateSnapshotter.Project(raw);
+            cancellationToken.ThrowIfCancellationRequested();
             _store.Write(snap);
             sw.Stop();
             MetricsRegistry.SnapshotsTaken.Add(1);
             MetricsRegistry.SnapshotDurationMs.Record(sw.Elapsed.TotalMilliseconds);
             _logger.LogDebug("Snapshot written at seq={Seq}.", snap.Seq);
+            return true;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            MetricsRegistry.SnapshotsFailed.Add(1);
+            _logger.LogDebug(
+                "Snapshot attempt cancelled before its committed-prefix fence completed; nothing was published.");
+            return false;
         }
         catch (Exception ex)
         {
             MetricsRegistry.SnapshotsFailed.Add(1);
             _logger.LogError(ex, "Snapshot attempt failed; will retry on next interval.");
+            return false;
         }
     }
 }
