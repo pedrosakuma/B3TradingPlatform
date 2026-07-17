@@ -77,6 +77,21 @@ public static class UserBotCredentialsEndpoints
             return Results.Ok(rows);
         });
 
+        group.MapPost("/{id:guid}/session", async (
+            Guid id,
+            HttpContext ctx,
+            IUserBotCredentialRegistry registry,
+            IUserBotSessionRegistry sessions,
+            CancellationToken ct) =>
+        {
+            var sub = RequireSub(ctx);
+            var owned = registry.ListByUser(sub)
+                .Any(c => c.Id == id && c.RevokedAtUtc is null);
+            if (!owned) return Results.NotFound();
+            var session = await sessions.GetOrCreateAsync(id, ct);
+            return Results.Ok(new UserBotSessionDto(session.SessionId, session.CurrentVer));
+        });
+
         group.MapPut("/{id:guid}/cert-binding", async (
             Guid id,
             HttpContext ctx,
@@ -141,6 +156,8 @@ public sealed record CreatedUserBotCredentialDto(
     DateTimeOffset CreatedAtUtc,
     string? BoundCertThumbprint,
     string PlainSecret);
+
+public sealed record UserBotSessionDto(uint SessionId, ulong SessionVerId);
 
 /// <summary>Public read-side DTO. No secret material; the thumbprint is non-secret.</summary>
 public sealed record UserBotCredentialDto(

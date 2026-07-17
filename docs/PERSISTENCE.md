@@ -38,7 +38,7 @@ data/{firm}/wal/2026-05-01/
   001.idx
 data/{firm}/snapshots/
   snap-000042.json
-  latest.txt          # {seq, file, ts} pointer for O(1) boot
+  latest.txt          # plain decimal snapshot seq hint
 data/{firm}/eod/
   eod-2026-05-01.json # daily reconciliation summary
 ```
@@ -186,6 +186,28 @@ Sequence numbers are derived from log position, not stored in the
 payload. They are monotonic and start from 1 on a fresh store.
 
 ## Snapshots
+
+### Application-consistent backup and restore drill
+
+Do not copy the live named volume: the WAL writer, snapshot pointer, SQLite
+WAL, and DataProtection keys can otherwise represent different instants.
+Use [`scripts/backup/backup-and-restore-drill.sh`](../scripts/backup/backup-and-restore-drill.sh).
+It:
+
+1. gracefully stops the host, which closes ingress, flushes the WAL and writes
+   the final snapshot;
+2. refuses the backup unless `latest.txt` references a matching snapshot and a
+   WAL segment exists;
+3. archives the entire `b3-trading-data` volume with a SHA-256 manifest;
+4. restores into an isolated volume, verifies every file, and boots the
+   restored host in `Mode=Unavailable`;
+5. fails unless snapshot/WAL replay and the SQLite identity directory are
+   healthy, then restarts the original host.
+
+The scheduled `.github/workflows/recovery-drill.yml` seeds durable state and
+runs this procedure weekly. A storage platform with atomic volume snapshots
+may replace the stop window only if it snapshots the complete volume as one
+unit and runs the same isolated restore/boot verification.
 
 `SnapshotService` is a `BackgroundService` that fires every
 `Trading:Persistence:SnapshotInterval` (default 5 min) and once more on

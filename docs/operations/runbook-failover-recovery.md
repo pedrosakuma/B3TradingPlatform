@@ -684,10 +684,15 @@ external editing or disk corruption).
 
 1. **Stop the host.** `docker compose stop trading-host`. Repair on a
    live process is unsupported.
-2. **Back up the WAL.**
+2. **Capture an application-consistent backup.** Do not tar selected live
+   directories. From the repository root run:
    ```bash
-   tar czf data-backup-$(date -u +%Y%m%dT%H%M%SZ).tar.gz data/{firm}/wal data/{firm}/snapshots
+   scripts/backup/backup-and-restore-drill.sh
    ```
+   The script keeps the host stopped while archiving the complete named
+   volume, verifies a SHA-256 manifest, boots an isolated restore, and restarts
+   the original host. If any phase fails, do not proceed with destructive
+   repair until the backup failure is resolved.
 3. **Identify the bad segment.** Recovery's exception trace points to
    the segment file. Cross-check with:
    ```bash
@@ -848,7 +853,6 @@ docker compose -f docker/docker-compose.yml \
 scripts/chaos/run-chaos-drill.sh --scenario host-kill
 scripts/chaos/run-chaos-drill.sh --scenario marketdata-kill
 scripts/chaos/run-chaos-drill.sh --scenario network-partition
-scripts/chaos/run-chaos-drill.sh --scenario wal-backpressure   # optional
 ```
 
 Or let the script bring the stack up itself:
@@ -861,10 +865,9 @@ scripts/chaos/run-chaos-drill.sh --up --scenario host-kill
 
 | Scenario | What it does | Pass criterion |
 |---|---|---|
-| `host-kill` | `docker kill -s SIGKILL b3-trading-host` → wait 5 s → restart → poll `/health`. | `/ready` returns 200 within `READY_TIMEOUT_S` seconds **and** `persistence.firmId` matches pre-drill. WAL `latest.txt` seq is monotonic across the kill (recovered seq ≥ pre-drill seq). |
-| `marketdata-kill` | `docker kill -s SIGKILL b3-marketdata`. Trading-host stays up. | `GET /health` keeps returning 200. `health.exchange` reflects degraded marketdata. No trading-host crash. |
-| `network-partition` | `docker network disconnect b3-net b3-trading-host` for 10 s, then reconnect. | After reconnect: `health.exchange.readyForOrders=true`. WAL `CurrentSeq` is monotonic (post >= pre). |
-| `wal-backpressure` (optional) | Drives synthetic load to trip `trading_wal_backpressure_total`. | Counter increases; no unbounded queue elsewhere (host RSS stable; no OOM). |
+| `host-kill` | `docker kill -s SIGKILL b3-trading-host` → restart. | `/ready` returns 200, every required firm is `Established`, WAL/snapshot state is monotonic, and a fresh crossed pair reaches `Filled`. |
+| `marketdata-kill` | `docker kill -s SIGKILL b3-marketdata` → restart. | Host remains live during outage; after restart exchange readiness returns and a fresh crossed pair reaches `Filled`. This keeps the #629 drill boundary aligned with the merged #516 marketdata recovery contract. |
+| `network-partition` | Disconnect trading-host from `b3-net`, then reconnect. | Every required firm re-establishes, WAL/snapshot state is monotonic, and a fresh crossed pair reaches `Filled`. |
 
 Each scenario writes pre/post-drill state JSON to `./chaos-artifacts/`
 in the worktree (configurable via `CHAOS_ARTIFACTS_DIR`). On failure
@@ -873,8 +876,9 @@ the script exits non-zero and prints a diff.
 ### 6.3 CI hook
 
 The workflow [`.github/workflows/chaos-drill.yml`](../../.github/workflows/chaos-drill.yml)
-runs the `host-kill` scenario on `workflow_dispatch` and on a nightly
-schedule. It reuses the conformance job's compose bringup pattern
+runs the selected scenario on `workflow_dispatch`; nightly runs rotate by UTC
+day-of-year through `host-kill`, `marketdata-kill`, and `network-partition`.
+It reuses the real-conformance compose bringup pattern
 (same env vars, including the
 `Trading__Reports__Cvm__OwnerHashSalt` placeholder added in Q4.8).
 On failure it uploads `docker compose logs` as an artifact.

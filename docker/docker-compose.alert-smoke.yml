@@ -1,0 +1,20 @@
+# Test-only overlay. Replaces the Prometheus config with one additional
+# synthetic scrape target and starts that target. Normal observability runs
+# neither expose the metric nor carry a permanently-down smoke target.
+services:
+  prometheus:
+    volumes: !override
+      - ./observability/prometheus.alert-smoke.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+
+  synthetic-alert-source:
+    image: python:3.13-alpine
+    container_name: b3-synthetic-alert-source
+    command: ["python3", "-m", "http.server", "8080", "--directory", "/metrics"]
+    volumes:
+      - ./observability/synthetic-alert:/metrics:ro
+    networks:
+      - b3-net
+    expose:
+      - "8080"

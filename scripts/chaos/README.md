@@ -34,10 +34,9 @@ scripts/chaos/run-chaos-drill.sh --up --scenario host-kill
 
 | `--scenario` | Action | Pass criterion |
 |---|---|---|
-| `host-kill` | SIGKILL `b3-trading-host`, sleep 5 s, restart, wait for `/ready`. | `/ready` 200 within `READY_TIMEOUT_S` (default 60 s). `health.persistence.firmId` unchanged. WAL `latest.txt` seq monotonic. |
-| `marketdata-kill` | SIGKILL `b3-marketdata`, then restart. | Trading-host `/health` stays 200 throughout (degraded surface allowed). |
-| `network-partition` | `docker network disconnect b3-net b3-trading-host` for `PARTITION_HOLD_S` (default 10 s), then reconnect. | `/ready` recovers within `READY_TIMEOUT_S`. WAL seq monotonic. |
-| `wal-backpressure` | Hammers `/health` to drive load (best-effort only). | Always PASS unless container becomes unreachable. Production-side checks are in the runbook §1.5. |
+| `host-kill` | SIGKILL `b3-trading-host`, restart. | Exchange sessions re-establish, WAL/snapshot state is monotonic, and a fresh real trade fills. |
+| `marketdata-kill` | SIGKILL `b3-marketdata`, then restart. | Host stays live; exchange readiness returns and a fresh real trade fills after recovery. |
+| `network-partition` | Disconnect trading-host from `b3-net`, then reconnect. | Exchange sessions re-establish, WAL/snapshot state is monotonic, and a fresh real trade fills. |
 
 Each scenario writes pre/post state JSON snapshots to
 `./chaos-artifacts/<scenario>-{pre,post}.json` (overridable via
@@ -68,7 +67,8 @@ Each scenario writes pre/post state JSON snapshots to
 ## CI
 
 The workflow [`.github/workflows/chaos-drill.yml`](../../.github/workflows/chaos-drill.yml)
-runs `host-kill` on `workflow_dispatch` and nightly. Container logs
+runs a selected scenario on `workflow_dispatch`; nightly runs rotate through
+all three supported scenarios. Container logs
 are uploaded on failure. It is **not** gated on PR merges — chaos is
 expensive.
 

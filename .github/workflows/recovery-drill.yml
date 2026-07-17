@@ -1,0 +1,68 @@
+name: Recovery drill
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 5 * * 0"
+
+permissions:
+  contents: read
+
+jobs:
+  restore:
+    name: Quiesced backup and restore
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      TRADING_AUTH_SIGNING_KEY: ci-recovery-drill-placeholder-key-min-32-bytes-long
+      TRADING_SEED_USER: alice
+      TRADING_SEED_PASSWORD: wonderland
+      TRADING_SEED_PASSWORD_HASH: ZDzDHANAHq8NDQK3BWk/YZjybKLCMKdRzw0z9Da5wic=
+      TRADING_SEED_PASSWORD_SALT: rXA+be7/gEYYZQrQDsUr2g==
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Start isolated no-broker host
+        run: |
+          docker compose \
+            -f docker/docker-compose.yml \
+            -f docker/docker-compose.unavailable.yml \
+            up -d --build --wait trading-host
+
+      - name: Seed durable state
+        run: |
+          set -euo pipefail
+          token="$(curl --fail --silent \
+            -H 'Content-Type: application/json' \
+            -d '{"username":"alice","password":"wonderland"}' \
+            http://127.0.0.1:5000/auth/login \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
+          curl --fail --silent \
+            -H "Authorization: Bearer $token" \
+            -H 'Content-Type: application/json' \
+            -d '{"label":"recovery-drill"}' \
+            http://127.0.0.1:5000/api/user-bot-credentials/ >/dev/null
+
+      - name: Quiesce, back up, restore, and boot
+        run: scripts/backup/backup-and-restore-drill.sh
+
+      - name: Upload recovery evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: recovery-drill-evidence
+          path: backup-artifacts/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Logs
+        if: failure()
+        run: docker logs b3-trading-host || true
+
+      - name: Tear down
+        if: always()
+        run: |
+          docker compose \
+            -f docker/docker-compose.yml \
+            -f docker/docker-compose.unavailable.yml \
+            down -v || true

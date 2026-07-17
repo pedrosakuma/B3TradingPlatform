@@ -1,4 +1,4 @@
-name: Chaos drill (host-kill)
+name: Chaos drill
 
 # Q4.15 (#315). Runs the trading-host chaos drill against the same
 # compose stack the conformance / e2e-smoke jobs use. Deliberately NOT
@@ -32,7 +32,7 @@ permissions:
 
 jobs:
   chaos:
-    name: Chaos drill (${{ github.event.inputs.scenario || 'host-kill' }})
+    name: Chaos drill
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -46,7 +46,6 @@ jobs:
       # Q4.8 (#308). CVM export boot guard requires this even though
       # the chaos drill does not exercise CVM endpoints.
       Trading__Reports__Cvm__OwnerHashSalt: chaos-only-cvm-salt-placeholder-DO-NOT-USE-IN-PROD
-      SCENARIO: ${{ github.event.inputs.scenario || 'host-kill' }}
 
     steps:
       - uses: actions/checkout@v6
@@ -54,12 +53,29 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      - name: Resolve rotating scenario
+        id: scenario
+        env:
+          REQUESTED: ${{ github.event.inputs.scenario }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$REQUESTED" ]]; then
+            scenario="$REQUESTED"
+          else
+            scenarios=(host-kill marketdata-kill network-partition)
+            scenario="${scenarios[$((10#$(date -u +%j) % ${#scenarios[@]}))]}"
+          fi
+          echo "SCENARIO=$scenario" >>"$GITHUB_ENV"
+          echo "scenario=$scenario" >>"$GITHUB_OUTPUT"
+          echo "Selected scheduled scenario: $scenario"
+
       - name: Bring up trading-host (Real stack)
         run: |
           docker compose \
               -f docker/docker-compose.yml \
               -f docker/docker-compose.real.yml \
               -f docker/docker-compose.conformance.yml \
+              -f docker/docker-compose.real-conformance.yml \
               up -d --build --wait trading-host
 
       - name: Run chaos drill
@@ -71,7 +87,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: chaos-artifacts-${{ env.SCENARIO }}
+          name: chaos-artifacts-${{ steps.scenario.outputs.scenario }}
           path: chaos-artifacts/
           if-no-files-found: ignore
           retention-days: 7
@@ -84,23 +100,26 @@ jobs:
               -f docker/docker-compose.yml \
               -f docker/docker-compose.real.yml \
               -f docker/docker-compose.conformance.yml \
+              -f docker/docker-compose.real-conformance.yml \
               logs --no-color trading-host > logs/trading-host.log || true
           docker compose \
               -f docker/docker-compose.yml \
               -f docker/docker-compose.real.yml \
               -f docker/docker-compose.conformance.yml \
+              -f docker/docker-compose.real-conformance.yml \
               logs --no-color matching-platform > logs/matching-platform.log || true
           docker compose \
               -f docker/docker-compose.yml \
               -f docker/docker-compose.real.yml \
               -f docker/docker-compose.conformance.yml \
+              -f docker/docker-compose.real-conformance.yml \
               logs --no-color marketdata > logs/marketdata.log || true
 
       - name: Upload container logs (on failure)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: chaos-logs-${{ env.SCENARIO }}
+          name: chaos-logs-${{ steps.scenario.outputs.scenario }}
           path: logs/
           if-no-files-found: ignore
           retention-days: 7
@@ -112,4 +131,5 @@ jobs:
               -f docker/docker-compose.yml \
               -f docker/docker-compose.real.yml \
               -f docker/docker-compose.conformance.yml \
+              -f docker/docker-compose.real-conformance.yml \
               down -v || true

@@ -6,11 +6,10 @@ connection-caps #529). These watch the surface a hostile internet can
 actually reach: TLS/mTLS handshakes, Negotiate auth, connection caps, and
 per-credential order flow.
 
-> Drop-in, not auto-loaded. Like `docs/ops/perf-v0-alerts.md`, this is a
-> template: copy the YAML into a file referenced by Prometheus
-> `rule_files:` for the host that scrapes the trading-host. The default
-> `docker/observability/prometheus.yml` only scrapes; add `rule_files`
-> there if you want them in the demo stack. The dashboard JSON lives at
+> The executable v1 rules are auto-loaded from
+> `docker/observability/prometheus/rules/v1/b3-trading.rules.yml` and tested
+> by `promtool` in CI. This page explains their thresholds and response.
+> The dashboard JSON lives at
 > `docker/observability/grafana/dashboards/public-auth.json` and is
 > auto-provisioned.
 

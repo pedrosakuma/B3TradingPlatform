@@ -1,0 +1,89 @@
+groups:
+  - name: b3-production-gates-v1
+    interval: 15s
+    rules:
+      - alert: B3SyntheticAlert
+        expr: b3_synthetic_alert == 1
+        labels:
+          severity: info
+          subsystem: operations-gate
+        annotations:
+          summary: "Synthetic alert delivery probe"
+          description: "The versioned Prometheus rule and Alertmanager receiver path are operational."
+
+      - alert: WsHubFanOutDropping
+        expr: rate(trading_dispatcher_ws_fanout_dropped_total[1m]) > 0
+        for: 1m
+        labels:
+          severity: page
+          subsystem: ws-hub
+        annotations:
+          summary: "WebSocket fan-out queue is dropping events"
+
+      - alert: FixpOutboundDrainShutdownAbandoned
+        expr: increase(trading_fixp_outbound_drain_shutdown_abandoned_total[5m]) > 0
+        labels:
+          severity: page
+          subsystem: fixp-listener
+        annotations:
+          summary: "FIXP outbound drain was abandoned during shutdown"
+
+      - alert: PublicAuthNegotiateRejectSpike
+        expr: sum(rate(entrypoint_listener_negotiate_total{outcome=~"reject:.*"}[5m])) > 1
+        for: 5m
+        labels:
+          severity: page
+          subsystem: fixp-listener
+          surface: public
+        annotations:
+          summary: "FIXP Negotiate rejections sustained above 1/s"
+
+      - alert: PublicConnectionsRejectedSpike
+        expr: sum by (reason) (rate(fixp_connections_rejected_total[5m])) > 5
+        for: 5m
+        labels:
+          severity: page
+          subsystem: fixp-listener
+          surface: public
+        annotations:
+          summary: "FIXP connections are being rejected at a sustained rate"
+
+      - alert: PublicMtlsClientCertRejectSpike
+        expr: sum(rate(entrypoint_listener_mtls_client_certs_total{outcome=~"reject:.*"}[5m])) > 0.5
+        for: 5m
+        labels:
+          severity: ticket
+          subsystem: fixp-listener
+          surface: public
+        annotations:
+          summary: "mTLS client-certificate rejections are sustained"
+
+      - alert: PublicTlsHandshakeLatencyHigh
+        expr: histogram_quantile(0.99, sum by (le) (rate(fixp_handshake_tls_duration_ms_bucket[5m]))) > 2000
+        for: 10m
+        labels:
+          severity: ticket
+          subsystem: fixp-listener
+          surface: public
+        annotations:
+          summary: "FIXP TLS handshake p99 exceeds 2 seconds"
+
+      - alert: PublicErOutboundDropping
+        expr: rate(entrypoint_listener_er_outbound_dropped_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: ticket
+          subsystem: fixp-listener
+          surface: public
+        annotations:
+          summary: "FIXP outbound execution-report buffer is dropping"
+
+      - alert: PublicFixpListenerDown
+        expr: max(entrypoint_listener_enabled) < 1 or absent(entrypoint_listener_enabled)
+        for: 2m
+        labels:
+          severity: page
+          subsystem: fixp-listener
+          surface: public
+        annotations:
+          summary: "Public FIXP listener is disabled or absent"

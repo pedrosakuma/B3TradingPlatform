@@ -25,6 +25,8 @@ are absent so CI stays green without a deployed instance.
 | `B3T_BASE_URL`  | Absolute base URL of the platform (e.g. `https://trading.uat.local`) |
 | `B3T_AUTH_USER` | Username of a smoke-test account configured on the target |
 | `B3T_AUTH_PASS` | Password for that account                                 |
+| `B3T_FIXP_ENDPOINT` | Inbound bot listener `host:port`; enables real SOFH/SBE journeys |
+| `B3T_FIXP_NEGOTIATE_BURST` | Configured per-credential Negotiate burst used by the rate-limit journey |
 
 To run the suite against a locally-running host:
 
@@ -46,6 +48,13 @@ dotnet test backend/tests/B3.Trading.Conformance --filter "Category=Conformance"
   loaded.
 
 ### Real-stack recovery
+
+- **`Spec_FIXP_UserBot/FixpListenerSpecTests`** — creates a one-time bot
+  credential over REST, then sends actual SOFH/SBE `Negotiate` and `Establish`
+  frames to the listener. It asserts wire acknowledgements, credential reject,
+  stale-version `EstablishReject`, and the configured credential rate limit.
+  The conformance compose overlay always sets the endpoint, so CI cannot pass
+  these rows through an environment-only placeholder or zero-traffic skip.
 
 - **`Spec_FIXP_SessionRoll/SuspendedTimeoutBoundarySpecTests`** —
   transport-fault boundary coverage for the venue FIXP suspend window:

@@ -2,9 +2,11 @@
 
 Concrete Prometheus alert rules for the metrics, log signals and
 config knobs catalogued in [`../RUNBOOK.md`](../RUNBOOK.md) §1.
-Drop the `groups:` block below into your existing
-`alerting_rules.yml` (or the equivalent file your AlertManager
-deploy loads).
+The executable source is
+[`docker/observability/prometheus/rules/v1/b3-trading.rules.yml`](../../docker/observability/prometheus/rules/v1/b3-trading.rules.yml).
+The bundled Prometheus loads that versioned directory and routes alerts to
+Alertmanager. The YAML below explains the contract; edit the executable rule
+file and its `promtool` test together.
 
 The trading-host scrape pipeline is documented in
 [`../METRICS.md`](../METRICS.md): app-meter signals reach
@@ -16,9 +18,8 @@ post-translation names.
 
 > **Translation notes.**
 >
-> - The repo currently has **no** committed alert rules — only the
->   scrape config in [`docker/observability/prometheus.yml`](../../docker/observability/prometheus.yml).
->   These rules are intentionally portable: drop them into any
+> - The repo ships committed, auto-loaded v1 rules and executable rule tests.
+>   The rules remain portable: copy them into any
 >   Prometheus + AlertManager stack, or translate them to the
 >   recording / alerting equivalent in your ops platform
 >   (Datadog monitor, Grafana Cloud alert, etc.) — the

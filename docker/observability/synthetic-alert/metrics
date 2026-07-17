@@ -1,0 +1,3 @@
+# HELP b3_synthetic_alert Synthetic signal used only by the receiver smoke.
+# TYPE b3_synthetic_alert gauge
+b3_synthetic_alert{subsystem="operations-gate"} 1

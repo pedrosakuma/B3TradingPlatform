@@ -7,8 +7,9 @@
 #
 # What this adds:
 #   1. otel-collector (OTLP/gRPC + http receivers; Prometheus exposition out)
-#   2. prometheus (scrapes the collector)
-#   3. grafana (provisioned datasource + 1 'Process Up' dashboard)
+#   2. prometheus (scrapes the collector and loads versioned rules)
+#   3. alertmanager (routes alerts to a configured receiver)
+#   4. grafana (provisioned dashboards)
 #
 # What this changes in trading-host:
 #   - Sets OTEL_EXPORTER_OTLP_ENDPOINT so the SDK we wired in PR 7-2b
@@ -18,6 +19,7 @@
 # UIs after `up`:
 #   - Grafana:    http://localhost:3000 (admin / admin on first login)
 #   - Prometheus: http://localhost:9090
+#   - Alertmanager: http://localhost:9093
 #   - Collector health: http://localhost:13133 (for k8s-style probes)
 
 name: b3trading
@@ -71,6 +73,7 @@ services:
       - --web.enable-lifecycle
     volumes:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/rules:/etc/prometheus/rules:ro
       - prometheus-data:/prometheus
     networks:
       - b3-net
@@ -80,12 +83,59 @@ services:
       - "${PROMETHEUS_PORT:-9090}:9090"
     depends_on:
       - otel-collector
+      - alertmanager
     healthcheck:
       test: ["CMD", "wget", "-q", "-T", "2", "--spider", "http://localhost:9090/-/ready"]
       interval: 5s
       timeout: 3s
       retries: 12
       start_period: 5s
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    container_name: b3-alertmanager
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    networks:
+      - b3-net
+    expose:
+      - "9093"
+    ports:
+      - "${ALERTMANAGER_PORT:-9093}:9093"
+    depends_on:
+      alert-receiver:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/bin/alertmanager", "--version"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # Local receiver with an inspectable /received endpoint. Production
+  # deployments replace alertmanager.yml with their pager/ticket receiver;
+  # this service exists so the bundled stack can prove delivery end-to-end.
+  alert-receiver:
+    build:
+      context: ./observability/alert-receiver
+    image: b3-alert-receiver:dev
+    container_name: b3-alert-receiver
+    restart: unless-stopped
+    networks:
+      - b3-net
+    expose:
+      - "8080"
+    ports:
+      - "${ALERT_RECEIVER_PORT:-18093}:8080"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
 
   grafana:
     image: grafana/grafana:11.3.1
@@ -123,3 +173,5 @@ volumes:
     name: b3-prometheus-data
   grafana-data:
     name: b3-grafana-data
+  alertmanager-data:
+    name: b3-alertmanager-data

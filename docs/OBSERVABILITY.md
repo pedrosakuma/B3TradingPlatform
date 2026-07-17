@@ -1,14 +1,10 @@
 # Observability & Lifecycle
 
-Phase 3 (partial) wires the platform to a generic Kubernetes-/Linux-host
+The platform is wired to a generic Kubernetes-/Linux-host
 shaped lifecycle and exposes a process-wide metric surface using
 `System.Diagnostics.Metrics`. Mirrors the convention in
 [`B3MarketDataPlatform`](https://github.com/pedrosakuma/B3MarketDataPlatform)
 (`MetricsRegistry`, `/health`, `/ready`, `/live`).
-
-The remaining Phase 3 items — ER replay on (re)connect, FIXP per-session
-state machine, gap recovery — are deferred until the
-`B3EntryPointClient` upstream lands.
 
 ## Probes
 
@@ -97,9 +93,20 @@ Local exploration with
 dotnet counters monitor --process-id <pid> --counters B3.Trading
 ```
 
-Production deployment: attach an OTel SDK + Prometheus / OTLP exporter
-in the host. Wiring is intentionally not in `Program.cs` — this is a
-deployment concern (Phase 7).
+The host exports OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` is configured.
+The observability compose overlay supplies the collector, Prometheus,
+versioned rules, Alertmanager, a local inspectable receiver, and Grafana.
+
+### Alert validation
+
+```bash
+scripts/observability/test-alerting.sh
+```
+
+The script runs `promtool test rules`, starts the alerting path, exposes the
+`b3_synthetic_alert` metric, and fails unless `B3SyntheticAlert` reaches the
+configured webhook receiver. Production replaces `alertmanager.yml` with the
+organization's pager/ticket receiver; the routing contract remains tested.
 
 ## Verification
 
@@ -115,8 +122,6 @@ Tests live in `backend/tests/B3.Trading.Api.Tests/Lifecycle/`:
 
 ## Out of scope (this slice)
 
-- ER replay on FIXP (re)connect — needs the upstream client.
-- Per-session FIXP state machine and gap recovery — same.
 - In-process Prometheus / OTLP exporter — deployment concern (Phase 7).
 - Distributed tracing — not exercised yet; trivial to add when an OTel
   collector is in front of the process.
