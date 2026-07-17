@@ -449,16 +449,19 @@ mounted at `/var/lib/b3trading`. The SQLite trading-user directory defaults to
 `synchronous=FULL`. Never copy selected files while the host is live. Run
 `scripts/backup/backup-and-restore-drill.sh`: it gracefully quiesces the host,
 archives the whole volume, verifies a file manifest, and boots an isolated
-restore before declaring success.
+real-mode restore. The drill also proves a seeded durable bot credential
+survives and a fresh trade fills before the original host resumes.
 
 ## Image release gates
 
 `.github/workflows/docker.yml` builds PR images without publishing. On `main`
-or a `v*.*.*` tag, promotion waits for the separate CI workflow and both
-unavailable-mode and real-stack conformance. It then publishes candidate
-multi-arch manifests, boots the exact host/frontend digests on AMD64 and ARM64,
-and only after those smokes succeed attaches `sha-*`, semver, branch, and
-`latest` tags. A failed required job therefore cannot move a release tag.
+or a `v*.*.*` tag it first publishes candidate multi-arch manifests and records
+their immutable digests. Recovery, unavailable-mode conformance, real-stack
+conformance, and ARM64 identity runtime then pull the exact host digest (compose
+builds are disabled). Promotion reuses those same digests, boots the exact
+host/frontend manifests on AMD64 and ARM64, and only then attaches `sha-*`,
+semver, branch, and `latest` tags. A failed or skipped required job cannot move
+a release tag.
 
 ## Health & readiness
 

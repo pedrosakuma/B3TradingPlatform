@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   restore:
-    name: Quiesced backup and restore
+    name: Real-mode backup, restore, and trade
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -22,11 +22,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Start isolated no-broker host
+      - name: Start real stack
         run: |
           docker compose \
             -f docker/docker-compose.yml \
-            -f docker/docker-compose.unavailable.yml \
+            -f docker/docker-compose.real.yml \
+            -f docker/docker-compose.conformance.yml \
+            -f docker/docker-compose.real-conformance.yml \
             up -d --build --wait trading-host
 
       - name: Seed durable state
@@ -37,13 +39,16 @@ jobs:
             -d '{"username":"alice","password":"wonderland"}' \
             http://127.0.0.1:5000/auth/login \
             | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
-          curl --fail --silent \
+          created="$(curl --fail --silent \
             -H "Authorization: Bearer $token" \
             -H 'Content-Type: application/json' \
             -d '{"label":"recovery-drill"}' \
-            http://127.0.0.1:5000/api/user-bot-credentials/ >/dev/null
+            http://127.0.0.1:5000/api/user-bot-credentials/)"
+          credential_id="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"$created")"
+          test -n "$credential_id"
+          echo "RECOVERY_CREDENTIAL_ID=$credential_id" >>"$GITHUB_ENV"
 
-      - name: Quiesce, back up, restore, and boot
+      - name: Quiesce, restore durable identity, and trade
         run: scripts/backup/backup-and-restore-drill.sh
 
       - name: Upload recovery evidence
@@ -64,5 +69,7 @@ jobs:
         run: |
           docker compose \
             -f docker/docker-compose.yml \
-            -f docker/docker-compose.unavailable.yml \
+            -f docker/docker-compose.real.yml \
+            -f docker/docker-compose.conformance.yml \
+            -f docker/docker-compose.real-conformance.yml \
             down -v || true

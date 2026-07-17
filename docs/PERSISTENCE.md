@@ -199,10 +199,13 @@ It:
 2. refuses the backup unless `latest.txt` references a matching snapshot and a
    WAL segment exists;
 3. archives the entire `b3-trading-data` volume with a SHA-256 manifest;
-4. restores into an isolated volume, verifies every file, and boots the
-   restored host in `Mode=Unavailable`;
-5. fails unless snapshot/WAL replay and the SQLite identity directory are
-   healthy, then restarts the original host.
+4. restores into an isolated volume, verifies every file, and boots the exact
+   image in `Mode=Real` against the sandbox matching/market-data stack;
+5. fails unless the seeded bot credential remains queryable, snapshot/WAL and
+   reconciliation-sidecar recovery leave readiness open, and a fresh crossed
+   order pair reaches `Filled`;
+6. gracefully releases the restored FIXP session, restarts the original host,
+   and requires its real-mode readiness to return.
 
 The scheduled `.github/workflows/recovery-drill.yml` seeds durable state and
 runs this procedure weekly. A storage platform with atomic volume snapshots

@@ -105,8 +105,11 @@ scripts/observability/test-alerting.sh
 
 The script runs `promtool test rules`, starts the alerting path, exposes the
 `b3_synthetic_alert` metric, and fails unless `B3SyntheticAlert` reaches the
-configured webhook receiver. Production replaces `alertmanager.yml` with the
-organization's pager/ticket receiver; the routing contract remains tested.
+configured webhook receiver. Every invocation uses unique container/network/
+volume names and a unique `run_id` metric label, clears stale smoke containers,
+and accepts only receiver evidence whose `startsAt` is after the current run
+began. Production replaces `alertmanager.yml` with the organization's
+pager/ticket receiver; the routing contract remains tested.
 
 ## Verification
 

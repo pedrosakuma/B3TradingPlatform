@@ -56,9 +56,12 @@ jobs:
         run: echo "PR validation only; image promotion is disabled."
 
   trading-host:
-    name: Validate trading-host image build
+    name: Build candidate images
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+    outputs:
+      host_digest: ${{ steps.host-candidate.outputs.digest }}
+      frontend_digest: ${{ steps.frontend-candidate.outputs.digest }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -69,7 +72,16 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Compute image metadata
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute PR image metadata
+        if: github.event_name == 'pull_request'
         id: meta
         uses: docker/metadata-action@v6
         with:
@@ -82,7 +94,8 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push
+      - name: Validate pull-request host build
+        if: github.event_name == 'pull_request'
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -94,10 +107,43 @@ jobs:
           cache-from: type=gha,scope=trading-host
           cache-to:   type=gha,scope=trading-host,mode=max
 
+      - name: Build immutable host candidate
+        if: github.event_name != 'pull_request'
+        id: host-candidate
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: backend/src/B3.Trading.Host/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/b3-trading-host:candidate-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=trading-host
+          cache-to: type=gha,scope=trading-host,mode=max
+
+      - name: Build immutable frontend candidate
+        if: github.event_name != 'pull_request'
+        id: frontend-candidate
+        uses: docker/build-push-action@v7
+        with:
+          context: frontend
+          file: frontend/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/b3-trading-frontend:candidate-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,scope=frontend,mode=max
+
   identity-directory-arm64-smoke:
     name: ARM64 identity directory smoke
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    needs: trading-host
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -108,7 +154,8 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Build linux/arm64 smoke image
+      - name: Build pull-request linux/arm64 smoke image
+        if: github.event_name == 'pull_request'
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -119,13 +166,29 @@ jobs:
           cache-from: type=gha,scope=trading-host-arm64-smoke
           cache-to:   type=gha,scope=trading-host-arm64-smoke,mode=max
 
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Boot and query SQLite identity directory
         env:
           TRADING_AUTH_SIGNING_KEY: ci-arm64-smoke-placeholder-key-min-32-bytes-long-aaaaa
           TRADING_SEED_PASSWORD_HASH: ZDzDHANAHq8NDQK3BWk/YZjybKLCMKdRzw0z9Da5wic=
           TRADING_SEED_PASSWORD_SALT: rXA+be7/gEYYZQrQDsUr2g==
+          CANDIDATE_DIGEST: ${{ needs.trading-host.outputs.host_digest }}
+          HOST_IMAGE: ghcr.io/${{ github.repository_owner }}/b3-trading-host
         run: |
           set -euo pipefail
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            image_ref="b3-trading-host:identity-arm64-smoke"
+          else
+            test -n "$CANDIDATE_DIGEST"
+            image_ref="$HOST_IMAGE@$CANDIDATE_DIGEST"
+          fi
           cid="$(docker run -d --platform linux/arm64 -p 18080:5000 \
             -e Trading__Auth__SigningKey="$TRADING_AUTH_SIGNING_KEY" \
             -e Trading__Auth__Users__0__Username=alice \
@@ -136,7 +199,7 @@ jobs:
             -e Trading__Auth__Users__0__Firm=FIRM01 \
             -e Trading__Reports__Cvm__OwnerHashSalt=ci-arm64-cvm-salt \
             -e Trading__DropCopy__ClOrdIdMaskSalt=ci-arm64-clordid-mask-salt \
-            b3-trading-host:identity-arm64-smoke)"
+            "$image_ref")"
           trap 'docker logs "$cid" || true; docker rm -f "$cid" >/dev/null || true' EXIT
           for i in $(seq 1 60); do
             if curl --fail --silent http://127.0.0.1:18080/live >/dev/null; then
@@ -160,6 +223,7 @@ jobs:
 
   frontend:
     name: Validate frontend image build
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -197,6 +261,76 @@ jobs:
           cache-from: type=gha,scope=frontend
           cache-to:   type=gha,scope=frontend,mode=max
 
+  candidate-runtime-smoke:
+    name: Smoke candidate manifests (AMD64 + ARM64)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: trading-host
+    steps:
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Smoke host digest on AMD64 and ARM64
+        env:
+          HOST_DIGEST: ${{ needs.trading-host.outputs.host_digest }}
+          HOST_IMAGE: ghcr.io/${{ github.repository_owner }}/b3-trading-host
+        run: |
+          set -euo pipefail
+          test -n "$HOST_DIGEST"
+          for entry in "linux/amd64:18080" "linux/arm64:18081"; do
+            platform="${entry%%:*}"
+            port="${entry##*:}"
+            cid="$(docker run -d --platform "$platform" -p "${port}:5000" \
+              -e Trading__Auth__SigningKey=ci-digest-smoke-key-min-32-bytes-long \
+              -e Trading__Reports__Cvm__OwnerHashSalt=ci-digest-cvm-salt \
+              -e Trading__DropCopy__ClOrdIdMaskSalt=ci-digest-clordid-mask-salt \
+              "$HOST_IMAGE@$HOST_DIGEST")"
+            trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+            for i in $(seq 1 90); do
+              if curl --fail --silent "http://127.0.0.1:${port}/live" >/dev/null; then
+                break
+              fi
+              sleep 1
+            done
+            curl --fail --silent "http://127.0.0.1:${port}/live"
+            docker rm -f "$cid" >/dev/null
+            docker image rm "$HOST_IMAGE@$HOST_DIGEST" >/dev/null 2>&1 || true
+            trap - EXIT
+          done
+
+      - name: Smoke frontend digest on AMD64 and ARM64
+        env:
+          FRONTEND_DIGEST: ${{ needs.trading-host.outputs.frontend_digest }}
+          FRONTEND_IMAGE: ghcr.io/${{ github.repository_owner }}/b3-trading-frontend
+        run: |
+          set -euo pipefail
+          test -n "$FRONTEND_DIGEST"
+          for entry in "linux/amd64:18082" "linux/arm64:18083"; do
+            platform="${entry%%:*}"
+            port="${entry##*:}"
+            cid="$(docker run -d --platform "$platform" -p "${port}:80" \
+              "$FRONTEND_IMAGE@$FRONTEND_DIGEST")"
+            trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+            for i in $(seq 1 60); do
+              if curl --fail --silent "http://127.0.0.1:${port}/" >/dev/null; then
+                break
+              fi
+              sleep 1
+            done
+            curl --fail --silent "http://127.0.0.1:${port}/" >/dev/null
+            docker rm -f "$cid" >/dev/null
+            docker image rm "$FRONTEND_IMAGE@$FRONTEND_DIGEST" >/dev/null 2>&1 || true
+            trap - EXIT
+          done
+
   compose-validate:
     name: Validate docker-compose
     runs-on: ubuntu-latest
@@ -212,6 +346,7 @@ jobs:
           TRADING_AUTH_SIGNING_KEY: validate-only-placeholder-key-min-32-bytes-long-aaaaa
           TRADING_SEED_PASSWORD_HASH: ZDzDHANAHq8NDQK3BWk/YZjybKLCMKdRzw0z9Da5wic=
           TRADING_SEED_PASSWORD_SALT: rXA+be7/gEYYZQrQDsUr2g==
+          ALERT_SMOKE_RUN_ID: validate
         run: |
           docker compose -f docker/docker-compose.yml config --quiet
           docker compose -f docker/docker-compose.yml -f docker/docker-compose.unavailable.yml config --quiet
@@ -303,7 +438,7 @@ jobs:
         run: scripts/observability/test-alerting.sh
 
   recovery-drill:
-    name: Quiesced backup and restore
+    name: Real-mode backup, restore, and trade
     runs-on: ubuntu-latest
     timeout-minutes: 25
     needs: trading-host
@@ -316,12 +451,36 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Start isolated no-broker host
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Start real stack
+        env:
+          CANDIDATE_DIGEST: ${{ needs.trading-host.outputs.host_digest }}
+          HOST_IMAGE: ghcr.io/${{ github.repository_owner }}/b3-trading-host
         run: |
-          docker compose \
-            -f docker/docker-compose.yml \
-            -f docker/docker-compose.unavailable.yml \
-            up -d --build --wait trading-host
+          set -euo pipefail
+          compose=(
+            docker compose
+            -f docker/docker-compose.yml
+            -f docker/docker-compose.real.yml
+            -f docker/docker-compose.conformance.yml
+            -f docker/docker-compose.real-conformance.yml
+          )
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            "${compose[@]}" up -d --build --wait trading-host
+          else
+            test -n "$CANDIDATE_DIGEST"
+            export TRADING_IMAGE="$HOST_IMAGE@$CANDIDATE_DIGEST"
+            docker pull "$TRADING_IMAGE"
+            "${compose[@]}" up -d --no-build --wait trading-host
+            test "$(docker inspect -f '{{.Config.Image}}' b3-trading-host)" = "$TRADING_IMAGE"
+          fi
 
       - name: Seed durable state
         run: |
@@ -331,14 +490,26 @@ jobs:
             -d '{"username":"alice","password":"wonderland"}' \
             http://127.0.0.1:5000/auth/login \
             | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
-          curl --fail --silent \
+          created="$(curl --fail --silent \
             -H "Authorization: Bearer $token" \
             -H 'Content-Type: application/json' \
             -d '{"label":"release-gate-recovery-drill"}' \
-            http://127.0.0.1:5000/api/user-bot-credentials/ >/dev/null
+            http://127.0.0.1:5000/api/user-bot-credentials/)"
+          credential_id="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"$created")"
+          test -n "$credential_id"
+          echo "RECOVERY_CREDENTIAL_ID=$credential_id" >>"$GITHUB_ENV"
 
-      - name: Quiesce, back up, restore, and boot
+      - name: Quiesce, restore durable identity, and trade
         run: scripts/backup/backup-and-restore-drill.sh
+
+      - name: Upload recovery evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-recovery-${{ github.sha }}
+          path: backup-artifacts/
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Logs
         if: failure()
@@ -349,11 +520,13 @@ jobs:
         run: |
           docker compose \
             -f docker/docker-compose.yml \
-            -f docker/docker-compose.unavailable.yml \
+            -f docker/docker-compose.real.yml \
+            -f docker/docker-compose.conformance.yml \
+            -f docker/docker-compose.real-conformance.yml \
             down -v || true
 
   conformance:
-    name: Run conformance suite against unavailable-mode stack
+    name: Run conformance against candidate (unavailable mode)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: trading-host
@@ -362,6 +535,14 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Bring up trading-host
         env:
@@ -379,12 +560,26 @@ jobs:
           TRADING_SEED_PASSWORD: wonderland
           TRADING_SEED_PASSWORD_HASH: ZDzDHANAHq8NDQK3BWk/YZjybKLCMKdRzw0z9Da5wic=
           TRADING_SEED_PASSWORD_SALT: rXA+be7/gEYYZQrQDsUr2g==
+          CANDIDATE_DIGEST: ${{ needs.trading-host.outputs.host_digest }}
+          HOST_IMAGE: ghcr.io/${{ github.repository_owner }}/b3-trading-host
         run: |
-          docker compose \
-              -f docker/docker-compose.yml \
-              -f docker/docker-compose.unavailable.yml \
-              -f docker/docker-compose.conformance.yml \
-              up -d --build --wait trading-host
+          set -euo pipefail
+          compose=(
+            docker compose
+            -f docker/docker-compose.yml
+            -f docker/docker-compose.unavailable.yml
+            -f docker/docker-compose.conformance.yml
+          )
+          "${compose[@]}" build conformance
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            "${compose[@]}" up -d --build --wait trading-host
+          else
+            test -n "$CANDIDATE_DIGEST"
+            export TRADING_IMAGE="$HOST_IMAGE@$CANDIDATE_DIGEST"
+            docker pull "$TRADING_IMAGE"
+            "${compose[@]}" up -d --no-build --wait trading-host
+            test "$(docker inspect -f '{{.Config.Image}}' b3-trading-host)" = "$TRADING_IMAGE"
+          fi
 
       - name: Run conformance
         env:
@@ -427,7 +622,7 @@ jobs:
               down -v
 
   real-stack-conformance:
-    name: Run conformance suite against real stack (matching-platform)
+    name: Run conformance against candidate (real stack)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: trading-host
@@ -444,6 +639,14 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Bring up real stack (matching-platform + marketdata + trading-host)
         # docker-compose.real.yml flips trading-host to Mode=Real, adds
         # the matching-platform service, and (since v1) the marketdata-live
@@ -456,13 +659,28 @@ jobs:
         # on a partial conformance fragment). --wait blocks until matching's
         # healthcheck passes AND trading-host reports healthy (FIXP Negotiate
         # succeeded against matching).
+        env:
+          CANDIDATE_DIGEST: ${{ needs.trading-host.outputs.host_digest }}
+          HOST_IMAGE: ghcr.io/${{ github.repository_owner }}/b3-trading-host
         run: |
-          docker compose \
-              -f docker/docker-compose.yml \
-              -f docker/docker-compose.real.yml \
-              -f docker/docker-compose.conformance.yml \
-              -f docker/docker-compose.real-conformance.yml \
-              up -d --build --wait trading-host
+          set -euo pipefail
+          compose=(
+            docker compose
+            -f docker/docker-compose.yml
+            -f docker/docker-compose.real.yml
+            -f docker/docker-compose.conformance.yml
+            -f docker/docker-compose.real-conformance.yml
+          )
+          "${compose[@]}" build conformance
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            "${compose[@]}" up -d --build --wait trading-host
+          else
+            test -n "$CANDIDATE_DIGEST"
+            export TRADING_IMAGE="$HOST_IMAGE@$CANDIDATE_DIGEST"
+            docker pull "$TRADING_IMAGE"
+            "${compose[@]}" up -d --no-build --wait trading-host
+            test "$(docker inspect -f '{{.Config.Image}}' b3-trading-host)" = "$TRADING_IMAGE"
+          fi
 
       - name: Run conformance
         # Per RFC integration-real-stack-v0 §4.7: auth + admin/firms +
@@ -509,14 +727,25 @@ jobs:
 
   promote:
     name: Promote tested image digests
-    if: github.event_name != 'pull_request'
+    if: >-
+      always() &&
+      github.event_name != 'pull_request' &&
+      needs.required-ci.result == 'success' &&
+      needs.trading-host.result == 'success' &&
+      needs.candidate-runtime-smoke.result == 'success' &&
+      needs.identity-directory-arm64-smoke.result == 'success' &&
+      needs.compose-validate.result == 'success' &&
+      needs.alerting.result == 'success' &&
+      needs.recovery-drill.result == 'success' &&
+      needs.conformance.result == 'success' &&
+      needs.real-stack-conformance.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     needs:
       - required-ci
       - trading-host
+      - candidate-runtime-smoke
       - identity-directory-arm64-smoke
-      - frontend
       - compose-validate
       - alerting
       - recovery-drill
@@ -524,9 +753,6 @@ jobs:
       - real-stack-conformance
     steps:
       - uses: actions/checkout@v6
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -562,95 +788,26 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build candidate host manifest
-        id: host-build
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: backend/src/B3.Trading.Host/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ghcr.io/${{ github.repository_owner }}/b3-trading-host:candidate-${{ github.sha }}
-          labels: ${{ steps.host-meta.outputs.labels }}
-          cache-from: type=gha,scope=trading-host
-          cache-to: type=gha,scope=trading-host,mode=max
-
-      - name: Build candidate frontend manifest
-        id: frontend-build
-        uses: docker/build-push-action@v7
-        with:
-          context: frontend
-          file: frontend/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ghcr.io/${{ github.repository_owner }}/b3-trading-frontend:candidate-${{ github.sha }}
-          labels: ${{ steps.frontend-meta.outputs.labels }}
-          cache-from: type=gha,scope=frontend
-          cache-to: type=gha,scope=frontend,mode=max
-
-      - name: Smoke host digest on AMD64 and ARM64
-        env:
-          HOST_DIGEST: ${{ steps.host-build.outputs.digest }}
-          HOST_IMAGE: ghcr.io/${{ github.repository_owner }}/b3-trading-host
-        run: |
-          set -euo pipefail
-          for entry in "linux/amd64:18080" "linux/arm64:18081"; do
-            platform="${entry%%:*}"
-            port="${entry##*:}"
-            cid="$(docker run -d --platform "$platform" -p "${port}:5000" \
-              -e Trading__Auth__SigningKey=ci-digest-smoke-key-min-32-bytes-long \
-              -e Trading__Reports__Cvm__OwnerHashSalt=ci-digest-cvm-salt \
-              -e Trading__DropCopy__ClOrdIdMaskSalt=ci-digest-clordid-mask-salt \
-              "$HOST_IMAGE@$HOST_DIGEST")"
-            for i in $(seq 1 90); do
-              if curl --fail --silent "http://127.0.0.1:${port}/live" >/dev/null; then
-                break
-              fi
-              sleep 1
-            done
-            curl --fail --silent "http://127.0.0.1:${port}/live"
-            docker rm -f "$cid" >/dev/null
-          done
-
-      - name: Smoke frontend digest on AMD64 and ARM64
-        env:
-          FRONTEND_DIGEST: ${{ steps.frontend-build.outputs.digest }}
-          FRONTEND_IMAGE: ghcr.io/${{ github.repository_owner }}/b3-trading-frontend
-        run: |
-          set -euo pipefail
-          for entry in "linux/amd64:18082" "linux/arm64:18083"; do
-            platform="${entry%%:*}"
-            port="${entry##*:}"
-            cid="$(docker run -d --platform "$platform" -p "${port}:8080" \
-              "$FRONTEND_IMAGE@$FRONTEND_DIGEST")"
-            for i in $(seq 1 60); do
-              if curl --fail --silent "http://127.0.0.1:${port}/" >/dev/null; then
-                break
-              fi
-              sleep 1
-            done
-            curl --fail --silent "http://127.0.0.1:${port}/" >/dev/null
-            docker rm -f "$cid" >/dev/null
-          done
-
       - name: Promote tested host digest
         env:
-          DIGEST: ${{ steps.host-build.outputs.digest }}
+          DIGEST: ${{ needs.trading-host.outputs.host_digest }}
           IMAGE: ghcr.io/${{ github.repository_owner }}/b3-trading-host
           TAGS: ${{ steps.host-meta.outputs.tags }}
         run: |
           set -euo pipefail
+          test -n "$DIGEST"
           while IFS= read -r tag; do
             [[ -n "$tag" ]] && docker buildx imagetools create --tag "$tag" "$IMAGE@$DIGEST"
           done <<<"$TAGS"
 
       - name: Promote tested frontend digest
         env:
-          DIGEST: ${{ steps.frontend-build.outputs.digest }}
+          DIGEST: ${{ needs.trading-host.outputs.frontend_digest }}
           IMAGE: ghcr.io/${{ github.repository_owner }}/b3-trading-frontend
           TAGS: ${{ steps.frontend-meta.outputs.tags }}
         run: |
           set -euo pipefail
+          test -n "$DIGEST"
           while IFS= read -r tag; do
             [[ -n "$tag" ]] && docker buildx imagetools create --tag "$tag" "$IMAGE@$DIGEST"
           done <<<"$TAGS"

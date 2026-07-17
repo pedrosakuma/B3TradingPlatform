@@ -2,7 +2,25 @@
 # synthetic scrape target and starts that target. Normal observability runs
 # neither expose the metric nor carry a permanently-down smoke target.
 services:
+  otel-collector:
+    container_name: b3-otel-collector-${ALERT_SMOKE_RUN_ID:?Set ALERT_SMOKE_RUN_ID}
+    labels:
+      com.b3trading.alert-smoke: "true"
+
+  alert-receiver:
+    container_name: b3-alert-receiver-${ALERT_SMOKE_RUN_ID:?Set ALERT_SMOKE_RUN_ID}
+    labels:
+      com.b3trading.alert-smoke: "true"
+
+  alertmanager:
+    container_name: b3-alertmanager-${ALERT_SMOKE_RUN_ID:?Set ALERT_SMOKE_RUN_ID}
+    labels:
+      com.b3trading.alert-smoke: "true"
+
   prometheus:
+    container_name: b3-prometheus-${ALERT_SMOKE_RUN_ID:?Set ALERT_SMOKE_RUN_ID}
+    labels:
+      com.b3trading.alert-smoke: "true"
     volumes: !override
       - ./observability/prometheus.alert-smoke.yml:/etc/prometheus/prometheus.yml:ro
       - ./observability/prometheus/rules:/etc/prometheus/rules:ro
@@ -10,11 +28,29 @@ services:
 
   synthetic-alert-source:
     image: python:3.13-alpine
-    container_name: b3-synthetic-alert-source
-    command: ["python3", "-m", "http.server", "8080", "--directory", "/metrics"]
-    volumes:
-      - ./observability/synthetic-alert:/metrics:ro
+    container_name: b3-synthetic-alert-source-${ALERT_SMOKE_RUN_ID:?Set ALERT_SMOKE_RUN_ID}
+    labels:
+      com.b3trading.alert-smoke: "true"
+    environment:
+      ALERT_SMOKE_RUN_ID: ${ALERT_SMOKE_RUN_ID}
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        mkdir -p /generated
+        printf '# TYPE b3_synthetic_alert gauge\nb3_synthetic_alert{subsystem="operations-gate",run_id="%s"} 1\n' "$$ALERT_SMOKE_RUN_ID" > /generated/metrics
+        exec python3 -m http.server 8080 --directory /generated
     networks:
       - b3-net
     expose:
       - "8080"
+
+volumes:
+  prometheus-data:
+    name: b3-prometheus-data-${ALERT_SMOKE_RUN_ID:?Set ALERT_SMOKE_RUN_ID}
+  alertmanager-data:
+    name: b3-alertmanager-data-${ALERT_SMOKE_RUN_ID:?Set ALERT_SMOKE_RUN_ID}
+
+networks:
+  b3-net:
+    name: b3-alert-net-${ALERT_SMOKE_RUN_ID:?Set ALERT_SMOKE_RUN_ID}

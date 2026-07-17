@@ -690,9 +690,10 @@ external editing or disk corruption).
    scripts/backup/backup-and-restore-drill.sh
    ```
    The script keeps the host stopped while archiving the complete named
-   volume, verifies a SHA-256 manifest, boots an isolated restore, and restarts
-   the original host. If any phase fails, do not proceed with destructive
-   repair until the backup failure is resolved.
+   volume, verifies a SHA-256 manifest, boots an isolated real-mode restore,
+   verifies the seeded durable credential, fills a fresh crossed trade, then
+   returns the FIXP session to the original host. If any phase fails, do not
+   proceed with destructive repair until the backup failure is resolved.
 3. **Identify the bad segment.** Recovery's exception trace points to
    the segment file. Cross-check with:
    ```bash
