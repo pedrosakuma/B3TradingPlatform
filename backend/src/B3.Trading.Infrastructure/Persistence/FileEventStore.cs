@@ -585,11 +585,18 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
     {
         var markerExists = File.Exists(_markerPath);
         var stagingExists = File.Exists(_markerStagingPath);
-        var physicalSegments = EnumeratePhysicalSegments();
+        WalCommitMarker? existingMarker = markerExists
+            ? ReadMarker(_markerPath)
+            : null;
+        var committedIds = existingMarker is { } markerValue
+            ? markerValue.Segments
+                .Select(static segment => segment.SegmentId)
+                .ToHashSet(StringComparer.Ordinal)
+            : null;
+        var physicalSegments = EnumeratePhysicalSegments(committedIds);
 
-        if (markerExists)
+        if (existingMarker is { } marker)
         {
-            var marker = ReadMarker(_markerPath);
             CompletePendingMigrationMetadata(marker, physicalSegments);
             RecoverCommittedPrefix(marker, physicalSegments);
             if (stagingExists)
@@ -666,7 +673,7 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
                     $"Controlled legacy WAL migration found corruption in '{segment.Path}' at offset {scan.LastValidEnd}: {scan.Failure}.");
             if (scan.RecordCount == 0)
             {
-                DeleteSegmentArtifacts(segment.Path);
+                DeleteSegmentArtifactsDurably(segment.Path);
                 continue;
             }
             if (segment.HintedFirstSeq is long hinted && hinted != nextSeq)
@@ -801,12 +808,10 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
             DeleteIfExists(metadataPath + ".tmp");
         }
 
-        foreach (var (segmentId, path) in physicalSegments)
-        {
-            if (!committedIds.Contains(segmentId))
-                DeleteSegmentArtifacts(path);
-        }
-        FlushArtifactChangesAndRemoveEmptyDayDirectories();
+        DeleteSurvivorSegmentsDurably(
+            physicalSegments
+                .Where(pair => !committedIds.Contains(pair.Key))
+                .Select(static pair => pair.Value));
     }
 
     private WalCommitMarker ReadMarker(string path)
@@ -857,9 +862,11 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
                 marker.LastDurableSeq);
     }
 
-    private IReadOnlyDictionary<string, string> EnumeratePhysicalSegments()
+    private IReadOnlyDictionary<string, string> EnumeratePhysicalSegments(
+        IReadOnlySet<string>? committedSegmentIds)
     {
         var segments = new Dictionary<string, string>(StringComparer.Ordinal);
+        var recognizedOrphans = new List<string>();
         foreach (var entry in Directory.EnumerateFileSystemEntries(_walRoot))
         {
             RejectReparsePoint(entry);
@@ -894,18 +901,64 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
                     ValidateSegmentId(id);
                     segments.Add(id, artifact);
                 }
-                else if (!name.EndsWith(".idx", StringComparison.Ordinal)
-                         && !name.EndsWith(".log.firstseq", StringComparison.Ordinal)
-                         && !name.EndsWith(".log.firstseq.tmp", StringComparison.Ordinal)
-                         && !name.EndsWith(
-                             ".log.firstseq" + MigrationMetadataSuffix,
-                             StringComparison.Ordinal))
+                else if (TryGetCompanionLogFileName(name, out var logFileName))
                 {
-                    throw new WalRecoveryException($"Unexpected WAL segment artifact: '{artifact}'.");
+                    var id = day + "/" + logFileName;
+                    ValidateSegmentId(id);
+                    var companionLogPath = Path.Combine(entry, logFileName);
+                    if (!File.Exists(companionLogPath)
+                        && (committedSegmentIds is null
+                            || !committedSegmentIds.Contains(id)))
+                    {
+                        recognizedOrphans.Add(artifact);
+                    }
                 }
+                else
+                    throw new WalRecoveryException($"Unexpected WAL segment artifact: '{artifact}'.");
             }
         }
+
+        if (recognizedOrphans.Count > 0)
+        {
+            foreach (var orphan in recognizedOrphans)
+            {
+                File.Delete(orphan);
+                _dirtyDirectories.Add(Path.GetDirectoryName(orphan)!);
+            }
+            FlushArtifactChangesAndRemoveEmptyDayDirectories();
+        }
         return segments;
+    }
+
+    private static bool TryGetCompanionLogFileName(
+        string artifactName,
+        out string logFileName)
+    {
+        if (artifactName.EndsWith(
+                ".log.firstseq" + MigrationMetadataSuffix,
+                StringComparison.Ordinal))
+        {
+            logFileName = artifactName[
+                ..^(".firstseq" + MigrationMetadataSuffix).Length];
+            return true;
+        }
+        if (artifactName.EndsWith(".log.firstseq.tmp", StringComparison.Ordinal))
+        {
+            logFileName = artifactName[..^".firstseq.tmp".Length];
+            return true;
+        }
+        if (artifactName.EndsWith(".log.firstseq", StringComparison.Ordinal))
+        {
+            logFileName = artifactName[..^".firstseq".Length];
+            return true;
+        }
+        if (artifactName.EndsWith(".idx", StringComparison.Ordinal))
+        {
+            logFileName = artifactName[..^".idx".Length] + ".log";
+            return true;
+        }
+        logFileName = "";
+        return false;
     }
 
     private void WriteMigrationSegmentMetadata(
@@ -928,14 +981,49 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
         _dirtyDirectories.Add(Path.GetDirectoryName(logPath)!);
     }
 
-    private void DeleteSegmentArtifacts(string logPath)
+    private void DeleteSurvivorSegmentsDurably(
+        IEnumerable<string> logPaths)
     {
-        DeleteIfExists(logPath);
+        var paths = logPaths.ToArray();
+        if (paths.Length == 0)
+        {
+            FlushArtifactChangesAndRemoveEmptyDayDirectories();
+            return;
+        }
+
+        // Metadata/index disappearance must be durable before the data file
+        // can disappear. A crash after log deletion can then leave only a
+        // harmless orphan log, never authoritative stale sequence metadata.
+        foreach (var path in paths)
+            DeleteSegmentCompanions(path);
+        FlushDirtyDirectories();
+
+        foreach (var path in paths)
+            DeleteSegmentLog(path);
+        FlushArtifactChangesAndRemoveEmptyDayDirectories();
+    }
+
+    private void DeleteSegmentArtifactsDurably(string logPath)
+    {
+        DeleteSegmentCompanions(logPath);
+        FlushDirtyDirectories();
+        DeleteSegmentLog(logPath);
+        FlushArtifactChangesAndRemoveEmptyDayDirectories();
+    }
+
+    private void DeleteSegmentCompanions(string logPath)
+    {
         DeleteIfExists(Path.ChangeExtension(logPath, ".idx"));
         DeleteIfExists(logPath + SegmentWriter.FirstSeqSidecarSuffix);
         DeleteIfExists(logPath + SegmentWriter.FirstSeqSidecarSuffix + ".tmp");
         DeleteIfExists(
             logPath + SegmentWriter.FirstSeqSidecarSuffix + MigrationMetadataSuffix);
+        _dirtyDirectories.Add(Path.GetDirectoryName(logPath)!);
+    }
+
+    private void DeleteSegmentLog(string logPath)
+    {
+        DeleteIfExists(logPath);
         _dirtyDirectories.Add(Path.GetDirectoryName(logPath)!);
     }
 
@@ -1110,18 +1198,36 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
     private static int NextOrdinalIn(string dayDir)
     {
         var max = -1;
-        foreach (var file in Directory.EnumerateFiles(dayDir, "*.log"))
+        foreach (var entry in Directory.EnumerateFileSystemEntries(dayDir))
         {
-            var name = Path.GetFileNameWithoutExtension(file);
-            if (int.TryParse(
-                    name,
-                    NumberStyles.Integer,
-                    CultureInfo.InvariantCulture,
-                    out var ordinal)
-                && ordinal > max)
+            RejectReparsePoint(entry);
+            if (Directory.Exists(entry))
+                throw new WalRecoveryException(
+                    $"Unexpected nested WAL directory: '{entry}'.");
+            var artifactName = Path.GetFileName(entry);
+            string logFileName;
+            if (artifactName.EndsWith(".log", StringComparison.Ordinal))
             {
-                max = ordinal;
+                logFileName = artifactName;
             }
+            else if (!TryGetCompanionLogFileName(
+                         artifactName, out logFileName))
+            {
+                throw new WalRecoveryException(
+                    $"Unexpected WAL segment artifact: '{entry}'.");
+            }
+            ValidateSegmentId(
+                Path.GetFileName(dayDir) + "/" + logFileName);
+            var name = Path.GetFileNameWithoutExtension(logFileName);
+            if (!int.TryParse(
+                    name,
+                    NumberStyles.None,
+                    CultureInfo.InvariantCulture,
+                    out var ordinal))
+                throw new WalRecoveryException(
+                    $"WAL segment ordinal is outside the supported range: '{entry}'.");
+            if (ordinal > max)
+                max = ordinal;
         }
         return checked(max + 1);
     }

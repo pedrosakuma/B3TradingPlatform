@@ -80,6 +80,13 @@ that marker generation and manifest. Complete frames beyond it are uncommitted
 survivors and are truncated; missing or corrupt data at/below it fails startup
 closed.
 
+Whole survivor segments are removed metadata-first: index, first-sequence,
+temporary and migration companions are deleted and the day directory fsynced
+before the `.log` is deleted. The child is fsynced again, then an empty day
+directory may be removed and the WAL root fsynced. Recognized companions left
+orphaned by an older/interrupted cleanup are removed through the same durable
+sequence before ordinals may be reused; unknown artifacts fail startup closed.
+
 A non-empty legacy WAL without `commit.marker` is never promoted from its
 highest CRC-valid frame automatically. The default
 `LegacyWalStartupMode=RejectUnknownShutdown` requires reconciliation. Set

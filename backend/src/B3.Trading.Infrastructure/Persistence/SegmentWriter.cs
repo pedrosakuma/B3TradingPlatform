@@ -80,10 +80,13 @@ internal sealed class SegmentWriter : IAsyncDisposable
         _fsyncOnFlush = fsyncOnFlush;
         _generation = generation;
         _bytesAtLastIndex = _log.Length;
-        // If the segment is being reopened mid-write (recovery / second
-        // pass within the same day-dir) and a sidecar already exists,
-        // treat it as already-written so we don't overwrite it.
-        _firstSeqWritten = File.Exists(logPath + FirstSeqSidecarSuffix) || _log.Length > 0;
+        // If a segment is reopened with log contents, its first-sequence
+        // metadata belongs to those existing records and must not be
+        // overwritten by a later append.
+        // A companion without log contents is an orphan from interrupted
+        // cleanup and must never suppress publication of fresh metadata when
+        // the ordinal is reused.
+        _firstSeqWritten = _log.Length > 0;
     }
 
     public long BytesWritten => _log.Length;

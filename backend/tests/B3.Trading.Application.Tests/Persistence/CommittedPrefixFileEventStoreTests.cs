@@ -135,6 +135,95 @@ public sealed class CommittedPrefixFileEventStoreTests : IDisposable
         Assert.False(Directory.Exists(survivorDay));
     }
 
+    [Fact]
+    public async Task LinuxFsyncRecovery_CleansOrphanCompanionsAndSafelyReusesOrdinal()
+    {
+        if (!OperatingSystem.IsLinux())
+            return;
+
+        var options = Options("linux-orphan-companions");
+        options.FsyncOnFlush = true;
+        var day = Path.Combine(WalRoot(options), "2026-01-01");
+        await using (var store = NewStore(
+                         options,
+                         new ThrowAtBoundaryHooks(
+                             WalCommitBoundary.LogFsynced)))
+        {
+            var seq = store.Append(NewOrder(0));
+            await Assert.ThrowsAsync<WalFaultedException>(
+                () => store.FlushThroughAsync(seq).AsTask());
+        }
+
+        var log = Directory.EnumerateFiles(day, "*.log").Single();
+        var sidecar = log + SegmentWriter.FirstSeqSidecarSuffix;
+        var staleMetadata = File.ReadAllBytes(sidecar);
+
+        // Reproduce the historical crash window: the data file deletion
+        // reached the directory, while every recognized companion survived.
+        File.Delete(log);
+        WriteAndFsync(sidecar + ".tmp", staleMetadata);
+        WriteAndFsync(
+            sidecar + FileEventStore.MigrationMetadataSuffix,
+            staleMetadata);
+        ReconciliationDirectoryDurability.Instance.Flush(day);
+        Assert.False(File.Exists(log));
+        Assert.True(File.Exists(sidecar));
+        Assert.True(File.Exists(Path.ChangeExtension(log, ".idx")));
+
+        Guid generation;
+        await using (var recovered = NewStore(options))
+        {
+            generation = recovered.WalGeneration;
+            Assert.False(Directory.Exists(day));
+
+            var seq = recovered.Append(NewOrder(1));
+            await recovered.FlushThroughAsync(seq);
+            Assert.Equal(1, seq);
+        }
+
+        var reusedLog = Directory.EnumerateFiles(day, "*.log").Single();
+        Assert.Equal("000.log", Path.GetFileName(reusedLog));
+        var metadataPath = reusedLog + SegmentWriter.FirstSeqSidecarSuffix;
+        var metadata = SegmentMetadata.Decode(
+            File.ReadAllBytes(metadataPath), metadataPath);
+        Assert.Equal(generation, metadata.Generation);
+        Assert.Equal(1, metadata.FirstSeq);
+        Assert.False(File.Exists(metadataPath + ".tmp"));
+        Assert.False(File.Exists(
+            metadataPath + FileEventStore.MigrationMetadataSuffix));
+
+        await using var restarted = NewStore(options);
+        Assert.Equal(new ulong[] { 2 }, await ReplayIds(restarted));
+    }
+
+    [Fact]
+    public async Task SegmentWriter_EmptyLogNeverTrustsOrphanSidecar()
+    {
+        var directory = Path.Combine(_root, "segment-writer-orphan");
+        Directory.CreateDirectory(directory);
+        var log = Path.Combine(directory, "000.log");
+        var sidecar = log + SegmentWriter.FirstSeqSidecarSuffix;
+        File.WriteAllBytes(sidecar, SegmentMetadata.Encode(Guid.NewGuid(), 99));
+        var generation = Guid.NewGuid();
+
+        await using (var writer = new SegmentWriter(
+                         log,
+                         Path.Combine(directory, "000.idx"),
+                         indexEveryNRecords: 64,
+                         indexEveryNBytes: 4096,
+                         fsyncOnFlush: false,
+                         generation))
+        {
+            writer.Append(1, Payload(NewOrder(0)), 0);
+            writer.Flush();
+        }
+
+        var metadata = SegmentMetadata.Decode(
+            File.ReadAllBytes(sidecar), sidecar);
+        Assert.Equal(generation, metadata.Generation);
+        Assert.Equal(1, metadata.FirstSeq);
+    }
+
     [Theory]
     [InlineData(WalCommitBoundary.RecordAppended)]
     [InlineData(WalCommitBoundary.LogFsynced)]
@@ -625,6 +714,19 @@ public sealed class CommittedPrefixFileEventStoreTests : IDisposable
             fsyncOnFlush: false);
         writer.Append(seq, Payload(evt), evt.TimestampUtc.ToUnixTimeMilliseconds());
         writer.Flush();
+    }
+
+    private static void WriteAndFsync(string path, byte[] payload)
+    {
+        using var stream = new FileStream(
+            path,
+            FileMode.Create,
+            FileAccess.Write,
+            FileShare.None,
+            bufferSize: 4096,
+            FileOptions.WriteThrough);
+        stream.Write(payload);
+        stream.Flush(flushToDisk: true);
     }
 
     private static OrderSubmittedEvent NewOrder(int i) => new()
