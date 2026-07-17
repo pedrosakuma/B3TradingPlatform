@@ -72,6 +72,17 @@ public interface IUserBotSessionRegistry
         CancellationToken ct);
 
     /// <summary>
+    /// Revalidates that the exact connection still owns the lease under the
+    /// supplied session version. Used around EstablishAck/publication to close
+    /// the claim-to-directory visibility gap during takeover.
+    /// </summary>
+    Task<bool> IsActiveLeaseAsync(
+        Guid credentialId,
+        ulong attemptedVer,
+        string connectionId,
+        CancellationToken ct);
+
+    /// <summary>
     /// Releases the active-session slot when <paramref name="connectionId"/>
     /// matches the current owner. Called on Terminate or socket close so
     /// a subsequent reconnect can re-claim. Idempotent — releasing a slot

@@ -141,7 +141,8 @@ public static class EntryPointListenerServiceCollectionExtensions
                     sp.GetRequiredService<RateLimiterRegistry>(),
                     sp.GetRequiredService<UserSessionCounter>(),
                     sp.GetService<TimeProvider>(),
-                    sp.GetService<Mtls.IClientCaTrustProvider>()));
+                    sp.GetService<Mtls.IClientCaTrustProvider>(),
+                    sp.GetService<Hosting.FixpSessionConnectionHooks>()));
             services.AddHostedService(sp =>
                 sp.GetRequiredService<Hosting.FixpListenerHostedService>());
         }

@@ -161,6 +161,9 @@ These are deliberately **not** in the v1 wiring:
 - **Reconnect state machine.** Peer termination or an unexpected event-stream
   stop marks the firm disconnected immediately and schedules the single-flight
   reconnect loop. Cold connect and reconnect share one serialization fence.
+  WAL backpressure/fault is different: the gateway marks health disconnected,
+  terminates the session best-effort, and rejects outbound mutations without
+  auto-reconnecting until persistence recovery is controlled externally.
 - **`BusinessReject` correlation.** Rejects are translated to a firm-scoped
   envelope, deduplicated by inbound sequence, counted, and persisted to the WAL
   for operator reconciliation. The upstream package still does not expose a

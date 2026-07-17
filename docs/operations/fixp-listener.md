@@ -254,7 +254,9 @@ Use the admin endpoint or the credential's version is auto-bumped on single-acti
 violations and buffer overflows. A takeover invalidates the old lease atomically,
 force-closes its connection, and permits the replacement to establish with the
 returned version. Repeated overflow/backpressure signals for one episode are
-coalesced into one durable bump and one close.
+coalesced into one durable bump and one close. Transient WAL/handler failures
+retain the pending episode and retry with bounded backoff until bump/close/reset
+finishes; the buffer cannot remain permanently wedged in overflow.
 
 ### Reading the outbound buffer
 

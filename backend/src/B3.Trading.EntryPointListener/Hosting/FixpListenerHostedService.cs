@@ -38,6 +38,7 @@ public sealed class FixpListenerHostedService : BackgroundService
     private readonly Mtls.IClientCaTrustProvider? _caTrust;
     private readonly TimeProvider _clock;
     private readonly ILogger<FixpListenerHostedService> _logger;
+    private readonly FixpSessionConnectionHooks? _connectionHooks;
     private readonly TaskCompletionSource<IPEndPoint> _boundTcs =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -60,7 +61,8 @@ public sealed class FixpListenerHostedService : BackgroundService
         TimeProvider? clock = null,
         Mtls.IClientCaTrustProvider? caTrust = null)
         : this(opts, credentials, sessions, logger, orders: null,
-               connectionDirectory, outboundCoordinator, rateLimiter, sessionCounter, clock, caTrust)
+               connectionDirectory, outboundCoordinator, rateLimiter, sessionCounter, clock, caTrust,
+               connectionHooks: null)
     {
     }
 
@@ -83,7 +85,8 @@ public sealed class FixpListenerHostedService : BackgroundService
         RateLimiterRegistry? rateLimiter = null,
         UserSessionCounter? sessionCounter = null,
         TimeProvider? clock = null,
-        Mtls.IClientCaTrustProvider? caTrust = null)
+        Mtls.IClientCaTrustProvider? caTrust = null,
+        FixpSessionConnectionHooks? connectionHooks = null)
     {
         _opts = opts.Value;
         _credentials = credentials;
@@ -96,6 +99,7 @@ public sealed class FixpListenerHostedService : BackgroundService
         _sessionCounter = sessionCounter;
         _caTrust = caTrust;
         _clock = clock ?? TimeProvider.System;
+        _connectionHooks = connectionHooks;
         _acceptLimiter = new AcceptConnectionRateLimiter(
             _opts.AcceptRateLimit.ConnectionsPerSecondPerIp,
             _opts.AcceptRateLimit.BurstPerIp);
@@ -409,7 +413,7 @@ public sealed class FixpListenerHostedService : BackgroundService
         var conn = new FixpSessionConnection(
             client, stream, _credentials, _sessions, _logger,
             _orders, _connectionDirectory, _outboundCoordinator, _opts, _clock,
-            _rateLimiter, _sessionCounter, clientCert);
+            _rateLimiter, _sessionCounter, clientCert, _connectionHooks);
         await conn.RunAsync(ct).ConfigureAwait(false);
     }
 

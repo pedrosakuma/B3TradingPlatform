@@ -100,6 +100,23 @@ public sealed class InMemoryUserBotSessionRegistry : IUserBotSessionRegistry
         }
     }
 
+    public Task<bool> IsActiveLeaseAsync(
+        Guid credentialId, ulong attemptedVer, string connectionId, CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(connectionId);
+
+        lock (_gate)
+        {
+            var active = _byCredentialId.TryGetValue(credentialId, out var state)
+                && state.CurrentVer == attemptedVer
+                && _activeConnectionByCredentialId.TryGetValue(
+                    credentialId, out var existing)
+                && string.Equals(
+                    existing, connectionId, StringComparison.Ordinal);
+            return Task.FromResult(active);
+        }
+    }
+
     public Task ReleaseAsync(Guid credentialId, string connectionId, CancellationToken ct)
     {
         ArgumentException.ThrowIfNullOrEmpty(connectionId);

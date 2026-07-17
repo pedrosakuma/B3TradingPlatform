@@ -716,6 +716,14 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// </summary>
     private async Task SendAsync(ulong clOrdId, string op, Func<CancellationToken, Task> sdkCall, CancellationToken ct)
     {
+        if (Volatile.Read(ref _connectedState) != 1
+            || (_connectedTestHook is null
+                && _eventLoop is not { IsCompleted: false }))
+        {
+            throw new InvalidOperationException(
+                $"EntryPoint gateway for firm '{_firmId}' is not operational; inbound event consumption is stopped.");
+        }
+
         var start = _clock.GetTimestamp();
         _latencyProbe.OnSubmitted(clOrdId, _firmId, op);
         try
@@ -993,9 +1001,11 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         catch (Exception ex) when (ex is WalBackpressureException or WalFaultedException)
         {
             recover = false;
+            MarkDisconnected();
             _logger.LogCritical(ex,
                 "EntryPoint event loop for firm {Firm} stopped because an inbound event could not be persisted; order ingress is draining.",
                 _firmId);
+            await TerminateFaultedSessionAsync().ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -1011,6 +1021,28 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 MarkDisconnected();
                 ScheduleReconnect();
             }
+        }
+    }
+
+    private async Task TerminateFaultedSessionAsync()
+    {
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(
+                _shutdownCts.Token);
+            cts.CancelAfter(_gracefulTerminateTimeout);
+            await _client.TerminateAsync(
+                Up.TerminationCode.Unspecified, cts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested)
+        {
+            // shutdown won the race
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to terminate faulted EntryPoint session for firm {Firm}; gateway remains fail-closed.",
+                _firmId);
         }
     }
 

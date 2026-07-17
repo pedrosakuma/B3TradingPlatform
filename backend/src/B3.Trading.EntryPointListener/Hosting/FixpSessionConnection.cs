@@ -12,6 +12,11 @@ using Microsoft.Extensions.Options;
 
 namespace B3.Trading.EntryPointListener.Hosting;
 
+internal sealed class FixpSessionConnectionHooks
+{
+    public Func<string, Task>? AfterLeaseClaimedAsync { get; init; }
+}
+
 /// <summary>
 /// Manages the FIXP session lifecycle for a single accepted TCP
 /// connection. Reads SOFH-framed SBE messages, drives
@@ -43,6 +48,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     private readonly EntryPointListenerOptions _options;
     private readonly TimeProvider _clock;
     private readonly string _connectionId;
+    private readonly FixpSessionConnectionHooks? _hooks;
 
     /// <summary>
     /// The validated client certificate captured during the TLS handshake
@@ -83,7 +89,8 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         TimeProvider? clock = null,
         RateLimiterRegistry? rateLimiter = null,
         UserSessionCounter? sessionCounter = null,
-        System.Security.Cryptography.X509Certificates.X509Certificate2? clientCertificate = null)
+        System.Security.Cryptography.X509Certificates.X509Certificate2? clientCertificate = null,
+        FixpSessionConnectionHooks? hooks = null)
     {
         _tcpClient = tcpClient;
         _stream = stream;
@@ -98,6 +105,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         _clock = clock ?? TimeProvider.System;
         _logger = logger;
         _clientCertificate = clientCertificate;
+        _hooks = hooks;
         _connectionId = Guid.NewGuid().ToString("N");
         _lastOutboundTicks = _clock.GetUtcNow().UtcTicks;
     }
@@ -117,10 +125,11 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         TimeProvider? clock = null,
         RateLimiterRegistry? rateLimiter = null,
         UserSessionCounter? sessionCounter = null,
-        System.Security.Cryptography.X509Certificates.X509Certificate2? clientCertificate = null)
+        System.Security.Cryptography.X509Certificates.X509Certificate2? clientCertificate = null,
+        FixpSessionConnectionHooks? hooks = null)
         : this(tcpClient, tcpClient.GetStream(), credentials, sessions, logger,
                orders, connectionDirectory, outboundCoordinator, options, clock,
-               rateLimiter, sessionCounter, clientCertificate)
+               rateLimiter, sessionCounter, clientCertificate, hooks)
     {
     }
 
@@ -699,11 +708,34 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
 
         _slotClaimed = true;
         FixpListenerMetrics.SessionsActive.Add(1);
+        if (_hooks?.AfterLeaseClaimedAsync is { } afterLeaseClaimed)
+            await afterLeaseClaimed(_connectionId).ConfigureAwait(false);
+
+        if (!await _sessions.IsActiveLeaseAsync(
+                credentialId, requestedVer, _connectionId, ct).ConfigureAwait(false))
+        {
+            _logger.LogInformation(
+                "fixp.establish.abort reason=LEASE_SUPERSEDED phase=before_ack credShortId={CredShortId} connectionId={ConnectionId}",
+                _scope.Principal.CredShortId, _connectionId);
+            _sm.ForceTerminated();
+            return false;
+        }
+
         _logger.LogInformation(
             "fixp.establish.ok credShortId={CredShortId} userId={UserId} sessionId={Sid} sessionVerId={Ver} connectionId={ConnectionId}",
             _scope.Principal.CredShortId, _scope.Principal.UserId,
             serverState.SessionId, serverState.CurrentVer, _connectionId);
         await WriteEstablishAckAsync(stream, requestedSid, requestedVer, ct).ConfigureAwait(false);
+
+        if (!await _sessions.IsActiveLeaseAsync(
+                credentialId, requestedVer, _connectionId, ct).ConfigureAwait(false))
+        {
+            _logger.LogInformation(
+                "fixp.establish.abort reason=LEASE_SUPERSEDED phase=after_ack credShortId={CredShortId} connectionId={ConnectionId}",
+                _scope.Principal.CredShortId, _connectionId);
+            _sm.ForceTerminated();
+            return false;
+        }
 
         // Sub-issue #172 (F): make the connection discoverable by the
         // outbound multiplexer. Registration AFTER EstablishAck is sent
@@ -724,6 +756,19 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
                 logger: _logger);
             _connectionDirectory.Register(credentialId, _connectionId, this);
             _registeredInDirectory = true;
+
+            if (!await _sessions.IsActiveLeaseAsync(
+                    credentialId, requestedVer, _connectionId, ct).ConfigureAwait(false))
+            {
+                _logger.LogInformation(
+                    "fixp.establish.abort reason=LEASE_SUPERSEDED phase=after_publish credShortId={CredShortId} connectionId={ConnectionId}",
+                    _scope.Principal.CredShortId, _connectionId);
+                _connectionDirectory.TryForceTerminate(
+                    credentialId, _connectionId);
+                _registeredInDirectory = false;
+                _sm.ForceTerminated();
+                return false;
+            }
         }
 
         // Sub-issue #173 (G): start the heartbeat loop that emits

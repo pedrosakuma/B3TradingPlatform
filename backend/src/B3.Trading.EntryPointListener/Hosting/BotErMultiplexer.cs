@@ -72,7 +72,15 @@ public sealed class BotErMultiplexer : BackgroundService, IBotErRouter, IExecuti
     private readonly BotOutboundCoordinator _outbound;
     private readonly ILogger<BotErMultiplexer> _logger;
     private readonly Channel<Guid> _overflowChannel;
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, byte> _pendingOverflows = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, OverflowWork> _pendingOverflows = new();
+
+    private sealed class OverflowWork
+    {
+        public int Attempts;
+        public int RecoveryCompleted;
+        public int ResignalRequested;
+        public BotSessionVersionAdvance? Advance;
+    }
 
     public BotErMultiplexer(
         IUserBotOrderMappingRegistry mappings,
@@ -275,26 +283,41 @@ public sealed class BotErMultiplexer : BackgroundService, IBotErRouter, IExecuti
         {
             await foreach (var credentialId in _overflowChannel.Reader.ReadAllAsync(ct).ConfigureAwait(false))
             {
+                if (!_pendingOverflows.TryGetValue(credentialId, out var work))
+                    continue;
+
                 try
                 {
-                    await HandleOverflowAsync(credentialId, ct).ConfigureAwait(false);
+                    await HandleOverflowAsync(credentialId, work, ct).ConfigureAwait(false);
+                    var entry = new KeyValuePair<Guid, OverflowWork>(
+                        credentialId, work);
+                    ((ICollection<KeyValuePair<Guid, OverflowWork>>)_pendingOverflows)
+                        .Remove(entry);
+                    if (Volatile.Read(ref work.ResignalRequested) == 1)
+                        SignalOverflow(credentialId);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    return;
                 }
                 catch (Exception ex)
                 {
+                    var attempt = Interlocked.Increment(ref work.Attempts);
                     _logger.LogError(ex,
-                        "fixp.outbound.overflow.handle.error credentialId={CredentialId}",
-                        credentialId);
-                }
-                finally
-                {
-                    _pendingOverflows.TryRemove(credentialId, out _);
+                        "fixp.outbound.overflow.handle.error credentialId={CredentialId} attempt={Attempt}",
+                        credentialId, attempt);
+                    _ = RequeueOverflowAsync(
+                        credentialId, work, attempt, ct);
                 }
             }
         }
         catch (OperationCanceledException) { /* shutdown */ }
     }
 
-    private async Task HandleOverflowAsync(Guid credentialId, CancellationToken ct)
+    private async Task HandleOverflowAsync(
+        Guid credentialId,
+        OverflowWork work,
+        CancellationToken ct)
     {
         // RFC §4.5 / §4.7 ordering: bump version FIRST (with the
         // FlushAsync fence inside BumpVersionAsync) so the bot's
@@ -302,8 +325,13 @@ public sealed class BotErMultiplexer : BackgroundService, IBotErRouter, IExecuti
         // bump do we evict the in-flight sender so any racing TryEnqueue
         // returns false and the corresponding ER falls into the cleared
         // buffer (no replay, no rollback).
-        var advance = await _sessions.BumpVersionAsync(
-            credentialId, "overflow", ct).ConfigureAwait(false);
+        var advance = work.Advance;
+        if (advance is null)
+        {
+            advance = await _sessions.BumpVersionAsync(
+                credentialId, "overflow", ct).ConfigureAwait(false);
+            work.Advance = advance;
+        }
         _logger.LogWarning(
             "fixp.outbound.overflow.bump credentialId={CredentialId} newVer={NewVer}",
             credentialId, advance.NewVersion);
@@ -335,6 +363,7 @@ public sealed class BotErMultiplexer : BackgroundService, IBotErRouter, IExecuti
         // TryEnqueue from another router pass sees the cleared buffer
         // and returns false, not a partial state.
         _outbound.GetOrCreateBuffer(credentialId).Reset();
+        Volatile.Write(ref work.RecoveryCompleted, 1);
     }
 
     private void SignalOverflow(Guid credentialId)
@@ -342,15 +371,53 @@ public sealed class BotErMultiplexer : BackgroundService, IBotErRouter, IExecuti
         // Buffer overflow and writer-channel backpressure can both report the
         // same episode. Only the first signal owns the durable bump/close;
         // subsequent signals are coalesced until handling completes.
-        if (!_pendingOverflows.TryAdd(credentialId, 0))
-            return;
+        while (true)
+        {
+            var work = new OverflowWork();
+            if (_pendingOverflows.TryAdd(credentialId, work))
+            {
+                if (_overflowChannel.Writer.TryWrite(credentialId))
+                    return;
 
-        if (_overflowChannel.Writer.TryWrite(credentialId))
-            return;
+                _pendingOverflows.TryRemove(credentialId, out _);
+                _logger.LogWarning(
+                    "fixp.outbound.overflow.signal-dropped credentialId={CredentialId}",
+                    credentialId);
+                return;
+            }
 
-        _pendingOverflows.TryRemove(credentialId, out _);
-        _logger.LogWarning(
-            "fixp.outbound.overflow.signal-dropped credentialId={CredentialId}",
-            credentialId);
+            if (!_pendingOverflows.TryGetValue(
+                    credentialId, out var existing))
+                continue;
+
+            if (Volatile.Read(ref existing.RecoveryCompleted) == 1)
+                Volatile.Write(ref existing.ResignalRequested, 1);
+            return;
+        }
+    }
+
+    private async Task RequeueOverflowAsync(
+        Guid credentialId,
+        OverflowWork work,
+        int attempt,
+        CancellationToken ct)
+    {
+        var exponent = Math.Min(attempt - 1, 7);
+        var delay = TimeSpan.FromMilliseconds(
+            Math.Min(1000, 10 * (1 << exponent)));
+        try
+        {
+            await Task.Delay(delay, ct).ConfigureAwait(false);
+            if (_pendingOverflows.TryGetValue(
+                    credentialId, out var current)
+                && ReferenceEquals(current, work))
+            {
+                _overflowChannel.Writer.TryWrite(credentialId);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // shutdown
+        }
     }
 }
