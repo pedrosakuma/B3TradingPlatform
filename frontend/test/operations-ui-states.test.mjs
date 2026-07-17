@@ -10,10 +10,15 @@ installDomStub({
     "reference-price-rows": { tag: "tbody" },
     "operations-feedback": { tag: "p", hidden: true },
     "operation-button": { tag: "button" },
+    "ticket-subaccount": { tag: "select" },
+    "subaccount-ticket-hint": { tag: "p" },
+    "ticket-subaccount-refresh": { tag: "button" },
   },
 });
 
 const ui = await import("../js/operationsUi.js");
+const { addTicketRouting } = await import("../js/ui.js");
+ui.bindOperationsUi();
 
 test("administrative resources distinguish loading, empty, stale and error", () => {
   const rows = document.getElementById("reference-price-rows");
@@ -66,4 +71,53 @@ test("mutations expose pending, success and error states", async () => {
   assert.equal(button.disabled, false);
   assert.match(feedback.textContent, /Denied by backend/);
   assert.match(feedback.className, /error/);
+});
+
+test("failed subaccount refresh preserves and blocks the selected account", () => {
+  const select = document.getElementById("ticket-subaccount");
+  ui.setSubAccountsResource({
+    status: "ready",
+    data: [{ id: "BOOK-A", displayName: "Agency book", active: true }],
+    fetchedAt: Date.now(),
+    error: null,
+  });
+  select.value = "BOOK-A";
+
+  ui.setSubAccountsResource({ status: "error", error: "refresh failed" });
+
+  assert.equal(select.value, "BOOK-A", "failure must not fall back to Master");
+  assert.match(select.innerHTML, /BOOK-A/);
+  assert.equal(select.disabled, true);
+  assert.equal(select.dataset.available, "0");
+  assert.match(
+    addTicketRouting(
+      { symbol: "PETR4" },
+      { subAccountId: select.value, subAccountAvailable: select.dataset.available === "1" },
+    ).error,
+    /subaccount data is unavailable or stale/i,
+  );
+});
+
+test("removed subaccount requires an explicit switch to Master", () => {
+  const select = document.getElementById("ticket-subaccount");
+  select.value = "BOOK-A";
+  ui.setSubAccountsResource({
+    status: "ready",
+    data: [],
+    fetchedAt: Date.now(),
+    error: null,
+  });
+
+  assert.equal(select.value, "BOOK-A");
+  assert.equal(select.disabled, false);
+  assert.equal(select.dataset.available, "0");
+  assert.match(select.innerHTML, /BOOK-A \(unavailable\)/);
+
+  select.value = "";
+  select.dispatchEvent(new Event("change"));
+  assert.equal(select.dataset.available, "1");
+  assert.equal(addTicketRouting(
+    { symbol: "PETR4" },
+    { subAccountId: select.value, subAccountAvailable: true },
+  ).error, null);
 });

@@ -57,6 +57,7 @@ export function setReferenceResource(next) {
 }
 
 export function bindOperationsUi() {
+  $("ticket-subaccount")?.addEventListener("change", renderSubAccounts);
   $("ticket-subaccount-refresh")?.addEventListener("click", () =>
     handlers.onRefreshSubAccounts?.());
   $("subaccount-create-form")?.addEventListener("submit", (event) => {
@@ -174,15 +175,21 @@ function renderSubAccounts() {
   const rows = Array.isArray(subAccounts.data) ? subAccounts.data : [];
   if (select) {
     const previous = select.value;
-    select.innerHTML = `<option value="">Master account</option>${rows
-      .filter((row) => row.active)
+    const activeRows = rows.filter((row) => row.active);
+    const previousIsActive = previous === "" || activeRows.some((row) => row.id === previous);
+    const unavailable = previous && !previousIsActive
+      ? `<option value="${escapeHtml(previous)}" disabled>${escapeHtml(previous)} (unavailable)</option>`
+      : "";
+    select.innerHTML = `<option value="">Master account</option>${unavailable}${activeRows
       .map((row) => `<option value="${escapeHtml(row.id)}">${escapeHtml(row.displayName || row.id)}</option>`)
       .join("")}`;
-    if (previous === "" || rows.some((row) => row.active && row.id === previous)) select.value = previous;
-    select.disabled = subAccounts.status === "loading"
-      || subAccounts.status === "error"
-      || isStale(subAccounts);
-    select.dataset.available = subAccounts.status === "ready" && !isStale(subAccounts) ? "1" : "0";
+    select.value = previous;
+    const sourceAvailable = subAccounts.status === "ready" && !isStale(subAccounts);
+    select.disabled = !sourceAvailable;
+    // A successful refresh may reveal that the previously selected account
+    // was deactivated. Keep that value visible and blocked until the trader
+    // explicitly switches to Master or another active account.
+    select.dataset.available = sourceAvailable && previousIsActive ? "1" : "0";
     select.setAttribute("aria-busy", subAccounts.status === "loading" ? "true" : "false");
   }
   const hint = $("subaccount-ticket-hint");
@@ -193,6 +200,8 @@ function renderSubAccounts() {
         ? `Subaccounts unavailable: ${subAccounts.error || "request failed"}`
         : isStale(subAccounts)
           ? "Subaccount list is stale; refresh before changing account."
+        : select?.value && select.dataset.available === "0"
+          ? `Selected subaccount ${select.value} is unavailable; choose Master or another active account.`
         : rows.filter((row) => row.active).length === 0
           ? "No active subaccounts; orders will use the master account."
           : "Orders are booked to the selected firm subaccount.";

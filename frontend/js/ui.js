@@ -3047,14 +3047,16 @@ function renderPositions() {
   const body = $("positions-body");
   let positions = [...getState().positions.values()]
     .filter(p => p.netQuantity !== 0);
-  
+
+  _expiryFilter = reconcilePositionExpiryFilter(positions, _expiryFilter);
+
   // FE-OPT-3 (#499). Apply expiry filter if set.
   if (_expiryFilter) {
     positions = positions.filter(p => 
       p.securityType === "Option" && p.optionExpirationDate === _expiryFilter
     );
   }
-  
+
   sortPositionsInPlace(positions, _positionsSort);
   
   if (positions.length === 0) {
@@ -3076,6 +3078,15 @@ function renderPositions() {
   syncPositionsSortHeaders();
   syncPositionsGroupToggle();
   renderExpiryStrip();
+}
+
+export function reconcilePositionExpiryFilter(positions, selectedExpiry) {
+  if (!selectedExpiry) return null;
+  const stillPresent = (positions ?? []).some((position) =>
+    position?.netQuantity !== 0
+    && position?.securityType === "Option"
+    && position?.optionExpirationDate === selectedExpiry);
+  return stillPresent ? selectedExpiry : null;
 }
 
 // FE-OPT-3 (#499). Render a single position row (used in flat and grouped views).

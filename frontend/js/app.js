@@ -1936,7 +1936,7 @@ async function refreshSubAccounts() {
   } catch (error) {
     if (session !== captured) return;
     if (error?.status === 401) { logout(); return; }
-    operationsUi.setSubAccountsResource({ status: "error", data: [], error: error.message });
+    operationsUi.setSubAccountsResource({ status: "error", error: error.message });
   }
 }
 
