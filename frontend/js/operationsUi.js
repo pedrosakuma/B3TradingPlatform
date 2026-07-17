@@ -25,6 +25,11 @@ export function setOperationsRole(nextRole) {
 export function resetOperations() {
   if (staleTimer) clearTimeout(staleTimer);
   staleTimer = null;
+  // Identity boundary: never carry a prior user's firm subaccount into the
+  // next session. In-session refreshes use setSubAccountsResource() and keep
+  // unavailable selections visible/blocked instead.
+  const select = $("ticket-subaccount");
+  if (select) select.value = "";
   subAccounts = resource([]);
   phase = resource(null);
   risk = resource(null);

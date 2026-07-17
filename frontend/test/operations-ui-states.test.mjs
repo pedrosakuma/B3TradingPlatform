@@ -121,3 +121,28 @@ test("removed subaccount requires an explicit switch to Master", () => {
     { subAccountId: select.value, subAccountAvailable: true },
   ).error, null);
 });
+
+test("identity reset clears the previous user's selected subaccount", () => {
+  const select = document.getElementById("ticket-subaccount");
+  ui.setSubAccountsResource({
+    status: "ready",
+    data: [{ id: "PRIVATE-BOOK", displayName: "Prior user book", active: true }],
+    fetchedAt: Date.now(),
+    error: null,
+  });
+  select.value = "PRIVATE-BOOK";
+
+  ui.resetOperations();
+
+  assert.equal(select.value, "");
+  assert.doesNotMatch(select.innerHTML, /PRIVATE-BOOK|Prior user book/);
+  assert.equal(select.disabled, true);
+  assert.equal(
+    addTicketRouting(
+      { symbol: "PETR4" },
+      { subAccountId: select.value, subAccountAvailable: false },
+    ).error,
+    null,
+    "Master remains an explicit safe default while the new user's list loads",
+  );
+});
