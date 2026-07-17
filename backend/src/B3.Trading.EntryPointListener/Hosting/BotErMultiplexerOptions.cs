@@ -1,4 +1,5 @@
 using B3.Trading.Application.UserBots;
+using Microsoft.Extensions.Options;
 
 namespace B3.Trading.EntryPointListener.Hosting;
 
@@ -26,4 +27,22 @@ public sealed class BotErMultiplexerOptions
 
     /// <summary>Per-credential message count threshold that forces an early checkpoint.</summary>
     public int CheckpointMessageThreshold { get; set; } = 100;
+}
+
+public sealed class BotErMultiplexerOptionsValidator : IValidateOptions<BotErMultiplexerOptions>
+{
+    public ValidateOptionsResult Validate(string? name, BotErMultiplexerOptions options)
+    {
+        var failures = new List<string>();
+        if (options.OutboundBufferMaxMessages <= 0)
+            failures.Add("Trading:EntryPointListener:Outbound:OutboundBufferMaxMessages must be > 0.");
+        if (options.CheckpointPeriod <= TimeSpan.Zero)
+            failures.Add("Trading:EntryPointListener:Outbound:CheckpointPeriod must be > 0.");
+        if (options.CheckpointMessageThreshold <= 0)
+            failures.Add("Trading:EntryPointListener:Outbound:CheckpointMessageThreshold must be > 0.");
+
+        return failures.Count == 0
+            ? ValidateOptionsResult.Success
+            : ValidateOptionsResult.Fail(failures);
+    }
 }

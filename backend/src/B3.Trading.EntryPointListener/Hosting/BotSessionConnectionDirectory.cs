@@ -10,20 +10,50 @@ namespace B3.Trading.EntryPointListener.Hosting;
 /// </summary>
 public sealed class BotSessionConnectionDirectory : IBotSessionConnectionDirectory
 {
-    private readonly ConcurrentDictionary<Guid, IBotSessionOutboundSender> _byCredentialId = new();
+    private sealed record ConnectionLease(
+        string? ConnectionId,
+        IBotSessionOutboundSender Sender);
 
-    public void Register(Guid credentialId, IBotSessionOutboundSender sender)
+    private readonly ConcurrentDictionary<Guid, ConnectionLease> _byCredentialId = new();
+
+    public void Register(
+        Guid credentialId,
+        string connectionId,
+        IBotSessionOutboundSender sender)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(connectionId);
+        RegisterCore(credentialId, connectionId, sender);
+    }
+
+    public void Register(Guid credentialId, IBotSessionOutboundSender sender) =>
+        RegisterCore(credentialId, connectionId: null, sender);
+
+    private void RegisterCore(
+        Guid credentialId,
+        string? connectionId,
+        IBotSessionOutboundSender sender)
     {
         ArgumentNullException.ThrowIfNull(sender);
         if (credentialId == Guid.Empty)
             throw new ArgumentException("CredentialId must not be empty.", nameof(credentialId));
-        // Last-write-wins. The caller (FixpSessionConnection) only invokes
-        // this after the per-credential session slot has been claimed via
-        // IUserBotSessionRegistry.TryClaimActiveAsync, so two concurrent
-        // Register calls for the same credentialId imply a race the
-        // session registry already serialised — the second one is the
-        // legitimate owner.
-        _byCredentialId[credentialId] = sender;
+        ConnectionLease? displaced = null;
+        var replacement = new ConnectionLease(connectionId, sender);
+        _byCredentialId.AddOrUpdate(
+            credentialId,
+            replacement,
+            (_, existing) =>
+            {
+                if (!ReferenceEquals(existing.Sender, sender))
+                    displaced = existing;
+                return replacement;
+            });
+
+        // The dictionary swap is the publication fence: once Register
+        // returns, routing can only discover the replacement. Close the
+        // displaced connection immediately so it cannot keep accepting
+        // inbound orders after losing the lease.
+        if (displaced?.Sender is IDisposable disposable)
+            disposable.Dispose();
     }
 
     public void Deregister(Guid credentialId, IBotSessionOutboundSender sender)
@@ -32,15 +62,19 @@ public sealed class BotSessionConnectionDirectory : IBotSessionConnectionDirecto
         // Compare-and-swap semantics: only remove if we are still the
         // recorded sender. A newer connection that already replaced us
         // must not be evicted by a stale close from the prior socket.
-        var kvp = new KeyValuePair<Guid, IBotSessionOutboundSender>(credentialId, sender);
-        ((ICollection<KeyValuePair<Guid, IBotSessionOutboundSender>>)_byCredentialId).Remove(kvp);
+        if (_byCredentialId.TryGetValue(credentialId, out var lease)
+            && ReferenceEquals(lease.Sender, sender))
+        {
+            var kvp = new KeyValuePair<Guid, ConnectionLease>(credentialId, lease);
+            ((ICollection<KeyValuePair<Guid, ConnectionLease>>)_byCredentialId).Remove(kvp);
+        }
     }
 
     public bool TryGet(Guid credentialId, out IBotSessionOutboundSender sender)
     {
         if (_byCredentialId.TryGetValue(credentialId, out var found))
         {
-            sender = found;
+            sender = found.Sender;
             return true;
         }
         sender = null!;
@@ -59,9 +93,29 @@ public sealed class BotSessionConnectionDirectory : IBotSessionConnectionDirecto
     /// </summary>
     public bool TryForceTerminate(Guid credentialId)
     {
-        if (_byCredentialId.TryRemove(credentialId, out var sender))
+        if (_byCredentialId.TryRemove(credentialId, out var lease))
         {
-            if (sender is IDisposable d) d.Dispose();
+            if (lease.Sender is IDisposable d) d.Dispose();
+            return true;
+        }
+        return false;
+    }
+
+    public bool TryForceTerminate(Guid credentialId, string connectionId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(connectionId);
+        while (_byCredentialId.TryGetValue(credentialId, out var lease))
+        {
+            if (!string.Equals(
+                    lease.ConnectionId, connectionId, StringComparison.Ordinal))
+                return false;
+            var kvp = new KeyValuePair<Guid, ConnectionLease>(
+                credentialId, lease);
+            if (!((ICollection<KeyValuePair<Guid, ConnectionLease>>)_byCredentialId)
+                    .Remove(kvp))
+                continue;
+            if (lease.Sender is IDisposable disposable)
+                disposable.Dispose();
             return true;
         }
         return false;

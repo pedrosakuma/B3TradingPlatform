@@ -56,6 +56,24 @@ public class InMemoryUserBotSessionRegistryTests
     }
 
     [Fact]
+    public async Task BumpVersion_AtomicallyInvalidatesPriorLease()
+    {
+        var reg = new InMemoryUserBotSessionRegistry();
+        var credId = Guid.NewGuid();
+        var state = await reg.GetOrCreateAsync(credId, default);
+        Assert.True(await reg.TryClaimActiveAsync(credId, state.CurrentVer, "old", default));
+
+        var advance = await reg.BumpVersionAsync(credId, "takeover", default);
+
+        Assert.Equal("old", advance.DisplacedConnectionId);
+        Assert.True(await reg.TryClaimActiveAsync(
+            credId, advance.NewVersion, "replacement", default));
+        await reg.ReleaseAsync(credId, "old", default);
+        Assert.True(await reg.TryClaimActiveAsync(
+            credId, advance.NewVersion, "replacement", default));
+    }
+
+    [Fact]
     public async Task BumpVersion_AppendsEventThenFlushes_FenceOrdering()
     {
         var store = new RecordingEventStore();

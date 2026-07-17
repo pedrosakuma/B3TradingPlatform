@@ -27,9 +27,11 @@ public class FixpListenerIntegrationTests
         IHost Host,
         FixpListenerHostedService Listener,
         InMemoryUserBotCredentialRegistry Credentials,
-        InMemoryUserBotSessionRegistry Sessions);
+        InMemoryUserBotSessionRegistry Sessions,
+        BotSessionConnectionDirectory Connections);
 
-    private static HostBundle BuildHost()
+    private static HostBundle BuildHost(
+        FixpSessionConnectionHooks? connectionHooks = null)
     {
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -50,6 +52,8 @@ public class FixpListenerIntegrationTests
                 s.AddSingleton<IUserBotSessionRegistry>(sp =>
                     sp.GetRequiredService<InMemoryUserBotSessionRegistry>());
                 s.AddNoopOrderPathStubs();
+                if (connectionHooks is not null)
+                    s.AddSingleton(connectionHooks);
                 s.AddEntryPointListener(config);
             })
             .Build();
@@ -58,7 +62,8 @@ public class FixpListenerIntegrationTests
             host,
             host.Services.GetRequiredService<FixpListenerHostedService>(),
             host.Services.GetRequiredService<InMemoryUserBotCredentialRegistry>(),
-            host.Services.GetRequiredService<InMemoryUserBotSessionRegistry>());
+            host.Services.GetRequiredService<InMemoryUserBotSessionRegistry>(),
+            host.Services.GetRequiredService<BotSessionConnectionDirectory>());
     }
 
     // ─── Wire helpers ────────────────────────────────────────────────────
@@ -239,10 +244,10 @@ public class FixpListenerIntegrationTests
         }
     }
 
-    [Fact(Timeout = 15_000)]
-    public async Task SimultaneousEstablish_SecondRejectsAndBumpsVersion()
+    [Fact(Timeout = 30_000)]
+    public async Task SessionTakeover_ClosesOldConnection_AndReplacementEstablishes()
     {
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(25));
         var bundle = BuildHost();
         try
         {
@@ -283,30 +288,115 @@ public class FixpListenerIntegrationTests
             // Server advanced the version durably (RFC §4.8 fence) before sending the reject.
             var afterBump = await bundle.Sessions.GetOrCreateAsync(created.Credential.Id, cts.Token);
             Assert.Equal(state.CurrentVer + 1, afterBump.CurrentVer);
+            await WaitForClosedAsync(firstStream, cts.Token);
 
-            // A third attempt from yet another connection that still uses the
-            // pre-bump ver also fails — but with INVALID_SESSIONVERID this time
-            // (the version is now stale, not duplicate).
+            // The replacement retries with the post-bump version and can claim
+            // immediately; the stale connection's delayed finally-release
+            // cannot evict the replacement lease.
             using var third = await ConnectAsync(endpoint, cts.Token);
             var thirdStream = third.GetStream();
             var thirdReader = new SofhFrameReader();
-            await thirdStream.WriteAsync(BuildNegotiateFrame(state.SessionId, state.CurrentVer, created.PlainToken), cts.Token);
+            await thirdStream.WriteAsync(BuildNegotiateFrame(state.SessionId, afterBump.CurrentVer, created.PlainToken), cts.Token);
             _ = await ReadFrameAsync(thirdReader, thirdStream, cts.Token);
-            await thirdStream.WriteAsync(BuildEstablishFrame(state.SessionId, state.CurrentVer), cts.Token);
+            await thirdStream.WriteAsync(BuildEstablishFrame(state.SessionId, afterBump.CurrentVer), cts.Token);
             var thirdEst = await ReadFrameAsync(thirdReader, thirdStream, cts.Token);
-            Assert.Equal((ushort)EstablishRejectData.MESSAGE_ID, thirdEst.TemplateId);
-            var thirdReject = MemoryMarshal.Read<EstablishRejectData>(thirdEst.Payload);
-            Assert.Equal(EstablishRejectCode.INVALID_SESSIONVERID, thirdReject.EstablishmentRejectCode);
-            // Stale-ver reject also echoes the server-current ver so the
-            // bot can resync. After the bump, that's `state.CurrentVer + 1`.
-            Assert.Equal((ulong)(SessionVerID)(state.CurrentVer + 1), (ulong)thirdReject.SessionVerID);
+            Assert.Equal((ushort)EstablishAckData.MESSAGE_ID, thirdEst.TemplateId);
+            await WaitForActiveConnectionsAsync(
+                bundle.Connections, expected: 1, cts.Token);
 
-            // Stale-ver path must NOT have bumped again.
-            var afterStale = await bundle.Sessions.GetOrCreateAsync(created.Credential.Id, cts.Token);
-            Assert.Equal(afterBump.CurrentVer, afterStale.CurrentVer);
+            var final = await bundle.Sessions.GetOrCreateAsync(created.Credential.Id, cts.Token);
+            Assert.Equal(afterBump.CurrentVer, final.CurrentVer);
         }
         finally
         {
+            await bundle.Host.StopAsync(CancellationToken.None);
+            bundle.Host.Dispose();
+        }
+    }
+
+    [Fact(Timeout = 30_000)]
+    public async Task TakeoverBetweenClaimAndPublication_StaleClaimantCannotBecomeOperational()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+        var firstClaimed = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var claimOrdinal = 0;
+        var hooks = new FixpSessionConnectionHooks
+        {
+            AfterLeaseClaimedAsync = async _ =>
+            {
+                if (Interlocked.Increment(ref claimOrdinal) != 1)
+                    return;
+                firstClaimed.TrySetResult();
+                await releaseFirst.Task.WaitAsync(cts.Token);
+            },
+        };
+        var bundle = BuildHost(hooks);
+        try
+        {
+            await bundle.Host.StartAsync(cts.Token);
+            var endpoint = await bundle.Listener.WhenBound.WaitAsync(
+                TimeSpan.FromSeconds(5), cts.Token);
+            var created = await bundle.Credentials.CreateAsync(
+                "user-race", "takeover-race", cts.Token);
+            var state = await bundle.Sessions.GetOrCreateAsync(
+                created.Credential.Id, cts.Token);
+
+            using var first = await ConnectAsync(endpoint, cts.Token);
+            var firstStream = first.GetStream();
+            var firstReader = new SofhFrameReader();
+            await firstStream.WriteAsync(BuildNegotiateFrame(
+                state.SessionId, state.CurrentVer, created.PlainToken), cts.Token);
+            _ = await ReadFrameAsync(firstReader, firstStream, cts.Token);
+            await firstStream.WriteAsync(BuildEstablishFrame(
+                state.SessionId, state.CurrentVer), cts.Token);
+            await firstClaimed.Task.WaitAsync(TimeSpan.FromSeconds(5), cts.Token);
+
+            using var second = await ConnectAsync(endpoint, cts.Token);
+            var secondStream = second.GetStream();
+            var secondReader = new SofhFrameReader();
+            await secondStream.WriteAsync(BuildNegotiateFrame(
+                state.SessionId, state.CurrentVer, created.PlainToken), cts.Token);
+            _ = await ReadFrameAsync(secondReader, secondStream, cts.Token);
+            await secondStream.WriteAsync(BuildEstablishFrame(
+                state.SessionId, state.CurrentVer), cts.Token);
+            var rejectFrame = await ReadFrameAsync(
+                secondReader, secondStream, cts.Token);
+            var reject = MemoryMarshal.Read<EstablishRejectData>(
+                rejectFrame.Payload);
+            Assert.Equal(
+                EstablishRejectCode.SESSION_BLOCKED,
+                reject.EstablishmentRejectCode);
+
+            releaseFirst.TrySetResult();
+            var staleAck = await ReadFrameAsync(
+                firstReader, firstStream, cts.Token);
+            Assert.False(staleAck.IsValid);
+            Assert.Equal(0, bundle.Connections.ActiveCount);
+
+            var advanced = await bundle.Sessions.GetOrCreateAsync(
+                created.Credential.Id, cts.Token);
+            using var replacement = await ConnectAsync(endpoint, cts.Token);
+            var replacementStream = replacement.GetStream();
+            var replacementReader = new SofhFrameReader();
+            await replacementStream.WriteAsync(BuildNegotiateFrame(
+                state.SessionId, advanced.CurrentVer, created.PlainToken), cts.Token);
+            _ = await ReadFrameAsync(
+                replacementReader, replacementStream, cts.Token);
+            await replacementStream.WriteAsync(BuildEstablishFrame(
+                state.SessionId, advanced.CurrentVer), cts.Token);
+            var ack = await ReadFrameAsync(
+                replacementReader, replacementStream, cts.Token);
+
+            Assert.Equal((ushort)EstablishAckData.MESSAGE_ID, ack.TemplateId);
+            await WaitForActiveConnectionsAsync(
+                bundle.Connections, expected: 1, cts.Token);
+        }
+        finally
+        {
+            releaseFirst.TrySetResult();
             await bundle.Host.StopAsync(CancellationToken.None);
             bundle.Host.Dispose();
         }
@@ -435,6 +525,35 @@ public class FixpListenerIntegrationTests
         }
     }
 
+    [Fact(Timeout = 10_000)]
+    public async Task StopAsync_AwaitsAllActiveConnectionTasks()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        var bundle = BuildHost();
+        var stopped = false;
+        try
+        {
+            await bundle.Host.StartAsync(cts.Token);
+            var endpoint = await bundle.Listener.WhenBound.WaitAsync(TimeSpan.FromSeconds(5), cts.Token);
+            using var tcp = await ConnectAsync(endpoint, cts.Token);
+
+            for (var i = 0; i < 100 && bundle.Listener.ActiveConnectionTaskCount == 0; i++)
+                await Task.Delay(10, cts.Token);
+            Assert.Equal(1, bundle.Listener.ActiveConnectionTaskCount);
+
+            await bundle.Host.StopAsync(cts.Token);
+            stopped = true;
+
+            Assert.Equal(0, bundle.Listener.ActiveConnectionTaskCount);
+        }
+        finally
+        {
+            if (!stopped)
+                await bundle.Host.StopAsync(CancellationToken.None);
+            bundle.Host.Dispose();
+        }
+    }
+
     /// <summary>
     /// Polls until the single-active slot is released. The release path
     /// runs in the listener's connection task <c>finally</c> block, which
@@ -455,5 +574,36 @@ public class FixpListenerIntegrationTests
             await Task.Delay(20, ct).ConfigureAwait(false);
         }
         throw new TimeoutException("Single-active slot never released after Terminate.");
+    }
+
+    private static async Task WaitForClosedAsync(NetworkStream stream, CancellationToken ct)
+    {
+        var buffer = new byte[4096];
+        try
+        {
+            while (await stream.ReadAsync(buffer, ct).ConfigureAwait(false) != 0)
+            {
+                // Drain any heartbeat already queued before force-close.
+            }
+        }
+        catch (IOException)
+        {
+            // A force-close may surface as EOF or a connection reset.
+        }
+    }
+
+    private static async Task WaitForActiveConnectionsAsync(
+        BotSessionConnectionDirectory directory,
+        int expected,
+        CancellationToken ct)
+    {
+        for (var i = 0; i < 200; i++)
+        {
+            if (directory.ActiveCount == expected)
+                return;
+            await Task.Delay(10, ct);
+        }
+
+        Assert.Equal(expected, directory.ActiveCount);
     }
 }

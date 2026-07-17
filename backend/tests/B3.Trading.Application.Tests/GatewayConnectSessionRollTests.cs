@@ -1,4 +1,6 @@
 using B3.Trading.Application;
+using B3.Trading.Application.Persistence;
+using B3.Trading.Domain;
 using B3.Trading.Infrastructure;
 using Microsoft.Extensions.Logging.Abstractions;
 using Up = B3.EntryPoint.Client;
@@ -28,7 +30,10 @@ public class GatewayConnectSessionRollTests
         Func<uint>? provider,
         IConnectSessionRollReactor? reactor,
         Func<Up.ReconnectMode, Func<uint, uint>, CancellationToken, Task<Up.ReconnectOutcome>>? reconnectAsyncOverride = null,
-        Action? connectedTestHook = null)
+        Action? connectedTestHook = null,
+        Func<CancellationToken, Task>? connectAsyncOverride = null,
+        Func<CancellationToken, IAsyncEnumerable<Up.Models.EntryPointEvent>>? eventStreamOverride = null,
+        Func<CancellationToken, Task>? reResolveEndpoint = null)
     {
         var opts = new B3.EntryPoint.Client.EntryPointClientOptions
         {
@@ -44,7 +49,10 @@ public class GatewayConnectSessionRollTests
             effectiveSessionVerIdProvider: provider,
             connectSessionRollReactor: reactor,
             reconnectAsyncOverride: reconnectAsyncOverride,
-            connectedTestHook: connectedTestHook);
+            connectedTestHook: connectedTestHook,
+            connectAsyncOverride: connectAsyncOverride,
+            eventStreamOverride: eventStreamOverride,
+            reResolveEndpoint: reResolveEndpoint);
     }
 
     [Fact]
@@ -222,5 +230,151 @@ public class GatewayConnectSessionRollTests
             B3.EntryPoint.Client.ReconnectKind.Renegotiated, priorVerId: 8, effectiveVerId: 9); // must not throw
 
         Assert.Equal(8u, gw.CurrentSessionVerId);
+    }
+
+    [Fact]
+    public async Task EventLoopFault_MarksGatewayUnhealthy_AndStartsReconnect()
+    {
+        var reconnectEntered = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var gw = BuildGateway(
+            initialVerId: 8,
+            provider: null,
+            reactor: null,
+            connectAsyncOverride: _ => Task.CompletedTask,
+            eventStreamOverride: FaultedEvents,
+            reconnectAsyncOverride: async (_, _, ct) =>
+            {
+                reconnectEntered.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+                throw new InvalidOperationException("unreachable");
+            });
+
+        await gw.ConnectAsync(CancellationToken.None);
+        await reconnectEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal("disconnected", gw.SessionStateTag);
+        Assert.True(gw.IsReconnecting);
+        await gw.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task ColdConnectAndReconnect_AreSerialized_AndDnsRunsInsideConnect()
+    {
+        var dnsCompleted = false;
+        var connectEntered = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var allowConnect = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var reconnectEntered = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var gw = BuildGateway(
+            initialVerId: 8,
+            provider: null,
+            reactor: null,
+            connectedTestHook: static () => { },
+            reResolveEndpoint: _ =>
+            {
+                dnsCompleted = true;
+                return Task.CompletedTask;
+            },
+            connectAsyncOverride: async ct =>
+            {
+                Assert.True(dnsCompleted);
+                connectEntered.TrySetResult();
+                await allowConnect.Task.WaitAsync(ct);
+            },
+            reconnectAsyncOverride: (_, _, _) =>
+            {
+                reconnectEntered.TrySetResult();
+                return Task.FromResult(new Up.ReconnectOutcome(
+                    Up.ReconnectKind.Reattached, 8, 0, 0, true));
+            });
+
+        var connect = gw.ConnectAsync(CancellationToken.None);
+        await connectEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var reconnect = gw.ReconnectLoopForTestsAsync(CancellationToken.None);
+        await Task.Delay(50);
+        Assert.False(reconnectEntered.Task.IsCompleted);
+
+        allowConnect.TrySetResult();
+        await connect;
+        await reconnectEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await reconnect;
+        await gw.DisposeAsync();
+    }
+
+    [Fact]
+    public Task WalBackpressureEventLoopTermination_FailsHealthAndIngressClosed() =>
+        AssertWalTerminationFailsClosedAsync(
+            new WalBackpressureException("saturated"));
+
+    [Fact]
+    public Task WalFaultedEventLoopTermination_FailsHealthAndIngressClosed() =>
+        AssertWalTerminationFailsClosedAsync(
+            new WalFaultedException("writer faulted", new IOException("disk")));
+
+    private static async Task AssertWalTerminationFailsClosedAsync(
+        Exception subscriberFailure)
+    {
+        var gw = BuildGateway(
+            initialVerId: 8,
+            provider: null,
+            reactor: null,
+            connectAsyncOverride: _ => Task.CompletedTask,
+            eventStreamOverride: SingleAcceptedEvent);
+        await using var registry = new FirmGatewayRegistry([gw]);
+        gw.ExecutionReportReceived += _ => throw subscriberFailure;
+
+        await gw.ConnectAsync(CancellationToken.None);
+        for (var i = 0; i < 100
+             && gw.SessionStateTag != "disconnected"; i++)
+            await Task.Delay(10);
+
+        Assert.Equal("disconnected", gw.SessionStateTag);
+        Assert.False(gw.IsReconnecting);
+        Assert.False(Assert.Single(registry.Snapshot()).IsEstablished);
+        var order = new Order(
+            1,
+            new EndClientId("bot:test"),
+            "PETR4",
+            4321,
+            OrderSide.Buy,
+            OrderType.Limit,
+            100,
+            30m,
+            "FIRM_A");
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => gw.SubmitAsync(order, CancellationToken.None));
+    }
+
+    private static async IAsyncEnumerable<Up.Models.EntryPointEvent> SingleAcceptedEvent(
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    {
+        await Task.Yield();
+        ct.ThrowIfCancellationRequested();
+        yield return new Up.Models.OrderAccepted
+        {
+            SeqNum = 1,
+            SendingTime = DateTimeOffset.UtcNow,
+            ClOrdID = new Up.Models.ClOrdID(1),
+            OrderId = 100,
+            OrderStatus = Up.Models.OrderStatus.New,
+            SecurityId = 4321,
+            Side = Up.Models.Side.Buy,
+            LeavesQty = 100,
+            CumQty = 0,
+        };
+    }
+
+    private static async IAsyncEnumerable<Up.Models.EntryPointEvent> FaultedEvents(
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    {
+        await Task.Yield();
+        ct.ThrowIfCancellationRequested();
+        throw new IOException("faulted event stream");
+#pragma warning disable CS0162
+        yield break;
+#pragma warning restore CS0162
     }
 }

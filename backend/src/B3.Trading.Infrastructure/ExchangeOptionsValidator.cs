@@ -98,6 +98,14 @@ public sealed class ExchangeOptionsValidator : IValidateOptions<ExchangeOptions>
             failures.Add($"{p}.EnteringTrader must be 1..5 chars.");
         if (f.KeepAliveIntervalMs is < 100u or > 60_000u)
             failures.Add($"{p}.KeepAliveIntervalMs={f.KeepAliveIntervalMs} is out of range; expected 100..60000.");
+        if (f.InitialReconnectDelay <= TimeSpan.Zero)
+            failures.Add($"{p}.InitialReconnectDelay must be > 0.");
+        if (f.MaxReconnectDelay < f.InitialReconnectDelay)
+            failures.Add($"{p}.MaxReconnectDelay must be >= InitialReconnectDelay.");
+        if (f.DnsResolutionTimeout <= TimeSpan.Zero)
+            failures.Add($"{p}.DnsResolutionTimeout must be > 0.");
+        if (f.GracefulTerminateTimeout <= TimeSpan.Zero)
+            failures.Add($"{p}.GracefulTerminateTimeout must be > 0.");
     }
 
     /// <summary>

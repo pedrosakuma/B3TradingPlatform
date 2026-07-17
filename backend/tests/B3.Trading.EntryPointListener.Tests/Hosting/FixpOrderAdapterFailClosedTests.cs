@@ -16,6 +16,58 @@ namespace B3.Trading.EntryPointListener.Tests.Hosting;
 public class FixpOrderAdapterFailClosedTests
 {
     [Fact]
+    public async Task NonDefaultCredentialFirm_FlowsIntoSubmittedOrder()
+    {
+        var credentialId = Guid.NewGuid();
+        const ulong securityId = 4321;
+        var gateway = new RecordingGateway();
+        var mappings = new InMemoryUserBotOrderMappingRegistry();
+        var submit = new OrderSubmissionService(
+            new ClOrdIdPrefixRegistry(),
+            new OrderOwnershipMap(),
+            new WorkingOrderBook(),
+            gateway,
+            new NoOpExecutionEventSink(),
+            new RiskPipeline(Array.Empty<IRiskCheck>()),
+            new NoOpMarginProvider(),
+            new CompositeRiskAccountant(Array.Empty<IRiskAccountant>()),
+            new EventDispatcher(new SyntheticTerminalRejectingStore()),
+            new TestDrainController(),
+            NullLogger<OrderSubmissionService>.Instance,
+            botMappings: mappings);
+        var adapter = new FixpOrderAdapter(
+            new SymbolDirectory(new SymbolDirectoryOptions
+            {
+                SecurityIds = new Dictionary<string, ulong> { ["PETR4"] = securityId },
+            }),
+            submit,
+            cancel: null!,
+            mappings,
+            NullLogger.Instance);
+        var scope = new FixpConnectionScope(
+            "conn-multifirm",
+            new BotSessionPrincipal("alice", credentialId, "cred-mf", "bot", "BROKER-B"),
+            new BotSessionState(credentialId, 10, 2, 0));
+        var decoded = new DecodedNewOrderSingle
+        {
+            MsgSeqNum = 1,
+            ClOrdId = 77,
+            SecurityId = securityId,
+            Side = Side.BUY,
+            OrdType = OrdType.LIMIT,
+            OrderQty = 100,
+            PriceMantissa = (long)(30d * PriceOptional.Multiplier),
+            TimeInForce = B3.Entrypoint.Fixp.Sbe.V6.TimeInForce.DAY,
+        };
+
+        await adapter.HandleNewOrderSingleAsync(
+            new MemoryStream(), decoded, scope, CancellationToken.None);
+
+        var order = Assert.IsType<Order>(gateway.Submitted);
+        Assert.Equal("BROKER-B", order.FirmId);
+    }
+
+    [Fact]
     public async Task ReconciliationRequired_EmitsNonTerminalBmrAndRequestsSessionClose()
     {
         var credentialId = Guid.NewGuid();
@@ -169,6 +221,27 @@ public class FixpOrderAdapterFailClosedTests
     {
         public Task SubmitAsync(Order order, CancellationToken ct) =>
             Task.FromException(new InvalidOperationException("venue unavailable"));
+        public Task CancelAsync(Order order, ulong newClOrdId, CancellationToken ct) =>
+            Task.CompletedTask;
+        public Task CancelReplaceAsync(
+            Order original,
+            ulong newClOrdId,
+            long newQuantity,
+            decimal? newPrice,
+            B3.Trading.Domain.TimeInForce? requestedTimeInForce,
+            decimal? requestedStopPrice,
+            DateTimeOffset? requestedGoodTillDate,
+            CancellationToken ct) => Task.CompletedTask;
+    }
+
+    private sealed class RecordingGateway : IExchangeGateway
+    {
+        public Order? Submitted { get; private set; }
+        public Task SubmitAsync(Order order, CancellationToken ct)
+        {
+            Submitted = order;
+            return Task.CompletedTask;
+        }
         public Task CancelAsync(Order order, ulong newClOrdId, CancellationToken ct) =>
             Task.CompletedTask;
         public Task CancelReplaceAsync(

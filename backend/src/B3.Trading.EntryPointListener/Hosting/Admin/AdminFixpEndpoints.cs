@@ -58,8 +58,24 @@ public static class AdminFixpEndpoints
                 {
                     ["credential_id"] = credentialId.ToString(),
                 });
-                var newVer = await sessions.BumpVersionAsync(credentialId, "operator", ct);
-                return Results.Ok(new { credentialId, newVersion = newVer });
+                var advance = await sessions.BumpVersionAsync(credentialId, "operator", ct);
+                if (advance.DisplacedConnectionId is { } displacedConnectionId)
+                {
+                    ctx.RequestServices
+                        .GetService<BotSessionConnectionDirectory>()
+                        ?.TryForceTerminate(credentialId, displacedConnectionId);
+                }
+                else
+                {
+                    ctx.RequestServices
+                        .GetService<BotSessionConnectionDirectory>()
+                        ?.TryForceTerminate(credentialId);
+                }
+                return Results.Ok(new
+                {
+                    credentialId,
+                    newVersion = advance.NewVersion,
+                });
             }
             catch (B3.Trading.Application.Persistence.WalBackpressureException ex)
             {

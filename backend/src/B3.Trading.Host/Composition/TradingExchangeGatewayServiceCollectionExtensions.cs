@@ -76,9 +76,10 @@ public static class TradingExchangeGatewayServiceCollectionExtensions
                 var gateways = opts.Firms.Select(firm =>
                 {
                     // Shape + uniqueness validation happened at startup via
-                    // ExchangeOptionsValidator (ValidateOnStart). Endpoint DNS
-                    // resolution is deferred to here because it requires network.
-                    var ep = FirmConfigValidation.ParseEndpoint(firm.Endpoint);
+                    // ExchangeOptionsValidator. Do not perform DNS I/O while
+                    // constructing the service graph: the gateway resolves
+                    // asynchronously inside each serialized connect attempt.
+                    var ep = FirmConfigValidation.CreateUnresolvedEndpoint(firm.Endpoint);
 
                     // Wire the SDK's file-backed warm-restart store + resolve the
                     // next SessionVerId from the persisted snapshot. Without this,
@@ -139,7 +140,11 @@ public static class TradingExchangeGatewayServiceCollectionExtensions
                     var routingInstructionResolver = sp.GetService<IRoutingInstructionResolver>();
                     var connectRollReactor = sp.GetService<IConnectSessionRollReactor>();
                     var gatewayLogger = lf.CreateLogger("FirmGatewayConnector");
+                    var hasResolvedEndpoint = 0;
                     return new B3EntryPointClientGateway(upstream, firm.FirmId, resumeVerId, gwLogger,
+                        initialReconnectDelay: firm.InitialReconnectDelay,
+                        maxReconnectDelay: firm.MaxReconnectDelay,
+                        gracefulTerminateTimeout: firm.GracefulTerminateTimeout,
                         venueDisconnectReactor: reactor,
                         riskOptions: riskOpts,
                         subAccountWireIdMapper: subAccountMapper,
@@ -169,19 +174,24 @@ public static class TradingExchangeGatewayServiceCollectionExtensions
                         reResolveEndpoint: async ct =>
                         {
                             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                            timeoutCts.CancelAfter(TimeSpan.FromSeconds(5));
+                            timeoutCts.CancelAfter(firm.DnsResolutionTimeout);
                             try
                             {
                                 clientOpts.Endpoint = await FirmConfigValidation.ParseEndpointAsync(
                                     firm.Endpoint, timeoutCts.Token).ConfigureAwait(false);
+                                Volatile.Write(ref hasResolvedEndpoint, 1);
                             }
-                            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                            catch (OperationCanceledException) when (
+                                !ct.IsCancellationRequested
+                                && Volatile.Read(ref hasResolvedEndpoint) == 1)
                             {
                                 gatewayLogger.LogWarning(
                                     "DNS re-resolve of endpoint '{Endpoint}' timed out for firm {Firm}; reusing last-known address {LastKnown}.",
                                     firm.Endpoint, firm.FirmId, clientOpts.Endpoint);
                             }
-                            catch (Exception ex) when (ex is not OperationCanceledException)
+                            catch (Exception ex) when (
+                                ex is not OperationCanceledException
+                                && Volatile.Read(ref hasResolvedEndpoint) == 1)
                             {
                                 gatewayLogger.LogWarning(ex,
                                     "DNS re-resolve of endpoint '{Endpoint}' failed for firm {Firm}; reusing last-known address {LastKnown}.",

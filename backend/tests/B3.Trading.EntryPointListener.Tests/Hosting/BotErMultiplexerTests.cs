@@ -32,6 +32,23 @@ public class BotErMultiplexerTests
             TimestampUtc: DateTimeOffset.UtcNow);
 
     [Fact]
+    public void Directory_StaleTerminationCannotCloseReplacement()
+    {
+        var credentialId = Guid.NewGuid();
+        var directory = new BotSessionConnectionDirectory();
+        var oldSender = new RejectingSender();
+        var replacement = new RejectingSender();
+        directory.Register(credentialId, "old", oldSender);
+        directory.Register(credentialId, "replacement", replacement);
+
+        Assert.True(oldSender.Disposed);
+        Assert.False(directory.TryForceTerminate(credentialId, "old"));
+        Assert.False(replacement.Disposed);
+        Assert.True(directory.TryGet(credentialId, out var current));
+        Assert.Same(replacement, current);
+    }
+
+    [Fact]
     public async Task Route_MappedClOrdId_BuffersAndSends()
     {
         var (mux, ctx) = await NewMultiplexerAsync();
@@ -93,6 +110,85 @@ public class BotErMultiplexerTests
         var newState = await ctx.Sessions.GetOrCreateAsync(ctx.CredentialId, default);
         Assert.True(newState.CurrentVer > startVer);
         Assert.False(ctx.Coordinator.GetOrCreateBuffer(ctx.CredentialId).IsOverflowed);
+    }
+
+    [Fact]
+    public async Task WriterOverflowBurst_IsCoalescedIntoOneBumpAndClose()
+    {
+        var credentialId = Guid.NewGuid();
+        var sessions = new BlockingSessionRegistry(credentialId);
+        var mappings = new FakeMappingRegistry();
+        mappings.Add(100, credentialId, 4242);
+        var directory = new BotSessionConnectionDirectory();
+        var sender = new RejectingSender();
+        directory.Register(credentialId, "conn-overflow", sender);
+        var coordinator = new BotOutboundCoordinator(
+            sessions,
+            new BotErMultiplexerOptions { OutboundBufferMaxMessages = 1000 });
+        var mux = new BotErMultiplexer(
+            mappings, sessions, directory, coordinator,
+            NullLogger<BotErMultiplexer>.Instance);
+        await mux.StartAsync(CancellationToken.None);
+
+        for (var i = 0; i < 20; i++)
+            mux.Route(NewEvent(100));
+        await sessions.BumpStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        for (var i = 0; i < 20; i++)
+            mux.Route(NewEvent(100));
+        Assert.Equal(1, sessions.BumpCount);
+
+        sessions.AllowBump.TrySetResult();
+        for (var i = 0; i < 100 && !sender.Disposed; i++)
+            await Task.Delay(10);
+
+        Assert.True(sender.Disposed);
+        Assert.Equal(1, sessions.BumpCount);
+        Assert.Equal(1, sender.DisposeCount);
+        await mux.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task OverflowHandlerFailure_RetriesUntilSingleRecovery()
+    {
+        var credentialId = Guid.NewGuid();
+        var sessions = new FailOnceSessionRegistry(credentialId);
+        var mappings = new FakeMappingRegistry();
+        mappings.Add(100, credentialId, 4242);
+        var directory = new BotSessionConnectionDirectory();
+        var sender = new RejectingSender();
+        directory.Register(credentialId, "conn-retry", sender);
+        var coordinator = new BotOutboundCoordinator(
+            sessions,
+            new BotErMultiplexerOptions { OutboundBufferMaxMessages = 1 });
+        var mux = new BotErMultiplexer(
+            mappings, sessions, directory, coordinator,
+            NullLogger<BotErMultiplexer>.Instance);
+        await mux.StartAsync(CancellationToken.None);
+
+        mux.Route(NewEvent(100));
+        mux.Route(NewEvent(100));
+        await sessions.FirstFailure.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await sessions.RetryStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        for (var i = 0; i < 20; i++)
+            mux.Route(NewEvent(100));
+        Assert.Equal(2, sessions.BumpAttempts);
+
+        sessions.AllowRecovery.TrySetResult();
+        await sessions.Recovered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        for (var i = 0; i < 100
+             && coordinator.GetOrCreateBuffer(credentialId).IsOverflowed; i++)
+            await Task.Delay(10);
+
+        Assert.Equal(2, sessions.BumpAttempts);
+        Assert.Equal(1, sessions.SuccessfulBumps);
+        Assert.Equal(1, sender.DisposeCount);
+        Assert.False(coordinator.GetOrCreateBuffer(credentialId).IsOverflowed);
+
+        mux.Route(NewEvent(100));
+        Assert.Equal(1, coordinator.GetOrCreateBuffer(credentialId).Count);
+        await mux.StopAsync(CancellationToken.None);
     }
 
     private static async Task<(BotErMultiplexer, MuxContext)> NewMultiplexerAsync(int bufferCap = 1000)
@@ -169,6 +265,111 @@ public class BotErMultiplexerTests
             return true;
         }
         public void Dispose() => Disposed = true;
+    }
+
+    private sealed class RejectingSender : IBotSessionOutboundSender, IDisposable
+    {
+        public int DisposeCount;
+        public bool Disposed => Volatile.Read(ref DisposeCount) > 0;
+        public bool TryEnqueue(OutboundFrame frame) => false;
+        public void Dispose() => Interlocked.Increment(ref DisposeCount);
+    }
+
+    private sealed class BlockingSessionRegistry : IUserBotSessionRegistry
+    {
+        private readonly BotSessionState _state;
+        public int BumpCount;
+        public TaskCompletionSource BumpStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource AllowBump { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public BlockingSessionRegistry(Guid credentialId)
+        {
+            _state = new BotSessionState(credentialId, 1, 1, 0);
+        }
+
+        public Task<BotSessionState> GetOrCreateAsync(Guid credentialId, CancellationToken ct) =>
+            Task.FromResult(_state);
+
+        public Task<bool> TryClaimActiveAsync(
+            Guid credentialId, ulong attemptedVer, string connectionId, CancellationToken ct) =>
+            Task.FromResult(true);
+
+        public Task<bool> IsActiveLeaseAsync(
+            Guid credentialId, ulong attemptedVer, string connectionId, CancellationToken ct) =>
+            Task.FromResult(true);
+
+        public Task ReleaseAsync(Guid credentialId, string connectionId, CancellationToken ct) =>
+            Task.CompletedTask;
+
+        public async Task<BotSessionVersionAdvance> BumpVersionAsync(
+            Guid credentialId, string reason, CancellationToken ct)
+        {
+            Interlocked.Increment(ref BumpCount);
+            BumpStarted.TrySetResult();
+            await AllowBump.Task.WaitAsync(ct);
+            return new BotSessionVersionAdvance(2, "conn-overflow");
+        }
+
+        public void UpdateCheckpointedOutboundSeq(Guid credentialId, ulong checkpointedSeq) { }
+    }
+
+    private sealed class FailOnceSessionRegistry : IUserBotSessionRegistry
+    {
+        private readonly BotSessionState _state;
+        public int BumpAttempts;
+        public int SuccessfulBumps;
+        public TaskCompletionSource FirstFailure { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource RetryStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource AllowRecovery { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Recovered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public FailOnceSessionRegistry(Guid credentialId)
+        {
+            _state = new BotSessionState(credentialId, 1, 1, 0);
+        }
+
+        public Task<BotSessionState> GetOrCreateAsync(
+            Guid credentialId, CancellationToken ct) =>
+            Task.FromResult(_state);
+
+        public Task<bool> TryClaimActiveAsync(
+            Guid credentialId, ulong attemptedVer, string connectionId, CancellationToken ct) =>
+            Task.FromResult(true);
+
+        public Task<bool> IsActiveLeaseAsync(
+            Guid credentialId, ulong attemptedVer, string connectionId, CancellationToken ct) =>
+            Task.FromResult(true);
+
+        public Task ReleaseAsync(
+            Guid credentialId, string connectionId, CancellationToken ct) =>
+            Task.CompletedTask;
+
+        public async Task<BotSessionVersionAdvance> BumpVersionAsync(
+            Guid credentialId, string reason, CancellationToken ct)
+        {
+            if (Interlocked.Increment(ref BumpAttempts) == 1)
+            {
+                FirstFailure.TrySetResult();
+                throw new IOException("transient WAL failure");
+            }
+
+            RetryStarted.TrySetResult();
+            await AllowRecovery.Task.WaitAsync(ct);
+            Interlocked.Increment(ref SuccessfulBumps);
+            Recovered.TrySetResult();
+            return new BotSessionVersionAdvance(2, "conn-retry");
+        }
+
+        public void UpdateCheckpointedOutboundSeq(
+            Guid credentialId, ulong checkpointedSeq)
+        {
+        }
     }
 
     private sealed class FakeMappingRegistry : IUserBotOrderMappingRegistry

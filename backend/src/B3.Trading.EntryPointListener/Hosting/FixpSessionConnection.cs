@@ -12,6 +12,11 @@ using Microsoft.Extensions.Options;
 
 namespace B3.Trading.EntryPointListener.Hosting;
 
+internal sealed class FixpSessionConnectionHooks
+{
+    public Func<string, Task>? AfterLeaseClaimedAsync { get; init; }
+}
+
 /// <summary>
 /// Manages the FIXP session lifecycle for a single accepted TCP
 /// connection. Reads SOFH-framed SBE messages, drives
@@ -43,6 +48,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
     private readonly EntryPointListenerOptions _options;
     private readonly TimeProvider _clock;
     private readonly string _connectionId;
+    private readonly FixpSessionConnectionHooks? _hooks;
 
     /// <summary>
     /// The validated client certificate captured during the TLS handshake
@@ -83,7 +89,8 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         TimeProvider? clock = null,
         RateLimiterRegistry? rateLimiter = null,
         UserSessionCounter? sessionCounter = null,
-        System.Security.Cryptography.X509Certificates.X509Certificate2? clientCertificate = null)
+        System.Security.Cryptography.X509Certificates.X509Certificate2? clientCertificate = null,
+        FixpSessionConnectionHooks? hooks = null)
     {
         _tcpClient = tcpClient;
         _stream = stream;
@@ -98,6 +105,7 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         _clock = clock ?? TimeProvider.System;
         _logger = logger;
         _clientCertificate = clientCertificate;
+        _hooks = hooks;
         _connectionId = Guid.NewGuid().ToString("N");
         _lastOutboundTicks = _clock.GetUtcNow().UtcTicks;
     }
@@ -117,10 +125,11 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
         TimeProvider? clock = null,
         RateLimiterRegistry? rateLimiter = null,
         UserSessionCounter? sessionCounter = null,
-        System.Security.Cryptography.X509Certificates.X509Certificate2? clientCertificate = null)
+        System.Security.Cryptography.X509Certificates.X509Certificate2? clientCertificate = null,
+        FixpSessionConnectionHooks? hooks = null)
         : this(tcpClient, tcpClient.GetStream(), credentials, sessions, logger,
                orders, connectionDirectory, outboundCoordinator, options, clock,
-               rateLimiter, sessionCounter, clientCertificate)
+               rateLimiter, sessionCounter, clientCertificate, hooks)
     {
     }
 
@@ -678,13 +687,20 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
             // would otherwise have to discover via a fresh Negotiate; a
             // second bot attempt with the now-stale ver will fail the
             // version check above without further bumping.
-            var bumpedVer = await _sessions.BumpVersionAsync(credentialId, "single-active-violation", ct)
+            var advance = await _sessions.BumpVersionAsync(credentialId, "single-active-violation", ct)
                 .ConfigureAwait(false);
+
+            // BumpVersionAsync atomically invalidates the prior lease. Close
+            // the corresponding live socket before replying so the old bot
+            // cannot remain operational under a stale version.
+            if (advance.DisplacedConnectionId is { } displacedConnectionId)
+                _connectionDirectory?.TryForceTerminate(
+                    credentialId, displacedConnectionId);
 
             _logger.LogInformation(
                 "fixp.establish.reject reason=SESSION_BLOCKED credShortId={CredShortId} cause=single-active-violation oldVer={OldVer} newVer={NewVer}",
-                _scope.Principal.CredShortId, requestedVer, bumpedVer);
-            await WriteEstablishRejectAsync(stream, requestedSid, bumpedVer,
+                _scope.Principal.CredShortId, requestedVer, advance.NewVersion);
+            await WriteEstablishRejectAsync(stream, requestedSid, advance.NewVersion,
                 EstablishRejectCode.SESSION_BLOCKED, ct).ConfigureAwait(false);
             _sm.ForceTerminated();
             return false;
@@ -692,11 +708,34 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
 
         _slotClaimed = true;
         FixpListenerMetrics.SessionsActive.Add(1);
+        if (_hooks?.AfterLeaseClaimedAsync is { } afterLeaseClaimed)
+            await afterLeaseClaimed(_connectionId).ConfigureAwait(false);
+
+        if (!await _sessions.IsActiveLeaseAsync(
+                credentialId, requestedVer, _connectionId, ct).ConfigureAwait(false))
+        {
+            _logger.LogInformation(
+                "fixp.establish.abort reason=LEASE_SUPERSEDED phase=before_ack credShortId={CredShortId} connectionId={ConnectionId}",
+                _scope.Principal.CredShortId, _connectionId);
+            _sm.ForceTerminated();
+            return false;
+        }
+
         _logger.LogInformation(
             "fixp.establish.ok credShortId={CredShortId} userId={UserId} sessionId={Sid} sessionVerId={Ver} connectionId={ConnectionId}",
             _scope.Principal.CredShortId, _scope.Principal.UserId,
             serverState.SessionId, serverState.CurrentVer, _connectionId);
         await WriteEstablishAckAsync(stream, requestedSid, requestedVer, ct).ConfigureAwait(false);
+
+        if (!await _sessions.IsActiveLeaseAsync(
+                credentialId, requestedVer, _connectionId, ct).ConfigureAwait(false))
+        {
+            _logger.LogInformation(
+                "fixp.establish.abort reason=LEASE_SUPERSEDED phase=after_ack credShortId={CredShortId} connectionId={ConnectionId}",
+                _scope.Principal.CredShortId, _connectionId);
+            _sm.ForceTerminated();
+            return false;
+        }
 
         // Sub-issue #172 (F): make the connection discoverable by the
         // outbound multiplexer. Registration AFTER EstablishAck is sent
@@ -711,12 +750,25 @@ internal sealed class FixpSessionConnection : IBotSessionOutboundSender, IDispos
             // multiplexer push lands on a live writer (no race where
             // TryGet returns us but the writer is not yet wired).
             _outboundWriter = new FixpOutboundChannelWriter(
-                capacity: Math.Max(1, _options.Buffers.OutboundChannelCapacity),
+                capacity: _options.Buffers.OutboundChannelCapacity,
                 writeAsync: WriteOutboundFromDrainLoopAsync,
                 connectionId: _connectionId,
                 logger: _logger);
-            _connectionDirectory.Register(credentialId, this);
+            _connectionDirectory.Register(credentialId, _connectionId, this);
             _registeredInDirectory = true;
+
+            if (!await _sessions.IsActiveLeaseAsync(
+                    credentialId, requestedVer, _connectionId, ct).ConfigureAwait(false))
+            {
+                _logger.LogInformation(
+                    "fixp.establish.abort reason=LEASE_SUPERSEDED phase=after_publish credShortId={CredShortId} connectionId={ConnectionId}",
+                    _scope.Principal.CredShortId, _connectionId);
+                _connectionDirectory.TryForceTerminate(
+                    credentialId, _connectionId);
+                _registeredInDirectory = false;
+                _sm.ForceTerminated();
+                return false;
+            }
         }
 
         // Sub-issue #173 (G): start the heartbeat loop that emits

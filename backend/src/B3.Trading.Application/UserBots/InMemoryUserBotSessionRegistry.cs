@@ -100,6 +100,23 @@ public sealed class InMemoryUserBotSessionRegistry : IUserBotSessionRegistry
         }
     }
 
+    public Task<bool> IsActiveLeaseAsync(
+        Guid credentialId, ulong attemptedVer, string connectionId, CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(connectionId);
+
+        lock (_gate)
+        {
+            var active = _byCredentialId.TryGetValue(credentialId, out var state)
+                && state.CurrentVer == attemptedVer
+                && _activeConnectionByCredentialId.TryGetValue(
+                    credentialId, out var existing)
+                && string.Equals(
+                    existing, connectionId, StringComparison.Ordinal);
+            return Task.FromResult(active);
+        }
+    }
+
     public Task ReleaseAsync(Guid credentialId, string connectionId, CancellationToken ct)
     {
         ArgumentException.ThrowIfNullOrEmpty(connectionId);
@@ -116,7 +133,8 @@ public sealed class InMemoryUserBotSessionRegistry : IUserBotSessionRegistry
         return Task.CompletedTask;
     }
 
-    public async Task<ulong> BumpVersionAsync(Guid credentialId, string reason, CancellationToken ct)
+    public async Task<BotSessionVersionAdvance> BumpVersionAsync(
+        Guid credentialId, string reason, CancellationToken ct)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(reason);
 
@@ -129,6 +147,7 @@ public sealed class InMemoryUserBotSessionRegistry : IUserBotSessionRegistry
         // because it is an async I/O fence, not state mutation.
         ulong oldVer;
         ulong newVer;
+        string? displacedConnectionId;
         BotSessionVerAdvancedEvent evt;
 
         lock (_gate)
@@ -139,6 +158,8 @@ public sealed class InMemoryUserBotSessionRegistry : IUserBotSessionRegistry
 
             oldVer = state.CurrentVer;
             newVer = checked(oldVer + 1);
+            _activeConnectionByCredentialId.TryGetValue(
+                credentialId, out displacedConnectionId);
             evt = new BotSessionVerAdvancedEvent
             {
                 CredentialId = credentialId,
@@ -160,7 +181,7 @@ public sealed class InMemoryUserBotSessionRegistry : IUserBotSessionRegistry
         if (_store is not null)
             await _store.FlushAsync(ct).ConfigureAwait(false);
 
-        return newVer;
+        return new BotSessionVersionAdvance(newVer, displacedConnectionId);
     }
 
     /// <summary>Snapshot capture (called under <c>EventDispatcher.WithSnapshotLock</c>).</summary>
@@ -231,6 +252,11 @@ public sealed class InMemoryUserBotSessionRegistry : IUserBotSessionRegistry
             {
                 _byCredentialId[credentialId] = existing with { CurrentVer = newVer };
             }
+            // Advancing the version invalidates every lease issued under the
+            // prior version. Clear it in the same critical section as the
+            // version mutation so a reconnect using newVer can claim
+            // immediately while the old socket is being force-closed.
+            _activeConnectionByCredentialId.Remove(credentialId);
             // A bump for an unknown credential during replay would mean a
             // missing initialised event upstream; tolerate silently rather
             // than crash recovery — the next live bump will re-emit if the

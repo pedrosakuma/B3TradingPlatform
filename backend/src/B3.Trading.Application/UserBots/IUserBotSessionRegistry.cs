@@ -33,6 +33,10 @@ public sealed record BotSessionState(
     ulong CurrentVer,
     ulong LastCheckpointedOutboundSeq);
 
+public sealed record BotSessionVersionAdvance(
+    ulong NewVersion,
+    string? DisplacedConnectionId);
+
 /// <summary>
 /// Per-credential session bookkeeping for the FIXP listener
 /// (RFC user-bot-fixp-listener-v0 §4.5 + §4.8). Implementations enforce
@@ -68,6 +72,17 @@ public interface IUserBotSessionRegistry
         CancellationToken ct);
 
     /// <summary>
+    /// Revalidates that the exact connection still owns the lease under the
+    /// supplied session version. Used around EstablishAck/publication to close
+    /// the claim-to-directory visibility gap during takeover.
+    /// </summary>
+    Task<bool> IsActiveLeaseAsync(
+        Guid credentialId,
+        ulong attemptedVer,
+        string connectionId,
+        CancellationToken ct);
+
+    /// <summary>
     /// Releases the active-session slot when <paramref name="connectionId"/>
     /// matches the current owner. Called on Terminate or socket close so
     /// a subsequent reconnect can re-claim. Idempotent — releasing a slot
@@ -82,9 +97,14 @@ public interface IUserBotSessionRegistry
     /// fence required by RFC §4.8 so the next bot-observable response
     /// (typically an <c>EstablishReject(InvalidSessionVerId)</c>) cannot
     /// roll back across a crash. Returns the new (post-bump) version so
-    /// the caller can echo it on the very reject that follows.
+    /// the caller can echo it on the very reject that follows. The result also
+    /// identifies the lease invalidated by the bump so the listener can close
+    /// exactly that connection without racing a newer replacement.
     /// </summary>
-    Task<ulong> BumpVersionAsync(Guid credentialId, string reason, CancellationToken ct);
+    Task<BotSessionVersionAdvance> BumpVersionAsync(
+        Guid credentialId,
+        string reason,
+        CancellationToken ct);
 
     /// <summary>
     /// Sub-issue #172 (F). Records a periodic checkpoint of the credential's

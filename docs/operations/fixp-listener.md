@@ -164,6 +164,10 @@ Trading__EntryPointListener__MaxSessionsPerUser=3
 A user with 3 active sessions will have their 4th Negotiate rejected. Sessions are
 released on Terminate or socket close.
 
+Credentials retain the human user's firm claim. Bot orders therefore route through
+that configured firm's real gateway; credentials created by older releases replay
+with the backward-compatible `default` firm.
+
 ## Monitoring / Metrics
 
 All instruments use the `B3.Trading` meter (subscribe with OTel or Prometheus).
@@ -242,12 +246,17 @@ curl -H "Authorization: Bearer $TOKEN" \
 | `RATE_LIMIT_CREDENTIAL` | Too many Negotiates for same credential | Slow reconnect loop |
 | `MAX_SESSIONS_PER_USER` | User hit session cap | Close other sessions first |
 | `INVALID_SESSIONVERID` | Version mismatch | Use version from NegotiateResponse |
-| `SESSION_BLOCKED` | Single-active violation | Previous session not cleanly closed |
+| `SESSION_BLOCKED` | Single-active violation | Server bumps the version and closes the old socket; retry with the returned version |
 
 ### Bumping session version
 
 Use the admin endpoint or the credential's version is auto-bumped on single-active
-violations and buffer overflows.
+violations and buffer overflows. A takeover invalidates the old lease atomically,
+force-closes its connection, and permits the replacement to establish with the
+returned version. Repeated overflow/backpressure signals for one episode are
+coalesced into one durable bump and one close. Transient WAL/handler failures
+retain the pending episode and retry with bounded backoff until bump/close/reset
+finishes; the buffer cannot remain permanently wedged in overflow.
 
 ### Reading the outbound buffer
 
@@ -263,6 +272,8 @@ The `/admin/fixp/credentials/{id}/buffer` endpoint shows:
 - **Overflow**: If the server buffer overflows, the session version is bumped and the
   bot must reconnect with the new version. Reconcile state via REST `/api/orders`.
 - **Heartbeat**: Server sends Sequence on configured cadence (default 3s).
+- **Shutdown**: listener stop cancels and awaits every accepted connection task;
+  once host shutdown returns there are no active bot connection loops.
 
 ## Out of v0
 

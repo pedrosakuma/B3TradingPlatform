@@ -17,6 +17,17 @@ internal static class FirmConfigValidation
     }
 
     /// <summary>
+    /// Produces a construction-time placeholder without performing DNS I/O.
+    /// The gateway replaces it through <see cref="ParseEndpointAsync"/> inside
+    /// the serialized cold-connect/reconnect attempt.
+    /// </summary>
+    public static System.Net.IPEndPoint CreateUnresolvedEndpoint(string endpoint)
+    {
+        var (_, port) = SplitHostPort(endpoint);
+        return new System.Net.IPEndPoint(System.Net.IPAddress.None, port);
+    }
+
+    /// <summary>
     /// Async, cancellable counterpart of <see cref="ParseEndpoint"/>. Used by
     /// <see cref="B3.Trading.Infrastructure.B3EntryPointClientGateway"/>'s
     /// reconnect loop (#565) to re-resolve the peer hostname before every
@@ -49,4 +60,3 @@ internal static class FirmConfigValidation
         return new System.Net.IPEndPoint(addrs[0], port);
     }
 }
-
