@@ -100,6 +100,41 @@ public sealed class CommittedPrefixFileEventStoreTests : IDisposable
             WalRoot(options), "*.log", SearchOption.AllDirectories));
     }
 
+    [Fact]
+    public async Task LinuxFsyncRecovery_DurablyRemovesEmptySurvivorDayDirectory()
+    {
+        if (!OperatingSystem.IsLinux())
+            return;
+
+        var options = Options("linux-empty-survivor-day");
+        options.FsyncOnFlush = true;
+        var survivorDay = Path.Combine(WalRoot(options), "2026-01-01");
+        await using (var store = NewStore(
+                         options,
+                         new ThrowAtBoundaryHooks(
+                             WalCommitBoundary.LogFsynced)))
+        {
+            var seq = store.Append(NewOrder(0));
+            await Assert.ThrowsAsync<WalFaultedException>(
+                () => store.FlushThroughAsync(seq).AsTask());
+        }
+        Assert.True(Directory.Exists(survivorDay));
+
+        await using (var reopened = NewStore(options))
+        {
+            Assert.Equal(0, reopened.LastCommittedSeq);
+            Assert.Empty(await ReplayIds(reopened));
+            Assert.False(Directory.Exists(survivorDay));
+            Assert.True(reopened.IsHealthy);
+        }
+
+        // A second real open proves the child deletion + WAL-root directory
+        // update survived the complete close/reopen sequence.
+        await using var secondRestart = NewStore(options);
+        Assert.Equal(0, secondRestart.LastCommittedSeq);
+        Assert.False(Directory.Exists(survivorDay));
+    }
+
     [Theory]
     [InlineData(WalCommitBoundary.RecordAppended)]
     [InlineData(WalCommitBoundary.LogFsynced)]

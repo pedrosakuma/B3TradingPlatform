@@ -683,7 +683,7 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
                 lastSeq);
             nextSeq = checked(lastSeq + 1);
         }
-        FlushDirtyDirectories();
+        FlushArtifactChangesAndRemoveEmptyDayDirectories();
         _hooks.OnBoundary(
             WalCommitBoundary.MigrationMetadataStagedAndFsynced,
             nextSeq - 1);
@@ -806,8 +806,7 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
             if (!committedIds.Contains(segmentId))
                 DeleteSegmentArtifacts(path);
         }
-        RemoveEmptyDayDirectories();
-        FlushDirtyDirectories();
+        FlushArtifactChangesAndRemoveEmptyDayDirectories();
     }
 
     private WalCommitMarker ReadMarker(string path)
@@ -965,15 +964,27 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
         stream.Flush(_opts.FsyncOnFlush);
     }
 
-    private void RemoveEmptyDayDirectories()
+    private void FlushArtifactChangesAndRemoveEmptyDayDirectories()
     {
+        // File deletion is first made durable in each still-existing child
+        // directory. Only then may the empty day directory be removed; that
+        // removal is a separate parent-directory mutation and is made durable
+        // by fsyncing the WAL root. Never retain a deleted child in the dirty
+        // set and attempt to fsync a path that no longer exists.
+        FlushDirtyDirectories();
+        var removedAny = false;
         foreach (var dayDir in Directory.EnumerateDirectories(_walRoot))
         {
             if (!Directory.EnumerateFileSystemEntries(dayDir).Any())
             {
                 Directory.Delete(dayDir);
-                _dirtyDirectories.Add(_walRoot);
+                removedAny = true;
             }
+        }
+        if (removedAny)
+        {
+            _dirtyDirectories.Add(_walRoot);
+            FlushDirtyDirectories();
         }
     }
 
