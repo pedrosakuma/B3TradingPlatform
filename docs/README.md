@@ -17,6 +17,9 @@ Start here. This is the map for everything under `docs/` in
 
 ## RFCs (latest first)
 
+- [durable-outbound-mutations-v0](rfcs/durable-outbound-mutations-v0.md)
+  — committed approval/attempt ledger, crash matrix, no-blind-resend recovery,
+  session-roll policy and implementation slices (#628 / parent #620).
 - [durability-classes-fail-closed-v0](rfcs/durability-classes-fail-closed-v0.md)
   — event durability classes, ACK/append/`fsync` boundaries, fail-closed
   readiness, venue ER replay and crash-test contract (#621 / parent #620).
