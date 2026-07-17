@@ -18,10 +18,10 @@ the rules that make the design safe.
 This applies to venue-derived order/execution state. The WAL now also contains
 local-only controls, credentials, cash, sub-accounts and algo lifecycle state
 that B3 cannot replay, so it is no longer universally only an audit log + boot
-accelerator. The proposed class-aware durability contract is
+accelerator. The class-aware durability contract is
 [`durability-classes-fail-closed-v0`](rfcs/durability-classes-fail-closed-v0.md);
-this document continues to describe the current runtime until its
-implementation slices land.
+the committed-prefix substrate described below is implemented, while later
+Class L/V/O business-flow slices remain staged separately.
 
 Every new event must therefore identify whether the venue can replay it or the
 platform is its only authority; the linked RFC defines that decision.
@@ -34,8 +34,10 @@ Per firm, under `Trading:Persistence:DataDirectory`:
 data/{firm}/wal/2026-05-01/
   000.log    # data segment, append-only
   000.idx    # sparse index, fixed 24-byte records
+  000.log.firstseq # generation-bound segment sequence metadata
   001.log
   001.idx
+data/{firm}/wal/commit.marker # checksum-protected committed prefix + generation
 data/{firm}/snapshots/
   snap-000042.json
   latest.txt          # plain decimal snapshot seq hint
@@ -67,6 +69,24 @@ Fixed 24-byte records, written every 64 events or every 4 KiB of log:
 
 Rebuildable from the `.log` if missing or corrupt. Used to skip ahead
 during `ReadFromAsync(sinceSeqExclusive)`.
+
+### Committed prefix
+
+Admission, frame append, log fsync and commit are separate boundaries.
+`FlushThroughAsync(N)` completes only after the checksum-protected marker
+publishes a contiguous segment manifest through sequence `N`, using staged
+file fsync, atomic replacement and WAL-directory fsync. Recovery validates only
+that marker generation and manifest. Complete frames beyond it are uncommitted
+survivors and are truncated; missing or corrupt data at/below it fails startup
+closed.
+
+A non-empty legacy WAL without `commit.marker` is never promoted from its
+highest CRC-valid frame automatically. The default
+`LegacyWalStartupMode=RejectUnknownShutdown` requires reconciliation. Set
+`ControlledCleanShutdown` only for the one-time upgrade after draining ingress,
+successfully flushing the old process and stopping it without further
+admission; the new process fsyncs that quiesced prefix and publishes its first
+generation marker.
 
 ## Event stream
 

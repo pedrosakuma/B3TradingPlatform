@@ -28,6 +28,12 @@ internal sealed class SegmentReader : IDisposable
         _log = new FileStream(logPath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 8192);
     }
 
+    internal readonly record struct SegmentScanResult(
+        long RecordCount,
+        long LastValidEnd,
+        bool IsValid,
+        string? Failure);
+
     public long LastValidEnd { get; private set; }
 
     /// <summary>
@@ -65,6 +71,40 @@ internal sealed class SegmentReader : IDisposable
             LastValidEnd = _log.Position;
             yield return payload;
         }
+
+    }
+
+    public SegmentScanResult ScanThrough(long requiredEnd)
+    {
+        if (requiredEnd < 0 || requiredEnd > _log.Length)
+            return new SegmentScanResult(0, 0, false, "required boundary is outside the log");
+
+        _log.Position = 0;
+        var count = 0L;
+        var header = new byte[SegmentWriter.RecordHeaderBytes];
+        while (_log.Position < requiredEnd)
+        {
+            var pos = _log.Position;
+            var read = _log.Read(header, 0, header.Length);
+            if (read != header.Length)
+                return new SegmentScanResult(count, pos, false, "torn record header");
+
+            var length = BinaryPrimitives.ReadUInt32LittleEndian(header);
+            var expectedCrc = BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(4));
+            var recordEnd = checked(pos + SegmentWriter.RecordHeaderBytes + length);
+            if (length == 0 || recordEnd > requiredEnd)
+                return new SegmentScanResult(count, pos, false, "record crosses the committed boundary");
+
+            var payload = new byte[length];
+            if (_log.Read(payload, 0, payload.Length) != payload.Length)
+                return new SegmentScanResult(count, pos, false, "torn record payload");
+            if (Crc32.HashToUInt32(payload) != expectedCrc)
+                return new SegmentScanResult(count, pos, false, "CRC mismatch");
+            count++;
+            LastValidEnd = _log.Position;
+        }
+
+        return new SegmentScanResult(count, _log.Position, _log.Position == requiredEnd, null);
     }
 
     public void Dispose()

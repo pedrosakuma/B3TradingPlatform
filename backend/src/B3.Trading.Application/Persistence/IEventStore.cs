@@ -14,13 +14,18 @@ namespace B3.Trading.Application.Persistence;
 /// Sequence numbers are assigned synchronously on <see cref="Append"/>
 /// and are strictly monotonic across the lifetime of a store instance.
 /// They start from 1 on a fresh store; on recovery they resume after the
-/// highest seq found on disk. <see cref="CurrentSeq"/> reflects the last
-/// assigned seq (whether or not it has been flushed).
+/// marker-committed prefix. <see cref="CurrentSeq"/> is the legacy alias
+/// for <see cref="LastAdmittedSeq"/>.
 /// </para>
 /// </summary>
 public interface IEventStore : IAsyncDisposable
 {
     long CurrentSeq { get; }
+    Guid WalGeneration => Guid.Empty;
+    long LastAdmittedSeq => CurrentSeq;
+    long LastAppendedSeq => CurrentSeq;
+    long LastLogFsyncedSeq => CurrentSeq;
+    long LastCommittedSeq => CurrentSeq;
 
     /// <summary>
     /// Synchronously assigns a sequence number to <paramref name="evt"/> and
@@ -56,6 +61,22 @@ public interface IEventStore : IAsyncDisposable
     ValueTask FlushAsync(CancellationToken ct = default);
 
     /// <summary>
+    /// Awaits marker-committed durability of <paramref name="seq"/> and its
+    /// complete WAL prefix. Cancellation stops only this caller's wait; it
+    /// never rolls back admission or lets an uncommitted sequence appear
+    /// durable.
+    /// </summary>
+    async ValueTask FlushThroughAsync(long seq, CancellationToken ct = default)
+    {
+        if (seq < 0 || seq > LastAdmittedSeq)
+            throw new ArgumentOutOfRangeException(nameof(seq));
+        await FlushAsync(ct).ConfigureAwait(false);
+        if (LastCommittedSeq < seq)
+            throw new InvalidOperationException(
+                $"WAL flush completed without committing requested sequence {seq}.");
+    }
+
+    /// <summary>
     /// Reads events in seq order with <c>seq &gt; sinceSeqExclusive</c>.
     /// Used by recovery to replay past a snapshot, and by the EOD
     /// materialiser to walk a day's segment tree.
@@ -71,6 +92,11 @@ public interface IEventStoreHealth
 {
     bool IsHealthy { get; }
     Exception? TerminalFault { get; }
+    Guid WalGeneration => Guid.Empty;
+    long LastAdmittedSeq => 0;
+    long LastAppendedSeq => 0;
+    long LastLogFsyncedSeq => 0;
+    long LastCommittedSeq => 0;
 }
 
 public sealed class WalBackpressureException : Exception
@@ -82,4 +108,16 @@ public sealed class WalFaultedException : IOException
 {
     public WalFaultedException(string message, Exception innerException)
         : base(message, innerException) { }
+}
+
+public class WalRecoveryException : IOException
+{
+    public WalRecoveryException(string message) : base(message) { }
+    public WalRecoveryException(string message, Exception innerException)
+        : base(message, innerException) { }
+}
+
+public sealed class WalLegacyMigrationRequiredException : WalRecoveryException
+{
+    public WalLegacyMigrationRequiredException(string message) : base(message) { }
 }

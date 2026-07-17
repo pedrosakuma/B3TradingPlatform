@@ -95,6 +95,11 @@ public static class HealthEndpoints
                     snapshotInterval = p.SnapshotInterval,
                     healthy = wal.IsHealthy,
                     terminalFault = wal.TerminalFault?.GetType().Name,
+                    walGeneration = wal.WalGeneration,
+                    lastAdmittedSeq = wal.LastAdmittedSeq,
+                    lastAppendedSeq = wal.LastAppendedSeq,
+                    lastLogFsyncedSeq = wal.LastLogFsyncedSeq,
+                    lastCommittedSeq = wal.LastCommittedSeq,
                 },
                 identityDirectory = new
                 {

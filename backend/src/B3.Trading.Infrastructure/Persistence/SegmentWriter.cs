@@ -41,6 +41,7 @@ internal sealed class SegmentWriter : IAsyncDisposable
     private readonly int _indexEveryNRecords;
     private readonly int _indexEveryNBytes;
     private readonly bool _fsyncOnFlush;
+    private readonly Guid _generation;
 
     private long _bytesAtLastIndex;
     private int _recordsSinceIndex;
@@ -57,6 +58,17 @@ internal sealed class SegmentWriter : IAsyncDisposable
     internal long IndexFlushCount;
 
     public SegmentWriter(string logPath, string idxPath, int indexEveryNRecords, int indexEveryNBytes, bool fsyncOnFlush)
+        : this(logPath, idxPath, indexEveryNRecords, indexEveryNBytes, fsyncOnFlush, Guid.Empty)
+    {
+    }
+
+    public SegmentWriter(
+        string logPath,
+        string idxPath,
+        int indexEveryNRecords,
+        int indexEveryNBytes,
+        bool fsyncOnFlush,
+        Guid generation)
     {
         _log = new FileStream(logPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.Read, bufferSize: 8192);
         _log.Seek(0, SeekOrigin.End);
@@ -66,6 +78,7 @@ internal sealed class SegmentWriter : IAsyncDisposable
         _indexEveryNRecords = indexEveryNRecords;
         _indexEveryNBytes = indexEveryNBytes;
         _fsyncOnFlush = fsyncOnFlush;
+        _generation = generation;
         _bytesAtLastIndex = _log.Length;
         // If the segment is being reopened mid-write (recovery / second
         // pass within the same day-dir) and a sidecar already exists,
@@ -74,6 +87,8 @@ internal sealed class SegmentWriter : IAsyncDisposable
     }
 
     public long BytesWritten => _log.Length;
+    public long EndOffset => _log.Position;
+    public string LogPath => _logPath;
 
     public void Append(long seq, ReadOnlySpan<byte> payload, long timestampMs)
     {
@@ -114,16 +129,15 @@ internal sealed class SegmentWriter : IAsyncDisposable
 
     private void WriteFirstSeqSidecar(long firstSeq)
     {
-        // Atomic-ish: write to a temp file then move into place. The
-        // sidecar is only ever read by EnumerateAllRecords for
-        // segment ordering — a missing sidecar falls back to the
-        // legacy count-based path, so a torn write here can't make
-        // the WAL unreadable, only fall back to legacy ordering.
+        // Write to a sibling staging file, fsync it when required, then
+        // atomically publish. FileEventStore fsyncs the containing
+        // directory before advancing the commit marker.
         var sidecar = _logPath + FirstSeqSidecarSuffix;
         var tmp = sidecar + ".tmp";
-        Span<byte> bytes = stackalloc byte[8];
-        BinaryPrimitives.WriteInt64LittleEndian(bytes, firstSeq);
-        using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 8))
+        var bytes = _generation == Guid.Empty
+            ? LegacyFirstSeq(firstSeq)
+            : SegmentMetadata.Encode(_generation, firstSeq);
+        using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: bytes.Length))
         {
             fs.Write(bytes);
             if (_fsyncOnFlush) fs.Flush(flushToDisk: true);
@@ -163,8 +177,27 @@ internal sealed class SegmentWriter : IAsyncDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        try { Flush(); } catch { /* best-effort on dispose */ }
-        await _log.DisposeAsync();
-        await _idx.DisposeAsync();
+        try
+        {
+            Flush();
+        }
+        finally
+        {
+            try
+            {
+                await _log.DisposeAsync();
+            }
+            finally
+            {
+                await _idx.DisposeAsync();
+            }
+        }
+    }
+
+    private static byte[] LegacyFirstSeq(long firstSeq)
+    {
+        var bytes = new byte[8];
+        BinaryPrimitives.WriteInt64LittleEndian(bytes, firstSeq);
+        return bytes;
     }
 }
