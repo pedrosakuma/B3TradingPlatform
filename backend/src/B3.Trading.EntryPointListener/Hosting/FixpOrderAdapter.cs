@@ -322,7 +322,7 @@ internal sealed class FixpOrderAdapter
             OrderCancelResultKind.Conflict => RejectReason.BadRequest,
             OrderCancelResultKind.WalBackpressure => RejectReason.WalBackpressure,
             OrderCancelResultKind.GatewayFailed => RejectReason.GatewayFailed,
-            OrderCancelResultKind.ReconciliationRequired => RejectReason.WalBackpressure,
+            OrderCancelResultKind.ReconciliationRequired => RejectReason.ReconciliationRequired,
             _ => RejectReason.BadRequest,
         };
 

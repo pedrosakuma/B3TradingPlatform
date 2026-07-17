@@ -84,6 +84,62 @@ public class FixpOrderAdapterFailClosedTests
         Assert.False(reader.TryReadFrame(out _));
     }
 
+    [Fact]
+    public async Task CancelReconciliationRequired_UsesDedicatedRejectReason()
+    {
+        var credentialId = Guid.NewGuid();
+        const ulong externalCancelClOrdId = 78;
+        const ulong externalOrigClOrdId = 77;
+        const ulong internalOrigClOrdId = 100;
+        const ulong securityId = 4321;
+        var mappings = new InMemoryUserBotOrderMappingRegistry();
+        mappings.RegisterOrderInternal(internalOrigClOrdId, credentialId, externalOrigClOrdId);
+        var drain = new TestDrainController();
+        drain.BeginDrain("test");
+        var cancel = new OrderCancelService(
+            new ClOrdIdPrefixRegistry(),
+            new OrderOwnershipMap(),
+            new WorkingOrderBook(),
+            new ThrowingGateway(),
+            new EventDispatcher(new SyntheticTerminalRejectingStore()),
+            NullLogger<OrderCancelService>.Instance,
+            botMappings: mappings,
+            reconciliationDrain: drain);
+        var symbols = new SymbolDirectory(new SymbolDirectoryOptions
+        {
+            SecurityIds = new Dictionary<string, ulong> { ["PETR4"] = securityId },
+        });
+        var adapter = new FixpOrderAdapter(
+            symbols,
+            submit: null!,
+            cancel,
+            mappings,
+            NullLogger.Instance);
+        var scope = new FixpConnectionScope(
+            "conn-1",
+            new BotSessionPrincipal("alice", credentialId, "cred-1", "bot", "FIRM-A"),
+            new BotSessionState(credentialId, SessionId: 10, CurrentVer: 2, LastCheckpointedOutboundSeq: 0));
+        var decoded = new DecodedOrderCancelRequest
+        {
+            MsgSeqNum = 2,
+            ClOrdId = externalCancelClOrdId,
+            OrigClOrdId = externalOrigClOrdId,
+            SecurityId = securityId,
+            Side = Side.BUY,
+        };
+        await using var stream = new MemoryStream();
+
+        await adapter.HandleOrderCancelRequestAsync(
+            stream, decoded, scope, CancellationToken.None);
+
+        var reader = new SofhFrameReader();
+        reader.Append(stream.ToArray());
+        Assert.True(reader.TryReadFrame(out var frame));
+        Assert.Equal((ushort)ExecutionReport_RejectData.MESSAGE_ID, frame.TemplateId);
+        Assert.Equal(1011u, BinaryPrimitives.ReadUInt32LittleEndian(frame.Payload[44..]));
+        Assert.False(reader.TryReadFrame(out _));
+    }
+
     private sealed class SyntheticTerminalRejectingStore : IEventStore
     {
         private long _seq;

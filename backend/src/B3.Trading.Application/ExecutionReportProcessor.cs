@@ -46,6 +46,7 @@ public sealed class ExecutionReportProcessor
     private readonly PendingCancelRegistry? _pendingCancels;
     private readonly Risk.IReplaceMarginCoordinator? _replaceMargin;
     private readonly IBotErRouter? _botErRouter;
+    private readonly IUserBotOrderMappingRegistry? _botMappings;
     private readonly Scheduling.GtdExpirationScheduler? _gtdScheduler;
     private readonly Scheduling.IocFokWatchdog? _iocWatchdog;
     private readonly FillProjection? _fillProjection;
@@ -71,7 +72,8 @@ public sealed class ExecutionReportProcessor
         SubAccountPnlKeeper? subAccountPnl = null,
         FillProjection? fillProjection = null,
         Scheduling.IocFokWatchdog? iocWatchdog = null,
-        PendingCancelRegistry? pendingCancels = null)
+        PendingCancelRegistry? pendingCancels = null,
+        IUserBotOrderMappingRegistry? botMappings = null)
     {
         _ownership = ownership;
         _orders = orders;
@@ -94,6 +96,7 @@ public sealed class ExecutionReportProcessor
         _fillProjection = fillProjection;
         _iocWatchdog = iocWatchdog;
         _pendingCancels = pendingCancels;
+        _botMappings = botMappings;
     }
 
     /// <summary>
@@ -256,6 +259,8 @@ public sealed class ExecutionReportProcessor
             && rejectedCancelOrder is not null
             && _pendingCancels.TryConsumeByCancel(clOrdId, out _))
         {
+            _ownership.RemoveCancelLink(clOrdId);
+            _botMappings?.ReapCancel(clOrdId);
             var cancelRejected = new ExecutionEvent(
                 rejectedCancelOrder.Owner,
                 clOrdId,

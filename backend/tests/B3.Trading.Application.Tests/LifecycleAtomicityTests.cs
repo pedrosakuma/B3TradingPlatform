@@ -1432,7 +1432,13 @@ public sealed class LifecycleAtomicityTests
     {
         var pending = new PendingCancelRegistry();
         Assert.True(pending.TryAdd(100, 200));
-        var recovered = BuildRecoveryState(pendingCancels: pending);
+        var botMappings = new InMemoryUserBotOrderMappingRegistry();
+        var credentialId = Guid.NewGuid();
+        botMappings.RegisterCancelInternal(200, 100, credentialId, 300);
+        var recovered = BuildRecoveryState(
+            pendingCancels: pending,
+            botMappings: botMappings);
+        recovered.Ownership.RegisterCancelLink(200, 100);
 
         recovered.Replayer.Apply(new ExecutionReportReceivedEvent
         {
@@ -1450,6 +1456,8 @@ public sealed class LifecycleAtomicityTests
         Assert.True(recovered.Book.TryGet(100, out var order));
         Assert.Equal(OrderStatus.Working, order!.Status);
         Assert.Equal(0, pending.CountForTesting);
+        Assert.False(recovered.Ownership.TryResolveOrig(200, out _));
+        Assert.False(botMappings.TryGetCancelMapping(200, out _));
     }
 
     [Fact]
@@ -1544,7 +1552,9 @@ public sealed class LifecycleAtomicityTests
             NullLogger<OrderCancelService>.Instance, pendingCancels: pending);
     }
 
-    private static RecoveryHarness BuildRecoveryState(PendingCancelRegistry? pendingCancels = null)
+    private static RecoveryHarness BuildRecoveryState(
+        PendingCancelRegistry? pendingCancels = null,
+        IUserBotOrderMappingRegistry? botMappings = null)
     {
         pendingCancels ??= new PendingCancelRegistry();
         var ownership = new OrderOwnershipMap();
@@ -1559,7 +1569,7 @@ public sealed class LifecycleAtomicityTests
             ownership, book, new PositionKeeper(), new RecordingSink(),
             new NoOpMarginProvider(), NullLogger<ExecutionReportProcessor>.Instance,
             replacements: replacements, replaceMargin: margin,
-            pendingCancels: pendingCancels);
+            pendingCancels: pendingCancels, botMappings: botMappings);
         var replayer = new EventReplayer(
             book, ownership, new KillSwitchService(), new SymbolHaltService(),
             new SessionPhaseService(), processor, new AlgoBook(), clOrdIds,
