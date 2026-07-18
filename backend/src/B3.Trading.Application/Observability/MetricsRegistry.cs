@@ -793,6 +793,8 @@ public static class MetricsRegistry
         Meter.CreateCounter<long>("trading.entrypoint.translation_errors");
     public static readonly Counter<long> EntryPointBusinessRejects =
         Meter.CreateCounter<long>("trading.entrypoint.business_rejects");
+    public static readonly Counter<long> OutboundUnmatchedVenueEvidence =
+        Meter.CreateCounter<long>("trading.outbound.unmatched_venue_evidence_total");
     public static readonly Counter<long> EntryPointTerminated =
         Meter.CreateCounter<long>("trading.entrypoint.terminated");
 

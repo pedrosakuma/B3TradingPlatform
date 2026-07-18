@@ -356,6 +356,7 @@ public sealed class OutboundLedgerSnapshot
     public bool LegacyMigrationCompleted { get; init; }
     public List<B3.Trading.Application.Outbound.OutboundMutationSnapshot> Mutations { get; init; } = new();
     public List<B3.Trading.Application.Outbound.OutboundCorrelationTombstone> CorrelationTombstones { get; init; } = new();
+    public List<B3.Trading.Application.Outbound.InboundVenueEvidenceSnapshot> InboundEvidence { get; init; } = new();
 }
 
 /// <summary>

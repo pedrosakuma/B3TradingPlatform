@@ -235,7 +235,10 @@ public class EntryPointGatewayAndRouterTests
             RejectReason: 3,
             Text: "Unknown SecurityID",
             SeqNum: 5000UL,
-            SendingTime: sendingTime));
+            SendingTime: sendingTime,
+            SessionId: 11,
+            SessionVerId: 7,
+            PossibleResend: true));
 
         var (_, evt) = Assert.Single(store.Recorded);
         var br = Assert.IsType<BusinessRejectReceivedEvent>(evt);
@@ -245,6 +248,10 @@ public class EntryPointGatewayAndRouterTests
         Assert.Equal("Unknown SecurityID", br.Text);
         Assert.Equal(5000UL, br.SeqNum);
         Assert.Equal(sendingTime, br.SendingTime);
+        Assert.Equal(11UL, br.SessionId);
+        Assert.Equal(7U, br.SessionVerId);
+        Assert.True(br.PossibleResend);
+        Assert.True(store.Flushed);
 
         // BR is replay-inert — it must not touch order state.
         Assert.Empty(sink.Events);
@@ -311,10 +318,48 @@ public class EntryPointGatewayAndRouterTests
         Assert.Empty(sink.Events);
     }
 
+    [Fact]
+    public void Router_OnNotApplied_CommitsFullIdentityBeforeReturning()
+    {
+        var proc = new ExecutionReportProcessor(
+            new OrderOwnershipMap(),
+            new WorkingOrderBook(),
+            new PositionKeeper(),
+            new TestSink(),
+            new NoOpMarginProvider(),
+            NullLogger<ExecutionReportProcessor>.Instance);
+        var client = new MockEntryPointClient();
+        var store = new BrRecordingStore();
+        using var router = new EntryPointExecutionReportRouter(
+            client,
+            proc,
+            new EventDispatcher(store));
+        var observedAt = new DateTimeOffset(2026, 7, 18, 13, 0, 0, TimeSpan.Zero);
+
+        client.EmitNotApplied(new NotAppliedEnvelope(
+            "FIRM-A",
+            SessionId: 11,
+            SessionVerId: 7,
+            FromSeqNo: ulong.MaxValue - 1,
+            Count: 2,
+            ObservedAtUtc: observedAt));
+
+        var (_, evt) = Assert.Single(store.Recorded);
+        var notApplied = Assert.IsType<NotAppliedReceivedEvent>(evt);
+        Assert.Equal("FIRM-A", notApplied.FirmId);
+        Assert.Equal(11UL, notApplied.SessionId);
+        Assert.Equal(7U, notApplied.SessionVerId);
+        Assert.Equal(ulong.MaxValue - 1, notApplied.FromSeqNo);
+        Assert.Equal(2U, notApplied.Count);
+        Assert.Equal(observedAt, notApplied.ObservedAtUtc);
+        Assert.True(store.Flushed);
+    }
+
     private sealed class BrRecordingStore : IEventStore
     {
         public System.Collections.Concurrent.ConcurrentQueue<(long Seq, WalEvent Event)> Recorded { get; } = new();
         private long _seq;
+        public bool Flushed { get; private set; }
         public long CurrentSeq => Interlocked.Read(ref _seq);
         public long Append(WalEvent evt)
         {
@@ -323,7 +368,11 @@ public class EntryPointGatewayAndRouterTests
             return s;
         }
         public long Append(WalEvent evt, ReadOnlyMemory<byte> _) => Append(evt);
-        public ValueTask FlushAsync(CancellationToken ct = default) => ValueTask.CompletedTask;
+        public ValueTask FlushAsync(CancellationToken ct = default)
+        {
+            Flushed = true;
+            return ValueTask.CompletedTask;
+        }
         public async System.Collections.Generic.IAsyncEnumerable<(long Seq, WalEvent Event)> ReadFromAsync(
             long sinceSeqExclusive, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
         {

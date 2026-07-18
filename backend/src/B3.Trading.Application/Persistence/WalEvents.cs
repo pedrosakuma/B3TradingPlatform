@@ -61,6 +61,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(SubAccountDeactivatedEvent), "sub-account.deactivated")]
 [JsonDerivedType(typeof(AuditLogEvent), "audit.log")]
 [JsonDerivedType(typeof(BusinessRejectReceivedEvent), "business-reject.received")]
+[JsonDerivedType(typeof(NotAppliedReceivedEvent), "not-applied.received")]
 [JsonDerivedType(typeof(OutboundApprovedEvent), "outbound.approved")]
 [JsonDerivedType(typeof(OutboundAttemptIntentPreparedEvent), "outbound.attempt-intent-prepared")]
 [JsonDerivedType(typeof(OutboundFramePreparedEvent), "outbound.frame-prepared")]
@@ -1365,4 +1366,19 @@ public sealed record BusinessRejectReceivedEvent : WalEvent
     public ulong? SessionId { get; init; }
     public uint? SessionVerId { get; init; }
     public bool PossibleResend { get; init; }
+}
+
+/// <summary>
+/// Records a venue FIXP <c>NotApplied</c> half-open outbound sequence range.
+/// This is session-scoped negative evidence and never authorises automatic
+/// resend by itself.
+/// </summary>
+public sealed record NotAppliedReceivedEvent : WalEvent
+{
+    public required string FirmId { get; init; }
+    public required ulong SessionId { get; init; }
+    public required uint SessionVerId { get; init; }
+    public required ulong FromSeqNo { get; init; }
+    public required uint Count { get; init; }
+    public required DateTimeOffset ObservedAtUtc { get; init; }
 }

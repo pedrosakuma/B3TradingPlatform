@@ -94,6 +94,37 @@ public enum OutboundAmbiguityReason
     UndecryptableCommandEnvelope,
     UnsupportedCommandVersion,
     ConflictingVenueEvidence,
+    NotAppliedEvidence,
+}
+
+public enum InboundVenueEvidenceKind
+{
+    ExecutionReport,
+    BusinessReject,
+    NotApplied,
+}
+
+public enum InboundVenueEvidenceDisposition
+{
+    Matched,
+    Unmatched,
+    Conflicting,
+}
+
+public enum InboundVenueEvidenceApplyStatus
+{
+    RecordedMatched,
+    RecordedUnmatched,
+    RecordedConflicting,
+    Duplicate,
+}
+
+public readonly record struct InboundVenueEvidenceApplyResult(
+    InboundVenueEvidenceApplyStatus Status)
+{
+    public bool ShouldApplyDomain =>
+        Status is InboundVenueEvidenceApplyStatus.RecordedMatched
+            or InboundVenueEvidenceApplyStatus.RecordedUnmatched;
 }
 
 public enum OutboundOperatorDecision
@@ -264,6 +295,43 @@ public sealed record OutboundCorrelationTombstone
     public required bool Terminal { get; init; }
     public required DateTimeOffset RetainFromUtc { get; init; }
 }
+
+public sealed record InboundVenueEvidenceSnapshot
+{
+    public required string EvidenceId { get; init; }
+    public required InboundVenueEvidenceKind Kind { get; init; }
+    public required InboundVenueEvidenceDisposition Disposition { get; init; }
+    public required string FirmId { get; init; }
+    public ulong? SessionId { get; init; }
+    public uint? SessionVerId { get; init; }
+    public ulong? InboundSeqNum { get; init; }
+    public DateTimeOffset? SendingTime { get; init; }
+    public bool PossibleResend { get; init; }
+    public string? MessageKind { get; init; }
+    public ulong? ClOrdId { get; init; }
+    public ulong? OrigClOrdId { get; init; }
+    public ulong? VenueOrderId { get; init; }
+    public ulong? BusinessRejectRefSeqNum { get; init; }
+    public ulong? NotAppliedFromSeqNo { get; init; }
+    public uint? NotAppliedCount { get; init; }
+    public required DateTimeOffset ObservedAtUtc { get; init; }
+    public IReadOnlyList<OutboundMutationId> MatchedMutationIds { get; init; } =
+        Array.Empty<OutboundMutationId>();
+}
+
+public sealed record InboundVenueEvidenceDiagnostic(
+    string EvidenceId,
+    InboundVenueEvidenceKind Kind,
+    InboundVenueEvidenceDisposition Disposition,
+    string FirmId,
+    ulong? SessionId,
+    uint? SessionVerId,
+    ulong? InboundSeqNum,
+    ulong? BusinessRejectRefSeqNum,
+    ulong? NotAppliedFromSeqNo,
+    uint? NotAppliedCount,
+    DateTimeOffset ObservedAtUtc,
+    int MatchedMutationCount);
 
 public sealed record OutboundMutationDiagnostic(
     OutboundMutationId MutationId,

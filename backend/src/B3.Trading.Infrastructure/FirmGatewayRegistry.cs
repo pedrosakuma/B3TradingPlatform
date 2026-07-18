@@ -20,6 +20,7 @@ public sealed class FirmGatewayRegistry : IEntryPointClient, IFirmSessionStatusP
     private readonly Dictionary<string, B3EntryPointClientGateway> _gateways;
     private readonly Action<ExecutionReportEnvelope> _bridge;
     private readonly Action<BusinessRejectEnvelope> _brBridge;
+    private readonly Action<NotAppliedEnvelope> _notAppliedBridge;
 
     public FirmGatewayRegistry(IEnumerable<B3EntryPointClientGateway> gateways)
     {
@@ -28,10 +29,12 @@ public sealed class FirmGatewayRegistry : IEntryPointClient, IFirmSessionStatusP
             throw new InvalidOperationException("FirmGatewayRegistry requires at least one configured firm.");
         _bridge = e => ExecutionReportReceived?.Invoke(e);
         _brBridge = e => BusinessRejectReceived?.Invoke(e);
+        _notAppliedBridge = e => NotAppliedReceived?.Invoke(e);
         foreach (var g in _gateways.Values)
         {
             g.ExecutionReportReceived += _bridge;
             g.BusinessRejectReceived += _brBridge;
+            g.NotAppliedReceived += _notAppliedBridge;
         }
     }
 
@@ -74,6 +77,7 @@ public sealed class FirmGatewayRegistry : IEntryPointClient, IFirmSessionStatusP
 
     public event Action<ExecutionReportEnvelope>? ExecutionReportReceived;
     public event Action<BusinessRejectEnvelope>? BusinessRejectReceived;
+    public event Action<NotAppliedEnvelope>? NotAppliedReceived;
 
     // Submit-side surface unused — OrdersEndpoints injects IExchangeGateway,
     // which resolves to MultiFirmExchangeGateway (which dispatches by firmId).
@@ -90,6 +94,7 @@ public sealed class FirmGatewayRegistry : IEntryPointClient, IFirmSessionStatusP
         {
             g.ExecutionReportReceived -= _bridge;
             g.BusinessRejectReceived -= _brBridge;
+            g.NotAppliedReceived -= _notAppliedBridge;
         }
         foreach (var g in _gateways.Values)
             await g.DisposeAsync().ConfigureAwait(false);

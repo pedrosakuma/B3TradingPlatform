@@ -298,8 +298,9 @@ public sealed class OutboundMutationLedgerTests
             OwnerEndClientId: "sensitive-owner"));
 
         var mutation = Assert.Single(ledger.SnapshotMutations());
-        Assert.Equal(OutboundMutationState.VenueAcknowledged, mutation.State);
+        Assert.Equal(OutboundMutationState.ProvenUnsent, mutation.State);
         Assert.True(Assert.Single(ledger.SnapshotCorrelations()).Terminal);
+        Assert.Single(ledger.GetInboundEvidenceDiagnostics());
     }
 
     [Fact]
@@ -378,6 +379,33 @@ public sealed class OutboundMutationLedgerTests
             clOrdId: 2));
         AssertState(superseded, OutboundMutationState.Ambiguous);
         Assert.Null(superseded.Ledger.SnapshotMutations()[0].Resolution);
+    }
+
+    [Fact]
+    public void CancelAcknowledgement_MissingOrigClOrdIdUsesExactDirectAttempt()
+    {
+        var fixture = Fixture.Create();
+        fixture.Ledger.Apply(fixture.Approved with
+        {
+            MutationKind = OutboundMutationKind.Cancel,
+            OriginalClOrdId = 50,
+        });
+        fixture.Ledger.Apply(fixture.Intent);
+        fixture.Ledger.Apply(fixture.Frame);
+
+        var result = fixture.Ledger.ApplyVenueAcknowledgement(
+            Acknowledgement(
+                fixture,
+                firmId: "F1",
+                sessionId: 11,
+                sessionVerId: 2) with
+            {
+                ExecKind = "Canceled",
+                OrigClOrdId = 0,
+            });
+
+        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedMatched, result.Status);
+        AssertState(fixture, OutboundMutationState.VenueAcknowledged);
     }
 
     [Fact]
@@ -797,6 +825,343 @@ public sealed class OutboundMutationLedgerTests
             TimestampUtc = T0.AddMinutes(2),
         });
         AssertState(fixture, OutboundMutationState.VenueAcknowledged);
+    }
+
+    [Fact]
+    public void BusinessReject_CorrelatesOnlyExactFirmSessionVersionAndSequence()
+    {
+        var first = Fixture.Create(101);
+        var second = Fixture.Create(102);
+        var third = Fixture.Create(103);
+        var ledger = new OutboundMutationLedger(first.Protector);
+        ApplyPrepared(ledger, first, first.Frame with
+        {
+            FirmId = "F1",
+            SessionId = 11,
+            SessionVerId = 2,
+            OutboundSeqNum = 77,
+        });
+        ApplyPrepared(ledger, second, second.Frame with
+        {
+            FirmId = "F2",
+            SessionId = 11,
+            SessionVerId = 2,
+            OutboundSeqNum = 77,
+        }, approvedFirm: "F2");
+        ApplyPrepared(ledger, third, third.Frame with
+        {
+            FirmId = "F1",
+            SessionId = 12,
+            SessionVerId = 2,
+            OutboundSeqNum = 77,
+        });
+
+        var wrongVersion = BusinessReject("F1", 11, 3, refSeqNum: 77, inboundSeqNum: 90);
+        Assert.Equal(
+            InboundVenueEvidenceApplyStatus.RecordedUnmatched,
+            ledger.ApplyBusinessReject(wrongVersion).Status);
+        AssertState(ledger, first.MutationId, OutboundMutationState.FramePrepared);
+        AssertState(ledger, second.MutationId, OutboundMutationState.FramePrepared);
+        AssertState(ledger, third.MutationId, OutboundMutationState.FramePrepared);
+
+        Assert.Equal(
+            InboundVenueEvidenceApplyStatus.RecordedMatched,
+            ledger.ApplyBusinessReject(
+                BusinessReject("F1", 12, 2, refSeqNum: 77, inboundSeqNum: 91)).Status);
+        AssertState(ledger, first.MutationId, OutboundMutationState.FramePrepared);
+        AssertState(ledger, second.MutationId, OutboundMutationState.FramePrepared);
+        AssertState(ledger, third.MutationId, OutboundMutationState.VenueAcknowledged);
+
+        Assert.Equal(
+            InboundVenueEvidenceApplyStatus.RecordedMatched,
+            ledger.ApplyBusinessReject(
+                BusinessReject("F2", 11, 2, refSeqNum: 77, inboundSeqNum: 92)).Status);
+        AssertState(ledger, first.MutationId, OutboundMutationState.FramePrepared);
+        AssertState(ledger, second.MutationId, OutboundMutationState.VenueAcknowledged);
+    }
+
+    [Fact]
+    public void BusinessReject_MissingIdentityRemainsUnmatchedAndDoesNotUseText()
+    {
+        var fixture = Fixture.Create();
+        ApplyPrepared(fixture.Ledger, fixture, fixture.Frame);
+
+        var result = fixture.Ledger.ApplyBusinessReject(new BusinessRejectReceivedEvent
+        {
+            FirmId = "F1",
+            RefSeqNum = 77,
+            RejectReason = 3,
+            Text = $"pretend clOrdId={fixture.ClOrdId}",
+            SeqNum = 90,
+            SendingTime = T0,
+            TimestampUtc = T0,
+        });
+
+        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedUnmatched, result.Status);
+        AssertState(fixture, OutboundMutationState.FramePrepared);
+        Assert.Equal(1, fixture.Ledger.InboundEvidenceCount);
+    }
+
+    [Fact]
+    public void NotApplied_UsesOverflowSafeHalfOpenRange_AndNeverAutoResends()
+    {
+        var fixture = Fixture.Create();
+        ApplyPrepared(fixture.Ledger, fixture, fixture.Frame with
+        {
+            OutboundSeqNum = ulong.MaxValue,
+        });
+
+        var result = fixture.Ledger.ApplyNotApplied(new NotAppliedReceivedEvent
+        {
+            FirmId = "F1",
+            SessionId = 11,
+            SessionVerId = 2,
+            FromSeqNo = ulong.MaxValue - 1,
+            Count = 2,
+            ObservedAtUtc = T0.AddMinutes(1),
+            TimestampUtc = T0.AddMinutes(1),
+        });
+
+        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedMatched, result.Status);
+        AssertState(fixture, OutboundMutationState.Ambiguous);
+        Assert.Equal(1, fixture.Ledger.ReadinessBlockingCount);
+        Assert.Equal(
+            OutboundAmbiguityReason.NotAppliedEvidence,
+            Assert.Single(fixture.Ledger.SnapshotMutations()).Attempts[^1].AmbiguityReason);
+        Assert.Equal(
+            InboundVenueEvidenceApplyStatus.Duplicate,
+            fixture.Ledger.ApplyNotApplied(new NotAppliedReceivedEvent
+            {
+                FirmId = "F1",
+                SessionId = 11,
+                SessionVerId = 2,
+                FromSeqNo = ulong.MaxValue - 1,
+                Count = 2,
+                ObservedAtUtc = T0.AddMinutes(2),
+                TimestampUtc = T0.AddMinutes(2),
+            }).Status);
+        Assert.Single(fixture.Ledger.GetInboundEvidenceDiagnostics());
+    }
+
+    [Fact]
+    public void NotApplied_ZeroCountIsBoundedUnmatchedEvidence()
+    {
+        var ledger = new OutboundMutationLedger();
+        var result = ledger.ApplyNotApplied(new NotAppliedReceivedEvent
+        {
+            FirmId = "F1",
+            SessionId = 11,
+            SessionVerId = 2,
+            FromSeqNo = ulong.MaxValue,
+            Count = 0,
+            ObservedAtUtc = T0,
+            TimestampUtc = T0,
+        });
+
+        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedUnmatched, result.Status);
+        Assert.Single(ledger.GetInboundEvidenceDiagnostics());
+    }
+
+    [Fact]
+    public void NotApplied_AfterExactVenueAcknowledgementIsConflictingAndFailClosed()
+    {
+        var fixture = Fixture.Create();
+        ApplyPrepared(fixture.Ledger, fixture, fixture.Frame);
+        fixture.Ledger.ApplyVenueAcknowledgement(Acknowledgement(
+            fixture,
+            firmId: "F1",
+            sessionId: 11,
+            sessionVerId: 2));
+
+        var result = fixture.Ledger.ApplyNotApplied(new NotAppliedReceivedEvent
+        {
+            FirmId = "F1",
+            SessionId = 11,
+            SessionVerId = 2,
+            FromSeqNo = 77,
+            Count = 1,
+            ObservedAtUtc = T0.AddMinutes(1),
+            TimestampUtc = T0.AddMinutes(1),
+        });
+
+        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedConflicting, result.Status);
+        AssertState(fixture, OutboundMutationState.VenueAcknowledged);
+        Assert.Equal(1, fixture.Ledger.ReadinessBlockingCount);
+    }
+
+    [Fact]
+    public void ExecutionReport_DuplicatePossResendAndConflictingSameIdentityAreMonotonic()
+    {
+        var fixture = Fixture.Create();
+        ApplyPrepared(fixture.Ledger, fixture, fixture.Frame);
+        var acknowledgement = Acknowledgement(
+            fixture,
+            firmId: "F1",
+            sessionId: 11,
+            sessionVerId: 2) with
+        {
+            InboundSeqNum = 92,
+            PossibleResend = false,
+        };
+
+        Assert.Equal(
+            InboundVenueEvidenceApplyStatus.RecordedMatched,
+            fixture.Ledger.ApplyVenueAcknowledgement(acknowledgement).Status);
+        Assert.Equal(
+            InboundVenueEvidenceApplyStatus.Duplicate,
+            fixture.Ledger.ApplyVenueAcknowledgement(
+                acknowledgement with { PossibleResend = true }).Status);
+        Assert.Equal(
+            InboundVenueEvidenceApplyStatus.RecordedConflicting,
+            fixture.Ledger.ApplyVenueAcknowledgement(
+                acknowledgement with { CumulativeQuantity = 9 }).Status);
+
+        AssertState(fixture, OutboundMutationState.VenueAcknowledged);
+        Assert.Equal(2, fixture.Ledger.InboundEvidenceCount);
+        Assert.Contains(
+            fixture.Ledger.CaptureSnapshot().InboundEvidence,
+            evidence => evidence.Disposition == InboundVenueEvidenceDisposition.Matched
+                && evidence.PossibleResend);
+    }
+
+    [Fact]
+    public void EventReplayer_ConflictingSameIdentityDoesNotDoubleBookDomainState()
+    {
+        var fixture = Fixture.Create();
+        var ownership = new OrderOwnershipMap();
+        var orders = new WorkingOrderBook();
+        var positions = new PositionKeeper();
+        var clOrdIds = new ClOrdIdPrefixRegistry();
+        var processor = new ExecutionReportProcessor(
+            ownership,
+            orders,
+            positions,
+            new NoOpExecutionEventSink(),
+            new NoOpMarginProvider(),
+            NullLogger<ExecutionReportProcessor>.Instance);
+        var replayer = new EventReplayer(
+            orders,
+            ownership,
+            new KillSwitchService(),
+            new SymbolHaltService(),
+            new SessionPhaseService(),
+            processor,
+            new AlgoBook(),
+            clOrdIds,
+            new AlgoIdRegistry(),
+            outboundLedger: fixture.Ledger);
+        replayer.Apply(LegacySubmit(fixture.ClOrdId));
+        replayer.Apply(fixture.Approved);
+        replayer.Apply(fixture.Intent);
+        replayer.Apply(fixture.Frame);
+        var first = Acknowledgement(
+            fixture,
+            firmId: "F1",
+            sessionId: 11,
+            sessionVerId: 2) with
+        {
+            ExecKind = "PartialFill",
+            LeavesQuantity = 5,
+            CumulativeQuantity = 5,
+            LastQuantity = 5,
+            LastPrice = 30m,
+            InboundSeqNum = 92,
+        };
+        replayer.Apply(first);
+        replayer.Apply(first with
+        {
+            ClOrdId = 999,
+            OrigClOrdId = fixture.ClOrdId,
+            LeavesQuantity = 0,
+            CumulativeQuantity = 10,
+            LastQuantity = 5,
+            LastPrice = 31m,
+        });
+
+        Assert.True(orders.TryGet(fixture.ClOrdId, out var order));
+        Assert.NotNull(order);
+        Assert.Equal(5, order.CumulativeQuantity);
+        Assert.Equal(
+            5,
+            Assert.Single(positions.ForEndClientAndFirm(
+                "F1",
+                new EndClientId("sensitive-owner"))).NetQuantity);
+        Assert.Equal(
+            1,
+            Assert.Single(
+                clOrdIds.Snapshot().Counters,
+                counter => counter.EndClientId == "sensitive-owner").Counter);
+        Assert.All(clOrdIds.Snapshot().Counters, counter => Assert.Equal(1, counter.Counter));
+        Assert.Equal(1, fixture.Ledger.ReadinessBlockingCount);
+    }
+
+    [Fact]
+    public void EvidenceSnapshot_RestoresUnmatchedDiagnosticsWithoutSensitivePayloads()
+    {
+        var ledger = new OutboundMutationLedger();
+        for (ulong i = 1; i <= OutboundMutationLedger.MaxRetainedUnmatchedEvidence + 1UL; i++)
+        {
+            ledger.ApplyBusinessReject(new BusinessRejectReceivedEvent
+            {
+                FirmId = "F1",
+                SessionId = 11,
+                SessionVerId = 2,
+                RefSeqNum = i,
+                RejectReason = 3,
+                Text = "account=SECRET investor=SECRET",
+                SeqNum = i,
+                SendingTime = T0,
+                TimestampUtc = T0.AddTicks((long)i),
+            });
+        }
+
+        Assert.Equal(
+            OutboundMutationLedger.MaxRetainedUnmatchedEvidence,
+            ledger.InboundEvidenceCount);
+        var snapshot = ledger.CaptureSnapshot();
+        var restored = new OutboundMutationLedger();
+        restored.Restore(
+            snapshot.Mutations,
+            snapshot.Correlations,
+            snapshot.InboundEvidence);
+
+        var diagnostics = restored.GetInboundEvidenceDiagnostics(
+            OutboundMutationLedger.MaxEvidenceDiagnostics);
+        Assert.Equal(OutboundMutationLedger.MaxEvidenceDiagnostics, diagnostics.Count);
+        var json = JsonSerializer.Serialize(diagnostics);
+        Assert.DoesNotContain("SECRET", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("account", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("investor", json, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void CommitBeforeApply_CrashWindowReplaysEvidenceDeterministically()
+    {
+        var fixture = Fixture.Create();
+        ApplyPrepared(fixture.Ledger, fixture, fixture.Frame);
+        var store = new CommitTrackingStore();
+        var dispatcher = new EventDispatcher(store);
+        var acknowledgement = Acknowledgement(
+            fixture,
+            firmId: "F1",
+            sessionId: 11,
+            sessionVerId: 2);
+
+        Assert.Throws<SimulatedCrashException>(() =>
+            dispatcher.DispatchCommitted(
+                acknowledgement,
+                () => throw new SimulatedCrashException()));
+        Assert.True(store.Flushed);
+        AssertState(fixture, OutboundMutationState.FramePrepared);
+
+        var recovered = new OutboundMutationLedger(fixture.Protector);
+        recovered.Apply(fixture.Approved);
+        recovered.Apply(fixture.Intent);
+        recovered.Apply(fixture.Frame);
+        recovered.ApplyVenueAcknowledgement(
+            Assert.IsType<ExecutionReportReceivedEvent>(Assert.Single(store.Events)));
+        AssertState(recovered, fixture.MutationId, OutboundMutationState.VenueAcknowledged);
+        Assert.Single(recovered.GetInboundEvidenceDiagnostics());
     }
 
     [Fact]
@@ -1416,6 +1781,7 @@ public sealed class OutboundMutationLedgerTests
                 LegacyMigrationCompleted = true,
                 Mutations = capture.Mutations.ToList(),
                 CorrelationTombstones = capture.Correlations.ToList(),
+                InboundEvidence = capture.InboundEvidence.ToList(),
             },
             ClOrdIds = new ClOrdIdRegistrySnapshot(),
         };
@@ -1731,6 +2097,7 @@ public sealed class OutboundMutationLedgerTests
                 LegacyMigrationCompleted = true,
                 Mutations = capture.Mutations.ToList(),
                 CorrelationTombstones = capture.Correlations.ToList(),
+                InboundEvidence = capture.InboundEvidence.ToList(),
             },
             ClOrdIds = new ClOrdIdRegistrySnapshot(),
         });
@@ -1860,6 +2227,79 @@ public sealed class OutboundMutationLedgerTests
             Func<TState, Exception?, string> formatter) =>
             Messages.Add(formatter(state, exception));
     }
+
+    private static void ApplyPrepared(
+        OutboundMutationLedger ledger,
+        Fixture fixture,
+        OutboundFramePreparedEvent frame,
+        string? approvedFirm = null)
+    {
+        ledger.Apply(approvedFirm is null
+            ? fixture.Approved
+            : fixture.Approved with { FirmId = approvedFirm });
+        ledger.Apply(fixture.Intent);
+        ledger.Apply(frame);
+    }
+
+    private static BusinessRejectReceivedEvent BusinessReject(
+        string firmId,
+        ulong sessionId,
+        uint sessionVerId,
+        ulong refSeqNum,
+        ulong inboundSeqNum) =>
+        new()
+        {
+            FirmId = firmId,
+            SessionId = sessionId,
+            SessionVerId = sessionVerId,
+            RefSeqNum = refSeqNum,
+            RejectReason = 3,
+            SeqNum = inboundSeqNum,
+            SendingTime = T0,
+            TimestampUtc = T0,
+        };
+
+    private static void AssertState(
+        OutboundMutationLedger ledger,
+        OutboundMutationId mutationId,
+        OutboundMutationState expected)
+    {
+        Assert.True(ledger.TryGet(mutationId, out var mutation));
+        Assert.Equal(expected, mutation!.State);
+    }
+
+    private sealed class CommitTrackingStore : IEventStore
+    {
+        private long _seq;
+        public List<WalEvent> Events { get; } = new();
+        public bool Flushed { get; private set; }
+        public long CurrentSeq => _seq;
+        public long Append(WalEvent evt)
+        {
+            Events.Add(evt);
+            return ++_seq;
+        }
+        public long Append(WalEvent evt, ReadOnlyMemory<byte> payload) => Append(evt);
+        public ValueTask FlushAsync(CancellationToken ct = default)
+        {
+            Flushed = true;
+            return ValueTask.CompletedTask;
+        }
+        public async IAsyncEnumerable<(long Seq, WalEvent Event)> ReadFromAsync(
+            long sinceSeqExclusive,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+        {
+            await Task.CompletedTask;
+            for (var i = 0; i < Events.Count; i++)
+            {
+                if (i + 1 > sinceSeqExclusive)
+                    yield return (i + 1, Events[i]);
+            }
+        }
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class SimulatedCrashException : Exception;
 
     private sealed class Fixture
     {

@@ -42,6 +42,7 @@ public sealed class MockEntryPointClient : IEntryPointClient
 
     public event Action<ExecutionReportEnvelope>? ExecutionReportReceived;
     public event Action<BusinessRejectEnvelope>? BusinessRejectReceived;
+    public event Action<NotAppliedEnvelope>? NotAppliedReceived;
 
     public Task SubmitNewOrderAsync(NewOrderSingle request, CancellationToken cancellationToken)
     {
@@ -125,4 +126,7 @@ public sealed class MockEntryPointClient : IEntryPointClient
     /// </summary>
     public void EmitBusinessReject(BusinessRejectEnvelope reject) =>
         BusinessRejectReceived?.Invoke(reject);
+
+    public void EmitNotApplied(NotAppliedEnvelope notApplied) =>
+        NotAppliedReceived?.Invoke(notApplied);
 }

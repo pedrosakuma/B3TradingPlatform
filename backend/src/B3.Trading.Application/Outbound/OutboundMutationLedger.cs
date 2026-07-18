@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Globalization;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Domain;
 
@@ -20,6 +21,8 @@ namespace B3.Trading.Application.Outbound;
 public sealed class OutboundMutationLedger
 {
     public const int MaxOutboundAttempts = 2;
+    public const int MaxRetainedUnmatchedEvidence = 1024;
+    public const int MaxEvidenceDiagnostics = 256;
     public static readonly TimeSpan DefaultTerminalCorrelationRetention = TimeSpan.FromDays(30);
 
     private readonly object _gate = new();
@@ -27,6 +30,11 @@ public sealed class OutboundMutationLedger
     private readonly Dictionary<ulong, OutboundMutationId> _byClOrdId = new();
     private readonly Dictionary<FrameKey, OutboundMutationId> _byFrame = new();
     private readonly Dictionary<ulong, OutboundCorrelationTombstone> _correlations = new();
+    private readonly Dictionary<string, InboundVenueEvidenceSnapshot> _inboundEvidence =
+        new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _inboundEvidenceIdentity =
+        new(StringComparer.Ordinal);
+    private readonly Queue<string> _unmatchedEvidenceOrder = new();
     private readonly IOutboundCommandProtector? _protector;
     private bool _legacyMigrationCompleted;
 
@@ -45,8 +53,16 @@ public sealed class OutboundMutationLedger
         get
         {
             lock (_gate)
-                return _mutations.Values.Count(IsReadinessBlocking);
+                return _mutations.Values.Count(IsReadinessBlocking)
+                    + _inboundEvidence.Values.Count(e =>
+                        e.Disposition != InboundVenueEvidenceDisposition.Matched
+                        && e.MatchedMutationIds.Count == 0);
         }
+    }
+
+    public int InboundEvidenceCount
+    {
+        get { lock (_gate) return _inboundEvidence.Count; }
     }
 
     public bool LegacyMigrationCompleted
@@ -330,11 +346,25 @@ public sealed class OutboundMutationLedger
         }
     }
 
-    public void ApplyVenueAcknowledgement(ExecutionReportReceivedEvent evt)
+    public InboundVenueEvidenceApplyResult ApplyVenueAcknowledgement(
+        ExecutionReportReceivedEvent evt)
     {
         ArgumentNullException.ThrowIfNull(evt);
+        var evidenceId = ExecutionReportEvidenceId(evt);
+        var evidenceIdentity = ExecutionReportEvidenceIdentity(evt, evidenceId);
         lock (_gate)
         {
+            var identityConflict = TryGetExistingEvidenceUnsafe(
+                evidenceIdentity,
+                evidenceId,
+                out var duplicate);
+            if (duplicate)
+            {
+                if (evt.PossibleResend)
+                    PromotePossibleResendUnsafe(evidenceId);
+                return new(InboundVenueEvidenceApplyStatus.Duplicate);
+            }
+
             var direct = default(OutboundMutationId);
             var hasDirect = evt.ClOrdId != 0
                 && _byClOrdId.TryGetValue(evt.ClOrdId, out direct);
@@ -342,10 +372,42 @@ public sealed class OutboundMutationLedger
             var hasOriginal = evt.OrigClOrdId != 0
                 && _byClOrdId.TryGetValue(evt.OrigClOrdId, out original);
             var id = hasDirect ? direct : hasOriginal ? original : default;
+            if (identityConflict)
+            {
+                OutboundMutationId[] matchedIds = [];
+                if (id.Value != Guid.Empty
+                    && _mutations.TryGetValue(id, out var conflictingMutation))
+                {
+                    if (!IsTerminal(conflictingMutation.State))
+                    {
+                        MarkConflictingVenueEvidence(
+                            conflictingMutation,
+                            evt.ClOrdId,
+                            evt.TimestampUtc);
+                    }
+                    else
+                    {
+                        MarkTerminalEvidenceConflict(conflictingMutation);
+                    }
+                    matchedIds = [id];
+                }
+                AddInboundEvidenceUnsafe(
+                    CreateExecutionReportEvidence(
+                        evt,
+                        evidenceId,
+                        InboundVenueEvidenceDisposition.Conflicting,
+                        matchedIds),
+                    evidenceIdentity);
+                return new(InboundVenueEvidenceApplyStatus.RecordedConflicting);
+            }
             if (id.Value == Guid.Empty || !_mutations.TryGetValue(id, out var mutation))
-                return;
-            if (IsTerminal(mutation.State))
-                return;
+            {
+                AddInboundEvidenceUnsafe(
+                    CreateExecutionReportEvidence(
+                        evt, evidenceId, InboundVenueEvidenceDisposition.Unmatched, []),
+                    evidenceIdentity);
+                return new(InboundVenueEvidenceApplyStatus.RecordedUnmatched);
+            }
             if (evt.Synthetic)
             {
                 if (hasDirect
@@ -360,37 +422,28 @@ public sealed class OutboundMutationLedger
                         DigestEvidence($"{evt.ClOrdId}|{evt.ExecKind}|{evt.RejectReason}"),
                         venueOrderId: null);
                 }
-                return;
+                return new(InboundVenueEvidenceApplyStatus.RecordedUnmatched);
             }
 
             if (mutation.Approval is null)
             {
-                if (!hasDirect
-                    || string.IsNullOrWhiteSpace(mutation.FirmId)
-                    || string.IsNullOrWhiteSpace(evt.FirmId))
-                    return;
-                if (!string.Equals(evt.FirmId, mutation.FirmId, StringComparison.Ordinal))
+                if (hasDirect
+                    && !string.IsNullOrWhiteSpace(mutation.FirmId)
+                    && !string.IsNullOrWhiteSpace(evt.FirmId)
+                    && !string.Equals(evt.FirmId, mutation.FirmId, StringComparison.Ordinal))
                 {
                     MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
-                    return;
+                    AddInboundEvidenceUnsafe(
+                        CreateExecutionReportEvidence(
+                            evt, evidenceId, InboundVenueEvidenceDisposition.Conflicting, [id]),
+                        evidenceIdentity);
+                    return new(InboundVenueEvidenceApplyStatus.RecordedConflicting);
                 }
-                var legacyOriginalMatches = mutation.OriginalClOrdId is { } legacyExpectedOriginal
-                    ? evt.OrigClOrdId == legacyExpectedOriginal
-                    : evt.OrigClOrdId == 0;
-                if (!IsLegacyState(mutation.State)
-                    || evt.ClOrdId != mutation.PrimaryClOrdId
-                    || !legacyOriginalMatches)
-                {
-                    MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
-                    return;
-                }
-                var legacyEvidenceDigest = DigestEvidence(
-                    $"{evt.FirmId}|{evt.ClOrdId}|{evt.OrigClOrdId}|{evt.ExecKind}");
-                Terminalise(
-                    mutation, OutboundMutationState.VenueAcknowledged,
-                    evt.TimestampUtc, "LegacyExecutionReport",
-                    legacyEvidenceDigest, evt.VenueOrderId);
-                return;
+                AddInboundEvidenceUnsafe(
+                    CreateExecutionReportEvidence(
+                        evt, evidenceId, InboundVenueEvidenceDisposition.Unmatched, [id]),
+                    evidenceIdentity);
+                return new(InboundVenueEvidenceApplyStatus.RecordedUnmatched);
             }
 
             if (!hasDirect
@@ -398,20 +451,51 @@ public sealed class OutboundMutationLedger
                 || !string.Equals(evt.FirmId, mutation.FirmId, StringComparison.Ordinal))
             {
                 MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
-                return;
+                AddInboundEvidenceUnsafe(
+                    CreateExecutionReportEvidence(
+                        evt, evidenceId, InboundVenueEvidenceDisposition.Conflicting, [id]),
+                    evidenceIdentity);
+                return new(InboundVenueEvidenceApplyStatus.RecordedConflicting);
             }
 
             if (mutation.Attempts.Count == 0)
             {
                 MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
-                return;
+                AddInboundEvidenceUnsafe(
+                    CreateExecutionReportEvidence(
+                        evt, evidenceId, InboundVenueEvidenceDisposition.Conflicting, [id]),
+                    evidenceIdentity);
+                return new(InboundVenueEvidenceApplyStatus.RecordedConflicting);
             }
             var activeAttemptIndex = mutation.Attempts.Count - 1;
             var activeAttempt = mutation.Attempts[activeAttemptIndex];
             var originalMatches = mutation.OriginalClOrdId is { } expectedOriginal
-                ? evt.OrigClOrdId == expectedOriginal
+                ? evt.OrigClOrdId == 0 || evt.OrigClOrdId == expectedOriginal
                 : evt.OrigClOrdId == 0;
             var frame = activeAttempt.FramePrepared;
+            if (IsTerminal(mutation.State))
+            {
+                var terminalMatches = evt.ClOrdId == activeAttempt.ClOrdId
+                    && frame is not null
+                    && evt.SessionId == frame.SessionId
+                    && evt.SessionVerId == frame.SessionVerId
+                    && evt.InboundSeqNum is not null and not 0
+                    && originalMatches;
+                AddInboundEvidenceUnsafe(
+                    CreateExecutionReportEvidence(
+                        evt,
+                        evidenceId,
+                        terminalMatches
+                            ? InboundVenueEvidenceDisposition.Matched
+                            : InboundVenueEvidenceDisposition.Conflicting,
+                        [id]),
+                    evidenceIdentity);
+                if (!terminalMatches)
+                    MarkTerminalEvidenceConflict(mutation);
+                return new(terminalMatches
+                    ? InboundVenueEvidenceApplyStatus.RecordedMatched
+                    : InboundVenueEvidenceApplyStatus.RecordedConflicting);
+            }
             if (evt.ClOrdId != activeAttempt.ClOrdId
                 || activeAttempt.ProvenUnsentEvidence is not null
                 || mutation.Attempts.Any(a =>
@@ -427,30 +511,100 @@ public sealed class OutboundMutationLedger
                 || !originalMatches)
             {
                 MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
-                return;
+                AddInboundEvidenceUnsafe(
+                    CreateExecutionReportEvidence(
+                        evt, evidenceId, InboundVenueEvidenceDisposition.Conflicting, [id]),
+                    evidenceIdentity);
+                return new(InboundVenueEvidenceApplyStatus.RecordedConflicting);
             }
 
+            AddInboundEvidenceUnsafe(
+                CreateExecutionReportEvidence(
+                    evt, evidenceId, InboundVenueEvidenceDisposition.Matched, [id]),
+                evidenceIdentity);
             var evidenceDigest = DigestEvidence(
                 $"{evt.FirmId}|{evt.SessionId}|{evt.SessionVerId}|{evt.InboundSeqNum}|{evt.ClOrdId}|{evt.OrigClOrdId}|{evt.ExecKind}");
             Terminalise(
                 mutation, OutboundMutationState.VenueAcknowledged,
                 evt.TimestampUtc, "ExecutionReport", evidenceDigest, evt.VenueOrderId);
+            return new(InboundVenueEvidenceApplyStatus.RecordedMatched);
         }
     }
 
-    public void ApplyBusinessReject(BusinessRejectReceivedEvent evt)
+    public InboundVenueEvidenceApplyResult ApplyBusinessReject(
+        BusinessRejectReceivedEvent evt)
     {
         ArgumentNullException.ThrowIfNull(evt);
-        if (evt.SessionId is null || evt.SessionVerId is null)
-            return;
+        var evidenceId = BusinessRejectEvidenceId(evt);
+        var evidenceIdentity = BusinessRejectEvidenceIdentity(evt, evidenceId);
         lock (_gate)
         {
+            var identityConflict = TryGetExistingEvidenceUnsafe(
+                evidenceIdentity,
+                evidenceId,
+                out var duplicate);
+            if (duplicate)
+            {
+                if (evt.PossibleResend)
+                    PromotePossibleResendUnsafe(evidenceId);
+                return new(InboundVenueEvidenceApplyStatus.Duplicate);
+            }
+            if (evt.SessionId is null or 0 || evt.SessionVerId is null or 0
+                || string.IsNullOrWhiteSpace(evt.FirmId) || evt.RefSeqNum == 0)
+            {
+                AddInboundEvidenceUnsafe(
+                    CreateBusinessRejectEvidence(
+                        evt, evidenceId, InboundVenueEvidenceDisposition.Unmatched, []),
+                    evidenceIdentity);
+                return new(InboundVenueEvidenceApplyStatus.RecordedUnmatched);
+            }
             var key = new FrameKey(evt.FirmId, evt.SessionId.Value, evt.SessionVerId.Value, evt.RefSeqNum);
             if (!_byFrame.TryGetValue(key, out var id)
-                || !_mutations.TryGetValue(id, out var mutation)
-                || IsTerminal(mutation.State))
-                return;
+                || !_mutations.TryGetValue(id, out var mutation))
+            {
+                AddInboundEvidenceUnsafe(
+                    CreateBusinessRejectEvidence(
+                        evt, evidenceId, InboundVenueEvidenceDisposition.Unmatched, []),
+                    evidenceIdentity);
+                return new(InboundVenueEvidenceApplyStatus.RecordedUnmatched);
+            }
+            if (identityConflict)
+            {
+                if (!IsTerminal(mutation.State))
+                    MarkConflictingVenueEvidence(mutation, clOrdId: 0, evt.TimestampUtc);
+                else
+                    MarkTerminalEvidenceConflict(mutation);
+                AddInboundEvidenceUnsafe(
+                    CreateBusinessRejectEvidence(
+                        evt,
+                        evidenceId,
+                        InboundVenueEvidenceDisposition.Conflicting,
+                        [id]),
+                    evidenceIdentity);
+                return new(InboundVenueEvidenceApplyStatus.RecordedConflicting);
+            }
             var activeAttempt = mutation.Attempts.LastOrDefault();
+            if (IsTerminal(mutation.State))
+            {
+                var terminalMatches = activeAttempt?.FramePrepared is { } terminalFrame
+                    && terminalFrame.SessionId == evt.SessionId.Value
+                    && terminalFrame.SessionVerId == evt.SessionVerId.Value
+                    && terminalFrame.OutboundSeqNum == evt.RefSeqNum;
+                AddInboundEvidenceUnsafe(
+                    CreateBusinessRejectEvidence(
+                        evt,
+                        evidenceId,
+                        terminalMatches
+                            ? InboundVenueEvidenceDisposition.Matched
+                            : InboundVenueEvidenceDisposition.Conflicting,
+                        [id]),
+                    evidenceIdentity);
+                if (!terminalMatches)
+                    MarkTerminalEvidenceConflict(mutation);
+                return new(terminalMatches
+                    ? InboundVenueEvidenceApplyStatus.RecordedMatched
+                    : InboundVenueEvidenceApplyStatus.RecordedConflicting);
+            }
             if (activeAttempt is null
                 || activeAttempt.FramePrepared is not { } frame
                 || frame.SessionId != evt.SessionId.Value
@@ -464,13 +618,101 @@ public sealed class OutboundMutationLedger
                     and not OutboundMutationState.Ambiguous)
             {
                 MarkConflictingVenueEvidence(mutation, clOrdId: 0, evt.TimestampUtc);
-                return;
+                AddInboundEvidenceUnsafe(
+                    CreateBusinessRejectEvidence(
+                        evt, evidenceId, InboundVenueEvidenceDisposition.Conflicting, [id]),
+                    evidenceIdentity);
+                return new(InboundVenueEvidenceApplyStatus.RecordedConflicting);
             }
+            AddInboundEvidenceUnsafe(
+                CreateBusinessRejectEvidence(
+                    evt, evidenceId, InboundVenueEvidenceDisposition.Matched, [id]),
+                evidenceIdentity);
             var evidenceDigest = DigestEvidence(
                 $"{evt.FirmId}|{evt.SessionId}|{evt.SessionVerId}|{evt.RefSeqNum}|{evt.SeqNum}|{evt.RejectReason}");
             Terminalise(
                 mutation, OutboundMutationState.VenueAcknowledged,
                 evt.TimestampUtc, "BusinessReject", evidenceDigest, venueOrderId: null);
+            return new(InboundVenueEvidenceApplyStatus.RecordedMatched);
+        }
+    }
+
+    public InboundVenueEvidenceApplyResult ApplyNotApplied(NotAppliedReceivedEvent evt)
+    {
+        ArgumentNullException.ThrowIfNull(evt);
+        var evidenceId = NotAppliedEvidenceId(evt);
+        var evidenceIdentity = NotAppliedEvidenceIdentity(evt);
+        lock (_gate)
+        {
+            _ = TryGetExistingEvidenceUnsafe(
+                evidenceIdentity,
+                evidenceId,
+                out var duplicate);
+            if (duplicate)
+                return new(InboundVenueEvidenceApplyStatus.Duplicate);
+
+            var matched = _byFrame
+                .Where(pair =>
+                    string.Equals(pair.Key.FirmId, evt.FirmId, StringComparison.Ordinal)
+                    && pair.Key.SessionId == evt.SessionId
+                    && pair.Key.SessionVerId == evt.SessionVerId
+                    && SequenceRangeContains(evt.FromSeqNo, evt.Count, pair.Key.OutboundSeqNum))
+                .Select(pair => pair.Value)
+                .Distinct()
+                .OrderBy(id => id.Value)
+                .ToArray();
+
+            if (matched.Length == 0)
+            {
+                AddInboundEvidenceUnsafe(
+                    CreateNotAppliedEvidence(
+                        evt, evidenceId, InboundVenueEvidenceDisposition.Unmatched, []),
+                    evidenceIdentity);
+                return new(InboundVenueEvidenceApplyStatus.RecordedUnmatched);
+            }
+
+            var disposition = InboundVenueEvidenceDisposition.Matched;
+            foreach (var id in matched)
+            {
+                if (!_mutations.TryGetValue(id, out var mutation))
+                    continue;
+                if (IsTerminal(mutation.State))
+                {
+                    MarkTerminalEvidenceConflict(mutation);
+                    disposition = InboundVenueEvidenceDisposition.Conflicting;
+                    continue;
+                }
+                var attempt = mutation.Attempts.LastOrDefault();
+                if (attempt?.FramePrepared is not { } frame
+                    || !SequenceRangeContains(evt.FromSeqNo, evt.Count, frame.OutboundSeqNum)
+                    || mutation.State is not OutboundMutationState.FramePrepared
+                        and not OutboundMutationState.TransportWriteCompleted
+                        and not OutboundMutationState.Ambiguous)
+                {
+                    MarkConflictingVenueEvidence(mutation, attempt?.ClOrdId ?? 0, evt.TimestampUtc);
+                    disposition = InboundVenueEvidenceDisposition.Conflicting;
+                    continue;
+                }
+                var index = mutation.Attempts.Count - 1;
+                var updated = attempt with
+                {
+                    AmbiguityReason = OutboundAmbiguityReason.NotAppliedEvidence,
+                };
+                _mutations[id] = ReplaceAttempt(
+                    mutation,
+                    index,
+                    updated,
+                    OutboundMutationState.Ambiguous,
+                    evt.TimestampUtc,
+                    requiresReconciliation: true);
+            }
+
+            AddInboundEvidenceUnsafe(
+                CreateNotAppliedEvidence(evt, evidenceId, disposition, matched),
+                evidenceIdentity);
+            return new(disposition == InboundVenueEvidenceDisposition.Conflicting
+                ? InboundVenueEvidenceApplyStatus.RecordedConflicting
+                : InboundVenueEvidenceApplyStatus.RecordedMatched);
         }
     }
 
@@ -734,6 +976,34 @@ public sealed class OutboundMutationLedger
                 RemoveMutationIndexes(mutation);
                 _mutations.Remove(id);
             }
+            if (purgeIds.Length > 0)
+            {
+                var purged = purgeIds.ToHashSet();
+                foreach (var pair in _inboundEvidence.ToArray())
+                {
+                    var remaining = pair.Value.MatchedMutationIds
+                        .Where(id => !purged.Contains(id))
+                        .ToArray();
+                    if (remaining.Length == 0
+                        && pair.Value.MatchedMutationIds.Count > 0)
+                    {
+                        _inboundEvidence.Remove(pair.Key);
+                        var identity = EvidenceIdentity(pair.Value);
+                        if (_inboundEvidenceIdentity.TryGetValue(identity, out var indexed)
+                            && indexed == pair.Key)
+                        {
+                            _inboundEvidenceIdentity.Remove(identity);
+                        }
+                    }
+                    else if (remaining.Length != pair.Value.MatchedMutationIds.Count)
+                    {
+                        _inboundEvidence[pair.Key] = pair.Value with
+                        {
+                            MatchedMutationIds = remaining,
+                        };
+                    }
+                }
+            }
             foreach (var correlation in _correlations.Values
                          .Where(c => c.Terminal
                              && c.RetainFromUtc <= cutoff
@@ -764,7 +1034,8 @@ public sealed class OutboundMutationLedger
 
     public (
         IReadOnlyList<OutboundMutationSnapshot> Mutations,
-        IReadOnlyList<OutboundCorrelationTombstone> Correlations) CaptureSnapshot()
+        IReadOnlyList<OutboundCorrelationTombstone> Correlations,
+        IReadOnlyList<InboundVenueEvidenceSnapshot> InboundEvidence) CaptureSnapshot()
     {
         lock (_gate)
         {
@@ -775,6 +1046,11 @@ public sealed class OutboundMutationLedger
                     .ToArray(),
                 _correlations.Values
                     .OrderBy(c => c.ClOrdId)
+                    .ToArray(),
+                _inboundEvidence.Values
+                    .OrderBy(e => e.ObservedAtUtc)
+                    .ThenBy(e => e.EvidenceId, StringComparer.Ordinal)
+                    .Select(CloneEvidence)
                     .ToArray());
         }
     }
@@ -811,19 +1087,62 @@ public sealed class OutboundMutationLedger
                 .ToArray();
     }
 
+    public IReadOnlyList<InboundVenueEvidenceDiagnostic> GetInboundEvidenceDiagnostics(
+        int limit = 100)
+    {
+        if (limit is < 1 or > MaxEvidenceDiagnostics)
+            throw new ArgumentOutOfRangeException(nameof(limit));
+        lock (_gate)
+        {
+            return _inboundEvidence.Values
+                .OrderByDescending(e => e.ObservedAtUtc)
+                .ThenBy(e => e.EvidenceId, StringComparer.Ordinal)
+                .Take(limit)
+                .Select(e => new InboundVenueEvidenceDiagnostic(
+                    e.EvidenceId,
+                    e.Kind,
+                    e.Disposition,
+                    e.FirmId,
+                    e.SessionId,
+                    e.SessionVerId,
+                    e.InboundSeqNum,
+                    e.BusinessRejectRefSeqNum,
+                    e.NotAppliedFromSeqNo,
+                    e.NotAppliedCount,
+                    e.ObservedAtUtc,
+                    e.MatchedMutationIds.Count))
+                .ToArray();
+        }
+    }
+
     public void Restore(
         IEnumerable<OutboundMutationSnapshot> mutations,
         IEnumerable<OutboundCorrelationTombstone> correlations,
         bool legacyMigrationCompleted = false)
+        => Restore(
+            mutations,
+            correlations,
+            Array.Empty<InboundVenueEvidenceSnapshot>(),
+            legacyMigrationCompleted);
+
+    public void Restore(
+        IEnumerable<OutboundMutationSnapshot> mutations,
+        IEnumerable<OutboundCorrelationTombstone> correlations,
+        IEnumerable<InboundVenueEvidenceSnapshot> inboundEvidence,
+        bool legacyMigrationCompleted = false)
     {
         ArgumentNullException.ThrowIfNull(mutations);
         ArgumentNullException.ThrowIfNull(correlations);
+        ArgumentNullException.ThrowIfNull(inboundEvidence);
         lock (_gate)
         {
             _mutations.Clear();
             _byClOrdId.Clear();
             _byFrame.Clear();
             _correlations.Clear();
+            _inboundEvidence.Clear();
+            _inboundEvidenceIdentity.Clear();
+            _unmatchedEvidenceOrder.Clear();
             _legacyMigrationCompleted = legacyMigrationCompleted;
             foreach (var source in mutations.OrderBy(m => m.MutationId.Value))
             {
@@ -854,6 +1173,20 @@ public sealed class OutboundMutationLedger
                         || existing.Kind != correlation.Kind))
                     throw new OutboundLedgerRecoveryException("Conflicting outbound correlation tombstone.");
                 _correlations[correlation.ClOrdId] = correlation;
+            }
+            foreach (var evidence in inboundEvidence
+                         .OrderBy(e => e.ObservedAtUtc)
+                         .ThenBy(e => e.EvidenceId, StringComparer.Ordinal))
+            {
+                if (!IsLowerHex(evidence.EvidenceId, 64)
+                    || string.IsNullOrWhiteSpace(evidence.FirmId))
+                {
+                    throw new OutboundLedgerRecoveryException(
+                        "Inbound venue evidence identity is invalid.");
+                }
+                AddInboundEvidenceUnsafe(
+                    CloneEvidence(evidence),
+                    EvidenceIdentity(evidence));
             }
         }
     }
@@ -1008,6 +1341,210 @@ public sealed class OutboundMutationLedger
         }
     }
 
+    private bool TryGetExistingEvidenceUnsafe(
+        string identity,
+        string evidenceId,
+        out bool duplicate)
+    {
+        duplicate = false;
+        if (!_inboundEvidenceIdentity.TryGetValue(identity, out var existingId))
+            return false;
+        duplicate = string.Equals(existingId, evidenceId, StringComparison.Ordinal);
+        return !duplicate;
+    }
+
+    private void PromotePossibleResendUnsafe(string evidenceId)
+    {
+        if (_inboundEvidence.TryGetValue(evidenceId, out var evidence)
+            && !evidence.PossibleResend)
+        {
+            _inboundEvidence[evidenceId] = evidence with
+            {
+                PossibleResend = true,
+            };
+        }
+    }
+
+    private void AddInboundEvidenceUnsafe(
+        InboundVenueEvidenceSnapshot evidence,
+        string identity)
+    {
+        if (_inboundEvidence.TryGetValue(evidence.EvidenceId, out var existing))
+        {
+            if (existing != evidence)
+                throw TransitionError("Conflicting inbound venue evidence identity.");
+            return;
+        }
+
+        _inboundEvidence.Add(evidence.EvidenceId, evidence);
+        _inboundEvidenceIdentity.TryAdd(identity, evidence.EvidenceId);
+        if (evidence.Disposition == InboundVenueEvidenceDisposition.Unmatched
+            && evidence.MatchedMutationIds.Count == 0)
+        {
+            _unmatchedEvidenceOrder.Enqueue(evidence.EvidenceId);
+            while (_unmatchedEvidenceOrder.Count > MaxRetainedUnmatchedEvidence)
+            {
+                var expired = _unmatchedEvidenceOrder.Dequeue();
+                if (_inboundEvidence.TryGetValue(expired, out var candidate)
+                    && candidate.Disposition == InboundVenueEvidenceDisposition.Unmatched
+                    && candidate.MatchedMutationIds.Count == 0)
+                {
+                    _inboundEvidence.Remove(expired);
+                    var candidateIdentity = EvidenceIdentity(candidate);
+                    if (_inboundEvidenceIdentity.TryGetValue(
+                            candidateIdentity,
+                            out var indexed)
+                        && indexed == expired)
+                    {
+                        _inboundEvidenceIdentity.Remove(candidateIdentity);
+                    }
+                }
+            }
+        }
+    }
+
+    private static InboundVenueEvidenceSnapshot CreateExecutionReportEvidence(
+        ExecutionReportReceivedEvent evt,
+        string evidenceId,
+        InboundVenueEvidenceDisposition disposition,
+        IReadOnlyList<OutboundMutationId> matchedMutationIds) =>
+        new()
+        {
+            EvidenceId = evidenceId,
+            Kind = InboundVenueEvidenceKind.ExecutionReport,
+            Disposition = disposition,
+            FirmId = NormalizeFirm(evt.FirmId),
+            SessionId = evt.SessionId,
+            SessionVerId = evt.SessionVerId,
+            InboundSeqNum = evt.InboundSeqNum,
+            SendingTime = evt.VenueSendingTime,
+            PossibleResend = evt.PossibleResend,
+            MessageKind = evt.ExecKind,
+            ClOrdId = evt.ClOrdId,
+            OrigClOrdId = evt.OrigClOrdId == 0 ? null : evt.OrigClOrdId,
+            VenueOrderId = evt.VenueOrderId,
+            ObservedAtUtc = evt.TimestampUtc,
+            MatchedMutationIds = matchedMutationIds.ToArray(),
+        };
+
+    private static InboundVenueEvidenceSnapshot CreateBusinessRejectEvidence(
+        BusinessRejectReceivedEvent evt,
+        string evidenceId,
+        InboundVenueEvidenceDisposition disposition,
+        IReadOnlyList<OutboundMutationId> matchedMutationIds) =>
+        new()
+        {
+            EvidenceId = evidenceId,
+            Kind = InboundVenueEvidenceKind.BusinessReject,
+            Disposition = disposition,
+            FirmId = NormalizeFirm(evt.FirmId),
+            SessionId = evt.SessionId,
+            SessionVerId = evt.SessionVerId,
+            InboundSeqNum = evt.SeqNum,
+            SendingTime = evt.SendingTime,
+            PossibleResend = evt.PossibleResend,
+            BusinessRejectRefSeqNum = evt.RefSeqNum,
+            ObservedAtUtc = evt.TimestampUtc,
+            MatchedMutationIds = matchedMutationIds.ToArray(),
+        };
+
+    private static InboundVenueEvidenceSnapshot CreateNotAppliedEvidence(
+        NotAppliedReceivedEvent evt,
+        string evidenceId,
+        InboundVenueEvidenceDisposition disposition,
+        IReadOnlyList<OutboundMutationId> matchedMutationIds) =>
+        new()
+        {
+            EvidenceId = evidenceId,
+            Kind = InboundVenueEvidenceKind.NotApplied,
+            Disposition = disposition,
+            FirmId = NormalizeFirm(evt.FirmId),
+            SessionId = evt.SessionId,
+            SessionVerId = evt.SessionVerId,
+            NotAppliedFromSeqNo = evt.FromSeqNo,
+            NotAppliedCount = evt.Count,
+            ObservedAtUtc = evt.ObservedAtUtc,
+            MatchedMutationIds = matchedMutationIds.ToArray(),
+        };
+
+    private static string ExecutionReportEvidenceId(ExecutionReportReceivedEvent evt) =>
+        DigestEvidence(Canonical(
+            $"er|{NormalizeFirm(evt.FirmId)}|{evt.SessionId}|{evt.SessionVerId}|{evt.InboundSeqNum}|{evt.ExecKind}|{evt.ClOrdId}|{evt.OrigClOrdId}|{evt.VenueOrderId}|{evt.LeavesQuantity}|{evt.CumulativeQuantity}|{evt.LastQuantity}|{evt.LastPrice}|{evt.Synthetic}"));
+
+    private static string BusinessRejectEvidenceId(BusinessRejectReceivedEvent evt) =>
+        DigestEvidence(Canonical(
+            $"br|{NormalizeFirm(evt.FirmId)}|{evt.SessionId}|{evt.SessionVerId}|{evt.SeqNum}|{evt.RefSeqNum}|{evt.RejectReason}"));
+
+    private static string NotAppliedEvidenceId(NotAppliedReceivedEvent evt) =>
+        DigestEvidence(Canonical(
+            $"na|{NormalizeFirm(evt.FirmId)}|{evt.SessionId}|{evt.SessionVerId}|{evt.FromSeqNo}|{evt.Count}"));
+
+    private static string ExecutionReportEvidenceIdentity(
+        ExecutionReportReceivedEvent evt,
+        string evidenceId) =>
+        evt.SessionId is not null and not 0
+        && evt.SessionVerId is not null and not 0
+        && evt.InboundSeqNum is not null and not 0
+            ? Canonical(
+                $"er|{NormalizeFirm(evt.FirmId)}|{evt.SessionId}|{evt.SessionVerId}|{evt.InboundSeqNum}")
+            : $"legacy|{evidenceId}";
+
+    private static string BusinessRejectEvidenceIdentity(
+        BusinessRejectReceivedEvent evt,
+        string evidenceId) =>
+        evt.SessionId is not null and not 0
+        && evt.SessionVerId is not null and not 0
+        && evt.SeqNum != 0
+            ? Canonical(
+                $"br|{NormalizeFirm(evt.FirmId)}|{evt.SessionId}|{evt.SessionVerId}|{evt.SeqNum}")
+            : $"legacy|{evidenceId}";
+
+    private static string NotAppliedEvidenceIdentity(NotAppliedReceivedEvent evt) =>
+        Canonical(
+            $"na|{NormalizeFirm(evt.FirmId)}|{evt.SessionId}|{evt.SessionVerId}|{evt.FromSeqNo}|{evt.Count}");
+
+    private static string EvidenceIdentity(InboundVenueEvidenceSnapshot evidence) =>
+        evidence.Kind switch
+        {
+            InboundVenueEvidenceKind.ExecutionReport
+                when evidence.SessionId is not null and not 0
+                     && evidence.SessionVerId is not null and not 0
+                     && evidence.InboundSeqNum is not null and not 0 =>
+                Canonical(
+                    $"er|{NormalizeFirm(evidence.FirmId)}|{evidence.SessionId}|{evidence.SessionVerId}|{evidence.InboundSeqNum}"),
+            InboundVenueEvidenceKind.BusinessReject
+                when evidence.SessionId is not null and not 0
+                     && evidence.SessionVerId is not null and not 0
+                     && evidence.InboundSeqNum is not null and not 0 =>
+                Canonical(
+                    $"br|{NormalizeFirm(evidence.FirmId)}|{evidence.SessionId}|{evidence.SessionVerId}|{evidence.InboundSeqNum}"),
+            InboundVenueEvidenceKind.NotApplied =>
+                Canonical(
+                    $"na|{NormalizeFirm(evidence.FirmId)}|{evidence.SessionId}|{evidence.SessionVerId}|{evidence.NotAppliedFromSeqNo}|{evidence.NotAppliedCount}"),
+            _ => $"legacy|{evidence.EvidenceId}",
+        };
+
+    private static string Canonical(FormattableString value) =>
+        value.ToString(CultureInfo.InvariantCulture);
+
+    private static bool SequenceRangeContains(
+        ulong fromSeqNo,
+        uint count,
+        ulong sequenceNumber) =>
+        count != 0
+        && sequenceNumber >= fromSeqNo
+        && sequenceNumber - fromSeqNo < count;
+
+    private static string NormalizeFirm(string? firmId) =>
+        string.IsNullOrWhiteSpace(firmId) ? "unknown" : firmId;
+
+    private static InboundVenueEvidenceSnapshot CloneEvidence(
+        InboundVenueEvidenceSnapshot evidence) =>
+        evidence with
+        {
+            MatchedMutationIds = evidence.MatchedMutationIds.ToArray(),
+        };
+
     private void Terminalise(
         OutboundMutationSnapshot mutation,
         OutboundMutationState state,
@@ -1066,6 +1603,14 @@ public sealed class OutboundMutationLedger
         };
         _mutations[mutation.MutationId] = mutation;
         MarkCorrelations(mutation, terminal: false, atUtc);
+    }
+
+    private void MarkTerminalEvidenceConflict(OutboundMutationSnapshot mutation)
+    {
+        _mutations[mutation.MutationId] = mutation with
+        {
+            RequiresReconciliation = true,
+        };
     }
 
     private static OutboundMutationSnapshot AppendLegacyEvidence(

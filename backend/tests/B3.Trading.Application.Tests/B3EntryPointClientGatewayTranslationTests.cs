@@ -42,6 +42,9 @@ public class B3EntryPointClientGatewayTranslationTests
         Assert.Equal(0UL, env.OrigClOrdId);
         Assert.Equal(100, env.LeavesQuantity);
         Assert.Equal(0, env.CumulativeQuantity);
+        Assert.Equal(1UL, env.InboundSeqNum);
+        Assert.Equal(ev.SendingTime, env.SendingTime);
+        Assert.Equal(999UL, env.VenueOrderId);
     }
 
     [Fact]
@@ -69,6 +72,8 @@ public class B3EntryPointClientGatewayTranslationTests
         Assert.Equal(30, p.LastQuantity);
         Assert.Equal(30.5m, p.LastPrice);
         Assert.Equal(EpExecType.Fill, f!.ExecType);
+        Assert.Equal(1UL, p.VenueOrderId);
+        Assert.Equal(partial.SendingTime, p.SendingTime);
     }
 
     [Fact]
@@ -90,6 +95,8 @@ public class B3EntryPointClientGatewayTranslationTests
         Assert.Equal(EpExecType.Canceled, env!.ExecType);
         Assert.Equal(99UL, env.ClOrdId);
         Assert.Equal(42UL, env.OrigClOrdId);
+        Assert.Equal(1UL, env.VenueOrderId);
+        Assert.Equal(ev.SendingTime, env.SendingTime);
     }
 
     [Fact]
@@ -114,6 +121,8 @@ public class B3EntryPointClientGatewayTranslationTests
         Assert.Equal(101UL, env.ClOrdId);
         Assert.Equal(42UL, env.OrigClOrdId);
         Assert.Equal(200, env.LeavesQuantity);
+        Assert.Equal(1UL, env.VenueOrderId);
+        Assert.Equal(ev.SendingTime, env.SendingTime);
     }
 
     [Fact]
@@ -136,6 +145,40 @@ public class B3EntryPointClientGatewayTranslationTests
         Assert.Equal("limit breached", a!.RejectReason);
         Assert.Equal("reject_code=99", b!.RejectReason);
         Assert.Equal(EpExecType.Rejected, a.ExecType);
+        Assert.Equal(0UL, a.VenueOrderId);
+        Assert.Equal(withReason.SendingTime, a.SendingTime);
+    }
+
+    [Fact]
+    public void FirmAwareTranslation_StampsFullSessionIdentityAndPossResend()
+    {
+        var sendingTime = new DateTimeOffset(2026, 7, 18, 12, 0, 0, TimeSpan.Zero);
+        var ev = new Up.OrderAccepted
+        {
+            SeqNum = 91,
+            SendingTime = sendingTime,
+            ClOrdID = new Up.ClOrdID(42),
+            OrderId = 700,
+            OrderStatus = Up.OrderStatus.New,
+            SecurityId = 123,
+            Side = Up.Side.Buy,
+        };
+
+        var envelope = B3EntryPointClientGateway.Translate(
+            ev,
+            "FIRM-A",
+            sessionId: 11,
+            sessionVerId: 4,
+            possibleResend: true);
+
+        Assert.NotNull(envelope);
+        Assert.Equal("FIRM-A", envelope.FirmId);
+        Assert.Equal(11UL, envelope.SessionId);
+        Assert.Equal(4U, envelope.SessionVerId);
+        Assert.Equal(91UL, envelope.InboundSeqNum);
+        Assert.Equal(sendingTime, envelope.SendingTime);
+        Assert.True(envelope.PossibleResend);
+        Assert.Equal(700UL, envelope.VenueOrderId);
     }
 
     [Fact]
