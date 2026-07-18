@@ -20,6 +20,11 @@ import {
   formatUtcDateTime,
   formatUtcTime,
 } from "./formatters.js";
+import {
+  deriveOrderSubmitFeedback,
+  deriveTraderEmptyState,
+  deriveTradingReadiness,
+} from "./operationalFluency.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -47,6 +52,7 @@ const POSITIONS_GROUP_KEY = "b3tp.positions.grouped";
 const POSITIONS_SORT_DEFAULT = { col: "absNet", dir: "desc" };
 let _positionsSort = POSITIONS_SORT_DEFAULT;
 let _execSymbolFilter = "";
+let _pendingLiveOrderId = null;
 // FE-OPT-3 (#499). Grouping state.
 let _positionsGrouped = false;
 
@@ -1704,7 +1710,7 @@ export function showOrderToast(message, kind) {
   }
   el.hidden = false;
   el.textContent = message;
-  const cls = kind === "warn" ? "warn" : kind === "error" ? "error" : "";
+  const cls = ["info", "warn", "error"].includes(kind) ? kind : "";
   el.className = cls ? `order-toast ${cls}` : "order-toast";
   if (_orderToastTimer) clearTimeout(_orderToastTimer);
   _orderToastTimer = setTimeout(() => {
@@ -1713,6 +1719,28 @@ export function showOrderToast(message, kind) {
     el.textContent = "";
     el.className = "order-toast";
   }, ORDER_TOAST_MS);
+}
+
+function completePendingOrderFeedback(state) {
+  if (!_pendingLiveOrderId) return;
+  const order = state?.orders?.get?.(_pendingLiveOrderId);
+  if (!order) return;
+  const feedback = deriveOrderSubmitFeedback({
+    clOrdId: _pendingLiveOrderId,
+    status: order.status,
+    live: true,
+  });
+  _pendingLiveOrderId = null;
+  showOrderToast(feedback.message, feedback.tone);
+}
+
+export function showPlatformAcceptedOrder(clOrdId) {
+  const feedback = deriveOrderSubmitFeedback({ clOrdId });
+  _pendingLiveOrderId = String(clOrdId);
+  showOrderToast(feedback.message, feedback.tone);
+  // A very fast live update can arrive before the REST response completes.
+  // Resolve it immediately rather than waiting for another orders render.
+  completePendingOrderFeedback(getState());
 }
 
 // Submit button disabled-state is the OR of two independent conditions
@@ -2097,6 +2125,7 @@ export function renderForSlice(slice) {
     setStatusPill(getState().status);
     renderReconnect(); // pill change usually correlates with countdown reset
     renderStaleness("ws");
+    renderTradingReadiness();
   }
   if (slice === "user")   setUserLabel(getState().user);
   if (slice === "balance" || slice === "user" || slice === "all") renderBalance();
@@ -2104,12 +2133,16 @@ export function renderForSlice(slice) {
   if (slice === "marketDataStatus") {
     setMdStatusPill(getState().marketDataStatus);
     renderStaleness("md");
+    renderTradingReadiness();
   }
   if (slice === "all") { renderStaleness("ws"); renderStaleness("md"); }
   if (slice === "submitInflight") renderInflight();
   if (slice === "wsReconnect") renderReconnect();
   if (slice === "firmsHealth" || slice === "all") renderFirmsHealth();
-  if (slice === "gatewayHealth" || slice === "all") renderGatewayPill();
+  if (slice === "gatewayHealth" || slice === "all") {
+    renderGatewayPill();
+    renderTradingReadiness();
+  }
   if (slice === "currentView" || slice === "all") applyCurrentView(getState().currentView);
   if (slice === "watchlist" || slice === "selectedSymbol" || slice === "all") renderSelectedSymbol();
   if (slice === "watchlist" || slice === "selectedSymbol" || slice === "book" || slice === "all") renderDob();
@@ -2582,10 +2615,55 @@ export function renderTicketPhaseCoupling() {
     submitEl.removeAttribute("title");
   }
   applySubmitDisabled();
+  renderTradingReadiness();
+}
+
+export function renderTradingReadiness() {
+  const root = $("trading-readiness");
+  if (!root) return;
+  const symbol = ($("ticket-symbol")?.value || "").trim().toUpperCase();
+  const readiness = deriveTradingReadiness({
+    ...getState(),
+    symbol,
+    phase: getPhase(symbol),
+  });
+  root.dataset.tone = readiness.tone;
+  const title = $("trading-readiness-title");
+  const message = $("trading-readiness-message");
+  if (title) title.textContent = readiness.title;
+  if (message) message.textContent = readiness.message;
+
+  for (const signal of readiness.signals) {
+    const item = $(`trading-readiness-${signal.key}`);
+    if (!item) continue;
+    item.dataset.tone = signal.tone;
+    item.title = signal.detail;
+    item.setAttribute("aria-label", `${signal.label}: ${signal.value}. ${signal.detail}`);
+    const value = item.querySelector(".trading-readiness-value");
+    if (value) value.textContent = signal.value;
+  }
+
+  const announcement = $("trading-readiness-announcement");
+  const announcementKey = [
+    readiness.tone,
+    readiness.title,
+    ...readiness.signals.map((signal) => `${signal.key}:${signal.value}`),
+  ].join("|");
+  if (announcement && root.dataset.announcementKey !== announcementKey) {
+    root.dataset.announcementKey = announcementKey;
+    announcement.textContent = `${readiness.title}. ${readiness.message}`;
+  }
 }
 
 const DOB_TOP_N = 10;
 const DOB_NO_BOOK_AFTER_MS = 10_000;
+
+function emptyStateHtml(emptyState) {
+  return `<span class="surface-empty-copy">`
+    + `<strong>${escapeHtml(emptyState.title)}</strong>`
+    + `<span>${escapeHtml(emptyState.detail)}</span>`
+    + `</span>`;
+}
 
 function renderDob() {
   const bidsBody = document.querySelector("#dob-bids tbody");
@@ -2598,9 +2676,13 @@ function renderDob() {
   const current = st.selectedSymbol;
 
   if (!current) {
-    bidsBody.innerHTML = `<tr><td colspan="3" class="muted-cell">select a symbol</td></tr>`;
-    asksBody.innerHTML = `<tr><td colspan="3" class="muted-cell">select a symbol</td></tr>`;
-    if (feedback) { feedback.hidden = true; feedback.textContent = ""; }
+    const emptyState = deriveTraderEmptyState("book");
+    bidsBody.innerHTML = `<tr><td colspan="3" class="muted-cell" aria-hidden="true">—</td></tr>`;
+    asksBody.innerHTML = `<tr><td colspan="3" class="muted-cell" aria-hidden="true">—</td></tr>`;
+    if (feedback) {
+      feedback.hidden = false;
+      feedback.innerHTML = emptyStateHtml(emptyState);
+    }
     if (spreadEl) spreadEl.textContent = "";
     return;
   }
@@ -2616,12 +2698,16 @@ function renderDob() {
     // immediately, even when a healthy snapshot is moments away.
     const sinceMd = Math.max(st.selectedSymbolSetAt || 0, st.lastMdResetAt || 0);
     const waited = sinceMd ? Date.now() - sinceMd : 0;
-    const msg = waited > DOB_NO_BOOK_AFTER_MS
-      ? "no book — check MD settings ⚙"
-      : "awaiting book snapshot…";
-    bidsBody.innerHTML = `<tr><td colspan="3" class="muted-cell">${msg}</td></tr>`;
-    asksBody.innerHTML = `<tr><td colspan="3" class="muted-cell">${msg}</td></tr>`;
-    if (feedback) { feedback.hidden = true; feedback.textContent = ""; }
+    const emptyState = deriveTraderEmptyState("book", {
+      symbol: current,
+      timedOut: waited > DOB_NO_BOOK_AFTER_MS,
+    });
+    bidsBody.innerHTML = `<tr><td colspan="3" class="muted-cell" aria-hidden="true">—</td></tr>`;
+    asksBody.innerHTML = `<tr><td colspan="3" class="muted-cell" aria-hidden="true">—</td></tr>`;
+    if (feedback) {
+      feedback.hidden = false;
+      feedback.innerHTML = emptyStateHtml(emptyState);
+    }
     if (spreadEl) spreadEl.textContent = "";
     return;
   }
@@ -2662,7 +2748,8 @@ function renderDob() {
 
 function renderDobSide(levels, side) {
   if (levels.length === 0) {
-    return `<tr><td colspan="3" class="muted-cell">empty</td></tr>`;
+    const emptyState = deriveTraderEmptyState("book", { side: side === "bid" ? "bid" : "ask" });
+    return `<tr><td colspan="3" class="muted-cell">${emptyStateHtml(emptyState)}</td></tr>`;
   }
   let cum = 0;
   return levels.map(lv => {
@@ -2757,12 +2844,18 @@ function renderChart() {
   const resStr = String(st.chartResolution);
   if (resSel.value !== resStr) resSel.value = resStr;
 
-  const showEmpty = (msg) => {
+  const showEmpty = (emptyState) => {
     svg.innerHTML = "";
-    if (empty) { empty.hidden = false; empty.textContent = msg; }
+    if (empty) {
+      empty.hidden = false;
+      empty.innerHTML = emptyStateHtml(emptyState);
+    }
   };
 
-  if (!st.selectedSymbol) { showEmpty("select a symbol"); return; }
+  if (!st.selectedSymbol) {
+    showEmpty(deriveTraderEmptyState("chart"));
+    return;
+  }
 
   const perRes = st.candles.get(st.selectedSymbol);
   const entry = perRes?.get(st.chartResolution);
@@ -2771,16 +2864,20 @@ function renderChart() {
     // reconnects, not just on selection changes.
     const sinceMd = Math.max(st.selectedSymbolSetAt || 0, st.lastMdResetAt || 0);
     const waited = sinceMd ? Date.now() - sinceMd : 0;
-    showEmpty(waited > CHART_NO_DATA_AFTER_MS
-      ? "no candle snapshot received"
-      : "awaiting candle snapshot…");
+    showEmpty(deriveTraderEmptyState("chart", {
+      symbol: st.selectedSymbol,
+      timedOut: waited > CHART_NO_DATA_AFTER_MS,
+    }));
     return;
   }
   if (entry.bars.length === 0) {
     // Snapshot arrived empty — aggregator has no history yet for this
     // resolution. The first CandleUpdate will fix this when a trade
     // closes a window.
-    showEmpty("no candles yet — waiting for first trade");
+    showEmpty(deriveTraderEmptyState("chart", {
+      symbol: st.selectedSymbol,
+      snapshotReady: true,
+    }));
     return;
   }
 
@@ -2869,10 +2966,11 @@ function renderTape() {
   }
 
   if (rows.length === 0) {
-    const msg = st.tapeShowAll
-      ? "no trades yet"
-      : (st.selectedSymbol ? "no trades yet" : "select a symbol");
-    list.innerHTML = `<li class="tape-empty">${msg}</li>`;
+    const emptyState = deriveTraderEmptyState("tape", {
+      showAll: st.tapeShowAll,
+      symbol: st.selectedSymbol,
+    });
+    list.innerHTML = `<li class="tape-empty">${emptyStateHtml(emptyState)}</li>`;
     return;
   }
 
@@ -2927,7 +3025,13 @@ function renderBlotter() {
   const pageRows = filtered.slice(start, start + BLOTTER_PAGE_SIZE);
 
   $("blotter-count").textContent = `${filtered.length}/${all.length}`;
-  body.innerHTML = pageRows.map(o => orderRow(o, st)).join("");
+  if (pageRows.length === 0) {
+    const emptyState = deriveTraderEmptyState("orders", { filtered: all.length > 0 });
+    body.innerHTML = `<tr><td colspan="12" class="muted-cell">${emptyStateHtml(emptyState)}</td></tr>`;
+  } else {
+    body.innerHTML = pageRows.map(o => orderRow(o, st)).join("");
+  }
+  completePendingOrderFeedback(st);
 
   const pager = $("blotter-pagination");
   if (pager) {
@@ -3220,14 +3324,26 @@ let _mobileDrawer = null;
 
 function renderExecutions() {
   const log = $("executions-log");
+  const empty = $("executions-empty");
   if (!log) return;
   const filter = _execSymbolFilter.trim().toUpperCase();
-  let items = getState().executions;
+  const allItems = getState().executions;
+  let items = allItems;
   if (filter) {
     items = items.filter(e => typeof e.symbol === "string" && e.symbol.toUpperCase().includes(filter));
   }
   // Newest first. slice() to avoid mutating state.
   const ordered = items.slice().reverse();
+  const isEmpty = ordered.length === 0;
+  log.hidden = isEmpty;
+  if (empty) {
+    empty.hidden = !isEmpty;
+    if (isEmpty) {
+      empty.innerHTML = emptyStateHtml(deriveTraderEmptyState("executions", {
+        filtered: allItems.length > 0 && !!filter,
+      }));
+    }
+  }
   if (!_execVList) {
     _execVList = createVirtualList(log, {
       rowHeight: EXEC_ROW_HEIGHT,
