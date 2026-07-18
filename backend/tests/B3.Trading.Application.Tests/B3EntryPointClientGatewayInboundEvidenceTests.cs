@@ -99,12 +99,66 @@ public sealed class B3EntryPointClientGatewayInboundEvidenceTests
         Assert.True(envelope.PossibleResend);
     }
 
-    private static Sdk.EntryPointClient CreateClient() =>
+    [Fact]
+    public async Task ContinuingEventLoop_StampsSessionVersionPerEventAfterReconnect()
+    {
+        var retransmit = new TestRetransmitHandler();
+        var releaseSecond = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstReceived = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondReceived = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var received = new List<ExecutionReportEnvelope>();
+        var client = CreateClient(sessionVerId: 1);
+        await using var gateway = new B3EntryPointClientGateway(
+            client,
+            "FIRM-A",
+            initialSessionVerId: 1,
+            NullLogger<B3EntryPointClientGateway>.Instance,
+            terminateOnShutdown: false,
+            reconnectAsyncOverride: (_, _, _) => Task.FromResult(
+                new Sdk.ReconnectOutcome(
+                    Sdk.ReconnectKind.Reattached,
+                    SessionVerId: 2,
+                    ServerNextSeqNoExpected: 0,
+                    ServerLastIncomingSeqNoSeen: 0,
+                    RetransmitWindowReady: true)),
+            connectAsyncOverride: _ => Task.CompletedTask,
+            eventStreamOverride: ct => ReconnectEvents(
+                releaseSecond.Task,
+                ct));
+        gateway.ConfigureInboundEvidenceForTests(42, () => retransmit);
+        gateway.ExecutionReportReceived += envelope =>
+        {
+            lock (received)
+            {
+                received.Add(envelope);
+                if (received.Count == 1)
+                    firstReceived.TrySetResult();
+                else if (received.Count == 2)
+                    secondReceived.TrySetResult();
+            }
+        };
+
+        await gateway.ConnectAsync(CancellationToken.None);
+        await firstReceived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await gateway.ReconnectLoopForTestsAsync(CancellationToken.None);
+        releaseSecond.SetResult();
+        await secondReceived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Collection(
+            received,
+            first => Assert.Equal(1U, first.SessionVerId),
+            second => Assert.Equal(2U, second.SessionVerId));
+    }
+
+    private static Sdk.EntryPointClient CreateClient(uint sessionVerId = 7) =>
         new(new Sdk.EntryPointClientOptions
         {
             Endpoint = new IPEndPoint(IPAddress.Loopback, 1),
             SessionId = 42,
-            SessionVerId = 7,
+            SessionVerId = sessionVerId,
             EnteringFirm = 9,
             Credentials = Sdk.EntryPointClientOptions.AccessKey(
                 "0123456789ABCDEF0123456789ABCDEF"),
@@ -129,6 +183,29 @@ public sealed class B3EntryPointClientGatewayInboundEvidenceTests
         };
         await Task.Delay(Timeout.InfiniteTimeSpan, ct);
     }
+
+    private static async IAsyncEnumerable<EntryPointEvent> ReconnectEvents(
+        Task releaseSecond,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    {
+        yield return Accepted(seqNum: 1, clOrdId: 101);
+        await releaseSecond.WaitAsync(ct);
+        yield return Accepted(seqNum: 1, clOrdId: 102);
+        await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+    }
+
+    private static OrderAccepted Accepted(ulong seqNum, ulong clOrdId) =>
+        new()
+        {
+            SeqNum = seqNum,
+            SendingTime = new DateTimeOffset(
+                2026, 7, 18, 15, 2, 0, TimeSpan.Zero),
+            ClOrdID = new ClOrdID(clOrdId),
+            OrderId = clOrdId + 1000,
+            OrderStatus = B3.EntryPoint.Client.Models.OrderStatus.New,
+            SecurityId = 123,
+            Side = Side.Buy,
+        };
 
     private sealed class TestRetransmitHandler : IRetransmitRequestHandler
     {

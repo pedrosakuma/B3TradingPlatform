@@ -1572,7 +1572,6 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     private async Task RunEventLoopAsync(CancellationToken ct)
     {
         var recover = true;
-        var sessionVerId = Volatile.Read(ref _currentSessionVerId);
         try
         {
             var events = _eventStreamOverride is not null
@@ -1580,6 +1579,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 : _client.Events(ct);
             await foreach (var ev in events.ConfigureAwait(false))
             {
+                var sessionVerId = Volatile.Read(ref _currentSessionVerId);
                 MetricsRegistry.EntryPointEventsReceived.Add(1,
                     new KeyValuePair<string, object?>("firm", _firmId),
                     new KeyValuePair<string, object?>("event_type", ev.GetType().Name));
