@@ -57,6 +57,7 @@ import { renderQrInto, clearQr } from "./qrRender.js";
 import { applyRiskPolicyFetch } from "./riskPolicy.js";
 import { readMdConnectionConfig, readMdDisplayConfig, writeMdConfig, clearMdConfig } from "./marketDataSettings.js";
 import { classifyAuthResponse, requireEnrollmentResponse } from "./authJourney.js";
+import { bindFirstOrderOnboarding, markFirstOrderAccepted } from "./onboarding.js";
 
 const BLOTTER_FILTER_KEY = "b3tp.blotter.filter";
 const DEFAULT_WATCHLIST = ["PETR4", "VALE3"];
@@ -150,6 +151,10 @@ async function init() {
   settingsUi.bindSettingsUi();
   // Fase 4 (#400). Trader sub-tab + lower-band + ticket-advanced.
   traderUi.bindTraderUi();
+  bindFirstOrderOnboarding({
+    getState: state.getState,
+    subscribe: state.subscribe,
+  });
   // Fase 5 (#401). Preferences sub-tab (density toggle).
   preferencesUi.bindPreferencesUi();
   // Restore density preference before any view renders so the login
@@ -1368,6 +1373,7 @@ async function handleSubmitOrder(payload) {
     // ticket form, and doesn't fight for space with the next submit.
     const msg = `accepted: ${resp.clOrdId}${resp.status ? ` (${resp.status})` : ""}`;
     ui.showOrderToast(msg, "ok");
+    markFirstOrderAccepted(resp.clOrdId);
     ui.clearTicket();
   } catch (err) {
     if (err.status === 401) { logout(); return; }

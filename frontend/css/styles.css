@@ -1332,6 +1332,104 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
   overflow-y: visible;
   padding: .6rem .8rem;
 }
+.first-order-guide {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  margin-bottom: var(--space-5);
+  padding: var(--space-5) var(--space-6);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg);
+}
+.first-order-guide-heading,
+.first-order-guide-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--space-6);
+}
+.first-order-guide-heading h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: .95rem;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.first-order-guide-heading p,
+.first-order-guide-footer p {
+  margin: var(--space-1) 0 0;
+  color: var(--text);
+  font-size: .8rem;
+  text-wrap: pretty;
+}
+.first-order-guide-heading p {
+  color: var(--muted);
+}
+.first-order-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+  padding: 0;
+  border-block: 1px solid var(--border);
+  list-style: none;
+}
+.first-order-steps li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-width: 0;
+  padding: var(--space-4) var(--space-5);
+  transition: background-color 150ms ease-out;
+}
+.first-order-steps li + li {
+  border-left: 1px solid var(--border);
+}
+.first-order-steps li[aria-current="true"] {
+  background: var(--panel-2);
+}
+.first-order-step-marker {
+  display: inline-flex;
+  flex: 0 0 1.5rem;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  color: var(--muted);
+  font-size: .72rem;
+  font-weight: 600;
+}
+.first-order-steps strong,
+.first-order-steps small {
+  display: block;
+}
+.first-order-steps strong {
+  color: var(--text);
+  font-size: .78rem;
+}
+.first-order-steps small {
+  margin-top: var(--space-1);
+  color: var(--muted);
+  font-size: .7rem;
+}
+.first-order-steps .is-complete .first-order-step-marker {
+  border-color: var(--green);
+  background: color-mix(in srgb, var(--green) 16%, transparent);
+  color: var(--green);
+}
+.first-order-guide-footer {
+  align-items: center;
+}
+.first-order-guide-footer p {
+  max-width: 68ch;
+}
+.first-order-guide-open {
+  align-self: flex-start;
+  margin-bottom: var(--space-3);
+  font-size: .75rem;
+}
 .ticket-form-compact {
   display: flex; flex-direction: column; gap: .35rem;
 }
@@ -1431,6 +1529,31 @@ tr[data-clordid]:hover > td { background: rgba(255,255,255,.025); }
   outline-offset: 2px;
 }
 :focus:not(:focus-visible) { outline: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .first-order-steps li {
+    transition: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .first-order-guide-heading,
+  .first-order-guide-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .first-order-steps {
+    grid-template-columns: 1fr;
+  }
+  .first-order-steps li + li {
+    border-left: 0;
+    border-top: 1px solid var(--border);
+  }
+  .first-order-guide-footer .cluster {
+    justify-content: space-between;
+    width: 100%;
+  }
+}
 
 /* Responsive ≤1280px.  Multi-column trader sub-tabs collapse to a
    single column so they remain usable on a 1366×768 laptop. */

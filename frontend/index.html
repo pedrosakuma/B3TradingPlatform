@@ -191,6 +191,39 @@
            every IDs the existing ui.js / app.js handlers expect.
            ────────────────────────────────────────────────────────────── -->
       <section class="panel ticket ticket-compact">
+        <aside id="first-order-guide" class="first-order-guide" aria-labelledby="first-order-guide-title" hidden>
+          <div class="first-order-guide-heading">
+            <div>
+              <h2 id="first-order-guide-title">Place your first order</h2>
+              <p>About one minute, using the live ticket below.</p>
+            </div>
+            <span id="first-order-guide-status" class="badge badge-info" aria-live="polite">Step 1 of 3</span>
+          </div>
+          <ol class="first-order-steps" aria-label="First order progress">
+            <li id="first-order-step-1">
+              <span class="first-order-step-marker" aria-hidden="true">1</span>
+              <span><strong>Connect</strong><small>Confirm live trading status</small></span>
+            </li>
+            <li id="first-order-step-2">
+              <span class="first-order-step-marker" aria-hidden="true">2</span>
+              <span><strong>Review and submit</strong><small>Use the real order ticket</small></span>
+            </li>
+            <li id="first-order-step-3">
+              <span class="first-order-step-marker" aria-hidden="true">3</span>
+              <span><strong>Verify</strong><small>Find it in Working Orders</small></span>
+            </li>
+          </ol>
+          <div class="first-order-guide-footer">
+            <p id="first-order-guide-message" role="status" aria-live="polite"></p>
+            <div class="cluster">
+              <button id="first-order-guide-dismiss" type="button" class="btn btn-link">Skip guide</button>
+              <button id="first-order-guide-action" type="button" class="btn btn-primary">Review the ticket</button>
+            </div>
+          </div>
+        </aside>
+        <button id="first-order-guide-open" type="button" class="first-order-guide-open btn btn-link" hidden>
+          First order guide
+        </button>
         <form id="ticket-form" class="ticket-form ticket-form-compact form-surface">
           <div class="ticket-row-quick">
             <label class="ticket-field ticket-field-symbol">
