@@ -163,8 +163,8 @@ test("renderAuctionPanel shows TOP, match qty, imbalance and arrow direction", (
   assert.equal(document.getElementById("auction-empty-state").hidden, true);
   assert.equal(document.getElementById("auction-prints-title").hidden, false);
   assert.equal(document.getElementById("auction-prints").hidden, false);
-  // Top price formatted via fmtPx (en-US dot decimal — #340).
-  assert.equal(document.getElementById("auction-top-price").textContent, "30.50");
+  // Top price follows the shared Brazilian trading-number convention.
+  assert.equal(document.getElementById("auction-top-price").textContent, "30,50");
   // Up arrow because 30.50 > 30.00.
   const arrow = document.getElementById("auction-top-arrow");
   assert.equal(arrow.textContent, "▲");
@@ -198,7 +198,7 @@ test("renderAuctionPanel renders the print history newest-first", () => {
   const html = document.getElementById("auction-prints").innerHTML;
   // Most recent (price=31) should appear before the older one in the
   // rendered list.
-  assert.ok(html.indexOf("31.00") < html.indexOf("30.00"),
+  assert.ok(html.indexOf("31,00") < html.indexOf("30,00"),
     "newest print must appear first in the list");
 });
 

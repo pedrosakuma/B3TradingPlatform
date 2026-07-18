@@ -18,8 +18,8 @@ test("getAlgoDetailParamEntries formats price and quantity fields per algo type"
   });
 
   assert.deepEqual(entries, [
-    ["Display quantity", "2,500"],
-    ["Limit price", "31.25"],
+    ["Display quantity", "2.500"],
+    ["Limit price", "31,25"],
   ]);
 });
 
@@ -39,12 +39,12 @@ test("getAlgoDetailParamEntries skips empty values and preserves typed labels", 
   });
 
   assert.deepEqual(entries, [
-    ["Start UTC", "2026-01-01T13:00:00Z"],
-    ["End UTC", "2026-01-01T14:00:00Z"],
+    ["Start UTC", "01/01/2026, 13:00:00 UTC"],
+    ["End UTC", "01/01/2026, 14:00:00 UTC"],
     ["Child order type", "Market"],
     ["Tick interval (s)", "30"],
-    ["Participation cap", "0.2"],
-    ["Price limit", "30.50"],
+    ["Participation cap", "20,0%"],
+    ["Price limit", "30,50"],
   ]);
 });
 
@@ -65,9 +65,9 @@ test("getAlgoDetailParamEntries includes Pegged child order type", () => {
     ["Reference", "Mid"],
     ["Offset ticks", "-2"],
     ["Repeg interval (ms)", "500"],
-    ["Tick size", "0.01"],
+    ["Tick size", "0,01"],
     ["Child order type", "Limit"],
-    ["Price limit", "31.40"],
+    ["Price limit", "31,40"],
   ]);
 });
 
