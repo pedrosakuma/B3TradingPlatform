@@ -1,5 +1,6 @@
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Infrastructure.Persistence;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -25,6 +26,8 @@ public static class TradingPersistenceServiceCollectionExtensions
             configuration.GetSection(PositionSeedOptions.SectionName));
         services.Configure<CashSeedOptions>(
             configuration.GetSection(CashSeedOptions.SectionName));
+        services.Configure<OutboundCommandProtectionOptions>(
+            configuration.GetSection(OutboundCommandProtectionOptions.SectionName));
 
         // Persistence: event-sourced WAL + periodic snapshot. The IEventStore
         // implementation is chosen at resolution time from the bound options so
@@ -53,6 +56,10 @@ public static class TradingPersistenceServiceCollectionExtensions
                 : new InMemoryReconciliationMarkerStore();
         });
         services.AddSingleton<ReconciliationResolutionWriter>();
+        services.AddSingleton<IOutboundNonceSource, CryptographicOutboundNonceSource>();
+        services.AddSingleton<IOutboundCommandProtector, AeadOutboundCommandProtector>();
+        services.AddSingleton<OutboundMutationLedger>();
+        services.AddSingleton<OutboundProcessEpoch>();
         services.AddSingleton<ReconciliationMarkerRecovery>();
         services.AddSingleton<ColdStartLifecycleGuard>();
         services.AddSingleton<StateSnapshotter>();

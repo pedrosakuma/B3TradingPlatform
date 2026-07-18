@@ -64,6 +64,7 @@ public sealed class PendingReplacementRegistry
         // <see cref="Risk.IReplaceMarginCoordinator.PrepareReplaceAsync"/>
         // with the same value the pre-crash dispatch used.
         public decimal NewRemainingNotional { get; set; }
+        public bool RecoveryFenced { get; set; }
         public Entry(OrderReplacementIntent intent, DateTimeOffset createdAt)
         {
             Intent = intent;
@@ -286,6 +287,14 @@ public sealed class PendingReplacementRegistry
         return false;
     }
 
+    public bool MarkRecoveryFenced(ulong newClOrdId)
+    {
+        if (!_byNewClOrdId.TryGetValue(newClOrdId, out var found))
+            return false;
+        found.RecoveryFenced = true;
+        return true;
+    }
+
     /// <summary>
     /// Back-compat overload used by tests written before pass-5
     /// introduced the explicit <c>AmbiguousAt</c> anchor. Anchors the
@@ -337,6 +346,7 @@ public sealed class PendingReplacementRegistry
                 continue;
             }
             if (!entry.AmbiguousMarginHeld) continue;
+            if (entry.RecoveryFenced) continue;
             // Use AmbiguousAt as the age anchor (falls back to
             // CreatedAt for legacy entries that pre-date pass-5).
             var anchor = entry.AmbiguousAt ?? entry.CreatedAt;
@@ -406,6 +416,7 @@ public sealed class PendingReplacementRegistry
                 AmbiguousMarginHeld = s.AmbiguousMarginHeld,
                 AmbiguousAt = s.AmbiguousAt,
                 NewRemainingNotional = s.NewRemainingNotional,
+                RecoveryFenced = true,
             };
             if (!_byOriginalClOrdId.TryAdd(s.Intent.OriginalClOrdId, s.Intent.NewClOrdId))
                 continue;

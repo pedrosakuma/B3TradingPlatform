@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using B3.Trading.Application.Lifecycle;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Application.UserBots;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Logging;
@@ -175,6 +176,7 @@ public sealed class ReconciliationMarkerRecovery
     private readonly IUserBotOrderMappingRegistry? _botMappings;
     private readonly IDrainController _drain;
     private readonly ILogger<ReconciliationMarkerRecovery> _logger;
+    private readonly OutboundMutationLedger? _outboundLedger;
 
     public ReconciliationMarkerRecovery(
         IReconciliationMarkerStore store,
@@ -185,7 +187,8 @@ public sealed class ReconciliationMarkerRecovery
         ClOrdIdPrefixRegistry clOrdIds,
         IDrainController drain,
         ILogger<ReconciliationMarkerRecovery> logger,
-        IUserBotOrderMappingRegistry? botMappings = null)
+        IUserBotOrderMappingRegistry? botMappings = null,
+        OutboundMutationLedger? outboundLedger = null)
     {
         _store = store;
         _dispatcher = dispatcher;
@@ -196,6 +199,7 @@ public sealed class ReconciliationMarkerRecovery
         _drain = drain;
         _logger = logger;
         _botMappings = botMappings;
+        _outboundLedger = outboundLedger;
     }
 
     public int Apply()
@@ -216,6 +220,7 @@ public sealed class ReconciliationMarkerRecovery
         var unresolved = 0;
         foreach (var marker in markers)
         {
+            _outboundLedger?.ImportReconciliationMarker(marker);
             _clOrdIds.AdvanceCounterTo(
                 new EndClientId(marker.OwnerEndClientId),
                 marker.MutationClOrdId);
@@ -283,31 +288,35 @@ public sealed class ColdStartLifecycleGuard
     private readonly PendingReplacementRegistry _replacements;
     private readonly IDrainController _drain;
     private readonly ILogger<ColdStartLifecycleGuard> _logger;
+    private readonly OutboundMutationLedger? _outboundLedger;
 
     public ColdStartLifecycleGuard(
         PendingCancelRegistry pendingCancels,
         PendingReplacementRegistry replacements,
         IDrainController drain,
-        ILogger<ColdStartLifecycleGuard> logger)
+        ILogger<ColdStartLifecycleGuard> logger,
+        OutboundMutationLedger? outboundLedger = null)
     {
         _pendingCancels = pendingCancels;
         _replacements = replacements;
         _drain = drain;
         _logger = logger;
+        _outboundLedger = outboundLedger;
     }
 
     public int Apply()
     {
         var cancelCount = _pendingCancels.Snapshot().Count;
         var replaceCount = _replacements.Snapshot().Count;
-        var unresolved = cancelCount + replaceCount;
+        var ledgerCount = _outboundLedger?.ReadinessBlockingCount ?? 0;
+        var unresolved = cancelCount + replaceCount + ledgerCount;
         if (unresolved == 0)
             return 0;
 
         _drain.BeginDrain("cold_start_unresolved_lifecycle_intents");
         _logger.LogCritical(
-            "Cold recovery retained {CancelCount} cancel and {ReplaceCount} replace intents without current-process send proof; readiness remains closed.",
-            cancelCount, replaceCount);
+            "Cold recovery retained {CancelCount} cancel, {ReplaceCount} replace and {LedgerCount} outbound-ledger reconciliation blockers; readiness remains closed.",
+            cancelCount, replaceCount, ledgerCount);
         return unresolved;
     }
 }

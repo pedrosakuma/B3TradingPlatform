@@ -63,6 +63,15 @@ namespace B3.Trading.Application.Persistence;
 [JsonSerializable(typeof(SubAccountDeactivatedEvent))]
 [JsonSerializable(typeof(AuditLogEvent))]
 [JsonSerializable(typeof(BusinessRejectReceivedEvent))]
+[JsonSerializable(typeof(OutboundApprovedEvent))]
+[JsonSerializable(typeof(OutboundAttemptIntentPreparedEvent))]
+[JsonSerializable(typeof(OutboundFramePreparedEvent))]
+[JsonSerializable(typeof(OutboundTransportWriteCompletedEvent))]
+[JsonSerializable(typeof(OutboundProvenUnsentEvent))]
+[JsonSerializable(typeof(OutboundOperatorResolvedEvent))]
+[JsonSerializable(typeof(Outbound.OutboundApprovalSnapshot))]
+[JsonSerializable(typeof(Outbound.OutboundCanonicalCommand))]
+[JsonSerializable(typeof(Outbound.EncryptedOutboundCommandEnvelope))]
 [JsonSerializable(typeof(MarketData.BookTouchSnapshot))]
 public sealed partial class WalEventJsonContext : JsonSerializerContext
 {

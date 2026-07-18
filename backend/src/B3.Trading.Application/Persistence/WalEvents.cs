@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Domain;
 
 namespace B3.Trading.Application.Persistence;
@@ -7,11 +8,11 @@ namespace B3.Trading.Application.Persistence;
 /// Base type for every event written to the WAL. Each derived record is
 /// serialised as a single JSON object inside a length+CRC framed record on
 /// disk. The <see cref="JsonPolymorphicAttribute"/> discriminator keeps
-/// the schema explicit and forward-compatible: an unknown subtype is
-/// <i>skipped with a structured warning</i> during recovery rather than
-/// crashing the reader — older binaries can therefore traverse WAL
-/// segments produced by newer engines (rolling deploys, downgrade paths,
-/// EOD materialisation of mixed-version days). See
+/// the schema explicit and forward-compatible. Unknown unrelated historical
+/// subtypes are skipped with a structured warning so older binaries can
+/// traverse mixed-version WAL segments. Unknown <c>outbound.*</c> subtypes
+/// fail recovery closed because skipping frame/attempt evidence could
+/// incorrectly prove a mutation unsent. See
 /// <see cref="B3.Trading.Infrastructure.Persistence.FileEventStore.ReadFromAsync"/>
 /// for the skip site. Genuine corruption (malformed JSON for a
 /// <i>known</i> kind, missing required fields, etc.) still surfaces as
@@ -60,6 +61,12 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(SubAccountDeactivatedEvent), "sub-account.deactivated")]
 [JsonDerivedType(typeof(AuditLogEvent), "audit.log")]
 [JsonDerivedType(typeof(BusinessRejectReceivedEvent), "business-reject.received")]
+[JsonDerivedType(typeof(OutboundApprovedEvent), "outbound.approved")]
+[JsonDerivedType(typeof(OutboundAttemptIntentPreparedEvent), "outbound.attempt-intent-prepared")]
+[JsonDerivedType(typeof(OutboundFramePreparedEvent), "outbound.frame-prepared")]
+[JsonDerivedType(typeof(OutboundTransportWriteCompletedEvent), "outbound.transport-write-completed")]
+[JsonDerivedType(typeof(OutboundProvenUnsentEvent), "outbound.proven-unsent")]
+[JsonDerivedType(typeof(OutboundOperatorResolvedEvent), "outbound.operator-resolved")]
 public abstract record WalEvent
 {
     public DateTimeOffset TimestampUtc { get; init; } = DateTimeOffset.UtcNow;
@@ -409,6 +416,66 @@ public sealed record OrderReplaceAmbiguousMarginHeldEvent : WalEvent
     public required DateTimeOffset HeldAtUtc { get; init; }
 }
 
+public sealed record OutboundApprovedEvent : WalEvent
+{
+    public required OutboundMutationId MutationId { get; init; }
+    public required OutboundMutationKind MutationKind { get; init; }
+    public required string FirmId { get; init; }
+    public required string EndClientRef { get; init; }
+    public required OutboundMutationOrigin Origin { get; init; }
+    public required ulong PrimaryClOrdId { get; init; }
+    public ulong? OriginalClOrdId { get; init; }
+    public required DateTimeOffset RecordedAtUtc { get; init; }
+    public required OutboundApprovalSnapshot Approval { get; init; }
+}
+
+public sealed record OutboundAttemptIntentPreparedEvent : WalEvent
+{
+    public required OutboundMutationId MutationId { get; init; }
+    public required OutboundAttemptId AttemptId { get; init; }
+    public required int AttemptNo { get; init; }
+    public required ulong ClOrdId { get; init; }
+    public required ProcessEpochId ProcessEpochId { get; init; }
+    public required DateTimeOffset IntentPreparedAtUtc { get; init; }
+}
+
+public sealed record OutboundFramePreparedEvent : WalEvent
+{
+    public required OutboundMutationId MutationId { get; init; }
+    public required OutboundAttemptId AttemptId { get; init; }
+    public required string FirmId { get; init; }
+    public required ulong SessionId { get; init; }
+    public required uint SessionVerId { get; init; }
+    public required ulong OutboundSeqNum { get; init; }
+    public required string EncodedFrameSha256 { get; init; }
+    public required DateTimeOffset PreparedAtUtc { get; init; }
+}
+
+public sealed record OutboundTransportWriteCompletedEvent : WalEvent
+{
+    public required OutboundMutationId MutationId { get; init; }
+    public required OutboundAttemptId AttemptId { get; init; }
+    public required DateTimeOffset CompletedAtUtc { get; init; }
+    public required int GatewayReceiptVersion { get; init; }
+}
+
+public sealed record OutboundProvenUnsentEvent : WalEvent
+{
+    public required OutboundMutationId MutationId { get; init; }
+    public required OutboundAttemptId AttemptId { get; init; }
+    public required OutboundProvenUnsentEvidence Evidence { get; init; }
+}
+
+public sealed record OutboundOperatorResolvedEvent : WalEvent
+{
+    public required OutboundMutationId MutationId { get; init; }
+    public required OutboundOperatorDecision Decision { get; init; }
+    public required OutboundOperatorEvidenceType EvidenceType { get; init; }
+    public required string EvidenceDigest { get; init; }
+    public required string OperatorRef { get; init; }
+    public required DateTimeOffset ResolvedAtUtc { get; init; }
+}
+
 /// <summary>
 /// Every ER routed by the platform — both real EntryPoint reports and
 /// synthetic rejections (risk decline / gateway failure). Replay drives
@@ -442,6 +509,12 @@ public sealed record ExecutionReportReceivedEvent : WalEvent
     /// (counted on <c>trading.er.firm_mismatch_total</c>).
     /// </summary>
     public string? FirmId { get; init; }
+    public ulong? SessionId { get; init; }
+    public uint? SessionVerId { get; init; }
+    public ulong? InboundSeqNum { get; init; }
+    public DateTimeOffset? VenueSendingTime { get; init; }
+    public bool PossibleResend { get; init; }
+    public ulong? VenueOrderId { get; init; }
 
     /// <summary>
     /// Q4.7 (#307). Top-of-book snapshot captured at the moment a
@@ -1289,4 +1362,7 @@ public sealed record BusinessRejectReceivedEvent : WalEvent
     public required ulong SeqNum { get; init; }
     /// <summary>Venue <c>SendingTime</c> from the reject envelope.</summary>
     public required DateTimeOffset SendingTime { get; init; }
+    public ulong? SessionId { get; init; }
+    public uint? SessionVerId { get; init; }
+    public bool PossibleResend { get; init; }
 }

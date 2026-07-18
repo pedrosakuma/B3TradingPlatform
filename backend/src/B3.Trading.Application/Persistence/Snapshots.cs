@@ -353,6 +353,9 @@ public sealed class OutboundLedgerSnapshot
     public const int CurrentVersion = 1;
 
     public int Version { get; init; }
+    public bool LegacyMigrationCompleted { get; init; }
+    public List<B3.Trading.Application.Outbound.OutboundMutationSnapshot> Mutations { get; init; } = new();
+    public List<B3.Trading.Application.Outbound.OutboundCorrelationTombstone> CorrelationTombstones { get; init; } = new();
 }
 
 /// <summary>
