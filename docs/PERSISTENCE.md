@@ -262,17 +262,25 @@ graceful shutdown. It captures:
   Their snapshot dictionary keys are `{firmId}|{endClientId}`; legacy plain
   keys also restore only into `DEFAULT`.
 
-After the raw state is captured under the dispatcher lock, the lock is released
-and `SnapshotService` awaits `FlushThroughAsync(snapshotSeq)`. Projection and
-publication happen only after the marker proves that complete prefix durable;
-failure or cancellation publishes nothing. Recovery ignores a snapshot whose
-sequence is ahead of `LastCommittedSeq` and falls back to full committed-WAL
-replay. Generation/lineage metadata remains the follow-up scope of #638.
+`EventDispatcher` tracks the highest contiguous applied sequence separately
+from WAL admission. Raw state, that applied sequence, and the marker's stable
+WAL generation/lineage are captured under the dispatcher lock. The lock is
+then released and `SnapshotService` awaits `FlushThroughAsync(snapshotSeq)`.
+Projection and publication happen only after the marker covers the complete
+applied prefix; failure or cancellation publishes nothing.
 
-Write is atomic via temp file + `File.Move(overwrite: true)`. The
-`latest.txt` pointer is then updated; if it is missing or corrupt at
-boot, `SnapshotStore.LoadLatest()` falls back to the highest-numbered
-`snap-*.json` it can parse.
+New snapshots use format version 1, carry the covering WAL generation, and
+include an empty version-1 outbound-ledger envelope reserved for #639. Legacy
+unversioned snapshots remain readable only when the current commit marker
+covers their sequence. Recovery rejects candidates ahead of the marker or from
+another generation, then tries older snapshots before full committed-WAL
+replay. Unknown future snapshot or outbound-ledger versions fail startup closed.
+
+Snapshot and `latest.txt` publication each use a file-fsynced staging file,
+atomic rename, and directory fsync. The pointer is only a hint: boot scans
+canonical snapshot files newest-first, removes recognized abandoned staging
+files, falls back across corrupt or lineage-invalid candidates, and rejects
+symlinks, unexpected artifacts, or non-canonical names.
 
 Snapshots are a **derived cache**. Deleting them is harmless — the WAL
 is sufficient (boot will be slower).

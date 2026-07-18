@@ -30,6 +30,9 @@ public sealed class RawPlatformSnapshot
 {
     public long Seq { get; init; }
     public DateTimeOffset CreatedAtUtc { get; init; }
+    public int FormatVersion { get; init; }
+    public Guid WalGeneration { get; init; }
+    public OutboundLedgerSnapshot? OutboundLedger { get; init; }
 
     public OrderRaw[] Orders { get; init; } = Array.Empty<OrderRaw>();
     public AlgoRaw[] Algos { get; init; } = Array.Empty<AlgoRaw>();

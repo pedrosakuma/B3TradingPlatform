@@ -101,15 +101,11 @@ public sealed class PersistenceRecovery
     public async Task RunAsync(Action? initializeReplayBaselines, CancellationToken ct = default)
     {
         long since = 0;
-        var snap = _snapshots.LoadLatest();
-        if (snap is not null && snap.Seq > _store.LastCommittedSeq)
-        {
-            _logger.LogError(
-                "Persistence recovery rejected snapshot seq={SnapshotSeq} ahead of committed WAL seq={CommittedSeq}; full committed-WAL replay will be used.",
-                snap.Seq,
-                _store.LastCommittedSeq);
-            snap = null;
-        }
+        var snap = _snapshots.LoadLatest(
+            ValidateSnapshot,
+            reason => _logger.LogError(
+                "Persistence recovery rejected a snapshot candidate: {Reason}",
+                reason));
         if (snap is not null)
         {
             _snapshotter.Restore(snap);
@@ -263,6 +259,58 @@ public sealed class PersistenceRecovery
         }
     }
 
+    private SnapshotValidationResult ValidateSnapshot(PlatformSnapshot snapshot)
+    {
+        if (snapshot.Seq < 0)
+            return SnapshotValidationResult.Reject("Snapshot sequence is negative.");
+
+        if (snapshot.FormatVersion == 0)
+        {
+            if (snapshot.WalGeneration != Guid.Empty
+                || snapshot.OutboundLedger is not null)
+            {
+                return SnapshotValidationResult.Reject(
+                    "Legacy snapshot contains versioned lineage or outbound-ledger fields.");
+            }
+            return snapshot.Seq <= _store.LastCommittedSeq
+                ? SnapshotValidationResult.Accept()
+                : SnapshotValidationResult.Reject(
+                    $"Legacy snapshot seq={snapshot.Seq} is ahead of committed WAL seq={_store.LastCommittedSeq}.");
+        }
+
+        if (snapshot.WalGeneration == Guid.Empty)
+        {
+            return SnapshotValidationResult.Reject(
+                "Versioned snapshot has an empty WAL generation.");
+        }
+        if (snapshot.WalGeneration != _store.WalGeneration)
+        {
+            return SnapshotValidationResult.Reject(
+                $"Snapshot WAL generation {snapshot.WalGeneration} does not match active generation {_store.WalGeneration}.");
+        }
+        if (snapshot.Seq > _store.LastCommittedSeq)
+        {
+            return SnapshotValidationResult.Reject(
+                $"Snapshot seq={snapshot.Seq} is ahead of committed WAL seq={_store.LastCommittedSeq}.");
+        }
+        if (snapshot.FormatVersion != PlatformSnapshot.CurrentFormatVersion)
+        {
+            return SnapshotValidationResult.Fatal(
+                $"Snapshot format version {snapshot.FormatVersion} is unsupported for the active WAL lineage; recovery is fail-closed.");
+        }
+        if (snapshot.OutboundLedger is null)
+        {
+            return SnapshotValidationResult.Reject(
+                "Versioned snapshot is missing its outbound-ledger envelope.");
+        }
+        if (snapshot.OutboundLedger.Version != OutboundLedgerSnapshot.CurrentVersion)
+        {
+            return SnapshotValidationResult.Fatal(
+                $"Outbound-ledger snapshot version {snapshot.OutboundLedger.Version} is unsupported for the active WAL lineage; recovery is fail-closed.");
+        }
+        return SnapshotValidationResult.Accept();
+    }
+
     private void ReconcileFirmSessionVerIds(PlatformSnapshot snap)
     {
         if (snap.FirmSessionVerIds is null || snap.FirmSessionVerIds.Count == 0)
@@ -388,9 +436,10 @@ public sealed class SnapshotService : Microsoft.Extensions.Hosting.BackgroundSer
             // expensive projection (per-DTO allocation, OrderBy sort,
             // enum.ToString, final List<T> materialisation) and then
             // the disk write.
-            RawPlatformSnapshot? raw = null;
-            _dispatcher.WithSnapshotLock(seq => raw = _snapshotter.CaptureRaw(seq));
-            if (raw is null) return false;
+            var raw = _dispatcher.CaptureSnapshot(
+                context => _snapshotter.CaptureRaw(
+                    context.AppliedSeq,
+                    context.WalGeneration));
 
             // The lock is deliberately released before awaiting disk
             // durability. Dispatch/projection can continue and the WAL writer

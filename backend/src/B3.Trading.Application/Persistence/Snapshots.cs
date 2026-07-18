@@ -35,8 +35,25 @@ namespace B3.Trading.Application.Persistence;
 /// </summary>
 public sealed class PlatformSnapshot
 {
+    public const int CurrentFormatVersion = 1;
+
     public long Seq { get; init; }
     public DateTimeOffset CreatedAtUtc { get; init; }
+    /// <summary>
+    /// Zero identifies the legacy unversioned shape. New snapshots use
+    /// <see cref="CurrentFormatVersion"/> and bind to <see cref="WalGeneration"/>.
+    /// </summary>
+    public int FormatVersion { get; init; }
+    /// <summary>
+    /// Stable lineage identifier from the covering WAL commit marker.
+    /// Empty only for legacy snapshots.
+    /// </summary>
+    public Guid WalGeneration { get; init; }
+    /// <summary>
+    /// Empty versioned envelope reserved for #639. No outbound mutation
+    /// business state is persisted by this slice.
+    /// </summary>
+    public OutboundLedgerSnapshot? OutboundLedger { get; init; }
     public List<OrderSnapshot> WorkingOrders { get; init; } = new();
     public List<PositionSnapshot> Positions { get; init; } = new();
     public List<string> KilledEndClients { get; init; } = new();
@@ -329,6 +346,13 @@ public sealed class PlatformSnapshot
     /// straight off the loaded snapshot by the recovery path.
     /// </summary>
     public Dictionary<string, uint> FirmSessionVerIds { get; init; } = new();
+}
+
+public sealed class OutboundLedgerSnapshot
+{
+    public const int CurrentVersion = 1;
+
+    public int Version { get; init; }
 }
 
 /// <summary>

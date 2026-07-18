@@ -144,6 +144,18 @@ public sealed class StateSnapshotter
 
     public PlatformSnapshot Capture(long seq) => Project(CaptureRaw(seq));
 
+    public RawPlatformSnapshot CaptureRaw(
+        long seq,
+        Guid walGeneration) =>
+        CaptureRawCore(
+            seq,
+            PlatformSnapshot.CurrentFormatVersion,
+            walGeneration,
+            new OutboundLedgerSnapshot
+            {
+                Version = OutboundLedgerSnapshot.CurrentVersion,
+            });
+
     /// <summary>
     /// Phase-1 (lock-side) capture for the two-phase snapshot pipeline
     /// described in RFC §5.8 / P6. Caller MUST hold
@@ -164,52 +176,62 @@ public sealed class StateSnapshotter
     /// <c>seq &gt; <paramref name="seq"/></c> can leak into the
     /// projected <see cref="PlatformSnapshot"/>.</para>
     /// </summary>
-    public RawPlatformSnapshot CaptureRaw(long seq) => new()
-    {
-        Seq = seq,
-        CreatedAtUtc = DateTimeOffset.UtcNow,
-        Orders = _orders.RawSnapshot(),
-        Algos = _algos.RawSnapshot(),
-        Positions = _positions.RawSnapshot(),
-        KilledEndClients = _killSwitch.RawSnapshotKilledEndClients(),
-        KilledFirms = _killSwitch.RawSnapshotKilledFirms(),
-        HaltedSymbols = _symbolHalts.RawSnapshot(),
-        HaltedSymbolOrigins = _symbolHalts.RawSnapshotWithOrigin(),
-        DefaultPhase = _sessionPhases.DefaultPhase,
-        SessionPhaseOverrides = _sessionPhases.RawSnapshotOverrides(),
-        ClOrdIds = _clOrdIds.RawSnapshot(),
-        AlgoIds = _algoIds.RawSnapshot(),
-        Ownership = _ownership.RawSnapshot(),
-        CashBalances = _cash.RawSnapshot(),
-        CashByEndclient = _cashKeeper?.RawSnapshot() ?? Array.Empty<CashKeeperRaw>(),
-        FeesByEndclientDay = _feeKeeper?.RawSnapshot() ?? Array.Empty<FeeKeeperRaw>(),
-        FeeSeenExecutionIds = _feeKeeper?.RawSnapshotSeenIds() ?? Array.Empty<string>(),
-        PnlRealizedByEndclientSymbolDay = _pnlKeeper?.RawSnapshotRealized() ?? Array.Empty<PnlRealizedRaw>(),
-        PnlAvgCost = _pnlKeeper?.RawSnapshotAvgCost() ?? Array.Empty<PnlAvgCostRaw>(),
-        PnlUnknownBasis = _pnlKeeper?.RawSnapshotUnknownBasis() ?? Array.Empty<PnlUnknownBasisRaw>(),
-        PnlSeenExecutionIds = _pnlKeeper?.RawSnapshotSeenIds() ?? Array.Empty<string>(),
-        UserBotCredentials = _userBotCredentials?.RawSnapshot() ?? Array.Empty<UserBotCredential>(),
-        BotSessions = _userBotSessions?.RawSnapshot() ?? Array.Empty<BotSessionState>(),
-        BotOrderMappings = _userBotMappings?.RawSnapshotOrders() ?? Array.Empty<BotOrderMappingRaw>(),
-        BotCancelMappings = _userBotMappings?.RawSnapshotCancels() ?? Array.Empty<BotCancelMappingRaw>(),
-        AuditedExpiredIds = _gtdScheduler?.SnapshotAuditedExpiredIds() ?? Array.Empty<ulong>(),
-        PovProgress = _povProgress is null
+    public RawPlatformSnapshot CaptureRaw(long seq) =>
+        CaptureRawCore(seq, formatVersion: 0, Guid.Empty, outboundLedger: null);
+
+    private RawPlatformSnapshot CaptureRawCore(
+        long seq,
+        int formatVersion,
+        Guid walGeneration,
+        OutboundLedgerSnapshot? outboundLedger) => new()
+        {
+            Seq = seq,
+            CreatedAtUtc = DateTimeOffset.UtcNow,
+            FormatVersion = formatVersion,
+            WalGeneration = walGeneration,
+            OutboundLedger = outboundLedger,
+            Orders = _orders.RawSnapshot(),
+            Algos = _algos.RawSnapshot(),
+            Positions = _positions.RawSnapshot(),
+            KilledEndClients = _killSwitch.RawSnapshotKilledEndClients(),
+            KilledFirms = _killSwitch.RawSnapshotKilledFirms(),
+            HaltedSymbols = _symbolHalts.RawSnapshot(),
+            HaltedSymbolOrigins = _symbolHalts.RawSnapshotWithOrigin(),
+            DefaultPhase = _sessionPhases.DefaultPhase,
+            SessionPhaseOverrides = _sessionPhases.RawSnapshotOverrides(),
+            ClOrdIds = _clOrdIds.RawSnapshot(),
+            AlgoIds = _algoIds.RawSnapshot(),
+            Ownership = _ownership.RawSnapshot(),
+            CashBalances = _cash.RawSnapshot(),
+            CashByEndclient = _cashKeeper?.RawSnapshot() ?? Array.Empty<CashKeeperRaw>(),
+            FeesByEndclientDay = _feeKeeper?.RawSnapshot() ?? Array.Empty<FeeKeeperRaw>(),
+            FeeSeenExecutionIds = _feeKeeper?.RawSnapshotSeenIds() ?? Array.Empty<string>(),
+            PnlRealizedByEndclientSymbolDay = _pnlKeeper?.RawSnapshotRealized() ?? Array.Empty<PnlRealizedRaw>(),
+            PnlAvgCost = _pnlKeeper?.RawSnapshotAvgCost() ?? Array.Empty<PnlAvgCostRaw>(),
+            PnlUnknownBasis = _pnlKeeper?.RawSnapshotUnknownBasis() ?? Array.Empty<PnlUnknownBasisRaw>(),
+            PnlSeenExecutionIds = _pnlKeeper?.RawSnapshotSeenIds() ?? Array.Empty<string>(),
+            UserBotCredentials = _userBotCredentials?.RawSnapshot() ?? Array.Empty<UserBotCredential>(),
+            BotSessions = _userBotSessions?.RawSnapshot() ?? Array.Empty<BotSessionState>(),
+            BotOrderMappings = _userBotMappings?.RawSnapshotOrders() ?? Array.Empty<BotOrderMappingRaw>(),
+            BotCancelMappings = _userBotMappings?.RawSnapshotCancels() ?? Array.Empty<BotCancelMappingRaw>(),
+            AuditedExpiredIds = _gtdScheduler?.SnapshotAuditedExpiredIds() ?? Array.Empty<ulong>(),
+            PovProgress = _povProgress is null
             ? Array.Empty<PovProgressRaw>()
             : _povProgress.Snapshot()
                 .Select(t => new PovProgressRaw(t.FirmId, t.AlgoId, t.Progress.MarketVolumeSeen, t.Progress.LastEvaluateAtUtc))
                 .ToArray(),
-        PeggedRepegPending = _peggedRepeg is null
+            PeggedRepegPending = _peggedRepeg is null
             ? Array.Empty<PeggedRepegPendingRaw>()
             : _peggedRepeg.Snapshot()
                 .Select(t => new PeggedRepegPendingRaw(t.FirmId, t.AlgoId,
                     t.Pending.CancelledChildClOrdId, t.Pending.TargetPrice, t.Pending.AtUtc))
                 .ToArray(),
-        PeggedRepegHistory = _peggedRepeg is null
+            PeggedRepegHistory = _peggedRepeg is null
             ? Array.Empty<PeggedRepegHistoryRaw>()
             : _peggedRepeg.SnapshotHistory()
                 .Select(t => new PeggedRepegHistoryRaw(t.FirmId, t.AlgoId, t.ChildClOrdIds.ToArray(), t.EvictionLogged))
                 .ToArray(),
-        PendingReplacements = _replacements is null
+            PendingReplacements = _replacements is null
             ? Array.Empty<PendingReplacementRaw>()
             : _replacements.Snapshot()
                 .Select(s => new PendingReplacementRaw(
@@ -233,23 +255,23 @@ public sealed class StateSnapshotter
                     AmbiguousAtUtc: s.AmbiguousAt,
                     NewRemainingNotional: s.NewRemainingNotional))
                 .ToArray(),
-        PendingCancels = _pendingCancels is null
+            PendingCancels = _pendingCancels is null
             ? Array.Empty<PendingCancelRaw>()
             : _pendingCancels.Snapshot()
                 .Select(static s => new PendingCancelRaw(s.OriginalClOrdId, s.CancelClOrdId))
                 .ToArray(),
-        SubAccounts = _subAccounts?.Snapshot() ?? Array.Empty<SubAccountSnapshot>(),
-        SubAccountPositions = _subAccountPositions?.Snapshot() ?? Array.Empty<SubAccountPositionSnapshot>(),
-        SubAccountPnl = _subAccountPnl?.Snapshot() ?? Array.Empty<SubAccountPnlSnapshot>(),
-        SubAccountPnlBasis = _subAccountPnl?.SnapshotBasis() ?? Array.Empty<SubAccountPnlBasisSnapshot>(),
-        // #380 path B. Each firm's live SessionVerId at capture time so
-        // recovery can detect a session-roll between snapshot and restart.
-        // Empty when the provider is null (Mock/Stub modes).
-        FirmSessionVerIds = _firmSessionStatus is null
+            SubAccounts = _subAccounts?.Snapshot() ?? Array.Empty<SubAccountSnapshot>(),
+            SubAccountPositions = _subAccountPositions?.Snapshot() ?? Array.Empty<SubAccountPositionSnapshot>(),
+            SubAccountPnl = _subAccountPnl?.Snapshot() ?? Array.Empty<SubAccountPnlSnapshot>(),
+            SubAccountPnlBasis = _subAccountPnl?.SnapshotBasis() ?? Array.Empty<SubAccountPnlBasisSnapshot>(),
+            // #380 path B. Each firm's live SessionVerId at capture time so
+            // recovery can detect a session-roll between snapshot and restart.
+            // Empty when the provider is null (Mock/Stub modes).
+            FirmSessionVerIds = _firmSessionStatus is null
             ? new Dictionary<string, uint>()
             : _firmSessionStatus.Snapshot()
                 .ToDictionary(s => s.FirmId, s => s.SessionVerId, StringComparer.Ordinal),
-    };
+        };
 
     /// <summary>
     /// Phase-2 projection for the two-phase snapshot pipeline (RFC §5.8 /
@@ -496,6 +518,9 @@ public sealed class StateSnapshotter
         {
             Seq = raw.Seq,
             CreatedAtUtc = raw.CreatedAtUtc,
+            FormatVersion = raw.FormatVersion,
+            WalGeneration = raw.WalGeneration,
+            OutboundLedger = raw.OutboundLedger,
             WorkingOrders = workingOrders,
             Positions = positions,
             KilledEndClients = new List<string>(raw.KilledEndClients),
