@@ -723,6 +723,7 @@ public sealed class OutboundMutationLedger
         {
             var purgeIds = _mutations.Values
                 .Where(m => IsTerminal(m.State)
+                    && !m.RequiresReconciliation
                     && m.Resolution is { ResolvedAtUtc: var resolved }
                     && resolved <= cutoff)
                 .Select(m => m.MutationId)
@@ -837,8 +838,9 @@ public sealed class OutboundMutationLedger
                     mutation = mutation with
                     {
                         SensitivePayloadAvailability = availability,
-                        RequiresReconciliation = mutation.RequiresReconciliation
-                            || availability != OutboundSensitivePayloadAvailability.Available,
+                        RequiresReconciliation =
+                            availability != OutboundSensitivePayloadAvailability.Available
+                            || StateRequiresReconciliation(mutation.State),
                     };
                 }
                 if (!_mutations.TryAdd(mutation.MutationId, mutation))
@@ -1026,7 +1028,9 @@ public sealed class OutboundMutationLedger
                 EvidenceDigest = evidenceDigest,
                 VenueOrderId = venueOrderId,
             },
-            RequiresReconciliation = false,
+            RequiresReconciliation =
+                mutation.SensitivePayloadAvailability
+                != OutboundSensitivePayloadAvailability.Available,
         };
         _mutations[mutation.MutationId] = mutation;
         MarkCorrelations(mutation, terminal: true, atUtc);
@@ -1230,7 +1234,10 @@ public sealed class OutboundMutationLedger
 
     private static bool IsReadinessBlocking(OutboundMutationSnapshot mutation) =>
         mutation.RequiresReconciliation
-        || mutation.State is OutboundMutationState.Ambiguous
+        || StateRequiresReconciliation(mutation.State);
+
+    private static bool StateRequiresReconciliation(OutboundMutationState state) =>
+        state is OutboundMutationState.Ambiguous
             or OutboundMutationState.LegacyUnknown
             or OutboundMutationState.LegacyUnknownCancel
             or OutboundMutationState.LegacyUnknownReplace;

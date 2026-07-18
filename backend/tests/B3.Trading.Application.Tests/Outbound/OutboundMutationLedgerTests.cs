@@ -1270,6 +1270,91 @@ public sealed class OutboundMutationLedgerTests
     }
 
     [Fact]
+    public void MissingKey_VenueAcknowledgementTerminalisesEvidenceButKeepsReadinessBlocked()
+    {
+        var writer = Fixture.Create();
+        var ledger = new OutboundMutationLedger(Protector(
+            ("other", 1, Key(9)), active: ("other", 1)));
+        var replayer = NewReplayer(ledger, new ClOrdIdPrefixRegistry());
+        replayer.Apply(writer.Approved);
+        replayer.Apply(writer.Intent);
+        replayer.Apply(writer.Frame);
+        replayer.Apply(Acknowledgement(
+            writer, firmId: "F1", sessionId: 11, sessionVerId: 2));
+
+        var terminal = Assert.Single(ledger.SnapshotMutations());
+        Assert.Equal(OutboundMutationState.VenueAcknowledged, terminal.State);
+        Assert.Equal(
+            OutboundSensitivePayloadAvailability.MissingHistoricalKey,
+            terminal.SensitivePayloadAvailability);
+        Assert.True(terminal.RequiresReconciliation);
+        Assert.Equal(1, ledger.ReadinessBlockingCount);
+        Assert.Equal(0, ledger.PurgeTerminalCorrelations(T0.AddYears(10)));
+        Assert.Single(ledger.SnapshotMutations());
+        AssertKeyRestorationClearsPayloadBlocker(ledger, writer);
+    }
+
+    [Fact]
+    public void WrongKey_BusinessRejectTerminalisesEvidenceButKeepsReadinessBlocked()
+    {
+        var writer = Fixture.Create();
+        var ledger = new OutboundMutationLedger(Protector(
+            ("key-a", 1, Key(9)), active: ("key-a", 1)));
+        var replayer = NewReplayer(ledger, new ClOrdIdPrefixRegistry());
+        replayer.Apply(writer.Approved);
+        replayer.Apply(writer.Intent);
+        replayer.Apply(writer.Frame);
+        replayer.Apply(new BusinessRejectReceivedEvent
+        {
+            FirmId = "F1",
+            SessionId = 11,
+            SessionVerId = 2,
+            RefSeqNum = 77,
+            RejectReason = 3,
+            SeqNum = 90,
+            SendingTime = T0,
+            TimestampUtc = T0.AddMinutes(1),
+        });
+
+        var terminal = Assert.Single(ledger.SnapshotMutations());
+        Assert.Equal(OutboundMutationState.VenueAcknowledged, terminal.State);
+        Assert.Equal(
+            OutboundSensitivePayloadAvailability.AuthenticationFailed,
+            terminal.SensitivePayloadAvailability);
+        Assert.True(terminal.RequiresReconciliation);
+        Assert.Equal(1, ledger.ReadinessBlockingCount);
+        AssertKeyRestorationClearsPayloadBlocker(ledger, writer);
+    }
+
+    [Fact]
+    public void MissingKey_OperatorTerminalisationKeepsReadinessBlocked()
+    {
+        var writer = Fixture.Create();
+        var ledger = new OutboundMutationLedger(Protector(
+            ("other", 1, Key(9)), active: ("other", 1)));
+        var replayer = NewReplayer(ledger, new ClOrdIdPrefixRegistry());
+        replayer.Apply(writer.Approved);
+        replayer.Apply(writer.Intent);
+        replayer.Apply(writer.Unsent);
+        replayer.Apply(new OutboundOperatorResolvedEvent
+        {
+            MutationId = writer.MutationId,
+            Decision = OutboundOperatorDecision.VenueAbsent,
+            EvidenceType = OutboundOperatorEvidenceType.OfficialExtract,
+            EvidenceDigest = new string('c', 64),
+            OperatorRef = "operator-17",
+            ResolvedAtUtc = T0.AddMinutes(1),
+            TimestampUtc = T0.AddMinutes(1),
+        });
+
+        var terminal = Assert.Single(ledger.SnapshotMutations());
+        Assert.Equal(OutboundMutationState.OperatorResolved, terminal.State);
+        Assert.True(terminal.RequiresReconciliation);
+        Assert.Equal(1, ledger.ReadinessBlockingCount);
+        AssertKeyRestorationClearsPayloadBlocker(ledger, writer);
+    }
+
+    [Fact]
     public void SnapshotRestore_RepairsPrimaryAndRetryAttemptWatermarksIdempotently()
     {
         var fixture = Fixture.Create();
@@ -1587,6 +1672,44 @@ public sealed class OutboundMutationLedgerTests
             clOrdIds,
             new AlgoIdRegistry(),
             outboundLedger: ledger);
+    }
+
+    private static void AssertKeyRestorationClearsPayloadBlocker(
+        OutboundMutationLedger unavailableLedger,
+        Fixture writer)
+    {
+        var capture = unavailableLedger.CaptureSnapshot();
+        var restoredLedger = new OutboundMutationLedger(writer.Protector);
+        var clOrdIds = new ClOrdIdPrefixRegistry();
+        var snapshotter = NewSnapshotter(
+            restoredLedger,
+            clOrdIds,
+            new PendingReplacementRegistry(),
+            new PendingCancelRegistry());
+        snapshotter.Restore(new PlatformSnapshot
+        {
+            Seq = 4,
+            FormatVersion = PlatformSnapshot.CurrentFormatVersion,
+            WalGeneration = Guid.NewGuid(),
+            OutboundLedger = new OutboundLedgerSnapshot
+            {
+                Version = OutboundLedgerSnapshot.CurrentVersion,
+                LegacyMigrationCompleted = true,
+                Mutations = capture.Mutations.ToList(),
+                CorrelationTombstones = capture.Correlations.ToList(),
+            },
+            ClOrdIds = new ClOrdIdRegistrySnapshot(),
+        });
+
+        var restored = Assert.Single(restoredLedger.SnapshotMutations());
+        Assert.Equal(
+            OutboundSensitivePayloadAvailability.Available,
+            restored.SensitivePayloadAvailability);
+        Assert.False(restored.RequiresReconciliation);
+        Assert.Equal(0, restoredLedger.ReadinessBlockingCount);
+        Assert.Equal(
+            2UL,
+            clOrdIds.Generate(new EndClientId(Sensitive().EndClientId)));
     }
 
     private static AeadOutboundCommandProtector Protector(
