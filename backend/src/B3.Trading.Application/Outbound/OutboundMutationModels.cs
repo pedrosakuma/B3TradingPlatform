@@ -93,6 +93,7 @@ public enum OutboundAmbiguityReason
     MissingHistoricalEncryptionKey,
     UndecryptableCommandEnvelope,
     UnsupportedCommandVersion,
+    ConflictingVenueEvidence,
 }
 
 public enum OutboundOperatorDecision
@@ -223,6 +224,13 @@ public sealed record OutboundOperatorEvidenceSnapshot
     public required DateTimeOffset RecordedAtUtc { get; init; }
 }
 
+public sealed record OutboundLegacyEvidenceSnapshot
+{
+    public required string EvidenceKind { get; init; }
+    public required string EvidenceDigest { get; init; }
+    public required DateTimeOffset ObservedAtUtc { get; init; }
+}
+
 public sealed record OutboundMutationSnapshot
 {
     public required OutboundMutationId MutationId { get; init; }
@@ -241,6 +249,8 @@ public sealed record OutboundMutationSnapshot
     public OutboundResolutionSnapshot? Resolution { get; init; }
     public IReadOnlyList<OutboundOperatorEvidenceSnapshot> OperatorEvidence { get; init; } =
         Array.Empty<OutboundOperatorEvidenceSnapshot>();
+    public IReadOnlyList<OutboundLegacyEvidenceSnapshot> LegacyEvidence { get; init; } =
+        Array.Empty<OutboundLegacyEvidenceSnapshot>();
     public OutboundSensitivePayloadAvailability SensitivePayloadAvailability { get; init; } =
         OutboundSensitivePayloadAvailability.Available;
     public bool RequiresReconciliation { get; init; }

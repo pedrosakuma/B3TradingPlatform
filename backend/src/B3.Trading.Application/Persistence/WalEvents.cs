@@ -8,11 +8,11 @@ namespace B3.Trading.Application.Persistence;
 /// Base type for every event written to the WAL. Each derived record is
 /// serialised as a single JSON object inside a length+CRC framed record on
 /// disk. The <see cref="JsonPolymorphicAttribute"/> discriminator keeps
-/// the schema explicit and forward-compatible: an unknown subtype is
-/// <i>skipped with a structured warning</i> during recovery rather than
-/// crashing the reader — older binaries can therefore traverse WAL
-/// segments produced by newer engines (rolling deploys, downgrade paths,
-/// EOD materialisation of mixed-version days). See
+/// the schema explicit and forward-compatible. Unknown unrelated historical
+/// subtypes are skipped with a structured warning so older binaries can
+/// traverse mixed-version WAL segments. Unknown <c>outbound.*</c> subtypes
+/// fail recovery closed because skipping frame/attempt evidence could
+/// incorrectly prove a mutation unsent. See
 /// <see cref="B3.Trading.Infrastructure.Persistence.FileEventStore.ReadFromAsync"/>
 /// for the skip site. Genuine corruption (malformed JSON for a
 /// <i>known</i> kind, missing required fields, etc.) still surfaces as

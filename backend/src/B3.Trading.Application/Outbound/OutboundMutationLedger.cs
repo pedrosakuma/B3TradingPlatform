@@ -335,18 +335,22 @@ public sealed class OutboundMutationLedger
         ArgumentNullException.ThrowIfNull(evt);
         lock (_gate)
         {
-            var id = evt.ClOrdId != 0 && _byClOrdId.TryGetValue(evt.ClOrdId, out var direct)
-                ? direct
-                : evt.OrigClOrdId != 0 && _byClOrdId.TryGetValue(evt.OrigClOrdId, out var original)
-                    ? original
-                    : default;
+            var direct = default(OutboundMutationId);
+            var hasDirect = evt.ClOrdId != 0
+                && _byClOrdId.TryGetValue(evt.ClOrdId, out direct);
+            var original = default(OutboundMutationId);
+            var hasOriginal = evt.OrigClOrdId != 0
+                && _byClOrdId.TryGetValue(evt.OrigClOrdId, out original);
+            var id = hasDirect ? direct : hasOriginal ? original : default;
             if (id.Value == Guid.Empty || !_mutations.TryGetValue(id, out var mutation))
                 return;
             if (IsTerminal(mutation.State))
                 return;
             if (evt.Synthetic)
             {
-                if (IsLegacyState(mutation.State))
+                if (hasDirect
+                    && IsLegacyState(mutation.State)
+                    && evt.ClOrdId == mutation.PrimaryClOrdId)
                 {
                     Terminalise(
                         mutation,
@@ -358,6 +362,65 @@ public sealed class OutboundMutationLedger
                 }
                 return;
             }
+
+            if (!hasDirect
+                || string.IsNullOrWhiteSpace(evt.FirmId)
+                || !string.Equals(evt.FirmId, mutation.FirmId, StringComparison.Ordinal))
+            {
+                MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
+                return;
+            }
+
+            if (mutation.Approval is null)
+            {
+                var legacyOriginalMatches = mutation.OriginalClOrdId is { } legacyExpectedOriginal
+                    ? evt.OrigClOrdId == legacyExpectedOriginal
+                    : evt.OrigClOrdId == 0;
+                if (!IsLegacyState(mutation.State)
+                    || evt.ClOrdId != mutation.PrimaryClOrdId
+                    || !legacyOriginalMatches)
+                {
+                    MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
+                    return;
+                }
+                var legacyEvidenceDigest = DigestEvidence(
+                    $"{evt.FirmId}|{evt.ClOrdId}|{evt.OrigClOrdId}|{evt.ExecKind}");
+                Terminalise(
+                    mutation, OutboundMutationState.VenueAcknowledged,
+                    evt.TimestampUtc, "LegacyExecutionReport",
+                    legacyEvidenceDigest, evt.VenueOrderId);
+                return;
+            }
+
+            if (mutation.Attempts.Count == 0)
+            {
+                MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
+                return;
+            }
+            var activeAttemptIndex = mutation.Attempts.Count - 1;
+            var activeAttempt = mutation.Attempts[activeAttemptIndex];
+            var originalMatches = mutation.OriginalClOrdId is { } expectedOriginal
+                ? evt.OrigClOrdId == expectedOriginal
+                : evt.OrigClOrdId == 0;
+            var frame = activeAttempt.FramePrepared;
+            if (evt.ClOrdId != activeAttempt.ClOrdId
+                || activeAttempt.ProvenUnsentEvidence is not null
+                || mutation.Attempts.Any(a =>
+                    a.AmbiguityReason
+                    == OutboundAmbiguityReason.ConflictingVenueEvidence)
+                || mutation.State is not OutboundMutationState.FramePrepared
+                    and not OutboundMutationState.TransportWriteCompleted
+                    and not OutboundMutationState.Ambiguous
+                || frame is null
+                || evt.SessionId != frame.SessionId
+                || evt.SessionVerId != frame.SessionVerId
+                || evt.InboundSeqNum is null or 0
+                || !originalMatches)
+            {
+                MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
+                return;
+            }
+
             var evidenceDigest = DigestEvidence(
                 $"{evt.FirmId}|{evt.SessionId}|{evt.SessionVerId}|{evt.InboundSeqNum}|{evt.ClOrdId}|{evt.OrigClOrdId}|{evt.ExecKind}");
             Terminalise(
@@ -378,6 +441,22 @@ public sealed class OutboundMutationLedger
                 || !_mutations.TryGetValue(id, out var mutation)
                 || IsTerminal(mutation.State))
                 return;
+            var activeAttempt = mutation.Attempts.LastOrDefault();
+            if (activeAttempt is null
+                || activeAttempt.FramePrepared is not { } frame
+                || frame.SessionId != evt.SessionId.Value
+                || frame.SessionVerId != evt.SessionVerId.Value
+                || frame.OutboundSeqNum != evt.RefSeqNum
+                || mutation.Attempts.Any(a =>
+                    a.AmbiguityReason
+                    == OutboundAmbiguityReason.ConflictingVenueEvidence)
+                || mutation.State is not OutboundMutationState.FramePrepared
+                    and not OutboundMutationState.TransportWriteCompleted
+                    and not OutboundMutationState.Ambiguous)
+            {
+                MarkConflictingVenueEvidence(mutation, clOrdId: 0, evt.TimestampUtc);
+                return;
+            }
             var evidenceDigest = DigestEvidence(
                 $"{evt.FirmId}|{evt.SessionId}|{evt.SessionVerId}|{evt.RefSeqNum}|{evt.SeqNum}|{evt.RejectReason}");
             Terminalise(
@@ -420,8 +499,30 @@ public sealed class OutboundMutationLedger
         lock (_gate)
         {
             var mutation = GetOrCreateLegacy(kind, string.Empty, mutationClOrdId, originalClOrdId, atUtc);
+            mutation = AppendLegacyEvidence(
+                mutation,
+                $"ProvenUnsent:{evidence}",
+                atUtc,
+                $"{kind}|{mutationClOrdId}|{originalClOrdId}|{evidence}");
             if (IsTerminal(mutation.State))
+            {
+                _mutations[mutation.MutationId] = mutation;
                 return;
+            }
+            if (mutation.State == OutboundMutationState.Ambiguous)
+            {
+                _mutations[mutation.MutationId] = mutation with
+                {
+                    RequiresReconciliation = true,
+                };
+                MarkCorrelations(mutation, terminal: false, atUtc);
+                return;
+            }
+            if (mutation.State == OutboundMutationState.ProvenUnsent)
+            {
+                _mutations[mutation.MutationId] = mutation;
+                return;
+            }
             mutation = mutation with
             {
                 State = OutboundMutationState.ProvenUnsent,
@@ -450,14 +551,33 @@ public sealed class OutboundMutationLedger
             var mutation = GetOrCreateLegacy(
                 OutboundMutationKind.Replace, string.Empty,
                 mutationClOrdId, originalClOrdId, atUtc);
+            mutation = AppendLegacyEvidence(
+                mutation,
+                "ReplaceAmbiguous",
+                atUtc,
+                $"{OutboundMutationKind.Replace}|{mutationClOrdId}|{originalClOrdId}|ambiguous");
             if (IsTerminal(mutation.State))
+            {
+                _mutations[mutation.MutationId] = mutation;
                 return;
-            _mutations[mutation.MutationId] = mutation with
+            }
+            if (mutation.State == OutboundMutationState.Ambiguous)
+            {
+                _mutations[mutation.MutationId] = mutation with
+                {
+                    RequiresReconciliation = true,
+                };
+                return;
+            }
+            mutation = mutation with
             {
                 State = OutboundMutationState.Ambiguous,
                 StateChangedAtUtc = atUtc,
+                Resolution = null,
                 RequiresReconciliation = true,
             };
+            _mutations[mutation.MutationId] = mutation;
+            MarkCorrelations(mutation, terminal: false, atUtc);
         }
     }
 
@@ -883,6 +1003,59 @@ public sealed class OutboundMutationLedger
         MarkCorrelations(mutation, terminal: true, atUtc);
     }
 
+    private void MarkConflictingVenueEvidence(
+        OutboundMutationSnapshot mutation,
+        ulong clOrdId,
+        DateTimeOffset atUtc)
+    {
+        if (IsTerminal(mutation.State))
+            return;
+        var attempts = mutation.Attempts.ToArray();
+        var index = Array.FindIndex(
+            attempts,
+            attempt => attempt.ClOrdId == clOrdId);
+        if (index < 0 && attempts.Length > 0)
+            index = attempts.Length - 1;
+        if (index >= 0)
+        {
+            attempts[index] = attempts[index] with
+            {
+                AmbiguityReason = OutboundAmbiguityReason.ConflictingVenueEvidence,
+            };
+        }
+        mutation = mutation with
+        {
+            Attempts = attempts,
+            State = OutboundMutationState.Ambiguous,
+            StateChangedAtUtc = atUtc,
+            Resolution = null,
+            RequiresReconciliation = true,
+        };
+        _mutations[mutation.MutationId] = mutation;
+        MarkCorrelations(mutation, terminal: false, atUtc);
+    }
+
+    private static OutboundMutationSnapshot AppendLegacyEvidence(
+        OutboundMutationSnapshot mutation,
+        string evidenceKind,
+        DateTimeOffset observedAtUtc,
+        string canonicalEvidence)
+    {
+        var digest = DigestEvidence(canonicalEvidence);
+        if (mutation.LegacyEvidence.Any(e =>
+                e.EvidenceKind == evidenceKind
+                && e.EvidenceDigest == digest))
+            return mutation;
+        var evidence = mutation.LegacyEvidence.ToList();
+        evidence.Add(new OutboundLegacyEvidenceSnapshot
+        {
+            EvidenceKind = evidenceKind,
+            EvidenceDigest = digest,
+            ObservedAtUtc = observedAtUtc,
+        });
+        return mutation with { LegacyEvidence = evidence };
+    }
+
     private void AddClOrdCorrelation(
         OutboundMutationSnapshot mutation,
         ulong clOrdId,
@@ -1083,6 +1256,9 @@ public sealed class OutboundMutationLedger
                 },
             Resolution = mutation.Resolution is null ? null : mutation.Resolution with { },
             OperatorEvidence = mutation.OperatorEvidence
+                .Select(e => e with { })
+                .ToArray(),
+            LegacyEvidence = mutation.LegacyEvidence
                 .Select(e => e with { })
                 .ToArray(),
         };

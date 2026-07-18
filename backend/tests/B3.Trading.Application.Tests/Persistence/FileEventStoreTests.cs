@@ -84,6 +84,37 @@ public class FileEventStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task ReadFromAsync_WithUnknownOutboundDiscriminator_FailsClosedWithoutLeakingPayload()
+    {
+        var opts = OptsForTest();
+        var walDir = Path.Combine(_root, "test", "wal", "2026-01-01");
+        Directory.CreateDirectory(walDir);
+        var logPath = Path.Combine(walDir, "000.log");
+        var idxPath = Path.Combine(walDir, "000.idx");
+        const string sensitive = "ACCOUNT-PLAINTEXT-MUST-NOT-LEAK";
+        var unknown = Encoding.UTF8.GetBytes(
+            $$"""{"kind":"outbound.future-frame-prepared","account":"{{sensitive}}","timestampUtc":"2026-01-01T10:00:00+00:00"}""");
+        var knownAfter = JsonSerializer.SerializeToUtf8Bytes<WalEvent>(
+            NewOrder(2), WalEventJsonContext.Default.WalEvent);
+
+        await using (var writer = new SegmentWriter(logPath, idxPath,
+            opts.IndexEveryNRecords, opts.IndexEveryNBytes, fsyncOnFlush: false))
+        {
+            writer.Append(1, unknown, 0);
+            writer.Append(2, knownAfter, 0);
+            writer.Flush();
+        }
+
+        await using var store = new FileEventStore(
+            opts, NullLogger<FileEventStore>.Instance);
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
+        {
+            await foreach (var _ in store.ReadFromAsync(0)) { }
+        });
+        Assert.DoesNotContain(sensitive, exception.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ReadFromAsync_WithMalformedKnownKind_StillThrows()
     {
         // Pass-2 review (#296) P1-B. Forward-compat skip applies ONLY

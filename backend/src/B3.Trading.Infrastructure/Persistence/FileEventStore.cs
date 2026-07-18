@@ -215,6 +215,16 @@ public sealed class FileEventStore : IEventStore, IEventStoreHealth
             var outcome = TryDeserialize(payload, out var evt, out var unknownKind);
             if (outcome == DeserializeOutcome.UnknownKind)
             {
+                if (unknownKind?.StartsWith(
+                        "outbound.",
+                        StringComparison.OrdinalIgnoreCase) == true)
+                {
+                    _logger.LogError(
+                        "FileEventStore: refusing unknown outbound WAL discriminator at seq={Seq}; recovery remains fail-closed.",
+                        seq);
+                    throw new InvalidDataException(
+                        $"FileEventStore: unknown outbound WAL discriminator at seq={seq}; recovery is fail-closed.");
+                }
                 MetricsRegistry.WalUnknownKindSkipped.Add(1,
                     new KeyValuePair<string, object?>("kind", unknownKind ?? "<unknown>"));
                 _logger.LogWarning(
