@@ -18,7 +18,6 @@ public class TradingHostCrashRestartSpecTests
     private const string RecoveredStateSymbol = "VALE3";
     private const string OutageFillSymbol = "PETR4";
     private const ulong OutageFillSecurityId = 900000000001UL;
-    private const string PostRestartTradeSymbol = "PETR4";
     private const string DirectCounterpartyEndpoint = "matching-platform:9876";
     private const uint DirectCounterpartySessionId = 10102;
     private const uint DirectCounterpartySessionVerId = 1;
@@ -35,7 +34,7 @@ public class TradingHostCrashRestartSpecTests
     private static readonly TimeSpan TradeTimeout = TimeSpan.FromSeconds(30);
 
     [ConformanceFact(RequiresAdmin = true, RequiresSandboxMatching = true, RequiresDockerControl = true)]
-    public async Task SigKillRestart_ReplaysStateAndResumesTrading()
+    public async Task SigKillRestart_ReplaysStateAndFailsClosedOnLegacyUnknown()
     {
         var peer = PlatformEndpoint.TryResolve()!;
         using var http = new HttpClient { BaseAddress = peer.BaseUrl };
@@ -107,9 +106,9 @@ public class TradingHostCrashRestartSpecTests
         await docker.WaitForTradingHostNotRunningAsync(TimeSpan.FromSeconds(10));
         await docker.StartTradingHostAsync();
         await docker.WaitForTradingHostRestartAsync(crashStartedUtc, ReadyTimeout);
-        await WaitForReadyAsync(http);
         _ = await WaitForFirmEstablishedAsync(http, adminAuth, Firm01);
         _ = await WaitForFirmEstablishedAsync(http, adminAuth, Firm02);
+        await WaitForServiceUnavailableReadinessAsync(http);
         var restingAfterRestart = await WaitForOrderAsync(
             http,
             firm02Auth,
@@ -134,18 +133,10 @@ public class TradingHostCrashRestartSpecTests
             "buyer cash/position/pnl to survive the restart unchanged");
         Assert.Equal(buyerBeforeCrash, buyerAfterRestart);
 
-        var postRestartTradePrice = SessionRollSpecSupport.PriceNearUpperCollar(
-            await SessionRollSpecSupport.GetEffectiveReferencePriceAsync(http, adminAuth, PostRestartTradeSymbol));
-        await AssertPostRecoveryTradingRoundTripAsync(
-            http,
-            firm02Auth,
-            firm01Auth,
-            docker,
-            PostRestartTradeSymbol,
-            postRestartTradePrice,
-            OrderQuantity);
-
-        await TryCleanupRecoveredOrderAsync(http, adminAuth, firm02Auth, Firm02, restingClOrdId, restingAfterRestart.IsStale);
+        // #640: this stack predates #642/#643 durable service wiring, so
+        // recovered outbound rows are LegacyUnknown. Domain projections still
+        // replay, but readiness must remain fail-closed rather than treating
+        // a legacy ER as sequence-proved acknowledgment.
     }
 
     [ConformanceFact(RequiresAdmin = true, RequiresSandboxMatching = true, RequiresDockerControl = true)]
@@ -200,8 +191,8 @@ public class TradingHostCrashRestartSpecTests
 
         await docker.StartTradingHostAsync();
         await docker.WaitForTradingHostRestartAsync(crashStartedUtc, ReadyTimeout);
-        await WaitForReadyAsync(http);
         _ = await WaitForFirmEstablishedAsync(http, adminAuth, Firm02);
+        await WaitForServiceUnavailableReadinessAsync(http);
 
         var recoveredOrder = await WaitForOrderAsync(
             http,
@@ -236,6 +227,30 @@ public class TradingHostCrashRestartSpecTests
 
         Assert.Equal(buyerBaseline.PositionNetQuantity + OrderQuantity, buyerAfterRestart.PositionNetQuantity);
         Assert.Equal(expectedAverageEntryPrice, buyerAfterRestart.PositionAverageEntryPrice);
+    }
+
+    private static async Task WaitForServiceUnavailableReadinessAsync(HttpClient http)
+    {
+        var deadline = DateTimeOffset.UtcNow + ReadyTimeout;
+        HttpStatusCode? lastStatus = null;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            try
+            {
+                using var response = await http.GetAsync("/ready");
+                lastStatus = response.StatusCode;
+                if (response.StatusCode == HttpStatusCode.ServiceUnavailable)
+                    return;
+            }
+            catch (HttpRequestException)
+            {
+            }
+
+            await Task.Delay(PollInterval);
+        }
+
+        Assert.Fail(
+            $"Timed out after {ReadyTimeout.TotalSeconds:F0}s waiting for /ready to remain fail-closed. Last status={(int?)lastStatus}.");
     }
 
     private static async Task<AuthenticationHeaderValue> LoginWithRetryAsync(
@@ -355,91 +370,6 @@ public class TradingHostCrashRestartSpecTests
             Assert.NotEqual("Rejected", statusProp.GetString());
 
         return ulong.Parse(json.GetProperty("clOrdId").GetString()!);
-    }
-
-    private static async Task ClearStaleAsync(
-        HttpClient http,
-        AuthenticationHeaderValue adminAuth,
-        string firmId,
-        ulong clOrdId)
-    {
-        using var req = new HttpRequestMessage(HttpMethod.Post, $"/admin/firms/{firmId}/orders/{clOrdId}/clear-stale");
-        req.Headers.Authorization = adminAuth;
-        var resp = await http.SendAsync(req);
-        var body = await resp.Content.ReadAsStringAsync();
-        Assert.True(resp.StatusCode == HttpStatusCode.NoContent,
-            $"POST /admin/firms/{firmId}/orders/{clOrdId}/clear-stale expected 204 NoContent, got {(int)resp.StatusCode}: {body}");
-    }
-
-    private static async Task CancelOrderAsync(
-        HttpClient http,
-        AuthenticationHeaderValue auth,
-        ulong clOrdId)
-    {
-        using var req = new HttpRequestMessage(HttpMethod.Delete, $"/orders/{clOrdId}");
-        req.Headers.Authorization = auth;
-        var resp = await http.SendAsync(req);
-        var body = await resp.Content.ReadAsStringAsync();
-        Assert.True(resp.StatusCode == HttpStatusCode.NoContent,
-            $"DELETE /orders/{clOrdId} expected 204 NoContent, got {(int)resp.StatusCode}: {body}");
-    }
-
-    private static async Task TryCleanupRecoveredOrderAsync(
-        HttpClient http,
-        AuthenticationHeaderValue adminAuth,
-        AuthenticationHeaderValue auth,
-        string firmId,
-        ulong clOrdId,
-        bool isStale)
-    {
-        try
-        {
-            if (isStale)
-                await ClearStaleAsync(http, adminAuth, firmId, clOrdId);
-
-            await CancelOrderAsync(http, auth, clOrdId);
-        }
-        catch
-        {
-        }
-    }
-
-    private static async Task AssertPostRecoveryTradingRoundTripAsync(
-        HttpClient http,
-        AuthenticationHeaderValue buyAuth,
-        AuthenticationHeaderValue sellAuth,
-        DockerVenueTransportController docker,
-        string symbol,
-        decimal price,
-        long quantity)
-    {
-        var submitStartUtc = DateTimeOffset.UtcNow;
-        var buyClOrdId = await SubmitOrderAsync(http, buyAuth, symbol, price, side: "Buy", quantity: quantity);
-        await WaitForOrderAsync(
-            http,
-            buyAuth,
-            buyClOrdId,
-            order => order.Status == "Working" && order.CumulativeQuantity == 0,
-            OrderTimeout,
-            "post-restart buy order to reach Working before the cross");
-
-        var sellClOrdId = await SubmitOrderAsync(http, sellAuth, symbol, price, side: "Sell", quantity: quantity);
-        await WaitForOrderAsync(
-            http,
-            buyAuth,
-            buyClOrdId,
-            order => order.Status == "Filled" && order.CumulativeQuantity == quantity,
-            TradeTimeout,
-            "post-restart buy order to reach Filled");
-        await WaitForOrderAsync(
-            http,
-            sellAuth,
-            sellClOrdId,
-            order => order.Status == "Filled" && order.CumulativeQuantity == quantity,
-            TradeTimeout,
-            "post-restart sell order to reach Filled");
-
-        await docker.WaitForMarketDataTradeDrainAsync(submitStartUtc, TradeTimeout);
     }
 
     private static async Task<OrderSnapshot> WaitForOrderAsync(
