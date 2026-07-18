@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net;
+using System.Text.Json;
 using B3.Trading.Application;
 using B3.Trading.Domain;
 using B3.Trading.Infrastructure;
@@ -14,6 +15,7 @@ public sealed class B3EntryPointClientGatewayReceiptTests
 {
     private const string FirmId = "FIRM_A";
     private const string FrameHash = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF";
+    private const string CanonicalFrameHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     [Fact]
     public void PublicConstructor_PreservesLegacyBinarySignature()
@@ -43,7 +45,15 @@ public sealed class B3EntryPointClientGatewayReceiptTests
         Assert.Equal(101UL, receipt.Frame.ClOrdId);
         Assert.Equal(ExchangeGatewayOperation.NewOrder, receipt.Frame.Operation);
         Assert.Equal(128, receipt.Frame.EncodedFrameLength);
-        Assert.Equal(FrameHash, receipt.Frame.EncodedFrameSha256);
+        Assert.Equal(CanonicalFrameHash, receipt.Frame.EncodedFrameSha256);
+        var equivalentLowercaseIdentity = new ExchangeGatewayFrameIdentity(
+            FirmId, 42, 7, 19, ExchangeGatewayOperation.NewOrder, 101, 128, CanonicalFrameHash);
+        Assert.Equal(equivalentLowercaseIdentity, receipt.Frame);
+        var json = JsonSerializer.Serialize(receipt.Frame);
+        Assert.Contains(CanonicalFrameHash, json, StringComparison.Ordinal);
+        Assert.DoesNotContain(FrameHash, json, StringComparison.Ordinal);
+        Assert.DoesNotContain("Payload", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Buffer", json, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(ExchangeGatewayAttemptStage.TransportWriteCompleted, receipt.LastStage);
         Assert.DoesNotContain(
             Enum.GetNames<ExchangeGatewayAttemptStage>(),
@@ -851,6 +861,7 @@ public sealed class B3EntryPointClientGatewayReceiptTests
 
         var logs = string.Join('\n', logger.Messages);
         Assert.DoesNotContain(FrameHash, logs, StringComparison.Ordinal);
+        Assert.DoesNotContain(CanonicalFrameHash, logs, StringComparison.Ordinal);
         Assert.DoesNotContain("secret-owner", logs, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("SECRET-SYMBOL", logs, StringComparison.Ordinal);
     }

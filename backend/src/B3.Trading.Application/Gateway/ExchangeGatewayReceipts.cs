@@ -39,8 +39,9 @@ public enum ExchangeGatewayFailureDisposition
 /// </summary>
 /// <remarks>
 /// <see cref="EncodedFrameSha256"/> is the SDK-provided SHA-256 over the complete
-/// SOFH-framed encoded bytes. The frame payload itself is never retained or
-/// exposed by this contract.
+/// SOFH-framed encoded bytes, canonicalized to lowercase hexadecimal for direct
+/// persistence in the outbound ledger. The frame payload itself is never
+/// retained or exposed by this contract.
 /// </remarks>
 public sealed record ExchangeGatewayFrameIdentity
 {
@@ -76,7 +77,7 @@ public sealed record ExchangeGatewayFrameIdentity
         Operation = operation;
         ClOrdId = clOrdId;
         EncodedFrameLength = encodedFrameLength;
-        EncodedFrameSha256 = encodedFrameSha256.ToUpperInvariant();
+        EncodedFrameSha256 = encodedFrameSha256.ToLowerInvariant();
     }
 
     public string FirmId { get; }

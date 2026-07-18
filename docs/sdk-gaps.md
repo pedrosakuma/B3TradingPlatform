@@ -21,6 +21,9 @@ prevents transport write. Successful completion proves only local
 `TransportWriteCompleted` (or later SDK state persistence), never venue
 acceptance. Typed failures expose the last stage and the SDK's explicit
 `NoTransportWritePossible` proof.
+The platform canonicalizes the SDK's uppercase digest to lowercase hexadecimal,
+matching the #639 ledger/WAL invariant so `OutboundFramePreparedEvent` can use
+the callback identity directly without a second conversion.
 
 The platform maps this API behind platform-owned receipt types in
 `IExchangeGateway`. Existing order services intentionally remain on the legacy
