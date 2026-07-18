@@ -53,10 +53,12 @@ import * as operationsUi from "./operationsUi.js";
 import { applyAppTitle } from "./branding.js";
 import { tabsForRole, defaultViewForRole } from "./complianceUi.js";
 import { FLAGS } from "./mdProtocol.js";
+import { formatCurrency, formatPercent, formatQuantity } from "./formatters.js";
 import { renderQrInto, clearQr } from "./qrRender.js";
 import { applyRiskPolicyFetch } from "./riskPolicy.js";
 import { readMdConnectionConfig, readMdDisplayConfig, writeMdConfig, clearMdConfig } from "./marketDataSettings.js";
 import { classifyAuthResponse, requireEnrollmentResponse } from "./authJourney.js";
+import { bindFirstOrderOnboarding, markFirstOrderAccepted } from "./onboarding.js";
 
 const BLOTTER_FILTER_KEY = "b3tp.blotter.filter";
 const DEFAULT_WATCHLIST = ["PETR4", "VALE3"];
@@ -150,6 +152,10 @@ async function init() {
   settingsUi.bindSettingsUi();
   // Fase 4 (#400). Trader sub-tab + lower-band + ticket-advanced.
   traderUi.bindTraderUi();
+  bindFirstOrderOnboarding({
+    getState: state.getState,
+    subscribe: state.subscribe,
+  });
   // Fase 5 (#401). Preferences sub-tab (density toggle).
   preferencesUi.bindPreferencesUi();
   // Restore density preference before any view renders so the login
@@ -1291,15 +1297,12 @@ function formatWsError(msg) {
 function formatPretradeWarning(w) {
   switch (w.kind) {
     case "fat_finger": {
-      const pct = (w.deviation * 100).toFixed(1);
-      return `fat-finger: price deviates ${pct}% from last trade ${ui.fmtPx(w.lastPrice)}`;
+      return `fat-finger: price deviates ${formatPercent(w.deviation)} from last trade ${ui.fmtPx(w.lastPrice)}`;
     }
     case "qty":
-      return `large quantity: ${w.qty.toLocaleString("en-US")} > ${w.multiple}× lot (${w.threshold.toLocaleString("en-US")})`;
-    case "market_notional": {
-      const fmt = (n) => `R$ ${n.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
-      return `market notional ≈ ${fmt(w.notional)} ≥ ${fmt(w.threshold)}`;
-    }
+      return `large quantity: ${formatQuantity(w.qty)} > ${w.multiple}× lot (${formatQuantity(w.threshold)})`;
+    case "market_notional":
+      return `market notional ≈ ${formatCurrency(w.notional)} ≥ ${formatCurrency(w.threshold)}`;
     default:
       return "advisory warning";
   }
@@ -1363,11 +1366,11 @@ async function handleSubmitOrder(payload) {
   state.setSubmitInflight({ startedAt: Date.now() });
   try {
     const resp = await submitOrder(session.backend, session.token, payload);
-    // #421: success surface is the standalone toast above the panel
-    // grid — easier to notice than the previous inline text under the
-    // ticket form, and doesn't fight for space with the next submit.
-    const msg = `accepted: ${resp.clOrdId}${resp.status ? ` (${resp.status})` : ""}`;
-    ui.showOrderToast(msg, "ok");
+    // The REST response confirms platform intake, not a live venue/order
+    // transition. Keep that distinction explicit until the corresponding
+    // WebSocket order row arrives and advances the same toast.
+    ui.showPlatformAcceptedOrder(resp.clOrdId);
+    markFirstOrderAccepted(resp.clOrdId);
     ui.clearTicket();
   } catch (err) {
     if (err.status === 401) { logout(); return; }

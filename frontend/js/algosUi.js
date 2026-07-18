@@ -9,7 +9,13 @@ import {
   getState, subscribe, isTerminalAlgoStatus,
   setSelectedAlgoId, setAlgosFilter,
 } from "./state.js";
-import { fmtQty, fmtPx } from "./ui.js";
+import {
+  formatDecimal,
+  formatPercent,
+  formatPrice as fmtPx,
+  formatQuantity as fmtQty,
+  formatUtcDateTime,
+} from "./formatters.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -30,9 +36,9 @@ const ALGO_PARAM_SECTIONS = {
   Twap: {
     block: "twap",
     rows: [
-      ["Start UTC", "startUtc"],
-      ["End UTC", "endUtc"],
-      ["Slice count", "sliceCount"],
+      ["Start UTC", "startUtc", formatUtcDateTime],
+      ["End UTC", "endUtc", formatUtcDateTime],
+      ["Slice count", "sliceCount", fmtQty],
       ["Child order type", "childOrderType"],
       ["Child price", "childPrice", fmtPx],
     ],
@@ -40,25 +46,25 @@ const ALGO_PARAM_SECTIONS = {
   Vwap: {
     block: "vwap",
     rows: [
-      ["Start UTC", "startUtc"],
-      ["End UTC", "endUtc"],
+      ["Start UTC", "startUtc", formatUtcDateTime],
+      ["End UTC", "endUtc", formatUtcDateTime],
       ["Child order type", "childOrderType"],
       ["Child price", "childPrice", fmtPx],
-      ["Tick interval (s)", "tickIntervalSeconds"],
-      ["Slice max %", "sliceMaxPct"],
-      ["Participation cap", "participationCap"],
+      ["Tick interval (s)", "tickIntervalSeconds", formatDecimal],
+      ["Slice max %", "sliceMaxPct", formatPercent],
+      ["Participation cap", "participationCap", formatPercent],
       ["Price limit", "priceLimit", fmtPx],
     ],
   },
   Pov: {
     block: "pov",
     rows: [
-      ["Start UTC", "startUtc"],
-      ["End UTC", "endUtc"],
+      ["Start UTC", "startUtc", formatUtcDateTime],
+      ["End UTC", "endUtc", formatUtcDateTime],
       ["Child order type", "childOrderType"],
       ["Child price", "childPrice", fmtPx],
-      ["Participation rate", "participationRate"],
-      ["Tick interval (s)", "tickIntervalSeconds"],
+      ["Participation rate", "participationRate", formatPercent],
+      ["Tick interval (s)", "tickIntervalSeconds", formatDecimal],
       ["Min slice qty", "minSliceQty", fmtQty],
       ["Price limit", "priceLimit", fmtPx],
     ],
@@ -67,9 +73,9 @@ const ALGO_PARAM_SECTIONS = {
     block: "pegged",
     rows: [
       ["Reference", "ref"],
-      ["Offset ticks", "offsetTicks"],
-      ["Repeg interval (ms)", "repegIntervalMs"],
-      ["Tick size", "tickSize"],
+      ["Offset ticks", "offsetTicks", formatDecimal],
+      ["Repeg interval (ms)", "repegIntervalMs", fmtQty],
+      ["Tick size", "tickSize", formatDecimal],
       ["Child order type", "childOrderType"],
       ["Price limit", "priceLimit", fmtPx],
     ],
@@ -184,8 +190,8 @@ function renderDetail() {
     ["Total / Filled / Remaining", `${fmtQty(a.totalQuantity)} / ${fmtQty(a.filledQuantity)} / ${fmtQty(a.remainingQuantity)}`],
     ["Status", a.status],
     ["TerminalReason", a.terminalReason],
-    ["CreatedAtUtc", a.createdAtUtc],
-    ["TerminalAtUtc", a.terminalAtUtc || "—"],
+    ["CreatedAtUtc", formatUtcDateTime(a.createdAtUtc, { fallback: a.createdAtUtc })],
+    ["TerminalAtUtc", formatUtcDateTime(a.terminalAtUtc)],
   ];
   const dl = document.createElement("dl");
   dl.className = "algos-detail-grid";

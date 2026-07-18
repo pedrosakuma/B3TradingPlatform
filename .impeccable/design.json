@@ -1,0 +1,104 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-18T04:03:08.033Z",
+  "title": "Design System: B3TradingPlatform",
+  "extensions": {
+    "colorMeta": {
+      "canvas": { "role": "neutral", "displayName": "Desk Canvas", "canonical": "#0f1218", "tonalRamp": ["#0f1218", "#171b24", "#232936", "#343c4d", "#505b70", "#748096", "#a6afbd", "#e8ebf0"] },
+      "surface": { "role": "neutral", "displayName": "Work Surface", "canonical": "#1a1f2a", "tonalRamp": ["#10131a", "#1a1f2a", "#262d3b", "#384254", "#536077", "#778399", "#a8b0be", "#e9ebef"] },
+      "surface-raised": { "role": "neutral", "displayName": "Raised Control", "canonical": "#232a39", "tonalRamp": ["#11151c", "#1b212d", "#2a3242", "#3d485d", "#59677f", "#7d899e", "#abb3c1", "#eaecf0"] },
+      "border": { "role": "neutral", "displayName": "Structure Line", "canonical": "#2a3242", "tonalRamp": ["#12161d", "#202632", "#30394a", "#455267", "#627088", "#8490a3", "#afb7c4", "#ebedf1"] },
+      "text": { "role": "neutral", "displayName": "Primary Ink", "canonical": "#d6dce8", "tonalRamp": ["#17191d", "#292c33", "#414650", "#606875", "#858e9d", "#aab2bf", "#d6dce8", "#f1f3f6"] },
+      "text-muted": { "role": "neutral", "displayName": "Secondary Ink", "canonical": "#8a93a6", "tonalRamp": ["#15171c", "#282b33", "#404550", "#5f6574", "#7c8495", "#9da5b4", "#c5cad3", "#eef0f3"] },
+      "accent": { "role": "primary", "displayName": "Action Blue", "canonical": "#4f9eff", "tonalRamp": ["#07192f", "#0b315d", "#15528e", "#2475c2", "#4f9eff", "#79b7ff", "#abd3ff", "#e8f3ff"] },
+      "success": { "role": "secondary", "displayName": "Execution Green", "canonical": "#36c46f", "tonalRamp": ["#071d10", "#0c3b20", "#145f34", "#20874a", "#36c46f", "#69da94", "#a2e9bb", "#e7faed"] },
+      "info": { "role": "secondary", "displayName": "Market Teal", "canonical": "#38b2ac", "tonalRamp": ["#071d1c", "#0d3a38", "#155c59", "#22817c", "#38b2ac", "#6accc7", "#a3e1de", "#e8f8f7"] },
+      "danger": { "role": "secondary", "displayName": "Reject Red", "canonical": "#ef5350", "tonalRamp": ["#270908", "#53110f", "#81201e", "#b33431", "#ef5350", "#f47f7d", "#f8afad", "#fde9e9"] },
+      "warning": { "role": "secondary", "displayName": "Risk Amber", "canonical": "#f5a623", "tonalRamp": ["#271802", "#503204", "#7d5009", "#ae7211", "#f5a623", "#f8c262", "#fbdda0", "#fff4df"] }
+    },
+    "typographyMeta": {
+      "title": { "displayName": "Title", "purpose": "Login and rare page-level titles." },
+      "body": { "displayName": "Body", "purpose": "Dense interface copy and table content." },
+      "label": { "displayName": "Label", "purpose": "Buttons, fields, and compact operational headings." }
+    },
+    "shadows": [],
+    "motion": [
+      { "name": "state-fast", "value": "150ms ease-out", "purpose": "Hover, focus, and compact state changes only." }
+    ],
+    "breakpoints": [
+      { "name": "mobile", "value": "768px" },
+      { "name": "compact-workstation", "value": "1280px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The single clear action in a workflow.",
+      "html": "<button class=\"ds-btn-primary\">Submit</button>",
+      "css": ".ds-btn-primary { min-height: 2rem; padding: .25rem 1rem; border: 1px solid var(--color-accent); border-radius: var(--radius-md); background: var(--color-accent); color: var(--color-on-accent); font: inherit; font-size: .8rem; font-weight: 600; cursor: pointer; } .ds-btn-primary:hover { filter: brightness(1.1); } .ds-btn-primary:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "A compact supporting action that stays visually quiet.",
+      "html": "<button class=\"ds-btn-secondary\">Advanced</button>",
+      "css": ".ds-btn-secondary { min-height: 2rem; padding: .25rem 1rem; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface-raised); color: var(--color-text); font: inherit; font-size: .8rem; font-weight: 600; cursor: pointer; } .ds-btn-secondary:hover { filter: brightness(1.1); } .ds-btn-secondary:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }"
+    },
+    {
+      "name": "Text Field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Compact order-entry and filtering control.",
+      "html": "<label class=\"ds-field\"><span>Symbol</span><input value=\"PETR4\" /></label>",
+      "css": ".ds-field { display: grid; gap: .25rem; color: var(--color-text-muted); font: 400 .8rem/1.4 system-ui, sans-serif; } .ds-field input { min-height: 2rem; padding: .25rem .5rem; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface-raised); color: var(--color-text); font: inherit; } .ds-field input:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }"
+    },
+    {
+      "name": "Status Badge",
+      "kind": "chip",
+      "description": "Compact textual state with semantic color.",
+      "html": "<span class=\"ds-badge\">connected</span>",
+      "css": ".ds-badge { display: inline-flex; align-items: center; padding: .125rem .375rem; border-radius: 999px; background: rgba(54,196,111,.16); color: var(--color-success); font: 600 .7rem/1.2 system-ui, sans-serif; letter-spacing: .04em; text-transform: uppercase; }"
+    },
+    {
+      "name": "Work Panel",
+      "kind": "card",
+      "refersTo": "panel",
+      "description": "Flat bordered container for one operational concern.",
+      "html": "<section class=\"ds-panel\"><h2>Working orders</h2><p>Order state appears here.</p></section>",
+      "css": ".ds-panel { padding: .75rem; border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface); color: var(--color-text); font: 400 13px/1.4 system-ui, sans-serif; } .ds-panel h2 { margin: 0 0 .6rem; color: var(--color-text-muted); font-size: .85rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; } .ds-panel p { margin: 0; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Quiet Trading Desk",
+    "overview": "The interface is dense, layered, and controlled: a professional workstation where market state and risk information remain legible without visual noise. Dark tonal layers separate tools and data while a restrained blue accent marks the current action, focus, or selection. The design should feel calm under pressure and familiar to experienced trading users.",
+    "keyCharacteristics": [
+      "Compact, information-rich composition with clear operational hierarchy.",
+      "Restrained accent use and explicit semantic state colors.",
+      "Flat bordered surfaces separated by tone rather than decoration.",
+      "Familiar controls, strong keyboard focus, and tabular numeric alignment."
+    ],
+    "rules": [
+      { "name": "The One Action Blue Rule", "body": "Use #4f9eff for actions, selection, and focus; never as ambient decoration.", "section": "colors" },
+      { "name": "The State Must Read Twice Rule", "body": "Status meaning must be present in text or iconography as well as color.", "section": "colors" },
+      { "name": "The Data Holds Still Rule", "body": "Use tabular numerals for prices, quantities, balances, counts, and changing market values.", "section": "typography" },
+      { "name": "The Tonal Layers Rule", "body": "Separate canvas, panel, and control layers with #0f1218, #1a1f2a, and #232a39; do not simulate hierarchy with decorative drop shadows or glass effects.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do preserve the compact 13px operational scale and established spacing tokens.",
+      "Do use Action Blue only for the next action, focus, or current selection.",
+      "Do make every onboarding action operate the real ticket and Working Orders surface.",
+      "Do keep every first-run step keyboard operable and compatible with reduced motion.",
+      "Do explain warnings at the point where they affect submission."
+    ],
+    "donts": [
+      "Don't add forced SaaS tours, modal step carousels, decorative celebration, or repeated popups.",
+      "Don't create a tutorial mode disconnected from the real trading workflow.",
+      "Don't simplify the interface into a consumer investing app or hide meaningful risk.",
+      "Don't use glassmorphism, gradient text, accent side stripes, or decorative shadows.",
+      "Don't use muted #8a93a6 for critical instructions or required action text."
+    ]
+  }
+}

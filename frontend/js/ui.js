@@ -11,26 +11,23 @@ import { rulesFor, setInstrumentRules } from "./validation.js";
 import { tabsForRole } from "./complianceUi.js";
 import { createVirtualList } from "./virtualList.js";
 import { bindMobileDrawer } from "./mobileDrawer.js";
+import {
+  formatCurrency,
+  formatDayMonth,
+  formatPrice as fmtPx,
+  formatQuantity as fmtQty,
+  formatUtcDate,
+  formatUtcDateTime,
+  formatUtcTime,
+} from "./formatters.js";
+import {
+  deriveOrderSubmitFeedback,
+  deriveTraderEmptyState,
+  deriveTradingReadiness,
+} from "./operationalFluency.js";
 
 const $ = (id) => document.getElementById(id);
 
-// ── Number formatting (en-US thousands separators / decimal point).
-// #340 quick-wins: unified locale so quantities and prices render with
-// 1,000.00 separators across the trader UI regardless of OS locale.
-// B3 traders expect Brazilian locale (`100.000,00`) for quantities,
-// prices and notionals. Centralised here so every panel stays in sync
-// and we have a single place to flip the locale if the product call
-// changes later.
-const _qtyFmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
-const _pxFmt  = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-function fmtQty(n) {
-  if (n == null || n === "" || Number.isNaN(Number(n))) return "—";
-  return _qtyFmt.format(Number(n));
-}
-function fmtPx(n) {
-  if (n == null || n === "" || Number.isNaN(Number(n))) return "—";
-  return _pxFmt.format(Number(n));
-}
 export { fmtQty, fmtPx };
 
 // #342: Modal focus restoration. When a modal opens we snapshot the
@@ -55,6 +52,7 @@ const POSITIONS_GROUP_KEY = "b3tp.positions.grouped";
 const POSITIONS_SORT_DEFAULT = { col: "absNet", dir: "desc" };
 let _positionsSort = POSITIONS_SORT_DEFAULT;
 let _execSymbolFilter = "";
+let _pendingLiveOrderId = null;
 // FE-OPT-3 (#499). Grouping state.
 let _positionsGrouped = false;
 
@@ -415,10 +413,10 @@ function openModifyModal(clOrdId) {
     }
   }
   if (summary) {
-    const px = order.price == null ? "MKT" : order.price;
+    const px = order.price == null ? "MKT" : fmtPx(order.price);
     summary.textContent =
       `Order ${order.clOrdId} — ${order.symbol} ${order.side} ${order.type} ` +
-      `(qty ${order.quantity}, leaves ${order.leavesQuantity}, cum ${order.cumulativeQuantity}, px ${px})`;
+      `(qty ${fmtQty(order.quantity)}, leaves ${fmtQty(order.leavesQuantity)}, cum ${fmtQty(order.cumulativeQuantity)}, px ${px})`;
   }
   refreshModifyWireHint();
   if (error) { error.hidden = true; error.textContent = ""; }
@@ -440,7 +438,7 @@ function refreshModifyWireHint() {
   const cum = Number(form.dataset.cumqty) || 0;
   const raw = qty.value.trim();
   if (raw === "") {
-    hint.textContent = `Wire OrderQty = cum ${cum} + remaining ?`;
+    hint.textContent = `Wire OrderQty = cum ${fmtQty(cum)} + remaining ?`;
     hint.classList.remove("error");
     return;
   }
@@ -450,7 +448,7 @@ function refreshModifyWireHint() {
     hint.classList.add("error");
     return;
   }
-  hint.textContent = `Wire OrderQty = cum ${cum} + remaining ${Number(raw)} = ${wire}`;
+  hint.textContent = `Wire OrderQty = cum ${fmtQty(cum)} + remaining ${fmtQty(raw)} = ${fmtQty(wire)}`;
   hint.classList.remove("error");
 }
 
@@ -529,10 +527,7 @@ export function executionsForClOrdId(executions, clOrdId) {
 }
 
 function fmtExecTime(ts) {
-  if (ts == null) return "—";
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toISOString().slice(11, 23);
+  return formatUtcTime(ts, { fractionalSecondDigits: 3 });
 }
 
 function focusableInDialog(dialog) {
@@ -962,7 +957,7 @@ function buildChainGrid(instruments) {
   html += '</tr></thead><tbody>';
   
   for (const strike of strikes) {
-   html += `<tr><td class="strike-col">${strike.toFixed(2)}</td>`;
+   html += `<tr><td class="strike-col">${fmtPx(strike)}</td>`;
    for (const exp of expiries) {
      const call = lookup.get(`${strike}|${exp}|Call`);
      const put = lookup.get(`${strike}|${exp}|Put`);
@@ -1585,16 +1580,8 @@ function updateNotionalPreview() {
   
   const notional = qty * price * multiplier;
   
-  // Format with Brazilian locale (1000,00 format) but since we want R$ 1,000.00 format
-  // Let's use Intl for proper formatting
   if (notional > 0) {
-    const formatted = new Intl.NumberFormat("pt-BR", {
-      style: "currency",
-      currency: "BRL",
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2
-    }).format(notional);
-    preview.textContent = `≈ ${formatted}`;
+    preview.textContent = `≈ ${formatCurrency(notional)}`;
   } else {
     preview.textContent = "";
   }
@@ -1723,7 +1710,7 @@ export function showOrderToast(message, kind) {
   }
   el.hidden = false;
   el.textContent = message;
-  const cls = kind === "warn" ? "warn" : kind === "error" ? "error" : "";
+  const cls = ["info", "warn", "error"].includes(kind) ? kind : "";
   el.className = cls ? `order-toast ${cls}` : "order-toast";
   if (_orderToastTimer) clearTimeout(_orderToastTimer);
   _orderToastTimer = setTimeout(() => {
@@ -1732,6 +1719,28 @@ export function showOrderToast(message, kind) {
     el.textContent = "";
     el.className = "order-toast";
   }, ORDER_TOAST_MS);
+}
+
+function completePendingOrderFeedback(state) {
+  if (!_pendingLiveOrderId) return;
+  const order = state?.orders?.get?.(_pendingLiveOrderId);
+  if (!order) return;
+  const feedback = deriveOrderSubmitFeedback({
+    clOrdId: _pendingLiveOrderId,
+    status: order.status,
+    live: true,
+  });
+  _pendingLiveOrderId = null;
+  showOrderToast(feedback.message, feedback.tone);
+}
+
+export function showPlatformAcceptedOrder(clOrdId) {
+  const feedback = deriveOrderSubmitFeedback({ clOrdId });
+  _pendingLiveOrderId = String(clOrdId);
+  showOrderToast(feedback.message, feedback.tone);
+  // A very fast live update can arrive before the REST response completes.
+  // Resolve it immediately rather than waiting for another orders render.
+  completePendingOrderFeedback(getState());
 }
 
 // Submit button disabled-state is the OR of two independent conditions
@@ -1880,13 +1889,6 @@ export function setUserLabel(user) {
 // rendered with a `balance-negative` class so the trader notices they
 // are underwater. Format uses pt-BR thousands/decimal separators to
 // match the rest of the trader UI (price ticket, P&L panel).
-const BALANCE_FORMATTER = new Intl.NumberFormat("pt-BR", {
-  style: "currency",
-  currency: "BRL",
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-
 function renderBalance() {
   const el = $("user-balance");
   if (!el) return;
@@ -1907,9 +1909,9 @@ function renderBalance() {
     el.title = "Available balance — awaiting data";
     return;
   }
-  el.textContent = BALANCE_FORMATTER.format(bal.available);
+  el.textContent = formatCurrency(bal.available);
   el.classList.toggle("balance-negative", bal.available < 0);
-  el.title = `Available balance: ${BALANCE_FORMATTER.format(bal.available)}`;
+  el.title = `Available balance: ${formatCurrency(bal.available)}`;
 }
 
 function applyCurrentView(view) {
@@ -2123,6 +2125,7 @@ export function renderForSlice(slice) {
     setStatusPill(getState().status);
     renderReconnect(); // pill change usually correlates with countdown reset
     renderStaleness("ws");
+    renderTradingReadiness();
   }
   if (slice === "user")   setUserLabel(getState().user);
   if (slice === "balance" || slice === "user" || slice === "all") renderBalance();
@@ -2130,12 +2133,16 @@ export function renderForSlice(slice) {
   if (slice === "marketDataStatus") {
     setMdStatusPill(getState().marketDataStatus);
     renderStaleness("md");
+    renderTradingReadiness();
   }
   if (slice === "all") { renderStaleness("ws"); renderStaleness("md"); }
   if (slice === "submitInflight") renderInflight();
   if (slice === "wsReconnect") renderReconnect();
   if (slice === "firmsHealth" || slice === "all") renderFirmsHealth();
-  if (slice === "gatewayHealth" || slice === "all") renderGatewayPill();
+  if (slice === "gatewayHealth" || slice === "all") {
+    renderGatewayPill();
+    renderTradingReadiness();
+  }
   if (slice === "currentView" || slice === "all") applyCurrentView(getState().currentView);
   if (slice === "watchlist" || slice === "selectedSymbol" || slice === "all") renderSelectedSymbol();
   if (slice === "watchlist" || slice === "selectedSymbol" || slice === "book" || slice === "all") renderDob();
@@ -2174,7 +2181,7 @@ const MD_PANEL_SELECTORS = [".panel.market-data", ".panel.dob", ".panel.chart", 
 
 function fmtStaleTimestamp(ms) {
   if (!ms) return "no data";
-  return new Date(ms).toLocaleTimeString("en-US", { hour12: false });
+  return formatUtcTime(ms);
 }
 
 function renderStaleness(kind) {
@@ -2256,7 +2263,7 @@ function renderMarketData() {
     if (!e || e.lastPrice == null) {
       return `<tr><td>${escapeHtml(symbol)}${phaseBadgeHtml(symbol)}</td><td colspan="4" class="muted-cell">awaiting data…</td></tr>`;
     }
-    const ts = e.updatedAt ? new Date(e.updatedAt).toISOString().slice(11, 19) : "—";
+    const ts = formatUtcTime(e.updatedAt);
     const stale = e.updatedAt && (now - e.updatedAt) > MD_STALE_MS;
     const tsCls = stale ? ' class="md-cell-stale"' : "";
     return `<tr>
@@ -2535,7 +2542,7 @@ export function renderAuctionPanel() {
       printsEl.innerHTML = `<li class="muted-line">No prints yet</li>`;
     } else {
       printsEl.innerHTML = prints.map(p => {
-        const ts = p.at ? new Date(p.at).toISOString().slice(11, 19) : "—";
+        const ts = formatUtcTime(p.at);
         const kind = escapeHtml(p.kind ?? "");
         return `<li><span class="auction-print-kind">${kind}</span> <span class="auction-print-px">${fmtPx(p.price)}</span> × <span class="auction-print-qty">${fmtQty(p.qty)}</span> <span class="muted-line">${escapeHtml(ts)}</span></li>`;
       }).join("");
@@ -2608,10 +2615,55 @@ export function renderTicketPhaseCoupling() {
     submitEl.removeAttribute("title");
   }
   applySubmitDisabled();
+  renderTradingReadiness();
+}
+
+export function renderTradingReadiness() {
+  const root = $("trading-readiness");
+  if (!root) return;
+  const symbol = ($("ticket-symbol")?.value || "").trim().toUpperCase();
+  const readiness = deriveTradingReadiness({
+    ...getState(),
+    symbol,
+    phase: getPhase(symbol),
+  });
+  root.dataset.tone = readiness.tone;
+  const title = $("trading-readiness-title");
+  const message = $("trading-readiness-message");
+  if (title) title.textContent = readiness.title;
+  if (message) message.textContent = readiness.message;
+
+  for (const signal of readiness.signals) {
+    const item = $(`trading-readiness-${signal.key}`);
+    if (!item) continue;
+    item.dataset.tone = signal.tone;
+    item.title = signal.detail;
+    item.setAttribute("aria-label", `${signal.label}: ${signal.value}. ${signal.detail}`);
+    const value = item.querySelector(".trading-readiness-value");
+    if (value) value.textContent = signal.value;
+  }
+
+  const announcement = $("trading-readiness-announcement");
+  const announcementKey = [
+    readiness.tone,
+    readiness.title,
+    ...readiness.signals.map((signal) => `${signal.key}:${signal.value}`),
+  ].join("|");
+  if (announcement && root.dataset.announcementKey !== announcementKey) {
+    root.dataset.announcementKey = announcementKey;
+    announcement.textContent = `${readiness.title}. ${readiness.message}`;
+  }
 }
 
 const DOB_TOP_N = 10;
 const DOB_NO_BOOK_AFTER_MS = 10_000;
+
+function emptyStateHtml(emptyState) {
+  return `<span class="surface-empty-copy">`
+    + `<strong>${escapeHtml(emptyState.title)}</strong>`
+    + `<span>${escapeHtml(emptyState.detail)}</span>`
+    + `</span>`;
+}
 
 function renderDob() {
   const bidsBody = document.querySelector("#dob-bids tbody");
@@ -2624,9 +2676,13 @@ function renderDob() {
   const current = st.selectedSymbol;
 
   if (!current) {
-    bidsBody.innerHTML = `<tr><td colspan="3" class="muted-cell">select a symbol</td></tr>`;
-    asksBody.innerHTML = `<tr><td colspan="3" class="muted-cell">select a symbol</td></tr>`;
-    if (feedback) { feedback.hidden = true; feedback.textContent = ""; }
+    const emptyState = deriveTraderEmptyState("book");
+    bidsBody.innerHTML = `<tr><td colspan="3" class="muted-cell" aria-hidden="true">—</td></tr>`;
+    asksBody.innerHTML = `<tr><td colspan="3" class="muted-cell" aria-hidden="true">—</td></tr>`;
+    if (feedback) {
+      feedback.hidden = false;
+      feedback.innerHTML = emptyStateHtml(emptyState);
+    }
     if (spreadEl) spreadEl.textContent = "";
     return;
   }
@@ -2642,12 +2698,16 @@ function renderDob() {
     // immediately, even when a healthy snapshot is moments away.
     const sinceMd = Math.max(st.selectedSymbolSetAt || 0, st.lastMdResetAt || 0);
     const waited = sinceMd ? Date.now() - sinceMd : 0;
-    const msg = waited > DOB_NO_BOOK_AFTER_MS
-      ? "no book — check MD settings ⚙"
-      : "awaiting book snapshot…";
-    bidsBody.innerHTML = `<tr><td colspan="3" class="muted-cell">${msg}</td></tr>`;
-    asksBody.innerHTML = `<tr><td colspan="3" class="muted-cell">${msg}</td></tr>`;
-    if (feedback) { feedback.hidden = true; feedback.textContent = ""; }
+    const emptyState = deriveTraderEmptyState("book", {
+      symbol: current,
+      timedOut: waited > DOB_NO_BOOK_AFTER_MS,
+    });
+    bidsBody.innerHTML = `<tr><td colspan="3" class="muted-cell" aria-hidden="true">—</td></tr>`;
+    asksBody.innerHTML = `<tr><td colspan="3" class="muted-cell" aria-hidden="true">—</td></tr>`;
+    if (feedback) {
+      feedback.hidden = false;
+      feedback.innerHTML = emptyStateHtml(emptyState);
+    }
     if (spreadEl) spreadEl.textContent = "";
     return;
   }
@@ -2688,7 +2748,8 @@ function renderDob() {
 
 function renderDobSide(levels, side) {
   if (levels.length === 0) {
-    return `<tr><td colspan="3" class="muted-cell">empty</td></tr>`;
+    const emptyState = deriveTraderEmptyState("book", { side: side === "bid" ? "bid" : "ask" });
+    return `<tr><td colspan="3" class="muted-cell">${emptyStateHtml(emptyState)}</td></tr>`;
   }
   let cum = 0;
   return levels.map(lv => {
@@ -2783,12 +2844,18 @@ function renderChart() {
   const resStr = String(st.chartResolution);
   if (resSel.value !== resStr) resSel.value = resStr;
 
-  const showEmpty = (msg) => {
+  const showEmpty = (emptyState) => {
     svg.innerHTML = "";
-    if (empty) { empty.hidden = false; empty.textContent = msg; }
+    if (empty) {
+      empty.hidden = false;
+      empty.innerHTML = emptyStateHtml(emptyState);
+    }
   };
 
-  if (!st.selectedSymbol) { showEmpty("select a symbol"); return; }
+  if (!st.selectedSymbol) {
+    showEmpty(deriveTraderEmptyState("chart"));
+    return;
+  }
 
   const perRes = st.candles.get(st.selectedSymbol);
   const entry = perRes?.get(st.chartResolution);
@@ -2797,16 +2864,20 @@ function renderChart() {
     // reconnects, not just on selection changes.
     const sinceMd = Math.max(st.selectedSymbolSetAt || 0, st.lastMdResetAt || 0);
     const waited = sinceMd ? Date.now() - sinceMd : 0;
-    showEmpty(waited > CHART_NO_DATA_AFTER_MS
-      ? "no candle snapshot received"
-      : "awaiting candle snapshot…");
+    showEmpty(deriveTraderEmptyState("chart", {
+      symbol: st.selectedSymbol,
+      timedOut: waited > CHART_NO_DATA_AFTER_MS,
+    }));
     return;
   }
   if (entry.bars.length === 0) {
     // Snapshot arrived empty — aggregator has no history yet for this
     // resolution. The first CandleUpdate will fix this when a trade
     // closes a window.
-    showEmpty("no candles yet — waiting for first trade");
+    showEmpty(deriveTraderEmptyState("chart", {
+      symbol: st.selectedSymbol,
+      snapshotReady: true,
+    }));
     return;
   }
 
@@ -2895,10 +2966,11 @@ function renderTape() {
   }
 
   if (rows.length === 0) {
-    const msg = st.tapeShowAll
-      ? "no trades yet"
-      : (st.selectedSymbol ? "no trades yet" : "select a symbol");
-    list.innerHTML = `<li class="tape-empty">${msg}</li>`;
+    const emptyState = deriveTraderEmptyState("tape", {
+      showAll: st.tapeShowAll,
+      symbol: st.selectedSymbol,
+    });
+    list.innerHTML = `<li class="tape-empty">${emptyStateHtml(emptyState)}</li>`;
     return;
   }
 
@@ -2909,7 +2981,7 @@ function tapeRow(e) {
   const cls = `tape-${e.side}` + (e.busted ? " tape-busted" : "");
   // Include milliseconds (slice 11..23) so two prints in the same
   // second can still be ordered visually.
-  const ts = new Date(e.receivedAt).toISOString().slice(11, 23);
+  const ts = formatUtcTime(e.receivedAt, { fractionalSecondDigits: 3 });
   const arrow = e.side === "up" ? "▲" : e.side === "down" ? "▼" : "·";
   return `<li class="${cls}">`
     + `<span>${ts}</span>`
@@ -2953,7 +3025,13 @@ function renderBlotter() {
   const pageRows = filtered.slice(start, start + BLOTTER_PAGE_SIZE);
 
   $("blotter-count").textContent = `${filtered.length}/${all.length}`;
-  body.innerHTML = pageRows.map(o => orderRow(o, st)).join("");
+  if (pageRows.length === 0) {
+    const emptyState = deriveTraderEmptyState("orders", { filtered: all.length > 0 });
+    body.innerHTML = `<tr><td colspan="12" class="muted-cell">${emptyStateHtml(emptyState)}</td></tr>`;
+  } else {
+    body.innerHTML = pageRows.map(o => orderRow(o, st)).join("");
+  }
+  completePendingOrderFeedback(st);
 
   const pager = $("blotter-pagination");
   if (pager) {
@@ -3006,7 +3084,7 @@ function orderRow(o, st) {
   const modifyLabel = modifyInflight ? "Modifying…" : "Modify";
   const modifyCls = "modify-btn btn btn-outline-primary btn-sm" + (modifyInflight ? " modifying" : "");
   const staleTitle = isStale
-    ? `Stale: ${o.staleReason || "venue desync"}${o.staledAtUtc ? ` (${o.staledAtUtc})` : ""}`
+    ? `Stale: ${o.staleReason || "venue desync"}${o.staledAtUtc ? ` (${formatUtcDateTime(o.staledAtUtc, { fallback: o.staledAtUtc })})` : ""}`
     : "";
   const staleBadge = isStale
     ? `<span class="order-stale-badge badge badge-warning badge-outline badge-uppercase" title="${escapeHtml(staleTitle)}">stale</span>`
@@ -3197,14 +3275,9 @@ function renderExpiryStrip() {
   strip.hidden = false;
 }
 
-// Format expiry date as short label (e.g., "Jun 20").
+// Compact pt-BR expiry label for the position filter.
 function formatExpiryChip(isoDate) {
-  try {
-    const d = new Date(isoDate + "T12:00:00");
-    return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-  } catch {
-    return isoDate;
-  }
+  return formatDayMonth(`${isoDate}T12:00:00Z`, isoDate);
 }
 
 // #342: pure sort helper so the column logic can be exercised without
@@ -3251,14 +3324,26 @@ let _mobileDrawer = null;
 
 function renderExecutions() {
   const log = $("executions-log");
+  const empty = $("executions-empty");
   if (!log) return;
   const filter = _execSymbolFilter.trim().toUpperCase();
-  let items = getState().executions;
+  const allItems = getState().executions;
+  let items = allItems;
   if (filter) {
     items = items.filter(e => typeof e.symbol === "string" && e.symbol.toUpperCase().includes(filter));
   }
   // Newest first. slice() to avoid mutating state.
   const ordered = items.slice().reverse();
+  const isEmpty = ordered.length === 0;
+  log.hidden = isEmpty;
+  if (empty) {
+    empty.hidden = !isEmpty;
+    if (isEmpty) {
+      empty.innerHTML = emptyStateHtml(deriveTraderEmptyState("executions", {
+        filtered: allItems.length > 0 && !!filter,
+      }));
+    }
+  }
   if (!_execVList) {
     _execVList = createVirtualList(log, {
       rowHeight: EXEC_ROW_HEIGHT,
@@ -3270,7 +3355,7 @@ function renderExecutions() {
 }
 
 function execRow(e) {
-  const ts = new Date(e.timestampUtc).toISOString().slice(11, 23);
+  const ts = formatUtcTime(e.timestampUtc, { fractionalSecondDigits: 3 });
   const reason = e.rejectReason ? ` — ${escapeHtml(e.rejectReason)}` : "";
   const lastPx = e.lastQuantity > 0 ? ` @ ${fmtPx(e.lastPrice)}` : "";
   const lastQty = e.lastQuantity > 0 ? fmtQty(e.lastQuantity) : "";
@@ -3383,12 +3468,7 @@ export function execKindLabel(kind) {
 // for null/empty inputs so the renderer can call this unconditionally.
 export function fmtGtd(iso) {
   if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return escapeHtml(iso);
-  // YYYY-MM-DD HH:mm UTC. Keeps the column compact and unambiguous —
-  // the trader sees the venue's wall clock, no locale surprises.
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`;
+  return formatUtcDateTime(iso, { seconds: false, fallback: escapeHtml(iso) });
 }
 
 // Format option tooltip for hover. Returns null for non-options; for options
@@ -3396,8 +3476,10 @@ export function fmtGtd(iso) {
 function formatOptionTooltip(order) {
   if (order.securityType !== "Option") return null;
   const side = order.optionPutOrCall || "?";
-  const strike = order.optionStrikePrice != null ? order.optionStrikePrice.toFixed(2) : "?";
-  const expiry = order.optionExpirationDate || "?";
+  const strike = order.optionStrikePrice != null ? fmtPx(order.optionStrikePrice) : "?";
+  const expiry = order.optionExpirationDate
+    ? formatUtcDate(`${order.optionExpirationDate}T12:00:00Z`, order.optionExpirationDate)
+    : "?";
   const underlying = order.optionUnderlyingSymbol || "?";
   return `${underlying} ${side} ${strike} @ ${expiry}`;
 }

@@ -191,6 +191,39 @@
            every IDs the existing ui.js / app.js handlers expect.
            ────────────────────────────────────────────────────────────── -->
       <section class="panel ticket ticket-compact">
+        <aside id="first-order-guide" class="first-order-guide" aria-labelledby="first-order-guide-title" hidden>
+          <div class="first-order-guide-heading">
+            <div>
+              <h2 id="first-order-guide-title">Place your first order</h2>
+              <p>About one minute, using the live ticket below.</p>
+            </div>
+            <span id="first-order-guide-status" class="badge badge-info" aria-live="polite">Step 1 of 3</span>
+          </div>
+          <ol class="first-order-steps" aria-label="First order progress">
+            <li id="first-order-step-1">
+              <span class="first-order-step-marker" aria-hidden="true">1</span>
+              <span><strong>Connect</strong><small>Confirm live trading status</small></span>
+            </li>
+            <li id="first-order-step-2">
+              <span class="first-order-step-marker" aria-hidden="true">2</span>
+              <span><strong>Review and submit</strong><small>Use the real order ticket</small></span>
+            </li>
+            <li id="first-order-step-3">
+              <span class="first-order-step-marker" aria-hidden="true">3</span>
+              <span><strong>Verify</strong><small>Find it in Working Orders</small></span>
+            </li>
+          </ol>
+          <div class="first-order-guide-footer">
+            <p id="first-order-guide-message" role="status" aria-live="polite"></p>
+            <div class="cluster">
+              <button id="first-order-guide-dismiss" type="button" class="btn btn-link">Skip guide</button>
+              <button id="first-order-guide-action" type="button" class="btn btn-primary">Review the ticket</button>
+            </div>
+          </div>
+        </aside>
+        <button id="first-order-guide-open" type="button" class="first-order-guide-open btn btn-link" hidden>
+          First order guide
+        </button>
         <form id="ticket-form" class="ticket-form ticket-form-compact form-surface">
           <div class="ticket-row-quick">
             <label class="ticket-field ticket-field-symbol">
@@ -244,6 +277,37 @@
               Advanced
             </button>
           </div>
+          <section id="trading-readiness" class="trading-readiness" data-tone="warning"
+                   aria-labelledby="trading-readiness-title"
+                   aria-describedby="trading-readiness-message">
+            <div class="trading-readiness-summary">
+              <span class="trading-readiness-label">Trading readiness</span>
+              <strong id="trading-readiness-title">Review before submitting</strong>
+            </div>
+            <ul class="trading-readiness-signals" aria-label="Current trading signals">
+              <li id="trading-readiness-orders" data-tone="warning">
+                <span>Order updates</span>
+                <strong class="trading-readiness-value">Offline</strong>
+              </li>
+              <li id="trading-readiness-gateway" data-tone="warning">
+                <span>Exchange gateway</span>
+                <strong class="trading-readiness-value">Unknown</strong>
+              </li>
+              <li id="trading-readiness-marketData" data-tone="warning">
+                <span>Market data</span>
+                <strong class="trading-readiness-value">Offline</strong>
+              </li>
+              <li id="trading-readiness-phase" data-tone="neutral">
+                <span>Session phase</span>
+                <strong class="trading-readiness-value">Select symbol</strong>
+              </li>
+            </ul>
+            <p id="trading-readiness-message">
+              Enter a symbol and review live connections before submitting.
+            </p>
+            <p id="trading-readiness-announcement" class="visually-hidden"
+               role="status" aria-live="polite" aria-atomic="true"></p>
+          </section>
           <div id="ticket-advanced" class="ticket-advanced" hidden>
             <label id="ticket-stop-price-label" class="ticket-field" hidden>
               <span>Stop price</span>
@@ -322,7 +386,13 @@
           </h2>
           <div class="chart-canvas">
             <svg id="chart-svg" viewBox="0 0 300 100" preserveAspectRatio="none" aria-label="Candlestick chart"></svg>
-            <p id="chart-empty" class="chart-empty muted-cell">select a symbol</p>
+            <p id="chart-empty" class="chart-empty muted-cell" role="status"
+               aria-live="polite" aria-atomic="true">
+              <span class="surface-empty-copy">
+                <strong>Select a symbol</strong>
+                <span>Candles for the active symbol and resolution appear here.</span>
+              </span>
+            </p>
           </div>
         </section>
 
@@ -332,7 +402,8 @@
             <span id="dob-symbol-tag" class="symbol-tag" aria-live="polite"></span>
             <span id="dob-spread" class="dob-spread" aria-live="polite"></span>
           </h2>
-          <p id="dob-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
+          <p id="dob-feedback" class="feedback surface-empty surface-empty-inline"
+             role="status" aria-live="polite" aria-atomic="true" hidden></p>
           <div class="dob-grid">
             <table id="dob-bids" class="dob-side dob-bid">
               <thead>
@@ -546,7 +617,10 @@
                    type="search" inputmode="latin" autocomplete="off"
                    placeholder="filter by symbol" aria-label="Filter executions by symbol" />
           </div>
-          <div id="executions-log" class="executions-log" role="log" aria-live="polite" aria-relevant="additions" aria-label="Executions log"></div>
+          <div id="executions-empty" class="surface-empty" role="status"
+               aria-live="polite" aria-atomic="true" hidden></div>
+          <div id="executions-log" class="executions-log" role="log" aria-live="polite"
+               aria-relevant="additions" aria-label="Executions log"></div>
         </div>
       </section>
     </main>

@@ -93,7 +93,13 @@ export function installDomStub({ ids = {} } = {}) {
   };
   globalThis.requestAnimationFrame =
     globalThis.requestAnimationFrame ?? ((fn) => { try { fn(0); } catch { /* ignore */ } return 0; });
-  globalThis.navigator = globalThis.navigator ?? {};
+  if (!globalThis.navigator) {
+    Object.defineProperty(globalThis, "navigator", {
+      value: {},
+      configurable: true,
+      writable: true,
+    });
+  }
 
   return { elements };
 }

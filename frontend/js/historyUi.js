@@ -22,6 +22,7 @@
 
 import { getState, subscribe } from "./state.js";
 import { fmtQty, fmtPx, execKindLabel } from "./ui.js";
+import { formatSignedCurrency, formatUtcDateTime } from "./formatters.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -123,10 +124,7 @@ export function setHistoryFeedback(message, kind) {
 // ── P&L panel ──────────────────────────────────────────────────────
 
 function fmtSigned(n) {
-  if (n == null || Number.isNaN(Number(n))) return "—";
-  const v = Number(n);
-  const sign = v > 0 ? "+" : "";
-  return `${sign}${fmtPx(v)}`;
+  return formatSignedCurrency(n);
 }
 
 function pnlToneClass(v) {
@@ -200,16 +198,7 @@ export function renderPnl() {
 // ── History tab ────────────────────────────────────────────────────
 
 function fmtTs(ts) {
-  if (!ts) return "—";
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return String(ts);
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  const hh = String(d.getUTCHours()).padStart(2, "0");
-  const mm = String(d.getUTCMinutes()).padStart(2, "0");
-  const ss = String(d.getUTCSeconds()).padStart(2, "0");
-  return `${y}-${m}-${day} ${hh}:${mm}:${ss}`;
+  return formatUtcDateTime(ts, { fallback: String(ts ?? "—") });
 }
 
 export function renderHistory() {

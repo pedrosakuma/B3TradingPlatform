@@ -4,6 +4,7 @@
 // app.js as well so 403s don't pollute logs if the role drifts.
 
 import { getState, subscribe } from "./state.js";
+import { formatUtcTime } from "./formatters.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -238,7 +239,7 @@ function renderEod() {
   const r = getState().eodReport;
   if (!r) { el.hidden = true; el.textContent = ""; return; }
   el.hidden = false;
-  const ts = new Date(r.ranAt).toISOString().slice(11, 19);
+  const ts = formatUtcTime(r.ranAt);
   el.textContent = `[${ts}] ${JSON.stringify(r.report, null, 2)}`;
 }
 
