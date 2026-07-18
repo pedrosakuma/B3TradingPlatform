@@ -1179,6 +1179,144 @@ public sealed class OutboundMutationLedgerTests
         Assert.Equal(2UL, clOrdIds.Generate(new EndClientId(Sensitive().EndClientId)));
     }
 
+    [Theory]
+    [InlineData(OutboundMutationKind.New)]
+    [InlineData(OutboundMutationKind.Cancel)]
+    [InlineData(OutboundMutationKind.Replace)]
+    public async Task Restart_ApprovalOnlyCommittedTail_AdvancesPrimaryWatermark(
+        OutboundMutationKind kind)
+    {
+        var fixture = Fixture.Create();
+        var approved = fixture.Approved with
+        {
+            MutationKind = kind,
+            OriginalClOrdId = kind == OutboundMutationKind.New ? null : 99UL,
+        };
+        var root = Path.Combine(
+            AppContext.BaseDirectory,
+            "outbound-approval-restart",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var options = new PersistenceOptions
+        {
+            DataDirectory = root,
+            FirmId = "test",
+            ChannelCapacity = 16,
+            GroupCommitMaxRecords = 1,
+            GroupCommitWindow = TimeSpan.Zero,
+            SegmentMaxBytes = 4096,
+            IndexEveryNRecords = 1,
+            IndexEveryNBytes = 128,
+            FsyncOnFlush = false,
+            LegacyWalStartupMode = LegacyWalStartupMode.ControlledCleanShutdown,
+        };
+        try
+        {
+            await using (var store = new FileEventStore(
+                options, NullLogger<FileEventStore>.Instance))
+            {
+                var seq = store.Append(approved);
+                await store.FlushThroughAsync(seq);
+            }
+
+            var ledger = new OutboundMutationLedger(fixture.Protector);
+            var clOrdIds = new ClOrdIdPrefixRegistry();
+            var replayer = NewReplayer(ledger, clOrdIds);
+            await using var reopened = new FileEventStore(
+                options, NullLogger<FileEventStore>.Instance);
+            await foreach (var (_, evt) in reopened.ReadFromAsync(0))
+                replayer.Apply(evt);
+
+            var mutation = Assert.Single(ledger.SnapshotMutations());
+            Assert.Equal(OutboundMutationState.ApprovedToSend, mutation.State);
+            Assert.Empty(mutation.Attempts);
+            Assert.Equal(
+                2UL,
+                clOrdIds.Generate(new EndClientId(Sensitive().EndClientId)));
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void ApprovalReplay_WithMissingHistoricalKey_BlocksReadiness()
+    {
+        var writer = Fixture.Create();
+        var missingProtector = Protector(
+            ("other", 1, Key(9)), active: ("other", 1));
+        var ledger = new OutboundMutationLedger(missingProtector);
+        var clOrdIds = new ClOrdIdPrefixRegistry();
+        var replayer = NewReplayer(ledger, clOrdIds);
+
+        replayer.Apply(writer.Approved);
+
+        var mutation = Assert.Single(ledger.SnapshotMutations());
+        Assert.Equal(
+            OutboundSensitivePayloadAvailability.MissingHistoricalKey,
+            mutation.SensitivePayloadAvailability);
+        Assert.True(mutation.RequiresReconciliation);
+        Assert.Equal(1, ledger.ReadinessBlockingCount);
+        var drain = new TestDrain();
+        var guard = new ColdStartLifecycleGuard(
+            new PendingCancelRegistry(),
+            new PendingReplacementRegistry(),
+            drain,
+            new CapturingLogger<ColdStartLifecycleGuard>(),
+            ledger);
+        Assert.Equal(1, guard.Apply());
+        Assert.True(drain.IsDraining);
+    }
+
+    [Fact]
+    public void SnapshotRestore_RepairsPrimaryAndRetryAttemptWatermarksIdempotently()
+    {
+        var fixture = Fixture.Create();
+        fixture.Ledger.Apply(fixture.Approved);
+        fixture.Ledger.Apply(fixture.Intent);
+        fixture.Ledger.Apply(fixture.Unsent);
+        fixture.Ledger.Apply(fixture.Intent with
+        {
+            AttemptId = new OutboundAttemptId(Guid.Parse(
+                "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")),
+            AttemptNo = 2,
+            ClOrdId = 2,
+            IntentPreparedAtUtc = T0.AddSeconds(6),
+            TimestampUtc = T0.AddSeconds(6),
+        });
+        var capture = fixture.Ledger.CaptureSnapshot();
+        var snapshot = new PlatformSnapshot
+        {
+            Seq = 4,
+            FormatVersion = PlatformSnapshot.CurrentFormatVersion,
+            WalGeneration = Guid.NewGuid(),
+            OutboundLedger = new OutboundLedgerSnapshot
+            {
+                Version = OutboundLedgerSnapshot.CurrentVersion,
+                LegacyMigrationCompleted = true,
+                Mutations = capture.Mutations.ToList(),
+                CorrelationTombstones = capture.Correlations.ToList(),
+            },
+            ClOrdIds = new ClOrdIdRegistrySnapshot(),
+        };
+        var restoredLedger = new OutboundMutationLedger(fixture.Protector);
+        var restoredClOrdIds = new ClOrdIdPrefixRegistry();
+        var snapshotter = NewSnapshotter(
+            restoredLedger,
+            restoredClOrdIds,
+            new PendingReplacementRegistry(),
+            new PendingCancelRegistry());
+
+        snapshotter.Restore(snapshot);
+        snapshotter.Restore(snapshot);
+
+        Assert.Equal(
+            3UL,
+            restoredClOrdIds.Generate(
+                new EndClientId(Sensitive().EndClientId)));
+    }
+
     [Fact]
     public void EventReplayer_FirmMismatchCannotTerminaliseLedgerAfterProcessorRejectsIt()
     {
@@ -1399,13 +1537,24 @@ public sealed class OutboundMutationLedgerTests
         OutboundMutationLedger ledger,
         PendingReplacementRegistry replacements,
         PendingCancelRegistry pendingCancels) =>
+        NewSnapshotter(
+            ledger,
+            new ClOrdIdPrefixRegistry(),
+            replacements,
+            pendingCancels);
+
+    private static StateSnapshotter NewSnapshotter(
+        OutboundMutationLedger ledger,
+        ClOrdIdPrefixRegistry clOrdIds,
+        PendingReplacementRegistry replacements,
+        PendingCancelRegistry pendingCancels) =>
         new(
             new WorkingOrderBook(),
             new PositionKeeper(),
             new KillSwitchService(),
             new SymbolHaltService(),
             new SessionPhaseService(),
-            new ClOrdIdPrefixRegistry(),
+            clOrdIds,
             new OrderOwnershipMap(),
             new AlgoBook(),
             new AlgoIdRegistry(),
@@ -1413,6 +1562,32 @@ public sealed class OutboundMutationLedgerTests
             replacements: replacements,
             pendingCancels: pendingCancels,
             outboundLedger: ledger);
+
+    private static EventReplayer NewReplayer(
+        OutboundMutationLedger ledger,
+        ClOrdIdPrefixRegistry clOrdIds)
+    {
+        var ownership = new OrderOwnershipMap();
+        var orders = new WorkingOrderBook();
+        var processor = new ExecutionReportProcessor(
+            ownership,
+            orders,
+            new PositionKeeper(),
+            new NoOpExecutionEventSink(),
+            new NoOpMarginProvider(),
+            NullLogger<ExecutionReportProcessor>.Instance);
+        return new EventReplayer(
+            orders,
+            ownership,
+            new KillSwitchService(),
+            new SymbolHaltService(),
+            new SessionPhaseService(),
+            processor,
+            new AlgoBook(),
+            clOrdIds,
+            new AlgoIdRegistry(),
+            outboundLedger: ledger);
+    }
 
     private static AeadOutboundCommandProtector Protector(
         (string Id, int Version, byte[] Key) key,

@@ -614,6 +614,7 @@ public sealed class StateSnapshotter
                 Enum.TryParse<SessionPhase>(o.Phase, ignoreCase: true, out var p) ? p : SessionPhase.Continuous));
         _sessionPhases.Restore(defaultPhase, overrides);
         _clOrdIds.Restore(snap.ClOrdIds);
+        AdvanceOutboundWatermarksFromLedger();
         _ownership.Restore(snap.Ownership);
         _algos.Restore(snap.Algos);
         _algoIds.Restore(snap.AlgoIds);
@@ -910,6 +911,23 @@ public sealed class StateSnapshotter
                 hints[group.Key] = firms[0];
         }
         return hints;
+    }
+
+    private void AdvanceOutboundWatermarksFromLedger()
+    {
+        if (_outboundLedger is null)
+            return;
+        foreach (var mutation in _outboundLedger.SnapshotMutations())
+        {
+            if (mutation.Approval is null
+                || !_outboundLedger.TryResolveWatermarkOwner(
+                    mutation.MutationId, out var owner)
+                || owner is null)
+                continue;
+            _clOrdIds.AdvanceCounterTo(owner, mutation.PrimaryClOrdId);
+            foreach (var attempt in mutation.Attempts)
+                _clOrdIds.AdvanceCounterTo(owner, attempt.ClOrdId);
+        }
     }
 }
 
@@ -1296,7 +1314,17 @@ public sealed class EventReplayer
                 }
                 break;
             case OutboundApprovedEvent approved:
-                _outboundLedger?.Apply(approved);
+                if (_outboundLedger is not null)
+                {
+                    _outboundLedger.Apply(approved);
+                    if (_outboundLedger.TryResolveWatermarkOwner(
+                            approved.MutationId, out var approvalOwner)
+                        && approvalOwner is not null)
+                    {
+                        _clOrdIds.AdvanceCounterTo(
+                            approvalOwner, approved.PrimaryClOrdId);
+                    }
+                }
                 break;
             case OutboundAttemptIntentPreparedEvent intent:
                 _outboundLedger?.Apply(intent);
