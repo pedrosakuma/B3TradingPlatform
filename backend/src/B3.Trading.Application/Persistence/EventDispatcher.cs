@@ -44,6 +44,8 @@ public sealed class EventDispatcher
     private readonly IEventStore _store;
     private readonly object _lock = new();
     private readonly IExecutionFanOutSink[] _erFanOutSinks;
+    private readonly HashSet<long> _completedAppliedSeqs = new();
+    private long _lastAppliedSeq;
 
     public EventDispatcher(IEventStore store)
         : this(store, fanOutSinks: null)
@@ -61,6 +63,7 @@ public sealed class EventDispatcher
     public EventDispatcher(IEventStore store, System.Collections.Generic.IEnumerable<IExecutionFanOutSink>? fanOutSinks)
     {
         _store = store;
+        _lastAppliedSeq = store.LastCommittedSeq;
         _erFanOutSinks = fanOutSinks is null
             ? System.Array.Empty<IExecutionFanOutSink>()
             : System.Linq.Enumerable.ToArray(fanOutSinks);
@@ -69,6 +72,11 @@ public sealed class EventDispatcher
     public long CurrentSeq
     {
         get { lock (_lock) return _store.CurrentSeq; }
+    }
+
+    public long LastAppliedSeq
+    {
+        get { lock (_lock) return _lastAppliedSeq; }
     }
 
     public ValueTask FlushAsync(CancellationToken cancellationToken = default) =>
@@ -100,6 +108,7 @@ public sealed class EventDispatcher
         {
             var seq = _store.Append(evt, payload);
             apply();
+            AdvanceApplied(seq);
             return seq;
         }
     }
@@ -121,6 +130,7 @@ public sealed class EventDispatcher
                 return new DispatchOutcome(false, 0);
             var seq = _store.Append(evt, payload);
             apply();
+            AdvanceApplied(seq);
             return new DispatchOutcome(true, seq);
         }
     }
@@ -168,6 +178,7 @@ public sealed class EventDispatcher
             {
                 seq = _store.Append(evt, payload);
                 applyAndCapture(fanOut);
+                AdvanceApplied(seq);
 
                 // Per-sink channel writes UNDER the lock. Empty fast-paths
                 // are common (e.g. a successful but ER-less WAL event).
@@ -240,7 +251,26 @@ public sealed class EventDispatcher
                 rollback();
                 throw;
             }
+            AdvanceApplied(seq);
             return new DispatchOutcome(true, seq);
+        }
+    }
+
+    /// <summary>
+    /// Captures a raw snapshot and its WAL lineage at the highest contiguous
+    /// sequence whose in-memory projection has completed. The callback runs
+    /// under the dispatcher lock; projection and durability waits must run
+    /// after this method returns.
+    /// </summary>
+    public T CaptureSnapshot<T>(Func<SnapshotCaptureContext, T> capture)
+    {
+        ArgumentNullException.ThrowIfNull(capture);
+        lock (_lock)
+        {
+            EnsureSnapshotCoverage();
+            return capture(new SnapshotCaptureContext(
+                _lastAppliedSeq,
+                _store.WalGeneration));
         }
     }
 
@@ -253,7 +283,8 @@ public sealed class EventDispatcher
         ArgumentNullException.ThrowIfNull(capture);
         lock (_lock)
         {
-            capture(_store.CurrentSeq);
+            EnsureSnapshotCoverage();
+            capture(_lastAppliedSeq);
         }
     }
 
@@ -271,6 +302,30 @@ public sealed class EventDispatcher
             body();
         }
     }
+
+    private void AdvanceApplied(long seq)
+    {
+        if (seq <= _lastAppliedSeq || !_completedAppliedSeqs.Add(seq))
+        {
+            throw new InvalidOperationException(
+                $"Dispatcher received duplicate or regressive applied sequence {seq} after {_lastAppliedSeq}.");
+        }
+        while (_lastAppliedSeq < long.MaxValue
+               && _completedAppliedSeqs.Remove(_lastAppliedSeq + 1))
+        {
+            _lastAppliedSeq++;
+        }
+    }
+
+    private void EnsureSnapshotCoverage()
+    {
+        var admitted = _store.LastAdmittedSeq;
+        if (admitted != _lastAppliedSeq)
+        {
+            throw new InvalidOperationException(
+                $"Snapshot capture refused because WAL admitted sequence {admitted} is not fully covered by the contiguous applied prefix {_lastAppliedSeq}.");
+        }
+    }
 }
 
 /// <summary>
@@ -280,3 +335,7 @@ public sealed class EventDispatcher
 /// <c>Applied=true</c>.
 /// </summary>
 public readonly record struct DispatchOutcome(bool Applied, long Seq);
+
+public readonly record struct SnapshotCaptureContext(
+    long AppliedSeq,
+    Guid WalGeneration);
