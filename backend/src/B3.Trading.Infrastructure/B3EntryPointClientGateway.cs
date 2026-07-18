@@ -64,15 +64,17 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     // Slice 2 of #132. Captured by the SDK's InboundGapAtReconnect handler
     // (fires synchronously inside ReconnectAsync, just before the call returns)
     // and consumed once on the very next post-reconnect call to the reactor.
-    // Single-writer (SDK inbound thread inside ReconnectAsync) / single-reader
-    // (reconnect loop, immediately after ReconnectAsync returns), separated by
-    // the await — no lock needed for the bool/struct fields, but we Volatile.Read
-    // / Write to defend against compiler reordering across the await barrier.
-    private int _lastReconnectHadGap;
+    // Captures reconnect evidence with the outbound lifecycle generation that
+    // produced it. The gate prevents an aborted pre-reset reconnect from leaking
+    // sticky gap/termination evidence into a later fresh session.
+    private readonly object _reconnectEvidenceGate = new();
+    private bool _lastReconnectHadGap;
+    private long _lastGapGeneration;
     private ulong _lastGapFromSeq;
     private uint _lastGapCount;
     private ulong _lastGapPriorSessionVerId;
     private string? _lastTerminationCode;
+    private long _lastTerminationGeneration;
     private readonly IVenueDisconnectReactor? _reactor;
     // #433 P1. Optional resolver for the venue-side STP instruction
     // stamped on every outbound NewOrderRequest / ReplaceOrderRequest.
@@ -293,18 +295,46 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
     private void OnInboundGapAtReconnect(object? sender, Up.InboundGapAtReconnectEventArgs e)
     {
-        // Capture for the post-reconnect reactor invocation; the SDK fires
-        // this exactly once per ReconnectAsync, synchronously inside that call,
-        // BEFORE it returns to ReconnectLoopAsync. No lock needed — see field
-        // declarations.
-        _lastGapFromSeq = e.FromSeqNo;
-        _lastGapCount = e.Count;
-        _lastGapPriorSessionVerId = e.PriorSessionVerId;
-        Volatile.Write(ref _lastReconnectHadGap, 1);
+        CaptureInboundGap(
+            e.FromSeqNo,
+            e.Count,
+            e.PriorSessionVerId,
+            Volatile.Read(ref _outboundLifecycleGeneration));
         _logger.LogWarning(
             "EntryPoint inbound gap at reconnect for firm {Firm}: priorVer={PriorVer} from={From} count={Count}",
             _firmId, e.PriorSessionVerId, e.FromSeqNo, e.Count);
     }
+
+    private void CaptureInboundGap(
+        ulong fromSeqNo,
+        uint count,
+        ulong priorSessionVerId,
+        long generation)
+    {
+        lock (_reconnectEvidenceGate)
+        {
+            _lastReconnectHadGap = true;
+            _lastGapGeneration = generation;
+            _lastGapFromSeq = fromSeqNo;
+            _lastGapCount = count;
+            _lastGapPriorSessionVerId = priorSessionVerId;
+        }
+    }
+
+    internal void CaptureInboundGapForTests(
+        ulong fromSeqNo,
+        uint count,
+        ulong priorSessionVerId) =>
+        CaptureInboundGap(
+            fromSeqNo,
+            count,
+            priorSessionVerId,
+            Volatile.Read(ref _outboundLifecycleGeneration));
+
+    internal void CaptureTerminationForTests(string terminationCode) =>
+        CaptureTermination(
+            terminationCode,
+            Volatile.Read(ref _outboundLifecycleGeneration));
 
     public string FirmId => _firmId;
 
@@ -363,6 +393,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 await _client.ConnectAsync(cancellationToken).ConfigureAwait(false);
             if (OutboundReconciliationRequired)
             {
+                ClearPendingReconnectEvidence(
+                    Volatile.Read(ref _outboundLifecycleGeneration));
                 MarkDisconnected();
                 await TerminateFaultedSessionAsync().ConfigureAwait(false);
                 ThrowIfOutboundReconciliationRequired();
@@ -413,6 +445,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                     $"EntryPoint gateway for firm '{_firmId}' reconciliation state changed while reset was waiting.");
             }
 
+            var resetGeneration = Volatile.Read(ref _outboundLifecycleGeneration);
+            ClearPendingReconnectEvidence(resetGeneration);
             var priorVerId = Volatile.Read(ref _currentSessionVerId);
             try
             {
@@ -438,12 +472,18 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                         "Outbound reconciliation reset could not publish the freshly negotiated SessionVerId.");
                 }
 
-                Interlocked.Increment(ref _outboundLifecycleGeneration);
-                Volatile.Write(ref _outboundReconciliationRequired, 0);
+                lock (_reconnectEvidenceGate)
+                {
+                    ClearPendingReconnectEvidenceUnsafe(resetGeneration);
+                    Interlocked.Increment(ref _outboundLifecycleGeneration);
+                    Volatile.Write(ref _outboundReconciliationRequired, 0);
+                }
                 OnConnected();
             }
             catch
             {
+                ClearPendingReconnectEvidence(
+                    Volatile.Read(ref _outboundLifecycleGeneration));
                 MarkDisconnected();
                 await TerminateFaultedSessionAsync().ConfigureAwait(false);
                 throw;
@@ -1165,8 +1205,13 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         Interlocked.Exchange(ref _outboundFailCloseInProgress, 1);
         try
         {
-            if (Interlocked.Exchange(ref _outboundReconciliationRequired, 1) == 0)
-                Interlocked.Increment(ref _outboundLifecycleGeneration);
+            lock (_reconnectEvidenceGate)
+            {
+                if (Interlocked.Exchange(ref _outboundReconciliationRequired, 1) == 0)
+                    Interlocked.Increment(ref _outboundLifecycleGeneration);
+                ClearPendingReconnectEvidenceUnsafe(
+                    Volatile.Read(ref _outboundLifecycleGeneration));
+            }
             MarkDisconnected();
             _logger.LogError(
                 "Outbound EntryPoint attempt requires reconciliation for firm {Firm}: operation={Operation} clOrdId={ClOrdId} stage={Stage} disposition={Disposition}; exact-sequence replay is unavailable.",
@@ -1694,11 +1739,47 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         // Capture the peer terminate code for the post-reconnect reactor
         // (slice 2 of #132). Stored before kicking the reconnect loop so
         // the loop sees the latest value when it consults it on success.
-        Volatile.Write(ref _lastTerminationCode, e.Code.ToString());
+        CaptureTermination(
+            e.Code.ToString(),
+            Volatile.Read(ref _outboundLifecycleGeneration));
 
         // Detach from the inbound thread so the event-loop can drain
         // cleanly; the reconnect loop owns its own lifecycle.
         ScheduleReconnect();
+    }
+
+    private void CaptureTermination(string terminationCode, long generation)
+    {
+        lock (_reconnectEvidenceGate)
+        {
+            _lastTerminationCode = terminationCode;
+            _lastTerminationGeneration = generation;
+        }
+    }
+
+    private void ClearPendingReconnectEvidence(long upToGeneration)
+    {
+        lock (_reconnectEvidenceGate)
+            ClearPendingReconnectEvidenceUnsafe(upToGeneration);
+    }
+
+    private void ClearPendingReconnectEvidenceUnsafe(long upToGeneration)
+    {
+        if (_lastReconnectHadGap && _lastGapGeneration <= upToGeneration)
+        {
+            _lastReconnectHadGap = false;
+            _lastGapGeneration = 0;
+            _lastGapFromSeq = 0;
+            _lastGapCount = 0;
+            _lastGapPriorSessionVerId = 0;
+        }
+
+        if (_lastTerminationCode is not null
+            && _lastTerminationGeneration <= upToGeneration)
+        {
+            _lastTerminationCode = null;
+            _lastTerminationGeneration = 0;
+        }
     }
 
     private void MarkDisconnected()
@@ -1766,6 +1847,12 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         try
         {
             var attempt = 0;
+            if (OutboundReconciliationRequired)
+            {
+                ClearPendingReconnectEvidence(
+                    Volatile.Read(ref _outboundLifecycleGeneration));
+                return;
+            }
             while (!ct.IsCancellationRequested
                    && !_disposed
                    && !OutboundReconciliationRequired)
@@ -1775,10 +1862,15 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                     new KeyValuePair<string, object?>("firm", _firmId),
                     new KeyValuePair<string, object?>("attempt", attempt));
                 var priorVerId = Volatile.Read(ref _currentSessionVerId);
+                var reconnectGeneration = Volatile.Read(ref _outboundLifecycleGeneration);
                 try
                 {
                     if (OutboundReconciliationRequired)
+                    {
+                        ClearPendingReconnectEvidence(
+                            Volatile.Read(ref _outboundLifecycleGeneration));
                         return;
+                    }
 
                     // #565. Re-resolve the peer hostname immediately before
                     // dialing so a matching-side pod IP change (Kubernetes
@@ -1798,8 +1890,11 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                         Up.ReconnectMode.EstablishReuseThenNegotiate,
                         BumpSessionVerIdSelector,
                         ct).ConfigureAwait(false);
-                    if (OutboundReconciliationRequired)
+                    if (OutboundReconciliationRequired
+                        || reconnectGeneration != Volatile.Read(ref _outboundLifecycleGeneration))
                     {
+                        ClearPendingReconnectEvidence(
+                            Volatile.Read(ref _outboundLifecycleGeneration));
                         MarkDisconnected();
                         await TerminateFaultedSessionAsync().ConfigureAwait(false);
                         return;
@@ -1817,14 +1912,26 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                     // ghosts still present — same backstop reasoning as the
                     // connect path).
                     ReconcileReconnectSessionRoll(outcome.Kind, priorVerId, outcome.SessionVerId);
-                    if (OutboundReconciliationRequired)
+                    if (OutboundReconciliationRequired
+                        || reconnectGeneration != Volatile.Read(ref _outboundLifecycleGeneration))
                     {
+                        ClearPendingReconnectEvidence(
+                            Volatile.Read(ref _outboundLifecycleGeneration));
                         MarkDisconnected();
                         await TerminateFaultedSessionAsync().ConfigureAwait(false);
                         return;
                     }
                     OnConnected(startEventLoop: false);
-                    NotifyVenueDisconnectReactor();
+                    if (OutboundReconciliationRequired
+                        || reconnectGeneration != Volatile.Read(ref _outboundLifecycleGeneration))
+                    {
+                        ClearPendingReconnectEvidence(
+                            Volatile.Read(ref _outboundLifecycleGeneration));
+                        MarkDisconnected();
+                        await TerminateFaultedSessionAsync().ConfigureAwait(false);
+                        return;
+                    }
+                    NotifyVenueDisconnectReactor(reconnectGeneration);
                     return;
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -1842,6 +1949,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 {
                     if (OutboundReconciliationRequired)
                     {
+                        ClearPendingReconnectEvidence(
+                            Volatile.Read(ref _outboundLifecycleGeneration));
                         MarkDisconnected();
                         await TerminateFaultedSessionAsync().ConfigureAwait(false);
                         return;
@@ -1933,25 +2042,63 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// gateway. Resets the captured state regardless of reactor
     /// presence so a subsequent reconnect cycle starts clean.
     /// </summary>
-    private void NotifyVenueDisconnectReactor()
+    private void NotifyVenueDisconnectReactor(long reconnectGeneration)
     {
-        var hadGap = Interlocked.Exchange(ref _lastReconnectHadGap, 0) == 1;
-        var fromSeq = hadGap ? (ulong?)_lastGapFromSeq : null;
-        var count = hadGap ? (uint?)_lastGapCount : null;
-        var priorVer = hadGap ? (ulong?)_lastGapPriorSessionVerId : null;
-        var priorCode = Interlocked.Exchange(ref _lastTerminationCode, null);
-
-        if (_reactor is null) return;
-
-        try
+        lock (_reconnectEvidenceGate)
         {
-            _reactor.OnPeerReconnected(_firmId,
-                new ReconnectOutcome(hadGap, fromSeq, count, priorVer, priorCode));
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex,
-                "VenueDisconnectReactor threw for firm {Firm}; suppressed to keep gateway alive.", _firmId);
+            if (OutboundReconciliationRequired
+                || Volatile.Read(ref _outboundLifecycleGeneration) != reconnectGeneration)
+            {
+                ClearPendingReconnectEvidenceUnsafe(
+                    Volatile.Read(ref _outboundLifecycleGeneration));
+                return;
+            }
+
+            bool hadGap = false;
+            ulong? fromSeq = null;
+            uint? count = null;
+            ulong? priorVer = null;
+            string? priorCode = null;
+            if (_lastReconnectHadGap
+                && _lastGapGeneration <= reconnectGeneration)
+            {
+                if (_lastGapGeneration == reconnectGeneration)
+                {
+                    hadGap = true;
+                    fromSeq = _lastGapFromSeq;
+                    count = _lastGapCount;
+                    priorVer = _lastGapPriorSessionVerId;
+                }
+
+                _lastReconnectHadGap = false;
+                _lastGapGeneration = 0;
+                _lastGapFromSeq = 0;
+                _lastGapCount = 0;
+                _lastGapPriorSessionVerId = 0;
+            }
+
+            if (_lastTerminationCode is not null
+                && _lastTerminationGeneration <= reconnectGeneration)
+            {
+                if (_lastTerminationGeneration == reconnectGeneration)
+                    priorCode = _lastTerminationCode;
+
+                _lastTerminationCode = null;
+                _lastTerminationGeneration = 0;
+            }
+
+            if (_reactor is null) return;
+
+            try
+            {
+                _reactor.OnPeerReconnected(_firmId,
+                    new ReconnectOutcome(hadGap, fromSeq, count, priorVer, priorCode));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "VenueDisconnectReactor threw for firm {Firm}; suppressed to keep gateway alive.", _firmId);
+            }
         }
     }
 

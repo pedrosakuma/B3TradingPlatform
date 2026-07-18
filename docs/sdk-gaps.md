@@ -33,6 +33,10 @@ frame-prepared-or-later failure. While latched, legacy/receipt sends, ordinary
 Only the explicit `CompleteOutboundReconciliationAsync` lifecycle transition
 can clear it, and only after a successful `AlwaysNegotiate` produces a strictly
 newer `SessionVerId`; failed reset attempts remain closed.
+Reconnect gap/termination captures are tagged with the outbound lifecycle
+generation: suppression and fresh-session reset discard pre-reset evidence,
+while an ordinary reconnect still delivers evidence captured in its current
+generation.
 
 There is still no exact-original-frame/original-sequence replay operation.
 Failures after frame preparation require reconciliation rather than resend. A

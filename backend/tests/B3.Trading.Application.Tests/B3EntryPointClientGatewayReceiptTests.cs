@@ -563,6 +563,8 @@ public sealed class B3EntryPointClientGatewayReceiptTests
         var releaseFailClose = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var queuedLegacyEntries = 0;
         var queuedReceiptEntries = 0;
+        var reactor = new CapturingDisconnectReactor();
+        B3EntryPointClientGateway? gateway = null;
 
         async IAsyncEnumerable<Up.EntryPointEvent> Events(
             [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
@@ -572,7 +574,7 @@ public sealed class B3EntryPointClientGatewayReceiptTests
             yield break;
         }
 
-        await using var gateway = await BuildGatewayAsync(
+        gateway = await BuildGatewayAsync(
             submit: async (request, callback, ct) =>
             {
                 var frame = Frame(Up.OutboundOperationKind.NewOrder, request.ClOrdID.Value, 1);
@@ -605,12 +607,16 @@ public sealed class B3EntryPointClientGatewayReceiptTests
             reconnect: async (_, _, ct) =>
             {
                 reconnectEntered.SetResult();
+                gateway!.CaptureInboundGapForTests(400, 2, 7);
+                gateway.CaptureTerminationForTests("aborted-reconnect");
                 await releaseReconnect.Task.WaitAsync(ct);
                 return new Sdk.ReconnectOutcome(
                     Sdk.ReconnectKind.Reattached, 7, 0, 0, true);
             },
             events: Events,
-            startEventLoop: true);
+            startEventLoop: true,
+            reactor: reactor);
+        await using var ownedGateway = gateway;
 
         await eventLoopEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
         var failed = gateway.SubmitWithReceiptAsync(
@@ -634,6 +640,7 @@ public sealed class B3EntryPointClientGatewayReceiptTests
         releaseReconnect.SetResult();
         await gateway.ScheduledReconnectTaskForTests!.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.True(gateway.OutboundReconciliationRequired);
+        Assert.Empty(reactor.Outcomes);
         Assert.Equal(0, Volatile.Read(ref queuedReceiptEntries));
         Assert.Equal(0, Volatile.Read(ref queuedLegacyEntries));
 
@@ -709,6 +716,63 @@ public sealed class B3EntryPointClientGatewayReceiptTests
             Order(100), 103, (_, _) => ValueTask.CompletedTask, CancellationToken.None);
         Assert.Equal(1, Volatile.Read(ref legacyEntries));
         Assert.Equal(1, Volatile.Read(ref receiptEntries));
+    }
+
+    [Fact]
+    public async Task ReconciliationReset_DropsOldEvidence_ButOrdinaryReconnectKeepsCurrentGeneration()
+    {
+        var reactor = new CapturingDisconnectReactor();
+        var reconnectCalls = 0;
+        B3EntryPointClientGateway? gateway = null;
+        gateway = await BuildGatewayAsync(
+            submit: async (request, callback, ct) =>
+            {
+                var frame = Frame(Up.OutboundOperationKind.NewOrder, request.ClOrdID.Value, 1);
+                await callback(frame, ct);
+                throw AttemptFailure(
+                    Up.OutboundAttemptStage.TransportWriteCompleted,
+                    frame,
+                    new IOException("session state persistence failed"));
+            },
+            reconnect: (mode, _, _) =>
+            {
+                var call = Interlocked.Increment(ref reconnectCalls);
+                if (call == 1)
+                {
+                    Assert.Equal(Sdk.ReconnectMode.AlwaysNegotiate, mode);
+                    gateway!.CaptureInboundGapForTests(200, 2, 7);
+                    gateway.CaptureTerminationForTests("reset-stale");
+                    return Task.FromResult(new Sdk.ReconnectOutcome(
+                        Sdk.ReconnectKind.Renegotiated, 8, 0, 0, false));
+                }
+
+                Assert.Equal(Sdk.ReconnectMode.EstablishReuseThenNegotiate, mode);
+                gateway!.CaptureInboundGapForTests(300, 3, 8);
+                gateway.CaptureTerminationForTests("current-generation");
+                return Task.FromResult(new Sdk.ReconnectOutcome(
+                    Sdk.ReconnectKind.Reattached, 8, 0, 0, true));
+            },
+            reactor: reactor);
+        await using var ownedGateway = gateway;
+
+        gateway.CaptureInboundGapForTests(100, 1, 6);
+        gateway.CaptureTerminationForTests("pre-fail-close");
+        await Assert.ThrowsAsync<ExchangeGatewayAttemptException>(() =>
+            gateway.SubmitWithReceiptAsync(
+                Order(101), (_, _) => ValueTask.CompletedTask, CancellationToken.None));
+
+        Assert.Empty(reactor.Outcomes);
+        await gateway.CompleteOutboundReconciliationAsync(CancellationToken.None);
+        Assert.Empty(reactor.Outcomes);
+
+        await gateway.ReconnectLoopForTestsAsync(CancellationToken.None);
+
+        var outcome = Assert.Single(reactor.Outcomes);
+        Assert.True(outcome.HadInboundGap);
+        Assert.Equal(300UL, outcome.GapFromSeq);
+        Assert.Equal(3u, outcome.GapCount);
+        Assert.Equal(8UL, outcome.PriorSessionVerId);
+        Assert.Equal("current-generation", outcome.PriorTerminationCode);
     }
 
     [Fact]
@@ -899,7 +963,8 @@ public sealed class B3EntryPointClientGatewayReceiptTests
         Func<Task>? beforeFailClose = null,
         Func<Sdk.ReconnectMode, Func<uint, uint>, CancellationToken, Task<Sdk.ReconnectOutcome>>? reconnect = null,
         Func<CancellationToken, IAsyncEnumerable<Up.EntryPointEvent>>? events = null,
-        bool startEventLoop = false)
+        bool startEventLoop = false,
+        IVenueDisconnectReactor? reactor = null)
     {
         var client = new Sdk.EntryPointClient(new Sdk.EntryPointClientOptions
         {
@@ -926,12 +991,24 @@ public sealed class B3EntryPointClientGatewayReceiptTests
                 BeforeFailClose = beforeFailClose,
             },
             terminateOnShutdown: false,
+            venueDisconnectReactor: reactor,
             connectedTestHook: startEventLoop ? null : static () => { },
             connectAsyncOverride: static _ => Task.CompletedTask,
             reconnectAsyncOverride: reconnect,
             eventStreamOverride: events);
         await gateway.ConnectAsync(CancellationToken.None);
         return gateway;
+    }
+
+    private sealed class CapturingDisconnectReactor : IVenueDisconnectReactor
+    {
+        public List<ReconnectOutcome> Outcomes { get; } = [];
+
+        public void OnPeerReconnected(string firmId, ReconnectOutcome outcome)
+        {
+            Assert.Equal(FirmId, firmId);
+            Outcomes.Add(outcome);
+        }
     }
 
     private sealed class LegacyOnlyGateway : IExchangeGateway
