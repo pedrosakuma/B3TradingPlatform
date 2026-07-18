@@ -415,6 +415,8 @@ public sealed class B3EntryPointClientGatewayReceiptTests
     [Fact]
     public async Task StatePersistenceFailure_DelayedFailClose_BlocksQueuedReceiptAndLegacySends()
     {
+        var sdkFailureReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSdkFailure = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var failCloseEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseFailClose = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var queuedReceiptEntries = 0;
@@ -424,6 +426,8 @@ public sealed class B3EntryPointClientGatewayReceiptTests
             {
                 var frame = Frame(Up.OutboundOperationKind.NewOrder, request.ClOrdID.Value, 1);
                 await callback(frame, ct);
+                sdkFailureReady.SetResult();
+                await releaseSdkFailure.Task.WaitAsync(ct);
                 throw AttemptFailure(
                     Up.OutboundAttemptStage.TransportWriteCompleted,
                     frame,
@@ -452,7 +456,7 @@ public sealed class B3EntryPointClientGatewayReceiptTests
             Order(101),
             (_, _) => ValueTask.CompletedTask,
             CancellationToken.None);
-        await failCloseEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await sdkFailureReady.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
         var queuedReceipt = gateway.CancelWithReceiptAsync(
             Order(100),
@@ -467,6 +471,12 @@ public sealed class B3EntryPointClientGatewayReceiptTests
         Assert.Equal(0, Volatile.Read(ref queuedReceiptEntries));
         Assert.Equal(0, Volatile.Read(ref queuedLegacyEntries));
 
+        releaseSdkFailure.SetResult();
+        await failCloseEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.True(gateway.OutboundReconciliationRequired);
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => gateway.CompleteOutboundReconciliationAsync(CancellationToken.None));
+
         releaseFailClose.SetResult();
 
         var failure = await Assert.ThrowsAsync<ExchangeGatewayAttemptException>(() => failed);
@@ -477,6 +487,228 @@ public sealed class B3EntryPointClientGatewayReceiptTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => queuedLegacy);
         Assert.Equal(0, Volatile.Read(ref queuedReceiptEntries));
         Assert.Equal(0, Volatile.Read(ref queuedLegacyEntries));
+    }
+
+    [Fact]
+    public async Task FailClose_TerminateDrainCompletion_SuppressesEventLoopReconnect()
+    {
+        var eventLoopEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseEventLoop = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var failCloseEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFailClose = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reconnectCalls = 0;
+
+        async IAsyncEnumerable<Up.EntryPointEvent> Events(
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            eventLoopEntered.SetResult();
+            await releaseEventLoop.Task.WaitAsync(ct);
+            yield break;
+        }
+
+        await using var gateway = await BuildGatewayAsync(
+            submit: async (request, callback, ct) =>
+            {
+                var frame = Frame(Up.OutboundOperationKind.NewOrder, request.ClOrdID.Value, 1);
+                await callback(frame, ct);
+                throw AttemptFailure(
+                    Up.OutboundAttemptStage.TransportWriteCompleted,
+                    frame,
+                    new IOException("session state persistence failed"));
+            },
+            beforeFailClose: async () =>
+            {
+                failCloseEntered.SetResult();
+                await releaseFailClose.Task;
+            },
+            reconnect: (_, _, _) =>
+            {
+                Interlocked.Increment(ref reconnectCalls);
+                return Task.FromResult(new Sdk.ReconnectOutcome(
+                    Sdk.ReconnectKind.Reattached, 7, 0, 0, true));
+            },
+            events: Events,
+            startEventLoop: true);
+
+        await eventLoopEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var failed = gateway.SubmitWithReceiptAsync(
+            Order(101),
+            (_, _) => ValueTask.CompletedTask,
+            CancellationToken.None);
+        await failCloseEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.True(gateway.OutboundReconciliationRequired);
+        releaseEventLoop.SetResult();
+        await gateway.EventLoopTaskForTests!.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(0, Volatile.Read(ref reconnectCalls));
+        Assert.False(gateway.IsReconnecting);
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => gateway.ConnectAsync(CancellationToken.None));
+
+        releaseFailClose.SetResult();
+        await Assert.ThrowsAsync<ExchangeGatewayAttemptException>(() => failed);
+    }
+
+    [Fact]
+    public async Task ScheduledReconnectRace_CannotReopenAfterOutboundFailClose()
+    {
+        var eventLoopEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseEventLoop = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var receiptPrepared = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseReceiptFailure = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reconnectEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseReconnect = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var failCloseEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFailClose = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var queuedLegacyEntries = 0;
+        var queuedReceiptEntries = 0;
+
+        async IAsyncEnumerable<Up.EntryPointEvent> Events(
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            eventLoopEntered.SetResult();
+            await releaseEventLoop.Task.WaitAsync(ct);
+            yield break;
+        }
+
+        await using var gateway = await BuildGatewayAsync(
+            submit: async (request, callback, ct) =>
+            {
+                var frame = Frame(Up.OutboundOperationKind.NewOrder, request.ClOrdID.Value, 1);
+                await callback(frame, ct);
+                receiptPrepared.SetResult();
+                await releaseReceiptFailure.Task.WaitAsync(ct);
+                throw AttemptFailure(
+                    Up.OutboundAttemptStage.TransportWriteCompleted,
+                    frame,
+                    new IOException("session state persistence failed"));
+            },
+            cancel: async (request, callback, ct) =>
+            {
+                Interlocked.Increment(ref queuedReceiptEntries);
+                var frame = Frame(Up.OutboundOperationKind.Cancel, request.ClOrdID.Value, 2);
+                await callback(frame, ct);
+                return new Up.OutboundAttemptReceipt(
+                    frame, Up.OutboundAttemptStage.TransportWriteCompleted);
+            },
+            legacyReplace: (_, _) =>
+            {
+                Interlocked.Increment(ref queuedLegacyEntries);
+                return Task.CompletedTask;
+            },
+            beforeFailClose: async () =>
+            {
+                failCloseEntered.SetResult();
+                await releaseFailClose.Task;
+            },
+            reconnect: async (_, _, ct) =>
+            {
+                reconnectEntered.SetResult();
+                await releaseReconnect.Task.WaitAsync(ct);
+                return new Sdk.ReconnectOutcome(
+                    Sdk.ReconnectKind.Reattached, 7, 0, 0, true);
+            },
+            events: Events,
+            startEventLoop: true);
+
+        await eventLoopEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var failed = gateway.SubmitWithReceiptAsync(
+            Order(101),
+            (_, _) => ValueTask.CompletedTask,
+            CancellationToken.None);
+        await receiptPrepared.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        releaseEventLoop.SetResult();
+        await reconnectEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        releaseReceiptFailure.SetResult();
+        await failCloseEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        var queuedReceipt = gateway.CancelWithReceiptAsync(
+            Order(100), 102, (_, _) => ValueTask.CompletedTask, CancellationToken.None);
+        var queuedLegacy = gateway.CancelReplaceAsync(
+            Order(100), 103, 90, 31m, null, null, null, CancellationToken.None);
+        Assert.False(queuedReceipt.IsCompleted);
+        Assert.False(queuedLegacy.IsCompleted);
+
+        releaseReconnect.SetResult();
+        await gateway.ScheduledReconnectTaskForTests!.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.True(gateway.OutboundReconciliationRequired);
+        Assert.Equal(0, Volatile.Read(ref queuedReceiptEntries));
+        Assert.Equal(0, Volatile.Read(ref queuedLegacyEntries));
+
+        releaseFailClose.SetResult();
+        await Assert.ThrowsAsync<ExchangeGatewayAttemptException>(() => failed);
+        await Assert.ThrowsAsync<ExchangeGatewayAttemptException>(() => queuedReceipt);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => queuedLegacy);
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => gateway.ConnectAsync(CancellationToken.None));
+        Assert.Equal(0, Volatile.Read(ref queuedReceiptEntries));
+        Assert.Equal(0, Volatile.Read(ref queuedLegacyEntries));
+    }
+
+    [Fact]
+    public async Task ExplicitReconciliationReset_RequiresFreshSession_AndFailureStaysClosed()
+    {
+        var resetAttempts = 0;
+        var legacyEntries = 0;
+        var receiptEntries = 0;
+        await using var gateway = await BuildGatewayAsync(
+            submit: async (request, callback, ct) =>
+            {
+                var frame = Frame(Up.OutboundOperationKind.NewOrder, request.ClOrdID.Value, 1);
+                await callback(frame, ct);
+                throw AttemptFailure(
+                    Up.OutboundAttemptStage.TransportWriteCompleted,
+                    frame,
+                    new IOException("session state persistence failed"));
+            },
+            cancel: async (request, callback, ct) =>
+            {
+                Interlocked.Increment(ref receiptEntries);
+                var frame = Frame(Up.OutboundOperationKind.Cancel, request.ClOrdID.Value, 1);
+                await callback(frame, ct);
+                return new Up.OutboundAttemptReceipt(
+                    frame, Up.OutboundAttemptStage.TransportWriteCompleted);
+            },
+            legacyCancel: (_, _) =>
+            {
+                Interlocked.Increment(ref legacyEntries);
+                return Task.CompletedTask;
+            },
+            reconnect: (mode, _, _) =>
+            {
+                Assert.Equal(Sdk.ReconnectMode.AlwaysNegotiate, mode);
+                if (Interlocked.Increment(ref resetAttempts) == 1)
+                    throw new IOException("fresh-session reset failed");
+                return Task.FromResult(new Sdk.ReconnectOutcome(
+                    Sdk.ReconnectKind.Renegotiated, 8, 0, 0, false));
+            });
+
+        await Assert.ThrowsAsync<ExchangeGatewayAttemptException>(() =>
+            gateway.SubmitWithReceiptAsync(
+                Order(101), (_, _) => ValueTask.CompletedTask, CancellationToken.None));
+
+        Assert.True(gateway.OutboundReconciliationRequired);
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => gateway.ConnectAsync(CancellationToken.None));
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => gateway.CancelAsync(Order(100), 102, CancellationToken.None));
+
+        await Assert.ThrowsAsync<IOException>(
+            () => gateway.CompleteOutboundReconciliationAsync(CancellationToken.None));
+        Assert.True(gateway.OutboundReconciliationRequired);
+        Assert.Equal(0, Volatile.Read(ref legacyEntries));
+
+        await gateway.CompleteOutboundReconciliationAsync(CancellationToken.None);
+
+        Assert.False(gateway.OutboundReconciliationRequired);
+        Assert.Equal(8u, gateway.CurrentSessionVerId);
+        await gateway.CancelAsync(Order(100), 102, CancellationToken.None);
+        await gateway.CancelWithReceiptAsync(
+            Order(100), 103, (_, _) => ValueTask.CompletedTask, CancellationToken.None);
+        Assert.Equal(1, Volatile.Read(ref legacyEntries));
+        Assert.Equal(1, Volatile.Read(ref receiptEntries));
     }
 
     [Fact]
@@ -664,7 +896,10 @@ public sealed class B3EntryPointClientGatewayReceiptTests
         Func<Up.NewOrderRequest, CancellationToken, Task>? legacySubmit = null,
         Func<Up.CancelOrderRequest, CancellationToken, Task>? legacyCancel = null,
         Func<Up.ReplaceOrderRequest, CancellationToken, Task>? legacyReplace = null,
-        Func<Task>? beforeFailClose = null)
+        Func<Task>? beforeFailClose = null,
+        Func<Sdk.ReconnectMode, Func<uint, uint>, CancellationToken, Task<Sdk.ReconnectOutcome>>? reconnect = null,
+        Func<CancellationToken, IAsyncEnumerable<Up.EntryPointEvent>>? events = null,
+        bool startEventLoop = false)
     {
         var client = new Sdk.EntryPointClient(new Sdk.EntryPointClientOptions
         {
@@ -691,8 +926,10 @@ public sealed class B3EntryPointClientGatewayReceiptTests
                 BeforeFailClose = beforeFailClose,
             },
             terminateOnShutdown: false,
-            connectedTestHook: static () => { },
-            connectAsyncOverride: static _ => Task.CompletedTask);
+            connectedTestHook: startEventLoop ? null : static () => { },
+            connectAsyncOverride: static _ => Task.CompletedTask,
+            reconnectAsyncOverride: reconnect,
+            eventStreamOverride: events);
         await gateway.ConnectAsync(CancellationToken.None);
         return gateway;
     }

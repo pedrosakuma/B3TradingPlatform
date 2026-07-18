@@ -54,6 +54,9 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     private uint _currentSessionVerId;
     private int _connectedState; // 0 = disconnected, 1 = connected (matches UpDownCounter increments)
     private int _reconnectingState; // 0 = idle, 1 = reconnect loop active (observable gauge)
+    private int _outboundReconciliationRequired;
+    private int _outboundFailCloseInProgress;
+    private long _outboundLifecycleGeneration;
     private ulong _lastInboundSeqNum;
     private int _reconnectScheduled;
     private volatile bool _disposed;
@@ -325,6 +328,13 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// <summary>True when the auto-reconnect loop is currently running for this firm.</summary>
     public bool IsReconnecting => Volatile.Read(ref _reconnectingState) == 1;
 
+    /// <summary>
+    /// True after a frame-prepared-or-later outbound failure. While set, sends,
+    /// ordinary connects and automatic reconnects remain fail-closed.
+    /// </summary>
+    public bool OutboundReconciliationRequired =>
+        Volatile.Read(ref _outboundReconciliationRequired) == 1;
+
     public event Action<ExecutionReportEnvelope>? ExecutionReportReceived;
     public event Action<BusinessRejectEnvelope>? BusinessRejectReceived;
 
@@ -334,10 +344,12 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// </summary>
     public async Task ConnectAsync(CancellationToken cancellationToken)
     {
+        ThrowIfOutboundReconciliationRequired();
         await _connectionLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
+            ThrowIfOutboundReconciliationRequired();
             if (Volatile.Read(ref _connectedState) == 1
                 && _eventLoop is { IsCompleted: false })
                 return;
@@ -349,12 +361,108 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 await _connectAsyncOverride(cancellationToken).ConfigureAwait(false);
             else
                 await _client.ConnectAsync(cancellationToken).ConfigureAwait(false);
+            if (OutboundReconciliationRequired)
+            {
+                MarkDisconnected();
+                await TerminateFaultedSessionAsync().ConfigureAwait(false);
+                ThrowIfOutboundReconciliationRequired();
+            }
             ReconcileConnectSessionRoll();
             OnConnected();
         }
         finally
         {
             _connectionLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Completes an operator/coordinator-owned reconciliation by establishing a
+    /// fresh SessionVerId. The caller must durably resolve every ambiguous
+    /// attempt before invoking this lifecycle transition.
+    /// </summary>
+    public async Task CompleteOutboundReconciliationAsync(CancellationToken cancellationToken)
+    {
+        await _connectionLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var outboundLockHeld = false;
+        try
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (!OutboundReconciliationRequired)
+                throw new InvalidOperationException(
+                    $"EntryPoint gateway for firm '{_firmId}' does not require outbound reconciliation.");
+            if (Volatile.Read(ref _outboundFailCloseInProgress) != 0)
+                throw new InvalidOperationException(
+                    $"EntryPoint gateway for firm '{_firmId}' cannot reset while fail-close termination is still running.");
+            if (_eventLoop is { IsCompleted: false })
+                throw new InvalidOperationException(
+                    $"EntryPoint gateway for firm '{_firmId}' cannot reset while its prior event loop is still running.");
+            if (Volatile.Read(ref _reconnectScheduled) != 0
+                || Volatile.Read(ref _reconnectingState) != 0)
+            {
+                throw new InvalidOperationException(
+                    $"EntryPoint gateway for firm '{_firmId}' cannot reset while automatic reconnect is still draining.");
+            }
+
+            await _outboundSendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+            outboundLockHeld = true;
+            if (!OutboundReconciliationRequired
+                || Volatile.Read(ref _outboundFailCloseInProgress) != 0)
+            {
+                throw new InvalidOperationException(
+                    $"EntryPoint gateway for firm '{_firmId}' reconciliation state changed while reset was waiting.");
+            }
+
+            var priorVerId = Volatile.Read(ref _currentSessionVerId);
+            try
+            {
+                if (_reResolveEndpoint is not null)
+                    await _reResolveEndpoint(cancellationToken).ConfigureAwait(false);
+
+                var outcome = await ReconnectAsyncCore(
+                    Up.ReconnectMode.AlwaysNegotiate,
+                    BumpSessionVerIdSelector,
+                    cancellationToken).ConfigureAwait(false);
+                if (outcome.Kind != Up.ReconnectKind.Renegotiated
+                    || outcome.SessionVerId <= priorVerId)
+                {
+                    throw new InvalidOperationException(
+                        "Outbound reconciliation reset requires a freshly negotiated, strictly newer SessionVerId.");
+                }
+
+                ReconcileReconnectSessionRoll(
+                    outcome.Kind, priorVerId, outcome.SessionVerId);
+                if (Volatile.Read(ref _currentSessionVerId) != outcome.SessionVerId)
+                {
+                    throw new InvalidOperationException(
+                        "Outbound reconciliation reset could not publish the freshly negotiated SessionVerId.");
+                }
+
+                Interlocked.Increment(ref _outboundLifecycleGeneration);
+                Volatile.Write(ref _outboundReconciliationRequired, 0);
+                OnConnected();
+            }
+            catch
+            {
+                MarkDisconnected();
+                await TerminateFaultedSessionAsync().ConfigureAwait(false);
+                throw;
+            }
+        }
+        finally
+        {
+            if (outboundLockHeld)
+                _outboundSendLock.Release();
+            _connectionLock.Release();
+        }
+    }
+
+    private void ThrowIfOutboundReconciliationRequired()
+    {
+        if (OutboundReconciliationRequired)
+        {
+            throw new InvalidOperationException(
+                $"EntryPoint gateway for firm '{_firmId}' requires outbound reconciliation and a fresh SessionVerId.");
         }
     }
 
@@ -480,6 +588,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
     private void OnConnected(bool startEventLoop = true)
     {
+        ThrowIfOutboundReconciliationRequired();
         if (Interlocked.Exchange(ref _connectedState, 1) == 0)
             MetricsRegistry.EntryPointConnected.Add(1, FirmTag());
         MetricsRegistry.RecordSessionVerId(_firmId, _currentSessionVerId);
@@ -899,9 +1008,15 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 "Outbound gateway calls cannot re-enter the same gateway from the frame-prepared callback.");
         }
 
+        var lifecycleGeneration = Volatile.Read(ref _outboundLifecycleGeneration);
         await _outboundSendLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            if (lifecycleGeneration != Volatile.Read(ref _outboundLifecycleGeneration))
+            {
+                throw new InvalidOperationException(
+                    $"EntryPoint gateway for firm '{_firmId}' crossed an outbound reconciliation boundary while queued.");
+            }
             if (!IsOperationalForOutbound())
             {
                 throw new InvalidOperationException(
@@ -947,6 +1062,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 frame: null);
         }
 
+        var lifecycleGeneration = Volatile.Read(ref _outboundLifecycleGeneration);
         try
         {
             await _outboundSendLock.WaitAsync(ct).ConfigureAwait(false);
@@ -963,6 +1079,14 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
         try
         {
+            if (lifecycleGeneration != Volatile.Read(ref _outboundLifecycleGeneration))
+            {
+                throw new ExchangeGatewayAttemptException(
+                    $"EntryPoint gateway for firm '{_firmId}' crossed an outbound reconciliation boundary while queued.",
+                    ExchangeGatewayFailureDisposition.OutboundProvenUnsent,
+                    ExchangeGatewayAttemptStage.NotStarted,
+                    frame: null);
+            }
             if (!IsOperationalForOutbound())
             {
                 throw new ExchangeGatewayAttemptException(
@@ -996,8 +1120,6 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
                 if (mapped.LastStage >= ExchangeGatewayAttemptStage.FramePrepared)
                 {
-                    if (_beforeOutboundFailCloseTestHook is not null)
-                        await _beforeOutboundFailCloseTestHook().ConfigureAwait(false);
                     await FailClosedOutboundAttemptAsync(op, clOrdId, mapped).ConfigureAwait(false);
                 }
 
@@ -1013,6 +1135,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     private bool IsOperationalForOutbound() =>
         !_disposed
         && !_shutdownCts.IsCancellationRequested
+        && !OutboundReconciliationRequired
         && Volatile.Read(ref _connectedState) == 1
         && (_connectedTestHook is not null
             || _eventLoop is { IsCompleted: false });
@@ -1039,15 +1162,27 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         ulong clOrdId,
         ExchangeGatewayAttemptException failure)
     {
-        MarkDisconnected();
-        _logger.LogError(
-            "Outbound EntryPoint attempt requires reconciliation for firm {Firm}: operation={Operation} clOrdId={ClOrdId} stage={Stage} disposition={Disposition}; exact-sequence replay is unavailable.",
-            _firmId,
-            operation,
-            clOrdId,
-            failure.LastStage,
-            failure.Disposition);
-        await TerminateFaultedSessionAsync().ConfigureAwait(false);
+        Interlocked.Exchange(ref _outboundFailCloseInProgress, 1);
+        try
+        {
+            if (Interlocked.Exchange(ref _outboundReconciliationRequired, 1) == 0)
+                Interlocked.Increment(ref _outboundLifecycleGeneration);
+            MarkDisconnected();
+            _logger.LogError(
+                "Outbound EntryPoint attempt requires reconciliation for firm {Firm}: operation={Operation} clOrdId={ClOrdId} stage={Stage} disposition={Disposition}; exact-sequence replay is unavailable.",
+                _firmId,
+                operation,
+                clOrdId,
+                failure.LastStage,
+                failure.Disposition);
+            if (_beforeOutboundFailCloseTestHook is not null)
+                await _beforeOutboundFailCloseTestHook().ConfigureAwait(false);
+            await TerminateFaultedSessionAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            Volatile.Write(ref _outboundFailCloseInProgress, 0);
+        }
     }
 
     internal static ExchangeGatewayReceipt MapReceipt(
@@ -1383,11 +1518,20 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         {
             if (recover && !_disposed && !_shutdownCts.IsCancellationRequested)
             {
-                _logger.LogWarning(
-                    "EntryPoint event loop for firm {Firm} stopped while the gateway was expected to be operational; scheduling recovery.",
-                    _firmId);
                 MarkDisconnected();
-                ScheduleReconnect();
+                if (OutboundReconciliationRequired)
+                {
+                    _logger.LogWarning(
+                        "EntryPoint event loop for firm {Firm} stopped while outbound reconciliation is required; automatic reconnect remains suppressed.",
+                        _firmId);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "EntryPoint event loop for firm {Firm} stopped while the gateway was expected to be operational; scheduling recovery.",
+                        _firmId);
+                    ScheduleReconnect();
+                }
             }
         }
     }
@@ -1541,7 +1685,11 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         // Don't fight a graceful shutdown or a client-initiated terminate
         // (e.g. our own DisposeAsync sending Terminate). Peer-initiated
         // terminations are the only ones that warrant a reconnect attempt.
-        if (e.InitiatedByClient || _disposed || _shutdownCts.IsCancellationRequested) return;
+        if (e.InitiatedByClient
+            || _disposed
+            || _shutdownCts.IsCancellationRequested
+            || OutboundReconciliationRequired)
+            return;
 
         // Capture the peer terminate code for the post-reconnect reactor
         // (slice 2 of #132). Stored before kicking the reconnect loop so
@@ -1561,7 +1709,9 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
     private void ScheduleReconnect()
     {
-        if (_disposed || _shutdownCts.IsCancellationRequested)
+        if (_disposed
+            || _shutdownCts.IsCancellationRequested
+            || OutboundReconciliationRequired)
             return;
         if (Interlocked.CompareExchange(ref _reconnectScheduled, 1, 0) != 0)
             return;
@@ -1580,7 +1730,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             if (Volatile.Read(ref _connectedState) == 1
                 && _connectedTestHook is null
                 && !_disposed
-                && !_shutdownCts.IsCancellationRequested)
+                && !_shutdownCts.IsCancellationRequested
+                && !OutboundReconciliationRequired)
                 StartEventLoop();
         });
     }
@@ -1615,7 +1766,9 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         try
         {
             var attempt = 0;
-            while (!ct.IsCancellationRequested && !_disposed)
+            while (!ct.IsCancellationRequested
+                   && !_disposed
+                   && !OutboundReconciliationRequired)
             {
                 attempt++;
                 MetricsRegistry.EntryPointReconnectAttempts.Add(1,
@@ -1624,6 +1777,9 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 var priorVerId = Volatile.Read(ref _currentSessionVerId);
                 try
                 {
+                    if (OutboundReconciliationRequired)
+                        return;
+
                     // #565. Re-resolve the peer hostname immediately before
                     // dialing so a matching-side pod IP change (Kubernetes
                     // failover/reschedule) is picked up on THIS attempt
@@ -1642,6 +1798,12 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                         Up.ReconnectMode.EstablishReuseThenNegotiate,
                         BumpSessionVerIdSelector,
                         ct).ConfigureAwait(false);
+                    if (OutboundReconciliationRequired)
+                    {
+                        MarkDisconnected();
+                        await TerminateFaultedSessionAsync().ConfigureAwait(false);
+                        return;
+                    }
                     MetricsRegistry.EntryPointReconnectSucceeded.Add(1,
                         new KeyValuePair<string, object?>("firm", _firmId),
                         new KeyValuePair<string, object?>("kind", ReconnectKindTag(outcome.Kind)));
@@ -1655,6 +1817,12 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                     // ghosts still present — same backstop reasoning as the
                     // connect path).
                     ReconcileReconnectSessionRoll(outcome.Kind, priorVerId, outcome.SessionVerId);
+                    if (OutboundReconciliationRequired)
+                    {
+                        MarkDisconnected();
+                        await TerminateFaultedSessionAsync().ConfigureAwait(false);
+                        return;
+                    }
                     OnConnected(startEventLoop: false);
                     NotifyVenueDisconnectReactor();
                     return;
@@ -1672,6 +1840,13 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 }
                 catch (Exception ex)
                 {
+                    if (OutboundReconciliationRequired)
+                    {
+                        MarkDisconnected();
+                        await TerminateFaultedSessionAsync().ConfigureAwait(false);
+                        return;
+                    }
+
                     MetricsRegistry.EntryPointReconnectFailed.Add(1,
                         new KeyValuePair<string, object?>("firm", _firmId),
                         new KeyValuePair<string, object?>("reason", ex.GetType().Name));
@@ -1702,6 +1877,9 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
     internal Task ReconnectLoopForTestsAsync(CancellationToken ct)
         => ReconnectLoopAsync(ct);
+
+    internal Task? EventLoopTaskForTests => _eventLoop;
+    internal Task? ScheduledReconnectTaskForTests => _reconnectLoop;
 
     private Task<Up.ReconnectOutcome> ReconnectAsyncCore(
         Up.ReconnectMode mode,

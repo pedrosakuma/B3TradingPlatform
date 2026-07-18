@@ -27,6 +27,13 @@ The platform maps this API behind platform-owned receipt types in
 compatibility methods until #642/#643 commit `AttemptIntentPrepared` and
 `FramePrepared` through the coordinator.
 
+The real adapter latches `OutboundReconciliationRequired` before terminating a
+frame-prepared-or-later failure. While latched, legacy/receipt sends, ordinary
+`ConnectAsync`, event-loop recovery and automatic reconnect remain closed.
+Only the explicit `CompleteOutboundReconciliationAsync` lifecycle transition
+can clear it, and only after a successful `AlwaysNegotiate` produces a strictly
+newer `SessionVerId`; failed reset attempts remain closed.
+
 There is still no exact-original-frame/original-sequence replay operation.
 Failures after frame preparation require reconciliation rather than resend. A
 dead epoch with intent but no committed `FramePrepared` becomes proven-unsent
