@@ -506,7 +506,8 @@ public sealed class OutboundMutationLedger
             if (activeAttempt.ProvenUnsentEvidence is not null
                 || mutation.Attempts.Any(a =>
                     a.AmbiguityReason
-                    == OutboundAmbiguityReason.ConflictingVenueEvidence))
+                    is OutboundAmbiguityReason.ConflictingVenueEvidence
+                        or OutboundAmbiguityReason.NotAppliedEvidence))
             {
                 MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
                 AddInboundEvidenceUnsafe(
@@ -529,6 +530,22 @@ public sealed class OutboundMutationLedger
 
             if (IsTerminal(mutation.State))
             {
+                if (string.Equals(
+                        mutation.Resolution?.EvidenceKind,
+                        "BusinessReject",
+                        StringComparison.Ordinal))
+                {
+                    MarkTerminalEvidenceConflict(mutation);
+                    AddInboundEvidenceUnsafe(
+                        CreateExecutionReportEvidence(
+                            evt,
+                            evidenceId,
+                            InboundVenueEvidenceDisposition.Conflicting,
+                            [id]),
+                        evidenceIdentity);
+                    return new(InboundVenueEvidenceApplyStatus.RecordedConflicting);
+                }
+
                 var terminalMatches = evt.ClOrdId == activeAttempt.ClOrdId
                     && frame is not null
                     && evt.SessionId == frame.SessionId
@@ -633,6 +650,22 @@ public sealed class OutboundMutationLedger
             var activeAttempt = mutation.Attempts.LastOrDefault();
             if (IsTerminal(mutation.State))
             {
+                if (string.Equals(
+                        mutation.Resolution?.EvidenceKind,
+                        "ExecutionReport",
+                        StringComparison.Ordinal))
+                {
+                    MarkTerminalEvidenceConflict(mutation);
+                    AddInboundEvidenceUnsafe(
+                        CreateBusinessRejectEvidence(
+                            evt,
+                            evidenceId,
+                            InboundVenueEvidenceDisposition.Conflicting,
+                            [id]),
+                        evidenceIdentity);
+                    return new(InboundVenueEvidenceApplyStatus.RecordedConflicting);
+                }
+
                 var terminalMatches = activeAttempt?.FramePrepared is { } terminalFrame
                     && terminalFrame.SessionId == evt.SessionId.Value
                     && terminalFrame.SessionVerId == evt.SessionVerId.Value
@@ -1206,7 +1239,10 @@ public sealed class OutboundMutationLedger
                         SensitivePayloadAvailability = availability,
                         RequiresReconciliation =
                             availability != OutboundSensitivePayloadAvailability.Available
-                            || StateRequiresReconciliation(mutation.State),
+                            || StateRequiresReconciliation(mutation.State)
+                            || mutation.Attempts.Any(a =>
+                                a.AmbiguityReason
+                                == OutboundAmbiguityReason.ConflictingVenueEvidence),
                     };
                 }
                 if (!_mutations.TryAdd(mutation.MutationId, mutation))
@@ -1699,8 +1735,17 @@ public sealed class OutboundMutationLedger
 
     private void MarkTerminalEvidenceConflict(OutboundMutationSnapshot mutation)
     {
+        var attempts = mutation.Attempts.ToArray();
+        if (attempts.Length > 0)
+        {
+            attempts[^1] = attempts[^1] with
+            {
+                AmbiguityReason = OutboundAmbiguityReason.ConflictingVenueEvidence,
+            };
+        }
         _mutations[mutation.MutationId] = mutation with
         {
+            Attempts = attempts,
             RequiresReconciliation = true,
         };
     }
