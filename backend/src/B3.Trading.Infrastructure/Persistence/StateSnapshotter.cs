@@ -585,7 +585,11 @@ public sealed class StateSnapshotter
         ArgumentNullException.ThrowIfNull(snap);
         if (snap.OutboundLedger is { } outbound)
         {
-            if (outbound.Version != OutboundLedgerSnapshot.CurrentVersion)
+            var legacyWithoutEvidence =
+                outbound.Version == OutboundLedgerSnapshot.LegacyVersionWithoutInboundEvidence
+                && outbound.InboundEvidence.Count == 0;
+            if (outbound.Version != OutboundLedgerSnapshot.CurrentVersion
+                && !legacyWithoutEvidence)
                 throw new OutboundLedgerRecoveryException(
                     "The outbound ledger snapshot version is unsupported.");
             _outboundLedger?.Restore(

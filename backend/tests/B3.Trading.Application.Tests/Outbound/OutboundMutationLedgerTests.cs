@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using B3.Trading.Application.Lifecycle;
+using B3.Trading.Application.MarketData;
 using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
@@ -1730,6 +1731,155 @@ public sealed class OutboundMutationLedgerTests
                 && evidence.PossibleResend);
     }
 
+    [Theory]
+    [InlineData("Rejected", OutboundMutationKind.New, 0UL, null, "")]
+    [InlineData("Rejected", OutboundMutationKind.New, 0UL, "risk-a", "risk-b")]
+    [InlineData("Canceled", OutboundMutationKind.Cancel, 50UL, "cancel-a", "cancel-b")]
+    public void ExecutionReport_ChangedRejectReasonConflictsWhileExactPossResendDedupes(
+        string execKind,
+        OutboundMutationKind mutationKind,
+        ulong originalClOrdId,
+        string? firstReason,
+        string? changedReason)
+    {
+        var fixture = Fixture.Create();
+        fixture.Ledger.Apply(fixture.Approved with
+        {
+            MutationKind = mutationKind,
+            OriginalClOrdId = originalClOrdId == 0 ? null : originalClOrdId,
+        });
+        fixture.Ledger.Apply(fixture.Intent);
+        fixture.Ledger.Apply(fixture.Frame);
+        var first = Acknowledgement(
+            fixture,
+            firmId: "F1",
+            sessionId: 11,
+            sessionVerId: 2) with
+        {
+            ExecKind = execKind,
+            OrigClOrdId = originalClOrdId,
+            RejectReason = firstReason,
+        };
+
+        Assert.Equal(
+            InboundVenueEvidenceApplyStatus.RecordedMatched,
+            fixture.Ledger.ApplyVenueAcknowledgement(first).Status);
+        var duplicate = fixture.Ledger.ApplyVenueAcknowledgement(first with
+        {
+            PossibleResend = true,
+            TimestampUtc = first.TimestampUtc.AddSeconds(1),
+            BookTouch = new BookTouchSnapshot
+            {
+                BestBid = 29m,
+                BestAsk = 31m,
+                MidPrice = 30m,
+                CapturedAtUtc = first.TimestampUtc.AddSeconds(1),
+            },
+        });
+        var changed = fixture.Ledger.ApplyVenueAcknowledgement(first with
+        {
+            RejectReason = changedReason,
+        });
+
+        Assert.Equal(InboundVenueEvidenceApplyStatus.Duplicate, duplicate.Status);
+        Assert.False(duplicate.ShouldApplyDomain);
+        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedConflicting, changed.Status);
+        Assert.False(changed.ShouldApplyDomain);
+        AssertTerminalConflict(fixture, "ExecutionReport");
+        Assert.Contains(
+            fixture.Ledger.CaptureSnapshot().InboundEvidence,
+            evidence => evidence.Kind == InboundVenueEvidenceKind.ExecutionReport
+                && evidence.Disposition == InboundVenueEvidenceDisposition.Matched
+                && evidence.PossibleResend);
+    }
+
+    [Fact]
+    public void EventReplayer_ChangedRejectReasonDoesNotPublishSecondDomainEvent()
+    {
+        var fixture = Fixture.Create();
+        var ownership = new OrderOwnershipMap();
+        var orders = new WorkingOrderBook();
+        var sink = new CapturingExecutionSink();
+        var replayer = new EventReplayer(
+            orders,
+            ownership,
+            new KillSwitchService(),
+            new SymbolHaltService(),
+            new SessionPhaseService(),
+            new ExecutionReportProcessor(
+                ownership,
+                orders,
+                new PositionKeeper(),
+                sink,
+                new NoOpMarginProvider(),
+                NullLogger<ExecutionReportProcessor>.Instance),
+            new AlgoBook(),
+            new ClOrdIdPrefixRegistry(),
+            new AlgoIdRegistry(),
+            outboundLedger: fixture.Ledger);
+        replayer.Apply(LegacySubmit(fixture.ClOrdId));
+        replayer.Apply(fixture.Approved);
+        replayer.Apply(fixture.Intent);
+        replayer.Apply(fixture.Frame);
+        var rejected = Acknowledgement(
+            fixture,
+            firmId: "F1",
+            sessionId: 11,
+            sessionVerId: 2) with
+        {
+            ExecKind = "Rejected",
+            RejectReason = "venue-risk-a",
+        };
+
+        replayer.Apply(rejected);
+        replayer.Apply(rejected with { PossibleResend = true });
+        replayer.Apply(rejected with { RejectReason = "venue-risk-b" });
+
+        Assert.True(orders.TryGet(fixture.ClOrdId, out var order));
+        Assert.NotNull(order);
+        Assert.Equal(OrderStatus.Rejected, order.Status);
+        var execution = Assert.Single(sink.Events);
+        Assert.Equal("venue-risk-a", execution.RejectReason);
+        AssertTerminalConflict(fixture, "ExecutionReport");
+    }
+
+    [Fact]
+    public void SnapshotRestart_RejectReasonDedupeAndConflictRemainStable()
+    {
+        var writer = Fixture.Create();
+        ApplyPrepared(writer.Ledger, writer, writer.Frame);
+        var rejected = Acknowledgement(
+            writer,
+            firmId: "F1",
+            sessionId: 11,
+            sessionVerId: 2) with
+        {
+            ExecKind = "Rejected",
+            RejectReason = "venue-risk-a",
+        };
+        writer.Ledger.ApplyVenueAcknowledgement(rejected);
+        writer.Ledger.ApplyVenueAcknowledgement(rejected with
+        {
+            PossibleResend = true,
+        });
+        var restored = RestoreLedger(writer);
+
+        var duplicate = restored.ApplyVenueAcknowledgement(rejected);
+        var conflict = restored.ApplyVenueAcknowledgement(rejected with
+        {
+            RejectReason = "venue-risk-b",
+        });
+
+        Assert.Equal(InboundVenueEvidenceApplyStatus.Duplicate, duplicate.Status);
+        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedConflicting, conflict.Status);
+        Assert.False(conflict.ShouldApplyDomain);
+        Assert.Equal(1, restored.ReadinessBlockingCount);
+        var mutation = Assert.Single(restored.SnapshotMutations());
+        Assert.Equal(
+            OutboundAmbiguityReason.ConflictingVenueEvidence,
+            Assert.Single(mutation.Attempts).AmbiguityReason);
+    }
+
     [Fact]
     public void EventReplayer_ConflictingSameIdentityDoesNotDoubleBookDomainState()
     {
@@ -2509,6 +2659,46 @@ public sealed class OutboundMutationLedgerTests
     }
 
     [Fact]
+    public void SnapshotRestore_AcceptsV1LedgerOnlyWhenInboundEvidenceIsEmpty()
+    {
+        var ledger = new OutboundMutationLedger();
+        var snapshotter = NewSnapshotter(
+            ledger,
+            new ClOrdIdPrefixRegistry(),
+            new PendingReplacementRegistry(),
+            new PendingCancelRegistry());
+
+        snapshotter.Restore(new PlatformSnapshot
+        {
+            OutboundLedger = new OutboundLedgerSnapshot
+            {
+                Version = OutboundLedgerSnapshot.LegacyVersionWithoutInboundEvidence,
+            },
+        });
+
+        Assert.Equal(0, ledger.Count);
+        Assert.Throws<OutboundLedgerRecoveryException>(() =>
+            snapshotter.Restore(new PlatformSnapshot
+            {
+                OutboundLedger = new OutboundLedgerSnapshot
+                {
+                    Version = OutboundLedgerSnapshot.LegacyVersionWithoutInboundEvidence,
+                    InboundEvidence =
+                    [
+                        new InboundVenueEvidenceSnapshot
+                        {
+                            EvidenceId = new string('a', 64),
+                            Kind = InboundVenueEvidenceKind.ExecutionReport,
+                            Disposition = InboundVenueEvidenceDisposition.Unmatched,
+                            FirmId = "F1",
+                            ObservedAtUtc = T0,
+                        },
+                    ],
+                },
+            }));
+    }
+
+    [Fact]
     public void EventReplayer_FirmMismatchCannotTerminaliseLedgerAfterProcessorRejectsIt()
     {
         var fixture = Fixture.Create();
@@ -2932,6 +3122,12 @@ public sealed class OutboundMutationLedgerTests
             Exception? exception,
             Func<TState, Exception?, string> formatter) =>
             Messages.Add(formatter(state, exception));
+    }
+
+    private sealed class CapturingExecutionSink : IExecutionEventSink
+    {
+        public List<ExecutionEvent> Events { get; } = new();
+        public void Publish(ExecutionEvent ev) => Events.Add(ev);
     }
 
     private static void ApplyPrepared(

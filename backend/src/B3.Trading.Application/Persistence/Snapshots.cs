@@ -350,7 +350,8 @@ public sealed class PlatformSnapshot
 
 public sealed class OutboundLedgerSnapshot
 {
-    public const int CurrentVersion = 1;
+    public const int LegacyVersionWithoutInboundEvidence = 1;
+    public const int CurrentVersion = 2;
 
     public int Version { get; init; }
     public bool LegacyMigrationCompleted { get; init; }

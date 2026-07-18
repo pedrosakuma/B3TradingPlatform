@@ -1552,7 +1552,7 @@ public sealed class OutboundMutationLedger
 
     private static string ExecutionReportEvidenceId(ExecutionReportReceivedEvent evt) =>
         DigestEvidence(Canonical(
-            $"er|{NormalizeFirm(evt.FirmId)}|{evt.SessionId}|{evt.SessionVerId}|{evt.InboundSeqNum}|{evt.ExecKind}|{evt.ClOrdId}|{evt.OrigClOrdId}|{evt.VenueOrderId}|{evt.LeavesQuantity}|{evt.CumulativeQuantity}|{evt.LastQuantity}|{evt.LastPrice}|{evt.Synthetic}"));
+            $"er|{NormalizeFirm(evt.FirmId)}|{evt.SessionId}|{evt.SessionVerId}|{evt.InboundSeqNum}|{evt.ExecKind}|{evt.ClOrdId}|{evt.OrigClOrdId}|{evt.VenueOrderId}|{evt.LeavesQuantity}|{evt.CumulativeQuantity}|{evt.LastQuantity}|{evt.LastPrice}|{CanonicalOptionalText(evt.RejectReason)}|{evt.Synthetic}"));
 
     private static string BusinessRejectEvidenceId(BusinessRejectReceivedEvent evt) =>
         DigestEvidence(Canonical(
@@ -1617,6 +1617,15 @@ public sealed class OutboundMutationLedger
 
     private static string Canonical(FormattableString value) =>
         value.ToString(CultureInfo.InvariantCulture);
+
+    private static string CanonicalOptionalText(string? value)
+    {
+        if (value is null)
+            return "null";
+        var bytes = Encoding.UTF8.GetBytes(value);
+        return Canonical(
+            $"text:{bytes.Length}:{Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant()}");
+    }
 
     private static bool SequenceRangeContains(
         ulong fromSeqNo,

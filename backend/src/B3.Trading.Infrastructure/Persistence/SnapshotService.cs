@@ -368,6 +368,19 @@ public sealed class PersistenceRecovery
             return SnapshotValidationResult.Reject(
                 "Versioned snapshot is missing its outbound-ledger envelope.");
         }
+        if (snapshot.OutboundLedger.Version
+                == OutboundLedgerSnapshot.LegacyVersionWithoutInboundEvidence
+            && snapshot.OutboundLedger.InboundEvidence.Count == 0)
+        {
+            return SnapshotValidationResult.Accept();
+        }
+        if (snapshot.OutboundLedger.Version
+                == OutboundLedgerSnapshot.LegacyVersionWithoutInboundEvidence
+            && snapshot.OutboundLedger.InboundEvidence.Count > 0)
+        {
+            return SnapshotValidationResult.Reject(
+                "Outbound-ledger snapshot v1 contains inbound evidence with an obsolete payload fingerprint; rebuild from the committed WAL.");
+        }
         if (snapshot.OutboundLedger.Version != OutboundLedgerSnapshot.CurrentVersion)
         {
             return SnapshotValidationResult.Fatal(
