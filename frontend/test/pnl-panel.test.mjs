@@ -119,11 +119,13 @@ test("renderPnl populates the DOM with totals + per-symbol rows after a snapshot
   const live = document.getElementById("pnl-live");
   const body = document.getElementById("pnl-rows");
 
-  assert.match(tr.textContent, /100/);
-  assert.match(tu.textContent, /25/);
+  assert.equal(tr.textContent, "+R$ 100,00");
+  assert.equal(tu.textContent, "-R$ 25,50");
   assert.equal(live.hidden, false, "live badge shown once pnl is populated");
   assert.match(body.innerHTML, /PETR4/);
   assert.match(body.innerHTML, /VALE3/);
+  assert.match(body.innerHTML, /-200/);
+  assert.match(body.innerHTML, /59,87/);
 });
 
 test("renderPnl shows 'no data' placeholder when pnl is null", async () => {

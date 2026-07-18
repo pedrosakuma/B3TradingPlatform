@@ -17,12 +17,12 @@ test("fmtGtd returns '—' for null / empty", () => {
   assert.equal(fmtGtd(undefined), "—");
 });
 
-test("fmtGtd formats an ISO timestamp as YYYY-MM-DD HH:mm UTC", () => {
-  assert.equal(fmtGtd("2026-05-07T14:30:00Z"), "2026-05-07 14:30 UTC");
+test("fmtGtd formats an ISO timestamp with pt-BR date order and explicit UTC", () => {
+  assert.equal(fmtGtd("2026-05-07T14:30:00Z"), "07/05/2026, 14:30 UTC");
 });
 
 test("fmtGtd zero-pads single-digit components", () => {
-  assert.equal(fmtGtd("2026-01-02T03:04:00Z"), "2026-01-02 03:04 UTC");
+  assert.equal(fmtGtd("2026-01-02T03:04:00Z"), "02/01/2026, 03:04 UTC");
 });
 
 test("fmtGtd echoes the (escaped) input for an unparseable string", () => {

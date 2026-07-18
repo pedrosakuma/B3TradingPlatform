@@ -43,6 +43,7 @@ import {
   setComplianceConnection,
   COMPLIANCE_FEED_CAP,
 } from "./state.js";
+import { formatPrice, formatQuantity, formatUtcDateTime, formatUtcTime } from "./formatters.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -209,13 +210,13 @@ function renderConnection() {
 }
 
 function rowHtml(entry) {
-  const t = entry.timestamp ? new Date(entry.timestamp).toISOString().slice(11, 19) : "";
+  const t = formatUtcTime(entry.timestamp, { fallback: "" });
   const type = escapeHtml(entry.type ?? "");
   const status = escapeHtml(entry.status ?? "");
   const sym  = escapeHtml(entry.symbol ?? "");
   const side = escapeHtml(entry.side ?? "");
-  const qty  = entry.qty != null ? String(entry.qty) : "";
-  const px   = entry.price != null ? String(entry.price) : "";
+  const qty  = formatQuantity(entry.qty, "");
+  const px   = formatPrice(entry.price, "");
   const cl   = escapeHtml(entry.clOrdId ?? "");
   return `<tr><td>${escapeHtml(t)}</td><td>${type}</td><td>${status}</td>` +
          `<td>${sym}</td><td>${side}</td><td class="num">${qty}</td>` +
@@ -232,7 +233,7 @@ export function setAuditResults(page) {
     body.innerHTML = `<tr><td colspan="6" class="muted-line">No matching audit events.</td></tr>`;
   } else {
     const rows = entries.map((e) => {
-      const t = new Date(e.timestampUtc).toISOString().replace("T", " ").slice(0, 19);
+      const t = formatUtcDateTime(e.timestampUtc, { fallback: String(e.timestampUtc ?? "") });
       return `<tr><td>${escapeHtml(t)}</td>` +
              `<td>${escapeHtml(e.eventType ?? "")}</td>` +
              `<td>${escapeHtml(e.outcome ?? "")}</td>` +

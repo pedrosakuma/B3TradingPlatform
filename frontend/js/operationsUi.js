@@ -1,3 +1,5 @@
+import { formatCurrency, formatPrice, formatUtcDateTime } from "./formatters.js";
+
 const $ = (id) => document.getElementById(id);
 const STALE_AFTER_MS = 60_000;
 
@@ -112,7 +114,7 @@ export function bindOperationsUi() {
     const kind = $("cash-kind")?.value;
     const amount = Number($("cash-amount")?.value);
     const endclient = $("cash-end-client")?.value.trim();
-    if (!window.confirm(`${kind} BRL ${amount} for ${endclient}? This writes the audited cash ledger.`)) return;
+    if (!window.confirm(`${kind} ${formatCurrency(amount)} for ${endclient}? This writes the audited cash ledger.`)) return;
     runMutation(event.currentTarget, () => handlers.onCash?.({
       endclient,
       kind,
@@ -256,12 +258,12 @@ function renderReferences() {
   if (stateRow) { body.innerHTML = stateRow; return; }
   body.innerHTML = items.map((row) => `<tr>
     <td><code>${escapeHtml(row.symbol)}</code></td>
-    <td>${escapeHtml(row.effectivePrice ?? "—")}</td>
+    <td class="num">${formatPrice(row.effectivePrice)}</td>
     <td>${escapeHtml(row.effectiveSource ?? "Missing")}</td>
     <td>${escapeHtml(row.live
-      ? `${row.live.price ?? "—"} @ ${row.live.updatedUtc ?? "unknown time"}`
+      ? `${formatPrice(row.live.price)} @ ${formatUtcDateTime(row.live.updatedUtc, { fallback: "unknown time" })}`
       : "—")}</td>
-    <td>${escapeHtml(row.fallbackPrice ?? "—")}</td>
+    <td class="num">${formatPrice(row.fallbackPrice)}</td>
   </tr>`).join("");
 }
 

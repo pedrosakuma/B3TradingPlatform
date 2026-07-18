@@ -53,6 +53,7 @@ import * as operationsUi from "./operationsUi.js";
 import { applyAppTitle } from "./branding.js";
 import { tabsForRole, defaultViewForRole } from "./complianceUi.js";
 import { FLAGS } from "./mdProtocol.js";
+import { formatCurrency, formatPercent, formatQuantity } from "./formatters.js";
 import { renderQrInto, clearQr } from "./qrRender.js";
 import { applyRiskPolicyFetch } from "./riskPolicy.js";
 import { readMdConnectionConfig, readMdDisplayConfig, writeMdConfig, clearMdConfig } from "./marketDataSettings.js";
@@ -1296,15 +1297,12 @@ function formatWsError(msg) {
 function formatPretradeWarning(w) {
   switch (w.kind) {
     case "fat_finger": {
-      const pct = (w.deviation * 100).toFixed(1);
-      return `fat-finger: price deviates ${pct}% from last trade ${ui.fmtPx(w.lastPrice)}`;
+      return `fat-finger: price deviates ${formatPercent(w.deviation)} from last trade ${ui.fmtPx(w.lastPrice)}`;
     }
     case "qty":
-      return `large quantity: ${w.qty.toLocaleString("en-US")} > ${w.multiple}× lot (${w.threshold.toLocaleString("en-US")})`;
-    case "market_notional": {
-      const fmt = (n) => `R$ ${n.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
-      return `market notional ≈ ${fmt(w.notional)} ≥ ${fmt(w.threshold)}`;
-    }
+      return `large quantity: ${formatQuantity(w.qty)} > ${w.multiple}× lot (${formatQuantity(w.threshold)})`;
+    case "market_notional":
+      return `market notional ≈ ${formatCurrency(w.notional)} ≥ ${formatCurrency(w.threshold)}`;
     default:
       return "advisory warning";
   }

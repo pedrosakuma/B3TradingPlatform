@@ -15,6 +15,8 @@
 //   * The list endpoint never returns the secret, so the table can
 //     safely be re-rendered from server state without leaking anything.
 
+import { formatUtcDateTime } from "./formatters.js";
+
 const $ = (id) => document.getElementById(id);
 
 let onCreate = () => {};
@@ -341,11 +343,7 @@ async function copyToClipboard(value, fallbackInput) {
 // ── Helpers ────────────────────────────────────────────────────────
 
 function formatDate(s) {
-  if (!s) return "—";
-  const d = new Date(s);
-  if (Number.isNaN(d.getTime())) return String(s);
-  // ISO-ish, seconds-precision; matches the look of the executions log.
-  return d.toISOString().replace("T", " ").slice(0, 19) + "Z";
+  return formatUtcDateTime(s, { fallback: String(s ?? "—") });
 }
 
 function escapeHtml(s) {
