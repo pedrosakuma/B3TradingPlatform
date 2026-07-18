@@ -38,6 +38,11 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     private readonly ILogger<B3EntryPointClientGateway> _logger;
     private readonly CancellationTokenSource _shutdownCts = new();
     private readonly SemaphoreSlim _connectionLock = new(1, 1);
+    // Platform-owned fence across legacy + receipt sends. A queued caller must
+    // re-check operational state only after the prior attempt has completed its
+    // receipt mapping and any fail-close transition.
+    private readonly SemaphoreSlim _outboundSendLock = new(1, 1);
+    private readonly AsyncLocal<int> _framePreparedCallbackDepth = new();
     private readonly TimeSpan _initialReconnectDelay;
     private readonly TimeSpan _maxReconnectDelay;
     private readonly TimeSpan _gracefulTerminateTimeout;
@@ -123,9 +128,13 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     private readonly Func<Up.ReconnectMode, Func<uint, uint>, CancellationToken, Task<Up.ReconnectOutcome>>? _reconnectAsyncOverride;
     private readonly Func<CancellationToken, Task>? _connectAsyncOverride;
     private readonly Func<CancellationToken, IAsyncEnumerable<UpModels.EntryPointEvent>>? _eventStreamOverride;
+    private readonly Func<UpModels.NewOrderRequest, CancellationToken, Task>? _submitOverride;
+    private readonly Func<UpModels.CancelOrderRequest, CancellationToken, Task>? _cancelOverride;
+    private readonly Func<UpModels.ReplaceOrderRequest, CancellationToken, Task>? _replaceOverride;
     private readonly Func<UpModels.NewOrderRequest, UpModels.OutboundFramePreparedCallback, CancellationToken, Task<UpModels.OutboundAttemptReceipt>>? _submitWithReceiptOverride;
     private readonly Func<UpModels.CancelOrderRequest, UpModels.OutboundFramePreparedCallback, CancellationToken, Task<UpModels.OutboundAttemptReceipt>>? _cancelWithReceiptOverride;
     private readonly Func<UpModels.ReplaceOrderRequest, UpModels.OutboundFramePreparedCallback, CancellationToken, Task<UpModels.OutboundAttemptReceipt>>? _replaceWithReceiptOverride;
+    private readonly Func<Task>? _beforeOutboundFailCloseTestHook;
     private readonly Action? _connectedTestHook;
     // #565. The upstream SDK dials whatever `IPEndPoint` is on the
     // `EntryPointClientOptions` instance it was constructed with — it never
@@ -145,6 +154,17 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     // Null → legacy behaviour (matches direct-construction tests and Mock
     // mode, where there is no DNS to re-resolve).
     private readonly Func<CancellationToken, Task>? _reResolveEndpoint;
+
+    internal sealed class OutboundTestOverrides
+    {
+        public Func<UpModels.NewOrderRequest, CancellationToken, Task>? Submit { get; init; }
+        public Func<UpModels.CancelOrderRequest, CancellationToken, Task>? Cancel { get; init; }
+        public Func<UpModels.ReplaceOrderRequest, CancellationToken, Task>? Replace { get; init; }
+        public Func<UpModels.NewOrderRequest, UpModels.OutboundFramePreparedCallback, CancellationToken, Task<UpModels.OutboundAttemptReceipt>>? SubmitWithReceipt { get; init; }
+        public Func<UpModels.CancelOrderRequest, UpModels.OutboundFramePreparedCallback, CancellationToken, Task<UpModels.OutboundAttemptReceipt>>? CancelWithReceipt { get; init; }
+        public Func<UpModels.ReplaceOrderRequest, UpModels.OutboundFramePreparedCallback, CancellationToken, Task<UpModels.OutboundAttemptReceipt>>? ReplaceWithReceipt { get; init; }
+        public Func<Task>? BeforeFailClose { get; init; }
+    }
 
     public B3EntryPointClientGateway(
         Up.EntryPointClient client,
@@ -169,11 +189,62 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         Func<Up.ReconnectMode, Func<uint, uint>, CancellationToken, Task<Up.ReconnectOutcome>>? reconnectAsyncOverride = null,
         Action? connectedTestHook = null,
         Func<CancellationToken, Task>? connectAsyncOverride = null,
-        Func<CancellationToken, IAsyncEnumerable<UpModels.EntryPointEvent>>? eventStreamOverride = null,
-        Func<UpModels.NewOrderRequest, UpModels.OutboundFramePreparedCallback, CancellationToken, Task<UpModels.OutboundAttemptReceipt>>? submitWithReceiptOverride = null,
-        Func<UpModels.CancelOrderRequest, UpModels.OutboundFramePreparedCallback, CancellationToken, Task<UpModels.OutboundAttemptReceipt>>? cancelWithReceiptOverride = null,
-        Func<UpModels.ReplaceOrderRequest, UpModels.OutboundFramePreparedCallback, CancellationToken, Task<UpModels.OutboundAttemptReceipt>>? replaceWithReceiptOverride = null)
+        Func<CancellationToken, IAsyncEnumerable<UpModels.EntryPointEvent>>? eventStreamOverride = null)
+        : this(
+            client,
+            firmId,
+            initialSessionVerId,
+            logger,
+            new OutboundTestOverrides(),
+            initialReconnectDelay,
+            maxReconnectDelay,
+            clock,
+            latencyProbe,
+            venueDisconnectReactor,
+            gracefulTerminateTimeout,
+            riskOptions,
+            subAccountWireIdMapper,
+            venueAccountResolver,
+            investorIdResolver,
+            routingInstructionResolver,
+            terminateOnShutdown,
+            effectiveSessionVerIdProvider,
+            connectSessionRollReactor,
+            reResolveEndpoint,
+            reconnectAsyncOverride,
+            connectedTestHook,
+            connectAsyncOverride,
+            eventStreamOverride)
     {
+    }
+
+    internal B3EntryPointClientGateway(
+        Up.EntryPointClient client,
+        string firmId,
+        uint initialSessionVerId,
+        ILogger<B3EntryPointClientGateway> logger,
+        OutboundTestOverrides outboundTestOverrides,
+        TimeSpan? initialReconnectDelay = null,
+        TimeSpan? maxReconnectDelay = null,
+        TimeProvider? clock = null,
+        OrderEntryLatencyProbe? latencyProbe = null,
+        IVenueDisconnectReactor? venueDisconnectReactor = null,
+        TimeSpan? gracefulTerminateTimeout = null,
+        IOptionsMonitor<RiskOptions>? riskOptions = null,
+        ISubAccountWireIdMapper? subAccountWireIdMapper = null,
+        IVenueAccountResolver? venueAccountResolver = null,
+        IInvestorIdResolver? investorIdResolver = null,
+        IRoutingInstructionResolver? routingInstructionResolver = null,
+        bool terminateOnShutdown = true,
+        Func<uint>? effectiveSessionVerIdProvider = null,
+        IConnectSessionRollReactor? connectSessionRollReactor = null,
+        Func<CancellationToken, Task>? reResolveEndpoint = null,
+        Func<Up.ReconnectMode, Func<uint, uint>, CancellationToken, Task<Up.ReconnectOutcome>>? reconnectAsyncOverride = null,
+        Action? connectedTestHook = null,
+        Func<CancellationToken, Task>? connectAsyncOverride = null,
+        Func<CancellationToken, IAsyncEnumerable<UpModels.EntryPointEvent>>? eventStreamOverride = null)
+    {
+        ArgumentNullException.ThrowIfNull(outboundTestOverrides);
         _terminateOnShutdown = terminateOnShutdown;
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _firmId = firmId ?? throw new ArgumentNullException(nameof(firmId));
@@ -197,9 +268,13 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         _connectedTestHook = connectedTestHook;
         _connectAsyncOverride = connectAsyncOverride;
         _eventStreamOverride = eventStreamOverride;
-        _submitWithReceiptOverride = submitWithReceiptOverride;
-        _cancelWithReceiptOverride = cancelWithReceiptOverride;
-        _replaceWithReceiptOverride = replaceWithReceiptOverride;
+        _submitOverride = outboundTestOverrides.Submit;
+        _cancelOverride = outboundTestOverrides.Cancel;
+        _replaceOverride = outboundTestOverrides.Replace;
+        _submitWithReceiptOverride = outboundTestOverrides.SubmitWithReceipt;
+        _cancelWithReceiptOverride = outboundTestOverrides.CancelWithReceipt;
+        _replaceWithReceiptOverride = outboundTestOverrides.ReplaceWithReceipt;
+        _beforeOutboundFailCloseTestHook = outboundTestOverrides.BeforeFailClose;
         _client.Terminated += OnTerminated;
         _client.InboundGapAtReconnect += OnInboundGapAtReconnect;
         MetricsRegistry.RecordSessionVerId(_firmId, _currentSessionVerId);
@@ -440,7 +515,10 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         var req = BuildNewOrderRequest(order, ResolveStpInstruction(order), ResolveTradingSubAccount(order), ResolveVenueAccount(order), ResolveInvestorId(order), ResolveRoutingInstruction(order));
 
         return SendAsync(req.ClOrdID.Value, OrderEntryLatencyProbe.OpSubmit,
-            ct => _client.SubmitAsync(req, ct), cancellationToken);
+            ct => _submitOverride is null
+                ? _client.SubmitAsync(req, ct)
+                : _submitOverride(req, ct),
+            cancellationToken);
     }
 
     public Task<ExchangeGatewayReceipt> SubmitWithReceiptAsync(
@@ -600,7 +678,10 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         };
 
         return SendAsync(newClOrdId, OrderEntryLatencyProbe.OpCancel,
-            ct => _client.CancelAsync(req, ct), cancellationToken);
+            ct => _cancelOverride is null
+                ? _client.CancelAsync(req, ct)
+                : _cancelOverride(req, ct),
+            cancellationToken);
     }
 
     public Task<ExchangeGatewayReceipt> CancelWithReceiptAsync(
@@ -667,7 +748,10 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             ResolveRoutingInstruction(original));
 
         return SendAsync(newClOrdId, OrderEntryLatencyProbe.OpReplace,
-            ct => _client.ReplaceAsync(req, ct), cancellationToken);
+            ct => _replaceOverride is null
+                ? _client.ReplaceAsync(req, ct)
+                : _replaceOverride(req, ct),
+            cancellationToken);
     }
 
     public Task<ExchangeGatewayReceipt> CancelReplaceWithReceiptAsync(
@@ -809,30 +893,42 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// </summary>
     private async Task SendAsync(ulong clOrdId, string op, Func<CancellationToken, Task> sdkCall, CancellationToken ct)
     {
-        if (Volatile.Read(ref _connectedState) != 1
-            || (_connectedTestHook is null
-                && _eventLoop is not { IsCompleted: false }))
+        if (_framePreparedCallbackDepth.Value != 0)
         {
             throw new InvalidOperationException(
-                $"EntryPoint gateway for firm '{_firmId}' is not operational; inbound event consumption is stopped.");
+                "Outbound gateway calls cannot re-enter the same gateway from the frame-prepared callback.");
         }
 
-        var start = _clock.GetTimestamp();
-        _latencyProbe.OnSubmitted(clOrdId, _firmId, op);
+        await _outboundSendLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            await sdkCall(ct).ConfigureAwait(false);
-        }
-        catch
-        {
-            _latencyProbe.Forget(clOrdId);
-            throw;
-        }
+            if (!IsOperationalForOutbound())
+            {
+                throw new InvalidOperationException(
+                    $"EntryPoint gateway for firm '{_firmId}' is not operational; inbound event consumption is stopped.");
+            }
 
-        MetricsRegistry.OrderEntryCallMs.Record(
-            _clock.GetElapsedTime(start).TotalMilliseconds,
-            new KeyValuePair<string, object?>("firm", _firmId),
-            new KeyValuePair<string, object?>("op", op));
+            var start = _clock.GetTimestamp();
+            _latencyProbe.OnSubmitted(clOrdId, _firmId, op);
+            try
+            {
+                await sdkCall(ct).ConfigureAwait(false);
+            }
+            catch
+            {
+                _latencyProbe.Forget(clOrdId);
+                throw;
+            }
+
+            MetricsRegistry.OrderEntryCallMs.Record(
+                _clock.GetElapsedTime(start).TotalMilliseconds,
+                new KeyValuePair<string, object?>("firm", _firmId),
+                new KeyValuePair<string, object?>("op", op));
+        }
+        finally
+        {
+            _outboundSendLock.Release();
+        }
     }
 
     private async Task<ExchangeGatewayReceipt> SendWithReceiptAsync(
@@ -842,42 +938,99 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         ExchangeGatewayFramePreparedCallback onFramePrepared,
         CancellationToken ct)
     {
-        if (Volatile.Read(ref _connectedState) != 1
-            || (_connectedTestHook is null
-                && _eventLoop is not { IsCompleted: false }))
+        if (_framePreparedCallbackDepth.Value != 0)
         {
             throw new ExchangeGatewayAttemptException(
-                $"EntryPoint gateway for firm '{_firmId}' is not operational; inbound event consumption is stopped.",
+                "Outbound gateway calls cannot re-enter the same gateway from the frame-prepared callback.",
                 ExchangeGatewayFailureDisposition.OutboundProvenUnsent,
                 ExchangeGatewayAttemptStage.NotStarted,
                 frame: null);
         }
 
-        var start = _clock.GetTimestamp();
-        _latencyProbe.OnSubmitted(clOrdId, _firmId, op);
         try
         {
-            var receipt = await sdkCall(
-                (frame, callbackCt) => onFramePrepared(MapFrameIdentity(frame, _firmId), callbackCt),
-                ct).ConfigureAwait(false);
-
-            var mapped = MapReceipt(receipt, _firmId);
-            MetricsRegistry.OrderEntryCallMs.Record(
-                _clock.GetElapsedTime(start).TotalMilliseconds,
-                new KeyValuePair<string, object?>("firm", _firmId),
-                new KeyValuePair<string, object?>("op", op));
-            return mapped;
+            await _outboundSendLock.WaitAsync(ct).ConfigureAwait(false);
         }
-        catch (UpModels.OutboundAttemptException ex)
+        catch (OperationCanceledException ex)
         {
-            var mapped = MapAttemptException(ex, _firmId);
-            if (mapped.NoTransportWritePossible)
-                _latencyProbe.Forget(clOrdId);
+            throw new ExchangeGatewayAttemptException(
+                "The outbound attempt was cancelled before entering the SDK.",
+                ExchangeGatewayFailureDisposition.OutboundProvenUnsent,
+                ExchangeGatewayAttemptStage.NotStarted,
+                frame: null,
+                ex);
+        }
 
-            if (mapped.LastStage >= ExchangeGatewayAttemptStage.FramePrepared)
-                await FailClosedOutboundAttemptAsync(op, clOrdId, mapped).ConfigureAwait(false);
+        try
+        {
+            if (!IsOperationalForOutbound())
+            {
+                throw new ExchangeGatewayAttemptException(
+                    $"EntryPoint gateway for firm '{_firmId}' is not operational; inbound event consumption is stopped.",
+                    ExchangeGatewayFailureDisposition.OutboundProvenUnsent,
+                    ExchangeGatewayAttemptStage.NotStarted,
+                    frame: null);
+            }
 
-            throw mapped;
+            var start = _clock.GetTimestamp();
+            _latencyProbe.OnSubmitted(clOrdId, _firmId, op);
+            try
+            {
+                var receipt = await sdkCall(
+                    (frame, callbackCt) => InvokeFramePreparedCallbackAsync(
+                        onFramePrepared, frame, callbackCt),
+                    ct).ConfigureAwait(false);
+
+                var mapped = MapReceipt(receipt, _firmId);
+                MetricsRegistry.OrderEntryCallMs.Record(
+                    _clock.GetElapsedTime(start).TotalMilliseconds,
+                    new KeyValuePair<string, object?>("firm", _firmId),
+                    new KeyValuePair<string, object?>("op", op));
+                return mapped;
+            }
+            catch (UpModels.OutboundAttemptException ex)
+            {
+                var mapped = MapAttemptException(ex, _firmId);
+                if (mapped.NoTransportWritePossible)
+                    _latencyProbe.Forget(clOrdId);
+
+                if (mapped.LastStage >= ExchangeGatewayAttemptStage.FramePrepared)
+                {
+                    if (_beforeOutboundFailCloseTestHook is not null)
+                        await _beforeOutboundFailCloseTestHook().ConfigureAwait(false);
+                    await FailClosedOutboundAttemptAsync(op, clOrdId, mapped).ConfigureAwait(false);
+                }
+
+                throw mapped;
+            }
+        }
+        finally
+        {
+            _outboundSendLock.Release();
+        }
+    }
+
+    private bool IsOperationalForOutbound() =>
+        !_disposed
+        && !_shutdownCts.IsCancellationRequested
+        && Volatile.Read(ref _connectedState) == 1
+        && (_connectedTestHook is not null
+            || _eventLoop is { IsCompleted: false });
+
+    private async ValueTask InvokeFramePreparedCallbackAsync(
+        ExchangeGatewayFramePreparedCallback callback,
+        UpModels.OutboundFrameIdentity frame,
+        CancellationToken ct)
+    {
+        var priorDepth = _framePreparedCallbackDepth.Value;
+        _framePreparedCallbackDepth.Value = priorDepth + 1;
+        try
+        {
+            await callback(MapFrameIdentity(frame, _firmId), ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _framePreparedCallbackDepth.Value = priorDepth;
         }
     }
 

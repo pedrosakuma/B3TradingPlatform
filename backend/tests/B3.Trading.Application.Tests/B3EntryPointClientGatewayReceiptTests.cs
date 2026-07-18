@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using B3.Trading.Application;
 using B3.Trading.Domain;
@@ -13,6 +14,17 @@ public sealed class B3EntryPointClientGatewayReceiptTests
 {
     private const string FirmId = "FIRM_A";
     private const string FrameHash = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF";
+
+    [Fact]
+    public void PublicConstructor_PreservesLegacyBinarySignature()
+    {
+        var constructor = Assert.Single(typeof(B3EntryPointClientGateway).GetConstructors());
+        var parameters = constructor.GetParameters();
+
+        Assert.Equal(23, parameters.Length);
+        Assert.Equal("eventStreamOverride", parameters[^1].Name);
+        Assert.True(parameters[^1].HasDefaultValue);
+    }
 
     [Fact]
     public void ReceiptMapping_PreservesExactFirmSessionSequenceAndFrameIdentity()
@@ -280,10 +292,11 @@ public sealed class B3EntryPointClientGatewayReceiptTests
     [Fact]
     public async Task ConcurrentMixedOperations_PreservePreparedAndWireSequenceOrder()
     {
-        using var sendLock = new SemaphoreSlim(1, 1);
-        var nextSeq = 0UL;
+        var nextSeq = 0L;
+        var active = 0;
+        var entered = new ConcurrentQueue<Up.OutboundOperationKind>();
         var prepared = new List<ulong>();
-        var written = new List<ulong>();
+        var written = new ConcurrentQueue<ulong>();
         var firstPrepared = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -293,19 +306,20 @@ public sealed class B3EntryPointClientGatewayReceiptTests
             Up.OutboundFramePreparedCallback callback,
             CancellationToken ct)
         {
-            await sendLock.WaitAsync(ct);
+            Assert.Equal(1, Interlocked.Increment(ref active));
             try
             {
-                var seq = ++nextSeq;
+                entered.Enqueue(operation);
+                var seq = (ulong)Interlocked.Increment(ref nextSeq);
                 var frame = Frame(operation, clOrdId, seq);
                 await callback(frame, ct);
-                written.Add(seq);
+                written.Enqueue(seq);
                 return new Up.OutboundAttemptReceipt(
                     frame, Up.OutboundAttemptStage.TransportWriteCompleted);
             }
             finally
             {
-                sendLock.Release();
+                Interlocked.Decrement(ref active);
             }
         }
 
@@ -339,6 +353,14 @@ public sealed class B3EntryPointClientGatewayReceiptTests
 
         var receipts = await Task.WhenAll(submit, cancel, replace);
 
+        Assert.Equal(
+            new[]
+            {
+                Up.OutboundOperationKind.NewOrder,
+                Up.OutboundOperationKind.Cancel,
+                Up.OutboundOperationKind.Replace,
+            },
+            entered);
         Assert.Equal(new ulong[] { 1, 2, 3 }, prepared);
         Assert.Equal(new ulong[] { 1, 2, 3 }, written);
         Assert.Equal(new ulong[] { 1, 2, 3 }, receipts.Select(r => r.Frame.OutboundSeqNum));
@@ -350,6 +372,153 @@ public sealed class B3EntryPointClientGatewayReceiptTests
                 ExchangeGatewayOperation.Replace,
             },
             receipts.Select(r => r.Frame.Operation));
+    }
+
+    [Fact]
+    public async Task LegacySend_HoldsAdapterGate_AgainstReceiptSend()
+    {
+        var legacyEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseLegacy = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var receiptEntries = 0;
+        await using var gateway = await BuildGatewayAsync(
+            legacySubmit: async (_, ct) =>
+            {
+                legacyEntered.SetResult();
+                await releaseLegacy.Task.WaitAsync(ct);
+            },
+            cancel: async (request, callback, ct) =>
+            {
+                Interlocked.Increment(ref receiptEntries);
+                var frame = Frame(Up.OutboundOperationKind.Cancel, request.ClOrdID.Value, 2);
+                await callback(frame, ct);
+                return new Up.OutboundAttemptReceipt(
+                    frame, Up.OutboundAttemptStage.TransportWriteCompleted);
+            });
+
+        var legacy = gateway.SubmitAsync(Order(101), CancellationToken.None);
+        await legacyEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var receipt = gateway.CancelWithReceiptAsync(
+            Order(100),
+            102,
+            (_, _) => ValueTask.CompletedTask,
+            CancellationToken.None);
+
+        Assert.False(receipt.IsCompleted);
+        Assert.Equal(0, Volatile.Read(ref receiptEntries));
+
+        releaseLegacy.SetResult();
+        await legacy;
+        await receipt;
+        Assert.Equal(1, Volatile.Read(ref receiptEntries));
+    }
+
+    [Fact]
+    public async Task StatePersistenceFailure_DelayedFailClose_BlocksQueuedReceiptAndLegacySends()
+    {
+        var failCloseEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFailClose = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var queuedReceiptEntries = 0;
+        var queuedLegacyEntries = 0;
+        await using var gateway = await BuildGatewayAsync(
+            submit: async (request, callback, ct) =>
+            {
+                var frame = Frame(Up.OutboundOperationKind.NewOrder, request.ClOrdID.Value, 1);
+                await callback(frame, ct);
+                throw AttemptFailure(
+                    Up.OutboundAttemptStage.TransportWriteCompleted,
+                    frame,
+                    new IOException("session state persistence failed"));
+            },
+            cancel: async (request, callback, ct) =>
+            {
+                Interlocked.Increment(ref queuedReceiptEntries);
+                var frame = Frame(Up.OutboundOperationKind.Cancel, request.ClOrdID.Value, 2);
+                await callback(frame, ct);
+                return new Up.OutboundAttemptReceipt(
+                    frame, Up.OutboundAttemptStage.TransportWriteCompleted);
+            },
+            legacyReplace: (_, _) =>
+            {
+                Interlocked.Increment(ref queuedLegacyEntries);
+                return Task.CompletedTask;
+            },
+            beforeFailClose: async () =>
+            {
+                failCloseEntered.SetResult();
+                await releaseFailClose.Task;
+            });
+
+        var failed = gateway.SubmitWithReceiptAsync(
+            Order(101),
+            (_, _) => ValueTask.CompletedTask,
+            CancellationToken.None);
+        await failCloseEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        var queuedReceipt = gateway.CancelWithReceiptAsync(
+            Order(100),
+            102,
+            (_, _) => ValueTask.CompletedTask,
+            CancellationToken.None);
+        var queuedLegacy = gateway.CancelReplaceAsync(
+            Order(100), 103, 90, 31m, null, null, null, CancellationToken.None);
+
+        Assert.False(queuedReceipt.IsCompleted);
+        Assert.False(queuedLegacy.IsCompleted);
+        Assert.Equal(0, Volatile.Read(ref queuedReceiptEntries));
+        Assert.Equal(0, Volatile.Read(ref queuedLegacyEntries));
+
+        releaseFailClose.SetResult();
+
+        var failure = await Assert.ThrowsAsync<ExchangeGatewayAttemptException>(() => failed);
+        Assert.Equal(ExchangeGatewayFailureDisposition.Ambiguous, failure.Disposition);
+        var receiptBlocked = await Assert.ThrowsAsync<ExchangeGatewayAttemptException>(
+            () => queuedReceipt);
+        Assert.Equal(ExchangeGatewayAttemptStage.NotStarted, receiptBlocked.LastStage);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => queuedLegacy);
+        Assert.Equal(0, Volatile.Read(ref queuedReceiptEntries));
+        Assert.Equal(0, Volatile.Read(ref queuedLegacyEntries));
+    }
+
+    [Fact]
+    public async Task FramePreparedCallback_ReentrantLegacySend_FailsInsteadOfDeadlocking()
+    {
+        var legacyEntries = 0;
+        B3EntryPointClientGateway? gateway = null;
+        gateway = await BuildGatewayAsync(
+            submit: async (request, callback, ct) =>
+            {
+                var frame = Frame(Up.OutboundOperationKind.NewOrder, request.ClOrdID.Value, 1);
+                try
+                {
+                    await callback(frame, ct);
+                }
+                catch (Exception ex)
+                {
+                    throw AttemptFailure(
+                        Up.OutboundAttemptStage.SequenceReservedAndEncoded,
+                        frame,
+                        ex);
+                }
+
+                return new Up.OutboundAttemptReceipt(
+                    frame, Up.OutboundAttemptStage.TransportWriteCompleted);
+            },
+            legacyCancel: (_, _) =>
+            {
+                Interlocked.Increment(ref legacyEntries);
+                return Task.CompletedTask;
+            });
+        await using var ownedGateway = gateway;
+
+        var failure = await Assert.ThrowsAsync<ExchangeGatewayAttemptException>(
+            () => gateway.SubmitWithReceiptAsync(
+                Order(101),
+                async (_, ct) => await gateway.CancelAsync(Order(100), 102, ct),
+                CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2)));
+
+        Assert.Equal(ExchangeGatewayAttemptStage.SequenceReservedAndEncoded, failure.LastStage);
+        Assert.True(failure.NoTransportWritePossible);
+        Assert.Equal(0, Volatile.Read(ref legacyEntries));
     }
 
     [Fact]
@@ -491,7 +660,11 @@ public sealed class B3EntryPointClientGatewayReceiptTests
         ILogger<B3EntryPointClientGateway>? logger = null,
         Func<Up.NewOrderRequest, Up.OutboundFramePreparedCallback, CancellationToken, Task<Up.OutboundAttemptReceipt>>? submit = null,
         Func<Up.CancelOrderRequest, Up.OutboundFramePreparedCallback, CancellationToken, Task<Up.OutboundAttemptReceipt>>? cancel = null,
-        Func<Up.ReplaceOrderRequest, Up.OutboundFramePreparedCallback, CancellationToken, Task<Up.OutboundAttemptReceipt>>? replace = null)
+        Func<Up.ReplaceOrderRequest, Up.OutboundFramePreparedCallback, CancellationToken, Task<Up.OutboundAttemptReceipt>>? replace = null,
+        Func<Up.NewOrderRequest, CancellationToken, Task>? legacySubmit = null,
+        Func<Up.CancelOrderRequest, CancellationToken, Task>? legacyCancel = null,
+        Func<Up.ReplaceOrderRequest, CancellationToken, Task>? legacyReplace = null,
+        Func<Task>? beforeFailClose = null)
     {
         var client = new Sdk.EntryPointClient(new Sdk.EntryPointClientOptions
         {
@@ -507,12 +680,19 @@ public sealed class B3EntryPointClientGatewayReceiptTests
             FirmId,
             7,
             logger ?? NullLogger<B3EntryPointClientGateway>.Instance,
+            new B3EntryPointClientGateway.OutboundTestOverrides
+            {
+                Submit = legacySubmit,
+                Cancel = legacyCancel,
+                Replace = legacyReplace,
+                SubmitWithReceipt = submit,
+                CancelWithReceipt = cancel,
+                ReplaceWithReceipt = replace,
+                BeforeFailClose = beforeFailClose,
+            },
             terminateOnShutdown: false,
             connectedTestHook: static () => { },
-            connectAsyncOverride: static _ => Task.CompletedTask,
-            submitWithReceiptOverride: submit,
-            cancelWithReceiptOverride: cancel,
-            replaceWithReceiptOverride: replace);
+            connectAsyncOverride: static _ => Task.CompletedTask);
         await gateway.ConnectAsync(CancellationToken.None);
         return gateway;
     }
