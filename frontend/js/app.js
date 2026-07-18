@@ -1366,11 +1366,10 @@ async function handleSubmitOrder(payload) {
   state.setSubmitInflight({ startedAt: Date.now() });
   try {
     const resp = await submitOrder(session.backend, session.token, payload);
-    // #421: success surface is the standalone toast above the panel
-    // grid — easier to notice than the previous inline text under the
-    // ticket form, and doesn't fight for space with the next submit.
-    const msg = `accepted: ${resp.clOrdId}${resp.status ? ` (${resp.status})` : ""}`;
-    ui.showOrderToast(msg, "ok");
+    // The REST response confirms platform intake, not a live venue/order
+    // transition. Keep that distinction explicit until the corresponding
+    // WebSocket order row arrives and advances the same toast.
+    ui.showPlatformAcceptedOrder(resp.clOrdId);
     markFirstOrderAccepted(resp.clOrdId);
     ui.clearTicket();
   } catch (err) {

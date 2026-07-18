@@ -109,6 +109,20 @@ frontend elsewhere.
 - Deep-link startup passes the desired `pnl.me` / `algo.me` subscriptions in
   the worker start message, so the first socket open subscribes without
   requiring a tab-navigation side effect.
+- The ticket's **Trading readiness** strip derives only from canonical
+  trader-WebSocket, `/health.exchange`, market-data WebSocket, and
+  per-symbol phase state. It explains degraded or blocked conditions but does
+  not add a Submit gate: existing in-flight, validation, and `Reserved`-phase
+  rules remain the client-side authority, with the server authoritative for
+  intake and routing.
+- A successful `POST /orders` first reports **platform acceptance**. The toast
+  advances to **live order update received** only after the corresponding
+  order appears in WebSocket state; the same delta drives the fresh-row cue in
+  Working Orders.
+- Chart, depth, tape, Working Orders, and Executions render contextual empty
+  states. Empty first-use state is kept distinct from active filters returning
+  no results, while market surfaces distinguish waiting-for-snapshot from a
+  feed timeout or an empty snapshot.
 
 ## Operator and account controls
 
