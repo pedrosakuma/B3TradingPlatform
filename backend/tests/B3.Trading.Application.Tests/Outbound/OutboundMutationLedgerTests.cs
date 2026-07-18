@@ -445,6 +445,161 @@ public sealed class OutboundMutationLedgerTests
     }
 
     [Fact]
+    public void OldWalNullableFirm_LegacyNewCancelAndReplaceRemainUnmatchedUntilProjectionReconciles()
+    {
+        var legacyNew = new OutboundMutationLedger();
+        legacyNew.ImportLegacyNew(LegacySubmit(1));
+        legacyNew.ApplyVenueAcknowledgement(OldEr(1, "New"));
+        Assert.Equal(
+            OutboundMutationState.LegacyUnknown,
+            Assert.Single(legacyNew.SnapshotMutations()).State);
+        Assert.Equal(1, legacyNew.ReadinessBlockingCount);
+        Assert.Equal(1, legacyNew.ReconcileLegacyPendingState([], [], [], T0.AddMinutes(1)));
+        Assert.Equal(0, legacyNew.ReadinessBlockingCount);
+
+        var legacyReplace = LegacyReplaceLedger();
+        legacyReplace.ApplyVenueAcknowledgement(OldEr(2, "Replaced", origClOrdId: 1));
+        Assert.Equal(
+            OutboundMutationState.LegacyUnknownReplace,
+            Assert.Single(legacyReplace.SnapshotMutations()).State);
+        Assert.Equal(1, legacyReplace.ReconcileLegacyPendingState([], [], [], T0.AddMinutes(1)));
+        Assert.Equal(0, legacyReplace.ReadinessBlockingCount);
+
+        var legacyCancel = new OutboundMutationLedger();
+        legacyCancel.ImportLegacyNew(LegacySubmit(1));
+        legacyCancel.ReconcileLegacyPendingState([], [], [], T0.AddSeconds(1));
+        legacyCancel.ImportLegacyCancel(new OrderCancelRequestedEvent
+        {
+            CancelClOrdId = 2,
+            OriginalClOrdId = 1,
+            OwnerEndClientId = "sensitive-owner",
+            TimestampUtc = T0.AddSeconds(2),
+        });
+        var cancel = Assert.Single(
+            legacyCancel.SnapshotMutations(), mutation => mutation.PrimaryClOrdId == 2);
+        Assert.Equal("F1", cancel.FirmId);
+        legacyCancel.ApplyVenueAcknowledgement(OldEr(2, "Cancelled", origClOrdId: 1));
+        Assert.Equal(
+            OutboundMutationState.LegacyUnknownCancel,
+            Assert.Single(
+                legacyCancel.SnapshotMutations(),
+                mutation => mutation.PrimaryClOrdId == 2).State);
+        Assert.Equal(1, legacyCancel.ReconcileLegacyPendingState([], [], [], T0.AddMinutes(1)));
+        Assert.Equal(0, legacyCancel.ReadinessBlockingCount);
+    }
+
+    [Fact]
+    public void LegacyActualFirmMismatch_FailsClosedWithoutCrossFirmAcknowledgement()
+    {
+        var legacyNew = new OutboundMutationLedger();
+        legacyNew.ImportLegacyNew(LegacySubmit(1));
+        legacyNew.ApplyVenueAcknowledgement(OldEr(1, "New") with { FirmId = "OTHER" });
+        Assert.Equal(
+            OutboundMutationState.Ambiguous,
+            Assert.Single(legacyNew.SnapshotMutations()).State);
+
+        var legacyReplace = LegacyReplaceLedger();
+        legacyReplace.ApplyVenueAcknowledgement(
+            OldEr(2, "Replaced", origClOrdId: 1) with { FirmId = "OTHER" });
+        Assert.Equal(
+            OutboundMutationState.Ambiguous,
+            Assert.Single(legacyReplace.SnapshotMutations()).State);
+
+        var legacyCancel = new OutboundMutationLedger();
+        legacyCancel.ImportLegacyCancel(new OrderCancelRequestedEvent
+        {
+            CancelClOrdId = 2,
+            OriginalClOrdId = 1,
+            OwnerEndClientId = "sensitive-owner",
+            TimestampUtc = T0,
+        }, authoritativeFirmId: "F1");
+        legacyCancel.ApplyVenueAcknowledgement(
+            OldEr(2, "Cancelled", origClOrdId: 1) with { FirmId = "OTHER" });
+        var cancel = Assert.Single(legacyCancel.SnapshotMutations());
+        Assert.Equal(OutboundMutationState.Ambiguous, cancel.State);
+        Assert.Equal(1, legacyCancel.ReadinessBlockingCount);
+        Assert.Null(cancel.Resolution);
+    }
+
+    [Fact]
+    public void LegacyCancelWithoutAuthoritativeFirm_RemainsUnmatchedNotConflicting()
+    {
+        var ledger = new OutboundMutationLedger();
+        ledger.ImportLegacyCancel(new OrderCancelRequestedEvent
+        {
+            CancelClOrdId = 2,
+            OriginalClOrdId = 1,
+            OwnerEndClientId = "sensitive-owner",
+            TimestampUtc = T0,
+        });
+        ledger.ApplyVenueAcknowledgement(
+            OldEr(2, "Cancelled", origClOrdId: 1) with { FirmId = "F1" });
+
+        var mutation = Assert.Single(ledger.SnapshotMutations());
+        Assert.Equal(string.Empty, mutation.FirmId);
+        Assert.Equal(OutboundMutationState.LegacyUnknownCancel, mutation.State);
+        Assert.Equal(1, ledger.ReconcileLegacyPendingState([], [], [], T0.AddMinutes(1)));
+        Assert.Equal(0, ledger.ReadinessBlockingCount);
+    }
+
+    [Fact]
+    public void EventReplayer_OldWalNullableFirmCancelUsesOriginalOrderFirmAndProjectionReconciliation()
+    {
+        var ledger = new OutboundMutationLedger();
+        var pendingCancels = new PendingCancelRegistry();
+        var ownership = new OrderOwnershipMap();
+        var orders = new WorkingOrderBook();
+        var processor = new ExecutionReportProcessor(
+            ownership,
+            orders,
+            new PositionKeeper(),
+            new NoOpExecutionEventSink(),
+            new NoOpMarginProvider(),
+            NullLogger<ExecutionReportProcessor>.Instance,
+            pendingCancels: pendingCancels);
+        var replayer = new EventReplayer(
+            orders,
+            ownership,
+            new KillSwitchService(),
+            new SymbolHaltService(),
+            new SessionPhaseService(),
+            processor,
+            new AlgoBook(),
+            new ClOrdIdPrefixRegistry(),
+            new AlgoIdRegistry(),
+            pendingCancels: pendingCancels,
+            outboundLedger: ledger);
+
+        replayer.Apply(LegacySubmit(1));
+        replayer.Apply(OldEr(1, "New"));
+        replayer.Apply(new OrderCancelRequestedEvent
+        {
+            CancelClOrdId = 2,
+            OriginalClOrdId = 1,
+            OwnerEndClientId = "sensitive-owner",
+            TimestampUtc = T0.AddSeconds(1),
+        });
+        Assert.Equal(
+            "F1",
+            Assert.Single(
+                ledger.SnapshotMutations(),
+                mutation => mutation.PrimaryClOrdId == 2).FirmId);
+        replayer.Apply(OldEr(2, "Canceled", origClOrdId: 1));
+
+        Assert.Empty(pendingCancels.Snapshot());
+        ledger.ReconcileLegacyPendingState(
+            orders.Snapshot()
+                .Where(order => order.Status == nameof(OrderStatus.PendingNew))
+                .Select(order => order.ClOrdId),
+            pendingCancels.Snapshot().Select(cancel => cancel.CancelClOrdId),
+            [],
+            T0.AddMinutes(1));
+        Assert.Equal(0, ledger.ReadinessBlockingCount);
+        Assert.All(ledger.SnapshotMutations(),
+            mutation => Assert.Equal(OutboundMutationState.LegacyTerminal, mutation.State));
+    }
+
+    [Fact]
     public void LegacyMigration_OnlyKeepsRowsWhoseDomainProjectionIsStillPending()
     {
         var ledger = new OutboundMutationLedger();
@@ -1192,6 +1347,33 @@ public sealed class OutboundMutationLedgerTests
             InboundSeqNum = 90,
             TimestampUtc = T0.AddMinutes(2),
         };
+
+    private static ExecutionReportReceivedEvent OldEr(
+        ulong clOrdId,
+        string execKind,
+        ulong origClOrdId = 0)
+    {
+        var json =
+            $$"""
+            {
+              "kind": "er.received",
+              "clOrdId": {{clOrdId}},
+              "execKind": "{{execKind}}",
+              "leavesQuantity": 0,
+              "cumulativeQuantity": 0,
+              "lastQuantity": 0,
+              "lastPrice": 0,
+              "synthetic": false,
+              "origClOrdId": {{origClOrdId}},
+              "timestampUtc": "2026-07-18T01:02:03Z"
+            }
+            """;
+        var evt = JsonSerializer.Deserialize<WalEvent>(
+            json, WalEventJsonContext.Default.WalEvent);
+        var er = Assert.IsType<ExecutionReportReceivedEvent>(evt);
+        Assert.Null(er.FirmId);
+        return er;
+    }
 
     private static OutboundMutationLedger LegacyReplaceLedger()
     {

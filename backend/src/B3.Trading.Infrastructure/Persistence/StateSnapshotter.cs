@@ -795,13 +795,15 @@ public sealed class StateSnapshotter
             }
             foreach (var pending in snap.PendingCancels)
             {
+                var originalFirmId = snap.WorkingOrders.FirstOrDefault(
+                    order => order.ClOrdId == pending.OriginalClOrdId)?.FirmId;
                 _outboundLedger.ImportLegacyCancel(new OrderCancelRequestedEvent
                 {
                     CancelClOrdId = pending.CancelClOrdId,
                     OriginalClOrdId = pending.OriginalClOrdId,
                     OwnerEndClientId = string.Empty,
                     TimestampUtc = snap.CreatedAtUtc,
-                });
+                }, originalFirmId);
             }
             foreach (var pending in snap.PendingReplacements)
             {
@@ -1155,7 +1157,13 @@ public sealed class EventReplayer
                 _pendingCancels?.TryAdd(ocr.OriginalClOrdId, ocr.CancelClOrdId);
                 _clOrdIds.AdvanceCounterTo(ocrOwner, ocr.CancelClOrdId);
                 if (_outboundLedger?.ShouldImportLegacy == true)
-                    _outboundLedger.ImportLegacyCancel(ocr);
+                {
+                    var originalFirmId = _orders.TryGet(
+                        ocr.OriginalClOrdId, out var originalOrder)
+                        ? originalOrder?.FirmId
+                        : null;
+                    _outboundLedger.ImportLegacyCancel(ocr, originalFirmId);
+                }
                 if (ocr.BotMapping is { } cbm && _userBotMappings is not null)
                     _userBotMappings.RegisterCancelInternal(
                         cancelInternalClOrdId: ocr.CancelClOrdId,

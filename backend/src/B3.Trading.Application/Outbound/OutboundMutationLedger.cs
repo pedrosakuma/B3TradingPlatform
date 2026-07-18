@@ -363,16 +363,17 @@ public sealed class OutboundMutationLedger
                 return;
             }
 
-            if (!hasDirect
-                || string.IsNullOrWhiteSpace(evt.FirmId)
-                || !string.Equals(evt.FirmId, mutation.FirmId, StringComparison.Ordinal))
-            {
-                MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
-                return;
-            }
-
             if (mutation.Approval is null)
             {
+                if (!hasDirect
+                    || string.IsNullOrWhiteSpace(mutation.FirmId)
+                    || string.IsNullOrWhiteSpace(evt.FirmId))
+                    return;
+                if (!string.Equals(evt.FirmId, mutation.FirmId, StringComparison.Ordinal))
+                {
+                    MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
+                    return;
+                }
                 var legacyOriginalMatches = mutation.OriginalClOrdId is { } legacyExpectedOriginal
                     ? evt.OrigClOrdId == legacyExpectedOriginal
                     : evt.OrigClOrdId == 0;
@@ -389,6 +390,14 @@ public sealed class OutboundMutationLedger
                     mutation, OutboundMutationState.VenueAcknowledged,
                     evt.TimestampUtc, "LegacyExecutionReport",
                     legacyEvidenceDigest, evt.VenueOrderId);
+                return;
+            }
+
+            if (!hasDirect
+                || string.IsNullOrWhiteSpace(evt.FirmId)
+                || !string.Equals(evt.FirmId, mutation.FirmId, StringComparison.Ordinal))
+            {
+                MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
                 return;
             }
 
@@ -473,11 +482,15 @@ public sealed class OutboundMutationLedger
             evt.TimestampUtc, OutboundMutationState.LegacyUnknown);
     }
 
-    public void ImportLegacyCancel(OrderCancelRequestedEvent evt)
+    public void ImportLegacyCancel(
+        OrderCancelRequestedEvent evt,
+        string? authoritativeFirmId = null)
     {
         ArgumentNullException.ThrowIfNull(evt);
+        var firmId = ResolveLegacyFirm(
+            evt.OriginalClOrdId, authoritativeFirmId);
         ImportLegacy(
-            OutboundMutationKind.Cancel, string.Empty, evt.CancelClOrdId,
+            OutboundMutationKind.Cancel, firmId, evt.CancelClOrdId,
             evt.OriginalClOrdId, evt.TimestampUtc, OutboundMutationState.LegacyUnknownCancel);
     }
 
@@ -946,6 +959,22 @@ public sealed class OutboundMutationLedger
         _mutations[id] = mutation;
         AddClOrdCorrelation(mutation, mutationClOrdId, terminal: false, atUtc);
         return mutation;
+    }
+
+    private string ResolveLegacyFirm(
+        ulong originalClOrdId,
+        string? authoritativeFirmId)
+    {
+        if (!string.IsNullOrWhiteSpace(authoritativeFirmId))
+            return authoritativeFirmId;
+        lock (_gate)
+        {
+            if (_byClOrdId.TryGetValue(originalClOrdId, out var mutationId)
+                && _mutations.TryGetValue(mutationId, out var original)
+                && !string.IsNullOrWhiteSpace(original.FirmId))
+                return original.FirmId;
+        }
+        return string.Empty;
     }
 
     private OutboundSensitivePayloadAvailability CheckPayloadAvailability(
