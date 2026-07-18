@@ -19,11 +19,34 @@ public interface IExchangeGateway
     Task SubmitAsync(Order order, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Evidence-aware submit boundary for the durable outbound coordinator.
+    /// The caller must commit its attempt intent before entry and durably commit
+    /// the supplied frame identity in <paramref name="onFramePrepared"/>.
+    /// Existing callers intentionally remain on <see cref="SubmitAsync"/> until
+    /// #642/#643 wire the coordinator.
+    /// </summary>
+    Task<ExchangeGatewayReceipt> SubmitWithReceiptAsync(
+        Order order,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken) =>
+        Task.FromException<ExchangeGatewayReceipt>(
+            ExchangeGatewayAttemptException.ReceiptNotSupported());
+
+    /// <summary>
     /// Cancel a working order. Takes the full <see cref="Order"/> because
     /// the upstream <c>CancelOrderRequest</c> requires <c>SecurityId</c> +
     /// <c>Side</c> in addition to the original ClOrdID.
     /// </summary>
     Task CancelAsync(Order order, ulong newClOrdId, CancellationToken cancellationToken);
+
+    /// <summary>Evidence-aware cancel boundary. See <see cref="SubmitWithReceiptAsync"/>.</summary>
+    Task<ExchangeGatewayReceipt> CancelWithReceiptAsync(
+        Order order,
+        ulong newClOrdId,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken) =>
+        Task.FromException<ExchangeGatewayReceipt>(
+            ExchangeGatewayAttemptException.ReceiptNotSupported());
 
     /// <summary>
     /// Cancel-replace a working order. <paramref name="newClOrdId"/> must
@@ -47,6 +70,20 @@ public interface IExchangeGateway
         decimal? requestedStopPrice,
         DateTimeOffset? requestedGoodTillDate,
         CancellationToken cancellationToken);
+
+    /// <summary>Evidence-aware replace boundary. See <see cref="SubmitWithReceiptAsync"/>.</summary>
+    Task<ExchangeGatewayReceipt> CancelReplaceWithReceiptAsync(
+        Order original,
+        ulong newClOrdId,
+        long newQuantity,
+        decimal? newPrice,
+        TimeInForce? requestedTimeInForce,
+        decimal? requestedStopPrice,
+        DateTimeOffset? requestedGoodTillDate,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken) =>
+        Task.FromException<ExchangeGatewayReceipt>(
+            ExchangeGatewayAttemptException.ReceiptNotSupported());
 }
 
 /// <summary>

@@ -2,7 +2,7 @@
 
 Tracks fields/contracts that the **B3.EntryPoint.Client** package does not yet expose on its public surface, plus recently closed gaps that are already mapped by this platform.
 
-Verified against: `B3.EntryPoint.Client 0.16.1` (13/07/2026).
+Verified against: `B3.EntryPoint.Client 0.17.0` (18/07/2026).
 
 ## Durable outbound-attempt evidence
 
@@ -10,27 +10,32 @@ RFC
 [`durable-outbound-mutations-v0`](rfcs/durable-outbound-mutations-v0.md)
 requires two durable boundaries: a platform-owned attempt intent before gateway
 entry, then an SDK callback after sequence reservation/encoding but before the
-first possible transport write. The 0.16.1 package and upstream `main` at
-`1fe35a318ae3d546e5e75e7207ad9808028878fc` (latest release 0.16.2) do not yet
-expose that contract.
+first possible transport write. SDK 0.17.0 closes the upstream gap through
+`SubmitWithReceiptAsync`, `ReplaceWithReceiptAsync` and
+`CancelWithReceiptAsync`.
 
-Current high-level `SubmitAsync` / `ReplaceAsync` return the ClOrdID and
-`CancelAsync` returns `Task`. Upstream `main` reserves the outbound
-`MsgSeqNum`, encodes and writes inside a private serialized helper, then
-persists its SDK session-state delta. The public result does not bind the
-business call to `SessionId`, `SessionVerId`, outbound `MsgSeqNum`,
-encoded-frame identity or a typed no-write/write-completed stage.
-`NotAppliedReceived` exposes a sequence range, but the platform cannot correlate
-that range to the full `(firmId, SessionId, SessionVerId, outboundSeqNum)`
-attempt identity.
-There is no public exact-original-sequence replay operation.
+The callback receives immutable `SessionId`, `SessionVerId`, outbound
+`MsgSeqNum`, operation, ClOrdID, frame length and SHA-256 identity while SDK
+reserve → encode → callback → write remains serialized. Callback failure
+prevents transport write. Successful completion proves only local
+`TransportWriteCompleted` (or later SDK state persistence), never venue
+acceptance. Typed failures expose the last stage and the SDK's explicit
+`NoTransportWritePossible` proof.
+
+The platform maps this API behind platform-owned receipt types in
+`IExchangeGateway`. Existing order services intentionally remain on the legacy
+compatibility methods until #642/#643 commit `AttemptIntentPrepared` and
+`FramePrepared` through the coordinator.
+
+There is still no exact-original-frame/original-sequence replay operation.
+Failures after frame preparation require reconciliation rather than resend. A
+dead epoch with intent but no committed `FramePrepared` becomes proven-unsent
+only after SDK sequence-state reconciliation under the callback no-write
+contract.
 
 Tracked upstream:
 [B3EntryPointClient#223](https://github.com/pedrosakuma/B3EntryPointClient/issues/223).
-Until that contract exists, #628 cannot enable the transport-writing pipeline.
-After it exists, an intent-only dead epoch with no committed SDK callback is
-proven not written; a dead epoch at/after the callback is ambiguous and never
-automatically resent.
+The remaining coordinator and service rewiring is tracked by #642/#643.
 
 This is not an order-status-query request. B3 EntryPoint 8.4.2 has no
 MassStatus/OrderStatus template; upstream
@@ -39,14 +44,14 @@ idea as not applicable to the wire.
 
 ## Outbound request shape — missing properties
 
-As of `0.16.1`, the remaining SDK-surface gaps on `NewOrderRequest` / `ReplaceOrderRequest` are:
+As of `0.17.0`, the remaining SDK-surface gaps on `NewOrderRequest` / `ReplaceOrderRequest` are:
 
 | Field | FIX tag | Compliance use | Platform compensation today | Tracking |
 | --- | --- | --- | --- | --- |
 | `ExecInst` | 18 | Flags (STP mode, do-not-aggregate, work-up, AON, …) | STP runs 100% host-side (sees every firm, doesn't need venue cooperation). AON / work-up have no host-side compensation | [#441](https://github.com/pedrosakuma/B3TradingPlatform/issues/441) |
 | `DisplayResetPolicy` / `RefreshPolicy` | n/a (B3 iceberg) | Iceberg refresh-on-execution policy (`Always` / `OnPartialFill` / `Never`) | REST + risk gate-bloqueia a escolha do trader a `Always` (#297) para que a omissão no wire seja faithful; loses the other two policies | [#298](https://github.com/pedrosakuma/B3TradingPlatform/issues/298), [#436](https://github.com/pedrosakuma/B3TradingPlatform/issues/436) (closed → covered here) |
 
-Reflection against `B3.EntryPoint.Client 0.16.1` confirms both request types expose `TradingSubAccount` but still do **not** expose any `ExecInst` / `ExecutionInstruction` / `ExecutionInstructions` or `DisplayResetPolicy` / `RefreshPolicy` / `DisplayRefreshPolicy` property.
+Reflection against `B3.EntryPoint.Client 0.17.0` confirms both request types expose `TradingSubAccount` but still do **not** expose any `ExecInst` / `ExecutionInstruction` / `ExecutionInstructions` or `DisplayResetPolicy` / `RefreshPolicy` / `DisplayRefreshPolicy` property.
 
 ## Resolved since the original compliance audit
 
@@ -67,7 +72,7 @@ The lookup is case-insensitive and covers known FIX-style aliases (`ExecInst`/`E
 
 ## Outbound request shape — present but not plumbed
 
-These fields **are** exposed by 0.16.1 but the platform does not populate them today. Tracked separately (no tripwire needed — straight implementation):
+These fields **are** exposed by 0.17.0 but the platform does not populate them today. Tracked separately (no tripwire needed — straight implementation):
 
 | Field | Tracking |
 | --- | --- |

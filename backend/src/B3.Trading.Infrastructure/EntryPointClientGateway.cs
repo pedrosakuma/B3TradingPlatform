@@ -106,4 +106,28 @@ public sealed class EntryPointClientGateway : IExchangeGateway
                 GoodTillDate: effGtd),
             cancellationToken);
     }
+
+    public Task<ExchangeGatewayReceipt> SubmitWithReceiptAsync(
+        Order order,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken) =>
+        Unsupported();
+
+    public Task<ExchangeGatewayReceipt> CancelWithReceiptAsync(
+        Order order,
+        ulong newClOrdId,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken) =>
+        Unsupported();
+
+    public Task<ExchangeGatewayReceipt> CancelReplaceWithReceiptAsync(
+        Order original, ulong newClOrdId, long newQuantity, decimal? newPrice,
+        TimeInForce? requestedTimeInForce, decimal? requestedStopPrice, DateTimeOffset? requestedGoodTillDate,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken) =>
+        Unsupported();
+
+    private static Task<ExchangeGatewayReceipt> Unsupported() =>
+        Task.FromException<ExchangeGatewayReceipt>(
+            ExchangeGatewayAttemptException.ReceiptNotSupported());
 }

@@ -24,12 +24,40 @@ public sealed class UnavailableExchangeGateway : IExchangeGateway, IExchangeGate
     public Task SubmitAsync(Order order, CancellationToken cancellationToken) =>
         throw new InvalidOperationException(Reason);
 
+    public Task<ExchangeGatewayReceipt> SubmitWithReceiptAsync(
+        Order order,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken) =>
+        ProvenUnsent();
+
     public Task CancelAsync(Order order, ulong newClOrdId, CancellationToken cancellationToken) =>
         throw new InvalidOperationException(Reason);
+
+    public Task<ExchangeGatewayReceipt> CancelWithReceiptAsync(
+        Order order,
+        ulong newClOrdId,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken) =>
+        ProvenUnsent();
 
     public Task CancelReplaceAsync(
         Order order, ulong newClOrdId, long newQuantity, decimal? newPrice,
         TimeInForce? requestedTimeInForce, decimal? requestedStopPrice, DateTimeOffset? requestedGoodTillDate,
         CancellationToken cancellationToken) =>
         throw new InvalidOperationException(Reason);
+
+    public Task<ExchangeGatewayReceipt> CancelReplaceWithReceiptAsync(
+        Order order, ulong newClOrdId, long newQuantity, decimal? newPrice,
+        TimeInForce? requestedTimeInForce, decimal? requestedStopPrice, DateTimeOffset? requestedGoodTillDate,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken) =>
+        ProvenUnsent();
+
+    private static Task<ExchangeGatewayReceipt> ProvenUnsent() =>
+        Task.FromException<ExchangeGatewayReceipt>(
+            new ExchangeGatewayAttemptException(
+                Reason,
+                ExchangeGatewayFailureDisposition.OutboundProvenUnsent,
+                ExchangeGatewayAttemptStage.NotStarted,
+                frame: null));
 }

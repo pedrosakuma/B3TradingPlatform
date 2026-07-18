@@ -8,7 +8,7 @@ namespace B3.Trading.Application.Tests;
 /// #459 (spin-off de #441 / #436). Tripwire defensivo: a auditoria
 /// de compliance B3 (24/05/2026) identificou campos FIX/B3 que a
 /// plataforma deveria emitir/honrar no wire mas que o
-/// <c>B3.EntryPoint.Client 0.16.1</c> ainda NÃO expõe no shape público
+/// <c>B3.EntryPoint.Client 0.17.0</c> ainda NÃO expõe no shape público
 /// de <see cref="Up.NewOrderRequest"/> e <see cref="Up.ReplaceOrderRequest"/>:
 ///
 /// <list type="bullet">
