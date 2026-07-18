@@ -38,6 +38,11 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     private readonly ILogger<B3EntryPointClientGateway> _logger;
     private readonly CancellationTokenSource _shutdownCts = new();
     private readonly SemaphoreSlim _connectionLock = new(1, 1);
+    // Platform-owned fence across legacy + receipt sends. A queued caller must
+    // re-check operational state only after the prior attempt has completed its
+    // receipt mapping and any fail-close transition.
+    private readonly SemaphoreSlim _outboundSendLock = new(1, 1);
+    private readonly AsyncLocal<int> _framePreparedCallbackDepth = new();
     private readonly TimeSpan _initialReconnectDelay;
     private readonly TimeSpan _maxReconnectDelay;
     private readonly TimeSpan _gracefulTerminateTimeout;
@@ -49,6 +54,9 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     private uint _currentSessionVerId;
     private int _connectedState; // 0 = disconnected, 1 = connected (matches UpDownCounter increments)
     private int _reconnectingState; // 0 = idle, 1 = reconnect loop active (observable gauge)
+    private int _outboundReconciliationRequired;
+    private int _outboundFailCloseInProgress;
+    private long _outboundLifecycleGeneration;
     private ulong _lastInboundSeqNum;
     private int _reconnectScheduled;
     private volatile bool _disposed;
@@ -56,15 +64,17 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     // Slice 2 of #132. Captured by the SDK's InboundGapAtReconnect handler
     // (fires synchronously inside ReconnectAsync, just before the call returns)
     // and consumed once on the very next post-reconnect call to the reactor.
-    // Single-writer (SDK inbound thread inside ReconnectAsync) / single-reader
-    // (reconnect loop, immediately after ReconnectAsync returns), separated by
-    // the await — no lock needed for the bool/struct fields, but we Volatile.Read
-    // / Write to defend against compiler reordering across the await barrier.
-    private int _lastReconnectHadGap;
+    // Captures reconnect evidence with the outbound lifecycle generation that
+    // produced it. The gate prevents an aborted pre-reset reconnect from leaking
+    // sticky gap/termination evidence into a later fresh session.
+    private readonly object _reconnectEvidenceGate = new();
+    private bool _lastReconnectHadGap;
+    private long _lastGapGeneration;
     private ulong _lastGapFromSeq;
     private uint _lastGapCount;
     private ulong _lastGapPriorSessionVerId;
     private string? _lastTerminationCode;
+    private long _lastTerminationGeneration;
     private readonly IVenueDisconnectReactor? _reactor;
     // #433 P1. Optional resolver for the venue-side STP instruction
     // stamped on every outbound NewOrderRequest / ReplaceOrderRequest.
@@ -123,6 +133,13 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     private readonly Func<Up.ReconnectMode, Func<uint, uint>, CancellationToken, Task<Up.ReconnectOutcome>>? _reconnectAsyncOverride;
     private readonly Func<CancellationToken, Task>? _connectAsyncOverride;
     private readonly Func<CancellationToken, IAsyncEnumerable<UpModels.EntryPointEvent>>? _eventStreamOverride;
+    private readonly Func<UpModels.NewOrderRequest, CancellationToken, Task>? _submitOverride;
+    private readonly Func<UpModels.CancelOrderRequest, CancellationToken, Task>? _cancelOverride;
+    private readonly Func<UpModels.ReplaceOrderRequest, CancellationToken, Task>? _replaceOverride;
+    private readonly Func<UpModels.NewOrderRequest, UpModels.OutboundFramePreparedCallback, CancellationToken, Task<UpModels.OutboundAttemptReceipt>>? _submitWithReceiptOverride;
+    private readonly Func<UpModels.CancelOrderRequest, UpModels.OutboundFramePreparedCallback, CancellationToken, Task<UpModels.OutboundAttemptReceipt>>? _cancelWithReceiptOverride;
+    private readonly Func<UpModels.ReplaceOrderRequest, UpModels.OutboundFramePreparedCallback, CancellationToken, Task<UpModels.OutboundAttemptReceipt>>? _replaceWithReceiptOverride;
+    private readonly Func<Task>? _beforeOutboundFailCloseTestHook;
     private readonly Action? _connectedTestHook;
     // #565. The upstream SDK dials whatever `IPEndPoint` is on the
     // `EntryPointClientOptions` instance it was constructed with — it never
@@ -142,6 +159,17 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     // Null → legacy behaviour (matches direct-construction tests and Mock
     // mode, where there is no DNS to re-resolve).
     private readonly Func<CancellationToken, Task>? _reResolveEndpoint;
+
+    internal sealed class OutboundTestOverrides
+    {
+        public Func<UpModels.NewOrderRequest, CancellationToken, Task>? Submit { get; init; }
+        public Func<UpModels.CancelOrderRequest, CancellationToken, Task>? Cancel { get; init; }
+        public Func<UpModels.ReplaceOrderRequest, CancellationToken, Task>? Replace { get; init; }
+        public Func<UpModels.NewOrderRequest, UpModels.OutboundFramePreparedCallback, CancellationToken, Task<UpModels.OutboundAttemptReceipt>>? SubmitWithReceipt { get; init; }
+        public Func<UpModels.CancelOrderRequest, UpModels.OutboundFramePreparedCallback, CancellationToken, Task<UpModels.OutboundAttemptReceipt>>? CancelWithReceipt { get; init; }
+        public Func<UpModels.ReplaceOrderRequest, UpModels.OutboundFramePreparedCallback, CancellationToken, Task<UpModels.OutboundAttemptReceipt>>? ReplaceWithReceipt { get; init; }
+        public Func<Task>? BeforeFailClose { get; init; }
+    }
 
     public B3EntryPointClientGateway(
         Up.EntryPointClient client,
@@ -167,7 +195,61 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         Action? connectedTestHook = null,
         Func<CancellationToken, Task>? connectAsyncOverride = null,
         Func<CancellationToken, IAsyncEnumerable<UpModels.EntryPointEvent>>? eventStreamOverride = null)
+        : this(
+            client,
+            firmId,
+            initialSessionVerId,
+            logger,
+            new OutboundTestOverrides(),
+            initialReconnectDelay,
+            maxReconnectDelay,
+            clock,
+            latencyProbe,
+            venueDisconnectReactor,
+            gracefulTerminateTimeout,
+            riskOptions,
+            subAccountWireIdMapper,
+            venueAccountResolver,
+            investorIdResolver,
+            routingInstructionResolver,
+            terminateOnShutdown,
+            effectiveSessionVerIdProvider,
+            connectSessionRollReactor,
+            reResolveEndpoint,
+            reconnectAsyncOverride,
+            connectedTestHook,
+            connectAsyncOverride,
+            eventStreamOverride)
     {
+    }
+
+    internal B3EntryPointClientGateway(
+        Up.EntryPointClient client,
+        string firmId,
+        uint initialSessionVerId,
+        ILogger<B3EntryPointClientGateway> logger,
+        OutboundTestOverrides outboundTestOverrides,
+        TimeSpan? initialReconnectDelay = null,
+        TimeSpan? maxReconnectDelay = null,
+        TimeProvider? clock = null,
+        OrderEntryLatencyProbe? latencyProbe = null,
+        IVenueDisconnectReactor? venueDisconnectReactor = null,
+        TimeSpan? gracefulTerminateTimeout = null,
+        IOptionsMonitor<RiskOptions>? riskOptions = null,
+        ISubAccountWireIdMapper? subAccountWireIdMapper = null,
+        IVenueAccountResolver? venueAccountResolver = null,
+        IInvestorIdResolver? investorIdResolver = null,
+        IRoutingInstructionResolver? routingInstructionResolver = null,
+        bool terminateOnShutdown = true,
+        Func<uint>? effectiveSessionVerIdProvider = null,
+        IConnectSessionRollReactor? connectSessionRollReactor = null,
+        Func<CancellationToken, Task>? reResolveEndpoint = null,
+        Func<Up.ReconnectMode, Func<uint, uint>, CancellationToken, Task<Up.ReconnectOutcome>>? reconnectAsyncOverride = null,
+        Action? connectedTestHook = null,
+        Func<CancellationToken, Task>? connectAsyncOverride = null,
+        Func<CancellationToken, IAsyncEnumerable<UpModels.EntryPointEvent>>? eventStreamOverride = null)
+    {
+        ArgumentNullException.ThrowIfNull(outboundTestOverrides);
         _terminateOnShutdown = terminateOnShutdown;
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _firmId = firmId ?? throw new ArgumentNullException(nameof(firmId));
@@ -191,6 +273,13 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         _connectedTestHook = connectedTestHook;
         _connectAsyncOverride = connectAsyncOverride;
         _eventStreamOverride = eventStreamOverride;
+        _submitOverride = outboundTestOverrides.Submit;
+        _cancelOverride = outboundTestOverrides.Cancel;
+        _replaceOverride = outboundTestOverrides.Replace;
+        _submitWithReceiptOverride = outboundTestOverrides.SubmitWithReceipt;
+        _cancelWithReceiptOverride = outboundTestOverrides.CancelWithReceipt;
+        _replaceWithReceiptOverride = outboundTestOverrides.ReplaceWithReceipt;
+        _beforeOutboundFailCloseTestHook = outboundTestOverrides.BeforeFailClose;
         _client.Terminated += OnTerminated;
         _client.InboundGapAtReconnect += OnInboundGapAtReconnect;
         MetricsRegistry.RecordSessionVerId(_firmId, _currentSessionVerId);
@@ -206,18 +295,46 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
     private void OnInboundGapAtReconnect(object? sender, Up.InboundGapAtReconnectEventArgs e)
     {
-        // Capture for the post-reconnect reactor invocation; the SDK fires
-        // this exactly once per ReconnectAsync, synchronously inside that call,
-        // BEFORE it returns to ReconnectLoopAsync. No lock needed — see field
-        // declarations.
-        _lastGapFromSeq = e.FromSeqNo;
-        _lastGapCount = e.Count;
-        _lastGapPriorSessionVerId = e.PriorSessionVerId;
-        Volatile.Write(ref _lastReconnectHadGap, 1);
+        CaptureInboundGap(
+            e.FromSeqNo,
+            e.Count,
+            e.PriorSessionVerId,
+            Volatile.Read(ref _outboundLifecycleGeneration));
         _logger.LogWarning(
             "EntryPoint inbound gap at reconnect for firm {Firm}: priorVer={PriorVer} from={From} count={Count}",
             _firmId, e.PriorSessionVerId, e.FromSeqNo, e.Count);
     }
+
+    private void CaptureInboundGap(
+        ulong fromSeqNo,
+        uint count,
+        ulong priorSessionVerId,
+        long generation)
+    {
+        lock (_reconnectEvidenceGate)
+        {
+            _lastReconnectHadGap = true;
+            _lastGapGeneration = generation;
+            _lastGapFromSeq = fromSeqNo;
+            _lastGapCount = count;
+            _lastGapPriorSessionVerId = priorSessionVerId;
+        }
+    }
+
+    internal void CaptureInboundGapForTests(
+        ulong fromSeqNo,
+        uint count,
+        ulong priorSessionVerId) =>
+        CaptureInboundGap(
+            fromSeqNo,
+            count,
+            priorSessionVerId,
+            Volatile.Read(ref _outboundLifecycleGeneration));
+
+    internal void CaptureTerminationForTests(string terminationCode) =>
+        CaptureTermination(
+            terminationCode,
+            Volatile.Read(ref _outboundLifecycleGeneration));
 
     public string FirmId => _firmId;
 
@@ -241,6 +358,13 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// <summary>True when the auto-reconnect loop is currently running for this firm.</summary>
     public bool IsReconnecting => Volatile.Read(ref _reconnectingState) == 1;
 
+    /// <summary>
+    /// True after a frame-prepared-or-later outbound failure. While set, sends,
+    /// ordinary connects and automatic reconnects remain fail-closed.
+    /// </summary>
+    public bool OutboundReconciliationRequired =>
+        Volatile.Read(ref _outboundReconciliationRequired) == 1;
+
     public event Action<ExecutionReportEnvelope>? ExecutionReportReceived;
     public event Action<BusinessRejectEnvelope>? BusinessRejectReceived;
 
@@ -250,10 +374,12 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// </summary>
     public async Task ConnectAsync(CancellationToken cancellationToken)
     {
+        ThrowIfOutboundReconciliationRequired();
         await _connectionLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
+            ThrowIfOutboundReconciliationRequired();
             if (Volatile.Read(ref _connectedState) == 1
                 && _eventLoop is { IsCompleted: false })
                 return;
@@ -265,12 +391,118 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 await _connectAsyncOverride(cancellationToken).ConfigureAwait(false);
             else
                 await _client.ConnectAsync(cancellationToken).ConfigureAwait(false);
+            if (OutboundReconciliationRequired)
+            {
+                ClearPendingReconnectEvidence(
+                    Volatile.Read(ref _outboundLifecycleGeneration));
+                MarkDisconnected();
+                await TerminateFaultedSessionAsync().ConfigureAwait(false);
+                ThrowIfOutboundReconciliationRequired();
+            }
             ReconcileConnectSessionRoll();
             OnConnected();
         }
         finally
         {
             _connectionLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Completes an operator/coordinator-owned reconciliation by establishing a
+    /// fresh SessionVerId. The caller must durably resolve every ambiguous
+    /// attempt before invoking this lifecycle transition.
+    /// </summary>
+    public async Task CompleteOutboundReconciliationAsync(CancellationToken cancellationToken)
+    {
+        await _connectionLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var outboundLockHeld = false;
+        try
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (!OutboundReconciliationRequired)
+                throw new InvalidOperationException(
+                    $"EntryPoint gateway for firm '{_firmId}' does not require outbound reconciliation.");
+            if (Volatile.Read(ref _outboundFailCloseInProgress) != 0)
+                throw new InvalidOperationException(
+                    $"EntryPoint gateway for firm '{_firmId}' cannot reset while fail-close termination is still running.");
+            if (_eventLoop is { IsCompleted: false })
+                throw new InvalidOperationException(
+                    $"EntryPoint gateway for firm '{_firmId}' cannot reset while its prior event loop is still running.");
+            if (Volatile.Read(ref _reconnectScheduled) != 0
+                || Volatile.Read(ref _reconnectingState) != 0)
+            {
+                throw new InvalidOperationException(
+                    $"EntryPoint gateway for firm '{_firmId}' cannot reset while automatic reconnect is still draining.");
+            }
+
+            await _outboundSendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+            outboundLockHeld = true;
+            if (!OutboundReconciliationRequired
+                || Volatile.Read(ref _outboundFailCloseInProgress) != 0)
+            {
+                throw new InvalidOperationException(
+                    $"EntryPoint gateway for firm '{_firmId}' reconciliation state changed while reset was waiting.");
+            }
+
+            var resetGeneration = Volatile.Read(ref _outboundLifecycleGeneration);
+            ClearPendingReconnectEvidence(resetGeneration);
+            var priorVerId = Volatile.Read(ref _currentSessionVerId);
+            try
+            {
+                if (_reResolveEndpoint is not null)
+                    await _reResolveEndpoint(cancellationToken).ConfigureAwait(false);
+
+                var outcome = await ReconnectAsyncCore(
+                    Up.ReconnectMode.AlwaysNegotiate,
+                    BumpSessionVerIdSelector,
+                    cancellationToken).ConfigureAwait(false);
+                if (outcome.Kind != Up.ReconnectKind.Renegotiated
+                    || outcome.SessionVerId <= priorVerId)
+                {
+                    throw new InvalidOperationException(
+                        "Outbound reconciliation reset requires a freshly negotiated, strictly newer SessionVerId.");
+                }
+
+                ReconcileReconnectSessionRoll(
+                    outcome.Kind, priorVerId, outcome.SessionVerId);
+                if (Volatile.Read(ref _currentSessionVerId) != outcome.SessionVerId)
+                {
+                    throw new InvalidOperationException(
+                        "Outbound reconciliation reset could not publish the freshly negotiated SessionVerId.");
+                }
+
+                lock (_reconnectEvidenceGate)
+                {
+                    ClearPendingReconnectEvidenceUnsafe(resetGeneration);
+                    Interlocked.Increment(ref _outboundLifecycleGeneration);
+                    Volatile.Write(ref _outboundReconciliationRequired, 0);
+                }
+                OnConnected();
+            }
+            catch
+            {
+                ClearPendingReconnectEvidence(
+                    Volatile.Read(ref _outboundLifecycleGeneration));
+                MarkDisconnected();
+                await TerminateFaultedSessionAsync().ConfigureAwait(false);
+                throw;
+            }
+        }
+        finally
+        {
+            if (outboundLockHeld)
+                _outboundSendLock.Release();
+            _connectionLock.Release();
+        }
+    }
+
+    private void ThrowIfOutboundReconciliationRequired()
+    {
+        if (OutboundReconciliationRequired)
+        {
+            throw new InvalidOperationException(
+                $"EntryPoint gateway for firm '{_firmId}' requires outbound reconciliation and a fresh SessionVerId.");
         }
     }
 
@@ -396,6 +628,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
     private void OnConnected(bool startEventLoop = true)
     {
+        ThrowIfOutboundReconciliationRequired();
         if (Interlocked.Exchange(ref _connectedState, 1) == 0)
             MetricsRegistry.EntryPointConnected.Add(1, FirmTag());
         MetricsRegistry.RecordSessionVerId(_firmId, _currentSessionVerId);
@@ -431,7 +664,31 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         var req = BuildNewOrderRequest(order, ResolveStpInstruction(order), ResolveTradingSubAccount(order), ResolveVenueAccount(order), ResolveInvestorId(order), ResolveRoutingInstruction(order));
 
         return SendAsync(req.ClOrdID.Value, OrderEntryLatencyProbe.OpSubmit,
-            ct => _client.SubmitAsync(req, ct), cancellationToken);
+            ct => _submitOverride is null
+                ? _client.SubmitAsync(req, ct)
+                : _submitOverride(req, ct),
+            cancellationToken);
+    }
+
+    public Task<ExchangeGatewayReceipt> SubmitWithReceiptAsync(
+        Order order,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(order);
+        ArgumentNullException.ThrowIfNull(onFramePrepared);
+        if (order.Quantity < 0)
+            throw new ArgumentOutOfRangeException(nameof(order), "Quantity cannot be negative when submitted upstream.");
+
+        var req = BuildNewOrderRequest(order, ResolveStpInstruction(order), ResolveTradingSubAccount(order), ResolveVenueAccount(order), ResolveInvestorId(order), ResolveRoutingInstruction(order));
+        return SendWithReceiptAsync(
+            req.ClOrdID.Value,
+            OrderEntryLatencyProbe.OpSubmit,
+            (callback, ct) => _submitWithReceiptOverride is null
+                ? _client.SubmitWithReceiptAsync(req, callback, ct)
+                : _submitWithReceiptOverride(req, callback, ct),
+            onFramePrepared,
+            cancellationToken);
     }
 
     /// <summary>
@@ -570,7 +827,39 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         };
 
         return SendAsync(newClOrdId, OrderEntryLatencyProbe.OpCancel,
-            ct => _client.CancelAsync(req, ct), cancellationToken);
+            ct => _cancelOverride is null
+                ? _client.CancelAsync(req, ct)
+                : _cancelOverride(req, ct),
+            cancellationToken);
+    }
+
+    public Task<ExchangeGatewayReceipt> CancelWithReceiptAsync(
+        Order order,
+        ulong newClOrdId,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(order);
+        ArgumentNullException.ThrowIfNull(onFramePrepared);
+        if (newClOrdId == 0)
+            throw new ArgumentOutOfRangeException(nameof(newClOrdId), "Cancel ClOrdID must be non-zero.");
+
+        var req = new UpModels.CancelOrderRequest
+        {
+            ClOrdID = new UpModels.ClOrdID(newClOrdId),
+            OrigClOrdID = new UpModels.ClOrdID(order.ClOrdId),
+            SecurityId = order.SecurityId,
+            Side = order.Side == OrderSide.Buy ? UpModels.Side.Buy : UpModels.Side.Sell,
+        };
+
+        return SendWithReceiptAsync(
+            newClOrdId,
+            OrderEntryLatencyProbe.OpCancel,
+            (callback, ct) => _cancelWithReceiptOverride is null
+                ? _client.CancelWithReceiptAsync(req, callback, ct)
+                : _cancelWithReceiptOverride(req, callback, ct),
+            onFramePrepared,
+            cancellationToken);
     }
 
     public Task CancelReplaceAsync(
@@ -608,7 +897,44 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             ResolveRoutingInstruction(original));
 
         return SendAsync(newClOrdId, OrderEntryLatencyProbe.OpReplace,
-            ct => _client.ReplaceAsync(req, ct), cancellationToken);
+            ct => _replaceOverride is null
+                ? _client.ReplaceAsync(req, ct)
+                : _replaceOverride(req, ct),
+            cancellationToken);
+    }
+
+    public Task<ExchangeGatewayReceipt> CancelReplaceWithReceiptAsync(
+        Order original,
+        ulong newClOrdId,
+        long newQuantity,
+        decimal? newPrice,
+        TimeInForce? requestedTimeInForce,
+        decimal? requestedStopPrice,
+        DateTimeOffset? requestedGoodTillDate,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(original);
+        ArgumentNullException.ThrowIfNull(onFramePrepared);
+        if (newClOrdId == 0)
+            throw new ArgumentOutOfRangeException(nameof(newClOrdId), "Replace ClOrdID must be non-zero.");
+        if (newQuantity < 0)
+            throw new ArgumentOutOfRangeException(nameof(newQuantity));
+
+        var req = BuildReplaceOrderRequest(original, newClOrdId, newQuantity, newPrice,
+            requestedTimeInForce, requestedStopPrice, requestedGoodTillDate,
+            ResolveStpInstruction(original), ResolveTradingSubAccount(original),
+            ResolveVenueAccount(original), ResolveInvestorId(original),
+            ResolveRoutingInstruction(original));
+
+        return SendWithReceiptAsync(
+            newClOrdId,
+            OrderEntryLatencyProbe.OpReplace,
+            (callback, ct) => _replaceWithReceiptOverride is null
+                ? _client.ReplaceWithReceiptAsync(req, callback, ct)
+                : _replaceWithReceiptOverride(req, callback, ct),
+            onFramePrepared,
+            cancellationToken);
     }
 
     /// <summary>
@@ -716,31 +1042,253 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// </summary>
     private async Task SendAsync(ulong clOrdId, string op, Func<CancellationToken, Task> sdkCall, CancellationToken ct)
     {
-        if (Volatile.Read(ref _connectedState) != 1
-            || (_connectedTestHook is null
-                && _eventLoop is not { IsCompleted: false }))
+        if (_framePreparedCallbackDepth.Value != 0)
         {
             throw new InvalidOperationException(
-                $"EntryPoint gateway for firm '{_firmId}' is not operational; inbound event consumption is stopped.");
+                "Outbound gateway calls cannot re-enter the same gateway from the frame-prepared callback.");
         }
 
-        var start = _clock.GetTimestamp();
-        _latencyProbe.OnSubmitted(clOrdId, _firmId, op);
+        var lifecycleGeneration = Volatile.Read(ref _outboundLifecycleGeneration);
+        await _outboundSendLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            await sdkCall(ct).ConfigureAwait(false);
+            if (lifecycleGeneration != Volatile.Read(ref _outboundLifecycleGeneration))
+            {
+                throw new InvalidOperationException(
+                    $"EntryPoint gateway for firm '{_firmId}' crossed an outbound reconciliation boundary while queued.");
+            }
+            if (!IsOperationalForOutbound())
+            {
+                throw new InvalidOperationException(
+                    $"EntryPoint gateway for firm '{_firmId}' is not operational; inbound event consumption is stopped.");
+            }
+
+            var start = _clock.GetTimestamp();
+            _latencyProbe.OnSubmitted(clOrdId, _firmId, op);
+            try
+            {
+                await sdkCall(ct).ConfigureAwait(false);
+            }
+            catch
+            {
+                _latencyProbe.Forget(clOrdId);
+                throw;
+            }
+
+            MetricsRegistry.OrderEntryCallMs.Record(
+                _clock.GetElapsedTime(start).TotalMilliseconds,
+                new KeyValuePair<string, object?>("firm", _firmId),
+                new KeyValuePair<string, object?>("op", op));
         }
-        catch
+        finally
         {
-            _latencyProbe.Forget(clOrdId);
-            throw;
+            _outboundSendLock.Release();
+        }
+    }
+
+    private async Task<ExchangeGatewayReceipt> SendWithReceiptAsync(
+        ulong clOrdId,
+        string op,
+        Func<UpModels.OutboundFramePreparedCallback, CancellationToken, Task<UpModels.OutboundAttemptReceipt>> sdkCall,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken ct)
+    {
+        if (_framePreparedCallbackDepth.Value != 0)
+        {
+            throw new ExchangeGatewayAttemptException(
+                "Outbound gateway calls cannot re-enter the same gateway from the frame-prepared callback.",
+                ExchangeGatewayFailureDisposition.OutboundProvenUnsent,
+                ExchangeGatewayAttemptStage.NotStarted,
+                frame: null);
         }
 
-        MetricsRegistry.OrderEntryCallMs.Record(
-            _clock.GetElapsedTime(start).TotalMilliseconds,
-            new KeyValuePair<string, object?>("firm", _firmId),
-            new KeyValuePair<string, object?>("op", op));
+        var lifecycleGeneration = Volatile.Read(ref _outboundLifecycleGeneration);
+        try
+        {
+            await _outboundSendLock.WaitAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException ex)
+        {
+            throw new ExchangeGatewayAttemptException(
+                "The outbound attempt was cancelled before entering the SDK.",
+                ExchangeGatewayFailureDisposition.OutboundProvenUnsent,
+                ExchangeGatewayAttemptStage.NotStarted,
+                frame: null,
+                ex);
+        }
+
+        try
+        {
+            if (lifecycleGeneration != Volatile.Read(ref _outboundLifecycleGeneration))
+            {
+                throw new ExchangeGatewayAttemptException(
+                    $"EntryPoint gateway for firm '{_firmId}' crossed an outbound reconciliation boundary while queued.",
+                    ExchangeGatewayFailureDisposition.OutboundProvenUnsent,
+                    ExchangeGatewayAttemptStage.NotStarted,
+                    frame: null);
+            }
+            if (!IsOperationalForOutbound())
+            {
+                throw new ExchangeGatewayAttemptException(
+                    $"EntryPoint gateway for firm '{_firmId}' is not operational; inbound event consumption is stopped.",
+                    ExchangeGatewayFailureDisposition.OutboundProvenUnsent,
+                    ExchangeGatewayAttemptStage.NotStarted,
+                    frame: null);
+            }
+
+            var start = _clock.GetTimestamp();
+            _latencyProbe.OnSubmitted(clOrdId, _firmId, op);
+            try
+            {
+                var receipt = await sdkCall(
+                    (frame, callbackCt) => InvokeFramePreparedCallbackAsync(
+                        onFramePrepared, frame, callbackCt),
+                    ct).ConfigureAwait(false);
+
+                var mapped = MapReceipt(receipt, _firmId);
+                MetricsRegistry.OrderEntryCallMs.Record(
+                    _clock.GetElapsedTime(start).TotalMilliseconds,
+                    new KeyValuePair<string, object?>("firm", _firmId),
+                    new KeyValuePair<string, object?>("op", op));
+                return mapped;
+            }
+            catch (UpModels.OutboundAttemptException ex)
+            {
+                var mapped = MapAttemptException(ex, _firmId);
+                if (mapped.NoTransportWritePossible)
+                    _latencyProbe.Forget(clOrdId);
+
+                if (mapped.LastStage >= ExchangeGatewayAttemptStage.FramePrepared)
+                {
+                    await FailClosedOutboundAttemptAsync(op, clOrdId, mapped).ConfigureAwait(false);
+                }
+
+                throw mapped;
+            }
+        }
+        finally
+        {
+            _outboundSendLock.Release();
+        }
     }
+
+    private bool IsOperationalForOutbound() =>
+        !_disposed
+        && !_shutdownCts.IsCancellationRequested
+        && !OutboundReconciliationRequired
+        && Volatile.Read(ref _connectedState) == 1
+        && (_connectedTestHook is not null
+            || _eventLoop is { IsCompleted: false });
+
+    private async ValueTask InvokeFramePreparedCallbackAsync(
+        ExchangeGatewayFramePreparedCallback callback,
+        UpModels.OutboundFrameIdentity frame,
+        CancellationToken ct)
+    {
+        var priorDepth = _framePreparedCallbackDepth.Value;
+        _framePreparedCallbackDepth.Value = priorDepth + 1;
+        try
+        {
+            await callback(MapFrameIdentity(frame, _firmId), ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _framePreparedCallbackDepth.Value = priorDepth;
+        }
+    }
+
+    private async Task FailClosedOutboundAttemptAsync(
+        string operation,
+        ulong clOrdId,
+        ExchangeGatewayAttemptException failure)
+    {
+        Interlocked.Exchange(ref _outboundFailCloseInProgress, 1);
+        try
+        {
+            lock (_reconnectEvidenceGate)
+            {
+                if (Interlocked.Exchange(ref _outboundReconciliationRequired, 1) == 0)
+                    Interlocked.Increment(ref _outboundLifecycleGeneration);
+                ClearPendingReconnectEvidenceUnsafe(
+                    Volatile.Read(ref _outboundLifecycleGeneration));
+            }
+            MarkDisconnected();
+            _logger.LogError(
+                "Outbound EntryPoint attempt requires reconciliation for firm {Firm}: operation={Operation} clOrdId={ClOrdId} stage={Stage} disposition={Disposition}; exact-sequence replay is unavailable.",
+                _firmId,
+                operation,
+                clOrdId,
+                failure.LastStage,
+                failure.Disposition);
+            if (_beforeOutboundFailCloseTestHook is not null)
+                await _beforeOutboundFailCloseTestHook().ConfigureAwait(false);
+            await TerminateFaultedSessionAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            Volatile.Write(ref _outboundFailCloseInProgress, 0);
+        }
+    }
+
+    internal static ExchangeGatewayReceipt MapReceipt(
+        UpModels.OutboundAttemptReceipt receipt,
+        string firmId)
+    {
+        ArgumentNullException.ThrowIfNull(receipt);
+        return new ExchangeGatewayReceipt(
+            MapFrameIdentity(receipt.Frame, firmId),
+            MapAttemptStage(receipt.Stage));
+    }
+
+    internal static ExchangeGatewayAttemptException MapAttemptException(
+        UpModels.OutboundAttemptException exception,
+        string firmId)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return new ExchangeGatewayAttemptException(
+            exception.Message,
+            exception.NoTransportWritePossible
+                ? ExchangeGatewayFailureDisposition.OutboundProvenUnsent
+                : ExchangeGatewayFailureDisposition.Ambiguous,
+            MapAttemptStage(exception.LastStage),
+            exception.Frame is null ? null : MapFrameIdentity(exception.Frame, firmId),
+            exception);
+    }
+
+    internal static ExchangeGatewayFrameIdentity MapFrameIdentity(
+        UpModels.OutboundFrameIdentity frame,
+        string firmId)
+    {
+        ArgumentNullException.ThrowIfNull(frame);
+        return new ExchangeGatewayFrameIdentity(
+            firmId,
+            frame.SessionId,
+            frame.SessionVerId,
+            frame.MsgSeqNum,
+            frame.Operation switch
+            {
+                UpModels.OutboundOperationKind.NewOrder => ExchangeGatewayOperation.NewOrder,
+                UpModels.OutboundOperationKind.Cancel => ExchangeGatewayOperation.Cancel,
+                UpModels.OutboundOperationKind.Replace => ExchangeGatewayOperation.Replace,
+                _ => throw new ArgumentOutOfRangeException(nameof(frame), frame.Operation, "Unknown SDK outbound operation."),
+            },
+            frame.ClOrdID.Value,
+            frame.EncodedFrameLength,
+            frame.EncodedFrameSha256);
+    }
+
+    internal static ExchangeGatewayAttemptStage MapAttemptStage(
+        UpModels.OutboundAttemptStage stage) => stage switch
+        {
+            UpModels.OutboundAttemptStage.NotStarted => ExchangeGatewayAttemptStage.NotStarted,
+            UpModels.OutboundAttemptStage.SequenceReserved => ExchangeGatewayAttemptStage.SequenceReserved,
+            UpModels.OutboundAttemptStage.SequenceReservedAndEncoded => ExchangeGatewayAttemptStage.SequenceReservedAndEncoded,
+            UpModels.OutboundAttemptStage.FramePrepared => ExchangeGatewayAttemptStage.FramePrepared,
+            UpModels.OutboundAttemptStage.TransportWriteStarted => ExchangeGatewayAttemptStage.TransportWriteStarted,
+            UpModels.OutboundAttemptStage.TransportWriteCompleted => ExchangeGatewayAttemptStage.TransportWriteCompleted,
+            UpModels.OutboundAttemptStage.SdkSessionStatePersisted => ExchangeGatewayAttemptStage.SdkSessionStatePersisted,
+            _ => throw new ArgumentOutOfRangeException(nameof(stage), stage, "Unknown SDK outbound attempt stage."),
+        };
 
     /// <summary>
     /// Q1.1 (#253). Domain → SDK <see cref="UpModels.OrderType"/> mapping
@@ -1015,11 +1563,20 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         {
             if (recover && !_disposed && !_shutdownCts.IsCancellationRequested)
             {
-                _logger.LogWarning(
-                    "EntryPoint event loop for firm {Firm} stopped while the gateway was expected to be operational; scheduling recovery.",
-                    _firmId);
                 MarkDisconnected();
-                ScheduleReconnect();
+                if (OutboundReconciliationRequired)
+                {
+                    _logger.LogWarning(
+                        "EntryPoint event loop for firm {Firm} stopped while outbound reconciliation is required; automatic reconnect remains suppressed.",
+                        _firmId);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "EntryPoint event loop for firm {Firm} stopped while the gateway was expected to be operational; scheduling recovery.",
+                        _firmId);
+                    ScheduleReconnect();
+                }
             }
         }
     }
@@ -1173,16 +1730,56 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         // Don't fight a graceful shutdown or a client-initiated terminate
         // (e.g. our own DisposeAsync sending Terminate). Peer-initiated
         // terminations are the only ones that warrant a reconnect attempt.
-        if (e.InitiatedByClient || _disposed || _shutdownCts.IsCancellationRequested) return;
+        if (e.InitiatedByClient
+            || _disposed
+            || _shutdownCts.IsCancellationRequested
+            || OutboundReconciliationRequired)
+            return;
 
         // Capture the peer terminate code for the post-reconnect reactor
         // (slice 2 of #132). Stored before kicking the reconnect loop so
         // the loop sees the latest value when it consults it on success.
-        Volatile.Write(ref _lastTerminationCode, e.Code.ToString());
+        CaptureTermination(
+            e.Code.ToString(),
+            Volatile.Read(ref _outboundLifecycleGeneration));
 
         // Detach from the inbound thread so the event-loop can drain
         // cleanly; the reconnect loop owns its own lifecycle.
         ScheduleReconnect();
+    }
+
+    private void CaptureTermination(string terminationCode, long generation)
+    {
+        lock (_reconnectEvidenceGate)
+        {
+            _lastTerminationCode = terminationCode;
+            _lastTerminationGeneration = generation;
+        }
+    }
+
+    private void ClearPendingReconnectEvidence(long upToGeneration)
+    {
+        lock (_reconnectEvidenceGate)
+            ClearPendingReconnectEvidenceUnsafe(upToGeneration);
+    }
+
+    private void ClearPendingReconnectEvidenceUnsafe(long upToGeneration)
+    {
+        if (_lastReconnectHadGap && _lastGapGeneration <= upToGeneration)
+        {
+            _lastReconnectHadGap = false;
+            _lastGapGeneration = 0;
+            _lastGapFromSeq = 0;
+            _lastGapCount = 0;
+            _lastGapPriorSessionVerId = 0;
+        }
+
+        if (_lastTerminationCode is not null
+            && _lastTerminationGeneration <= upToGeneration)
+        {
+            _lastTerminationCode = null;
+            _lastTerminationGeneration = 0;
+        }
     }
 
     private void MarkDisconnected()
@@ -1193,7 +1790,9 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
     private void ScheduleReconnect()
     {
-        if (_disposed || _shutdownCts.IsCancellationRequested)
+        if (_disposed
+            || _shutdownCts.IsCancellationRequested
+            || OutboundReconciliationRequired)
             return;
         if (Interlocked.CompareExchange(ref _reconnectScheduled, 1, 0) != 0)
             return;
@@ -1212,7 +1811,8 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             if (Volatile.Read(ref _connectedState) == 1
                 && _connectedTestHook is null
                 && !_disposed
-                && !_shutdownCts.IsCancellationRequested)
+                && !_shutdownCts.IsCancellationRequested
+                && !OutboundReconciliationRequired)
                 StartEventLoop();
         });
     }
@@ -1247,15 +1847,31 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         try
         {
             var attempt = 0;
-            while (!ct.IsCancellationRequested && !_disposed)
+            if (OutboundReconciliationRequired)
+            {
+                ClearPendingReconnectEvidence(
+                    Volatile.Read(ref _outboundLifecycleGeneration));
+                return;
+            }
+            while (!ct.IsCancellationRequested
+                   && !_disposed
+                   && !OutboundReconciliationRequired)
             {
                 attempt++;
                 MetricsRegistry.EntryPointReconnectAttempts.Add(1,
                     new KeyValuePair<string, object?>("firm", _firmId),
                     new KeyValuePair<string, object?>("attempt", attempt));
                 var priorVerId = Volatile.Read(ref _currentSessionVerId);
+                var reconnectGeneration = Volatile.Read(ref _outboundLifecycleGeneration);
                 try
                 {
+                    if (OutboundReconciliationRequired)
+                    {
+                        ClearPendingReconnectEvidence(
+                            Volatile.Read(ref _outboundLifecycleGeneration));
+                        return;
+                    }
+
                     // #565. Re-resolve the peer hostname immediately before
                     // dialing so a matching-side pod IP change (Kubernetes
                     // failover/reschedule) is picked up on THIS attempt
@@ -1274,6 +1890,15 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                         Up.ReconnectMode.EstablishReuseThenNegotiate,
                         BumpSessionVerIdSelector,
                         ct).ConfigureAwait(false);
+                    if (OutboundReconciliationRequired
+                        || reconnectGeneration != Volatile.Read(ref _outboundLifecycleGeneration))
+                    {
+                        ClearPendingReconnectEvidence(
+                            Volatile.Read(ref _outboundLifecycleGeneration));
+                        MarkDisconnected();
+                        await TerminateFaultedSessionAsync().ConfigureAwait(false);
+                        return;
+                    }
                     MetricsRegistry.EntryPointReconnectSucceeded.Add(1,
                         new KeyValuePair<string, object?>("firm", _firmId),
                         new KeyValuePair<string, object?>("kind", ReconnectKindTag(outcome.Kind)));
@@ -1287,8 +1912,26 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                     // ghosts still present — same backstop reasoning as the
                     // connect path).
                     ReconcileReconnectSessionRoll(outcome.Kind, priorVerId, outcome.SessionVerId);
+                    if (OutboundReconciliationRequired
+                        || reconnectGeneration != Volatile.Read(ref _outboundLifecycleGeneration))
+                    {
+                        ClearPendingReconnectEvidence(
+                            Volatile.Read(ref _outboundLifecycleGeneration));
+                        MarkDisconnected();
+                        await TerminateFaultedSessionAsync().ConfigureAwait(false);
+                        return;
+                    }
                     OnConnected(startEventLoop: false);
-                    NotifyVenueDisconnectReactor();
+                    if (OutboundReconciliationRequired
+                        || reconnectGeneration != Volatile.Read(ref _outboundLifecycleGeneration))
+                    {
+                        ClearPendingReconnectEvidence(
+                            Volatile.Read(ref _outboundLifecycleGeneration));
+                        MarkDisconnected();
+                        await TerminateFaultedSessionAsync().ConfigureAwait(false);
+                        return;
+                    }
+                    NotifyVenueDisconnectReactor(reconnectGeneration);
                     return;
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -1304,6 +1947,15 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 }
                 catch (Exception ex)
                 {
+                    if (OutboundReconciliationRequired)
+                    {
+                        ClearPendingReconnectEvidence(
+                            Volatile.Read(ref _outboundLifecycleGeneration));
+                        MarkDisconnected();
+                        await TerminateFaultedSessionAsync().ConfigureAwait(false);
+                        return;
+                    }
+
                     MetricsRegistry.EntryPointReconnectFailed.Add(1,
                         new KeyValuePair<string, object?>("firm", _firmId),
                         new KeyValuePair<string, object?>("reason", ex.GetType().Name));
@@ -1334,6 +1986,9 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
     internal Task ReconnectLoopForTestsAsync(CancellationToken ct)
         => ReconnectLoopAsync(ct);
+
+    internal Task? EventLoopTaskForTests => _eventLoop;
+    internal Task? ScheduledReconnectTaskForTests => _reconnectLoop;
 
     private Task<Up.ReconnectOutcome> ReconnectAsyncCore(
         Up.ReconnectMode mode,
@@ -1387,25 +2042,63 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// gateway. Resets the captured state regardless of reactor
     /// presence so a subsequent reconnect cycle starts clean.
     /// </summary>
-    private void NotifyVenueDisconnectReactor()
+    private void NotifyVenueDisconnectReactor(long reconnectGeneration)
     {
-        var hadGap = Interlocked.Exchange(ref _lastReconnectHadGap, 0) == 1;
-        var fromSeq = hadGap ? (ulong?)_lastGapFromSeq : null;
-        var count = hadGap ? (uint?)_lastGapCount : null;
-        var priorVer = hadGap ? (ulong?)_lastGapPriorSessionVerId : null;
-        var priorCode = Interlocked.Exchange(ref _lastTerminationCode, null);
-
-        if (_reactor is null) return;
-
-        try
+        lock (_reconnectEvidenceGate)
         {
-            _reactor.OnPeerReconnected(_firmId,
-                new ReconnectOutcome(hadGap, fromSeq, count, priorVer, priorCode));
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex,
-                "VenueDisconnectReactor threw for firm {Firm}; suppressed to keep gateway alive.", _firmId);
+            if (OutboundReconciliationRequired
+                || Volatile.Read(ref _outboundLifecycleGeneration) != reconnectGeneration)
+            {
+                ClearPendingReconnectEvidenceUnsafe(
+                    Volatile.Read(ref _outboundLifecycleGeneration));
+                return;
+            }
+
+            bool hadGap = false;
+            ulong? fromSeq = null;
+            uint? count = null;
+            ulong? priorVer = null;
+            string? priorCode = null;
+            if (_lastReconnectHadGap
+                && _lastGapGeneration <= reconnectGeneration)
+            {
+                if (_lastGapGeneration == reconnectGeneration)
+                {
+                    hadGap = true;
+                    fromSeq = _lastGapFromSeq;
+                    count = _lastGapCount;
+                    priorVer = _lastGapPriorSessionVerId;
+                }
+
+                _lastReconnectHadGap = false;
+                _lastGapGeneration = 0;
+                _lastGapFromSeq = 0;
+                _lastGapCount = 0;
+                _lastGapPriorSessionVerId = 0;
+            }
+
+            if (_lastTerminationCode is not null
+                && _lastTerminationGeneration <= reconnectGeneration)
+            {
+                if (_lastTerminationGeneration == reconnectGeneration)
+                    priorCode = _lastTerminationCode;
+
+                _lastTerminationCode = null;
+                _lastTerminationGeneration = 0;
+            }
+
+            if (_reactor is null) return;
+
+            try
+            {
+                _reactor.OnPeerReconnected(_firmId,
+                    new ReconnectOutcome(hadGap, fromSeq, count, priorVer, priorCode));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "VenueDisconnectReactor threw for firm {Firm}; suppressed to keep gateway alive.", _firmId);
+            }
         }
     }
 

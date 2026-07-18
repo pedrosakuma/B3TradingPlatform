@@ -6,9 +6,11 @@ using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
+using B3.Trading.Infrastructure;
 using B3.Trading.Infrastructure.Persistence;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Up = B3.EntryPoint.Client.Models;
 
 namespace B3.Trading.Application.Tests.Outbound;
 
@@ -37,6 +39,38 @@ public sealed class OutboundMutationLedgerTests
         Assert.Equal(T0.AddSeconds(4), attempt.TransportWriteCompletedAtUtc);
         Assert.Throws<InvalidOperationException>(() =>
             fixture.Ledger.Apply(fixture.Unsent));
+    }
+
+    [Fact]
+    public void GatewayMappedFrameIdentity_CanBePersistedDirectly()
+    {
+        var fixture = Fixture.Create(clOrdId: 101);
+        fixture.Ledger.Apply(fixture.Approved);
+        fixture.Ledger.Apply(fixture.Intent);
+        var mapped = B3EntryPointClientGateway.MapFrameIdentity(
+            new Up.OutboundFrameIdentity(
+                sessionId: 11,
+                sessionVerId: 2,
+                msgSeqNum: 77,
+                Up.OutboundOperationKind.NewOrder,
+                new Up.ClOrdID(fixture.ClOrdId),
+                encodedFrameLength: 128,
+                encodedFrameSha256: new string('A', 64)),
+            fixture.Frame.FirmId);
+        var frameEvent = fixture.Frame with
+        {
+            FirmId = mapped.FirmId,
+            SessionId = mapped.SessionId,
+            SessionVerId = mapped.SessionVerId,
+            OutboundSeqNum = mapped.OutboundSeqNum,
+            EncodedFrameSha256 = mapped.EncodedFrameSha256,
+        };
+
+        fixture.Ledger.Apply(frameEvent);
+
+        Assert.True(fixture.Ledger.TryGet(fixture.MutationId, out var mutation));
+        var attempt = Assert.Single(mutation!.Attempts);
+        Assert.Equal(new string('a', 64), attempt.FramePrepared!.EncodedFrameSha256);
     }
 
     [Fact]

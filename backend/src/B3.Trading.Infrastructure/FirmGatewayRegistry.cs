@@ -116,10 +116,31 @@ public sealed class MultiFirmExchangeGateway : IExchangeGateway
         return _registry.For(order.FirmId).SubmitAsync(order, cancellationToken);
     }
 
+    public Task<ExchangeGatewayReceipt> SubmitWithReceiptAsync(
+        Order order,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(order);
+        return _registry.For(order.FirmId).SubmitWithReceiptAsync(
+            order, onFramePrepared, cancellationToken);
+    }
+
     public Task CancelAsync(Order order, ulong newClOrdId, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(order);
         return _registry.For(order.FirmId).CancelAsync(order, newClOrdId, cancellationToken);
+    }
+
+    public Task<ExchangeGatewayReceipt> CancelWithReceiptAsync(
+        Order order,
+        ulong newClOrdId,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(order);
+        return _registry.For(order.FirmId).CancelWithReceiptAsync(
+            order, newClOrdId, onFramePrepared, cancellationToken);
     }
 
     public Task CancelReplaceAsync(
@@ -131,5 +152,18 @@ public sealed class MultiFirmExchangeGateway : IExchangeGateway
         return _registry.For(original.FirmId).CancelReplaceAsync(
             original, newClOrdId, newQuantity, newPrice,
             requestedTimeInForce, requestedStopPrice, requestedGoodTillDate, cancellationToken);
+    }
+
+    public Task<ExchangeGatewayReceipt> CancelReplaceWithReceiptAsync(
+        Order original, ulong newClOrdId, long newQuantity, decimal? newPrice,
+        TimeInForce? requestedTimeInForce, decimal? requestedStopPrice, DateTimeOffset? requestedGoodTillDate,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(original);
+        return _registry.For(original.FirmId).CancelReplaceWithReceiptAsync(
+            original, newClOrdId, newQuantity, newPrice,
+            requestedTimeInForce, requestedStopPrice, requestedGoodTillDate,
+            onFramePrepared, cancellationToken);
     }
 }
