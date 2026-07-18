@@ -408,6 +408,400 @@ public sealed class OutboundMutationLedgerTests
         AssertState(fixture, OutboundMutationState.VenueAcknowledged);
     }
 
+    [Theory]
+    [InlineData("New", OutboundMutationKind.New, 0UL)]
+    [InlineData("Rejected", OutboundMutationKind.New, 0UL)]
+    [InlineData("Fill", OutboundMutationKind.New, 0UL)]
+    [InlineData("Canceled", OutboundMutationKind.Cancel, 50UL)]
+    [InlineData("Replaced", OutboundMutationKind.Replace, 50UL)]
+    public void Pre640WalEr_MissingSessionEvidenceRemainsUnmatchedAndFailClosed(
+        string execKind,
+        OutboundMutationKind mutationKind,
+        ulong originalClOrdId)
+    {
+        var fixture = Fixture.Create();
+        fixture.Ledger.Apply(fixture.Approved with
+        {
+            MutationKind = mutationKind,
+            OriginalClOrdId = originalClOrdId == 0 ? null : originalClOrdId,
+        });
+        fixture.Ledger.Apply(fixture.Intent);
+        fixture.Ledger.Apply(fixture.Frame);
+        var oldEr = OldEr(fixture.ClOrdId, execKind, originalClOrdId) with
+        {
+            FirmId = "F1",
+        };
+
+        var result = fixture.Ledger.ApplyVenueAcknowledgement(oldEr);
+
+        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedUnmatched, result.Status);
+        Assert.True(result.ShouldApplyDomain);
+        AssertState(fixture, OutboundMutationState.Ambiguous);
+        var mutation = Assert.Single(fixture.Ledger.SnapshotMutations());
+        Assert.Null(mutation.Resolution);
+        Assert.Equal(
+            OutboundAmbiguityReason.IncompleteVenueEvidence,
+            Assert.Single(mutation.Attempts).AmbiguityReason);
+        Assert.Equal(1, fixture.Ledger.ReadinessBlockingCount);
+        Assert.Equal(
+            InboundVenueEvidenceDisposition.Unmatched,
+            Assert.Single(fixture.Ledger.CaptureSnapshot().InboundEvidence).Disposition);
+    }
+
+    [Fact]
+    public void Pre640WalEr_PartialEvidenceAppliesUnlessAProvidedFieldMismatches()
+    {
+        var partial = Fixture.Create();
+        ApplyPrepared(partial.Ledger, partial, partial.Frame);
+        var missingInboundSeq = OldEr(partial.ClOrdId, "New") with
+        {
+            FirmId = "F1",
+            SessionId = 11,
+            SessionVerId = 2,
+        };
+
+        var partialResult = partial.Ledger.ApplyVenueAcknowledgement(missingInboundSeq);
+
+        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedUnmatched, partialResult.Status);
+        Assert.True(partialResult.ShouldApplyDomain);
+        AssertState(partial, OutboundMutationState.Ambiguous);
+
+        var mismatch = Fixture.Create(clOrdId: 2);
+        ApplyPrepared(mismatch.Ledger, mismatch, mismatch.Frame);
+        var wrongProvidedSession = OldEr(mismatch.ClOrdId, "New") with
+        {
+            FirmId = "F1",
+            SessionId = 99,
+        };
+
+        var mismatchResult = mismatch.Ledger.ApplyVenueAcknowledgement(
+            wrongProvidedSession);
+
+        Assert.Equal(
+            InboundVenueEvidenceApplyStatus.RecordedConflicting,
+            mismatchResult.Status);
+        Assert.False(mismatchResult.ShouldApplyDomain);
+        AssertState(mismatch, OutboundMutationState.Ambiguous);
+    }
+
+    [Fact]
+    public void Pre640WalEr_FirmMismatchRemainsConflicting()
+    {
+        var fixture = Fixture.Create();
+        ApplyPrepared(fixture.Ledger, fixture, fixture.Frame);
+
+        var result = fixture.Ledger.ApplyVenueAcknowledgement(
+            OldEr(fixture.ClOrdId, "New") with { FirmId = "OTHER" });
+
+        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedConflicting, result.Status);
+        Assert.False(result.ShouldApplyDomain);
+        AssertState(fixture, OutboundMutationState.Ambiguous);
+    }
+
+    [Fact]
+    public void Pre640WalEr_CannotOverridePriorConflictOrProvenUnsent()
+    {
+        var conflicting = Fixture.Create();
+        ApplyPrepared(conflicting.Ledger, conflicting, conflicting.Frame);
+        conflicting.Ledger.ApplyVenueAcknowledgement(
+            Acknowledgement(
+                conflicting,
+                firmId: "F1",
+                sessionId: 99,
+                sessionVerId: 2));
+
+        var afterConflict = conflicting.Ledger.ApplyVenueAcknowledgement(
+            OldEr(conflicting.ClOrdId, "New") with { FirmId = "F1" });
+
+        Assert.Equal(
+            InboundVenueEvidenceApplyStatus.RecordedConflicting,
+            afterConflict.Status);
+        Assert.False(afterConflict.ShouldApplyDomain);
+        Assert.Equal(
+            OutboundAmbiguityReason.ConflictingVenueEvidence,
+            Assert.Single(conflicting.Ledger.SnapshotMutations()).Attempts[^1]
+                .AmbiguityReason);
+
+        var provenUnsent = Fixture.Create(clOrdId: 2);
+        provenUnsent.Ledger.Apply(provenUnsent.Approved);
+        provenUnsent.Ledger.Apply(provenUnsent.Intent);
+        provenUnsent.Ledger.Apply(provenUnsent.Unsent);
+
+        var afterProvenUnsent = provenUnsent.Ledger.ApplyVenueAcknowledgement(
+            OldEr(provenUnsent.ClOrdId, "New") with { FirmId = "F1" });
+
+        Assert.Equal(
+            InboundVenueEvidenceApplyStatus.RecordedConflicting,
+            afterProvenUnsent.Status);
+        Assert.False(afterProvenUnsent.ShouldApplyDomain);
+        AssertState(provenUnsent, OutboundMutationState.Ambiguous);
+    }
+
+    [Theory]
+    [InlineData("New", "Working", 0L)]
+    [InlineData("Rejected", "Rejected", 0L)]
+    [InlineData("Fill", "Filled", 10L)]
+    public void EventReplayer_Pre640NewRejectAndFillStillUpdateDomain(
+        string execKind,
+        string expectedStatus,
+        long expectedCumulativeQuantity)
+    {
+        var fixture = Fixture.Create();
+        var ownership = new OrderOwnershipMap();
+        var orders = new WorkingOrderBook();
+        var positions = new PositionKeeper();
+        var processor = new ExecutionReportProcessor(
+            ownership,
+            orders,
+            positions,
+            new NoOpExecutionEventSink(),
+            new NoOpMarginProvider(),
+            NullLogger<ExecutionReportProcessor>.Instance);
+        var replayer = new EventReplayer(
+            orders,
+            ownership,
+            new KillSwitchService(),
+            new SymbolHaltService(),
+            new SessionPhaseService(),
+            processor,
+            new AlgoBook(),
+            new ClOrdIdPrefixRegistry(),
+            new AlgoIdRegistry(),
+            outboundLedger: fixture.Ledger);
+        replayer.Apply(LegacySubmit(fixture.ClOrdId));
+        replayer.Apply(fixture.Approved);
+        replayer.Apply(fixture.Intent);
+        replayer.Apply(fixture.Frame);
+        var oldEr = OldEr(fixture.ClOrdId, execKind) with
+        {
+            FirmId = "F1",
+            LeavesQuantity = expectedCumulativeQuantity == 10 ? 0 : 10,
+            CumulativeQuantity = expectedCumulativeQuantity,
+            LastQuantity = expectedCumulativeQuantity,
+            LastPrice = expectedCumulativeQuantity == 0 ? 0 : 30m,
+        };
+
+        replayer.Apply(oldEr);
+
+        Assert.True(orders.TryGet(fixture.ClOrdId, out var order));
+        Assert.NotNull(order);
+        Assert.Equal(expectedStatus, order.Status.ToString());
+        Assert.Equal(expectedCumulativeQuantity, order.CumulativeQuantity);
+        AssertState(fixture, OutboundMutationState.Ambiguous);
+        Assert.Equal(1, fixture.Ledger.ReadinessBlockingCount);
+    }
+
+    [Fact]
+    public void EventReplayer_Pre640CancelStillUpdatesDomain()
+    {
+        var fixture = Fixture.Create();
+        var ownership = new OrderOwnershipMap();
+        var orders = new WorkingOrderBook();
+        var pendingCancels = new PendingCancelRegistry();
+        var processor = new ExecutionReportProcessor(
+            ownership,
+            orders,
+            new PositionKeeper(),
+            new NoOpExecutionEventSink(),
+            new NoOpMarginProvider(),
+            NullLogger<ExecutionReportProcessor>.Instance,
+            pendingCancels: pendingCancels);
+        var replayer = new EventReplayer(
+            orders,
+            ownership,
+            new KillSwitchService(),
+            new SymbolHaltService(),
+            new SessionPhaseService(),
+            processor,
+            new AlgoBook(),
+            new ClOrdIdPrefixRegistry(),
+            new AlgoIdRegistry(),
+            pendingCancels: pendingCancels,
+            outboundLedger: fixture.Ledger);
+        replayer.Apply(LegacySubmit(50));
+        replayer.Apply(fixture.Approved with
+        {
+            MutationKind = OutboundMutationKind.Cancel,
+            OriginalClOrdId = 50,
+        });
+        replayer.Apply(fixture.Intent);
+        replayer.Apply(fixture.Frame);
+        replayer.Apply(new OrderCancelRequestedEvent
+        {
+            CancelClOrdId = fixture.ClOrdId,
+            OriginalClOrdId = 50,
+            OwnerEndClientId = "sensitive-owner",
+            TimestampUtc = T0.AddSeconds(1),
+        });
+
+        replayer.Apply(OldEr(fixture.ClOrdId, "Canceled", origClOrdId: 50) with
+        {
+            FirmId = "F1",
+        });
+
+        Assert.True(orders.TryGet(50, out var original));
+        Assert.NotNull(original);
+        Assert.Equal(OrderStatus.Cancelled, original.Status);
+        Assert.Empty(pendingCancels.Snapshot());
+        AssertState(fixture, OutboundMutationState.Ambiguous);
+        Assert.Equal(2, fixture.Ledger.ReadinessBlockingCount);
+    }
+
+    [Fact]
+    public void EventReplayer_Pre640ReplaceStillUpdatesDomain()
+    {
+        var fixture = Fixture.Create();
+        var ownership = new OrderOwnershipMap();
+        var orders = new WorkingOrderBook();
+        var replacements = new PendingReplacementRegistry();
+        var processor = new ExecutionReportProcessor(
+            ownership,
+            orders,
+            new PositionKeeper(),
+            new NoOpExecutionEventSink(),
+            new NoOpMarginProvider(),
+            NullLogger<ExecutionReportProcessor>.Instance,
+            replacements: replacements);
+        var replayer = new EventReplayer(
+            orders,
+            ownership,
+            new KillSwitchService(),
+            new SymbolHaltService(),
+            new SessionPhaseService(),
+            processor,
+            new AlgoBook(),
+            new ClOrdIdPrefixRegistry(),
+            new AlgoIdRegistry(),
+            replacements: replacements,
+            outboundLedger: fixture.Ledger);
+        replayer.Apply(LegacySubmit(50));
+        replayer.Apply(fixture.Approved with
+        {
+            MutationKind = OutboundMutationKind.Replace,
+            OriginalClOrdId = 50,
+        });
+        replayer.Apply(fixture.Intent);
+        replayer.Apply(fixture.Frame);
+        replayer.Apply(new OrderReplaceRequestedEvent
+        {
+            OriginalClOrdId = 50,
+            NewClOrdId = fixture.ClOrdId,
+            EndClientId = "sensitive-owner",
+            FirmId = "F1",
+            Symbol = "PETR4",
+            SecurityId = 123,
+            Side = "Buy",
+            Type = "Limit",
+            NewQuantity = 20,
+            NewPrice = 31m,
+            TimestampUtc = T0.AddSeconds(1),
+        });
+
+        replayer.Apply(OldEr(fixture.ClOrdId, "Replaced", origClOrdId: 50) with
+        {
+            FirmId = "F1",
+            LeavesQuantity = 20,
+        });
+
+        Assert.True(orders.TryGet(50, out var original));
+        Assert.NotNull(original);
+        Assert.Equal(OrderStatus.Replaced, original.Status);
+        Assert.True(orders.TryGet(fixture.ClOrdId, out var replacement));
+        Assert.NotNull(replacement);
+        Assert.Equal(OrderStatus.Working, replacement.Status);
+        Assert.Empty(replacements.Snapshot());
+        AssertState(fixture, OutboundMutationState.Ambiguous);
+        Assert.Equal(2, fixture.Ledger.ReadinessBlockingCount);
+    }
+
+    [Fact]
+    public void SnapshotAndPre640Tail_PreserveDomainApplyAndUnprovenReadiness()
+    {
+        var writer = Fixture.Create();
+        ApplyPrepared(writer.Ledger, writer, writer.Frame);
+        writer.Ledger.ApplyVenueAcknowledgement(
+            OldEr(writer.ClOrdId, "New") with { FirmId = "F1" });
+        var capture = writer.Ledger.CaptureSnapshot();
+        var restoredLedger = new OutboundMutationLedger(writer.Protector);
+        restoredLedger.Restore(
+            capture.Mutations,
+            capture.Correlations,
+            capture.InboundEvidence);
+        var ownership = new OrderOwnershipMap();
+        var orders = new WorkingOrderBook();
+        var owner = new EndClientId("sensitive-owner");
+        var order = new Order(
+            writer.ClOrdId,
+            owner,
+            "PETR4",
+            123,
+            OrderSide.Buy,
+            OrderType.Limit,
+            10,
+            30m,
+            "F1");
+        order.MarkWorking();
+        Assert.True(orders.TryAdd(order));
+        ownership.Register(writer.ClOrdId, owner);
+        var replayer = new EventReplayer(
+            orders,
+            ownership,
+            new KillSwitchService(),
+            new SymbolHaltService(),
+            new SessionPhaseService(),
+            new ExecutionReportProcessor(
+                ownership,
+                orders,
+                new PositionKeeper(),
+                new NoOpExecutionEventSink(),
+                new NoOpMarginProvider(),
+                NullLogger<ExecutionReportProcessor>.Instance),
+            new AlgoBook(),
+            new ClOrdIdPrefixRegistry(),
+            new AlgoIdRegistry(),
+            outboundLedger: restoredLedger);
+
+        replayer.Apply(OldEr(writer.ClOrdId, "Fill") with
+        {
+            FirmId = "F1",
+            LeavesQuantity = 0,
+            CumulativeQuantity = 10,
+            LastQuantity = 10,
+            LastPrice = 30m,
+            TimestampUtc = T0.AddMinutes(3),
+        });
+
+        Assert.Equal(OrderStatus.Filled, order.Status);
+        Assert.Equal(10, order.CumulativeQuantity);
+        AssertState(restoredLedger, writer.MutationId, OutboundMutationState.Ambiguous);
+        Assert.Equal(1, restoredLedger.ReadinessBlockingCount);
+        Assert.Equal(2, restoredLedger.InboundEvidenceCount);
+    }
+
+    [Fact]
+    public void SnapshotRestore_Pre640MissingFirmDuplicateRemainsIdempotent()
+    {
+        var writer = Fixture.Create();
+        ApplyPrepared(writer.Ledger, writer, writer.Frame);
+        var oldEr = OldEr(writer.ClOrdId, "New");
+        var first = writer.Ledger.ApplyVenueAcknowledgement(oldEr);
+        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedUnmatched, first.Status);
+        var capture = writer.Ledger.CaptureSnapshot();
+        var restored = new OutboundMutationLedger(writer.Protector);
+        restored.Restore(
+            capture.Mutations,
+            capture.Correlations,
+            capture.InboundEvidence);
+
+        var duplicate = restored.ApplyVenueAcknowledgement(oldEr);
+
+        Assert.Equal(InboundVenueEvidenceApplyStatus.Duplicate, duplicate.Status);
+        Assert.False(duplicate.ShouldApplyDomain);
+        Assert.Equal(1, restored.InboundEvidenceCount);
+        AssertState(restored, writer.MutationId, OutboundMutationState.Ambiguous);
+        Assert.Equal(1, restored.ReadinessBlockingCount);
+    }
+
     [Fact]
     public void LateConflictingEr_CannotReopenOrRewriteTerminalTombstone()
     {

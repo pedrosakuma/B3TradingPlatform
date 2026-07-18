@@ -95,6 +95,7 @@ public enum OutboundAmbiguityReason
     UnsupportedCommandVersion,
     ConflictingVenueEvidence,
     NotAppliedEvidence,
+    IncompleteVenueEvidence,
 }
 
 public enum InboundVenueEvidenceKind

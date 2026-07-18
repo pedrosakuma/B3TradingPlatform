@@ -20,6 +20,7 @@ namespace B3.Trading.Application.Outbound;
 /// </summary>
 public sealed class OutboundMutationLedger
 {
+    private const string UnknownFirm = "<unknown>";
     public const int MaxOutboundAttempts = 2;
     public const int MaxRetainedUnmatchedEvidence = 1024;
     public const int MaxEvidenceDiagnostics = 256;
@@ -447,8 +448,8 @@ public sealed class OutboundMutationLedger
             }
 
             if (!hasDirect
-                || string.IsNullOrWhiteSpace(evt.FirmId)
-                || !string.Equals(evt.FirmId, mutation.FirmId, StringComparison.Ordinal))
+                || (!string.IsNullOrWhiteSpace(evt.FirmId)
+                    && !string.Equals(evt.FirmId, mutation.FirmId, StringComparison.Ordinal)))
             {
                 MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
                 AddInboundEvidenceUnsafe(
@@ -460,6 +461,40 @@ public sealed class OutboundMutationLedger
 
             if (mutation.Attempts.Count == 0)
             {
+                if (HasCompleteExecutionReportIdentity(evt))
+                {
+                    MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
+                    AddInboundEvidenceUnsafe(
+                        CreateExecutionReportEvidence(
+                            evt, evidenceId, InboundVenueEvidenceDisposition.Conflicting, [id]),
+                        evidenceIdentity);
+                    return new(InboundVenueEvidenceApplyStatus.RecordedConflicting);
+                }
+
+                MarkIncompleteVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
+                AddInboundEvidenceUnsafe(
+                    CreateExecutionReportEvidence(
+                        evt, evidenceId, InboundVenueEvidenceDisposition.Unmatched, [id]),
+                    evidenceIdentity);
+                return new(InboundVenueEvidenceApplyStatus.RecordedUnmatched);
+            }
+            var activeAttemptIndex = mutation.Attempts.Count - 1;
+            var activeAttempt = mutation.Attempts[activeAttemptIndex];
+            var originalMismatch = mutation.OriginalClOrdId is { } expectedOriginal
+                ? evt.OrigClOrdId != 0 && evt.OrigClOrdId != expectedOriginal
+                : evt.OrigClOrdId != 0;
+            var frame = activeAttempt.FramePrepared;
+            var positiveIdentityMismatch =
+                evt.ClOrdId != activeAttempt.ClOrdId
+                || originalMismatch
+                || (evt.SessionId is not null and not 0
+                    && frame is not null
+                    && evt.SessionId != frame.SessionId)
+                || (evt.SessionVerId is not null and not 0
+                    && frame is not null
+                    && evt.SessionVerId != frame.SessionVerId);
+            if (positiveIdentityMismatch)
+            {
                 MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
                 AddInboundEvidenceUnsafe(
                     CreateExecutionReportEvidence(
@@ -467,20 +502,38 @@ public sealed class OutboundMutationLedger
                     evidenceIdentity);
                 return new(InboundVenueEvidenceApplyStatus.RecordedConflicting);
             }
-            var activeAttemptIndex = mutation.Attempts.Count - 1;
-            var activeAttempt = mutation.Attempts[activeAttemptIndex];
-            var originalMatches = mutation.OriginalClOrdId is { } expectedOriginal
-                ? evt.OrigClOrdId == 0 || evt.OrigClOrdId == expectedOriginal
-                : evt.OrigClOrdId == 0;
-            var frame = activeAttempt.FramePrepared;
+
+            if (activeAttempt.ProvenUnsentEvidence is not null
+                || mutation.Attempts.Any(a =>
+                    a.AmbiguityReason
+                    == OutboundAmbiguityReason.ConflictingVenueEvidence))
+            {
+                MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
+                AddInboundEvidenceUnsafe(
+                    CreateExecutionReportEvidence(
+                        evt, evidenceId, InboundVenueEvidenceDisposition.Conflicting, [id]),
+                    evidenceIdentity);
+                return new(InboundVenueEvidenceApplyStatus.RecordedConflicting);
+            }
+
+            if (!HasCompleteExecutionReportIdentity(evt))
+            {
+                if (!IsTerminal(mutation.State))
+                    MarkIncompleteVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
+                AddInboundEvidenceUnsafe(
+                    CreateExecutionReportEvidence(
+                        evt, evidenceId, InboundVenueEvidenceDisposition.Unmatched, [id]),
+                    evidenceIdentity);
+                return new(InboundVenueEvidenceApplyStatus.RecordedUnmatched);
+            }
+
             if (IsTerminal(mutation.State))
             {
                 var terminalMatches = evt.ClOrdId == activeAttempt.ClOrdId
                     && frame is not null
                     && evt.SessionId == frame.SessionId
                     && evt.SessionVerId == frame.SessionVerId
-                    && evt.InboundSeqNum is not null and not 0
-                    && originalMatches;
+                    && evt.InboundSeqNum is not null and not 0;
                 AddInboundEvidenceUnsafe(
                     CreateExecutionReportEvidence(
                         evt,
@@ -496,19 +549,13 @@ public sealed class OutboundMutationLedger
                     ? InboundVenueEvidenceApplyStatus.RecordedMatched
                     : InboundVenueEvidenceApplyStatus.RecordedConflicting);
             }
-            if (evt.ClOrdId != activeAttempt.ClOrdId
-                || activeAttempt.ProvenUnsentEvidence is not null
-                || mutation.Attempts.Any(a =>
-                    a.AmbiguityReason
-                    == OutboundAmbiguityReason.ConflictingVenueEvidence)
-                || mutation.State is not OutboundMutationState.FramePrepared
+            if (mutation.State is not OutboundMutationState.FramePrepared
                     and not OutboundMutationState.TransportWriteCompleted
                     and not OutboundMutationState.Ambiguous
                 || frame is null
                 || evt.SessionId != frame.SessionId
                 || evt.SessionVerId != frame.SessionVerId
-                || evt.InboundSeqNum is null or 0
-                || !originalMatches)
+                || evt.InboundSeqNum is null or 0)
             {
                 MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
                 AddInboundEvidenceUnsafe(
@@ -1482,17 +1529,23 @@ public sealed class OutboundMutationLedger
     private static string ExecutionReportEvidenceIdentity(
         ExecutionReportReceivedEvent evt,
         string evidenceId) =>
-        evt.SessionId is not null and not 0
-        && evt.SessionVerId is not null and not 0
-        && evt.InboundSeqNum is not null and not 0
+        HasCompleteExecutionReportIdentity(evt)
             ? Canonical(
                 $"er|{NormalizeFirm(evt.FirmId)}|{evt.SessionId}|{evt.SessionVerId}|{evt.InboundSeqNum}")
             : $"legacy|{evidenceId}";
 
+    private static bool HasCompleteExecutionReportIdentity(
+        ExecutionReportReceivedEvent evt) =>
+        !string.IsNullOrWhiteSpace(evt.FirmId)
+        && evt.SessionId is not null and not 0
+        && evt.SessionVerId is not null and not 0
+        && evt.InboundSeqNum is not null and not 0;
+
     private static string BusinessRejectEvidenceIdentity(
         BusinessRejectReceivedEvent evt,
         string evidenceId) =>
-        evt.SessionId is not null and not 0
+        !string.IsNullOrWhiteSpace(evt.FirmId)
+        && evt.SessionId is not null and not 0
         && evt.SessionVerId is not null and not 0
         && evt.SeqNum != 0
             ? Canonical(
@@ -1507,13 +1560,15 @@ public sealed class OutboundMutationLedger
         evidence.Kind switch
         {
             InboundVenueEvidenceKind.ExecutionReport
-                when evidence.SessionId is not null and not 0
+                when IsKnownEvidenceFirm(evidence.FirmId)
+                     && evidence.SessionId is not null and not 0
                      && evidence.SessionVerId is not null and not 0
                      && evidence.InboundSeqNum is not null and not 0 =>
                 Canonical(
                     $"er|{NormalizeFirm(evidence.FirmId)}|{evidence.SessionId}|{evidence.SessionVerId}|{evidence.InboundSeqNum}"),
             InboundVenueEvidenceKind.BusinessReject
-                when evidence.SessionId is not null and not 0
+                when IsKnownEvidenceFirm(evidence.FirmId)
+                     && evidence.SessionId is not null and not 0
                      && evidence.SessionVerId is not null and not 0
                      && evidence.InboundSeqNum is not null and not 0 =>
                 Canonical(
@@ -1536,7 +1591,11 @@ public sealed class OutboundMutationLedger
         && sequenceNumber - fromSeqNo < count;
 
     private static string NormalizeFirm(string? firmId) =>
-        string.IsNullOrWhiteSpace(firmId) ? "unknown" : firmId;
+        string.IsNullOrWhiteSpace(firmId) ? UnknownFirm : firmId;
+
+    private static bool IsKnownEvidenceFirm(string firmId) =>
+        !string.IsNullOrWhiteSpace(firmId)
+        && !string.Equals(firmId, UnknownFirm, StringComparison.Ordinal);
 
     private static InboundVenueEvidenceSnapshot CloneEvidence(
         InboundVenueEvidenceSnapshot evidence) =>
@@ -1591,6 +1650,39 @@ public sealed class OutboundMutationLedger
             attempts[index] = attempts[index] with
             {
                 AmbiguityReason = OutboundAmbiguityReason.ConflictingVenueEvidence,
+            };
+        }
+        mutation = mutation with
+        {
+            Attempts = attempts,
+            State = OutboundMutationState.Ambiguous,
+            StateChangedAtUtc = atUtc,
+            Resolution = null,
+            RequiresReconciliation = true,
+        };
+        _mutations[mutation.MutationId] = mutation;
+        MarkCorrelations(mutation, terminal: false, atUtc);
+    }
+
+    private void MarkIncompleteVenueEvidence(
+        OutboundMutationSnapshot mutation,
+        ulong clOrdId,
+        DateTimeOffset atUtc)
+    {
+        if (IsTerminal(mutation.State))
+            return;
+        var attempts = mutation.Attempts.ToArray();
+        var index = Array.FindIndex(
+            attempts,
+            attempt => attempt.ClOrdId == clOrdId);
+        if (index < 0 && attempts.Length > 0)
+            index = attempts.Length - 1;
+        if (index >= 0)
+        {
+            attempts[index] = attempts[index] with
+            {
+                AmbiguityReason = attempts[index].AmbiguityReason
+                    ?? OutboundAmbiguityReason.IncompleteVenueEvidence,
             };
         }
         mutation = mutation with
