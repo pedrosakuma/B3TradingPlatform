@@ -1,6 +1,7 @@
 using B3.Trading.Application;
 using B3.Trading.Application.Audit;
 using B3.Trading.Application.Persistence;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.Scheduling;
 using B3.Trading.Application.UserBots;
@@ -85,6 +86,7 @@ public sealed class StateSnapshotter
     // Mock/Stub modes — capture writes an empty dict, recovery skips
     // the reconcile.
     private readonly IFirmSessionStatusProvider? _firmSessionStatus;
+    private readonly OutboundMutationLedger? _outboundLedger;
 
     public StateSnapshotter(
         WorkingOrderBook orders,
@@ -112,7 +114,8 @@ public sealed class StateSnapshotter
         SubAccountPositionKeeper? subAccountPositions = null,
         SubAccountPnlKeeper? subAccountPnl = null,
         IFirmSessionStatusProvider? firmSessionStatus = null,
-        PendingCancelRegistry? pendingCancels = null)
+        PendingCancelRegistry? pendingCancels = null,
+        OutboundMutationLedger? outboundLedger = null)
     {
         _orders = orders;
         _positions = positions;
@@ -140,6 +143,7 @@ public sealed class StateSnapshotter
         _subAccountPnl = subAccountPnl;
         _firmSessionStatus = firmSessionStatus;
         _pendingCancels = pendingCancels;
+        _outboundLedger = outboundLedger;
     }
 
     public PlatformSnapshot Capture(long seq) => Project(CaptureRaw(seq));
@@ -151,10 +155,7 @@ public sealed class StateSnapshotter
             seq,
             PlatformSnapshot.CurrentFormatVersion,
             walGeneration,
-            new OutboundLedgerSnapshot
-            {
-                Version = OutboundLedgerSnapshot.CurrentVersion,
-            });
+            CaptureOutboundLedger());
 
     /// <summary>
     /// Phase-1 (lock-side) capture for the two-phase snapshot pipeline
@@ -272,6 +273,18 @@ public sealed class StateSnapshotter
             : _firmSessionStatus.Snapshot()
                 .ToDictionary(s => s.FirmId, s => s.SessionVerId, StringComparer.Ordinal),
         };
+
+    private OutboundLedgerSnapshot CaptureOutboundLedger()
+    {
+        var capture = _outboundLedger?.CaptureSnapshot();
+        return new OutboundLedgerSnapshot
+        {
+            Version = OutboundLedgerSnapshot.CurrentVersion,
+            LegacyMigrationCompleted = _outboundLedger?.LegacyMigrationCompleted ?? false,
+            Mutations = capture?.Mutations.ToList() ?? new(),
+            CorrelationTombstones = capture?.Correlations.ToList() ?? new(),
+        };
+    }
 
     /// <summary>
     /// Phase-2 projection for the two-phase snapshot pipeline (RFC §5.8 /
@@ -569,6 +582,16 @@ public sealed class StateSnapshotter
     public void Restore(PlatformSnapshot snap)
     {
         ArgumentNullException.ThrowIfNull(snap);
+        if (snap.OutboundLedger is { } outbound)
+        {
+            if (outbound.Version != OutboundLedgerSnapshot.CurrentVersion)
+                throw new OutboundLedgerRecoveryException(
+                    "The outbound ledger snapshot version is unsupported.");
+            _outboundLedger?.Restore(
+                outbound.Mutations,
+                outbound.CorrelationTombstones,
+                outbound.LegacyMigrationCompleted);
+        }
         _orders.Restore(snap.WorkingOrders);
         _positions.Restore(snap.Positions);
         _killSwitch.Restore(snap.KilledEndClients, snap.KilledFirms);
@@ -747,6 +770,64 @@ public sealed class StateSnapshotter
                     _ownership.RegisterCancelLink(pending.CancelClOrdId, pending.OriginalClOrdId);
             }
         }
+        if (_outboundLedger?.ShouldImportLegacy == true)
+        {
+            foreach (var order in snap.WorkingOrders)
+            {
+                if (!string.Equals(
+                        order.Status,
+                        nameof(OrderStatus.PendingNew),
+                        StringComparison.OrdinalIgnoreCase))
+                    continue;
+                _outboundLedger.ImportLegacyNew(new OrderSubmittedEvent
+                {
+                    ClOrdId = order.ClOrdId,
+                    EndClientId = order.EndClientId,
+                    FirmId = order.FirmId,
+                    Symbol = order.Symbol,
+                    SecurityId = order.SecurityId,
+                    Side = order.Side,
+                    Type = order.Type,
+                    Quantity = order.Quantity,
+                    Price = order.Price,
+                    TimestampUtc = snap.CreatedAtUtc,
+                });
+            }
+            foreach (var pending in snap.PendingCancels)
+            {
+                _outboundLedger.ImportLegacyCancel(new OrderCancelRequestedEvent
+                {
+                    CancelClOrdId = pending.CancelClOrdId,
+                    OriginalClOrdId = pending.OriginalClOrdId,
+                    OwnerEndClientId = string.Empty,
+                    TimestampUtc = snap.CreatedAtUtc,
+                });
+            }
+            foreach (var pending in snap.PendingReplacements)
+            {
+                _outboundLedger.ImportLegacyReplace(new OrderReplaceRequestedEvent
+                {
+                    OriginalClOrdId = pending.OriginalClOrdId,
+                    NewClOrdId = pending.NewClOrdId,
+                    EndClientId = pending.OwnerEndClientId,
+                    FirmId = pending.FirmId,
+                    Symbol = pending.Symbol,
+                    SecurityId = pending.SecurityId,
+                    Side = pending.Side,
+                    Type = pending.Type,
+                    NewQuantity = pending.NewQuantity,
+                    NewPrice = pending.NewPrice,
+                    TimestampUtc = snap.CreatedAtUtc,
+                });
+                if (pending.AmbiguousMarginHeld)
+                {
+                    _outboundLedger.ImportLegacyAmbiguous(
+                        pending.NewClOrdId,
+                        pending.OriginalClOrdId,
+                        pending.AmbiguousAtUtc ?? snap.CreatedAtUtc);
+                }
+            }
+        }
         // Q4.1 (#301). Restore the sub-account registry + parallel
         // keepers BEFORE WAL replay starts. EventReplayer's
         // SubAccountCreated/Deactivated branches and the
@@ -904,6 +985,7 @@ public sealed class EventReplayer
     /// path.
     /// </summary>
     private readonly PeggedRepegBook? _peggedRepeg;
+    private readonly OutboundMutationLedger? _outboundLedger;
 
     public EventReplayer(
         WorkingOrderBook orders,
@@ -943,7 +1025,8 @@ public sealed class EventReplayer
         // <see cref="AuditLogEvent"/> folds the envelope into the
         // in-memory ring-buffer keeper that backs GET /admin/audit.
         AuditLogKeeper? auditKeeper = null,
-        PendingCancelRegistry? pendingCancels = null)
+        PendingCancelRegistry? pendingCancels = null,
+        OutboundMutationLedger? outboundLedger = null)
     {
         _orders = orders;
         _ownership = ownership;
@@ -971,6 +1054,7 @@ public sealed class EventReplayer
         _subAccountPnl = subAccountPnl;
         _auditKeeper = auditKeeper;
         _pendingCancels = pendingCancels;
+        _outboundLedger = outboundLedger;
     }
 
     /// <summary>
@@ -1045,6 +1129,8 @@ public sealed class EventReplayer
                 // #157: advance the ClOrdID registry watermark so the next
                 // live Generate(owner) cannot re-allocate this ID.
                 _clOrdIds.AdvanceCounterTo(owner, o.ClOrdId);
+                if (_outboundLedger?.ShouldImportLegacy == true)
+                    _outboundLedger.ImportLegacyNew(o);
                 // Sub-issue #171 (E): rebuild the bot order mapping side
                 // record for FIXP-origin orders. Same call shape as the
                 // live submit-time apply callback so a snapshot taken
@@ -1068,6 +1154,8 @@ public sealed class EventReplayer
                 _ownership.RegisterCancelLink(ocr.CancelClOrdId, ocr.OriginalClOrdId);
                 _pendingCancels?.TryAdd(ocr.OriginalClOrdId, ocr.CancelClOrdId);
                 _clOrdIds.AdvanceCounterTo(ocrOwner, ocr.CancelClOrdId);
+                if (_outboundLedger?.ShouldImportLegacy == true)
+                    _outboundLedger.ImportLegacyCancel(ocr);
                 if (ocr.BotMapping is { } cbm && _userBotMappings is not null)
                     _userBotMappings.RegisterCancelInternal(
                         cancelInternalClOrdId: ocr.CancelClOrdId,
@@ -1081,6 +1169,15 @@ public sealed class EventReplayer
                 _userBotMappings?.ReapCancel(ocf.CancelClOrdId);
                 _clOrdIds.AdvanceCounterTo(
                     new EndClientId(ocf.OwnerEndClientId), ocf.CancelClOrdId);
+                if (_outboundLedger?.ShouldImportLegacy == true)
+                {
+                    _outboundLedger.ImportLegacyProvenUnsent(
+                        ocf.CancelClOrdId,
+                        OutboundMutationKind.Cancel,
+                        ocf.OriginalClOrdId,
+                        ocf.TimestampUtc,
+                        OutboundProvenUnsentEvidence.LegacyWave1CancelPreSend);
+                }
                 break;
             case OrderReplaceRequestedEvent rr:
                 // Slice 4 of #122. Re-register the in-flight intent and
@@ -1120,12 +1217,23 @@ public sealed class EventReplayer
                 // must advance the watermark even if the replacement
                 // intent itself wasn't re-registered (orig already gone).
                 _clOrdIds.AdvanceCounterTo(new EndClientId(rr.EndClientId), rr.NewClOrdId);
+                if (_outboundLedger?.ShouldImportLegacy == true)
+                    _outboundLedger.ImportLegacyReplace(rr);
                 break;
             case OrderReplacePreSendFailedEvent rpf:
                 _replacements?.TryConsume(rpf.NewClOrdId, out _);
                 _ownership.RemoveCancelLink(rpf.NewClOrdId);
                 _replaceMargin?.AbortReplace(rpf.NewClOrdId);
                 _clOrdIds.AdvanceCounterTo(new EndClientId(rpf.EndClientId), rpf.NewClOrdId);
+                if (_outboundLedger?.ShouldImportLegacy == true)
+                {
+                    _outboundLedger.ImportLegacyProvenUnsent(
+                        rpf.NewClOrdId,
+                        OutboundMutationKind.Replace,
+                        rpf.OriginalClOrdId,
+                        rpf.TimestampUtc,
+                        OutboundProvenUnsentEvidence.LegacyWave1ReplacePreSend);
+                }
                 break;
             case OrderReplaceRejectedEvent rrj:
                 // #337 — pure-audit event. Replay does NOT mutate the
@@ -1172,6 +1280,33 @@ public sealed class EventReplayer
                         .GetAwaiter().GetResult();
                 }
                 _replacements?.MarkAmbiguousMarginHeld(amh.NewClOrdId, amh.HeldAtUtc, amh.NewRemainingNotional);
+                _replacements?.MarkRecoveryFenced(amh.NewClOrdId);
+                if (_outboundLedger?.ShouldImportLegacy == true)
+                {
+                    _outboundLedger.ImportLegacyAmbiguous(
+                        amh.NewClOrdId, amh.OriginalClOrdId, amh.HeldAtUtc);
+                }
+                break;
+            case OutboundApprovedEvent approved:
+                _outboundLedger?.Apply(approved);
+                break;
+            case OutboundAttemptIntentPreparedEvent intent:
+                _outboundLedger?.Apply(intent);
+                if (_outboundLedger?.TryResolveWatermarkOwner(intent.MutationId, out var attemptOwner) == true
+                    && attemptOwner is not null)
+                    _clOrdIds.AdvanceCounterTo(attemptOwner, intent.ClOrdId);
+                break;
+            case OutboundFramePreparedEvent frame:
+                _outboundLedger?.Apply(frame);
+                break;
+            case OutboundTransportWriteCompletedEvent write:
+                _outboundLedger?.Apply(write);
+                break;
+            case OutboundProvenUnsentEvent unsent:
+                _outboundLedger?.Apply(unsent);
+                break;
+            case OutboundOperatorResolvedEvent resolved:
+                _outboundLedger?.Apply(resolved);
                 break;
             case ExecutionReportReceivedEvent er:
                 if (Enum.TryParse<ExecKind>(er.ExecKind, ignoreCase: true, out var kind))
@@ -1194,6 +1329,10 @@ public sealed class EventReplayer
                     erOwner = origOwner;
                 if (erOwner is { } resolvedOwner)
                     _clOrdIds.AdvanceCounterTo(resolvedOwner, er.ClOrdId);
+                _outboundLedger?.ApplyVenueAcknowledgement(er);
+                break;
+            case BusinessRejectReceivedEvent businessReject:
+                _outboundLedger?.ApplyBusinessReject(businessReject);
                 break;
             case KillSwitchToggledEvent k:
                 if (k.Scope.Equals("end-client", StringComparison.OrdinalIgnoreCase))

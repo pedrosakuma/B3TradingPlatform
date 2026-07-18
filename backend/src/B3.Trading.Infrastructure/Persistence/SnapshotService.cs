@@ -3,6 +3,7 @@ using B3.Trading.Application;
 using B3.Trading.Application.Audit;
 using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.Risk.Accounting;
 using B3.Trading.Domain;
@@ -56,9 +57,13 @@ public sealed class PersistenceRecovery
     private readonly IFirmSessionStatusProvider? _firmSessionStatus;
     private readonly ReserveOnSubmitMarginProvider? _marginProvider;
     private readonly PendingReplacementRegistry? _replacements;
+    private readonly PendingCancelRegistry? _pendingCancels;
     private readonly IRiskRecoveryFence[] _riskRecoveryFences;
     private readonly ReconciliationMarkerRecovery? _reconciliationMarkers;
     private readonly ColdStartLifecycleGuard? _coldStartLifecycleGuard;
+    private readonly OutboundMutationLedger? _outboundLedger;
+    private readonly OutboundProcessEpoch? _processEpoch;
+    private readonly TimeProvider _timeProvider;
 
     public PersistenceRecovery(
         IEventStore store,
@@ -75,7 +80,11 @@ public sealed class PersistenceRecovery
         PendingReplacementRegistry? replacements = null,
         IEnumerable<IRiskRecoveryFence>? riskRecoveryFences = null,
         ReconciliationMarkerRecovery? reconciliationMarkers = null,
-        ColdStartLifecycleGuard? coldStartLifecycleGuard = null)
+        ColdStartLifecycleGuard? coldStartLifecycleGuard = null,
+        OutboundMutationLedger? outboundLedger = null,
+        OutboundProcessEpoch? processEpoch = null,
+        TimeProvider? timeProvider = null,
+        PendingCancelRegistry? pendingCancels = null)
     {
         _store = store;
         _snapshotter = snapshotter;
@@ -93,6 +102,10 @@ public sealed class PersistenceRecovery
             ?? Array.Empty<IRiskRecoveryFence>();
         _reconciliationMarkers = reconciliationMarkers;
         _coldStartLifecycleGuard = coldStartLifecycleGuard;
+        _outboundLedger = outboundLedger;
+        _processEpoch = processEpoch;
+        _timeProvider = timeProvider ?? TimeProvider.System;
+        _pendingCancels = pendingCancels;
     }
 
     public Task RunAsync(CancellationToken ct = default) =>
@@ -215,6 +228,58 @@ public sealed class PersistenceRecovery
             _logger.LogCritical(
                 "Persistence recovery found {Count} unresolved outbound reconciliation markers; readiness remains closed.",
                 unresolvedMarkers);
+        }
+        if (_outboundLedger is not null && _processEpoch is not null)
+        {
+            var legacyMigrationWasCompleted =
+                _outboundLedger.LegacyMigrationCompleted;
+            var reconciledLegacy = _outboundLedger.ReconcileLegacyPendingState(
+                _orders?.Snapshot()
+                    .Where(static order => string.Equals(
+                        order.Status,
+                        nameof(OrderStatus.PendingNew),
+                        StringComparison.OrdinalIgnoreCase))
+                    .Select(static order => order.ClOrdId)
+                    ?? Array.Empty<ulong>(),
+                _pendingCancels?.Snapshot()
+                    .Select(static pending => pending.CancelClOrdId)
+                    ?? Array.Empty<ulong>(),
+                _replacements?.Snapshot()
+                    .Select(static pending => pending.Intent.NewClOrdId)
+                    ?? Array.Empty<ulong>(),
+                _timeProvider.GetUtcNow());
+            if (reconciledLegacy > 0)
+            {
+                _logger.LogInformation(
+                    "Persistence recovery terminalised {Count} legacy outbound rows whose domain pending projection had already resolved.",
+                    reconciledLegacy);
+            }
+            var classified = _outboundLedger.ClassifyRecoveredAttempts(
+                _processEpoch.Id,
+                _timeProvider.GetUtcNow());
+            if (classified > 0)
+            {
+                _logger.LogWarning(
+                    "Persistence recovery classified {Count} dead-epoch outbound attempts from durable evidence.",
+                    classified);
+            }
+            _outboundLedger.CompleteLegacyMigration();
+            if (!legacyMigrationWasCompleted
+                && _store.WalGeneration != Guid.Empty)
+            {
+                await _store.FlushThroughAsync(
+                    _store.LastAdmittedSeq, ct).ConfigureAwait(false);
+                var migrationSnapshot = StateSnapshotter.Project(
+                    _snapshotter.CaptureRaw(
+                        _store.LastCommittedSeq,
+                        _store.WalGeneration));
+                _snapshots.Write(migrationSnapshot);
+                snap = migrationSnapshot;
+                since = migrationSnapshot.Seq;
+                _logger.LogInformation(
+                    "Persistence recovery published the outbound legacy-migration checkpoint at seq={Seq}.",
+                    migrationSnapshot.Seq);
+            }
         }
         var unresolvedLifecycle = _coldStartLifecycleGuard?.Apply() ?? 0;
         if (unresolvedLifecycle > 0)
