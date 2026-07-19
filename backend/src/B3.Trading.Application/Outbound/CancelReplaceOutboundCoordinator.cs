@@ -400,10 +400,22 @@ public sealed class CancelReplaceOutboundCoordinator : IHostedService
                 IntentPreparedAtUtc = intentAt,
                 TimestampUtc = intentAt,
             };
-            _dispatcher.DispatchCommitted(
+            var dispatched = _dispatcher.DispatchCommittedIf(
                 intent,
+                () => _ledger.CanPrepareAttempt(
+                    mutation.MutationId,
+                    attemptNo,
+                    attemptClOrdId),
                 () => _ledger.Apply(intent),
                 CancellationToken.None);
+            if (!dispatched.Applied)
+            {
+                return attemptNo > 1
+                    ? new(CancelReplaceDispatchOutcome.RetryNotAllowed, attemptClOrdId)
+                    : ReconciliationRequired(
+                        "initial attempt intent was no longer eligible",
+                        attemptClOrdId);
+            }
         }
         catch (Exception ex) when (ex is WalBackpressureException or WalFaultedException)
         {

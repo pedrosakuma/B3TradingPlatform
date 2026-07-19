@@ -137,6 +137,38 @@ public sealed class EventDispatcher
     }
 
     /// <summary>
+    /// Commit-fenced counterpart to <see cref="DispatchIf"/> for outbound
+    /// attempt transitions that must remain conditional without entering the
+    /// gateway before the WAL marker is durable.
+    /// </summary>
+    public DispatchOutcome DispatchCommittedIf(
+        WalEvent evt,
+        Func<bool> condition,
+        Action apply,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(evt);
+        ArgumentNullException.ThrowIfNull(condition);
+        ArgumentNullException.ThrowIfNull(apply);
+        var payload = JsonSerializer.SerializeToUtf8Bytes(
+            evt,
+            WalEventJsonContext.Default.WalEvent);
+        lock (_lock)
+        {
+            if (!condition())
+                return new DispatchOutcome(false, 0);
+            var seq = _store.Append(evt, payload);
+            _store.FlushThroughAsync(seq, cancellationToken)
+                .AsTask()
+                .GetAwaiter()
+                .GetResult();
+            apply();
+            AdvanceApplied(seq);
+            return new DispatchOutcome(true, seq);
+        }
+    }
+
+    /// <summary>
     /// RFC §5.2 (F2). Outcome-capture overload. <paramref name="applyAndCapture"/>
     /// runs under the dispatcher lock — same as the legacy <see cref="Dispatch(WalEvent, Action)"/> —
     /// but instead of synchronously fanning out to subscribers it adds

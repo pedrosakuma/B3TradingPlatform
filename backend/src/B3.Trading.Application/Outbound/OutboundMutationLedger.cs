@@ -172,6 +172,17 @@ public sealed class OutboundMutationLedger
             if (mutation.State is not OutboundMutationState.ApprovedToSend
                 and not OutboundMutationState.ProvenUnsent)
                 throw TransitionError("Attempt intent is out of order.");
+            if (mutation.State == OutboundMutationState.ProvenUnsent
+                && mutation.OriginalClOrdId is { } retryOriginalClOrdId)
+            {
+                var originalKey = new OriginalOrderKey(mutation.FirmId, retryOriginalClOrdId);
+                if (_activeByOriginal.TryGetValue(originalKey, out var activeMutation)
+                    && activeMutation != mutation.MutationId)
+                {
+                    throw TransitionError(
+                        "Another outbound mutation became active before the retry attempt.");
+                }
+            }
             if (mutation.Attempts.Count >= MaxOutboundAttempts
                 || evt.AttemptNo != mutation.Attempts.Count + 1)
                 throw TransitionError("Attempt number or cap is invalid.");
@@ -200,6 +211,36 @@ public sealed class OutboundMutationLedger
             };
             _mutations[evt.MutationId] = mutation;
             AddClOrdCorrelation(mutation, evt.ClOrdId, terminal: false, evt.TimestampUtc);
+            AddActiveOriginalIndex(mutation);
+        }
+    }
+
+    internal bool CanPrepareAttempt(
+        OutboundMutationId mutationId,
+        int attemptNo,
+        ulong clOrdId)
+    {
+        lock (_gate)
+        {
+            if (!_mutations.TryGetValue(mutationId, out var mutation)
+                || mutation.State is not (OutboundMutationState.ApprovedToSend
+                    or OutboundMutationState.ProvenUnsent)
+                || mutation.Attempts.Count >= MaxOutboundAttempts
+                || attemptNo != mutation.Attempts.Count + 1
+                || mutation.Attempts.Any(attempt => attempt.ClOrdId == clOrdId)
+                || (_byClOrdId.TryGetValue(clOrdId, out var clOrdOwner)
+                    && clOrdOwner != mutationId))
+            {
+                return false;
+            }
+            if (mutation.State != OutboundMutationState.ProvenUnsent
+                || mutation.OriginalClOrdId is not { } originalClOrdId)
+            {
+                return true;
+            }
+            var key = new OriginalOrderKey(mutation.FirmId, originalClOrdId);
+            return !_activeByOriginal.TryGetValue(key, out var activeMutation)
+                || activeMutation == mutationId;
         }
     }
 
@@ -302,6 +343,7 @@ public sealed class OutboundMutationLedger
             _mutations[evt.MutationId] = updatedMutation;
             AddClOrdCorrelation(
                 updatedMutation, attempt.ClOrdId, terminal: true, evt.TimestampUtc);
+            RemoveActiveOriginalIndex(updatedMutation);
         }
     }
 
@@ -2027,6 +2069,7 @@ public sealed class OutboundMutationLedger
     private void AddActiveOriginalIndex(OutboundMutationSnapshot mutation)
     {
         if (mutation.OriginalClOrdId is not { } originalClOrdId
+            || mutation.State == OutboundMutationState.ProvenUnsent
             || IsTerminal(mutation.State))
             return;
         var key = new OriginalOrderKey(mutation.FirmId, originalClOrdId);
