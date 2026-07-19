@@ -335,6 +335,25 @@ public sealed class OutboundMutationLedgerTests
     }
 
     [Fact]
+    public void VenueAcknowledgement_AfterSessionVersionRoll_ResolvesByStableSessionAndClOrdId()
+    {
+        var fixture = Fixture.Create();
+        fixture.Ledger.Apply(fixture.Approved);
+        fixture.Ledger.Apply(fixture.Intent);
+        fixture.Ledger.Apply(fixture.Frame);
+
+        var result = fixture.Ledger.ApplyVenueAcknowledgement(Acknowledgement(
+            fixture,
+            firmId: "F1",
+            sessionId: 11,
+            sessionVerId: 3));
+
+        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedMatched, result.Status);
+        AssertState(fixture, OutboundMutationState.VenueAcknowledged);
+        Assert.Equal(0, fixture.Ledger.ReadinessBlockingCount);
+    }
+
+    [Fact]
     public void VenueAcknowledgement_ForProvenUnsentOrSupersededAttemptStaysConflicting()
     {
         var provenUnsent = Fixture.Create();
