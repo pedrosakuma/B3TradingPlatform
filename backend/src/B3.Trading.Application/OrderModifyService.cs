@@ -200,6 +200,8 @@ public sealed class OrderModifyService
             if (_restIdempotency is null)
                 return OrderModifyResult.Conflict("REST idempotency store is unavailable");
             var activeClOrdId = active.Attempts.LastOrDefault()?.ClOrdId ?? active.PrimaryClOrdId;
+            if (!MatchesActiveReplaceRequest(active, orig, req, activeClOrdId))
+                return OrderModifyResult.Conflict("active replace has different effective fields");
             var binding = req.IdempotencyContext.Binding with
             {
                 MutationId = active.MutationId,
@@ -247,6 +249,52 @@ public sealed class OrderModifyService
         finally
         {
             _replacements.ReleaseOriginalClaim(req.OriginalClOrdId);
+        }
+    }
+
+    private bool MatchesActiveReplaceRequest(
+        OutboundMutationSnapshot active,
+        Order original,
+        OrderModifyRequest request,
+        ulong activeClOrdId)
+    {
+        if (_approvalFactory is null || active.Approval is null)
+            return false;
+        try
+        {
+            var effectivePrice = request.NewPrice ?? original.Price;
+            var (effectiveTimeInForce, effectiveStopPrice, effectiveGoodTillDate) =
+                Order.MergeReplacementOptionals(
+                    original.Type,
+                    original.TimeInForce,
+                    original.StopPrice,
+                    original.GoodTillDate,
+                    request.NewTimeInForce,
+                    request.NewStopPrice,
+                    request.NewGoodTillDate);
+            var effectiveLeaves = request.NewQuantity - original.CumulativeQuantity;
+            var newRemainingNotional = original.Side == OrderSide.Buy
+                && original.Type.IsMarginBearing()
+                && effectivePrice is { } price
+                    ? price * effectiveLeaves
+                    : 0m;
+            var candidate = _approvalFactory.CreateReplace(
+                active.MutationId,
+                original,
+                activeClOrdId,
+                request.NewQuantity,
+                effectivePrice,
+                effectiveTimeInForce,
+                effectiveStopPrice,
+                effectiveGoodTillDate,
+                newRemainingNotional,
+                _clock.GetUtcNow());
+            return candidate.Approval.CanonicalCommandNonSensitive
+                == active.Approval.CanonicalCommandNonSensitive;
+        }
+        catch (OutboundCommandEnvelopeException)
+        {
+            return false;
         }
     }
 

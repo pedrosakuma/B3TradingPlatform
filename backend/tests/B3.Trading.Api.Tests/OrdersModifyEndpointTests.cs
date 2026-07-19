@@ -259,6 +259,36 @@ public class OrdersModifyEndpointTests
     }
 
     [Fact]
+    public async Task PUT_orders_FreshKeyWithDifferentBodyDuringActiveReplace_Returns409()
+    {
+        using var f = new TestAppFactory();
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var posted = await PostOrder(http, token, qty: 100, price: 30m);
+        var original = await posted.Content.ReadFromJsonAsync<OrderAck>();
+
+        var first = await PutModify(
+            http, token, original!.ClOrdId, qty: 200, price: 30m,
+            idempotencyKey: "replace-mismatch-first");
+        var mismatch = await PutModify(
+            http, token, original.ClOrdId, qty: 300, price: 30m,
+            idempotencyKey: "replace-mismatch-second");
+        var mismatchRetry = await PutModify(
+            http, token, original.ClOrdId, qty: 300, price: 30m,
+            idempotencyKey: "replace-mismatch-second");
+
+        Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, mismatch.StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, mismatchRetry.StatusCode);
+        var ledger = f.Services.GetRequiredService<OutboundMutationLedger>();
+        var mutation = Assert.Single(
+            ledger.SnapshotMutations(),
+            candidate => candidate.Kind == OutboundMutationKind.Replace);
+        Assert.Equal(200, mutation.Approval!.CanonicalCommandNonSensitive.Quantity);
+        Assert.Single(mutation.Attempts);
+    }
+
+    [Fact]
     public async Task DELETE_orders_IdempotentRepeat_ReplaysMutationWithoutSecondAttempt()
     {
         using var f = new TestAppFactory();

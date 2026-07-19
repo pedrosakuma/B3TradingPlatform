@@ -580,7 +580,10 @@ public sealed class OutboundMutationLedger
                 || originalMismatch
                 || (evt.SessionId is not null and not 0
                     && frame is not null
-                    && evt.SessionId != frame.SessionId);
+                    && evt.SessionId != frame.SessionId)
+                || (evt.SessionVerId is not null and not 0
+                    && frame is not null
+                    && evt.SessionVerId != frame.SessionVerId);
             if (positiveIdentityMismatch)
             {
                 MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
@@ -637,6 +640,7 @@ public sealed class OutboundMutationLedger
                 var terminalMatches = evt.ClOrdId == activeAttempt.ClOrdId
                     && frame is not null
                     && evt.SessionId == frame.SessionId
+                    && evt.SessionVerId == frame.SessionVerId
                     && evt.InboundSeqNum is not null and not 0;
                 AddInboundEvidenceUnsafe(
                     CreateExecutionReportEvidence(
@@ -658,6 +662,7 @@ public sealed class OutboundMutationLedger
                     and not OutboundMutationState.Ambiguous
                 || frame is null
                 || evt.SessionId != frame.SessionId
+                || evt.SessionVerId != frame.SessionVerId
                 || evt.InboundSeqNum is null or 0)
             {
                 MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
@@ -1526,7 +1531,10 @@ public sealed class OutboundMutationLedger
                 ? preferred
                 : DeterministicLegacyId(kind, firmId, mutationClOrdId);
         if (_mutations.TryGetValue(id, out var existing))
+        {
+            AddActiveOriginalIndex(existing);
             return existing;
+        }
         var state = kind switch
         {
             OutboundMutationKind.New => OutboundMutationState.LegacyUnknown,
@@ -1549,6 +1557,7 @@ public sealed class OutboundMutationLedger
         };
         _mutations[id] = mutation;
         AddClOrdCorrelation(mutation, mutationClOrdId, terminal: false, atUtc);
+        AddActiveOriginalIndex(mutation);
         return mutation;
     }
 
@@ -2078,8 +2087,14 @@ public sealed class OutboundMutationLedger
         var key = new OriginalOrderKey(mutation.FirmId, originalClOrdId);
         if (_activeByOriginal.TryGetValue(key, out var existing)
             && existing != mutation.MutationId)
+        {
+            if (_mutations.TryGetValue(existing, out var existingMutation)
+                && existingMutation.Origin == OutboundMutationOrigin.Legacy
+                && mutation.Origin == OutboundMutationOrigin.Legacy)
+                return;
             throw new OutboundLedgerRecoveryException(
                 "Multiple active outbound mutations target the same original order.");
+        }
         _activeByOriginal[key] = mutation.MutationId;
     }
 
@@ -2090,7 +2105,21 @@ public sealed class OutboundMutationLedger
         var key = new OriginalOrderKey(mutation.FirmId, originalClOrdId);
         if (_activeByOriginal.TryGetValue(key, out var existing)
             && existing == mutation.MutationId)
+        {
             _activeByOriginal.Remove(key);
+            var replacement = _mutations.Values
+                .Where(candidate =>
+                    candidate.MutationId != mutation.MutationId
+                    && candidate.OriginalClOrdId == originalClOrdId
+                    && string.Equals(candidate.FirmId, mutation.FirmId, StringComparison.Ordinal)
+                    && candidate.State != OutboundMutationState.ProvenUnsent
+                    && !IsTerminal(candidate.State))
+                .OrderBy(candidate => candidate.RecordedAtUtc)
+                .ThenBy(candidate => candidate.MutationId.Value)
+                .FirstOrDefault();
+            if (replacement is not null)
+                _activeByOriginal[key] = replacement.MutationId;
+        }
     }
 
     private OutboundMutationSnapshot RequiredMutation(OutboundMutationId id)
