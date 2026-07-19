@@ -2,6 +2,10 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using B3.Trading.Application;
+using B3.Trading.Application.Persistence;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace B3.Trading.Api.Tests;
 
@@ -213,6 +217,149 @@ public sealed class OrderIdempotencyEndpointTests
         }
     }
 
+    [Fact]
+    public async Task ApprovalCommitFailure_ReplayRemainsServiceUnavailable()
+    {
+        var store = new RejectingApprovalStore();
+        using var factory = TestAppFactory.WithOverrides(
+            new Dictionary<string, string?>(),
+            services =>
+            {
+                services.RemoveAll<IEventStore>();
+                services.AddSingleton<IEventStore>(store);
+                services.RemoveAll<IEventStoreHealth>();
+                services.AddSingleton<IEventStoreHealth>(store);
+            });
+        using var http = factory.CreateClient();
+        var token = await factory.LoginAsync(http);
+
+        using var first = await PostAsync(http, token, "approval-failure-key", Body());
+        using var second = await PostAsync(http, token, "approval-failure-key", Body());
+        var firstPayload = await ReadAsync(first);
+        var secondPayload = await ReadAsync(second);
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, first.StatusCode);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, second.StatusCode);
+        Assert.Equal(firstPayload.MutationId, secondPayload.MutationId);
+        Assert.Equal(firstPayload.ClOrdId, secondPayload.ClOrdId);
+        Assert.True(secondPayload.Replayed);
+        Assert.DoesNotContain(store.Events, evt => evt is OutboundApprovedEvent);
+    }
+
+    [Fact]
+    public async Task ExistingBinding_ReplaysAfterSubAccountDeactivationBeforeMutableValidation()
+    {
+        using var factory = new TestAppFactory();
+        using var http = factory.CreateClient();
+        var token = await factory.LoginAsync(http);
+        var registry = factory.Services.GetRequiredService<SubAccountsRegistry>();
+        foreach (var firm in new[] { "default", "FIRM01", "TEST" })
+            registry.ApplyCreated(firm, "desk-1", "Desk 1");
+        var body = new
+        {
+            symbol = "PETR4",
+            securityId = 4321,
+            side = "Buy",
+            type = "Limit",
+            quantity = 100,
+            price = 30m,
+            subAccountId = "desk-1",
+        };
+
+        using var first = await PostAsync(http, token, "subaccount-key", body);
+        foreach (var firm in new[] { "default", "FIRM01", "TEST" })
+            registry.ApplyDeactivated(firm, "desk-1");
+        using var replay = await PostAsync(http, token, "subaccount-key", body);
+        using var conflict = await PostAsync(
+            http,
+            token,
+            "subaccount-key",
+            new
+            {
+                symbol = "PETR4",
+                securityId = 4321,
+                side = "Buy",
+                type = "Limit",
+                quantity = 101,
+                price = 30m,
+                subAccountId = "desk-1",
+            });
+
+        Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, replay.StatusCode);
+        Assert.True((await ReadAsync(replay)).Replayed);
+        Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+    }
+
+    [Fact]
+    public async Task StableReferenceRotation_ReplaysWithHistory_AndFailsClosedWithoutIt()
+    {
+        var dataDir = Path.Combine(
+            Directory.GetCurrentDirectory(),
+            ".test-artifacts",
+            "idempotency-rotation-" + Guid.NewGuid().ToString("N"));
+        var persistence = new Dictionary<string, string?>
+        {
+            ["Trading:Persistence:Enabled"] = "true",
+            ["Trading:Persistence:DataDirectory"] = dataDir,
+            ["Trading:Persistence:FirmId"] = "default",
+            ["Trading:Persistence:FsyncOnFlush"] = "false",
+            ["Trading:Persistence:SnapshotInterval"] = "00:10:00",
+        };
+        try
+        {
+            var oldConfig = ProtectionConfig("old", ["old"]);
+            foreach (var pair in persistence)
+                oldConfig[pair.Key] = pair.Value;
+            ResponsePayload original;
+            using (var factory = TestAppFactory.WithOverrides(oldConfig))
+            using (var http = factory.CreateClient())
+            {
+                var token = await factory.LoginAsync(http);
+                using var response = await PostAsync(http, token, "rotation-api-key", Body());
+                Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+                original = await ReadAsync(response);
+            }
+
+            var retainedConfig = ProtectionConfig("new", ["old", "new"]);
+            foreach (var pair in persistence)
+                retainedConfig[pair.Key] = pair.Value;
+            using (var factory = TestAppFactory.WithOverrides(retainedConfig))
+            using (var http = factory.CreateClient())
+            {
+                var token = await factory.LoginAsync(http);
+                using var response = await PostAsync(http, token, "rotation-api-key", Body());
+                Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+                var replayed = await ReadAsync(response);
+                Assert.Equal(original.MutationId, replayed.MutationId);
+                Assert.Equal(original.ClOrdId, replayed.ClOrdId);
+                Assert.True(replayed.Replayed);
+            }
+
+            var missingConfig = ProtectionConfig("new", ["new"]);
+            foreach (var pair in persistence)
+                missingConfig[pair.Key] = pair.Value;
+            using var missingFactory = TestAppFactory.WithOverrides(missingConfig);
+            using var missingHttp = missingFactory.CreateClient();
+            var missingToken = await missingFactory.LoginAsync(missingHttp);
+            using var unavailable = await PostAsync(
+                missingHttp,
+                missingToken,
+                "rotation-api-key",
+                Body());
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, unavailable.StatusCode);
+            var unavailableJson = await unavailable.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Equal(
+                "idempotency_history_unavailable",
+                unavailableJson.GetProperty("code").GetString());
+        }
+        finally
+        {
+            if (Directory.Exists(dataDir))
+                Directory.Delete(dataDir, recursive: true);
+        }
+    }
+
     private static async Task<HttpResponseMessage> PostAsync(
         HttpClient http,
         string token,
@@ -243,6 +390,29 @@ public sealed class OrderIdempotencyEndpointTests
             timeInForce,
         };
 
+    private static Dictionary<string, string?> ProtectionConfig(
+        string activeKeyId,
+        string[] keyIds)
+    {
+        var config = new Dictionary<string, string?>
+        {
+            ["Trading:OutboundCommandProtection:ActiveKeyId"] = activeKeyId,
+            ["Trading:OutboundCommandProtection:ActiveKeyVersion"] = "1",
+            ["Trading:OutboundCommandProtection:StableReferenceKeyId"] = activeKeyId,
+            ["Trading:OutboundCommandProtection:StableReferenceKeyVersion"] = "1",
+        };
+        for (var i = 0; i < keyIds.Length; i++)
+        {
+            var keyId = keyIds[i];
+            config[$"Trading:OutboundCommandProtection:Keys:{i}:KeyId"] = keyId;
+            config[$"Trading:OutboundCommandProtection:Keys:{i}:Version"] = "1";
+            config[$"Trading:OutboundCommandProtection:Keys:{i}:KeyBase64"] =
+                Convert.ToBase64String(System.Security.Cryptography.SHA256.HashData(
+                    System.Text.Encoding.UTF8.GetBytes($"api-idempotency-rotation:{keyId}")));
+        }
+        return config;
+    }
+
     private static async Task<ResponsePayload> ReadAsync(HttpResponseMessage response)
     {
         var json = await response.Content.ReadFromJsonAsync<JsonElement>();
@@ -256,4 +426,40 @@ public sealed class OrderIdempotencyEndpointTests
         string MutationId,
         string ClOrdId,
         bool Replayed);
+
+    private sealed class RejectingApprovalStore : IEventStore, IEventStoreHealth
+    {
+        private long _seq;
+        public List<WalEvent> Events { get; } = new();
+        public long CurrentSeq => _seq;
+        public long LastCommittedSeq => _seq;
+        public bool IsHealthy => true;
+        public Exception? TerminalFault => null;
+
+        public long Append(WalEvent evt) => Append(evt, ReadOnlyMemory<byte>.Empty);
+
+        public long Append(WalEvent evt, ReadOnlyMemory<byte> preSerialisedPayload)
+        {
+            if (evt is OutboundApprovedEvent)
+                throw new WalBackpressureException("approval commit rejected");
+            Events.Add(evt);
+            return ++_seq;
+        }
+
+        public ValueTask FlushAsync(CancellationToken ct = default) =>
+            ValueTask.CompletedTask;
+
+        public ValueTask FlushThroughAsync(long seq, CancellationToken ct = default) =>
+            ValueTask.CompletedTask;
+
+        public async IAsyncEnumerable<(long Seq, WalEvent Event)> ReadFromAsync(
+            long sinceSeqExclusive,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
 }

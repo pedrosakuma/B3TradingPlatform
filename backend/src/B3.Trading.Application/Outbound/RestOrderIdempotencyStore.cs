@@ -12,6 +12,8 @@ public sealed record RestOrderIdempotencyBindingSnapshot
     public required string CanonicalRequestSha256 { get; init; }
     public required string Operation { get; init; }
     public required DateTimeOffset BoundAtUtc { get; init; }
+    public string StableReferenceKeyId { get; init; } = string.Empty;
+    public int StableReferenceKeyVersion { get; init; }
 }
 
 public sealed record RestOrderIdempotencyIdentity(
@@ -31,10 +33,21 @@ public enum RestOrderIdempotencyExecutionKind
     Conflict,
 }
 
+public enum RestOrderIdempotencyResolutionKind
+{
+    Missing,
+    Replayed,
+    Conflict,
+}
+
 public sealed record RestOrderIdempotencyExecution<T>(
     RestOrderIdempotencyExecutionKind Kind,
     RestOrderIdempotencyBindingSnapshot? Binding,
     T? Value);
+
+public sealed record RestOrderIdempotencyResolution(
+    RestOrderIdempotencyResolutionKind Kind,
+    RestOrderIdempotencyBindingSnapshot? Binding);
 
 public sealed class RestOrderIdempotencyStore
 {
@@ -65,21 +78,18 @@ public sealed class RestOrderIdempotencyStore
         ArgumentNullException.ThrowIfNull(create);
         ValidateIdentity(identity);
         ValidateDigest(canonicalRequestSha256, 64, nameof(canonicalRequestSha256));
-        var scopedKeyDigest = ScopedKeyDigest(identity);
+        var activeKey = _protector.ActiveStableReferenceKey;
+        var scopedKeyDigest = ScopedKeyDigest(identity, activeKey);
         var semaphore = _locks.GetOrAdd(scopedKeyDigest, static _ => new SemaphoreSlim(1, 1));
         await semaphore.WaitAsync().ConfigureAwait(false);
         try
         {
-            lock (_gate)
+            var resolution = Resolve(identity, canonicalRequestSha256);
+            if (resolution.Kind != RestOrderIdempotencyResolutionKind.Missing)
             {
-                if (_byScopedKey.TryGetValue(scopedKeyDigest, out var existing))
-                {
-                    return CryptographicOperations.FixedTimeEquals(
-                            Convert.FromHexString(existing.CanonicalRequestSha256),
-                            Convert.FromHexString(canonicalRequestSha256))
-                        ? new(RestOrderIdempotencyExecutionKind.Replayed, existing, default)
-                        : new(RestOrderIdempotencyExecutionKind.Conflict, existing, default);
-                }
+                return resolution.Kind == RestOrderIdempotencyResolutionKind.Replayed
+                    ? new(RestOrderIdempotencyExecutionKind.Replayed, resolution.Binding, default)
+                    : new(RestOrderIdempotencyExecutionKind.Conflict, resolution.Binding, default);
             }
 
             var binding = new RestOrderIdempotencyBindingSnapshot
@@ -91,6 +101,8 @@ public sealed class RestOrderIdempotencyStore
                 CanonicalRequestSha256 = canonicalRequestSha256,
                 Operation = identity.Operation,
                 BoundAtUtc = _clock.GetUtcNow(),
+                StableReferenceKeyId = activeKey.KeyId,
+                StableReferenceKeyVersion = activeKey.KeyVersion,
             };
             var value = await create(new RestOrderIdempotencyContext(binding))
                 .ConfigureAwait(false);
@@ -100,6 +112,76 @@ public sealed class RestOrderIdempotencyStore
                     ? new(RestOrderIdempotencyExecutionKind.Created, applied, value)
                     : new(RestOrderIdempotencyExecutionKind.Created, null, value);
             }
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+
+    public RestOrderIdempotencyResolution Resolve(
+        RestOrderIdempotencyIdentity identity,
+        string canonicalRequestSha256)
+    {
+        ArgumentNullException.ThrowIfNull(identity);
+        ValidateIdentity(identity);
+        ValidateDigest(canonicalRequestSha256, 64, nameof(canonicalRequestSha256));
+        lock (_gate)
+        {
+            var keyIdentities = _byMutation.Values
+                .Select(static binding => new OutboundStableReferenceKey(
+                    binding.StableReferenceKeyId,
+                    binding.StableReferenceKeyVersion))
+                .Append(_protector.ActiveStableReferenceKey)
+                .Distinct()
+                .ToArray();
+            var historicalKeyUnavailable = false;
+            foreach (var keyIdentity in keyIdentities)
+            {
+                string digest;
+                try
+                {
+                    digest = ScopedKeyDigest(identity, keyIdentity);
+                }
+                catch (OutboundCommandEnvelopeException ex)
+                    when (ex.Availability == OutboundSensitivePayloadAvailability.MissingHistoricalKey)
+                {
+                    historicalKeyUnavailable = true;
+                    continue;
+                }
+
+                if (!_byScopedKey.TryGetValue(digest, out var existing)
+                    || existing.StableReferenceKeyId != keyIdentity.KeyId
+                    || existing.StableReferenceKeyVersion != keyIdentity.KeyVersion)
+                    continue;
+                return FixedTimeHexEquals(
+                        existing.CanonicalRequestSha256,
+                        canonicalRequestSha256)
+                    ? new(RestOrderIdempotencyResolutionKind.Replayed, existing)
+                    : new(RestOrderIdempotencyResolutionKind.Conflict, existing);
+            }
+
+            if (historicalKeyUnavailable)
+                throw new RestOrderIdempotencyUnavailableException(
+                    "A historical idempotency reference key is unavailable.");
+            return new(RestOrderIdempotencyResolutionKind.Missing, null);
+        }
+    }
+
+    public async Task<RestOrderIdempotencyResolution> ResolveAsync(
+        RestOrderIdempotencyIdentity identity,
+        string canonicalRequestSha256,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(identity);
+        ValidateIdentity(identity);
+        ValidateDigest(canonicalRequestSha256, 64, nameof(canonicalRequestSha256));
+        var digest = ScopedKeyDigest(identity, _protector.ActiveStableReferenceKey);
+        var semaphore = _locks.GetOrAdd(digest, static _ => new SemaphoreSlim(1, 1));
+        await semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return Resolve(identity, canonicalRequestSha256);
         }
         finally
         {
@@ -156,9 +238,25 @@ public sealed class RestOrderIdempotencyStore
         string principalId,
         string operation)
     {
-        var candidate = _protector.CreateStableEndClientRef(
-            firmId,
-            $"rest-owner-v1\n{endClientId}\n{principalId}\n{operation}");
+        if (string.IsNullOrWhiteSpace(binding.StableReferenceKeyId)
+            || binding.StableReferenceKeyVersion <= 0)
+            throw new RestOrderIdempotencyUnavailableException(
+                "The idempotency reference key identity is unavailable.");
+        string candidate;
+        try
+        {
+            candidate = _protector.CreateStableReference(
+                new OutboundStableReferenceKey(
+                    binding.StableReferenceKeyId,
+                    binding.StableReferenceKeyVersion),
+                $"{firmId}\nrest-owner-v1\n{endClientId}\n{principalId}\n{operation}");
+        }
+        catch (OutboundCommandEnvelopeException ex)
+            when (ex.Availability == OutboundSensitivePayloadAvailability.MissingHistoricalKey)
+        {
+            throw new RestOrderIdempotencyUnavailableException(
+                "A historical idempotency reference key is unavailable.");
+        }
         return FixedTimeHexEquals(binding.OwnerScopeRef, candidate);
     }
 
@@ -180,15 +278,17 @@ public sealed class RestOrderIdempotencyStore
         }
     }
 
-    private string ScopedKeyDigest(RestOrderIdempotencyIdentity identity) =>
-        _protector.CreateStableEndClientRef(
-            identity.FirmId,
-            $"rest-idempotency-v1\n{identity.EndClientId}\n{identity.PrincipalId}\n{identity.Operation}\n{identity.Key}");
+    private string ScopedKeyDigest(
+        RestOrderIdempotencyIdentity identity,
+        OutboundStableReferenceKey keyIdentity) =>
+        _protector.CreateStableReference(
+            keyIdentity,
+            $"{identity.FirmId}\nrest-idempotency-v1\n{identity.EndClientId}\n{identity.PrincipalId}\n{identity.Operation}\n{identity.Key}");
 
     private string OwnerScopeRef(RestOrderIdempotencyIdentity identity) =>
-        _protector.CreateStableEndClientRef(
-            identity.FirmId,
-            $"rest-owner-v1\n{identity.EndClientId}\n{identity.PrincipalId}\n{identity.Operation}");
+        _protector.CreateStableReference(
+            _protector.ActiveStableReferenceKey,
+            $"{identity.FirmId}\nrest-owner-v1\n{identity.EndClientId}\n{identity.PrincipalId}\n{identity.Operation}");
 
     private static bool FixedTimeHexEquals(string left, string right) =>
         CryptographicOperations.FixedTimeEquals(
@@ -212,4 +312,9 @@ public sealed class RestOrderIdempotencyStore
         if (digest.Length != length || digest.Any(c => !char.IsAsciiHexDigit(c)))
             throw new ArgumentException("Stable reference digest is invalid.", parameterName);
     }
+}
+
+public sealed class RestOrderIdempotencyUnavailableException : InvalidOperationException
+{
+    public RestOrderIdempotencyUnavailableException(string message) : base(message) { }
 }

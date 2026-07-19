@@ -72,26 +72,98 @@ public sealed class RestOrderIdempotencyStoreTests
         Assert.DoesNotContain(owner, json, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task RotationWithHistoricalStableKey_ReplaysInsteadOfCreatingDuplicate()
+    {
+        var oldProtector = CreateProtector("old", ["old"]);
+        var original = new RestOrderIdempotencyStore(oldProtector);
+        var identity = Identity("rotation-key");
+        var hash = Hash("request");
+        var created = await original.ExecuteAsync(
+            identity,
+            hash,
+            context =>
+            {
+                original.Apply(context.Binding with { ClOrdId = 1234 });
+                return Task.FromResult(1234UL);
+            });
+        var rotated = new RestOrderIdempotencyStore(
+            CreateProtector("new", ["old", "new"]));
+        rotated.Restore(original.CaptureSnapshot());
+
+        var replayed = await rotated.ExecuteAsync<ulong>(
+            identity,
+            hash,
+            _ => throw new InvalidOperationException("rotation must not create"));
+
+        Assert.Equal(RestOrderIdempotencyExecutionKind.Replayed, replayed.Kind);
+        Assert.Equal(created.Binding, replayed.Binding);
+        Assert.True(rotated.IsOwnedBy(
+            replayed.Binding!,
+            "FIRM-A",
+            "alice",
+            "alice",
+            "POST /orders"));
+    }
+
+    [Fact]
+    public async Task MissingHistoricalStableKey_FailsClosedForSameAndNewKeys()
+    {
+        var original = new RestOrderIdempotencyStore(
+            CreateProtector("old", ["old"]));
+        await original.ExecuteAsync(
+            Identity("old-key"),
+            Hash("request"),
+            context =>
+            {
+                original.Apply(context.Binding with { ClOrdId = 1234 });
+                return Task.FromResult(0);
+            });
+        var rotated = new RestOrderIdempotencyStore(
+            CreateProtector("new", ["new"]));
+        rotated.Restore(original.CaptureSnapshot());
+
+        await Assert.ThrowsAsync<RestOrderIdempotencyUnavailableException>(
+            () => rotated.ExecuteAsync<int>(
+                Identity("old-key"),
+                Hash("request"),
+                _ => Task.FromResult(1)));
+        await Assert.ThrowsAsync<RestOrderIdempotencyUnavailableException>(
+            () => rotated.ExecuteAsync<int>(
+                Identity("different-key"),
+                Hash("different-request"),
+                _ => Task.FromResult(1)));
+        Assert.Single(rotated.CaptureSnapshot());
+    }
+
     private static string Hash(string value) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)))
             .ToLowerInvariant();
 
+    private static RestOrderIdempotencyIdentity Identity(string key) =>
+        new("FIRM-A", "alice", "alice", "POST /orders", key);
+
     private static AeadOutboundCommandProtector CreateProtector() =>
+        CreateProtector("test", ["test"]);
+
+    private static AeadOutboundCommandProtector CreateProtector(
+        string activeStableKeyId,
+        string[] keyIds) =>
         new(
             new OutboundCommandProtectionOptions
             {
-                ActiveKeyId = "test",
+                ActiveKeyId = activeStableKeyId,
                 ActiveKeyVersion = 1,
-                Keys =
-                [
+                StableReferenceKeyId = activeStableKeyId,
+                StableReferenceKeyVersion = 1,
+                Keys = keyIds.Select(id =>
                     new OutboundCommandProtectionKeyOptions
                     {
-                        KeyId = "test",
+                        KeyId = id,
                         Version = 1,
                         KeyBase64 = Convert.ToBase64String(
                             SHA256.HashData(Encoding.UTF8.GetBytes(
-                                "rest-order-idempotency-store-tests"))),
-                    },
-                ],
+                                $"rest-order-idempotency-store-tests:{id}"))),
+                    }).ToList(),
             });
 }

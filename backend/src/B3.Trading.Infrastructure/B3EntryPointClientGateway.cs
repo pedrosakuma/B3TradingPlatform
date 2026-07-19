@@ -1330,11 +1330,19 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
             var start = _clock.GetTimestamp();
             _latencyProbe.OnSubmitted(clOrdId, _firmId, op);
+            ExchangeGatewayFrameIdentity? committedFrame = null;
             try
             {
                 var receipt = await sdkCall(
-                    (frame, callbackCt) => InvokeFramePreparedCallbackAsync(
-                        onFramePrepared, frame, callbackCt),
+                    async (frame, callbackCt) =>
+                    {
+                        var mappedFrame = MapFrameIdentity(frame, _firmId);
+                        await InvokeFramePreparedCallbackAsync(
+                            onFramePrepared,
+                            mappedFrame,
+                            callbackCt).ConfigureAwait(false);
+                        committedFrame = mappedFrame;
+                    },
                     ct).ConfigureAwait(false);
 
                 var mapped = MapReceipt(receipt, _firmId);
@@ -1357,6 +1365,17 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
                 throw mapped;
             }
+            catch (Exception ex) when (committedFrame is not null)
+            {
+                var mapped = new ExchangeGatewayAttemptException(
+                    "The outbound gateway failed after the frame-prepared callback committed.",
+                    ExchangeGatewayFailureDisposition.Ambiguous,
+                    ExchangeGatewayAttemptStage.FramePrepared,
+                    committedFrame,
+                    ex);
+                await FailClosedOutboundAttemptAsync(op, clOrdId, mapped).ConfigureAwait(false);
+                throw mapped;
+            }
         }
         finally
         {
@@ -1374,14 +1393,14 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
     private async ValueTask InvokeFramePreparedCallbackAsync(
         ExchangeGatewayFramePreparedCallback callback,
-        UpModels.OutboundFrameIdentity frame,
+        ExchangeGatewayFrameIdentity frame,
         CancellationToken ct)
     {
         var priorDepth = _framePreparedCallbackDepth.Value;
         _framePreparedCallbackDepth.Value = priorDepth + 1;
         try
         {
-            await callback(MapFrameIdentity(frame, _firmId), ct).ConfigureAwait(false);
+            await callback(frame, ct).ConfigureAwait(false);
         }
         finally
         {

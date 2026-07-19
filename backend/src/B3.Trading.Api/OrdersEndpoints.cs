@@ -87,21 +87,6 @@ public static class OrdersEndpoints
                 displayPolicy = parsedPolicy;
             }
 
-            // Q4.1 (#301). Parse the optional sub-account hint, validate
-            // the id (1-64 chars, alphanumerics + ._-) via the value-type
-            // constructor, and confirm it exists and is active for the
-            // caller's firm. Active-status is checked again inside
-            // SubAccountLimitsCheck under the dispatcher lock — this
-            // is a fast-fail before any WAL write happens.
-            //
-            // PR review #301 P2: distinguish the two rejection cases
-            // with structured reasons so clients and metrics can tell
-            // "unknown id" apart from "operator-disabled".
-            //   * sub_account_not_registered — never seen this id
-            //     for this firm (or it was created under a different
-            //     firm and the caller's claim mismatches);
-            //   * sub_account_deactivated   — registered but soft-
-            //     deleted via DELETE /sub-accounts.
             SubAccountId? subAccount = null;
             if (!string.IsNullOrWhiteSpace(req.SubAccountId))
             {
@@ -110,8 +95,57 @@ public static class OrdersEndpoints
                 {
                     return Results.BadRequest(new { error = $"invalid subAccountId: {ex.Message}" });
                 }
-                var firmForLookup = ResolveFirm(ctx);
-                if (!subAccounts.TryGet(firmForLookup, subAccount.Value, out var entry))
+            }
+
+            var owner = ResolveOwner(ctx, registry);
+            var firm = ResolveFirm(ctx);
+            var idempotencyValues = ctx.Request.Headers["Idempotency-Key"];
+            if (idempotencyValues.Count > 1)
+                return Results.BadRequest(new { error = "multiple Idempotency-Key values are not allowed" });
+            var idempotencyKey = idempotencyValues.ToString();
+            RestOrderIdempotencyIdentity? idempotencyIdentity = null;
+            string? requestHash = null;
+            if (!string.IsNullOrWhiteSpace(idempotencyKey))
+            {
+                idempotencyIdentity = new RestOrderIdempotencyIdentity(
+                    firm,
+                    owner.Value,
+                    ResolvePrincipal(ctx),
+                    "POST /orders",
+                    idempotencyKey);
+                requestHash = CanonicalRequestHash(
+                    req,
+                    side,
+                    type,
+                    tif,
+                    displayPolicy,
+                    subAccount);
+                try
+                {
+                    var resolution = await idempotency.ResolveAsync(
+                        idempotencyIdentity,
+                        requestHash,
+                        ct);
+                    if (resolution.Kind == RestOrderIdempotencyResolutionKind.Conflict)
+                        return Results.Conflict(new { error = "idempotency_key_reused_with_different_request" });
+                    if (resolution.Kind == RestOrderIdempotencyResolutionKind.Replayed)
+                        return MapReplayedSubmission(resolution.Binding!, outboundLedger, book);
+                }
+                catch (RestOrderIdempotencyUnavailableException)
+                {
+                    return IdempotencyUnavailable();
+                }
+                catch (ArgumentException ex)
+                {
+                    return Results.BadRequest(new { error = ex.Message });
+                }
+            }
+
+            // Mutable directory/activation checks intentionally run only after
+            // an existing scoped idempotency binding has had a chance to replay.
+            if (subAccount is not null)
+            {
+                if (!subAccounts.TryGet(firm, subAccount.Value, out var entry))
                     return Results.BadRequest(new
                     {
                         error = $"sub-account '{subAccount.Value}' is not registered for firm",
@@ -125,18 +159,9 @@ public static class OrdersEndpoints
                     });
             }
 
-            // SecurityId resolution: explicit non-zero in the payload
-            // wins (preserves the conformance contract). Otherwise look
-            // up the directory by symbol — that is the path the trader
-            // UI takes, since the ticket form does not expose the
-            // numeric SecurityId.
             var securityId = req.SecurityId;
             if (securityId == 0 && symbols.TryResolve(req.Symbol, out var resolved))
                 securityId = resolved;
-
-            var owner = ResolveOwner(ctx, registry);
-            var firm = ResolveFirm(ctx);
-
             var submission = new OrderSubmissionRequest(
                 owner, firm, req.Symbol, securityId, side, type,
                 req.Quantity, req.Price, OrderSubmissionSource.Manual,
@@ -150,11 +175,8 @@ public static class OrdersEndpoints
             {
                 UseDurableOutboundCoordinator = true,
             };
-            var idempotencyValues = ctx.Request.Headers["Idempotency-Key"];
-            if (idempotencyValues.Count > 1)
-                return Results.BadRequest(new { error = "multiple Idempotency-Key values are not allowed" });
-            var idempotencyKey = idempotencyValues.ToString();
-            if (string.IsNullOrWhiteSpace(idempotencyKey))
+
+            if (idempotencyIdentity is null)
             {
                 ctx.Response.Headers["Idempotency-Key-Required"] = "true";
                 ctx.Response.Headers.Append(
@@ -175,20 +197,8 @@ public static class OrdersEndpoints
             try
             {
                 execution = await idempotency.ExecuteAsync(
-                    new RestOrderIdempotencyIdentity(
-                        firm,
-                        owner.Value,
-                        ResolvePrincipal(ctx),
-                        "POST /orders",
-                        idempotencyKey),
-                    CanonicalRequestHash(
-                        req,
-                        securityId,
-                        side,
-                        type,
-                        tif,
-                        displayPolicy,
-                        subAccount),
+                    idempotencyIdentity,
+                    requestHash!,
                     async idempotencyContext =>
                         await submitter.SubmitAsync(
                             submission with { IdempotencyContext = idempotencyContext },
@@ -197,6 +207,10 @@ public static class OrdersEndpoints
             catch (ArgumentException ex)
             {
                 return Results.BadRequest(new { error = ex.Message });
+            }
+            catch (RestOrderIdempotencyUnavailableException)
+            {
+                return IdempotencyUnavailable();
             }
 
             if (execution.Kind == RestOrderIdempotencyExecutionKind.Conflict)
@@ -228,13 +242,20 @@ public static class OrdersEndpoints
             var firm = ResolveFirm(ctx);
             if (idempotency.TryGetByMutation(id, out var binding) && binding is not null)
             {
-                if (!idempotency.IsOwnedBy(
-                        binding,
-                        firm,
-                        owner.Value,
-                        ResolvePrincipal(ctx),
-                        "POST /orders"))
-                    return Results.NotFound();
+                try
+                {
+                    if (!idempotency.IsOwnedBy(
+                            binding,
+                            firm,
+                            owner.Value,
+                            ResolvePrincipal(ctx),
+                            "POST /orders"))
+                        return Results.NotFound();
+                }
+                catch (RestOrderIdempotencyUnavailableException)
+                {
+                    return IdempotencyUnavailable();
+                }
                 return Results.Ok(MutationResponse(
                     binding.MutationId,
                     binding.ClOrdId,
@@ -419,6 +440,7 @@ public static class OrdersEndpoints
                 nameof(OutboundMutationState.Ambiguous) => "outbound mutation requires reconciliation",
                 nameof(OutboundMutationState.AttemptIntentPrepared) => "outbound mutation outcome is unknown",
                 nameof(OutboundMutationState.FramePrepared) => "outbound mutation outcome is unknown",
+                "RecordedPendingApproval" => "outbound approval is not durably committed",
                 _ => null,
             });
         return state switch
@@ -429,6 +451,8 @@ public static class OrdersEndpoints
                 or nameof(OutboundMutationState.AttemptIntentPrepared)
                 or nameof(OutboundMutationState.FramePrepared)
                 or nameof(OutboundMutationState.LegacyUnknown) =>
+                Results.Json(response, statusCode: StatusCodes.Status503ServiceUnavailable),
+            "RecordedPendingApproval" =>
                 Results.Json(response, statusCode: StatusCodes.Status503ServiceUnavailable),
             _ => Results.Accepted($"/orders/mutations/{binding.MutationId}", response),
         };
@@ -522,7 +546,6 @@ public static class OrdersEndpoints
 
     private static string CanonicalRequestHash(
         SubmitOrderRequest request,
-        ulong securityId,
         OrderSide side,
         OrderType type,
         TimeInForce timeInForce,
@@ -533,7 +556,7 @@ public static class OrdersEndpoints
         {
             version = 1,
             symbol = request.Symbol,
-            securityId,
+            securityId = request.SecurityId,
             side = side.ToString(),
             type = type.ToString(),
             request.Quantity,
@@ -550,6 +573,15 @@ public static class OrdersEndpoints
         });
         return Convert.ToHexString(SHA256.HashData(canonical)).ToLowerInvariant();
     }
+
+    private static IResult IdempotencyUnavailable() =>
+        Results.Json(
+            new
+            {
+                error = "idempotency history unavailable; operator reconciliation required",
+                code = "idempotency_history_unavailable",
+            },
+            statusCode: StatusCodes.Status503ServiceUnavailable);
 }
 
 public sealed record SubmitOrderRequest(
