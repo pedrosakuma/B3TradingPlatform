@@ -1,4 +1,5 @@
 using B3.Trading.Application.Observability;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.Risk.Accounting;
@@ -40,6 +41,11 @@ public sealed class OrderModifyService
     private readonly Routing.IRoutingInstructionResolver? _routingResolver;
     private readonly CompositeRiskAccountant? _accountant;
     private readonly ILogger<OrderModifyService> _logger;
+    private readonly OutboundMutationLedger? _outboundLedger;
+    private readonly CancelReplaceApprovalFactory? _approvalFactory;
+    private readonly CancelReplaceOutboundCoordinator? _outboundCoordinator;
+    private readonly RestOrderIdempotencyStore? _restIdempotency;
+    private readonly TimeProvider _clock;
 
     public OrderModifyService(
         ClOrdIdPrefixRegistry clOrdIds,
@@ -56,7 +62,12 @@ public sealed class OrderModifyService
         Routing.IRoutingInstructionResolver? routingInstructionResolver = null,
         CompositeRiskAccountant? accountant = null,
         Lifecycle.IDrainController? reconciliationDrain = null,
-        ReconciliationResolutionWriter? resolutionWriter = null)
+        ReconciliationResolutionWriter? resolutionWriter = null,
+        OutboundMutationLedger? outboundLedger = null,
+        CancelReplaceApprovalFactory? approvalFactory = null,
+        CancelReplaceOutboundCoordinator? outboundCoordinator = null,
+        RestOrderIdempotencyStore? restIdempotency = null,
+        TimeProvider? clock = null)
     {
         _clOrdIds = clOrdIds;
         _ownership = ownership;
@@ -77,6 +88,11 @@ public sealed class OrderModifyService
         _routingResolver = routingInstructionResolver;
         _accountant = accountant;
         _logger = logger;
+        _outboundLedger = outboundLedger;
+        _approvalFactory = approvalFactory;
+        _outboundCoordinator = outboundCoordinator;
+        _restIdempotency = restIdempotency;
+        _clock = clock ?? TimeProvider.System;
     }
 
     /// <summary>
@@ -173,6 +189,20 @@ public sealed class OrderModifyService
                 $"new quantity ({req.NewQuantity}) must exceed already-filled quantity ({orig.CumulativeQuantity})");
         }
 
+        if (_outboundLedger?.TryGetActiveForOriginal(
+                orig.FirmId,
+                req.OriginalClOrdId,
+                out var active) == true
+            && active is not null)
+        {
+            return active.Kind == OutboundMutationKind.Replace
+                && req.IdempotencyContext is not null
+                ? OrderModifyResult.Accepted(
+                    active.Attempts.LastOrDefault()?.ClOrdId ?? active.PrimaryClOrdId,
+                    active.MutationId)
+                : OrderModifyResult.Conflict("another mutation for this order is already active");
+        }
+
         try
         {
             Order.ValidatePriceForType(orig.Type, req.NewPrice ?? orig.Price);
@@ -203,6 +233,8 @@ public sealed class OrderModifyService
         decimal? effectivePrice,
         CancellationToken ct)
     {
+        var mutationId = req.IdempotencyContext?.Binding.MutationId
+            ?? OutboundMutationId.New();
         var newClOrdId = _clOrdIds.Generate(req.Owner);
         // #108 — DuplicateClOrdID defensive guard. The new ID must
         // be unique against BOTH the working book AND in-flight
@@ -340,12 +372,21 @@ public sealed class OrderModifyService
             RequestedTimeInForce: req.NewTimeInForce,
             RequestedStopPrice: req.NewStopPrice,
             RequestedGoodTillDate: req.NewGoodTillDate);
+        var recordedAt = _clock.GetUtcNow();
+        var restIdempotency = req.IdempotencyContext is { Binding: { } pendingBinding }
+            ? pendingBinding with
+            {
+                ClOrdId = newClOrdId,
+                BoundAtUtc = recordedAt,
+            }
+            : null;
 
         try
         {
             var dispatched = _dispatcher.DispatchIf(
                 new OrderReplaceRequestedEvent
                 {
+                    MutationId = _outboundCoordinator is null ? null : mutationId,
                     OriginalClOrdId = req.OriginalClOrdId,
                     NewClOrdId = newClOrdId,
                     EndClientId = req.Owner.Value,
@@ -361,6 +402,8 @@ public sealed class OrderModifyService
                     RequestedTimeInForce = req.NewTimeInForce?.ToString(),
                     RequestedStopPrice = req.NewStopPrice,
                     RequestedGoodTillDate = req.NewGoodTillDate,
+                    RestIdempotency = restIdempotency,
+                    TimestampUtc = recordedAt,
                 },
                 () => orig.Status is not (OrderStatus.Filled or OrderStatus.Cancelled
                     or OrderStatus.Rejected or OrderStatus.Replaced)
@@ -371,6 +414,8 @@ public sealed class OrderModifyService
                         throw new InvalidOperationException(
                             $"Original ClOrdID {req.OriginalClOrdId} was not exclusively claimed.");
                     _ownership.RegisterReplaceLink(req.OriginalClOrdId, newClOrdId);
+                    if (restIdempotency is not null)
+                        _restIdempotency?.Apply(restIdempotency);
                 });
             if (!dispatched.Applied)
             {
@@ -390,6 +435,93 @@ public sealed class OrderModifyService
         }
 
         _accountant?.RecordAccepted(riskCtx);
+
+        if (_outboundCoordinator is not null)
+        {
+            if (_outboundLedger is null || _approvalFactory is null)
+            {
+                return FailResolutionForReconciliation(
+                    newClOrdId,
+                    "outbound_replace_composition_invalid",
+                    new InvalidOperationException("Replace outbound coordinator composition is incomplete."));
+            }
+            var approvedAt = _clock.GetUtcNow();
+            try
+            {
+                var frozen = _approvalFactory.CreateReplace(
+                    mutationId,
+                    orig,
+                    newClOrdId,
+                    req.NewQuantity,
+                    effectivePrice,
+                    effTif,
+                    effStop,
+                    effGtd,
+                    newRemainingNotional,
+                    approvedAt);
+                var approved = new OutboundApprovedEvent
+                {
+                    MutationId = mutationId,
+                    MutationKind = OutboundMutationKind.Replace,
+                    FirmId = orig.FirmId,
+                    EndClientRef = frozen.EndClientRef,
+                    Origin = req.Origin ?? OutboundMutationOrigin.Rest,
+                    PrimaryClOrdId = newClOrdId,
+                    OriginalClOrdId = req.OriginalClOrdId,
+                    RecordedAtUtc = recordedAt,
+                    Approval = frozen.Approval,
+                    TimestampUtc = approvedAt,
+                };
+                _dispatcher.DispatchCommitted(
+                    approved,
+                    () => _outboundLedger.Apply(approved),
+                    CancellationToken.None);
+            }
+            catch (Exception ex) when (
+                ex is WalBackpressureException
+                    or WalFaultedException
+                    or OutboundCommandEnvelopeException)
+            {
+                return FailResolutionForReconciliation(
+                    newClOrdId,
+                    "outbound_replace_approval_not_committed",
+                    ex);
+            }
+
+            var dispatch = await _outboundCoordinator.EnqueueAsync(mutationId, ct)
+                .ConfigureAwait(false);
+            if (dispatch.Outcome == CancelReplaceDispatchOutcome.TransportWriteCompleted)
+            {
+                MetricsRegistry.OrdersModifyRequested.Add(1,
+                    new KeyValuePair<string, object?>("symbol", orig.Symbol),
+                    new KeyValuePair<string, object?>("side", orig.Side.ToString()),
+                    new KeyValuePair<string, object?>("firmId", orig.FirmId));
+                return OrderModifyResult.Accepted(dispatch.ClOrdId, mutationId);
+            }
+            if (dispatch.Outcome == CancelReplaceDispatchOutcome.ProvenUnsent)
+            {
+                return OrderModifyResult.GatewayFailed(
+                    dispatch.ClOrdId,
+                    dispatch.Exception
+                        ?? new ExchangeGatewayPreSendException("Replace was proven unsent."),
+                    mutationId);
+            }
+            if (_outboundLedger.TryGet(mutationId, out var current)
+                && current?.State == OutboundMutationState.Ambiguous)
+            {
+                return OrderModifyResult.GatewayAmbiguous(
+                    dispatch.ClOrdId,
+                    dispatch.Exception
+                        ?? new InvalidOperationException("Replace outcome is ambiguous."),
+                    mutationId);
+            }
+            return OrderModifyResult.ReconciliationRequired(
+                dispatch.ClOrdId,
+                "replace_outcome_requires_reconciliation",
+                dispatch.Exception
+                    ?? new InvalidOperationException("Replace requires reconciliation."),
+                mutationId);
+        }
 
         try
         {
@@ -519,7 +651,7 @@ public sealed class OrderModifyService
             new KeyValuePair<string, object?>("side", orig.Side.ToString()),
             new KeyValuePair<string, object?>("firmId", orig.FirmId));
 
-        return OrderModifyResult.Accepted(newClOrdId);
+        return OrderModifyResult.Accepted(newClOrdId, mutationId);
     }
 
     private OrderModifyResult FailResolutionForReconciliation(
@@ -638,7 +770,9 @@ public sealed record OrderModifyRequest(
     /// already operate on a known order; user-facing transports
     /// (REST, FIXP) must populate it.
     /// </summary>
-    string? FirmId = null);
+    string? FirmId = null,
+    RestOrderIdempotencyContext? IdempotencyContext = null,
+    OutboundMutationOrigin? Origin = null);
 
 /// <summary>
 /// Outcome of <see cref="OrderModifyService.ModifyAsync"/>. The
@@ -649,6 +783,7 @@ public sealed class OrderModifyResult
 {
     public OrderModifyResultKind Kind { get; }
     public ulong NewClOrdId { get; }
+    public OutboundMutationId MutationId { get; }
     public string? Reason { get; }
     /// <summary>
     /// #288 — stable machine-readable code (e.g. <c>min_tick_size</c>,
@@ -657,26 +792,62 @@ public sealed class OrderModifyResult
     public string? Code { get; }
     public Exception? GatewayException { get; }
 
-    private OrderModifyResult(OrderModifyResultKind kind, ulong newClOrdId, string? reason, string? code, Exception? ex)
+    private OrderModifyResult(
+        OrderModifyResultKind kind,
+        ulong newClOrdId,
+        string? reason,
+        string? code,
+        Exception? ex,
+        OutboundMutationId mutationId = default)
     {
         Kind = kind;
         NewClOrdId = newClOrdId;
         Reason = reason;
         Code = code;
         GatewayException = ex;
+        MutationId = mutationId;
     }
 
-    public static OrderModifyResult Accepted(ulong newClOrdId) =>
-        new(OrderModifyResultKind.Accepted, newClOrdId, null, null, null);
+    public static OrderModifyResult Accepted(
+        ulong newClOrdId,
+        OutboundMutationId mutationId = default) =>
+        new(OrderModifyResultKind.Accepted, newClOrdId, null, null, null, mutationId);
     public static OrderModifyResult RiskRejected(string reason, string? code = null) =>
         new(OrderModifyResultKind.RiskRejected, 0, reason, code, null);
-    public static OrderModifyResult GatewayFailed(ulong newClOrdId, Exception ex) =>
-        new(OrderModifyResultKind.GatewayFailed, newClOrdId, "gateway_unavailable", "gateway_unavailable", ex);
-    public static OrderModifyResult GatewayAmbiguous(ulong newClOrdId, Exception ex) =>
-        new(OrderModifyResultKind.GatewayAmbiguous, newClOrdId, "send_ambiguous", "send_ambiguous", ex);
+    public static OrderModifyResult GatewayFailed(
+        ulong newClOrdId,
+        Exception ex,
+        OutboundMutationId mutationId = default) =>
+        new(
+            OrderModifyResultKind.GatewayFailed,
+            newClOrdId,
+            "gateway_unavailable",
+            "gateway_unavailable",
+            ex,
+            mutationId);
+    public static OrderModifyResult GatewayAmbiguous(
+        ulong newClOrdId,
+        Exception ex,
+        OutboundMutationId mutationId = default) =>
+        new(
+            OrderModifyResultKind.GatewayAmbiguous,
+            newClOrdId,
+            "send_ambiguous",
+            "send_ambiguous",
+            ex,
+            mutationId);
     public static OrderModifyResult ReconciliationRequired(
-        ulong newClOrdId, string reason, Exception ex) =>
-        new(OrderModifyResultKind.ReconciliationRequired, newClOrdId, reason, "reconciliation_required", ex);
+        ulong newClOrdId,
+        string reason,
+        Exception ex,
+        OutboundMutationId mutationId = default) =>
+        new(
+            OrderModifyResultKind.ReconciliationRequired,
+            newClOrdId,
+            reason,
+            "reconciliation_required",
+            ex,
+            mutationId);
     public static OrderModifyResult WalBackpressure(string detail) =>
         new(OrderModifyResultKind.WalBackpressure, 0, detail, "wal_backpressure", null);
     public static OrderModifyResult BadRequest(string reason) =>

@@ -44,9 +44,8 @@ public sealed class PendingReplacementRegistry
         // under <see cref="OrderReplacementIntent.NewClOrdId"/> is
         // left in place (rather than aborted) so a late Replaced ER
         // can converge through CommitReplace without re-checking
-        // capacity — but it must be released by the sweep if no ER
-        // arrives within the configured TTL, otherwise the upsize
-        // delta leaks until the parent terminates.
+        // capacity. Time is not evidence, so the TTL sweep only alerts;
+        // resolution requires venue evidence or an operator decision.
         public bool AmbiguousMarginHeld { get; set; }
         // Pass-5 review (#299) P1. Wall-clock at which the entry was
         // marked ambiguous. Used by the TTL sweep as the age anchor
@@ -78,7 +77,7 @@ public sealed class PendingReplacementRegistry
     private readonly ConcurrentDictionary<ulong, ulong> _byOriginalClOrdId = new();
     // Pass-5 review (#299) P2. Tertiary index: new ClOrdIDs whose
     // entry is flagged <see cref="Entry.AmbiguousMarginHeld"/>. The
-    // TTL sweep enumerates THIS set rather than the full registry so
+    // TTL alert sweep enumerates THIS set rather than the full registry so
     // its cost is O(ambiguous) — typically zero — instead of O(all
     // pending modifies). Membership is maintained in lock-step with
     // <see cref="MarkAmbiguousMarginHeld(ulong, DateTimeOffset)"/>
@@ -87,6 +86,7 @@ public sealed class PendingReplacementRegistry
     // has no <c>ConcurrentHashSet</c> equivalent in BCL; the value
     // is never read.
     private readonly ConcurrentDictionary<ulong, byte> _ambiguous = new();
+    private readonly ConcurrentDictionary<ulong, byte> _ambiguousAlerted = new();
     // Pass-5 review (#299) P2 test hook. Counts the number of
     // registry entries the most recent <see cref="SweepExpiredAmbiguous"/>
     // call inspected. Exposed via the internal helper below so the
@@ -176,6 +176,7 @@ public sealed class PendingReplacementRegistry
         {
             _byOriginalClOrdId.TryRemove(found.Intent.OriginalClOrdId, out _);
             _ambiguous.TryRemove(newClOrdId, out _);
+            _ambiguousAlerted.TryRemove(newClOrdId, out _);
             intent = found.Intent;
             return true;
         }
@@ -200,6 +201,7 @@ public sealed class PendingReplacementRegistry
             && _byNewClOrdId.TryRemove(newId, out var found))
         {
             _ambiguous.TryRemove(newId, out _);
+            _ambiguousAlerted.TryRemove(newId, out _);
             intent = found.Intent;
             ambiguousMarginHeld = found.AmbiguousMarginHeld;
             return true;
@@ -244,16 +246,16 @@ public sealed class PendingReplacementRegistry
     /// <paramref name="newClOrdId"/> as having a still-held margin
     /// reservation. Called by the AlgoEngine modify path AFTER an
     /// ambiguous gateway dispatch failure — the intent is kept in
-    /// place so a late Replaced ER can converge, but the reservation
-    /// will leak indefinitely if no ER ever arrives. The sweep below
-    /// uses this flag to bound the leak via TTL. Returns <c>false</c>
+    /// place so a late Replaced ER can converge. The sweep below uses
+    /// this flag to alert operators after the TTL without releasing
+    /// capacity. Returns <c>false</c>
     /// when no entry exists (e.g. the intent was already consumed
     /// by a racing ER between dispatch failure and this call).
     /// <para>
     /// Pass-5 review (#299) P1. The <paramref name="ambiguousAt"/>
     /// timestamp is captured on the entry AND persisted via the
     /// matching <c>OrderReplaceAmbiguousMarginHeldEvent</c> so a
-    /// post-restart replay re-hydrates the same TTL deadline the
+    /// post-restart replay re-hydrates the same TTL alert deadline the
     /// pre-crash sweep would have observed. Pass the engine clock's
     /// current value; the sweep below ages from this stamp, not
     /// from <see cref="Entry.CreatedAt"/>.
@@ -311,13 +313,11 @@ public sealed class PendingReplacementRegistry
     }
 
     /// <summary>
-    /// Pass-4 review (#299) P1. Remove + return every entry whose
+    /// Return every entry whose
     /// <see cref="Entry.AmbiguousMarginHeld"/> flag is set AND whose
     /// <see cref="Entry.AmbiguousAt"/> is older than <paramref name="now"/>
     /// minus <paramref name="ttl"/>. Caller (the AlgoScheduler sweep)
-    /// is responsible for calling
-    /// <see cref="Risk.IReplaceMarginCoordinator.AbortReplace"/> for
-    /// each returned intent and bumping the expired-counter metric.
+    /// is responsible for alerting/escalating for each returned intent.
     /// Entries without the ambiguous flag (the normal in-flight state)
     /// are NEVER reaped — a long-lived modify on a slow venue is
     /// legitimate.
@@ -351,15 +351,8 @@ public sealed class PendingReplacementRegistry
             // CreatedAt for legacy entries that pre-date pass-5).
             var anchor = entry.AmbiguousAt ?? entry.CreatedAt;
             if (anchor > cutoff) continue;
-            // Atomic remove guarded by the secondary index so a
-            // racing TryConsume(newClOrdId) wins cleanly (only one
-            // side will observe the entry as removable).
-            if (_byNewClOrdId.TryRemove(kvp.Key, out var found))
-            {
-                _byOriginalClOrdId.TryRemove(found.Intent.OriginalClOrdId, out _);
-                _ambiguous.TryRemove(kvp.Key, out _);
-                (expired ??= new List<OrderReplacementIntent>()).Add(found.Intent);
-            }
+            if (_ambiguousAlerted.TryAdd(kvp.Key, 0))
+                (expired ??= new List<OrderReplacementIntent>()).Add(entry.Intent);
         }
         return (IReadOnlyList<OrderReplacementIntent>?)expired ?? Array.Empty<OrderReplacementIntent>();
     }
@@ -409,6 +402,7 @@ public sealed class PendingReplacementRegistry
         _byNewClOrdId.Clear();
         _byOriginalClOrdId.Clear();
         _ambiguous.Clear();
+        _ambiguousAlerted.Clear();
         foreach (var s in entries)
         {
             var entry = new Entry(s.Intent, s.CreatedAt)

@@ -1,6 +1,7 @@
 using B3.Trading.Domain;
 
 using B3.Trading.Application;
+using B3.Trading.Application.Outbound;
 
 namespace B3.Trading.Infrastructure;
 
@@ -40,6 +41,12 @@ public sealed class UnavailableExchangeGateway : IExchangeGateway, IExchangeGate
         CancellationToken cancellationToken) =>
         ProvenUnsent();
 
+    public Task<ExchangeGatewayReceipt> CancelWithReceiptAsync(
+        OutboundCancelCommand command,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken) =>
+        ProvenUnsent();
+
     public Task CancelReplaceAsync(
         Order order, ulong newClOrdId, long newQuantity, decimal? newPrice,
         TimeInForce? requestedTimeInForce, decimal? requestedStopPrice, DateTimeOffset? requestedGoodTillDate,
@@ -49,6 +56,12 @@ public sealed class UnavailableExchangeGateway : IExchangeGateway, IExchangeGate
     public Task<ExchangeGatewayReceipt> CancelReplaceWithReceiptAsync(
         Order order, ulong newClOrdId, long newQuantity, decimal? newPrice,
         TimeInForce? requestedTimeInForce, decimal? requestedStopPrice, DateTimeOffset? requestedGoodTillDate,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken) =>
+        ProvenUnsent();
+
+    public Task<ExchangeGatewayReceipt> CancelReplaceWithReceiptAsync(
+        OutboundReplaceCommand command,
         ExchangeGatewayFramePreparedCallback onFramePrepared,
         CancellationToken cancellationToken) =>
         ProvenUnsent();

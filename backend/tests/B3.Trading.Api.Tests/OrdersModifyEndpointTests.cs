@@ -1,6 +1,8 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using B3.Trading.Application.Outbound;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace B3.Trading.Api.Tests;
 
@@ -176,6 +178,108 @@ public class OrdersModifyEndpointTests
         Assert.Equal(HttpStatusCode.Accepted, put.StatusCode);
     }
 
+    [Fact]
+    public async Task PUT_orders_IdempotentRepeat_ReplaysMutationWithoutSecondAttempt()
+    {
+        using var f = new TestAppFactory();
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var posted = await PostOrder(http, token, qty: 100, price: 30m);
+        var original = await posted.Content.ReadFromJsonAsync<OrderAck>();
+
+        var first = await PutModify(
+            http,
+            token,
+            original!.ClOrdId,
+            qty: 200,
+            price: 30m,
+            idempotencyKey: "replace-repeat");
+        var replay = await PutModify(
+            http,
+            token,
+            original.ClOrdId,
+            qty: 200,
+            price: 30m,
+            idempotencyKey: "replace-repeat");
+
+        Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, replay.StatusCode);
+        var firstBody = await first.Content.ReadFromJsonAsync<MutationAck>();
+        var replayBody = await replay.Content.ReadFromJsonAsync<MutationAck>();
+        Assert.Equal(firstBody!.MutationId, replayBody!.MutationId);
+        Assert.Equal(firstBody.ClOrdId, replayBody.ClOrdId);
+        Assert.False(firstBody.Replayed);
+        Assert.True(replayBody.Replayed);
+        var ledger = f.Services.GetRequiredService<OutboundMutationLedger>();
+        Assert.True(ledger.TryGet(
+            new OutboundMutationId(Guid.Parse(firstBody.MutationId)),
+            out var mutation));
+        Assert.Single(mutation!.Attempts);
+    }
+
+    [Fact]
+    public async Task DELETE_orders_IdempotentRepeat_ReplaysMutationWithoutSecondAttempt()
+    {
+        using var f = new TestAppFactory();
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var posted = await PostOrder(http, token, qty: 100, price: 30m);
+        var original = await posted.Content.ReadFromJsonAsync<OrderAck>();
+
+        var first = await DeleteOrder(
+            http,
+            token,
+            original!.ClOrdId,
+            idempotencyKey: "cancel-repeat");
+        var replay = await DeleteOrder(
+            http,
+            token,
+            original.ClOrdId,
+            idempotencyKey: "cancel-repeat");
+
+        Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, replay.StatusCode);
+        var firstBody = await first.Content.ReadFromJsonAsync<MutationAck>();
+        var replayBody = await replay.Content.ReadFromJsonAsync<MutationAck>();
+        Assert.Equal(firstBody!.MutationId, replayBody!.MutationId);
+        Assert.Equal(firstBody.ClOrdId, replayBody.ClOrdId);
+        Assert.False(firstBody.Replayed);
+        Assert.True(replayBody.Replayed);
+        var ledger = f.Services.GetRequiredService<OutboundMutationLedger>();
+        Assert.True(ledger.TryGet(
+            new OutboundMutationId(Guid.Parse(firstBody.MutationId)),
+            out var mutation));
+        Assert.Single(mutation!.Attempts);
+    }
+
+    [Fact]
+    public async Task PUT_orders_IdempotencyKeyReusedWithDifferentBody_Returns409()
+    {
+        using var f = new TestAppFactory();
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var posted = await PostOrder(http, token, qty: 100, price: 30m);
+        var original = await posted.Content.ReadFromJsonAsync<OrderAck>();
+
+        var first = await PutModify(
+            http,
+            token,
+            original!.ClOrdId,
+            qty: 200,
+            price: 30m,
+            idempotencyKey: "replace-conflict");
+        var conflict = await PutModify(
+            http,
+            token,
+            original.ClOrdId,
+            qty: 250,
+            price: 30m,
+            idempotencyKey: "replace-conflict");
+
+        Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+    }
+
     private static async Task<HttpResponseMessage> PostOrder(
         HttpClient http, string token, int qty, decimal price, string side = "Buy")
     {
@@ -196,16 +300,41 @@ public class OrdersModifyEndpointTests
     }
 
     private static async Task<HttpResponseMessage> PutModify(
-        HttpClient http, string token, string clOrdId, int qty, decimal? price)
+        HttpClient http,
+        string token,
+        string clOrdId,
+        int qty,
+        decimal? price,
+        string? idempotencyKey = null)
     {
         var req = new HttpRequestMessage(HttpMethod.Put, $"/orders/{clOrdId}")
         {
             Content = JsonContent.Create(new { Quantity = qty, Price = price })
         };
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        if (idempotencyKey is not null)
+            req.Headers.Add("Idempotency-Key", idempotencyKey);
+        return await http.SendAsync(req);
+    }
+
+    private static async Task<HttpResponseMessage> DeleteOrder(
+        HttpClient http,
+        string token,
+        string clOrdId,
+        string? idempotencyKey = null)
+    {
+        var req = new HttpRequestMessage(HttpMethod.Delete, $"/orders/{clOrdId}");
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        if (idempotencyKey is not null)
+            req.Headers.Add("Idempotency-Key", idempotencyKey);
         return await http.SendAsync(req);
     }
 
     private sealed record OrderAck(string ClOrdId, string? Status, string? Reason);
     private sealed record ModifyAck(string ClOrdId, string OriginalClOrdId);
+    private sealed record MutationAck(
+        string MutationId,
+        string ClOrdId,
+        string State,
+        bool Replayed);
 }

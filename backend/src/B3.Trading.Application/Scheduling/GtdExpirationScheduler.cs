@@ -578,7 +578,11 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
             }
 
             // 2) Issue the cancel through the regular pipeline.
-            var result = await _cancel.CancelAsync(order.Owner, clOrdId, CancellationToken.None)
+            var result = await _cancel.CancelAsync(
+                    order.Owner,
+                    clOrdId,
+                    CancellationToken.None,
+                    origin: Outbound.OutboundMutationOrigin.Scheduler)
                 .ConfigureAwait(false);
 
             if (result.Kind == OrderCancelResultKind.WalBackpressure)

@@ -212,10 +212,12 @@ public sealed record BotOrderMapping(Guid CredentialId, ulong ExternalClOrdId);
 /// </summary>
 public sealed record OrderCancelRequestedEvent : WalEvent
 {
+    public OutboundMutationId? MutationId { get; init; }
     public required ulong CancelClOrdId { get; init; }
     public required ulong OriginalClOrdId { get; init; }
     public required string OwnerEndClientId { get; init; }
     public BotOrderMapping? BotMapping { get; init; }
+    public RestOrderIdempotencyBindingSnapshot? RestIdempotency { get; init; }
 }
 
 /// <summary>
@@ -249,6 +251,7 @@ public sealed record OrderCancelPreSendFailedEvent : WalEvent
 /// </summary>
 public sealed record OrderReplaceRequestedEvent : WalEvent
 {
+    public OutboundMutationId? MutationId { get; init; }
     public required ulong OriginalClOrdId { get; init; }
     public required ulong NewClOrdId { get; init; }
     public required string EndClientId { get; init; }
@@ -274,6 +277,7 @@ public sealed record OrderReplaceRequestedEvent : WalEvent
     public string? RequestedTimeInForce { get; init; }
     public decimal? RequestedStopPrice { get; init; }
     public DateTimeOffset? RequestedGoodTillDate { get; init; }
+    public RestOrderIdempotencyBindingSnapshot? RestIdempotency { get; init; }
 }
 
 /// <summary>

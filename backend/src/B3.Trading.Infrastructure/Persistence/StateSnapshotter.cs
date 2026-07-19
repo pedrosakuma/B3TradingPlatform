@@ -1193,6 +1193,8 @@ public sealed class EventReplayer
                 _ownership.RegisterCancelLink(ocr.CancelClOrdId, ocr.OriginalClOrdId);
                 _pendingCancels?.TryAdd(ocr.OriginalClOrdId, ocr.CancelClOrdId);
                 _clOrdIds.AdvanceCounterTo(ocrOwner, ocr.CancelClOrdId);
+                if (ocr.RestIdempotency is { } cancelIdempotency)
+                    _restOrderIdempotency?.Apply(cancelIdempotency);
                 if (_outboundLedger?.ShouldImportLegacy == true)
                 {
                     var originalFirmId = _orders.TryGet(
@@ -1262,6 +1264,8 @@ public sealed class EventReplayer
                 // must advance the watermark even if the replacement
                 // intent itself wasn't re-registered (orig already gone).
                 _clOrdIds.AdvanceCounterTo(new EndClientId(rr.EndClientId), rr.NewClOrdId);
+                if (rr.RestIdempotency is { } replaceIdempotency)
+                    _restOrderIdempotency?.Apply(replaceIdempotency);
                 if (_outboundLedger?.ShouldImportLegacy == true)
                     _outboundLedger.ImportLegacyReplace(rr);
                 break;

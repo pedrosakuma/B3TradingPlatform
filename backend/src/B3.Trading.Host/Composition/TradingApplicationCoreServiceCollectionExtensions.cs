@@ -231,6 +231,7 @@ public static class TradingApplicationCoreServiceCollectionExtensions
 
         services.AddSingleton<ExecutionReportProcessor>();
         services.AddSingleton<B3.Trading.Application.Outbound.NewOrderOutboundCoordinator>();
+        services.AddSingleton<B3.Trading.Application.Outbound.CancelReplaceOutboundCoordinator>();
         services.AddSingleton<OrderSubmissionService>();
         services.AddSingleton<OrderCancelService>();
         services.AddSingleton<OrderModifyService>();

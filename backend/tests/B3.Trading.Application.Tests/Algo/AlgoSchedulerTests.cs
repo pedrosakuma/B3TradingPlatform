@@ -199,7 +199,7 @@ public class AlgoSchedulerTests
     // ───────── Pass-4 review (#299) P1 — ambiguous-send TTL sweep ─────────
 
     [Fact]
-    public async Task SweepAmbiguousReplaceIntents_ExpiredEntry_ReleasesReservationAndBumpsMetric()
+    public async Task SweepAmbiguousReplaceIntents_ExpiredEntry_AlertsAndKeepsReservation()
     {
         // Pass-4 review (#299) P1. Approach A+TTL convergence: an
         // AlgoEngine modify whose gateway dispatch threw post-Prepare
@@ -273,7 +273,7 @@ public class AlgoSchedulerTests
         Assert.True(reg.IsOriginalInFlight(100UL));
         Assert.Equal(3050m, margin.ReservedForTesting("alice"));
 
-        // Past TTL: sweep releases the reservation + clears the intent.
+        // Past TTL: sweep alerts but retains the reservation + intent.
         long expiredCount = 0;
         string? expiredAlgoType = null;
         using var listener = new System.Diagnostics.Metrics.MeterListener();
@@ -292,9 +292,8 @@ public class AlgoSchedulerTests
 
         scheduler.SweepAmbiguousReplaceIntents(clock.GetUtcNow().AddSeconds(31));
 
-        Assert.False(reg.IsOriginalInFlight(100UL));
-        // Released: _reserved drops back to the original 3000m.
-        Assert.Equal(3000m, margin.ReservedForTesting("alice"));
+        Assert.True(reg.IsOriginalInFlight(100UL));
+        Assert.Equal(3050m, margin.ReservedForTesting("alice"));
         listener.RecordObservableInstruments();
         Assert.Equal(1, Interlocked.Read(ref expiredCount));
         // ParentAlgoId is null in this synthetic test, so the tag
@@ -363,8 +362,9 @@ public class AlgoSchedulerTests
         // The 1000 normal entries are NOT consumed by the sweep —
         // they remain in the registry as long-lived legitimate
         // in-flight modifies.
-        Assert.Equal(1000, reg.CountForTesting);
-        Assert.Equal(0, reg.AmbiguousCountForTesting);
+        Assert.Equal(1003, reg.CountForTesting);
+        Assert.Equal(3, reg.AmbiguousCountForTesting);
+        Assert.Empty(reg.SweepExpiredAmbiguous(now.AddMinutes(6), TimeSpan.FromMinutes(1)));
     }
 
     [Fact]

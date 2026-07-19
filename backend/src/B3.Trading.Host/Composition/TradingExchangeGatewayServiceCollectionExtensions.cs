@@ -258,6 +258,8 @@ public static class TradingExchangeGatewayServiceCollectionExtensions
         // in-flight durable send reaches committed completion.
         services.AddHostedService(sp =>
             sp.GetRequiredService<NewOrderOutboundCoordinator>());
+        services.AddHostedService(sp =>
+            sp.GetRequiredService<CancelReplaceOutboundCoordinator>());
 
         services.AddSingleton<ExchangeStatus>(sp =>
         {

@@ -79,6 +79,7 @@ public enum OutboundSensitiveFieldRef
 public enum OutboundProvenUnsentEvidence
 {
     TypedPreFrameFailure,
+    RetryProjectionNotPrepared,
     DeadEpochIntentWithoutFrame,
     LegacyWave1CancelPreSend,
     LegacyWave1ReplacePreSend,
@@ -189,6 +190,18 @@ public sealed class SensitiveOutboundCommand
 }
 
 public sealed record OutboundNewOrderCommand(
+    OutboundMutationId MutationId,
+    string FirmId,
+    OutboundCanonicalCommand Canonical,
+    SensitiveOutboundCommand Sensitive);
+
+public sealed record OutboundCancelCommand(
+    OutboundMutationId MutationId,
+    string FirmId,
+    OutboundCanonicalCommand Canonical,
+    SensitiveOutboundCommand Sensitive);
+
+public sealed record OutboundReplaceCommand(
     OutboundMutationId MutationId,
     string FirmId,
     OutboundCanonicalCommand Canonical,

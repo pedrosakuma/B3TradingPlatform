@@ -164,8 +164,8 @@ public sealed class AlgoScheduler : BackgroundService
     public void Tick()
     {
         var now = _clock.GetUtcNow();
-        // Pass-4 review (#299) P1. Reap any ambiguous-send replace
-        // intents whose held margin reservation has aged past TTL.
+        // Alert on ambiguous-send replace intents whose held margin
+        // reservation has aged past TTL; never release on elapsed time.
         // Cheap no-op when no entries are in the ambiguous state
         // (the common case): the sweep iterates the registry but
         // only acts on entries explicitly flagged via
@@ -330,11 +330,11 @@ public sealed class AlgoScheduler : BackgroundService
     }
 
     /// <summary>
-    /// Pass-4 review (#299) P1. Release any margin reservation tied
+    /// Alert on any margin reservation tied
     /// to a replace intent that's been pending past
     /// <see cref="MarginOptions.AmbiguousReplaceTtl"/> after the
     /// AlgoEngine intentionally retained both intent + reserve on
-    /// an ambiguous gateway dispatch failure. Each released entry
+    /// an ambiguous gateway dispatch failure. Each overdue entry
     /// bumps <c>algo.modify_ambiguous_intent_expired_total</c>
     /// tagged with the parent's algoType (looked up by ParentAlgoId
     /// + FirmId; falls back to "unknown" when the parent is no
@@ -353,8 +353,6 @@ public sealed class AlgoScheduler : BackgroundService
 
         foreach (var intent in expired)
         {
-            _replaceMargin.AbortReplace(intent.NewClOrdId);
-
             // Best-effort algoType tag: ParentAlgoId is null for
             // operator-driven plain-order modifies (those don't
             // currently flow through this AlgoEngine ambiguous path,
@@ -371,7 +369,7 @@ public sealed class AlgoScheduler : BackgroundService
                 new KeyValuePair<string, object?>("algoType", algoType));
 
             _logger.LogWarning(
-                "AlgoScheduler released ambiguous-send replace reservation for new ClOrdID {NewClOrdId} (orig {OrigClOrdId}, owner {Owner}, algoType {AlgoType}); intent expired past TTL {TtlSeconds}s.",
+                "Ambiguous-send replace for new ClOrdID {NewClOrdId} (orig {OrigClOrdId}, owner {Owner}, algoType {AlgoType}) exceeded TTL {TtlSeconds}s; reservation remains held and operator reconciliation is required.",
                 intent.NewClOrdId, intent.OriginalClOrdId, intent.Owner.Value, algoType, ttl.TotalSeconds);
         }
     }

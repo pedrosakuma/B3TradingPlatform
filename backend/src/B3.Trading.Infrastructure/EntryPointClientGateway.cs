@@ -174,12 +174,98 @@ public sealed class EntryPointClientGateway : IExchangeGateway
         CancellationToken cancellationToken) =>
         Unsupported();
 
+    public Task<ExchangeGatewayReceipt> CancelWithReceiptAsync(
+        OutboundCancelCommand command,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken) =>
+        SendMutationWithReceiptAsync(
+            command.FirmId,
+            command.Canonical,
+            ExchangeGatewayOperation.Cancel,
+            onFramePrepared,
+            cancellationToken,
+            ct => _client.SubmitCancelAsync(
+                new OrderCancelRequest(
+                    command.Canonical.ClOrdId,
+                    command.Canonical.OriginalClOrdId
+                        ?? throw new ArgumentException("Approved cancel command has no original ClOrdID."),
+                    command.Canonical.SecurityId,
+                    Enum.Parse<OrderSide>(command.Canonical.Side, true) == OrderSide.Buy
+                        ? EpSide.Buy
+                        : EpSide.Sell,
+                    command.FirmId),
+                ct));
+
     public Task<ExchangeGatewayReceipt> CancelReplaceWithReceiptAsync(
         Order original, ulong newClOrdId, long newQuantity, decimal? newPrice,
         TimeInForce? requestedTimeInForce, decimal? requestedStopPrice, DateTimeOffset? requestedGoodTillDate,
         ExchangeGatewayFramePreparedCallback onFramePrepared,
         CancellationToken cancellationToken) =>
         Unsupported();
+
+    public Task<ExchangeGatewayReceipt> CancelReplaceWithReceiptAsync(
+        OutboundReplaceCommand command,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken) =>
+        SendMutationWithReceiptAsync(
+            command.FirmId,
+            command.Canonical,
+            ExchangeGatewayOperation.Replace,
+            onFramePrepared,
+            cancellationToken,
+            ct => _client.SubmitCancelReplaceAsync(
+                new OrderCancelReplaceRequest(
+                    command.Canonical.OriginalClOrdId
+                        ?? throw new ArgumentException("Approved replace command has no original ClOrdID."),
+                    command.Canonical.ClOrdId,
+                    command.Canonical.SecurityId,
+                    Enum.Parse<OrderSide>(command.Canonical.Side, true) == OrderSide.Buy
+                        ? EpSide.Buy
+                        : EpSide.Sell,
+                    command.Canonical.Quantity,
+                    command.Canonical.Price,
+                    command.FirmId,
+                    command.Canonical.MaxFloor,
+                    command.Canonical.MinQty,
+                    Enum.Parse<TimeInForce>(command.Canonical.TimeInForce, true),
+                    command.Canonical.StopPrice,
+                    command.Canonical.GoodTillDate),
+                ct));
+
+    private async Task<ExchangeGatewayReceipt> SendMutationWithReceiptAsync(
+        string firmId,
+        OutboundCanonicalCommand canonical,
+        ExchangeGatewayOperation operation,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken,
+        Func<CancellationToken, Task> send)
+    {
+        ArgumentNullException.ThrowIfNull(onFramePrepared);
+        var seq = checked((ulong)Interlocked.Increment(ref _outboundSeq));
+        var encoded = JsonSerializer.SerializeToUtf8Bytes(canonical);
+        var frame = new ExchangeGatewayFrameIdentity(
+            firmId,
+            sessionId: 1,
+            sessionVerId: 1,
+            outboundSeqNum: seq,
+            operation,
+            canonical.ClOrdId,
+            encoded.Length,
+            Convert.ToHexString(SHA256.HashData(encoded)).ToLowerInvariant());
+        await onFramePrepared(frame, cancellationToken).ConfigureAwait(false);
+        if (_client is MockEntryPointClient mock)
+        {
+            mock.RegisterOutboundFrame(
+                canonical.ClOrdId,
+                firmId,
+                frame.SessionId,
+                frame.SessionVerId);
+        }
+        await send(cancellationToken).ConfigureAwait(false);
+        return new ExchangeGatewayReceipt(
+            frame,
+            ExchangeGatewayAttemptStage.TransportWriteCompleted);
+    }
 
     private static Task<ExchangeGatewayReceipt> Unsupported() =>
         Task.FromException<ExchangeGatewayReceipt>(

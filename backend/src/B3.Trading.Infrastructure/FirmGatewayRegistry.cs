@@ -173,6 +173,16 @@ public sealed class MultiFirmExchangeGateway : IExchangeGateway
             order, newClOrdId, onFramePrepared, cancellationToken);
     }
 
+    public Task<ExchangeGatewayReceipt> CancelWithReceiptAsync(
+        OutboundCancelCommand command,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        return _registry.For(command.FirmId).CancelWithReceiptAsync(
+            command, onFramePrepared, cancellationToken);
+    }
+
     public Task CancelReplaceAsync(
         Order original, ulong newClOrdId, long newQuantity, decimal? newPrice,
         TimeInForce? requestedTimeInForce, decimal? requestedStopPrice, DateTimeOffset? requestedGoodTillDate,
@@ -195,5 +205,15 @@ public sealed class MultiFirmExchangeGateway : IExchangeGateway
             original, newClOrdId, newQuantity, newPrice,
             requestedTimeInForce, requestedStopPrice, requestedGoodTillDate,
             onFramePrepared, cancellationToken);
+    }
+
+    public Task<ExchangeGatewayReceipt> CancelReplaceWithReceiptAsync(
+        OutboundReplaceCommand command,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        return _registry.For(command.FirmId).CancelReplaceWithReceiptAsync(
+            command, onFramePrepared, cancellationToken);
     }
 }
