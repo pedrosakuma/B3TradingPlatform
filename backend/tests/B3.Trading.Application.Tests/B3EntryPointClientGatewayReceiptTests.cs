@@ -300,6 +300,137 @@ public sealed class B3EntryPointClientGatewayReceiptTests
     }
 
     [Fact]
+    public async Task GenericFailureAfterCommittedCallback_FailsClosedAndBlocksQueuedSends()
+    {
+        var callbackCommitted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFailure = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var queuedReceiptEntries = 0;
+        var queuedLegacyEntries = 0;
+        await using var gateway = await BuildGatewayAsync(
+            submit: async (request, callback, ct) =>
+            {
+                var frame = Frame(Up.OutboundOperationKind.NewOrder, request.ClOrdID.Value, 1);
+                await callback(frame, ct);
+                callbackCommitted.SetResult();
+                await releaseFailure.Task.WaitAsync(ct);
+                throw new IOException("generic socket failure after callback");
+            },
+            cancel: async (request, callback, ct) =>
+            {
+                Interlocked.Increment(ref queuedReceiptEntries);
+                var frame = Frame(Up.OutboundOperationKind.Cancel, request.ClOrdID.Value, 2);
+                await callback(frame, ct);
+                return new Up.OutboundAttemptReceipt(
+                    frame,
+                    Up.OutboundAttemptStage.TransportWriteCompleted);
+            },
+            legacyReplace: (_, _) =>
+            {
+                Interlocked.Increment(ref queuedLegacyEntries);
+                return Task.CompletedTask;
+            });
+
+        var failed = gateway.SubmitWithReceiptAsync(
+            Order(101),
+            (_, _) => ValueTask.CompletedTask,
+            CancellationToken.None);
+        await callbackCommitted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var queuedReceipt = gateway.CancelWithReceiptAsync(
+            Order(100),
+            102,
+            (_, _) => ValueTask.CompletedTask,
+            CancellationToken.None);
+        var queuedLegacy = gateway.CancelReplaceAsync(
+            Order(100),
+            103,
+            90,
+            31m,
+            null,
+            null,
+            null,
+            CancellationToken.None);
+
+        Assert.False(queuedReceipt.IsCompleted);
+        Assert.False(queuedLegacy.IsCompleted);
+        releaseFailure.SetResult();
+
+        var failure = await Assert.ThrowsAsync<ExchangeGatewayAttemptException>(() => failed);
+        Assert.Equal(ExchangeGatewayFailureDisposition.Ambiguous, failure.Disposition);
+        Assert.Equal(ExchangeGatewayAttemptStage.FramePrepared, failure.LastStage);
+        Assert.IsType<IOException>(failure.InnerException);
+        Assert.True(gateway.OutboundReconciliationRequired);
+        var blockedReceipt = await Assert.ThrowsAsync<ExchangeGatewayAttemptException>(
+            () => queuedReceipt);
+        Assert.Equal(ExchangeGatewayAttemptStage.NotStarted, blockedReceipt.LastStage);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => queuedLegacy);
+        Assert.Equal(0, Volatile.Read(ref queuedReceiptEntries));
+        Assert.Equal(0, Volatile.Read(ref queuedLegacyEntries));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReceiptCallbackInvariantFailure_FailsClosedBeforeQueuedSendEnters(
+        bool invokeMismatchedCallback)
+    {
+        var receiptReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseReceipt = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var queuedEntries = 0;
+        await using var gateway = await BuildGatewayAsync(
+            submit: async (request, callback, ct) =>
+            {
+                var receiptFrame = Frame(
+                    Up.OutboundOperationKind.NewOrder,
+                    request.ClOrdID.Value,
+                    seq: 2);
+                if (invokeMismatchedCallback)
+                {
+                    await callback(
+                        Frame(
+                            Up.OutboundOperationKind.NewOrder,
+                            request.ClOrdID.Value,
+                            seq: 1),
+                        ct);
+                }
+                receiptReady.SetResult();
+                await releaseReceipt.Task.WaitAsync(ct);
+                return new Up.OutboundAttemptReceipt(
+                    receiptFrame,
+                    Up.OutboundAttemptStage.TransportWriteCompleted);
+            },
+            cancel: async (request, callback, ct) =>
+            {
+                Interlocked.Increment(ref queuedEntries);
+                var frame = Frame(Up.OutboundOperationKind.Cancel, request.ClOrdID.Value, 3);
+                await callback(frame, ct);
+                return new Up.OutboundAttemptReceipt(
+                    frame,
+                    Up.OutboundAttemptStage.TransportWriteCompleted);
+            });
+
+        var failed = gateway.SubmitWithReceiptAsync(
+            Order(101),
+            (_, _) => ValueTask.CompletedTask,
+            CancellationToken.None);
+        await receiptReady.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var queued = gateway.CancelWithReceiptAsync(
+            Order(100),
+            102,
+            (_, _) => ValueTask.CompletedTask,
+            CancellationToken.None);
+        Assert.False(queued.IsCompleted);
+
+        releaseReceipt.SetResult();
+
+        var failure = await Assert.ThrowsAsync<ExchangeGatewayAttemptException>(() => failed);
+        Assert.Equal(ExchangeGatewayFailureDisposition.Ambiguous, failure.Disposition);
+        Assert.True(gateway.OutboundReconciliationRequired);
+        var blocked = await Assert.ThrowsAsync<ExchangeGatewayAttemptException>(() => queued);
+        Assert.Equal(ExchangeGatewayAttemptStage.NotStarted, blocked.LastStage);
+        Assert.Equal(0, Volatile.Read(ref queuedEntries));
+    }
+
+    [Fact]
     public async Task ConcurrentMixedOperations_PreservePreparedAndWireSequenceOrder()
     {
         var nextSeq = 0L;

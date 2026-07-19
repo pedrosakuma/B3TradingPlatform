@@ -50,7 +50,15 @@ public interface IOutboundCommandProtector
         EncryptedOutboundCommandEnvelope envelope);
 
     string CreateStableEndClientRef(string firmId, string endClientId);
+
+    OutboundStableReferenceKey ActiveStableReferenceKey { get; }
+
+    string CreateStableReference(
+        OutboundStableReferenceKey keyIdentity,
+        string canonicalValue);
 }
+
+public readonly record struct OutboundStableReferenceKey(string KeyId, int KeyVersion);
 
 public sealed class AeadOutboundCommandProtector : IOutboundCommandProtector
 {
@@ -221,18 +229,32 @@ public sealed class AeadOutboundCommandProtector : IOutboundCommandProtector
     }
 
     public string CreateStableEndClientRef(string firmId, string endClientId)
+        => CreateStableReference(
+            ActiveStableReferenceKey,
+            $"{firmId}\n{endClientId}");
+
+    public OutboundStableReferenceKey ActiveStableReferenceKey =>
+        new(_stableReference.Id, _stableReference.Version);
+
+    public string CreateStableReference(
+        OutboundStableReferenceKey keyIdentity,
+        string canonicalValue)
     {
-        if (!_keys.TryGetValue(_stableReference, out var key))
+        if (string.IsNullOrWhiteSpace(keyIdentity.KeyId) || keyIdentity.KeyVersion <= 0)
             throw new OutboundCommandEnvelopeException(
                 OutboundSensitivePayloadAvailability.MissingHistoricalKey,
-                "The stable outbound reference key is unavailable.");
+                "The stable outbound reference key identity is unavailable.");
+        if (!_keys.TryGetValue((keyIdentity.KeyId, keyIdentity.KeyVersion), out var key))
+            throw new OutboundCommandEnvelopeException(
+                OutboundSensitivePayloadAvailability.MissingHistoricalKey,
+                "A historical stable outbound reference key is unavailable.");
         using var derivation = new HMACSHA256(key);
         var referenceKey = derivation.ComputeHash(
             Encoding.ASCII.GetBytes("b3-outbound-stable-reference-v1"));
         try
         {
             using var hmac = new HMACSHA256(referenceKey);
-            var digest = hmac.ComputeHash(Encoding.UTF8.GetBytes($"{firmId}\n{endClientId}"));
+            var digest = hmac.ComputeHash(Encoding.UTF8.GetBytes(canonicalValue));
             return Convert.ToHexString(digest.AsSpan(0, 16)).ToLowerInvariant();
         }
         finally

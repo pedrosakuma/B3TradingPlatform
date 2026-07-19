@@ -1,19 +1,22 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using B3.Trading.Application;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Infrastructure;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
 namespace B3.Trading.Api.Tests.Lifecycle;
 
 /// <summary>
 /// End-to-end behavior of <c>Trading:Exchange:Mode = Unavailable</c>:
 /// process boots, /health surfaces the mode, and POST /orders is rejected
-/// with a synthesized rejection (502 BadGateway) instead of being silently
-/// accepted by a stub. This is the contract the Docker bootstrap relies on.
+/// with a durable proven-no-write rejection instead of being silently accepted
+/// by a stub. Recovered approved mutations remain deferred until shutdown.
 /// </summary>
 public class UnavailableModeTests
 {
@@ -35,6 +38,12 @@ public class UnavailableModeTests
         var exchange = doc.RootElement.GetProperty("exchange");
         Assert.Equal(nameof(ExchangeMode.Unavailable), exchange.GetProperty("mode").GetString());
         Assert.False(exchange.GetProperty("readyForOrders").GetBoolean());
+        Assert.Same(
+            UnavailableOutboundGatewayReadiness.Instance,
+            factory.Services.GetRequiredService<IOutboundGatewayReadiness>());
+        Assert.Single(
+            factory.Services.GetServices<IHostedService>()
+                .OfType<NewOrderOutboundCoordinator>());
     }
 
     [Fact]
@@ -51,7 +60,7 @@ public class UnavailableModeTests
     }
 
     [Fact]
-    public async Task Submit_Returns_502_Gateway_Unavailable()
+    public async Task Submit_ProvenUnavailable_TerminalisesAsDurableNoWriteRejection()
     {
         using var factory = MakeUnavailableFactory();
         using var client = await factory.CreateAuthedClientAsync();
@@ -66,8 +75,9 @@ public class UnavailableModeTests
             Price = 30m,
         });
 
-        Assert.Equal(HttpStatusCode.BadGateway, resp.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, resp.StatusCode);
         var body = await resp.Content.ReadAsStringAsync();
-        Assert.Contains("gateway unavailable", body, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("\"status\":\"Rejected\"", body, StringComparison.Ordinal);
+        Assert.Contains("gateway_proven_unsent", body, StringComparison.Ordinal);
     }
 }

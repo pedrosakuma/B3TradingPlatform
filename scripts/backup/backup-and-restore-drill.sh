@@ -241,6 +241,10 @@ docker run -d --name "$restore_container" -p "${RESTORE_PORT}:5000" \
   -e Trading__Auth__Users__0__Firm=FIRM01 \
   -e Trading__Reports__Cvm__OwnerHashSalt=restore-drill-cvm-salt \
   -e Trading__DropCopy__ClOrdIdMaskSalt=restore-drill-clordid-mask-salt \
+  -e Trading__OutboundCommandProtection__ActiveKeyId=restore-drill \
+  -e Trading__OutboundCommandProtection__StableReferenceKeyId=restore-drill \
+  -e Trading__OutboundCommandProtection__Keys__0__KeyId=restore-drill \
+  -e Trading__OutboundCommandProtection__Keys__0__KeyBase64=N2tjXhiFZ61TrXVa78oABf6mKVhmZV9xV4IxWA4QB9Y= \
   -e Trading__Exchange__Mode=Real \
   -e Trading__Exchange__UseRealEntryPointClient=true \
   -e Trading__Exchange__Firms__0__FirmId=FIRM01 \

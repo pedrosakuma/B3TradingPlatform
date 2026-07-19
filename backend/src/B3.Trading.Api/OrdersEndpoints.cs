@@ -1,7 +1,11 @@
 using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text.Json;
 using B3.Trading.Api.Auth;
 using B3.Trading.Api.WebSockets;
 using B3.Trading.Application;
+using B3.Trading.Application.Observability;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Domain;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -30,6 +34,9 @@ public static class OrdersEndpoints
             HttpContext ctx,
             EndClientRegistry registry,
             OrderSubmissionService submitter,
+            RestOrderIdempotencyStore idempotency,
+            OutboundMutationLedger outboundLedger,
+            WorkingOrderBook book,
             SymbolDirectory symbols,
             SubAccountsRegistry subAccounts,
             CancellationToken ct) =>
@@ -80,21 +87,6 @@ public static class OrdersEndpoints
                 displayPolicy = parsedPolicy;
             }
 
-            // Q4.1 (#301). Parse the optional sub-account hint, validate
-            // the id (1-64 chars, alphanumerics + ._-) via the value-type
-            // constructor, and confirm it exists and is active for the
-            // caller's firm. Active-status is checked again inside
-            // SubAccountLimitsCheck under the dispatcher lock — this
-            // is a fast-fail before any WAL write happens.
-            //
-            // PR review #301 P2: distinguish the two rejection cases
-            // with structured reasons so clients and metrics can tell
-            // "unknown id" apart from "operator-disabled".
-            //   * sub_account_not_registered — never seen this id
-            //     for this firm (or it was created under a different
-            //     firm and the caller's claim mismatches);
-            //   * sub_account_deactivated   — registered but soft-
-            //     deleted via DELETE /sub-accounts.
             SubAccountId? subAccount = null;
             if (!string.IsNullOrWhiteSpace(req.SubAccountId))
             {
@@ -103,8 +95,57 @@ public static class OrdersEndpoints
                 {
                     return Results.BadRequest(new { error = $"invalid subAccountId: {ex.Message}" });
                 }
-                var firmForLookup = ResolveFirm(ctx);
-                if (!subAccounts.TryGet(firmForLookup, subAccount.Value, out var entry))
+            }
+
+            var owner = ResolveOwner(ctx, registry);
+            var firm = ResolveFirm(ctx);
+            var idempotencyValues = ctx.Request.Headers["Idempotency-Key"];
+            if (idempotencyValues.Count > 1)
+                return Results.BadRequest(new { error = "multiple Idempotency-Key values are not allowed" });
+            var idempotencyKey = idempotencyValues.ToString();
+            RestOrderIdempotencyIdentity? idempotencyIdentity = null;
+            string? requestHash = null;
+            if (!string.IsNullOrWhiteSpace(idempotencyKey))
+            {
+                idempotencyIdentity = new RestOrderIdempotencyIdentity(
+                    firm,
+                    owner.Value,
+                    ResolvePrincipal(ctx),
+                    "POST /orders",
+                    idempotencyKey);
+                requestHash = CanonicalRequestHash(
+                    req,
+                    side,
+                    type,
+                    tif,
+                    displayPolicy,
+                    subAccount);
+                try
+                {
+                    var resolution = await idempotency.ResolveAsync(
+                        idempotencyIdentity,
+                        requestHash,
+                        ct);
+                    if (resolution.Kind == RestOrderIdempotencyResolutionKind.Conflict)
+                        return Results.Conflict(new { error = "idempotency_key_reused_with_different_request" });
+                    if (resolution.Kind == RestOrderIdempotencyResolutionKind.Replayed)
+                        return MapReplayedSubmission(resolution.Binding!, outboundLedger, book);
+                }
+                catch (RestOrderIdempotencyUnavailableException)
+                {
+                    return IdempotencyUnavailable();
+                }
+                catch (ArgumentException ex)
+                {
+                    return Results.BadRequest(new { error = ex.Message });
+                }
+            }
+
+            // Mutable directory/activation checks intentionally run only after
+            // an existing scoped idempotency binding has had a chance to replay.
+            if (subAccount is not null)
+            {
+                if (!subAccounts.TryGet(firm, subAccount.Value, out var entry))
                     return Results.BadRequest(new
                     {
                         error = $"sub-account '{subAccount.Value}' is not registered for firm",
@@ -118,19 +159,10 @@ public static class OrdersEndpoints
                     });
             }
 
-            // SecurityId resolution: explicit non-zero in the payload
-            // wins (preserves the conformance contract). Otherwise look
-            // up the directory by symbol — that is the path the trader
-            // UI takes, since the ticket form does not expose the
-            // numeric SecurityId.
             var securityId = req.SecurityId;
             if (securityId == 0 && symbols.TryResolve(req.Symbol, out var resolved))
                 securityId = resolved;
-
-            var owner = ResolveOwner(ctx, registry);
-            var firm = ResolveFirm(ctx);
-
-            var result = await submitter.SubmitAsync(new OrderSubmissionRequest(
+            var submission = new OrderSubmissionRequest(
                 owner, firm, req.Symbol, securityId, side, type,
                 req.Quantity, req.Price, OrderSubmissionSource.Manual,
                 TimeInForce: tif,
@@ -139,48 +171,111 @@ public static class OrdersEndpoints
                 DisplayQty: req.DisplayQty,
                 DisplayResetPolicy: displayPolicy,
                 SubAccountId: subAccount,
-                MinQty: req.MinQty), ct);
-
-            return result.Kind switch
+                MinQty: req.MinQty)
             {
-                OrderSubmissionResultKind.Accepted =>
-                    Results.Accepted($"/orders/{result.ClOrdId}", new { ClOrdId = result.ClOrdId.ToString() }),
-                OrderSubmissionResultKind.Rejected =>
-                    Results.Accepted($"/orders/{result.ClOrdId}",
-                        new { ClOrdId = result.ClOrdId.ToString(), Status = "Rejected", Reason = result.Reason, Code = result.Code }),
-                OrderSubmissionResultKind.GatewayFailed =>
-                    Results.Json(
-                        new { error = "gateway unavailable", clOrdId = result.ClOrdId.ToString() },
-                        statusCode: StatusCodes.Status502BadGateway),
-                OrderSubmissionResultKind.WalBackpressure =>
-                    Results.Json(
-                        new
-                        {
-                            error = result.Code == "wal_faulted"
-                                ? "service unavailable (WAL faulted)"
-                                : "system busy (WAL backpressure)",
-                            detail = result.Reason,
-                        },
-                        statusCode: StatusCodes.Status503ServiceUnavailable),
-                OrderSubmissionResultKind.Drained =>
-                    Results.Json(
-                        new { error = "service draining" },
-                        statusCode: StatusCodes.Status503ServiceUnavailable),
-                OrderSubmissionResultKind.BadRequest =>
-                    Results.BadRequest(new { error = result.Reason }),
-                OrderSubmissionResultKind.DuplicateClOrdId =>
-                    Results.Conflict(new { error = result.Reason, clOrdId = result.ClOrdId.ToString() }),
-                OrderSubmissionResultKind.ReconciliationRequired =>
-                    Results.Json(
-                        new
-                        {
-                            error = "WAL reconciliation required; service draining",
-                            clOrdId = result.ClOrdId.ToString(),
-                            code = result.Code,
-                        },
-                        statusCode: StatusCodes.Status503ServiceUnavailable),
-                _ => Results.StatusCode(StatusCodes.Status500InternalServerError),
+                UseDurableOutboundCoordinator = true,
             };
+
+            if (idempotencyIdentity is null)
+            {
+                ctx.Response.Headers["Idempotency-Key-Required"] = "true";
+                ctx.Response.Headers.Append(
+                    "Warning",
+                    "299 B3TradingPlatform \"Idempotency-Key will become required for POST /orders\"");
+                MetricsRegistry.OrdersMissingIdempotencyKey.Add(
+                    1,
+                    new KeyValuePair<string, object?>("firmId", firm),
+                    new KeyValuePair<string, object?>("endpoint", "POST /orders"));
+                var unkeyedResult = await submitter.SubmitAsync(submission, ct);
+                return MapSubmissionResult(
+                    unkeyedResult,
+                    replayed: false,
+                    ResolveState(unkeyedResult.MutationId, unkeyedResult.ClOrdId, outboundLedger, book));
+            }
+
+            RestOrderIdempotencyExecution<OrderSubmissionResult> execution;
+            try
+            {
+                execution = await idempotency.ExecuteAsync(
+                    idempotencyIdentity,
+                    requestHash!,
+                    async idempotencyContext =>
+                        await submitter.SubmitAsync(
+                            submission with { IdempotencyContext = idempotencyContext },
+                            ct));
+            }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+            catch (RestOrderIdempotencyUnavailableException)
+            {
+                return IdempotencyUnavailable();
+            }
+
+            if (execution.Kind == RestOrderIdempotencyExecutionKind.Conflict)
+                return Results.Conflict(new { error = "idempotency_key_reused_with_different_request" });
+            if (execution.Kind == RestOrderIdempotencyExecutionKind.Replayed)
+            {
+                var binding = execution.Binding!;
+                return MapReplayedSubmission(binding, outboundLedger, book);
+            }
+
+            var result = execution.Value!;
+            return MapSubmissionResult(
+                result,
+                replayed: false,
+                ResolveState(result.MutationId, result.ClOrdId, outboundLedger, book));
+        });
+
+        group.MapGet("/mutations/{mutationId:guid}", (
+            Guid mutationId,
+            HttpContext ctx,
+            EndClientRegistry registry,
+            RestOrderIdempotencyStore idempotency,
+            OutboundMutationLedger outboundLedger,
+            IOutboundCommandProtector protector,
+            WorkingOrderBook book) =>
+        {
+            var id = new OutboundMutationId(mutationId);
+            var owner = ResolveOwner(ctx, registry);
+            var firm = ResolveFirm(ctx);
+            if (idempotency.TryGetByMutation(id, out var binding) && binding is not null)
+            {
+                try
+                {
+                    if (!idempotency.IsOwnedBy(
+                            binding,
+                            firm,
+                            owner.Value,
+                            ResolvePrincipal(ctx),
+                            "POST /orders"))
+                        return Results.NotFound();
+                }
+                catch (RestOrderIdempotencyUnavailableException)
+                {
+                    return IdempotencyUnavailable();
+                }
+                return Results.Ok(MutationResponse(
+                    binding.MutationId,
+                    binding.ClOrdId,
+                    ResolveState(binding.MutationId, binding.ClOrdId, outboundLedger, book),
+                    replayed: true));
+            }
+            if (!outboundLedger.TryGet(id, out var mutation)
+                || mutation is null
+                || mutation.Kind != OutboundMutationKind.New
+                || !string.Equals(mutation.FirmId, firm, StringComparison.Ordinal)
+                || !string.Equals(
+                    mutation.EndClientRef,
+                    protector.CreateStableEndClientRef(firm, owner.Value),
+                    StringComparison.Ordinal))
+                return Results.NotFound();
+            return Results.Ok(MutationResponse(
+                mutation.MutationId,
+                mutation.PrimaryClOrdId,
+                mutation.State.ToString(),
+                replayed: false));
         });
 
         group.MapPut("/{clOrdId}", async (
@@ -323,6 +418,180 @@ public static class OrdersEndpoints
 
     private static string ResolveFirm(HttpContext ctx) =>
         ctx.User.FindFirstValue(JwtIssuer.FirmClaim) ?? "default";
+
+    private static string ResolvePrincipal(HttpContext ctx) =>
+        ctx.User.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)
+        ?? throw new InvalidOperationException("Authenticated request missing sub claim.");
+
+    private static IResult MapReplayedSubmission(
+        RestOrderIdempotencyBindingSnapshot binding,
+        OutboundMutationLedger ledger,
+        WorkingOrderBook book)
+    {
+        var state = ResolveState(binding.MutationId, binding.ClOrdId, ledger, book);
+        var response = MutationResponse(
+            binding.MutationId,
+            binding.ClOrdId,
+            state,
+            replayed: true,
+            error: state switch
+            {
+                nameof(OutboundMutationState.ProvenUnsent) => "gateway unavailable",
+                nameof(OutboundMutationState.Ambiguous) => "outbound mutation requires reconciliation",
+                nameof(OutboundMutationState.AttemptIntentPrepared) => "outbound mutation outcome is unknown",
+                nameof(OutboundMutationState.FramePrepared) => "outbound mutation outcome is unknown",
+                "RecordedPendingApproval" => "outbound approval is not durably committed",
+                _ => null,
+            });
+        return state switch
+        {
+            nameof(OutboundMutationState.ProvenUnsent) =>
+                Results.Json(response, statusCode: StatusCodes.Status502BadGateway),
+            nameof(OutboundMutationState.Ambiguous)
+                or nameof(OutboundMutationState.AttemptIntentPrepared)
+                or nameof(OutboundMutationState.FramePrepared)
+                or nameof(OutboundMutationState.LegacyUnknown) =>
+                Results.Json(response, statusCode: StatusCodes.Status503ServiceUnavailable),
+            "RecordedPendingApproval" =>
+                Results.Json(response, statusCode: StatusCodes.Status503ServiceUnavailable),
+            _ => Results.Accepted($"/orders/mutations/{binding.MutationId}", response),
+        };
+    }
+
+    private static IResult MapSubmissionResult(
+        OrderSubmissionResult result,
+        bool replayed,
+        string state)
+    {
+        var response = MutationResponse(
+            result.MutationId,
+            result.ClOrdId,
+            state,
+            replayed,
+            result.Reason,
+            result.Code,
+            status: result.Kind == OrderSubmissionResultKind.Rejected ? "Rejected" : null,
+            error: result.Kind switch
+            {
+                OrderSubmissionResultKind.GatewayFailed => "gateway unavailable",
+                OrderSubmissionResultKind.ReconciliationRequired =>
+                    "WAL reconciliation required; service draining",
+                OrderSubmissionResultKind.WalBackpressure =>
+                    result.Code == "wal_faulted"
+                        ? "service unavailable (WAL faulted)"
+                        : "system busy (WAL backpressure)",
+                _ => null,
+            });
+        return result.Kind switch
+        {
+            OrderSubmissionResultKind.Accepted or OrderSubmissionResultKind.Rejected =>
+                Results.Accepted($"/orders/mutations/{result.MutationId}", response),
+            OrderSubmissionResultKind.GatewayFailed =>
+                Results.Json(response, statusCode: StatusCodes.Status502BadGateway),
+            OrderSubmissionResultKind.WalBackpressure =>
+                Results.Json(response, statusCode: StatusCodes.Status503ServiceUnavailable),
+            OrderSubmissionResultKind.Drained =>
+                Results.Json(
+                    new { error = "service draining" },
+                    statusCode: StatusCodes.Status503ServiceUnavailable),
+            OrderSubmissionResultKind.BadRequest =>
+                Results.BadRequest(new { error = result.Reason }),
+            OrderSubmissionResultKind.DuplicateClOrdId =>
+                Results.Conflict(new { error = result.Reason, clOrdId = result.ClOrdId.ToString() }),
+            OrderSubmissionResultKind.ReconciliationRequired =>
+                Results.Json(response, statusCode: StatusCodes.Status503ServiceUnavailable),
+            _ => Results.StatusCode(StatusCodes.Status500InternalServerError),
+        };
+    }
+
+    private static object MutationResponse(
+        OutboundMutationId mutationId,
+        ulong clOrdId,
+        string state,
+        bool replayed,
+        string? reason = null,
+        string? code = null,
+        string? status = null,
+        string? error = null) => new
+        {
+            mutationId = mutationId.Value == Guid.Empty ? null : mutationId.ToString(),
+            clOrdId = clOrdId == 0 ? null : clOrdId.ToString(),
+            state,
+            lookupUrl = mutationId.Value == Guid.Empty
+                ? null
+                : $"/orders/mutations/{mutationId}",
+            replayed,
+            status = status ?? (state is "RejectedBeforeApproval" or "RejectedBeforeSend"
+                ? "Rejected"
+                : null),
+            reason,
+            code,
+            error,
+        };
+
+    private static string ResolveState(
+        OutboundMutationId mutationId,
+        ulong clOrdId,
+        OutboundMutationLedger ledger,
+        WorkingOrderBook? book)
+    {
+        if (mutationId.Value != Guid.Empty
+            && ledger.TryGet(mutationId, out var mutation)
+            && mutation is not null)
+        {
+            if (mutation.State == OutboundMutationState.OperatorResolved
+                && string.Equals(
+                    mutation.Resolution?.EvidenceKind,
+                    "OutboundProvenNoWrite",
+                    StringComparison.Ordinal))
+                return "RejectedBeforeSend";
+            return mutation.State.ToString();
+        }
+        if (book?.TryGet(clOrdId, out var order) == true && order is not null)
+            return order.Status == OrderStatus.Rejected
+                ? "RejectedBeforeApproval"
+                : "RecordedPendingApproval";
+        return "RecordedPendingApproval";
+    }
+
+    private static string CanonicalRequestHash(
+        SubmitOrderRequest request,
+        OrderSide side,
+        OrderType type,
+        TimeInForce timeInForce,
+        DisplayResetPolicy? displayResetPolicy,
+        SubAccountId? subAccount)
+    {
+        var canonical = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            version = 1,
+            symbol = request.Symbol,
+            securityId = request.SecurityId,
+            side = side.ToString(),
+            type = type.ToString(),
+            request.Quantity,
+            request.Price,
+            timeInForce = timeInForce.ToString(),
+            request.StopPrice,
+            goodTillDate = request.GoodTillDate?.ToUniversalTime(),
+            request.DisplayQty,
+            displayResetPolicy = request.DisplayQty is null
+                ? null
+                : (displayResetPolicy ?? DisplayResetPolicy.Always).ToString(),
+            subAccountId = subAccount?.Value,
+            request.MinQty,
+        });
+        return Convert.ToHexString(SHA256.HashData(canonical)).ToLowerInvariant();
+    }
+
+    private static IResult IdempotencyUnavailable() =>
+        Results.Json(
+            new
+            {
+                error = "idempotency history unavailable; operator reconciliation required",
+                code = "idempotency_history_unavailable",
+            },
+            statusCode: StatusCodes.Status503ServiceUnavailable);
 }
 
 public sealed record SubmitOrderRequest(

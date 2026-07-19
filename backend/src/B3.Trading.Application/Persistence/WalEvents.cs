@@ -181,6 +181,7 @@ public sealed record OrderSubmittedEvent : WalEvent
     /// hydrate errors rather than silently poisoning the venue.
     /// </summary>
     public long? MinQty { get; init; }
+    public RestOrderIdempotencyBindingSnapshot? RestIdempotency { get; init; }
 }
 
 /// <summary>
@@ -516,6 +517,8 @@ public sealed record ExecutionReportReceivedEvent : WalEvent
     public DateTimeOffset? VenueSendingTime { get; init; }
     public bool PossibleResend { get; init; }
     public ulong? VenueOrderId { get; init; }
+    public bool OutboundProvenNoWrite { get; init; }
+    public OutboundMutationId? OutboundMutationId { get; init; }
 
     /// <summary>
     /// Q4.7 (#307). Top-of-book snapshot captured at the moment a

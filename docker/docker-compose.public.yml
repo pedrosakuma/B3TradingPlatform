@@ -32,6 +32,10 @@ services:
       # No-default secrets — required, no dev fallback. Boot fails closed.
       Trading__Reports__Cvm__OwnerHashSalt: ${TRADING_CVM_OWNER_HASH_SALT:?Set TRADING_CVM_OWNER_HASH_SALT in .env (no default in public mode)}
       Trading__DropCopy__ClOrdIdMaskSalt: ${TRADING_CLORDID_MASK_SALT:?Set TRADING_CLORDID_MASK_SALT in .env (no default in public mode)}
+      Trading__OutboundCommandProtection__ActiveKeyId: ${TRADING_OUTBOUND_KEY_ID:?Set TRADING_OUTBOUND_KEY_ID in .env}
+      Trading__OutboundCommandProtection__StableReferenceKeyId: ${TRADING_OUTBOUND_KEY_ID:?Set TRADING_OUTBOUND_KEY_ID in .env}
+      Trading__OutboundCommandProtection__Keys__0__KeyId: ${TRADING_OUTBOUND_KEY_ID:?Set TRADING_OUTBOUND_KEY_ID in .env}
+      Trading__OutboundCommandProtection__Keys__0__KeyBase64: ${TRADING_OUTBOUND_KEY_BASE64:?Set a 256-bit base64 TRADING_OUTBOUND_KEY_BASE64 in .env}
 
       # --- FIXP listener: public, TLS + mTLS required (#528) ---
       Trading__EntryPointListener__Enabled: "true"

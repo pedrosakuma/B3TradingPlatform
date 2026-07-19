@@ -1,4 +1,7 @@
 using B3.Trading.Domain;
+using B3.Trading.Application.Outbound;
+using System.Security.Cryptography;
+using System.Text.Json;
 
 using B3.Trading.Application;
 
@@ -18,6 +21,7 @@ public sealed class EntryPointClientGateway : IExchangeGateway
 {
     private readonly IEntryPointClient _client;
     private readonly string _firmId;
+    private long _outboundSeq;
 
     public EntryPointClientGateway(IEntryPointClient client, string firmId)
     {
@@ -112,6 +116,56 @@ public sealed class EntryPointClientGateway : IExchangeGateway
         ExchangeGatewayFramePreparedCallback onFramePrepared,
         CancellationToken cancellationToken) =>
         Unsupported();
+
+    public async Task<ExchangeGatewayReceipt> SubmitWithReceiptAsync(
+        OutboundNewOrderCommand command,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        ArgumentNullException.ThrowIfNull(onFramePrepared);
+        var canonical = command.Canonical;
+        var seq = checked((ulong)Interlocked.Increment(ref _outboundSeq));
+        var encoded = JsonSerializer.SerializeToUtf8Bytes(canonical);
+        var frame = new ExchangeGatewayFrameIdentity(
+            command.FirmId,
+            sessionId: 1,
+            sessionVerId: 1,
+            outboundSeqNum: seq,
+            ExchangeGatewayOperation.NewOrder,
+            canonical.ClOrdId,
+            encoded.Length,
+            Convert.ToHexString(SHA256.HashData(encoded)).ToLowerInvariant());
+        await onFramePrepared(frame, cancellationToken).ConfigureAwait(false);
+        if (_client is MockEntryPointClient mock)
+        {
+            mock.RegisterOutboundFrame(
+                canonical.ClOrdId,
+                command.FirmId,
+                frame.SessionId,
+                frame.SessionVerId);
+        }
+        await _client.SubmitNewOrderAsync(
+            new NewOrderSingle(
+                canonical.ClOrdId,
+                canonical.SecurityId,
+                canonical.Symbol,
+                Enum.Parse<OrderSide>(canonical.Side, true) == OrderSide.Buy
+                    ? EpSide.Buy
+                    : EpSide.Sell,
+                Enum.Parse<OrderType>(canonical.OrderType, true) == OrderType.Limit
+                    ? EpOrderType.Limit
+                    : EpOrderType.Market,
+                canonical.Quantity,
+                canonical.Price,
+                _firmId,
+                MaxFloor: canonical.MaxFloor,
+                MinQty: canonical.MinQty),
+            cancellationToken).ConfigureAwait(false);
+        return new ExchangeGatewayReceipt(
+            frame,
+            ExchangeGatewayAttemptStage.TransportWriteCompleted);
+    }
 
     public Task<ExchangeGatewayReceipt> CancelWithReceiptAsync(
         Order order,

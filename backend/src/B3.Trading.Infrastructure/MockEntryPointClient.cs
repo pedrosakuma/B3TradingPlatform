@@ -12,6 +12,9 @@ public sealed class MockEntryPointClient : IEntryPointClient
     private readonly ConcurrentQueue<NewOrderSingle> _newOrders = new();
     private readonly ConcurrentQueue<OrderCancelRequest> _cancels = new();
     private readonly ConcurrentQueue<OrderCancelReplaceRequest> _replaces = new();
+    private readonly ConcurrentDictionary<ulong, (string FirmId, ulong SessionId, uint SessionVerId)>
+        _outboundFrames = new();
+    private long _inboundSeq;
 
     public IReadOnlyCollection<NewOrderSingle> SubmittedNewOrders => _newOrders;
     public IReadOnlyCollection<OrderCancelRequest> SubmittedCancels => _cancels;
@@ -117,8 +120,29 @@ public sealed class MockEntryPointClient : IEntryPointClient
     /// <summary>
     /// Test/host hook to push an ER through the exchange-side event.
     /// </summary>
-    public void EmitExecutionReport(ExecutionReportEnvelope er) =>
+    public void EmitExecutionReport(ExecutionReportEnvelope er)
+    {
+        if (er.SessionId is null
+            && _outboundFrames.TryGetValue(er.ClOrdId, out var frame))
+        {
+            er = er with
+            {
+                FirmId = er.FirmId ?? frame.FirmId,
+                SessionId = frame.SessionId,
+                SessionVerId = frame.SessionVerId,
+                InboundSeqNum = checked((ulong)Interlocked.Increment(ref _inboundSeq)),
+                SendingTime = er.SendingTime ?? DateTimeOffset.UtcNow,
+            };
+        }
         ExecutionReportReceived?.Invoke(er);
+    }
+
+    internal void RegisterOutboundFrame(
+        ulong clOrdId,
+        string firmId,
+        ulong sessionId,
+        uint sessionVerId) =>
+        _outboundFrames[clOrdId] = (firmId, sessionId, sessionVerId);
 
     /// <summary>
     /// #432 — test/host hook to push a <c>BusinessReject</c> through the

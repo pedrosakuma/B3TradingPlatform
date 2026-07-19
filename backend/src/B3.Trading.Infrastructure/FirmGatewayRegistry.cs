@@ -1,6 +1,7 @@
 using B3.Trading.Domain;
 
 using B3.Trading.Application;
+using B3.Trading.Application.Outbound;
 
 namespace B3.Trading.Infrastructure;
 
@@ -15,7 +16,11 @@ namespace B3.Trading.Infrastructure;
 ///         consume all firms transparently.</item>
 /// </list>
 /// </summary>
-public sealed class FirmGatewayRegistry : IEntryPointClient, IFirmSessionStatusProvider, IAsyncDisposable
+public sealed class FirmGatewayRegistry :
+    IEntryPointClient,
+    IFirmSessionStatusProvider,
+    IOutboundGatewayReadiness,
+    IAsyncDisposable
 {
     private readonly Dictionary<string, B3EntryPointClientGateway> _gateways;
     private readonly Action<ExecutionReportEnvelope> _bridge;
@@ -54,6 +59,16 @@ public sealed class FirmGatewayRegistry : IEntryPointClient, IFirmSessionStatusP
 
     public Task ConnectAllAsync(CancellationToken ct) =>
         Task.WhenAll(_gateways.Values.Select(g => g.ConnectAsync(ct)));
+
+    public async ValueTask WaitUntilOperationalAsync(
+        string firmId,
+        CancellationToken cancellationToken)
+    {
+        var gateway = For(firmId);
+        while (!gateway.IsOperationalForOutboundNow)
+            await Task.Delay(TimeSpan.FromMilliseconds(20), cancellationToken)
+                .ConfigureAwait(false);
+    }
 
     /// <inheritdoc />
     public IReadOnlyList<FirmSessionStatus> Snapshot()
@@ -129,6 +144,16 @@ public sealed class MultiFirmExchangeGateway : IExchangeGateway
         ArgumentNullException.ThrowIfNull(order);
         return _registry.For(order.FirmId).SubmitWithReceiptAsync(
             order, onFramePrepared, cancellationToken);
+    }
+
+    public Task<ExchangeGatewayReceipt> SubmitWithReceiptAsync(
+        OutboundNewOrderCommand command,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        return _registry.For(command.FirmId).SubmitWithReceiptAsync(
+            command, onFramePrepared, cancellationToken);
     }
 
     public Task CancelAsync(Order order, ulong newClOrdId, CancellationToken cancellationToken)

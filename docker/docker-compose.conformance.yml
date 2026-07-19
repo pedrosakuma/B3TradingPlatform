@@ -52,6 +52,10 @@ services:
       # #435 Part B. Drop-copy ClOrdId masker salt — boot-guard throws
       # if unset in non-Development. Placeholder for conformance only.
       Trading__DropCopy__ClOrdIdMaskSalt: "conformance-only-clordid-mask-salt-placeholder-DO-NOT-USE-IN-PROD"
+      Trading__OutboundCommandProtection__ActiveKeyId: "conformance-only"
+      Trading__OutboundCommandProtection__StableReferenceKeyId: "conformance-only"
+      Trading__OutboundCommandProtection__Keys__0__KeyId: "conformance-only"
+      Trading__OutboundCommandProtection__Keys__0__KeyBase64: "l2n/Kw481J8w0MiioO9MeNgKdla43exhEo1+5xBMffM="
       # #629. Drive the public FIXP contract over actual SOFH/SBE frames.
       # Plain TCP is deliberate inside the private compose bridge; the
       # separate mTLS conformance matrix owns transport security.

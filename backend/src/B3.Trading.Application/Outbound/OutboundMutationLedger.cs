@@ -379,6 +379,17 @@ public sealed class OutboundMutationLedger
             var original = default(OutboundMutationId);
             var hasOriginal = evt.OrigClOrdId != 0
                 && _byClOrdId.TryGetValue(evt.OrigClOrdId, out original);
+            if (!hasDirect
+                && hasOriginal
+                && evt.ClOrdId != evt.OrigClOrdId
+                && _mutations.TryGetValue(original, out var originalMutation)
+                && originalMutation.Kind == OutboundMutationKind.New)
+            {
+                // #643 owns cancel/replace coordinator correlation. Until then,
+                // a new-order ledger row must not claim an ER whose business
+                // ClOrdID belongs to an uncoordinated cancel/replace mutation.
+                hasOriginal = false;
+            }
             var id = hasDirect ? direct : hasOriginal ? original : default;
             if (identityConflict)
             {
@@ -417,6 +428,32 @@ public sealed class OutboundMutationLedger
                         "LegacySyntheticTerminal",
                         DigestEvidence($"{evt.ClOrdId}|{evt.ExecKind}|{evt.RejectReason}"),
                         venueOrderId: null);
+                    return new(InboundVenueEvidenceApplyStatus.RecordedUnmatched);
+                }
+                if (evt.OutboundProvenNoWrite
+                    && evt.OutboundMutationId == mutation.MutationId
+                    && hasDirect
+                    && mutation.Kind == OutboundMutationKind.New
+                    && evt.ClOrdId == mutation.PrimaryClOrdId
+                    && ((mutation.State == OutboundMutationState.ApprovedToSend
+                            && mutation.Attempts.Count == 0)
+                        || (mutation.State == OutboundMutationState.ProvenUnsent
+                            && mutation.Attempts.LastOrDefault()?.ProvenUnsentEvidence is not null)))
+                {
+                    Terminalise(
+                        mutation,
+                        OutboundMutationState.OperatorResolved,
+                        evt.TimestampUtc,
+                        "OutboundProvenNoWrite",
+                        DigestEvidence(
+                            $"{evt.OutboundMutationId}|{evt.ClOrdId}|{evt.RejectReason}"),
+                        venueOrderId: null);
+                    return new(InboundVenueEvidenceApplyStatus.RecordedMatched);
+                }
+                if (evt.OutboundProvenNoWrite)
+                {
+                    MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
+                    return new(InboundVenueEvidenceApplyStatus.RecordedConflicting);
                 }
                 return new(InboundVenueEvidenceApplyStatus.RecordedUnmatched);
             }
@@ -484,10 +521,7 @@ public sealed class OutboundMutationLedger
                 || originalMismatch
                 || (evt.SessionId is not null and not 0
                     && frame is not null
-                    && evt.SessionId != frame.SessionId)
-                || (evt.SessionVerId is not null and not 0
-                    && frame is not null
-                    && evt.SessionVerId != frame.SessionVerId);
+                    && evt.SessionId != frame.SessionId);
             if (positiveIdentityMismatch)
             {
                 MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
@@ -544,7 +578,6 @@ public sealed class OutboundMutationLedger
                 var terminalMatches = evt.ClOrdId == activeAttempt.ClOrdId
                     && frame is not null
                     && evt.SessionId == frame.SessionId
-                    && evt.SessionVerId == frame.SessionVerId
                     && evt.InboundSeqNum is not null and not 0;
                 AddInboundEvidenceUnsafe(
                     CreateExecutionReportEvidence(
@@ -566,7 +599,6 @@ public sealed class OutboundMutationLedger
                     and not OutboundMutationState.Ambiguous
                 || frame is null
                 || evt.SessionId != frame.SessionId
-                || evt.SessionVerId != frame.SessionVerId
                 || evt.InboundSeqNum is null or 0)
             {
                 MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
@@ -996,6 +1028,45 @@ public sealed class OutboundMutationLedger
         }
     }
 
+    public void MarkAmbiguous(
+        OutboundMutationId mutationId,
+        OutboundAttemptId attemptId,
+        OutboundAmbiguityReason reason,
+        DateTimeOffset atUtc)
+    {
+        lock (_gate)
+        {
+            var mutation = RequiredMutation(mutationId);
+            var (attempt, index) = RequiredAttempt(mutation, attemptId);
+            if (attempt.FramePrepared is null)
+                throw TransitionError("Ambiguity requires committed frame evidence.");
+            if (attempt.AmbiguityReason is { } existing)
+            {
+                if (existing == reason)
+                    return;
+                throw TransitionError("Conflicting ambiguity classification.");
+            }
+            _mutations[mutationId] = ReplaceAttempt(
+                mutation,
+                index,
+                attempt with { AmbiguityReason = reason },
+                OutboundMutationState.Ambiguous,
+                atUtc,
+                requiresReconciliation: true);
+        }
+    }
+
+    public IReadOnlyList<OutboundMutationSnapshot> GetMutations(
+        OutboundMutationKind kind,
+        OutboundMutationState state)
+    {
+        lock (_gate)
+            return _mutations.Values
+                .Where(m => m.Kind == kind && m.State == state)
+                .OrderBy(m => m.RecordedAtUtc)
+                .ToArray();
+    }
+
     public int ReconcileLegacyPendingState(
         IEnumerable<ulong> pendingNewClOrdIds,
         IEnumerable<ulong> pendingCancelClOrdIds,
@@ -1290,6 +1361,7 @@ public sealed class OutboundMutationLedger
                 mutation = Clone(found);
                 return true;
             }
+
             mutation = null;
             return false;
         }
@@ -1977,6 +2049,8 @@ public sealed class OutboundMutationLedger
 
     private static bool IsReadinessBlocking(OutboundMutationSnapshot mutation) =>
         mutation.RequiresReconciliation
+        || (mutation.Kind == OutboundMutationKind.New
+            && mutation.State == OutboundMutationState.ProvenUnsent)
         || StateRequiresReconciliation(mutation.State);
 
     private static bool StateRequiresReconciliation(OutboundMutationState state) =>

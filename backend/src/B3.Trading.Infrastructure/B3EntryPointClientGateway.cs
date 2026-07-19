@@ -1,5 +1,6 @@
 using B3.Trading.Application.Investor;
 using B3.Trading.Application.Observability;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Routing;
 using B3.Trading.Application.Risk;
@@ -374,6 +375,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
     /// <summary>True when the auto-reconnect loop is currently running for this firm.</summary>
     public bool IsReconnecting => Volatile.Read(ref _reconnectingState) == 1;
+    public bool IsOperationalForOutboundNow => IsOperationalForOutbound();
 
     /// <summary>
     /// True after a frame-prepared-or-later outbound failure. While set, sends,
@@ -805,6 +807,82 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             onFramePrepared,
             cancellationToken);
     }
+
+    public Task<ExchangeGatewayReceipt> SubmitWithReceiptAsync(
+        OutboundNewOrderCommand command,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        ArgumentNullException.ThrowIfNull(onFramePrepared);
+        var canonical = command.Canonical;
+        var sensitive = command.Sensitive;
+        var order = new Order(
+            canonical.ClOrdId,
+            new EndClientId(sensitive.EndClientId),
+            canonical.Symbol,
+            canonical.SecurityId,
+            Enum.Parse<OrderSide>(canonical.Side, ignoreCase: true),
+            Enum.Parse<OrderType>(canonical.OrderType, ignoreCase: true),
+            canonical.Quantity,
+            canonical.Price,
+            command.FirmId,
+            timeInForce: Enum.Parse<TimeInForce>(canonical.TimeInForce, ignoreCase: true),
+            stopPrice: canonical.StopPrice,
+            goodTillDate: canonical.GoodTillDate,
+            displayQty: canonical.MaxFloor,
+            displayResetPolicy: canonical.MaxFloor is null ? null : DisplayResetPolicy.Always,
+            minQty: canonical.MinQty);
+        var stp = string.IsNullOrWhiteSpace(canonical.SelfTradePreventionInstruction)
+            ? SelfTradePreventionMode.None
+            : Enum.Parse<SelfTradePreventionMode>(
+                canonical.SelfTradePreventionInstruction,
+                ignoreCase: true);
+        var tradingSubAccount = ParseNullableUInt32(sensitive.TradingSubAccount);
+        var account = ParseNullableUInt64(sensitive.Account);
+        InvestorIdentity? investor = null;
+        if (sensitive.InvestorIdPrefix is not null
+            && sensitive.InvestorIdDocument is not null)
+        {
+            investor = new InvestorIdentity(
+                ushort.Parse(
+                    sensitive.InvestorIdPrefix,
+                    System.Globalization.CultureInfo.InvariantCulture),
+                uint.Parse(
+                    sensitive.InvestorIdDocument,
+                    System.Globalization.CultureInfo.InvariantCulture));
+        }
+        var routing = string.IsNullOrWhiteSpace(canonical.RoutingInstruction)
+            ? (RoutingInstruction?)null
+            : Enum.Parse<RoutingInstruction>(
+                canonical.RoutingInstruction,
+                ignoreCase: true);
+        var req = BuildNewOrderRequest(
+            order,
+            MapStpInstruction(stp),
+            tradingSubAccount,
+            account,
+            investor,
+            routing);
+        return SendWithReceiptAsync(
+            req.ClOrdID.Value,
+            OrderEntryLatencyProbe.OpSubmit,
+            (callback, ct) => _submitWithReceiptOverride is null
+                ? _client.SubmitWithReceiptAsync(req, callback, ct)
+                : _submitWithReceiptOverride(req, callback, ct),
+            onFramePrepared,
+            cancellationToken);
+    }
+
+    private static uint? ParseNullableUInt32(string? value) =>
+        value is null
+            ? null
+            : uint.Parse(value, System.Globalization.CultureInfo.InvariantCulture);
+
+    private static ulong? ParseNullableUInt64(string? value) =>
+        value is null
+            ? null
+            : ulong.Parse(value, System.Globalization.CultureInfo.InvariantCulture);
 
     /// <summary>
     /// Q3.4 (#284). Extracted from <see cref="SubmitAsync"/> so the
@@ -1253,14 +1331,38 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
             var start = _clock.GetTimestamp();
             _latencyProbe.OnSubmitted(clOrdId, _firmId, op);
+            ExchangeGatewayFrameIdentity? committedFrame = null;
             try
             {
                 var receipt = await sdkCall(
-                    (frame, callbackCt) => InvokeFramePreparedCallbackAsync(
-                        onFramePrepared, frame, callbackCt),
+                    async (frame, callbackCt) =>
+                    {
+                        var mappedFrame = MapFrameIdentity(frame, _firmId);
+                        await InvokeFramePreparedCallbackAsync(
+                            onFramePrepared,
+                            mappedFrame,
+                            callbackCt).ConfigureAwait(false);
+                        committedFrame = mappedFrame;
+                    },
                     ct).ConfigureAwait(false);
 
                 var mapped = MapReceipt(receipt, _firmId);
+                if (committedFrame is null || mapped.Frame != committedFrame)
+                {
+                    var invariantFailure = new ExchangeGatewayAttemptException(
+                        committedFrame is null
+                            ? "The SDK returned a receipt without invoking the frame-prepared callback."
+                            : "The SDK receipt frame identity differs from the committed frame callback identity.",
+                        ExchangeGatewayFailureDisposition.Ambiguous,
+                        ExchangeGatewayAttemptStage.FramePrepared,
+                        committedFrame ?? mapped.Frame);
+                    await FailClosedOutboundAttemptAsync(
+                        op,
+                        clOrdId,
+                        invariantFailure).ConfigureAwait(false);
+                    committedFrame = null;
+                    throw invariantFailure;
+                }
                 MetricsRegistry.OrderEntryCallMs.Record(
                     _clock.GetElapsedTime(start).TotalMilliseconds,
                     new KeyValuePair<string, object?>("firm", _firmId),
@@ -1280,6 +1382,17 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
                 throw mapped;
             }
+            catch (Exception ex) when (committedFrame is not null)
+            {
+                var mapped = new ExchangeGatewayAttemptException(
+                    "The outbound gateway failed after the frame-prepared callback committed.",
+                    ExchangeGatewayFailureDisposition.Ambiguous,
+                    ExchangeGatewayAttemptStage.FramePrepared,
+                    committedFrame,
+                    ex);
+                await FailClosedOutboundAttemptAsync(op, clOrdId, mapped).ConfigureAwait(false);
+                throw mapped;
+            }
         }
         finally
         {
@@ -1297,14 +1410,14 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
     private async ValueTask InvokeFramePreparedCallbackAsync(
         ExchangeGatewayFramePreparedCallback callback,
-        UpModels.OutboundFrameIdentity frame,
+        ExchangeGatewayFrameIdentity frame,
         CancellationToken ct)
     {
         var priorDepth = _framePreparedCallbackDepth.Value;
         _framePreparedCallbackDepth.Value = priorDepth + 1;
         try
         {
-            await callback(MapFrameIdentity(frame, _firmId), ct).ConfigureAwait(false);
+            await callback(frame, ct).ConfigureAwait(false);
         }
         finally
         {

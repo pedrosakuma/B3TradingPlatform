@@ -124,7 +124,7 @@ public sealed class OutboundMutationLedgerTests
         AssertState(intentOnly, OutboundMutationState.ProvenUnsent);
         AssertState(frame, OutboundMutationState.Ambiguous);
         AssertState(write, OutboundMutationState.Ambiguous);
-        Assert.Equal(0, intentOnly.Ledger.ReadinessBlockingCount);
+        Assert.Equal(1, intentOnly.Ledger.ReadinessBlockingCount);
         Assert.Equal(1, frame.Ledger.ReadinessBlockingCount);
         Assert.Equal(1, write.Ledger.ReadinessBlockingCount);
     }
@@ -332,6 +332,25 @@ public sealed class OutboundMutationLedgerTests
             OutboundAmbiguityReason.ConflictingVenueEvidence,
             Assert.Single(wrongSession.Ledger.SnapshotMutations()[0].Attempts)
                 .AmbiguityReason);
+    }
+
+    [Fact]
+    public void VenueAcknowledgement_AfterSessionVersionRoll_ResolvesByStableSessionAndClOrdId()
+    {
+        var fixture = Fixture.Create();
+        fixture.Ledger.Apply(fixture.Approved);
+        fixture.Ledger.Apply(fixture.Intent);
+        fixture.Ledger.Apply(fixture.Frame);
+
+        var result = fixture.Ledger.ApplyVenueAcknowledgement(Acknowledgement(
+            fixture,
+            firmId: "F1",
+            sessionId: 11,
+            sessionVerId: 3));
+
+        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedMatched, result.Status);
+        AssertState(fixture, OutboundMutationState.VenueAcknowledged);
+        Assert.Equal(0, fixture.Ledger.ReadinessBlockingCount);
     }
 
     [Fact]

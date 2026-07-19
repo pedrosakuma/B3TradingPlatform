@@ -33,6 +33,10 @@ public sealed class RawPlatformSnapshot
     public int FormatVersion { get; init; }
     public Guid WalGeneration { get; init; }
     public OutboundLedgerSnapshot? OutboundLedger { get; init; }
+    public B3.Trading.Application.Outbound.RestOrderIdempotencyBindingSnapshot[]
+        RestOrderIdempotency
+    { get; init; } =
+            Array.Empty<B3.Trading.Application.Outbound.RestOrderIdempotencyBindingSnapshot>();
 
     public OrderRaw[] Orders { get; init; } = Array.Empty<OrderRaw>();
     public AlgoRaw[] Algos { get; init; } = Array.Empty<AlgoRaw>();

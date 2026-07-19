@@ -1,6 +1,8 @@
 using B3.Trading.Domain;
 
 using B3.Trading.Application;
+using B3.Trading.Application.Outbound;
+using System.Security.Cryptography;
 
 namespace B3.Trading.Infrastructure;
 
@@ -11,6 +13,7 @@ namespace B3.Trading.Infrastructure;
 /// </summary>
 public sealed class StubExchangeGateway : IExchangeGateway
 {
+    private long _seq;
     public Task SubmitAsync(Order order, CancellationToken cancellationToken) => Task.CompletedTask;
     public Task CancelAsync(Order order, ulong newClOrdId, CancellationToken cancellationToken) => Task.CompletedTask;
     public Task CancelReplaceAsync(
@@ -23,6 +26,31 @@ public sealed class StubExchangeGateway : IExchangeGateway
         ExchangeGatewayFramePreparedCallback onFramePrepared,
         CancellationToken cancellationToken) =>
         Unsupported();
+
+    public async Task<ExchangeGatewayReceipt> SubmitWithReceiptAsync(
+        OutboundNewOrderCommand command,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken)
+    {
+        var seq = checked((ulong)Interlocked.Increment(ref _seq));
+        var hash = Convert.ToHexString(SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(
+                $"{command.FirmId}|{command.Canonical.ClOrdId}|{seq}")))
+            .ToLowerInvariant();
+        var frame = new ExchangeGatewayFrameIdentity(
+            command.FirmId,
+            sessionId: 1,
+            sessionVerId: 1,
+            outboundSeqNum: seq,
+            ExchangeGatewayOperation.NewOrder,
+            command.Canonical.ClOrdId,
+            encodedFrameLength: 1,
+            hash);
+        await onFramePrepared(frame, cancellationToken).ConfigureAwait(false);
+        return new ExchangeGatewayReceipt(
+            frame,
+            ExchangeGatewayAttemptStage.TransportWriteCompleted);
+    }
 
     public Task<ExchangeGatewayReceipt> CancelWithReceiptAsync(
         Order order,
