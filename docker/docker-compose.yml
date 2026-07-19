@@ -298,6 +298,16 @@ services:
       Trading__Reports__Cvm__OwnerHashSalt: ${TRADING_CVM_OWNER_HASH_SALT:-local-dev-cvm-salt-not-for-prod}
       # ClOrdId masking salt for drop-copy compliance (#435). Required by boot guard.
       Trading__DropCopy__ClOrdIdMaskSalt: ${TRADING_CLORDID_MASK_SALT:-local-dev-clordid-mask-salt-not-for-prod}
+      # #642. AEAD key for frozen outbound commands and HMAC key for REST
+      # idempotency scope references. The local default is intentionally
+      # non-secret; production/public overlays must supply a real 256-bit key.
+      Trading__OutboundCommandProtection__ActiveKeyId: ${TRADING_OUTBOUND_KEY_ID:-local-dev}
+      Trading__OutboundCommandProtection__ActiveKeyVersion: "1"
+      Trading__OutboundCommandProtection__StableReferenceKeyId: ${TRADING_OUTBOUND_KEY_ID:-local-dev}
+      Trading__OutboundCommandProtection__StableReferenceKeyVersion: "1"
+      Trading__OutboundCommandProtection__Keys__0__KeyId: ${TRADING_OUTBOUND_KEY_ID:-local-dev}
+      Trading__OutboundCommandProtection__Keys__0__Version: "1"
+      Trading__OutboundCommandProtection__Keys__0__KeyBase64: ${TRADING_OUTBOUND_KEY_BASE64:-N2tjXhiFZ61TrXVa78oABf6mKVhmZV9xV4IxWA4QB9Y=}
       # #416. Margin enforcement now defaults to ON. Fund the default
       # dogfood/recovery users that participate in real crossed-order
       # flows so Buy submissions do not get risk-rejected on a cold stack.

@@ -76,6 +76,10 @@ services:
       # #435 Part B. Drop-copy ClOrdId masker salt — boot-guard throws
       # if unset in non-Development. Placeholder for demo only.
       Trading__DropCopy__ClOrdIdMaskSalt: "demo-only-clordid-mask-salt-placeholder-DO-NOT-USE-IN-PROD"
+      Trading__OutboundCommandProtection__ActiveKeyId: "demo-only"
+      Trading__OutboundCommandProtection__StableReferenceKeyId: "demo-only"
+      Trading__OutboundCommandProtection__Keys__0__KeyId: "demo-only"
+      Trading__OutboundCommandProtection__Keys__0__KeyBase64: "IS/qA0c4PLW1WKIoY0+Ru5lUwgQ8eil/5Xq1YiHVIQM="
 
       # #416. The demo bots submit random Buy orders continuously. Fund
       # both accounts up front so default-on margin never degrades the

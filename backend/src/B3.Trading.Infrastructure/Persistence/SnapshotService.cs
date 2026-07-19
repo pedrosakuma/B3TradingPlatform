@@ -303,8 +303,13 @@ public sealed class PersistenceRecovery
 
         if (_marginProvider is not null && _orders is not null)
         {
+            var recoverableOrders = _orders.Snapshot()
+                .Where(order =>
+                    _outboundLedger?.TryGetByClOrdId(order.ClOrdId, out var mutation) != true
+                    || mutation?.State != OutboundMutationState.ProvenUnsent)
+                .ToArray();
             var restoredReservations = _marginProvider.RestoreRecoveryState(
-                _orders.Snapshot(),
+                recoverableOrders,
                 _replacements?.Snapshot());
             _logger.LogInformation(
                 "Persistence recovery: restored {Orders} order margin reservations and {Replacements} pending-replace reservations.",

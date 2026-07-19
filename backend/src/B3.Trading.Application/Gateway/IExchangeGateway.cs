@@ -1,4 +1,5 @@
 using B3.Trading.Domain;
+using B3.Trading.Application.Outbound;
 
 namespace B3.Trading.Application;
 
@@ -27,6 +28,17 @@ public interface IExchangeGateway
     /// </summary>
     Task<ExchangeGatewayReceipt> SubmitWithReceiptAsync(
         Order order,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken) =>
+        Task.FromException<ExchangeGatewayReceipt>(
+            ExchangeGatewayAttemptException.ReceiptNotSupported());
+
+    /// <summary>
+    /// Sends the immutable command committed by the outbound approval ledger.
+    /// Implementations must not re-resolve tenant configuration on this path.
+    /// </summary>
+    Task<ExchangeGatewayReceipt> SubmitWithReceiptAsync(
+        OutboundNewOrderCommand command,
         ExchangeGatewayFramePreparedCallback onFramePrepared,
         CancellationToken cancellationToken) =>
         Task.FromException<ExchangeGatewayReceipt>(

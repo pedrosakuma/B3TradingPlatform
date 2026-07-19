@@ -181,6 +181,7 @@ public sealed record OrderSubmittedEvent : WalEvent
     /// hydrate errors rather than silently poisoning the venue.
     /// </summary>
     public long? MinQty { get; init; }
+    public RestOrderIdempotencyBindingSnapshot? RestIdempotency { get; init; }
 }
 
 /// <summary>

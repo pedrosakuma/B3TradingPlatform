@@ -73,6 +73,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonSerializable(typeof(Outbound.OutboundApprovalSnapshot))]
 [JsonSerializable(typeof(Outbound.OutboundCanonicalCommand))]
 [JsonSerializable(typeof(Outbound.EncryptedOutboundCommandEnvelope))]
+[JsonSerializable(typeof(Outbound.RestOrderIdempotencyBindingSnapshot))]
 [JsonSerializable(typeof(MarketData.BookTouchSnapshot))]
 public sealed partial class WalEventJsonContext : JsonSerializerContext
 {

@@ -87,6 +87,7 @@ public sealed class StateSnapshotter
     // the reconcile.
     private readonly IFirmSessionStatusProvider? _firmSessionStatus;
     private readonly OutboundMutationLedger? _outboundLedger;
+    private readonly RestOrderIdempotencyStore? _restOrderIdempotency;
 
     public StateSnapshotter(
         WorkingOrderBook orders,
@@ -115,7 +116,8 @@ public sealed class StateSnapshotter
         SubAccountPnlKeeper? subAccountPnl = null,
         IFirmSessionStatusProvider? firmSessionStatus = null,
         PendingCancelRegistry? pendingCancels = null,
-        OutboundMutationLedger? outboundLedger = null)
+        OutboundMutationLedger? outboundLedger = null,
+        RestOrderIdempotencyStore? restOrderIdempotency = null)
     {
         _orders = orders;
         _positions = positions;
@@ -144,6 +146,7 @@ public sealed class StateSnapshotter
         _firmSessionStatus = firmSessionStatus;
         _pendingCancels = pendingCancels;
         _outboundLedger = outboundLedger;
+        _restOrderIdempotency = restOrderIdempotency;
     }
 
     public PlatformSnapshot Capture(long seq) => Project(CaptureRaw(seq));
@@ -191,6 +194,9 @@ public sealed class StateSnapshotter
             FormatVersion = formatVersion,
             WalGeneration = walGeneration,
             OutboundLedger = outboundLedger,
+            RestOrderIdempotency =
+                _restOrderIdempotency?.CaptureSnapshot().ToArray()
+                ?? Array.Empty<RestOrderIdempotencyBindingSnapshot>(),
             Orders = _orders.RawSnapshot(),
             Algos = _algos.RawSnapshot(),
             Positions = _positions.RawSnapshot(),
@@ -535,6 +541,7 @@ public sealed class StateSnapshotter
             FormatVersion = raw.FormatVersion,
             WalGeneration = raw.WalGeneration,
             OutboundLedger = raw.OutboundLedger,
+            RestOrderIdempotency = raw.RestOrderIdempotency.ToList(),
             WorkingOrders = workingOrders,
             Positions = positions,
             KilledEndClients = new List<string>(raw.KilledEndClients),
@@ -598,6 +605,7 @@ public sealed class StateSnapshotter
                 outbound.InboundEvidence,
                 outbound.LegacyMigrationCompleted);
         }
+        _restOrderIdempotency?.Restore(snap.RestOrderIdempotency);
         _orders.Restore(snap.WorkingOrders);
         _positions.Restore(snap.Positions);
         _killSwitch.Restore(snap.KilledEndClients, snap.KilledFirms);
@@ -1012,6 +1020,7 @@ public sealed class EventReplayer
     /// </summary>
     private readonly PeggedRepegBook? _peggedRepeg;
     private readonly OutboundMutationLedger? _outboundLedger;
+    private readonly RestOrderIdempotencyStore? _restOrderIdempotency;
 
     public EventReplayer(
         WorkingOrderBook orders,
@@ -1052,7 +1061,8 @@ public sealed class EventReplayer
         // in-memory ring-buffer keeper that backs GET /admin/audit.
         AuditLogKeeper? auditKeeper = null,
         PendingCancelRegistry? pendingCancels = null,
-        OutboundMutationLedger? outboundLedger = null)
+        OutboundMutationLedger? outboundLedger = null,
+        RestOrderIdempotencyStore? restOrderIdempotency = null)
     {
         _orders = orders;
         _ownership = ownership;
@@ -1081,6 +1091,7 @@ public sealed class EventReplayer
         _auditKeeper = auditKeeper;
         _pendingCancels = pendingCancels;
         _outboundLedger = outboundLedger;
+        _restOrderIdempotency = restOrderIdempotency;
     }
 
     /// <summary>
@@ -1157,6 +1168,8 @@ public sealed class EventReplayer
                 _clOrdIds.AdvanceCounterTo(owner, o.ClOrdId);
                 if (_outboundLedger?.ShouldImportLegacy == true)
                     _outboundLedger.ImportLegacyNew(o);
+                if (o.RestIdempotency is { } idempotency)
+                    _restOrderIdempotency?.Apply(idempotency);
                 // Sub-issue #171 (E): rebuild the bot order mapping side
                 // record for FIXP-origin orders. Same call shape as the
                 // live submit-time apply callback so a snapshot taken

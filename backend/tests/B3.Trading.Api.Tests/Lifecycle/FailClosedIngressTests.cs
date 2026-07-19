@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using B3.Trading.Application;
 using B3.Trading.Application.Persistence;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Domain;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -12,7 +13,7 @@ namespace B3.Trading.Api.Tests.Lifecycle;
 public class FailClosedIngressTests
 {
     [Fact]
-    public async Task SyntheticTerminalWalFailure_ReturnsClOrdIdAndDrainsIngress()
+    public async Task GatewayAmbiguity_ReturnsClOrdIdAndDrainsWithoutSyntheticRejection()
     {
         var store = new SyntheticTerminalRejectingStore();
         using var factory = TestAppFactory.WithOverrides(
@@ -51,13 +52,17 @@ public class FailClosedIngressTests
 
         using var health = JsonDocument.Parse(await client.GetStringAsync("/health"));
         Assert.Equal(
-            "wal_synthetic_terminal_reconciliation_required",
+            "outbound_new_order_reconciliation_required",
             health.RootElement.GetProperty("drainReason").GetString());
+        Assert.DoesNotContain(
+            store.Events,
+            evt => evt is ExecutionReportReceivedEvent { Synthetic: true });
     }
 
     private sealed class SyntheticTerminalRejectingStore : IEventStore, IEventStoreHealth
     {
         private long _seq;
+        public List<WalEvent> Events { get; } = new();
         public long CurrentSeq => Interlocked.Read(ref _seq);
         public bool IsHealthy => true;
         public Exception? TerminalFault => null;
@@ -66,8 +71,7 @@ public class FailClosedIngressTests
 
         public long Append(WalEvent evt, ReadOnlyMemory<byte> preSerialisedPayload)
         {
-            if (evt is ExecutionReportReceivedEvent { Synthetic: true })
-                throw new WalBackpressureException("forced saturation");
+            Events.Add(evt);
             return Interlocked.Increment(ref _seq);
         }
 
@@ -86,6 +90,24 @@ public class FailClosedIngressTests
     {
         public Task SubmitAsync(Order order, CancellationToken ct) =>
             Task.FromException(new InvalidOperationException("venue unavailable"));
+        public async Task<ExchangeGatewayReceipt> SubmitWithReceiptAsync(
+            OutboundNewOrderCommand command,
+            ExchangeGatewayFramePreparedCallback onFramePrepared,
+            CancellationToken ct)
+        {
+            await onFramePrepared(
+                new ExchangeGatewayFrameIdentity(
+                    command.FirmId,
+                    1,
+                    1,
+                    1,
+                    ExchangeGatewayOperation.NewOrder,
+                    command.Canonical.ClOrdId,
+                    1,
+                    new string('a', 64)),
+                ct);
+            throw new IOException("socket outcome unknown");
+        }
         public Task CancelAsync(Order order, ulong newClOrdId, CancellationToken ct) =>
             Task.CompletedTask;
         public Task CancelReplaceAsync(

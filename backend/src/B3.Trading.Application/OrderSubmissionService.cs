@@ -1,4 +1,5 @@
 using B3.Trading.Application.Observability;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.Risk.Accounting;
@@ -42,6 +43,11 @@ public sealed class OrderSubmissionService
     private readonly Routing.IRoutingInstructionResolver? _routingResolver;
     private readonly SymbolDirectory? _symbolDirectory;
     private readonly ILogger<OrderSubmissionService> _logger;
+    private readonly OutboundMutationLedger? _outboundLedger;
+    private readonly NewOrderApprovalFactory? _approvalFactory;
+    private readonly NewOrderOutboundCoordinator? _outboundCoordinator;
+    private readonly RestOrderIdempotencyStore? _restIdempotency;
+    private readonly TimeProvider _clock;
 
     public OrderSubmissionService(
         ClOrdIdPrefixRegistry clOrdIds,
@@ -59,7 +65,12 @@ public sealed class OrderSubmissionService
         Scheduling.GtdExpirationScheduler? gtdScheduler = null,
         Scheduling.IocFokWatchdog? iocWatchdog = null,
         Routing.IRoutingInstructionResolver? routingInstructionResolver = null,
-        SymbolDirectory? symbolDirectory = null)
+        SymbolDirectory? symbolDirectory = null,
+        OutboundMutationLedger? outboundLedger = null,
+        NewOrderApprovalFactory? approvalFactory = null,
+        NewOrderOutboundCoordinator? outboundCoordinator = null,
+        RestOrderIdempotencyStore? restIdempotency = null,
+        TimeProvider? clock = null)
     {
         _clOrdIds = clOrdIds;
         _ownership = ownership;
@@ -77,6 +88,11 @@ public sealed class OrderSubmissionService
         _routingResolver = routingInstructionResolver;
         _symbolDirectory = symbolDirectory;
         _logger = logger;
+        _outboundLedger = outboundLedger;
+        _approvalFactory = approvalFactory;
+        _outboundCoordinator = outboundCoordinator;
+        _restIdempotency = restIdempotency;
+        _clock = clock ?? TimeProvider.System;
     }
 
     /// <summary>
@@ -116,6 +132,8 @@ public sealed class OrderSubmissionService
                 $"displayResetPolicy={drp} is not supported by the current entrypoint SDK; " +
                 "supported: Always. Track issue #298.");
 
+        var mutationId = req.IdempotencyContext?.Binding.MutationId
+            ?? OutboundMutationId.New();
         var clOrdId = _clOrdIds.Generate(req.Owner);
         // #108 — DuplicateClOrdID defensive guard. The registry's
         // per-end-client counter is allocated atomically, so two
@@ -132,12 +150,13 @@ public sealed class OrderSubmissionService
                 new KeyValuePair<string, object?>("op", "submit"),
                 new KeyValuePair<string, object?>("scope", "book"));
             _logger.LogError(
-                "Duplicate ClOrdID {ClOrdId} for end-client {Owner} (firm {Firm}); refusing submit. " +
+                "Duplicate ClOrdID {ClOrdId} for firm {Firm}; refusing submit. " +
                 "Likely snapshot/WAL-replay regression — investigate ClOrdIdPrefixRegistry watermark.",
-                clOrdId, req.Owner.Value, req.FirmId);
+                clOrdId, req.FirmId);
             return OrderSubmissionResult.DuplicateClOrdId(clOrdId);
         }
         Order order;
+        var recordedAt = _clock.GetUtcNow();
         try
         {
             order = new Order(
@@ -172,29 +191,39 @@ public sealed class OrderSubmissionService
                 ? new BotOrderMapping(origin.CredentialId, origin.ExternalClOrdId)
                 : null;
 
-            _dispatcher.Dispatch(
-                new OrderSubmittedEvent
+            var restIdempotency = req.IdempotencyContext is { Binding: { } pendingBinding }
+                ? pendingBinding with
                 {
                     ClOrdId = clOrdId,
-                    EndClientId = req.Owner.Value,
-                    FirmId = req.FirmId,
-                    Symbol = req.Symbol,
-                    SecurityId = req.SecurityId,
-                    Side = req.Side.ToString(),
-                    Type = req.Type.ToString(),
-                    Quantity = req.Quantity,
-                    Price = req.Price,
-                    ParentAlgoId = req.ParentAlgoId,
-                    AlgoSliceSeq = req.AlgoSliceSeq,
-                    BotMapping = botMapping,
-                    TimeInForce = req.TimeInForce.ToString(),
-                    StopPrice = req.StopPrice,
-                    GoodTillDate = req.GoodTillDate,
-                    DisplayQty = order.DisplayQty,
-                    DisplayResetPolicy = order.DisplayResetPolicy?.ToString(),
-                    SubAccountId = order.SubAccountId?.Value,
-                    MinQty = order.MinQty,
-                },
+                    BoundAtUtc = recordedAt,
+                }
+                : null;
+            var submitted = new OrderSubmittedEvent
+            {
+                ClOrdId = clOrdId,
+                EndClientId = req.Owner.Value,
+                FirmId = req.FirmId,
+                Symbol = req.Symbol,
+                SecurityId = req.SecurityId,
+                Side = req.Side.ToString(),
+                Type = req.Type.ToString(),
+                Quantity = req.Quantity,
+                Price = req.Price,
+                ParentAlgoId = req.ParentAlgoId,
+                AlgoSliceSeq = req.AlgoSliceSeq,
+                BotMapping = botMapping,
+                TimeInForce = req.TimeInForce.ToString(),
+                StopPrice = req.StopPrice,
+                GoodTillDate = req.GoodTillDate,
+                DisplayQty = order.DisplayQty,
+                DisplayResetPolicy = order.DisplayResetPolicy?.ToString(),
+                SubAccountId = order.SubAccountId?.Value,
+                MinQty = order.MinQty,
+                RestIdempotency = restIdempotency,
+                TimestampUtc = recordedAt,
+            };
+            _dispatcher.DispatchCommitted(
+                submitted,
                 () =>
                 {
                     if (!_book.TryAdd(order))
@@ -221,7 +250,10 @@ public sealed class OrderSubmissionService
                         _botMappings.RegisterOrderInternal(
                             clOrdId, botMapping.CredentialId, botMapping.ExternalClOrdId);
                     }
-                });
+                    if (restIdempotency is not null)
+                        _restIdempotency?.Apply(restIdempotency);
+                },
+                CancellationToken.None);
         }
         catch (WalBackpressureException ex)
         {
@@ -295,8 +327,8 @@ public sealed class OrderSubmissionService
             // pre-trade RoutingInstructionAllowedCheck can gate it
             // against the per-scope whitelist before the gateway
             // ever sees the order. The gateway will resolve again at
-            // stamp time — resolvers MUST be deterministic per-Order
-            // (see IRoutingInstructionResolver doc).
+            // approval-freeze time — resolvers MUST be deterministic
+            // per-Order (see IRoutingInstructionResolver doc).
             RoutingInstruction: _routingResolver?.TryResolve(order),
             ParentAlgoId: req.Source == OrderSubmissionSource.Algo ? req.ParentAlgoId : null,
             AlgoType: req.Source == OrderSubmissionSource.Algo
@@ -319,9 +351,99 @@ public sealed class OrderSubmissionService
                 new KeyValuePair<string, object?>("reason", reason),
                 new KeyValuePair<string, object?>("code", code),
                 new KeyValuePair<string, object?>("firmId", req.FirmId));
-            var walFailure = PublishSyntheticRejection(order, reason);
+            var walFailure = PublishSyntheticRejection(mutationId, order, reason);
             if (walFailure is not null) return walFailure;
-            return OrderSubmissionResult.Rejected(clOrdId, reason, code);
+            return OrderSubmissionResult.Rejected(mutationId, clOrdId, reason, code);
+        }
+
+        if (req.UseDurableOutboundCoordinator && _outboundCoordinator is not null)
+        {
+            if (_outboundLedger is null || _approvalFactory is null)
+            {
+                if (marginReserved) _margin.ReleaseReservation(clOrdId);
+                _drain.BeginDrain("outbound_new_order_composition_invalid");
+                return OrderSubmissionResult.ReconciliationRequired(mutationId, clOrdId);
+            }
+            var approvedAt = _clock.GetUtcNow();
+            OutboundApprovedEvent approved;
+            try
+            {
+                var frozen = _approvalFactory.Create(mutationId, order, approvedAt);
+                approved = new OutboundApprovedEvent
+                {
+                    MutationId = mutationId,
+                    MutationKind = OutboundMutationKind.New,
+                    FirmId = req.FirmId,
+                    EndClientRef = frozen.EndClientRef,
+                    Origin = req.Source == OrderSubmissionSource.Algo
+                        ? OutboundMutationOrigin.Algo
+                        : req.BotOrigin is not null
+                            ? OutboundMutationOrigin.UserBotFixp
+                            : OutboundMutationOrigin.Rest,
+                    PrimaryClOrdId = clOrdId,
+                    RecordedAtUtc = recordedAt,
+                    Approval = frozen.Approval,
+                    TimestampUtc = approvedAt,
+                };
+                _dispatcher.DispatchCommitted(
+                    approved,
+                    () => _outboundLedger.Apply(approved),
+                    CancellationToken.None);
+            }
+            catch (WalBackpressureException ex)
+            {
+                if (marginReserved) _margin.ReleaseReservation(clOrdId);
+                return OrderSubmissionResult.WalBackpressure(
+                    ex.Message,
+                    mutationId,
+                    clOrdId);
+            }
+            catch (WalFaultedException ex)
+            {
+                if (marginReserved) _margin.ReleaseReservation(clOrdId);
+                return OrderSubmissionResult.WalFaulted(
+                    ex.Message,
+                    mutationId,
+                    clOrdId);
+            }
+            catch (OutboundCommandEnvelopeException ex)
+            {
+                if (marginReserved) _margin.ReleaseReservation(clOrdId);
+                _logger.LogCritical(
+                    ex,
+                    "New-order approval command protection failed for firm {FirmId}.",
+                    req.FirmId);
+                return OrderSubmissionResult.WalFaulted(
+                    "outbound command protection is unavailable",
+                    mutationId,
+                    clOrdId);
+            }
+
+            _accountant.RecordAccepted(riskCtx);
+            NewOrderDispatchResult dispatch;
+            try
+            {
+                dispatch = await _outboundCoordinator.EnqueueAsync(mutationId, ct)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            if (dispatch.Outcome != NewOrderDispatchOutcome.TransportWriteCompleted)
+            {
+                MetricsRegistry.OrdersGatewayFailed.Add(
+                    1,
+                    new KeyValuePair<string, object?>("firmId", req.FirmId));
+            }
+            return dispatch.Outcome switch
+            {
+                NewOrderDispatchOutcome.TransportWriteCompleted =>
+                    OrderSubmissionResult.Accepted(mutationId, clOrdId),
+                NewOrderDispatchOutcome.ProvenUnsent =>
+                    OrderSubmissionResult.GatewayFailed(mutationId, clOrdId, dispatch.Exception),
+                _ => OrderSubmissionResult.ReconciliationRequired(mutationId, clOrdId),
+            };
         }
 
         _accountant.RecordAccepted(riskCtx);
@@ -335,12 +457,12 @@ public sealed class OrderSubmissionService
             MetricsRegistry.OrdersGatewayFailed.Add(1,
                 new KeyValuePair<string, object?>("firmId", req.FirmId));
             _logger.LogError(ex,
-                "Gateway submit failed for {ClOrdId}; attempting durable synthetic rejection.",
+                "Legacy gateway submit failed for {ClOrdId}; attempting durable synthetic rejection.",
                 clOrdId);
             if (marginReserved) _margin.ReleaseReservation(clOrdId);
-            var walFailure = PublishSyntheticRejection(order, "gateway_unavailable");
+            var walFailure = PublishSyntheticRejection(mutationId, order, "gateway_unavailable");
             if (walFailure is not null) return walFailure;
-            return OrderSubmissionResult.GatewayFailed(clOrdId, ex);
+            return OrderSubmissionResult.GatewayFailed(mutationId, clOrdId, ex);
         }
 
         // Q1.3 (#255). Arm the GTD scheduler ONLY after the gateway submit
@@ -366,14 +488,17 @@ public sealed class OrderSubmissionService
         // submit-side failure synthesises its own rejection above.
         _iocWatchdog?.Register(order);
 
-        return OrderSubmissionResult.Accepted(clOrdId);
+        return OrderSubmissionResult.Accepted(mutationId, clOrdId);
     }
 
-    private OrderSubmissionResult? PublishSyntheticRejection(Order order, string reason)
+    private OrderSubmissionResult? PublishSyntheticRejection(
+        OutboundMutationId mutationId,
+        Order order,
+        string reason)
     {
         try
         {
-            _dispatcher.Dispatch(
+            _dispatcher.DispatchCommitted(
                 new ExecutionReportReceivedEvent
                 {
                     ClOrdId = order.ClOrdId,
@@ -392,26 +517,30 @@ public sealed class OrderSubmissionService
                         order.Owner, order.ClOrdId, order.Symbol, order.Side, order.Status, ExecKind.Rejected,
                         order.LeavesQuantity, order.CumulativeQuantity, 0, 0m,
                         reason, DateTimeOffset.UtcNow, IsNativeStp: false, FirmId: order.FirmId));
-                });
+                },
+                CancellationToken.None);
             return null;
         }
         catch (WalBackpressureException ex)
         {
-            return FailDrainForReconciliation(order, ex);
+            return FailDrainForReconciliation(mutationId, order, ex);
         }
         catch (WalFaultedException ex)
         {
-            return FailDrainForReconciliation(order, ex);
+            return FailDrainForReconciliation(mutationId, order, ex);
         }
     }
 
-    private OrderSubmissionResult FailDrainForReconciliation(Order order, Exception exception)
+    private OrderSubmissionResult FailDrainForReconciliation(
+        OutboundMutationId mutationId,
+        Order order,
+        Exception exception)
     {
         _drain.BeginDrain("wal_synthetic_terminal_reconciliation_required");
         _logger.LogCritical(exception,
             "Durable synthetic rejection failed for {ClOrdId}; ingress is draining and operator reconciliation is required.",
             order.ClOrdId);
-        return OrderSubmissionResult.ReconciliationRequired(order.ClOrdId);
+        return OrderSubmissionResult.ReconciliationRequired(mutationId, order.ClOrdId);
     }
 }
 
@@ -473,6 +602,9 @@ public sealed record OrderSubmissionRequest(
     /// </summary>
     string? AlgoTypeTag = null)
 {
+    public RestOrderIdempotencyContext? IdempotencyContext { get; init; }
+    public bool UseDurableOutboundCoordinator { get; init; }
+
     /// <summary>
     /// Sub-issue #171 (E). When non-null, the request originates from
     /// the FIXP listener on behalf of a user-bot credential. The submit
@@ -504,6 +636,7 @@ public sealed record BotOrigin(Guid CredentialId, ulong ExternalClOrdId);
 /// </summary>
 public sealed class OrderSubmissionResult
 {
+    public OutboundMutationId MutationId { get; }
     public OrderSubmissionResultKind Kind { get; }
     public ulong ClOrdId { get; }
     public string? Reason { get; }
@@ -514,8 +647,15 @@ public sealed class OrderSubmissionResult
     public string? Code { get; }
     public Exception? GatewayException { get; }
 
-    private OrderSubmissionResult(OrderSubmissionResultKind kind, ulong clOrdId, string? reason, string? code, Exception? ex)
+    private OrderSubmissionResult(
+        OutboundMutationId mutationId,
+        OrderSubmissionResultKind kind,
+        ulong clOrdId,
+        string? reason,
+        string? code,
+        Exception? ex)
     {
+        MutationId = mutationId;
         Kind = kind;
         ClOrdId = clOrdId;
         Reason = reason;
@@ -523,27 +663,43 @@ public sealed class OrderSubmissionResult
         GatewayException = ex;
     }
 
-    public static OrderSubmissionResult Accepted(ulong clOrdId) =>
-        new(OrderSubmissionResultKind.Accepted, clOrdId, null, null, null);
-    public static OrderSubmissionResult Rejected(ulong clOrdId, string reason, string? code = null) =>
-        new(OrderSubmissionResultKind.Rejected, clOrdId, reason, code, null);
-    public static OrderSubmissionResult GatewayFailed(ulong clOrdId, Exception ex) =>
-        new(OrderSubmissionResultKind.GatewayFailed, clOrdId, "gateway_unavailable", "gateway_unavailable", ex);
-    public static OrderSubmissionResult WalBackpressure(string detail) =>
-        new(OrderSubmissionResultKind.WalBackpressure, 0, detail, "wal_backpressure", null);
-    public static OrderSubmissionResult WalFaulted(string detail) =>
-        new(OrderSubmissionResultKind.WalBackpressure, 0, detail, "wal_faulted", null);
-    public static OrderSubmissionResult ReconciliationRequired(ulong clOrdId) =>
+    public static OrderSubmissionResult Accepted(OutboundMutationId mutationId, ulong clOrdId) =>
+        new(mutationId, OrderSubmissionResultKind.Accepted, clOrdId, null, null, null);
+    public static OrderSubmissionResult Rejected(
+        OutboundMutationId mutationId,
+        ulong clOrdId,
+        string reason,
+        string? code = null) =>
+        new(mutationId, OrderSubmissionResultKind.Rejected, clOrdId, reason, code, null);
+    public static OrderSubmissionResult GatewayFailed(
+        OutboundMutationId mutationId,
+        ulong clOrdId,
+        Exception? ex) =>
+        new(mutationId, OrderSubmissionResultKind.GatewayFailed, clOrdId, "gateway_unavailable", "gateway_unavailable", ex);
+    public static OrderSubmissionResult WalBackpressure(
+        string detail,
+        OutboundMutationId mutationId = default,
+        ulong clOrdId = 0) =>
+        new(mutationId, OrderSubmissionResultKind.WalBackpressure, clOrdId, detail, "wal_backpressure", null);
+    public static OrderSubmissionResult WalFaulted(
+        string detail,
+        OutboundMutationId mutationId = default,
+        ulong clOrdId = 0) =>
+        new(mutationId, OrderSubmissionResultKind.WalBackpressure, clOrdId, detail, "wal_faulted", null);
+    public static OrderSubmissionResult ReconciliationRequired(
+        OutboundMutationId mutationId,
+        ulong clOrdId) =>
         new(
+            mutationId,
             OrderSubmissionResultKind.ReconciliationRequired,
             clOrdId,
-            "durable terminal transition failed; operator reconciliation required",
+            "outbound mutation requires operator reconciliation",
             "wal_reconciliation_required",
             null);
     public static OrderSubmissionResult BadRequest(string reason) =>
-        new(OrderSubmissionResultKind.BadRequest, 0, reason, "bad_request", null);
+        new(default, OrderSubmissionResultKind.BadRequest, 0, reason, "bad_request", null);
     public static OrderSubmissionResult Drained { get; } =
-        new(OrderSubmissionResultKind.Drained, 0, "service draining", "service_draining", null);
+        new(default, OrderSubmissionResultKind.Drained, 0, "service draining", "service_draining", null);
     /// <summary>
     /// #108 — DuplicateClOrdID guard. The just-allocated ClOrdID
     /// already exists in the <see cref="WorkingOrderBook"/>. No WAL
@@ -553,7 +709,7 @@ public sealed class OrderSubmissionResult
     /// failures and so operators can spot the invariant breach.
     /// </summary>
     public static OrderSubmissionResult DuplicateClOrdId(ulong clOrdId) =>
-        new(OrderSubmissionResultKind.DuplicateClOrdId, clOrdId, "duplicate_clordid", "duplicate_clordid", null);
+        new(default, OrderSubmissionResultKind.DuplicateClOrdId, clOrdId, "duplicate_clordid", "duplicate_clordid", null);
 }
 
 public enum OrderSubmissionResultKind

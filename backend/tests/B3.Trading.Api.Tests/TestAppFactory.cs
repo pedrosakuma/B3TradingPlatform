@@ -125,6 +125,15 @@ public class TestAppFactory : WebApplicationFactory<Program>
                 // and SignupCashSeedTests for the pattern.
                 ["Trading:Risk:Margin:Enabled"] = "false",
                 ["Trading:Persistence:Enabled"] = "false",
+                ["Trading:OutboundCommandProtection:ActiveKeyId"] = "api-tests",
+                ["Trading:OutboundCommandProtection:ActiveKeyVersion"] = "1",
+                ["Trading:OutboundCommandProtection:StableReferenceKeyId"] = "api-tests",
+                ["Trading:OutboundCommandProtection:StableReferenceKeyVersion"] = "1",
+                ["Trading:OutboundCommandProtection:Keys:0:KeyId"] = "api-tests",
+                ["Trading:OutboundCommandProtection:Keys:0:Version"] = "1",
+                ["Trading:OutboundCommandProtection:Keys:0:KeyBase64"] =
+                    Convert.ToBase64String(SHA256.HashData(
+                        Encoding.UTF8.GetBytes("B3.Trading.Api.Tests outbound command key"))),
                 // Slice 2 of #97 ships rate limits enabled by default.
                 // The default suite hits /auth/login and /auth/signup
                 // hundreds of times per run; disable here so individual

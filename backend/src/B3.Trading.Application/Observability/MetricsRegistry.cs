@@ -23,6 +23,8 @@ public static class MetricsRegistry
         Meter.CreateCounter<long>("trading.orders.rejected_by_risk");
     public static readonly Counter<long> OrdersGatewayFailed =
         Meter.CreateCounter<long>("trading.orders.gateway_failed");
+    public static readonly Counter<long> OrdersMissingIdempotencyKey =
+        Meter.CreateCounter<long>("trading.orders.idempotency_key_missing");
     public static readonly Counter<long> OrdersCancelRequested =
         Meter.CreateCounter<long>("trading.orders.cancel_requested");
     /// <summary>

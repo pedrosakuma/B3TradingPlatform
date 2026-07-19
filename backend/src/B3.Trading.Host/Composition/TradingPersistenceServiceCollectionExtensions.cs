@@ -57,9 +57,40 @@ public static class TradingPersistenceServiceCollectionExtensions
         });
         services.AddSingleton<ReconciliationResolutionWriter>();
         services.AddSingleton<IOutboundNonceSource, CryptographicOutboundNonceSource>();
-        services.AddSingleton<IOutboundCommandProtector, AeadOutboundCommandProtector>();
+        services.AddSingleton<IOutboundCommandProtector>(sp =>
+        {
+            var configured = sp.GetRequiredService<IOptions<OutboundCommandProtectionOptions>>().Value;
+            if (configured.Keys.Count > 0
+                || sp.GetRequiredService<IOptions<PersistenceOptions>>().Value.Enabled)
+                return new AeadOutboundCommandProtector(
+                    configured,
+                    sp.GetRequiredService<IOutboundNonceSource>());
+
+            var ephemeral = new OutboundCommandProtectionOptions
+            {
+                ActiveKeyId = "ephemeral-no-persistence",
+                ActiveKeyVersion = 1,
+                StableReferenceKeyId = "ephemeral-no-persistence",
+                StableReferenceKeyVersion = 1,
+                Keys =
+                [
+                    new OutboundCommandProtectionKeyOptions
+                    {
+                        KeyId = "ephemeral-no-persistence",
+                        Version = 1,
+                        KeyBase64 = Convert.ToBase64String(
+                            System.Security.Cryptography.RandomNumberGenerator.GetBytes(32)),
+                    },
+                ],
+            };
+            return new AeadOutboundCommandProtector(
+                ephemeral,
+                sp.GetRequiredService<IOutboundNonceSource>());
+        });
         services.AddSingleton<OutboundMutationLedger>();
         services.AddSingleton<OutboundProcessEpoch>();
+        services.AddSingleton<RestOrderIdempotencyStore>();
+        services.AddSingleton<NewOrderApprovalFactory>();
         services.AddSingleton<ReconciliationMarkerRecovery>();
         services.AddSingleton<ColdStartLifecycleGuard>();
         services.AddSingleton<StateSnapshotter>();

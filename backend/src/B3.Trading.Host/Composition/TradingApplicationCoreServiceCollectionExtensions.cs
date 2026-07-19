@@ -230,6 +230,9 @@ public static class TradingApplicationCoreServiceCollectionExtensions
             sp.GetRequiredService<WebSocketAuctionEventSink>());
 
         services.AddSingleton<ExecutionReportProcessor>();
+        services.AddSingleton<B3.Trading.Application.Outbound.NewOrderOutboundCoordinator>();
+        services.AddHostedService(sp =>
+            sp.GetRequiredService<B3.Trading.Application.Outbound.NewOrderOutboundCoordinator>());
         services.AddSingleton<OrderSubmissionService>();
         services.AddSingleton<OrderCancelService>();
         services.AddSingleton<OrderModifyService>();

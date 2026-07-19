@@ -96,6 +96,7 @@ public enum OutboundAmbiguityReason
     ConflictingVenueEvidence,
     NotAppliedEvidence,
     IncompleteVenueEvidence,
+    GatewayOutcomeUnknown,
 }
 
 public enum InboundVenueEvidenceKind
@@ -178,12 +179,20 @@ public sealed class SensitiveOutboundCommand
 {
     public string? Account { get; init; }
     public string? InvestorId { get; init; }
+    public string? InvestorIdPrefix { get; init; }
+    public string? InvestorIdDocument { get; init; }
     public required string EndClientId { get; init; }
     public string? CustomerIdentifier { get; init; }
     public string? TradingSubAccount { get; init; }
 
     public override string ToString() => "[REDACTED sensitive outbound command]";
 }
+
+public sealed record OutboundNewOrderCommand(
+    OutboundMutationId MutationId,
+    string FirmId,
+    OutboundCanonicalCommand Canonical,
+    SensitiveOutboundCommand Sensitive);
 
 public sealed class EncryptedOutboundCommandEnvelope
 {

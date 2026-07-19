@@ -54,6 +54,9 @@ public sealed class PlatformSnapshot
     /// business state is persisted by this slice.
     /// </summary>
     public OutboundLedgerSnapshot? OutboundLedger { get; init; }
+    public List<B3.Trading.Application.Outbound.RestOrderIdempotencyBindingSnapshot>
+        RestOrderIdempotency
+    { get; init; } = new();
     public List<OrderSnapshot> WorkingOrders { get; init; } = new();
     public List<PositionSnapshot> Positions { get; init; } = new();
     public List<string> KilledEndClients { get; init; } = new();

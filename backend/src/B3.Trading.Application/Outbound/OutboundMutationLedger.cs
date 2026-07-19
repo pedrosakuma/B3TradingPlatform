@@ -379,6 +379,17 @@ public sealed class OutboundMutationLedger
             var original = default(OutboundMutationId);
             var hasOriginal = evt.OrigClOrdId != 0
                 && _byClOrdId.TryGetValue(evt.OrigClOrdId, out original);
+            if (!hasDirect
+                && hasOriginal
+                && evt.ClOrdId != evt.OrigClOrdId
+                && _mutations.TryGetValue(original, out var originalMutation)
+                && originalMutation.Kind == OutboundMutationKind.New)
+            {
+                // #643 owns cancel/replace coordinator correlation. Until then,
+                // a new-order ledger row must not claim an ER whose business
+                // ClOrdID belongs to an uncoordinated cancel/replace mutation.
+                hasOriginal = false;
+            }
             var id = hasDirect ? direct : hasOriginal ? original : default;
             if (identityConflict)
             {
@@ -996,6 +1007,45 @@ public sealed class OutboundMutationLedger
         }
     }
 
+    public void MarkAmbiguous(
+        OutboundMutationId mutationId,
+        OutboundAttemptId attemptId,
+        OutboundAmbiguityReason reason,
+        DateTimeOffset atUtc)
+    {
+        lock (_gate)
+        {
+            var mutation = RequiredMutation(mutationId);
+            var (attempt, index) = RequiredAttempt(mutation, attemptId);
+            if (attempt.FramePrepared is null)
+                throw TransitionError("Ambiguity requires committed frame evidence.");
+            if (attempt.AmbiguityReason is { } existing)
+            {
+                if (existing == reason)
+                    return;
+                throw TransitionError("Conflicting ambiguity classification.");
+            }
+            _mutations[mutationId] = ReplaceAttempt(
+                mutation,
+                index,
+                attempt with { AmbiguityReason = reason },
+                OutboundMutationState.Ambiguous,
+                atUtc,
+                requiresReconciliation: true);
+        }
+    }
+
+    public IReadOnlyList<OutboundMutationSnapshot> GetMutations(
+        OutboundMutationKind kind,
+        OutboundMutationState state)
+    {
+        lock (_gate)
+            return _mutations.Values
+                .Where(m => m.Kind == kind && m.State == state)
+                .OrderBy(m => m.RecordedAtUtc)
+                .ToArray();
+    }
+
     public int ReconcileLegacyPendingState(
         IEnumerable<ulong> pendingNewClOrdIds,
         IEnumerable<ulong> pendingCancelClOrdIds,
@@ -1286,6 +1336,22 @@ public sealed class OutboundMutationLedger
         lock (_gate)
         {
             if (_mutations.TryGetValue(mutationId, out var found))
+            {
+                mutation = Clone(found);
+                return true;
+            }
+
+            mutation = null;
+            return false;
+        }
+    }
+
+    public bool TryGetByClOrdId(ulong clOrdId, out OutboundMutationSnapshot? mutation)
+    {
+        lock (_gate)
+        {
+            if (_byClOrdId.TryGetValue(clOrdId, out var mutationId)
+                && _mutations.TryGetValue(mutationId, out var found))
             {
                 mutation = Clone(found);
                 return true;
