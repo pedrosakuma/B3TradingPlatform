@@ -57,7 +57,8 @@ public sealed class OutboundMutationLedger
                 return _mutations.Values.Count(IsReadinessBlocking)
                     + _inboundEvidence.Values.Count(e =>
                         e.Disposition != InboundVenueEvidenceDisposition.Matched
-                        && e.MatchedMutationIds.Count == 0);
+                        && (e.MatchedMutationIds.Count == 0
+                            || !e.MatchedMutationIds.Any(_mutations.ContainsKey)));
         }
     }
 
@@ -355,6 +356,12 @@ public sealed class OutboundMutationLedger
         var evidenceIdentity = ExecutionReportEvidenceIdentity(evt, evidenceId);
         lock (_gate)
         {
+            if (_inboundEvidence.ContainsKey(evidenceId))
+            {
+                if (evt.PossibleResend)
+                    PromotePossibleResendUnsafe(evidenceId);
+                return new(InboundVenueEvidenceApplyStatus.Duplicate);
+            }
             var identityConflict = TryGetExistingEvidenceUnsafe(
                 evidenceIdentity,
                 evidenceId,
@@ -375,23 +382,11 @@ public sealed class OutboundMutationLedger
             var id = hasDirect ? direct : hasOriginal ? original : default;
             if (identityConflict)
             {
-                OutboundMutationId[] matchedIds = [];
-                if (id.Value != Guid.Empty
-                    && _mutations.TryGetValue(id, out var conflictingMutation))
-                {
-                    if (!IsTerminal(conflictingMutation.State))
-                    {
-                        MarkConflictingVenueEvidence(
-                            conflictingMutation,
-                            evt.ClOrdId,
-                            evt.TimestampUtc);
-                    }
-                    else
-                    {
-                        MarkTerminalEvidenceConflict(conflictingMutation);
-                    }
-                    matchedIds = [id];
-                }
+                var matchedIds = MarkEvidenceIdentityConflictUnsafe(
+                    evidenceIdentity,
+                    id.Value == Guid.Empty ? null : id,
+                    evt.ClOrdId,
+                    evt.TimestampUtc);
                 AddInboundEvidenceUnsafe(
                     CreateExecutionReportEvidence(
                         evt,
@@ -603,6 +598,12 @@ public sealed class OutboundMutationLedger
         var evidenceIdentity = BusinessRejectEvidenceIdentity(evt, evidenceId);
         lock (_gate)
         {
+            if (_inboundEvidence.ContainsKey(evidenceId))
+            {
+                if (evt.PossibleResend)
+                    PromotePossibleResendUnsafe(evidenceId);
+                return new(InboundVenueEvidenceApplyStatus.Duplicate);
+            }
             var identityConflict = TryGetExistingEvidenceUnsafe(
                 evidenceIdentity,
                 evidenceId,
@@ -623,29 +624,32 @@ public sealed class OutboundMutationLedger
                 return new(InboundVenueEvidenceApplyStatus.RecordedUnmatched);
             }
             var key = new FrameKey(evt.FirmId, evt.SessionId.Value, evt.SessionVerId.Value, evt.RefSeqNum);
-            if (!_byFrame.TryGetValue(key, out var id)
-                || !_mutations.TryGetValue(id, out var mutation))
+            var id = default(OutboundMutationId);
+            OutboundMutationSnapshot? mutation = null;
+            var hasMutation = _byFrame.TryGetValue(key, out id)
+                && _mutations.TryGetValue(id, out mutation);
+            if (identityConflict)
+            {
+                AddInboundEvidenceUnsafe(
+                    CreateBusinessRejectEvidence(
+                        evt,
+                        evidenceId,
+                        InboundVenueEvidenceDisposition.Conflicting,
+                        MarkEvidenceIdentityConflictUnsafe(
+                            evidenceIdentity,
+                            hasMutation ? id : null,
+                            clOrdId: 0,
+                            evt.TimestampUtc)),
+                    evidenceIdentity);
+                return new(InboundVenueEvidenceApplyStatus.RecordedConflicting);
+            }
+            if (!hasMutation || mutation is null)
             {
                 AddInboundEvidenceUnsafe(
                     CreateBusinessRejectEvidence(
                         evt, evidenceId, InboundVenueEvidenceDisposition.Unmatched, []),
                     evidenceIdentity);
                 return new(InboundVenueEvidenceApplyStatus.RecordedUnmatched);
-            }
-            if (identityConflict)
-            {
-                if (!IsTerminal(mutation.State))
-                    MarkConflictingVenueEvidence(mutation, clOrdId: 0, evt.TimestampUtc);
-                else
-                    MarkTerminalEvidenceConflict(mutation);
-                AddInboundEvidenceUnsafe(
-                    CreateBusinessRejectEvidence(
-                        evt,
-                        evidenceId,
-                        InboundVenueEvidenceDisposition.Conflicting,
-                        [id]),
-                    evidenceIdentity);
-                return new(InboundVenueEvidenceApplyStatus.RecordedConflicting);
             }
             var activeAttempt = mutation.Attempts.LastOrDefault();
             if (IsTerminal(mutation.State))
@@ -724,6 +728,8 @@ public sealed class OutboundMutationLedger
         var evidenceIdentity = NotAppliedEvidenceIdentity(evt);
         lock (_gate)
         {
+            if (_inboundEvidence.ContainsKey(evidenceId))
+                return new(InboundVenueEvidenceApplyStatus.Duplicate);
             _ = TryGetExistingEvidenceUnsafe(
                 evidenceIdentity,
                 evidenceId,
@@ -1434,6 +1440,51 @@ public sealed class OutboundMutationLedger
             return false;
         duplicate = string.Equals(existingId, evidenceId, StringComparison.Ordinal);
         return !duplicate;
+    }
+
+    private OutboundMutationId[] MarkEvidenceIdentityConflictUnsafe(
+        string identity,
+        OutboundMutationId? newlyReferencedMutationId,
+        ulong clOrdId,
+        DateTimeOffset atUtc)
+    {
+        if (!_inboundEvidenceIdentity.TryGetValue(identity, out var existingEvidenceId)
+            || !_inboundEvidence.TryGetValue(existingEvidenceId, out var existingEvidence))
+        {
+            throw TransitionError("Inbound evidence identity index is inconsistent.");
+        }
+
+        var matchedIds = existingEvidence.MatchedMutationIds
+            .Append(newlyReferencedMutationId ?? default)
+            .Where(id => id.Value != Guid.Empty)
+            .Distinct()
+            .OrderBy(id => id.Value)
+            .ToArray();
+        foreach (var matchedId in matchedIds)
+        {
+            if (!_mutations.TryGetValue(matchedId, out var mutation))
+                continue;
+            if (IsTerminal(mutation.State))
+            {
+                MarkTerminalEvidenceConflict(mutation);
+                continue;
+            }
+
+            var mutationClOrdId = newlyReferencedMutationId is { } newId
+                && matchedId == newId
+                && clOrdId != 0
+                    ? clOrdId
+                    : mutation.Attempts.LastOrDefault()?.ClOrdId
+                        ?? mutation.PrimaryClOrdId;
+            MarkConflictingVenueEvidence(mutation, mutationClOrdId, atUtc);
+        }
+
+        _inboundEvidence[existingEvidenceId] = existingEvidence with
+        {
+            Disposition = InboundVenueEvidenceDisposition.Conflicting,
+            MatchedMutationIds = matchedIds,
+        };
+        return matchedIds;
     }
 
     private void PromotePossibleResendUnsafe(string evidenceId)
