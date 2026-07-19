@@ -696,7 +696,8 @@ public sealed class OutboundMutationLedger
                 || frame.OutboundSeqNum != evt.RefSeqNum
                 || mutation.Attempts.Any(a =>
                     a.AmbiguityReason
-                    == OutboundAmbiguityReason.ConflictingVenueEvidence)
+                    is OutboundAmbiguityReason.ConflictingVenueEvidence
+                        or OutboundAmbiguityReason.NotAppliedEvidence)
                 || mutation.State is not OutboundMutationState.FramePrepared
                     and not OutboundMutationState.TransportWriteCompleted
                     and not OutboundMutationState.Ambiguous)

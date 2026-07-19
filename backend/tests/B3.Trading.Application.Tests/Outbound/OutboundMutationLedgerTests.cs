@@ -1437,6 +1437,192 @@ public sealed class OutboundMutationLedgerTests
                 && evidence.PossibleResend);
     }
 
+    [Theory]
+    [InlineData("live", false)]
+    [InlineData("live", true)]
+    [InlineData("replay", false)]
+    [InlineData("replay", true)]
+    [InlineData("restart", false)]
+    [InlineData("restart", true)]
+    public void NotAppliedAndBusinessReject_AreConflictingInBothOrders(
+        string mode,
+        bool businessRejectFirst)
+    {
+        var fixture = Fixture.Create();
+        ApplyPrepared(fixture.Ledger, fixture, fixture.Frame);
+        var ledger = fixture.Ledger;
+        var notApplied = ExactNotApplied();
+        var businessReject = BusinessReject(
+            "F1", 11, 2, refSeqNum: 77, inboundSeqNum: 90);
+
+        if (mode == "live")
+        {
+            var client = new MockEntryPointClient();
+            var ownership = new OrderOwnershipMap();
+            var orders = new WorkingOrderBook();
+            using var router = new EntryPointExecutionReportRouter(
+                client,
+                new ExecutionReportProcessor(
+                    ownership,
+                    orders,
+                    new PositionKeeper(),
+                    new NoOpExecutionEventSink(),
+                    new NoOpMarginProvider(),
+                    NullLogger<ExecutionReportProcessor>.Instance),
+                new EventDispatcher(new NullEventStore()),
+                orders,
+                bookTop: null,
+                drain: null,
+                outboundLedger: ledger);
+            if (businessRejectFirst)
+            {
+                client.EmitBusinessReject(ExactBusinessRejectEnvelope());
+                client.EmitNotApplied(ExactNotAppliedEnvelope());
+                client.EmitNotApplied(ExactNotAppliedEnvelope() with
+                {
+                    ObservedAtUtc = T0.AddMinutes(2),
+                });
+            }
+            else
+            {
+                client.EmitNotApplied(ExactNotAppliedEnvelope());
+                client.EmitBusinessReject(ExactBusinessRejectEnvelope());
+                client.EmitBusinessReject(ExactBusinessRejectEnvelope() with
+                {
+                    PossibleResend = true,
+                });
+            }
+        }
+        else if (mode == "replay")
+        {
+            var replayer = NewReplayer(ledger, new ClOrdIdPrefixRegistry());
+            if (businessRejectFirst)
+            {
+                replayer.Apply(businessReject);
+                replayer.Apply(notApplied);
+                replayer.Apply(notApplied with
+                {
+                    ObservedAtUtc = T0.AddMinutes(2),
+                    TimestampUtc = T0.AddMinutes(2),
+                });
+            }
+            else
+            {
+                replayer.Apply(notApplied);
+                replayer.Apply(businessReject);
+                replayer.Apply(businessReject with { PossibleResend = true });
+            }
+        }
+        else
+        {
+            if (businessRejectFirst)
+                ledger.ApplyBusinessReject(businessReject);
+            else
+                ledger.ApplyNotApplied(notApplied);
+            ledger = RestoreLedger(ledger, fixture.Protector);
+            if (businessRejectFirst)
+            {
+                ledger.ApplyNotApplied(notApplied);
+                ledger.ApplyNotApplied(notApplied with
+                {
+                    ObservedAtUtc = T0.AddMinutes(2),
+                    TimestampUtc = T0.AddMinutes(2),
+                });
+            }
+            else
+            {
+                ledger.ApplyBusinessReject(businessReject);
+                ledger.ApplyBusinessReject(
+                    businessReject with { PossibleResend = true });
+            }
+        }
+
+        var mutation = Assert.Single(ledger.SnapshotMutations());
+        Assert.Equal(
+            businessRejectFirst
+                ? OutboundMutationState.VenueAcknowledged
+                : OutboundMutationState.Ambiguous,
+            mutation.State);
+        Assert.Equal(
+            businessRejectFirst ? "BusinessReject" : null,
+            mutation.Resolution?.EvidenceKind);
+        Assert.Equal(
+            OutboundAmbiguityReason.ConflictingVenueEvidence,
+            Assert.Single(mutation.Attempts).AmbiguityReason);
+        Assert.True(mutation.RequiresReconciliation);
+        Assert.Equal(1, ledger.ReadinessBlockingCount);
+        Assert.Equal(2, ledger.InboundEvidenceCount);
+        Assert.Single(
+            ledger.CaptureSnapshot().InboundEvidence,
+            evidence => evidence.Disposition
+                == InboundVenueEvidenceDisposition.Conflicting);
+        if (!businessRejectFirst)
+        {
+            Assert.Contains(
+                ledger.CaptureSnapshot().InboundEvidence,
+                evidence => evidence.Kind
+                        == InboundVenueEvidenceKind.BusinessReject
+                    && evidence.PossibleResend);
+        }
+    }
+
+    [Fact]
+    public void NotAppliedRangeOverlap_ConflictsTerminalRejectAndKeepsOtherAttemptNegative()
+    {
+        var (ledger, first, second) = PreparedMutationPair();
+        ledger.ApplyBusinessReject(
+            BusinessReject("F1", 11, 2, refSeqNum: 77, inboundSeqNum: 90));
+        var range = ExactNotApplied() with
+        {
+            FromSeqNo = 77,
+            Count = 2,
+        };
+
+        var result = ledger.ApplyNotApplied(range);
+        var duplicate = ledger.ApplyNotApplied(range with
+        {
+            ObservedAtUtc = T0.AddMinutes(2),
+            TimestampUtc = T0.AddMinutes(2),
+        });
+
+        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedConflicting, result.Status);
+        Assert.Equal(InboundVenueEvidenceApplyStatus.Duplicate, duplicate.Status);
+        AssertState(
+            ledger,
+            first.MutationId,
+            OutboundMutationState.VenueAcknowledged);
+        AssertState(
+            ledger,
+            second.MutationId,
+            OutboundMutationState.Ambiguous);
+        Assert.Equal(
+            OutboundAmbiguityReason.ConflictingVenueEvidence,
+            Assert.Single(
+                ledger.SnapshotMutations(),
+                mutation => mutation.MutationId == first.MutationId)
+                .Attempts[^1].AmbiguityReason);
+        Assert.Equal(
+            OutboundAmbiguityReason.NotAppliedEvidence,
+            Assert.Single(
+                ledger.SnapshotMutations(),
+                mutation => mutation.MutationId == second.MutationId)
+                .Attempts[^1].AmbiguityReason);
+        Assert.Equal(2, ledger.ReadinessBlockingCount);
+
+        var rejectAfterRange = ledger.ApplyBusinessReject(
+            BusinessReject("F1", 11, 2, refSeqNum: 78, inboundSeqNum: 91));
+        Assert.Equal(
+            InboundVenueEvidenceApplyStatus.RecordedConflicting,
+            rejectAfterRange.Status);
+        AssertState(ledger, second.MutationId, OutboundMutationState.Ambiguous);
+        Assert.Equal(
+            OutboundAmbiguityReason.ConflictingVenueEvidence,
+            Assert.Single(
+                ledger.SnapshotMutations(),
+                mutation => mutation.MutationId == second.MutationId)
+                .Attempts[^1].AmbiguityReason);
+    }
+
     [Fact]
     public void BusinessRejectAndExecutionReport_AreConflictingInBothOrders()
     {
@@ -3533,6 +3719,20 @@ public sealed class OutboundMutationLedgerTests
             ObservedAtUtc = T0.AddMinutes(1),
             TimestampUtc = T0.AddMinutes(1),
         };
+
+    private static NotAppliedEnvelope ExactNotAppliedEnvelope() =>
+        new("F1", 11, 2, 77, 1, T0.AddMinutes(1));
+
+    private static BusinessRejectEnvelope ExactBusinessRejectEnvelope() =>
+        new(
+            "F1",
+            RefSeqNum: 77,
+            RejectReason: 3,
+            Text: "structural reject",
+            SeqNum: 90,
+            SendingTime: T0,
+            SessionId: 11,
+            SessionVerId: 2);
 
     private static Order AddPendingOrder(ulong clOrdId) =>
         new(
