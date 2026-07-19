@@ -360,9 +360,12 @@ public sealed class OrderSubmissionService
         {
             if (_outboundLedger is null || _approvalFactory is null)
             {
-                if (marginReserved) _margin.ReleaseReservation(clOrdId);
-                _drain.BeginDrain("outbound_new_order_composition_invalid");
-                return OrderSubmissionResult.ReconciliationRequired(mutationId, clOrdId);
+                return TerminalizeProvenNoWrite(
+                    mutationId,
+                    order,
+                    marginReserved,
+                    "outbound_composition_invalid",
+                    "outbound_composition_invalid");
             }
             var approvedAt = _clock.GetUtcNow();
             OutboundApprovedEvent approved;
@@ -392,31 +395,42 @@ public sealed class OrderSubmissionService
             }
             catch (WalBackpressureException ex)
             {
-                if (marginReserved) _margin.ReleaseReservation(clOrdId);
-                return OrderSubmissionResult.WalBackpressure(
-                    ex.Message,
-                    mutationId,
+                _logger.LogError(
+                    ex,
+                    "New-order approval was not committed for {ClOrdId}; terminalising as proven no-write.",
                     clOrdId);
+                return TerminalizeProvenNoWrite(
+                    mutationId,
+                    order,
+                    marginReserved,
+                    "outbound_approval_not_committed",
+                    "outbound_approval_not_committed");
             }
             catch (WalFaultedException ex)
             {
-                if (marginReserved) _margin.ReleaseReservation(clOrdId);
-                return OrderSubmissionResult.WalFaulted(
-                    ex.Message,
-                    mutationId,
+                _logger.LogCritical(
+                    ex,
+                    "New-order approval WAL commit faulted for {ClOrdId}; attempting proven no-write terminalisation.",
                     clOrdId);
+                return TerminalizeProvenNoWrite(
+                    mutationId,
+                    order,
+                    marginReserved,
+                    "outbound_approval_not_committed",
+                    "outbound_approval_not_committed");
             }
             catch (OutboundCommandEnvelopeException ex)
             {
-                if (marginReserved) _margin.ReleaseReservation(clOrdId);
                 _logger.LogCritical(
                     ex,
                     "New-order approval command protection failed for firm {FirmId}.",
                     req.FirmId);
-                return OrderSubmissionResult.WalFaulted(
-                    "outbound command protection is unavailable",
+                return TerminalizeProvenNoWrite(
                     mutationId,
-                    clOrdId);
+                    order,
+                    marginReserved,
+                    "outbound_command_protection_unavailable",
+                    "outbound_command_protection_unavailable");
             }
 
             _accountant.RecordAccepted(riskCtx);
@@ -436,14 +450,18 @@ public sealed class OrderSubmissionService
                     1,
                     new KeyValuePair<string, object?>("firmId", req.FirmId));
             }
-            return dispatch.Outcome switch
+            if (dispatch.Outcome == NewOrderDispatchOutcome.ProvenUnsent)
             {
-                NewOrderDispatchOutcome.TransportWriteCompleted =>
-                    OrderSubmissionResult.Accepted(mutationId, clOrdId),
-                NewOrderDispatchOutcome.ProvenUnsent =>
-                    OrderSubmissionResult.GatewayFailed(mutationId, clOrdId, dispatch.Exception),
-                _ => OrderSubmissionResult.ReconciliationRequired(mutationId, clOrdId),
-            };
+                return TerminalizeProvenNoWrite(
+                    mutationId,
+                    order,
+                    marginReserved,
+                    "gateway_proven_unsent",
+                    "gateway_proven_unsent");
+            }
+            return dispatch.Outcome == NewOrderDispatchOutcome.TransportWriteCompleted
+                ? OrderSubmissionResult.Accepted(mutationId, clOrdId)
+                : OrderSubmissionResult.ReconciliationRequired(mutationId, clOrdId);
         }
 
         _accountant.RecordAccepted(riskCtx);
@@ -494,24 +512,36 @@ public sealed class OrderSubmissionService
     private OrderSubmissionResult? PublishSyntheticRejection(
         OutboundMutationId mutationId,
         Order order,
-        string reason)
+        string reason,
+        bool outboundProvenNoWrite = false)
     {
         try
         {
+            var rejected = new ExecutionReportReceivedEvent
+            {
+                ClOrdId = order.ClOrdId,
+                ExecKind = ExecKind.Rejected.ToString(),
+                LeavesQuantity = order.LeavesQuantity,
+                CumulativeQuantity = order.CumulativeQuantity,
+                LastQuantity = 0,
+                LastPrice = 0m,
+                RejectReason = reason,
+                Synthetic = true,
+                OutboundProvenNoWrite = outboundProvenNoWrite,
+                OutboundMutationId = outboundProvenNoWrite ? mutationId : null,
+                TimestampUtc = _clock.GetUtcNow(),
+            };
             _dispatcher.DispatchCommitted(
-                new ExecutionReportReceivedEvent
-                {
-                    ClOrdId = order.ClOrdId,
-                    ExecKind = ExecKind.Rejected.ToString(),
-                    LeavesQuantity = order.LeavesQuantity,
-                    CumulativeQuantity = order.CumulativeQuantity,
-                    LastQuantity = 0,
-                    LastPrice = 0m,
-                    RejectReason = reason,
-                    Synthetic = true,
-                },
+                rejected,
                 () =>
                 {
+                    if (outboundProvenNoWrite)
+                    {
+                        var ledgerResult = _outboundLedger?.ApplyVenueAcknowledgement(rejected);
+                        if (ledgerResult?.Status == InboundVenueEvidenceApplyStatus.RecordedConflicting)
+                            throw new InvalidOperationException(
+                                "Proven no-write terminal evidence conflicted with the outbound ledger.");
+                    }
                     order.MarkRejected();
                     _sink.Publish(new ExecutionEvent(
                         order.Owner, order.ClOrdId, order.Symbol, order.Side, order.Status, ExecKind.Rejected,
@@ -529,6 +559,29 @@ public sealed class OrderSubmissionService
         {
             return FailDrainForReconciliation(mutationId, order, ex);
         }
+        catch (InvalidOperationException ex)
+        {
+            return FailDrainForReconciliation(mutationId, order, ex);
+        }
+    }
+
+    private OrderSubmissionResult TerminalizeProvenNoWrite(
+        OutboundMutationId mutationId,
+        Order order,
+        bool marginReserved,
+        string reason,
+        string code)
+    {
+        var walFailure = PublishSyntheticRejection(
+            mutationId,
+            order,
+            reason,
+            outboundProvenNoWrite: true);
+        if (walFailure is not null)
+            return walFailure;
+        if (marginReserved)
+            _margin.ReleaseReservation(order.ClOrdId);
+        return OrderSubmissionResult.Rejected(mutationId, order.ClOrdId, reason, code);
     }
 
     private OrderSubmissionResult FailDrainForReconciliation(

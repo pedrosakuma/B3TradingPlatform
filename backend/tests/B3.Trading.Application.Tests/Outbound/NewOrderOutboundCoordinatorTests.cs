@@ -48,7 +48,7 @@ public sealed class NewOrderOutboundCoordinatorTests
     }
 
     [Fact]
-    public async Task TypedPreFrameFailure_IsProvenUnsentAndReleasesMargin()
+    public async Task TypedPreFrameFailure_IsProvenUnsentAndRetainsMarginUntilDomainTerminalCommit()
     {
         var margin = new RecordingMarginProvider();
         var fixture = CreateFixture(new ProvenUnsentGateway(), margin);
@@ -60,7 +60,8 @@ public sealed class NewOrderOutboundCoordinatorTests
         Assert.Equal(NewOrderDispatchOutcome.ProvenUnsent, result.Outcome);
         Assert.True(fixture.Ledger.TryGet(fixture.MutationId, out var mutation));
         Assert.Equal(OutboundMutationState.ProvenUnsent, mutation!.State);
-        Assert.Equal(1, margin.ReleaseCount);
+        Assert.Equal(0, margin.ReleaseCount);
+        Assert.Equal(1, fixture.Ledger.ReadinessBlockingCount);
         Assert.False(fixture.Drain.IsDraining);
     }
 

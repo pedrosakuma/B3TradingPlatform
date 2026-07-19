@@ -319,7 +319,6 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
                     unsent,
                     () => _ledger.Apply(unsent),
                     CancellationToken.None);
-                _margin.ReleaseReservation(mutation.PrimaryClOrdId);
                 return new(NewOrderDispatchOutcome.ProvenUnsent, ex);
             }
             catch (Exception walEx) when (walEx is WalBackpressureException or WalFaultedException)

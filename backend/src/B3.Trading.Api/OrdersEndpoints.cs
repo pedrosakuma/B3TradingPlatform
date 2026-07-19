@@ -521,7 +521,9 @@ public static class OrdersEndpoints
                 ? null
                 : $"/orders/mutations/{mutationId}",
             replayed,
-            status = status ?? (state == "RejectedBeforeApproval" ? "Rejected" : null),
+            status = status ?? (state is "RejectedBeforeApproval" or "RejectedBeforeSend"
+                ? "Rejected"
+                : null),
             reason,
             code,
             error,
@@ -536,7 +538,15 @@ public static class OrdersEndpoints
         if (mutationId.Value != Guid.Empty
             && ledger.TryGet(mutationId, out var mutation)
             && mutation is not null)
+        {
+            if (mutation.State == OutboundMutationState.OperatorResolved
+                && string.Equals(
+                    mutation.Resolution?.EvidenceKind,
+                    "OutboundProvenNoWrite",
+                    StringComparison.Ordinal))
+                return "RejectedBeforeSend";
             return mutation.State.ToString();
+        }
         if (book?.TryGet(clOrdId, out var order) == true && order is not null)
             return order.Status == OrderStatus.Rejected
                 ? "RejectedBeforeApproval"

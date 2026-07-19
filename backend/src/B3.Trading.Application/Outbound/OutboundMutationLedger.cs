@@ -428,6 +428,32 @@ public sealed class OutboundMutationLedger
                         "LegacySyntheticTerminal",
                         DigestEvidence($"{evt.ClOrdId}|{evt.ExecKind}|{evt.RejectReason}"),
                         venueOrderId: null);
+                    return new(InboundVenueEvidenceApplyStatus.RecordedUnmatched);
+                }
+                if (evt.OutboundProvenNoWrite
+                    && evt.OutboundMutationId == mutation.MutationId
+                    && hasDirect
+                    && mutation.Kind == OutboundMutationKind.New
+                    && evt.ClOrdId == mutation.PrimaryClOrdId
+                    && ((mutation.State == OutboundMutationState.ApprovedToSend
+                            && mutation.Attempts.Count == 0)
+                        || (mutation.State == OutboundMutationState.ProvenUnsent
+                            && mutation.Attempts.LastOrDefault()?.ProvenUnsentEvidence is not null)))
+                {
+                    Terminalise(
+                        mutation,
+                        OutboundMutationState.OperatorResolved,
+                        evt.TimestampUtc,
+                        "OutboundProvenNoWrite",
+                        DigestEvidence(
+                            $"{evt.OutboundMutationId}|{evt.ClOrdId}|{evt.RejectReason}"),
+                        venueOrderId: null);
+                    return new(InboundVenueEvidenceApplyStatus.RecordedMatched);
+                }
+                if (evt.OutboundProvenNoWrite)
+                {
+                    MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
+                    return new(InboundVenueEvidenceApplyStatus.RecordedConflicting);
                 }
                 return new(InboundVenueEvidenceApplyStatus.RecordedUnmatched);
             }
@@ -1341,21 +1367,6 @@ public sealed class OutboundMutationLedger
         }
     }
 
-    public bool TryGetByClOrdId(ulong clOrdId, out OutboundMutationSnapshot? mutation)
-    {
-        lock (_gate)
-        {
-            if (_byClOrdId.TryGetValue(clOrdId, out var mutationId)
-                && _mutations.TryGetValue(mutationId, out var found))
-            {
-                mutation = Clone(found);
-                return true;
-            }
-            mutation = null;
-            return false;
-        }
-    }
-
     public bool TryResolveWatermarkOwner(
         OutboundMutationId mutationId,
         out EndClientId? owner)
@@ -2038,6 +2049,8 @@ public sealed class OutboundMutationLedger
 
     private static bool IsReadinessBlocking(OutboundMutationSnapshot mutation) =>
         mutation.RequiresReconciliation
+        || (mutation.Kind == OutboundMutationKind.New
+            && mutation.State == OutboundMutationState.ProvenUnsent)
         || StateRequiresReconciliation(mutation.State);
 
     private static bool StateRequiresReconciliation(OutboundMutationState state) =>

@@ -51,7 +51,7 @@ public class UnavailableModeTests
     }
 
     [Fact]
-    public async Task Submit_Returns_502_Gateway_Unavailable()
+    public async Task Submit_ProvenUnavailable_TerminalisesAsDurableNoWriteRejection()
     {
         using var factory = MakeUnavailableFactory();
         using var client = await factory.CreateAuthedClientAsync();
@@ -66,8 +66,9 @@ public class UnavailableModeTests
             Price = 30m,
         });
 
-        Assert.Equal(HttpStatusCode.BadGateway, resp.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, resp.StatusCode);
         var body = await resp.Content.ReadAsStringAsync();
-        Assert.Contains("gateway unavailable", body, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("\"status\":\"Rejected\"", body, StringComparison.Ordinal);
+        Assert.Contains("gateway_proven_unsent", body, StringComparison.Ordinal);
     }
 }

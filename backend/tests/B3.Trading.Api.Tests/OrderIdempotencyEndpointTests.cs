@@ -3,7 +3,9 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using B3.Trading.Application;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Persistence;
+using B3.Trading.Domain;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
@@ -218,7 +220,7 @@ public sealed class OrderIdempotencyEndpointTests
     }
 
     [Fact]
-    public async Task ApprovalCommitFailure_ReplayRemainsServiceUnavailable()
+    public async Task ApprovalCommitFailure_ReplayReturnsDurableNoWriteRejection()
     {
         var store = new RejectingApprovalStore();
         using var factory = TestAppFactory.WithOverrides(
@@ -238,12 +240,17 @@ public sealed class OrderIdempotencyEndpointTests
         var firstPayload = await ReadAsync(first);
         var secondPayload = await ReadAsync(second);
 
-        Assert.Equal(HttpStatusCode.ServiceUnavailable, first.StatusCode);
-        Assert.Equal(HttpStatusCode.ServiceUnavailable, second.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, second.StatusCode);
         Assert.Equal(firstPayload.MutationId, secondPayload.MutationId);
         Assert.Equal(firstPayload.ClOrdId, secondPayload.ClOrdId);
+        Assert.Equal("Rejected", firstPayload.Status);
+        Assert.Equal("Rejected", secondPayload.Status);
         Assert.True(secondPayload.Replayed);
         Assert.DoesNotContain(store.Events, evt => evt is OutboundApprovedEvent);
+        Assert.Contains(
+            store.Events,
+            evt => evt is ExecutionReportReceivedEvent { OutboundProvenNoWrite: true });
     }
 
     [Fact]
@@ -360,6 +367,61 @@ public sealed class OrderIdempotencyEndpointTests
         }
     }
 
+    [Fact]
+    public async Task ProvenUnsentTerminal_ReplaysAsRejectedAfterRestart()
+    {
+        var dataDir = Path.Combine(
+            Directory.GetCurrentDirectory(),
+            ".test-artifacts",
+            "proven-unsent-" + Guid.NewGuid().ToString("N"));
+        var overrides = new Dictionary<string, string?>
+        {
+            ["Trading:Persistence:Enabled"] = "true",
+            ["Trading:Persistence:DataDirectory"] = dataDir,
+            ["Trading:Persistence:FirmId"] = "default",
+            ["Trading:Persistence:FsyncOnFlush"] = "false",
+            ["Trading:Persistence:SnapshotInterval"] = "00:10:00",
+        };
+        static void ReplaceGateway(IServiceCollection services)
+        {
+            services.RemoveAll<IExchangeGateway>();
+            services.AddSingleton<IExchangeGateway, ProvenUnsentApiGateway>();
+        }
+        try
+        {
+            ResponsePayload firstPayload;
+            using (var factory = TestAppFactory.WithOverrides(overrides, ReplaceGateway))
+            using (var http = factory.CreateClient())
+            {
+                var token = await factory.LoginAsync(http);
+                using var first = await PostAsync(http, token, "proven-unsent-key", Body());
+                Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
+                firstPayload = await ReadAsync(first);
+                Assert.Equal("Rejected", firstPayload.Status);
+            }
+
+            using var restartedFactory = TestAppFactory.WithOverrides(overrides, ReplaceGateway);
+            using var restartedHttp = restartedFactory.CreateClient();
+            var restartedToken = await restartedFactory.LoginAsync(restartedHttp);
+            using var replay = await PostAsync(
+                restartedHttp,
+                restartedToken,
+                "proven-unsent-key",
+                Body());
+            Assert.Equal(HttpStatusCode.Accepted, replay.StatusCode);
+            var replayed = await ReadAsync(replay);
+            Assert.Equal(firstPayload.MutationId, replayed.MutationId);
+            Assert.Equal(firstPayload.ClOrdId, replayed.ClOrdId);
+            Assert.Equal("Rejected", replayed.Status);
+            Assert.True(replayed.Replayed);
+        }
+        finally
+        {
+            if (Directory.Exists(dataDir))
+                Directory.Delete(dataDir, recursive: true);
+        }
+    }
+
     private static async Task<HttpResponseMessage> PostAsync(
         HttpClient http,
         string token,
@@ -419,13 +481,17 @@ public sealed class OrderIdempotencyEndpointTests
         return new ResponsePayload(
             json.GetProperty("mutationId").GetString()!,
             json.GetProperty("clOrdId").GetString()!,
-            json.GetProperty("replayed").GetBoolean());
+            json.GetProperty("replayed").GetBoolean(),
+            json.TryGetProperty("status", out var status) && status.ValueKind != JsonValueKind.Null
+                ? status.GetString()
+                : null);
     }
 
     private sealed record ResponsePayload(
         string MutationId,
         string ClOrdId,
-        bool Replayed);
+        bool Replayed,
+        string? Status);
 
     private sealed class RejectingApprovalStore : IEventStore, IEventStoreHealth
     {
@@ -461,5 +527,39 @@ public sealed class OrderIdempotencyEndpointTests
         }
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class ProvenUnsentApiGateway : IExchangeGateway
+    {
+        public Task SubmitAsync(Order order, CancellationToken cancellationToken) =>
+            Task.FromException(new ExchangeGatewayPreSendException("proven no-write"));
+
+        public Task<ExchangeGatewayReceipt> SubmitWithReceiptAsync(
+            OutboundNewOrderCommand command,
+            ExchangeGatewayFramePreparedCallback onFramePrepared,
+            CancellationToken cancellationToken) =>
+            Task.FromException<ExchangeGatewayReceipt>(
+                new ExchangeGatewayAttemptException(
+                    "proven no-write",
+                    ExchangeGatewayFailureDisposition.OutboundProvenUnsent,
+                    ExchangeGatewayAttemptStage.SequenceReservedAndEncoded,
+                    frame: null));
+
+        public Task CancelAsync(
+            Order order,
+            ulong newClOrdId,
+            CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+
+        public Task CancelReplaceAsync(
+            Order original,
+            ulong newClOrdId,
+            long newQuantity,
+            decimal? newPrice,
+            TimeInForce? requestedTimeInForce,
+            decimal? requestedStopPrice,
+            DateTimeOffset? requestedGoodTillDate,
+            CancellationToken cancellationToken) =>
+            Task.CompletedTask;
     }
 }

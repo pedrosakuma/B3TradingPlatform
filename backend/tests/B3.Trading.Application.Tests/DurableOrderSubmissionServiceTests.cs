@@ -52,7 +52,80 @@ public sealed class DurableOrderSubmissionServiceTests
         Assert.Equal(0, fixture.Gateway.CallCount);
     }
 
-    private static Fixture CreateFixture(IEnumerable<IRiskCheck> checks)
+    [Fact]
+    public async Task ProvenUnsent_CommitsDomainTerminalBeforeReleasingMargin()
+    {
+        var fixture = CreateFixture(
+            Array.Empty<IRiskCheck>(),
+            gateway: new ProvenUnsentGateway());
+
+        var result = await fixture.Service.SubmitAsync(
+            Request(),
+            CancellationToken.None);
+
+        Assert.Equal(OrderSubmissionResultKind.Rejected, result.Kind);
+        Assert.Equal("gateway_proven_unsent", result.Code);
+        Assert.Collection(
+            fixture.Store.Events,
+            e => Assert.IsType<OrderSubmittedEvent>(e),
+            e => Assert.IsType<OutboundApprovedEvent>(e),
+            e => Assert.IsType<OutboundAttemptIntentPreparedEvent>(e),
+            e => Assert.IsType<OutboundProvenUnsentEvent>(e),
+            e => Assert.True(Assert.IsType<ExecutionReportReceivedEvent>(e).OutboundProvenNoWrite));
+        Assert.True(fixture.Book.TryGet(result.ClOrdId, out var order));
+        Assert.Equal(OrderStatus.Rejected, order!.Status);
+        Assert.Equal(1, fixture.Margin.ReleaseCount);
+        Assert.True(fixture.Ledger.TryGet(result.MutationId, out var mutation));
+        Assert.Equal(OutboundMutationState.OperatorResolved, mutation!.State);
+        Assert.Equal(0, fixture.Ledger.ReadinessBlockingCount);
+    }
+
+    [Fact]
+    public async Task ApprovalAppendFailure_TerminalisesNoWriteBeforeMarginRelease()
+    {
+        var fixture = CreateFixture(
+            Array.Empty<IRiskCheck>(),
+            store: new RejectingApprovalStore(rejectTerminal: false));
+
+        var result = await fixture.Service.SubmitAsync(
+            Request(),
+            CancellationToken.None);
+
+        Assert.Equal(OrderSubmissionResultKind.Rejected, result.Kind);
+        Assert.Equal("outbound_approval_not_committed", result.Code);
+        Assert.Collection(
+            fixture.Store.Events,
+            e => Assert.IsType<OrderSubmittedEvent>(e),
+            e => Assert.True(Assert.IsType<ExecutionReportReceivedEvent>(e).OutboundProvenNoWrite));
+        Assert.Equal(1, fixture.Margin.ReleaseCount);
+        Assert.True(fixture.Book.TryGet(result.ClOrdId, out var order));
+        Assert.Equal(OrderStatus.Rejected, order!.Status);
+        Assert.Equal(0, fixture.Gateway.CallCount);
+    }
+
+    [Fact]
+    public async Task NoWriteTerminalCommitFailure_HoldsMarginAndDrains()
+    {
+        var fixture = CreateFixture(
+            Array.Empty<IRiskCheck>(),
+            store: new RejectingApprovalStore(rejectTerminal: true));
+
+        var result = await fixture.Service.SubmitAsync(
+            Request(),
+            CancellationToken.None);
+
+        Assert.Equal(OrderSubmissionResultKind.ReconciliationRequired, result.Kind);
+        Assert.Equal(0, fixture.Margin.ReleaseCount);
+        Assert.True(fixture.Book.TryGet(result.ClOrdId, out var order));
+        Assert.Equal(OrderStatus.PendingNew, order!.Status);
+        Assert.True(fixture.Drain.IsDraining);
+        Assert.Equal(0, fixture.Gateway.CallCount);
+    }
+
+    private static Fixture CreateFixture(
+        IEnumerable<IRiskCheck> checks,
+        CompletingGateway? gateway = null,
+        RecordingStore? store = null)
     {
         var protector = new AeadOutboundCommandProtector(
             new OutboundCommandProtectionOptions
@@ -72,13 +145,13 @@ public sealed class DurableOrderSubmissionServiceTests
                     },
                 ],
             });
-        var store = new RecordingStore();
+        store ??= new RecordingStore();
         var dispatcher = new EventDispatcher(store);
         var ledger = new OutboundMutationLedger(protector);
         var book = new WorkingOrderBook();
-        var gateway = new CompletingGateway();
+        gateway ??= new CompletingGateway();
         var drain = new RecordingDrain();
-        var margin = new NoOpMarginProvider();
+        var margin = new RecordingMarginProvider();
         var coordinator = new NewOrderOutboundCoordinator(
             ledger,
             new OutboundProcessEpoch(new ProcessEpochId(
@@ -105,7 +178,7 @@ public sealed class DurableOrderSubmissionServiceTests
             outboundLedger: ledger,
             approvalFactory: new NewOrderApprovalFactory(protector),
             outboundCoordinator: coordinator);
-        return new Fixture(service, store, gateway);
+        return new Fixture(service, store, gateway, margin, book, ledger, drain);
     }
 
     private static OrderSubmissionRequest Request() =>
@@ -125,7 +198,11 @@ public sealed class DurableOrderSubmissionServiceTests
     private sealed record Fixture(
         OrderSubmissionService Service,
         RecordingStore Store,
-        CompletingGateway Gateway);
+        CompletingGateway Gateway,
+        RecordingMarginProvider Margin,
+        WorkingOrderBook Book,
+        OutboundMutationLedger Ledger,
+        RecordingDrain Drain);
 
     private sealed class RejectingRiskCheck : IRiskCheck
     {
@@ -135,14 +212,14 @@ public sealed class DurableOrderSubmissionServiceTests
             RiskDecision.Reject("test_reject", "rejected by test");
     }
 
-    private sealed class CompletingGateway : IExchangeGateway
+    private class CompletingGateway : IExchangeGateway
     {
-        public int CallCount { get; private set; }
+        public int CallCount { get; protected set; }
 
         public Task SubmitAsync(Order order, CancellationToken cancellationToken) =>
             throw new NotSupportedException();
 
-        public async Task<ExchangeGatewayReceipt> SubmitWithReceiptAsync(
+        public virtual async Task<ExchangeGatewayReceipt> SubmitWithReceiptAsync(
             OutboundNewOrderCommand command,
             ExchangeGatewayFramePreparedCallback onFramePrepared,
             CancellationToken cancellationToken)
@@ -178,6 +255,36 @@ public sealed class DurableOrderSubmissionServiceTests
             throw new NotSupportedException();
     }
 
+    private sealed class ProvenUnsentGateway : CompletingGateway
+    {
+        public override Task<ExchangeGatewayReceipt> SubmitWithReceiptAsync(
+            OutboundNewOrderCommand command,
+            ExchangeGatewayFramePreparedCallback onFramePrepared,
+            CancellationToken cancellationToken)
+        {
+            CallCount++;
+            return Task.FromException<ExchangeGatewayReceipt>(
+                new ExchangeGatewayAttemptException(
+                    "typed no-write",
+                    ExchangeGatewayFailureDisposition.OutboundProvenUnsent,
+                    ExchangeGatewayAttemptStage.SequenceReservedAndEncoded,
+                    frame: null));
+        }
+    }
+
+    private sealed class RecordingMarginProvider : IMarginProvider
+    {
+        public int ReleaseCount { get; private set; }
+
+        public Task<RiskDecision> TryReserveAsync(
+            ulong clOrdId,
+            RiskContext ctx,
+            CancellationToken ct) =>
+            Task.FromResult(RiskDecision.Approve);
+
+        public void ReleaseReservation(ulong clOrdId) => ReleaseCount++;
+    }
+
     private sealed class NullExecutionSink : IExecutionEventSink
     {
         public void Publish(ExecutionEvent ev) { }
@@ -189,7 +296,7 @@ public sealed class DurableOrderSubmissionServiceTests
         public void BeginDrain(string reason) => IsDraining = true;
     }
 
-    private sealed class RecordingStore : IEventStore
+    private class RecordingStore : IEventStore
     {
         private long _seq;
         public List<WalEvent> Events { get; } = new();
@@ -198,7 +305,7 @@ public sealed class DurableOrderSubmissionServiceTests
 
         public long Append(WalEvent evt) => Append(evt, ReadOnlyMemory<byte>.Empty);
 
-        public long Append(WalEvent evt, ReadOnlyMemory<byte> preSerialisedPayload)
+        public virtual long Append(WalEvent evt, ReadOnlyMemory<byte> preSerialisedPayload)
         {
             Events.Add(evt);
             return ++_seq;
@@ -219,5 +326,17 @@ public sealed class DurableOrderSubmissionServiceTests
         }
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class RejectingApprovalStore(bool rejectTerminal) : RecordingStore
+    {
+        public override long Append(WalEvent evt, ReadOnlyMemory<byte> preSerialisedPayload)
+        {
+            if (evt is OutboundApprovedEvent
+                || (rejectTerminal
+                    && evt is ExecutionReportReceivedEvent { OutboundProvenNoWrite: true }))
+                throw new WalBackpressureException("forced no-write terminal failure");
+            return base.Append(evt, preSerialisedPayload);
+        }
     }
 }

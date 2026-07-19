@@ -1346,6 +1346,22 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                     ct).ConfigureAwait(false);
 
                 var mapped = MapReceipt(receipt, _firmId);
+                if (committedFrame is null || mapped.Frame != committedFrame)
+                {
+                    var invariantFailure = new ExchangeGatewayAttemptException(
+                        committedFrame is null
+                            ? "The SDK returned a receipt without invoking the frame-prepared callback."
+                            : "The SDK receipt frame identity differs from the committed frame callback identity.",
+                        ExchangeGatewayFailureDisposition.Ambiguous,
+                        ExchangeGatewayAttemptStage.FramePrepared,
+                        committedFrame ?? mapped.Frame);
+                    await FailClosedOutboundAttemptAsync(
+                        op,
+                        clOrdId,
+                        invariantFailure).ConfigureAwait(false);
+                    committedFrame = null;
+                    throw invariantFailure;
+                }
                 MetricsRegistry.OrderEntryCallMs.Record(
                     _clock.GetElapsedTime(start).TotalMilliseconds,
                     new KeyValuePair<string, object?>("firm", _firmId),

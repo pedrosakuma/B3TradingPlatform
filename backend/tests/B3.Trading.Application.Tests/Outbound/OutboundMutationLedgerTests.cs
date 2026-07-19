@@ -124,7 +124,7 @@ public sealed class OutboundMutationLedgerTests
         AssertState(intentOnly, OutboundMutationState.ProvenUnsent);
         AssertState(frame, OutboundMutationState.Ambiguous);
         AssertState(write, OutboundMutationState.Ambiguous);
-        Assert.Equal(0, intentOnly.Ledger.ReadinessBlockingCount);
+        Assert.Equal(1, intentOnly.Ledger.ReadinessBlockingCount);
         Assert.Equal(1, frame.Ledger.ReadinessBlockingCount);
         Assert.Equal(1, write.Ledger.ReadinessBlockingCount);
     }
