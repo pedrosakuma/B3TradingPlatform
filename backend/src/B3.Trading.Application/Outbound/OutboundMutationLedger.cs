@@ -956,6 +956,7 @@ public sealed class OutboundMutationLedger
             if (mutation.State == OutboundMutationState.ProvenUnsent)
             {
                 _mutations[mutation.MutationId] = mutation;
+                RemoveActiveOriginalIndex(mutation);
                 return;
             }
             mutation = mutation with
@@ -973,6 +974,7 @@ public sealed class OutboundMutationLedger
             };
             _mutations[mutation.MutationId] = mutation;
             MarkCorrelations(mutation, terminal: true, atUtc);
+            RemoveActiveOriginalIndex(mutation);
         }
     }
 
@@ -1070,6 +1072,7 @@ public sealed class OutboundMutationLedger
                     _mutations[pair.Key] = updatedMutation;
                     AddClOrdCorrelation(
                         updatedMutation, attempt.ClOrdId, terminal: true, atUtc);
+                    RemoveActiveOriginalIndex(updatedMutation);
                 }
 
                 else

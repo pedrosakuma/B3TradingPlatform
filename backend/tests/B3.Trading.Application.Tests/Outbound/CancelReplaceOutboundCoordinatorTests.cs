@@ -282,6 +282,80 @@ public sealed class CancelReplaceOutboundCoordinatorTests
         Assert.Equal(secondMutationId, active!.MutationId);
     }
 
+    [Theory]
+    [InlineData(OutboundMutationKind.Cancel)]
+    [InlineData(OutboundMutationKind.Replace)]
+    public void DeadEpochIntentWithoutFrame_ReleasesOriginalForFreshMutation(
+        OutboundMutationKind kind)
+    {
+        var fixture = CreateFixture(
+            new RecordingGateway(GatewayOutcome.Completed),
+            new RecordingReplaceMarginCoordinator());
+        var original = OriginalOrder();
+        AddOriginal(fixture, original);
+        var firstMutationId = OutboundMutationId.New();
+        var firstClOrdId = 2001UL;
+        var frozen = CreateFrozenApproval(
+            fixture,
+            kind,
+            firstMutationId,
+            original,
+            firstClOrdId);
+        ApplyApproval(fixture, firstMutationId, kind, original, firstClOrdId, frozen);
+        fixture.Ledger.Apply(new OutboundAttemptIntentPreparedEvent
+        {
+            MutationId = firstMutationId,
+            AttemptId = OutboundAttemptId.New(),
+            AttemptNo = 1,
+            ClOrdId = firstClOrdId,
+            ProcessEpochId = ProcessEpochId.New(),
+            IntentPreparedAtUtc = DateTimeOffset.UtcNow,
+            TimestampUtc = DateTimeOffset.UtcNow,
+        });
+
+        var recovered = new OutboundMutationLedger(fixture.Protector);
+        recovered.Restore(
+            fixture.Ledger.SnapshotMutations(),
+            fixture.Ledger.SnapshotCorrelations());
+        Assert.True(recovered.TryGetActiveForOriginal(
+            original.FirmId,
+            original.ClOrdId,
+            out _));
+
+        Assert.Equal(
+            1,
+            recovered.ClassifyRecoveredAttempts(
+                ProcessEpochId.New(),
+                DateTimeOffset.UtcNow));
+        Assert.True(recovered.TryGet(firstMutationId, out var provenUnsent));
+        Assert.Equal(OutboundMutationState.ProvenUnsent, provenUnsent!.State);
+        Assert.False(recovered.TryGetActiveForOriginal(
+            original.FirmId,
+            original.ClOrdId,
+            out _));
+
+        var secondMutationId = OutboundMutationId.New();
+        var secondClOrdId = 2002UL;
+        var secondFrozen = CreateFrozenApproval(
+            fixture,
+            kind,
+            secondMutationId,
+            original,
+            secondClOrdId);
+        recovered.Apply(CreateApprovalEvent(
+            secondMutationId,
+            kind,
+            original,
+            secondClOrdId,
+            secondFrozen));
+
+        Assert.True(recovered.TryGetActiveForOriginal(
+            original.FirmId,
+            original.ClOrdId,
+            out var active));
+        Assert.Equal(secondMutationId, active!.MutationId);
+    }
+
     [Fact]
     public async Task Recovery_AmbiguousReplace_RestoresMarginAndCorrelationWithoutResend()
     {
@@ -463,7 +537,25 @@ public sealed class CancelReplaceOutboundCoordinatorTests
         ulong clOrdId,
         (string EndClientRef, OutboundApprovalSnapshot Approval) frozen)
     {
-        var approved = new OutboundApprovedEvent
+        var approved = CreateApprovalEvent(
+            mutationId,
+            kind,
+            original,
+            clOrdId,
+            frozen);
+        fixture.Dispatcher.DispatchCommitted(
+            approved,
+            () => fixture.Ledger.Apply(approved),
+            CancellationToken.None);
+    }
+
+    private static OutboundApprovedEvent CreateApprovalEvent(
+        OutboundMutationId mutationId,
+        OutboundMutationKind kind,
+        Order original,
+        ulong clOrdId,
+        (string EndClientRef, OutboundApprovalSnapshot Approval) frozen) =>
+        new()
         {
             MutationId = mutationId,
             MutationKind = kind,
@@ -476,11 +568,31 @@ public sealed class CancelReplaceOutboundCoordinatorTests
             Approval = frozen.Approval,
             TimestampUtc = DateTimeOffset.UtcNow,
         };
-        fixture.Dispatcher.DispatchCommitted(
-            approved,
-            () => fixture.Ledger.Apply(approved),
-            CancellationToken.None);
-    }
+
+    private static (string EndClientRef, OutboundApprovalSnapshot Approval)
+        CreateFrozenApproval(
+            Fixture fixture,
+            OutboundMutationKind kind,
+            OutboundMutationId mutationId,
+            Order original,
+            ulong clOrdId) =>
+        kind == OutboundMutationKind.Cancel
+            ? fixture.ApprovalFactory.CreateCancel(
+                mutationId,
+                original,
+                clOrdId,
+                DateTimeOffset.UtcNow)
+            : fixture.ApprovalFactory.CreateReplace(
+                mutationId,
+                original,
+                clOrdId,
+                120,
+                31.50m,
+                TimeInForce.Day,
+                null,
+                null,
+                3_780m,
+                DateTimeOffset.UtcNow);
 
     private static Order OriginalOrder() =>
         new(
