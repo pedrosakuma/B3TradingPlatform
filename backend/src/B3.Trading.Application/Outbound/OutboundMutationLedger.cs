@@ -580,10 +580,7 @@ public sealed class OutboundMutationLedger
                 || originalMismatch
                 || (evt.SessionId is not null and not 0
                     && frame is not null
-                    && evt.SessionId != frame.SessionId)
-                || (evt.SessionVerId is not null and not 0
-                    && frame is not null
-                    && evt.SessionVerId != frame.SessionVerId);
+                    && evt.SessionId != frame.SessionId);
             if (positiveIdentityMismatch)
             {
                 MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
@@ -606,6 +603,21 @@ public sealed class OutboundMutationLedger
                         evt, evidenceId, InboundVenueEvidenceDisposition.Conflicting, [id]),
                     evidenceIdentity);
                 return new(InboundVenueEvidenceApplyStatus.RecordedConflicting);
+            }
+
+            if (evt.SessionVerId is not null and not 0
+                && frame is not null
+                && evt.SessionVerId != frame.SessionVerId)
+            {
+                // A post-roll ER cannot resolve the old outbound attempt, but
+                // it can still be valid order-lifecycle evidence.
+                if (!IsTerminal(mutation.State))
+                    MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
+                AddInboundEvidenceUnsafe(
+                    CreateExecutionReportEvidence(
+                        evt, evidenceId, InboundVenueEvidenceDisposition.Unmatched, [id]),
+                    evidenceIdentity);
+                return new(InboundVenueEvidenceApplyStatus.RecordedUnmatched);
             }
 
             if (!HasCompleteExecutionReportIdentity(evt))
