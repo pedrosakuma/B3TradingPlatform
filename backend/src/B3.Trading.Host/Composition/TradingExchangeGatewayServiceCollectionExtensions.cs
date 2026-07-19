@@ -1,6 +1,7 @@
 using B3.Trading.Application;
 using B3.Trading.Application.Investor;
 using B3.Trading.Application.Lifecycle;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Routing;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
@@ -251,6 +252,12 @@ public static class TradingExchangeGatewayServiceCollectionExtensions
                 _ => ImmediateOutboundGatewayReadiness.Instance,
             };
         });
+        // Register after FirmGatewayConnector so .NET starts the connector
+        // first and stops this coordinator first (hosted services stop in
+        // reverse registration order). This keeps gateways alive until every
+        // in-flight durable send reaches committed completion.
+        services.AddHostedService(sp =>
+            sp.GetRequiredService<NewOrderOutboundCoordinator>());
 
         services.AddSingleton<ExchangeStatus>(sp =>
         {

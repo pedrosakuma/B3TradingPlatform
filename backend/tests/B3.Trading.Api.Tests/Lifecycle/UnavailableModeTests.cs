@@ -2,11 +2,13 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using B3.Trading.Application;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Infrastructure;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
 namespace B3.Trading.Api.Tests.Lifecycle;
 
@@ -39,6 +41,9 @@ public class UnavailableModeTests
         Assert.Same(
             UnavailableOutboundGatewayReadiness.Instance,
             factory.Services.GetRequiredService<IOutboundGatewayReadiness>());
+        Assert.Single(
+            factory.Services.GetServices<IHostedService>()
+                .OfType<NewOrderOutboundCoordinator>());
     }
 
     [Fact]

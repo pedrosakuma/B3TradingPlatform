@@ -186,26 +186,83 @@ public sealed class NewOrderOutboundCoordinatorTests
     }
 
     [Fact]
-    public async Task HostedServiceRegistrationOrder_CoordinatorBeforeConnectorStillWaits()
+    public async Task HostedServiceRegistrationOrder_ConnectorStartsBeforeCoordinator()
     {
         var readiness = new ControlledGatewayReadiness();
         var gateway = new CompletingGateway();
         var fixture = CreateFixture(gateway, readiness: readiness);
+        var connector = new ControlledConnector(readiness, "FIRM-A");
         var services = new ServiceCollection();
+        services.AddSingleton<IHostedService>(connector);
         services.AddSingleton<IHostedService>(fixture.Coordinator);
-        services.AddSingleton<IHostedService>(
-            new SignalingConnector(readiness, "FIRM-A"));
         await using var provider = services.BuildServiceProvider();
         var hosted = provider.GetServices<IHostedService>().ToArray();
 
+        Assert.Same(connector, hosted[0]);
+        Assert.Same(fixture.Coordinator, hosted[1]);
         await hosted[0].StartAsync(CancellationToken.None);
+        await hosted[1].StartAsync(CancellationToken.None);
         Assert.Equal(0, gateway.CallCount);
         Assert.Single(fixture.Store.Events);
-        await hosted[1].StartAsync(CancellationToken.None);
+        connector.Signal();
         await WaitForCallsAsync(gateway, 1);
 
         Assert.Equal(1, gateway.CallCount);
-        await hosted[0].StopAsync(CancellationToken.None);
+        await StopHostedInReverseAsync(hosted);
+        Assert.True(connector.Stopped);
+    }
+
+    [Fact]
+    public async Task HostedServiceReverseStop_DrainsSendBeforeConnectorDisposal()
+    {
+        var readiness = new ControlledGatewayReadiness();
+        var gateway = new BlockingWriteGateway();
+        var fixture = CreateFixture(gateway, readiness: readiness);
+        var connector = new ControlledConnector(readiness, "FIRM-A");
+        var services = new ServiceCollection();
+        services.AddSingleton<IHostedService>(connector);
+        services.AddSingleton<IHostedService>(fixture.Coordinator);
+        await using var provider = services.BuildServiceProvider();
+        var hosted = provider.GetServices<IHostedService>().ToArray();
+        foreach (var service in hosted)
+            await service.StartAsync(CancellationToken.None);
+        connector.Signal();
+        await gateway.WaitUntilWriteAsync();
+
+        var stopping = StopHostedInReverseAsync(hosted);
+        await Task.Delay(50);
+        Assert.False(stopping.IsCompleted);
+        Assert.False(connector.Stopped);
+
+        gateway.ReleaseWrite();
+        await stopping;
+        Assert.True(connector.Stopped);
+        Assert.True(fixture.Ledger.TryGet(fixture.MutationId, out var mutation));
+        Assert.Equal(OutboundMutationState.TransportWriteCompleted, mutation!.State);
+    }
+
+    [Fact]
+    public async Task HostedServiceConnectFailure_ShutdownCancelsWaitBeforeConnectorDisposal()
+    {
+        var readiness = new ControlledGatewayReadiness();
+        var gateway = new CompletingGateway();
+        var fixture = CreateFixture(gateway, readiness: readiness);
+        var connector = new ControlledConnector(readiness, "FIRM-A");
+        var services = new ServiceCollection();
+        services.AddSingleton<IHostedService>(connector);
+        services.AddSingleton<IHostedService>(fixture.Coordinator);
+        await using var provider = services.BuildServiceProvider();
+        var hosted = provider.GetServices<IHostedService>().ToArray();
+        foreach (var service in hosted)
+            await service.StartAsync(CancellationToken.None);
+        await readiness.WaitUntilObservedAsync("FIRM-A");
+
+        await StopHostedInReverseAsync(hosted);
+
+        Assert.True(connector.Stopped);
+        Assert.Equal(0, gateway.CallCount);
+        Assert.True(fixture.Ledger.TryGet(fixture.MutationId, out var mutation));
+        Assert.Equal(OutboundMutationState.ApprovedToSend, mutation!.State);
     }
 
     [Theory]
@@ -436,6 +493,12 @@ public sealed class NewOrderOutboundCoordinatorTests
         Assert.Equal(expected, gateway.CallCount);
     }
 
+    private static async Task StopHostedInReverseAsync(IHostedService[] hosted)
+    {
+        for (var i = hosted.Length - 1; i >= 0; i--)
+            await hosted[i].StopAsync(CancellationToken.None);
+    }
+
     private static AeadOutboundCommandProtector CreateProtector() =>
         new(
             new OutboundCommandProtectionOptions
@@ -639,18 +702,22 @@ public sealed class NewOrderOutboundCoordinatorTests
                 .WaitAsync(TimeSpan.FromSeconds(2));
     }
 
-    private sealed class SignalingConnector(
+    private sealed class ControlledConnector(
         ControlledGatewayReadiness readiness,
         string firmId) : IHostedService
     {
-        public Task StartAsync(CancellationToken cancellationToken)
+        public bool Stopped { get; private set; }
+
+        public Task StartAsync(CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+
+        public Task StopAsync(CancellationToken cancellationToken)
         {
-            readiness.Signal(firmId);
+            Stopped = true;
             return Task.CompletedTask;
         }
 
-        public Task StopAsync(CancellationToken cancellationToken) =>
-            Task.CompletedTask;
+        public void Signal() => readiness.Signal(firmId);
     }
 
     private class RecordingCommittedStore : IEventStore
