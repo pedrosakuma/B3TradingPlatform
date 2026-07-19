@@ -396,7 +396,10 @@ public sealed class OrderModifyService
                 new KeyValuePair<string, object?>("code", code),
                 new KeyValuePair<string, object?>("path", "modify"),
                 new KeyValuePair<string, object?>("firmId", orig.FirmId));
-            PublishReplaceRejected(req, orig, newClOrdId, "risk", reason);
+            var walFailure = PublishReplaceRejected(
+                req, orig, newClOrdId, "risk", reason, code);
+            if (walFailure is not null)
+                return walFailure;
             return OrderModifyResult.RiskRejected(reason, code);
         }
 
@@ -423,7 +426,10 @@ public sealed class OrderModifyService
                 new KeyValuePair<string, object?>("code", code),
                 new KeyValuePair<string, object?>("path", "modify"),
                 new KeyValuePair<string, object?>("firmId", orig.FirmId));
-            PublishReplaceRejected(req, orig, newClOrdId, "margin", reason);
+            var walFailure = PublishReplaceRejected(
+                req, orig, newClOrdId, "margin", reason, code);
+            if (walFailure is not null)
+                return walFailure;
             return OrderModifyResult.RiskRejected(reason, code);
         }
 
@@ -752,13 +758,24 @@ public sealed class OrderModifyService
     /// publish so the trader still observes the reject even when WAL
     /// append is degraded (same posture as the submit path).
     /// </summary>
-    private void PublishReplaceRejected(
+    private OrderModifyResult? PublishReplaceRejected(
         OrderModifyRequest req,
         Order orig,
         ulong newClOrdId,
         string source,
-        string reason)
+        string reason,
+        string code)
     {
+        var rejectedAt = _clock.GetUtcNow();
+        var restIdempotency = req.IdempotencyContext is { Binding: { } pendingBinding }
+            ? pendingBinding with
+            {
+                ClOrdId = newClOrdId,
+                BoundAtUtc = rejectedAt,
+                RejectionReason = reason,
+                RejectionCode = code,
+            }
+            : null;
         var evt = new OrderReplaceRejectedEvent
         {
             OriginalClOrdId = req.OriginalClOrdId,
@@ -778,6 +795,8 @@ public sealed class OrderModifyService
             Reason = reason,
             ParentAlgoId = orig.ParentAlgoId,
             AlgoSliceSeq = orig.AlgoSliceSeq,
+            RestIdempotency = restIdempotency,
+            TimestampUtc = rejectedAt,
         };
 
         Action publishLive = () => _sink.Publish(new ExecutionEvent(
@@ -790,19 +809,39 @@ public sealed class OrderModifyService
             CumulativeQuantity: orig.CumulativeQuantity,
             LastQuantity: 0, LastPrice: 0m,
             RejectReason: reason,
-            TimestampUtc: DateTimeOffset.UtcNow,
+            TimestampUtc: rejectedAt,
             FirmId: orig.FirmId));
 
         try
         {
-            _dispatcher.Dispatch(evt, publishLive);
+            if (restIdempotency is null)
+            {
+                _dispatcher.Dispatch(evt, publishLive);
+            }
+            else
+            {
+                _dispatcher.DispatchCommitted(
+                    evt,
+                    () =>
+                    {
+                        (_restIdempotency ?? throw new InvalidOperationException(
+                            "REST idempotency store is unavailable."))
+                            .Apply(restIdempotency);
+                        publishLive();
+                    },
+                    CancellationToken.None);
+            }
+            return null;
         }
-        catch (WalBackpressureException)
+        catch (Exception ex) when (ex is WalBackpressureException or WalFaultedException)
         {
             MetricsRegistry.WalBackpressure.Add(1,
                 new KeyValuePair<string, object?>("call_site", "orders.modify.reject"),
                 new KeyValuePair<string, object?>("firmId", orig.FirmId));
             publishLive();
+            return restIdempotency is null
+                ? null
+                : OrderModifyResult.WalBackpressure(ex.Message);
         }
     }
 }

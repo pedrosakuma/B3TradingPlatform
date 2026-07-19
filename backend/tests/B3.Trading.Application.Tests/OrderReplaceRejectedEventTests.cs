@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
@@ -113,12 +114,78 @@ public class OrderReplaceRejectedEventTests
         Assert.Null(evt.RequestedStopPrice);
     }
 
+    [Fact]
+    public async Task RiskReject_with_idempotency_context_persists_and_applies_rejected_outcome()
+    {
+        var protector = new AeadOutboundCommandProtector(
+            new OutboundCommandProtectionOptions
+            {
+                ActiveKeyId = "test",
+                ActiveKeyVersion = 1,
+                StableReferenceKeyId = "test",
+                StableReferenceKeyVersion = 1,
+                Keys =
+                [
+                    new OutboundCommandProtectionKeyOptions
+                    {
+                        KeyId = "test",
+                        Version = 1,
+                        KeyBase64 = Convert.ToBase64String(new byte[32]),
+                    },
+                ],
+            });
+        var idempotency = new RestOrderIdempotencyStore(protector);
+        var (svc, store, _, _, seed) = Build(
+            riskRejects: true,
+            marginRejects: false,
+            idempotency);
+        RestOrderIdempotencyContext? pending = null;
+        await idempotency.ExecuteAsync(
+            new RestOrderIdempotencyIdentity(
+                seed.FirmId,
+                seed.Owner.Value,
+                seed.Owner.Value,
+                "PUT /orders/{clOrdId}",
+                "rejected-modify"),
+            new string('a', 64),
+            context =>
+            {
+                pending = context;
+                return Task.FromResult(0);
+            });
+        Assert.NotNull(pending);
+
+        var result = await svc.ModifyAsync(
+            new OrderModifyRequest(
+                seed.Owner,
+                seed.ClOrdId,
+                NewQuantity: 200,
+                NewPrice: 30m,
+                IdempotencyContext: pending),
+            CancellationToken.None);
+
+        Assert.Equal(OrderModifyResultKind.RiskRejected, result.Kind);
+        var rejected = store.Recorded.Select(x => x.Event)
+            .OfType<OrderReplaceRejectedEvent>().Single();
+        Assert.NotNull(rejected.RestIdempotency);
+        Assert.Equal(rejected.NewClOrdId, rejected.RestIdempotency!.ClOrdId);
+        Assert.Equal("test_risk_reject", rejected.RestIdempotency.RejectionReason);
+        Assert.Equal("AlwaysReject", rejected.RestIdempotency.RejectionCode);
+
+        var applied = Assert.Single(idempotency.CaptureSnapshot());
+        Assert.Equal(rejected.NewClOrdId, applied.ClOrdId);
+        Assert.Equal(rejected.RestIdempotency, applied);
+    }
+
     // ----------------------------------------------------------------
     // Builders / fakes
     // ----------------------------------------------------------------
 
     private static (OrderModifyService Svc, RecordingEventStore Store, CapturingSink Sink,
-        CapturingGateway Gw, Order Seed) Build(bool riskRejects, bool marginRejects)
+        CapturingGateway Gw, Order Seed) Build(
+            bool riskRejects,
+            bool marginRejects,
+            RestOrderIdempotencyStore? idempotency = null)
     {
         var owner = new EndClientId("alice");
         var seed = new Order(
@@ -143,7 +210,8 @@ public class OrderReplaceRejectedEventTests
         var svc = new OrderModifyService(
             clOrdIds, ownership, book, gateway, sink, risk, margin,
             new PendingReplacementRegistry(), dispatcher,
-            new NeverDrain(), NullLogger<OrderModifyService>.Instance);
+            new NeverDrain(), NullLogger<OrderModifyService>.Instance,
+            restIdempotency: idempotency);
         return (svc, store, sink, gateway, seed);
     }
 

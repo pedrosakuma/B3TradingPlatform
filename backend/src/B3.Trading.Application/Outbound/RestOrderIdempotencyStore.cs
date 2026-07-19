@@ -14,6 +14,8 @@ public sealed record RestOrderIdempotencyBindingSnapshot
     public required DateTimeOffset BoundAtUtc { get; init; }
     public string StableReferenceKeyId { get; init; } = string.Empty;
     public int StableReferenceKeyVersion { get; init; }
+    public string? RejectionReason { get; init; }
+    public string? RejectionCode { get; init; }
 }
 
 public sealed record RestOrderIdempotencyIdentity(

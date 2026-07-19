@@ -2,6 +2,9 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using B3.Trading.Application;
+using B3.Trading.Application.Outbound;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace B3.Trading.Api.Tests;
 
@@ -96,6 +99,63 @@ public class RiskRejectionCodeSurfaceTests
         Assert.NotNull(err);
         Assert.Equal("min_tick_size", err!.Code);
         Assert.Contains("tick size", err.Error);
+    }
+
+    [Fact]
+    public async Task PUT_RejectedModify_WithSameIdempotencyKey_ReplaysWithoutBurningAnotherClOrdId()
+    {
+        using var f = TestAppFactory.WithOverrides(new Dictionary<string, string?>
+        {
+            ["Trading:SymbolDirectory:Specs:PETR4:TickSize"] = "0.01",
+        });
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var posted = await PostOrder(http, token, new
+        {
+            Symbol = "PETR4",
+            SecurityId = 4321UL,
+            Side = "Buy",
+            Type = "Limit",
+            TimeInForce = "Day",
+            Quantity = 100,
+            Price = 29.90m,
+        });
+        var origAck = await ReadAck(posted);
+        const string idempotencyKey = "rejected-modify-replay";
+
+        async Task<HttpResponseMessage> SendModify()
+        {
+            var request = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origAck.ClOrdId}")
+            {
+                Content = JsonContent.Create(new
+                {
+                    Quantity = 100,
+                    Price = 29.905m,
+                }),
+            };
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            request.Headers.Add("Idempotency-Key", idempotencyKey);
+            return await http.SendAsync(request);
+        }
+
+        var first = await SendModify();
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, first.StatusCode);
+        var firstBody = await first.Content.ReadAsStringAsync();
+        var counterAfterFirst = f.Services.GetRequiredService<ClOrdIdPrefixRegistry>()
+            .Snapshot().Counters.Single(x => x.EndClientId == TestAppFactory.TestUser).Counter;
+
+        var replay = await SendModify();
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, replay.StatusCode);
+        Assert.Equal(firstBody, await replay.Content.ReadAsStringAsync());
+        var counterAfterReplay = f.Services.GetRequiredService<ClOrdIdPrefixRegistry>()
+            .Snapshot().Counters.Single(x => x.EndClientId == TestAppFactory.TestUser).Counter;
+        Assert.Equal(counterAfterFirst, counterAfterReplay);
+
+        var binding = Assert.Single(f.Services.GetRequiredService<RestOrderIdempotencyStore>()
+            .CaptureSnapshot());
+        Assert.Equal("min_tick_size", binding.RejectionCode);
+        Assert.Contains("tick size", binding.RejectionReason);
     }
 
     private static async Task<HttpResponseMessage> PostOrder(HttpClient http, string token, object payload)

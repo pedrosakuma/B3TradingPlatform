@@ -1290,10 +1290,12 @@ public sealed class EventReplayer
                 // none of those were touched on the live path either
                 // (reject happens BEFORE intent registration and
                 // BEFORE the gateway dispatch). The only durable
-                // effect to recover is the burned ClOrdId watermark
-                // so the same ID is never re-issued post-restart,
-                // matching the successful-replace branch above.
+                // effects to recover are the burned ClOrdId watermark
+                // and, for keyed REST requests, the rejected outcome
+                // binding used to replay the same 422 after restart.
                 _clOrdIds.AdvanceCounterTo(new EndClientId(rrj.EndClientId), rrj.NewClOrdId);
+                if (rrj.RestIdempotency is { } rejectedIdempotency)
+                    _restOrderIdempotency?.Apply(rejectedIdempotency);
                 break;
             case OrderReplaceAmbiguousMarginHeldEvent amh:
                 // Pass-5 review (#299) P1. Re-establish the held

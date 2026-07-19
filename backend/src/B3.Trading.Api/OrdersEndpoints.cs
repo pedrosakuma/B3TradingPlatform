@@ -607,6 +607,14 @@ public static class OrdersEndpoints
         OutboundMutationLedger ledger,
         WorkingOrderBook book)
     {
+        if (binding.RejectionReason is { } rejectionReason)
+        {
+            return Results.UnprocessableEntity(new
+            {
+                error = rejectionReason,
+                code = binding.RejectionCode,
+            });
+        }
         var state = ResolveState(binding.MutationId, binding.ClOrdId, ledger, book);
         var response = MutationResponse(
             binding.MutationId,

@@ -364,6 +364,7 @@ public sealed record OrderReplaceRejectedEvent : WalEvent
     public required string Reason { get; init; }
     public ulong? ParentAlgoId { get; init; }
     public int? AlgoSliceSeq { get; init; }
+    public RestOrderIdempotencyBindingSnapshot? RestIdempotency { get; init; }
 }
 
 /// <summary>
