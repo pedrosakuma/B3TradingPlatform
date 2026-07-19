@@ -29,6 +29,7 @@ public sealed class OutboundMutationLedger
     private readonly object _gate = new();
     private readonly Dictionary<OutboundMutationId, OutboundMutationSnapshot> _mutations = new();
     private readonly Dictionary<ulong, OutboundMutationId> _byClOrdId = new();
+    private readonly Dictionary<OriginalOrderKey, OutboundMutationId> _activeByOriginal = new();
     private readonly Dictionary<FrameKey, OutboundMutationId> _byFrame = new();
     private readonly Dictionary<ulong, OutboundCorrelationTombstone> _correlations = new();
     private readonly Dictionary<string, InboundVenueEvidenceSnapshot> _inboundEvidence =
@@ -92,9 +93,17 @@ public sealed class OutboundMutationLedger
         {
             if (_mutations.TryGetValue(evt.MutationId, out var existing))
             {
-                if (ApprovalEquivalent(existing, evt))
+                if (IsLegacyState(existing.State)
+                    && existing.PrimaryClOrdId == evt.PrimaryClOrdId
+                    && existing.Kind == evt.MutationKind)
+                {
+                    RemoveMutationIndexes(existing);
+                    _mutations.Remove(evt.MutationId);
+                }
+                else if (ApprovalEquivalent(existing, evt))
                     return;
-                throw TransitionError("Conflicting approval evidence.");
+                else
+                    throw TransitionError("Conflicting approval evidence.");
             }
             if (_byClOrdId.TryGetValue(evt.PrimaryClOrdId, out var existingMutation))
             {
@@ -108,6 +117,13 @@ public sealed class OutboundMutationLedger
                 {
                     throw TransitionError("The approval ClOrdID is already correlated.");
                 }
+            }
+            if (evt.OriginalClOrdId is { } originalClOrdId)
+            {
+                var originalKey = new OriginalOrderKey(evt.FirmId, originalClOrdId);
+                if (_activeByOriginal.TryGetValue(originalKey, out var activeMutation)
+                    && activeMutation != evt.MutationId)
+                    throw TransitionError("The original order already has an active outbound mutation.");
             }
 
             var availability = CheckPayloadAvailability(evt);
@@ -130,6 +146,7 @@ public sealed class OutboundMutationLedger
             };
             _mutations.Add(evt.MutationId, mutation);
             AddClOrdCorrelation(mutation, evt.PrimaryClOrdId, terminal: false, evt.TimestampUtc);
+            AddActiveOriginalIndex(mutation);
         }
     }
 
@@ -155,6 +172,17 @@ public sealed class OutboundMutationLedger
             if (mutation.State is not OutboundMutationState.ApprovedToSend
                 and not OutboundMutationState.ProvenUnsent)
                 throw TransitionError("Attempt intent is out of order.");
+            if (mutation.State == OutboundMutationState.ProvenUnsent
+                && mutation.OriginalClOrdId is { } retryOriginalClOrdId)
+            {
+                var originalKey = new OriginalOrderKey(mutation.FirmId, retryOriginalClOrdId);
+                if (_activeByOriginal.TryGetValue(originalKey, out var activeMutation)
+                    && activeMutation != mutation.MutationId)
+                {
+                    throw TransitionError(
+                        "Another outbound mutation became active before the retry attempt.");
+                }
+            }
             if (mutation.Attempts.Count >= MaxOutboundAttempts
                 || evt.AttemptNo != mutation.Attempts.Count + 1)
                 throw TransitionError("Attempt number or cap is invalid.");
@@ -183,6 +211,36 @@ public sealed class OutboundMutationLedger
             };
             _mutations[evt.MutationId] = mutation;
             AddClOrdCorrelation(mutation, evt.ClOrdId, terminal: false, evt.TimestampUtc);
+            AddActiveOriginalIndex(mutation);
+        }
+    }
+
+    internal bool CanPrepareAttempt(
+        OutboundMutationId mutationId,
+        int attemptNo,
+        ulong clOrdId)
+    {
+        lock (_gate)
+        {
+            if (!_mutations.TryGetValue(mutationId, out var mutation)
+                || mutation.State is not (OutboundMutationState.ApprovedToSend
+                    or OutboundMutationState.ProvenUnsent)
+                || mutation.Attempts.Count >= MaxOutboundAttempts
+                || attemptNo != mutation.Attempts.Count + 1
+                || mutation.Attempts.Any(attempt => attempt.ClOrdId == clOrdId)
+                || (_byClOrdId.TryGetValue(clOrdId, out var clOrdOwner)
+                    && clOrdOwner != mutationId))
+            {
+                return false;
+            }
+            if (mutation.State != OutboundMutationState.ProvenUnsent
+                || mutation.OriginalClOrdId is not { } originalClOrdId)
+            {
+                return true;
+            }
+            var key = new OriginalOrderKey(mutation.FirmId, originalClOrdId);
+            return !_activeByOriginal.TryGetValue(key, out var activeMutation)
+                || activeMutation == mutationId;
         }
     }
 
@@ -285,6 +343,7 @@ public sealed class OutboundMutationLedger
             _mutations[evt.MutationId] = updatedMutation;
             AddClOrdCorrelation(
                 updatedMutation, attempt.ClOrdId, terminal: true, evt.TimestampUtc);
+            RemoveActiveOriginalIndex(updatedMutation);
         }
     }
 
@@ -503,7 +562,11 @@ public sealed class OutboundMutationLedger
                     return new(InboundVenueEvidenceApplyStatus.RecordedConflicting);
                 }
 
-                MarkIncompleteVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
+                MarkUnmatchedVenueEvidence(
+                    mutation,
+                    evt.ClOrdId,
+                    evt.TimestampUtc,
+                    OutboundAmbiguityReason.IncompleteVenueEvidence);
                 AddInboundEvidenceUnsafe(
                     CreateExecutionReportEvidence(
                         evt, evidenceId, InboundVenueEvidenceDisposition.Unmatched, [id]),
@@ -546,10 +609,33 @@ public sealed class OutboundMutationLedger
                 return new(InboundVenueEvidenceApplyStatus.RecordedConflicting);
             }
 
+            if (evt.SessionVerId is not null and not 0
+                && frame is not null
+                && evt.SessionVerId != frame.SessionVerId)
+            {
+                // A post-roll ER cannot resolve the old outbound attempt, but
+                // it can still be valid order-lifecycle evidence.
+                if (!IsTerminal(mutation.State))
+                    MarkUnmatchedVenueEvidence(
+                        mutation,
+                        evt.ClOrdId,
+                        evt.TimestampUtc,
+                        OutboundAmbiguityReason.SessionVersionMismatchEvidence);
+                AddInboundEvidenceUnsafe(
+                    CreateExecutionReportEvidence(
+                        evt, evidenceId, InboundVenueEvidenceDisposition.Unmatched, [id]),
+                    evidenceIdentity);
+                return new(InboundVenueEvidenceApplyStatus.RecordedUnmatched);
+            }
+
             if (!HasCompleteExecutionReportIdentity(evt))
             {
                 if (!IsTerminal(mutation.State))
-                    MarkIncompleteVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
+                    MarkUnmatchedVenueEvidence(
+                        mutation,
+                        evt.ClOrdId,
+                        evt.TimestampUtc,
+                        OutboundAmbiguityReason.IncompleteVenueEvidence);
                 AddInboundEvidenceUnsafe(
                     CreateExecutionReportEvidence(
                         evt, evidenceId, InboundVenueEvidenceDisposition.Unmatched, [id]),
@@ -578,6 +664,7 @@ public sealed class OutboundMutationLedger
                 var terminalMatches = evt.ClOrdId == activeAttempt.ClOrdId
                     && frame is not null
                     && evt.SessionId == frame.SessionId
+                    && evt.SessionVerId == frame.SessionVerId
                     && evt.InboundSeqNum is not null and not 0;
                 AddInboundEvidenceUnsafe(
                     CreateExecutionReportEvidence(
@@ -599,6 +686,7 @@ public sealed class OutboundMutationLedger
                     and not OutboundMutationState.Ambiguous
                 || frame is null
                 || evt.SessionId != frame.SessionId
+                || evt.SessionVerId != frame.SessionVerId
                 || evt.InboundSeqNum is null or 0)
             {
                 MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
@@ -852,7 +940,8 @@ public sealed class OutboundMutationLedger
             evt.OriginalClOrdId, authoritativeFirmId);
         ImportLegacy(
             OutboundMutationKind.Cancel, firmId, evt.CancelClOrdId,
-            evt.OriginalClOrdId, evt.TimestampUtc, OutboundMutationState.LegacyUnknownCancel);
+            evt.OriginalClOrdId, evt.TimestampUtc, OutboundMutationState.LegacyUnknownCancel,
+            evt.MutationId);
     }
 
     public void ImportLegacyReplace(OrderReplaceRequestedEvent evt)
@@ -860,7 +949,8 @@ public sealed class OutboundMutationLedger
         ArgumentNullException.ThrowIfNull(evt);
         ImportLegacy(
             OutboundMutationKind.Replace, evt.FirmId, evt.NewClOrdId,
-            evt.OriginalClOrdId, evt.TimestampUtc, OutboundMutationState.LegacyUnknownReplace);
+            evt.OriginalClOrdId, evt.TimestampUtc, OutboundMutationState.LegacyUnknownReplace,
+            evt.MutationId);
     }
 
     public void ImportLegacyProvenUnsent(
@@ -895,6 +985,7 @@ public sealed class OutboundMutationLedger
             if (mutation.State == OutboundMutationState.ProvenUnsent)
             {
                 _mutations[mutation.MutationId] = mutation;
+                RemoveActiveOriginalIndex(mutation);
                 return;
             }
             mutation = mutation with
@@ -912,6 +1003,7 @@ public sealed class OutboundMutationLedger
             };
             _mutations[mutation.MutationId] = mutation;
             MarkCorrelations(mutation, terminal: true, atUtc);
+            RemoveActiveOriginalIndex(mutation);
         }
     }
 
@@ -1009,6 +1101,7 @@ public sealed class OutboundMutationLedger
                     _mutations[pair.Key] = updatedMutation;
                     AddClOrdCorrelation(
                         updatedMutation, attempt.ClOrdId, terminal: true, atUtc);
+                    RemoveActiveOriginalIndex(updatedMutation);
                 }
 
                 else
@@ -1296,6 +1389,7 @@ public sealed class OutboundMutationLedger
         {
             _mutations.Clear();
             _byClOrdId.Clear();
+            _activeByOriginal.Clear();
             _byFrame.Clear();
             _correlations.Clear();
             _inboundEvidence.Clear();
@@ -1367,6 +1461,30 @@ public sealed class OutboundMutationLedger
         }
     }
 
+    public bool TryGetActiveForOriginal(
+        string firmId,
+        ulong originalClOrdId,
+        out OutboundMutationSnapshot? mutation)
+    {
+        if (string.IsNullOrWhiteSpace(firmId))
+            throw new ArgumentException("Firm id is required.", nameof(firmId));
+        if (originalClOrdId == 0)
+            throw new ArgumentOutOfRangeException(nameof(originalClOrdId));
+        lock (_gate)
+        {
+            if (_activeByOriginal.TryGetValue(
+                    new OriginalOrderKey(firmId, originalClOrdId),
+                    out var mutationId)
+                && _mutations.TryGetValue(mutationId, out var found))
+            {
+                mutation = Clone(found);
+                return true;
+            }
+            mutation = null;
+            return false;
+        }
+    }
+
     public bool TryResolveWatermarkOwner(
         OutboundMutationId mutationId,
         out EndClientId? owner)
@@ -1402,7 +1520,8 @@ public sealed class OutboundMutationLedger
         ulong mutationClOrdId,
         ulong? originalClOrdId,
         DateTimeOffset atUtc,
-        OutboundMutationState state)
+        OutboundMutationState state,
+        OutboundMutationId? preferredMutationId = null)
     {
         if (mutationClOrdId == 0)
             return;
@@ -1411,7 +1530,7 @@ public sealed class OutboundMutationLedger
             if (_byClOrdId.ContainsKey(mutationClOrdId))
                 return;
             var mutation = GetOrCreateLegacy(
-                kind, firmId, mutationClOrdId, originalClOrdId, atUtc);
+                kind, firmId, mutationClOrdId, originalClOrdId, atUtc, preferredMutationId);
             _mutations[mutation.MutationId] = mutation with
             {
                 State = state,
@@ -1426,13 +1545,20 @@ public sealed class OutboundMutationLedger
         string firmId,
         ulong mutationClOrdId,
         ulong? originalClOrdId,
-        DateTimeOffset atUtc)
+        DateTimeOffset atUtc,
+        OutboundMutationId? preferredMutationId = null)
     {
         if (_byClOrdId.TryGetValue(mutationClOrdId, out var existingId))
             return _mutations[existingId];
-        var id = DeterministicLegacyId(kind, firmId, mutationClOrdId);
+        var id = preferredMutationId is { } preferred
+            && preferred.Value != Guid.Empty
+                ? preferred
+                : DeterministicLegacyId(kind, firmId, mutationClOrdId);
         if (_mutations.TryGetValue(id, out var existing))
+        {
+            AddActiveOriginalIndex(existing);
             return existing;
+        }
         var state = kind switch
         {
             OutboundMutationKind.New => OutboundMutationState.LegacyUnknown,
@@ -1455,6 +1581,7 @@ public sealed class OutboundMutationLedger
         };
         _mutations[id] = mutation;
         AddClOrdCorrelation(mutation, mutationClOrdId, terminal: false, atUtc);
+        AddActiveOriginalIndex(mutation);
         return mutation;
     }
 
@@ -1799,6 +1926,7 @@ public sealed class OutboundMutationLedger
         };
         _mutations[mutation.MutationId] = mutation;
         MarkCorrelations(mutation, terminal: true, atUtc);
+        RemoveActiveOriginalIndex(mutation);
     }
 
     private void MarkConflictingVenueEvidence(
@@ -1833,10 +1961,11 @@ public sealed class OutboundMutationLedger
         MarkCorrelations(mutation, terminal: false, atUtc);
     }
 
-    private void MarkIncompleteVenueEvidence(
+    private void MarkUnmatchedVenueEvidence(
         OutboundMutationSnapshot mutation,
         ulong clOrdId,
-        DateTimeOffset atUtc)
+        DateTimeOffset atUtc,
+        OutboundAmbiguityReason reason)
     {
         if (IsTerminal(mutation.State))
             return;
@@ -1851,7 +1980,7 @@ public sealed class OutboundMutationLedger
             attempts[index] = attempts[index] with
             {
                 AmbiguityReason = attempts[index].AmbiguityReason
-                    ?? OutboundAmbiguityReason.IncompleteVenueEvidence,
+                    ?? reason,
             };
         }
         mutation = mutation with
@@ -1956,6 +2085,7 @@ public sealed class OutboundMutationLedger
                 _byFrame[key] = mutation.MutationId;
             }
         }
+        AddActiveOriginalIndex(mutation);
     }
 
     private void RemoveMutationIndexes(OutboundMutationSnapshot mutation)
@@ -1969,6 +2099,51 @@ public sealed class OutboundMutationLedger
             if (attempt.FramePrepared is { } frame)
                 _byFrame.Remove(new FrameKey(
                     mutation.FirmId, frame.SessionId, frame.SessionVerId, frame.OutboundSeqNum));
+        }
+        RemoveActiveOriginalIndex(mutation);
+    }
+
+    private void AddActiveOriginalIndex(OutboundMutationSnapshot mutation)
+    {
+        if (mutation.OriginalClOrdId is not { } originalClOrdId
+            || mutation.State == OutboundMutationState.ProvenUnsent
+            || IsTerminal(mutation.State))
+            return;
+        var key = new OriginalOrderKey(mutation.FirmId, originalClOrdId);
+        if (_activeByOriginal.TryGetValue(key, out var existing)
+            && existing != mutation.MutationId)
+        {
+            if (_mutations.TryGetValue(existing, out var existingMutation)
+                && existingMutation.Origin == OutboundMutationOrigin.Legacy
+                && mutation.Origin == OutboundMutationOrigin.Legacy)
+                return;
+            throw new OutboundLedgerRecoveryException(
+                "Multiple active outbound mutations target the same original order.");
+        }
+        _activeByOriginal[key] = mutation.MutationId;
+    }
+
+    private void RemoveActiveOriginalIndex(OutboundMutationSnapshot mutation)
+    {
+        if (mutation.OriginalClOrdId is not { } originalClOrdId)
+            return;
+        var key = new OriginalOrderKey(mutation.FirmId, originalClOrdId);
+        if (_activeByOriginal.TryGetValue(key, out var existing)
+            && existing == mutation.MutationId)
+        {
+            _activeByOriginal.Remove(key);
+            var replacement = _mutations.Values
+                .Where(candidate =>
+                    candidate.MutationId != mutation.MutationId
+                    && candidate.OriginalClOrdId == originalClOrdId
+                    && string.Equals(candidate.FirmId, mutation.FirmId, StringComparison.Ordinal)
+                    && candidate.State != OutboundMutationState.ProvenUnsent
+                    && !IsTerminal(candidate.State))
+                .OrderBy(candidate => candidate.RecordedAtUtc)
+                .ThenBy(candidate => candidate.MutationId.Value)
+                .FirstOrDefault();
+            if (replacement is not null)
+                _activeByOriginal[key] = replacement.MutationId;
         }
     }
 
@@ -2134,4 +2309,6 @@ public sealed class OutboundMutationLedger
         ulong SessionId,
         uint SessionVerId,
         ulong OutboundSeqNum);
+
+    private readonly record struct OriginalOrderKey(string FirmId, ulong OriginalClOrdId);
 }

@@ -68,6 +68,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(OutboundTransportWriteCompletedEvent), "outbound.transport-write-completed")]
 [JsonDerivedType(typeof(OutboundProvenUnsentEvent), "outbound.proven-unsent")]
 [JsonDerivedType(typeof(OutboundOperatorResolvedEvent), "outbound.operator-resolved")]
+[JsonDerivedType(typeof(RestOrderIdempotencyBoundEvent), "outbound.rest-idempotency-bound")]
 public abstract record WalEvent
 {
     public DateTimeOffset TimestampUtc { get; init; } = DateTimeOffset.UtcNow;
@@ -212,10 +213,12 @@ public sealed record BotOrderMapping(Guid CredentialId, ulong ExternalClOrdId);
 /// </summary>
 public sealed record OrderCancelRequestedEvent : WalEvent
 {
+    public OutboundMutationId? MutationId { get; init; }
     public required ulong CancelClOrdId { get; init; }
     public required ulong OriginalClOrdId { get; init; }
     public required string OwnerEndClientId { get; init; }
     public BotOrderMapping? BotMapping { get; init; }
+    public RestOrderIdempotencyBindingSnapshot? RestIdempotency { get; init; }
 }
 
 /// <summary>
@@ -249,6 +252,7 @@ public sealed record OrderCancelPreSendFailedEvent : WalEvent
 /// </summary>
 public sealed record OrderReplaceRequestedEvent : WalEvent
 {
+    public OutboundMutationId? MutationId { get; init; }
     public required ulong OriginalClOrdId { get; init; }
     public required ulong NewClOrdId { get; init; }
     public required string EndClientId { get; init; }
@@ -274,6 +278,7 @@ public sealed record OrderReplaceRequestedEvent : WalEvent
     public string? RequestedTimeInForce { get; init; }
     public decimal? RequestedStopPrice { get; init; }
     public DateTimeOffset? RequestedGoodTillDate { get; init; }
+    public RestOrderIdempotencyBindingSnapshot? RestIdempotency { get; init; }
 }
 
 /// <summary>
@@ -359,6 +364,7 @@ public sealed record OrderReplaceRejectedEvent : WalEvent
     public required string Reason { get; init; }
     public ulong? ParentAlgoId { get; init; }
     public int? AlgoSliceSeq { get; init; }
+    public RestOrderIdempotencyBindingSnapshot? RestIdempotency { get; init; }
 }
 
 /// <summary>
@@ -476,6 +482,11 @@ public sealed record OutboundOperatorResolvedEvent : WalEvent
     public required string EvidenceDigest { get; init; }
     public required string OperatorRef { get; init; }
     public required DateTimeOffset ResolvedAtUtc { get; init; }
+}
+
+public sealed record RestOrderIdempotencyBoundEvent : WalEvent
+{
+    public required RestOrderIdempotencyBindingSnapshot Binding { get; init; }
 }
 
 /// <summary>

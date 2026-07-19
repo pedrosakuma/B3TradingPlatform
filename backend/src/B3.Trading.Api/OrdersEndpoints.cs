@@ -249,7 +249,7 @@ public static class OrdersEndpoints
                             firm,
                             owner.Value,
                             ResolvePrincipal(ctx),
-                            "POST /orders"))
+                            binding.Operation))
                         return Results.NotFound();
                 }
                 catch (RestOrderIdempotencyUnavailableException)
@@ -264,7 +264,6 @@ public static class OrdersEndpoints
             }
             if (!outboundLedger.TryGet(id, out var mutation)
                 || mutation is null
-                || mutation.Kind != OutboundMutationKind.New
                 || !string.Equals(mutation.FirmId, firm, StringComparison.Ordinal)
                 || !string.Equals(
                     mutation.EndClientRef,
@@ -284,16 +283,51 @@ public static class OrdersEndpoints
             HttpContext ctx,
             EndClientRegistry registry,
             OrderModifyService modifier,
+            RestOrderIdempotencyStore idempotency,
+            OutboundMutationLedger outboundLedger,
+            WorkingOrderBook book,
             CancellationToken ct) =>
         {
             if (!ulong.TryParse(clOrdId, out var clOrdIdU))
                 return Results.NotFound();
 
-            // Q1.1 (#253). Optional TIF (null = no change) — parse as
-            // string + case-insensitive enum to mirror POST exactly,
-            // since the host does not register JsonStringEnumConverter
-            // and would otherwise force REST callers to send the
-            // numeric enum value over JSON.
+            var owner = ResolveOwner(ctx, registry);
+            var firm = ResolveFirm(ctx);
+            var idempotencyValues = ctx.Request.Headers["Idempotency-Key"];
+            if (idempotencyValues.Count > 1)
+                return Results.BadRequest(new { error = "multiple Idempotency-Key values are not allowed" });
+            var idempotencyKey = idempotencyValues.ToString();
+            RestOrderIdempotencyIdentity? identity = null;
+            string? requestHash = null;
+            if (!string.IsNullOrWhiteSpace(idempotencyKey))
+            {
+                identity = new RestOrderIdempotencyIdentity(
+                    firm,
+                    owner.Value,
+                    ResolvePrincipal(ctx),
+                    "PUT /orders",
+                    idempotencyKey);
+                requestHash = CanonicalModifyRequestHash(clOrdIdU, req);
+                try
+                {
+                    var resolution = await idempotency.ResolveAsync(identity, requestHash, ct);
+                    if (resolution.Kind == RestOrderIdempotencyResolutionKind.Conflict)
+                        return Results.Conflict(new { error = "idempotency_key_reused_with_different_request" });
+                    if (resolution.Kind == RestOrderIdempotencyResolutionKind.Replayed)
+                        return MapReplayedSubmission(resolution.Binding!, outboundLedger, book);
+                }
+                catch (RestOrderIdempotencyUnavailableException)
+                {
+                    return IdempotencyUnavailable();
+                }
+                catch (ArgumentException ex)
+                {
+                    return Results.BadRequest(new { error = ex.Message });
+                }
+            }
+
+            // Existing idempotency bindings must be resolved before mutable
+            // request validation so a durable prior result remains replayable.
             TimeInForce? tif = null;
             if (!string.IsNullOrWhiteSpace(req.TimeInForce))
             {
@@ -302,58 +336,53 @@ public static class OrdersEndpoints
                 tif = parsed;
             }
 
-            var owner = ResolveOwner(ctx, registry);
-            var firm = ResolveFirm(ctx);
-            var result = await modifier.ModifyAsync(
-                new OrderModifyRequest(
-                    owner, clOrdIdU, req.Quantity, req.Price,
-                    tif, req.StopPrice, req.GoodTillDate,
-                    FirmId: firm),
-                ct);
-
-            return result.Kind switch
+            var request = new OrderModifyRequest(
+                owner, clOrdIdU, req.Quantity, req.Price,
+                tif, req.StopPrice, req.GoodTillDate,
+                FirmId: firm);
+            if (identity is null)
             {
-                OrderModifyResultKind.Accepted =>
-                    Results.Accepted(
-                        $"/orders/{result.NewClOrdId}",
-                        new { ClOrdId = result.NewClOrdId.ToString(), OriginalClOrdId = clOrdIdU.ToString() }),
-                OrderModifyResultKind.NotFound =>
-                    Results.NotFound(),
-                OrderModifyResultKind.Conflict =>
-                    Results.Conflict(new { error = result.Reason }),
-                OrderModifyResultKind.BadRequest =>
-                    Results.BadRequest(new { error = result.Reason }),
-                OrderModifyResultKind.RiskRejected =>
-                    Results.UnprocessableEntity(new { error = result.Reason, code = result.Code }),
-                OrderModifyResultKind.GatewayFailed =>
-                    Results.Json(
-                        new { error = "gateway unavailable", clOrdId = result.NewClOrdId.ToString() },
-                        statusCode: StatusCodes.Status502BadGateway),
-                OrderModifyResultKind.GatewayAmbiguous =>
-                    Results.Json(
-                        new { error = "gateway send outcome ambiguous", clOrdId = result.NewClOrdId.ToString() },
-                        statusCode: StatusCodes.Status502BadGateway),
-                OrderModifyResultKind.ReconciliationRequired =>
-                    Results.Json(
-                        new
-                        {
-                            error = "replace resolution requires reconciliation",
-                            detail = result.Reason,
-                            clOrdId = result.NewClOrdId.ToString(),
-                        },
-                        statusCode: StatusCodes.Status503ServiceUnavailable),
-                OrderModifyResultKind.WalBackpressure =>
-                    Results.Json(
-                        new { error = "system busy (WAL backpressure)", detail = result.Reason },
-                        statusCode: StatusCodes.Status503ServiceUnavailable),
-                OrderModifyResultKind.Drained =>
-                    Results.Json(
-                        new { error = "service draining" },
-                        statusCode: StatusCodes.Status503ServiceUnavailable),
-                OrderModifyResultKind.DuplicateClOrdId =>
-                    Results.Conflict(new { error = result.Reason, newClOrdId = result.NewClOrdId.ToString() }),
-                _ => Results.StatusCode(StatusCodes.Status500InternalServerError),
-            };
+                MarkMissingIdempotency(ctx, firm, "PUT /orders");
+                var unkeyed = await modifier.ModifyAsync(request, ct);
+                return MapModifyResult(
+                    unkeyed,
+                    clOrdIdU,
+                    outboundLedger,
+                    book,
+                    replayed: false,
+                    legacyResponse: true);
+            }
+
+            RestOrderIdempotencyExecution<OrderModifyResult> execution;
+            try
+            {
+                execution = await idempotency.ExecuteAsync(
+                    identity,
+                    requestHash!,
+                    async idempotencyContext =>
+                        await modifier.ModifyAsync(
+                            request with { IdempotencyContext = idempotencyContext },
+                            ct));
+            }
+            catch (RestOrderIdempotencyUnavailableException)
+            {
+                return IdempotencyUnavailable();
+            }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+            if (execution.Kind == RestOrderIdempotencyExecutionKind.Conflict)
+                return Results.Conflict(new { error = "idempotency_key_reused_with_different_request" });
+            if (execution.Kind == RestOrderIdempotencyExecutionKind.Replayed)
+                return MapReplayedSubmission(execution.Binding!, outboundLedger, book);
+            return MapModifyResult(
+                execution.Value!,
+                clOrdIdU,
+                outboundLedger,
+                book,
+                replayed: false,
+                legacyResponse: false);
         });
 
         group.MapDelete("/{clOrdId}", async (
@@ -361,6 +390,9 @@ public static class OrdersEndpoints
             HttpContext ctx,
             EndClientRegistry registry,
             OrderCancelService canceller,
+            RestOrderIdempotencyStore idempotency,
+            OutboundMutationLedger outboundLedger,
+            WorkingOrderBook book,
             CancellationToken ct) =>
         {
             if (!ulong.TryParse(clOrdId, out var clOrdIdU))
@@ -368,46 +400,193 @@ public static class OrdersEndpoints
 
             var owner = ResolveOwner(ctx, registry);
             var firm = ResolveFirm(ctx);
-            // Sub-issue #171 (E): REST cancels now go through the WAL-
-            // durable OrderCancelRequestedEvent path (RFC §4.6 / §4.8).
-            // botOrigin is null — REST is not a bot session.
-            // PR #316 P1 — pass firm so the service rejects (as
-            // NotFound) cancels that target an order owned by a
-            // different firm, matching GET /orders scoping.
-            var result = await canceller.CancelAsync(owner, clOrdIdU, ct, firmId: firm);
-            return result.Kind switch
+            var idempotencyValues = ctx.Request.Headers["Idempotency-Key"];
+            if (idempotencyValues.Count > 1)
+                return Results.BadRequest(new { error = "multiple Idempotency-Key values are not allowed" });
+            var idempotencyKey = idempotencyValues.ToString();
+            RestOrderIdempotencyIdentity? identity = null;
+            string? requestHash = null;
+            if (!string.IsNullOrWhiteSpace(idempotencyKey))
             {
-                OrderCancelResultKind.Accepted => Results.NoContent(),
-                OrderCancelResultKind.NotFound => Results.NotFound(),
-                OrderCancelResultKind.Stale =>
-                    Results.Conflict(new { error = "order is marked stale", reason = result.Reason }),
-                OrderCancelResultKind.Conflict =>
-                    Results.Conflict(new { error = result.Reason }),
-                OrderCancelResultKind.WalBackpressure =>
-                    Results.Json(
-                        new { error = "system busy (WAL backpressure)", detail = result.Reason },
-                        statusCode: StatusCodes.Status503ServiceUnavailable),
-                OrderCancelResultKind.GatewayFailed =>
-                    Results.Json(
-                        new { error = "gateway unavailable", clOrdId = result.CancelClOrdId.ToString() },
-                        statusCode: StatusCodes.Status502BadGateway),
-                OrderCancelResultKind.ReconciliationRequired =>
-                    Results.Json(
-                        new
-                        {
-                            error = "cancel resolution requires reconciliation",
-                            detail = result.Reason,
-                            clOrdId = result.CancelClOrdId == 0
-                                ? null
-                                : result.CancelClOrdId.ToString(),
-                        },
-                        statusCode: StatusCodes.Status503ServiceUnavailable),
-                _ => Results.StatusCode(StatusCodes.Status500InternalServerError),
-            };
+                identity = new RestOrderIdempotencyIdentity(
+                    firm,
+                    owner.Value,
+                    ResolvePrincipal(ctx),
+                    "DELETE /orders",
+                    idempotencyKey);
+                requestHash = CanonicalCancelRequestHash(clOrdIdU);
+                try
+                {
+                    var resolution = await idempotency.ResolveAsync(identity, requestHash, ct);
+                    if (resolution.Kind == RestOrderIdempotencyResolutionKind.Conflict)
+                        return Results.Conflict(new { error = "idempotency_key_reused_with_different_request" });
+                    if (resolution.Kind == RestOrderIdempotencyResolutionKind.Replayed)
+                        return MapReplayedSubmission(resolution.Binding!, outboundLedger, book);
+                }
+                catch (RestOrderIdempotencyUnavailableException)
+                {
+                    return IdempotencyUnavailable();
+                }
+                catch (ArgumentException ex)
+                {
+                    return Results.BadRequest(new { error = ex.Message });
+                }
+            }
+
+            if (identity is null)
+            {
+                MarkMissingIdempotency(ctx, firm, "DELETE /orders");
+                var unkeyed = await canceller.CancelAsync(owner, clOrdIdU, ct, firmId: firm);
+                return MapCancelResult(
+                    unkeyed,
+                    outboundLedger,
+                    book,
+                    replayed: false,
+                    legacyResponse: true);
+            }
+
+            RestOrderIdempotencyExecution<OrderCancelResult> execution;
+            try
+            {
+                execution = await idempotency.ExecuteAsync(
+                    identity,
+                    requestHash!,
+                    async idempotencyContext =>
+                        await canceller.CancelAsync(
+                            owner,
+                            clOrdIdU,
+                            ct,
+                            firmId: firm,
+                            idempotencyContext: idempotencyContext));
+            }
+            catch (RestOrderIdempotencyUnavailableException)
+            {
+                return IdempotencyUnavailable();
+            }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+            if (execution.Kind == RestOrderIdempotencyExecutionKind.Conflict)
+                return Results.Conflict(new { error = "idempotency_key_reused_with_different_request" });
+            if (execution.Kind == RestOrderIdempotencyExecutionKind.Replayed)
+                return MapReplayedSubmission(execution.Binding!, outboundLedger, book);
+            return MapCancelResult(
+                execution.Value!,
+                outboundLedger,
+                book,
+                replayed: false,
+                legacyResponse: false);
         });
 
         return app;
     }
+
+    private static IResult MapModifyResult(
+        OrderModifyResult result,
+        ulong originalClOrdId,
+        OutboundMutationLedger ledger,
+        WorkingOrderBook book,
+        bool replayed,
+        bool legacyResponse) =>
+        result.Kind switch
+        {
+            OrderModifyResultKind.Accepted => legacyResponse
+                ? Results.Accepted(
+                    $"/orders/{result.NewClOrdId}",
+                    new
+                    {
+                        ClOrdId = result.NewClOrdId.ToString(),
+                        OriginalClOrdId = originalClOrdId.ToString(),
+                    })
+                : Results.Accepted(
+                    $"/orders/mutations/{result.MutationId}",
+                    MutationResponse(
+                        result.MutationId,
+                        result.NewClOrdId,
+                        ResolveState(result.MutationId, result.NewClOrdId, ledger, book),
+                        replayed)),
+            OrderModifyResultKind.NotFound =>
+                Results.NotFound(),
+            OrderModifyResultKind.Conflict =>
+                Results.Conflict(new { error = result.Reason }),
+            OrderModifyResultKind.BadRequest =>
+                Results.BadRequest(new { error = result.Reason }),
+            OrderModifyResultKind.RiskRejected =>
+                Results.UnprocessableEntity(new { error = result.Reason, code = result.Code }),
+            OrderModifyResultKind.GatewayFailed =>
+                Results.Json(
+                    new { error = "gateway unavailable", clOrdId = result.NewClOrdId.ToString() },
+                    statusCode: StatusCodes.Status502BadGateway),
+            OrderModifyResultKind.GatewayAmbiguous =>
+                Results.Json(
+                    new { error = "gateway send outcome ambiguous", clOrdId = result.NewClOrdId.ToString() },
+                    statusCode: StatusCodes.Status502BadGateway),
+            OrderModifyResultKind.ReconciliationRequired =>
+                Results.Json(
+                    new
+                    {
+                        error = "replace resolution requires reconciliation",
+                        detail = result.Reason,
+                        clOrdId = result.NewClOrdId.ToString(),
+                    },
+                    statusCode: StatusCodes.Status503ServiceUnavailable),
+            OrderModifyResultKind.WalBackpressure =>
+                Results.Json(
+                    new { error = "system busy (WAL backpressure)", detail = result.Reason },
+                    statusCode: StatusCodes.Status503ServiceUnavailable),
+            OrderModifyResultKind.Drained =>
+                Results.Json(
+                    new { error = "service draining" },
+                    statusCode: StatusCodes.Status503ServiceUnavailable),
+            OrderModifyResultKind.DuplicateClOrdId =>
+                Results.Conflict(new { error = result.Reason, newClOrdId = result.NewClOrdId.ToString() }),
+            _ => Results.StatusCode(StatusCodes.Status500InternalServerError),
+        };
+
+    private static IResult MapCancelResult(
+        OrderCancelResult result,
+        OutboundMutationLedger ledger,
+        WorkingOrderBook book,
+        bool replayed,
+        bool legacyResponse) =>
+        result.Kind switch
+        {
+            OrderCancelResultKind.Accepted => legacyResponse
+                ? Results.NoContent()
+                : Results.Accepted(
+                    $"/orders/mutations/{result.MutationId}",
+                    MutationResponse(
+                        result.MutationId,
+                        result.CancelClOrdId,
+                        ResolveState(result.MutationId, result.CancelClOrdId, ledger, book),
+                        replayed)),
+            OrderCancelResultKind.NotFound => Results.NotFound(),
+            OrderCancelResultKind.Stale =>
+                Results.Conflict(new { error = "order is marked stale", reason = result.Reason }),
+            OrderCancelResultKind.Conflict =>
+                Results.Conflict(new { error = result.Reason }),
+            OrderCancelResultKind.WalBackpressure =>
+                Results.Json(
+                    new { error = "system busy (WAL backpressure)", detail = result.Reason },
+                    statusCode: StatusCodes.Status503ServiceUnavailable),
+            OrderCancelResultKind.GatewayFailed =>
+                Results.Json(
+                    new { error = "gateway unavailable", clOrdId = result.CancelClOrdId.ToString() },
+                    statusCode: StatusCodes.Status502BadGateway),
+            OrderCancelResultKind.ReconciliationRequired =>
+                Results.Json(
+                    new
+                    {
+                        error = "cancel resolution requires reconciliation",
+                        detail = result.Reason,
+                        clOrdId = result.CancelClOrdId == 0
+                            ? null
+                            : result.CancelClOrdId.ToString(),
+                    },
+                    statusCode: StatusCodes.Status503ServiceUnavailable),
+            _ => Results.StatusCode(StatusCodes.Status500InternalServerError),
+        };
 
     private static EndClientId ResolveOwner(HttpContext ctx, EndClientRegistry registry)
     {
@@ -428,6 +607,14 @@ public static class OrdersEndpoints
         OutboundMutationLedger ledger,
         WorkingOrderBook book)
     {
+        if (binding.RejectionReason is { } rejectionReason)
+        {
+            return Results.UnprocessableEntity(new
+            {
+                error = rejectionReason,
+                code = binding.RejectionCode,
+            });
+        }
         var state = ResolveState(binding.MutationId, binding.ClOrdId, ledger, book);
         var response = MutationResponse(
             binding.MutationId,
@@ -582,6 +769,56 @@ public static class OrdersEndpoints
             request.MinQty,
         });
         return Convert.ToHexString(SHA256.HashData(canonical)).ToLowerInvariant();
+    }
+
+    private static string CanonicalModifyRequestHash(
+        ulong originalClOrdId,
+        ModifyOrderRequest request)
+    {
+        var timeInForce = string.IsNullOrWhiteSpace(request.TimeInForce)
+            ? null
+            : Enum.TryParse<TimeInForce>(
+                request.TimeInForce,
+                ignoreCase: true,
+                out var parsed)
+                ? parsed.ToString()
+                : request.TimeInForce.Trim();
+        var canonical = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            version = 1,
+            originalClOrdId,
+            request.Quantity,
+            request.Price,
+            timeInForce,
+            request.StopPrice,
+            goodTillDate = request.GoodTillDate?.ToUniversalTime(),
+        });
+        return Convert.ToHexString(SHA256.HashData(canonical)).ToLowerInvariant();
+    }
+
+    private static string CanonicalCancelRequestHash(ulong originalClOrdId)
+    {
+        var canonical = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            version = 1,
+            originalClOrdId,
+        });
+        return Convert.ToHexString(SHA256.HashData(canonical)).ToLowerInvariant();
+    }
+
+    private static void MarkMissingIdempotency(
+        HttpContext context,
+        string firmId,
+        string endpoint)
+    {
+        context.Response.Headers["Idempotency-Key-Required"] = "true";
+        context.Response.Headers.Append(
+            "Warning",
+            $"299 B3TradingPlatform \"Idempotency-Key will become required for {endpoint}\"");
+        MetricsRegistry.OrdersMissingIdempotencyKey.Add(
+            1,
+            new KeyValuePair<string, object?>("firmId", firmId),
+            new KeyValuePair<string, object?>("endpoint", endpoint));
     }
 
     private static IResult IdempotencyUnavailable() =>

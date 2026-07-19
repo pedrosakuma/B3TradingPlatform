@@ -91,6 +91,7 @@ public static class TradingPersistenceServiceCollectionExtensions
         services.AddSingleton<OutboundProcessEpoch>();
         services.AddSingleton<RestOrderIdempotencyStore>();
         services.AddSingleton<NewOrderApprovalFactory>();
+        services.AddSingleton<CancelReplaceApprovalFactory>();
         services.AddSingleton<ReconciliationMarkerRecovery>();
         services.AddSingleton<ColdStartLifecycleGuard>();
         services.AddSingleton<StateSnapshotter>();

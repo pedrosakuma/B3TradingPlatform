@@ -1055,6 +1055,37 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             cancellationToken);
     }
 
+    public Task<ExchangeGatewayReceipt> CancelWithReceiptAsync(
+        OutboundCancelCommand command,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        ArgumentNullException.ThrowIfNull(onFramePrepared);
+        var canonical = command.Canonical;
+        if (canonical.OriginalClOrdId is not { } originalClOrdId)
+            throw new ArgumentException("Approved cancel command has no original ClOrdID.", nameof(command));
+
+        var req = new UpModels.CancelOrderRequest
+        {
+            ClOrdID = new UpModels.ClOrdID(canonical.ClOrdId),
+            OrigClOrdID = new UpModels.ClOrdID(originalClOrdId),
+            SecurityId = canonical.SecurityId,
+            Side = Enum.Parse<OrderSide>(canonical.Side, ignoreCase: true) == OrderSide.Buy
+                ? UpModels.Side.Buy
+                : UpModels.Side.Sell,
+        };
+
+        return SendWithReceiptAsync(
+            canonical.ClOrdId,
+            OrderEntryLatencyProbe.OpCancel,
+            (callback, ct) => _cancelWithReceiptOverride is null
+                ? _client.CancelWithReceiptAsync(req, callback, ct)
+                : _cancelWithReceiptOverride(req, callback, ct),
+            onFramePrepared,
+            cancellationToken);
+    }
+
     public Task CancelReplaceAsync(
         Order original,
         ulong newClOrdId,
@@ -1122,6 +1153,80 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
         return SendWithReceiptAsync(
             newClOrdId,
+            OrderEntryLatencyProbe.OpReplace,
+            (callback, ct) => _replaceWithReceiptOverride is null
+                ? _client.ReplaceWithReceiptAsync(req, callback, ct)
+                : _replaceWithReceiptOverride(req, callback, ct),
+            onFramePrepared,
+            cancellationToken);
+    }
+
+    public Task<ExchangeGatewayReceipt> CancelReplaceWithReceiptAsync(
+        OutboundReplaceCommand command,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        ArgumentNullException.ThrowIfNull(onFramePrepared);
+        var canonical = command.Canonical;
+        var sensitive = command.Sensitive;
+        if (canonical.OriginalClOrdId is not { } originalClOrdId)
+            throw new ArgumentException("Approved replace command has no original ClOrdID.", nameof(command));
+
+        var effectiveOriginal = new Order(
+            originalClOrdId,
+            new EndClientId(sensitive.EndClientId),
+            canonical.Symbol,
+            canonical.SecurityId,
+            Enum.Parse<OrderSide>(canonical.Side, ignoreCase: true),
+            Enum.Parse<OrderType>(canonical.OrderType, ignoreCase: true),
+            canonical.Quantity,
+            canonical.Price,
+            command.FirmId,
+            timeInForce: Enum.Parse<TimeInForce>(canonical.TimeInForce, ignoreCase: true),
+            stopPrice: canonical.StopPrice,
+            goodTillDate: canonical.GoodTillDate,
+            displayQty: canonical.MaxFloor,
+            displayResetPolicy: canonical.MaxFloor is null ? null : DisplayResetPolicy.Always,
+            minQty: canonical.MinQty);
+        var stp = string.IsNullOrWhiteSpace(canonical.SelfTradePreventionInstruction)
+            ? SelfTradePreventionMode.None
+            : Enum.Parse<SelfTradePreventionMode>(
+                canonical.SelfTradePreventionInstruction,
+                ignoreCase: true);
+        InvestorIdentity? investor = null;
+        if (sensitive.InvestorIdPrefix is not null
+            && sensitive.InvestorIdDocument is not null)
+        {
+            investor = new InvestorIdentity(
+                ushort.Parse(
+                    sensitive.InvestorIdPrefix,
+                    System.Globalization.CultureInfo.InvariantCulture),
+                uint.Parse(
+                    sensitive.InvestorIdDocument,
+                    System.Globalization.CultureInfo.InvariantCulture));
+        }
+        var routing = string.IsNullOrWhiteSpace(canonical.RoutingInstruction)
+            ? (RoutingInstruction?)null
+            : Enum.Parse<RoutingInstruction>(
+                canonical.RoutingInstruction,
+                ignoreCase: true);
+        var req = BuildReplaceOrderRequest(
+            effectiveOriginal,
+            canonical.ClOrdId,
+            canonical.Quantity,
+            canonical.Price,
+            requestedTimeInForce: null,
+            requestedStopPrice: null,
+            requestedGoodTillDate: null,
+            MapStpInstruction(stp),
+            ParseNullableUInt32(sensitive.TradingSubAccount),
+            ParseNullableUInt64(sensitive.Account),
+            investor,
+            routing);
+
+        return SendWithReceiptAsync(
+            canonical.ClOrdId,
             OrderEntryLatencyProbe.OpReplace,
             (callback, ct) => _replaceWithReceiptOverride is null
                 ? _client.ReplaceWithReceiptAsync(req, callback, ct)

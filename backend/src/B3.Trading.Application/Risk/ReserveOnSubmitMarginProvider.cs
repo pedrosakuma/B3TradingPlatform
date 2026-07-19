@@ -508,15 +508,32 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
         if (!_options.CurrentValue.Margin.Enabled)
             return Task.FromResult(RiskDecision.Approve);
 
-        // Sells / markets / non-positive notionals never touched the
-        // reservation ledger on submit; they don't here either.
-        if (newRemainingNotional <= 0m)
-            return Task.FromResult(RiskDecision.Approve);
-
         var ownerKey = owner.Value;
         var account = MarginAccountKey.Create(firmId, ownerKey);
         lock (_gate)
         {
+            if (_reservations.TryGetValue(newClOrdId, out var existing))
+            {
+                if (existing.OriginalQty == 0
+                    && string.Equals(existing.FirmId, firmId, StringComparison.Ordinal)
+                    && string.Equals(existing.Owner, ownerKey, StringComparison.Ordinal))
+                {
+                    return Task.FromResult(RiskDecision.Approve);
+                }
+                return Task.FromResult(RiskDecision.Reject(
+                    $"replace ClOrdID {newClOrdId} already has a non-replace reservation"));
+            }
+
+            // Sells / markets / non-positive notionals never touched the
+            // reservation ledger on submit; track a zero-delta transient so
+            // repeated prepare/recovery calls remain idempotent.
+            if (newRemainingNotional <= 0m)
+            {
+                _reservations[newClOrdId] = new ReservationEntry(
+                    firmId, ownerKey, 0m, 0L, 0m);
+                return Task.FromResult(RiskDecision.Approve);
+            }
+
             // #153. A suspended original held no cash in _reserved, so
             // the upsize-delta math must treat its tracked remaining as
             // zero. Otherwise we'd approve a replace that, at commit

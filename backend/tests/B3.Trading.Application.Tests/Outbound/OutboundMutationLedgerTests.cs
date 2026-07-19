@@ -197,7 +197,7 @@ public sealed class OutboundMutationLedgerTests
         });
         ledger.ImportLegacyReplace(new OrderReplaceRequestedEvent
         {
-            OriginalClOrdId = 1,
+            OriginalClOrdId = 4,
             NewClOrdId = 3,
             EndClientId = "customer-secret",
             FirmId = "F1",
@@ -211,7 +211,7 @@ public sealed class OutboundMutationLedgerTests
         });
         ledger.ImportReconciliationMarker(new ReconciliationMarker(
             ReconciliationMarkerKind.ReplaceAmbiguous,
-            OriginalClOrdId: 1,
+            OriginalClOrdId: 4,
             MutationClOrdId: 3,
             OwnerEndClientId: "customer-secret",
             NewRemainingNotional: 620m,
@@ -226,6 +226,80 @@ public sealed class OutboundMutationLedgerTests
         Assert.Contains(ledger.SnapshotMutations(),
             m => m.State == OutboundMutationState.Ambiguous);
         Assert.All(ledger.SnapshotCorrelations(), c => Assert.False(c.Terminal));
+    }
+
+    [Theory]
+    [InlineData(OutboundMutationKind.Cancel)]
+    [InlineData(OutboundMutationKind.Replace)]
+    public void LegacyPendingMutation_BlocksNewMutationForSameOriginal(
+        OutboundMutationKind legacyKind)
+    {
+        var fixture = Fixture.Create(clOrdId: 99);
+        if (legacyKind == OutboundMutationKind.Cancel)
+        {
+            fixture.Ledger.ImportLegacyNew(new OrderSubmittedEvent
+            {
+                ClOrdId = 1,
+                EndClientId = "customer-secret",
+                FirmId = "F1",
+                Symbol = "PETR4",
+                SecurityId = 123,
+                Side = "Buy",
+                Type = "Limit",
+                Quantity = 10,
+                Price = 30m,
+                TimestampUtc = T0,
+            });
+            fixture.Ledger.ImportLegacyCancel(new OrderCancelRequestedEvent
+            {
+                CancelClOrdId = 2,
+                OriginalClOrdId = 1,
+                OwnerEndClientId = "customer-secret",
+                TimestampUtc = T0,
+            });
+        }
+        else
+        {
+            fixture.Ledger.ImportLegacyReplace(new OrderReplaceRequestedEvent
+            {
+                OriginalClOrdId = 1,
+                NewClOrdId = 2,
+                EndClientId = "customer-secret",
+                FirmId = "F1",
+                Symbol = "PETR4",
+                SecurityId = 123,
+                Side = "Buy",
+                Type = "Limit",
+                NewQuantity = 20,
+                NewPrice = 31m,
+                TimestampUtc = T0,
+            });
+        }
+
+        Assert.True(fixture.Ledger.TryGetActiveForOriginal("F1", 1, out var active));
+        Assert.Equal(legacyKind, active!.Kind);
+        Assert.Throws<InvalidOperationException>(() =>
+            fixture.Ledger.Apply(fixture.Approved with
+            {
+                MutationKind = OutboundMutationKind.Cancel,
+                OriginalClOrdId = 1,
+            }));
+        fixture.Ledger.ImportLegacyProvenUnsent(
+            2,
+            legacyKind,
+            1,
+            T0.AddSeconds(1),
+            legacyKind == OutboundMutationKind.Cancel
+                ? OutboundProvenUnsentEvidence.LegacyWave1CancelPreSend
+                : OutboundProvenUnsentEvidence.LegacyWave1ReplacePreSend);
+        Assert.False(fixture.Ledger.TryGetActiveForOriginal("F1", 1, out _));
+        fixture.Ledger.Apply(fixture.Approved with
+        {
+            MutationKind = OutboundMutationKind.Cancel,
+            OriginalClOrdId = 1,
+        });
+        Assert.True(fixture.Ledger.TryGetActiveForOriginal("F1", 1, out var fresh));
+        Assert.Equal(fixture.MutationId, fresh!.MutationId);
     }
 
     [Fact]
@@ -335,20 +409,72 @@ public sealed class OutboundMutationLedgerTests
     }
 
     [Fact]
-    public void VenueAcknowledgement_AfterSessionVersionRoll_ResolvesByStableSessionAndClOrdId()
+    public void MultipleVenueAcknowledgements_AfterSessionVersionRoll_RemainDomainApplicable()
     {
         var fixture = Fixture.Create();
         fixture.Ledger.Apply(fixture.Approved);
         fixture.Ledger.Apply(fixture.Intent);
         fixture.Ledger.Apply(fixture.Frame);
 
-        var result = fixture.Ledger.ApplyVenueAcknowledgement(Acknowledgement(
+        var first = fixture.Ledger.ApplyVenueAcknowledgement(Acknowledgement(
             fixture,
             firmId: "F1",
             sessionId: 11,
-            sessionVerId: 3));
+            sessionVerId: 3) with
+        {
+            ExecKind = "PartialFill",
+            InboundSeqNum = 88,
+        });
+        var second = fixture.Ledger.ApplyVenueAcknowledgement(Acknowledgement(
+            fixture,
+            firmId: "F1",
+            sessionId: 11,
+            sessionVerId: 3) with
+        {
+            ExecKind = "PartialFill",
+            InboundSeqNum = 89,
+        });
 
-        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedMatched, result.Status);
+        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedUnmatched, first.Status);
+        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedUnmatched, second.Status);
+        Assert.True(first.ShouldApplyDomain);
+        Assert.True(second.ShouldApplyDomain);
+        AssertState(fixture, OutboundMutationState.Ambiguous);
+        Assert.Equal(
+            OutboundAmbiguityReason.SessionVersionMismatchEvidence,
+            Assert.Single(fixture.Ledger.SnapshotMutations()[0].Attempts).AmbiguityReason);
+        Assert.All(
+            fixture.Ledger.CaptureSnapshot().InboundEvidence,
+            evidence => Assert.Equal(
+                InboundVenueEvidenceDisposition.Unmatched,
+                evidence.Disposition));
+        Assert.Equal(1, fixture.Ledger.ReadinessBlockingCount);
+    }
+
+    [Fact]
+    public void LateExecutionReport_AfterSessionVersionRoll_AppliesDomainWithoutChangingTerminalResolution()
+    {
+        var fixture = Fixture.Create();
+        ApplyPrepared(fixture.Ledger, fixture, fixture.Frame);
+        var acknowledged = fixture.Ledger.ApplyVenueAcknowledgement(Acknowledgement(
+            fixture,
+            firmId: "F1",
+            sessionId: fixture.Frame.SessionId,
+            sessionVerId: fixture.Frame.SessionVerId));
+        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedMatched, acknowledged.Status);
+
+        var lateFill = fixture.Ledger.ApplyVenueAcknowledgement(Acknowledgement(
+            fixture,
+            firmId: "F1",
+            sessionId: fixture.Frame.SessionId,
+            sessionVerId: fixture.Frame.SessionVerId + 1) with
+        {
+            ExecKind = "Fill",
+            InboundSeqNum = 89,
+        });
+
+        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedUnmatched, lateFill.Status);
+        Assert.True(lateFill.ShouldApplyDomain);
         AssertState(fixture, OutboundMutationState.VenueAcknowledged);
         Assert.Equal(0, fixture.Ledger.ReadinessBlockingCount);
     }
@@ -2765,6 +2891,16 @@ public sealed class OutboundMutationLedgerTests
         Assert.Contains(ledger.SnapshotMutations(),
             m => m.State == OutboundMutationState.Ambiguous);
         Assert.Equal(3, ledger.ReadinessBlockingCount);
+        Assert.True(ledger.TryGetActiveForOriginal("F1", 1, out var activeCancel));
+        Assert.Equal(OutboundMutationKind.Cancel, activeCancel!.Kind);
+        ledger.ImportLegacyProvenUnsent(
+            2,
+            OutboundMutationKind.Cancel,
+            1,
+            T0.AddSeconds(1),
+            OutboundProvenUnsentEvidence.LegacyWave1CancelPreSend);
+        Assert.True(ledger.TryGetActiveForOriginal("F1", 1, out var activeReplace));
+        Assert.Equal(OutboundMutationKind.Replace, activeReplace!.Kind);
     }
 
     [Fact]

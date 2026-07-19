@@ -60,6 +60,13 @@ public interface IExchangeGateway
         Task.FromException<ExchangeGatewayReceipt>(
             ExchangeGatewayAttemptException.ReceiptNotSupported());
 
+    Task<ExchangeGatewayReceipt> CancelWithReceiptAsync(
+        OutboundCancelCommand command,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken) =>
+        Task.FromException<ExchangeGatewayReceipt>(
+            ExchangeGatewayAttemptException.ReceiptNotSupported());
+
     /// <summary>
     /// Cancel-replace a working order. <paramref name="newClOrdId"/> must
     /// already be allocated; the original ClOrdID is the one being replaced.
@@ -92,6 +99,13 @@ public interface IExchangeGateway
         TimeInForce? requestedTimeInForce,
         decimal? requestedStopPrice,
         DateTimeOffset? requestedGoodTillDate,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken) =>
+        Task.FromException<ExchangeGatewayReceipt>(
+            ExchangeGatewayAttemptException.ReceiptNotSupported());
+
+    Task<ExchangeGatewayReceipt> CancelReplaceWithReceiptAsync(
+        OutboundReplaceCommand command,
         ExchangeGatewayFramePreparedCallback onFramePrepared,
         CancellationToken cancellationToken) =>
         Task.FromException<ExchangeGatewayReceipt>(

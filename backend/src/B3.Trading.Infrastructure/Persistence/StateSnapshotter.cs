@@ -1193,6 +1193,8 @@ public sealed class EventReplayer
                 _ownership.RegisterCancelLink(ocr.CancelClOrdId, ocr.OriginalClOrdId);
                 _pendingCancels?.TryAdd(ocr.OriginalClOrdId, ocr.CancelClOrdId);
                 _clOrdIds.AdvanceCounterTo(ocrOwner, ocr.CancelClOrdId);
+                if (ocr.RestIdempotency is { } cancelIdempotency)
+                    _restOrderIdempotency?.Apply(cancelIdempotency);
                 if (_outboundLedger?.ShouldImportLegacy == true)
                 {
                     var originalFirmId = _orders.TryGet(
@@ -1262,6 +1264,8 @@ public sealed class EventReplayer
                 // must advance the watermark even if the replacement
                 // intent itself wasn't re-registered (orig already gone).
                 _clOrdIds.AdvanceCounterTo(new EndClientId(rr.EndClientId), rr.NewClOrdId);
+                if (rr.RestIdempotency is { } replaceIdempotency)
+                    _restOrderIdempotency?.Apply(replaceIdempotency);
                 if (_outboundLedger?.ShouldImportLegacy == true)
                     _outboundLedger.ImportLegacyReplace(rr);
                 break;
@@ -1286,10 +1290,12 @@ public sealed class EventReplayer
                 // none of those were touched on the live path either
                 // (reject happens BEFORE intent registration and
                 // BEFORE the gateway dispatch). The only durable
-                // effect to recover is the burned ClOrdId watermark
-                // so the same ID is never re-issued post-restart,
-                // matching the successful-replace branch above.
+                // effects to recover are the burned ClOrdId watermark
+                // and, for keyed REST requests, the rejected outcome
+                // binding used to replay the same 422 after restart.
                 _clOrdIds.AdvanceCounterTo(new EndClientId(rrj.EndClientId), rrj.NewClOrdId);
+                if (rrj.RestIdempotency is { } rejectedIdempotency)
+                    _restOrderIdempotency?.Apply(rejectedIdempotency);
                 break;
             case OrderReplaceAmbiguousMarginHeldEvent amh:
                 // Pass-5 review (#299) P1. Re-establish the held
@@ -1331,6 +1337,9 @@ public sealed class EventReplayer
                     _outboundLedger.ImportLegacyAmbiguous(
                         amh.NewClOrdId, amh.OriginalClOrdId, amh.HeldAtUtc);
                 }
+                break;
+            case RestOrderIdempotencyBoundEvent idempotencyBound:
+                _restOrderIdempotency?.Apply(idempotencyBound.Binding);
                 break;
             case OutboundApprovedEvent approved:
                 if (_outboundLedger is not null)

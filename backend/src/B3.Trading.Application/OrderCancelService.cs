@@ -1,4 +1,5 @@
 using B3.Trading.Application.Observability;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.UserBots;
 using B3.Trading.Domain;
@@ -34,6 +35,11 @@ public sealed class OrderCancelService
     private readonly Lifecycle.IDrainController? _reconciliationDrain;
     private readonly ReconciliationResolutionWriter _resolutionWriter;
     private readonly ILogger<OrderCancelService> _logger;
+    private readonly OutboundMutationLedger? _outboundLedger;
+    private readonly CancelReplaceApprovalFactory? _approvalFactory;
+    private readonly CancelReplaceOutboundCoordinator? _outboundCoordinator;
+    private readonly RestOrderIdempotencyStore? _restIdempotency;
+    private readonly TimeProvider _clock;
 
     public OrderCancelService(
         ClOrdIdPrefixRegistry clOrdIds,
@@ -45,7 +51,12 @@ public sealed class OrderCancelService
         IUserBotOrderMappingRegistry? botMappings = null,
         PendingCancelRegistry? pendingCancels = null,
         Lifecycle.IDrainController? reconciliationDrain = null,
-        ReconciliationResolutionWriter? resolutionWriter = null)
+        ReconciliationResolutionWriter? resolutionWriter = null,
+        OutboundMutationLedger? outboundLedger = null,
+        CancelReplaceApprovalFactory? approvalFactory = null,
+        CancelReplaceOutboundCoordinator? outboundCoordinator = null,
+        RestOrderIdempotencyStore? restIdempotency = null,
+        TimeProvider? clock = null)
     {
         _clOrdIds = clOrdIds;
         _ownership = ownership;
@@ -61,6 +72,11 @@ public sealed class OrderCancelService
             Microsoft.Extensions.Logging.Abstractions.NullLogger<
                 ReconciliationResolutionWriter>.Instance);
         _logger = logger;
+        _outboundLedger = outboundLedger;
+        _approvalFactory = approvalFactory;
+        _outboundCoordinator = outboundCoordinator;
+        _restIdempotency = restIdempotency;
+        _clock = clock ?? TimeProvider.System;
     }
 
     /// <summary>
@@ -76,7 +92,9 @@ public sealed class OrderCancelService
         ulong originalClOrdId,
         CancellationToken ct,
         BotOrigin? botOrigin = null,
-        string? firmId = null)
+        string? firmId = null,
+        RestOrderIdempotencyContext? idempotencyContext = null,
+        OutboundMutationOrigin? origin = null)
     {
         ArgumentNullException.ThrowIfNull(owner);
 
@@ -101,13 +119,71 @@ public sealed class OrderCancelService
         if (order.IsStale)
             return OrderCancelResult.Stale(order.StaleReason ?? "stale");
 
+        if (_outboundLedger?.TryGetActiveForOriginal(
+                order.FirmId,
+                originalClOrdId,
+                out var active) == true
+            && active is not null)
+        {
+            if (active.Kind != OutboundMutationKind.Cancel)
+                return OrderCancelResult.Conflict("another mutation for this order is already active");
+            var activeClOrdId = active.Attempts.LastOrDefault()?.ClOrdId ?? active.PrimaryClOrdId;
+            if (idempotencyContext is not null)
+            {
+                if (_restIdempotency is null)
+                    return OrderCancelResult.Conflict("REST idempotency store is unavailable");
+                var binding = idempotencyContext.Binding with
+                {
+                    MutationId = active.MutationId,
+                    ClOrdId = activeClOrdId,
+                    BoundAtUtc = _clock.GetUtcNow(),
+                };
+                try
+                {
+                    _dispatcher.DispatchCommitted(
+                        new RestOrderIdempotencyBoundEvent
+                        {
+                            Binding = binding,
+                            TimestampUtc = binding.BoundAtUtc,
+                        },
+                        () => _restIdempotency.Apply(binding),
+                        ct);
+                }
+                catch (WalBackpressureException ex)
+                {
+                    MetricsRegistry.WalBackpressure.Add(1,
+                        new KeyValuePair<string, object?>("call_site", "orders.cancel.idempotency-alias"));
+                    return OrderCancelResult.WalBackpressure(ex.Message);
+                }
+            }
+            return OrderCancelResult.Accepted(activeClOrdId, active.MutationId);
+        }
+
         var claim = _pendingCancels.Claim(originalClOrdId);
         if (!claim.IsAcquired)
-            return OrderCancelResult.Accepted(claim.ExistingCancelClOrdId);
+        {
+            var existingMutationId = _outboundLedger?.SnapshotMutations()
+                .FirstOrDefault(m => m.Kind == OutboundMutationKind.Cancel
+                    && m.PrimaryClOrdId == claim.ExistingCancelClOrdId)
+                ?.MutationId;
+            return OrderCancelResult.Accepted(
+                claim.ExistingCancelClOrdId,
+                existingMutationId ?? default);
+        }
 
+        var mutationId = idempotencyContext?.Binding.MutationId
+            ?? OutboundMutationId.New();
         var cancelClOrdId = _clOrdIds.Generate(owner);
         BotOrderMapping? botMapping = botOrigin is { } o
             ? new BotOrderMapping(o.CredentialId, o.ExternalClOrdId)
+            : null;
+        var recordedAt = _clock.GetUtcNow();
+        var restIdempotency = idempotencyContext is { Binding: { } pendingBinding }
+            ? pendingBinding with
+            {
+                ClOrdId = cancelClOrdId,
+                BoundAtUtc = recordedAt,
+            }
             : null;
 
         try
@@ -115,10 +191,13 @@ public sealed class OrderCancelService
             var dispatched = _dispatcher.DispatchIf(
                 new OrderCancelRequestedEvent
                 {
+                    MutationId = _outboundCoordinator is null ? null : mutationId,
                     CancelClOrdId = cancelClOrdId,
                     OriginalClOrdId = originalClOrdId,
                     OwnerEndClientId = owner.Value,
                     BotMapping = botMapping,
+                    RestIdempotency = restIdempotency,
+                    TimestampUtc = recordedAt,
                 },
                 () => order.Status is not (OrderStatus.Filled or OrderStatus.Cancelled
                     or OrderStatus.Rejected or OrderStatus.Replaced),
@@ -142,6 +221,8 @@ public sealed class OrderCancelService
                             credentialId: botMapping.CredentialId,
                             externalCancelClOrdId: botMapping.ExternalClOrdId);
                     }
+                    if (restIdempotency is not null)
+                        _restIdempotency?.Apply(restIdempotency);
                 });
             if (!dispatched.Applied)
             {
@@ -160,6 +241,75 @@ public sealed class OrderCancelService
         {
             _pendingCancels.ReleaseClaim(originalClOrdId);
             throw;
+        }
+
+        if (_outboundCoordinator is not null)
+        {
+            if (_outboundLedger is null || _approvalFactory is null)
+                return FailResolutionForReconciliation(
+                    cancelClOrdId,
+                    "outbound_cancel_composition_invalid",
+                    new InvalidOperationException("Cancel outbound coordinator composition is incomplete."));
+            var approvedAt = _clock.GetUtcNow();
+            try
+            {
+                var frozen = _approvalFactory.CreateCancel(
+                    mutationId,
+                    order,
+                    cancelClOrdId,
+                    approvedAt);
+                var approved = new OutboundApprovedEvent
+                {
+                    MutationId = mutationId,
+                    MutationKind = OutboundMutationKind.Cancel,
+                    FirmId = order.FirmId,
+                    EndClientRef = frozen.EndClientRef,
+                    Origin = botOrigin is not null
+                        ? OutboundMutationOrigin.UserBotFixp
+                        : origin ?? OutboundMutationOrigin.Rest,
+                    PrimaryClOrdId = cancelClOrdId,
+                    OriginalClOrdId = originalClOrdId,
+                    RecordedAtUtc = recordedAt,
+                    Approval = frozen.Approval,
+                    TimestampUtc = approvedAt,
+                };
+                _dispatcher.DispatchCommitted(
+                    approved,
+                    () => _outboundLedger.Apply(approved),
+                    CancellationToken.None);
+            }
+            catch (Exception ex) when (
+                ex is WalBackpressureException
+                    or WalFaultedException
+                    or OutboundCommandEnvelopeException)
+            {
+                return FailResolutionForReconciliation(
+                    cancelClOrdId,
+                    "outbound_cancel_approval_not_committed",
+                    ex);
+            }
+
+            var dispatch = await _outboundCoordinator.EnqueueAsync(mutationId, ct)
+                .ConfigureAwait(false);
+            return dispatch.Outcome switch
+            {
+                CancelReplaceDispatchOutcome.TransportWriteCompleted =>
+                    OrderCancelResult.Accepted(dispatch.ClOrdId, mutationId),
+                CancelReplaceDispatchOutcome.ProvenUnsent =>
+                    OrderCancelResult.GatewayFailed(dispatch.ClOrdId, dispatch.Exception
+                        ?? new ExchangeGatewayPreSendException("Cancel was proven unsent."), mutationId),
+                CancelReplaceDispatchOutcome.DeferredForShutdown =>
+                    OrderCancelResult.ReconciliationRequired(
+                        dispatch.ClOrdId,
+                        "cancel_deferred_for_shutdown",
+                        dispatch.Exception,
+                        mutationId),
+                _ => OrderCancelResult.ReconciliationRequired(
+                    dispatch.ClOrdId,
+                    "cancel_outcome_requires_reconciliation",
+                    dispatch.Exception,
+                    mutationId),
+            };
         }
 
         try
@@ -227,7 +377,7 @@ public sealed class OrderCancelService
 
         MetricsRegistry.OrdersCancelRequested.Add(1,
             new KeyValuePair<string, object?>("firmId", order.FirmId));
-        return OrderCancelResult.Accepted(cancelClOrdId);
+        return OrderCancelResult.Accepted(cancelClOrdId, mutationId);
     }
 
     private void ResolvePreSendFailure(ulong cancelClOrdId)
@@ -265,19 +415,28 @@ public sealed class OrderCancelResult
 {
     public OrderCancelResultKind Kind { get; }
     public ulong CancelClOrdId { get; }
+    public OutboundMutationId MutationId { get; }
     public string? Reason { get; }
     public Exception? GatewayException { get; }
 
-    private OrderCancelResult(OrderCancelResultKind kind, ulong cancelClOrdId, string? reason, Exception? ex)
+    private OrderCancelResult(
+        OrderCancelResultKind kind,
+        ulong cancelClOrdId,
+        string? reason,
+        Exception? ex,
+        OutboundMutationId mutationId = default)
     {
         Kind = kind;
         CancelClOrdId = cancelClOrdId;
         Reason = reason;
         GatewayException = ex;
+        MutationId = mutationId;
     }
 
-    public static OrderCancelResult Accepted(ulong cancelClOrdId) =>
-        new(OrderCancelResultKind.Accepted, cancelClOrdId, null, null);
+    public static OrderCancelResult Accepted(
+        ulong cancelClOrdId,
+        OutboundMutationId mutationId = default) =>
+        new(OrderCancelResultKind.Accepted, cancelClOrdId, null, null, mutationId);
     public static OrderCancelResult NotFound { get; } =
         new(OrderCancelResultKind.NotFound, 0, null, null);
     public static OrderCancelResult Stale(string reason) =>
@@ -286,11 +445,27 @@ public sealed class OrderCancelResult
         new(OrderCancelResultKind.Conflict, 0, reason, null);
     public static OrderCancelResult WalBackpressure(string detail) =>
         new(OrderCancelResultKind.WalBackpressure, 0, detail, null);
-    public static OrderCancelResult GatewayFailed(ulong cancelClOrdId, Exception ex) =>
-        new(OrderCancelResultKind.GatewayFailed, cancelClOrdId, "gateway_unavailable", ex);
+    public static OrderCancelResult GatewayFailed(
+        ulong cancelClOrdId,
+        Exception ex,
+        OutboundMutationId mutationId = default) =>
+        new(
+            OrderCancelResultKind.GatewayFailed,
+            cancelClOrdId,
+            "gateway_unavailable",
+            ex,
+            mutationId);
     public static OrderCancelResult ReconciliationRequired(
-        ulong cancelClOrdId, string reason, Exception? ex) =>
-        new(OrderCancelResultKind.ReconciliationRequired, cancelClOrdId, reason, ex);
+        ulong cancelClOrdId,
+        string reason,
+        Exception? ex,
+        OutboundMutationId mutationId = default) =>
+        new(
+            OrderCancelResultKind.ReconciliationRequired,
+            cancelClOrdId,
+            reason,
+            ex,
+            mutationId);
 }
 
 public enum OrderCancelResultKind

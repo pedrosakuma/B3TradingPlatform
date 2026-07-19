@@ -59,12 +59,60 @@ public sealed class StubExchangeGateway : IExchangeGateway
         CancellationToken cancellationToken) =>
         Unsupported();
 
+    public Task<ExchangeGatewayReceipt> CancelWithReceiptAsync(
+        OutboundCancelCommand command,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken) =>
+        CompleteAsync(
+            command.FirmId,
+            command.Canonical.ClOrdId,
+            ExchangeGatewayOperation.Cancel,
+            onFramePrepared,
+            cancellationToken);
+
     public Task<ExchangeGatewayReceipt> CancelReplaceWithReceiptAsync(
         Order original, ulong newClOrdId, long newQuantity, decimal? newPrice,
         TimeInForce? requestedTimeInForce, decimal? requestedStopPrice, DateTimeOffset? requestedGoodTillDate,
         ExchangeGatewayFramePreparedCallback onFramePrepared,
         CancellationToken cancellationToken) =>
         Unsupported();
+
+    public Task<ExchangeGatewayReceipt> CancelReplaceWithReceiptAsync(
+        OutboundReplaceCommand command,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken) =>
+        CompleteAsync(
+            command.FirmId,
+            command.Canonical.ClOrdId,
+            ExchangeGatewayOperation.Replace,
+            onFramePrepared,
+            cancellationToken);
+
+    private async Task<ExchangeGatewayReceipt> CompleteAsync(
+        string firmId,
+        ulong clOrdId,
+        ExchangeGatewayOperation operation,
+        ExchangeGatewayFramePreparedCallback onFramePrepared,
+        CancellationToken cancellationToken)
+    {
+        var seq = checked((ulong)Interlocked.Increment(ref _seq));
+        var hash = Convert.ToHexString(SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes($"{firmId}|{clOrdId}|{seq}")))
+            .ToLowerInvariant();
+        var frame = new ExchangeGatewayFrameIdentity(
+            firmId,
+            sessionId: 1,
+            sessionVerId: 1,
+            outboundSeqNum: seq,
+            operation,
+            clOrdId,
+            encodedFrameLength: 1,
+            hash);
+        await onFramePrepared(frame, cancellationToken).ConfigureAwait(false);
+        return new ExchangeGatewayReceipt(
+            frame,
+            ExchangeGatewayAttemptStage.TransportWriteCompleted);
+    }
 
     private static Task<ExchangeGatewayReceipt> Unsupported() =>
         Task.FromException<ExchangeGatewayReceipt>(
