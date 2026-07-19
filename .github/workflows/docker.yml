@@ -417,6 +417,8 @@ jobs:
           TRADING_SEED_PASSWORD_SALT: rXA+be7/gEYYZQrQDsUr2g==
           TRADING_CVM_OWNER_HASH_SALT: validate-only-cvm-salt
           TRADING_CLORDID_MASK_SALT: validate-only-clordid-mask-salt
+          TRADING_OUTBOUND_KEY_ID: validate-only-outbound
+          TRADING_OUTBOUND_KEY_BASE64: N2tjXhiFZ61TrXVa78oABf6mKVhmZV9xV4IxWA4QB9Y=
           PUBLIC_FIXP_TLS_DIR: /opt/fixp-tls
           PUBLIC_FIXP_TLS_CERT: /etc/ssl/fixp/server.pfx
           PUBLIC_FIXP_CA_BUNDLE: /etc/ssl/fixp/bot-ca-bundle.pem
