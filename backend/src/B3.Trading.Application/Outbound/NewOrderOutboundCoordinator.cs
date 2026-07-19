@@ -101,6 +101,7 @@ public enum NewOrderDispatchOutcome
     TransportWriteCompleted,
     ProvenUnsent,
     ReconciliationRequired,
+    DeferredForShutdown,
 }
 
 public sealed record NewOrderDispatchResult(
@@ -124,8 +125,10 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
     private readonly IOutboundGatewayReadiness _gatewayReadiness;
     private readonly CancellationTokenSource _recoveryShutdown = new();
     private readonly object _recoveryGate = new();
+    private readonly object _lifecycleGate = new();
     private readonly List<Task> _recoveryTasks = new();
     private int _recoveryStarted;
+    private bool _stopping;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<
         OutboundMutationId,
         Lazy<Task<NewOrderDispatchResult>>> _executions = new();
@@ -165,12 +168,15 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
         OutboundMutationId mutationId,
         CancellationToken waitCancellationToken = default)
     {
-        var execution = _executions.GetOrAdd(
-            mutationId,
-            id => new Lazy<Task<NewOrderDispatchResult>>(
-                () => ExecuteAsync(id),
-                LazyThreadSafetyMode.ExecutionAndPublication));
-        var task = execution.Value;
+        Lazy<Task<NewOrderDispatchResult>> execution;
+        Task<NewOrderDispatchResult> task;
+        lock (_lifecycleGate)
+        {
+            if (_stopping)
+                return new(NewOrderDispatchOutcome.DeferredForShutdown);
+            execution = GetOrAddExecution(mutationId);
+            task = execution.Value;
+        }
         try
         {
             return await task.WaitAsync(waitCancellationToken).ConfigureAwait(false);
@@ -178,7 +184,7 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
         finally
         {
             if (task.IsCompleted)
-                _executions.TryRemove(mutationId, out _);
+                RemoveExecution(mutationId, execution);
         }
     }
 
@@ -202,19 +208,21 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
-        _recoveryShutdown.Cancel();
-        Task[] tasks;
-        lock (_recoveryGate)
-            tasks = _recoveryTasks.ToArray();
-        try
+        Task[] recoveryTasks;
+        Task[] executionTasks;
+        lock (_lifecycleGate)
         {
-            await Task.WhenAll(tasks).WaitAsync(cancellationToken).ConfigureAwait(false);
+            _stopping = true;
+            _recoveryShutdown.Cancel();
+            lock (_recoveryGate)
+                recoveryTasks = _recoveryTasks.ToArray();
+            executionTasks = _executions.Values
+                .Where(static execution => execution.IsValueCreated)
+                .Select(static execution => execution.Value)
+                .ToArray();
         }
-        catch (OperationCanceledException) when (
-            cancellationToken.IsCancellationRequested
-            || _recoveryShutdown.IsCancellationRequested)
-        {
-        }
+        await Task.WhenAll(recoveryTasks.Concat(executionTasks))
+            .ConfigureAwait(false);
     }
 
     private async Task RecoverWhenOperationalAsync(
@@ -230,7 +238,24 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
             if (!_ledger.TryGet(mutationId, out var mutation)
                 || mutation?.State != OutboundMutationState.ApprovedToSend)
                 return;
-            await EnqueueAsync(mutationId, cancellationToken).ConfigureAwait(false);
+            Lazy<Task<NewOrderDispatchResult>> execution;
+            Task<NewOrderDispatchResult> task;
+            lock (_lifecycleGate)
+            {
+                if (_stopping || cancellationToken.IsCancellationRequested)
+                    return;
+                execution = GetOrAddExecution(mutationId);
+                task = execution.Value;
+            }
+            try
+            {
+                await task.ConfigureAwait(false);
+            }
+            finally
+            {
+                if (task.IsCompleted)
+                    RemoveExecution(mutationId, execution);
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -245,6 +270,24 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
                 firmId);
         }
     }
+
+    private Lazy<Task<NewOrderDispatchResult>> GetOrAddExecution(
+        OutboundMutationId mutationId) =>
+        _executions.GetOrAdd(
+            mutationId,
+            id => new Lazy<Task<NewOrderDispatchResult>>(
+                () => ExecuteAsync(id),
+                LazyThreadSafetyMode.ExecutionAndPublication));
+
+    private void RemoveExecution(
+        OutboundMutationId mutationId,
+        Lazy<Task<NewOrderDispatchResult>> execution) =>
+        ((ICollection<KeyValuePair<
+            OutboundMutationId,
+            Lazy<Task<NewOrderDispatchResult>>>>)_executions)
+        .Remove(new KeyValuePair<
+            OutboundMutationId,
+            Lazy<Task<NewOrderDispatchResult>>>(mutationId, execution));
 
     private async Task<NewOrderDispatchResult> ExecuteAsync(OutboundMutationId mutationId)
     {

@@ -159,6 +159,7 @@ public sealed class NewOrderOutboundCoordinatorTests
         var fixture = CreateFixture(gateway, readiness: readiness);
 
         await fixture.Coordinator.StartAsync(CancellationToken.None);
+        await readiness.WaitUntilObservedAsync("FIRM-A");
         await fixture.Coordinator.StopAsync(CancellationToken.None);
         readiness.Signal("FIRM-A");
         await Task.Delay(50);
@@ -205,6 +206,85 @@ public sealed class NewOrderOutboundCoordinatorTests
 
         Assert.Equal(1, gateway.CallCount);
         await hosted[0].StopAsync(CancellationToken.None);
+    }
+
+    [Theory]
+    [InlineData(RecoveryBlockStage.BeforeIntent)]
+    [InlineData(RecoveryBlockStage.DuringFrameCallbackCommit)]
+    [InlineData(RecoveryBlockStage.AfterGatewayWrite)]
+    public async Task RecoveryStop_WaitsForStartedExecutionToReachCommittedCompletion(
+        RecoveryBlockStage stage)
+    {
+        var store = new BlockingCommittedStore(stage);
+        var gateway = new CompletingGateway();
+        var fixture = CreateFixture(gateway, store: store);
+        var start = Task.Factory.StartNew(
+                () => fixture.Coordinator.StartAsync(CancellationToken.None),
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default)
+            .Unwrap();
+        await store.WaitUntilBlockedAsync();
+
+        var stop = Task.Factory.StartNew(
+                () => fixture.Coordinator.StopAsync(CancellationToken.None),
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default)
+            .Unwrap();
+        await Task.Delay(50);
+        Assert.False(stop.IsCompleted);
+
+        store.Release();
+        await start;
+        await stop;
+        Assert.Equal(1, gateway.CallCount);
+        Assert.True(fixture.Ledger.TryGet(fixture.MutationId, out var mutation));
+        Assert.Equal(OutboundMutationState.TransportWriteCompleted, mutation!.State);
+        var callsAfterStop = gateway.CallCount;
+        await Task.Delay(50);
+        Assert.Equal(callsAfterStop, gateway.CallCount);
+    }
+
+    [Fact]
+    public async Task RecoveryStop_WaitsDuringGatewayWrite()
+    {
+        var gateway = new BlockingWriteGateway();
+        var fixture = CreateFixture(gateway);
+        await fixture.Coordinator.StartAsync(CancellationToken.None);
+        await gateway.WaitUntilWriteAsync();
+
+        var stop = fixture.Coordinator.StopAsync(CancellationToken.None);
+        await Task.Delay(50);
+        Assert.False(stop.IsCompleted);
+
+        gateway.ReleaseWrite();
+        await stop;
+        Assert.True(fixture.Ledger.TryGet(fixture.MutationId, out var mutation));
+        Assert.Equal(OutboundMutationState.TransportWriteCompleted, mutation!.State);
+    }
+
+    [Fact]
+    public async Task ApiOriginatedExecution_IsAlsoAwaitedDuringShutdown()
+    {
+        var gateway = new BlockingWriteGateway();
+        var fixture = CreateFixture(gateway);
+        var dispatch = fixture.Coordinator.EnqueueAsync(
+            fixture.MutationId,
+            CancellationToken.None);
+        await gateway.WaitUntilWriteAsync();
+
+        using var stopCts = new CancellationTokenSource();
+        stopCts.Cancel();
+        var stop = fixture.Coordinator.StopAsync(stopCts.Token);
+        await Task.Delay(50);
+        Assert.False(stop.IsCompleted);
+
+        gateway.ReleaseWrite();
+        Assert.Equal(
+            NewOrderDispatchOutcome.TransportWriteCompleted,
+            (await dispatch).Outcome);
+        await stop;
     }
 
     private static Fixture CreateFixture(
@@ -402,8 +482,7 @@ public sealed class NewOrderOutboundCoordinatorTests
             ExchangeGatewayFramePreparedCallback onFramePrepared,
             CancellationToken cancellationToken)
         {
-            Interlocked.Increment(ref _callCount);
-            CalledFirms.Enqueue(command.FirmId);
+            RecordCall(command.FirmId);
             var frame = Frame(command);
             await onFramePrepared(frame, cancellationToken);
             return new ExchangeGatewayReceipt(
@@ -424,6 +503,12 @@ public sealed class NewOrderOutboundCoordinatorTests
             DateTimeOffset? requestedGoodTillDate,
             CancellationToken cancellationToken) =>
             throw new NotSupportedException();
+
+        protected void RecordCall(string firmId)
+        {
+            Interlocked.Increment(ref _callCount);
+            CalledFirms.Enqueue(firmId);
+        }
     }
 
     private sealed class ThrowAfterFrameGateway : CompletingGateway
@@ -451,6 +536,34 @@ public sealed class NewOrderOutboundCoordinatorTests
                     ExchangeGatewayFailureDisposition.OutboundProvenUnsent,
                     ExchangeGatewayAttemptStage.SequenceReservedAndEncoded,
                     frame: null));
+    }
+
+    private sealed class BlockingWriteGateway : CompletingGateway
+    {
+        private readonly TaskCompletionSource _writeEntered =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _releaseWrite =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override async Task<ExchangeGatewayReceipt> SubmitWithReceiptAsync(
+            OutboundNewOrderCommand command,
+            ExchangeGatewayFramePreparedCallback onFramePrepared,
+            CancellationToken cancellationToken)
+        {
+            RecordCall(command.FirmId);
+            var frame = Frame(command);
+            await onFramePrepared(frame, cancellationToken);
+            _writeEntered.TrySetResult();
+            await _releaseWrite.Task;
+            return new ExchangeGatewayReceipt(
+                frame,
+                ExchangeGatewayAttemptStage.TransportWriteCompleted);
+        }
+
+        public Task WaitUntilWriteAsync() =>
+            _writeEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        public void ReleaseWrite() => _releaseWrite.TrySetResult();
     }
 
     private static ExchangeGatewayFrameIdentity Frame(
@@ -489,16 +602,26 @@ public sealed class NewOrderOutboundCoordinatorTests
         private readonly System.Collections.Concurrent.ConcurrentDictionary<
             string,
             TaskCompletionSource> _signals = new(StringComparer.Ordinal);
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<
+            string,
+            TaskCompletionSource> _observed = new(StringComparer.Ordinal);
 
         public ValueTask WaitUntilOperationalAsync(
             string firmId,
-            CancellationToken cancellationToken) =>
-            new(_signals.GetOrAdd(
+            CancellationToken cancellationToken)
+        {
+            _observed.GetOrAdd(
+                    firmId,
+                    static _ => new TaskCompletionSource(
+                        TaskCreationOptions.RunContinuationsAsynchronously))
+                .TrySetResult();
+            return new(_signals.GetOrAdd(
                     firmId,
                     static _ => new TaskCompletionSource(
                         TaskCreationOptions.RunContinuationsAsynchronously))
                 .Task
                 .WaitAsync(cancellationToken));
+        }
 
         public void Signal(string firmId) =>
             _signals.GetOrAdd(
@@ -506,6 +629,14 @@ public sealed class NewOrderOutboundCoordinatorTests
                     static _ => new TaskCompletionSource(
                         TaskCreationOptions.RunContinuationsAsynchronously))
                 .TrySetResult();
+
+        public Task WaitUntilObservedAsync(string firmId) =>
+            _observed.GetOrAdd(
+                    firmId,
+                    static _ => new TaskCompletionSource(
+                        TaskCreationOptions.RunContinuationsAsynchronously))
+                .Task
+                .WaitAsync(TimeSpan.FromSeconds(2));
     }
 
     private sealed class SignalingConnector(
@@ -552,6 +683,47 @@ public sealed class NewOrderOutboundCoordinatorTests
         }
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    public enum RecoveryBlockStage
+    {
+        BeforeIntent,
+        DuringFrameCallbackCommit,
+        AfterGatewayWrite,
+    }
+
+    private sealed class BlockingCommittedStore(
+        RecoveryBlockStage stage) : RecordingCommittedStore
+    {
+        private readonly TaskCompletionSource _blocked =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly ManualResetEventSlim _release = new(false);
+
+        public override long Append(WalEvent evt, ReadOnlyMemory<byte> preSerialisedPayload)
+        {
+            if (ShouldBlock(evt))
+            {
+                _blocked.TrySetResult();
+                _release.Wait(TimeSpan.FromSeconds(30));
+            }
+            return base.Append(evt, preSerialisedPayload);
+        }
+
+        public Task WaitUntilBlockedAsync() =>
+            _blocked.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        public void Release() => _release.Set();
+
+        private bool ShouldBlock(WalEvent evt) => stage switch
+        {
+            RecoveryBlockStage.BeforeIntent =>
+                evt is OutboundAttemptIntentPreparedEvent,
+            RecoveryBlockStage.DuringFrameCallbackCommit =>
+                evt is OutboundFramePreparedEvent,
+            RecoveryBlockStage.AfterGatewayWrite =>
+                evt is OutboundTransportWriteCompletedEvent,
+            _ => false,
+        };
     }
 
     private sealed class FrameRejectingStore : RecordingCommittedStore
