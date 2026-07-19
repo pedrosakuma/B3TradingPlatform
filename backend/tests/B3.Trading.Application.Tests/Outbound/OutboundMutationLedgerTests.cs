@@ -409,22 +409,45 @@ public sealed class OutboundMutationLedgerTests
     }
 
     [Fact]
-    public void VenueAcknowledgement_AfterSessionVersionRoll_DoesNotResolveButRemainsDomainApplicable()
+    public void MultipleVenueAcknowledgements_AfterSessionVersionRoll_RemainDomainApplicable()
     {
         var fixture = Fixture.Create();
         fixture.Ledger.Apply(fixture.Approved);
         fixture.Ledger.Apply(fixture.Intent);
         fixture.Ledger.Apply(fixture.Frame);
 
-        var result = fixture.Ledger.ApplyVenueAcknowledgement(Acknowledgement(
+        var first = fixture.Ledger.ApplyVenueAcknowledgement(Acknowledgement(
             fixture,
             firmId: "F1",
             sessionId: 11,
-            sessionVerId: 3));
+            sessionVerId: 3) with
+        {
+            ExecKind = "PartialFill",
+            InboundSeqNum = 88,
+        });
+        var second = fixture.Ledger.ApplyVenueAcknowledgement(Acknowledgement(
+            fixture,
+            firmId: "F1",
+            sessionId: 11,
+            sessionVerId: 3) with
+        {
+            ExecKind = "PartialFill",
+            InboundSeqNum = 89,
+        });
 
-        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedUnmatched, result.Status);
-        Assert.True(result.ShouldApplyDomain);
+        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedUnmatched, first.Status);
+        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedUnmatched, second.Status);
+        Assert.True(first.ShouldApplyDomain);
+        Assert.True(second.ShouldApplyDomain);
         AssertState(fixture, OutboundMutationState.Ambiguous);
+        Assert.Equal(
+            OutboundAmbiguityReason.SessionVersionMismatchEvidence,
+            Assert.Single(fixture.Ledger.SnapshotMutations()[0].Attempts).AmbiguityReason);
+        Assert.All(
+            fixture.Ledger.CaptureSnapshot().InboundEvidence,
+            evidence => Assert.Equal(
+                InboundVenueEvidenceDisposition.Unmatched,
+                evidence.Disposition));
         Assert.Equal(1, fixture.Ledger.ReadinessBlockingCount);
     }
 

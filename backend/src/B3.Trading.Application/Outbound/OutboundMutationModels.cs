@@ -98,6 +98,7 @@ public enum OutboundAmbiguityReason
     NotAppliedEvidence,
     IncompleteVenueEvidence,
     GatewayOutcomeUnknown,
+    SessionVersionMismatchEvidence,
 }
 
 public enum InboundVenueEvidenceKind

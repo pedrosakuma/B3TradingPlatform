@@ -562,7 +562,11 @@ public sealed class OutboundMutationLedger
                     return new(InboundVenueEvidenceApplyStatus.RecordedConflicting);
                 }
 
-                MarkIncompleteVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
+                MarkUnmatchedVenueEvidence(
+                    mutation,
+                    evt.ClOrdId,
+                    evt.TimestampUtc,
+                    OutboundAmbiguityReason.IncompleteVenueEvidence);
                 AddInboundEvidenceUnsafe(
                     CreateExecutionReportEvidence(
                         evt, evidenceId, InboundVenueEvidenceDisposition.Unmatched, [id]),
@@ -612,7 +616,11 @@ public sealed class OutboundMutationLedger
                 // A post-roll ER cannot resolve the old outbound attempt, but
                 // it can still be valid order-lifecycle evidence.
                 if (!IsTerminal(mutation.State))
-                    MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
+                    MarkUnmatchedVenueEvidence(
+                        mutation,
+                        evt.ClOrdId,
+                        evt.TimestampUtc,
+                        OutboundAmbiguityReason.SessionVersionMismatchEvidence);
                 AddInboundEvidenceUnsafe(
                     CreateExecutionReportEvidence(
                         evt, evidenceId, InboundVenueEvidenceDisposition.Unmatched, [id]),
@@ -623,7 +631,11 @@ public sealed class OutboundMutationLedger
             if (!HasCompleteExecutionReportIdentity(evt))
             {
                 if (!IsTerminal(mutation.State))
-                    MarkIncompleteVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
+                    MarkUnmatchedVenueEvidence(
+                        mutation,
+                        evt.ClOrdId,
+                        evt.TimestampUtc,
+                        OutboundAmbiguityReason.IncompleteVenueEvidence);
                 AddInboundEvidenceUnsafe(
                     CreateExecutionReportEvidence(
                         evt, evidenceId, InboundVenueEvidenceDisposition.Unmatched, [id]),
@@ -1949,10 +1961,11 @@ public sealed class OutboundMutationLedger
         MarkCorrelations(mutation, terminal: false, atUtc);
     }
 
-    private void MarkIncompleteVenueEvidence(
+    private void MarkUnmatchedVenueEvidence(
         OutboundMutationSnapshot mutation,
         ulong clOrdId,
-        DateTimeOffset atUtc)
+        DateTimeOffset atUtc,
+        OutboundAmbiguityReason reason)
     {
         if (IsTerminal(mutation.State))
             return;
@@ -1967,7 +1980,7 @@ public sealed class OutboundMutationLedger
             attempts[index] = attempts[index] with
             {
                 AmbiguityReason = attempts[index].AmbiguityReason
-                    ?? OutboundAmbiguityReason.IncompleteVenueEvidence,
+                    ?? reason,
             };
         }
         mutation = mutation with
