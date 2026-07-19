@@ -121,6 +121,11 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
     private readonly IocFokWatchdog? _iocFok;
     private readonly TimeProvider _clock;
     private readonly ILogger<NewOrderOutboundCoordinator> _logger;
+    private readonly IOutboundGatewayReadiness _gatewayReadiness;
+    private readonly CancellationTokenSource _recoveryShutdown = new();
+    private readonly object _recoveryGate = new();
+    private readonly List<Task> _recoveryTasks = new();
+    private int _recoveryStarted;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<
         OutboundMutationId,
         Lazy<Task<NewOrderDispatchResult>>> _executions = new();
@@ -137,7 +142,8 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
         ILogger<NewOrderOutboundCoordinator> logger,
         GtdExpirationScheduler? gtd = null,
         IocFokWatchdog? iocFok = null,
-        TimeProvider? clock = null)
+        TimeProvider? clock = null,
+        IOutboundGatewayReadiness? gatewayReadiness = null)
     {
         _ledger = ledger;
         _epoch = epoch;
@@ -151,6 +157,8 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
         _gtd = gtd;
         _iocFok = iocFok;
         _clock = clock ?? TimeProvider.System;
+        _gatewayReadiness = gatewayReadiness
+            ?? ImmediateOutboundGatewayReadiness.Instance;
     }
 
     public async Task<NewOrderDispatchResult> EnqueueAsync(
@@ -176,24 +184,67 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
+        if (Interlocked.Exchange(ref _recoveryStarted, 1) != 0)
+            return Task.CompletedTask;
         foreach (var mutation in _ledger.GetMutations(
                      OutboundMutationKind.New,
                      OutboundMutationState.ApprovedToSend))
         {
-            _ = EnqueueAsync(mutation.MutationId, CancellationToken.None)
-                .ContinueWith(
-                    task => _logger.LogCritical(
-                        task.Exception,
-                        "Recovered new-order mutation {MutationId} coordinator execution failed.",
-                        mutation.MutationId),
-                    CancellationToken.None,
-                    TaskContinuationOptions.OnlyOnFaulted,
-                    TaskScheduler.Default);
+            var task = RecoverWhenOperationalAsync(
+                mutation.MutationId,
+                mutation.FirmId,
+                _recoveryShutdown.Token);
+            lock (_recoveryGate)
+                _recoveryTasks.Add(task);
         }
         return Task.CompletedTask;
     }
 
-    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    public async Task StopAsync(CancellationToken cancellationToken)
+    {
+        _recoveryShutdown.Cancel();
+        Task[] tasks;
+        lock (_recoveryGate)
+            tasks = _recoveryTasks.ToArray();
+        try
+        {
+            await Task.WhenAll(tasks).WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (
+            cancellationToken.IsCancellationRequested
+            || _recoveryShutdown.IsCancellationRequested)
+        {
+        }
+    }
+
+    private async Task RecoverWhenOperationalAsync(
+        OutboundMutationId mutationId,
+        string firmId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _gatewayReadiness.WaitUntilOperationalAsync(
+                firmId,
+                cancellationToken).ConfigureAwait(false);
+            if (!_ledger.TryGet(mutationId, out var mutation)
+                || mutation?.State != OutboundMutationState.ApprovedToSend)
+                return;
+            await EnqueueAsync(mutationId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            _drain.BeginDrain("outbound_new_order_reconciliation_required");
+            _logger.LogCritical(
+                ex,
+                "Recovered new-order mutation {MutationId} for firm {FirmId} could not wait for or enter its operational gateway.",
+                mutationId,
+                firmId);
+        }
+    }
 
     private async Task<NewOrderDispatchResult> ExecuteAsync(OutboundMutationId mutationId)
     {

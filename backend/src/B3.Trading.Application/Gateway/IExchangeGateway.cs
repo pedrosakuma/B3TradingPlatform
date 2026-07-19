@@ -107,6 +107,35 @@ public interface IExchangeGatewayPreSendOnly
 {
 }
 
+public interface IOutboundGatewayReadiness
+{
+    ValueTask WaitUntilOperationalAsync(
+        string firmId,
+        CancellationToken cancellationToken);
+}
+
+public sealed class ImmediateOutboundGatewayReadiness : IOutboundGatewayReadiness
+{
+    public static ImmediateOutboundGatewayReadiness Instance { get; } = new();
+    private ImmediateOutboundGatewayReadiness() { }
+
+    public ValueTask WaitUntilOperationalAsync(
+        string firmId,
+        CancellationToken cancellationToken) =>
+        ValueTask.CompletedTask;
+}
+
+public sealed class UnavailableOutboundGatewayReadiness : IOutboundGatewayReadiness
+{
+    public static UnavailableOutboundGatewayReadiness Instance { get; } = new();
+    private UnavailableOutboundGatewayReadiness() { }
+
+    public async ValueTask WaitUntilOperationalAsync(
+        string firmId,
+        CancellationToken cancellationToken) =>
+        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+}
+
 /// <summary>
 /// Signals that the gateway proved no wire attempt occurred. Callers may
 /// durably terminalise the outbound intent instead of retaining it as an

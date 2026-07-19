@@ -375,6 +375,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
     /// <summary>True when the auto-reconnect loop is currently running for this firm.</summary>
     public bool IsReconnecting => Volatile.Read(ref _reconnectingState) == 1;
+    public bool IsOperationalForOutboundNow => IsOperationalForOutbound();
 
     /// <summary>
     /// True after a frame-prepared-or-later outbound failure. While set, sends,

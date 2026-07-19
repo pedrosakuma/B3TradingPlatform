@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using B3.Trading.Application;
 using B3.Trading.Infrastructure;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -12,8 +13,8 @@ namespace B3.Trading.Api.Tests.Lifecycle;
 /// <summary>
 /// End-to-end behavior of <c>Trading:Exchange:Mode = Unavailable</c>:
 /// process boots, /health surfaces the mode, and POST /orders is rejected
-/// with a synthesized rejection (502 BadGateway) instead of being silently
-/// accepted by a stub. This is the contract the Docker bootstrap relies on.
+/// with a durable proven-no-write rejection instead of being silently accepted
+/// by a stub. Recovered approved mutations remain deferred until shutdown.
 /// </summary>
 public class UnavailableModeTests
 {
@@ -35,6 +36,9 @@ public class UnavailableModeTests
         var exchange = doc.RootElement.GetProperty("exchange");
         Assert.Equal(nameof(ExchangeMode.Unavailable), exchange.GetProperty("mode").GetString());
         Assert.False(exchange.GetProperty("readyForOrders").GetBoolean());
+        Assert.Same(
+            UnavailableOutboundGatewayReadiness.Instance,
+            factory.Services.GetRequiredService<IOutboundGatewayReadiness>());
     }
 
     [Fact]

@@ -239,6 +239,18 @@ public static class TradingExchangeGatewayServiceCollectionExtensions
                 _ => sp.GetRequiredService<EntryPointClientGateway>(),
             };
         });
+        services.AddSingleton<IOutboundGatewayReadiness>(sp =>
+        {
+            var mode = sp.GetRequiredService<IOptions<ExchangeOptions>>().Value.ResolveMode();
+            return mode switch
+            {
+                ExchangeMode.Real when earlyIsReal =>
+                    sp.GetRequiredService<FirmGatewayRegistry>(),
+                ExchangeMode.Unavailable =>
+                    UnavailableOutboundGatewayReadiness.Instance,
+                _ => ImmediateOutboundGatewayReadiness.Instance,
+            };
+        });
 
         services.AddSingleton<ExchangeStatus>(sp =>
         {
