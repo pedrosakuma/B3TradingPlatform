@@ -68,6 +68,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(OutboundTransportWriteCompletedEvent), "outbound.transport-write-completed")]
 [JsonDerivedType(typeof(OutboundProvenUnsentEvent), "outbound.proven-unsent")]
 [JsonDerivedType(typeof(OutboundOperatorResolvedEvent), "outbound.operator-resolved")]
+[JsonDerivedType(typeof(RestOrderIdempotencyBoundEvent), "outbound.rest-idempotency-bound")]
 public abstract record WalEvent
 {
     public DateTimeOffset TimestampUtc { get; init; } = DateTimeOffset.UtcNow;
@@ -480,6 +481,11 @@ public sealed record OutboundOperatorResolvedEvent : WalEvent
     public required string EvidenceDigest { get; init; }
     public required string OperatorRef { get; init; }
     public required DateTimeOffset ResolvedAtUtc { get; init; }
+}
+
+public sealed record RestOrderIdempotencyBoundEvent : WalEvent
+{
+    public required RestOrderIdempotencyBindingSnapshot Binding { get; init; }
 }
 
 /// <summary>

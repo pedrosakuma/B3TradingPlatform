@@ -195,12 +195,35 @@ public sealed class OrderModifyService
                 out var active) == true
             && active is not null)
         {
-            return active.Kind == OutboundMutationKind.Replace
-                && req.IdempotencyContext is not null
-                ? OrderModifyResult.Accepted(
-                    active.Attempts.LastOrDefault()?.ClOrdId ?? active.PrimaryClOrdId,
-                    active.MutationId)
-                : OrderModifyResult.Conflict("another mutation for this order is already active");
+            if (active.Kind != OutboundMutationKind.Replace || req.IdempotencyContext is null)
+                return OrderModifyResult.Conflict("another mutation for this order is already active");
+            if (_restIdempotency is null)
+                return OrderModifyResult.Conflict("REST idempotency store is unavailable");
+            var activeClOrdId = active.Attempts.LastOrDefault()?.ClOrdId ?? active.PrimaryClOrdId;
+            var binding = req.IdempotencyContext.Binding with
+            {
+                MutationId = active.MutationId,
+                ClOrdId = activeClOrdId,
+                BoundAtUtc = _clock.GetUtcNow(),
+            };
+            try
+            {
+                _dispatcher.DispatchCommitted(
+                    new RestOrderIdempotencyBoundEvent
+                    {
+                        Binding = binding,
+                        TimestampUtc = binding.BoundAtUtc,
+                    },
+                    () => _restIdempotency.Apply(binding),
+                    ct);
+            }
+            catch (WalBackpressureException ex)
+            {
+                MetricsRegistry.WalBackpressure.Add(1,
+                    new KeyValuePair<string, object?>("call_site", "orders.modify.idempotency-alias"));
+                return OrderModifyResult.WalBackpressure(ex.Message);
+            }
+            return OrderModifyResult.Accepted(activeClOrdId, active.MutationId);
         }
 
         try

@@ -125,11 +125,38 @@ public sealed class OrderCancelService
                 out var active) == true
             && active is not null)
         {
-            return active.Kind == OutboundMutationKind.Cancel
-                ? OrderCancelResult.Accepted(
-                    active.Attempts.LastOrDefault()?.ClOrdId ?? active.PrimaryClOrdId,
-                    active.MutationId)
-                : OrderCancelResult.Conflict("another mutation for this order is already active");
+            if (active.Kind != OutboundMutationKind.Cancel)
+                return OrderCancelResult.Conflict("another mutation for this order is already active");
+            var activeClOrdId = active.Attempts.LastOrDefault()?.ClOrdId ?? active.PrimaryClOrdId;
+            if (idempotencyContext is not null)
+            {
+                if (_restIdempotency is null)
+                    return OrderCancelResult.Conflict("REST idempotency store is unavailable");
+                var binding = idempotencyContext.Binding with
+                {
+                    MutationId = active.MutationId,
+                    ClOrdId = activeClOrdId,
+                    BoundAtUtc = _clock.GetUtcNow(),
+                };
+                try
+                {
+                    _dispatcher.DispatchCommitted(
+                        new RestOrderIdempotencyBoundEvent
+                        {
+                            Binding = binding,
+                            TimestampUtc = binding.BoundAtUtc,
+                        },
+                        () => _restIdempotency.Apply(binding),
+                        ct);
+                }
+                catch (WalBackpressureException ex)
+                {
+                    MetricsRegistry.WalBackpressure.Add(1,
+                        new KeyValuePair<string, object?>("call_site", "orders.cancel.idempotency-alias"));
+                    return OrderCancelResult.WalBackpressure(ex.Message);
+                }
+            }
+            return OrderCancelResult.Accepted(activeClOrdId, active.MutationId);
         }
 
         var claim = _pendingCancels.Claim(originalClOrdId);

@@ -1336,6 +1336,9 @@ public sealed class EventReplayer
                         amh.NewClOrdId, amh.OriginalClOrdId, amh.HeldAtUtc);
                 }
                 break;
+            case RestOrderIdempotencyBoundEvent idempotencyBound:
+                _restOrderIdempotency?.Apply(idempotencyBound.Binding);
+                break;
             case OutboundApprovedEvent approved:
                 if (_outboundLedger is not null)
                 {

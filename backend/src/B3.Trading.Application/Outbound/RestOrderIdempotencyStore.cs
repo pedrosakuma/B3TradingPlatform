@@ -128,7 +128,7 @@ public sealed class RestOrderIdempotencyStore
         ValidateDigest(canonicalRequestSha256, 64, nameof(canonicalRequestSha256));
         lock (_gate)
         {
-            var keyIdentities = _byMutation.Values
+            var keyIdentities = _byScopedKey.Values
                 .Select(static binding => new OutboundStableReferenceKey(
                     binding.StableReferenceKeyId,
                     binding.StableReferenceKeyVersion))
@@ -207,11 +207,8 @@ public sealed class RestOrderIdempotencyStore
                     return;
                 throw new InvalidOperationException("Conflicting REST idempotency binding.");
             }
-            if (_byMutation.TryGetValue(binding.MutationId, out var mutationExisting)
-                && mutationExisting != binding)
-                throw new InvalidOperationException("Mutation already has a different REST idempotency binding.");
             _byScopedKey.Add(binding.ScopedKeyDigest, binding);
-            _byMutation[binding.MutationId] = binding;
+            _byMutation.TryAdd(binding.MutationId, binding);
         }
     }
 
@@ -263,7 +260,7 @@ public sealed class RestOrderIdempotencyStore
     public IReadOnlyList<RestOrderIdempotencyBindingSnapshot> CaptureSnapshot()
     {
         lock (_gate)
-            return _byMutation.Values.OrderBy(x => x.BoundAtUtc).ToArray();
+            return _byScopedKey.Values.OrderBy(x => x.BoundAtUtc).ToArray();
     }
 
     public void Restore(IEnumerable<RestOrderIdempotencyBindingSnapshot> records)

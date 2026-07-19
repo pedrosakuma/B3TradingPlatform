@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using B3.Trading.Application.Outbound;
+using B3.Trading.Application.Persistence;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace B3.Trading.Api.Tests;
@@ -218,6 +219,46 @@ public class OrdersModifyEndpointTests
     }
 
     [Fact]
+    public async Task PUT_orders_FreshKeyDuringActiveReplace_BindsToActiveMutation()
+    {
+        using var f = new TestAppFactory();
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var posted = await PostOrder(http, token, qty: 100, price: 30m);
+        var original = await posted.Content.ReadFromJsonAsync<OrderAck>();
+
+        var first = await PutModify(
+            http, token, original!.ClOrdId, qty: 200, price: 30m,
+            idempotencyKey: "replace-active-first");
+        var alias = await PutModify(
+            http, token, original.ClOrdId, qty: 200, price: 30m,
+            idempotencyKey: "replace-active-alias");
+        var firstBody = await first.Content.ReadFromJsonAsync<MutationAck>();
+        var aliasBody = await alias.Content.ReadFromJsonAsync<MutationAck>();
+
+        Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, alias.StatusCode);
+        Assert.Equal(firstBody!.MutationId, aliasBody!.MutationId);
+        Assert.Equal(firstBody.ClOrdId, aliasBody.ClOrdId);
+        TerminalizeMutation(f, firstBody.MutationId);
+
+        var replay = await PutModify(
+            http, token, original.ClOrdId, qty: 200, price: 30m,
+            idempotencyKey: "replace-active-alias");
+        var replayBody = await replay.Content.ReadFromJsonAsync<MutationAck>();
+
+        Assert.Equal(HttpStatusCode.Accepted, replay.StatusCode);
+        Assert.Equal(firstBody.MutationId, replayBody!.MutationId);
+        Assert.Equal(firstBody.ClOrdId, replayBody.ClOrdId);
+        Assert.True(replayBody.Replayed);
+        var ledger = f.Services.GetRequiredService<OutboundMutationLedger>();
+        Assert.True(ledger.TryGet(
+            new OutboundMutationId(Guid.Parse(firstBody.MutationId)),
+            out var mutation));
+        Assert.Single(mutation!.Attempts);
+    }
+
+    [Fact]
     public async Task DELETE_orders_IdempotentRepeat_ReplaysMutationWithoutSecondAttempt()
     {
         using var f = new TestAppFactory();
@@ -244,6 +285,43 @@ public class OrdersModifyEndpointTests
         Assert.Equal(firstBody!.MutationId, replayBody!.MutationId);
         Assert.Equal(firstBody.ClOrdId, replayBody.ClOrdId);
         Assert.False(firstBody.Replayed);
+        Assert.True(replayBody.Replayed);
+        var ledger = f.Services.GetRequiredService<OutboundMutationLedger>();
+        Assert.True(ledger.TryGet(
+            new OutboundMutationId(Guid.Parse(firstBody.MutationId)),
+            out var mutation));
+        Assert.Single(mutation!.Attempts);
+    }
+
+    [Fact]
+    public async Task DELETE_orders_FreshKeyDuringActiveCancel_BindsToActiveMutation()
+    {
+        using var f = new TestAppFactory();
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var posted = await PostOrder(http, token, qty: 100, price: 30m);
+        var original = await posted.Content.ReadFromJsonAsync<OrderAck>();
+
+        var first = await DeleteOrder(
+            http, token, original!.ClOrdId, idempotencyKey: "cancel-active-first");
+        var alias = await DeleteOrder(
+            http, token, original.ClOrdId, idempotencyKey: "cancel-active-alias");
+        var firstBody = await first.Content.ReadFromJsonAsync<MutationAck>();
+        var aliasBody = await alias.Content.ReadFromJsonAsync<MutationAck>();
+
+        Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, alias.StatusCode);
+        Assert.Equal(firstBody!.MutationId, aliasBody!.MutationId);
+        Assert.Equal(firstBody.ClOrdId, aliasBody.ClOrdId);
+        TerminalizeMutation(f, firstBody.MutationId);
+
+        var replay = await DeleteOrder(
+            http, token, original.ClOrdId, idempotencyKey: "cancel-active-alias");
+        var replayBody = await replay.Content.ReadFromJsonAsync<MutationAck>();
+
+        Assert.Equal(HttpStatusCode.Accepted, replay.StatusCode);
+        Assert.Equal(firstBody.MutationId, replayBody!.MutationId);
+        Assert.Equal(firstBody.ClOrdId, replayBody.ClOrdId);
         Assert.True(replayBody.Replayed);
         var ledger = f.Services.GetRequiredService<OutboundMutationLedger>();
         Assert.True(ledger.TryGet(
@@ -328,6 +406,29 @@ public class OrdersModifyEndpointTests
         if (idempotencyKey is not null)
             req.Headers.Add("Idempotency-Key", idempotencyKey);
         return await http.SendAsync(req);
+    }
+
+    private static void TerminalizeMutation(TestAppFactory factory, string mutationId)
+    {
+        var ledger = factory.Services.GetRequiredService<OutboundMutationLedger>();
+        var id = new OutboundMutationId(Guid.Parse(mutationId));
+        Assert.True(ledger.TryGet(id, out var mutation));
+        if (mutation!.State is not OutboundMutationState.Ambiguous
+            and not OutboundMutationState.ProvenUnsent)
+        {
+            ledger.ClassifyRecoveredAttempts(
+                new ProcessEpochId(Guid.NewGuid()),
+                DateTimeOffset.UtcNow);
+        }
+        ledger.Apply(new OutboundOperatorResolvedEvent
+        {
+            MutationId = id,
+            Decision = OutboundOperatorDecision.VenueAcknowledged,
+            EvidenceType = OutboundOperatorEvidenceType.OfficialExtract,
+            EvidenceDigest = new string('a', 64),
+            OperatorRef = $"api-test-{mutationId}",
+            ResolvedAtUtc = DateTimeOffset.UtcNow,
+        });
     }
 
     private sealed record OrderAck(string ClOrdId, string? Status, string? Reason);

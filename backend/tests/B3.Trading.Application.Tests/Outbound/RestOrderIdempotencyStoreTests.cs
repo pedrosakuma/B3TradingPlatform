@@ -46,6 +46,45 @@ public sealed class RestOrderIdempotencyStoreTests
     }
 
     [Fact]
+    public async Task SnapshotRestore_PreservesMultipleKeysBoundToOneMutation()
+    {
+        var protector = CreateProtector();
+        var store = new RestOrderIdempotencyStore(protector);
+        var first = await store.ExecuteAsync(
+            Identity("first-key"),
+            Hash("request"),
+            context =>
+            {
+                store.Apply(context.Binding with { ClOrdId = 1234 });
+                return Task.FromResult(0);
+            });
+        var alias = await store.ExecuteAsync(
+            Identity("alias-key"),
+            Hash("request"),
+            context =>
+            {
+                store.Apply(context.Binding with
+                {
+                    MutationId = first.Binding!.MutationId,
+                    ClOrdId = first.Binding.ClOrdId,
+                });
+                return Task.FromResult(0);
+            });
+        var restored = new RestOrderIdempotencyStore(protector);
+        restored.Restore(store.CaptureSnapshot());
+
+        var replayed = await restored.ExecuteAsync<int>(
+            Identity("alias-key"),
+            Hash("request"),
+            _ => throw new InvalidOperationException("alias must replay"));
+
+        Assert.Equal(RestOrderIdempotencyExecutionKind.Created, alias.Kind);
+        Assert.Equal(RestOrderIdempotencyExecutionKind.Replayed, replayed.Kind);
+        Assert.Equal(first.Binding!.MutationId, replayed.Binding!.MutationId);
+        Assert.Equal(2, restored.CaptureSnapshot().Count);
+    }
+
+    [Fact]
     public async Task DurableRecord_ContainsNoPlaintextKeyOrOwner()
     {
         var protector = CreateProtector();
