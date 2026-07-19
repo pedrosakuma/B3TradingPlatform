@@ -1,4 +1,5 @@
 using B3.Trading.Application;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
@@ -430,6 +431,45 @@ public sealed class SnapshotCommittedPrefixTests : IDisposable
                 .RunAsync()
                 .GetAwaiter()
                 .GetResult());
+    }
+
+    [Fact]
+    public async Task LegacyInboundEvidenceFingerprint_RejectsSnapshotAndRebuildsFromWal()
+    {
+        var options = NewOptions("legacy-inbound-evidence");
+        var snapshots = new SnapshotStore(options.DataDirectory, options.FirmId);
+        await using var store = NewStore(options);
+        var state = BuildState(store);
+        var seq = DispatchSubmit(state.Dispatcher, state.Book, state.Ownership, 1);
+        await store.FlushThroughAsync(seq);
+        snapshots.Write(new PlatformSnapshot
+        {
+            Seq = seq,
+            FormatVersion = PlatformSnapshot.CurrentFormatVersion,
+            WalGeneration = store.WalGeneration,
+            OutboundLedger = new OutboundLedgerSnapshot
+            {
+                Version = OutboundLedgerSnapshot.LegacyVersionWithoutInboundEvidence,
+                InboundEvidence =
+                [
+                    new InboundVenueEvidenceSnapshot
+                    {
+                        EvidenceId = new string('a', 64),
+                        Kind = InboundVenueEvidenceKind.ExecutionReport,
+                        Disposition = InboundVenueEvidenceDisposition.Unmatched,
+                        FirmId = "F1",
+                        ObservedAtUtc = DateTimeOffset.UnixEpoch,
+                    },
+                ],
+            },
+        });
+        var tracking = new TrackingEventStore(store);
+        var recovered = BuildState(tracking);
+
+        await NewRecovery(tracking, recovered, snapshots).RunAsync();
+
+        Assert.Equal(0, tracking.LastReadSince);
+        Assert.Single(recovered.Book.Snapshot());
     }
 
     [Fact]

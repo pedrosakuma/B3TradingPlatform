@@ -33,10 +33,11 @@ namespace B3.Trading.Application.Persistence;
 /// </para>
 ///
 /// <para>
-/// The lock is process-global (one platform instance per firm pool) and
-/// is held for the duration of synchronous, in-memory work only. No I/O
-/// happens while it is held — the WAL append is a synchronous channel
-/// enqueue; disk flush runs on a background task.
+/// The lock is process-global (one platform instance per firm pool).
+/// Ordinary dispatch holds it only for synchronous in-memory work. The
+/// inbound-evidence <see cref="DispatchCommitted(WalEvent, Action, CancellationToken)"/>
+/// path deliberately also holds it across the marker-commit wait so a
+/// snapshot cannot overtake venue evidence.
 /// </para>
 /// </summary>
 public sealed class EventDispatcher
@@ -204,6 +205,64 @@ public sealed class EventDispatcher
         {
             fanOut.Return();
         }
+    }
+
+    /// <summary>
+    /// Class V/L inbound-evidence boundary: append, marker-commit the complete
+    /// WAL prefix, then apply ledger/domain state in that order. The dispatcher
+    /// lock remains held across the durability wait so no later event or
+    /// snapshot can observe a projection beyond the committed evidence.
+    /// </summary>
+    public long DispatchCommitted(
+        WalEvent evt,
+        Action<ExecutionFanOut> applyAndCapture,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(evt);
+        ArgumentNullException.ThrowIfNull(applyAndCapture);
+        var payload = JsonSerializer.SerializeToUtf8Bytes(
+            evt,
+            WalEventJsonContext.Default.WalEvent);
+        var fanOut = ExecutionFanOut.Rent();
+        try
+        {
+            lock (_lock)
+            {
+                var seq = _store.Append(evt, payload);
+                _store.FlushThroughAsync(seq, cancellationToken)
+                    .AsTask()
+                    .GetAwaiter()
+                    .GetResult();
+                applyAndCapture(fanOut);
+                AdvanceApplied(seq);
+
+                var sinks = _erFanOutSinks;
+                for (var i = 0; i < fanOut.Count; i++)
+                {
+                    var entry = fanOut[i];
+                    for (var s = 0; s < sinks.Length; s++)
+                    {
+                        var sink = sinks[s];
+                        if ((entry.Targets & sink.Target) != 0)
+                            sink.Enqueue(seq, entry.Event);
+                    }
+                }
+                return seq;
+            }
+        }
+        finally
+        {
+            fanOut.Return();
+        }
+    }
+
+    public long DispatchCommitted(
+        WalEvent evt,
+        Action apply,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(apply);
+        return DispatchCommitted(evt, _ => apply(), cancellationToken);
     }
 
     /// <summary>

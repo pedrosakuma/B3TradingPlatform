@@ -283,6 +283,7 @@ public sealed class StateSnapshotter
             LegacyMigrationCompleted = _outboundLedger?.LegacyMigrationCompleted ?? false,
             Mutations = capture?.Mutations.ToList() ?? new(),
             CorrelationTombstones = capture?.Correlations.ToList() ?? new(),
+            InboundEvidence = capture?.InboundEvidence.ToList() ?? new(),
         };
     }
 
@@ -584,12 +585,17 @@ public sealed class StateSnapshotter
         ArgumentNullException.ThrowIfNull(snap);
         if (snap.OutboundLedger is { } outbound)
         {
-            if (outbound.Version != OutboundLedgerSnapshot.CurrentVersion)
+            var legacyWithoutEvidence =
+                outbound.Version == OutboundLedgerSnapshot.LegacyVersionWithoutInboundEvidence
+                && outbound.InboundEvidence.Count == 0;
+            if (outbound.Version != OutboundLedgerSnapshot.CurrentVersion
+                && !legacyWithoutEvidence)
                 throw new OutboundLedgerRecoveryException(
                     "The outbound ledger snapshot version is unsupported.");
             _outboundLedger?.Restore(
                 outbound.Mutations,
                 outbound.CorrelationTombstones,
+                outbound.InboundEvidence,
                 outbound.LegacyMigrationCompleted);
         }
         _orders.Restore(snap.WorkingOrders);
@@ -1345,7 +1351,10 @@ public sealed class EventReplayer
                 _outboundLedger?.Apply(resolved);
                 break;
             case ExecutionReportReceivedEvent er:
-                if (Enum.TryParse<ExecKind>(er.ExecKind, ignoreCase: true, out var kind))
+                var evidenceResult = _outboundLedger?.ApplyVenueAcknowledgement(er);
+                var shouldApplyDomain = evidenceResult?.ShouldApplyDomain != false;
+                if (shouldApplyDomain
+                    && Enum.TryParse<ExecKind>(er.ExecKind, ignoreCase: true, out var kind))
                 {
                     _processor.Apply(er.ClOrdId, kind, er.LeavesQuantity, er.CumulativeQuantity,
                         er.LastQuantity, er.LastPrice, er.RejectReason, er.OrigClOrdId, isReplay: true, eventTimestampUtc: er.TimestampUtc, envelopeFirmId: er.FirmId, bookTouch: er.BookTouch);
@@ -1358,17 +1367,22 @@ public sealed class EventReplayer
                 // covers the cancel-replace ack case where ClOrdId is the
                 // brand-new ID and OrigClOrdId is the pre-existing order
                 // we know the owner of.
-                EndClientId? erOwner = null;
-                if (_ownership.TryResolve(er.ClOrdId, out var directOwner) && directOwner is not null)
-                    erOwner = directOwner;
-                else if (er.OrigClOrdId is { } origId && _ownership.TryResolve(origId, out var origOwner) && origOwner is not null)
-                    erOwner = origOwner;
-                if (erOwner is { } resolvedOwner)
-                    _clOrdIds.AdvanceCounterTo(resolvedOwner, er.ClOrdId);
-                _outboundLedger?.ApplyVenueAcknowledgement(er);
+                if (shouldApplyDomain)
+                {
+                    EndClientId? erOwner = null;
+                    if (_ownership.TryResolve(er.ClOrdId, out var directOwner) && directOwner is not null)
+                        erOwner = directOwner;
+                    else if (er.OrigClOrdId is { } origId && _ownership.TryResolve(origId, out var origOwner) && origOwner is not null)
+                        erOwner = origOwner;
+                    if (erOwner is { } resolvedOwner)
+                        _clOrdIds.AdvanceCounterTo(resolvedOwner, er.ClOrdId);
+                }
                 break;
             case BusinessRejectReceivedEvent businessReject:
                 _outboundLedger?.ApplyBusinessReject(businessReject);
+                break;
+            case NotAppliedReceivedEvent notApplied:
+                _outboundLedger?.ApplyNotApplied(notApplied);
                 break;
             case KillSwitchToggledEvent k:
                 if (k.Scope.Equals("end-client", StringComparison.OrdinalIgnoreCase))

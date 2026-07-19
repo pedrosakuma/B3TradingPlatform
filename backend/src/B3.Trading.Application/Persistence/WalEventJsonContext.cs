@@ -63,6 +63,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonSerializable(typeof(SubAccountDeactivatedEvent))]
 [JsonSerializable(typeof(AuditLogEvent))]
 [JsonSerializable(typeof(BusinessRejectReceivedEvent))]
+[JsonSerializable(typeof(NotAppliedReceivedEvent))]
 [JsonSerializable(typeof(OutboundApprovedEvent))]
 [JsonSerializable(typeof(OutboundAttemptIntentPreparedEvent))]
 [JsonSerializable(typeof(OutboundFramePreparedEvent))]

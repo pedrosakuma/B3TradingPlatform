@@ -36,6 +36,13 @@ public interface IEntryPointClient
     /// contract.
     /// </summary>
     event Action<BusinessRejectEnvelope>? BusinessRejectReceived;
+
+    /// <summary>
+    /// Raised when the venue reports an outbound sequence range as
+    /// <c>NotApplied</c>. This is negative session evidence only; consumers
+    /// must not treat it as automatic resend permission.
+    /// </summary>
+    event Action<NotAppliedEnvelope>? NotAppliedReceived;
 }
 
 public enum EpSide
@@ -158,7 +165,13 @@ public sealed record ExecutionReportEnvelope(
     /// Nullable so legacy WAL events written before #317 replay
     /// unchanged — a null envelope FirmId skips the cross-firm check.
     /// </summary>
-    string? FirmId = null);
+    string? FirmId = null,
+    ulong? SessionId = null,
+    uint? SessionVerId = null,
+    ulong? InboundSeqNum = null,
+    DateTimeOffset? SendingTime = null,
+    bool PossibleResend = false,
+    ulong? VenueOrderId = null);
 
 /// <summary>
 /// #432. Wire-layer envelope for a venue <c>BusinessReject</c> — a
@@ -189,4 +202,19 @@ public sealed record BusinessRejectEnvelope(
     int RejectReason,
     string? Text,
     ulong SeqNum,
-    DateTimeOffset SendingTime);
+    DateTimeOffset SendingTime,
+    ulong? SessionId = null,
+    uint? SessionVerId = null,
+    bool PossibleResend = false);
+
+/// <summary>
+/// Session-scoped negative evidence emitted by the venue for the half-open
+/// outbound sequence range <c>[FromSeqNo, FromSeqNo + Count)</c>.
+/// </summary>
+public sealed record NotAppliedEnvelope(
+    string FirmId,
+    ulong SessionId,
+    uint SessionVerId,
+    ulong FromSeqNo,
+    uint Count,
+    DateTimeOffset ObservedAtUtc);

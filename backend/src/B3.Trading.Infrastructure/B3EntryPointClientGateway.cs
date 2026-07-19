@@ -35,6 +35,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 {
     private readonly Up.EntryPointClient _client;
     private readonly string _firmId;
+    private ulong _sessionId = 1;
     private readonly ILogger<B3EntryPointClientGateway> _logger;
     private readonly CancellationTokenSource _shutdownCts = new();
     private readonly SemaphoreSlim _connectionLock = new(1, 1);
@@ -58,6 +59,13 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     private int _outboundFailCloseInProgress;
     private long _outboundLifecycleGeneration;
     private ulong _lastInboundSeqNum;
+    private readonly object _inboundEvidenceGate = new();
+    private Up.Fixp.IRetransmitRequestHandler? _retransmitEvidenceSource;
+    private EventHandler<Up.Fixp.NotAppliedEventArgs>? _notAppliedHandler;
+    private EventHandler<Up.Fixp.RetransmissionEventArgs>? _retransmissionHandler;
+    private long _inboundSubscriptionGeneration;
+    private ulong _retransmissionFromSeqNo;
+    private uint _retransmissionCount;
     private int _reconnectScheduled;
     private volatile bool _disposed;
 
@@ -133,6 +141,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     private readonly Func<Up.ReconnectMode, Func<uint, uint>, CancellationToken, Task<Up.ReconnectOutcome>>? _reconnectAsyncOverride;
     private readonly Func<CancellationToken, Task>? _connectAsyncOverride;
     private readonly Func<CancellationToken, IAsyncEnumerable<UpModels.EntryPointEvent>>? _eventStreamOverride;
+    private Func<Up.Fixp.IRetransmitRequestHandler?>? _retransmitHandlerProvider;
     private readonly Func<UpModels.NewOrderRequest, CancellationToken, Task>? _submitOverride;
     private readonly Func<UpModels.CancelOrderRequest, CancellationToken, Task>? _cancelOverride;
     private readonly Func<UpModels.ReplaceOrderRequest, CancellationToken, Task>? _replaceOverride;
@@ -219,7 +228,9 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
             reconnectAsyncOverride,
             connectedTestHook,
             connectAsyncOverride,
-            eventStreamOverride)
+            eventStreamOverride,
+            sessionId: 1,
+            retransmitHandlerProvider: null)
     {
     }
 
@@ -247,12 +258,17 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         Func<Up.ReconnectMode, Func<uint, uint>, CancellationToken, Task<Up.ReconnectOutcome>>? reconnectAsyncOverride = null,
         Action? connectedTestHook = null,
         Func<CancellationToken, Task>? connectAsyncOverride = null,
-        Func<CancellationToken, IAsyncEnumerable<UpModels.EntryPointEvent>>? eventStreamOverride = null)
+        Func<CancellationToken, IAsyncEnumerable<UpModels.EntryPointEvent>>? eventStreamOverride = null,
+        ulong sessionId = 1,
+        Func<Up.Fixp.IRetransmitRequestHandler?>? retransmitHandlerProvider = null)
     {
         ArgumentNullException.ThrowIfNull(outboundTestOverrides);
         _terminateOnShutdown = terminateOnShutdown;
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _firmId = firmId ?? throw new ArgumentNullException(nameof(firmId));
+        if (sessionId == 0)
+            throw new ArgumentOutOfRangeException(nameof(sessionId));
+        _sessionId = sessionId;
         _logger = logger;
         _currentSessionVerId = initialSessionVerId;
         _initialReconnectDelay = initialReconnectDelay ?? TimeSpan.FromSeconds(1);
@@ -273,6 +289,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         _connectedTestHook = connectedTestHook;
         _connectAsyncOverride = connectAsyncOverride;
         _eventStreamOverride = eventStreamOverride;
+        _retransmitHandlerProvider = retransmitHandlerProvider;
         _submitOverride = outboundTestOverrides.Submit;
         _cancelOverride = outboundTestOverrides.Cancel;
         _replaceOverride = outboundTestOverrides.Replace;
@@ -367,6 +384,28 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
 
     public event Action<ExecutionReportEnvelope>? ExecutionReportReceived;
     public event Action<BusinessRejectEnvelope>? BusinessRejectReceived;
+    public event Action<NotAppliedEnvelope>? NotAppliedReceived;
+
+    public void ConfigureInboundEvidenceSession(ulong sessionId)
+    {
+        if (sessionId == 0)
+            throw new ArgumentOutOfRangeException(nameof(sessionId));
+        if (Volatile.Read(ref _connectedState) != 0)
+            throw new InvalidOperationException(
+                "Inbound evidence session identity must be configured before connecting.");
+        lock (_inboundEvidenceGate)
+            _sessionId = sessionId;
+    }
+
+    internal void ConfigureInboundEvidenceForTests(
+        ulong sessionId,
+        Func<Up.Fixp.IRetransmitRequestHandler?> retransmitHandlerProvider)
+    {
+        ArgumentNullException.ThrowIfNull(retransmitHandlerProvider);
+        ConfigureInboundEvidenceSession(sessionId);
+        lock (_inboundEvidenceGate)
+            _retransmitHandlerProvider = retransmitHandlerProvider;
+    }
 
     /// <summary>
     /// Establish the FIXP session and start the inbound event loop. Idempotent;
@@ -400,6 +439,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 ThrowIfOutboundReconciliationRequired();
             }
             ReconcileConnectSessionRoll();
+            RefreshInboundEvidenceSubscription();
             OnConnected();
         }
         finally
@@ -478,6 +518,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                     Interlocked.Increment(ref _outboundLifecycleGeneration);
                     Volatile.Write(ref _outboundReconciliationRequired, 0);
                 }
+                RefreshInboundEvidenceSubscription();
                 OnConnected();
             }
             catch
@@ -639,6 +680,80 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         }
         if (startEventLoop)
             StartEventLoop();
+    }
+
+    private void RefreshInboundEvidenceSubscription()
+    {
+        lock (_inboundEvidenceGate)
+        {
+            DetachInboundEvidenceSubscriptionUnsafe();
+            var generation = Interlocked.Increment(ref _inboundSubscriptionGeneration);
+            var source = _retransmitHandlerProvider?.Invoke() ?? _client.Retransmit;
+            if (source is null)
+                return;
+            var sessionVerId = Volatile.Read(ref _currentSessionVerId);
+            _lastInboundSeqNum = 0;
+            _retransmissionFromSeqNo = 0;
+            _retransmissionCount = 0;
+
+            _notAppliedHandler = (_, e) =>
+            {
+                if (generation != Volatile.Read(ref _inboundSubscriptionGeneration)
+                    || sessionVerId != Volatile.Read(ref _currentSessionVerId))
+                    return;
+                InvokeNotAppliedSubscribers(
+                    NotAppliedReceived,
+                    new NotAppliedEnvelope(
+                        _firmId,
+                        _sessionId,
+                        sessionVerId,
+                        e.FromSeqNo,
+                        e.Count,
+                        _clock.GetUtcNow()),
+                    _firmId,
+                    _logger);
+            };
+            _retransmissionHandler = (_, e) =>
+            {
+                if (generation != Volatile.Read(ref _inboundSubscriptionGeneration)
+                    || sessionVerId != Volatile.Read(ref _currentSessionVerId))
+                    return;
+                lock (_inboundEvidenceGate)
+                {
+                    _retransmissionFromSeqNo = e.NextSeqNo;
+                    _retransmissionCount = e.Count;
+                }
+            };
+            source.NotAppliedReceived += _notAppliedHandler;
+            source.RetransmissionReceived += _retransmissionHandler;
+            _retransmitEvidenceSource = source;
+        }
+    }
+
+    private void DetachInboundEvidenceSubscriptionUnsafe()
+    {
+        if (_retransmitEvidenceSource is not null)
+        {
+            if (_notAppliedHandler is not null)
+                _retransmitEvidenceSource.NotAppliedReceived -= _notAppliedHandler;
+            if (_retransmissionHandler is not null)
+                _retransmitEvidenceSource.RetransmissionReceived -= _retransmissionHandler;
+        }
+        _retransmitEvidenceSource = null;
+        _notAppliedHandler = null;
+        _retransmissionHandler = null;
+    }
+
+    private bool IsPossibleResend(ulong seqNum, GapObservation observation)
+    {
+        if (observation == GapObservation.Duplicate)
+            return true;
+        lock (_inboundEvidenceGate)
+        {
+            return _retransmissionCount != 0
+                && seqNum >= _retransmissionFromSeqNo
+                && seqNum - _retransmissionFromSeqNo < _retransmissionCount;
+        }
     }
 
     /// <summary>
@@ -1464,6 +1579,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                 : _client.Events(ct);
             await foreach (var ev in events.ConfigureAwait(false))
             {
+                var sessionVerId = Volatile.Read(ref _currentSessionVerId);
                 MetricsRegistry.EntryPointEventsReceived.Add(1,
                     new KeyValuePair<string, object?>("firm", _firmId),
                     new KeyValuePair<string, object?>("event_type", ev.GetType().Name));
@@ -1489,16 +1605,15 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                         break;
                 }
 
-                // BusinessReject lacks the ER processor's ClOrdID-keyed
-                // idempotency path, so a retransmitted duplicate must stop here
-                // rather than being re-counted / re-routed downstream.
-                if (gapObservation == GapObservation.Duplicate && ev is UpModels.BusinessReject)
-                    continue;
-
                 ExecutionReportEnvelope? envelope;
                 try
                 {
-                    envelope = Translate(ev, _firmId);
+                    envelope = Translate(
+                        ev,
+                        _firmId,
+                        _sessionId,
+                        sessionVerId,
+                        IsPossibleResend(ev.SeqNum, gapObservation));
                 }
                 catch (Exception ex)
                 {
@@ -1524,7 +1639,10 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                             RejectReason: br.RejectReason,
                             Text: br.Text,
                             SeqNum: br.SeqNum,
-                            SendingTime: br.SendingTime),
+                            SendingTime: br.SendingTime,
+                            SessionId: _sessionId,
+                            SessionVerId: sessionVerId,
+                            PossibleResend: IsPossibleResend(br.SeqNum, gapObservation)),
                         _firmId,
                         _logger);
                     continue;
@@ -1635,6 +1753,22 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         }
     }
 
+    internal static void InvokeNotAppliedSubscribers(
+        Action<NotAppliedEnvelope>? subscribers,
+        NotAppliedEnvelope envelope,
+        string firmId,
+        ILogger<B3EntryPointClientGateway> logger)
+    {
+        try
+        {
+            subscribers?.Invoke(envelope);
+        }
+        catch (Exception ex) when (ex is not WalBackpressureException and not WalFaultedException)
+        {
+            logger.LogError(ex, "NotApplied subscriber threw for firm {Firm}; continuing.", firmId);
+        }
+    }
+
     /// <summary>
     /// Translates an upstream <c>EntryPointEvent</c> subtype into our internal
     /// envelope. Returns <c>null</c> when the event has no in-domain
@@ -1653,69 +1787,107 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// </summary>
     internal static ExecutionReportEnvelope? Translate(UpModels.EntryPointEvent ev) => Translate(ev, firmId: null);
 
-    internal static ExecutionReportEnvelope? Translate(UpModels.EntryPointEvent ev, string? firmId) => ev switch
-    {
-        UpModels.OrderAccepted a => new ExecutionReportEnvelope(
-            ClOrdId: a.ClOrdID.Value,
-            ExecType: EpExecType.New,
-            LeavesQuantity: (long)(a.LeavesQty ?? 0UL),
-            CumulativeQuantity: (long)(a.CumQty ?? 0UL),
-            LastQuantity: 0,
-            LastPrice: 0m,
-            RejectReason: null,
-            FirmId: firmId),
+    internal static ExecutionReportEnvelope? Translate(UpModels.EntryPointEvent ev, string? firmId) =>
+        Translate(ev, firmId, sessionId: null, sessionVerId: null, possibleResend: false);
 
-        UpModels.OrderTrade t => new ExecutionReportEnvelope(
-            ClOrdId: t.ClOrdID.Value,
-            ExecType: t.OrderStatus == UpModels.OrderStatus.Filled ? EpExecType.Fill : EpExecType.PartialFill,
-            LeavesQuantity: (long)(t.LeavesQty ?? 0UL),
-            CumulativeQuantity: (long)(t.CumQty ?? 0UL),
-            LastQuantity: (long)t.LastQty,
-            LastPrice: t.LastPx,
-            RejectReason: null,
-            FirmId: firmId),
+    internal static ExecutionReportEnvelope? Translate(
+        UpModels.EntryPointEvent ev,
+        string? firmId,
+        ulong? sessionId,
+        uint? sessionVerId,
+        bool possibleResend) => ev switch
+        {
+            UpModels.OrderAccepted a => new ExecutionReportEnvelope(
+                ClOrdId: a.ClOrdID.Value,
+                ExecType: EpExecType.New,
+                LeavesQuantity: (long)(a.LeavesQty ?? 0UL),
+                CumulativeQuantity: (long)(a.CumQty ?? 0UL),
+                LastQuantity: 0,
+                LastPrice: 0m,
+                RejectReason: null,
+                FirmId: firmId,
+                SessionId: sessionId,
+                SessionVerId: sessionVerId,
+                InboundSeqNum: a.SeqNum,
+                SendingTime: a.SendingTime,
+                PossibleResend: possibleResend,
+                VenueOrderId: a.OrderId),
 
-        UpModels.OrderCancelled c => new ExecutionReportEnvelope(
-            ClOrdId: c.ClOrdID.Value,
-            ExecType: EpExecType.Canceled,
-            LeavesQuantity: 0,
-            CumulativeQuantity: 0,
-            LastQuantity: 0,
-            LastPrice: 0m,
-            RejectReason: c.RestatementReason?.ToString(),
-            OrigClOrdId: c.OrigClOrdID?.Value ?? 0UL,
-            FirmId: firmId),
+            UpModels.OrderTrade t => new ExecutionReportEnvelope(
+                ClOrdId: t.ClOrdID.Value,
+                ExecType: t.OrderStatus == UpModels.OrderStatus.Filled ? EpExecType.Fill : EpExecType.PartialFill,
+                LeavesQuantity: (long)(t.LeavesQty ?? 0UL),
+                CumulativeQuantity: (long)(t.CumQty ?? 0UL),
+                LastQuantity: (long)t.LastQty,
+                LastPrice: t.LastPx,
+                RejectReason: null,
+                FirmId: firmId,
+                SessionId: sessionId,
+                SessionVerId: sessionVerId,
+                InboundSeqNum: t.SeqNum,
+                SendingTime: t.SendingTime,
+                PossibleResend: possibleResend,
+                VenueOrderId: t.OrderId),
 
-        UpModels.OrderModified m => new ExecutionReportEnvelope(
-            ClOrdId: m.ClOrdID.Value,
-            ExecType: EpExecType.Replaced,
-            LeavesQuantity: (long)(m.LeavesQty ?? 0UL),
-            CumulativeQuantity: (long)(m.CumQty ?? 0UL),
-            LastQuantity: 0,
-            LastPrice: 0m,
-            RejectReason: null,
-            // OrigClOrdID is a non-nullable ClOrdID struct in the SDK,
-            // but a venue that sends 0 on the wire would surface as
-            // Value == 0 here. The processor treats OrigClOrdId == 0
-            // as "missing" and falls back to OrderOwnershipMap's
-            // new→orig link populated by RegisterReplaceLink (slice 1
-            // of #122).
-            OrigClOrdId: m.OrigClOrdID.Value,
-            FirmId: firmId),
+            UpModels.OrderCancelled c => new ExecutionReportEnvelope(
+                ClOrdId: c.ClOrdID.Value,
+                ExecType: EpExecType.Canceled,
+                LeavesQuantity: 0,
+                CumulativeQuantity: 0,
+                LastQuantity: 0,
+                LastPrice: 0m,
+                RejectReason: c.RestatementReason?.ToString(),
+                OrigClOrdId: c.OrigClOrdID?.Value ?? 0UL,
+                FirmId: firmId,
+                SessionId: sessionId,
+                SessionVerId: sessionVerId,
+                InboundSeqNum: c.SeqNum,
+                SendingTime: c.SendingTime,
+                PossibleResend: possibleResend,
+                VenueOrderId: c.OrderId),
 
-        UpModels.OrderRejected r => new ExecutionReportEnvelope(
-            ClOrdId: r.ClOrdID.Value,
-            ExecType: EpExecType.Rejected,
-            LeavesQuantity: 0,
-            CumulativeQuantity: 0,
-            LastQuantity: 0,
-            LastPrice: 0m,
-            RejectReason: r.Reason ?? $"reject_code={r.RejectCode}",
-            FirmId: firmId),
+            UpModels.OrderModified m => new ExecutionReportEnvelope(
+                ClOrdId: m.ClOrdID.Value,
+                ExecType: EpExecType.Replaced,
+                LeavesQuantity: (long)(m.LeavesQty ?? 0UL),
+                CumulativeQuantity: (long)(m.CumQty ?? 0UL),
+                LastQuantity: 0,
+                LastPrice: 0m,
+                RejectReason: null,
+                // OrigClOrdID is a non-nullable ClOrdID struct in the SDK,
+                // but a venue that sends 0 on the wire would surface as
+                // Value == 0 here. The processor treats OrigClOrdId == 0
+                // as "missing" and falls back to OrderOwnershipMap's
+                // new→orig link populated by RegisterReplaceLink (slice 1
+                // of #122).
+                OrigClOrdId: m.OrigClOrdID.Value,
+                FirmId: firmId,
+                SessionId: sessionId,
+                SessionVerId: sessionVerId,
+                InboundSeqNum: m.SeqNum,
+                SendingTime: m.SendingTime,
+                PossibleResend: possibleResend,
+                VenueOrderId: m.OrderId),
 
-        UpModels.BusinessReject br => null, // surfaced on the dedicated BusinessReject channel
-        _ => null,
-    };
+            UpModels.OrderRejected r => new ExecutionReportEnvelope(
+                ClOrdId: r.ClOrdID.Value,
+                ExecType: EpExecType.Rejected,
+                LeavesQuantity: 0,
+                CumulativeQuantity: 0,
+                LastQuantity: 0,
+                LastPrice: 0m,
+                RejectReason: r.Reason ?? $"reject_code={r.RejectCode}",
+                FirmId: firmId,
+                SessionId: sessionId,
+                SessionVerId: sessionVerId,
+                InboundSeqNum: r.SeqNum,
+                SendingTime: r.SendingTime,
+                PossibleResend: possibleResend,
+                VenueOrderId: r.OrderId),
+
+            UpModels.BusinessReject br => null, // surfaced on the dedicated BusinessReject channel
+            _ => null,
+        };
 
     private void OnTerminated(object? sender, Up.TerminatedEventArgs e)
     {
@@ -1921,6 +2093,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
                         await TerminateFaultedSessionAsync().ConfigureAwait(false);
                         return;
                     }
+                    RefreshInboundEvidenceSubscription();
                     OnConnected(startEventLoop: false);
                     if (OutboundReconciliationRequired
                         || reconnectGeneration != Volatile.Read(ref _outboundLifecycleGeneration))
@@ -2115,6 +2288,11 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     public async ValueTask DisposeAsync()
     {
         _disposed = true;
+        lock (_inboundEvidenceGate)
+        {
+            Interlocked.Increment(ref _inboundSubscriptionGeneration);
+            DetachInboundEvidenceSubscriptionUnsafe();
+        }
         try { _shutdownCts.Cancel(); } catch { /* ignore */ }
         // Stop emitting per-firm gauges before tearing down the SDK so the
         // observable callbacks don't race with _client disposal.

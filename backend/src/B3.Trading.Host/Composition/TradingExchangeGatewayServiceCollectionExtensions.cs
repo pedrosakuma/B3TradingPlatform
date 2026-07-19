@@ -141,7 +141,7 @@ public static class TradingExchangeGatewayServiceCollectionExtensions
                     var connectRollReactor = sp.GetService<IConnectSessionRollReactor>();
                     var gatewayLogger = lf.CreateLogger("FirmGatewayConnector");
                     var hasResolvedEndpoint = 0;
-                    return new B3EntryPointClientGateway(upstream, firm.FirmId, resumeVerId, gwLogger,
+                    var gateway = new B3EntryPointClientGateway(upstream, firm.FirmId, resumeVerId, gwLogger,
                         initialReconnectDelay: firm.InitialReconnectDelay,
                         maxReconnectDelay: firm.MaxReconnectDelay,
                         gracefulTerminateTimeout: firm.GracefulTerminateTimeout,
@@ -198,6 +198,8 @@ public static class TradingExchangeGatewayServiceCollectionExtensions
                                     firm.Endpoint, firm.FirmId, clientOpts.Endpoint);
                             }
                         });
+                    gateway.ConfigureInboundEvidenceSession(firm.SessionId);
+                    return gateway;
                 });
                 return new FirmGatewayRegistry(gateways);
             });
