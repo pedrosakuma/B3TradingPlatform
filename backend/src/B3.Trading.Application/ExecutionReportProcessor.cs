@@ -770,7 +770,15 @@ public sealed class ExecutionReportProcessor
         if (order.Status is OrderStatus.Filled or OrderStatus.Cancelled
             or OrderStatus.Rejected or OrderStatus.Replaced)
         {
-            _pendingCancels?.TryConsumeByOriginal(lookupId, out _);
+            if (_pendingCancels?.TryConsumeByOriginal(
+                    lookupId,
+                    out var completedCancelClOrdId) == true)
+            {
+                _botMappings?.ReapCancel(completedCancelClOrdId);
+            }
+            _botMappings?.MarkOrderResolved(
+                lookupId,
+                eventTimestampUtc ?? DateTimeOffset.UtcNow);
             _gtdScheduler?.OnOrderTerminal(lookupId);
             // #351 — Cancel the IOC/FOK watchdog timer (if any). The
             // expected happy-path: a fill / cancel / reject ER lands

@@ -224,6 +224,13 @@ public sealed class PlatformSnapshot
     public List<BotCancelMappingSnapshot> BotCancelMappings { get; init; } = new();
 
     /// <summary>
+    /// Durable FIXP business-duplicate identities. Null identifies a legacy
+    /// snapshot that predates tombstones; live mappings are migrated, while
+    /// already-terminal mappings without retained origin cannot be recreated.
+    /// </summary>
+    public List<UserBots.BotBusinessIdentityTombstone>? BotBusinessIdentityTombstones { get; init; }
+
+    /// <summary>
     /// Pass-4 review (#255). ClOrdIds whose <c>OrderExpiredEvent</c>
     /// audit envelope is durably on the WAL but whose downstream
     /// <c>OrderCancelRequestedEvent</c> has not yet been observed.

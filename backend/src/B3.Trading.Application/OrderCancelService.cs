@@ -281,7 +281,9 @@ public sealed class OrderCancelService
                             cancelInternalClOrdId: cancelClOrdId,
                             originalInternalClOrdId: originalClOrdId,
                             credentialId: botMapping.CredentialId,
-                            externalCancelClOrdId: botMapping.ExternalClOrdId);
+                            externalCancelClOrdId: botMapping.ExternalClOrdId,
+                            recordedAtUtc: recordedAt,
+                            mutationId: mutationId);
                     }
                     if (restIdempotency is not null)
                         _restIdempotency?.Apply(restIdempotency);
@@ -330,6 +332,11 @@ public sealed class OrderCancelService
                         ? OutboundMutationOrigin.UserBotFixp
                         : origin ?? OutboundMutationOrigin.Rest,
                     AlgoOriginIdentity = algoOriginIdentity,
+                    BotBusinessIdentity = botOrigin is { } bot
+                        ? new OutboundBotBusinessIdentity(
+                            bot.CredentialId,
+                            bot.ExternalClOrdId)
+                        : null,
                     PrimaryClOrdId = cancelClOrdId,
                     OriginalClOrdId = originalClOrdId,
                     RecordedAtUtc = recordedAt,

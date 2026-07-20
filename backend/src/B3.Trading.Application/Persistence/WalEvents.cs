@@ -51,6 +51,9 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(BotSessionInitializedEvent), "userbot.session.initialized")]
 [JsonDerivedType(typeof(BotSessionVerAdvancedEvent), "userbot.session.ver-advanced")]
 [JsonDerivedType(typeof(BotSessionSeqAdvancedEvent), "userbot.session.seq-advanced")]
+[JsonDerivedType(typeof(BotBusinessIdentityClaimedEvent), "userbot.business-identity.claimed")]
+[JsonDerivedType(typeof(BotBusinessIdentityResolvedEvent), "userbot.business-identity.resolved")]
+[JsonDerivedType(typeof(BotBusinessIdentityTombstonePurgedEvent), "userbot.business-identity.purged")]
 [JsonDerivedType(typeof(OrderCancelRequestedEvent), "order.cancel-requested")]
 [JsonDerivedType(typeof(OrderCancelPreSendFailedEvent), "order.cancel-pre-send-failed")]
 [JsonDerivedType(typeof(OrderExpiredEvent), "order.expired")]
@@ -83,6 +86,7 @@ public abstract record WalEvent
 /// </summary>
 public sealed record OrderSubmittedEvent : WalEvent
 {
+    public OutboundMutationId? MutationId { get; init; }
     public required ulong ClOrdId { get; init; }
     public required string EndClientId { get; init; }
     public required string FirmId { get; init; }
@@ -195,6 +199,34 @@ public sealed record OrderSubmittedEvent : WalEvent
 /// to be the on-the-wire and on-WAL identifier.
 /// </summary>
 public sealed record BotOrderMapping(Guid CredentialId, ulong ExternalClOrdId);
+
+public sealed record BotBusinessIdentityClaimedEvent : WalEvent
+{
+    public required Guid CredentialId { get; init; }
+    public required ulong ExternalClOrdId { get; init; }
+    public required OutboundMutationKind MutationKind { get; init; }
+    public required DateTimeOffset ClaimedAtUtc { get; init; }
+}
+
+public sealed record BotBusinessIdentityResolvedEvent : WalEvent
+{
+    public required Guid CredentialId { get; init; }
+    public required ulong ExternalClOrdId { get; init; }
+    public required DateTimeOffset ResolvedAtUtc { get; init; }
+}
+
+public sealed record BotBusinessIdentityTombstonePurgedEvent : WalEvent
+{
+    public required Guid CredentialId { get; init; }
+    public required ulong ExternalClOrdId { get; init; }
+    public required OutboundMutationKind MutationKind { get; init; }
+    public ulong? InternalClOrdId { get; init; }
+    public OutboundMutationId? MutationId { get; init; }
+    public required DateTimeOffset ClaimedAtUtc { get; init; }
+    public required DateTimeOffset ResolvedAtUtc { get; init; }
+    public required TimeSpan Retention { get; init; }
+    public required DateTimeOffset PurgedAtUtc { get; init; }
+}
 
 /// <summary>
 /// Sub-issue #171 (E). Recorded the moment a cancel request reaches the
@@ -433,6 +465,7 @@ public sealed record OutboundApprovedEvent : WalEvent
     public required string EndClientRef { get; init; }
     public required OutboundMutationOrigin Origin { get; init; }
     public AlgoOutboundOriginIdentity? AlgoOriginIdentity { get; init; }
+    public OutboundBotBusinessIdentity? BotBusinessIdentity { get; init; }
     public required ulong PrimaryClOrdId { get; init; }
     public ulong? OriginalClOrdId { get; init; }
     public required DateTimeOffset RecordedAtUtc { get; init; }
