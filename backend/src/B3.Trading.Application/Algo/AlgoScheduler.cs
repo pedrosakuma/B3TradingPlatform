@@ -234,6 +234,22 @@ public sealed class AlgoScheduler : BackgroundService
                 TickPegged(algo, pgp, now);
                 continue;
             }
+
+            if (algo.Type == AlgoType.Iceberg)
+            {
+                // Iceberg normally advances immediately from its child-ER
+                // signal. If that notification drops after the book became
+                // terminal, there is no live child and no other periodic
+                // trigger, so enqueue a reconciliation pass.
+                var children = _orders.EnumerateChildrenOf(
+                    algo.FirmId,
+                    algo.AlgoId);
+                if (children.Count > 0
+                    && children.All(IsChildTerminal))
+                {
+                    Enqueue(algo);
+                }
+            }
         }
     }
 

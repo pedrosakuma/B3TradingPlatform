@@ -30,6 +30,17 @@ public class PeggedAlgoEndpointTests
             ["Trading:SymbolDirectory:SecurityIds:PETR4"] = "4321",
         };
 
+    private static TestAppFactory WithDroppingSignals() =>
+        TestAppFactory.WithOverrides(
+            Simulator(),
+            services =>
+            {
+                services.RemoveAll<IAlgoSignalQueue>();
+                services.AddSingleton<DroppingAlgoSignalQueue>();
+                services.AddSingleton<IAlgoSignalQueue>(sp =>
+                    sp.GetRequiredService<DroppingAlgoSignalQueue>());
+            });
+
     private static object PeggedBody(long total, string pegRef = "Mid",
         int offsetTicks = 0, int? repegMs = 100, decimal? tickSize = 0.5m,
         string? childType = null, decimal? priceLimit = null, string side = "Buy") => new
@@ -1025,15 +1036,7 @@ public class PeggedAlgoEndpointTests
     [Fact]
     public async Task Pegged_DroppedReplacementAdoptionSignal_AdoptsHydratedChildWithoutResubmit()
     {
-        using var f = TestAppFactory.WithOverrides(
-            Simulator(),
-            services =>
-            {
-                services.RemoveAll<IAlgoSignalQueue>();
-                services.AddSingleton<DroppingAlgoSignalQueue>();
-                services.AddSingleton<IAlgoSignalQueue>(sp =>
-                    sp.GetRequiredService<DroppingAlgoSignalQueue>());
-            });
+        using var f = WithDroppingSignals();
         using var http = f.CreateClient();
         var token = await f.LoginAsync(http);
         var adminToken = await f.LoginAsync(http, "admin");
@@ -1081,6 +1084,154 @@ public class PeggedAlgoEndpointTests
             .ToList();
         var adopted = Assert.Single(liveChildren);
         Assert.Equal(replace.NewClOrdId, adopted.ClOrdId);
+    }
+
+    [Fact]
+    public async Task Pegged_DroppedNormalFillSignal_BooksFillAndCompletes()
+    {
+        using var f = WithDroppingSignals();
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        await WaitFor(
+            () => mock.SubmittedNewOrders.Count > 0,
+            TimeSpan.FromSeconds(3),
+            "initial child submission was not recorded");
+        var newOrdersBeforeFill = mock.SubmittedNewOrders.Count;
+        var signals = f.Services.GetRequiredService<DroppingAlgoSignalQueue>();
+        signals.DropNextChildExecutionSignal(child.ClOrdId);
+
+        await InjectEr(
+            http,
+            adminToken,
+            child.ClOrdId,
+            "Fill",
+            lastQty: child.Quantity);
+        Assert.Equal(1, signals.DroppedSignals);
+        await WaitForAlgoStatus(http, token, algoId, "Completed");
+
+        var completed = await GetAlgo(http, token, algoId);
+        Assert.Equal(100, completed.GetProperty("filledQuantity").GetInt64());
+        Assert.Equal("None", completed.GetProperty("terminalReason").GetString());
+        Assert.Equal(newOrdersBeforeFill, mock.SubmittedNewOrders.Count);
+    }
+
+    [Fact]
+    public async Task Pegged_DroppedPartialFillSignal_BooksDeltaFromOrderState()
+    {
+        using var f = WithDroppingSignals();
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100));
+        var algoIdValue = ulong.Parse(algoId);
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        var signals = f.Services.GetRequiredService<DroppingAlgoSignalQueue>();
+        signals.DropNextChildExecutionSignal(child.ClOrdId);
+
+        await InjectEr(
+            http,
+            adminToken,
+            child.ClOrdId,
+            "PartialFill",
+            lastQty: 40);
+        Assert.Equal(1, signals.DroppedSignals);
+        var algos = f.Services.GetRequiredService<AlgoBook>();
+        await WaitFor(
+            () => algos.TryGet("default", algoIdValue, out var algo)
+                && algo?.FilledQuantity == 40,
+            TimeSpan.FromSeconds(3),
+            "dropped partial fill was not booked from the working-order state");
+
+        Assert.Equal(
+            child.ClOrdId,
+            f.Services.GetRequiredService<AlgoEngine>()
+                .TryGetLiveChildClOrdId("default", algoIdValue));
+    }
+
+    [Fact]
+    public async Task Pegged_DroppedCancelConfirmation_CompletesParentCancellation()
+    {
+        using var f = WithDroppingSignals();
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100));
+        var child = await WaitForAnyChild(
+            f.Services.GetRequiredService<WorkingOrderBook>(),
+            algoId,
+            TimeSpan.FromSeconds(3));
+        var cancelRequest = new HttpRequestMessage(
+            HttpMethod.Delete,
+            $"/algo/{algoId}");
+        cancelRequest.Headers.Authorization =
+            new AuthenticationHeaderValue("Bearer", token);
+        var cancelResponse = await http.SendAsync(cancelRequest);
+        Assert.Equal(HttpStatusCode.Accepted, cancelResponse.StatusCode);
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        await WaitFor(
+            () => mock.SubmittedCancels.Any(request =>
+                request.OrigClOrdId == child.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "algo child cancel was not submitted");
+        var signals = f.Services.GetRequiredService<DroppingAlgoSignalQueue>();
+        signals.DropNextChildExecutionSignal(child.ClOrdId);
+
+        await InjectEr(http, adminToken, child.ClOrdId, "Canceled");
+        Assert.Equal(1, signals.DroppedSignals);
+        await WaitForAlgoStatus(http, token, algoId, "Cancelled");
+
+        var cancelled = await GetAlgo(http, token, algoId);
+        Assert.Equal(
+            "UserCancelled",
+            cancelled.GetProperty("terminalReason").GetString());
+    }
+
+    [Fact]
+    public async Task Pegged_DroppedNormalRejectedSignal_SuspendsRiskRejected()
+    {
+        using var f = WithDroppingSignals();
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100));
+        var child = await WaitForAnyChild(
+            f.Services.GetRequiredService<WorkingOrderBook>(),
+            algoId,
+            TimeSpan.FromSeconds(3));
+        var signals = f.Services.GetRequiredService<DroppingAlgoSignalQueue>();
+        signals.DropNextChildExecutionSignal(child.ClOrdId);
+
+        await InjectEr(
+            http,
+            adminToken,
+            child.ClOrdId,
+            "Rejected",
+            rejectReason: "RiskRejected");
+        Assert.Equal(1, signals.DroppedSignals);
+        await WaitForAlgoStatus(http, token, algoId, "Suspended");
+
+        var suspended = await GetAlgo(http, token, algoId);
+        Assert.Equal(
+            "RiskRejected",
+            suspended.GetProperty("terminalReason").GetString());
     }
 
     [Fact]
@@ -2219,7 +2370,8 @@ public class PeggedAlgoEndpointTests
 
     private static async Task<HttpResponseMessage> InjectEr(
         HttpClient http, string adminToken, ulong childClOrdId,
-        string type, long? lastQty = null, decimal lastPx = 30m)
+        string type, long? lastQty = null, decimal lastPx = 30m,
+        string? rejectReason = null)
     {
         var req = new HttpRequestMessage(HttpMethod.Post, "/admin/simulator/er")
         {
@@ -2229,6 +2381,7 @@ public class PeggedAlgoEndpointTests
                 Type = type,
                 LastQty = lastQty,
                 LastPx = lastQty.HasValue ? lastPx : (decimal?)null,
+                RejectReason = rejectReason,
             }),
         };
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", adminToken);
@@ -2436,9 +2589,12 @@ public class PeggedAlgoEndpointTests
     {
         private readonly AlgoSignalQueue _inner;
         private long _childClOrdIdToDrop;
+        private int _droppedSignals;
 
         public DroppingAlgoSignalQueue(AlgoSignalQueue inner) =>
             _inner = inner;
+
+        public int DroppedSignals => Volatile.Read(ref _droppedSignals);
 
         public void DropNextChildExecutionSignal(ulong childClOrdId) =>
             Interlocked.Exchange(
@@ -2455,6 +2611,7 @@ public class PeggedAlgoEndpointTests
                         0,
                         expected) == expected)
                 {
+                    Interlocked.Increment(ref _droppedSignals);
                     return false;
                 }
             }

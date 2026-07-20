@@ -299,7 +299,7 @@ public class AlgoSchedulerTests
     public void Tick_IgnoresIcebergParents()
     {
         // Iceberg refills happen entirely in the engine's OnChildErAsync;
-        // the scheduler must never inject extra signals for them.
+        // without child state there is nothing to reconcile.
         var (algos, _, queue, _, scheduler) = Build(now: Start);
         var ice = new Algo(2UL, new EndClientId("alice"), Firm, "PETR4", 4321UL,
             OrderSide.Buy, AlgoType.Iceberg, 1000,
@@ -307,6 +307,27 @@ public class AlgoSchedulerTests
         algos.TryAdd(ice);
         scheduler.Tick();
         Assert.Empty(Drain(queue));
+    }
+
+    [Fact]
+    public void Tick_IcebergWithOnlyTerminalChild_EnqueuesReconciliation()
+    {
+        var (algos, orders, queue, _, scheduler) = Build(now: Start);
+        var ice = new Algo(2UL, new EndClientId("alice"), Firm, "PETR4", 4321UL,
+            OrderSide.Buy, AlgoType.Iceberg, 1000,
+            new IcebergParameters(100, 30m), Start);
+        algos.TryAdd(ice);
+        orders.TryAdd(NewChild(
+            clOrdId: 200,
+            parentAlgoId: ice.AlgoId,
+            sliceSeq: 0,
+            qty: 100,
+            status: OrderStatus.Filled));
+
+        scheduler.Tick();
+
+        var signal = Assert.IsType<AlgoCreatedSignal>(Assert.Single(Drain(queue)));
+        Assert.Equal(ice.AlgoId, signal.AlgoId);
     }
 
     [Fact]

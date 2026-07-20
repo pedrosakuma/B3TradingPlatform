@@ -662,6 +662,8 @@ public sealed class AlgoEngine : BackgroundService
     {
         if (!_outboundRecovery.IsBusinessIngressOpen(algo.FirmId)) return;
         if (algo.IsTerminal) return;
+        if (await ReconcileLiveChildAgainstBookAsync(algo, rt, ct).ConfigureAwait(false))
+            return;
         if (algo.Status == AlgoStatus.Cancelling)
         {
             await OnCancelRequestedAsync(algo, rt, explicitRetry: false, ct).ConfigureAwait(false);
@@ -968,7 +970,7 @@ public sealed class AlgoEngine : BackgroundService
             if (peggedRepegAdoption)
             {
                 rt.RepegPending = false;
-                rt.PeggedReplacedHoldTicks = 0;
+                rt.ReplacedAdoptionHoldTicks = 0;
                 try
                 {
                     var firmIdSnap = algo.FirmId;
@@ -1288,6 +1290,155 @@ public sealed class AlgoEngine : BackgroundService
         }
     }
 
+    private async Task<bool> ReconcileLiveChildAgainstBookAsync(
+        Algo algo,
+        AlgoParentRuntime rt,
+        CancellationToken ct)
+    {
+        if (rt.LiveChildClOrdId is not { } liveChildClOrdId)
+            return false;
+
+        if (!_orders.TryGet(liveChildClOrdId, out var child) || child is null)
+        {
+            await FailClosedStaleLiveChildAsync(
+                algo,
+                rt,
+                liveChildClOrdId,
+                "runtime live child is missing from the working-order book")
+                .ConfigureAwait(false);
+            return true;
+        }
+
+        if (!IsChildTerminal(child)
+            && child.CumulativeQuantity
+                > rt.ChildBookedCum.GetValueOrDefault(child.ClOrdId, 0L))
+        {
+            await OnChildErAsync(
+                algo,
+                rt,
+                new ChildExecutionObservedSignal
+                {
+                    FirmId = algo.FirmId,
+                    AlgoId = algo.AlgoId,
+                    ChildClOrdId = child.ClOrdId,
+                },
+                ct).ConfigureAwait(false);
+            return true;
+        }
+
+        if (!IsChildTerminal(child))
+        {
+            rt.ReplacedAdoptionHoldTicks = 0;
+            return false;
+        }
+
+        if (child.Status == OrderStatus.Replaced)
+        {
+            rt.ReplacedAdoptionHoldTicks++;
+            if (rt.ReplacedAdoptionHoldTicks
+                < AlgoParentRuntime.ReplacedAdoptionHoldMaxTicks)
+            {
+                return true;
+            }
+
+            var replacements = _orders
+                .EnumerateChildrenOf(algo.FirmId, algo.AlgoId)
+                .Where(candidate =>
+                    candidate.ClOrdId != liveChildClOrdId
+                    && _ownership.TryResolveOrig(
+                        candidate.ClOrdId,
+                        out var candidateOriginal)
+                    && candidateOriginal == liveChildClOrdId)
+                .ToArray();
+            if (replacements.Length == 1)
+            {
+                var replacement = replacements[0];
+                _logger.LogWarning(
+                    "AlgoEngine adoption signal for replacement {Replacement} of child {Child} on {Firm}/{AlgoId} appears dropped after {Ticks} ticks; adopting the hydrated replacement from the order book.",
+                    replacement.ClOrdId,
+                    liveChildClOrdId,
+                    algo.FirmId,
+                    algo.AlgoId,
+                    rt.ReplacedAdoptionHoldTicks);
+                await OnChildErAsync(
+                    algo,
+                    rt,
+                    new ChildExecutionObservedSignal
+                    {
+                        FirmId = algo.FirmId,
+                        AlgoId = algo.AlgoId,
+                        ChildClOrdId = replacement.ClOrdId,
+                    },
+                    ct).ConfigureAwait(false);
+                if (algo.IsTerminal
+                    || rt.LiveChildClOrdId == replacement.ClOrdId)
+                {
+                    return true;
+                }
+            }
+
+            await FailClosedStaleLiveChildAsync(
+                algo,
+                rt,
+                liveChildClOrdId,
+                replacements.Length switch
+                {
+                    0 => "dropped adoption signal but no hydrated replacement was found",
+                    1 => "hydrated replacement could not be adopted",
+                    _ => "dropped adoption signal matched multiple replacement children",
+                }).ConfigureAwait(false);
+            return true;
+        }
+
+        rt.ReplacedAdoptionHoldTicks = 0;
+        await OnChildErAsync(
+            algo,
+            rt,
+            new ChildExecutionObservedSignal
+            {
+                FirmId = algo.FirmId,
+                AlgoId = algo.AlgoId,
+                ChildClOrdId = child.ClOrdId,
+            },
+            ct).ConfigureAwait(false);
+        return true;
+    }
+
+    private async Task FailClosedStaleLiveChildAsync(
+        Algo algo,
+        AlgoParentRuntime rt,
+        ulong liveChildClOrdId,
+        string outcome)
+    {
+        var isPeggedRepeg = algo.Type == AlgoType.Pegged
+            && (rt.RepegPending
+                || _peggedRepeg?.TryGet(algo.FirmId, algo.AlgoId) is not null
+                || FindLatestBlockingRepegMutation(
+                    algo,
+                    liveChildClOrdId) is not null);
+        if (isPeggedRepeg)
+        {
+            await FailClosedPeggedRepegAsync(
+                algo,
+                rt,
+                liveChildClOrdId,
+                outcome).ConfigureAwait(false);
+            return;
+        }
+
+        _logger.LogWarning(
+            "AlgoEngine live-child reconciliation failed for {Firm}/{AlgoId} child {Child}: {Outcome}; suspending for reconciliation.",
+            algo.FirmId,
+            algo.AlgoId,
+            liveChildClOrdId,
+            outcome);
+        await RecordTerminalAsync(
+            algo,
+            rt,
+            AlgoStatus.Suspended,
+            AlgoTerminalReason.ReconciliationRequired).ConfigureAwait(false);
+    }
+
     private bool IsTwapWindowExpired(Algo algo) =>
         algo.Type == AlgoType.Twap
         && algo.Parameters is TwapParameters tp
@@ -1336,6 +1487,11 @@ public sealed class AlgoEngine : BackgroundService
             MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
                 new KeyValuePair<string, object?>("algoType", algoTypeTag),
                 new KeyValuePair<string, object?>("reason", "algo_cancelling"));
+            return;
+        }
+        if (sig.TargetChildClOrdId is null
+            && await ReconcileLiveChildAgainstBookAsync(algo, rt, ct).ConfigureAwait(false))
+        {
             return;
         }
 
@@ -1616,6 +1772,9 @@ public sealed class AlgoEngine : BackgroundService
             // Cancelling. Nothing to do.
             return;
         }
+
+        if (await ReconcileLiveChildAgainstBookAsync(algo, rt, ct).ConfigureAwait(false))
+            return;
 
         OutboundMutationSnapshot? retryMutation = null;
         if (explicitRetry && rt.LiveChildClOrdId is { } retryChildClOrdId)
@@ -2259,7 +2418,7 @@ public sealed class AlgoEngine : BackgroundService
         var cleanupOriginalClOrdId = pendingCycleOriginal ?? originalClOrdId;
         rt.RepegPending = false;
         rt.LastRepegCancelledChildId = null;
-        rt.PeggedReplacedHoldTicks = 0;
+        rt.ReplacedAdoptionHoldTicks = 0;
 
         AbortReplacementIntent(cleanupOriginalClOrdId);
         if (cleanupOriginalClOrdId != originalClOrdId)
@@ -2477,190 +2636,13 @@ public sealed class AlgoEngine : BackgroundService
         if (!_orders.TryGet(liveChildClOrdId, out var child) || child is null
             || IsChildTerminal(child))
         {
-            if (child is null
-                && IsConfirmedProvenUnsentMutation(
-                    algo,
-                    liveChildClOrdId,
-                    AlgoOutboundActionKind.Repeg))
-            {
-                // The retry can no longer be applied because its original
-                // child disappeared from the durable order book. Fail
-                // closed rather than clearing the slot and leaving the
-                // ProvenUnsent action permanently blocking scheduling.
-                _peggedRepeg?.UnmarkCancelledChild(
-                    algo.FirmId,
-                    algo.AlgoId,
-                    liveChildClOrdId);
-                rt.RepegPending = false;
-                rt.LastRepegCancelledChildId = null;
-                await RecordTerminalAsync(
-                    algo,
-                    rt,
-                    AlgoStatus.Suspended,
-                    AlgoTerminalReason.ReconciliationRequired).ConfigureAwait(false);
-                return;
-            }
-
-            if (child?.Status == OrderStatus.Filled
-                && (rt.RepegPending
-                    || (_peggedRepeg?.IsCancelledChild(
-                        algo.FirmId,
-                        algo.AlgoId,
-                        child.ClOrdId) ?? false)))
-            {
-                var previouslyBooked = rt.ChildBookedCum.GetValueOrDefault(
-                    child.ClOrdId,
-                    0L);
-                var fillDelta = child.CumulativeQuantity - previouslyBooked;
-                if (fillDelta > 0)
-                {
-                    algo.RecordFill(fillDelta);
-                    rt.ChildBookedCum[child.ClOrdId] = child.CumulativeQuantity;
-                }
-                if (rt.LiveChildClOrdId == child.ClOrdId)
-                    rt.LiveChildClOrdId = null;
-                await ResolveRepegOnFillAsync(algo, rt, child).ConfigureAwait(false);
-                return;
-            }
-
-            if (child is not null
-                && child.Status is OrderStatus.Cancelled or OrderStatus.Rejected
-                && IsConfirmedProvenUnsentMutation(
-                    algo,
-                    child.ClOrdId,
-                    AlgoOutboundActionKind.Repeg))
-            {
-                // The replace never reached the venue, so this terminal
-                // status belongs to the original child and must not be
-                // deduplicated as a successful repeg side effect. Process
-                // it here as well as through the queued ER signal so a
-                // dropped signal cannot leave a blocking mutation with an
-                // empty live slot.
-                _peggedRepeg?.UnmarkCancelledChild(
-                    algo.FirmId,
-                    algo.AlgoId,
-                    child.ClOrdId);
-                rt.RepegPending = false;
-                rt.LastRepegCancelledChildId = null;
-                await OnChildErAsync(
-                    algo,
-                    rt,
-                    new ChildExecutionObservedSignal
-                    {
-                        FirmId = algo.FirmId,
-                        AlgoId = algo.AlgoId,
-                        ChildClOrdId = child.ClOrdId,
-                    },
-                    ct).ConfigureAwait(false);
-                return;
-            }
-
-            if (child is not null
-                && child.Status is OrderStatus.Cancelled or OrderStatus.Rejected
-                && IsUnresolvedPotentiallySentRepegMutation(
-                    algo,
-                    child.ClOrdId))
-            {
-                await FailClosedPeggedRepegAsync(
-                    algo,
-                    rt,
-                    child.ClOrdId,
-                    $"unresolved replace observed terminal {child.Status} on original")
-                    .ConfigureAwait(false);
-                return;
-            }
-
-            // #329: When the child is terminal with status Replaced, an
-            // adoption signal is normally in flight from the ER processor
-            // (ApplyReplaceAccepted enqueues ChildExecutionObservedSignal
-            // for the NEW child AFTER MarkReplaced flips the OLD to
-            // Replaced). The adoption block in OnChildErAsync requires
-            // `rt.LiveChildClOrdId is { } oldLive` — if we null it here
-            // first, adoption is skipped and the parent ends up orphaned
-            // with no live child until the next scheduler tick spawns a
-            // fresh slice (which leaks a clOrdID and skips the retired-
-            // child FIFO accounting that powers AlgoModifyRetiredChildEvictedTotal).
-            // Leave the slot pointing at OLD so the imminent adoption
-            // signal can transition it atomically.
-            //
-            // Safety valve: the adoption signal can be dropped if the
-            // bounded AlgoSignalQueue is full when ApplyReplaceAccepted
-            // tries to enqueue (TryEnqueue returns false and bumps
-            // AlgoSignalsDropped). Without a fallback the parent would
-            // be wedged on the terminal OLD child until process restart.
-            // After PeggedReplacedHoldMaxTicks consecutive evaluations
-            // where we still see OLD as Replaced, recover the replacement
-            // directly from the order book. ApplyReplaceAccepted hydrates
-            // it before attempting to enqueue the adoption signal, so
-            // clearing the slot here could submit a second live child.
-            if (child is not null && child.Status == OrderStatus.Replaced)
-            {
-                rt.PeggedReplacedHoldTicks++;
-                if (rt.PeggedReplacedHoldTicks < AlgoParentRuntime.PeggedReplacedHoldMaxTicks)
-                    return;
-
-                var replacements = _orders
-                    .EnumerateChildrenOf(algo.FirmId, algo.AlgoId)
-                    .Where(candidate =>
-                        candidate.ClOrdId != liveChildClOrdId
-                        && _ownership.TryResolveOrig(
-                            candidate.ClOrdId,
-                            out var candidateOriginal)
-                        && candidateOriginal == liveChildClOrdId)
-                    .ToArray();
-                if (replacements.Length == 1)
-                {
-                    var replacement = replacements[0];
-                    _logger.LogWarning(
-                        "AlgoEngine Pegged repeg: adoption signal for replacement {Replacement} of child {Child} on {Firm}/{AlgoId} appears dropped after {Ticks} ticks; adopting the hydrated replacement from the order book.",
-                        replacement.ClOrdId,
-                        liveChildClOrdId,
-                        algo.FirmId,
-                        algo.AlgoId,
-                        rt.PeggedReplacedHoldTicks);
-                    await OnChildErAsync(
-                        algo,
-                        rt,
-                        new ChildExecutionObservedSignal
-                        {
-                            FirmId = algo.FirmId,
-                            AlgoId = algo.AlgoId,
-                            ChildClOrdId = replacement.ClOrdId,
-                        },
-                        ct).ConfigureAwait(false);
-                    if (algo.IsTerminal
-                        || rt.LiveChildClOrdId == replacement.ClOrdId)
-                    {
-                        return;
-                    }
-
-                    await FailClosedPeggedRepegAsync(
-                        algo,
-                        rt,
-                        liveChildClOrdId,
-                        "hydrated replacement could not be adopted by the dropped-signal watchdog")
-                        .ConfigureAwait(false);
-                    return;
-                }
-
-                await FailClosedPeggedRepegAsync(
-                    algo,
-                    rt,
-                    liveChildClOrdId,
-                    replacements.Length == 0
-                        ? "dropped adoption signal but no hydrated replacement was found"
-                        : "dropped adoption signal matched multiple replacement children")
-                    .ConfigureAwait(false);
-                return;
-            }
-            rt.PeggedReplacedHoldTicks = 0;
-            rt.LiveChildClOrdId = null;
+            await ReconcileLiveChildAgainstBookAsync(algo, rt, ct).ConfigureAwait(false);
             return;
         }
 
         // Non-terminal child observed — clear the dropped-adoption
         // watchdog so a future Replaced does not inherit a stale count.
-        rt.PeggedReplacedHoldTicks = 0;
+        rt.ReplacedAdoptionHoldTicks = 0;
 
         // Throttle: don't start a NEW cycle while one is in flight.
         // Moved here from before the terminal block (PR #334 code review)
@@ -3193,8 +3175,8 @@ public sealed class AlgoEngine : BackgroundService
         // ERs do not flip the parent to Suspended/VenueCancelled).
         public ulong? LastRepegCancelledChildId;
 
-        // #329. Watchdog for the adoption-signal-dropped recovery in
-        // EvaluatePeggedRepegAsync. Counts consecutive scheduler-tick
+        // #329. Watchdog for adoption-signal-dropped recovery in
+        // ReconcileLiveChildAgainstBookAsync. Counts consecutive reactor
         // observations where the live child is terminal with status
         // Replaced (i.e. an adoption signal is expected but hasn't been
         // processed yet). Cleared on any non-Replaced observation OR
@@ -3203,7 +3185,7 @@ public sealed class AlgoEngine : BackgroundService
         // within one tick) never triggers it; only a genuinely dropped
         // signal due to a full bounded queue lets the count reach the
         // ceiling and force order-book adoption or fail-closed recovery.
-        public int PeggedReplacedHoldTicks;
-        public const int PeggedReplacedHoldMaxTicks = 10;
+        public int ReplacedAdoptionHoldTicks;
+        public const int ReplacedAdoptionHoldMaxTicks = 10;
     }
 }
