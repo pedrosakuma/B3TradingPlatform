@@ -19,8 +19,9 @@ services:
   # Add an admin-role seed user so the conformance suite can hit /admin/*.
   # Reuses alice's hash/salt (PBKDF2 is deterministic on plaintext+salt)
   # under a different username + role=admin, so no extra secret-management
-  # is required. Slot Users__4 to avoid colliding with base (alice=0,
-  # bob=3) and demo (bot-clientA=1, bot-clientB=2).
+  # is required. Slots Users__4 and Users__8 avoid colliding with base
+  # (alice=0, bob=5, firm users=6-7) and demo (bot-clientA=1,
+  # bot-clientB=2, demo-admin=3).
   trading-host:
     environment:
       Trading__Auth__Users__4__Username: ${TRADING_ADMIN_USER:-carol}
@@ -28,7 +29,13 @@ services:
       Trading__Auth__Users__4__Salt: ${TRADING_SEED_PASSWORD_SALT:?Set TRADING_SEED_PASSWORD_SALT in .env (base64)}
       Trading__Auth__Users__4__Iterations: "600000"
       Trading__Auth__Users__4__Role: admin
-      Trading__Auth__Users__4__Firm: default
+      Trading__Auth__Users__4__Firm: FIRM01
+      Trading__Auth__Users__8__Username: ${TRADING_CHECKER_USER:-dave}
+      Trading__Auth__Users__8__PasswordHash: ${TRADING_SEED_PASSWORD_HASH:?Set TRADING_SEED_PASSWORD_HASH in .env (PBKDF2 base64)}
+      Trading__Auth__Users__8__Salt: ${TRADING_SEED_PASSWORD_SALT:?Set TRADING_SEED_PASSWORD_SALT in .env (base64)}
+      Trading__Auth__Users__8__Iterations: "600000"
+      Trading__Auth__Users__8__Role: admin
+      Trading__Auth__Users__8__Firm: FIRM01
       # #416. Margin enforcement now defaults to ON. The conformance smoke
       # user (alice by default) submits real Buy orders in multiple specs,
       # so fund the account up front the same way an operator would.
@@ -91,6 +98,8 @@ services:
       # password material, different username + admin role.
       B3T_ADMIN_USER: ${TRADING_ADMIN_USER:-carol}
       B3T_ADMIN_PASS: ${TRADING_SEED_PASSWORD:-wonderland}
+      B3T_CHECKER_USER: ${TRADING_CHECKER_USER:-dave}
+      B3T_CHECKER_PASS: ${TRADING_SEED_PASSWORD:-wonderland}
       # Mirror the host's HS256 signing key into the conformance container
       # so scenarios that need to mint deterministic tokens (e.g. expired-
       # JWT rejection, see Spec_HTTP_Auth/ExpiredTokenTests) can sign with

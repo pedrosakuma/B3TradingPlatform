@@ -9,6 +9,18 @@ using Microsoft.Extensions.Logging;
 
 namespace B3.Trading.Application;
 
+public enum OutboundSubmissionFaultPoint
+{
+    BeforeRecordedIntentAdmission,
+    AfterRecordedIntentCommittedBeforeRisk,
+    AfterRiskRejectedBeforeRejectionCommit,
+}
+
+public interface IOutboundSubmissionFaultInjector
+{
+    void OnBoundary(OutboundSubmissionFaultPoint point);
+}
+
 /// <summary>
 /// The "submit an order" pipeline extracted from <c>POST /orders</c> so it
 /// can be reused by the algo engine (RFC algo-orders-v0 §4.3). Manual
@@ -49,6 +61,7 @@ public sealed class OrderSubmissionService
     private readonly RestOrderIdempotencyStore? _restIdempotency;
     private readonly TimeProvider _clock;
     private readonly IOutboundRecoveryGate _outboundRecovery;
+    private readonly IOutboundSubmissionFaultInjector? _faultInjector;
 
     public OrderSubmissionService(
         ClOrdIdPrefixRegistry clOrdIds,
@@ -72,7 +85,8 @@ public sealed class OrderSubmissionService
         NewOrderOutboundCoordinator? outboundCoordinator = null,
         RestOrderIdempotencyStore? restIdempotency = null,
         TimeProvider? clock = null,
-        IOutboundRecoveryGate? outboundRecovery = null)
+        IOutboundRecoveryGate? outboundRecovery = null,
+        IOutboundSubmissionFaultInjector? faultInjector = null)
     {
         _clOrdIds = clOrdIds;
         _ownership = ownership;
@@ -96,6 +110,7 @@ public sealed class OrderSubmissionService
         _restIdempotency = restIdempotency;
         _clock = clock ?? TimeProvider.System;
         _outboundRecovery = outboundRecovery ?? ImmediateOutboundRecoveryGate.Instance;
+        _faultInjector = faultInjector;
     }
 
     /// <summary>
@@ -211,6 +226,8 @@ public sealed class OrderSubmissionService
 
         try
         {
+            _faultInjector?.OnBoundary(
+                OutboundSubmissionFaultPoint.BeforeRecordedIntentAdmission);
             // Sub-issue #171 (E): when the order originates from the FIXP
             // listener, the WAL event carries the BotMapping side-record
             // (RFC §4.6 / §4.8) and the apply callback registers the
@@ -289,6 +306,8 @@ public sealed class OrderSubmissionService
                         _restIdempotency?.Apply(restIdempotency);
                 },
                 CancellationToken.None);
+            _faultInjector?.OnBoundary(
+                OutboundSubmissionFaultPoint.AfterRecordedIntentCommittedBeforeRisk);
         }
         catch (WalBackpressureException ex)
         {
@@ -380,6 +399,8 @@ public sealed class OrderSubmissionService
         }
         if (!decision.Approved)
         {
+            _faultInjector?.OnBoundary(
+                OutboundSubmissionFaultPoint.AfterRiskRejectedBeforeRejectionCommit);
             var reason = decision.Reason ?? "risk_rejected";
             var code = decision.Code ?? "risk_rejected";
             MetricsRegistry.OrdersRejectedByRisk.Add(1,

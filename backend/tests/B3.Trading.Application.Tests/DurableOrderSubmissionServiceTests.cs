@@ -11,6 +11,77 @@ namespace B3.Trading.Application.Tests;
 public sealed class DurableOrderSubmissionServiceTests
 {
     [Fact]
+    public async Task C01_CrashBeforeRecordedIntentAdmission_RetryReusesUncommittedClOrdId()
+    {
+        var crashed = CreateFixture(
+            Array.Empty<IRiskCheck>(),
+            faultInjector: new ThrowingFaultInjector(
+                OutboundSubmissionFaultPoint.BeforeRecordedIntentAdmission));
+
+        await Assert.ThrowsAsync<SimulatedCrashException>(
+            () => crashed.Service.SubmitAsync(Request(), CancellationToken.None));
+
+        Assert.Empty(crashed.Store.Events);
+        Assert.Equal(0, crashed.Gateway.CallCount);
+
+        var restarted = CreateFixture(Array.Empty<IRiskCheck>());
+        var retry = await restarted.Service.SubmitAsync(
+            Request(),
+            CancellationToken.None);
+
+        Assert.Equal(OrderSubmissionResultKind.Accepted, retry.Kind);
+        Assert.Equal(1UL, retry.ClOrdId);
+        Assert.Equal(1, restarted.Gateway.CallCount);
+    }
+
+    [Fact]
+    public async Task C03_CrashAfterIntentCommitBeforeRisk_RestartsFailClosedWithoutPolicyVersion()
+    {
+        var fixture = CreateFixture(
+            Array.Empty<IRiskCheck>(),
+            faultInjector: new ThrowingFaultInjector(
+                OutboundSubmissionFaultPoint.AfterRecordedIntentCommittedBeforeRisk));
+
+        await Assert.ThrowsAsync<SimulatedCrashException>(
+            () => fixture.Service.SubmitAsync(Request(), CancellationToken.None));
+
+        var submitted = Assert.IsType<OrderSubmittedEvent>(
+            Assert.Single(fixture.Store.Events));
+        Assert.Equal(0, fixture.Gateway.CallCount);
+
+        var recovered = RecoverIntentOnly(submitted);
+        var mutation = Assert.Single(recovered.SnapshotMutations());
+        Assert.Equal(OutboundMutationState.LegacyUnknown, mutation.State);
+        Assert.True(mutation.RequiresReconciliation);
+        Assert.Equal(1, recovered.ReadinessBlockingCount);
+    }
+
+    [Fact]
+    public async Task C04_CrashAfterRiskRejectBeforeCommit_ReevaluatesAsUnknownNotPriorReject()
+    {
+        var fixture = CreateFixture(
+            [new RejectingRiskCheck()],
+            faultInjector: new ThrowingFaultInjector(
+                OutboundSubmissionFaultPoint.AfterRiskRejectedBeforeRejectionCommit));
+
+        await Assert.ThrowsAsync<SimulatedCrashException>(
+            () => fixture.Service.SubmitAsync(Request(), CancellationToken.None));
+
+        var submitted = Assert.IsType<OrderSubmittedEvent>(
+            Assert.Single(fixture.Store.Events));
+        Assert.DoesNotContain(
+            fixture.Store.Events,
+            evt => evt is ExecutionReportReceivedEvent);
+        Assert.Equal(0, fixture.Gateway.CallCount);
+
+        var recovered = RecoverIntentOnly(submitted);
+        var mutation = Assert.Single(recovered.SnapshotMutations());
+        Assert.Equal(OutboundMutationState.LegacyUnknown, mutation.State);
+        Assert.Null(mutation.Resolution);
+        Assert.True(mutation.RequiresReconciliation);
+    }
+
+    [Fact]
     public async Task ApprovedSubmit_CommitsPendingApprovalIntentFrameAndWriteInOrder()
     {
         var fixture = CreateFixture(Array.Empty<IRiskCheck>());
@@ -154,7 +225,8 @@ public sealed class DurableOrderSubmissionServiceTests
     private static Fixture CreateFixture(
         IEnumerable<IRiskCheck> checks,
         CompletingGateway? gateway = null,
-        RecordingStore? store = null)
+        RecordingStore? store = null,
+        IOutboundSubmissionFaultInjector? faultInjector = null)
     {
         var protector = new AeadOutboundCommandProtector(
             new OutboundCommandProtectionOptions
@@ -206,8 +278,17 @@ public sealed class DurableOrderSubmissionServiceTests
             NullLogger<OrderSubmissionService>.Instance,
             outboundLedger: ledger,
             approvalFactory: new NewOrderApprovalFactory(protector),
-            outboundCoordinator: coordinator);
+            outboundCoordinator: coordinator,
+            faultInjector: faultInjector);
         return new Fixture(service, store, gateway, margin, book, ledger, drain);
+    }
+
+    private static OutboundMutationLedger RecoverIntentOnly(
+        OrderSubmittedEvent submitted)
+    {
+        var ledger = new OutboundMutationLedger();
+        ledger.ImportLegacyNew(submitted);
+        return ledger;
     }
 
     private static OrderSubmissionRequest Request() =>
@@ -240,6 +321,19 @@ public sealed class DurableOrderSubmissionServiceTests
         public RiskDecision Check(RiskContext ctx) =>
             RiskDecision.Reject("test_reject", "rejected by test");
     }
+
+    private sealed class ThrowingFaultInjector(OutboundSubmissionFaultPoint target)
+        : IOutboundSubmissionFaultInjector
+    {
+        public void OnBoundary(OutboundSubmissionFaultPoint point)
+        {
+            if (point == target)
+                throw new SimulatedCrashException(point);
+        }
+    }
+
+    private sealed class SimulatedCrashException(OutboundSubmissionFaultPoint point)
+        : Exception($"Simulated process crash at {point}.");
 
     private class CompletingGateway : IExchangeGateway
     {

@@ -2863,6 +2863,67 @@ public sealed class OutboundMutationLedgerTests
     }
 
     [Fact]
+    public void C16_ExecutionReportReceivedButNotAdmitted_DrainsUntilRetransmission()
+    {
+        var fixture = Fixture.Create();
+        ApplyPrepared(fixture.Ledger, fixture, fixture.Frame);
+        var order = AddPendingOrder(fixture.ClOrdId);
+        var ownership = Ownership(order);
+        var orders = new WorkingOrderBook();
+        Assert.True(orders.TryAdd(order));
+        var processor = new ExecutionReportProcessor(
+            ownership,
+            orders,
+            new PositionKeeper(),
+            new NoOpExecutionEventSink(),
+            new NoOpMarginProvider(),
+            NullLogger<ExecutionReportProcessor>.Instance);
+        var drain = new TestDrain();
+        var rejectedClient = new MockEntryPointClient();
+        using (var rejectedRouter = new EntryPointExecutionReportRouter(
+                   rejectedClient,
+                   processor,
+                   new EventDispatcher(new RejectingAdmissionStore()),
+                   orders,
+                   bookTop: null,
+                   drain,
+                   fixture.Ledger))
+        {
+            Assert.Throws<WalFaultedException>(() =>
+                rejectedClient.EmitExecutionReport(
+                    ExactNewEnvelope(fixture.ClOrdId, inboundSeqNum: 90)));
+        }
+
+        Assert.True(drain.IsDraining);
+        Assert.Equal(OrderStatus.PendingNew, order.Status);
+        Assert.Equal(0, fixture.Ledger.InboundEvidenceCount);
+        AssertState(fixture, OutboundMutationState.FramePrepared);
+
+        var retransmitClient = new MockEntryPointClient();
+        using var retransmitRouter = new EntryPointExecutionReportRouter(
+            retransmitClient,
+            processor,
+            new EventDispatcher(new CommitTrackingStore()),
+            orders,
+            bookTop: null,
+            drain: null,
+            fixture.Ledger);
+        var retransmission = ExactNewEnvelope(
+            fixture.ClOrdId,
+            inboundSeqNum: 90) with
+        {
+            PossibleResend = true,
+        };
+
+        retransmitClient.EmitExecutionReport(retransmission);
+        retransmitClient.EmitExecutionReport(retransmission);
+
+        Assert.Equal(OrderStatus.Working, order.Status);
+        AssertState(fixture, OutboundMutationState.VenueAcknowledged);
+        Assert.Equal(1, fixture.Ledger.InboundEvidenceCount);
+    }
+
+    [Fact]
     public void Crypto_RotatesDecryptsHistoricalKeys_AndRejectsMissingWrongOrTamperedKeys()
     {
         var oldProtector = Protector(("old", 1, Key(1)), active: ("old", 1));
@@ -4234,6 +4295,33 @@ public sealed class OutboundMutationLedgerTests
             }
         }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class RejectingAdmissionStore : IEventStore
+    {
+        public long CurrentSeq => 0;
+        public long LastCommittedSeq => 0;
+        public long Append(WalEvent evt) => throw Failure();
+        public long Append(WalEvent evt, ReadOnlyMemory<byte> payload) =>
+            throw Failure();
+        public ValueTask FlushAsync(CancellationToken ct = default) =>
+            ValueTask.FromException(Failure());
+        public ValueTask FlushThroughAsync(
+            long seq,
+            CancellationToken ct = default) =>
+            ValueTask.FromException(Failure());
+        public async IAsyncEnumerable<(long Seq, WalEvent Event)> ReadFromAsync(
+            long sinceSeqExclusive,
+            [System.Runtime.CompilerServices.EnumeratorCancellation]
+            CancellationToken ct = default)
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+        private static WalFaultedException Failure() =>
+            new("inbound admission rejected", new IOException("injected"));
     }
 
     [Fact]

@@ -248,6 +248,39 @@ public sealed class CommittedPrefixFileEventStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task C17_ExecutionReportAppendedButNotCommitted_IsDiscardedAndRetransmitted()
+    {
+        var options = Options("er-uncommitted-tail");
+        var applied = 0;
+        await using (var store = NewStore(
+                         options,
+                         new ThrowAtBoundaryHooks(WalCommitBoundary.LogFsynced)))
+        {
+            var dispatcher = new EventDispatcher(store);
+            await Assert.ThrowsAsync<WalFaultedException>(() =>
+                Task.Run(() => dispatcher.DispatchCommitted(
+                    NewExecutionReport(),
+                    () => applied++)));
+            Assert.Equal(0, applied);
+            Assert.Equal(0, store.LastCommittedSeq);
+        }
+
+        await using (var recovered = NewStore(options))
+        {
+            Assert.Empty(await ReplayEvents(recovered));
+            var dispatcher = new EventDispatcher(recovered);
+            dispatcher.DispatchCommitted(
+                NewExecutionReport() with { PossibleResend = true },
+                () => applied++);
+        }
+
+        Assert.Equal(1, applied);
+        await using var final = NewStore(options);
+        var replayed = Assert.Single(await ReplayEvents(final));
+        Assert.True(Assert.IsType<ExecutionReportReceivedEvent>(replayed).PossibleResend);
+    }
+
+    [Fact]
     public async Task CorruptionBeyondMarker_IsQuarantinedByTruncationWithoutInspection()
     {
         var options = Options("corrupt-survivor");
@@ -698,6 +731,14 @@ public sealed class CommittedPrefixFileEventStoreTests : IDisposable
         return ids.ToArray();
     }
 
+    private static async Task<WalEvent[]> ReplayEvents(FileEventStore store)
+    {
+        var events = new List<WalEvent>();
+        await foreach (var (_, evt) in store.ReadFromAsync(0))
+            events.Add(evt);
+        return events.ToArray();
+    }
+
     private static async Task WriteLegacySegment(
         PersistenceOptions options,
         string dayDirectory,
@@ -741,6 +782,29 @@ public sealed class CommittedPrefixFileEventStoreTests : IDisposable
         Quantity = 100,
         Price = 30m,
         TimestampUtc = new DateTimeOffset(2026, 1, 1, 12, 0, 0, TimeSpan.Zero),
+    };
+
+    private static ExecutionReportReceivedEvent NewExecutionReport() => new()
+    {
+        ClOrdId = 1,
+        ExecKind = "New",
+        LeavesQuantity = 100,
+        CumulativeQuantity = 0,
+        LastQuantity = 0,
+        LastPrice = 0,
+        Synthetic = false,
+        FirmId = "TEST",
+        SessionId = 11,
+        SessionVerId = 2,
+        InboundSeqNum = 90,
+        TimestampUtc = new DateTimeOffset(
+            2026,
+            1,
+            1,
+            12,
+            0,
+            1,
+            TimeSpan.Zero),
     };
 
     private sealed class ThrowAtBoundaryHooks(
