@@ -1023,6 +1023,67 @@ public class PeggedAlgoEndpointTests
     }
 
     [Fact]
+    public async Task Pegged_DroppedReplacementAdoptionSignal_AdoptsHydratedChildWithoutResubmit()
+    {
+        using var f = TestAppFactory.WithOverrides(
+            Simulator(),
+            services =>
+            {
+                services.RemoveAll<IAlgoSignalQueue>();
+                services.AddSingleton<DroppingAlgoSignalQueue>();
+                services.AddSingleton<IAlgoSignalQueue>(sp =>
+                    sp.GetRequiredService<DroppingAlgoSignalQueue>());
+            });
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100));
+        var algoIdValue = ulong.Parse(algoId);
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var original = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        var engine = f.Services.GetRequiredService<AlgoEngine>();
+        var signals = f.Services.GetRequiredService<DroppingAlgoSignalQueue>();
+
+        cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+        await WaitFor(
+            () => mock.SubmittedReplaces.Any(request =>
+                request.OriginalClOrdId == original.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "repeg was not submitted");
+        var replace = mock.SubmittedReplaces.Single(request =>
+            request.OriginalClOrdId == original.ClOrdId);
+        var newOrdersBeforeAdoption = mock.SubmittedNewOrders.Count;
+        signals.DropNextChildExecutionSignal(replace.NewClOrdId);
+
+        await InjectReplacedEr(
+            http,
+            adminToken,
+            replace.NewClOrdId,
+            replace.OriginalClOrdId,
+            replace.NewQuantity);
+        await WaitFor(
+            () => engine.TryGetLiveChildClOrdId("default", algoIdValue)
+                == replace.NewClOrdId,
+            TimeSpan.FromSeconds(5),
+            "watchdog did not adopt the hydrated replacement");
+
+        await Task.Delay(300);
+        Assert.Equal(newOrdersBeforeAdoption, mock.SubmittedNewOrders.Count);
+        var liveChildren = book.EnumerateChildrenOf("default", algoIdValue)
+            .Where(child => child.Status is
+                OrderStatus.PendingNew
+                or OrderStatus.Working
+                or OrderStatus.PartiallyFilled)
+            .ToList();
+        var adopted = Assert.Single(liveChildren);
+        Assert.Equal(replace.NewClOrdId, adopted.ClOrdId);
+    }
+
+    [Fact]
     public async Task Pegged_ProvenUnsentRepeg_AttemptCapSuspendsForReconciliation()
     {
         using var f = TestAppFactory.WithOverrides(
@@ -2368,6 +2429,36 @@ public class PeggedAlgoEndpointTests
                 command,
                 onFramePrepared,
                 cancellationToken);
+        }
+    }
+
+    private sealed class DroppingAlgoSignalQueue : IAlgoSignalQueue
+    {
+        private readonly AlgoSignalQueue _inner;
+        private long _childClOrdIdToDrop;
+
+        public DroppingAlgoSignalQueue(AlgoSignalQueue inner) =>
+            _inner = inner;
+
+        public void DropNextChildExecutionSignal(ulong childClOrdId) =>
+            Interlocked.Exchange(
+                ref _childClOrdIdToDrop,
+                unchecked((long)childClOrdId));
+
+        public bool TryEnqueue(AlgoSignal signal)
+        {
+            if (signal is ChildExecutionObservedSignal child)
+            {
+                var expected = unchecked((long)child.ChildClOrdId);
+                if (Interlocked.CompareExchange(
+                        ref _childClOrdIdToDrop,
+                        0,
+                        expected) == expected)
+                {
+                    return false;
+                }
+            }
+            return _inner.TryEnqueue(signal);
         }
     }
 }

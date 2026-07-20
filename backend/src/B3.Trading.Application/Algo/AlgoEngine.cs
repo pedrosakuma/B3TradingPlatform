@@ -2589,75 +2589,69 @@ public sealed class AlgoEngine : BackgroundService
             // AlgoSignalsDropped). Without a fallback the parent would
             // be wedged on the terminal OLD child until process restart.
             // After PeggedReplacedHoldMaxTicks consecutive evaluations
-            // where we still see OLD as Replaced, give up on the
-            // adoption signal, clear the slot, and let the next tick
-            // resubmit from the empty path. The threshold is generous
-            // (≈1 second @ 100ms scheduler tick) so the normal in-order
-            // case always lands before fallback kicks in.
+            // where we still see OLD as Replaced, recover the replacement
+            // directly from the order book. ApplyReplaceAccepted hydrates
+            // it before attempting to enqueue the adoption signal, so
+            // clearing the slot here could submit a second live child.
             if (child is not null && child.Status == OrderStatus.Replaced)
             {
                 rt.PeggedReplacedHoldTicks++;
                 if (rt.PeggedReplacedHoldTicks < AlgoParentRuntime.PeggedReplacedHoldMaxTicks)
                     return;
-                _logger.LogWarning(
-                    "AlgoEngine Pegged repeg: live child {Child} on {Firm}/{AlgoId} observed terminal=Replaced for {Ticks} ticks; adoption signal appears dropped — clearing slot and resubmitting on next tick.",
-                    liveChildClOrdId, algo.FirmId, algo.AlgoId, rt.PeggedReplacedHoldTicks);
 
-                // #300 (PR #334) code-review fix. The dropped-adoption
-                // fallback must also wind down the cancel-replace cycle
-                // it started: release the pending replace intent + its
-                // margin reservation, clear RepegPending, and emit the
-                // Resolved-with-Aborted WAL companion if a Started was
-                // already persisted. Without this the parent leaks a
-                // PendingReplacementRegistry row + a reserve-margin
-                // entry indefinitely AND the audit pair stays
-                // unbalanced. Best-effort under WAL backpressure —
-                // Reconcile's orphan-prune covers the audit-pair gap on
-                // the next restart.
-                if (rt.RepegPending)
+                var replacements = _orders
+                    .EnumerateChildrenOf(algo.FirmId, algo.AlgoId)
+                    .Where(candidate =>
+                        candidate.ClOrdId != liveChildClOrdId
+                        && _ownership.TryResolveOrig(
+                            candidate.ClOrdId,
+                            out var candidateOriginal)
+                        && candidateOriginal == liveChildClOrdId)
+                    .ToArray();
+                if (replacements.Length == 1)
                 {
-                    rt.RepegPending = false;
-                    if (_replacements is not null
-                        && _replacements.TryConsumeByOriginal(liveChildClOrdId, out var staleIntent, out var staleAmbiguous)
-                        && staleIntent is not null
-                        && _replaceMargin is not null)
+                    var replacement = replacements[0];
+                    _logger.LogWarning(
+                        "AlgoEngine Pegged repeg: adoption signal for replacement {Replacement} of child {Child} on {Firm}/{AlgoId} appears dropped after {Ticks} ticks; adopting the hydrated replacement from the order book.",
+                        replacement.ClOrdId,
+                        liveChildClOrdId,
+                        algo.FirmId,
+                        algo.AlgoId,
+                        rt.PeggedReplacedHoldTicks);
+                    await OnChildErAsync(
+                        algo,
+                        rt,
+                        new ChildExecutionObservedSignal
+                        {
+                            FirmId = algo.FirmId,
+                            AlgoId = algo.AlgoId,
+                            ChildClOrdId = replacement.ClOrdId,
+                        },
+                        ct).ConfigureAwait(false);
+                    if (algo.IsTerminal
+                        || rt.LiveChildClOrdId == replacement.ClOrdId)
                     {
-                        try { _replaceMargin.AbortReplace(staleIntent.NewClOrdId); }
-                        catch (Exception abortEx)
-                        {
-                            _logger.LogWarning(abortEx,
-                                "AlgoEngine Pegged repeg watchdog: AbortReplace failed for new ClOrdID {NewClOrdId} (ambiguousHeld={Ambiguous}).",
-                                staleIntent.NewClOrdId, staleAmbiguous);
-                        }
+                        return;
                     }
-                    if (_peggedRepeg?.TryGet(algo.FirmId, algo.AlgoId) is not null)
-                    {
-                        try
-                        {
-                            var firmIdSnap = algo.FirmId;
-                            var algoIdSnap = algo.AlgoId;
-                            var cancelledIdSnap = liveChildClOrdId;
-                            var atUtcSnap = _clock.GetUtcNow();
-                            var book = _peggedRepeg;
-                            _dispatcher.Dispatch(
-                                new AlgoPeggedRepegResolvedEvent
-                                {
-                                    AlgoId = algoIdSnap,
-                                    FirmId = firmIdSnap,
-                                    CancelledChildClOrdId = cancelledIdSnap,
-                                    AtUtc = atUtcSnap,
-                                    Aborted = true,
-                                },
-                                () => book?.Remove(firmIdSnap, algoIdSnap));
-                        }
-                        catch (WalBackpressureException)
-                        {
-                            MetricsRegistry.WalBackpressure.Add(1,
-                                new KeyValuePair<string, object?>("call_site", "algo.pegged.repeg-resolved.watchdog"));
-                        }
-                    }
-                    MetricsRegistry.AlgoPeggedRepegFailed.Add(1);
+
+                    await FailClosedPeggedRepegAsync(
+                        algo,
+                        rt,
+                        liveChildClOrdId,
+                        "hydrated replacement could not be adopted by the dropped-signal watchdog")
+                        .ConfigureAwait(false);
+                    return;
                 }
+
+                await FailClosedPeggedRepegAsync(
+                    algo,
+                    rt,
+                    liveChildClOrdId,
+                    replacements.Length == 0
+                        ? "dropped adoption signal but no hydrated replacement was found"
+                        : "dropped adoption signal matched multiple replacement children")
+                    .ConfigureAwait(false);
+                return;
             }
             rt.PeggedReplacedHoldTicks = 0;
             rt.LiveChildClOrdId = null;
@@ -3208,7 +3202,7 @@ public sealed class AlgoEngine : BackgroundService
         // normal in-order case (signal queued, consumer picks it up
         // within one tick) never triggers it; only a genuinely dropped
         // signal due to a full bounded queue lets the count reach the
-        // ceiling and force a fallback resubmit.
+        // ceiling and force order-book adoption or fail-closed recovery.
         public int PeggedReplacedHoldTicks;
         public const int PeggedReplacedHoldMaxTicks = 10;
     }
