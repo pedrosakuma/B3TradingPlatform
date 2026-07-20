@@ -183,6 +183,57 @@ public class AlgoSchedulerTests
     }
 
     [Fact]
+    public void Tick_SoleProvenUnsentRepeg_EnqueuesPeggedRetry()
+    {
+        var ledger = new OutboundMutationLedger();
+        ledger.Restore(
+            [
+                new OutboundMutationSnapshot
+                {
+                    MutationId = OutboundMutationId.New(),
+                    Kind = OutboundMutationKind.Replace,
+                    FirmId = Firm,
+                    EndClientRef = new string('a', 32),
+                    Origin = OutboundMutationOrigin.Algo,
+                    AlgoOriginIdentity = new AlgoOutboundOriginIdentity(
+                        2,
+                        AlgoOutboundActionKind.Repeg,
+                        0),
+                    PrimaryClOrdId = 7002,
+                    OriginalClOrdId = 7001,
+                    RecordedAtUtc = Start,
+                    State = OutboundMutationState.ProvenUnsent,
+                    StateChangedAtUtc = Start,
+                },
+            ],
+            Array.Empty<OutboundCorrelationTombstone>());
+        var (algos, _, queue, _, scheduler) = Build(Start, ledger);
+        var pegged = new Algo(
+            2,
+            new EndClientId("alice"),
+            Firm,
+            "PETR4",
+            4321,
+            OrderSide.Buy,
+            AlgoType.Pegged,
+            100,
+            new PeggedParameters(
+                PegRef.Mid,
+                0,
+                TimeSpan.FromMilliseconds(100),
+                0.01m,
+                OrderType.Limit,
+                null),
+            Start);
+        algos.TryAdd(pegged);
+
+        scheduler.Tick();
+
+        var signal = Assert.IsType<AlgoCreatedSignal>(Assert.Single(Drain(queue)));
+        Assert.Equal(pegged.AlgoId, signal.AlgoId);
+    }
+
+    [Fact]
     public void Tick_WithLiveChild_DoesNotEnqueue()
     {
         // Engine invariant: only one in-flight child per parent. Scheduler

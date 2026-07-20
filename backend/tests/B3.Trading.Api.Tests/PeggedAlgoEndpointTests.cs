@@ -1154,6 +1154,62 @@ public class PeggedAlgoEndpointTests
     }
 
     [Fact]
+    public async Task Pegged_ProvenUnsentRepeg_RetriesSameOriginAndSelfHeals()
+    {
+        using var f = TestAppFactory.WithOverrides(
+            Simulator(),
+            services =>
+            {
+                services.RemoveAll<IExchangeGateway>();
+                services.AddSingleton<ProvenUnsentCancelGateway>();
+                services.AddSingleton<IExchangeGateway>(sp =>
+                    sp.GetRequiredService<ProvenUnsentCancelGateway>());
+            });
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var gateway = f.Services.GetRequiredService<ProvenUnsentCancelGateway>();
+        gateway.ProvenUnsentReplaceFailuresRemaining = 1;
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        await WaitFor(
+            () => mock.SubmittedNewOrders.Any(order => order.ClOrdId == child.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "initial child was not dispatched");
+
+        cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+        await WaitFor(
+            () => gateway.AttemptedReplaceClOrdIds.Count == 2,
+            TimeSpan.FromSeconds(3),
+            "ProvenUnsent repeg was not retried");
+        await WaitFor(
+            () => mock.SubmittedReplaces.Count == 1,
+            TimeSpan.FromSeconds(3),
+            "repeg retry did not self-heal through a successful transport write");
+
+        var ledger = f.Services.GetRequiredService<
+            B3.Trading.Application.Outbound.OutboundMutationLedger>();
+        var repeg = Assert.Single(
+            ledger.GetAlgoMutations("default", ulong.Parse(algoId)),
+            m => m.AlgoOriginIdentity?.ActionKind
+                == B3.Trading.Application.Outbound.AlgoOutboundActionKind.Repeg);
+        Assert.Equal(2, repeg.Attempts.Count);
+        Assert.Equal(
+            B3.Trading.Application.Outbound.OutboundMutationState.TransportWriteCompleted,
+            repeg.State);
+        Assert.NotEqual(
+            gateway.AttemptedReplaceClOrdIds.ElementAt(0),
+            gateway.AttemptedReplaceClOrdIds.ElementAt(1));
+        Assert.Equal(
+            gateway.AttemptedReplaceClOrdIds.ElementAt(1),
+            mock.SubmittedReplaces.Single().NewClOrdId);
+    }
+
+    [Fact]
     public async Task Pegged_RecoveryWithUnresolvedOutbound_KeepsReconcileAndSchedulingGated()
     {
         // A restart with an unresolved outbound child must classify the
@@ -1926,6 +1982,7 @@ public class PeggedAlgoEndpointTests
     private sealed class ProvenUnsentCancelGateway : IExchangeGateway
     {
         private readonly EntryPointClientGateway _inner;
+        private int _provenUnsentReplaceFailuresRemaining = int.MaxValue;
 
         public ProvenUnsentCancelGateway(EntryPointClientGateway inner) =>
             _inner = inner;
@@ -1936,6 +1993,11 @@ public class PeggedAlgoEndpointTests
         public System.Collections.Concurrent.ConcurrentQueue<ulong>
             AttemptedReplaceClOrdIds
         { get; } = new();
+        public int ProvenUnsentReplaceFailuresRemaining
+        {
+            get => Volatile.Read(ref _provenUnsentReplaceFailuresRemaining);
+            set => Volatile.Write(ref _provenUnsentReplaceFailuresRemaining, value);
+        }
 
         public Task SubmitAsync(Order order, CancellationToken cancellationToken) =>
             _inner.SubmitAsync(order, cancellationToken);
@@ -1998,12 +2060,19 @@ public class PeggedAlgoEndpointTests
             CancellationToken cancellationToken)
         {
             AttemptedReplaceClOrdIds.Enqueue(command.Canonical.ClOrdId);
-            return Task.FromException<ExchangeGatewayReceipt>(
-                new ExchangeGatewayAttemptException(
-                    "typed pre-frame replace failure",
-                    ExchangeGatewayFailureDisposition.OutboundProvenUnsent,
-                    ExchangeGatewayAttemptStage.NotStarted,
-                    frame: null));
+            if (Interlocked.Decrement(ref _provenUnsentReplaceFailuresRemaining) >= 0)
+            {
+                return Task.FromException<ExchangeGatewayReceipt>(
+                    new ExchangeGatewayAttemptException(
+                        "typed pre-frame replace failure",
+                        ExchangeGatewayFailureDisposition.OutboundProvenUnsent,
+                        ExchangeGatewayAttemptStage.NotStarted,
+                        frame: null));
+            }
+            return _inner.CancelReplaceWithReceiptAsync(
+                command,
+                onFramePrepared,
+                cancellationToken);
         }
     }
 }

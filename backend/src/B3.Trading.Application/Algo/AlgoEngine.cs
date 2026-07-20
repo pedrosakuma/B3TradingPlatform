@@ -107,6 +107,7 @@ public sealed class AlgoEngine : BackgroundService
     private readonly IReplaceMarginCoordinator? _replaceMargin;
     private readonly Lifecycle.IDrainController? _reconciliationDrain;
     private readonly Outbound.IOutboundRecoveryGate _outboundRecovery;
+    private readonly OutboundProcessEpoch? _outboundEpoch;
 
     // Per-parent runtime state. Owned by the consumer task; the
     // ConcurrentDictionary is only used because TryAdd/TryGetValue are
@@ -137,7 +138,8 @@ public sealed class AlgoEngine : BackgroundService
         IReplaceMarginCoordinator? replaceMargin = null,
         SymbolDirectory? symbols = null,
         Lifecycle.IDrainController? reconciliationDrain = null,
-        Outbound.IOutboundRecoveryGate? outboundRecovery = null)
+        Outbound.IOutboundRecoveryGate? outboundRecovery = null,
+        OutboundProcessEpoch? outboundEpoch = null)
     {
         _queue = queue;
         _algos = algos;
@@ -163,6 +165,7 @@ public sealed class AlgoEngine : BackgroundService
         _reconciliationDrain = reconciliationDrain;
         _outboundRecovery = outboundRecovery
             ?? Outbound.ImmediateOutboundRecoveryGate.Instance;
+        _outboundEpoch = outboundEpoch;
     }
 
     /// <summary>
@@ -665,7 +668,15 @@ public sealed class AlgoEngine : BackgroundService
             return;
         }
         if (_outboundLedger.HasBlockingAlgoMutation(algo.FirmId, algo.AlgoId))
-            return;
+        {
+            var retryableRepeg = algo.Type == AlgoType.Pegged
+                && rt.LiveChildClOrdId is { } retryChildClOrdId
+                && FindSoleRetryableProvenUnsentMutation(
+                    algo,
+                    retryChildClOrdId,
+                    AlgoOutboundActionKind.Repeg) is not null;
+            if (!retryableRepeg) return;
+        }
 
         // Pass-1 review (#294) P1. VWAP needs the SDK subscribed to its
         // symbol so the VolumeCurveEstimator receives trade prints; without
@@ -1444,6 +1455,29 @@ public sealed class AlgoEngine : BackgroundService
             .OrderByDescending(m => m.RecordedAtUtc)
             .ThenByDescending(m => m.MutationId.Value)
             .FirstOrDefault();
+
+    private OutboundMutationSnapshot? FindSoleRetryableProvenUnsentMutation(
+        Algo algo,
+        ulong originalClOrdId,
+        AlgoOutboundActionKind actionKind)
+    {
+        var mutation = FindExplicitProvenUnsentMutation(
+            algo,
+            originalClOrdId,
+            actionKind);
+        return mutation is not null
+            && mutation.Attempts.Count < OutboundMutationLedger.MaxOutboundAttempts
+            && (_outboundEpoch is null
+                || (_outboundEpoch.IsInitialized
+                    && mutation.Attempts.LastOrDefault()?.ProcessEpochId
+                        == _outboundEpoch.Id))
+            && !_outboundLedger.HasBlockingAlgoMutationExcept(
+                algo.FirmId,
+                algo.AlgoId,
+                mutation.MutationId)
+            ? mutation
+            : null;
+    }
 
     private async Task OnCancelRequestedAsync(
         Algo algo,
@@ -2347,9 +2381,14 @@ public sealed class AlgoEngine : BackgroundService
         bool replaced;
         try
         {
+            var explicitRetry = FindSoleRetryableProvenUnsentMutation(
+                algo,
+                child.ClOrdId,
+                AlgoOutboundActionKind.Repeg);
             replaced = await TryReplaceChildAsync(
                 algo, child, child.Quantity, target.Value,
-                reason: "AlgoInternal", AlgoOutboundActionKind.Repeg, ct).ConfigureAwait(false);
+                reason: "AlgoInternal", AlgoOutboundActionKind.Repeg, ct,
+                explicitRetry?.AlgoOriginIdentity).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

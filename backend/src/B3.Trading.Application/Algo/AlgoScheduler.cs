@@ -81,6 +81,7 @@ public sealed class AlgoScheduler : BackgroundService
     private readonly IOptionsMonitor<RiskOptions>? _riskOptions;
     private readonly OutboundMutationLedger? _outboundLedger;
     private readonly IOutboundRecoveryGate _recovery;
+    private readonly OutboundProcessEpoch? _outboundEpoch;
 
     public AlgoScheduler(
         AlgoBook algos,
@@ -92,9 +93,11 @@ public sealed class AlgoScheduler : BackgroundService
         IReplaceMarginCoordinator? replaceMargin = null,
         IOptionsMonitor<RiskOptions>? riskOptions = null,
         IOutboundRecoveryGate? recovery = null,
-        OutboundMutationLedger? outboundLedger = null)
+        OutboundMutationLedger? outboundLedger = null,
+        OutboundProcessEpoch? outboundEpoch = null)
         : this(algos, orders, signals, clock, DefaultTickInterval, logger,
-               replacements, replaceMargin, riskOptions, recovery, outboundLedger)
+               replacements, replaceMargin, riskOptions, recovery, outboundLedger,
+               outboundEpoch)
     {
     }
 
@@ -113,7 +116,8 @@ public sealed class AlgoScheduler : BackgroundService
         IReplaceMarginCoordinator? replaceMargin = null,
         IOptionsMonitor<RiskOptions>? riskOptions = null,
         IOutboundRecoveryGate? recovery = null,
-        OutboundMutationLedger? outboundLedger = null)
+        OutboundMutationLedger? outboundLedger = null,
+        OutboundProcessEpoch? outboundEpoch = null)
     {
         if (tickInterval <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(tickInterval));
@@ -128,6 +132,7 @@ public sealed class AlgoScheduler : BackgroundService
         _riskOptions = riskOptions;
         _recovery = recovery ?? ImmediateOutboundRecoveryGate.Instance;
         _outboundLedger = outboundLedger;
+        _outboundEpoch = outboundEpoch;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -189,6 +194,9 @@ public sealed class AlgoScheduler : BackgroundService
             if (algo.IsTerminal) continue;
             var outboundBlocked =
                 _outboundLedger?.HasBlockingAlgoMutation(algo.FirmId, algo.AlgoId) == true;
+            var retryableRepeg = outboundBlocked
+                && algo.Type == AlgoType.Pegged
+                && HasSoleRetryableProvenUnsentRepeg(algo);
             if (algo.Status == AlgoStatus.Cancelling)
             {
                 if (!outboundBlocked)
@@ -201,7 +209,7 @@ public sealed class AlgoScheduler : BackgroundService
                 }
                 continue;
             }
-            if (outboundBlocked) continue;
+            if (outboundBlocked && !retryableRepeg) continue;
 
             if (algo.Type == AlgoType.Twap && algo.Parameters is TwapParameters tp)
             {
@@ -227,6 +235,25 @@ public sealed class AlgoScheduler : BackgroundService
                 continue;
             }
         }
+    }
+
+    private bool HasSoleRetryableProvenUnsentRepeg(Algo algo)
+    {
+        if (_outboundLedger is null) return false;
+        return _outboundLedger.GetAlgoMutations(algo.FirmId, algo.AlgoId)
+            .Any(m =>
+                m.AlgoOriginIdentity?.ActionKind == AlgoOutboundActionKind.Repeg
+                && m.State == OutboundMutationState.ProvenUnsent
+                && !m.RequiresReconciliation
+                && m.Attempts.Count < OutboundMutationLedger.MaxOutboundAttempts
+                && (_outboundEpoch is null
+                    || (_outboundEpoch.IsInitialized
+                        && m.Attempts.LastOrDefault()?.ProcessEpochId
+                            == _outboundEpoch.Id))
+                && !_outboundLedger.HasBlockingAlgoMutationExcept(
+                    algo.FirmId,
+                    algo.AlgoId,
+                    m.MutationId));
     }
 
     /// <summary>
