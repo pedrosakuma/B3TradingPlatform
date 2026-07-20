@@ -182,14 +182,14 @@ internal sealed class FixpOrderAdapter
             _logger.LogInformation(
                 "fixp.order.reject reason=unknown_security cred={Cred} clOrdId={ClOrdId} securityId={SecId}",
                 scope.Principal.CredShortId, externalClOrdId, securityId);
-            await WriteBusinessMessageRejectAsync(stream,
-                MessageType.NewOrderSingle, refSeqNum, externalClOrdId,
-                RejectReason.UnknownSecurity, ct).ConfigureAwait(false);
             _botMappings.MarkBusinessIdentityResolved(
                 scope.Principal.CredentialId,
                 externalClOrdId,
                 DateTimeOffset.UtcNow,
                 CancellationToken.None);
+            await WriteBusinessMessageRejectAsync(stream,
+                MessageType.NewOrderSingle, refSeqNum, externalClOrdId,
+                RejectReason.UnknownSecurity, ct).ConfigureAwait(false);
             return FixpOrderHandlingResult.Keep;
         }
 
@@ -204,14 +204,14 @@ internal sealed class FixpOrderAdapter
             || !TryMapOrdType(decoded.OrdType, out var type)
             || !TryMapTimeInForce(decoded.TimeInForce, out var tif))
         {
-            await WriteBusinessMessageRejectAsync(stream,
-                MessageType.NewOrderSingle, refSeqNum, externalClOrdId,
-                RejectReason.InvalidShape, ct).ConfigureAwait(false);
             _botMappings.MarkBusinessIdentityResolved(
                 scope.Principal.CredentialId,
                 externalClOrdId,
                 DateTimeOffset.UtcNow,
                 CancellationToken.None);
+            await WriteBusinessMessageRejectAsync(stream,
+                MessageType.NewOrderSingle, refSeqNum, externalClOrdId,
+                RejectReason.InvalidShape, ct).ConfigureAwait(false);
             return FixpOrderHandlingResult.Keep;
         }
 
@@ -407,14 +407,14 @@ internal sealed class FixpOrderAdapter
             _logger.LogInformation(
                 "fixp.cancel.reject reason=unknown_order cred={Cred} clOrdId={ClOrdId} origClOrdId={Orig}",
                 scope.Principal.CredShortId, externalCancelClOrdId, externalOrigClOrdId);
-            await WriteBusinessMessageRejectAsync(stream,
-                MessageType.OrderCancelRequest, refSeqNum, externalCancelClOrdId,
-                RejectReason.UnknownOrder, ct).ConfigureAwait(false);
             _botMappings.MarkBusinessIdentityResolved(
                 scope.Principal.CredentialId,
                 externalCancelClOrdId,
                 DateTimeOffset.UtcNow,
                 CancellationToken.None);
+            await WriteBusinessMessageRejectAsync(stream,
+                MessageType.OrderCancelRequest, refSeqNum, externalCancelClOrdId,
+                RejectReason.UnknownOrder, ct).ConfigureAwait(false);
             return;
         }
 

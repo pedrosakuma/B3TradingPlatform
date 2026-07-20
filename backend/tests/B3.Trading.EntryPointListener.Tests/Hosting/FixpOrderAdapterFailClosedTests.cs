@@ -326,6 +326,44 @@ public class FixpOrderAdapterFailClosedTests
     }
 
     [Fact]
+    public async Task TerminalPrePipelineReject_ResolvesIdentityBeforeWriteFailure()
+    {
+        var credentialId = Guid.NewGuid();
+        var mappings = new InMemoryUserBotOrderMappingRegistry();
+        var adapter = new FixpOrderAdapter(
+            new SymbolDirectory(new SymbolDirectoryOptions()),
+            submit: null!,
+            cancel: null!,
+            mappings,
+            NullLogger.Instance);
+        var scope = new FixpConnectionScope(
+            "conn-1",
+            new BotSessionPrincipal("alice", credentialId, "cred-1", "bot", "FIRM-A"),
+            new BotSessionState(credentialId, 10, 2, 0));
+
+        await Assert.ThrowsAsync<IOException>(() =>
+            adapter.HandleNewOrderSingleAsync(
+                new ThrowingWriteStream(),
+                new DecodedNewOrderSingle
+                {
+                    MsgSeqNum = 1,
+                    ClOrdId = 77,
+                    SecurityId = 999,
+                    Side = Side.BUY,
+                    OrdType = OrdType.LIMIT,
+                    OrderQty = 100,
+                    PriceMantissa = (long)(30d * PriceOptional.Multiplier),
+                    TimeInForce = B3.Entrypoint.Fixp.Sbe.V6.TimeInForce.DAY,
+                },
+                scope,
+                CancellationToken.None));
+
+        var tombstone = Assert.Single(mappings.SnapshotBusinessIdentities());
+        Assert.Equal(77UL, tombstone.ExternalClOrdId);
+        Assert.NotNull(tombstone.ResolvedAtUtc);
+    }
+
+    [Fact]
     public async Task TombstonedCancelId_RejectsBeforeCancelPipeline()
     {
         var credentialId = Guid.NewGuid();
@@ -562,6 +600,16 @@ public class FixpOrderAdapterFailClosedTests
             decimal? requestedStopPrice,
             DateTimeOffset? requestedGoodTillDate,
             CancellationToken ct) => Task.CompletedTask;
+    }
+
+    private sealed class ThrowingWriteStream : MemoryStream
+    {
+        public override Task WriteAsync(
+            byte[] buffer,
+            int offset,
+            int count,
+            CancellationToken cancellationToken) =>
+            Task.FromException(new IOException("connection closed"));
     }
 
     private sealed class NoOpExecutionEventSink : IExecutionEventSink
