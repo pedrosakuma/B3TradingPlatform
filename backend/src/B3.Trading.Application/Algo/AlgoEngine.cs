@@ -1142,7 +1142,11 @@ public sealed class AlgoEngine : BackgroundService
                     return;
                 }
                 else if (algo.Type == AlgoType.Pegged
-                         && (_peggedRepeg?.IsCancelledChild(algo.FirmId, algo.AlgoId, child.ClOrdId) ?? false))
+                         && (_peggedRepeg?.IsCancelledChild(algo.FirmId, algo.AlgoId, child.ClOrdId) ?? false)
+                         && !IsConfirmedProvenUnsentMutation(
+                             algo,
+                             child.ClOrdId,
+                             AlgoOutboundActionKind.Repeg))
                 {
                     // Pass-1 review (#296) P1-A. Duplicate / late
                     // Cancelled ER for a child we already cancelled
@@ -1446,15 +1450,34 @@ public sealed class AlgoEngine : BackgroundService
         Algo algo,
         ulong originalClOrdId,
         AlgoOutboundActionKind actionKind) =>
+        FindLatestAlgoMutation(algo, originalClOrdId, actionKind) is
+        {
+            State: OutboundMutationState.ProvenUnsent,
+            RequiresReconciliation: false,
+        } mutation
+            ? mutation
+            : null;
+
+    private OutboundMutationSnapshot? FindLatestAlgoMutation(
+        Algo algo,
+        ulong originalClOrdId,
+        AlgoOutboundActionKind actionKind) =>
         _outboundLedger.GetAlgoMutations(algo.FirmId, algo.AlgoId)
-            .Where(m =>
-                m.AlgoOriginIdentity?.ActionKind == actionKind
-                && m.OriginalClOrdId == originalClOrdId
-                && m.State == OutboundMutationState.ProvenUnsent
-                && !m.RequiresReconciliation)
+            .Where(m => m.AlgoOriginIdentity?.ActionKind == actionKind
+                && m.OriginalClOrdId == originalClOrdId)
             .OrderByDescending(m => m.RecordedAtUtc)
             .ThenByDescending(m => m.MutationId.Value)
             .FirstOrDefault();
+
+    private bool IsConfirmedProvenUnsentMutation(
+        Algo algo,
+        ulong originalClOrdId,
+        AlgoOutboundActionKind actionKind) =>
+        FindLatestAlgoMutation(algo, originalClOrdId, actionKind) is
+        {
+            State: OutboundMutationState.ProvenUnsent,
+            RequiresReconciliation: false,
+        };
 
     private OutboundMutationSnapshot? FindSoleRetryableProvenUnsentMutation(
         Algo algo,
@@ -2181,6 +2204,30 @@ public sealed class AlgoEngine : BackgroundService
         if (!_orders.TryGet(liveChildClOrdId, out var child) || child is null
             || IsChildTerminal(child))
         {
+            if (child is null
+                && IsConfirmedProvenUnsentMutation(
+                    algo,
+                    liveChildClOrdId,
+                    AlgoOutboundActionKind.Repeg))
+            {
+                // The retry can no longer be applied because its original
+                // child disappeared from the durable order book. Fail
+                // closed rather than clearing the slot and leaving the
+                // ProvenUnsent action permanently blocking scheduling.
+                _peggedRepeg?.UnmarkCancelledChild(
+                    algo.FirmId,
+                    algo.AlgoId,
+                    liveChildClOrdId);
+                rt.RepegPending = false;
+                rt.LastRepegCancelledChildId = null;
+                await RecordTerminalAsync(
+                    algo,
+                    rt,
+                    AlgoStatus.Suspended,
+                    AlgoTerminalReason.ReconciliationRequired).ConfigureAwait(false);
+                return;
+            }
+
             if (child?.Status == OrderStatus.Filled
                 && (rt.RepegPending
                     || (_peggedRepeg?.IsCancelledChild(
@@ -2200,6 +2247,38 @@ public sealed class AlgoEngine : BackgroundService
                 if (rt.LiveChildClOrdId == child.ClOrdId)
                     rt.LiveChildClOrdId = null;
                 await ResolveRepegOnFillAsync(algo, rt, child).ConfigureAwait(false);
+                return;
+            }
+
+            if (child is not null
+                && child.Status is OrderStatus.Cancelled or OrderStatus.Rejected
+                && IsConfirmedProvenUnsentMutation(
+                    algo,
+                    child.ClOrdId,
+                    AlgoOutboundActionKind.Repeg))
+            {
+                // The replace never reached the venue, so this terminal
+                // status belongs to the original child and must not be
+                // deduplicated as a successful repeg side effect. Process
+                // it here as well as through the queued ER signal so a
+                // dropped signal cannot leave a blocking mutation with an
+                // empty live slot.
+                _peggedRepeg?.UnmarkCancelledChild(
+                    algo.FirmId,
+                    algo.AlgoId,
+                    child.ClOrdId);
+                rt.RepegPending = false;
+                rt.LastRepegCancelledChildId = null;
+                await OnChildErAsync(
+                    algo,
+                    rt,
+                    new ChildExecutionObservedSignal
+                    {
+                        FirmId = algo.FirmId,
+                        AlgoId = algo.AlgoId,
+                        ChildClOrdId = child.ClOrdId,
+                    },
+                    ct).ConfigureAwait(false);
                 return;
             }
 
@@ -2408,6 +2487,20 @@ public sealed class AlgoEngine : BackgroundService
             // cancel-failure rollback.
             rt.RepegPending = false;
             rt.LastRepegCancelledChildId = null;
+            if (FindLatestAlgoMutation(
+                    algo,
+                    liveChildClOrdId,
+                    AlgoOutboundActionKind.Repeg) is null
+                || IsConfirmedProvenUnsentMutation(
+                    algo,
+                    liveChildClOrdId,
+                    AlgoOutboundActionKind.Repeg))
+            {
+                _peggedRepeg?.UnmarkCancelledChild(
+                    algo.FirmId,
+                    algo.AlgoId,
+                    liveChildClOrdId);
+            }
             MetricsRegistry.AlgoPeggedRepegFailed.Add(1);
             _logger.LogWarning(ex,
                 "AlgoEngine pegged repeg cancel-replace failed for algo {Firm}/{AlgoId} child {Child}; cleared marker, will retry next tick.",
@@ -2433,6 +2526,25 @@ public sealed class AlgoEngine : BackgroundService
             // tick should be allowed to try again if drift persists.
             rt.RepegPending = false;
             rt.LastRepegCancelledChildId = null;
+            var failedMutation = FindLatestAlgoMutation(
+                algo,
+                liveChildClOrdId,
+                AlgoOutboundActionKind.Repeg);
+            if (failedMutation is null
+                || (failedMutation.State == OutboundMutationState.ProvenUnsent
+                    && !failedMutation.RequiresReconciliation))
+            {
+                // MarkCancelledChild is optimistic because it must exist
+                // before a potentially-sent replace can race a terminal
+                // ER. ProvenUnsent (and pre-ledger rejection) proves that
+                // no repeg-induced cancel can arrive, so retaining the
+                // marker would hide a genuine venue cancellation of the
+                // original child and wedge the parent with no live slot.
+                _peggedRepeg?.UnmarkCancelledChild(
+                    algo.FirmId,
+                    algo.AlgoId,
+                    liveChildClOrdId);
+            }
             MetricsRegistry.AlgoPeggedRepegFailed.Add(1);
             return;
         }

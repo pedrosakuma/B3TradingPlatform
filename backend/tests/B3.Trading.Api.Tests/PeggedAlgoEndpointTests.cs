@@ -1222,6 +1222,66 @@ public class PeggedAlgoEndpointTests
     }
 
     [Fact]
+    public async Task Pegged_ProvenUnsentRepeg_OriginalChildCancelled_SuspendsInsteadOfWedging()
+    {
+        using var f = TestAppFactory.WithOverrides(
+            Simulator(),
+            services =>
+            {
+                services.RemoveAll<IExchangeGateway>();
+                services.AddSingleton<ProvenUnsentCancelGateway>();
+                services.AddSingleton<IExchangeGateway>(sp =>
+                    sp.GetRequiredService<ProvenUnsentCancelGateway>());
+            });
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(
+            http,
+            token,
+            PeggedBody(total: 100, repegMs: 1000));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        await WaitFor(
+            () => mock.SubmittedNewOrders.Any(order => order.ClOrdId == child.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "initial child was not dispatched");
+
+        cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+        var ledger = f.Services.GetRequiredService<
+            B3.Trading.Application.Outbound.OutboundMutationLedger>();
+        await WaitFor(
+            () => ledger.GetAlgoMutations("default", ulong.Parse(algoId)).Any(m =>
+                m.AlgoOriginIdentity?.ActionKind
+                    == B3.Trading.Application.Outbound.AlgoOutboundActionKind.Repeg
+                && m.State
+                    == B3.Trading.Application.Outbound.OutboundMutationState.ProvenUnsent),
+            TimeSpan.FromSeconds(3),
+            "initial repeg did not become ProvenUnsent");
+
+        var repegBook = f.Services.GetRequiredService<PeggedRepegBook>();
+        await WaitFor(
+            () => !repegBook.IsCancelledChild("default", ulong.Parse(algoId), child.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "ProvenUnsent repeg retained its optimistic cancelled-child marker");
+
+        await InjectEr(http, adminToken, child.ClOrdId, "Canceled");
+        await WaitForAlgoStatus(http, token, algoId, "Suspended");
+        var snapshot = await GetAlgo(http, token, algoId);
+        Assert.Equal("VenueCancelled", snapshot.GetProperty("terminalReason").GetString());
+        Assert.Single(
+            ledger.GetAlgoMutations("default", ulong.Parse(algoId)),
+            mutation => mutation.AlgoOriginIdentity?.ActionKind
+                == B3.Trading.Application.Outbound.AlgoOutboundActionKind.Repeg
+                && mutation.State
+                    == B3.Trading.Application.Outbound.OutboundMutationState.ProvenUnsent);
+    }
+
+    [Fact]
     public async Task Pegged_RecoveryWithUnresolvedOutbound_KeepsReconcileAndSchedulingGated()
     {
         // A restart with an unresolved outbound child must classify the
