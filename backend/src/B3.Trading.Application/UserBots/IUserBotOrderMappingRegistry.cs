@@ -1,4 +1,5 @@
 using B3.Trading.Application.Persistence;
+using B3.Trading.Application.Outbound;
 
 namespace B3.Trading.Application.UserBots;
 
@@ -10,13 +11,10 @@ namespace B3.Trading.Application.UserBots;
 /// (<see cref="TryGetOrderMapping"/> is synchronous) so implementations
 /// must avoid async I/O on the read side.
 ///
-/// <para>State is rebuilt at startup by the snapshot+replay machinery —
-/// snapshot capture/restore covers live mappings, and post-snapshot
-/// <see cref="OrderSubmittedEvent"/> /
-/// <see cref="OrderCancelRequestedEvent"/> events further mutate the
-/// registry via the existing replay path. The registry never originates
-/// a WAL append on its own; the order/cancel events are the source of
-/// truth and the registry is just a queryable cache rebuilt from them.</para>
+/// <para>State is rebuilt at startup by the snapshot+replay machinery.
+/// Live mappings remain routing-only state, while durable business-identity
+/// tombstones are claimed before the internal order pipeline and outlive
+/// terminal routing-map reap.</para>
 /// </summary>
 public interface IUserBotOrderMappingRegistry
 {
@@ -39,6 +37,30 @@ public interface IUserBotOrderMappingRegistry
     /// </summary>
     bool TryGetByExternal(Guid credentialId, ulong externalClOrdId, out ulong internalClOrdId);
 
+    bool ContainsBusinessIdentity(Guid credentialId, ulong externalClOrdId) => false;
+
+    BotBusinessIdentityClaimResult TryClaimBusinessIdentity(
+        Guid credentialId,
+        ulong externalClOrdId,
+        OutboundMutationKind mutationKind,
+        DateTimeOffset claimedAtUtc,
+        CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("Business identity claims are not supported by this registry.");
+
+    void Apply(BotBusinessIdentityClaimedEvent evt) { }
+
+    void Apply(BotBusinessIdentityResolvedEvent evt) { }
+
+    void Apply(BotBusinessIdentityTombstonePurgedEvent evt) { }
+
+    void MarkBusinessIdentityResolved(
+        Guid credentialId,
+        ulong externalClOrdId,
+        DateTimeOffset resolvedAtUtc,
+        CancellationToken cancellationToken = default)
+    {
+    }
+
     /// <summary>
     /// Synchronous lookup for sub-issue F to recover the bot's external
     /// cancel ClOrdID when an ER references a cancel-side internal
@@ -60,6 +82,8 @@ public interface IUserBotOrderMappingRegistry
     /// </summary>
     void ReapCancel(ulong cancelInternalClOrdId);
 
+    void MarkOrderResolved(ulong internalClOrdId, DateTimeOffset resolvedAtUtc) { }
+
     /// <summary>
     /// In-memory mutation invoked from the
     /// <see cref="EventDispatcher"/> apply callback for an
@@ -68,6 +92,14 @@ public interface IUserBotOrderMappingRegistry
     /// runs under the dispatcher lock alongside the WAL append.
     /// </summary>
     void RegisterOrderInternal(ulong internalClOrdId, Guid credentialId, ulong externalClOrdId);
+
+    void RegisterOrderInternal(
+        ulong internalClOrdId,
+        Guid credentialId,
+        ulong externalClOrdId,
+        DateTimeOffset? recordedAtUtc = null,
+        OutboundMutationId? mutationId = null) =>
+        RegisterOrderInternal(internalClOrdId, credentialId, externalClOrdId);
 
     /// <summary>
     /// In-memory mutation invoked from the
@@ -81,6 +113,19 @@ public interface IUserBotOrderMappingRegistry
         ulong originalInternalClOrdId,
         Guid credentialId,
         ulong externalCancelClOrdId);
+
+    void RegisterCancelInternal(
+        ulong cancelInternalClOrdId,
+        ulong originalInternalClOrdId,
+        Guid credentialId,
+        ulong externalCancelClOrdId,
+        DateTimeOffset? recordedAtUtc = null,
+        OutboundMutationId? mutationId = null) =>
+        RegisterCancelInternal(
+            cancelInternalClOrdId,
+            originalInternalClOrdId,
+            credentialId,
+            externalCancelClOrdId);
 
     /// <summary>Snapshot capture — called under <c>WithSnapshotLock</c>.</summary>
     IReadOnlyList<BotOrderMappingSnapshot> SnapshotOrders();
@@ -103,10 +148,26 @@ public interface IUserBotOrderMappingRegistry
     /// </summary>
     BotCancelMappingRaw[] RawSnapshotCancels();
 
+    BotBusinessIdentityTombstone[] RawSnapshotBusinessIdentities() => [];
+
+    IReadOnlyList<BotBusinessIdentityTombstone> SnapshotBusinessIdentities() => [];
+
+    int PurgeResolvedBusinessIdentities(
+        DateTimeOffset now,
+        TimeSpan? retention = null,
+        CancellationToken cancellationToken = default) => 0;
+
     /// <summary>Snapshot restore — single-threaded at startup.</summary>
     void Restore(
         IEnumerable<BotOrderMappingSnapshot> orders,
         IEnumerable<BotCancelMappingSnapshot> cancels);
+
+    void Restore(
+        IEnumerable<BotOrderMappingSnapshot> orders,
+        IEnumerable<BotCancelMappingSnapshot> cancels,
+        IEnumerable<BotBusinessIdentityTombstone>? businessIdentities = null,
+        DateTimeOffset? legacySnapshotCreatedAtUtc = null) =>
+        Restore(orders, cancels);
 }
 
 /// <summary>
@@ -125,3 +186,22 @@ public readonly record struct CancelMapping(
     ulong OriginalInternalClOrdId,
     Guid CredentialId,
     ulong ExternalCancelClOrdId);
+
+public enum BotBusinessIdentityClaimResult
+{
+    Claimed,
+    Duplicate,
+    WalBackpressure,
+    WalFaulted,
+}
+
+public sealed record BotBusinessIdentityTombstone
+{
+    public required Guid CredentialId { get; init; }
+    public required ulong ExternalClOrdId { get; init; }
+    public required OutboundMutationKind MutationKind { get; init; }
+    public required DateTimeOffset ClaimedAtUtc { get; init; }
+    public ulong? InternalClOrdId { get; init; }
+    public OutboundMutationId? MutationId { get; init; }
+    public DateTimeOffset? ResolvedAtUtc { get; init; }
+}

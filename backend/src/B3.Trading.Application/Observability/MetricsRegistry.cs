@@ -28,6 +28,8 @@ public static class MetricsRegistry
         Meter.CreateCounter<long>("trading.orders.idempotency_key_missing");
     public static readonly Counter<long> OrdersCancelRequested =
         Meter.CreateCounter<long>("trading.orders.cancel_requested");
+    public static readonly Counter<long> UserBotBusinessIdentityMigrationLimitations =
+        Meter.CreateCounter<long>("trading.userbot.business_identity.migration_limitations");
     /// <summary>
     /// #473. Counts every approved stamp of a routing instruction on
     /// an outbound NewOrder / Replace. Tagged with <c>value</c>

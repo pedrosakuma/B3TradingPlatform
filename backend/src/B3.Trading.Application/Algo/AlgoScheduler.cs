@@ -79,7 +79,9 @@ public sealed class AlgoScheduler : BackgroundService
     private readonly PendingReplacementRegistry? _replacements;
     private readonly IReplaceMarginCoordinator? _replaceMargin;
     private readonly IOptionsMonitor<RiskOptions>? _riskOptions;
+    private readonly OutboundMutationLedger? _outboundLedger;
     private readonly IOutboundRecoveryGate _recovery;
+    private readonly OutboundProcessEpoch? _outboundEpoch;
 
     public AlgoScheduler(
         AlgoBook algos,
@@ -90,9 +92,12 @@ public sealed class AlgoScheduler : BackgroundService
         PendingReplacementRegistry? replacements = null,
         IReplaceMarginCoordinator? replaceMargin = null,
         IOptionsMonitor<RiskOptions>? riskOptions = null,
-        IOutboundRecoveryGate? recovery = null)
+        IOutboundRecoveryGate? recovery = null,
+        OutboundMutationLedger? outboundLedger = null,
+        OutboundProcessEpoch? outboundEpoch = null)
         : this(algos, orders, signals, clock, DefaultTickInterval, logger,
-               replacements, replaceMargin, riskOptions, recovery)
+               replacements, replaceMargin, riskOptions, recovery, outboundLedger,
+               outboundEpoch)
     {
     }
 
@@ -110,7 +115,9 @@ public sealed class AlgoScheduler : BackgroundService
         PendingReplacementRegistry? replacements = null,
         IReplaceMarginCoordinator? replaceMargin = null,
         IOptionsMonitor<RiskOptions>? riskOptions = null,
-        IOutboundRecoveryGate? recovery = null)
+        IOutboundRecoveryGate? recovery = null,
+        OutboundMutationLedger? outboundLedger = null,
+        OutboundProcessEpoch? outboundEpoch = null)
     {
         if (tickInterval <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(tickInterval));
@@ -124,6 +131,8 @@ public sealed class AlgoScheduler : BackgroundService
         _replaceMargin = replaceMargin;
         _riskOptions = riskOptions;
         _recovery = recovery ?? ImmediateOutboundRecoveryGate.Instance;
+        _outboundLedger = outboundLedger;
+        _outboundEpoch = outboundEpoch;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -181,8 +190,26 @@ public sealed class AlgoScheduler : BackgroundService
         var algos = _algos.EnumerateAll(includeTerminal: false);
         foreach (var algo in algos)
         {
+            if (!_recovery.IsBusinessIngressOpen(algo.FirmId)) continue;
             if (algo.IsTerminal) continue;
-            if (algo.Status == AlgoStatus.Cancelling) continue;
+            var outboundBlocked =
+                _outboundLedger?.HasBlockingAlgoMutation(algo.FirmId, algo.AlgoId) == true;
+            var retryableRepeg = outboundBlocked
+                && algo.Type == AlgoType.Pegged
+                && HasSoleRetryableProvenUnsentRepeg(algo);
+            if (algo.Status == AlgoStatus.Cancelling)
+            {
+                if (!outboundBlocked)
+                {
+                    _signals.TryEnqueue(new AlgoCancelRequestedSignal
+                    {
+                        FirmId = algo.FirmId,
+                        AlgoId = algo.AlgoId,
+                    });
+                }
+                continue;
+            }
+            if (outboundBlocked && !retryableRepeg) continue;
 
             if (algo.Type == AlgoType.Twap && algo.Parameters is TwapParameters tp)
             {
@@ -207,7 +234,42 @@ public sealed class AlgoScheduler : BackgroundService
                 TickPegged(algo, pgp, now);
                 continue;
             }
+
+            if (algo.Type == AlgoType.Iceberg)
+            {
+                // Iceberg normally advances immediately from its child-ER
+                // signal. If that notification drops after the book became
+                // terminal, there is no live child and no other periodic
+                // trigger, so enqueue a reconciliation pass.
+                var children = _orders.EnumerateChildrenOf(
+                    algo.FirmId,
+                    algo.AlgoId);
+                if (children.Count > 0
+                    && children.All(IsChildTerminal))
+                {
+                    Enqueue(algo);
+                }
+            }
         }
+    }
+
+    private bool HasSoleRetryableProvenUnsentRepeg(Algo algo)
+    {
+        if (_outboundLedger is null) return false;
+        return _outboundLedger.GetAlgoMutations(algo.FirmId, algo.AlgoId)
+            .Any(m =>
+                m.AlgoOriginIdentity?.ActionKind == AlgoOutboundActionKind.Repeg
+                && m.State == OutboundMutationState.ProvenUnsent
+                && !m.RequiresReconciliation
+                && m.Attempts.Count < OutboundMutationLedger.MaxOutboundAttempts
+                && (_outboundEpoch is null
+                    || (_outboundEpoch.IsInitialized
+                        && m.Attempts.LastOrDefault()?.ProcessEpochId
+                            == _outboundEpoch.Id))
+                && !_outboundLedger.HasBlockingAlgoMutationExcept(
+                    algo.FirmId,
+                    algo.AlgoId,
+                    m.MutationId));
     }
 
     /// <summary>

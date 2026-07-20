@@ -81,6 +81,35 @@ public sealed class DurableOrderSubmissionServiceTests
     }
 
     [Fact]
+    public async Task AlgoProvenUnsent_TerminalizesPhantomChildWithoutPermittingAutomaticRetry()
+    {
+        var fixture = CreateFixture(
+            Array.Empty<IRiskCheck>(),
+            gateway: new ProvenUnsentGateway());
+        var origin = new AlgoOutboundOriginIdentity(
+            99,
+            AlgoOutboundActionKind.NewChild,
+            0);
+        var request = Request() with
+        {
+            Source = OrderSubmissionSource.Algo,
+            ParentAlgoId = origin.ParentAlgoId,
+            AlgoSliceSeq = origin.Sequence,
+            AlgoOriginIdentity = origin,
+        };
+
+        var result = await fixture.Service.SubmitAsync(request, CancellationToken.None);
+
+        Assert.Equal(OrderSubmissionResultKind.ReconciliationRequired, result.Kind);
+        Assert.True(fixture.Book.TryGet(result.ClOrdId, out var child));
+        Assert.Equal(OrderStatus.Rejected, child!.Status);
+        Assert.Equal(1, fixture.Margin.ReleaseCount);
+        Assert.True(fixture.Ledger.TryGet(result.MutationId, out var mutation));
+        Assert.Equal(OutboundMutationState.OperatorResolved, mutation!.State);
+        Assert.Equal(origin, mutation.AlgoOriginIdentity);
+    }
+
+    [Fact]
     public async Task ApprovalAppendFailure_TerminalisesNoWriteBeforeMarginRelease()
     {
         var fixture = CreateFixture(

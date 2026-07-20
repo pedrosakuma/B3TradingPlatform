@@ -66,6 +66,54 @@ public sealed class AdminOutboundMutationEndpointTests
         Assert.DoesNotContain("ciphertextBase64", payload, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task AlgoReconciliationRequired_IsListedAndResolvableByAdminWorkflow()
+    {
+        using var factory = NewFactory(out _);
+        var fixture = SeedAlgoProvenUnsentMutation(factory, "F1", 64711);
+        var ledger = factory.Services.GetRequiredService<OutboundMutationLedger>();
+        ledger.Apply(new OutboundReconciliationRequiredEvent
+        {
+            MutationId = fixture.MutationId,
+            Reason = "AlgoRepegAttemptCapExhausted",
+            TimestampUtc = T0.AddMinutes(1),
+        });
+        using var admin = CreateAdminClient(factory, "algo-operator", "F1");
+
+        var list = await admin.GetAsync(
+            "/admin/outbound-mutations/?requiresReconciliation=true");
+        var listPayload = await list.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, list.StatusCode);
+        Assert.Contains(fixture.MutationId.ToString(), listPayload, StringComparison.Ordinal);
+        Assert.Contains("\"origin\":\"algo\"", listPayload, StringComparison.Ordinal);
+        Assert.Contains("\"requiresReconciliation\":true", listPayload, StringComparison.Ordinal);
+
+        var reference = await PrepareEvidenceAsync(
+            factory,
+            fixture,
+            "official_extract",
+            admin);
+        var resolve = await admin.PostAsJsonAsync(
+            $"/admin/outbound-mutations/{fixture.MutationId}/resolve",
+            new
+            {
+                decision = "venue_absent",
+                evidenceType = "official_extract",
+                evidenceReference = reference,
+                reason = "official_extract_attested",
+            });
+
+        Assert.Equal(HttpStatusCode.OK, resolve.StatusCode);
+        using var result = JsonDocument.Parse(await resolve.Content.ReadAsStringAsync());
+        Assert.False(result.RootElement.GetProperty("requiresReconciliation").GetBoolean());
+        var mutation = Assert.Single(ledger.SnapshotMutations());
+        Assert.Equal(OutboundMutationOrigin.Algo, mutation.Origin);
+        Assert.Equal(OutboundMutationState.OperatorResolved, mutation.State);
+        Assert.False(mutation.RequiresReconciliation);
+        Assert.False(mutation.ExplicitlyRequiresReconciliation);
+    }
+
     [Theory]
     [InlineData("contracted_not_applied", "contracted_not_applied_verified")]
     [InlineData("venue_mass_action", "venue_mass_action_verified")]
@@ -558,6 +606,81 @@ public sealed class AdminOutboundMutationEndpointTests
             attemptId,
             OutboundAmbiguityReason.GatewayOutcomeUnknown,
             T0.AddSeconds(3));
+        return new SeededMutation(mutationId, attemptId, clOrdId, endClientRef);
+    }
+
+    private static SeededMutation SeedAlgoProvenUnsentMutation(
+        TestAppFactory factory,
+        string firmId,
+        ulong clOrdId)
+    {
+        _ = factory.CreateClient();
+        var ledger = factory.Services.GetRequiredService<OutboundMutationLedger>();
+        var protector = factory.Services.GetRequiredService<IOutboundCommandProtector>();
+        var mutationId = OutboundMutationId.New();
+        var attemptId = OutboundAttemptId.New();
+        var canonical = new OutboundCanonicalCommand
+        {
+            ClOrdId = clOrdId,
+            SecurityId = 123,
+            Symbol = "PETR4",
+            Side = "Buy",
+            OrderType = "Limit",
+            Quantity = 10,
+            Price = 30m,
+        };
+        var sensitive = new SensitiveOutboundCommand
+        {
+            Account = AccountSecret,
+            InvestorId = InvestorSecret,
+            EndClientId = EndClientSecret,
+        };
+        var approval = OutboundApprovalFactory.Create(
+            mutationId,
+            firmId,
+            canonical,
+            sensitive,
+            [
+                OutboundSensitiveFieldRef.Account,
+                OutboundSensitiveFieldRef.InvestorId,
+                OutboundSensitiveFieldRef.EndClientId,
+            ],
+            protector,
+            T0);
+        var endClientRef = protector.CreateStableEndClientRef(firmId, EndClientSecret);
+        ledger.Apply(new OutboundApprovedEvent
+        {
+            MutationId = mutationId,
+            MutationKind = OutboundMutationKind.New,
+            FirmId = firmId,
+            EndClientRef = endClientRef,
+            Origin = OutboundMutationOrigin.Algo,
+            AlgoOriginIdentity = new AlgoOutboundOriginIdentity(
+                ParentAlgoId: 647,
+                ActionKind: AlgoOutboundActionKind.NewChild,
+                Sequence: 1),
+            PrimaryClOrdId = clOrdId,
+            RecordedAtUtc = T0,
+            Approval = approval,
+            TimestampUtc = T0,
+        });
+        ledger.Apply(new OutboundAttemptIntentPreparedEvent
+        {
+            MutationId = mutationId,
+            AttemptId = attemptId,
+            AttemptNo = 1,
+            ClOrdId = clOrdId,
+            ProcessEpochId = ProcessEpochId.New(),
+            IntentPreparedAtUtc = T0.AddSeconds(1),
+            TimestampUtc = T0.AddSeconds(1),
+        });
+        ledger.Apply(new OutboundProvenUnsentEvent
+        {
+            MutationId = mutationId,
+            AttemptId = attemptId,
+            Evidence = OutboundProvenUnsentEvidence.TypedPreFrameFailure,
+            TimestampUtc = T0.AddSeconds(2),
+        });
         return new SeededMutation(mutationId, attemptId, clOrdId, endClientRef);
     }
 

@@ -31,6 +31,7 @@ public sealed record AlgoCreatedSignal : AlgoSignal
 public sealed record AlgoCancelRequestedSignal : AlgoSignal
 {
     public required ulong AlgoId { get; init; }
+    public bool ExplicitRetry { get; init; }
 }
 
 /// <summary>
@@ -52,7 +53,7 @@ public sealed record ChildExecutionObservedSignal : AlgoSignal
 /// engine resolves the actual target child by the parent's
 /// <c>LiveChildClOrdId</c> when <see cref="TargetChildClOrdId"/>
 /// is null, validates terminal/qty invariants on the consumer
-/// thread, and dispatches via <c>IExchangeGateway.CancelReplaceAsync</c>.
+/// thread, and dispatches through the durable order-modify service.
 /// At least one of <see cref="NewQuantity"/> / <see cref="NewPrice"/>
 /// must be set; the engine inherits the omitted side from the
 /// live child.

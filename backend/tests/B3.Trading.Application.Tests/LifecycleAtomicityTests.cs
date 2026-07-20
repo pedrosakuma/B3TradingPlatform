@@ -271,65 +271,6 @@ public sealed class LifecycleAtomicityTests
     }
 
     [Fact]
-    public async Task AlgoAmbiguousResolutionWalFault_DrainsAndMarksIntentInMemory()
-    {
-        var store = new RecordingEventStore(
-            failOnAppend: 2,
-            failureFactory: static () => new WalFaultedException(
-                "resolution writer faulted", new IOException("disk full")));
-        var gateway = new TestGateway
-        {
-            ReplaceException = new IOException("wire outcome unknown"),
-        };
-        var drain = new NeverDrainController();
-        var replacements = new PendingReplacementRegistry();
-        var margin = new NoOpReplaceMargin();
-        var ownership = new OrderOwnershipMap();
-        var orders = new WorkingOrderBook();
-        var child = new Order(
-            100, Owner, "PETR4", 4321, OrderSide.Buy, OrderType.Limit,
-            100, 30m, "FIRM", parentAlgoId: 1, algoSliceSeq: 0);
-        child.MarkWorking();
-        Assert.True(orders.TryAdd(child));
-        ownership.Register(child.ClOrdId, Owner);
-        var dispatcher = new EventDispatcher(store);
-        var submitter = new OrderSubmissionService(
-            new ClOrdIdPrefixRegistry(), ownership, orders, gateway,
-            new RecordingSink(), new RiskPipeline(Array.Empty<IRiskCheck>()),
-            new NoOpMarginProvider(), new CompositeRiskAccountant(Array.Empty<IRiskAccountant>()),
-            dispatcher, drain, NullLogger<OrderSubmissionService>.Instance);
-        var engine = new B3.Trading.Application.AlgoEngine(
-            new AlgoSignalQueue(), new AlgoBook(), orders, submitter,
-            new ClOrdIdPrefixRegistry(), gateway, new NoOpAlgoEventSink(),
-            dispatcher, TimeProvider.System,
-            NullLogger<B3.Trading.Application.AlgoEngine>.Instance,
-            ownership, replacements: replacements,
-            risk: new RiskPipeline(Array.Empty<IRiskCheck>()),
-            replaceMargin: margin, reconciliationDrain: drain);
-        var now = DateTimeOffset.UtcNow;
-        var algo = new Algo(
-            1, Owner, "FIRM", "PETR4", 4321, OrderSide.Buy, AlgoType.Twap, 100,
-            new TwapParameters(now, now.AddMinutes(1), 1, OrderType.Limit, 30m), now);
-
-        var replaced = await engine.TryReplaceChildAsync(
-            algo, child, newQuantity: 120, newPrice: 31m,
-            reason: "test", CancellationToken.None);
-
-        Assert.False(replaced);
-        Assert.True(drain.IsDraining);
-        Assert.True(Assert.Single(replacements.Snapshot()).AmbiguousMarginHeld);
-        Assert.Empty(margin.Aborted);
-        Assert.Single(store.Events);
-        Assert.IsType<OrderReplaceRequestedEvent>(store.Events[0]);
-
-        var retried = await engine.TryReplaceChildAsync(
-            algo, child, newQuantity: 120, newPrice: 31m,
-            reason: "test", CancellationToken.None);
-        Assert.False(retried);
-        Assert.Equal(1, gateway.ReplaceCalls);
-    }
-
-    [Fact]
     public async Task CrashBeforeSnapshot_CancelPreSendMarkerCleansReplayAndKeepsStartupDrained()
     {
         var markers = new InMemoryReconciliationMarkerStore();

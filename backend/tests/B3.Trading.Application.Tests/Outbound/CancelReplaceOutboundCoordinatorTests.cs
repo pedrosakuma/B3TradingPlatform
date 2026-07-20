@@ -47,7 +47,11 @@ public sealed class CancelReplaceOutboundCoordinatorTests
         var fixture = CreateFixture(gateway, new RecordingReplaceMarginCoordinator());
         var original = OriginalOrder();
         AddOriginal(fixture, original);
-        var mutationId = Approve(fixture, original, 2001);
+        var algoOrigin = new AlgoOutboundOriginIdentity(
+            77,
+            AlgoOutboundActionKind.Repeg,
+            3);
+        var mutationId = Approve(fixture, original, 2001, algoOrigin: algoOrigin);
 
         var first = await fixture.Coordinator.EnqueueAsync(
             mutationId,
@@ -64,6 +68,7 @@ public sealed class CancelReplaceOutboundCoordinatorTests
         Assert.Equal(CancelReplaceDispatchOutcome.RetryNotAllowed, third.Outcome);
         Assert.True(fixture.Ledger.TryGet(mutationId, out var mutation));
         Assert.Equal(2, mutation!.Attempts.Count);
+        Assert.Equal(algoOrigin, mutation.AlgoOriginIdentity);
         Assert.NotEqual(mutation.Attempts[0].ClOrdId, mutation.Attempts[1].ClOrdId);
         Assert.Equal(
             mutation.Attempts.Select(a => a.ClOrdId),
@@ -71,6 +76,35 @@ public sealed class CancelReplaceOutboundCoordinatorTests
         var correlations = fixture.Ledger.SnapshotCorrelations();
         Assert.Contains(correlations, c => c.ClOrdId == mutation.Attempts[0].ClOrdId && c.Terminal);
         Assert.Contains(correlations, c => c.ClOrdId == mutation.Attempts[1].ClOrdId && c.Terminal);
+    }
+
+    [Fact]
+    public async Task ProvenUnsent_NewProcessEpoch_DoesNotAutomaticallyRetryAlgoAction()
+    {
+        var gateway = new RecordingGateway(GatewayOutcome.ProvenUnsent);
+        var fixture = CreateFixture(gateway, new RecordingReplaceMarginCoordinator());
+        var original = OriginalOrder();
+        AddOriginal(fixture, original);
+        var mutationId = Approve(
+            fixture,
+            original,
+            2001,
+            algoOrigin: new AlgoOutboundOriginIdentity(
+                78,
+                AlgoOutboundActionKind.Repeg,
+                0));
+        var first = await fixture.Coordinator.EnqueueAsync(
+            mutationId,
+            CancellationToken.None);
+        Assert.Equal(CancelReplaceDispatchOutcome.ProvenUnsent, first.Outcome);
+
+        await fixture.Coordinator.StartAsync(CancellationToken.None);
+        await Task.Delay(50);
+
+        Assert.Single(gateway.ReplaceCommands);
+        Assert.True(fixture.Ledger.TryGet(mutationId, out var mutation));
+        Assert.Single(mutation!.Attempts);
+        Assert.Equal(OutboundMutationState.ProvenUnsent, mutation.State);
     }
 
     [Fact]
@@ -485,7 +519,8 @@ public sealed class CancelReplaceOutboundCoordinatorTests
         Fixture fixture,
         Order original,
         ulong newClOrdId,
-        OutboundMutationId? requestedMutationId = null)
+        OutboundMutationId? requestedMutationId = null,
+        AlgoOutboundOriginIdentity? algoOrigin = null)
     {
         var mutationId = requestedMutationId ?? OutboundMutationId.New();
         var frozen = fixture.ApprovalFactory.CreateReplace(
@@ -505,7 +540,8 @@ public sealed class CancelReplaceOutboundCoordinatorTests
             OutboundMutationKind.Replace,
             original,
             newClOrdId,
-            frozen);
+            frozen,
+            algoOrigin);
         fixture.Margin.PrepareReplaceAsync(
             original.ClOrdId,
             newClOrdId,
@@ -535,14 +571,16 @@ public sealed class CancelReplaceOutboundCoordinatorTests
         OutboundMutationKind kind,
         Order original,
         ulong clOrdId,
-        (string EndClientRef, OutboundApprovalSnapshot Approval) frozen)
+        (string EndClientRef, OutboundApprovalSnapshot Approval) frozen,
+        AlgoOutboundOriginIdentity? algoOrigin = null)
     {
         var approved = CreateApprovalEvent(
             mutationId,
             kind,
             original,
             clOrdId,
-            frozen);
+            frozen,
+            algoOrigin);
         fixture.Dispatcher.DispatchCommitted(
             approved,
             () => fixture.Ledger.Apply(approved),
@@ -554,14 +592,18 @@ public sealed class CancelReplaceOutboundCoordinatorTests
         OutboundMutationKind kind,
         Order original,
         ulong clOrdId,
-        (string EndClientRef, OutboundApprovalSnapshot Approval) frozen) =>
+        (string EndClientRef, OutboundApprovalSnapshot Approval) frozen,
+        AlgoOutboundOriginIdentity? algoOrigin = null) =>
         new()
         {
             MutationId = mutationId,
             MutationKind = kind,
             FirmId = original.FirmId,
             EndClientRef = frozen.EndClientRef,
-            Origin = OutboundMutationOrigin.Rest,
+            Origin = algoOrigin is null
+                ? OutboundMutationOrigin.Rest
+                : OutboundMutationOrigin.Algo,
+            AlgoOriginIdentity = algoOrigin,
             PrimaryClOrdId = clOrdId,
             OriginalClOrdId = original.ClOrdId,
             RecordedAtUtc = DateTimeOffset.UtcNow,

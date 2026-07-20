@@ -532,7 +532,12 @@ public static class AlgoEndpoints
 
             sink.PublishAlgoSnapshot(owner, firm, id);
 
-            if (!signals.TryEnqueue(new AlgoCancelRequestedSignal { FirmId = firm, AlgoId = id }))
+            if (!signals.TryEnqueue(new AlgoCancelRequestedSignal
+            {
+                FirmId = firm,
+                AlgoId = id,
+                ExplicitRetry = true,
+            }))
             {
                 MetricsRegistry.AlgoSignalsDropped.Add(1,
                     new KeyValuePair<string, object?>("kind", "cancel_requested"));

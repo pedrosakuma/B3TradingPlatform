@@ -31,6 +31,7 @@ public sealed class OutboundMutationLedger
     private readonly Dictionary<OutboundMutationId, OutboundMutationSnapshot> _mutations = new();
     private readonly Dictionary<ulong, OutboundMutationId> _byClOrdId = new();
     private readonly Dictionary<OriginalOrderKey, OutboundMutationId> _activeByOriginal = new();
+    private readonly Dictionary<FirmAlgoOriginKey, OutboundMutationId> _byAlgoOrigin = new();
     private readonly Dictionary<FrameKey, OutboundMutationId> _byFrame = new();
     private readonly Dictionary<ulong, OutboundCorrelationTombstone> _correlations = new();
     private readonly Dictionary<string, InboundVenueEvidenceSnapshot> _inboundEvidence =
@@ -112,6 +113,7 @@ public sealed class OutboundMutationLedger
     {
         ArgumentNullException.ThrowIfNull(evt);
         ValidateIdentity(evt.MutationId, evt.PrimaryClOrdId, evt.FirmId, evt.EndClientRef);
+        ValidateOrigin(evt.Origin, evt.AlgoOriginIdentity);
         ValidateApproval(evt.Approval, evt.PrimaryClOrdId);
         lock (_gate)
         {
@@ -149,6 +151,14 @@ public sealed class OutboundMutationLedger
                     && activeMutation != evt.MutationId)
                     throw TransitionError("The original order already has an active outbound mutation.");
             }
+            if (evt.AlgoOriginIdentity is { } algoOrigin
+                && _byAlgoOrigin.TryGetValue(
+                    new FirmAlgoOriginKey(evt.FirmId, algoOrigin),
+                    out var existingAlgoMutation)
+                && existingAlgoMutation != evt.MutationId)
+            {
+                throw TransitionError("The algo logical action already has an outbound mutation.");
+            }
 
             var availability = CheckPayloadAvailability(evt);
             var requiresReconciliation = availability != OutboundSensitivePayloadAvailability.Available;
@@ -159,6 +169,8 @@ public sealed class OutboundMutationLedger
                 FirmId = evt.FirmId,
                 EndClientRef = evt.EndClientRef,
                 Origin = evt.Origin,
+                AlgoOriginIdentity = evt.AlgoOriginIdentity,
+                BotBusinessIdentity = evt.BotBusinessIdentity,
                 PrimaryClOrdId = evt.PrimaryClOrdId,
                 OriginalClOrdId = evt.OriginalClOrdId,
                 RecordedAtUtc = evt.RecordedAtUtc,
@@ -171,6 +183,7 @@ public sealed class OutboundMutationLedger
             _mutations.Add(evt.MutationId, mutation);
             AddClOrdCorrelation(mutation, evt.PrimaryClOrdId, terminal: false, evt.TimestampUtc);
             AddActiveOriginalIndex(mutation);
+            AddAlgoOriginIndex(mutation);
         }
     }
 
@@ -459,6 +472,22 @@ public sealed class OutboundMutationLedger
             {
                 ResolutionProposals = proposals,
                 RequiresReconciliation = true,
+            };
+        }
+    }
+
+    public void Apply(OutboundReconciliationRequiredEvent evt)
+    {
+        ArgumentNullException.ThrowIfNull(evt);
+        lock (_gate)
+        {
+            var mutation = RequiredMutation(evt.MutationId);
+            if (mutation.ExplicitlyRequiresReconciliation) return;
+            _mutations[mutation.MutationId] = mutation with
+            {
+                RequiresReconciliation = true,
+                ExplicitlyRequiresReconciliation = true,
+                StateChangedAtUtc = evt.TimestampUtc,
             };
         }
     }
@@ -1569,7 +1598,9 @@ public sealed class OutboundMutationLedger
                     m.Attempts.Count,
                     m.RequiresReconciliation,
                     m.Approval?.SensitiveCommandEnvelope.KeyId,
-                    m.Approval?.SensitiveCommandEnvelope.KeyVersion))
+                    m.Approval?.SensitiveCommandEnvelope.KeyVersion,
+                    m.BotBusinessIdentity?.CredentialId,
+                    m.BotBusinessIdentity?.ExternalClOrdId))
                 .ToArray();
     }
 
@@ -1788,6 +1819,7 @@ public sealed class OutboundMutationLedger
             _mutations.Clear();
             _byClOrdId.Clear();
             _activeByOriginal.Clear();
+            _byAlgoOrigin.Clear();
             _byFrame.Clear();
             _correlations.Clear();
             _inboundEvidence.Clear();
@@ -1803,18 +1835,32 @@ public sealed class OutboundMutationLedger
                 {
                     if (!AeadOutboundCommandProtector.IntegrityMatches(approval))
                         throw new OutboundLedgerRecoveryException("Outbound ledger command integrity validation failed.");
+                    var snapshotDerivedReconciliation =
+                        mutation.SensitivePayloadAvailability
+                            != OutboundSensitivePayloadAvailability.Available
+                        || StateRequiresReconciliation(mutation.State)
+                        || mutation.Attempts.Any(a =>
+                            a.AmbiguityReason
+                            == OutboundAmbiguityReason.ConflictingVenueEvidence);
+                    var explicitlyRequiresReconciliation =
+                        mutation.ExplicitlyRequiresReconciliation
+                        || (mutation.RequiresReconciliation
+                            && !snapshotDerivedReconciliation);
                     var availability = CheckPayloadAvailability(mutation.MutationId, mutation.FirmId, approval);
                     mutation = mutation with
                     {
                         SensitivePayloadAvailability = availability,
                         RequiresReconciliation =
-                            availability != OutboundSensitivePayloadAvailability.Available
+                            explicitlyRequiresReconciliation
+                            || availability != OutboundSensitivePayloadAvailability.Available
                             || StateRequiresReconciliation(mutation.State)
                             || mutation.Attempts.Any(a =>
                                 a.AmbiguityReason
                                 == OutboundAmbiguityReason.ConflictingVenueEvidence)
                             || mutation.ResolutionProposals.Any(
                                 proposal => proposal.ApprovedAtUtc is null),
+                        ExplicitlyRequiresReconciliation =
+                            explicitlyRequiresReconciliation,
                     };
                 }
                 if (!_mutations.TryAdd(mutation.MutationId, mutation))
@@ -1855,10 +1901,94 @@ public sealed class OutboundMutationLedger
                 mutation = Clone(found);
                 return true;
             }
-
             mutation = null;
             return false;
         }
+    }
+
+    public bool TryGetByClOrdId(ulong clOrdId, out OutboundMutationSnapshot? mutation)
+    {
+        if (clOrdId == 0)
+            throw new ArgumentOutOfRangeException(nameof(clOrdId));
+        lock (_gate)
+        {
+            if (_byClOrdId.TryGetValue(clOrdId, out var mutationId)
+                && _mutations.TryGetValue(mutationId, out var found))
+            {
+                mutation = Clone(found);
+                return true;
+            }
+            mutation = null;
+            return false;
+        }
+    }
+
+    public bool TryGetByAlgoOrigin(
+        string firmId,
+        AlgoOutboundOriginIdentity origin,
+        out OutboundMutationSnapshot? mutation)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        ArgumentNullException.ThrowIfNull(origin);
+        lock (_gate)
+        {
+            if (_byAlgoOrigin.TryGetValue(
+                    new FirmAlgoOriginKey(firmId, origin),
+                    out var mutationId)
+                && _mutations.TryGetValue(mutationId, out var found))
+            {
+                mutation = Clone(found);
+                return true;
+            }
+            mutation = null;
+            return false;
+        }
+    }
+
+    public IReadOnlyList<OutboundMutationSnapshot> GetAlgoMutations(
+        string firmId,
+        ulong parentAlgoId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        if (parentAlgoId == 0)
+            throw new ArgumentOutOfRangeException(nameof(parentAlgoId));
+        lock (_gate)
+            return _mutations.Values
+                .Where(m =>
+                    string.Equals(m.FirmId, firmId, StringComparison.Ordinal)
+                    && m.AlgoOriginIdentity?.ParentAlgoId == parentAlgoId)
+                .OrderBy(m => m.RecordedAtUtc)
+                .ThenBy(m => m.MutationId.Value)
+                .Select(Clone)
+                .ToArray();
+    }
+
+    public bool HasBlockingAlgoMutation(string firmId, ulong parentAlgoId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        if (parentAlgoId == 0)
+            throw new ArgumentOutOfRangeException(nameof(parentAlgoId));
+        lock (_gate)
+            return _mutations.Values.Any(m =>
+                string.Equals(m.FirmId, firmId, StringComparison.Ordinal)
+                && m.AlgoOriginIdentity?.ParentAlgoId == parentAlgoId
+                && (m.RequiresReconciliation || IsAlgoActionBlocking(m.State)));
+    }
+
+    public bool HasBlockingAlgoMutationExcept(
+        string firmId,
+        ulong parentAlgoId,
+        OutboundMutationId excludedMutationId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        if (parentAlgoId == 0)
+            throw new ArgumentOutOfRangeException(nameof(parentAlgoId));
+        lock (_gate)
+            return _mutations.Values.Any(m =>
+                m.MutationId != excludedMutationId
+                && string.Equals(m.FirmId, firmId, StringComparison.Ordinal)
+                && m.AlgoOriginIdentity?.ParentAlgoId == parentAlgoId
+                && (m.RequiresReconciliation || IsAlgoActionBlocking(m.State)));
     }
 
     public bool TryGetActiveForOriginal(
@@ -2362,6 +2492,7 @@ public sealed class OutboundMutationLedger
             RequiresReconciliation =
                 mutation.SensitivePayloadAvailability
                 != OutboundSensitivePayloadAvailability.Available,
+            ExplicitlyRequiresReconciliation = false,
         };
         _mutations[mutation.MutationId] = mutation;
         MarkCorrelations(mutation, terminal: true, atUtc);
@@ -2554,6 +2685,7 @@ public sealed class OutboundMutationLedger
             }
         }
         AddActiveOriginalIndex(mutation);
+        AddAlgoOriginIndex(mutation);
     }
 
     private void RemoveMutationIndexes(OutboundMutationSnapshot mutation)
@@ -2569,6 +2701,28 @@ public sealed class OutboundMutationLedger
                     mutation.FirmId, frame.SessionId, frame.SessionVerId, frame.OutboundSeqNum));
         }
         RemoveActiveOriginalIndex(mutation);
+        if (mutation.AlgoOriginIdentity is { } algoOrigin
+            && _byAlgoOrigin.TryGetValue(
+                new FirmAlgoOriginKey(mutation.FirmId, algoOrigin),
+                out var existing)
+            && existing == mutation.MutationId)
+        {
+            _byAlgoOrigin.Remove(new FirmAlgoOriginKey(mutation.FirmId, algoOrigin));
+        }
+    }
+
+    private void AddAlgoOriginIndex(OutboundMutationSnapshot mutation)
+    {
+        if (mutation.AlgoOriginIdentity is not { } origin)
+            return;
+        var key = new FirmAlgoOriginKey(mutation.FirmId, origin);
+        if (_byAlgoOrigin.TryGetValue(key, out var existing)
+            && existing != mutation.MutationId)
+        {
+            throw new OutboundLedgerRecoveryException(
+                "Multiple outbound mutations share the same algo logical action.");
+        }
+        _byAlgoOrigin[key] = mutation.MutationId;
     }
 
     private void AddActiveOriginalIndex(OutboundMutationSnapshot mutation)
@@ -2659,6 +2813,9 @@ public sealed class OutboundMutationLedger
         existing.Kind == evt.MutationKind
         && existing.FirmId == evt.FirmId
         && existing.EndClientRef == evt.EndClientRef
+        && existing.Origin == evt.Origin
+        && existing.AlgoOriginIdentity == evt.AlgoOriginIdentity
+        && existing.BotBusinessIdentity == evt.BotBusinessIdentity
         && existing.PrimaryClOrdId == evt.PrimaryClOrdId
         && existing.OriginalClOrdId == evt.OriginalClOrdId
         && existing.Approval?.StoredCommandIntegritySha256
@@ -2690,6 +2847,24 @@ public sealed class OutboundMutationLedger
             throw TransitionError("The encrypted command envelope must carry end-client identity.");
     }
 
+    private static void ValidateOrigin(
+        OutboundMutationOrigin origin,
+        AlgoOutboundOriginIdentity? algoOrigin)
+    {
+        if (origin == OutboundMutationOrigin.Algo)
+        {
+            if (algoOrigin is null
+                || algoOrigin.ParentAlgoId == 0
+                || algoOrigin.Sequence < 0)
+            {
+                throw TransitionError("Algo outbound origin identity is invalid.");
+            }
+            return;
+        }
+        if (algoOrigin is not null)
+            throw TransitionError("Algo outbound origin identity requires Algo origin.");
+    }
+
     private static bool IsReadinessBlocking(OutboundMutationSnapshot mutation) =>
         mutation.RequiresReconciliation
         || (mutation.Kind == OutboundMutationKind.New
@@ -2698,6 +2873,16 @@ public sealed class OutboundMutationLedger
 
     private static bool StateRequiresReconciliation(OutboundMutationState state) =>
         state is OutboundMutationState.Ambiguous
+            or OutboundMutationState.LegacyUnknown
+            or OutboundMutationState.LegacyUnknownCancel
+            or OutboundMutationState.LegacyUnknownReplace;
+
+    private static bool IsAlgoActionBlocking(OutboundMutationState state) =>
+        state is OutboundMutationState.ApprovedToSend
+            or OutboundMutationState.AttemptIntentPrepared
+            or OutboundMutationState.FramePrepared
+            or OutboundMutationState.ProvenUnsent
+            or OutboundMutationState.Ambiguous
             or OutboundMutationState.LegacyUnknown
             or OutboundMutationState.LegacyUnknownCancel
             or OutboundMutationState.LegacyUnknownReplace;
@@ -2750,6 +2935,9 @@ public sealed class OutboundMutationLedger
                         AuthenticationTagBase64 = mutation.Approval.SensitiveCommandEnvelope.AuthenticationTagBase64,
                     },
                 },
+            BotBusinessIdentity = mutation.BotBusinessIdentity is null
+                ? null
+                : mutation.BotBusinessIdentity with { },
             Resolution = mutation.Resolution is null ? null : mutation.Resolution with { },
             OperatorEvidence = mutation.OperatorEvidence
                 .Select(e => e with { })
@@ -2891,6 +3079,10 @@ public sealed class OutboundMutationLedger
         ulong SessionId,
         uint SessionVerId,
         ulong OutboundSeqNum);
+
+    private readonly record struct FirmAlgoOriginKey(
+        string FirmId,
+        AlgoOutboundOriginIdentity Origin);
 
     private readonly record struct OriginalOrderKey(string FirmId, ulong OriginalClOrdId);
 }

@@ -21,6 +21,34 @@ public sealed class OutboundMutationLedgerTests
         new(2026, 7, 18, 1, 2, 3, TimeSpan.Zero);
 
     [Fact]
+    public void BotBusinessIdentity_RoundTripsIntoOperatorDiagnostics()
+    {
+        var fixture = Fixture.Create();
+        var credentialId = Guid.Parse("11111111-1111-1111-1111-111111111111");
+        var approved = fixture.Approved with
+        {
+            Origin = OutboundMutationOrigin.UserBotFixp,
+            BotBusinessIdentity = new OutboundBotBusinessIdentity(credentialId, 77),
+        };
+        fixture.Ledger.Apply(approved);
+
+        var snapshot = Assert.Single(fixture.Ledger.SnapshotMutations());
+        Assert.Equal(credentialId, snapshot.BotBusinessIdentity!.CredentialId);
+        Assert.Equal(77UL, snapshot.BotBusinessIdentity.ExternalClOrdId);
+        var diagnostic = Assert.Single(fixture.Ledger.GetDiagnostics());
+        Assert.Equal(credentialId, diagnostic.BotCredentialId);
+        Assert.Equal(77UL, diagnostic.ExternalClOrdId);
+
+        var restored = new OutboundMutationLedger(fixture.Protector);
+        restored.Restore(
+            fixture.Ledger.SnapshotMutations(),
+            fixture.Ledger.SnapshotCorrelations());
+
+        var restoredSnapshot = Assert.Single(restored.SnapshotMutations());
+        Assert.Equal(snapshot.BotBusinessIdentity, restoredSnapshot.BotBusinessIdentity);
+    }
+
+    [Fact]
     public void StateMachine_AppliesOrderedEvidence_Idempotently()
     {
         var fixture = Fixture.Create();
@@ -3434,6 +3462,56 @@ public sealed class OutboundMutationLedgerTests
     }
 
     [Fact]
+    public void ReconciliationRequiredEvent_ReplayDurablyFlagsProvenUnsentMutation()
+    {
+        var writer = Fixture.Create();
+        var ledger = new OutboundMutationLedger(writer.Protector);
+        var replayer = NewReplayer(ledger, new ClOrdIdPrefixRegistry());
+        replayer.Apply(writer.Approved);
+        replayer.Apply(writer.Intent);
+        replayer.Apply(writer.Unsent);
+        var flaggedAt = T0.AddMinutes(1);
+
+        replayer.Apply(new OutboundReconciliationRequiredEvent
+        {
+            MutationId = writer.MutationId,
+            Reason = "AlgoRepegAttemptCapExhausted",
+            TimestampUtc = flaggedAt,
+        });
+
+        var mutation = Assert.Single(ledger.SnapshotMutations());
+        Assert.Equal(OutboundMutationState.ProvenUnsent, mutation.State);
+        Assert.True(mutation.RequiresReconciliation);
+        Assert.True(mutation.ExplicitlyRequiresReconciliation);
+        Assert.Equal(flaggedAt, mutation.StateChangedAtUtc);
+    }
+
+    [Fact]
+    public void ReconciliationRequiredEvent_SnapshotRestorePreservesExplicitFlag()
+    {
+        var writer = Fixture.Create();
+        writer.Ledger.Apply(writer.Approved);
+        writer.Ledger.Apply(writer.Intent);
+        writer.Ledger.Apply(writer.Unsent);
+        writer.Ledger.Apply(new OutboundReconciliationRequiredEvent
+        {
+            MutationId = writer.MutationId,
+            Reason = "AlgoRepegAttemptCapExhausted",
+            TimestampUtc = T0.AddMinutes(1),
+        });
+
+        var restored = RestoreLedger(writer);
+
+        var mutation = Assert.Single(restored.SnapshotMutations());
+        Assert.Equal(OutboundMutationState.ProvenUnsent, mutation.State);
+        Assert.Equal(
+            OutboundSensitivePayloadAvailability.Available,
+            mutation.SensitivePayloadAvailability);
+        Assert.True(mutation.RequiresReconciliation);
+        Assert.True(mutation.ExplicitlyRequiresReconciliation);
+    }
+
+    [Fact]
     public void SnapshotRestore_RepairsPrimaryAndRetryAttemptWatermarksIdempotently()
     {
         var fixture = Fixture.Create();
@@ -4156,6 +4234,121 @@ public sealed class OutboundMutationLedgerTests
             }
         }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    [Fact]
+    public void AlgoOriginIdentity_IsDurableUniqueAndBlocksUnresolvedScheduling()
+    {
+        var origin = new AlgoOutboundOriginIdentity(
+            9001,
+            AlgoOutboundActionKind.NewChild,
+            4);
+        var first = Fixture.Create(7001);
+        var approved = first.Approved with
+        {
+            Origin = OutboundMutationOrigin.Algo,
+            AlgoOriginIdentity = origin,
+        };
+        first.Ledger.Apply(approved);
+
+        Assert.True(first.Ledger.HasBlockingAlgoMutation(approved.FirmId, origin.ParentAlgoId));
+        Assert.True(first.Ledger.TryGetByAlgoOrigin(approved.FirmId, origin, out var stored));
+        Assert.Equal(approved.MutationId, stored!.MutationId);
+
+        var snapshot = first.Ledger.CaptureSnapshot();
+        var restored = new OutboundMutationLedger(first.Protector);
+        restored.Restore(
+            snapshot.Mutations,
+            snapshot.Correlations,
+            snapshot.InboundEvidence);
+        Assert.True(restored.TryGetByAlgoOrigin(approved.FirmId, origin, out var recovered));
+        Assert.Equal(origin, recovered!.AlgoOriginIdentity);
+
+        var second = Fixture.Create(7002);
+        var duplicate = second.Approved with
+        {
+            Origin = OutboundMutationOrigin.Algo,
+            AlgoOriginIdentity = origin,
+        };
+        Assert.Throws<InvalidOperationException>(() => restored.Apply(duplicate));
+        Assert.Single(restored.GetAlgoMutations(approved.FirmId, origin.ParentAlgoId));
+
+        var otherFirm = duplicate with { FirmId = "OTHER" };
+        restored.Apply(otherFirm);
+        Assert.True(restored.TryGetByAlgoOrigin("OTHER", origin, out var otherStored));
+        Assert.Equal(otherFirm.MutationId, otherStored!.MutationId);
+    }
+
+    [Fact]
+    public void AlgoProvenUnsent_RemainsBlockedUntilExplicitDecision()
+    {
+        var fixture = Fixture.Create(7101);
+        var origin = new AlgoOutboundOriginIdentity(
+            9002,
+            AlgoOutboundActionKind.Repeg,
+            1);
+        fixture.Ledger.Apply(fixture.Approved with
+        {
+            Origin = OutboundMutationOrigin.Algo,
+            AlgoOriginIdentity = origin,
+        });
+        fixture.Ledger.Apply(fixture.Intent);
+        fixture.Ledger.Apply(fixture.Unsent);
+
+        Assert.True(fixture.Ledger.HasBlockingAlgoMutation(
+            fixture.Approved.FirmId,
+            origin.ParentAlgoId));
+        Assert.Equal(
+            OutboundMutationState.ProvenUnsent,
+            Assert.Single(fixture.Ledger.GetAlgoMutations(
+                fixture.Approved.FirmId,
+                origin.ParentAlgoId)).State);
+        Assert.False(fixture.Ledger.HasBlockingAlgoMutationExcept(
+            fixture.Approved.FirmId,
+            origin.ParentAlgoId,
+            fixture.MutationId));
+    }
+
+    [Fact]
+    public void AlgoTerminalMutationRequiringReconciliation_RemainsBlocking()
+    {
+        var fixture = Fixture.Create(7102);
+        var origin = new AlgoOutboundOriginIdentity(
+            9003,
+            AlgoOutboundActionKind.CancelChild,
+            1);
+        fixture.Ledger.Apply(fixture.Approved with
+        {
+            Origin = OutboundMutationOrigin.Algo,
+            AlgoOriginIdentity = origin,
+        });
+        fixture.Ledger.Apply(fixture.Intent);
+        fixture.Ledger.Apply(fixture.Frame);
+        fixture.Ledger.Apply(fixture.Write);
+
+        var snapshot = Assert.Single(fixture.Ledger.CaptureSnapshot().Mutations);
+        var restored = new OutboundMutationLedger(fixture.Protector);
+        restored.Restore(
+            [
+                   snapshot with
+                   {
+                       State = OutboundMutationState.VenueAcknowledged,
+                       Attempts =
+                       [
+                           snapshot.Attempts[0] with
+                           {
+                               AmbiguityReason =
+                                   OutboundAmbiguityReason.ConflictingVenueEvidence,
+                           },
+                       ],
+                   },
+            ],
+            Array.Empty<OutboundCorrelationTombstone>(),
+            Array.Empty<InboundVenueEvidenceSnapshot>());
+
+        Assert.True(restored.HasBlockingAlgoMutation(
+            fixture.Approved.FirmId,
+            origin.ParentAlgoId));
     }
 
     private sealed class SimulatedCrashException : Exception;
