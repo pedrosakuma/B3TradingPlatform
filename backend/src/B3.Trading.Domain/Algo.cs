@@ -59,6 +59,7 @@ public enum AlgoTerminalReason
     TwapWindowExpired,
     RetriesExhausted,
     Drained,
+    ReconciliationRequired,
     /// <summary>VWAP window expired (Q3.1 / #281). Mirrors <see cref="TwapWindowExpired"/>.</summary>
     VwapWindowExpired,
     /// <summary>POV window expired with residue (Q3.2 / #282). Mirrors <see cref="VwapWindowExpired"/>.</summary>

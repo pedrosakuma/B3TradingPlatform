@@ -70,6 +70,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(OutboundFramePreparedEvent), "outbound.frame-prepared")]
 [JsonDerivedType(typeof(OutboundTransportWriteCompletedEvent), "outbound.transport-write-completed")]
 [JsonDerivedType(typeof(OutboundProvenUnsentEvent), "outbound.proven-unsent")]
+[JsonDerivedType(typeof(OutboundReconciliationRequiredEvent), "outbound.reconciliation-required")]
 [JsonDerivedType(typeof(OutboundOperatorResolvedEvent), "outbound.operator-resolved")]
 [JsonDerivedType(typeof(RestOrderIdempotencyBoundEvent), "outbound.rest-idempotency-bound")]
 public abstract record WalEvent
@@ -463,6 +464,7 @@ public sealed record OutboundApprovedEvent : WalEvent
     public required string FirmId { get; init; }
     public required string EndClientRef { get; init; }
     public required OutboundMutationOrigin Origin { get; init; }
+    public AlgoOutboundOriginIdentity? AlgoOriginIdentity { get; init; }
     public OutboundBotBusinessIdentity? BotBusinessIdentity { get; init; }
     public required ulong PrimaryClOrdId { get; init; }
     public ulong? OriginalClOrdId { get; init; }
@@ -505,6 +507,12 @@ public sealed record OutboundProvenUnsentEvent : WalEvent
     public required OutboundMutationId MutationId { get; init; }
     public required OutboundAttemptId AttemptId { get; init; }
     public required OutboundProvenUnsentEvidence Evidence { get; init; }
+}
+
+public sealed record OutboundReconciliationRequiredEvent : WalEvent
+{
+    public required OutboundMutationId MutationId { get; init; }
+    public required string Reason { get; init; }
 }
 
 public sealed record OutboundOperatorResolvedEvent : WalEvent

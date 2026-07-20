@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using B3.Trading.Application;
 using B3.Trading.Domain;
+using B3.Trading.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
@@ -228,12 +229,14 @@ public class VwapAlgoEndpointTests
                 tickSeconds: 0.2));
 
         var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
 
         // Fill the first slice; expect at least one more to follow.
         // The engine's catch-up loop may skip the seq=0 slot because the
         // CDF evaluated at startUtc is 0 (no gap to fill); we just want
         // *any* slice to fire first.
         var first = await WaitForAnyChild(book, algoId);
+        await WaitForNewOrderDispatch(mock, first.ClOrdId);
         await InjectEr(http, adminToken, first.ClOrdId, "Fill", lastQty: first.Quantity);
         var seenSeqs = new HashSet<int> { first.AlgoSliceSeq!.Value };
         long filled = first.Quantity;
@@ -252,6 +255,7 @@ public class VwapAlgoEndpointTests
             var next = book.EnumerateChildrenOf("default", ulong.Parse(algoId))
                 .FirstOrDefault(c => c.AlgoSliceSeq is { } s && seenSeqs.Add(s));
             if (next is null) { await Task.Delay(20); continue; }
+            await WaitForNewOrderDispatch(mock, next.ClOrdId);
             await InjectEr(http, adminToken, next.ClOrdId, "Fill", lastQty: next.Quantity);
             filled += next.Quantity;
             if (filled >= 400) break;
@@ -530,6 +534,20 @@ public class VwapAlgoEndpointTests
             await Task.Delay(10);
         }
         throw new TimeoutException($"No child for algo {algoIdStr} within 5s.");
+    }
+
+    private static async Task WaitForNewOrderDispatch(
+        MockEntryPointClient client,
+        ulong clOrdId)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.Elapsed < TimeSpan.FromSeconds(3))
+        {
+            if (client.SubmittedNewOrders.Any(order => order.ClOrdId == clOrdId))
+                return;
+            await Task.Delay(10);
+        }
+        throw new TimeoutException($"New order {clOrdId} was not dispatched within 3s.");
     }
 
     private static async Task WaitForAlgoStatus(HttpClient http, string token, string algoId, params string[] anyOf)

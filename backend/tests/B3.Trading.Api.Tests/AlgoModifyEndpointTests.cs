@@ -122,6 +122,7 @@ public class AlgoModifyEndpointTests
 
         var book = f.Services.GetRequiredService<WorkingOrderBook>();
         var child = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        await WaitForNewOrderDispatch(f, child.ClOrdId);
 
         // Drive the algo to Filled (terminal) so the modify is rejected.
         await InjectEr(http, adminToken, child.ClOrdId, "Fill", lastQty: 100);
@@ -995,6 +996,21 @@ public class AlgoModifyEndpointTests
             await Task.Delay(10);
         }
         throw new TimeoutException($"No child for algo {algoIdStr} within {timeout.TotalSeconds}s.");
+    }
+
+    private static async Task WaitForNewOrderDispatch(
+        TestAppFactory factory,
+        ulong clOrdId)
+    {
+        var client = factory.Services.GetRequiredService<MockEntryPointClient>();
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.Elapsed < TimeSpan.FromSeconds(3))
+        {
+            if (client.SubmittedNewOrders.Any(order => order.ClOrdId == clOrdId))
+                return;
+            await Task.Delay(10);
+        }
+        throw new TimeoutException($"New order {clOrdId} was not dispatched within 3s.");
     }
 
     private static async Task<Order> WaitForChildOtherThan(

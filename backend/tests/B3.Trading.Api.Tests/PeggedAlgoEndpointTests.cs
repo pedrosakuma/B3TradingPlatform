@@ -30,6 +30,17 @@ public class PeggedAlgoEndpointTests
             ["Trading:SymbolDirectory:SecurityIds:PETR4"] = "4321",
         };
 
+    private static TestAppFactory WithDroppingSignals() =>
+        TestAppFactory.WithOverrides(
+            Simulator(),
+            services =>
+            {
+                services.RemoveAll<IAlgoSignalQueue>();
+                services.AddSingleton<DroppingAlgoSignalQueue>();
+                services.AddSingleton<IAlgoSignalQueue>(sp =>
+                    sp.GetRequiredService<DroppingAlgoSignalQueue>());
+            });
+
     private static object PeggedBody(long total, string pegRef = "Mid",
         int offsetTicks = 0, int? repegMs = 100, decimal? tickSize = 0.5m,
         string? childType = null, decimal? priceLimit = null, string side = "Buy") => new
@@ -397,6 +408,7 @@ public class PeggedAlgoEndpointTests
             ["Trading:Persistence:Enabled"] = "true",
             ["Trading:Persistence:DataDirectory"] = dataDir,
             ["Trading:Persistence:FirmId"] = "default",
+            ["Trading:Exchange:Firms:0:FirmId"] = "default",
             ["Trading:Persistence:SnapshotInterval"] = "00:10:00",
         };
         return d;
@@ -515,6 +527,51 @@ public class PeggedAlgoEndpointTests
         var stillThere = book.EnumerateChildrenOf("default", ulong.Parse(algoId))
             .FirstOrDefault(c => c.ClOrdId == child2.ClOrdId);
         Assert.NotNull(stillThere);
+    }
+
+    [Fact]
+    public async Task Pegged_SentRepeg_OriginalChildCancelled_SuspendsAndUnwindsCycle()
+    {
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+
+        cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+        await WaitFor(
+            () => mock.SubmittedReplaces.Any(request =>
+                request.OriginalClOrdId == child.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "engine did not send the repeg cancel-replace");
+        var repegBook = f.Services.GetRequiredService<PeggedRepegBook>();
+        await WaitFor(
+            () => repegBook.TryGet("default", ulong.Parse(algoId)) is not null,
+            TimeSpan.FromSeconds(3),
+            "sent repeg did not persist its pending cycle");
+
+        await InjectEr(http, adminToken, child.ClOrdId, "Canceled");
+        await WaitForAlgoStatus(http, token, algoId, "Suspended");
+
+        var snapshot = await GetAlgo(http, token, algoId);
+        Assert.Equal(
+            "ReconciliationRequired",
+            snapshot.GetProperty("terminalReason").GetString());
+        Assert.Null(repegBook.TryGet("default", ulong.Parse(algoId)));
+        Assert.False(
+            f.Services.GetRequiredService<PendingReplacementRegistry>()
+                .IsOriginalInFlight(child.ClOrdId));
+        await Task.Delay(250);
+        Assert.Single(mock.SubmittedReplaces);
+        Assert.DoesNotContain(
+            book.EnumerateChildrenOf("default", ulong.Parse(algoId)),
+            candidate => candidate.ClOrdId != child.ClOrdId);
     }
 
     [Fact]
@@ -798,6 +855,7 @@ public class PeggedAlgoEndpointTests
         using var f = TestAppFactory.WithOverrides(Simulator());
         using var http = f.CreateClient();
         var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
 
         var cache = f.Services.GetRequiredService<PegBookTopCache>();
         cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
@@ -849,6 +907,879 @@ public class PeggedAlgoEndpointTests
         await Task.Delay(400);
         Assert.Single(mock.SubmittedReplaces);
         Assert.Empty(mock.SubmittedCancels);
+
+        await InjectEr(http, adminToken, child1.ClOrdId, "Canceled");
+        await WaitForAlgoStatus(http, token, algoId, "Suspended");
+        var terminal = await GetAlgo(http, token, algoId);
+        Assert.Equal(
+            "ReconciliationRequired",
+            terminal.GetProperty("terminalReason").GetString());
+        Assert.False(registry.IsOriginalInFlight(child1.ClOrdId));
+    }
+
+    [Fact]
+    public async Task Pegged_AmbiguousRepeg_OriginalFills_LateReplaceCannotOverfillParent()
+    {
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        mock.ReplaceFailureInjector = _ =>
+            new InvalidOperationException("simulated ambiguous replace send");
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var original = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+
+        cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+        await WaitFor(
+            () => mock.SubmittedReplaces.Any(request =>
+                request.OriginalClOrdId == original.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "ambiguous repeg was not attempted");
+        var replacement = mock.SubmittedReplaces.Single(request =>
+            request.OriginalClOrdId == original.ClOrdId);
+        var registry = f.Services.GetRequiredService<PendingReplacementRegistry>();
+        Assert.True(registry.IsOriginalInFlight(original.ClOrdId));
+
+        await InjectEr(
+            http,
+            adminToken,
+            original.ClOrdId,
+            "Fill",
+            lastQty: original.Quantity);
+        await WaitForAlgoStatus(http, token, algoId, "Completed");
+        Assert.False(registry.IsOriginalInFlight(original.ClOrdId));
+
+        await InjectReplacedEr(
+            http,
+            adminToken,
+            replacement.NewClOrdId,
+            replacement.OriginalClOrdId,
+            replacement.NewQuantity,
+            cumQty: replacement.NewQuantity);
+        await Task.Delay(250);
+
+        var terminal = await GetAlgo(http, token, algoId);
+        Assert.Equal("Completed", terminal.GetProperty("status").GetString());
+        Assert.Equal(100, terminal.GetProperty("filledQuantity").GetInt64());
+        Assert.DoesNotContain(
+            book.EnumerateChildrenOf("default", ulong.Parse(algoId)),
+            child => child.ClOrdId == replacement.NewClOrdId);
+    }
+
+    [Fact]
+    public async Task Pegged_ReplacedAdoptedBeforeLateOriginalFill_CancelsReplacementAndSuspends()
+    {
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var original = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+
+        cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+        await WaitFor(
+            () => mock.SubmittedReplaces.Any(request =>
+                request.OriginalClOrdId == original.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "repeg was not submitted");
+        var replace = mock.SubmittedReplaces.Single(request =>
+            request.OriginalClOrdId == original.ClOrdId);
+        await InjectReplacedEr(
+            http,
+            adminToken,
+            replace.NewClOrdId,
+            replace.OriginalClOrdId,
+            replace.NewQuantity);
+        var adopted = await WaitForChildOtherThan(
+            book,
+            algoId,
+            original.ClOrdId,
+            TimeSpan.FromSeconds(3));
+
+        await InjectEr(
+            http,
+            adminToken,
+            original.ClOrdId,
+            "Fill",
+            lastQty: original.Quantity);
+        await WaitFor(
+            () => mock.SubmittedCancels.Any(request =>
+                request.OrigClOrdId == adopted.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "late original fill did not cancel the adopted replacement");
+        await WaitForAlgoStatus(http, token, algoId, "Suspended");
+
+        var terminal = await GetAlgo(http, token, algoId);
+        Assert.Equal(100, terminal.GetProperty("filledQuantity").GetInt64());
+        Assert.Equal(
+            "ReconciliationRequired",
+            terminal.GetProperty("terminalReason").GetString());
+        var ledger = f.Services.GetRequiredService<
+            B3.Trading.Application.Outbound.OutboundMutationLedger>();
+        Assert.Contains(
+            ledger.GetAlgoMutations("default", ulong.Parse(algoId)),
+            mutation => mutation.AlgoOriginIdentity?.ActionKind
+                    == B3.Trading.Application.Outbound.AlgoOutboundActionKind.Repeg
+                && mutation.RequiresReconciliation);
+    }
+
+    [Fact]
+    public async Task Pegged_DroppedReplacementAdoptionSignal_AdoptsHydratedChildWithoutResubmit()
+    {
+        using var f = WithDroppingSignals();
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100));
+        var algoIdValue = ulong.Parse(algoId);
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var original = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        var engine = f.Services.GetRequiredService<AlgoEngine>();
+        var signals = f.Services.GetRequiredService<DroppingAlgoSignalQueue>();
+
+        cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+        await WaitFor(
+            () => mock.SubmittedReplaces.Any(request =>
+                request.OriginalClOrdId == original.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "repeg was not submitted");
+        var replace = mock.SubmittedReplaces.Single(request =>
+            request.OriginalClOrdId == original.ClOrdId);
+        var newOrdersBeforeAdoption = mock.SubmittedNewOrders.Count;
+        signals.DropNextChildExecutionSignal(replace.NewClOrdId);
+
+        await InjectReplacedEr(
+            http,
+            adminToken,
+            replace.NewClOrdId,
+            replace.OriginalClOrdId,
+            replace.NewQuantity);
+        await WaitFor(
+            () => engine.TryGetLiveChildClOrdId("default", algoIdValue)
+                == replace.NewClOrdId,
+            TimeSpan.FromSeconds(5),
+            "watchdog did not adopt the hydrated replacement");
+
+        await Task.Delay(300);
+        Assert.Equal(newOrdersBeforeAdoption, mock.SubmittedNewOrders.Count);
+        var liveChildren = book.EnumerateChildrenOf("default", algoIdValue)
+            .Where(child => child.Status is
+                OrderStatus.PendingNew
+                or OrderStatus.Working
+                or OrderStatus.PartiallyFilled)
+            .ToList();
+        var adopted = Assert.Single(liveChildren);
+        Assert.Equal(replace.NewClOrdId, adopted.ClOrdId);
+    }
+
+    [Fact]
+    public async Task Pegged_DroppedNormalFillSignal_BooksFillAndCompletes()
+    {
+        using var f = WithDroppingSignals();
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        await WaitFor(
+            () => mock.SubmittedNewOrders.Count > 0,
+            TimeSpan.FromSeconds(3),
+            "initial child submission was not recorded");
+        var newOrdersBeforeFill = mock.SubmittedNewOrders.Count;
+        var signals = f.Services.GetRequiredService<DroppingAlgoSignalQueue>();
+        signals.DropNextChildExecutionSignal(child.ClOrdId);
+
+        await InjectEr(
+            http,
+            adminToken,
+            child.ClOrdId,
+            "Fill",
+            lastQty: child.Quantity);
+        Assert.Equal(1, signals.DroppedSignals);
+        await WaitForAlgoStatus(http, token, algoId, "Completed");
+
+        var completed = await GetAlgo(http, token, algoId);
+        Assert.Equal(100, completed.GetProperty("filledQuantity").GetInt64());
+        Assert.Equal("None", completed.GetProperty("terminalReason").GetString());
+        Assert.Equal(newOrdersBeforeFill, mock.SubmittedNewOrders.Count);
+    }
+
+    [Fact]
+    public async Task Pegged_DroppedPartialFillSignal_BooksDeltaFromOrderState()
+    {
+        using var f = WithDroppingSignals();
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100));
+        var algoIdValue = ulong.Parse(algoId);
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        var signals = f.Services.GetRequiredService<DroppingAlgoSignalQueue>();
+        signals.DropNextChildExecutionSignal(child.ClOrdId);
+
+        await InjectEr(
+            http,
+            adminToken,
+            child.ClOrdId,
+            "PartialFill",
+            lastQty: 40);
+        Assert.Equal(1, signals.DroppedSignals);
+        var algos = f.Services.GetRequiredService<AlgoBook>();
+        await WaitFor(
+            () => algos.TryGet("default", algoIdValue, out var algo)
+                && algo?.FilledQuantity == 40,
+            TimeSpan.FromSeconds(3),
+            "dropped partial fill was not booked from the working-order state");
+
+        Assert.Equal(
+            child.ClOrdId,
+            f.Services.GetRequiredService<AlgoEngine>()
+                .TryGetLiveChildClOrdId("default", algoIdValue));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Pegged_DroppedPartialFillSignal_DoesNotConsumePendingModify(
+        bool targetChildExplicitly)
+    {
+        using var f = WithDroppingSignals();
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(
+            http,
+            token,
+            PeggedBody(total: 100, repegMs: 30_000));
+        var algoIdValue = ulong.Parse(algoId);
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        await WaitFor(
+            () => mock.SubmittedNewOrders.Any(order =>
+                order.ClOrdId == child.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "initial child submission was not recorded");
+        var signals = f.Services.GetRequiredService<DroppingAlgoSignalQueue>();
+        signals.DropNextChildExecutionSignal(child.ClOrdId);
+
+        await InjectEr(
+            http,
+            adminToken,
+            child.ClOrdId,
+            "PartialFill",
+            lastQty: 40);
+        Assert.Equal(1, signals.DroppedSignals);
+
+        var modifyRequest = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"/algo/{algoId}/modify")
+        {
+            Content = JsonContent.Create(new
+            {
+                ChildClOrdId = targetChildExplicitly
+                    ? child.ClOrdId
+                    : (ulong?)null,
+                NewPrice = 30.5m,
+            }),
+        };
+        modifyRequest.Headers.Authorization =
+            new AuthenticationHeaderValue("Bearer", token);
+        var modifyResponse = await http.SendAsync(modifyRequest);
+        Assert.Equal(HttpStatusCode.Accepted, modifyResponse.StatusCode);
+
+        await WaitFor(
+            () => mock.SubmittedReplaces.Any(replace =>
+                replace.OriginalClOrdId == child.ClOrdId
+                && replace.NewPrice == 30.5m),
+            TimeSpan.FromSeconds(3),
+            "modify was consumed while reconciling the dropped partial fill");
+        Assert.True(
+            f.Services.GetRequiredService<AlgoBook>()
+                .TryGet("default", algoIdValue, out var algo));
+        Assert.Equal(40, algo!.FilledQuantity);
+    }
+
+    [Fact]
+    public async Task Pegged_DroppedCancelConfirmation_CompletesParentCancellation()
+    {
+        using var f = WithDroppingSignals();
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100));
+        var child = await WaitForAnyChild(
+            f.Services.GetRequiredService<WorkingOrderBook>(),
+            algoId,
+            TimeSpan.FromSeconds(3));
+        var cancelRequest = new HttpRequestMessage(
+            HttpMethod.Delete,
+            $"/algo/{algoId}");
+        cancelRequest.Headers.Authorization =
+            new AuthenticationHeaderValue("Bearer", token);
+        var cancelResponse = await http.SendAsync(cancelRequest);
+        Assert.Equal(HttpStatusCode.Accepted, cancelResponse.StatusCode);
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        await WaitFor(
+            () => mock.SubmittedCancels.Any(request =>
+                request.OrigClOrdId == child.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "algo child cancel was not submitted");
+        var signals = f.Services.GetRequiredService<DroppingAlgoSignalQueue>();
+        signals.DropNextChildExecutionSignal(child.ClOrdId);
+
+        await InjectEr(http, adminToken, child.ClOrdId, "Canceled");
+        Assert.Equal(1, signals.DroppedSignals);
+        await WaitForAlgoStatus(http, token, algoId, "Cancelled");
+
+        var cancelled = await GetAlgo(http, token, algoId);
+        Assert.Equal(
+            "UserCancelled",
+            cancelled.GetProperty("terminalReason").GetString());
+    }
+
+    [Fact]
+    public async Task Pegged_DroppedNormalRejectedSignal_SuspendsRiskRejected()
+    {
+        using var f = WithDroppingSignals();
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100));
+        var child = await WaitForAnyChild(
+            f.Services.GetRequiredService<WorkingOrderBook>(),
+            algoId,
+            TimeSpan.FromSeconds(3));
+        var signals = f.Services.GetRequiredService<DroppingAlgoSignalQueue>();
+        signals.DropNextChildExecutionSignal(child.ClOrdId);
+
+        await InjectEr(
+            http,
+            adminToken,
+            child.ClOrdId,
+            "Rejected",
+            rejectReason: "RiskRejected");
+        Assert.Equal(1, signals.DroppedSignals);
+        await WaitForAlgoStatus(http, token, algoId, "Suspended");
+
+        var suspended = await GetAlgo(http, token, algoId);
+        Assert.Equal(
+            "RiskRejected",
+            suspended.GetProperty("terminalReason").GetString());
+    }
+
+    [Fact]
+    public async Task Pegged_ProvenUnsentRepeg_AttemptCapSuspendsForReconciliation()
+    {
+        using var f = TestAppFactory.WithOverrides(
+            Simulator(),
+            services =>
+            {
+                services.RemoveAll<IExchangeGateway>();
+                services.AddSingleton<ProvenUnsentCancelGateway>();
+                services.AddSingleton<IExchangeGateway>(sp =>
+                    sp.GetRequiredService<ProvenUnsentCancelGateway>());
+            });
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(
+            http,
+            token,
+            PeggedBody(total: 100, repegMs: 100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        _ = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        var gateway = f.Services.GetRequiredService<ProvenUnsentCancelGateway>();
+
+        cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+        await WaitFor(
+            () => gateway.AttemptedReplaceClOrdIds.Count
+                == B3.Trading.Application.Outbound.OutboundMutationLedger
+                    .MaxOutboundAttempts,
+            TimeSpan.FromSeconds(5),
+            "ProvenUnsent repeg retry did not reach the attempt cap");
+        await WaitForAlgoStatus(http, token, algoId, "Suspended");
+
+        var terminal = await GetAlgo(http, token, algoId);
+        Assert.Equal(
+            "ReconciliationRequired",
+            terminal.GetProperty("terminalReason").GetString());
+        var ledger = f.Services.GetRequiredService<
+            B3.Trading.Application.Outbound.OutboundMutationLedger>();
+        var mutation = Assert.Single(
+            ledger.GetAlgoMutations("default", ulong.Parse(algoId)),
+            candidate => candidate.AlgoOriginIdentity?.ActionKind
+                == B3.Trading.Application.Outbound.AlgoOutboundActionKind.Repeg);
+        Assert.Equal(
+            B3.Trading.Application.Outbound.OutboundMutationState.ProvenUnsent,
+            mutation.State);
+        Assert.Equal(
+            B3.Trading.Application.Outbound.OutboundMutationLedger.MaxOutboundAttempts,
+            mutation.Attempts.Count);
+        Assert.True(mutation.RequiresReconciliation);
+    }
+
+    [Fact]
+    public async Task Pegged_ParentCancelWithAmbiguousChild_FailsClosed()
+    {
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        mock.ReplaceFailureInjector = _ =>
+            new InvalidOperationException("simulated ambiguous replace send");
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+
+        cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+        var ledger = f.Services.GetRequiredService<
+            B3.Trading.Application.Outbound.OutboundMutationLedger>();
+        await WaitFor(
+            () => ledger.GetAlgoMutations("default", ulong.Parse(algoId)).Any(m =>
+                m.State == B3.Trading.Application.Outbound.OutboundMutationState.Ambiguous),
+            TimeSpan.FromSeconds(3),
+            "replace mutation did not become ambiguous");
+
+        var cancel = new HttpRequestMessage(HttpMethod.Delete, $"/algo/{algoId}");
+        cancel.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        Assert.Equal(
+            HttpStatusCode.ServiceUnavailable,
+            (await http.SendAsync(cancel)).StatusCode);
+
+        await Task.Delay(250);
+        var snapshot = await GetAlgo(http, token, algoId);
+        Assert.Equal("Working", snapshot.GetProperty("status").GetString());
+        Assert.DoesNotContain(mock.SubmittedCancels, c => c.OrigClOrdId == child.ClOrdId);
+    }
+
+    [Fact]
+    public async Task Pegged_ParentCancelDuringReplace_CancelsAdoptedChild()
+    {
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        await WaitFor(
+            () => mock.SubmittedNewOrders.Any(order => order.ClOrdId == child.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "initial child was not dispatched");
+
+        cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+        await WaitFor(
+            () => mock.SubmittedReplaces.Any(replace =>
+                replace.OriginalClOrdId == child.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "repeg replace was not dispatched");
+        var replace = mock.SubmittedReplaces.Single(replace =>
+            replace.OriginalClOrdId == child.ClOrdId);
+
+        var cancel = new HttpRequestMessage(HttpMethod.Delete, $"/algo/{algoId}");
+        cancel.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        Assert.Equal(HttpStatusCode.Accepted, (await http.SendAsync(cancel)).StatusCode);
+
+        await InjectReplacedEr(
+            http,
+            adminToken,
+            replace.NewClOrdId,
+            replace.OriginalClOrdId,
+            replace.NewQuantity);
+        _ = await WaitForChildOtherThan(
+            book,
+            algoId,
+            child.ClOrdId,
+            TimeSpan.FromSeconds(3));
+        await WaitFor(
+            () => mock.SubmittedCancels.Any(request =>
+                request.OrigClOrdId == replace.NewClOrdId),
+            TimeSpan.FromSeconds(3),
+            "adopted replacement child was not cancelled");
+
+        var snapshot = await GetAlgo(http, token, algoId);
+        Assert.Equal("Cancelling", snapshot.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task Pegged_RejectedChildCancel_RedrivesWithFreshLogicalAction()
+    {
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        await WaitFor(
+            () => mock.SubmittedNewOrders.Any(order => order.ClOrdId == child.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "initial child was not dispatched");
+
+        var cancel = new HttpRequestMessage(HttpMethod.Delete, $"/algo/{algoId}");
+        cancel.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        Assert.Equal(HttpStatusCode.Accepted, (await http.SendAsync(cancel)).StatusCode);
+        await WaitFor(
+            () => mock.SubmittedCancels.Any(request =>
+                request.OrigClOrdId == child.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "initial child cancel was not dispatched");
+        var firstCancel = mock.SubmittedCancels.Single(request =>
+            request.OrigClOrdId == child.ClOrdId);
+
+        mock.EmitExecutionReport(new ExecutionReportEnvelope(
+            firstCancel.ClOrdId,
+            EpExecType.Rejected,
+            child.LeavesQuantity,
+            child.CumulativeQuantity,
+            0,
+            0m,
+            "too_late_to_cancel",
+            child.ClOrdId));
+
+        await WaitFor(
+            () => mock.SubmittedCancels.Any(request =>
+                request.OrigClOrdId == child.ClOrdId
+                && request.ClOrdId != firstCancel.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "rejected child cancel was not redriven with a fresh ClOrdID");
+        var secondCancel = mock.SubmittedCancels.Single(request =>
+            request.OrigClOrdId == child.ClOrdId
+            && request.ClOrdId != firstCancel.ClOrdId);
+        Assert.NotEqual(firstCancel.ClOrdId, secondCancel.ClOrdId);
+
+        var ledger = f.Services.GetRequiredService<
+            B3.Trading.Application.Outbound.OutboundMutationLedger>();
+        var origins = ledger.GetAlgoMutations("default", ulong.Parse(algoId))
+            .Where(m => m.AlgoOriginIdentity?.ActionKind
+                == B3.Trading.Application.Outbound.AlgoOutboundActionKind.CancelChild)
+            .Select(m => m.AlgoOriginIdentity!.Sequence)
+            .Order()
+            .ToArray();
+        Assert.Equal([0, 1], origins);
+    }
+
+    [Fact]
+    public async Task Pegged_ProvenUnsentChildCancel_ExplicitRetryPreservesOriginAndCapsAttempts()
+    {
+        using var f = TestAppFactory.WithOverrides(
+            Simulator(),
+            services =>
+            {
+                services.RemoveAll<IExchangeGateway>();
+                services.AddSingleton<ProvenUnsentCancelGateway>();
+                services.AddSingleton<IExchangeGateway>(sp =>
+                    sp.GetRequiredService<ProvenUnsentCancelGateway>());
+            });
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        await WaitFor(
+            () => mock.SubmittedNewOrders.Any(order => order.ClOrdId == child.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "initial child was not dispatched");
+        var gateway = f.Services.GetRequiredService<ProvenUnsentCancelGateway>();
+
+        async Task<HttpStatusCode> DeleteAlgo()
+        {
+            var request = new HttpRequestMessage(HttpMethod.Delete, $"/algo/{algoId}");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            return (await http.SendAsync(request)).StatusCode;
+        }
+
+        Assert.Equal(HttpStatusCode.Accepted, await DeleteAlgo());
+        var ledger = f.Services.GetRequiredService<
+            B3.Trading.Application.Outbound.OutboundMutationLedger>();
+        await WaitFor(
+            () => ledger.GetAlgoMutations("default", ulong.Parse(algoId)).Any(m =>
+                m.AlgoOriginIdentity?.ActionKind
+                    == B3.Trading.Application.Outbound.AlgoOutboundActionKind.CancelChild
+                && m.State
+                    == B3.Trading.Application.Outbound.OutboundMutationState.ProvenUnsent),
+            TimeSpan.FromSeconds(3),
+            "initial child cancel did not become ProvenUnsent");
+
+        Assert.Equal(HttpStatusCode.Accepted, await DeleteAlgo());
+        await WaitFor(
+            () => gateway.AttemptedCancelClOrdIds.Count == 2,
+            TimeSpan.FromSeconds(3),
+            "explicit ProvenUnsent retry was not dispatched");
+        Assert.Equal(HttpStatusCode.Accepted, await DeleteAlgo());
+        await Task.Delay(250);
+
+        var cancelMutation = Assert.Single(
+            ledger.GetAlgoMutations("default", ulong.Parse(algoId)),
+            m => m.AlgoOriginIdentity?.ActionKind
+                == B3.Trading.Application.Outbound.AlgoOutboundActionKind.CancelChild);
+        Assert.Equal(2, cancelMutation.Attempts.Count);
+        Assert.Equal(
+            B3.Trading.Application.Outbound.OutboundMutationState.ProvenUnsent,
+            cancelMutation.State);
+        Assert.Equal(2, gateway.AttemptedCancelClOrdIds.Count);
+        Assert.Equal(
+            cancelMutation.AlgoOriginIdentity,
+            ledger.GetAlgoMutations("default", ulong.Parse(algoId))
+                .Single(m => m.MutationId == cancelMutation.MutationId)
+                .AlgoOriginIdentity);
+        Assert.NotEqual(
+            gateway.AttemptedCancelClOrdIds.ElementAt(0),
+            gateway.AttemptedCancelClOrdIds.ElementAt(1));
+    }
+
+    [Fact]
+    public async Task Pegged_ProvenUnsentChildReplace_ExplicitRetryPreservesOriginAndCapsAttempts()
+    {
+        using var f = TestAppFactory.WithOverrides(
+            Simulator(),
+            services =>
+            {
+                services.RemoveAll<IExchangeGateway>();
+                services.AddSingleton<ProvenUnsentCancelGateway>();
+                services.AddSingleton<IExchangeGateway>(sp =>
+                    sp.GetRequiredService<ProvenUnsentCancelGateway>());
+            });
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        await WaitFor(
+            () => mock.SubmittedNewOrders.Any(order => order.ClOrdId == child.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "initial child was not dispatched");
+        var gateway = f.Services.GetRequiredService<ProvenUnsentCancelGateway>();
+
+        async Task<HttpStatusCode> ModifyChild()
+        {
+            var request = new HttpRequestMessage(
+                HttpMethod.Post,
+                $"/algo/{algoId}/modify")
+            {
+                Content = JsonContent.Create(new
+                {
+                    ChildClOrdId = child.ClOrdId,
+                    NewPrice = 29.9m,
+                }),
+            };
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            return (await http.SendAsync(request)).StatusCode;
+        }
+
+        Assert.Equal(HttpStatusCode.Accepted, await ModifyChild());
+        var ledger = f.Services.GetRequiredService<
+            B3.Trading.Application.Outbound.OutboundMutationLedger>();
+        await WaitFor(
+            () => ledger.GetAlgoMutations("default", ulong.Parse(algoId)).Any(m =>
+                m.AlgoOriginIdentity?.ActionKind
+                    == B3.Trading.Application.Outbound.AlgoOutboundActionKind.ReplaceChild
+                && m.State
+                    == B3.Trading.Application.Outbound.OutboundMutationState.ProvenUnsent),
+            TimeSpan.FromSeconds(3),
+            "initial child replace did not become ProvenUnsent");
+
+        Assert.Equal(HttpStatusCode.Accepted, await ModifyChild());
+        await WaitFor(
+            () => gateway.AttemptedReplaceClOrdIds.Count == 2,
+            TimeSpan.FromSeconds(3),
+            "explicit ProvenUnsent replace retry was not dispatched");
+        Assert.Equal(HttpStatusCode.Accepted, await ModifyChild());
+        await Task.Delay(250);
+
+        var replaceMutation = Assert.Single(
+            ledger.GetAlgoMutations("default", ulong.Parse(algoId)),
+            m => m.AlgoOriginIdentity?.ActionKind
+                == B3.Trading.Application.Outbound.AlgoOutboundActionKind.ReplaceChild);
+        Assert.Equal(2, replaceMutation.Attempts.Count);
+        Assert.Equal(
+            B3.Trading.Application.Outbound.OutboundMutationState.ProvenUnsent,
+            replaceMutation.State);
+        Assert.Equal(2, gateway.AttemptedReplaceClOrdIds.Count);
+        Assert.NotEqual(
+            gateway.AttemptedReplaceClOrdIds.ElementAt(0),
+            gateway.AttemptedReplaceClOrdIds.ElementAt(1));
+    }
+
+    [Fact]
+    public async Task Pegged_ProvenUnsentRepeg_RetriesFrozenCommandWhenMarketRevertsToLiveChild()
+    {
+        using var f = TestAppFactory.WithOverrides(
+            Simulator(),
+            services =>
+            {
+                services.RemoveAll<IExchangeGateway>();
+                services.AddSingleton<ProvenUnsentCancelGateway>();
+                services.AddSingleton<IExchangeGateway>(sp =>
+                    sp.GetRequiredService<ProvenUnsentCancelGateway>());
+            });
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var gateway = f.Services.GetRequiredService<ProvenUnsentCancelGateway>();
+        gateway.ProvenUnsentReplaceFailuresRemaining = 1;
+        var algoId = await PostAlgo(
+            http,
+            token,
+            PeggedBody(total: 100, repegMs: 1000));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        await WaitFor(
+            () => mock.SubmittedNewOrders.Any(order => order.ClOrdId == child.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "initial child was not dispatched");
+
+        cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+        await WaitFor(
+            () => gateway.AttemptedReplaceClOrdIds.Count == 1,
+            TimeSpan.FromSeconds(3),
+            "initial repeg did not become ProvenUnsent");
+        var frozenPrice = gateway.AttemptedReplacePrices.Single();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+        await WaitFor(
+            () => gateway.AttemptedReplaceClOrdIds.Count == 2,
+            TimeSpan.FromSeconds(3),
+            "ProvenUnsent repeg was not retried");
+        await WaitFor(
+            () => mock.SubmittedReplaces.Count == 1,
+            TimeSpan.FromSeconds(3),
+            "repeg retry did not self-heal through a successful transport write");
+
+        var ledger = f.Services.GetRequiredService<
+            B3.Trading.Application.Outbound.OutboundMutationLedger>();
+        var repeg = Assert.Single(
+            ledger.GetAlgoMutations("default", ulong.Parse(algoId)),
+            m => m.AlgoOriginIdentity?.ActionKind
+                == B3.Trading.Application.Outbound.AlgoOutboundActionKind.Repeg);
+        Assert.Equal(2, repeg.Attempts.Count);
+        Assert.Equal(
+            B3.Trading.Application.Outbound.OutboundMutationState.TransportWriteCompleted,
+            repeg.State);
+        Assert.NotEqual(
+            gateway.AttemptedReplaceClOrdIds.ElementAt(0),
+            gateway.AttemptedReplaceClOrdIds.ElementAt(1));
+        Assert.Equal(
+            gateway.AttemptedReplaceClOrdIds.ElementAt(1),
+            mock.SubmittedReplaces.Single().NewClOrdId);
+        Assert.Equal([frozenPrice, frozenPrice], gateway.AttemptedReplacePrices);
+        Assert.Equal(31m, frozenPrice);
+        Assert.Equal(frozenPrice, mock.SubmittedReplaces.Single().NewPrice);
+    }
+
+    [Fact]
+    public async Task Pegged_ProvenUnsentRepeg_OriginalChildCancelled_SuspendsInsteadOfWedging()
+    {
+        using var f = TestAppFactory.WithOverrides(
+            Simulator(),
+            services =>
+            {
+                services.RemoveAll<IExchangeGateway>();
+                services.AddSingleton<ProvenUnsentCancelGateway>();
+                services.AddSingleton<IExchangeGateway>(sp =>
+                    sp.GetRequiredService<ProvenUnsentCancelGateway>());
+            });
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(
+            http,
+            token,
+            PeggedBody(total: 100, repegMs: 1000));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        await WaitFor(
+            () => mock.SubmittedNewOrders.Any(order => order.ClOrdId == child.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "initial child was not dispatched");
+
+        cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+        var ledger = f.Services.GetRequiredService<
+            B3.Trading.Application.Outbound.OutboundMutationLedger>();
+        await WaitFor(
+            () => ledger.GetAlgoMutations("default", ulong.Parse(algoId)).Any(m =>
+                m.AlgoOriginIdentity?.ActionKind
+                    == B3.Trading.Application.Outbound.AlgoOutboundActionKind.Repeg
+                && m.State
+                    == B3.Trading.Application.Outbound.OutboundMutationState.ProvenUnsent),
+            TimeSpan.FromSeconds(3),
+            "initial repeg did not become ProvenUnsent");
+
+        var repegBook = f.Services.GetRequiredService<PeggedRepegBook>();
+        await WaitFor(
+            () => !repegBook.IsCancelledChild("default", ulong.Parse(algoId), child.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "ProvenUnsent repeg retained its optimistic cancelled-child marker");
+
+        await InjectEr(http, adminToken, child.ClOrdId, "Canceled");
+        await WaitForAlgoStatus(http, token, algoId, "Suspended");
+        var snapshot = await GetAlgo(http, token, algoId);
+        Assert.Equal("VenueCancelled", snapshot.GetProperty("terminalReason").GetString());
+        Assert.Single(
+            ledger.GetAlgoMutations("default", ulong.Parse(algoId)),
+            mutation => mutation.AlgoOriginIdentity?.ActionKind
+                == B3.Trading.Application.Outbound.AlgoOutboundActionKind.Repeg
+                && mutation.State
+                    == B3.Trading.Application.Outbound.OutboundMutationState.ProvenUnsent);
     }
 
     [Fact]
@@ -870,7 +1801,6 @@ public class PeggedAlgoEndpointTests
             using (var http = f.CreateClient())
             {
                 var token = await f.LoginAsync(http);
-                var adminToken = await f.LoginAsync(http, "admin");
                 var cache = f.Services.GetRequiredService<PegBookTopCache>();
                 cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
 
@@ -882,28 +1812,22 @@ public class PeggedAlgoEndpointTests
                 var book = f.Services.GetRequiredService<WorkingOrderBook>();
                 var child1 = await WaitForAnyChild(book, algoIdStr, TimeSpan.FromSeconds(3));
                 child1ClOrdId = child1.ClOrdId;
-                cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
                 var mock = f.Services.GetRequiredService<MockEntryPointClient>();
-                await WaitFor(() => mock.SubmittedReplaces.Any(r => r.OriginalClOrdId == child1ClOrdId),
-                    TimeSpan.FromSeconds(3), "engine did not emit the cancel-replace");
-
-                // Drain the cycle normally so child1 goes terminal +
-                // child2 becomes the live working slice. After this
-                // point the engine's Reconcile path is the only thing
-                // the orphan entry will encounter on restart.
-                var replace = mock.SubmittedReplaces.Single(r => r.OriginalClOrdId == child1ClOrdId);
-                await InjectReplacedEr(http, adminToken,
-                    newClOrdId: replace.NewClOrdId,
-                    origClOrdId: replace.OriginalClOrdId,
-                    leavesQuantity: replace.NewQuantity);
-                _ = await WaitForChildOtherThan(book, algoIdStr, child1ClOrdId,
-                    TimeSpan.FromSeconds(5));
-
-                // Re-inject the orphan: an entry that points at the
-                // now-terminal child1, exactly as an old-binary WAL
-                // would have left after a backpressured Resolved.
-                var repegBook = f.Services.GetRequiredService<PeggedRepegBook>();
-                repegBook.Set("default", algoIdNum, child1ClOrdId, 31.0m, DateTimeOffset.UtcNow);
+                mock.ReplaceFailureInjector = _ =>
+                    new InvalidOperationException("simulated ambiguous replace send");
+                cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+                await WaitFor(
+                    () => mock.SubmittedReplaces.Any(r => r.OriginalClOrdId == child1ClOrdId),
+                    TimeSpan.FromSeconds(3),
+                    "engine did not emit the ambiguous cancel-replace");
+                var ledger = f.Services.GetRequiredService<
+                    B3.Trading.Application.Outbound.OutboundMutationLedger>();
+                await WaitFor(
+                    () => ledger.GetAlgoMutations("default", algoIdNum).Any(m =>
+                        m.Kind == B3.Trading.Application.Outbound.OutboundMutationKind.Replace
+                        && m.State == B3.Trading.Application.Outbound.OutboundMutationState.Ambiguous),
+                    TimeSpan.FromSeconds(3),
+                    "replace mutation did not become ambiguous");
 
                 ResolveSnapshotService(f).TryTakeSnapshot();
             }
@@ -914,7 +1838,11 @@ public class PeggedAlgoEndpointTests
                 var token = await f2.LoginAsync(http2);
                 var recovery = f2.Services.GetRequiredService<
                     B3.Trading.Application.Outbound.IOutboundRecoveryGate>();
-                Assert.False(recovery.IsReady);
+                await recovery.WaitUntilClassificationCompleteAsync(
+                    CancellationToken.None);
+                Assert.False(
+                    recovery.IsReady,
+                    $"phase={recovery.Phase}; statuses={string.Join(';', recovery.Snapshot())}");
                 Assert.Equal(
                     B3.Trading.Application.Outbound.OutboundRecoveryPhase.ReconciliationRequired,
                     recovery.Phase);
@@ -1224,30 +2152,26 @@ public class PeggedAlgoEndpointTests
 
         var newOrdersBeforeLateEr = mock.SubmittedNewOrders.Count;
 
-        // Late Fill ER for child1 (already-Cancelled). The processor
+        // Late Fill ER for child1 (already Replaced). The processor
         // preserves the terminal status (Order.ApplyCumulativeFill
-        // line ~367) but enqueues the signal because cumQty advanced.
-        // The engine then sees child1.Status==Cancelled and routes
-        // into the Cancelled-case; without the history-ring dedup
-        // the parent would be Suspended/VenueCancelled.
+        // line ~527) but enqueues the signal because cumQty advanced.
+        // The replacement capacity is now stale, so the engine must
+        // fail closed instead of silently leaving child2 working.
         await InjectEr(http, adminToken, child1.ClOrdId, "Fill", lastQty: 10);
 
-        // Give the consumer loop time to drain the late ER signal.
-        await Task.Delay(200);
-
+        await WaitForAlgoStatus(http, token, algoId, "Suspended");
         var snap = await GetAlgo(http, token, algoId);
-        Assert.Equal("Working", snap.GetProperty("status").GetString());
-        Assert.Equal("None", snap.GetProperty("terminalReason").GetString());
+        Assert.Equal(
+            "ReconciliationRequired",
+            snap.GetProperty("terminalReason").GetString());
 
-        // No new replacement child spawned from the late ER — only
-        // the two cycles' children (child1 terminal + child2 still
-        // working) are in the book.
+        // No brand-new slice is spawned from the late ER.
         Assert.Equal(newOrdersBeforeLateEr, mock.SubmittedNewOrders.Count);
-        var liveChildren = book.EnumerateChildrenOf("default", algoIdNum)
-            .Where(c => c.Status is OrderStatus.PendingNew or OrderStatus.Working or OrderStatus.PartiallyFilled)
-            .ToList();
-        Assert.Single(liveChildren);
-        Assert.Equal(child2.ClOrdId, liveChildren[0].ClOrdId);
+        Assert.Contains(
+            f.Services.GetRequiredService<
+                B3.Trading.Application.Outbound.OutboundMutationLedger>()
+                .GetAlgoMutations("default", algoIdNum),
+            mutation => mutation.RequiresReconciliation);
     }
 
     [Fact]
@@ -1402,6 +2326,10 @@ public class PeggedAlgoEndpointTests
         var child1 = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
 
         var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        await WaitFor(
+            () => mock.SubmittedNewOrders.Any(o => o.ClOrdId == child1.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "initial child was not dispatched through the outbound coordinator");
         var newOrdersBefore = mock.SubmittedNewOrders.Count;
 
         cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
@@ -1508,7 +2436,8 @@ public class PeggedAlgoEndpointTests
 
     private static async Task<HttpResponseMessage> InjectEr(
         HttpClient http, string adminToken, ulong childClOrdId,
-        string type, long? lastQty = null, decimal lastPx = 30m)
+        string type, long? lastQty = null, decimal lastPx = 30m,
+        string? rejectReason = null)
     {
         var req = new HttpRequestMessage(HttpMethod.Post, "/admin/simulator/er")
         {
@@ -1518,6 +2447,7 @@ public class PeggedAlgoEndpointTests
                 Type = type,
                 LastQty = lastQty,
                 LastPx = lastQty.HasValue ? lastPx : (decimal?)null,
+                RejectReason = rejectReason,
             }),
         };
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", adminToken);
@@ -1618,5 +2548,140 @@ public class PeggedAlgoEndpointTests
             await Task.Delay(20);
         }
         throw new TimeoutException($"Algo {algoId} did not reach any of [{string.Join(",", anyOf)}] within 5s; last={last}");
+    }
+
+    private sealed class ProvenUnsentCancelGateway : IExchangeGateway
+    {
+        private readonly EntryPointClientGateway _inner;
+        private int _provenUnsentReplaceFailuresRemaining = int.MaxValue;
+
+        public ProvenUnsentCancelGateway(EntryPointClientGateway inner) =>
+            _inner = inner;
+
+        public System.Collections.Concurrent.ConcurrentQueue<ulong>
+            AttemptedCancelClOrdIds
+        { get; } = new();
+        public System.Collections.Concurrent.ConcurrentQueue<ulong>
+            AttemptedReplaceClOrdIds
+        { get; } = new();
+        public System.Collections.Concurrent.ConcurrentQueue<decimal?>
+            AttemptedReplacePrices
+        { get; } = new();
+        public int ProvenUnsentReplaceFailuresRemaining
+        {
+            get => Volatile.Read(ref _provenUnsentReplaceFailuresRemaining);
+            set => Volatile.Write(ref _provenUnsentReplaceFailuresRemaining, value);
+        }
+
+        public Task SubmitAsync(Order order, CancellationToken cancellationToken) =>
+            _inner.SubmitAsync(order, cancellationToken);
+
+        public Task<ExchangeGatewayReceipt> SubmitWithReceiptAsync(
+            Order order,
+            ExchangeGatewayFramePreparedCallback onFramePrepared,
+            CancellationToken cancellationToken) =>
+            _inner.SubmitWithReceiptAsync(order, onFramePrepared, cancellationToken);
+
+        public Task<ExchangeGatewayReceipt> SubmitWithReceiptAsync(
+            B3.Trading.Application.Outbound.OutboundNewOrderCommand command,
+            ExchangeGatewayFramePreparedCallback onFramePrepared,
+            CancellationToken cancellationToken) =>
+            _inner.SubmitWithReceiptAsync(command, onFramePrepared, cancellationToken);
+
+        public Task CancelAsync(
+            Order order,
+            ulong newClOrdId,
+            CancellationToken cancellationToken) =>
+            _inner.CancelAsync(order, newClOrdId, cancellationToken);
+
+        public Task<ExchangeGatewayReceipt> CancelWithReceiptAsync(
+            B3.Trading.Application.Outbound.OutboundCancelCommand command,
+            ExchangeGatewayFramePreparedCallback onFramePrepared,
+            CancellationToken cancellationToken)
+        {
+            AttemptedCancelClOrdIds.Enqueue(
+                command.Canonical.ClOrdId);
+            return Task.FromException<ExchangeGatewayReceipt>(
+                new ExchangeGatewayAttemptException(
+                    "typed pre-frame cancel failure",
+                    ExchangeGatewayFailureDisposition.OutboundProvenUnsent,
+                    ExchangeGatewayAttemptStage.NotStarted,
+                    frame: null));
+        }
+
+        public Task CancelReplaceAsync(
+            Order original,
+            ulong newClOrdId,
+            long newQuantity,
+            decimal? newPrice,
+            TimeInForce? requestedTimeInForce,
+            decimal? requestedStopPrice,
+            DateTimeOffset? requestedGoodTillDate,
+            CancellationToken cancellationToken) =>
+            _inner.CancelReplaceAsync(
+                original,
+                newClOrdId,
+                newQuantity,
+                newPrice,
+                requestedTimeInForce,
+                requestedStopPrice,
+                requestedGoodTillDate,
+                cancellationToken);
+
+        public Task<ExchangeGatewayReceipt> CancelReplaceWithReceiptAsync(
+            B3.Trading.Application.Outbound.OutboundReplaceCommand command,
+            ExchangeGatewayFramePreparedCallback onFramePrepared,
+            CancellationToken cancellationToken)
+        {
+            AttemptedReplaceClOrdIds.Enqueue(command.Canonical.ClOrdId);
+            AttemptedReplacePrices.Enqueue(command.Canonical.Price);
+            if (Interlocked.Decrement(ref _provenUnsentReplaceFailuresRemaining) >= 0)
+            {
+                return Task.FromException<ExchangeGatewayReceipt>(
+                    new ExchangeGatewayAttemptException(
+                        "typed pre-frame replace failure",
+                        ExchangeGatewayFailureDisposition.OutboundProvenUnsent,
+                        ExchangeGatewayAttemptStage.NotStarted,
+                        frame: null));
+            }
+            return _inner.CancelReplaceWithReceiptAsync(
+                command,
+                onFramePrepared,
+                cancellationToken);
+        }
+    }
+
+    private sealed class DroppingAlgoSignalQueue : IAlgoSignalQueue
+    {
+        private readonly AlgoSignalQueue _inner;
+        private long _childClOrdIdToDrop;
+        private int _droppedSignals;
+
+        public DroppingAlgoSignalQueue(AlgoSignalQueue inner) =>
+            _inner = inner;
+
+        public int DroppedSignals => Volatile.Read(ref _droppedSignals);
+
+        public void DropNextChildExecutionSignal(ulong childClOrdId) =>
+            Interlocked.Exchange(
+                ref _childClOrdIdToDrop,
+                unchecked((long)childClOrdId));
+
+        public bool TryEnqueue(AlgoSignal signal)
+        {
+            if (signal is ChildExecutionObservedSignal child)
+            {
+                var expected = unchecked((long)child.ChildClOrdId);
+                if (Interlocked.CompareExchange(
+                        ref _childClOrdIdToDrop,
+                        0,
+                        expected) == expected)
+                {
+                    Interlocked.Increment(ref _droppedSignals);
+                    return false;
+                }
+            }
+            return _inner.TryEnqueue(signal);
+        }
     }
 }

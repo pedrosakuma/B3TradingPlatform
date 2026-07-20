@@ -1397,6 +1397,9 @@ public sealed class EventReplayer
             case OutboundProvenUnsentEvent unsent:
                 _outboundLedger?.Apply(unsent);
                 break;
+            case OutboundReconciliationRequiredEvent reconciliationRequired:
+                _outboundLedger?.Apply(reconciliationRequired);
+                break;
             case OutboundOperatorResolvedEvent resolved:
                 _outboundLedger?.Apply(resolved);
                 break;

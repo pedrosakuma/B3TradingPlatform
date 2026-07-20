@@ -8,6 +8,26 @@ namespace B3.Trading.Application.Tests.AlgoEngine;
 
 public class PeggedRepegBookTests
 {
+    [Fact]
+    public void UnmarkCancelledChild_RemovesMarkerWithoutCorruptingFifo()
+    {
+        var book = new PeggedRepegBook();
+        const string firm = "TEST";
+        const ulong algoId = 1UL;
+
+        book.MarkCancelledChild(firm, algoId, 10UL);
+        book.MarkCancelledChild(firm, algoId, 11UL);
+
+        Assert.True(book.UnmarkCancelledChild(firm, algoId, 10UL));
+        Assert.False(book.IsCancelledChild(firm, algoId, 10UL));
+        Assert.True(book.IsCancelledChild(firm, algoId, 11UL));
+        Assert.False(book.UnmarkCancelledChild(firm, algoId, 10UL));
+
+        book.MarkCancelledChild(firm, algoId, 10UL);
+        Assert.True(book.IsCancelledChild(firm, algoId, 10UL));
+        Assert.Equal([11UL, 10UL], book.SnapshotHistory().Single().ChildClOrdIds);
+    }
+
     /// <summary>
     /// Pass-6 review (#296) P2. When the per-parent cancelled-child
     /// FIFO ring overflows past <see cref="PeggedRepegBook.CancelledHistoryCap"/>,

@@ -1,9 +1,9 @@
 using System.Collections.Concurrent;
 using B3.Trading.Application.MarketData;
 using B3.Trading.Application.Observability;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
-using B3.Trading.Application.Risk.Accounting;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -30,19 +30,16 @@ namespace B3.Trading.Application;
 ///         <c>Completed</c>; on Cancelled propagate to the parent based on
 ///         whether the cancel was operator-driven; on Rejected suspend.</item>
 ///   <item><c>AlgoCancelRequested</c> → cancel the live child via the
-///         gateway; the actual <c>Cancelled</c> transition lands when the
+///         common outbound coordinator; the actual <c>Cancelled</c> transition lands when the
 ///         child cancel-ack arrives back through the ER pipeline.</item>
 /// </list>
 /// </para>
 ///
 /// <para>
-/// <b>Retries:</b> gateway/WAL transient failures retry up to 3 times with
-/// 100/300/900 ms back-off via <see cref="Task.Delay(TimeSpan, CancellationToken)"/>.
-/// Doing the delay inline blocks the consumer for up to ~1.3s on a flaky
-/// venue — acceptable in v0 because algo flow is orders-of-magnitude lower
-/// than ER flow and pause latency only affects other algos, never order
-/// reception. Promotion to a dedicated retry queue is future work if
-/// production traffic ever justifies it.
+/// <b>Retries:</b> the engine never retries an outbound mutation merely
+/// because time elapsed or the process epoch changed. Proven-unsent retry
+/// is an explicit coordinator decision against the same durable logical
+/// action and is bounded by the outbound attempt cap.
 /// </para>
 ///
 /// <para>
@@ -57,23 +54,13 @@ namespace B3.Trading.Application;
 /// </summary>
 public sealed class AlgoEngine : BackgroundService
 {
-    // Retry policy for transient submit failures (gateway/WAL backpressure).
-    // Sequence intentionally short: the operator notices a stuck algo via
-    // the suspended-with-RetriesExhausted state much faster than via
-    // dashboards, and a long retry tail just delays the alert.
-    private static readonly TimeSpan[] RetryDelays =
-    {
-        TimeSpan.FromMilliseconds(100),
-        TimeSpan.FromMilliseconds(300),
-        TimeSpan.FromMilliseconds(900),
-    };
-
     private readonly AlgoSignalQueue _queue;
     private readonly AlgoBook _algos;
     private readonly WorkingOrderBook _orders;
     private readonly OrderSubmissionService _submitter;
-    private readonly ClOrdIdPrefixRegistry _clOrdIds;
-    private readonly IExchangeGateway _gateway;
+    private readonly OrderCancelService _canceller;
+    private readonly OrderModifyService _modifier;
+    private readonly OutboundMutationLedger _outboundLedger;
     private readonly IAlgoEventSink _algoSink;
     private readonly EventDispatcher _dispatcher;
     private readonly TimeProvider _clock;
@@ -117,25 +104,10 @@ public sealed class AlgoEngine : BackgroundService
     /// </summary>
     private readonly PendingReplacementRegistry? _replacements;
 
-    /// <summary>
-    /// Pass-3 review (#299) P1. Risk pipeline + replace-margin coordinator
-    /// for the engine-driven modify path. Mirrors
-    /// <see cref="OrderModifyService"/>'s pre-trade gates so an operator
-    /// or engine-driven cancel-replace that would push a Buy past
-    /// available cash (or trip any other pre-trade rule) is rejected
-    /// BEFORE the gateway dispatch — closing the bypass identified in
-    /// pass-3 where the algo modify path went straight from validation
-    /// to gateway with no risk check or margin reserve. Both are
-    /// optional only to keep test compositions (which don't wire the
-    /// full risk pipeline) buildable; production composition always
-    /// supplies them via DI alongside <see cref="_replacements"/>.
-    /// </summary>
-    private readonly RiskPipeline? _risk;
     private readonly IReplaceMarginCoordinator? _replaceMargin;
-    private readonly CompositeRiskAccountant? _accountant;
     private readonly Lifecycle.IDrainController? _reconciliationDrain;
-    private readonly ReconciliationResolutionWriter _resolutionWriter;
     private readonly Outbound.IOutboundRecoveryGate _outboundRecovery;
+    private readonly OutboundProcessEpoch? _outboundEpoch;
 
     // Per-parent runtime state. Owned by the consumer task; the
     // ConcurrentDictionary is only used because TryAdd/TryGetValue are
@@ -148,8 +120,9 @@ public sealed class AlgoEngine : BackgroundService
         AlgoBook algos,
         WorkingOrderBook orders,
         OrderSubmissionService submitter,
-        ClOrdIdPrefixRegistry clOrdIds,
-        IExchangeGateway gateway,
+        OrderCancelService canceller,
+        OrderModifyService modifier,
+        OutboundMutationLedger outboundLedger,
         IAlgoEventSink algoSink,
         EventDispatcher dispatcher,
         TimeProvider clock,
@@ -162,20 +135,19 @@ public sealed class AlgoEngine : BackgroundService
         MarketDataPegBookPump? pegBookPump = null,
         PeggedRepegBook? peggedRepeg = null,
         PendingReplacementRegistry? replacements = null,
-        RiskPipeline? risk = null,
         IReplaceMarginCoordinator? replaceMargin = null,
         SymbolDirectory? symbols = null,
-        CompositeRiskAccountant? accountant = null,
         Lifecycle.IDrainController? reconciliationDrain = null,
-        ReconciliationResolutionWriter? resolutionWriter = null,
-        Outbound.IOutboundRecoveryGate? outboundRecovery = null)
+        Outbound.IOutboundRecoveryGate? outboundRecovery = null,
+        OutboundProcessEpoch? outboundEpoch = null)
     {
         _queue = queue;
         _algos = algos;
         _orders = orders;
         _submitter = submitter;
-        _clOrdIds = clOrdIds;
-        _gateway = gateway;
+        _canceller = canceller;
+        _modifier = modifier;
+        _outboundLedger = outboundLedger;
         _algoSink = algoSink;
         _dispatcher = dispatcher;
         _clock = clock;
@@ -188,18 +160,12 @@ public sealed class AlgoEngine : BackgroundService
         _pegBookPump = pegBookPump;
         _peggedRepeg = peggedRepeg;
         _replacements = replacements;
-        _risk = risk;
         _replaceMargin = replaceMargin;
         _symbols = symbols;
-        _accountant = accountant;
         _reconciliationDrain = reconciliationDrain;
-        _resolutionWriter = resolutionWriter ?? new ReconciliationResolutionWriter(
-            new InMemoryReconciliationMarkerStore(),
-            dispatcher,
-            Microsoft.Extensions.Logging.Abstractions.NullLogger<
-                ReconciliationResolutionWriter>.Instance);
         _outboundRecovery = outboundRecovery
             ?? Outbound.ImmediateOutboundRecoveryGate.Instance;
+        _outboundEpoch = outboundEpoch;
     }
 
     /// <summary>
@@ -323,13 +289,14 @@ public sealed class AlgoEngine : BackgroundService
 
     /// <summary>
     /// Boot-time pass over every non-terminal parent. Builds the runtime
-    /// state from the order book (live child + cumulative-fill baseline +
-    /// next slice seq) and re-enqueues an <see cref="AlgoCreatedSignal"/>
+    /// state from the outbound ledger plus order book (live child +
+    /// cumulative-fill baseline + next slice seq) and re-enqueues an <see cref="AlgoCreatedSignal"/>
     /// so the reactor evaluates "do I need to submit more?" through the
     /// same code path as steady-state. Safe to call multiple times because
     /// <see cref="Algo.RehydrateProgress"/> never moves <c>FilledQuantity</c>
     /// backwards and the reactor itself is idempotent on a still-live
-    /// child.
+    /// child. A recovered child without durable algo-origin ledger evidence
+    /// is suspended as reconciliation-required instead of being re-sliced.
     /// </summary>
     private void Reconcile()
     {
@@ -348,6 +315,22 @@ public sealed class AlgoEngine : BackgroundService
         {
             var rt = _runtime.GetOrAdd((algo.FirmId, algo.AlgoId), static _ => new AlgoParentRuntime());
             var children = _orders.EnumerateChildrenOf(algo.FirmId, algo.AlgoId);
+            var algoMutations = _outboundLedger.GetAlgoMutations(algo.FirmId, algo.AlgoId);
+            var missingLedgerEvidence = children.Any(child =>
+                !_outboundLedger.TryGetByClOrdId(child.ClOrdId, out var mutation)
+                || mutation?.AlgoOriginIdentity?.ParentAlgoId != algo.AlgoId);
+            var unresolvedProvenNoWriteChild = algoMutations.Any(m =>
+                m.AlgoOriginIdentity?.ActionKind == AlgoOutboundActionKind.NewChild
+                && m.State == OutboundMutationState.OperatorResolved
+                && string.Equals(
+                    m.Resolution?.EvidenceKind,
+                    "OutboundProvenNoWrite",
+                    StringComparison.Ordinal));
+            if (missingLedgerEvidence || unresolvedProvenNoWriteChild)
+            {
+                MarkRecoveryReconciliationRequired(algo, rt);
+                continue;
+            }
 
             long totalCum = 0;
             int maxSeq = -1;
@@ -361,7 +344,12 @@ public sealed class AlgoEngine : BackgroundService
             }
 
             algo.RehydrateProgress(totalCum);
-            rt.NextSliceSeq = maxSeq + 1;
+            var maxLedgerSliceSeq = algoMutations
+                .Where(m => m.AlgoOriginIdentity?.ActionKind == AlgoOutboundActionKind.NewChild)
+                .Select(m => m.AlgoOriginIdentity!.Sequence)
+                .DefaultIfEmpty(-1)
+                .Max();
+            rt.NextSliceSeq = Math.Max(maxSeq, maxLedgerSliceSeq) + 1;
             rt.LiveChildClOrdId = liveChild;
 
             // Pass-1 review (#295) P1#1. Restore POV scheduling baseline
@@ -445,7 +433,10 @@ public sealed class AlgoEngine : BackgroundService
             // Re-arm the reactor regardless: even if a live child exists,
             // the reactor may need to react if the child has since become
             // terminal between snapshot capture and recovery.
-            if (!_queue.TryEnqueue(new AlgoCreatedSignal { FirmId = algo.FirmId, AlgoId = algo.AlgoId }))
+            AlgoSignal signal = algo.Status == AlgoStatus.Cancelling
+                ? new AlgoCancelRequestedSignal { FirmId = algo.FirmId, AlgoId = algo.AlgoId }
+                : new AlgoCreatedSignal { FirmId = algo.FirmId, AlgoId = algo.AlgoId };
+            if (!_queue.TryEnqueue(signal))
             {
                 MetricsRegistry.AlgoSignalsDropped.Add(1,
                     new KeyValuePair<string, object?>("kind", "created"));
@@ -458,6 +449,39 @@ public sealed class AlgoEngine : BackgroundService
         _logger.LogInformation("AlgoEngine reconciliation enqueued {Count} non-terminal parents.", algos.Count);
         PruneOrphanPovProgress(algos);
         PrunePeggedRepegBookOrphans(algos);
+    }
+
+    private void MarkRecoveryReconciliationRequired(Algo algo, AlgoParentRuntime rt)
+    {
+        rt.LiveChildClOrdId = null;
+        var atUtc = _clock.GetUtcNow();
+        try
+        {
+            _dispatcher.DispatchCommitted(
+                new AlgoTerminalStateRecordedEvent
+                {
+                    AlgoId = algo.AlgoId,
+                    FirmId = algo.FirmId,
+                    Status = AlgoStatus.Suspended.ToString(),
+                    Reason = AlgoTerminalReason.ReconciliationRequired.ToString(),
+                    AtUtc = atUtc,
+                    TimestampUtc = atUtc,
+                },
+                () => algo.RecordTerminal(
+                    AlgoStatus.Suspended,
+                    AlgoTerminalReason.ReconciliationRequired,
+                    atUtc),
+                CancellationToken.None);
+        }
+        catch (Exception ex) when (ex is WalBackpressureException or WalFaultedException)
+        {
+            _reconciliationDrain?.BeginDrain("algo_recovery_missing_outbound_ledger");
+            _logger.LogCritical(
+                ex,
+                "Recovered algo {Firm}/{AlgoId} has child state without durable outbound origin evidence.",
+                algo.FirmId,
+                algo.AlgoId);
+        }
     }
 
     /// <summary>
@@ -569,6 +593,11 @@ public sealed class AlgoEngine : BackgroundService
     private async Task ReactAsync(AlgoSignal signal, CancellationToken ct)
     {
         var (firmId, algoId) = (signal.FirmId, AlgoIdOf(signal));
+        if (!_outboundRecovery.IsBusinessIngressOpen(firmId))
+        {
+            _ = RequeueAfterRecoveryAsync(signal, ct);
+            return;
+        }
         if (algoId == 0)
         {
             _logger.LogWarning("AlgoEngine received signal with zero AlgoId; ignoring.");
@@ -592,8 +621,8 @@ public sealed class AlgoEngine : BackgroundService
             case ChildExecutionObservedSignal er:
                 await OnChildErAsync(algo, rt, er, ct).ConfigureAwait(false);
                 break;
-            case AlgoCancelRequestedSignal:
-                await OnCancelRequestedAsync(algo, rt, ct).ConfigureAwait(false);
+            case AlgoCancelRequestedSignal cancel:
+                await OnCancelRequestedAsync(algo, rt, cancel.ExplicitRetry, ct).ConfigureAwait(false);
                 break;
             case AlgoModifyRequestedSignal mod:
                 await OnModifyRequestedAsync(algo, rt, mod, ct).ConfigureAwait(false);
@@ -604,10 +633,76 @@ public sealed class AlgoEngine : BackgroundService
         }
     }
 
+    private async Task RequeueAfterRecoveryAsync(AlgoSignal signal, CancellationToken ct)
+    {
+        try
+        {
+            await _outboundRecovery.WaitUntilBusinessIngressOpenAsync(signal.FirmId, ct)
+                .ConfigureAwait(false);
+            if (!_queue.TryEnqueue(signal))
+            {
+                MetricsRegistry.AlgoSignalsDropped.Add(1,
+                    new KeyValuePair<string, object?>("kind", SignalKind(signal)));
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(
+                ex,
+                "AlgoEngine could not defer signal {SignalKind} for firm {FirmId} until outbound recovery opened.",
+                SignalKind(signal),
+                signal.FirmId);
+        }
+    }
+
     private async Task OnCreatedAsync(Algo algo, AlgoParentRuntime rt, CancellationToken ct)
     {
+        if (!_outboundRecovery.IsBusinessIngressOpen(algo.FirmId)) return;
         if (algo.IsTerminal) return;
-        if (algo.Status == AlgoStatus.Cancelling) return;
+        if (await ReconcileLiveChildAgainstBookAsync(algo, rt, ct).ConfigureAwait(false)
+            != LiveChildReconciliationOutcome.None)
+            return;
+        if (algo.Status == AlgoStatus.Cancelling)
+        {
+            await OnCancelRequestedAsync(algo, rt, explicitRetry: false, ct).ConfigureAwait(false);
+            return;
+        }
+        if (_outboundLedger.HasBlockingAlgoMutation(algo.FirmId, algo.AlgoId))
+        {
+            if (algo.Type == AlgoType.Pegged
+                && rt.LiveChildClOrdId is null
+                && FindLatestBlockingRepegMutation(algo) is
+                {
+                    OriginalClOrdId: { } orphanedOriginalClOrdId,
+                })
+            {
+                await FailClosedPeggedRepegAsync(
+                    algo,
+                    rt,
+                    orphanedOriginalClOrdId,
+                    "blocking repeg has no live original child").ConfigureAwait(false);
+                return;
+            }
+
+            var retryableRepeg = algo.Type == AlgoType.Pegged
+                && rt.LiveChildClOrdId is { } retryChildClOrdId
+                && FindSoleRetryableProvenUnsentMutation(
+                    algo,
+                    retryChildClOrdId,
+                    AlgoOutboundActionKind.Repeg) is not null;
+            var terminalRepegCleanup = algo.Type == AlgoType.Pegged
+                && rt.LiveChildClOrdId is { } terminalChildClOrdId
+                && FindLatestBlockingRepegMutation(
+                    algo,
+                    terminalChildClOrdId) is not null
+                && (!_orders.TryGet(terminalChildClOrdId, out var terminalChild)
+                    || terminalChild is null
+                    || IsChildTerminal(terminalChild));
+            if (!retryableRepeg && !terminalRepegCleanup) return;
+        }
 
         // Pass-1 review (#294) P1. VWAP needs the SDK subscribed to its
         // symbol so the VolumeCurveEstimator receives trade prints; without
@@ -761,6 +856,19 @@ public sealed class AlgoEngine : BackgroundService
             _logger.LogWarning("AlgoEngine child ER for unknown child {ClOrdId}; dropping.", er.ChildClOrdId);
             return;
         }
+        if (algo.IsTerminal)
+        {
+            // Terminal parent quantities are immutable. In particular, a
+            // late replacement child from an earlier ambiguous repeg must
+            // never be adopted or credited after the parent completed.
+            _logger.LogDebug(
+                "AlgoEngine ignoring child ER for {Child} because algo {Firm}/{AlgoId} is terminal {Status}.",
+                child.ClOrdId,
+                algo.FirmId,
+                algo.AlgoId,
+                algo.Status);
+            return;
+        }
 
         // Pass-1 review (#299) P1-A. First observation of a replacement
         // child — adopt it here (NOT eagerly at modify-dispatch time) so
@@ -863,7 +971,7 @@ public sealed class AlgoEngine : BackgroundService
             if (peggedRepegAdoption)
             {
                 rt.RepegPending = false;
-                rt.PeggedReplacedHoldTicks = 0;
+                rt.ReplacedAdoptionHoldTicks = 0;
                 try
                 {
                     var firmIdSnap = algo.FirmId;
@@ -910,9 +1018,28 @@ public sealed class AlgoEngine : BackgroundService
             algo.RecordFill(delta);
             rt.ChildBookedCum[child.ClOrdId] = child.CumulativeQuantity;
         }
+        if (delta > 0
+            && child.Status == OrderStatus.Replaced
+            && rt.LiveChildClOrdId != child.ClOrdId)
+        {
+            await HandleLateFillOnReplacedOriginalAsync(
+                algo,
+                rt,
+                child,
+                ct).ConfigureAwait(false);
+            return;
+        }
 
         // Non-terminal child: nothing more to do (the next ER will land).
-        if (!IsChildTerminal(child)) return;
+        if (!IsChildTerminal(child))
+        {
+            if (algo.Status == AlgoStatus.Cancelling
+                && rt.LiveChildClOrdId == child.ClOrdId)
+            {
+                await OnCancelRequestedAsync(algo, rt, explicitRetry: false, ct).ConfigureAwait(false);
+            }
+            return;
+        }
 
         // Child is terminal — this clOrdId is no longer live regardless of
         // outcome. Clear the slot before transitioning so re-entrancy via
@@ -923,7 +1050,6 @@ public sealed class AlgoEngine : BackgroundService
         switch (child.Status)
         {
             case OrderStatus.Filled:
-                if (algo.IsTerminal) return; // redundant ER after we already terminal-ed
                 // Pass-4 review (#296) P1. Repeg-cancel ↔ Fill race. The
                 // engine issued (or has just issued) a cancel for this
                 // child as part of a repeg cycle, but a terminal Fill ER
@@ -1026,46 +1152,49 @@ public sealed class AlgoEngine : BackgroundService
                 else if (rt.RepegPending && algo.Type == AlgoType.Pegged
                          && rt.LastRepegCancelledChildId == child.ClOrdId)
                 {
-                    // #300 retrofit. Pre-#300 this branch consumed the
-                    // Cancelled-on-OLD ack as the "cycle resolved,
-                    // place fresh slice" trigger. Post-#300 the engine
-                    // dispatches CancelReplace (TryReplaceChildAsync)
-                    // instead of a bare cancel, so the venue's
-                    // response is a Replaced ER which adoption-block
-                    // (~line 714) drains. A Cancelled ER reaching
-                    // here while RepegPending is still true means
-                    // the venue rejected the modify and emitted a
-                    // bare cancel on the original (or the venue
-                    // hand-split cancel-replace into cancel+place
-                    // and the cancel landed first). Strict no-op:
-                    //   * Do NOT SubmitNextSliceAsync — the
-                    //     PendingReplacementRegistry intent is still
-                    //     in flight; if the Replaced ER eventually
-                    //     lands it will adopt the new child via the
-                    //     normal path; if not, the AlgoScheduler
-                    //     ambiguous-replace TTL sweep releases the
-                    //     held margin and the #329 watchdog clears
-                    //     the wedged slot on the next tick.
-                    //   * Do NOT dispatch Resolved — adoption will
-                    //     dispatch it; if adoption never fires the
-                    //     watchdog + Reconcile orphan prune converge
-                    //     state on the next restart.
-                    //   * Do NOT clear RepegPending — the throttle
-                    //     guard keeps the engine from racing another
-                    //     repeg against the still-live replace
-                    //     intent.
-                    // The bounded IsCancelledChild dedup branch below
-                    // catches this same condition for replay safety
-                    // (older WAL segments persisted with pre-#300
-                    // cancel-only semantics); we leave that branch in
-                    // place per the issue.
-                    _logger.LogDebug(
-                        "AlgoEngine pegged repeg: stray Cancelled-on-OLD ER for {Firm}/{AlgoId} child {Child} while replace is in flight; no-op (Replaced ER adoption drives resolution).",
-                        algo.FirmId, algo.AlgoId, child.ClOrdId);
+                    // ExecutionReportProcessor consumes the replacement
+                    // intent before this signal is enqueued. With the
+                    // original now terminal and the live slot already
+                    // cleared, no Replaced adoption or terminal-child
+                    // watchdog can finish this cycle. Fail closed because
+                    // a split cancel-replace venue may still create the
+                    // replacement after acknowledging the original cancel.
+                    await FailClosedPeggedRepegAsync(
+                        algo,
+                        rt,
+                        child.ClOrdId,
+                        "sent replace ended with Cancelled on original").ConfigureAwait(false);
                     return;
                 }
                 else if (algo.Type == AlgoType.Pegged
-                         && (_peggedRepeg?.IsCancelledChild(algo.FirmId, algo.AlgoId, child.ClOrdId) ?? false))
+                         && (_peggedRepeg?.IsCancelledChild(
+                             algo.FirmId,
+                             algo.AlgoId,
+                             child.ClOrdId) ?? false)
+                         && IsUnresolvedPotentiallySentRepegMutation(
+                             algo,
+                             child.ClOrdId))
+                {
+                    // The ambiguous-send path clears RepegPending and does
+                    // not persist a Started record, but retains the history
+                    // marker because the venue may have accepted the
+                    // replace. A later Cancelled-on-original consumes that
+                    // retained intent in ExecutionReportProcessor. Suspend
+                    // explicitly instead of letting the history dedup hide
+                    // the terminal and strand an empty live slot.
+                    await FailClosedPeggedRepegAsync(
+                        algo,
+                        rt,
+                        child.ClOrdId,
+                        "unresolved replace ended with Cancelled on original").ConfigureAwait(false);
+                    return;
+                }
+                else if (algo.Type == AlgoType.Pegged
+                         && (_peggedRepeg?.IsCancelledChild(algo.FirmId, algo.AlgoId, child.ClOrdId) ?? false)
+                         && !IsConfirmedProvenUnsentMutation(
+                             algo,
+                             child.ClOrdId,
+                             AlgoOutboundActionKind.Repeg))
                 {
                     // Pass-1 review (#296) P1-A. Duplicate / late
                     // Cancelled ER for a child we already cancelled
@@ -1125,6 +1254,23 @@ public sealed class AlgoEngine : BackgroundService
 
             case OrderStatus.Rejected:
                 if (algo.IsTerminal) return;
+                if (algo.Type == AlgoType.Pegged
+                    && (rt.RepegPending
+                        || (_peggedRepeg?.IsCancelledChild(
+                            algo.FirmId,
+                            algo.AlgoId,
+                            child.ClOrdId) ?? false))
+                    && IsUnresolvedPotentiallySentRepegMutation(
+                        algo,
+                        child.ClOrdId))
+                {
+                    await FailClosedPeggedRepegAsync(
+                        algo,
+                        rt,
+                        child.ClOrdId,
+                        "unresolved replace ended with Rejected on original").ConfigureAwait(false);
+                    return;
+                }
                 if (IsTwapWindowExpired(algo))
                 {
                     await RecordTerminalAsync(algo, rt, AlgoStatus.Expired, AlgoTerminalReason.TwapWindowExpired).ConfigureAwait(false);
@@ -1143,6 +1289,169 @@ public sealed class AlgoEngine : BackgroundService
                 await RecordTerminalAsync(algo, rt, AlgoStatus.Suspended, AlgoTerminalReason.RiskRejected).ConfigureAwait(false);
                 return;
         }
+    }
+
+    private async Task<LiveChildReconciliationOutcome> ReconcileLiveChildAgainstBookAsync(
+        Algo algo,
+        AlgoParentRuntime rt,
+        CancellationToken ct)
+    {
+        if (rt.LiveChildClOrdId is not { } liveChildClOrdId)
+            return LiveChildReconciliationOutcome.None;
+
+        if (!_orders.TryGet(liveChildClOrdId, out var child) || child is null)
+        {
+            await FailClosedStaleLiveChildAsync(
+                algo,
+                rt,
+                liveChildClOrdId,
+                "runtime live child is missing from the working-order book")
+                .ConfigureAwait(false);
+            return LiveChildReconciliationOutcome.StopProcessing;
+        }
+
+        if (!IsChildTerminal(child)
+            && child.CumulativeQuantity
+                > rt.ChildBookedCum.GetValueOrDefault(child.ClOrdId, 0L))
+        {
+            await OnChildErAsync(
+                algo,
+                rt,
+                new ChildExecutionObservedSignal
+                {
+                    FirmId = algo.FirmId,
+                    AlgoId = algo.AlgoId,
+                    ChildClOrdId = child.ClOrdId,
+                },
+                ct).ConfigureAwait(false);
+            return !algo.IsTerminal
+                && algo.Status != AlgoStatus.Cancelling
+                && rt.LiveChildClOrdId == child.ClOrdId
+                && _orders.TryGet(child.ClOrdId, out var reconciledChild)
+                && reconciledChild is not null
+                && !IsChildTerminal(reconciledChild)
+                    ? LiveChildReconciliationOutcome.NonTerminalFillRecovered
+                    : LiveChildReconciliationOutcome.StopProcessing;
+        }
+
+        if (!IsChildTerminal(child))
+        {
+            rt.ReplacedAdoptionHoldTicks = 0;
+            return LiveChildReconciliationOutcome.None;
+        }
+
+        if (child.Status == OrderStatus.Replaced)
+        {
+            rt.ReplacedAdoptionHoldTicks++;
+            if (rt.ReplacedAdoptionHoldTicks
+                < AlgoParentRuntime.ReplacedAdoptionHoldMaxTicks)
+            {
+                return LiveChildReconciliationOutcome.StopProcessing;
+            }
+
+            var replacements = _orders
+                .EnumerateChildrenOf(algo.FirmId, algo.AlgoId)
+                .Where(candidate =>
+                    candidate.ClOrdId != liveChildClOrdId
+                    && _ownership.TryResolveOrig(
+                        candidate.ClOrdId,
+                        out var candidateOriginal)
+                    && candidateOriginal == liveChildClOrdId)
+                .ToArray();
+            if (replacements.Length == 1)
+            {
+                var replacement = replacements[0];
+                _logger.LogWarning(
+                    "AlgoEngine adoption signal for replacement {Replacement} of child {Child} on {Firm}/{AlgoId} appears dropped after {Ticks} ticks; adopting the hydrated replacement from the order book.",
+                    replacement.ClOrdId,
+                    liveChildClOrdId,
+                    algo.FirmId,
+                    algo.AlgoId,
+                    rt.ReplacedAdoptionHoldTicks);
+                await OnChildErAsync(
+                    algo,
+                    rt,
+                    new ChildExecutionObservedSignal
+                    {
+                        FirmId = algo.FirmId,
+                        AlgoId = algo.AlgoId,
+                        ChildClOrdId = replacement.ClOrdId,
+                    },
+                    ct).ConfigureAwait(false);
+                if (algo.IsTerminal
+                    || rt.LiveChildClOrdId == replacement.ClOrdId)
+                {
+                    return LiveChildReconciliationOutcome.StopProcessing;
+                }
+            }
+
+            await FailClosedStaleLiveChildAsync(
+                algo,
+                rt,
+                liveChildClOrdId,
+                replacements.Length switch
+                {
+                    0 => "dropped adoption signal but no hydrated replacement was found",
+                    1 => "hydrated replacement could not be adopted",
+                    _ => "dropped adoption signal matched multiple replacement children",
+                }).ConfigureAwait(false);
+            return LiveChildReconciliationOutcome.StopProcessing;
+        }
+
+        rt.ReplacedAdoptionHoldTicks = 0;
+        await OnChildErAsync(
+            algo,
+            rt,
+            new ChildExecutionObservedSignal
+            {
+                FirmId = algo.FirmId,
+                AlgoId = algo.AlgoId,
+                ChildClOrdId = child.ClOrdId,
+            },
+            ct).ConfigureAwait(false);
+        return LiveChildReconciliationOutcome.StopProcessing;
+    }
+
+    private enum LiveChildReconciliationOutcome
+    {
+        None,
+        NonTerminalFillRecovered,
+        StopProcessing,
+    }
+
+    private async Task FailClosedStaleLiveChildAsync(
+        Algo algo,
+        AlgoParentRuntime rt,
+        ulong liveChildClOrdId,
+        string outcome)
+    {
+        var isPeggedRepeg = algo.Type == AlgoType.Pegged
+            && (rt.RepegPending
+                || _peggedRepeg?.TryGet(algo.FirmId, algo.AlgoId) is not null
+                || FindLatestBlockingRepegMutation(
+                    algo,
+                    liveChildClOrdId) is not null);
+        if (isPeggedRepeg)
+        {
+            await FailClosedPeggedRepegAsync(
+                algo,
+                rt,
+                liveChildClOrdId,
+                outcome).ConfigureAwait(false);
+            return;
+        }
+
+        _logger.LogWarning(
+            "AlgoEngine live-child reconciliation failed for {Firm}/{AlgoId} child {Child}: {Outcome}; suspending for reconciliation.",
+            algo.FirmId,
+            algo.AlgoId,
+            liveChildClOrdId,
+            outcome);
+        await RecordTerminalAsync(
+            algo,
+            rt,
+            AlgoStatus.Suspended,
+            AlgoTerminalReason.ReconciliationRequired).ConfigureAwait(false);
     }
 
     private bool IsTwapWindowExpired(Algo algo) =>
@@ -1176,6 +1485,7 @@ public sealed class AlgoEngine : BackgroundService
     private async Task OnModifyRequestedAsync(
         Algo algo, AlgoParentRuntime rt, AlgoModifyRequestedSignal sig, CancellationToken ct)
     {
+        if (!_outboundRecovery.IsBusinessIngressOpen(algo.FirmId)) return;
         var algoTypeTag = algo.Type.ToString().ToLowerInvariant();
         if (algo.IsTerminal)
         {
@@ -1192,6 +1502,12 @@ public sealed class AlgoEngine : BackgroundService
             MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
                 new KeyValuePair<string, object?>("algoType", algoTypeTag),
                 new KeyValuePair<string, object?>("reason", "algo_cancelling"));
+            return;
+        }
+        var reconciliation =
+            await ReconcileLiveChildAgainstBookAsync(algo, rt, ct).ConfigureAwait(false);
+        if (reconciliation == LiveChildReconciliationOutcome.StopProcessing)
+        {
             return;
         }
 
@@ -1239,434 +1555,106 @@ public sealed class AlgoEngine : BackgroundService
             return;
         }
 
-        await TryReplaceChildAsync(algo, child, newQty, newPrice, sig.Reason, ct).ConfigureAwait(false);
+        var explicitRetry = FindExplicitProvenUnsentMutation(
+            algo,
+            child.ClOrdId,
+            AlgoOutboundActionKind.ReplaceChild);
+        await TryReplaceChildAsync(
+            algo, child, newQty, newPrice, sig.Reason,
+            AlgoOutboundActionKind.ReplaceChild, ct,
+            explicitRetry?.AlgoOriginIdentity).ConfigureAwait(false);
     }
 
-    /// <summary>
-    /// Q3.5 (#285). Shared helper: turn a "modify this live child"
-    /// intent into a gateway cancel-replace dispatched against the
-    /// venue, preserving book priority on B3 (priority-up keeps
-    /// queue position on price-improving Sells / Buys; qty-down
-    /// keeps it as well). Mirrors <see cref="OrderModifyService"/>'s
-    /// plumbing — allocates a new ClOrdID, runs the same pre-trade
-    /// risk pipeline + margin Prepare (delta-only reservation under
-    /// the new ClOrdID), registers the intent in
-    /// <see cref="PendingReplacementRegistry"/> so the Replaced ack
-    /// hydrates the new child into the book, writes the
-    /// <see cref="OrderReplaceRequestedEvent"/> + audit
-    /// <see cref="AlgoChildModifiedEvent"/>, then dispatches to the
-    /// gateway. Pass-3 review (#299) P1 added the risk + margin
-    /// gates: without them a Buy child could be price/qty-modified
-    /// beyond available cash (CommitReplace on the venue ack only
-    /// rebalances; it does not reject). The gates run BEFORE the
-    /// WAL append + gateway dispatch so a rejection emits no
-    /// <see cref="AlgoChildModifiedEvent"/> and no wire-call —
-    /// only the <c>algo.modify_rejected_total</c> counter with
-    /// reason=<c>risk_rejected</c> / <c>margin_rejected</c>.
-    /// </summary>
     internal async Task<bool> TryReplaceChildAsync(
-        Algo algo, Order child,
-        long newQuantity, decimal? newPrice, string reason, CancellationToken ct)
-    {
-        var algoTypeTag = algo.Type.ToString().ToLowerInvariant();
-        if (_reconciliationDrain?.IsDraining == true)
-        {
-            MetricsRegistry.DrainRejections.Add(1,
-                new KeyValuePair<string, object?>("route", "algo.modify"));
-            return false;
-        }
-        if (_replacements is null)
-        {
-            // Defensive: the test composition that omits the registry
-            // also omits the modify path. Surface as a metric so a
-            // misconfigured composition is observable instead of silently
-            // skipping the retrofit.
-            MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
-                new KeyValuePair<string, object?>("algoType", algoTypeTag),
-                new KeyValuePair<string, object?>("reason", "registry_unavailable"));
-            return false;
-        }
-
-        var effectivePrice = newPrice ?? child.Price;
-        try
-        {
-            Order.ValidatePriceForType(child.Type, effectivePrice);
-        }
-        catch (ArgumentException ex)
-        {
-            MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
-                new KeyValuePair<string, object?>("algoType", algoTypeTag),
-                new KeyValuePair<string, object?>("reason", "invalid_price"));
-            _logger.LogInformation(ex,
-                "AlgoEngine modify rejected invalid price/type for algo {Firm}/{AlgoId} child {Child}.",
-                algo.FirmId, algo.AlgoId, child.ClOrdId);
-            return false;
-        }
-
-        if (!_replacements.TryClaimOriginal(child.ClOrdId))
-        {
-            MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
-                new KeyValuePair<string, object?>("algoType", algoTypeTag),
-                new KeyValuePair<string, object?>("reason", "already_in_flight"));
-            return false;
-        }
-
-        try
-        {
-            return await TryReplaceClaimedChildAsync(
-                algo, child, newQuantity, effectivePrice, reason, algoTypeTag, ct)
-                .ConfigureAwait(false);
-        }
-        finally
-        {
-            _replacements.ReleaseOriginalClaim(child.ClOrdId);
-        }
-    }
-
-    private async Task<bool> TryReplaceClaimedChildAsync(
         Algo algo,
         Order child,
         long newQuantity,
         decimal? newPrice,
         string reason,
-        string algoTypeTag,
-        CancellationToken ct)
+        AlgoOutboundActionKind actionKind,
+        CancellationToken ct,
+        AlgoOutboundOriginIdentity? explicitRetryOrigin = null)
     {
-        var replacements = _replacements!;
-        var newClOrdId = _clOrdIds.Generate(child.Owner);
-
-        // Pass-3 review (#299) P1. Run the same pre-trade gates the
-        // operator-driven plain-order modify pipeline applies in
-        // <see cref="OrderModifyService.ModifyAsync"/> — pre-trade
-        // risk evaluation (projecting the new qty/price under the
-        // replace context) followed by margin Prepare (delta-only
-        // reservation under the new ClOrdID). Without this, a Buy
-        // child could be price/qty-modified beyond available cash
-        // and the venue ack would land in CommitReplace which only
-        // re-balances; it does not reject. Inputs mirror the
-        // OrderModifyService block: ReplaceOriginalClOrdId set so
-        // NoNakedShortCheck projects the swap; EffectiveLeavesQty
-        // = newQty - cum (already validated > 0 by the caller); TIF
-        // / Stop / GTD are inherited from the original (the algo
-        // modify path does not surface them as overrides).
-        var effectiveLeaves = newQuantity - child.CumulativeQuantity;
-        var riskCtx = new RiskContext(
-            child.Owner, child.FirmId, child.Symbol, child.Side, child.Type,
-            newQuantity, newPrice,
-            ReplaceOriginalClOrdId: child.ClOrdId,
-            EffectiveLeavesQuantity: effectiveLeaves,
-            TimeInForce: child.TimeInForce,
-            StopPrice: child.StopPrice,
-            GoodTillDate: child.GoodTillDate,
-            SubAccountId: child.SubAccountId,
-            ParentAlgoId: algo.AlgoId,
-            AlgoType: algoTypeTag);
-        if (_risk is not null)
+        if (!_outboundRecovery.IsBusinessIngressOpen(algo.FirmId)) return false;
+        var algoTypeTag = algo.Type.ToString().ToLowerInvariant();
+        OutboundMutationSnapshot? retryMutation = null;
+        if (explicitRetryOrigin is not null)
         {
-            var riskDecision = _risk.Evaluate(riskCtx);
-            if (!riskDecision.Approved)
-            {
-                MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
-                    new KeyValuePair<string, object?>("algoType", algoTypeTag),
-                    new KeyValuePair<string, object?>("reason", "risk_rejected"));
-                _logger.LogInformation(
-                    "AlgoEngine modify rejected by risk for algo {Firm}/{AlgoId} child {Child}: {Reason}",
-                    algo.FirmId, algo.AlgoId, child.ClOrdId, riskDecision.Reason);
-                return false;
-            }
+            _outboundLedger.TryGetByAlgoOrigin(
+                algo.FirmId,
+                explicitRetryOrigin,
+                out retryMutation);
+        }
+        var retryAllowed = retryMutation is
+        {
+            State: OutboundMutationState.ProvenUnsent,
+            RequiresReconciliation: false,
+        }
+            && retryMutation.OriginalClOrdId == child.ClOrdId
+            && retryMutation.AlgoOriginIdentity?.ActionKind == actionKind
+            && retryMutation.Approval?.CanonicalCommandNonSensitive.Quantity
+                == newQuantity
+            && retryMutation.Approval.CanonicalCommandNonSensitive.Price
+                == newPrice
+            && !_outboundLedger.HasBlockingAlgoMutationExcept(
+                algo.FirmId,
+                algo.AlgoId,
+                retryMutation.MutationId);
+        if (!retryAllowed
+            && _outboundLedger.HasBlockingAlgoMutation(algo.FirmId, algo.AlgoId))
+        {
+            MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
+                new KeyValuePair<string, object?>("algoType", algoTypeTag),
+                new KeyValuePair<string, object?>("reason", "outbound_unresolved"));
+            return false;
         }
 
-        // Margin Prepare: reserve only the upsize delta. The coordinator
-        // no-ops on sells / markets / non-positive notionals; the
-        // gating predicate mirrors OrderModifyService so the algo and
-        // plain-order modify paths agree on which orders consume cash.
-        var newRemainingNotional = (child.Side == OrderSide.Buy
-                                    && child.Type.IsMarginBearing()
-                                    && newPrice is { } px)
-            ? px * effectiveLeaves
-            : 0m;
-        var marginPrepared = false;
-        if (_replaceMargin is not null)
-        {
-            var marginDecision = await _replaceMargin.PrepareReplaceAsync(
-                child.ClOrdId,
-                newClOrdId,
+        var origin = retryAllowed
+            ? explicitRetryOrigin!
+            : new AlgoOutboundOriginIdentity(
+                algo.AlgoId,
+                actionKind,
+                NextAlgoActionSequence(algo.FirmId, algo.AlgoId, actionKind));
+        var result = await _modifier.ModifyAsync(
+            new OrderModifyRequest(
                 child.Owner,
-                child.FirmId,
-                newRemainingNotional,
-                ct).ConfigureAwait(false);
-            if (!marginDecision.Approved)
-            {
-                MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
-                    new KeyValuePair<string, object?>("algoType", algoTypeTag),
-                    new KeyValuePair<string, object?>("reason", "margin_rejected"));
-                _logger.LogInformation(
-                    "AlgoEngine modify rejected by margin coordinator for algo {Firm}/{AlgoId} child {Child}: {Reason}",
-                    algo.FirmId, algo.AlgoId, child.ClOrdId, marginDecision.Reason);
-                return false;
-            }
-            marginPrepared = true;
-        }
-
-        var intent = new OrderReplacementIntent(
-            OriginalClOrdId: child.ClOrdId,
-            NewClOrdId: newClOrdId,
-            Owner: child.Owner,
-            Symbol: child.Symbol,
-            SecurityId: child.SecurityId,
-            Side: child.Side,
-            Type: child.Type,
-            NewQuantity: newQuantity,
-            NewPrice: newPrice,
-            FirmId: child.FirmId,
-            ParentAlgoId: child.ParentAlgoId,
-            AlgoSliceSeq: child.AlgoSliceSeq);
-
-        var atUtc = _clock.GetUtcNow();
-        try
+                child.ClOrdId,
+                newQuantity,
+                newPrice,
+                FirmId: algo.FirmId,
+                Origin: OutboundMutationOrigin.Algo,
+                AlgoOriginIdentity: origin),
+            ct).ConfigureAwait(false);
+        if (result.Kind != OrderModifyResultKind.Accepted)
         {
-            var dispatched = _dispatcher.DispatchIf(
-                new OrderReplaceRequestedEvent
-                {
-                    OriginalClOrdId = child.ClOrdId,
-                    NewClOrdId = newClOrdId,
-                    EndClientId = child.Owner.Value,
-                    FirmId = child.FirmId,
-                    Symbol = child.Symbol,
-                    SecurityId = child.SecurityId,
-                    Side = child.Side.ToString(),
-                    Type = child.Type.ToString(),
-                    NewQuantity = newQuantity,
-                    NewPrice = newPrice,
-                    ParentAlgoId = child.ParentAlgoId,
-                    AlgoSliceSeq = child.AlgoSliceSeq,
-                },
-                () => child.Status is not (OrderStatus.Filled or OrderStatus.Cancelled
-                    or OrderStatus.Rejected or OrderStatus.Replaced)
-                    && newQuantity > child.CumulativeQuantity,
-                () =>
-                {
-                    // Pass-4 review (#299) P1. Stamp the registry entry
-                    // with the current clock so the AlgoScheduler TTL
-                    // sweep can bound any ambiguous-send leak below.
-                    if (!replacements.TryAddClaimed(intent, _clock.GetUtcNow()))
-                        throw new InvalidOperationException(
-                            $"Original ClOrdID {child.ClOrdId} was not exclusively claimed.");
-                    _ownership.RegisterReplaceLink(child.ClOrdId, newClOrdId);
-                });
-            if (!dispatched.Applied)
+            var rejectionReason = result.Kind switch
             {
-                if (marginPrepared)
-                    _replaceMargin!.AbortReplace(newClOrdId);
-                return false;
-            }
-        }
-        catch (WalBackpressureException)
-        {
-            MetricsRegistry.WalBackpressure.Add(1,
-                new KeyValuePair<string, object?>("call_site", "algo.modify"));
+                OrderModifyResultKind.GatewayAmbiguous => "gateway_ambiguous",
+                OrderModifyResultKind.RiskRejected
+                    when string.Equals(result.Code, "margin_rejected", StringComparison.Ordinal)
+                        => "margin_rejected",
+                OrderModifyResultKind.RiskRejected => "risk_rejected",
+                _ => result.Kind.ToString().ToLowerInvariant(),
+            };
             MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
                 new KeyValuePair<string, object?>("algoType", algoTypeTag),
-                new KeyValuePair<string, object?>("reason", "wal_backpressure"));
-            // Pass-3 review (#299) P1. Roll back the margin Prepare —
-            // the intent never made it to the registry, so a future
-            // ER cannot drive CommitReplace. Holding the reserve would
-            // leak permanently.
-            if (marginPrepared)
-                _replaceMargin!.AbortReplace(newClOrdId);
+                new KeyValuePair<string, object?>("reason", rejectionReason));
             return false;
         }
-
-        _accountant?.RecordAccepted(riskCtx);
 
         try
         {
-            await _gateway.CancelReplaceAsync(
-                child, newClOrdId, newQuantity, newPrice,
-                requestedTimeInForce: null, requestedStopPrice: null, requestedGoodTillDate: null,
-                ct).ConfigureAwait(false);
-        }
-        catch (Exception ex) when (
-            ex is ExchangeGatewayPreSendException || _gateway is IExchangeGatewayPreSendOnly)
-        {
-            MetricsRegistry.OrdersGatewayFailed.Add(1,
-                new KeyValuePair<string, object?>("path", "algo.modify"),
-                new KeyValuePair<string, object?>("firmId", algo.FirmId));
-            MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
-                new KeyValuePair<string, object?>("algoType", algoTypeTag),
-                new KeyValuePair<string, object?>("reason", "gateway_pre_send"));
-            _logger.LogWarning(ex,
-                "AlgoEngine modify was proven unsent for algo {Firm}/{AlgoId} child {Child}; terminalising intent.",
-                algo.FirmId, algo.AlgoId, child.ClOrdId);
-            var marker = new ReconciliationMarker(
-                ReconciliationMarkerKind.ReplacePreSend,
-                child.ClOrdId,
-                newClOrdId,
-                child.Owner.Value);
-            ReconciliationResolutionResult resolution;
-            try
-            {
-                resolution = await _resolutionWriter.ResolveAsync(
-                    marker,
-                    new OrderReplacePreSendFailedEvent
-                    {
-                        OriginalClOrdId = child.ClOrdId,
-                        NewClOrdId = newClOrdId,
-                        EndClientId = child.Owner.Value,
-                        Reason = "gateway_unavailable",
-                    },
-                    () =>
-                    {
-                        replacements.TryConsume(newClOrdId, out _);
-                        _ownership.RemoveCancelLink(newClOrdId);
-                        if (marginPrepared)
-                            _replaceMargin!.AbortReplace(newClOrdId);
-                    }).ConfigureAwait(false);
-            }
-            catch (Exception resolutionEx)
-            {
-                BeginReplaceResolutionDrain(
-                    newClOrdId, "pre_send_resolution_not_durable", resolutionEx);
-                return false;
-            }
-            if (!resolution.Durable)
-            {
-                if (resolution.MarkerDurable)
-                {
-                    _dispatcher.RunExclusive(() =>
-                    {
-                        replacements.TryConsume(newClOrdId, out _);
-                        _ownership.RemoveCancelLink(newClOrdId);
-                        if (marginPrepared)
-                            _replaceMargin!.AbortReplace(newClOrdId);
-                    });
-                }
-                BeginReplaceResolutionDrain(
-                    newClOrdId, "pre_send_resolution_not_durable",
-                    resolution.Failure!);
-            }
-            return false;
-        }
-        catch (Exception ex)
-        {
-            // Pass-1 review (#299) P1-B. Send-failure is AMBIGUOUS: the
-            // venue may have already accepted the cancel-replace (network
-            // jitter, write succeeded but ack timed out). If we drop the
-            // intent here and a Replaced ER arrives later, it bypasses
-            // the PendingReplacementRegistry intercept and is silently
-            // ignored — the new ClOrdID never appears in the book and
-            // the parent's child pointer stays on the OLD child forever.
-            //
-            // Instead: KEEP the intent and ownership link in place so a
-            // late Replaced ER still resolves correctly. The parent
-            // pointer was deliberately NOT re-targeted yet (see P1-A
-            // adoption-on-Replaced), so the OLD child remains the live
-            // slot and any in-flight fills on it are booked normally.
-            // Operator surfaces this through the dedicated
-            // modify_send_ambiguous counter; the algo-rejected counter
-            // is NOT incremented because we cannot tell yet whether the
-            // modify will eventually succeed.
-            MetricsRegistry.OrdersGatewayFailed.Add(1,
-                new KeyValuePair<string, object?>("path", "algo.modify"),
-                new KeyValuePair<string, object?>("firmId", algo.FirmId));
-            MetricsRegistry.AlgoModifySendAmbiguous.Add(1,
-                new KeyValuePair<string, object?>("algoType", algoTypeTag));
-            _logger.LogWarning(ex,
-                "AlgoEngine modify gateway dispatch ambiguous for algo {Firm}/{AlgoId} child {Child}; intent retained for late Replaced ER.",
-                algo.FirmId, algo.AlgoId, child.ClOrdId);
-            // Pass-4 review (#299) P1. KEEP the margin reservation —
-            // do NOT call AbortReplace. Pass-3 freed the upsize delta
-            // here on the theory that holding it indefinitely was the
-            // worse failure mode; that left a window in which another
-            // order could consume the freed headroom before a late
-            // Replaced ER arrived, then CommitReplace would silently
-            // re-add the delta on top, pushing reserved exposure above
-            // the owner's cash cap. The pass-4 fix instead tags the
-            // intent as "ambiguous margin held" so the AlgoScheduler
-            // TTL sweep (see <see cref="AlgoScheduler.SweepAmbiguousReplaceIntents"/>)
-            // bounds the leak: if no Replaced/Rejected/Canceled ER
-            // arrives within
-            // <c>RiskOptions.Margin.AmbiguousReplaceTtl</c>, the
-            // reservation is released and the
-            // <c>algo.modify_ambiguous_intent_expired_total</c>
-            // counter bumps so operators can correlate with the
-            // dashboards. CommitReplace on a late Replaced ER stays
-            // a no-op for the upsize delta (the transient entry is
-            // still present), and a Canceled ER for the orig (venue
-            // dropped the replace) routes through the ER processor's
-            // new TryConsumeByOriginal arm which also releases the
-            // reservation. The cash invariant is preserved either
-            // way.
-            var heldAt = _clock.GetUtcNow();
-            var marker = new ReconciliationMarker(
-                ReconciliationMarkerKind.ReplaceAmbiguous,
-                child.ClOrdId,
-                newClOrdId,
-                child.Owner.Value,
-                newRemainingNotional,
-                heldAt);
-            ReconciliationResolutionResult resolution;
-            try
-            {
-                resolution = await _resolutionWriter.ResolveAsync(
-                    marker,
-                    new OrderReplaceAmbiguousMarginHeldEvent
-                    {
-                        NewClOrdId = newClOrdId,
-                        OriginalClOrdId = child.ClOrdId,
-                        EndClientId = child.Owner.Value,
-                        NewRemainingNotional = newRemainingNotional,
-                        HeldAtUtc = heldAt,
-                    },
-                    () => replacements.MarkAmbiguousMarginHeld(
-                        newClOrdId, heldAt, newRemainingNotional))
-                    .ConfigureAwait(false);
-            }
-            catch (Exception resolutionEx)
-            {
-                BeginReplaceResolutionDrain(
-                    newClOrdId, "ambiguous_resolution_not_durable", resolutionEx);
-                return false;
-            }
-            if (!resolution.Durable)
-            {
-                if (resolution.MarkerDurable)
-                {
-                    _dispatcher.RunExclusive(() =>
-                        replacements.MarkAmbiguousMarginHeld(
-                            newClOrdId, heldAt, newRemainingNotional));
-                }
-                BeginReplaceResolutionDrain(
-                    newClOrdId, "ambiguous_resolution_not_durable",
-                    resolution.Failure!);
-            }
-            return false;
-        }
-
-        // Best-effort audit envelope — observability-only, not
-        // replayed (the OrderReplaceRequestedEvent above is the
-        // durable record). WAL backpressure here is non-fatal.
-        try
-        {
-            var algoIdSnap = algo.AlgoId;
-            var firmIdSnap = algo.FirmId;
-            var oldIdSnap = child.ClOrdId;
-            var newIdSnap = newClOrdId;
-            var atUtcSnap = atUtc;
-            var reasonSnap = reason;
-            var qtySnap = newQuantity;
-            var priceSnap = newPrice;
             _dispatcher.Dispatch(
                 new AlgoChildModifiedEvent
                 {
-                    AlgoId = algoIdSnap,
-                    FirmId = firmIdSnap,
-                    OldChildClOrdId = oldIdSnap,
-                    NewChildClOrdId = newIdSnap,
-                    NewQuantity = qtySnap,
-                    NewPrice = priceSnap,
-                    Reason = reasonSnap,
-                    AtUtc = atUtcSnap,
+                    AlgoId = algo.AlgoId,
+                    FirmId = algo.FirmId,
+                    OldChildClOrdId = child.ClOrdId,
+                    NewChildClOrdId = result.NewClOrdId,
+                    NewQuantity = newQuantity,
+                    NewPrice = newPrice,
+                    Reason = reason,
+                    AtUtc = _clock.GetUtcNow(),
                 },
                 static () => { });
         }
@@ -1679,40 +1667,116 @@ public sealed class AlgoEngine : BackgroundService
         MetricsRegistry.AlgoChildModifiesTotal.Add(1,
             new KeyValuePair<string, object?>("algoType", algoTypeTag),
             new KeyValuePair<string, object?>("reason", reason));
-
-        // Pass-1 review (#299) P1-A. Do NOT re-target rt.LiveChildClOrdId
-        // here — the venue has not yet acknowledged the cancel-replace.
-        // Re-targeting before the Replaced ER arrives creates a window in
-        // which a Fill ER for the OLD child would book against an
-        // already-rebound parent slot AND when the Replaced ER finally
-        // arrived the replacement's seeded cum would re-book the same
-        // fill, double-counting it on the parent. The adoption now
-        // happens in OnChildErAsync the first time the engine observes
-        // the new ClOrdID (i.e. on the ChildExecutionObservedSignal
-        // emitted by ApplyReplaceAccepted), at which point the new
-        // child's CumulativeQuantity is the venue's authoritative carry-
-        // over baseline.
         return true;
     }
 
-    private void BeginReplaceResolutionDrain(
-        ulong newClOrdId,
-        string reason,
-        Exception exception)
-    {
-        if (exception is WalBackpressureException)
+    private int NextAlgoActionSequence(
+        string firmId,
+        ulong algoId,
+        AlgoOutboundActionKind actionKind) =>
+        _outboundLedger.GetAlgoMutations(firmId, algoId)
+            .Where(m => m.AlgoOriginIdentity?.ActionKind == actionKind)
+            .Select(m => m.AlgoOriginIdentity!.Sequence)
+            .DefaultIfEmpty(-1)
+            .Max() + 1;
+
+    private OutboundMutationSnapshot? FindExplicitProvenUnsentMutation(
+        Algo algo,
+        ulong originalClOrdId,
+        AlgoOutboundActionKind actionKind) =>
+        FindLatestAlgoMutation(algo, originalClOrdId, actionKind) is
         {
-            MetricsRegistry.WalBackpressure.Add(1,
-                new KeyValuePair<string, object?>("call_site", "algo.modify.resolution"));
-        }
-        _reconciliationDrain?.BeginDrain("wal_replace_resolution_reconciliation_required");
-        _logger.LogCritical(exception,
-            "Algo replace resolution {Reason} for new ClOrdID {NewClOrdId}; ingress is draining and operator reconciliation is required.",
-            reason, newClOrdId);
+            State: OutboundMutationState.ProvenUnsent,
+            RequiresReconciliation: false,
+        } mutation
+            ? mutation
+            : null;
+
+    private OutboundMutationSnapshot? FindLatestAlgoMutation(
+        Algo algo,
+        ulong originalClOrdId,
+        AlgoOutboundActionKind actionKind) =>
+        _outboundLedger.GetAlgoMutations(algo.FirmId, algo.AlgoId)
+            .Where(m => m.AlgoOriginIdentity?.ActionKind == actionKind
+                && m.OriginalClOrdId == originalClOrdId)
+            .OrderByDescending(m => m.RecordedAtUtc)
+            .ThenByDescending(m => m.MutationId.Value)
+            .FirstOrDefault();
+
+    private bool IsConfirmedProvenUnsentMutation(
+        Algo algo,
+        ulong originalClOrdId,
+        AlgoOutboundActionKind actionKind) =>
+        FindLatestAlgoMutation(algo, originalClOrdId, actionKind) is
+        {
+            State: OutboundMutationState.ProvenUnsent,
+            RequiresReconciliation: false,
+        };
+
+    private bool IsUnresolvedPotentiallySentRepegMutation(
+        Algo algo,
+        ulong originalClOrdId)
+    {
+        var mutation = FindLatestBlockingRepegMutation(algo, originalClOrdId);
+        return mutation is not null
+            && mutation.State != OutboundMutationState.ProvenUnsent;
     }
 
-    private async Task OnCancelRequestedAsync(Algo algo, AlgoParentRuntime rt, CancellationToken ct)
+    private OutboundMutationSnapshot? FindLatestBlockingRepegMutation(
+        Algo algo,
+        ulong? originalClOrdId = null) =>
+        _outboundLedger.GetAlgoMutations(algo.FirmId, algo.AlgoId)
+            .Where(m =>
+                m.AlgoOriginIdentity?.ActionKind == AlgoOutboundActionKind.Repeg
+                && (originalClOrdId is null
+                    || m.OriginalClOrdId == originalClOrdId.Value)
+                && IsBlockingAlgoRepegMutation(m))
+            .OrderByDescending(m => m.RecordedAtUtc)
+            .ThenByDescending(m => m.MutationId.Value)
+            .FirstOrDefault();
+
+    private static bool IsBlockingAlgoRepegMutation(
+        OutboundMutationSnapshot mutation) =>
+        mutation.RequiresReconciliation
+        || mutation.State is OutboundMutationState.ApprovedToSend
+            or OutboundMutationState.AttemptIntentPrepared
+            or OutboundMutationState.FramePrepared
+            or OutboundMutationState.TransportWriteCompleted
+            or OutboundMutationState.ProvenUnsent
+            or OutboundMutationState.Ambiguous
+            or OutboundMutationState.LegacyUnknown
+            or OutboundMutationState.LegacyUnknownReplace;
+
+    private OutboundMutationSnapshot? FindSoleRetryableProvenUnsentMutation(
+        Algo algo,
+        ulong originalClOrdId,
+        AlgoOutboundActionKind actionKind)
     {
+        var mutation = FindExplicitProvenUnsentMutation(
+            algo,
+            originalClOrdId,
+            actionKind);
+        return mutation is not null
+            && mutation.Attempts.Count < OutboundMutationLedger.MaxOutboundAttempts
+            && (_outboundEpoch is null
+                || (_outboundEpoch.IsInitialized
+                    && mutation.Attempts.LastOrDefault()?.ProcessEpochId
+                        == _outboundEpoch.Id))
+            && !_outboundLedger.HasBlockingAlgoMutationExcept(
+                algo.FirmId,
+                algo.AlgoId,
+                mutation.MutationId)
+            ? mutation
+            : null;
+    }
+
+    private async Task OnCancelRequestedAsync(
+        Algo algo,
+        AlgoParentRuntime rt,
+        bool explicitRetry,
+        CancellationToken ct)
+    {
+        if (!_outboundRecovery.IsBusinessIngressOpen(algo.FirmId)) return;
         // Operator already drove the parent into Cancelling via the API;
         // reactor's job is to take down the live child (if any). When
         // there is no live child the parent can move straight to Cancelled
@@ -1722,6 +1786,33 @@ public sealed class AlgoEngine : BackgroundService
             // Replay-time edge-case: a cancel was enqueued but later events
             // (gateway-failed, etc) already moved the parent past
             // Cancelling. Nothing to do.
+            return;
+        }
+
+        if (await ReconcileLiveChildAgainstBookAsync(algo, rt, ct).ConfigureAwait(false)
+            != LiveChildReconciliationOutcome.None)
+            return;
+
+        OutboundMutationSnapshot? retryMutation = null;
+        if (explicitRetry && rt.LiveChildClOrdId is { } retryChildClOrdId)
+        {
+            retryMutation = FindExplicitProvenUnsentMutation(
+                algo,
+                retryChildClOrdId,
+                AlgoOutboundActionKind.CancelChild);
+        }
+        var retryAllowed = retryMutation is not null
+            && !_outboundLedger.HasBlockingAlgoMutationExcept(
+                algo.FirmId,
+                algo.AlgoId,
+                retryMutation.MutationId);
+        if (!retryAllowed
+            && _outboundLedger.HasBlockingAlgoMutation(algo.FirmId, algo.AlgoId))
+        {
+            _logger.LogWarning(
+                "Algo parent cancel for {Firm}/{AlgoId} is waiting for unresolved child outbound evidence.",
+                algo.FirmId,
+                algo.AlgoId);
             return;
         }
 
@@ -1739,29 +1830,37 @@ public sealed class AlgoEngine : BackgroundService
             return;
         }
 
-        var newClOrdId = _clOrdIds.Generate(child.Owner);
-        try
+        var origin = retryAllowed
+            ? retryMutation!.AlgoOriginIdentity!
+            : new AlgoOutboundOriginIdentity(
+                algo.AlgoId,
+                AlgoOutboundActionKind.CancelChild,
+                NextAlgoActionSequence(
+                    algo.FirmId,
+                    algo.AlgoId,
+                    AlgoOutboundActionKind.CancelChild));
+        var result = await _canceller.CancelAsync(
+            child.Owner,
+            child.ClOrdId,
+            ct,
+            firmId: algo.FirmId,
+            origin: OutboundMutationOrigin.Algo,
+            algoOriginIdentity: origin).ConfigureAwait(false);
+        if (result.Kind != OrderCancelResultKind.Accepted)
         {
-            // Pre-register the cancel-side → original mapping so the
-            // cancel-ack ER can resolve back to the child order even if
-            // upstream omits OrigClOrdID on the wire.
-            _ownership.RegisterCancelLink(newClOrdId, child.ClOrdId);
-            await _gateway.CancelAsync(child, newClOrdId, ct).ConfigureAwait(false);
-            // Don't mark terminal here — wait for the cancel-ack ER to land
-            // via OnChildErAsync. That's what makes the engine consistent
-            // with replay (the WAL records the ER, never the cancel intent).
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex,
-                "AlgoEngine cancel of child {Child} for algo {Firm}/{AlgoId} failed; operator may retry DELETE.",
-                childClOrdId, algo.FirmId, algo.AlgoId);
-            // Stay in Cancelling so DELETE is re-driveable; do not auto-suspend.
+            _logger.LogWarning(
+                "Algo parent cancel for {Firm}/{AlgoId} child {Child} remains pending: {Kind} {Reason}.",
+                algo.FirmId,
+                algo.AlgoId,
+                childClOrdId,
+                result.Kind,
+                result.Reason);
         }
     }
 
     private async Task SubmitNextSliceAsync(Algo algo, AlgoParentRuntime rt, CancellationToken ct)
     {
+        if (!_outboundRecovery.IsBusinessIngressOpen(algo.FirmId)) return;
         var (rawQty, slicePrice) = ComputeNextSlice(algo);
         // #518. Final lot-size invariant: no algo child leaves the engine
         // with an odd lot the venue's MinLotSizeCheck would reject (which
@@ -1870,7 +1969,6 @@ public sealed class AlgoEngine : BackgroundService
             }
         }
 
-        for (var attempt = 0; attempt <= RetryDelays.Length; attempt++)
         {
             var req = new OrderSubmissionRequest(
                 Owner: algo.Owner,
@@ -1884,7 +1982,14 @@ public sealed class AlgoEngine : BackgroundService
                 Source: OrderSubmissionSource.Algo,
                 ParentAlgoId: algo.AlgoId,
                 AlgoSliceSeq: sliceSeq,
-                AlgoTypeTag: algo.Type.ToString().ToLowerInvariant());
+                AlgoTypeTag: algo.Type.ToString().ToLowerInvariant())
+            {
+                UseDurableOutboundCoordinator = true,
+                AlgoOriginIdentity = new AlgoOutboundOriginIdentity(
+                    algo.AlgoId,
+                    AlgoOutboundActionKind.NewChild,
+                    sliceSeq),
+            };
 
             OrderSubmissionResult result;
             try
@@ -1987,8 +2092,15 @@ public sealed class AlgoEngine : BackgroundService
                     return;
 
                 case OrderSubmissionResultKind.Drained:
-                case OrderSubmissionResultKind.ReconciliationRequired:
                     await RecordTerminalAsync(algo, rt, AlgoStatus.Suspended, AlgoTerminalReason.Drained).ConfigureAwait(false);
+                    return;
+
+                case OrderSubmissionResultKind.ReconciliationRequired:
+                    await RecordTerminalAsync(
+                        algo,
+                        rt,
+                        AlgoStatus.Suspended,
+                        AlgoTerminalReason.ReconciliationRequired).ConfigureAwait(false);
                     return;
 
                 case OrderSubmissionResultKind.BadRequest:
@@ -2003,26 +2115,15 @@ public sealed class AlgoEngine : BackgroundService
 
                 case OrderSubmissionResultKind.GatewayFailed:
                 case OrderSubmissionResultKind.WalBackpressure:
-                    if (attempt >= RetryDelays.Length)
-                    {
-                        var reason = result.Kind == OrderSubmissionResultKind.GatewayFailed
-                            ? AlgoTerminalReason.RetriesExhausted
-                            : AlgoTerminalReason.RetriesExhausted;
-                        await RecordTerminalAsync(algo, rt, AlgoStatus.Suspended, reason).ConfigureAwait(false);
-                        return;
-                    }
                     _logger.LogWarning(
-                        "AlgoEngine submit transient ({Kind}, {Reason}) for algo {Firm}/{AlgoId} slice {Seq}; retry {Attempt}.",
-                        result.Kind, result.Reason, algo.FirmId, algo.AlgoId, sliceSeq, attempt + 1);
-                    try
-                    {
-                        await Task.Delay(RetryDelays[attempt], ct).ConfigureAwait(false);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        return;
-                    }
-                    continue;
+                        "AlgoEngine child submit for {Firm}/{AlgoId} slice {Seq} returned {Kind}; no automatic retry is permitted.",
+                        algo.FirmId, algo.AlgoId, sliceSeq, result.Kind);
+                    await RecordTerminalAsync(
+                        algo,
+                        rt,
+                        AlgoStatus.Suspended,
+                        AlgoTerminalReason.ReconciliationRequired).ConfigureAwait(false);
+                    return;
             }
         }
     }
@@ -2244,6 +2345,9 @@ public sealed class AlgoEngine : BackgroundService
         // cancel — nothing to clean up beyond the in-memory marker.
         // Post-#300 the cycle is a cancel-replace whose intent +
         // (possibly) held margin live in PendingReplacementRegistry.
+        // The intent may exist even when RepegPending is false: an
+        // ambiguous dispatch deliberately clears the in-memory throttle
+        // but retains the registry row until authoritative evidence.
         // A Fill on the OLD child has already settled the cycle from
         // the parent's POV, so the replace is now meaningless: if the
         // venue eventually emits a Replaced ER the adoption block
@@ -2252,7 +2356,7 @@ public sealed class AlgoEngine : BackgroundService
         // are released; the late Replaced ER will then bypass
         // PendingReplacementRegistry's intercept and the synthetic
         // child is silently dropped.
-        if (wasPending && _replacements is not null)
+        if (_replacements is not null)
         {
             if (_replacements.TryConsumeByOriginal(child.ClOrdId, out var intent, out var ambiguousHeld))
             {
@@ -2320,6 +2424,180 @@ public sealed class AlgoEngine : BackgroundService
         // ref. This keeps "new working slice" submission single-sourced.
     }
 
+    private async Task FailClosedPeggedRepegAsync(
+        Algo algo,
+        AlgoParentRuntime rt,
+        ulong originalClOrdId,
+        string outcome)
+    {
+        var pendingCycleOriginal =
+            _peggedRepeg?.TryGet(algo.FirmId, algo.AlgoId)?.CancelledChildClOrdId;
+        var cleanupOriginalClOrdId = pendingCycleOriginal ?? originalClOrdId;
+        rt.RepegPending = false;
+        rt.LastRepegCancelledChildId = null;
+        rt.ReplacedAdoptionHoldTicks = 0;
+
+        AbortReplacementIntent(cleanupOriginalClOrdId);
+        if (cleanupOriginalClOrdId != originalClOrdId)
+            AbortReplacementIntent(originalClOrdId);
+
+        var mutation = FindLatestAlgoMutation(
+            algo,
+            cleanupOriginalClOrdId,
+            AlgoOutboundActionKind.Repeg);
+        if (mutation is { RequiresReconciliation: false })
+        {
+            MarkOutboundReconciliationRequired(
+                mutation.MutationId,
+                "AlgoRepegFailClosed");
+        }
+
+        if (pendingCycleOriginal is not null)
+        {
+            SelfHealOrphanRepeg(
+                algo.FirmId,
+                algo.AlgoId,
+                cleanupOriginalClOrdId);
+        }
+        _peggedRepeg?.UnmarkCancelledChild(
+            algo.FirmId,
+            algo.AlgoId,
+            cleanupOriginalClOrdId);
+        if (cleanupOriginalClOrdId != originalClOrdId)
+        {
+            _peggedRepeg?.UnmarkCancelledChild(
+                algo.FirmId,
+                algo.AlgoId,
+                originalClOrdId);
+        }
+        MetricsRegistry.AlgoPeggedRepegFailed.Add(1);
+        _logger.LogWarning(
+            "AlgoEngine pegged repeg for {Firm}/{AlgoId} child {Child} cannot adopt a replacement: {Outcome}; suspending for reconciliation.",
+            algo.FirmId,
+            algo.AlgoId,
+            originalClOrdId,
+            outcome);
+        await RecordTerminalAsync(
+            algo,
+            rt,
+            AlgoStatus.Suspended,
+            AlgoTerminalReason.ReconciliationRequired).ConfigureAwait(false);
+
+        void AbortReplacementIntent(ulong candidateOriginalClOrdId)
+        {
+            if (_replacements is null
+                || !_replacements.TryConsumeByOriginal(
+                    candidateOriginalClOrdId,
+                    out var staleIntent,
+                    out var ambiguousHeld)
+                || staleIntent is null
+                || _replaceMargin is null)
+            {
+                return;
+            }
+            try
+            {
+                _replaceMargin.AbortReplace(staleIntent.NewClOrdId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "AlgoEngine pegged repeg fail-closed cleanup: AbortReplace failed for new ClOrdID {NewClOrdId} (ambiguousHeld={Ambiguous}).",
+                    staleIntent.NewClOrdId,
+                    ambiguousHeld);
+            }
+        }
+    }
+
+    private async Task HandleLateFillOnReplacedOriginalAsync(
+        Algo algo,
+        AlgoParentRuntime rt,
+        Order retiredOriginal,
+        CancellationToken ct)
+    {
+        if (rt.LiveChildClOrdId is { } liveReplacementClOrdId
+            && _orders.TryGet(liveReplacementClOrdId, out var liveReplacement)
+            && liveReplacement is not null
+            && !IsChildTerminal(liveReplacement))
+        {
+            var cancelOrigin = new AlgoOutboundOriginIdentity(
+                algo.AlgoId,
+                AlgoOutboundActionKind.CancelChild,
+                NextAlgoActionSequence(
+                    algo.FirmId,
+                    algo.AlgoId,
+                    AlgoOutboundActionKind.CancelChild));
+            var cancel = await _canceller.CancelAsync(
+                liveReplacement.Owner,
+                liveReplacement.ClOrdId,
+                ct,
+                firmId: algo.FirmId,
+                origin: OutboundMutationOrigin.Algo,
+                algoOriginIdentity: cancelOrigin).ConfigureAwait(false);
+            if (cancel.Kind != OrderCancelResultKind.Accepted)
+            {
+                _logger.LogWarning(
+                    "AlgoEngine late fill on replaced child {OldChild} could not cancel adopted replacement {LiveChild} for {Firm}/{AlgoId}: {Kind} {Reason}.",
+                    retiredOriginal.ClOrdId,
+                    liveReplacement.ClOrdId,
+                    algo.FirmId,
+                    algo.AlgoId,
+                    cancel.Kind,
+                    cancel.Reason);
+            }
+        }
+
+        var repegMutation = FindLatestAlgoMutation(
+            algo,
+            retiredOriginal.ClOrdId,
+            AlgoOutboundActionKind.Repeg);
+        if (repegMutation is not null)
+        {
+            MarkOutboundReconciliationRequired(
+                repegMutation.MutationId,
+                "LateFillOnReplacedAlgoOriginal");
+        }
+        await FailClosedPeggedRepegAsync(
+            algo,
+            rt,
+            retiredOriginal.ClOrdId,
+            "late fill landed on a replaced original after replacement adoption")
+            .ConfigureAwait(false);
+    }
+
+    private bool MarkOutboundReconciliationRequired(
+        OutboundMutationId mutationId,
+        string reason)
+    {
+        var evt = new OutboundReconciliationRequiredEvent
+        {
+            MutationId = mutationId,
+            Reason = reason,
+            TimestampUtc = _clock.GetUtcNow(),
+        };
+        try
+        {
+            _dispatcher.Dispatch(
+                evt,
+                () => _outboundLedger.Apply(evt));
+            return true;
+        }
+        catch (Exception ex) when (ex is WalBackpressureException or WalFaultedException)
+        {
+            MetricsRegistry.WalBackpressure.Add(1,
+                new KeyValuePair<string, object?>(
+                    "call_site",
+                    "algo.outbound.reconciliation-required"));
+            _logger.LogError(
+                ex,
+                "AlgoEngine could not mark outbound mutation {MutationId} reconciliation-required ({Reason}).",
+                mutationId,
+                reason);
+            return false;
+        }
+    }
+
     /// <summary>
     /// Q3.3 (#283). Repeg evaluation for a Pegged parent that already
     /// has a live working slice. The decision tree, in order:
@@ -2375,103 +2653,13 @@ public sealed class AlgoEngine : BackgroundService
         if (!_orders.TryGet(liveChildClOrdId, out var child) || child is null
             || IsChildTerminal(child))
         {
-            // #329: When the child is terminal with status Replaced, an
-            // adoption signal is normally in flight from the ER processor
-            // (ApplyReplaceAccepted enqueues ChildExecutionObservedSignal
-            // for the NEW child AFTER MarkReplaced flips the OLD to
-            // Replaced). The adoption block in OnChildErAsync requires
-            // `rt.LiveChildClOrdId is { } oldLive` — if we null it here
-            // first, adoption is skipped and the parent ends up orphaned
-            // with no live child until the next scheduler tick spawns a
-            // fresh slice (which leaks a clOrdID and skips the retired-
-            // child FIFO accounting that powers AlgoModifyRetiredChildEvictedTotal).
-            // Leave the slot pointing at OLD so the imminent adoption
-            // signal can transition it atomically.
-            //
-            // Safety valve: the adoption signal can be dropped if the
-            // bounded AlgoSignalQueue is full when ApplyReplaceAccepted
-            // tries to enqueue (TryEnqueue returns false and bumps
-            // AlgoSignalsDropped). Without a fallback the parent would
-            // be wedged on the terminal OLD child until process restart.
-            // After PeggedReplacedHoldMaxTicks consecutive evaluations
-            // where we still see OLD as Replaced, give up on the
-            // adoption signal, clear the slot, and let the next tick
-            // resubmit from the empty path. The threshold is generous
-            // (≈1 second @ 100ms scheduler tick) so the normal in-order
-            // case always lands before fallback kicks in.
-            if (child is not null && child.Status == OrderStatus.Replaced)
-            {
-                rt.PeggedReplacedHoldTicks++;
-                if (rt.PeggedReplacedHoldTicks < AlgoParentRuntime.PeggedReplacedHoldMaxTicks)
-                    return;
-                _logger.LogWarning(
-                    "AlgoEngine Pegged repeg: live child {Child} on {Firm}/{AlgoId} observed terminal=Replaced for {Ticks} ticks; adoption signal appears dropped — clearing slot and resubmitting on next tick.",
-                    liveChildClOrdId, algo.FirmId, algo.AlgoId, rt.PeggedReplacedHoldTicks);
-
-                // #300 (PR #334) code-review fix. The dropped-adoption
-                // fallback must also wind down the cancel-replace cycle
-                // it started: release the pending replace intent + its
-                // margin reservation, clear RepegPending, and emit the
-                // Resolved-with-Aborted WAL companion if a Started was
-                // already persisted. Without this the parent leaks a
-                // PendingReplacementRegistry row + a reserve-margin
-                // entry indefinitely AND the audit pair stays
-                // unbalanced. Best-effort under WAL backpressure —
-                // Reconcile's orphan-prune covers the audit-pair gap on
-                // the next restart.
-                if (rt.RepegPending)
-                {
-                    rt.RepegPending = false;
-                    if (_replacements is not null
-                        && _replacements.TryConsumeByOriginal(liveChildClOrdId, out var staleIntent, out var staleAmbiguous)
-                        && staleIntent is not null
-                        && _replaceMargin is not null)
-                    {
-                        try { _replaceMargin.AbortReplace(staleIntent.NewClOrdId); }
-                        catch (Exception abortEx)
-                        {
-                            _logger.LogWarning(abortEx,
-                                "AlgoEngine Pegged repeg watchdog: AbortReplace failed for new ClOrdID {NewClOrdId} (ambiguousHeld={Ambiguous}).",
-                                staleIntent.NewClOrdId, staleAmbiguous);
-                        }
-                    }
-                    if (_peggedRepeg?.TryGet(algo.FirmId, algo.AlgoId) is not null)
-                    {
-                        try
-                        {
-                            var firmIdSnap = algo.FirmId;
-                            var algoIdSnap = algo.AlgoId;
-                            var cancelledIdSnap = liveChildClOrdId;
-                            var atUtcSnap = _clock.GetUtcNow();
-                            var book = _peggedRepeg;
-                            _dispatcher.Dispatch(
-                                new AlgoPeggedRepegResolvedEvent
-                                {
-                                    AlgoId = algoIdSnap,
-                                    FirmId = firmIdSnap,
-                                    CancelledChildClOrdId = cancelledIdSnap,
-                                    AtUtc = atUtcSnap,
-                                    Aborted = true,
-                                },
-                                () => book?.Remove(firmIdSnap, algoIdSnap));
-                        }
-                        catch (WalBackpressureException)
-                        {
-                            MetricsRegistry.WalBackpressure.Add(1,
-                                new KeyValuePair<string, object?>("call_site", "algo.pegged.repeg-resolved.watchdog"));
-                        }
-                    }
-                    MetricsRegistry.AlgoPeggedRepegFailed.Add(1);
-                }
-            }
-            rt.PeggedReplacedHoldTicks = 0;
-            rt.LiveChildClOrdId = null;
+            await ReconcileLiveChildAgainstBookAsync(algo, rt, ct).ConfigureAwait(false);
             return;
         }
 
         // Non-terminal child observed — clear the dropped-adoption
         // watchdog so a future Replaced does not inherit a stale count.
-        rt.PeggedReplacedHoldTicks = 0;
+        rt.ReplacedAdoptionHoldTicks = 0;
 
         // Throttle: don't start a NEW cycle while one is in flight.
         // Moved here from before the terminal block (PR #334 code review)
@@ -2485,8 +2673,14 @@ public sealed class AlgoEngine : BackgroundService
             return;
         }
 
+        var explicitRetry = FindSoleRetryableProvenUnsentMutation(
+            algo,
+            child.ClOrdId,
+            AlgoOutboundActionKind.Repeg);
+        var retryCommand =
+            explicitRetry?.Approval?.CanonicalCommandNonSensitive;
         var target = ResolvePeggedTarget(algo, pgp);
-        if (target is null)
+        if (retryCommand is null && target is null)
         {
             // No live ref yet — don't disturb the working slice; next
             // tick may have a price.
@@ -2494,8 +2688,12 @@ public sealed class AlgoEngine : BackgroundService
         }
 
         var currentPrice = child.Price ?? 0m;
-        if (currentPrice <= 0m
-            || !PeggedPlan.IsRepegNeeded(currentPrice, target.Value, pgp.TickSize))
+        if (retryCommand is null
+            && (currentPrice <= 0m
+                || !PeggedPlan.IsRepegNeeded(
+                    currentPrice,
+                    target!.Value,
+                    pgp.TickSize)))
         {
             // No drift — record eval-at so the throttle holds.
             rt.PeggedLastEvalUtc = now;
@@ -2550,12 +2748,15 @@ public sealed class AlgoEngine : BackgroundService
         // Resolved). The next scheduler tick re-evaluates drift; if
         // it was an ambiguous send the #329 watchdog +
         // AlgoScheduler.SweepAmbiguousReplaceIntents bound recovery.
+        var dispatchQuantity = retryCommand?.Quantity ?? child.Quantity;
+        var dispatchPrice = retryCommand?.Price ?? target!.Value;
         bool replaced;
         try
         {
             replaced = await TryReplaceChildAsync(
-                algo, child, child.Quantity, target.Value,
-                reason: "AlgoInternal", ct).ConfigureAwait(false);
+                algo, child, dispatchQuantity, dispatchPrice,
+                reason: "AlgoInternal", AlgoOutboundActionKind.Repeg, ct,
+                explicitRetry?.AlgoOriginIdentity).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -2567,6 +2768,20 @@ public sealed class AlgoEngine : BackgroundService
             // cancel-failure rollback.
             rt.RepegPending = false;
             rt.LastRepegCancelledChildId = null;
+            if (FindLatestAlgoMutation(
+                    algo,
+                    liveChildClOrdId,
+                    AlgoOutboundActionKind.Repeg) is null
+                || IsConfirmedProvenUnsentMutation(
+                    algo,
+                    liveChildClOrdId,
+                    AlgoOutboundActionKind.Repeg))
+            {
+                _peggedRepeg?.UnmarkCancelledChild(
+                    algo.FirmId,
+                    algo.AlgoId,
+                    liveChildClOrdId);
+            }
             MetricsRegistry.AlgoPeggedRepegFailed.Add(1);
             _logger.LogWarning(ex,
                 "AlgoEngine pegged repeg cancel-replace failed for algo {Firm}/{AlgoId} child {Child}; cleared marker, will retry next tick.",
@@ -2592,6 +2807,47 @@ public sealed class AlgoEngine : BackgroundService
             // tick should be allowed to try again if drift persists.
             rt.RepegPending = false;
             rt.LastRepegCancelledChildId = null;
+            var failedMutation = FindLatestAlgoMutation(
+                algo,
+                liveChildClOrdId,
+                AlgoOutboundActionKind.Repeg);
+            if (failedMutation is null
+                || (failedMutation.State == OutboundMutationState.ProvenUnsent
+                    && !failedMutation.RequiresReconciliation))
+            {
+                // MarkCancelledChild is optimistic because it must exist
+                // before a potentially-sent replace can race a terminal
+                // ER. ProvenUnsent (and pre-ledger rejection) proves that
+                // no repeg-induced cancel can arrive, so retaining the
+                // marker would hide a genuine venue cancellation of the
+                // original child and wedge the parent with no live slot.
+                _peggedRepeg?.UnmarkCancelledChild(
+                    algo.FirmId,
+                    algo.AlgoId,
+                    liveChildClOrdId);
+            }
+            if (failedMutation is
+                {
+                    State: OutboundMutationState.ProvenUnsent,
+                    RequiresReconciliation: false,
+                }
+                && failedMutation.Attempts.Count
+                    >= OutboundMutationLedger.MaxOutboundAttempts)
+            {
+                if (!MarkOutboundReconciliationRequired(
+                        failedMutation.MutationId,
+                        "AlgoRepegAttemptCapExhausted"))
+                {
+                    return;
+                }
+                await FailClosedPeggedRepegAsync(
+                    algo,
+                    rt,
+                    liveChildClOrdId,
+                    "ProvenUnsent repeg exhausted its outbound attempt cap")
+                    .ConfigureAwait(false);
+                return;
+            }
             MetricsRegistry.AlgoPeggedRepegFailed.Add(1);
             return;
         }
@@ -2615,7 +2871,7 @@ public sealed class AlgoEngine : BackgroundService
             var firmIdSnap = algo.FirmId;
             var algoIdSnap = algo.AlgoId;
             var cancelledIdSnap = liveChildClOrdId;
-            var targetSnap = target.Value;
+            var targetSnap = dispatchPrice;
             var atUtcSnap = now;
             var book = _peggedRepeg;
             _dispatcher.Dispatch(
@@ -2633,7 +2889,7 @@ public sealed class AlgoEngine : BackgroundService
                     // replayer keys only on CancelledChildClOrdId
                     // and the field is audit-only.
                     NewClOrdId = 0UL,
-                    TargetPrice = target.Value,
+                    TargetPrice = dispatchPrice,
                     AtUtc = now,
                 },
                 () => book?.Set(firmIdSnap, algoIdSnap, cancelledIdSnap, targetSnap, atUtcSnap));
@@ -2649,7 +2905,7 @@ public sealed class AlgoEngine : BackgroundService
             // book lookup is the discriminator under approach (b)).
             // Recovery for this specific cycle is best-effort;
             // Reconcile's orphan-prune covers any drift on restart.
-            _peggedRepeg?.Set(algo.FirmId, algo.AlgoId, liveChildClOrdId, target.Value, now);
+            _peggedRepeg?.Set(algo.FirmId, algo.AlgoId, liveChildClOrdId, dispatchPrice, now);
         }
 
         // Best-effort audit envelope; WAL backpressure is non-fatal
@@ -2667,7 +2923,7 @@ public sealed class AlgoEngine : BackgroundService
                     RefKind = pgp.Ref.ToString(),
                     RefPrice = refForAudit,
                     OldChildPrice = oldChildPrice,
-                    NewTargetPrice = target.Value,
+                    NewTargetPrice = dispatchPrice,
                     AtUtc = now,
                 },
                 static () => { });
@@ -2936,8 +3192,8 @@ public sealed class AlgoEngine : BackgroundService
         // ERs do not flip the parent to Suspended/VenueCancelled).
         public ulong? LastRepegCancelledChildId;
 
-        // #329. Watchdog for the adoption-signal-dropped recovery in
-        // EvaluatePeggedRepegAsync. Counts consecutive scheduler-tick
+        // #329. Watchdog for adoption-signal-dropped recovery in
+        // ReconcileLiveChildAgainstBookAsync. Counts consecutive reactor
         // observations where the live child is terminal with status
         // Replaced (i.e. an adoption signal is expected but hasn't been
         // processed yet). Cleared on any non-Replaced observation OR
@@ -2945,8 +3201,8 @@ public sealed class AlgoEngine : BackgroundService
         // normal in-order case (signal queued, consumer picks it up
         // within one tick) never triggers it; only a genuinely dropped
         // signal due to a full bounded queue lets the count reach the
-        // ceiling and force a fallback resubmit.
-        public int PeggedReplacedHoldTicks;
-        public const int PeggedReplacedHoldMaxTicks = 10;
+        // ceiling and force order-book adoption or fail-closed recovery.
+        public int ReplacedAdoptionHoldTicks;
+        public const int ReplacedAdoptionHoldMaxTicks = 10;
     }
 }

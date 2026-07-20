@@ -169,6 +169,16 @@ public sealed class PeggedRepegBook
         return _history.TryGetValue((firmId, algoId), out var ring) && ring.Contains(childClOrdId);
     }
 
+    /// <summary>
+    /// Removes an optimistic cancelled-child marker when a repeg is
+    /// definitively proven not to have reached the venue.
+    /// </summary>
+    public bool UnmarkCancelledChild(string firmId, ulong algoId, ulong childClOrdId)
+    {
+        return _history.TryGetValue((firmId, algoId), out var ring)
+            && ring.Remove(childClOrdId);
+    }
+
     public IEnumerable<(string FirmId, ulong AlgoId, PeggedRepegPending Pending)> Snapshot()
     {
         foreach (var kv in _entries)
@@ -310,6 +320,19 @@ internal sealed class CancelledChildRing
     public bool Contains(ulong id)
     {
         lock (_lock) return _set.Contains(id);
+    }
+
+    public bool Remove(ulong id)
+    {
+        lock (_lock)
+        {
+            if (!_set.Remove(id)) return false;
+
+            var retained = _order.Where(candidate => candidate != id).ToArray();
+            _order.Clear();
+            foreach (var candidate in retained) _order.Enqueue(candidate);
+            return true;
+        }
     }
 
     public IReadOnlyList<ulong> Snapshot()

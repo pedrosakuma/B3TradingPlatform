@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using B3.Trading.Application;
 using B3.Trading.Domain;
+using B3.Trading.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace B3.Trading.Api.Tests;
@@ -48,14 +49,17 @@ public class AlgoEngineIntegrationTests
         // in the WorkingOrderBook (engine reactor is async).
         var book = f.Services.GetRequiredService<WorkingOrderBook>();
         var child1 = await WaitForChild(book, algoId, expectedSeq: 0);
+        await WaitForNewOrderDispatch(f, child1.ClOrdId);
 
         await InjectEr(http, adminToken, child1.ClOrdId, "Fill", lastQty: 100);
 
         // Slice 2 should be submitted automatically after the refill.
         var child2 = await WaitForChild(book, algoId, expectedSeq: 1);
+        await WaitForNewOrderDispatch(f, child2.ClOrdId);
         await InjectEr(http, adminToken, child2.ClOrdId, "Fill", lastQty: 100);
 
         var child3 = await WaitForChild(book, algoId, expectedSeq: 2);
+        await WaitForNewOrderDispatch(f, child3.ClOrdId);
         await InjectEr(http, adminToken, child3.ClOrdId, "Fill", lastQty: 100);
 
         // Parent should now reach Completed (no more remaining quantity).
@@ -78,6 +82,7 @@ public class AlgoEngineIntegrationTests
         var book = f.Services.GetRequiredService<WorkingOrderBook>();
 
         var child1 = await WaitForChild(book, algoId, expectedSeq: 0);
+        await WaitForNewOrderDispatch(f, child1.ClOrdId);
         // Partial fill — child stays Working with 60 booked, 40 leaves.
         await InjectEr(http, adminToken, child1.ClOrdId, "PartialFill", lastQty: 60);
         // Engine must NOT submit slice 2 yet (child not terminal).
@@ -88,6 +93,7 @@ public class AlgoEngineIntegrationTests
         // Fill the remaining 40 — child terminal Filled, engine refills.
         await InjectEr(http, adminToken, child1.ClOrdId, "Fill", lastQty: 40);
         var child2 = await WaitForChild(book, algoId, expectedSeq: 1);
+        await WaitForNewOrderDispatch(f, child2.ClOrdId);
         await InjectEr(http, adminToken, child2.ClOrdId, "Fill", lastQty: 100);
 
         await WaitForAlgoStatus(http, userToken, algoId, "Completed");
@@ -104,6 +110,7 @@ public class AlgoEngineIntegrationTests
         var algoId = await PostAlgo(http, userToken, IcebergBody(total: 300, display: 100));
         var book = f.Services.GetRequiredService<WorkingOrderBook>();
         var child1 = await WaitForChild(book, algoId, expectedSeq: 0);
+        await WaitForNewOrderDispatch(f, child1.ClOrdId);
 
         // Operator cancels — engine asks the gateway to cancel the child;
         // until the cancel-ack ER lands, the parent is Cancelling.
@@ -131,6 +138,7 @@ public class AlgoEngineIntegrationTests
         var algoId = await PostAlgo(http, userToken, IcebergBody(total: 200, display: 100));
         var book = f.Services.GetRequiredService<WorkingOrderBook>();
         var child1 = await WaitForChild(book, algoId, expectedSeq: 0);
+        await WaitForNewOrderDispatch(f, child1.ClOrdId);
 
         // Venue cancels without operator request — engine must suspend
         // (auto-refilling against an unhappy venue can spin a tight loop).
@@ -210,6 +218,21 @@ public class AlgoEngineIntegrationTests
             await Task.Delay(10);
         }
         throw new TimeoutException($"Child for algo {algoIdStr} seq {expectedSeq} did not appear within 5s.");
+    }
+
+    private static async Task WaitForNewOrderDispatch(
+        TestAppFactory factory,
+        ulong clOrdId)
+    {
+        var client = factory.Services.GetRequiredService<MockEntryPointClient>();
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.Elapsed < TimeSpan.FromSeconds(3))
+        {
+            if (client.SubmittedNewOrders.Any(order => order.ClOrdId == clOrdId))
+                return;
+            await Task.Delay(10);
+        }
+        throw new TimeoutException($"New order {clOrdId} was not dispatched within 3s.");
     }
 
     private static async Task WaitForAlgoStatus(HttpClient http, string token, string algoId, params string[] anyOf)

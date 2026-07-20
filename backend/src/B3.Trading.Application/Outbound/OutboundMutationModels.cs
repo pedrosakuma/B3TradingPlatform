@@ -120,6 +120,19 @@ public enum OutboundMutationOrigin
     Legacy,
 }
 
+public enum AlgoOutboundActionKind
+{
+    NewChild,
+    CancelChild,
+    ReplaceChild,
+    Repeg,
+}
+
+public sealed record AlgoOutboundOriginIdentity(
+    ulong ParentAlgoId,
+    AlgoOutboundActionKind ActionKind,
+    int Sequence);
+
 public sealed record OutboundBotBusinessIdentity(
     Guid CredentialId,
     ulong ExternalClOrdId);
@@ -380,6 +393,7 @@ public sealed record OutboundMutationSnapshot
     public required string FirmId { get; init; }
     public required string EndClientRef { get; init; }
     public required OutboundMutationOrigin Origin { get; init; }
+    public AlgoOutboundOriginIdentity? AlgoOriginIdentity { get; init; }
     public OutboundBotBusinessIdentity? BotBusinessIdentity { get; init; }
     public required ulong PrimaryClOrdId { get; init; }
     public ulong? OriginalClOrdId { get; init; }
@@ -397,6 +411,7 @@ public sealed record OutboundMutationSnapshot
     public OutboundSensitivePayloadAvailability SensitivePayloadAvailability { get; init; } =
         OutboundSensitivePayloadAvailability.Available;
     public bool RequiresReconciliation { get; init; }
+    public bool ExplicitlyRequiresReconciliation { get; init; }
 }
 
 public sealed record OutboundCorrelationTombstone

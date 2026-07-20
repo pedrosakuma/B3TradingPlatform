@@ -72,6 +72,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonSerializable(typeof(OutboundFramePreparedEvent))]
 [JsonSerializable(typeof(OutboundTransportWriteCompletedEvent))]
 [JsonSerializable(typeof(OutboundProvenUnsentEvent))]
+[JsonSerializable(typeof(OutboundReconciliationRequiredEvent))]
 [JsonSerializable(typeof(OutboundOperatorResolvedEvent))]
 [JsonSerializable(typeof(RestOrderIdempotencyBoundEvent))]
 [JsonSerializable(typeof(Outbound.OutboundApprovalSnapshot))]
