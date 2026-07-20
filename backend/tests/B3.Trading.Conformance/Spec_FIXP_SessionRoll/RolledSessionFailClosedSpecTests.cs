@@ -44,10 +44,9 @@ public sealed class RolledSessionFailClosedSpecTests
                 maker,
                 "PETR4"));
 
-        var disconnectedAt = DateTimeOffset.UtcNow;
-        await using (var detached = await docker.DisconnectMatchingAsync())
+        IReadOnlyList<MutationSummary> unresolved;
+        await using (var paused = await docker.PauseMatchingAsync())
         {
-            await Task.Delay(TimeSpan.FromMilliseconds(100));
             var submissions = Enumerable.Range(0, 4)
                 .Select(index => SubmitFaultWindowProbeAsync(
                     http,
@@ -57,10 +56,19 @@ public sealed class RolledSessionFailClosedSpecTests
                     index))
                 .ToArray();
             await Task.WhenAll(submissions);
-            await SessionRollSpecSupport.DelayUntilAsync(
-                disconnectedAt,
-                TimeSpan.FromMilliseconds(5000));
-            await detached.ReconnectAsync();
+            unresolved = await WaitForNewUnresolvedMutationsAsync(
+                http,
+                maker,
+                baseline);
+            var crashStartedUtc = DateTimeOffset.UtcNow;
+            await docker.KillTradingHostAsync();
+            await docker.WaitForTradingHostNotRunningAsync(
+                TimeSpan.FromSeconds(10));
+            await paused.RestartAsync(TimeSpan.FromSeconds(30));
+            await docker.StartTradingHostAsync();
+            await docker.WaitForTradingHostRestartAsync(
+                crashStartedUtc,
+                TimeSpan.FromSeconds(30));
         }
 
         _ = await SessionRollSpecSupport.WaitForFirmEstablishedAsync(
@@ -68,10 +76,6 @@ public sealed class RolledSessionFailClosedSpecTests
             maker,
             priorVerId: before.SessionVerId,
             expectAdvance: true);
-        var unresolved = await WaitForNewUnresolvedMutationsAsync(
-            http,
-            maker,
-            baseline);
 
         Assert.Contains(
             unresolved,
