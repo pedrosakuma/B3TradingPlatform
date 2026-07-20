@@ -149,40 +149,9 @@ internal sealed class FixpOrderAdapter
         var securityId = decoded.SecurityId;
         var refSeqNum = decoded.MsgSeqNum;
 
-        // 1. Resolve SecurityId → Symbol. Without a directory entry the
-        //    submit pipeline would reject anyway with "symbol is required";
-        //    we short-circuit with the more precise UnknownSecurity reason.
-        if (!_symbols.TryGetSymbolBySecurityId(securityId, out var symbol) || symbol is null)
-        {
-            _logger.LogInformation(
-                "fixp.order.reject reason=unknown_security cred={Cred} clOrdId={ClOrdId} securityId={SecId}",
-                scope.Principal.CredShortId, externalClOrdId, securityId);
-            await WriteBusinessMessageRejectAsync(stream,
-                MessageType.NewOrderSingle, refSeqNum, externalClOrdId,
-                RejectReason.UnknownSecurity, ct).ConfigureAwait(false);
-            return FixpOrderHandlingResult.Keep;
-        }
-
-        // 2. Validate side/ordType + TIF up-front so a malformed wire
-        //    byte is a clean BMR rather than a generic BadRequest from
-        //    the pipeline. Stop variants and the full TIF set are
-        //    accepted at the wire (Q1.1 / #253) — domain-side cross-
-        //    field invariants (StopPrice required for Stop*; ExpireDate
-        //    required for GTD) are checked inside the Order ctor and
-        //    bubble back up as BadRequest below.
-        if (!TryMapSide(decoded.Side, out var side)
-            || !TryMapOrdType(decoded.OrdType, out var type)
-            || !TryMapTimeInForce(decoded.TimeInForce, out var tif))
-        {
-            await WriteBusinessMessageRejectAsync(stream,
-                MessageType.NewOrderSingle, refSeqNum, externalClOrdId,
-                RejectReason.InvalidShape, ct).ConfigureAwait(false);
-            return FixpOrderHandlingResult.Keep;
-        }
-
-        // Business identity is independent of the live ER-routing map and
-        // of the session-level protocol replay key. Claim it durably before
-        // OrderSubmissionService can allocate an internal ClOrdID.
+        // Claim the decoded business identity before any semantic validation.
+        // A terminal business reject is still the first use of this external
+        // ClOrdID and therefore prevents every later reuse by the credential.
         var claim = _botMappings.TryClaimBusinessIdentity(
             scope.Principal.CredentialId,
             externalClOrdId,
@@ -202,6 +171,47 @@ internal sealed class FixpOrderAdapter
             await WriteBusinessMessageRejectAsync(stream,
                 MessageType.NewOrderSingle, refSeqNum, externalClOrdId,
                 RejectReason.WalBackpressure, ct).ConfigureAwait(false);
+            return FixpOrderHandlingResult.Keep;
+        }
+
+        // 1. Resolve SecurityId → Symbol. Without a directory entry the
+        //    submit pipeline would reject anyway with "symbol is required";
+        //    we short-circuit with the more precise UnknownSecurity reason.
+        if (!_symbols.TryGetSymbolBySecurityId(securityId, out var symbol) || symbol is null)
+        {
+            _logger.LogInformation(
+                "fixp.order.reject reason=unknown_security cred={Cred} clOrdId={ClOrdId} securityId={SecId}",
+                scope.Principal.CredShortId, externalClOrdId, securityId);
+            await WriteBusinessMessageRejectAsync(stream,
+                MessageType.NewOrderSingle, refSeqNum, externalClOrdId,
+                RejectReason.UnknownSecurity, ct).ConfigureAwait(false);
+            _botMappings.MarkBusinessIdentityResolved(
+                scope.Principal.CredentialId,
+                externalClOrdId,
+                DateTimeOffset.UtcNow,
+                CancellationToken.None);
+            return FixpOrderHandlingResult.Keep;
+        }
+
+        // 2. Validate side/ordType + TIF up-front so a malformed wire
+        //    byte is a clean BMR rather than a generic BadRequest from
+        //    the pipeline. Stop variants and the full TIF set are
+        //    accepted at the wire (Q1.1 / #253) — domain-side cross-
+        //    field invariants (StopPrice required for Stop*; ExpireDate
+        //    required for GTD) are checked inside the Order ctor and
+        //    bubble back up as BadRequest below.
+        if (!TryMapSide(decoded.Side, out var side)
+            || !TryMapOrdType(decoded.OrdType, out var type)
+            || !TryMapTimeInForce(decoded.TimeInForce, out var tif))
+        {
+            await WriteBusinessMessageRejectAsync(stream,
+                MessageType.NewOrderSingle, refSeqNum, externalClOrdId,
+                RejectReason.InvalidShape, ct).ConfigureAwait(false);
+            _botMappings.MarkBusinessIdentityResolved(
+                scope.Principal.CredentialId,
+                externalClOrdId,
+                DateTimeOffset.UtcNow,
+                CancellationToken.None);
             return FixpOrderHandlingResult.Keep;
         }
 
@@ -356,37 +366,6 @@ internal sealed class FixpOrderAdapter
         var securityId = decoded.SecurityId;
         var refSeqNum = decoded.MsgSeqNum;
 
-        if (_botMappings.ContainsBusinessIdentity(
-                scope.Principal.CredentialId,
-                externalCancelClOrdId))
-        {
-            await WriteBusinessMessageRejectAsync(
-                stream,
-                MessageType.OrderCancelRequest,
-                refSeqNum,
-                externalCancelClOrdId,
-                RejectReason.DuplicateClOrdId,
-                ct).ConfigureAwait(false);
-            return;
-        }
-
-        // Resolve original order via the bot mapping side-registry.
-        // The registry's TryGetByExternal already enforces the
-        // (credentialId, externalOrigClOrdId) → internal lookup, which
-        // doubles as the cross-credential isolation guard (RFC §4.6:
-        // a bot can only cancel orders it submitted).
-        if (!_botMappings.TryGetByExternal(
-                scope.Principal.CredentialId, externalOrigClOrdId, out var internalOrigClOrdId))
-        {
-            _logger.LogInformation(
-                "fixp.cancel.reject reason=unknown_order cred={Cred} clOrdId={ClOrdId} origClOrdId={Orig}",
-                scope.Principal.CredShortId, externalCancelClOrdId, externalOrigClOrdId);
-            await WriteBusinessMessageRejectAsync(stream,
-                MessageType.OrderCancelRequest, refSeqNum, externalCancelClOrdId,
-                RejectReason.UnknownOrder, ct).ConfigureAwait(false);
-            return;
-        }
-
         var claim = _botMappings.TryClaimBusinessIdentity(
             scope.Principal.CredentialId,
             externalCancelClOrdId,
@@ -414,6 +393,28 @@ internal sealed class FixpOrderAdapter
                 externalCancelClOrdId,
                 RejectReason.WalBackpressure,
                 ct).ConfigureAwait(false);
+            return;
+        }
+
+        // Resolve original order via the bot mapping side-registry.
+        // The registry's TryGetByExternal already enforces the
+        // (credentialId, externalOrigClOrdId) → internal lookup, which
+        // doubles as the cross-credential isolation guard (RFC §4.6:
+        // a bot can only cancel orders it submitted).
+        if (!_botMappings.TryGetByExternal(
+                scope.Principal.CredentialId, externalOrigClOrdId, out var internalOrigClOrdId))
+        {
+            _logger.LogInformation(
+                "fixp.cancel.reject reason=unknown_order cred={Cred} clOrdId={ClOrdId} origClOrdId={Orig}",
+                scope.Principal.CredShortId, externalCancelClOrdId, externalOrigClOrdId);
+            await WriteBusinessMessageRejectAsync(stream,
+                MessageType.OrderCancelRequest, refSeqNum, externalCancelClOrdId,
+                RejectReason.UnknownOrder, ct).ConfigureAwait(false);
+            _botMappings.MarkBusinessIdentityResolved(
+                scope.Principal.CredentialId,
+                externalCancelClOrdId,
+                DateTimeOffset.UtcNow,
+                CancellationToken.None);
             return;
         }
 

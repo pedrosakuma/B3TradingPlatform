@@ -192,6 +192,139 @@ public class FixpOrderAdapterFailClosedTests
         Assert.Equal(1003u, BinaryPrimitives.ReadUInt32LittleEndian(frame.Payload[32..]));
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task TerminalPrePipelineReject_TombstonesExternalId(bool unknownSecurity)
+    {
+        var credentialId = Guid.NewGuid();
+        const ulong securityId = 4321;
+        const ulong externalClOrdId = 77;
+        var gateway = new RecordingGateway();
+        var mappings = new InMemoryUserBotOrderMappingRegistry();
+        var submit = new OrderSubmissionService(
+            new ClOrdIdPrefixRegistry(),
+            new OrderOwnershipMap(),
+            new WorkingOrderBook(),
+            gateway,
+            new NoOpExecutionEventSink(),
+            new RiskPipeline(Array.Empty<IRiskCheck>()),
+            new NoOpMarginProvider(),
+            new CompositeRiskAccountant(Array.Empty<IRiskAccountant>()),
+            new EventDispatcher(new SyntheticTerminalRejectingStore()),
+            new TestDrainController(),
+            NullLogger<OrderSubmissionService>.Instance,
+            botMappings: mappings);
+        var adapter = new FixpOrderAdapter(
+            new SymbolDirectory(new SymbolDirectoryOptions
+            {
+                SecurityIds = new Dictionary<string, ulong> { ["PETR4"] = securityId },
+            }),
+            submit,
+            cancel: null!,
+            mappings,
+            NullLogger.Instance);
+        var scope = new FixpConnectionScope(
+            "conn-1",
+            new BotSessionPrincipal("alice", credentialId, "cred-1", "bot", "FIRM-A"),
+            new BotSessionState(credentialId, 10, 2, 0));
+        var first = new DecodedNewOrderSingle
+        {
+            MsgSeqNum = 1,
+            ClOrdId = externalClOrdId,
+            SecurityId = unknownSecurity ? 999UL : securityId,
+            Side = unknownSecurity ? Side.BUY : (Side)byte.MaxValue,
+            OrdType = OrdType.LIMIT,
+            OrderQty = 100,
+            PriceMantissa = (long)(30d * PriceOptional.Multiplier),
+            TimeInForce = B3.Entrypoint.Fixp.Sbe.V6.TimeInForce.DAY,
+        };
+
+        await adapter.HandleNewOrderSingleAsync(
+            new MemoryStream(), first, scope, CancellationToken.None);
+
+        Assert.NotNull(Assert.Single(
+            mappings.SnapshotBusinessIdentities()).ResolvedAtUtc);
+        await using var retryResponse = new MemoryStream();
+        await adapter.HandleNewOrderSingleAsync(
+            retryResponse,
+            new DecodedNewOrderSingle
+            {
+                MsgSeqNum = 2,
+                ClOrdId = externalClOrdId,
+                SecurityId = securityId,
+                Side = Side.BUY,
+                OrdType = OrdType.LIMIT,
+                OrderQty = 100,
+                PriceMantissa = (long)(30d * PriceOptional.Multiplier),
+                TimeInForce = B3.Entrypoint.Fixp.Sbe.V6.TimeInForce.DAY,
+            },
+            scope,
+            CancellationToken.None);
+
+        Assert.Equal(0, gateway.SubmitCount);
+        var reader = new SofhFrameReader();
+        reader.Append(retryResponse.ToArray());
+        Assert.True(reader.TryReadFrame(out var frame));
+        Assert.Equal((ushort)BusinessMessageRejectData.MESSAGE_ID, frame.TemplateId);
+        Assert.Equal(1003u, BinaryPrimitives.ReadUInt32LittleEndian(frame.Payload[32..]));
+    }
+
+    [Fact]
+    public async Task UnknownOrderCancelReject_TombstonesCancelExternalId()
+    {
+        var credentialId = Guid.NewGuid();
+        const ulong securityId = 4321;
+        var mappings = new InMemoryUserBotOrderMappingRegistry();
+        var adapter = new FixpOrderAdapter(
+            new SymbolDirectory(new SymbolDirectoryOptions
+            {
+                SecurityIds = new Dictionary<string, ulong> { ["PETR4"] = securityId },
+            }),
+            submit: null!,
+            cancel: null!,
+            mappings,
+            NullLogger.Instance);
+        var scope = new FixpConnectionScope(
+            "conn-1",
+            new BotSessionPrincipal("alice", credentialId, "cred-1", "bot", "FIRM-A"),
+            new BotSessionState(credentialId, 10, 2, 0));
+        var request = new DecodedOrderCancelRequest
+        {
+            MsgSeqNum = 1,
+            ClOrdId = 78,
+            OrigClOrdId = 77,
+            SecurityId = securityId,
+            Side = Side.BUY,
+        };
+
+        await adapter.HandleOrderCancelRequestAsync(
+            new MemoryStream(), request, scope, CancellationToken.None);
+
+        Assert.NotNull(Assert.Single(
+            mappings.SnapshotBusinessIdentities()).ResolvedAtUtc);
+        mappings.RegisterOrderInternal(100, credentialId, 77);
+        await using var retryResponse = new MemoryStream();
+        await adapter.HandleOrderCancelRequestAsync(
+            retryResponse,
+            new DecodedOrderCancelRequest
+            {
+                MsgSeqNum = 2,
+                ClOrdId = 78,
+                OrigClOrdId = 77,
+                SecurityId = securityId,
+                Side = Side.BUY,
+            },
+            scope,
+            CancellationToken.None);
+
+        var reader = new SofhFrameReader();
+        reader.Append(retryResponse.ToArray());
+        Assert.True(reader.TryReadFrame(out var frame));
+        Assert.Equal((ushort)BusinessMessageRejectData.MESSAGE_ID, frame.TemplateId);
+        Assert.Equal(1003u, BinaryPrimitives.ReadUInt32LittleEndian(frame.Payload[32..]));
+    }
+
     [Fact]
     public async Task TombstonedCancelId_RejectsBeforeCancelPipeline()
     {

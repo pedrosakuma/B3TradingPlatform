@@ -94,11 +94,14 @@ public sealed class InMemoryUserBotOrderMappingRegistry : IUserBotOrderMappingRe
                     ? BotBusinessIdentityClaimResult.Claimed
                     : BotBusinessIdentityClaimResult.Duplicate;
 
+            // Cancellation may prevent admission, but once Append succeeds the
+            // durable claim must always be applied to the live duplicate index.
+            cancellationToken.ThrowIfCancellationRequested();
             var outcome = _dispatcher.DispatchCommittedIf(
                 evt,
                 () => !ContainsBusinessIdentity(credentialId, externalClOrdId),
                 () => Apply(evt),
-                cancellationToken);
+                CancellationToken.None);
             return outcome.Applied
                 ? BotBusinessIdentityClaimResult.Claimed
                 : BotBusinessIdentityClaimResult.Duplicate;

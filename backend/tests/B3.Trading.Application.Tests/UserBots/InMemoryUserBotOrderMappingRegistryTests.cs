@@ -74,6 +74,34 @@ public class InMemoryUserBotOrderMappingRegistryTests
     }
 
     [Fact]
+    public void Claim_AppliesAfterAdmissionEvenWhenRequestCancelsDuringCommitWait()
+    {
+        using var requestCancellation = new CancellationTokenSource();
+        var store = new CancelDuringFlushEventStore(requestCancellation);
+        var sut = new InMemoryUserBotOrderMappingRegistry(
+            new EventDispatcher(store));
+
+        var result = sut.TryClaimBusinessIdentity(
+            CredA,
+            9,
+            OutboundMutationKind.New,
+            T0,
+            requestCancellation.Token);
+
+        Assert.Equal(BotBusinessIdentityClaimResult.Claimed, result);
+        Assert.True(requestCancellation.IsCancellationRequested);
+        Assert.True(sut.ContainsBusinessIdentity(CredA, 9));
+        Assert.Equal(
+            BotBusinessIdentityClaimResult.Duplicate,
+            sut.TryClaimBusinessIdentity(
+                CredA,
+                9,
+                OutboundMutationKind.New,
+                T0.AddSeconds(1)));
+        Assert.Single(store.Events);
+    }
+
+    [Fact]
     public void Purge_IsAuditedAndRequiresResolutionRetentionAndNoLiveRouting()
     {
         var store = new RecordingEventStore();
@@ -319,6 +347,53 @@ public class InMemoryUserBotOrderMappingRegistryTests
         {
             Events.Add(evt);
             return ++_seq;
+        }
+
+        public ValueTask FlushAsync(CancellationToken ct = default) =>
+            ValueTask.CompletedTask;
+
+        public async IAsyncEnumerable<(long Seq, WalEvent Event)> ReadFromAsync(
+            long sinceSeqExclusive,
+            [System.Runtime.CompilerServices.EnumeratorCancellation]
+            CancellationToken ct = default)
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class CancelDuringFlushEventStore : IEventStore
+    {
+        private readonly CancellationTokenSource _requestCancellation;
+        private long _seq;
+
+        public CancelDuringFlushEventStore(
+            CancellationTokenSource requestCancellation)
+        {
+            _requestCancellation = requestCancellation;
+        }
+
+        public List<WalEvent> Events { get; } = [];
+        public long CurrentSeq => _seq;
+
+        public long Append(WalEvent evt) => Append(evt, ReadOnlyMemory<byte>.Empty);
+
+        public long Append(WalEvent evt, ReadOnlyMemory<byte> preSerialisedPayload)
+        {
+            Events.Add(evt);
+            return ++_seq;
+        }
+
+        public ValueTask FlushThroughAsync(
+            long seq,
+            CancellationToken ct = default)
+        {
+            _requestCancellation.Cancel();
+            return ct.IsCancellationRequested
+                ? ValueTask.FromCanceled(ct)
+                : ValueTask.CompletedTask;
         }
 
         public ValueTask FlushAsync(CancellationToken ct = default) =>
