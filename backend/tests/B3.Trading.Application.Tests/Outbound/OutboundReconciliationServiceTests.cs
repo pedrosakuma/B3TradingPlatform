@@ -57,6 +57,22 @@ public sealed class OutboundReconciliationServiceTests
         Assert.False(mutation!.RequiresReconciliation);
         Assert.Equal("maker", Assert.Single(mutation.ResolutionProposals).MakerRef);
         Assert.Equal("checker", Assert.Single(mutation.OperatorEvidence).CheckerRef);
+
+        var duplicate = fixture.Service.Resolve(
+            fixture.MutationId,
+            "F1",
+            "maker",
+            new(
+                OutboundOperatorDecision.VenueAbsent,
+                evidenceType,
+                reference,
+                ReasonFor(evidenceType)));
+
+        Assert.Equal(OutboundOperatorResolutionStatus.Resolved, duplicate.Status);
+        Assert.Equal(approved.ProposalId, duplicate.ProposalId);
+        Assert.True(duplicate.CapacityReleased);
+        Assert.Equal(1, fixture.Margin.ReleaseCount);
+        Assert.Single(fixture.Ledger.SnapshotMutations().Single().OperatorEvidence);
     }
 
     [Fact]

@@ -111,6 +111,19 @@ public sealed class AdminOutboundMutationEndpointTests
 
         Assert.Equal(HttpStatusCode.OK, approve.StatusCode);
         Assert.Equal(1, margin.ReleaseCount);
+
+        var duplicate = await maker.PostAsJsonAsync(
+            $"/admin/outbound-mutations/{fixture.MutationId}/resolve",
+            new
+            {
+                decision = "venue_absent",
+                evidenceType,
+                evidenceReference = reference,
+                reason,
+            });
+
+        Assert.Equal(HttpStatusCode.OK, duplicate.StatusCode);
+        Assert.Equal(1, margin.ReleaseCount);
     }
 
     [Fact]

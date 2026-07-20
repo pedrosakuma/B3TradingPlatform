@@ -109,12 +109,16 @@ public sealed class OutboundReconciliationService
     {
         operatorRef = CanonicalizeOperatorRef(operatorRef);
         var mutation = GetScopedMutation(mutationId, callerFirmId);
-        ValidateRequest(mutation, request);
         var evidenceDigest = DigestResolution(mutationId, request);
         var existing = mutation.OperatorEvidence.FirstOrDefault(
-            evidence => evidence.EvidenceDigest == evidenceDigest);
+            evidence => evidence.EvidenceDigest == evidenceDigest
+                && evidence.Decision == request.Decision
+                && evidence.EvidenceType == request.EvidenceType
+                && evidence.EvidenceReference == request.EvidenceReference
+                && evidence.ReasonCode == request.ReasonCode);
         if (existing is not null)
             return ResultFromEvidence(mutation, existing);
+        ValidateRequest(mutation, request);
 
         var releaseCapacity = ReleasesCapacity(mutation, request.Decision);
         if (releaseCapacity)
