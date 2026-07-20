@@ -519,6 +519,51 @@ public class PeggedAlgoEndpointTests
     }
 
     [Fact]
+    public async Task Pegged_SentRepeg_OriginalChildCancelled_SuspendsAndUnwindsCycle()
+    {
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+
+        cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+        await WaitFor(
+            () => mock.SubmittedReplaces.Any(request =>
+                request.OriginalClOrdId == child.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "engine did not send the repeg cancel-replace");
+        var repegBook = f.Services.GetRequiredService<PeggedRepegBook>();
+        await WaitFor(
+            () => repegBook.TryGet("default", ulong.Parse(algoId)) is not null,
+            TimeSpan.FromSeconds(3),
+            "sent repeg did not persist its pending cycle");
+
+        await InjectEr(http, adminToken, child.ClOrdId, "Canceled");
+        await WaitForAlgoStatus(http, token, algoId, "Suspended");
+
+        var snapshot = await GetAlgo(http, token, algoId);
+        Assert.Equal(
+            "ReconciliationRequired",
+            snapshot.GetProperty("terminalReason").GetString());
+        Assert.Null(repegBook.TryGet("default", ulong.Parse(algoId)));
+        Assert.False(
+            f.Services.GetRequiredService<PendingReplacementRegistry>()
+                .IsOriginalInFlight(child.ClOrdId));
+        await Task.Delay(250);
+        Assert.Single(mock.SubmittedReplaces);
+        Assert.DoesNotContain(
+            book.EnumerateChildrenOf("default", ulong.Parse(algoId)),
+            candidate => candidate.ClOrdId != child.ClOrdId);
+    }
+
+    [Fact]
     public async Task Pegged_RepegThrottle_SuppressesCancelStorm()
     {
         // Pass-1 review (#296) P1-B. Rapid mid moves while a cancel
@@ -799,6 +844,7 @@ public class PeggedAlgoEndpointTests
         using var f = TestAppFactory.WithOverrides(Simulator());
         using var http = f.CreateClient();
         var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
 
         var cache = f.Services.GetRequiredService<PegBookTopCache>();
         cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
@@ -850,6 +896,14 @@ public class PeggedAlgoEndpointTests
         await Task.Delay(400);
         Assert.Single(mock.SubmittedReplaces);
         Assert.Empty(mock.SubmittedCancels);
+
+        await InjectEr(http, adminToken, child1.ClOrdId, "Canceled");
+        await WaitForAlgoStatus(http, token, algoId, "Suspended");
+        var terminal = await GetAlgo(http, token, algoId);
+        Assert.Equal(
+            "ReconciliationRequired",
+            terminal.GetProperty("terminalReason").GetString());
+        Assert.False(registry.IsOriginalInFlight(child1.ClOrdId));
     }
 
     [Fact]

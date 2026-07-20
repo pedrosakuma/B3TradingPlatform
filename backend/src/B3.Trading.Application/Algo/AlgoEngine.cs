@@ -669,13 +669,36 @@ public sealed class AlgoEngine : BackgroundService
         }
         if (_outboundLedger.HasBlockingAlgoMutation(algo.FirmId, algo.AlgoId))
         {
+            if (algo.Type == AlgoType.Pegged
+                && rt.LiveChildClOrdId is null
+                && FindLatestBlockingRepegMutation(algo) is
+                {
+                    OriginalClOrdId: { } orphanedOriginalClOrdId,
+                })
+            {
+                await FailClosedPeggedRepegOnOriginalTerminalAsync(
+                    algo,
+                    rt,
+                    orphanedOriginalClOrdId,
+                    "blocking repeg has no live original child").ConfigureAwait(false);
+                return;
+            }
+
             var retryableRepeg = algo.Type == AlgoType.Pegged
                 && rt.LiveChildClOrdId is { } retryChildClOrdId
                 && FindSoleRetryableProvenUnsentMutation(
                     algo,
                     retryChildClOrdId,
                     AlgoOutboundActionKind.Repeg) is not null;
-            if (!retryableRepeg) return;
+            var terminalRepegCleanup = algo.Type == AlgoType.Pegged
+                && rt.LiveChildClOrdId is { } terminalChildClOrdId
+                && FindLatestBlockingRepegMutation(
+                    algo,
+                    terminalChildClOrdId) is not null
+                && (!_orders.TryGet(terminalChildClOrdId, out var terminalChild)
+                    || terminalChild is null
+                    || IsChildTerminal(terminalChild));
+            if (!retryableRepeg && !terminalRepegCleanup) return;
         }
 
         // Pass-1 review (#294) P1. VWAP needs the SDK subscribed to its
@@ -1103,42 +1126,41 @@ public sealed class AlgoEngine : BackgroundService
                 else if (rt.RepegPending && algo.Type == AlgoType.Pegged
                          && rt.LastRepegCancelledChildId == child.ClOrdId)
                 {
-                    // #300 retrofit. Pre-#300 this branch consumed the
-                    // Cancelled-on-OLD ack as the "cycle resolved,
-                    // place fresh slice" trigger. Post-#300 the engine
-                    // dispatches CancelReplace (TryReplaceChildAsync)
-                    // instead of a bare cancel, so the venue's
-                    // response is a Replaced ER which adoption-block
-                    // (~line 714) drains. A Cancelled ER reaching
-                    // here while RepegPending is still true means
-                    // the venue rejected the modify and emitted a
-                    // bare cancel on the original (or the venue
-                    // hand-split cancel-replace into cancel+place
-                    // and the cancel landed first). Strict no-op:
-                    //   * Do NOT SubmitNextSliceAsync — the
-                    //     PendingReplacementRegistry intent is still
-                    //     in flight; if the Replaced ER eventually
-                    //     lands it will adopt the new child via the
-                    //     normal path; if not, the AlgoScheduler
-                    //     ambiguous-replace TTL sweep releases the
-                    //     held margin and the #329 watchdog clears
-                    //     the wedged slot on the next tick.
-                    //   * Do NOT dispatch Resolved — adoption will
-                    //     dispatch it; if adoption never fires the
-                    //     watchdog + Reconcile orphan prune converge
-                    //     state on the next restart.
-                    //   * Do NOT clear RepegPending — the throttle
-                    //     guard keeps the engine from racing another
-                    //     repeg against the still-live replace
-                    //     intent.
-                    // The bounded IsCancelledChild dedup branch below
-                    // catches this same condition for replay safety
-                    // (older WAL segments persisted with pre-#300
-                    // cancel-only semantics); we leave that branch in
-                    // place per the issue.
-                    _logger.LogDebug(
-                        "AlgoEngine pegged repeg: stray Cancelled-on-OLD ER for {Firm}/{AlgoId} child {Child} while replace is in flight; no-op (Replaced ER adoption drives resolution).",
-                        algo.FirmId, algo.AlgoId, child.ClOrdId);
+                    // ExecutionReportProcessor consumes the replacement
+                    // intent before this signal is enqueued. With the
+                    // original now terminal and the live slot already
+                    // cleared, no Replaced adoption or terminal-child
+                    // watchdog can finish this cycle. Fail closed because
+                    // a split cancel-replace venue may still create the
+                    // replacement after acknowledging the original cancel.
+                    await FailClosedPeggedRepegOnOriginalTerminalAsync(
+                        algo,
+                        rt,
+                        child.ClOrdId,
+                        "sent replace ended with Cancelled on original").ConfigureAwait(false);
+                    return;
+                }
+                else if (algo.Type == AlgoType.Pegged
+                         && (_peggedRepeg?.IsCancelledChild(
+                             algo.FirmId,
+                             algo.AlgoId,
+                             child.ClOrdId) ?? false)
+                         && IsUnresolvedPotentiallySentRepegMutation(
+                             algo,
+                             child.ClOrdId))
+                {
+                    // The ambiguous-send path clears RepegPending and does
+                    // not persist a Started record, but retains the history
+                    // marker because the venue may have accepted the
+                    // replace. A later Cancelled-on-original consumes that
+                    // retained intent in ExecutionReportProcessor. Suspend
+                    // explicitly instead of letting the history dedup hide
+                    // the terminal and strand an empty live slot.
+                    await FailClosedPeggedRepegOnOriginalTerminalAsync(
+                        algo,
+                        rt,
+                        child.ClOrdId,
+                        "unresolved replace ended with Cancelled on original").ConfigureAwait(false);
                     return;
                 }
                 else if (algo.Type == AlgoType.Pegged
@@ -1206,6 +1228,23 @@ public sealed class AlgoEngine : BackgroundService
 
             case OrderStatus.Rejected:
                 if (algo.IsTerminal) return;
+                if (algo.Type == AlgoType.Pegged
+                    && (rt.RepegPending
+                        || (_peggedRepeg?.IsCancelledChild(
+                            algo.FirmId,
+                            algo.AlgoId,
+                            child.ClOrdId) ?? false))
+                    && IsUnresolvedPotentiallySentRepegMutation(
+                        algo,
+                        child.ClOrdId))
+                {
+                    await FailClosedPeggedRepegOnOriginalTerminalAsync(
+                        algo,
+                        rt,
+                        child.ClOrdId,
+                        "unresolved replace ended with Rejected on original").ConfigureAwait(false);
+                    return;
+                }
                 if (IsTwapWindowExpired(algo))
                 {
                     await RecordTerminalAsync(algo, rt, AlgoStatus.Expired, AlgoTerminalReason.TwapWindowExpired).ConfigureAwait(false);
@@ -1478,6 +1517,40 @@ public sealed class AlgoEngine : BackgroundService
             State: OutboundMutationState.ProvenUnsent,
             RequiresReconciliation: false,
         };
+
+    private bool IsUnresolvedPotentiallySentRepegMutation(
+        Algo algo,
+        ulong originalClOrdId)
+    {
+        var mutation = FindLatestBlockingRepegMutation(algo, originalClOrdId);
+        return mutation is not null
+            && mutation.State != OutboundMutationState.ProvenUnsent;
+    }
+
+    private OutboundMutationSnapshot? FindLatestBlockingRepegMutation(
+        Algo algo,
+        ulong? originalClOrdId = null) =>
+        _outboundLedger.GetAlgoMutations(algo.FirmId, algo.AlgoId)
+            .Where(m =>
+                m.AlgoOriginIdentity?.ActionKind == AlgoOutboundActionKind.Repeg
+                && (originalClOrdId is null
+                    || m.OriginalClOrdId == originalClOrdId.Value)
+                && IsBlockingAlgoRepegMutation(m))
+            .OrderByDescending(m => m.RecordedAtUtc)
+            .ThenByDescending(m => m.MutationId.Value)
+            .FirstOrDefault();
+
+    private static bool IsBlockingAlgoRepegMutation(
+        OutboundMutationSnapshot mutation) =>
+        mutation.RequiresReconciliation
+        || mutation.State is OutboundMutationState.ApprovedToSend
+            or OutboundMutationState.AttemptIntentPrepared
+            or OutboundMutationState.FramePrepared
+            or OutboundMutationState.TransportWriteCompleted
+            or OutboundMutationState.ProvenUnsent
+            or OutboundMutationState.Ambiguous
+            or OutboundMutationState.LegacyUnknown
+            or OutboundMutationState.LegacyUnknownReplace;
 
     private OutboundMutationSnapshot? FindSoleRetryableProvenUnsentMutation(
         Algo algo,
@@ -2149,6 +2222,60 @@ public sealed class AlgoEngine : BackgroundService
         // ref. This keeps "new working slice" submission single-sourced.
     }
 
+    private async Task FailClosedPeggedRepegOnOriginalTerminalAsync(
+        Algo algo,
+        AlgoParentRuntime rt,
+        ulong originalClOrdId,
+        string outcome)
+    {
+        rt.RepegPending = false;
+        rt.LastRepegCancelledChildId = null;
+        rt.PeggedReplacedHoldTicks = 0;
+
+        if (_replacements is not null
+            && _replacements.TryConsumeByOriginal(
+                originalClOrdId,
+                out var staleIntent,
+                out var ambiguousHeld)
+            && staleIntent is not null
+            && _replaceMargin is not null)
+        {
+            try
+            {
+                _replaceMargin.AbortReplace(staleIntent.NewClOrdId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "AlgoEngine pegged repeg terminal-original cleanup: AbortReplace failed for new ClOrdID {NewClOrdId} (ambiguousHeld={Ambiguous}).",
+                    staleIntent.NewClOrdId,
+                    ambiguousHeld);
+            }
+        }
+
+        if (_peggedRepeg?.TryGet(algo.FirmId, algo.AlgoId) is not null)
+        {
+            SelfHealOrphanRepeg(algo.FirmId, algo.AlgoId, originalClOrdId);
+        }
+        _peggedRepeg?.UnmarkCancelledChild(
+            algo.FirmId,
+            algo.AlgoId,
+            originalClOrdId);
+        MetricsRegistry.AlgoPeggedRepegFailed.Add(1);
+        _logger.LogWarning(
+            "AlgoEngine pegged repeg for {Firm}/{AlgoId} child {Child} cannot adopt a replacement: {Outcome}; suspending for reconciliation.",
+            algo.FirmId,
+            algo.AlgoId,
+            originalClOrdId,
+            outcome);
+        await RecordTerminalAsync(
+            algo,
+            rt,
+            AlgoStatus.Suspended,
+            AlgoTerminalReason.ReconciliationRequired).ConfigureAwait(false);
+    }
+
     /// <summary>
     /// Q3.3 (#283). Repeg evaluation for a Pegged parent that already
     /// has a live working slice. The decision tree, in order:
@@ -2279,6 +2406,21 @@ public sealed class AlgoEngine : BackgroundService
                         ChildClOrdId = child.ClOrdId,
                     },
                     ct).ConfigureAwait(false);
+                return;
+            }
+
+            if (child is not null
+                && child.Status is OrderStatus.Cancelled or OrderStatus.Rejected
+                && IsUnresolvedPotentiallySentRepegMutation(
+                    algo,
+                    child.ClOrdId))
+            {
+                await FailClosedPeggedRepegOnOriginalTerminalAsync(
+                    algo,
+                    rt,
+                    child.ClOrdId,
+                    $"unresolved replace observed terminal {child.Status} on original")
+                    .ConfigureAwait(false);
                 return;
             }
 
