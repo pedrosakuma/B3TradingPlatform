@@ -907,6 +907,112 @@ public class PeggedAlgoEndpointTests
     }
 
     [Fact]
+    public async Task Pegged_AmbiguousRepeg_OriginalFills_LateReplaceCannotOverfillParent()
+    {
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        mock.ReplaceFailureInjector = _ =>
+            new InvalidOperationException("simulated ambiguous replace send");
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var original = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+
+        cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+        await WaitFor(
+            () => mock.SubmittedReplaces.Any(request =>
+                request.OriginalClOrdId == original.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "ambiguous repeg was not attempted");
+        var replacement = mock.SubmittedReplaces.Single(request =>
+            request.OriginalClOrdId == original.ClOrdId);
+        var registry = f.Services.GetRequiredService<PendingReplacementRegistry>();
+        Assert.True(registry.IsOriginalInFlight(original.ClOrdId));
+
+        await InjectEr(
+            http,
+            adminToken,
+            original.ClOrdId,
+            "Fill",
+            lastQty: original.Quantity);
+        await WaitForAlgoStatus(http, token, algoId, "Completed");
+        Assert.False(registry.IsOriginalInFlight(original.ClOrdId));
+
+        await InjectReplacedEr(
+            http,
+            adminToken,
+            replacement.NewClOrdId,
+            replacement.OriginalClOrdId,
+            replacement.NewQuantity,
+            cumQty: replacement.NewQuantity);
+        await Task.Delay(250);
+
+        var terminal = await GetAlgo(http, token, algoId);
+        Assert.Equal("Completed", terminal.GetProperty("status").GetString());
+        Assert.Equal(100, terminal.GetProperty("filledQuantity").GetInt64());
+        Assert.DoesNotContain(
+            book.EnumerateChildrenOf("default", ulong.Parse(algoId)),
+            child => child.ClOrdId == replacement.NewClOrdId);
+    }
+
+    [Fact]
+    public async Task Pegged_ProvenUnsentRepeg_AttemptCapSuspendsForReconciliation()
+    {
+        using var f = TestAppFactory.WithOverrides(
+            Simulator(),
+            services =>
+            {
+                services.RemoveAll<IExchangeGateway>();
+                services.AddSingleton<ProvenUnsentCancelGateway>();
+                services.AddSingleton<IExchangeGateway>(sp =>
+                    sp.GetRequiredService<ProvenUnsentCancelGateway>());
+            });
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(
+            http,
+            token,
+            PeggedBody(total: 100, repegMs: 100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        _ = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        var gateway = f.Services.GetRequiredService<ProvenUnsentCancelGateway>();
+
+        cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+        await WaitFor(
+            () => gateway.AttemptedReplaceClOrdIds.Count
+                == B3.Trading.Application.Outbound.OutboundMutationLedger
+                    .MaxOutboundAttempts,
+            TimeSpan.FromSeconds(5),
+            "ProvenUnsent repeg retry did not reach the attempt cap");
+        await WaitForAlgoStatus(http, token, algoId, "Suspended");
+
+        var terminal = await GetAlgo(http, token, algoId);
+        Assert.Equal(
+            "ReconciliationRequired",
+            terminal.GetProperty("terminalReason").GetString());
+        var ledger = f.Services.GetRequiredService<
+            B3.Trading.Application.Outbound.OutboundMutationLedger>();
+        var mutation = Assert.Single(
+            ledger.GetAlgoMutations("default", ulong.Parse(algoId)),
+            candidate => candidate.AlgoOriginIdentity?.ActionKind
+                == B3.Trading.Application.Outbound.AlgoOutboundActionKind.Repeg);
+        Assert.Equal(
+            B3.Trading.Application.Outbound.OutboundMutationState.ProvenUnsent,
+            mutation.State);
+        Assert.Equal(
+            B3.Trading.Application.Outbound.OutboundMutationLedger.MaxOutboundAttempts,
+            mutation.Attempts.Count);
+    }
+
+    [Fact]
     public async Task Pegged_ParentCancelWithAmbiguousChild_FailsClosed()
     {
         using var f = TestAppFactory.WithOverrides(Simulator());

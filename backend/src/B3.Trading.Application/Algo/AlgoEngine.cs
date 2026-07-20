@@ -676,7 +676,7 @@ public sealed class AlgoEngine : BackgroundService
                     OriginalClOrdId: { } orphanedOriginalClOrdId,
                 })
             {
-                await FailClosedPeggedRepegOnOriginalTerminalAsync(
+                await FailClosedPeggedRepegAsync(
                     algo,
                     rt,
                     orphanedOriginalClOrdId,
@@ -853,6 +853,19 @@ public sealed class AlgoEngine : BackgroundService
             _logger.LogWarning("AlgoEngine child ER for unknown child {ClOrdId}; dropping.", er.ChildClOrdId);
             return;
         }
+        if (algo.IsTerminal)
+        {
+            // Terminal parent quantities are immutable. In particular, a
+            // late replacement child from an earlier ambiguous repeg must
+            // never be adopted or credited after the parent completed.
+            _logger.LogDebug(
+                "AlgoEngine ignoring child ER for {Child} because algo {Firm}/{AlgoId} is terminal {Status}.",
+                child.ClOrdId,
+                algo.FirmId,
+                algo.AlgoId,
+                algo.Status);
+            return;
+        }
 
         // Pass-1 review (#299) P1-A. First observation of a replacement
         // child — adopt it here (NOT eagerly at modify-dispatch time) so
@@ -1023,7 +1036,6 @@ public sealed class AlgoEngine : BackgroundService
         switch (child.Status)
         {
             case OrderStatus.Filled:
-                if (algo.IsTerminal) return; // redundant ER after we already terminal-ed
                 // Pass-4 review (#296) P1. Repeg-cancel ↔ Fill race. The
                 // engine issued (or has just issued) a cancel for this
                 // child as part of a repeg cycle, but a terminal Fill ER
@@ -1133,7 +1145,7 @@ public sealed class AlgoEngine : BackgroundService
                     // watchdog can finish this cycle. Fail closed because
                     // a split cancel-replace venue may still create the
                     // replacement after acknowledging the original cancel.
-                    await FailClosedPeggedRepegOnOriginalTerminalAsync(
+                    await FailClosedPeggedRepegAsync(
                         algo,
                         rt,
                         child.ClOrdId,
@@ -1156,7 +1168,7 @@ public sealed class AlgoEngine : BackgroundService
                     // retained intent in ExecutionReportProcessor. Suspend
                     // explicitly instead of letting the history dedup hide
                     // the terminal and strand an empty live slot.
-                    await FailClosedPeggedRepegOnOriginalTerminalAsync(
+                    await FailClosedPeggedRepegAsync(
                         algo,
                         rt,
                         child.ClOrdId,
@@ -1238,7 +1250,7 @@ public sealed class AlgoEngine : BackgroundService
                         algo,
                         child.ClOrdId))
                 {
-                    await FailClosedPeggedRepegOnOriginalTerminalAsync(
+                    await FailClosedPeggedRepegAsync(
                         algo,
                         rt,
                         child.ClOrdId,
@@ -2146,6 +2158,9 @@ public sealed class AlgoEngine : BackgroundService
         // cancel — nothing to clean up beyond the in-memory marker.
         // Post-#300 the cycle is a cancel-replace whose intent +
         // (possibly) held margin live in PendingReplacementRegistry.
+        // The intent may exist even when RepegPending is false: an
+        // ambiguous dispatch deliberately clears the in-memory throttle
+        // but retains the registry row until authoritative evidence.
         // A Fill on the OLD child has already settled the cycle from
         // the parent's POV, so the replace is now meaningless: if the
         // venue eventually emits a Replaced ER the adoption block
@@ -2154,7 +2169,7 @@ public sealed class AlgoEngine : BackgroundService
         // are released; the late Replaced ER will then bypass
         // PendingReplacementRegistry's intercept and the synthetic
         // child is silently dropped.
-        if (wasPending && _replacements is not null)
+        if (_replacements is not null)
         {
             if (_replacements.TryConsumeByOriginal(child.ClOrdId, out var intent, out var ambiguousHeld))
             {
@@ -2222,7 +2237,7 @@ public sealed class AlgoEngine : BackgroundService
         // ref. This keeps "new working slice" submission single-sourced.
     }
 
-    private async Task FailClosedPeggedRepegOnOriginalTerminalAsync(
+    private async Task FailClosedPeggedRepegAsync(
         Algo algo,
         AlgoParentRuntime rt,
         ulong originalClOrdId,
@@ -2415,7 +2430,7 @@ public sealed class AlgoEngine : BackgroundService
                     algo,
                     child.ClOrdId))
             {
-                await FailClosedPeggedRepegOnOriginalTerminalAsync(
+                await FailClosedPeggedRepegAsync(
                     algo,
                     rt,
                     child.ClOrdId,
@@ -2686,6 +2701,22 @@ public sealed class AlgoEngine : BackgroundService
                     algo.FirmId,
                     algo.AlgoId,
                     liveChildClOrdId);
+            }
+            if (failedMutation is
+                {
+                    State: OutboundMutationState.ProvenUnsent,
+                    RequiresReconciliation: false,
+                }
+                && failedMutation.Attempts.Count
+                    >= OutboundMutationLedger.MaxOutboundAttempts)
+            {
+                await FailClosedPeggedRepegAsync(
+                    algo,
+                    rt,
+                    liveChildClOrdId,
+                    "ProvenUnsent repeg exhausted its outbound attempt cap")
+                    .ConfigureAwait(false);
+                return;
             }
             MetricsRegistry.AlgoPeggedRepegFailed.Add(1);
             return;
