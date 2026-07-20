@@ -1004,6 +1004,156 @@ public class PeggedAlgoEndpointTests
     }
 
     [Fact]
+    public async Task Pegged_ProvenUnsentChildCancel_ExplicitRetryPreservesOriginAndCapsAttempts()
+    {
+        using var f = TestAppFactory.WithOverrides(
+            Simulator(),
+            services =>
+            {
+                services.RemoveAll<IExchangeGateway>();
+                services.AddSingleton<ProvenUnsentCancelGateway>();
+                services.AddSingleton<IExchangeGateway>(sp =>
+                    sp.GetRequiredService<ProvenUnsentCancelGateway>());
+            });
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        await WaitFor(
+            () => mock.SubmittedNewOrders.Any(order => order.ClOrdId == child.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "initial child was not dispatched");
+        var gateway = f.Services.GetRequiredService<ProvenUnsentCancelGateway>();
+
+        async Task<HttpStatusCode> DeleteAlgo()
+        {
+            var request = new HttpRequestMessage(HttpMethod.Delete, $"/algo/{algoId}");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            return (await http.SendAsync(request)).StatusCode;
+        }
+
+        Assert.Equal(HttpStatusCode.Accepted, await DeleteAlgo());
+        var ledger = f.Services.GetRequiredService<
+            B3.Trading.Application.Outbound.OutboundMutationLedger>();
+        await WaitFor(
+            () => ledger.GetAlgoMutations("default", ulong.Parse(algoId)).Any(m =>
+                m.AlgoOriginIdentity?.ActionKind
+                    == B3.Trading.Application.Outbound.AlgoOutboundActionKind.CancelChild
+                && m.State
+                    == B3.Trading.Application.Outbound.OutboundMutationState.ProvenUnsent),
+            TimeSpan.FromSeconds(3),
+            "initial child cancel did not become ProvenUnsent");
+
+        Assert.Equal(HttpStatusCode.Accepted, await DeleteAlgo());
+        await WaitFor(
+            () => gateway.AttemptedCancelClOrdIds.Count == 2,
+            TimeSpan.FromSeconds(3),
+            "explicit ProvenUnsent retry was not dispatched");
+        Assert.Equal(HttpStatusCode.Accepted, await DeleteAlgo());
+        await Task.Delay(250);
+
+        var cancelMutation = Assert.Single(
+            ledger.GetAlgoMutations("default", ulong.Parse(algoId)),
+            m => m.AlgoOriginIdentity?.ActionKind
+                == B3.Trading.Application.Outbound.AlgoOutboundActionKind.CancelChild);
+        Assert.Equal(2, cancelMutation.Attempts.Count);
+        Assert.Equal(
+            B3.Trading.Application.Outbound.OutboundMutationState.ProvenUnsent,
+            cancelMutation.State);
+        Assert.Equal(2, gateway.AttemptedCancelClOrdIds.Count);
+        Assert.Equal(
+            cancelMutation.AlgoOriginIdentity,
+            ledger.GetAlgoMutations("default", ulong.Parse(algoId))
+                .Single(m => m.MutationId == cancelMutation.MutationId)
+                .AlgoOriginIdentity);
+        Assert.NotEqual(
+            gateway.AttemptedCancelClOrdIds.ElementAt(0),
+            gateway.AttemptedCancelClOrdIds.ElementAt(1));
+    }
+
+    [Fact]
+    public async Task Pegged_ProvenUnsentChildReplace_ExplicitRetryPreservesOriginAndCapsAttempts()
+    {
+        using var f = TestAppFactory.WithOverrides(
+            Simulator(),
+            services =>
+            {
+                services.RemoveAll<IExchangeGateway>();
+                services.AddSingleton<ProvenUnsentCancelGateway>();
+                services.AddSingleton<IExchangeGateway>(sp =>
+                    sp.GetRequiredService<ProvenUnsentCancelGateway>());
+            });
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        await WaitFor(
+            () => mock.SubmittedNewOrders.Any(order => order.ClOrdId == child.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "initial child was not dispatched");
+        var gateway = f.Services.GetRequiredService<ProvenUnsentCancelGateway>();
+
+        async Task<HttpStatusCode> ModifyChild()
+        {
+            var request = new HttpRequestMessage(
+                HttpMethod.Post,
+                $"/algo/{algoId}/modify")
+            {
+                Content = JsonContent.Create(new
+                {
+                    ChildClOrdId = child.ClOrdId,
+                    NewPrice = 29.9m,
+                }),
+            };
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            return (await http.SendAsync(request)).StatusCode;
+        }
+
+        Assert.Equal(HttpStatusCode.Accepted, await ModifyChild());
+        var ledger = f.Services.GetRequiredService<
+            B3.Trading.Application.Outbound.OutboundMutationLedger>();
+        await WaitFor(
+            () => ledger.GetAlgoMutations("default", ulong.Parse(algoId)).Any(m =>
+                m.AlgoOriginIdentity?.ActionKind
+                    == B3.Trading.Application.Outbound.AlgoOutboundActionKind.ReplaceChild
+                && m.State
+                    == B3.Trading.Application.Outbound.OutboundMutationState.ProvenUnsent),
+            TimeSpan.FromSeconds(3),
+            "initial child replace did not become ProvenUnsent");
+
+        Assert.Equal(HttpStatusCode.Accepted, await ModifyChild());
+        await WaitFor(
+            () => gateway.AttemptedReplaceClOrdIds.Count == 2,
+            TimeSpan.FromSeconds(3),
+            "explicit ProvenUnsent replace retry was not dispatched");
+        Assert.Equal(HttpStatusCode.Accepted, await ModifyChild());
+        await Task.Delay(250);
+
+        var replaceMutation = Assert.Single(
+            ledger.GetAlgoMutations("default", ulong.Parse(algoId)),
+            m => m.AlgoOriginIdentity?.ActionKind
+                == B3.Trading.Application.Outbound.AlgoOutboundActionKind.ReplaceChild);
+        Assert.Equal(2, replaceMutation.Attempts.Count);
+        Assert.Equal(
+            B3.Trading.Application.Outbound.OutboundMutationState.ProvenUnsent,
+            replaceMutation.State);
+        Assert.Equal(2, gateway.AttemptedReplaceClOrdIds.Count);
+        Assert.NotEqual(
+            gateway.AttemptedReplaceClOrdIds.ElementAt(0),
+            gateway.AttemptedReplaceClOrdIds.ElementAt(1));
+    }
+
+    [Fact]
     public async Task Pegged_RecoveryWithUnresolvedOutbound_KeepsReconcileAndSchedulingGated()
     {
         // A restart with an unresolved outbound child must classify the
@@ -1771,5 +1921,89 @@ public class PeggedAlgoEndpointTests
             await Task.Delay(20);
         }
         throw new TimeoutException($"Algo {algoId} did not reach any of [{string.Join(",", anyOf)}] within 5s; last={last}");
+    }
+
+    private sealed class ProvenUnsentCancelGateway : IExchangeGateway
+    {
+        private readonly EntryPointClientGateway _inner;
+
+        public ProvenUnsentCancelGateway(EntryPointClientGateway inner) =>
+            _inner = inner;
+
+        public System.Collections.Concurrent.ConcurrentQueue<ulong>
+            AttemptedCancelClOrdIds
+        { get; } = new();
+        public System.Collections.Concurrent.ConcurrentQueue<ulong>
+            AttemptedReplaceClOrdIds
+        { get; } = new();
+
+        public Task SubmitAsync(Order order, CancellationToken cancellationToken) =>
+            _inner.SubmitAsync(order, cancellationToken);
+
+        public Task<ExchangeGatewayReceipt> SubmitWithReceiptAsync(
+            Order order,
+            ExchangeGatewayFramePreparedCallback onFramePrepared,
+            CancellationToken cancellationToken) =>
+            _inner.SubmitWithReceiptAsync(order, onFramePrepared, cancellationToken);
+
+        public Task<ExchangeGatewayReceipt> SubmitWithReceiptAsync(
+            B3.Trading.Application.Outbound.OutboundNewOrderCommand command,
+            ExchangeGatewayFramePreparedCallback onFramePrepared,
+            CancellationToken cancellationToken) =>
+            _inner.SubmitWithReceiptAsync(command, onFramePrepared, cancellationToken);
+
+        public Task CancelAsync(
+            Order order,
+            ulong newClOrdId,
+            CancellationToken cancellationToken) =>
+            _inner.CancelAsync(order, newClOrdId, cancellationToken);
+
+        public Task<ExchangeGatewayReceipt> CancelWithReceiptAsync(
+            B3.Trading.Application.Outbound.OutboundCancelCommand command,
+            ExchangeGatewayFramePreparedCallback onFramePrepared,
+            CancellationToken cancellationToken)
+        {
+            AttemptedCancelClOrdIds.Enqueue(
+                command.Canonical.ClOrdId);
+            return Task.FromException<ExchangeGatewayReceipt>(
+                new ExchangeGatewayAttemptException(
+                    "typed pre-frame cancel failure",
+                    ExchangeGatewayFailureDisposition.OutboundProvenUnsent,
+                    ExchangeGatewayAttemptStage.NotStarted,
+                    frame: null));
+        }
+
+        public Task CancelReplaceAsync(
+            Order original,
+            ulong newClOrdId,
+            long newQuantity,
+            decimal? newPrice,
+            TimeInForce? requestedTimeInForce,
+            decimal? requestedStopPrice,
+            DateTimeOffset? requestedGoodTillDate,
+            CancellationToken cancellationToken) =>
+            _inner.CancelReplaceAsync(
+                original,
+                newClOrdId,
+                newQuantity,
+                newPrice,
+                requestedTimeInForce,
+                requestedStopPrice,
+                requestedGoodTillDate,
+                cancellationToken);
+
+        public Task<ExchangeGatewayReceipt> CancelReplaceWithReceiptAsync(
+            B3.Trading.Application.Outbound.OutboundReplaceCommand command,
+            ExchangeGatewayFramePreparedCallback onFramePrepared,
+            CancellationToken cancellationToken)
+        {
+            AttemptedReplaceClOrdIds.Enqueue(command.Canonical.ClOrdId);
+            return Task.FromException<ExchangeGatewayReceipt>(
+                new ExchangeGatewayAttemptException(
+                    "typed pre-frame replace failure",
+                    ExchangeGatewayFailureDisposition.OutboundProvenUnsent,
+                    ExchangeGatewayAttemptStage.NotStarted,
+                    frame: null));
+        }
     }
 }

@@ -185,6 +185,7 @@ public sealed class AlgoScheduler : BackgroundService
         var algos = _algos.EnumerateAll(includeTerminal: false);
         foreach (var algo in algos)
         {
+            if (!_recovery.IsBusinessIngressOpen(algo.FirmId)) continue;
             if (algo.IsTerminal) continue;
             var outboundBlocked =
                 _outboundLedger?.HasBlockingAlgoMutation(algo.FirmId, algo.AlgoId) == true;

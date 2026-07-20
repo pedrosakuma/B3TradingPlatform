@@ -590,6 +590,11 @@ public sealed class AlgoEngine : BackgroundService
     private async Task ReactAsync(AlgoSignal signal, CancellationToken ct)
     {
         var (firmId, algoId) = (signal.FirmId, AlgoIdOf(signal));
+        if (!_outboundRecovery.IsBusinessIngressOpen(firmId))
+        {
+            _ = RequeueAfterRecoveryAsync(signal, ct);
+            return;
+        }
         if (algoId == 0)
         {
             _logger.LogWarning("AlgoEngine received signal with zero AlgoId; ignoring.");
@@ -613,8 +618,8 @@ public sealed class AlgoEngine : BackgroundService
             case ChildExecutionObservedSignal er:
                 await OnChildErAsync(algo, rt, er, ct).ConfigureAwait(false);
                 break;
-            case AlgoCancelRequestedSignal:
-                await OnCancelRequestedAsync(algo, rt, ct).ConfigureAwait(false);
+            case AlgoCancelRequestedSignal cancel:
+                await OnCancelRequestedAsync(algo, rt, cancel.ExplicitRetry, ct).ConfigureAwait(false);
                 break;
             case AlgoModifyRequestedSignal mod:
                 await OnModifyRequestedAsync(algo, rt, mod, ct).ConfigureAwait(false);
@@ -625,12 +630,38 @@ public sealed class AlgoEngine : BackgroundService
         }
     }
 
+    private async Task RequeueAfterRecoveryAsync(AlgoSignal signal, CancellationToken ct)
+    {
+        try
+        {
+            await _outboundRecovery.WaitUntilBusinessIngressOpenAsync(signal.FirmId, ct)
+                .ConfigureAwait(false);
+            if (!_queue.TryEnqueue(signal))
+            {
+                MetricsRegistry.AlgoSignalsDropped.Add(1,
+                    new KeyValuePair<string, object?>("kind", SignalKind(signal)));
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(
+                ex,
+                "AlgoEngine could not defer signal {SignalKind} for firm {FirmId} until outbound recovery opened.",
+                SignalKind(signal),
+                signal.FirmId);
+        }
+    }
+
     private async Task OnCreatedAsync(Algo algo, AlgoParentRuntime rt, CancellationToken ct)
     {
+        if (!_outboundRecovery.IsBusinessIngressOpen(algo.FirmId)) return;
         if (algo.IsTerminal) return;
         if (algo.Status == AlgoStatus.Cancelling)
         {
-            await OnCancelRequestedAsync(algo, rt, ct).ConfigureAwait(false);
+            await OnCancelRequestedAsync(algo, rt, explicitRetry: false, ct).ConfigureAwait(false);
             return;
         }
         if (_outboundLedger.HasBlockingAlgoMutation(algo.FirmId, algo.AlgoId))
@@ -944,7 +975,7 @@ public sealed class AlgoEngine : BackgroundService
             if (algo.Status == AlgoStatus.Cancelling
                 && rt.LiveChildClOrdId == child.ClOrdId)
             {
-                await OnCancelRequestedAsync(algo, rt, ct).ConfigureAwait(false);
+                await OnCancelRequestedAsync(algo, rt, explicitRetry: false, ct).ConfigureAwait(false);
             }
             return;
         }
@@ -1211,6 +1242,7 @@ public sealed class AlgoEngine : BackgroundService
     private async Task OnModifyRequestedAsync(
         Algo algo, AlgoParentRuntime rt, AlgoModifyRequestedSignal sig, CancellationToken ct)
     {
+        if (!_outboundRecovery.IsBusinessIngressOpen(algo.FirmId)) return;
         var algoTypeTag = algo.Type.ToString().ToLowerInvariant();
         if (algo.IsTerminal)
         {
@@ -1274,9 +1306,14 @@ public sealed class AlgoEngine : BackgroundService
             return;
         }
 
+        var explicitRetry = FindExplicitProvenUnsentMutation(
+            algo,
+            child.ClOrdId,
+            AlgoOutboundActionKind.ReplaceChild);
         await TryReplaceChildAsync(
             algo, child, newQty, newPrice, sig.Reason,
-            AlgoOutboundActionKind.ReplaceChild, ct).ConfigureAwait(false);
+            AlgoOutboundActionKind.ReplaceChild, ct,
+            explicitRetry?.AlgoOriginIdentity).ConfigureAwait(false);
     }
 
     internal async Task<bool> TryReplaceChildAsync(
@@ -1286,10 +1323,36 @@ public sealed class AlgoEngine : BackgroundService
         decimal? newPrice,
         string reason,
         AlgoOutboundActionKind actionKind,
-        CancellationToken ct)
+        CancellationToken ct,
+        AlgoOutboundOriginIdentity? explicitRetryOrigin = null)
     {
+        if (!_outboundRecovery.IsBusinessIngressOpen(algo.FirmId)) return false;
         var algoTypeTag = algo.Type.ToString().ToLowerInvariant();
-        if (_outboundLedger.HasBlockingAlgoMutation(algo.FirmId, algo.AlgoId))
+        OutboundMutationSnapshot? retryMutation = null;
+        if (explicitRetryOrigin is not null)
+        {
+            _outboundLedger.TryGetByAlgoOrigin(
+                algo.FirmId,
+                explicitRetryOrigin,
+                out retryMutation);
+        }
+        var retryAllowed = retryMutation is
+        {
+            State: OutboundMutationState.ProvenUnsent,
+            RequiresReconciliation: false,
+        }
+            && retryMutation.OriginalClOrdId == child.ClOrdId
+            && retryMutation.AlgoOriginIdentity?.ActionKind == actionKind
+            && retryMutation.Approval?.CanonicalCommandNonSensitive.Quantity
+                == newQuantity
+            && retryMutation.Approval.CanonicalCommandNonSensitive.Price
+                == newPrice
+            && !_outboundLedger.HasBlockingAlgoMutationExcept(
+                algo.FirmId,
+                algo.AlgoId,
+                retryMutation.MutationId);
+        if (!retryAllowed
+            && _outboundLedger.HasBlockingAlgoMutation(algo.FirmId, algo.AlgoId))
         {
             MetricsRegistry.AlgoModifyRejectedTotal.Add(1,
                 new KeyValuePair<string, object?>("algoType", algoTypeTag),
@@ -1297,10 +1360,12 @@ public sealed class AlgoEngine : BackgroundService
             return false;
         }
 
-        var origin = new AlgoOutboundOriginIdentity(
-            algo.AlgoId,
-            actionKind,
-            NextAlgoActionSequence(algo.FirmId, algo.AlgoId, actionKind));
+        var origin = retryAllowed
+            ? explicitRetryOrigin!
+            : new AlgoOutboundOriginIdentity(
+                algo.AlgoId,
+                actionKind,
+                NextAlgoActionSequence(algo.FirmId, algo.AlgoId, actionKind));
         var result = await _modifier.ModifyAsync(
             new OrderModifyRequest(
                 child.Owner,
@@ -1366,8 +1431,27 @@ public sealed class AlgoEngine : BackgroundService
             .DefaultIfEmpty(-1)
             .Max() + 1;
 
-    private async Task OnCancelRequestedAsync(Algo algo, AlgoParentRuntime rt, CancellationToken ct)
+    private OutboundMutationSnapshot? FindExplicitProvenUnsentMutation(
+        Algo algo,
+        ulong originalClOrdId,
+        AlgoOutboundActionKind actionKind) =>
+        _outboundLedger.GetAlgoMutations(algo.FirmId, algo.AlgoId)
+            .Where(m =>
+                m.AlgoOriginIdentity?.ActionKind == actionKind
+                && m.OriginalClOrdId == originalClOrdId
+                && m.State == OutboundMutationState.ProvenUnsent
+                && !m.RequiresReconciliation)
+            .OrderByDescending(m => m.RecordedAtUtc)
+            .ThenByDescending(m => m.MutationId.Value)
+            .FirstOrDefault();
+
+    private async Task OnCancelRequestedAsync(
+        Algo algo,
+        AlgoParentRuntime rt,
+        bool explicitRetry,
+        CancellationToken ct)
     {
+        if (!_outboundRecovery.IsBusinessIngressOpen(algo.FirmId)) return;
         // Operator already drove the parent into Cancelling via the API;
         // reactor's job is to take down the live child (if any). When
         // there is no live child the parent can move straight to Cancelled
@@ -1380,7 +1464,21 @@ public sealed class AlgoEngine : BackgroundService
             return;
         }
 
-        if (_outboundLedger.HasBlockingAlgoMutation(algo.FirmId, algo.AlgoId))
+        OutboundMutationSnapshot? retryMutation = null;
+        if (explicitRetry && rt.LiveChildClOrdId is { } retryChildClOrdId)
+        {
+            retryMutation = FindExplicitProvenUnsentMutation(
+                algo,
+                retryChildClOrdId,
+                AlgoOutboundActionKind.CancelChild);
+        }
+        var retryAllowed = retryMutation is not null
+            && !_outboundLedger.HasBlockingAlgoMutationExcept(
+                algo.FirmId,
+                algo.AlgoId,
+                retryMutation.MutationId);
+        if (!retryAllowed
+            && _outboundLedger.HasBlockingAlgoMutation(algo.FirmId, algo.AlgoId))
         {
             _logger.LogWarning(
                 "Algo parent cancel for {Firm}/{AlgoId} is waiting for unresolved child outbound evidence.",
@@ -1403,13 +1501,15 @@ public sealed class AlgoEngine : BackgroundService
             return;
         }
 
-        var origin = new AlgoOutboundOriginIdentity(
-            algo.AlgoId,
-            AlgoOutboundActionKind.CancelChild,
-            NextAlgoActionSequence(
-                algo.FirmId,
+        var origin = retryAllowed
+            ? retryMutation!.AlgoOriginIdentity!
+            : new AlgoOutboundOriginIdentity(
                 algo.AlgoId,
-                AlgoOutboundActionKind.CancelChild));
+                AlgoOutboundActionKind.CancelChild,
+                NextAlgoActionSequence(
+                    algo.FirmId,
+                    algo.AlgoId,
+                    AlgoOutboundActionKind.CancelChild));
         var result = await _canceller.CancelAsync(
             child.Owner,
             child.ClOrdId,
@@ -1431,6 +1531,7 @@ public sealed class AlgoEngine : BackgroundService
 
     private async Task SubmitNextSliceAsync(Algo algo, AlgoParentRuntime rt, CancellationToken ct)
     {
+        if (!_outboundRecovery.IsBusinessIngressOpen(algo.FirmId)) return;
         var (rawQty, slicePrice) = ComputeNextSlice(algo);
         // #518. Final lot-size invariant: no algo child leaves the engine
         // with an odd lot the venue's MinLotSizeCheck would reject (which
@@ -2046,6 +2147,28 @@ public sealed class AlgoEngine : BackgroundService
         if (!_orders.TryGet(liveChildClOrdId, out var child) || child is null
             || IsChildTerminal(child))
         {
+            if (child?.Status == OrderStatus.Filled
+                && (rt.RepegPending
+                    || (_peggedRepeg?.IsCancelledChild(
+                        algo.FirmId,
+                        algo.AlgoId,
+                        child.ClOrdId) ?? false)))
+            {
+                var previouslyBooked = rt.ChildBookedCum.GetValueOrDefault(
+                    child.ClOrdId,
+                    0L);
+                var fillDelta = child.CumulativeQuantity - previouslyBooked;
+                if (fillDelta > 0)
+                {
+                    algo.RecordFill(fillDelta);
+                    rt.ChildBookedCum[child.ClOrdId] = child.CumulativeQuantity;
+                }
+                if (rt.LiveChildClOrdId == child.ClOrdId)
+                    rt.LiveChildClOrdId = null;
+                await ResolveRepegOnFillAsync(algo, rt, child).ConfigureAwait(false);
+                return;
+            }
+
             // #329: When the child is terminal with status Replaced, an
             // adoption signal is normally in flight from the ER processor
             // (ApplyReplaceAccepted enqueues ChildExecutionObservedSignal

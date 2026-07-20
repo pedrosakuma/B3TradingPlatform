@@ -27,7 +27,8 @@ public class AlgoSchedulerTests
 
     private static (AlgoBook algos, WorkingOrderBook orders, AlgoSignalQueue queue, MutableClock clock, AlgoScheduler scheduler) Build(
         DateTimeOffset now,
-        OutboundMutationLedger? outboundLedger = null)
+        OutboundMutationLedger? outboundLedger = null,
+        IOutboundRecoveryGate? recovery = null)
     {
         var algos = new AlgoBook();
         var orders = new WorkingOrderBook();
@@ -35,6 +36,7 @@ public class AlgoSchedulerTests
         var clock = new MutableClock(now);
         var scheduler = new AlgoScheduler(algos, orders, queue, clock,
             AlgoScheduler.DefaultTickInterval, NullLogger<AlgoScheduler>.Instance,
+            recovery: recovery,
             outboundLedger: outboundLedger);
         return (algos, orders, queue, clock, scheduler);
     }
@@ -128,6 +130,21 @@ public class AlgoSchedulerTests
         scheduler.Tick();
 
         Assert.Empty(Drain(queue));
+    }
+
+    [Fact]
+    public void Tick_FirmRecoveryClosed_DefersWithoutMutatingParent()
+    {
+        var recovery = new ClosedRecoveryGate();
+        var (algos, _, queue, _, scheduler) = Build(Start, recovery: recovery);
+        var twap = NewTwap(1);
+        algos.TryAdd(twap);
+
+        scheduler.Tick();
+
+        Assert.Empty(Drain(queue));
+        Assert.Equal(AlgoStatus.PendingNew, twap.Status);
+        Assert.False(twap.IsTerminal);
     }
 
     [Fact]
@@ -267,6 +284,25 @@ public class AlgoSchedulerTests
         algos.TryAdd(NewTwap(1, sliceCount: 4));
         scheduler.Tick();
         Assert.Single(Drain(queue));
+    }
+
+    private sealed class ClosedRecoveryGate : IOutboundRecoveryGate
+    {
+        public OutboundRecoveryPhase Phase => OutboundRecoveryPhase.ClassifyingAttempts;
+        public bool IsClassificationComplete => false;
+        public bool IsReady => false;
+        public string? FailureReason => null;
+        public IReadOnlyList<FirmOutboundRecoveryStatus> Snapshot() => [];
+        public bool IsBusinessIngressOpen(string firmId) => false;
+        public ValueTask WaitUntilClassificationCompleteAsync(CancellationToken cancellationToken) =>
+            ValueTask.CompletedTask;
+        public ValueTask WaitUntilBusinessIngressOpenAsync(
+            string firmId,
+            CancellationToken cancellationToken) =>
+            new(Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken));
+        public ValueTask WaitUntilAllRequiredBusinessIngressOpenAsync(
+            CancellationToken cancellationToken) =>
+            new(Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken));
     }
 
     // ───────── Pass-4 review (#299) P1 — ambiguous-send TTL sweep ─────────

@@ -1609,6 +1609,22 @@ public sealed class OutboundMutationLedger
                 && (m.RequiresReconciliation || IsAlgoActionBlocking(m.State)));
     }
 
+    public bool HasBlockingAlgoMutationExcept(
+        string firmId,
+        ulong parentAlgoId,
+        OutboundMutationId excludedMutationId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        if (parentAlgoId == 0)
+            throw new ArgumentOutOfRangeException(nameof(parentAlgoId));
+        lock (_gate)
+            return _mutations.Values.Any(m =>
+                m.MutationId != excludedMutationId
+                && string.Equals(m.FirmId, firmId, StringComparison.Ordinal)
+                && m.AlgoOriginIdentity?.ParentAlgoId == parentAlgoId
+                && (m.RequiresReconciliation || IsAlgoActionBlocking(m.State)));
+    }
+
     public bool TryGetActiveForOriginal(
         string firmId,
         ulong originalClOrdId,

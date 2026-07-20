@@ -4176,6 +4176,10 @@ public sealed class OutboundMutationLedgerTests
             Assert.Single(fixture.Ledger.GetAlgoMutations(
                 fixture.Approved.FirmId,
                 origin.ParentAlgoId)).State);
+        Assert.False(fixture.Ledger.HasBlockingAlgoMutationExcept(
+            fixture.Approved.FirmId,
+            origin.ParentAlgoId,
+            fixture.MutationId));
     }
 
     [Fact]

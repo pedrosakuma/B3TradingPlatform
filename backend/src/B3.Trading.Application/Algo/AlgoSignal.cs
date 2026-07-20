@@ -31,6 +31,7 @@ public sealed record AlgoCreatedSignal : AlgoSignal
 public sealed record AlgoCancelRequestedSignal : AlgoSignal
 {
     public required ulong AlgoId { get; init; }
+    public bool ExplicitRetry { get; init; }
 }
 
 /// <summary>
