@@ -209,6 +209,7 @@ public sealed class OrderSubmissionService
                 : null;
             var submitted = new OrderSubmittedEvent
             {
+                MutationId = mutationId,
                 ClOrdId = clOrdId,
                 EndClientId = req.Owner.Value,
                 FirmId = req.FirmId,
@@ -257,7 +258,11 @@ public sealed class OrderSubmissionService
                         // method) so the registry is rehydrated by exactly
                         // the same code path that populated it originally.
                         _botMappings.RegisterOrderInternal(
-                            clOrdId, botMapping.CredentialId, botMapping.ExternalClOrdId);
+                            clOrdId,
+                            botMapping.CredentialId,
+                            botMapping.ExternalClOrdId,
+                            recordedAt,
+                            mutationId);
                     }
                     if (restIdempotency is not null)
                         _restIdempotency?.Apply(restIdempotency);
@@ -392,6 +397,11 @@ public sealed class OrderSubmissionService
                         : req.BotOrigin is not null
                             ? OutboundMutationOrigin.UserBotFixp
                             : OutboundMutationOrigin.Rest,
+                    BotBusinessIdentity = req.BotOrigin is { } botOrigin
+                        ? new OutboundBotBusinessIdentity(
+                            botOrigin.CredentialId,
+                            botOrigin.ExternalClOrdId)
+                        : null,
                     PrimaryClOrdId = clOrdId,
                     RecordedAtUtc = recordedAt,
                     Approval = frozen.Approval,
