@@ -754,12 +754,25 @@ public sealed class OutboundMutationLedger
                     && evt.SessionId != frame.SessionId);
             if (positiveIdentityMismatch)
             {
-                MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
+                var reopenedReconciliation = IsTerminal(mutation.State);
+                if (reopenedReconciliation)
+                {
+                    MarkTerminalEvidenceConflict(
+                        mutation,
+                        evt.TimestampUtc,
+                        reopenReconciliation: true);
+                }
+                else
+                {
+                    MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
+                }
                 AddInboundEvidenceUnsafe(
                     CreateExecutionReportEvidence(
                         evt, evidenceId, InboundVenueEvidenceDisposition.Conflicting, [id]),
                     evidenceIdentity);
-                return new(InboundVenueEvidenceApplyStatus.RecordedConflicting);
+                return new(
+                    InboundVenueEvidenceApplyStatus.RecordedConflicting,
+                    ReopenedReconciliation: reopenedReconciliation);
             }
 
             if (mutation.State == OutboundMutationState.OperatorResolved

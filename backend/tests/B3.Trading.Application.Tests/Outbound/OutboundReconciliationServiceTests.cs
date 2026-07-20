@@ -116,6 +116,7 @@ public sealed class OutboundReconciliationServiceTests
             "checker");
 
         Assert.True(approved.CapacityReleased);
+        Assert.True(approved.RequiresReconciliation);
         Assert.Equal(1, margin.ReleaseCount);
         var terminal = Assert.Single(ledger.SnapshotMutations());
         Assert.Equal(
@@ -130,6 +131,7 @@ public sealed class OutboundReconciliationServiceTests
             "maker",
             firstRequest);
         Assert.Equal(OutboundOperatorResolutionStatus.Resolved, duplicate.Status);
+        Assert.True(duplicate.RequiresReconciliation);
         Assert.Equal(1, margin.ReleaseCount);
 
         Assert.Throws<OutboundReconciliationValidationException>(() =>
@@ -161,6 +163,43 @@ public sealed class OutboundReconciliationServiceTests
         Assert.Single(terminal.OperatorEvidence);
         Assert.Single(terminal.ResolutionProposals);
         Assert.Equal(1, margin.ReleaseCount);
+    }
+
+    [Fact]
+    public void DirectTerminalResolution_ReturnsActualUnavailablePayloadReconciliationState()
+    {
+        var writer = Fixture.Create(kind: OutboundMutationKind.Cancel);
+        var evidenceReference = writer.RegisterEvidence(
+            OutboundOperatorEvidenceType.OfficialExtract,
+            '3');
+        var snapshot = writer.Ledger.CaptureSnapshot();
+        var ledger = new OutboundMutationLedger(CreateProtector("replacement"));
+        ledger.Restore(
+            snapshot.Mutations,
+            snapshot.Correlations,
+            snapshot.InboundEvidence);
+        var service = new OutboundReconciliationService(
+            ledger,
+            new EventDispatcher(new NullEventStore()),
+            new NullAuditLogger(),
+            new RecordingMargin(),
+            new RecordingReplaceMargin(),
+            new PendingReplacementRegistry());
+
+        var resolved = service.Resolve(
+            writer.MutationId,
+            "F1",
+            "operator",
+            new(
+                OutboundOperatorDecision.VenueAbsent,
+                OutboundOperatorEvidenceType.OfficialExtract,
+                evidenceReference,
+                "official_extract_attested"));
+
+        Assert.Equal(OutboundOperatorResolutionStatus.Resolved, resolved.Status);
+        Assert.False(resolved.CapacityReleased);
+        Assert.True(resolved.RequiresReconciliation);
+        Assert.True(Assert.Single(ledger.SnapshotMutations()).RequiresReconciliation);
     }
 
     [Fact]

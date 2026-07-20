@@ -171,6 +171,7 @@ public sealed class OutboundReconciliationService
             mutation.FirmId,
             releaseCapacity: false,
             cancellationToken);
+        var committedMutation = GetScopedMutation(mutationId, callerFirmId);
         var status = request.Decision == OutboundOperatorDecision.LeaveAmbiguous
             ? OutboundOperatorResolutionStatus.Annotated
             : OutboundOperatorResolutionStatus.Resolved;
@@ -179,7 +180,7 @@ public sealed class OutboundReconciliationService
             status,
             null,
             CapacityReleased: false,
-            RequiresReconciliation: status == OutboundOperatorResolutionStatus.Annotated);
+            RequiresReconciliation: committedMutation.RequiresReconciliation);
     }
 
     public OutboundAuthoritativeEvidenceSnapshot RegisterAuthoritativeEvidence(
@@ -316,12 +317,13 @@ public sealed class OutboundReconciliationService
             mutation.FirmId,
             releaseCapacity: true,
             cancellationToken);
+        var committedMutation = GetScopedMutation(mutationId, callerFirmId);
         return new OutboundOperatorResolutionResult(
             mutationId,
             OutboundOperatorResolutionStatus.Resolved,
             proposalId,
             CapacityReleased: true,
-            RequiresReconciliation: false);
+            RequiresReconciliation: committedMutation.RequiresReconciliation);
     }
 
     private OutboundOperatorResolutionResult Propose(

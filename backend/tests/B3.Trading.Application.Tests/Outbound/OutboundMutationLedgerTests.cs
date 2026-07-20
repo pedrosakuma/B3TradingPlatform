@@ -601,6 +601,55 @@ public sealed class OutboundMutationLedgerTests
     }
 
     [Fact]
+    public void LateExecutionReportForOlderAttempt_ReopensTerminalLatestAttempt()
+    {
+        var fixture = Fixture.Create();
+        fixture.Ledger.Apply(fixture.Approved);
+        fixture.Ledger.Apply(fixture.Intent);
+        fixture.Ledger.Apply(fixture.Unsent);
+        var retryId = new OutboundAttemptId(Guid.Parse(
+            "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"));
+        fixture.Ledger.Apply(fixture.Intent with
+        {
+            AttemptId = retryId,
+            AttemptNo = 2,
+            ClOrdId = 2,
+            IntentPreparedAtUtc = T0.AddSeconds(6),
+            TimestampUtc = T0.AddSeconds(6),
+        });
+        fixture.Ledger.Apply(fixture.Frame with
+        {
+            AttemptId = retryId,
+            PreparedAtUtc = T0.AddSeconds(7),
+            TimestampUtc = T0.AddSeconds(7),
+        });
+        fixture.Ledger.ApplyVenueAcknowledgement(Acknowledgement(
+            fixture,
+            firmId: "F1",
+            sessionId: 11,
+            sessionVerId: 2,
+            clOrdId: 2));
+
+        var result = fixture.Ledger.ApplyVenueAcknowledgement(Acknowledgement(
+            fixture,
+            firmId: "F1",
+            sessionId: 11,
+            sessionVerId: 2) with
+        {
+            ExecKind = "Fill",
+            InboundSeqNum = 91,
+            TimestampUtc = T0.AddMinutes(3),
+        });
+
+        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedConflicting, result.Status);
+        Assert.True(result.ReopenedReconciliation);
+        var mutation = Assert.Single(fixture.Ledger.SnapshotMutations());
+        Assert.Equal(OutboundMutationState.Ambiguous, mutation.State);
+        Assert.True(mutation.RequiresReconciliation);
+        Assert.Equal(1, fixture.Ledger.ReadinessBlockingCount);
+    }
+
+    [Fact]
     public void CancelAcknowledgement_MissingOrigClOrdIdUsesExactDirectAttempt()
     {
         var fixture = Fixture.Create();
