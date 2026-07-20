@@ -1113,7 +1113,10 @@ public sealed class OutboundReconciliationServiceTests
     {
         var audit = new CapturingAuditLogger();
         var fixture = Fixture.Create(audit);
-        fixture.RegisterEvidence(OutboundOperatorEvidenceType.OfficialExtract, 'f');
+        var officialReference = fixture.RegisterEvidence(
+            OutboundOperatorEvidenceType.OfficialExtract,
+            'f');
+        var annotationReference = $"annotation:{new string('f', 64)}";
         fixture.Service.Resolve(
             fixture.MutationId,
             "F1",
@@ -1121,8 +1124,22 @@ public sealed class OutboundReconciliationServiceTests
             new(
                 OutboundOperatorDecision.LeaveAmbiguous,
                 OutboundOperatorEvidenceType.ManualAnnotation,
-                $"annotation:{new string('f', 64)}",
+                annotationReference,
                 "manual_comparison_recorded"));
+        var proposed = fixture.Service.Resolve(
+            fixture.MutationId,
+            "F1",
+            "maker",
+            new(
+                OutboundOperatorDecision.VenueAbsent,
+                OutboundOperatorEvidenceType.OfficialExtract,
+                officialReference,
+                "official_extract_attested"));
+        fixture.Service.Approve(
+            fixture.MutationId,
+            proposed.ProposalId!.Value,
+            "F1",
+            "checker");
 
         var payload = JsonSerializer.Serialize(new
         {
@@ -1135,6 +1152,24 @@ public sealed class OutboundReconciliationServiceTests
         Assert.DoesNotContain("CLIENT-SECRET", payload, StringComparison.Ordinal);
         Assert.DoesNotContain("CiphertextBase64\":\"ACCOUNT", payload, StringComparison.Ordinal);
         Assert.Single(fixture.Ledger.SnapshotMutations().Single().AuthoritativeEvidence);
+        var resolutionAudits = audit.Events
+            .Where(evt => evt.Details?.GetValueOrDefault("action")
+                ?.StartsWith("outbound_resolution_", StringComparison.Ordinal) == true)
+            .ToArray();
+        Assert.Equal(3, resolutionAudits.Length);
+        Assert.Equal(
+            annotationReference,
+            resolutionAudits.Single(evt =>
+                evt.Details!["action"] == "outbound_resolution_commit")
+                .Details!["evidence_reference"]);
+        foreach (var evt in resolutionAudits.Where(item =>
+                     item.Details!["action"] != "outbound_resolution_commit"))
+        {
+            Assert.Equal(officialReference, evt.Details!["evidence_reference"]);
+            Assert.NotEqual(
+                evt.Details["evidence_digest"],
+                evt.Details["evidence_reference"]);
+        }
     }
 
     private static string ReasonFor(OutboundOperatorEvidenceType evidenceType) =>

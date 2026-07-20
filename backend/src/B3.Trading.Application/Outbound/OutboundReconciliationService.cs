@@ -459,6 +459,7 @@ public sealed class OutboundReconciliationService
             ["action"] = action,
             ["decision"] = ToMetricValue(request.Decision),
             ["evidence_type"] = ToMetricValue(request.EvidenceType),
+            ["evidence_reference"] = request.EvidenceReference,
             ["evidence_digest"] = evidenceDigest,
             ["reason_code"] = request.ReasonCode,
         };
