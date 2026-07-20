@@ -239,10 +239,10 @@ public static class TradingApplicationCoreServiceCollectionExtensions
         // Q1.3 (#255). GTD expiration scheduler. Registered as both a
         // singleton (so OrderSubmissionService + ExecutionReportProcessor
         // can take an optional ctor dependency on it) AND as a hosted
-        // service (so its StartAsync runs after WAL recovery has
-        // populated WorkingOrderBook — RunRecoveryAndSeedingAsync
-        // awaits before app.Run, IHostedService.StartAsync runs at
-        // app.Run).
+        // service. Its background loop waits for outbound cold-start
+        // classification before performing the one-shot WorkingOrderBook
+        // seed, so this registration may safely precede persistence without
+        // blocking the recovery hosted service from starting.
         services.AddSingleton<B3.Trading.Application.Scheduling.GtdExpirationScheduler>();
         services.AddHostedService(sp =>
             sp.GetRequiredService<B3.Trading.Application.Scheduling.GtdExpirationScheduler>());

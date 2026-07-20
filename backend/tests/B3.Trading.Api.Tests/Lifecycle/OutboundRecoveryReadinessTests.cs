@@ -4,7 +4,9 @@ using B3.Trading.Api;
 using B3.Trading.Application;
 using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Persistence;
+using B3.Trading.Application.Scheduling;
 using B3.Trading.Domain;
+using B3.Trading.Infrastructure.Persistence;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
@@ -54,6 +56,83 @@ public sealed class OutboundRecoveryReadinessTests
                     loser.Services.GetRequiredService<
                         B3.Trading.Application.Persistence.IReconciliationMarkerStore>());
             }
+        }
+        finally
+        {
+            if (Directory.Exists(dataDir))
+                Directory.Delete(dataDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Restart_SeedsRecoveredGtdOrderAfterPersistenceRecovery_AndExpiresIt()
+    {
+        var dataDir = Path.Combine(
+            Directory.GetCurrentDirectory(),
+            ".test-artifacts",
+            "gtd-recovery-" + Guid.NewGuid().ToString("N"));
+        var overrides = new Dictionary<string, string?>
+        {
+            ["Trading:Persistence:Enabled"] = "true",
+            ["Trading:Persistence:DataDirectory"] = dataDir,
+            ["Trading:Persistence:FirmId"] = "default",
+            ["Trading:Persistence:FsyncOnFlush"] = "false",
+            ["Trading:Persistence:SnapshotInterval"] = "00:10:00",
+        };
+        const ulong clOrdId = 8_001;
+
+        try
+        {
+            using (var first = TestAppFactory.WithOverrides(overrides))
+            using (var firstClient = first.CreateClient())
+            {
+                await first.Services
+                    .GetRequiredService<IOutboundRecoveryGate>()
+                    .WaitUntilClassificationCompleteAsync(CancellationToken.None);
+
+                var owner = first.Services
+                    .GetRequiredService<EndClientRegistry>()
+                    .Register(TestAppFactory.TestUser);
+                var order = new Order(
+                    clOrdId,
+                    owner,
+                    "PETR4",
+                    4321,
+                    OrderSide.Buy,
+                    OrderType.Limit,
+                    100,
+                    30m,
+                    firmId: "FIRM01",
+                    timeInForce: TimeInForce.GTD,
+                    goodTillDate: DateTimeOffset.UtcNow.AddSeconds(3));
+                order.MarkWorking();
+                Assert.True(first.Services.GetRequiredService<WorkingOrderBook>().TryAdd(order));
+                first.Services.GetRequiredService<OrderOwnershipMap>().Register(clOrdId, owner);
+                Assert.True(await first.Services
+                    .GetRequiredService<SnapshotService>()
+                    .TryTakeSnapshotAsync());
+            }
+
+            using var second = TestAppFactory.WithOverrides(overrides);
+            using var secondClient = second.CreateClient();
+            await second.Services
+                .GetRequiredService<IOutboundRecoveryGate>()
+                .WaitUntilClassificationCompleteAsync(CancellationToken.None);
+            var scheduler = second.Services.GetRequiredService<GtdExpirationScheduler>();
+
+            await WaitUntilAsync(
+                () => scheduler.TrackedCount == 1,
+                TimeSpan.FromSeconds(5));
+            await WaitUntilAsync(
+                () => scheduler.TrackedCount == 0,
+                TimeSpan.FromSeconds(8));
+
+            var eventStore = second.Services.GetRequiredService<IEventStore>();
+            await eventStore.FlushAsync();
+            var expiredPersisted = false;
+            await foreach (var (_, evt) in eventStore.ReadFromAsync(0))
+                expiredPersisted |= evt is OrderExpiredEvent { ClOrdId: clOrdId };
+            Assert.True(expiredPersisted);
         }
         finally
         {
@@ -185,5 +264,13 @@ public sealed class OutboundRecoveryReadinessTests
             EnqueueCount++;
             return true;
         }
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout)
+    {
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        while (!condition() && DateTimeOffset.UtcNow < deadline)
+            await Task.Delay(20);
+        Assert.True(condition());
     }
 }
