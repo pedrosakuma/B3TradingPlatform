@@ -3385,6 +3385,30 @@ public sealed class OutboundMutationLedgerTests
     }
 
     [Fact]
+    public void ReconciliationRequiredEvent_ReplayDurablyFlagsProvenUnsentMutation()
+    {
+        var writer = Fixture.Create();
+        var ledger = new OutboundMutationLedger(writer.Protector);
+        var replayer = NewReplayer(ledger, new ClOrdIdPrefixRegistry());
+        replayer.Apply(writer.Approved);
+        replayer.Apply(writer.Intent);
+        replayer.Apply(writer.Unsent);
+        var flaggedAt = T0.AddMinutes(1);
+
+        replayer.Apply(new OutboundReconciliationRequiredEvent
+        {
+            MutationId = writer.MutationId,
+            Reason = "AlgoRepegAttemptCapExhausted",
+            TimestampUtc = flaggedAt,
+        });
+
+        var mutation = Assert.Single(ledger.SnapshotMutations());
+        Assert.Equal(OutboundMutationState.ProvenUnsent, mutation.State);
+        Assert.True(mutation.RequiresReconciliation);
+        Assert.Equal(flaggedAt, mutation.StateChangedAtUtc);
+    }
+
+    [Fact]
     public void SnapshotRestore_RepairsPrimaryAndRetryAttemptWatermarksIdempotently()
     {
         var fixture = Fixture.Create();

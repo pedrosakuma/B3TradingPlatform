@@ -383,6 +383,21 @@ public sealed class OutboundMutationLedger
         }
     }
 
+    public void Apply(OutboundReconciliationRequiredEvent evt)
+    {
+        ArgumentNullException.ThrowIfNull(evt);
+        lock (_gate)
+        {
+            var mutation = RequiredMutation(evt.MutationId);
+            if (mutation.RequiresReconciliation) return;
+            _mutations[mutation.MutationId] = mutation with
+            {
+                RequiresReconciliation = true,
+                StateChangedAtUtc = evt.TimestampUtc,
+            };
+        }
+    }
+
     public void Apply(OutboundOperatorResolvedEvent evt)
     {
         ArgumentNullException.ThrowIfNull(evt);

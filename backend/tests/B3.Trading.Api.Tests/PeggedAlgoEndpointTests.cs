@@ -961,6 +961,68 @@ public class PeggedAlgoEndpointTests
     }
 
     [Fact]
+    public async Task Pegged_ReplacedAdoptedBeforeLateOriginalFill_CancelsReplacementAndSuspends()
+    {
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100));
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var original = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+
+        cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+        await WaitFor(
+            () => mock.SubmittedReplaces.Any(request =>
+                request.OriginalClOrdId == original.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "repeg was not submitted");
+        var replace = mock.SubmittedReplaces.Single(request =>
+            request.OriginalClOrdId == original.ClOrdId);
+        await InjectReplacedEr(
+            http,
+            adminToken,
+            replace.NewClOrdId,
+            replace.OriginalClOrdId,
+            replace.NewQuantity);
+        var adopted = await WaitForChildOtherThan(
+            book,
+            algoId,
+            original.ClOrdId,
+            TimeSpan.FromSeconds(3));
+
+        await InjectEr(
+            http,
+            adminToken,
+            original.ClOrdId,
+            "Fill",
+            lastQty: original.Quantity);
+        await WaitFor(
+            () => mock.SubmittedCancels.Any(request =>
+                request.OrigClOrdId == adopted.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "late original fill did not cancel the adopted replacement");
+        await WaitForAlgoStatus(http, token, algoId, "Suspended");
+
+        var terminal = await GetAlgo(http, token, algoId);
+        Assert.Equal(100, terminal.GetProperty("filledQuantity").GetInt64());
+        Assert.Equal(
+            "ReconciliationRequired",
+            terminal.GetProperty("terminalReason").GetString());
+        var ledger = f.Services.GetRequiredService<
+            B3.Trading.Application.Outbound.OutboundMutationLedger>();
+        Assert.Contains(
+            ledger.GetAlgoMutations("default", ulong.Parse(algoId)),
+            mutation => mutation.AlgoOriginIdentity?.ActionKind
+                    == B3.Trading.Application.Outbound.AlgoOutboundActionKind.Repeg
+                && mutation.RequiresReconciliation);
+    }
+
+    [Fact]
     public async Task Pegged_ProvenUnsentRepeg_AttemptCapSuspendsForReconciliation()
     {
         using var f = TestAppFactory.WithOverrides(
@@ -1010,6 +1072,7 @@ public class PeggedAlgoEndpointTests
         Assert.Equal(
             B3.Trading.Application.Outbound.OutboundMutationLedger.MaxOutboundAttempts,
             mutation.Attempts.Count);
+        Assert.True(mutation.RequiresReconciliation);
     }
 
     [Fact]
@@ -1811,30 +1874,26 @@ public class PeggedAlgoEndpointTests
 
         var newOrdersBeforeLateEr = mock.SubmittedNewOrders.Count;
 
-        // Late Fill ER for child1 (already-Cancelled). The processor
+        // Late Fill ER for child1 (already Replaced). The processor
         // preserves the terminal status (Order.ApplyCumulativeFill
-        // line ~367) but enqueues the signal because cumQty advanced.
-        // The engine then sees child1.Status==Cancelled and routes
-        // into the Cancelled-case; without the history-ring dedup
-        // the parent would be Suspended/VenueCancelled.
+        // line ~527) but enqueues the signal because cumQty advanced.
+        // The replacement capacity is now stale, so the engine must
+        // fail closed instead of silently leaving child2 working.
         await InjectEr(http, adminToken, child1.ClOrdId, "Fill", lastQty: 10);
 
-        // Give the consumer loop time to drain the late ER signal.
-        await Task.Delay(200);
-
+        await WaitForAlgoStatus(http, token, algoId, "Suspended");
         var snap = await GetAlgo(http, token, algoId);
-        Assert.Equal("Working", snap.GetProperty("status").GetString());
-        Assert.Equal("None", snap.GetProperty("terminalReason").GetString());
+        Assert.Equal(
+            "ReconciliationRequired",
+            snap.GetProperty("terminalReason").GetString());
 
-        // No new replacement child spawned from the late ER — only
-        // the two cycles' children (child1 terminal + child2 still
-        // working) are in the book.
+        // No brand-new slice is spawned from the late ER.
         Assert.Equal(newOrdersBeforeLateEr, mock.SubmittedNewOrders.Count);
-        var liveChildren = book.EnumerateChildrenOf("default", algoIdNum)
-            .Where(c => c.Status is OrderStatus.PendingNew or OrderStatus.Working or OrderStatus.PartiallyFilled)
-            .ToList();
-        Assert.Single(liveChildren);
-        Assert.Equal(child2.ClOrdId, liveChildren[0].ClOrdId);
+        Assert.Contains(
+            f.Services.GetRequiredService<
+                B3.Trading.Application.Outbound.OutboundMutationLedger>()
+                .GetAlgoMutations("default", algoIdNum),
+            mutation => mutation.RequiresReconciliation);
     }
 
     [Fact]

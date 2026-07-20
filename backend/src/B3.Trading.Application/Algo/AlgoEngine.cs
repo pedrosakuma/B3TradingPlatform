@@ -1015,6 +1015,17 @@ public sealed class AlgoEngine : BackgroundService
             algo.RecordFill(delta);
             rt.ChildBookedCum[child.ClOrdId] = child.CumulativeQuantity;
         }
+        if (delta > 0
+            && child.Status == OrderStatus.Replaced
+            && rt.LiveChildClOrdId != child.ClOrdId)
+        {
+            await HandleLateFillOnReplacedOriginalAsync(
+                algo,
+                rt,
+                child,
+                ct).ConfigureAwait(false);
+            return;
+        }
 
         // Non-terminal child: nothing more to do (the next ER will land).
         if (!IsChildTerminal(child))
@@ -2243,40 +2254,46 @@ public sealed class AlgoEngine : BackgroundService
         ulong originalClOrdId,
         string outcome)
     {
+        var pendingCycleOriginal =
+            _peggedRepeg?.TryGet(algo.FirmId, algo.AlgoId)?.CancelledChildClOrdId;
+        var cleanupOriginalClOrdId = pendingCycleOriginal ?? originalClOrdId;
         rt.RepegPending = false;
         rt.LastRepegCancelledChildId = null;
         rt.PeggedReplacedHoldTicks = 0;
 
-        if (_replacements is not null
-            && _replacements.TryConsumeByOriginal(
-                originalClOrdId,
-                out var staleIntent,
-                out var ambiguousHeld)
-            && staleIntent is not null
-            && _replaceMargin is not null)
+        AbortReplacementIntent(cleanupOriginalClOrdId);
+        if (cleanupOriginalClOrdId != originalClOrdId)
+            AbortReplacementIntent(originalClOrdId);
+
+        var mutation = FindLatestAlgoMutation(
+            algo,
+            cleanupOriginalClOrdId,
+            AlgoOutboundActionKind.Repeg);
+        if (mutation is { RequiresReconciliation: false })
         {
-            try
-            {
-                _replaceMargin.AbortReplace(staleIntent.NewClOrdId);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(
-                    ex,
-                    "AlgoEngine pegged repeg terminal-original cleanup: AbortReplace failed for new ClOrdID {NewClOrdId} (ambiguousHeld={Ambiguous}).",
-                    staleIntent.NewClOrdId,
-                    ambiguousHeld);
-            }
+            MarkOutboundReconciliationRequired(
+                mutation.MutationId,
+                "AlgoRepegFailClosed");
         }
 
-        if (_peggedRepeg?.TryGet(algo.FirmId, algo.AlgoId) is not null)
+        if (pendingCycleOriginal is not null)
         {
-            SelfHealOrphanRepeg(algo.FirmId, algo.AlgoId, originalClOrdId);
+            SelfHealOrphanRepeg(
+                algo.FirmId,
+                algo.AlgoId,
+                cleanupOriginalClOrdId);
         }
         _peggedRepeg?.UnmarkCancelledChild(
             algo.FirmId,
             algo.AlgoId,
-            originalClOrdId);
+            cleanupOriginalClOrdId);
+        if (cleanupOriginalClOrdId != originalClOrdId)
+        {
+            _peggedRepeg?.UnmarkCancelledChild(
+                algo.FirmId,
+                algo.AlgoId,
+                originalClOrdId);
+        }
         MetricsRegistry.AlgoPeggedRepegFailed.Add(1);
         _logger.LogWarning(
             "AlgoEngine pegged repeg for {Firm}/{AlgoId} child {Child} cannot adopt a replacement: {Outcome}; suspending for reconciliation.",
@@ -2289,6 +2306,120 @@ public sealed class AlgoEngine : BackgroundService
             rt,
             AlgoStatus.Suspended,
             AlgoTerminalReason.ReconciliationRequired).ConfigureAwait(false);
+
+        void AbortReplacementIntent(ulong candidateOriginalClOrdId)
+        {
+            if (_replacements is null
+                || !_replacements.TryConsumeByOriginal(
+                    candidateOriginalClOrdId,
+                    out var staleIntent,
+                    out var ambiguousHeld)
+                || staleIntent is null
+                || _replaceMargin is null)
+            {
+                return;
+            }
+            try
+            {
+                _replaceMargin.AbortReplace(staleIntent.NewClOrdId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "AlgoEngine pegged repeg fail-closed cleanup: AbortReplace failed for new ClOrdID {NewClOrdId} (ambiguousHeld={Ambiguous}).",
+                    staleIntent.NewClOrdId,
+                    ambiguousHeld);
+            }
+        }
+    }
+
+    private async Task HandleLateFillOnReplacedOriginalAsync(
+        Algo algo,
+        AlgoParentRuntime rt,
+        Order retiredOriginal,
+        CancellationToken ct)
+    {
+        if (rt.LiveChildClOrdId is { } liveReplacementClOrdId
+            && _orders.TryGet(liveReplacementClOrdId, out var liveReplacement)
+            && liveReplacement is not null
+            && !IsChildTerminal(liveReplacement))
+        {
+            var cancelOrigin = new AlgoOutboundOriginIdentity(
+                algo.AlgoId,
+                AlgoOutboundActionKind.CancelChild,
+                NextAlgoActionSequence(
+                    algo.FirmId,
+                    algo.AlgoId,
+                    AlgoOutboundActionKind.CancelChild));
+            var cancel = await _canceller.CancelAsync(
+                liveReplacement.Owner,
+                liveReplacement.ClOrdId,
+                ct,
+                firmId: algo.FirmId,
+                origin: OutboundMutationOrigin.Algo,
+                algoOriginIdentity: cancelOrigin).ConfigureAwait(false);
+            if (cancel.Kind != OrderCancelResultKind.Accepted)
+            {
+                _logger.LogWarning(
+                    "AlgoEngine late fill on replaced child {OldChild} could not cancel adopted replacement {LiveChild} for {Firm}/{AlgoId}: {Kind} {Reason}.",
+                    retiredOriginal.ClOrdId,
+                    liveReplacement.ClOrdId,
+                    algo.FirmId,
+                    algo.AlgoId,
+                    cancel.Kind,
+                    cancel.Reason);
+            }
+        }
+
+        var repegMutation = FindLatestAlgoMutation(
+            algo,
+            retiredOriginal.ClOrdId,
+            AlgoOutboundActionKind.Repeg);
+        if (repegMutation is not null)
+        {
+            MarkOutboundReconciliationRequired(
+                repegMutation.MutationId,
+                "LateFillOnReplacedAlgoOriginal");
+        }
+        await FailClosedPeggedRepegAsync(
+            algo,
+            rt,
+            retiredOriginal.ClOrdId,
+            "late fill landed on a replaced original after replacement adoption")
+            .ConfigureAwait(false);
+    }
+
+    private bool MarkOutboundReconciliationRequired(
+        OutboundMutationId mutationId,
+        string reason)
+    {
+        var evt = new OutboundReconciliationRequiredEvent
+        {
+            MutationId = mutationId,
+            Reason = reason,
+            TimestampUtc = _clock.GetUtcNow(),
+        };
+        try
+        {
+            _dispatcher.Dispatch(
+                evt,
+                () => _outboundLedger.Apply(evt));
+            return true;
+        }
+        catch (Exception ex) when (ex is WalBackpressureException or WalFaultedException)
+        {
+            MetricsRegistry.WalBackpressure.Add(1,
+                new KeyValuePair<string, object?>(
+                    "call_site",
+                    "algo.outbound.reconciliation-required"));
+            _logger.LogError(
+                ex,
+                "AlgoEngine could not mark outbound mutation {MutationId} reconciliation-required ({Reason}).",
+                mutationId,
+                reason);
+            return false;
+        }
     }
 
     /// <summary>
@@ -2710,6 +2841,12 @@ public sealed class AlgoEngine : BackgroundService
                 && failedMutation.Attempts.Count
                     >= OutboundMutationLedger.MaxOutboundAttempts)
             {
+                if (!MarkOutboundReconciliationRequired(
+                        failedMutation.MutationId,
+                        "AlgoRepegAttemptCapExhausted"))
+                {
+                    return;
+                }
                 await FailClosedPeggedRepegAsync(
                     algo,
                     rt,
