@@ -1154,7 +1154,7 @@ public class PeggedAlgoEndpointTests
     }
 
     [Fact]
-    public async Task Pegged_ProvenUnsentRepeg_RetriesSameOriginAndSelfHeals()
+    public async Task Pegged_ProvenUnsentRepeg_RetriesFrozenCommandWhenMarketRevertsToLiveChild()
     {
         using var f = TestAppFactory.WithOverrides(
             Simulator(),
@@ -1190,7 +1190,7 @@ public class PeggedAlgoEndpointTests
             TimeSpan.FromSeconds(3),
             "initial repeg did not become ProvenUnsent");
         var frozenPrice = gateway.AttemptedReplacePrices.Single();
-        cache.UpdateBookTop("PETR4", 31.5m, 32.5m, DateTimeOffset.UtcNow);
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
         await WaitFor(
             () => gateway.AttemptedReplaceClOrdIds.Count == 2,
             TimeSpan.FromSeconds(3),

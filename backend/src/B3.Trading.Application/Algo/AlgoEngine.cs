@@ -2313,8 +2313,14 @@ public sealed class AlgoEngine : BackgroundService
             return;
         }
 
+        var explicitRetry = FindSoleRetryableProvenUnsentMutation(
+            algo,
+            child.ClOrdId,
+            AlgoOutboundActionKind.Repeg);
+        var retryCommand =
+            explicitRetry?.Approval?.CanonicalCommandNonSensitive;
         var target = ResolvePeggedTarget(algo, pgp);
-        if (target is null)
+        if (retryCommand is null && target is null)
         {
             // No live ref yet — don't disturb the working slice; next
             // tick may have a price.
@@ -2322,8 +2328,12 @@ public sealed class AlgoEngine : BackgroundService
         }
 
         var currentPrice = child.Price ?? 0m;
-        if (currentPrice <= 0m
-            || !PeggedPlan.IsRepegNeeded(currentPrice, target.Value, pgp.TickSize))
+        if (retryCommand is null
+            && (currentPrice <= 0m
+                || !PeggedPlan.IsRepegNeeded(
+                    currentPrice,
+                    target!.Value,
+                    pgp.TickSize)))
         {
             // No drift — record eval-at so the throttle holds.
             rt.PeggedLastEvalUtc = now;
@@ -2378,14 +2388,8 @@ public sealed class AlgoEngine : BackgroundService
         // Resolved). The next scheduler tick re-evaluates drift; if
         // it was an ambiguous send the #329 watchdog +
         // AlgoScheduler.SweepAmbiguousReplaceIntents bound recovery.
-        var explicitRetry = FindSoleRetryableProvenUnsentMutation(
-            algo,
-            child.ClOrdId,
-            AlgoOutboundActionKind.Repeg);
-        var retryCommand =
-            explicitRetry?.Approval?.CanonicalCommandNonSensitive;
         var dispatchQuantity = retryCommand?.Quantity ?? child.Quantity;
-        var dispatchPrice = retryCommand?.Price ?? target.Value;
+        var dispatchPrice = retryCommand?.Price ?? target!.Value;
         bool replaced;
         try
         {
