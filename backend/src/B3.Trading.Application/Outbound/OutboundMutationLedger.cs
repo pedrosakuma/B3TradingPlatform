@@ -489,14 +489,21 @@ public sealed class OutboundMutationLedger
                     return;
                 throw TransitionError("Conflicting operator resolution.");
             }
-            if (evt.Decision == OutboundOperatorDecision.VenueAbsent
-                && evt.EvidenceType == OutboundOperatorEvidenceType.TerminalExecutionReport
-                && evt.EvidenceReference is { } evidenceReference
-                && _inboundEvidence.TryGetValue(evidenceReference, out var terminalEvidence)
-                && terminalEvidence.MatchedMutationIds.Contains(evt.MutationId)
-                && IsVenueAcknowledgmentOnlyExecutionReportKind(terminalEvidence.MessageKind))
-                throw TransitionError(
-                    "Fill or Replaced execution reports cannot prove venue absence.");
+            if (evt.EvidenceType == OutboundOperatorEvidenceType.TerminalExecutionReport)
+            {
+                if (evt.EvidenceReference is not { } terminalEvidenceReference
+                    || !HasAuthoritativeTerminalExecutionReportUnsafe(
+                        mutation,
+                        terminalEvidenceReference,
+                        out var terminalEvidence))
+                    throw TransitionError(
+                        "Terminal execution report evidence is not currently authoritative.");
+                if (evt.Decision == OutboundOperatorDecision.VenueAbsent
+                    && IsVenueAcknowledgmentOnlyExecutionReportKind(
+                        terminalEvidence.MessageKind))
+                    throw TransitionError(
+                        "Fill or Replaced execution reports cannot prove venue absence.");
+            }
             if (mutation.OperatorEvidence.Any(
                     evidence => evidence.Decision != OutboundOperatorDecision.LeaveAmbiguous)
                 && mutation.State is OutboundMutationState.OperatorResolved
@@ -1619,22 +1626,10 @@ public sealed class OutboundMutationLedger
             return evidenceType switch
             {
                 OutboundOperatorEvidenceType.TerminalExecutionReport =>
-                    _inboundEvidence.TryGetValue(evidenceReference, out var executionReport)
-                    && executionReport.Kind == InboundVenueEvidenceKind.ExecutionReport
-                    && (executionReport.Disposition == InboundVenueEvidenceDisposition.Matched
-                        || (executionReport.Disposition
-                                == InboundVenueEvidenceDisposition.Conflicting
-                            && executionReport.AuthoritativeTerminalContradiction))
-                    && executionReport.MatchedMutationIds.Contains(mutationId)
-                    && string.Equals(
-                        executionReport.FirmId,
-                        mutation.FirmId,
-                        StringComparison.Ordinal)
-                    && executionReport.SessionId is > 0
-                    && executionReport.SessionVerId is > 0
-                    && executionReport.InboundSeqNum is > 0
-                    && executionReport.SendingTime is not null
-                    && IsTerminalExecutionReportKind(executionReport.MessageKind),
+                    HasAuthoritativeTerminalExecutionReportUnsafe(
+                        mutation,
+                        evidenceReference,
+                        out _),
                 OutboundOperatorEvidenceType.ContractedNotApplied =>
                     _inboundEvidence.TryGetValue(evidenceReference, out var notApplied)
                     && notApplied.Kind == InboundVenueEvidenceKind.NotApplied
@@ -1664,15 +1659,39 @@ public sealed class OutboundMutationLedger
         lock (_gate)
         {
             if (!_mutations.TryGetValue(mutationId, out var mutation)
-                || !_inboundEvidence.TryGetValue(evidenceReference, out var evidence)
-                || evidence.Kind != InboundVenueEvidenceKind.ExecutionReport
-                || !evidence.MatchedMutationIds.Contains(mutationId)
-                || !string.Equals(evidence.FirmId, mutation.FirmId, StringComparison.Ordinal)
-                || !IsTerminalExecutionReportKind(evidence.MessageKind))
+                || !HasAuthoritativeTerminalExecutionReportUnsafe(
+                    mutation,
+                    evidenceReference,
+                    out var evidence))
                 return false;
             return decision != OutboundOperatorDecision.VenueAbsent
                 || !IsVenueAcknowledgmentOnlyExecutionReportKind(evidence.MessageKind);
         }
+    }
+
+    private bool HasAuthoritativeTerminalExecutionReportUnsafe(
+        OutboundMutationSnapshot mutation,
+        string evidenceReference,
+        out InboundVenueEvidenceSnapshot evidence)
+    {
+        if (_inboundEvidence.TryGetValue(evidenceReference, out var found)
+            && found.Kind == InboundVenueEvidenceKind.ExecutionReport
+            && (found.Disposition == InboundVenueEvidenceDisposition.Matched
+                || (found.Disposition == InboundVenueEvidenceDisposition.Conflicting
+                    && found.AuthoritativeTerminalContradiction))
+            && found.MatchedMutationIds.Contains(mutation.MutationId)
+            && string.Equals(found.FirmId, mutation.FirmId, StringComparison.Ordinal)
+            && found.SessionId is > 0
+            && found.SessionVerId is > 0
+            && found.InboundSeqNum is > 0
+            && found.SendingTime is not null
+            && IsTerminalExecutionReportKind(found.MessageKind))
+        {
+            evidence = found;
+            return true;
+        }
+        evidence = null!;
+        return false;
     }
 
     public IReadOnlyList<OutboundReconciliationMetricSnapshot> GetReconciliationMetrics(
@@ -2784,8 +2803,9 @@ public sealed class OutboundMutationLedger
                 or OutboundOperatorEvidenceType.OfficialExtract))
             throw TransitionError("Capacity release requires authoritative venue evidence.");
         if (decision == OutboundOperatorDecision.VenueAcknowledged
-            && evidenceType == OutboundOperatorEvidenceType.ContractedNotApplied)
-            throw TransitionError("Contracted NotApplied cannot prove venue acknowledgment.");
+            && evidenceType != OutboundOperatorEvidenceType.TerminalExecutionReport)
+            throw TransitionError(
+                "Venue acknowledgment requires terminal execution report evidence.");
     }
 
     private static bool IsTerminalExecutionReportKind(string? messageKind) =>

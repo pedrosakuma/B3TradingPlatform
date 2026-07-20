@@ -453,7 +453,7 @@ public class OrdersModifyEndpointTests
         ledger.Apply(new OutboundOperatorResolvedEvent
         {
             MutationId = id,
-            Decision = OutboundOperatorDecision.VenueAcknowledged,
+            Decision = OutboundOperatorDecision.VenueAbsent,
             EvidenceType = OutboundOperatorEvidenceType.OfficialExtract,
             EvidenceDigest = new string('a', 64),
             OperatorRef = $"api-test-{mutationId}",

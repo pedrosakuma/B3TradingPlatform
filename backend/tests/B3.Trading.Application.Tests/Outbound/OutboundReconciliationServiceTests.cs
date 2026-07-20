@@ -906,6 +906,115 @@ public sealed class OutboundReconciliationServiceTests
     }
 
     [Fact]
+    public void EvidenceRevokedDuringAuditWindow_BlocksNonProposalResolution()
+    {
+        var fixture = Fixture.Create();
+        var evidenceReference = fixture.RegisterEvidence(
+            OutboundOperatorEvidenceType.OfficialExtract,
+            '3');
+        var proposed = fixture.Service.Resolve(
+            fixture.MutationId,
+            "F1",
+            "maker",
+            new(
+                OutboundOperatorDecision.VenueAbsent,
+                OutboundOperatorEvidenceType.OfficialExtract,
+                evidenceReference,
+                "official_extract_attested"));
+        fixture.Service.Approve(
+            fixture.MutationId,
+            proposed.ProposalId!.Value,
+            "F1",
+            "checker");
+        var lateEr = fixture.TerminalEr() with
+        {
+            SessionVerId = 3,
+            InboundSeqNum = 93,
+            TimestampUtc = T0.AddMinutes(3),
+        };
+        fixture.Ledger.ApplyVenueAcknowledgement(lateEr);
+        var authoritativeId = Assert.Single(
+            fixture.Ledger.GetInboundEvidenceForMutation(fixture.MutationId))
+            .EvidenceId;
+        var audit = new CallbackAuditLogger
+        {
+            OnCommitted = () => fixture.Ledger.ApplyVenueAcknowledgement(lateEr with
+            {
+                ExecKind = "Canceled",
+                RejectReason = null,
+                TimestampUtc = T0.AddMinutes(4),
+            }),
+        };
+        var service = new OutboundReconciliationService(
+            fixture.Ledger,
+            new EventDispatcher(new NullEventStore()),
+            audit,
+            fixture.Margin,
+            fixture.ReplaceMargin,
+            fixture.Replacements);
+
+        Assert.Throws<OutboundReconciliationConflictException>(() =>
+            service.Resolve(
+                fixture.MutationId,
+                "F1",
+                "second-operator",
+                new(
+                    OutboundOperatorDecision.VenueAcknowledged,
+                    OutboundOperatorEvidenceType.TerminalExecutionReport,
+                    authoritativeId,
+                    "late_contradiction_reconciled")));
+
+        var evidence = fixture.Ledger
+            .GetInboundEvidenceForMutation(fixture.MutationId)
+            .Single(item => item.EvidenceId == authoritativeId);
+        Assert.False(evidence.AuthoritativeTerminalContradiction);
+        var mutation = fixture.Ledger.SnapshotMutations().Single();
+        Assert.Equal(OutboundMutationState.Ambiguous, mutation.State);
+        Assert.True(mutation.RequiresReconciliation);
+        Assert.Single(mutation.OperatorEvidence);
+        Assert.Throws<InvalidOperationException>(() =>
+            fixture.Ledger.Apply(new OutboundOperatorResolvedEvent
+            {
+                MutationId = fixture.MutationId,
+                Decision = OutboundOperatorDecision.VenueAcknowledged,
+                EvidenceType = OutboundOperatorEvidenceType.TerminalExecutionReport,
+                EvidenceReference = authoritativeId,
+                EvidenceDigest = new string('e', 64),
+                ReasonCode = "late_contradiction_reconciled",
+                OperatorRef = "second-operator",
+                ReleaseCapacity = false,
+                ResolvedAtUtc = T0.AddMinutes(5),
+                TimestampUtc = T0.AddMinutes(5),
+            }));
+    }
+
+    [Theory]
+    [InlineData(OutboundOperatorEvidenceType.ContractedNotApplied)]
+    [InlineData(OutboundOperatorEvidenceType.VenueMassAction)]
+    [InlineData(OutboundOperatorEvidenceType.OfficialExtract)]
+    public void AbsenceEvidence_CannotProveVenueAcknowledgment(
+        OutboundOperatorEvidenceType evidenceType)
+    {
+        var fixture = Fixture.Create();
+        var evidenceReference = fixture.PrepareEvidence(evidenceType);
+
+        Assert.Throws<OutboundReconciliationValidationException>(() =>
+            fixture.Service.Resolve(
+                fixture.MutationId,
+                "F1",
+                "operator",
+                new(
+                    OutboundOperatorDecision.VenueAcknowledged,
+                    evidenceType,
+                    evidenceReference,
+                    ReasonFor(evidenceType))));
+
+        var mutation = fixture.Ledger.SnapshotMutations().Single();
+        Assert.Empty(mutation.OperatorEvidence);
+        Assert.Empty(mutation.ResolutionProposals);
+    }
+
+    [Fact]
     public void ReopenedReplace_RestoresOriginalGuardAndReplacedErCanResolve()
     {
         var fixture = Fixture.Create(kind: OutboundMutationKind.Replace);

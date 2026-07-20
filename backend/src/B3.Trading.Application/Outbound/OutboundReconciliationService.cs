@@ -573,9 +573,9 @@ public sealed class OutboundReconciliationService
             throw new OutboundReconciliationValidationException(
                 "The outbound mutation already has a terminal operator resolution.");
         if (request.Decision == OutboundOperatorDecision.VenueAcknowledged
-            && request.EvidenceType == OutboundOperatorEvidenceType.ContractedNotApplied)
+            && request.EvidenceType != OutboundOperatorEvidenceType.TerminalExecutionReport)
             throw new OutboundReconciliationValidationException(
-                "Contracted NotApplied cannot prove venue acknowledgment.");
+                "Venue acknowledgment requires terminal execution report evidence.");
         if (mutation.State == OutboundMutationState.VenueAcknowledged
             && request.Decision != OutboundOperatorDecision.VenueAcknowledged)
             throw new OutboundReconciliationValidationException(
@@ -696,7 +696,27 @@ public sealed class OutboundReconciliationService
                 or OutboundMutationState.VenueAcknowledged)
             return false;
         if (resolved.ProposalId is not { } proposalId)
-            return current.RequiresReconciliation;
+        {
+            if (resolved.EvidenceReference is not { } evidenceReference
+                || resolved.ReasonCode is not { } reasonCode)
+                return false;
+            var request = new OutboundOperatorResolutionRequest(
+                resolved.Decision,
+                resolved.EvidenceType,
+                evidenceReference,
+                reasonCode);
+            if (DigestResolution(resolved.MutationId, request) != resolved.EvidenceDigest)
+                return false;
+            try
+            {
+                ValidateRequest(current, request);
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+            return true;
+        }
         var proposal = current.ResolutionProposals.FirstOrDefault(
             candidate => candidate.ProposalId == proposalId);
         if (proposal is null
