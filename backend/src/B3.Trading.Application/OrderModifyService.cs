@@ -46,6 +46,7 @@ public sealed class OrderModifyService
     private readonly CancelReplaceOutboundCoordinator? _outboundCoordinator;
     private readonly RestOrderIdempotencyStore? _restIdempotency;
     private readonly TimeProvider _clock;
+    private readonly IOutboundRecoveryGate _outboundRecovery;
 
     public OrderModifyService(
         ClOrdIdPrefixRegistry clOrdIds,
@@ -67,7 +68,8 @@ public sealed class OrderModifyService
         CancelReplaceApprovalFactory? approvalFactory = null,
         CancelReplaceOutboundCoordinator? outboundCoordinator = null,
         RestOrderIdempotencyStore? restIdempotency = null,
-        TimeProvider? clock = null)
+        TimeProvider? clock = null,
+        IOutboundRecoveryGate? outboundRecovery = null)
     {
         _clOrdIds = clOrdIds;
         _ownership = ownership;
@@ -93,6 +95,7 @@ public sealed class OrderModifyService
         _outboundCoordinator = outboundCoordinator;
         _restIdempotency = restIdempotency;
         _clock = clock ?? TimeProvider.System;
+        _outboundRecovery = outboundRecovery ?? ImmediateOutboundRecoveryGate.Instance;
     }
 
     /// <summary>
@@ -122,6 +125,12 @@ public sealed class OrderModifyService
     /// </summary>
     public async Task<OrderModifyResult> ModifyAsync(OrderModifyRequest req, CancellationToken ct)
     {
+        if (req?.FirmId is { } recoveryFirm
+                ? !_outboundRecovery.IsBusinessIngressOpen(recoveryFirm)
+                : !_outboundRecovery.IsReady)
+        {
+            return OrderModifyResult.Drained;
+        }
         ArgumentNullException.ThrowIfNull(req);
 
         if (_drain.IsDraining)

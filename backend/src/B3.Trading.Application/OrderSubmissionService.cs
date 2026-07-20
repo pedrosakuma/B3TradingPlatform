@@ -48,6 +48,7 @@ public sealed class OrderSubmissionService
     private readonly NewOrderOutboundCoordinator? _outboundCoordinator;
     private readonly RestOrderIdempotencyStore? _restIdempotency;
     private readonly TimeProvider _clock;
+    private readonly IOutboundRecoveryGate _outboundRecovery;
 
     public OrderSubmissionService(
         ClOrdIdPrefixRegistry clOrdIds,
@@ -70,7 +71,8 @@ public sealed class OrderSubmissionService
         NewOrderApprovalFactory? approvalFactory = null,
         NewOrderOutboundCoordinator? outboundCoordinator = null,
         RestOrderIdempotencyStore? restIdempotency = null,
-        TimeProvider? clock = null)
+        TimeProvider? clock = null,
+        IOutboundRecoveryGate? outboundRecovery = null)
     {
         _clOrdIds = clOrdIds;
         _ownership = ownership;
@@ -93,6 +95,7 @@ public sealed class OrderSubmissionService
         _outboundCoordinator = outboundCoordinator;
         _restIdempotency = restIdempotency;
         _clock = clock ?? TimeProvider.System;
+        _outboundRecovery = outboundRecovery ?? ImmediateOutboundRecoveryGate.Instance;
     }
 
     /// <summary>
@@ -103,6 +106,12 @@ public sealed class OrderSubmissionService
     /// </summary>
     public async Task<OrderSubmissionResult> SubmitAsync(OrderSubmissionRequest req, CancellationToken ct)
     {
+        if (req is null
+                ? !_outboundRecovery.IsReady
+                : !_outboundRecovery.IsBusinessIngressOpen(req.FirmId))
+        {
+            return OrderSubmissionResult.Drained;
+        }
         ArgumentNullException.ThrowIfNull(req);
 
         if (_drain.IsDraining)

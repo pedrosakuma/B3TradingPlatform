@@ -9,12 +9,9 @@ namespace B3.Trading.Application;
 /// <summary>
 /// Shared session-roll reconciliation policy (#380 / #504). When a firm's
 /// venue session version advances past the baseline we last reconciled
-/// against, un-acked <see cref="OrderStatus.PendingNew"/> orders are the
-/// one class that cannot survive: the venue never acknowledged them, so a
-/// session roll guarantees they do not exist under any session version.
-/// Working / PartiallyFilled orders are deliberately KEPT — FIXP
-/// retransmission resynchronises them during recovery, and a terminal ER
-/// (Cancel/Fill) arrives if the venue dropped them.
+/// against, the roll is recorded diagnostically but never terminalises an
+/// order. Session identity is transport evidence, not authoritative proof
+/// that a business mutation was absent at the venue.
 ///
 /// <para>
 /// This is the single source of truth for that policy. Both the boot-time
@@ -27,14 +24,13 @@ namespace B3.Trading.Application;
 public static class FirmSessionRollReconciliation
 {
     /// <summary>
-    /// Cancels every <see cref="OrderStatus.PendingNew"/> order attached to
-    /// <paramref name="firmId"/> and returns the number actually transitioned
-    /// to <see cref="OrderStatus.Cancelled"/>. The caller owns serialisation:
+    /// Records a session roll while preserving every pending-new order and
+    /// returns the number preserved. The caller owns serialisation:
     /// boot reconcile runs before any event loop starts; the runtime reactor
     /// runs under the <see cref="EventDispatcher"/> lock. Emits the same log
     /// + metrics regardless of caller so dashboards/alerts are uniform.
     /// </summary>
-    public static int CancelPendingNewForRolledFirm(
+    public static int PreservePendingNewForRolledFirm(
         WorkingOrderBook orders,
         string firmId,
         uint fromVerId,
@@ -45,37 +41,18 @@ public static class FirmSessionRollReconciliation
         ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
         ArgumentNullException.ThrowIfNull(logger);
 
-        var cancelled = 0;
-        foreach (var order in orders.EnumerateForFirm(firmId, includeTerminal: false))
-        {
-            if (order.Status == OrderStatus.PendingNew)
-            {
-                order.MarkCancelled();
-                if (order.Status == OrderStatus.Cancelled)
-                {
-                    cancelled++;
-                }
-            }
-        }
+        var preserved = orders.EnumerateForFirm(firmId, includeTerminal: false)
+            .Count(static order => order.Status == OrderStatus.PendingNew);
 
-        if (cancelled > 0)
-        {
-            logger.LogWarning(
-                "event=recovery.session-rolled firm={Firm} from={From} to={To} pendingNewCancelled={Cancelled}",
-                firmId, fromVerId, toVerId, cancelled);
-        }
-        else
-        {
-            logger.LogInformation(
-                "event=recovery.session-rolled firm={Firm} from={From} to={To} (FIXP recovery handles sync)",
-                firmId, fromVerId, toVerId);
-        }
+        logger.LogWarning(
+            "event=recovery.session-rolled firm={Firm} from={From} to={To} pendingNewPreserved={Preserved} reason=session_roll_is_not_venue_absence_evidence",
+            firmId, fromVerId, toVerId, preserved);
 
         MetricsRegistry.RecoverySessionRolledFirms.Add(1,
             new KeyValuePair<string, object?>("firm", firmId));
-        MetricsRegistry.RecoverySessionRolledOrdersDropped.Add(cancelled,
+        MetricsRegistry.RecoverySessionRolledOrdersDropped.Add(0,
             new KeyValuePair<string, object?>("firm", firmId));
-        return cancelled;
+        return preserved;
     }
 
     /// <summary>
@@ -133,10 +110,8 @@ public interface IConnectSessionRollReactor
 /// roll it does two things, in order:
 ///
 /// <list type="number">
-///   <item>reaps un-acked <see cref="OrderStatus.PendingNew"/> orders for the
-///         rolled firm under the <see cref="EventDispatcher"/> lock (in-memory
-///         <c>MarkCancelled</c>, durable via the next snapshot — the #504
-///         model);</item>
+///   <item>preserves un-acked <see cref="OrderStatus.PendingNew"/> orders and
+///         records the roll under the <see cref="EventDispatcher"/> lock;</item>
 ///   <item>flags surviving <see cref="OrderStatus.Working"/> /
 ///         <see cref="OrderStatus.PartiallyFilled"/> orders STALE via
 ///         <see cref="OrderStalenessService.MarkAllWorkingByFirm"/>. Unlike the
@@ -191,9 +166,9 @@ public sealed class PendingNewReapingConnectRollReactor : IConnectSessionRollRea
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
 
-        // Phase 1: reap un-acked PendingNew under the dispatcher lock.
+        // Phase 1: preserve un-acked PendingNew under the dispatcher lock.
         _dispatcher.RunExclusive(() =>
-            FirmSessionRollReconciliation.CancelPendingNewForRolledFirm(
+            FirmSessionRollReconciliation.PreservePendingNewForRolledFirm(
                 _orders, firmId, fromVerId, toVerId, _logger));
 
         // Phase 2: flag surviving Working / PartiallyFilled stale. NOT nested

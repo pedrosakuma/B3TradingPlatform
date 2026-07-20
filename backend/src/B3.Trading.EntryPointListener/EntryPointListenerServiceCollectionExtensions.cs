@@ -131,7 +131,8 @@ public static class EntryPointListenerServiceCollectionExtensions
                     sp.GetService<OrderSubmissionService>()!,
                     sp.GetService<OrderCancelService>()!,
                     sp.GetService<IUserBotOrderMappingRegistry>()!,
-                    sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<Hosting.FixpListenerHostedService>>()));
+                    sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<Hosting.FixpListenerHostedService>>(),
+                    sp.GetService<B3.Trading.Application.Outbound.IOutboundRecoveryGate>()));
 
             // Use an explicit factory so DI binds to the internal
             // overload that accepts FixpOrderAdapter (issue #185).

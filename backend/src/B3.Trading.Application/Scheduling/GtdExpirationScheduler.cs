@@ -1,4 +1,5 @@
 using B3.Trading.Application.Observability;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Hosting;
@@ -47,8 +48,8 @@ namespace B3.Trading.Application.Scheduling;
 /// </para>
 ///
 /// <para>
-/// <b>Cold-start replay.</b> On <see cref="StartAsync"/> the scheduler
-/// scans <see cref="WorkingOrderBook"/> for every non-terminal,
+/// <b>Cold-start replay.</b> After outbound recovery classification
+/// completes, the scheduler scans <see cref="WorkingOrderBook"/> for every non-terminal,
 /// non-stale GTD order and re-inserts it into the heap. Orders whose
 /// expiry already elapsed during the host's downtime fire immediately
 /// with <c>AtUtc = order.GoodTillDate</c> (the original expiry) so the
@@ -66,12 +67,12 @@ namespace B3.Trading.Application.Scheduling;
 /// (a) the order is already terminal so the
 /// <see cref="OrderCancelService"/> short-circuits with
 /// <c>NotFound</c> at the book lookup, and (b) the projection is a
-/// pure audit ping. Bootstrapping ordering is preserved by
-/// <c>TradingHostStartup.RunRecoveryAndSeedingAsync</c> which awaits
-/// recovery before <c>app.Run()</c> starts hosted services.
+/// pure audit ping. Bootstrapping ordering is preserved by waiting on
+/// <see cref="IOutboundRecoveryGate.WaitUntilClassificationCompleteAsync"/>
+/// before the one-shot book seed.
 /// </para>
 /// </summary>
-public sealed class GtdExpirationScheduler : IHostedService, IDisposable
+public sealed class GtdExpirationScheduler : BackgroundService
 {
     /// <summary>
     /// Minimum delay handed to <see cref="ITimer.Change(TimeSpan, TimeSpan)"/>
@@ -182,6 +183,7 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
     private readonly IExecutionEventSink _sink;
     private readonly TimeProvider _clock;
     private readonly ILogger<GtdExpirationScheduler>? _logger;
+    private readonly IOutboundRecoveryGate _outboundRecovery;
 
     private ITimer? _timer;
     private DateTimeOffset _scheduledFor = DateTimeOffset.MaxValue;
@@ -193,7 +195,8 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
         EventDispatcher dispatcher,
         IExecutionEventSink sink,
         TimeProvider? clock = null,
-        ILogger<GtdExpirationScheduler>? logger = null)
+        ILogger<GtdExpirationScheduler>? logger = null,
+        IOutboundRecoveryGate? outboundRecovery = null)
     {
         _book = book ?? throw new ArgumentNullException(nameof(book));
         _cancel = cancel ?? throw new ArgumentNullException(nameof(cancel));
@@ -201,6 +204,7 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
         _sink = sink ?? new NoOpExecutionEventSink();
         _clock = clock ?? TimeProvider.System;
         _logger = logger;
+        _outboundRecovery = outboundRecovery ?? ImmediateOutboundRecoveryGate.Instance;
     }
 
     /// <summary>
@@ -497,6 +501,12 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
     {
         try
         {
+            if (!_outboundRecovery.IsReady)
+            {
+                ReArmRetry(clOrdId);
+                return;
+            }
+
             // Snapshot the per-order tracking state under the lock so
             // we observe a consistent (audit-flag, original-gtd) pair
             // even if a concurrent OnOrderTerminal evicts the entry
@@ -514,6 +524,11 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
             if (!_book.TryGet(clOrdId, out var order) || order is null)
             {
                 Resolve(clOrdId);
+                return;
+            }
+            if (!_outboundRecovery.IsBusinessIngressOpen(order.FirmId))
+            {
+                ReArmRetry(clOrdId);
                 return;
             }
             if (IsTerminal(order.Status))
@@ -582,6 +597,7 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
                     order.Owner,
                     clOrdId,
                     CancellationToken.None,
+                    firmId: order.FirmId,
                     origin: Outbound.OutboundMutationOrigin.Scheduler)
                 .ConfigureAwait(false);
 
@@ -641,10 +657,31 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
     }
 
     /// <inheritdoc />
-    public Task StartAsync(CancellationToken cancellationToken)
+    public override Task StartAsync(CancellationToken cancellationToken)
     {
-        if (_replayed) return Task.CompletedTask;
-        _replayed = true;
+        if (_outboundRecovery.IsClassificationComplete)
+            SeedRecoveredOrders();
+        return base.StartAsync(cancellationToken);
+    }
+
+    /// <inheritdoc />
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        await _outboundRecovery
+            .WaitUntilClassificationCompleteAsync(stoppingToken)
+            .ConfigureAwait(false);
+        SeedRecoveredOrders();
+        await Task.Delay(Timeout.InfiniteTimeSpan, stoppingToken).ConfigureAwait(false);
+    }
+
+    private void SeedRecoveredOrders()
+    {
+        lock (_lock)
+        {
+            if (_replayed)
+                return;
+            _replayed = true;
+        }
 
         // Cold-start replay: every non-terminal GTD order in the book
         // (post WAL replay + snapshot restore) gets seeded into the
@@ -666,25 +703,25 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
         _logger?.LogInformation(
             "GtdExpirationScheduler started: seeded {Count} GTD order(s) from book snapshot.",
             seeded);
-        return Task.CompletedTask;
     }
 
     /// <inheritdoc />
-    public Task StopAsync(CancellationToken cancellationToken)
+    public override async Task StopAsync(CancellationToken cancellationToken)
     {
         lock (_lock)
         {
             _timer?.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
         }
-        return Task.CompletedTask;
+        await base.StopAsync(cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
-    public void Dispose()
+    public override void Dispose()
     {
         ITimer? t;
         lock (_lock) { t = _timer; _timer = null; }
         t?.Dispose();
+        base.Dispose();
     }
 
     private static bool IsTerminal(OrderStatus s) =>

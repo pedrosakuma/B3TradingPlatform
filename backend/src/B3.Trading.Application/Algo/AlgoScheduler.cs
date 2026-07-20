@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using B3.Trading.Application.Observability;
 using B3.Trading.Application.Risk;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -78,6 +79,7 @@ public sealed class AlgoScheduler : BackgroundService
     private readonly PendingReplacementRegistry? _replacements;
     private readonly IReplaceMarginCoordinator? _replaceMargin;
     private readonly IOptionsMonitor<RiskOptions>? _riskOptions;
+    private readonly IOutboundRecoveryGate _recovery;
 
     public AlgoScheduler(
         AlgoBook algos,
@@ -87,9 +89,10 @@ public sealed class AlgoScheduler : BackgroundService
         ILogger<AlgoScheduler> logger,
         PendingReplacementRegistry? replacements = null,
         IReplaceMarginCoordinator? replaceMargin = null,
-        IOptionsMonitor<RiskOptions>? riskOptions = null)
+        IOptionsMonitor<RiskOptions>? riskOptions = null,
+        IOutboundRecoveryGate? recovery = null)
         : this(algos, orders, signals, clock, DefaultTickInterval, logger,
-               replacements, replaceMargin, riskOptions)
+               replacements, replaceMargin, riskOptions, recovery)
     {
     }
 
@@ -106,7 +109,8 @@ public sealed class AlgoScheduler : BackgroundService
         ILogger<AlgoScheduler> logger,
         PendingReplacementRegistry? replacements = null,
         IReplaceMarginCoordinator? replaceMargin = null,
-        IOptionsMonitor<RiskOptions>? riskOptions = null)
+        IOptionsMonitor<RiskOptions>? riskOptions = null,
+        IOutboundRecoveryGate? recovery = null)
     {
         if (tickInterval <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(tickInterval));
@@ -119,10 +123,13 @@ public sealed class AlgoScheduler : BackgroundService
         _replacements = replacements;
         _replaceMargin = replaceMargin;
         _riskOptions = riskOptions;
+        _recovery = recovery ?? ImmediateOutboundRecoveryGate.Instance;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        await _recovery.WaitUntilAllRequiredBusinessIngressOpenAsync(stoppingToken)
+            .ConfigureAwait(false);
         _logger.LogInformation("AlgoScheduler starting (tick={TickMs}ms).", _tickInterval.TotalMilliseconds);
         // PeriodicTimer is the right primitive: it does not drift on slow
         // ticks (next fire is still aligned to wall-clock interval) and

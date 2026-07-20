@@ -254,15 +254,6 @@ public sealed class PersistenceRecovery
                     "Persistence recovery terminalised {Count} legacy outbound rows whose domain pending projection had already resolved.",
                     reconciledLegacy);
             }
-            var classified = _outboundLedger.ClassifyRecoveredAttempts(
-                _processEpoch.Id,
-                _timeProvider.GetUtcNow());
-            if (classified > 0)
-            {
-                _logger.LogWarning(
-                    "Persistence recovery classified {Count} dead-epoch outbound attempts from durable evidence.",
-                    classified);
-            }
             _outboundLedger.CompleteLegacyMigration();
             if (!legacyMigrationWasCompleted
                 && _store.WalGeneration != Guid.Empty)
@@ -423,14 +414,11 @@ public sealed class PersistenceRecovery
             // recovery. If no terminal ER (Cancel/Fill) arrives during
             // FIXP recovery, the order is still valid on the venue.
             //
-            // PendingNew is the one exception: the venue never acked
-            // those, so a session roll guarantees they cannot exist
-            // under any session version. The reap policy + log + metrics
-            // live in the shared helper so this boot-time reconcile and
-            // the runtime post-connect reactor (#512) never drift apart.
+            // PendingNew is preserved too: a session roll is not authoritative
+            // venue-absence evidence and cannot release its reservation.
             // Boot reconcile runs single-threaded before app start, so no
             // dispatcher lock is needed here.
-            B3.Trading.Application.FirmSessionRollReconciliation.CancelPendingNewForRolledFirm(
+            B3.Trading.Application.FirmSessionRollReconciliation.PreservePendingNewForRolledFirm(
                 _orders!, status.FirmId, storedVerId, status.SessionVerId, _logger);
         }
     }
@@ -450,13 +438,15 @@ public sealed class SnapshotService : Microsoft.Extensions.Hosting.BackgroundSer
     private readonly ILogger<SnapshotService> _logger;
 
     private readonly bool _enabled;
+    private readonly IOutboundRecoveryGate _recovery;
 
     public SnapshotService(
         EventDispatcher dispatcher,
         StateSnapshotter snapshotter,
         SnapshotStore store,
         IOptions<PersistenceOptions> opts,
-        ILogger<SnapshotService> logger)
+        ILogger<SnapshotService> logger,
+        IOutboundRecoveryGate? recovery = null)
     {
         _dispatcher = dispatcher;
         _snapshotter = snapshotter;
@@ -464,11 +454,14 @@ public sealed class SnapshotService : Microsoft.Extensions.Hosting.BackgroundSer
         _interval = opts.Value.SnapshotInterval;
         _enabled = opts.Value.Enabled;
         _logger = logger;
+        _recovery = recovery ?? ImmediateOutboundRecoveryGate.Instance;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         if (!_enabled) return;
+        await _recovery.WaitUntilClassificationCompleteAsync(stoppingToken)
+            .ConfigureAwait(false);
         try
         {
             while (!stoppingToken.IsCancellationRequested)

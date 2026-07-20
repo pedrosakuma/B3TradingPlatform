@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using B3.Entrypoint.Fixp.Sbe.V6;
 using B3.Trading.Application;
 using B3.Trading.Application.UserBots;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Domain;
 using B3.Trading.EntryPointListener.Framing;
 using Microsoft.Extensions.Logging;
@@ -65,19 +66,22 @@ internal sealed class FixpOrderAdapter
     private readonly OrderCancelService _cancel;
     private readonly IUserBotOrderMappingRegistry _botMappings;
     private readonly ILogger _logger;
+    private readonly IOutboundRecoveryGate _recovery;
 
     public FixpOrderAdapter(
         SymbolDirectory symbols,
         OrderSubmissionService submit,
         OrderCancelService cancel,
         IUserBotOrderMappingRegistry botMappings,
-        ILogger logger)
+        ILogger logger,
+        IOutboundRecoveryGate? recovery = null)
     {
         _symbols = symbols;
         _submit = submit;
         _cancel = cancel;
         _botMappings = botMappings;
         _logger = logger;
+        _recovery = recovery ?? ImmediateOutboundRecoveryGate.Instance;
     }
 
     /// <summary>
@@ -97,6 +101,17 @@ internal sealed class FixpOrderAdapter
         // and any caller that has not yet adopted the zero-copy decode.
         // Hot in-Established traffic now flows through the
         // `in DecodedNewOrderSingle` overload below (RFC §5.6 / P10).
+        if (!_recovery.IsBusinessIngressOpen(scope.Principal.FirmId))
+        {
+            await WriteBusinessMessageRejectAsync(
+                stream,
+                MessageType.NewOrderSingle,
+                refSeqNum: 0,
+                businessRejectRefID: 0,
+                RejectReason.Drained,
+                ct).ConfigureAwait(false);
+            return FixpOrderHandlingResult.Keep;
+        }
         if (!InboundDecoders.TryDecodeNewOrderSingle(payload.Span, out var decoded))
         {
             await WriteBusinessMessageRejectAsync(stream,
@@ -119,6 +134,17 @@ internal sealed class FixpOrderAdapter
         FixpConnectionScope scope,
         CancellationToken ct)
     {
+        if (!_recovery.IsBusinessIngressOpen(scope.Principal.FirmId))
+        {
+            await WriteBusinessMessageRejectAsync(
+                stream,
+                MessageType.NewOrderSingle,
+                decoded.MsgSeqNum,
+                decoded.ClOrdId,
+                RejectReason.Drained,
+                ct).ConfigureAwait(false);
+            return FixpOrderHandlingResult.Keep;
+        }
         var externalClOrdId = decoded.ClOrdId;
         var securityId = decoded.SecurityId;
         var refSeqNum = decoded.MsgSeqNum;
@@ -266,6 +292,16 @@ internal sealed class FixpOrderAdapter
         CancellationToken ct)
     {
         // Legacy entry point retained for the malformed-length fall-through.
+        if (!_recovery.IsBusinessIngressOpen(scope.Principal.FirmId))
+        {
+            return WriteBusinessMessageRejectAsync(
+                stream,
+                MessageType.OrderCancelRequest,
+                refSeqNum: 0,
+                businessRejectRefID: 0,
+                RejectReason.Drained,
+                ct);
+        }
         if (!InboundDecoders.TryDecodeOrderCancelRequest(payload.Span, out var decoded))
         {
             return WriteBusinessMessageRejectAsync(stream,
@@ -286,6 +322,17 @@ internal sealed class FixpOrderAdapter
         FixpConnectionScope scope,
         CancellationToken ct)
     {
+        if (!_recovery.IsBusinessIngressOpen(scope.Principal.FirmId))
+        {
+            await WriteBusinessMessageRejectAsync(
+                stream,
+                MessageType.OrderCancelRequest,
+                decoded.MsgSeqNum,
+                decoded.ClOrdId,
+                RejectReason.Drained,
+                ct).ConfigureAwait(false);
+            return;
+        }
         var externalCancelClOrdId = decoded.ClOrdId;
         var externalOrigClOrdId = decoded.OrigClOrdId;
         var securityId = decoded.SecurityId;
@@ -311,7 +358,12 @@ internal sealed class FixpOrderAdapter
         var owner = OwnerFor(scope);
         var botOrigin = new BotOrigin(scope.Principal.CredentialId, externalCancelClOrdId);
 
-        var result = await _cancel.CancelAsync(owner, internalOrigClOrdId, ct, botOrigin)
+        var result = await _cancel.CancelAsync(
+                owner,
+                internalOrigClOrdId,
+                ct,
+                botOrigin,
+                firmId: scope.Principal.FirmId)
             .ConfigureAwait(false);
         if (result.Kind == OrderCancelResultKind.Accepted) return;
 

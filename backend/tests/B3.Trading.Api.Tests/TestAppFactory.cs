@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
 using B3.Trading.Api.Auth;
+using B3.Trading.Application.Outbound;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -184,6 +185,8 @@ public class TestAppFactory : WebApplicationFactory<Program>
         var resp = await client.PostAsJsonAsync("/auth/login", new LoginRequest(user, password));
         resp.EnsureSuccessStatusCode();
         var body = await resp.Content.ReadFromJsonAsync<LoginResponse>();
+        if (Services.GetService<IOutboundRecoveryGate>() is OutboundRecoveryState recovery)
+            await recovery.WaitUntilClassificationCompleteAsync(CancellationToken.None);
         return body!.Token;
     }
 

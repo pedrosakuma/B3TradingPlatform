@@ -852,31 +852,12 @@ public class PeggedAlgoEndpointTests
     }
 
     [Fact]
-    public async Task Pegged_RecoverySelfHealsOrphanRepegEntry_NoStallOnReconcile()
+    public async Task Pegged_RecoveryWithUnresolvedOutbound_KeepsReconcileAndSchedulingGated()
     {
-        // Pass-3 review (#296) P1 — approach C (defensive guard).
-        // Historical WALs written by pre-Pass-3 binaries may have
-        // persisted an AlgoPeggedRepegStartedEvent for a cancel that
-        // never reached the venue (the old code persisted Started
-        // BEFORE CancelAsync). After snapshot+restart that orphan
-        // can survive into the rehydrated PeggedRepegBook. The
-        // Reconcile pass MUST self-heal: if the cancelled child id
-        // is no longer present as a live (non-terminal) order, the
-        // book entry is dropped and RepegPending stays false so the
-        // algo can continue slicing instead of stalling forever on
-        // an ack that will never arrive.
-        //
-        // We construct the orphan shape end-to-end by:
-        //   1. Driving a real repeg → Started lands in WAL + book.
-        //   2. Injecting the cancel-ack so child1 goes terminal and
-        //      child2 (the replacement) becomes the live child.
-        //   3. Manually re-inserting an orphan book entry pointing
-        //      at child1's now-terminal ClOrdId — simulating exactly
-        //      the post-replay state an old-binary WAL would leave
-        //      (Started without matching Resolved + child terminal).
-        //   4. Snapshot + restart.
-        //   5. Assert the book entry is gone after Reconcile and the
-        //      algo is still Working.
+        // A restart with an unresolved outbound child must classify the
+        // mutation before the algo engine can reconcile or schedule more
+        // work. Diagnostic reads remain available, but readiness stays
+        // closed until authoritative venue evidence or operator resolution.
         var dataDir = Path.Combine(Environment.CurrentDirectory, "test-data",
             "b3-pegged-repeg-self-heal-" + Guid.NewGuid().ToString("N"));
         try
@@ -901,7 +882,6 @@ public class PeggedAlgoEndpointTests
                 var book = f.Services.GetRequiredService<WorkingOrderBook>();
                 var child1 = await WaitForAnyChild(book, algoIdStr, TimeSpan.FromSeconds(3));
                 child1ClOrdId = child1.ClOrdId;
-
                 cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
                 var mock = f.Services.GetRequiredService<MockEntryPointClient>();
                 await WaitFor(() => mock.SubmittedReplaces.Any(r => r.OriginalClOrdId == child1ClOrdId),
@@ -932,15 +912,21 @@ public class PeggedAlgoEndpointTests
             using (var http2 = f2.CreateClient())
             {
                 var token = await f2.LoginAsync(http2);
+                var recovery = f2.Services.GetRequiredService<
+                    B3.Trading.Application.Outbound.IOutboundRecoveryGate>();
+                Assert.False(recovery.IsReady);
+                Assert.Equal(
+                    B3.Trading.Application.Outbound.OutboundRecoveryPhase.ReconciliationRequired,
+                    recovery.Phase);
 
-                // The Reconcile self-heal pass must have dropped the
-                // orphan entry (cancelled child id is no longer live).
-                var repegBook2 = f2.Services.GetRequiredService<PeggedRepegBook>();
-                await WaitFor(() => repegBook2.TryGet("default", algoIdNum) is null,
-                    TimeSpan.FromSeconds(3),
-                    "Reconcile did not self-heal the orphan PeggedRepegBook entry");
+                // The unresolved outbound mutation keeps the algo engine
+                // behind the cold-start gate, so new scheduling cannot race
+                // the operator's venue-evidence decision.
+                Assert.Equal(HttpStatusCode.ServiceUnavailable, (await http2.GetAsync("/ready")).StatusCode);
+                Assert.Equal(HttpStatusCode.OK, (await http2.GetAsync("/live")).StatusCode);
 
-                // And the algo did not get stuck in a stalled state.
+                // Diagnostic reads remain available while business scheduling
+                // is held closed.
                 var snap = await GetAlgo(http2, token, algoIdNum.ToString());
                 Assert.Equal("Working", snap.GetProperty("status").GetString());
                 Assert.Equal("None", snap.GetProperty("terminalReason").GetString());

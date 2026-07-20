@@ -22,15 +22,84 @@ public readonly record struct ProcessEpochId(Guid Value)
 
 public sealed class OutboundProcessEpoch
 {
-    public ProcessEpochId Id { get; }
+    private readonly object _gate = new();
+    private ProcessEpochId _id;
+    private long _sequence;
+    private bool _initialized;
 
-    public OutboundProcessEpoch() : this(ProcessEpochId.New()) { }
+    public OutboundProcessEpoch() : this(ProcessEpochId.New(), 0) { }
 
-    public OutboundProcessEpoch(ProcessEpochId id)
+    public OutboundProcessEpoch(ProcessEpochId id) : this(id, 0)
+    {
+    }
+
+    public OutboundProcessEpoch(ProcessEpochId id, long sequence)
     {
         if (id.Value == Guid.Empty)
             throw new ArgumentException("Process epoch is required.", nameof(id));
-        Id = id;
+        if (sequence < 0)
+            throw new ArgumentOutOfRangeException(nameof(sequence));
+        _id = id;
+        _sequence = sequence;
+        _initialized = true;
+    }
+
+    private OutboundProcessEpoch(bool uninitialized)
+    {
+        _ = uninitialized;
+    }
+
+    public static OutboundProcessEpoch CreateUninitialized() => new(uninitialized: true);
+
+    public bool IsInitialized
+    {
+        get
+        {
+            lock (_gate)
+                return _initialized;
+        }
+    }
+
+    public ProcessEpochId Id
+    {
+        get
+        {
+            lock (_gate)
+                return _initialized
+                    ? _id
+                    : throw new InvalidOperationException("The active-host fence has not assigned a process epoch.");
+        }
+    }
+
+    public long Sequence
+    {
+        get
+        {
+            lock (_gate)
+                return _initialized
+                    ? _sequence
+                    : throw new InvalidOperationException("The active-host fence has not assigned a process epoch.");
+        }
+    }
+
+    public void Initialize(ProcessEpochId id, long sequence)
+    {
+        if (id.Value == Guid.Empty)
+            throw new ArgumentException("Process epoch is required.", nameof(id));
+        if (sequence <= 0)
+            throw new ArgumentOutOfRangeException(nameof(sequence));
+        lock (_gate)
+        {
+            if (_initialized)
+            {
+                if (_id == id && _sequence == sequence)
+                    return;
+                throw new InvalidOperationException("The process epoch was already initialized.");
+            }
+            _id = id;
+            _sequence = sequence;
+            _initialized = true;
+        }
     }
 }
 
@@ -100,6 +169,20 @@ public enum OutboundAmbiguityReason
     GatewayOutcomeUnknown,
     SessionVersionMismatchEvidence,
 }
+
+public enum RecoveredOutboundAttemptDisposition
+{
+    ProvenUnsent,
+    Ambiguous,
+}
+
+public sealed record RecoveredOutboundAttemptClassification(
+    OutboundMutationId MutationId,
+    OutboundAttemptId AttemptId,
+    string FirmId,
+    RecoveredOutboundAttemptDisposition Disposition,
+    OutboundProvenUnsentEvidence? ProvenUnsentEvidence,
+    OutboundAmbiguityReason? AmbiguityReason);
 
 public enum InboundVenueEvidenceKind
 {
