@@ -1,4 +1,5 @@
 using B3.Trading.Application.Persistence;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.UserBots;
 using B3.Trading.Domain;
@@ -367,6 +368,61 @@ public class OrderModifyMarginAndProcessorTests
     }
 
     private sealed class NeverDrain : Lifecycle.IDrainGate { public bool IsDraining => false; }
+
+    private sealed class ClosedRecoveryGate : IOutboundRecoveryGate
+    {
+        public OutboundRecoveryPhase Phase => OutboundRecoveryPhase.RestoringPersistence;
+        public bool IsClassificationComplete => false;
+        public bool IsReady => false;
+        public string? FailureReason => null;
+
+        public IReadOnlyList<FirmOutboundRecoveryStatus> Snapshot() => [];
+
+        public bool IsBusinessIngressOpen(string firmId) => false;
+
+        public async ValueTask WaitUntilClassificationCompleteAsync(CancellationToken cancellationToken) =>
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+
+        public async ValueTask WaitUntilBusinessIngressOpenAsync(
+            string firmId,
+            CancellationToken cancellationToken) =>
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+
+        public async ValueTask WaitUntilAllRequiredBusinessIngressOpenAsync(
+            CancellationToken cancellationToken) =>
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+    }
+
+    [Fact]
+    public async Task ModifyAsync_ClosedRecoveryGate_PrecedesValidationAndMissingOrderLookup()
+    {
+        var gateway = new CapturingGateway();
+        var service = new OrderModifyService(
+            new ClOrdIdPrefixRegistry(),
+            new OrderOwnershipMap(),
+            new WorkingOrderBook(),
+            gateway,
+            new CapturingSink(),
+            new RiskPipeline(Array.Empty<IRiskCheck>()),
+            new NoOpReplaceMargin(),
+            new PendingReplacementRegistry(),
+            new EventDispatcher(new NullEventStore()),
+            new NeverDrain(),
+            NullLogger<OrderModifyService>.Instance,
+            outboundRecovery: new ClosedRecoveryGate());
+
+        var result = await service.ModifyAsync(
+            new OrderModifyRequest(
+                new EndClientId("alice"),
+                OriginalClOrdId: 999UL,
+                NewQuantity: 0,
+                NewPrice: null,
+                FirmId: "FIRM"),
+            CancellationToken.None);
+
+        Assert.Equal(OrderModifyResultKind.Drained, result.Kind);
+        Assert.Empty(gateway.Replaces);
+    }
 
     private sealed class CapturingAccountant : Risk.Accounting.IRiskAccountant
     {

@@ -6,6 +6,7 @@ using B3.Trading.Application;
 
 using B3.Trading.Application.MarketData;
 using B3.Trading.Application.Observability;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Domain;
 using Microsoft.AspNetCore.Authorization;
@@ -57,10 +58,14 @@ public static class AlgoEndpoints
             IAlgoEventSink sink,
             EventDispatcher dispatcher,
             DrainState drain,
+            IOutboundRecoveryGate recovery,
             SymbolDirectory symbols,
             IAlgoSignalQueue signals,
             ITickSizeProvider tickSizes) =>
         {
+            var firm = ResolveFirm(ctx);
+            if (!recovery.IsBusinessIngressOpen(firm))
+                return RecoveryUnavailable();
             if (drain.IsDraining)
             {
                 MetricsRegistry.DrainRejections.Add(1,
@@ -299,9 +304,7 @@ public static class AlgoEndpoints
                 default:
                     return Results.BadRequest(new { error = $"unsupported algo type '{type}'" });
             }
-
             var owner = ResolveOwner(ctx, registry);
-            var firm = ResolveFirm(ctx);
             var algoId = algoIds.Generate(firm);
             var createdAt = DateTimeOffset.UtcNow;
             var algo = new Algo(algoId, owner, firm, req.Symbol, securityId,
@@ -392,8 +395,12 @@ public static class AlgoEndpoints
             EndClientRegistry registry,
             AlgoBook algos,
             DrainState drain,
+            IOutboundRecoveryGate recovery,
             IAlgoSignalQueue signals) =>
         {
+            var firm = ResolveFirm(ctx);
+            if (!recovery.IsBusinessIngressOpen(firm))
+                return RecoveryUnavailable();
             if (drain.IsDraining)
             {
                 MetricsRegistry.DrainRejections.Add(1,
@@ -411,9 +418,7 @@ public static class AlgoEndpoints
                 return Results.BadRequest(new { error = "at least one of newQuantity or newPrice must be set" });
             if (req.NewQuantity is { } q && q <= 0)
                 return Results.BadRequest(new { error = "newQuantity must be positive" });
-
             var owner = ResolveOwner(ctx, registry);
-            var firm = ResolveFirm(ctx);
             if (!algos.TryGet(firm, id, out var algo) || algo is null || algo.Owner != owner)
                 return Results.NotFound();
             if (algo.IsTerminal)
@@ -473,8 +478,12 @@ public static class AlgoEndpoints
             IAlgoEventSink sink,
             EventDispatcher dispatcher,
             DrainState drain,
+            IOutboundRecoveryGate recovery,
             IAlgoSignalQueue signals) =>
         {
+            var firm = ResolveFirm(ctx);
+            if (!recovery.IsBusinessIngressOpen(firm))
+                return RecoveryUnavailable();
             if (drain.IsDraining)
             {
                 MetricsRegistry.DrainRejections.Add(1,
@@ -486,9 +495,7 @@ public static class AlgoEndpoints
 
             if (!ulong.TryParse(algoId, out var id) || id == 0)
                 return Results.NotFound();
-
             var owner = ResolveOwner(ctx, registry);
-            var firm = ResolveFirm(ctx);
             if (!algos.TryGet(firm, id, out var algo) || algo is null || algo.Owner != owner)
                 return Results.NotFound();
 
@@ -540,6 +547,15 @@ public static class AlgoEndpoints
 
         return app;
     }
+
+    private static IResult RecoveryUnavailable() =>
+        Results.Json(
+            new
+            {
+                error = "outbound cold-start recovery is incomplete",
+                code = "outbound_recovery_incomplete",
+            },
+            statusCode: StatusCodes.Status503ServiceUnavailable);
 
     private static EndClientId ResolveOwner(HttpContext ctx, EndClientRegistry registry)
     {

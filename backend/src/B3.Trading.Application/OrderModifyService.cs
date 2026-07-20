@@ -125,6 +125,12 @@ public sealed class OrderModifyService
     /// </summary>
     public async Task<OrderModifyResult> ModifyAsync(OrderModifyRequest req, CancellationToken ct)
     {
+        if (req?.FirmId is { } recoveryFirm
+                ? !_outboundRecovery.IsBusinessIngressOpen(recoveryFirm)
+                : !_outboundRecovery.IsReady)
+        {
+            return OrderModifyResult.Drained;
+        }
         ArgumentNullException.ThrowIfNull(req);
 
         if (_drain.IsDraining)
@@ -149,8 +155,6 @@ public sealed class OrderModifyService
         // (same as cross-owner) so existence is not leaked.
         if (req.FirmId is not null && !string.Equals(orig.FirmId, req.FirmId, StringComparison.Ordinal))
             return OrderModifyResult.NotFound;
-        if (!_outboundRecovery.IsBusinessIngressOpen(orig.FirmId))
-            return OrderModifyResult.Drained;
 
         if (orig.Status is OrderStatus.Filled or OrderStatus.Cancelled
             or OrderStatus.Rejected or OrderStatus.Replaced)

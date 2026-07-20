@@ -99,6 +99,13 @@ public sealed class OrderCancelService
         RestOrderIdempotencyContext? idempotencyContext = null,
         OutboundMutationOrigin? origin = null)
     {
+        if (firmId is { } recoveryFirm
+                ? !_outboundRecovery.IsBusinessIngressOpen(recoveryFirm)
+                : !_outboundRecovery.IsReady)
+        {
+            return OrderCancelResult.ReconciliationRequired(
+                0, "outbound cold-start recovery is incomplete", null);
+        }
         ArgumentNullException.ThrowIfNull(owner);
 
         if (_reconciliationDrain?.IsDraining == true)
@@ -114,9 +121,6 @@ public sealed class OrderCancelService
         // not leaked across the firm boundary.
         if (firmId is not null && !string.Equals(order.FirmId, firmId, StringComparison.Ordinal))
             return OrderCancelResult.NotFound;
-        if (!_outboundRecovery.IsBusinessIngressOpen(order.FirmId))
-            return OrderCancelResult.ReconciliationRequired(
-                0, "outbound cold-start recovery is incomplete", null);
         if (order.Status is OrderStatus.Filled or OrderStatus.Cancelled
             or OrderStatus.Rejected or OrderStatus.Replaced)
         {

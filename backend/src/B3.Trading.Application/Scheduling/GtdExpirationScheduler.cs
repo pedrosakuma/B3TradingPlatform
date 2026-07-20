@@ -1,4 +1,5 @@
 using B3.Trading.Application.Observability;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Hosting;
@@ -182,6 +183,7 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
     private readonly IExecutionEventSink _sink;
     private readonly TimeProvider _clock;
     private readonly ILogger<GtdExpirationScheduler>? _logger;
+    private readonly IOutboundRecoveryGate _outboundRecovery;
 
     private ITimer? _timer;
     private DateTimeOffset _scheduledFor = DateTimeOffset.MaxValue;
@@ -193,7 +195,8 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
         EventDispatcher dispatcher,
         IExecutionEventSink sink,
         TimeProvider? clock = null,
-        ILogger<GtdExpirationScheduler>? logger = null)
+        ILogger<GtdExpirationScheduler>? logger = null,
+        IOutboundRecoveryGate? outboundRecovery = null)
     {
         _book = book ?? throw new ArgumentNullException(nameof(book));
         _cancel = cancel ?? throw new ArgumentNullException(nameof(cancel));
@@ -201,6 +204,7 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
         _sink = sink ?? new NoOpExecutionEventSink();
         _clock = clock ?? TimeProvider.System;
         _logger = logger;
+        _outboundRecovery = outboundRecovery ?? ImmediateOutboundRecoveryGate.Instance;
     }
 
     /// <summary>
@@ -497,6 +501,12 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
     {
         try
         {
+            if (!_outboundRecovery.IsReady)
+            {
+                ReArmRetry(clOrdId);
+                return;
+            }
+
             // Snapshot the per-order tracking state under the lock so
             // we observe a consistent (audit-flag, original-gtd) pair
             // even if a concurrent OnOrderTerminal evicts the entry
@@ -514,6 +524,11 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
             if (!_book.TryGet(clOrdId, out var order) || order is null)
             {
                 Resolve(clOrdId);
+                return;
+            }
+            if (!_outboundRecovery.IsBusinessIngressOpen(order.FirmId))
+            {
+                ReArmRetry(clOrdId);
                 return;
             }
             if (IsTerminal(order.Status))
@@ -582,6 +597,7 @@ public sealed class GtdExpirationScheduler : IHostedService, IDisposable
                     order.Owner,
                     clOrdId,
                     CancellationToken.None,
+                    firmId: order.FirmId,
                     origin: Outbound.OutboundMutationOrigin.Scheduler)
                 .ConfigureAwait(false);
 

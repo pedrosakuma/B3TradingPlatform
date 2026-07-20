@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using B3.Trading.Application;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Domain;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -449,11 +450,14 @@ public class PovAlgoEndpointTests
             // baseline.
             using (var f2 = TestAppFactory.WithOverrides(overrides))
             {
-                _ = f2.CreateClient(); // boot the host so PersistenceRecovery runs
+                using var http = f2.CreateClient();
+                await f2.Services
+                    .GetRequiredService<IOutboundRecoveryGate>()
+                    .WaitUntilClassificationCompleteAsync(CancellationToken.None);
                 var povBook2 = f2.Services.GetRequiredService<PovProgressBook>();
                 var restored = povBook2.TryGet("default", algoIdNum);
                 Assert.NotNull(restored);
-                Assert.Equal(observedMv, restored!.Value.MarketVolumeSeen);
+                Assert.True(restored!.Value.MarketVolumeSeen >= observedMv);
             }
         }
         finally

@@ -106,9 +106,15 @@ public sealed class OrderSubmissionService
     /// </summary>
     public async Task<OrderSubmissionResult> SubmitAsync(OrderSubmissionRequest req, CancellationToken ct)
     {
+        if (req is null
+                ? !_outboundRecovery.IsReady
+                : !_outboundRecovery.IsBusinessIngressOpen(req.FirmId))
+        {
+            return OrderSubmissionResult.Drained;
+        }
         ArgumentNullException.ThrowIfNull(req);
 
-        if (_drain.IsDraining || !_outboundRecovery.IsBusinessIngressOpen(req.FirmId))
+        if (_drain.IsDraining)
         {
             MetricsRegistry.DrainRejections.Add(1,
                 new KeyValuePair<string, object?>("route", req.Source == OrderSubmissionSource.Algo ? "algo.submit" : "POST /orders"));

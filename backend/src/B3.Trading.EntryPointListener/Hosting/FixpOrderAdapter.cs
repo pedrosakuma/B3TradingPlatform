@@ -101,6 +101,17 @@ internal sealed class FixpOrderAdapter
         // and any caller that has not yet adopted the zero-copy decode.
         // Hot in-Established traffic now flows through the
         // `in DecodedNewOrderSingle` overload below (RFC §5.6 / P10).
+        if (!_recovery.IsBusinessIngressOpen(scope.Principal.FirmId))
+        {
+            await WriteBusinessMessageRejectAsync(
+                stream,
+                MessageType.NewOrderSingle,
+                refSeqNum: 0,
+                businessRejectRefID: 0,
+                RejectReason.Drained,
+                ct).ConfigureAwait(false);
+            return FixpOrderHandlingResult.Keep;
+        }
         if (!InboundDecoders.TryDecodeNewOrderSingle(payload.Span, out var decoded))
         {
             await WriteBusinessMessageRejectAsync(stream,
@@ -123,20 +134,20 @@ internal sealed class FixpOrderAdapter
         FixpConnectionScope scope,
         CancellationToken ct)
     {
-        var externalClOrdId = decoded.ClOrdId;
-        var securityId = decoded.SecurityId;
-        var refSeqNum = decoded.MsgSeqNum;
         if (!_recovery.IsBusinessIngressOpen(scope.Principal.FirmId))
         {
             await WriteBusinessMessageRejectAsync(
                 stream,
                 MessageType.NewOrderSingle,
-                refSeqNum,
-                externalClOrdId,
+                decoded.MsgSeqNum,
+                decoded.ClOrdId,
                 RejectReason.Drained,
                 ct).ConfigureAwait(false);
             return FixpOrderHandlingResult.Keep;
         }
+        var externalClOrdId = decoded.ClOrdId;
+        var securityId = decoded.SecurityId;
+        var refSeqNum = decoded.MsgSeqNum;
 
         // 1. Resolve SecurityId → Symbol. Without a directory entry the
         //    submit pipeline would reject anyway with "symbol is required";
@@ -281,6 +292,16 @@ internal sealed class FixpOrderAdapter
         CancellationToken ct)
     {
         // Legacy entry point retained for the malformed-length fall-through.
+        if (!_recovery.IsBusinessIngressOpen(scope.Principal.FirmId))
+        {
+            return WriteBusinessMessageRejectAsync(
+                stream,
+                MessageType.OrderCancelRequest,
+                refSeqNum: 0,
+                businessRejectRefID: 0,
+                RejectReason.Drained,
+                ct);
+        }
         if (!InboundDecoders.TryDecodeOrderCancelRequest(payload.Span, out var decoded))
         {
             return WriteBusinessMessageRejectAsync(stream,
@@ -337,7 +358,12 @@ internal sealed class FixpOrderAdapter
         var owner = OwnerFor(scope);
         var botOrigin = new BotOrigin(scope.Principal.CredentialId, externalCancelClOrdId);
 
-        var result = await _cancel.CancelAsync(owner, internalOrigClOrdId, ct, botOrigin)
+        var result = await _cancel.CancelAsync(
+                owner,
+                internalOrigClOrdId,
+                ct,
+                botOrigin,
+                firmId: scope.Principal.FirmId)
             .ConfigureAwait(false);
         if (result.Kind == OrderCancelResultKind.Accepted) return;
 

@@ -1,6 +1,10 @@
 using System.Net;
 using System.Net.Http.Json;
+using B3.Trading.Api;
+using B3.Trading.Application;
 using B3.Trading.Application.Outbound;
+using B3.Trading.Application.Persistence;
+using B3.Trading.Domain;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
@@ -89,6 +93,63 @@ public sealed class OutboundRecoveryReadinessTests
         Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
     }
 
+    [Fact]
+    public async Task ClosedRecoveryGate_RejectsAlgoAndOrderMutationsBeforeStateAccess()
+    {
+        var gate = new ClosedRecoveryGate();
+        var signals = new RecordingAlgoSignalQueue();
+        using var factory = TestAppFactory.WithOverrides(
+            new Dictionary<string, string?>(),
+            services =>
+            {
+                services.RemoveAll<IOutboundRecoveryGate>();
+                services.AddSingleton<IOutboundRecoveryGate>(gate);
+                services.RemoveAll<IAlgoSignalQueue>();
+                services.AddSingleton<IAlgoSignalQueue>(signals);
+            });
+        using var client = await factory.CreateAuthedClientAsync();
+        var eventStore = factory.Services.GetRequiredService<IEventStore>();
+        var registry = factory.Services.GetRequiredService<EndClientRegistry>();
+        var algos = factory.Services.GetRequiredService<AlgoBook>();
+        Assert.True(algos.TryAdd(new Algo(
+            999,
+            registry.Register(TestAppFactory.TestUser),
+            "FIRM01",
+            "PETR4",
+            4321,
+            OrderSide.Buy,
+            AlgoType.Iceberg,
+            100,
+            new IcebergParameters(10, 30m),
+            DateTimeOffset.UtcNow)));
+        var seqBefore = eventStore.CurrentSeq;
+
+        var createAlgo = await client.PostAsJsonAsync("/algo", new CreateAlgoRequest(
+            "PETR4",
+            4321,
+            "Buy",
+            "Iceberg",
+            100,
+            new CreateAlgoIcebergParams(10, 30m),
+            Twap: null));
+        var modifyAlgo = await client.PostAsJsonAsync(
+            "/algo/999/modify",
+            new ModifyAlgoRequest(NewQuantity: 10));
+        var cancelAlgo = await client.DeleteAsync("/algo/999");
+        var modifyOrder = await client.PutAsJsonAsync(
+            "/orders/999",
+            new ModifyOrderRequest(Quantity: 10, Price: 30m));
+        var cancelOrder = await client.DeleteAsync("/orders/999");
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, createAlgo.StatusCode);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, modifyAlgo.StatusCode);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, cancelAlgo.StatusCode);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, modifyOrder.StatusCode);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, cancelOrder.StatusCode);
+        Assert.Equal(seqBefore, eventStore.CurrentSeq);
+        Assert.Equal(0, signals.EnqueueCount);
+    }
+
     private sealed class ClosedRecoveryGate : IOutboundRecoveryGate
     {
         public OutboundRecoveryPhase Phase => OutboundRecoveryPhase.RestoringPersistence;
@@ -113,5 +174,16 @@ public sealed class OutboundRecoveryReadinessTests
         public async ValueTask WaitUntilAllRequiredBusinessIngressOpenAsync(
             CancellationToken cancellationToken) =>
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+    }
+
+    private sealed class RecordingAlgoSignalQueue : IAlgoSignalQueue
+    {
+        public int EnqueueCount { get; private set; }
+
+        public bool TryEnqueue(AlgoSignal signal)
+        {
+            EnqueueCount++;
+            return true;
+        }
     }
 }

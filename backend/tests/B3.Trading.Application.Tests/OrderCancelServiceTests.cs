@@ -1,4 +1,5 @@
 using B3.Trading.Application;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.UserBots;
 using B3.Trading.Domain;
@@ -159,5 +160,52 @@ public class OrderCancelServiceTests
             (await sut.CancelAsync(new EndClientId("mallory"), 101UL, CancellationToken.None)).Kind);
 
         Assert.Empty(gateway.Calls);
+    }
+
+    [Fact]
+    public async Task CancelAsync_ClosedRecoveryGate_PrecedesMissingOrderLookup()
+    {
+        var gateway = new RecordingGateway();
+        var sut = new OrderCancelService(
+            new ClOrdIdPrefixRegistry(),
+            new OrderOwnershipMap(),
+            new WorkingOrderBook(),
+            gateway,
+            new EventDispatcher(new NullEventStore()),
+            NullLogger<OrderCancelService>.Instance,
+            outboundRecovery: new ClosedRecoveryGate());
+
+        var result = await sut.CancelAsync(
+            Owner,
+            999UL,
+            CancellationToken.None,
+            firmId: "FIRM");
+
+        Assert.Equal(OrderCancelResultKind.ReconciliationRequired, result.Kind);
+        Assert.Empty(gateway.Calls);
+    }
+
+    private sealed class ClosedRecoveryGate : IOutboundRecoveryGate
+    {
+        public OutboundRecoveryPhase Phase => OutboundRecoveryPhase.RestoringPersistence;
+        public bool IsClassificationComplete => false;
+        public bool IsReady => false;
+        public string? FailureReason => null;
+
+        public IReadOnlyList<FirmOutboundRecoveryStatus> Snapshot() => [];
+
+        public bool IsBusinessIngressOpen(string firmId) => false;
+
+        public async ValueTask WaitUntilClassificationCompleteAsync(CancellationToken cancellationToken) =>
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+
+        public async ValueTask WaitUntilBusinessIngressOpenAsync(
+            string firmId,
+            CancellationToken cancellationToken) =>
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+
+        public async ValueTask WaitUntilAllRequiredBusinessIngressOpenAsync(
+            CancellationToken cancellationToken) =>
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
     }
 }
