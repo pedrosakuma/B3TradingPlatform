@@ -97,7 +97,8 @@ public sealed class OrderCancelService
         BotOrigin? botOrigin = null,
         string? firmId = null,
         RestOrderIdempotencyContext? idempotencyContext = null,
-        OutboundMutationOrigin? origin = null)
+        OutboundMutationOrigin? origin = null,
+        AlgoOutboundOriginIdentity? algoOriginIdentity = null)
     {
         if (firmId is { } recoveryFirm
                 ? !_outboundRecovery.IsBusinessIngressOpen(recoveryFirm)
@@ -107,6 +108,57 @@ public sealed class OrderCancelService
                 0, "outbound cold-start recovery is incomplete", null);
         }
         ArgumentNullException.ThrowIfNull(owner);
+        if (origin == OutboundMutationOrigin.Algo)
+        {
+            if (string.IsNullOrWhiteSpace(firmId)
+                || algoOriginIdentity is null
+                || algoOriginIdentity.ActionKind != AlgoOutboundActionKind.CancelChild)
+            {
+                return OrderCancelResult.Conflict("algo cancel origin identity is required");
+            }
+            if (_outboundLedger?.TryGetByAlgoOrigin(
+                    firmId,
+                    algoOriginIdentity,
+                    out var existing) == true
+                && existing is not null)
+            {
+                var activeClOrdId = existing.Attempts.LastOrDefault()?.ClOrdId
+                    ?? existing.PrimaryClOrdId;
+                if (existing.State == OutboundMutationState.ProvenUnsent)
+                {
+                    var retry = await _outboundCoordinator!
+                        .RetryProvenUnsentAsync(existing.MutationId, ct)
+                        .ConfigureAwait(false);
+                    return retry.Outcome switch
+                    {
+                        CancelReplaceDispatchOutcome.TransportWriteCompleted =>
+                            OrderCancelResult.Accepted(retry.ClOrdId, existing.MutationId),
+                        CancelReplaceDispatchOutcome.ProvenUnsent =>
+                            OrderCancelResult.GatewayFailed(
+                                retry.ClOrdId,
+                                retry.Exception
+                                    ?? new ExchangeGatewayPreSendException(
+                                        "Cancel retry was proven unsent."),
+                                existing.MutationId),
+                        _ => OrderCancelResult.ReconciliationRequired(
+                            retry.ClOrdId,
+                            retry.Outcome == CancelReplaceDispatchOutcome.RetryNotAllowed
+                                ? "cancel_retry_attempt_cap_reached"
+                                : "cancel_retry_requires_reconciliation",
+                            retry.Exception,
+                            existing.MutationId),
+                    };
+                }
+                return existing.State is OutboundMutationState.Ambiguous
+                    or OutboundMutationState.LegacyUnknownCancel
+                    ? OrderCancelResult.ReconciliationRequired(
+                        activeClOrdId,
+                        "algo cancel outcome is unresolved",
+                        null,
+                        existing.MutationId)
+                    : OrderCancelResult.Accepted(activeClOrdId, existing.MutationId);
+            }
+        }
 
         if (_reconciliationDrain?.IsDraining == true)
             return OrderCancelResult.ReconciliationRequired(
@@ -277,6 +329,7 @@ public sealed class OrderCancelService
                     Origin = botOrigin is not null
                         ? OutboundMutationOrigin.UserBotFixp
                         : origin ?? OutboundMutationOrigin.Rest,
+                    AlgoOriginIdentity = algoOriginIdentity,
                     PrimaryClOrdId = cancelClOrdId,
                     OriginalClOrdId = originalClOrdId,
                     RecordedAtUtc = recordedAt,

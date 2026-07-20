@@ -431,6 +431,7 @@ public sealed record OutboundApprovedEvent : WalEvent
     public required string FirmId { get; init; }
     public required string EndClientRef { get; init; }
     public required OutboundMutationOrigin Origin { get; init; }
+    public AlgoOutboundOriginIdentity? AlgoOriginIdentity { get; init; }
     public required ulong PrimaryClOrdId { get; init; }
     public ulong? OriginalClOrdId { get; init; }
     public required DateTimeOffset RecordedAtUtc { get; init; }

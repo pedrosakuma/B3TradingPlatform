@@ -114,6 +114,27 @@ public sealed class OrderSubmissionService
         }
         ArgumentNullException.ThrowIfNull(req);
 
+        if (req.Source == OrderSubmissionSource.Algo)
+        {
+            if (req.AlgoOriginIdentity is not { } algoOrigin
+                || algoOrigin.ActionKind != AlgoOutboundActionKind.NewChild
+                || algoOrigin.ParentAlgoId != req.ParentAlgoId
+                || algoOrigin.Sequence != req.AlgoSliceSeq)
+            {
+                return OrderSubmissionResult.BadRequest("algo origin identity must match the child slice");
+            }
+            if (_outboundLedger?.TryGetByAlgoOrigin(req.FirmId, algoOrigin, out var existing) == true
+                && existing is not null)
+            {
+                var existingClOrdId = existing.Attempts.LastOrDefault()?.ClOrdId
+                    ?? existing.PrimaryClOrdId;
+                return existing.State is OutboundMutationState.VenueAcknowledged
+                    or OutboundMutationState.TransportWriteCompleted
+                    ? OrderSubmissionResult.Accepted(existing.MutationId, existingClOrdId)
+                    : OrderSubmissionResult.ReconciliationRequired(existing.MutationId, existingClOrdId);
+            }
+        }
+
         if (_drain.IsDraining)
         {
             MetricsRegistry.DrainRejections.Add(1,
@@ -392,6 +413,7 @@ public sealed class OrderSubmissionService
                         : req.BotOrigin is not null
                             ? OutboundMutationOrigin.UserBotFixp
                             : OutboundMutationOrigin.Rest,
+                    AlgoOriginIdentity = req.AlgoOriginIdentity,
                     PrimaryClOrdId = clOrdId,
                     RecordedAtUtc = recordedAt,
                     Approval = frozen.Approval,
@@ -461,12 +483,16 @@ public sealed class OrderSubmissionService
             }
             if (dispatch.Outcome == NewOrderDispatchOutcome.ProvenUnsent)
             {
-                return TerminalizeProvenNoWrite(
+                var terminal = TerminalizeProvenNoWrite(
                     mutationId,
                     order,
                     marginReserved,
                     "gateway_proven_unsent",
                     "gateway_proven_unsent");
+                return req.Source == OrderSubmissionSource.Algo
+                    && terminal.Kind == OrderSubmissionResultKind.Rejected
+                    ? OrderSubmissionResult.ReconciliationRequired(mutationId, clOrdId)
+                    : terminal;
             }
             return dispatch.Outcome == NewOrderDispatchOutcome.TransportWriteCompleted
                 ? OrderSubmissionResult.Accepted(mutationId, clOrdId)
@@ -666,6 +692,7 @@ public sealed record OrderSubmissionRequest(
 {
     public RestOrderIdempotencyContext? IdempotencyContext { get; init; }
     public bool UseDurableOutboundCoordinator { get; init; }
+    public AlgoOutboundOriginIdentity? AlgoOriginIdentity { get; init; }
 
     /// <summary>
     /// Sub-issue #171 (E). When non-null, the request originates from

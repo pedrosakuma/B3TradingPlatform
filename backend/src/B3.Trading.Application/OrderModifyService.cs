@@ -132,6 +132,57 @@ public sealed class OrderModifyService
             return OrderModifyResult.Drained;
         }
         ArgumentNullException.ThrowIfNull(req);
+        if (req.Origin == OutboundMutationOrigin.Algo)
+        {
+            if (string.IsNullOrWhiteSpace(req.FirmId)
+                || req.AlgoOriginIdentity is null
+                || req.AlgoOriginIdentity.ActionKind is not (
+                    AlgoOutboundActionKind.ReplaceChild or AlgoOutboundActionKind.Repeg))
+            {
+                return OrderModifyResult.BadRequest("algo replace origin identity is required");
+            }
+            if (_outboundLedger?.TryGetByAlgoOrigin(
+                    req.FirmId!,
+                    req.AlgoOriginIdentity,
+                    out var existing) == true
+                && existing is not null)
+            {
+                var activeClOrdId = existing.Attempts.LastOrDefault()?.ClOrdId
+                    ?? existing.PrimaryClOrdId;
+                if (existing.State == OutboundMutationState.ProvenUnsent)
+                {
+                    var retry = await _outboundCoordinator!
+                        .RetryProvenUnsentAsync(existing.MutationId, ct)
+                        .ConfigureAwait(false);
+                    if (retry.Outcome == CancelReplaceDispatchOutcome.TransportWriteCompleted)
+                        return OrderModifyResult.Accepted(retry.ClOrdId, existing.MutationId);
+                    if (retry.Outcome == CancelReplaceDispatchOutcome.ProvenUnsent)
+                    {
+                        return OrderModifyResult.GatewayFailed(
+                            retry.ClOrdId,
+                            retry.Exception
+                                ?? new ExchangeGatewayPreSendException(
+                                    "Replace retry was proven unsent."),
+                            existing.MutationId);
+                    }
+                    return OrderModifyResult.GatewayAmbiguous(
+                        retry.ClOrdId,
+                        retry.Exception
+                            ?? new InvalidOperationException(
+                                retry.Outcome == CancelReplaceDispatchOutcome.RetryNotAllowed
+                                    ? "Replace retry attempt cap reached."
+                                    : "Replace retry requires reconciliation."),
+                        existing.MutationId);
+                }
+                return existing.State is OutboundMutationState.Ambiguous
+                    or OutboundMutationState.LegacyUnknownReplace
+                    ? OrderModifyResult.GatewayAmbiguous(
+                        activeClOrdId,
+                        new InvalidOperationException("Algo replace outcome is unresolved."),
+                        existing.MutationId)
+                    : OrderModifyResult.Accepted(activeClOrdId, existing.MutationId);
+            }
+        }
 
         if (_drain.IsDraining)
         {
@@ -552,6 +603,7 @@ public sealed class OrderModifyService
                     FirmId = orig.FirmId,
                     EndClientRef = frozen.EndClientRef,
                     Origin = req.Origin ?? OutboundMutationOrigin.Rest,
+                    AlgoOriginIdentity = req.AlgoOriginIdentity,
                     PrimaryClOrdId = newClOrdId,
                     OriginalClOrdId = req.OriginalClOrdId,
                     RecordedAtUtc = recordedAt,
@@ -891,7 +943,8 @@ public sealed record OrderModifyRequest(
     /// </summary>
     string? FirmId = null,
     RestOrderIdempotencyContext? IdempotencyContext = null,
-    OutboundMutationOrigin? Origin = null);
+    OutboundMutationOrigin? Origin = null,
+    AlgoOutboundOriginIdentity? AlgoOriginIdentity = null);
 
 /// <summary>
 /// Outcome of <see cref="OrderModifyService.ModifyAsync"/>. The

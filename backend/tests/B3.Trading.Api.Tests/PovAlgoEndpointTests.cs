@@ -5,6 +5,7 @@ using System.Text.Json;
 using B3.Trading.Application;
 using B3.Trading.Application.Outbound;
 using B3.Trading.Domain;
+using B3.Trading.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
@@ -180,6 +181,9 @@ public class PovAlgoEndpointTests
         var first = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
         // Pro-rated bucket fraction → ~1000 cum mv → 20% → 200; clamped by remaining (400) → 200.
         Assert.True(first.Quantity > 0);
+        await WaitForNewOrderDispatch(
+            f.Services.GetRequiredService<MockEntryPointClient>(),
+            first.ClOrdId);
         await InjectEr(http, adminToken, first.ClOrdId, "Fill", lastQty: first.Quantity);
 
         // Push more volume so a second slice can fire and the parent
@@ -199,6 +203,9 @@ public class PovAlgoEndpointTests
             var next = book.EnumerateChildrenOf("default", ulong.Parse(algoId))
                 .FirstOrDefault(c => c.AlgoSliceSeq is { } s && seenSeqs.Add(s));
             if (next is null) { await Task.Delay(20); continue; }
+            await WaitForNewOrderDispatch(
+                f.Services.GetRequiredService<MockEntryPointClient>(),
+                next.ClOrdId);
             await InjectEr(http, adminToken, next.ClOrdId, "Fill", lastQty: next.Quantity);
             filled += next.Quantity;
             if (filled >= 400) break;
@@ -496,6 +503,9 @@ public class PovAlgoEndpointTests
 
                 var book = f.Services.GetRequiredService<WorkingOrderBook>();
                 var inFlight = await WaitForAnyChild(book, algoIdStr, TimeSpan.FromSeconds(5));
+                await WaitForNewOrderDispatch(
+                    f.Services.GetRequiredService<MockEntryPointClient>(),
+                    inFlight.ClOrdId);
 
                 // Pre-cancel sanity: the engine populated PovProgressBook
                 // for the slice that fired.
@@ -567,6 +577,9 @@ public class PovAlgoEndpointTests
 
                 var book = f.Services.GetRequiredService<WorkingOrderBook>();
                 var child = await WaitForAnyChild(book, algoIdStr, TimeSpan.FromSeconds(5));
+                await WaitForNewOrderDispatch(
+                    f.Services.GetRequiredService<MockEntryPointClient>(),
+                    child.ClOrdId);
 
                 var povBook = f.Services.GetRequiredService<PovProgressBook>();
                 Assert.NotNull(povBook.TryGet("default", algoIdNum));
@@ -652,17 +665,34 @@ public class PovAlgoEndpointTests
         throw new TimeoutException($"No child for algo {algoIdStr} within {timeout.TotalSeconds}s.");
     }
 
+    private static async Task WaitForNewOrderDispatch(
+        MockEntryPointClient client,
+        ulong clOrdId)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.Elapsed < TimeSpan.FromSeconds(3))
+        {
+            if (client.SubmittedNewOrders.Any(order => order.ClOrdId == clOrdId))
+                return;
+            await Task.Delay(10);
+        }
+        throw new TimeoutException($"New order {clOrdId} was not dispatched within 3s.");
+    }
+
     private static async Task WaitForAlgoStatus(HttpClient http, string token, string algoId, params string[] anyOf)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
         string? last = null;
+        string? lastReason = null;
         while (sw.Elapsed < TimeSpan.FromSeconds(5))
         {
             var algo = await GetAlgo(http, token, algoId);
             last = algo.GetProperty("status").GetString();
+            lastReason = algo.GetProperty("terminalReason").GetString();
             if (anyOf.Contains(last)) return;
             await Task.Delay(20);
         }
-        throw new TimeoutException($"Algo {algoId} did not reach any of [{string.Join(",", anyOf)}] within 5s; last={last}");
+        throw new TimeoutException(
+            $"Algo {algoId} did not reach any of [{string.Join(",", anyOf)}] within 5s; last={last}/{lastReason}");
     }
 }

@@ -3,6 +3,7 @@ using System.Linq;
 using System.Threading;
 using B3.Trading.Application;
 using B3.Trading.Application.Persistence;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -24,14 +25,17 @@ public class AlgoSchedulerTests
         public override DateTimeOffset GetUtcNow() => Now;
     }
 
-    private static (AlgoBook algos, WorkingOrderBook orders, AlgoSignalQueue queue, MutableClock clock, AlgoScheduler scheduler) Build(DateTimeOffset now)
+    private static (AlgoBook algos, WorkingOrderBook orders, AlgoSignalQueue queue, MutableClock clock, AlgoScheduler scheduler) Build(
+        DateTimeOffset now,
+        OutboundMutationLedger? outboundLedger = null)
     {
         var algos = new AlgoBook();
         var orders = new WorkingOrderBook();
         var queue = new AlgoSignalQueue();
         var clock = new MutableClock(now);
         var scheduler = new AlgoScheduler(algos, orders, queue, clock,
-            AlgoScheduler.DefaultTickInterval, NullLogger<AlgoScheduler>.Instance);
+            AlgoScheduler.DefaultTickInterval, NullLogger<AlgoScheduler>.Instance,
+            outboundLedger: outboundLedger);
         return (algos, orders, queue, clock, scheduler);
     }
 
@@ -92,6 +96,73 @@ public class AlgoSchedulerTests
         var signals = Drain(queue);
         var s = Assert.Single(signals);
         Assert.Equal(1UL, ((AlgoCreatedSignal)s).AlgoId);
+    }
+
+    [Fact]
+    public void Tick_UnresolvedAlgoMutation_DoesNotEnqueueAnotherSlice()
+    {
+        var ledger = new OutboundMutationLedger();
+        ledger.Restore(
+            [
+                new OutboundMutationSnapshot
+                {
+                    MutationId = OutboundMutationId.New(),
+                    Kind = OutboundMutationKind.New,
+                    FirmId = Firm,
+                    EndClientRef = new string('a', 32),
+                    Origin = OutboundMutationOrigin.Algo,
+                    AlgoOriginIdentity = new AlgoOutboundOriginIdentity(
+                        1,
+                        AlgoOutboundActionKind.NewChild,
+                        0),
+                    PrimaryClOrdId = 7001,
+                    RecordedAtUtc = Start,
+                    State = OutboundMutationState.ApprovedToSend,
+                    StateChangedAtUtc = Start,
+                },
+            ],
+            Array.Empty<OutboundCorrelationTombstone>());
+        var (algos, _, queue, _, scheduler) = Build(Start, ledger);
+        algos.TryAdd(NewTwap(1));
+
+        scheduler.Tick();
+
+        Assert.Empty(Drain(queue));
+    }
+
+    [Fact]
+    public void Tick_UnresolvedAlgoMutation_DoesNotRedriveParentCancel()
+    {
+        var ledger = new OutboundMutationLedger();
+        ledger.Restore(
+            [
+                new OutboundMutationSnapshot
+                {
+                    MutationId = OutboundMutationId.New(),
+                    Kind = OutboundMutationKind.Replace,
+                    FirmId = Firm,
+                    EndClientRef = new string('a', 32),
+                    Origin = OutboundMutationOrigin.Algo,
+                    AlgoOriginIdentity = new AlgoOutboundOriginIdentity(
+                        1,
+                        AlgoOutboundActionKind.Repeg,
+                        0),
+                    PrimaryClOrdId = 7002,
+                    OriginalClOrdId = 7001,
+                    RecordedAtUtc = Start,
+                    State = OutboundMutationState.Ambiguous,
+                    StateChangedAtUtc = Start,
+                },
+            ],
+            Array.Empty<OutboundCorrelationTombstone>());
+        var (algos, _, queue, _, scheduler) = Build(Start, ledger);
+        var twap = NewTwap(1);
+        twap.RequestCancel();
+        algos.TryAdd(twap);
+
+        scheduler.Tick();
+
+        Assert.Empty(Drain(queue));
     }
 
     [Fact]
@@ -171,16 +242,18 @@ public class AlgoSchedulerTests
     }
 
     [Fact]
-    public void Tick_IgnoresCancellingParents()
+    public void Tick_RedrivesCancellingParents()
     {
-        // Operator already drove the parent into Cancelling — the engine
-        // owns the next transition. Scheduler stays out.
+        // A previously blocked parent cancel must be retried after its
+        // child mutation resolves; the cancel service deduplicates repeats.
         var (algos, _, queue, _, scheduler) = Build(now: Start.AddMinutes(20));
         var twap = NewTwap(1);
         twap.RequestCancel();
         algos.TryAdd(twap);
         scheduler.Tick();
-        Assert.Empty(Drain(queue));
+        var signal = Assert.IsType<AlgoCancelRequestedSignal>(Assert.Single(Drain(queue)));
+        Assert.Equal(twap.AlgoId, signal.AlgoId);
+        Assert.Equal(twap.FirmId, signal.FirmId);
     }
 
     [Fact]

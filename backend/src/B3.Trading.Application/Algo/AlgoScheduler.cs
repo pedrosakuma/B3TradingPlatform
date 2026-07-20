@@ -79,6 +79,7 @@ public sealed class AlgoScheduler : BackgroundService
     private readonly PendingReplacementRegistry? _replacements;
     private readonly IReplaceMarginCoordinator? _replaceMargin;
     private readonly IOptionsMonitor<RiskOptions>? _riskOptions;
+    private readonly OutboundMutationLedger? _outboundLedger;
     private readonly IOutboundRecoveryGate _recovery;
 
     public AlgoScheduler(
@@ -90,9 +91,10 @@ public sealed class AlgoScheduler : BackgroundService
         PendingReplacementRegistry? replacements = null,
         IReplaceMarginCoordinator? replaceMargin = null,
         IOptionsMonitor<RiskOptions>? riskOptions = null,
-        IOutboundRecoveryGate? recovery = null)
+        IOutboundRecoveryGate? recovery = null,
+        OutboundMutationLedger? outboundLedger = null)
         : this(algos, orders, signals, clock, DefaultTickInterval, logger,
-               replacements, replaceMargin, riskOptions, recovery)
+               replacements, replaceMargin, riskOptions, recovery, outboundLedger)
     {
     }
 
@@ -110,7 +112,8 @@ public sealed class AlgoScheduler : BackgroundService
         PendingReplacementRegistry? replacements = null,
         IReplaceMarginCoordinator? replaceMargin = null,
         IOptionsMonitor<RiskOptions>? riskOptions = null,
-        IOutboundRecoveryGate? recovery = null)
+        IOutboundRecoveryGate? recovery = null,
+        OutboundMutationLedger? outboundLedger = null)
     {
         if (tickInterval <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(tickInterval));
@@ -124,6 +127,7 @@ public sealed class AlgoScheduler : BackgroundService
         _replaceMargin = replaceMargin;
         _riskOptions = riskOptions;
         _recovery = recovery ?? ImmediateOutboundRecoveryGate.Instance;
+        _outboundLedger = outboundLedger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -182,7 +186,21 @@ public sealed class AlgoScheduler : BackgroundService
         foreach (var algo in algos)
         {
             if (algo.IsTerminal) continue;
-            if (algo.Status == AlgoStatus.Cancelling) continue;
+            var outboundBlocked =
+                _outboundLedger?.HasBlockingAlgoMutation(algo.FirmId, algo.AlgoId) == true;
+            if (algo.Status == AlgoStatus.Cancelling)
+            {
+                if (!outboundBlocked)
+                {
+                    _signals.TryEnqueue(new AlgoCancelRequestedSignal
+                    {
+                        FirmId = algo.FirmId,
+                        AlgoId = algo.AlgoId,
+                    });
+                }
+                continue;
+            }
+            if (outboundBlocked) continue;
 
             if (algo.Type == AlgoType.Twap && algo.Parameters is TwapParameters tp)
             {

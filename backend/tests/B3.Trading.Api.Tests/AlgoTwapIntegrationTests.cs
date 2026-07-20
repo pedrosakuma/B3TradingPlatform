@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using B3.Trading.Application;
 using B3.Trading.Domain;
+using B3.Trading.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace B3.Trading.Api.Tests;
@@ -73,14 +74,17 @@ public class AlgoTwapIntegrationTests
         // Slices 0..2 each carry 100 (300/3 even split).
         var s0 = await WaitForChild(book, algoId, expectedSeq: 0);
         Assert.Equal(100, s0.Quantity);
+        await WaitForNewOrderDispatch(f, s0.ClOrdId);
         await InjectEr(http, adminToken, s0.ClOrdId, "Fill", lastQty: 100);
 
         var s1 = await WaitForChild(book, algoId, expectedSeq: 1);
         Assert.Equal(100, s1.Quantity);
+        await WaitForNewOrderDispatch(f, s1.ClOrdId);
         await InjectEr(http, adminToken, s1.ClOrdId, "Fill", lastQty: 100);
 
         var s2 = await WaitForChild(book, algoId, expectedSeq: 2);
         Assert.Equal(100, s2.Quantity);
+        await WaitForNewOrderDispatch(f, s2.ClOrdId);
         await InjectEr(http, adminToken, s2.ClOrdId, "Fill", lastQty: 100);
 
         await WaitForAlgoStatus(http, userToken, algoId, "Completed");
@@ -107,14 +111,17 @@ public class AlgoTwapIntegrationTests
         var book = f.Services.GetRequiredService<WorkingOrderBook>();
         var s0 = await WaitForChild(book, algoId, expectedSeq: 0);
         Assert.Equal(334, s0.Quantity);
+        await WaitForNewOrderDispatch(f, s0.ClOrdId);
         await InjectEr(http, adminToken, s0.ClOrdId, "Fill", lastQty: 334);
 
         var s1 = await WaitForChild(book, algoId, expectedSeq: 1);
         Assert.Equal(334, s1.Quantity);
+        await WaitForNewOrderDispatch(f, s1.ClOrdId);
         await InjectEr(http, adminToken, s1.ClOrdId, "Fill", lastQty: 334);
 
         var s2 = await WaitForChild(book, algoId, expectedSeq: 2);
         Assert.Equal(335, s2.Quantity); // remainder lands on the last slice
+        await WaitForNewOrderDispatch(f, s2.ClOrdId);
         await InjectEr(http, adminToken, s2.ClOrdId, "Fill", lastQty: 335);
 
         await WaitForAlgoStatus(http, userToken, algoId, "Completed");
@@ -143,6 +150,7 @@ public class AlgoTwapIntegrationTests
 
         var book = f.Services.GetRequiredService<WorkingOrderBook>();
         var s0 = await WaitForChild(book, algoId, expectedSeq: 0);
+        await WaitForNewOrderDispatch(f, s0.ClOrdId);
 
         // Wait past the window end so the scheduler's expiry path is
         // armed by the time the child terminalizes.
@@ -238,6 +246,21 @@ public class AlgoTwapIntegrationTests
             await Task.Delay(10);
         }
         throw new TimeoutException($"Child for algo {algoIdStr} seq {expectedSeq} did not appear within 5s.");
+    }
+
+    private static async Task WaitForNewOrderDispatch(
+        TestAppFactory factory,
+        ulong clOrdId)
+    {
+        var client = factory.Services.GetRequiredService<MockEntryPointClient>();
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.Elapsed < TimeSpan.FromSeconds(3))
+        {
+            if (client.SubmittedNewOrders.Any(order => order.ClOrdId == clOrdId))
+                return;
+            await Task.Delay(10);
+        }
+        throw new TimeoutException($"New order {clOrdId} was not dispatched within 3s.");
     }
 
     private static async Task WaitForAlgoStatus(HttpClient http, string token, string algoId, params string[] anyOf)

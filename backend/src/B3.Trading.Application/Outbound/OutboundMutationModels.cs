@@ -120,6 +120,19 @@ public enum OutboundMutationOrigin
     Legacy,
 }
 
+public enum AlgoOutboundActionKind
+{
+    NewChild,
+    CancelChild,
+    ReplaceChild,
+    Repeg,
+}
+
+public sealed record AlgoOutboundOriginIdentity(
+    ulong ParentAlgoId,
+    AlgoOutboundActionKind ActionKind,
+    int Sequence);
+
 public enum OutboundMutationState
 {
     ApprovedToSend,
@@ -376,6 +389,7 @@ public sealed record OutboundMutationSnapshot
     public required string FirmId { get; init; }
     public required string EndClientRef { get; init; }
     public required OutboundMutationOrigin Origin { get; init; }
+    public AlgoOutboundOriginIdentity? AlgoOriginIdentity { get; init; }
     public required ulong PrimaryClOrdId { get; init; }
     public ulong? OriginalClOrdId { get; init; }
     public required DateTimeOffset RecordedAtUtc { get; init; }

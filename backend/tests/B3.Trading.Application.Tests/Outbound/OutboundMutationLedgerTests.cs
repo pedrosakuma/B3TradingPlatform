@@ -4109,6 +4109,117 @@ public sealed class OutboundMutationLedgerTests
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
+    [Fact]
+    public void AlgoOriginIdentity_IsDurableUniqueAndBlocksUnresolvedScheduling()
+    {
+        var origin = new AlgoOutboundOriginIdentity(
+            9001,
+            AlgoOutboundActionKind.NewChild,
+            4);
+        var first = Fixture.Create(7001);
+        var approved = first.Approved with
+        {
+            Origin = OutboundMutationOrigin.Algo,
+            AlgoOriginIdentity = origin,
+        };
+        first.Ledger.Apply(approved);
+
+        Assert.True(first.Ledger.HasBlockingAlgoMutation(approved.FirmId, origin.ParentAlgoId));
+        Assert.True(first.Ledger.TryGetByAlgoOrigin(approved.FirmId, origin, out var stored));
+        Assert.Equal(approved.MutationId, stored!.MutationId);
+
+        var snapshot = first.Ledger.CaptureSnapshot();
+        var restored = new OutboundMutationLedger(first.Protector);
+        restored.Restore(
+            snapshot.Mutations,
+            snapshot.Correlations,
+            snapshot.InboundEvidence);
+        Assert.True(restored.TryGetByAlgoOrigin(approved.FirmId, origin, out var recovered));
+        Assert.Equal(origin, recovered!.AlgoOriginIdentity);
+
+        var second = Fixture.Create(7002);
+        var duplicate = second.Approved with
+        {
+            Origin = OutboundMutationOrigin.Algo,
+            AlgoOriginIdentity = origin,
+        };
+        Assert.Throws<InvalidOperationException>(() => restored.Apply(duplicate));
+        Assert.Single(restored.GetAlgoMutations(approved.FirmId, origin.ParentAlgoId));
+
+        var otherFirm = duplicate with { FirmId = "OTHER" };
+        restored.Apply(otherFirm);
+        Assert.True(restored.TryGetByAlgoOrigin("OTHER", origin, out var otherStored));
+        Assert.Equal(otherFirm.MutationId, otherStored!.MutationId);
+    }
+
+    [Fact]
+    public void AlgoProvenUnsent_RemainsBlockedUntilExplicitDecision()
+    {
+        var fixture = Fixture.Create(7101);
+        var origin = new AlgoOutboundOriginIdentity(
+            9002,
+            AlgoOutboundActionKind.Repeg,
+            1);
+        fixture.Ledger.Apply(fixture.Approved with
+        {
+            Origin = OutboundMutationOrigin.Algo,
+            AlgoOriginIdentity = origin,
+        });
+        fixture.Ledger.Apply(fixture.Intent);
+        fixture.Ledger.Apply(fixture.Unsent);
+
+        Assert.True(fixture.Ledger.HasBlockingAlgoMutation(
+            fixture.Approved.FirmId,
+            origin.ParentAlgoId));
+        Assert.Equal(
+            OutboundMutationState.ProvenUnsent,
+            Assert.Single(fixture.Ledger.GetAlgoMutations(
+                fixture.Approved.FirmId,
+                origin.ParentAlgoId)).State);
+    }
+
+    [Fact]
+    public void AlgoTerminalMutationRequiringReconciliation_RemainsBlocking()
+    {
+        var fixture = Fixture.Create(7102);
+        var origin = new AlgoOutboundOriginIdentity(
+            9003,
+            AlgoOutboundActionKind.CancelChild,
+            1);
+        fixture.Ledger.Apply(fixture.Approved with
+        {
+            Origin = OutboundMutationOrigin.Algo,
+            AlgoOriginIdentity = origin,
+        });
+        fixture.Ledger.Apply(fixture.Intent);
+        fixture.Ledger.Apply(fixture.Frame);
+        fixture.Ledger.Apply(fixture.Write);
+
+        var snapshot = Assert.Single(fixture.Ledger.CaptureSnapshot().Mutations);
+        var restored = new OutboundMutationLedger(fixture.Protector);
+        restored.Restore(
+            [
+                   snapshot with
+                   {
+                       State = OutboundMutationState.VenueAcknowledged,
+                       Attempts =
+                       [
+                           snapshot.Attempts[0] with
+                           {
+                               AmbiguityReason =
+                                   OutboundAmbiguityReason.ConflictingVenueEvidence,
+                           },
+                       ],
+                   },
+            ],
+            Array.Empty<OutboundCorrelationTombstone>(),
+            Array.Empty<InboundVenueEvidenceSnapshot>());
+
+        Assert.True(restored.HasBlockingAlgoMutation(
+            fixture.Approved.FirmId,
+            origin.ParentAlgoId));
+    }
+
     private sealed class SimulatedCrashException : Exception;
 
     private sealed class Fixture
