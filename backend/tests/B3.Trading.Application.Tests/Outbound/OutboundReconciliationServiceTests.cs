@@ -3,7 +3,9 @@ using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
+using B3.Trading.Infrastructure;
 using B3.Trading.Infrastructure.Persistence;
+using Microsoft.Extensions.Logging.Abstractions;
 using System.Text.Json;
 
 namespace B3.Trading.Application.Tests.Outbound;
@@ -406,6 +408,7 @@ public sealed class OutboundReconciliationServiceTests
             fixture.Ledger.GetInboundEvidenceForMutation(fixture.MutationId));
 
         Assert.True(result.ReopenedReconciliation);
+        Assert.True(result.ShouldApplyDomain);
         Assert.Equal(InboundVenueEvidenceDisposition.Conflicting, lateEvidence.Disposition);
         Assert.True(lateEvidence.AuthoritativeTerminalContradiction);
         var resolved = fixture.Service.Resolve(
@@ -422,6 +425,84 @@ public sealed class OutboundReconciliationServiceTests
         Assert.Equal(
             OutboundMutationState.VenueAcknowledged,
             fixture.Ledger.SnapshotMutations().Single().State);
+    }
+
+    [Fact]
+    public void AuthoritativeContradictoryFill_ReopensAndAppliesDomainEffects()
+    {
+        var fixture = Fixture.Create();
+        var evidenceReference = fixture.RegisterEvidence(
+            OutboundOperatorEvidenceType.OfficialExtract,
+            'e');
+        var proposed = fixture.Service.Resolve(
+            fixture.MutationId,
+            "F1",
+            "maker",
+            new(
+                OutboundOperatorDecision.VenueAbsent,
+                OutboundOperatorEvidenceType.OfficialExtract,
+                evidenceReference,
+                "official_extract_attested"));
+        fixture.Service.Approve(
+            fixture.MutationId,
+            proposed.ProposalId!.Value,
+            "F1",
+            "checker");
+        var owner = new EndClientId("CLIENT-SECRET");
+        var ownership = new OrderOwnershipMap();
+        var book = new WorkingOrderBook();
+        var positions = new PositionKeeper();
+        var cash = new CashLedger();
+        var order = new Order(
+            101,
+            owner,
+            "PETR4",
+            123,
+            OrderSide.Buy,
+            OrderType.Limit,
+            10,
+            30m,
+            firmId: "F1");
+        Assert.True(book.TryAdd(order));
+        ownership.Register(order.ClOrdId, owner);
+        var processor = new ExecutionReportProcessor(
+            ownership,
+            book,
+            positions,
+            new NoOpExecutionEventSink(),
+            new NoOpMarginProvider(),
+            NullLogger<ExecutionReportProcessor>.Instance,
+            cash: cash);
+        var client = new MockEntryPointClient();
+        using var router = new EntryPointExecutionReportRouter(
+            client,
+            processor,
+            new EventDispatcher(new NullEventStore()),
+            book,
+            bookTop: null,
+            outboundLedger: fixture.Ledger);
+
+        client.EmitExecutionReport(new ExecutionReportEnvelope(
+            order.ClOrdId,
+            EpExecType.Fill,
+            LeavesQuantity: 0,
+            CumulativeQuantity: 10,
+            LastQuantity: 10,
+            LastPrice: 30m,
+            RejectReason: null,
+            FirmId: "F1",
+            SessionId: 11,
+            SessionVerId: 3,
+            InboundSeqNum: 94,
+            SendingTime: T0.AddMinutes(3)));
+
+        Assert.Equal(OrderStatus.Filled, order.Status);
+        Assert.Equal(10, order.CumulativeQuantity);
+        Assert.Equal(10, positions.GetOrCreate("F1", owner, "PETR4").NetQuantity);
+        Assert.Equal(-300m, cash.GetAvailable("F1", owner));
+        var mutation = fixture.Ledger.SnapshotMutations().Single();
+        Assert.Equal(OutboundMutationState.Ambiguous, mutation.State);
+        Assert.True(mutation.RequiresReconciliation);
     }
 
     [Fact]

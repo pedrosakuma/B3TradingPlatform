@@ -761,7 +761,8 @@ public sealed class OutboundMutationLedger
                     evidenceIdentity);
                 return new(
                     InboundVenueEvidenceApplyStatus.RecordedConflicting,
-                    ReopenedReconciliation: true);
+                    ReopenedReconciliation: true,
+                    ApplyDomainDespiteConflict: true);
             }
 
             if (activeAttempt.ProvenUnsentEvidence is not null

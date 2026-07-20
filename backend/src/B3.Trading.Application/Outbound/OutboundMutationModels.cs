@@ -214,11 +214,13 @@ public enum InboundVenueEvidenceApplyStatus
 
 public readonly record struct InboundVenueEvidenceApplyResult(
     InboundVenueEvidenceApplyStatus Status,
-    bool ReopenedReconciliation = false)
+    bool ReopenedReconciliation = false,
+    bool ApplyDomainDespiteConflict = false)
 {
     public bool ShouldApplyDomain =>
-        Status is InboundVenueEvidenceApplyStatus.RecordedMatched
-            or InboundVenueEvidenceApplyStatus.RecordedUnmatched;
+        (Status is InboundVenueEvidenceApplyStatus.RecordedMatched
+            or InboundVenueEvidenceApplyStatus.RecordedUnmatched)
+        || ApplyDomainDespiteConflict;
 }
 
 public enum OutboundOperatorDecision
