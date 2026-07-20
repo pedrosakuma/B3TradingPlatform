@@ -620,6 +620,19 @@ public sealed class OutboundReconciliationServiceTests
         Assert.Equal(
             OutboundMutationState.VenueAcknowledged,
             fixture.Ledger.SnapshotMutations().Single().State);
+
+        var snapshot = fixture.Ledger.CaptureSnapshot();
+        var restored = new OutboundMutationLedger(fixture.Protector);
+        restored.Restore(
+            snapshot.Mutations,
+            snapshot.Correlations,
+            snapshot.InboundEvidence);
+
+        var restoredMutation = Assert.Single(restored.SnapshotMutations());
+        Assert.Equal(OutboundMutationState.VenueAcknowledged, restoredMutation.State);
+        Assert.False(restoredMutation.RequiresReconciliation);
+        Assert.Equal(0, restored.ReadinessBlockingCount);
+        Assert.Null(Assert.Single(restoredMutation.Attempts).AmbiguityReason);
     }
 
     [Fact]

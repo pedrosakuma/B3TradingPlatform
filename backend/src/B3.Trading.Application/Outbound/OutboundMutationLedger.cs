@@ -2320,8 +2320,22 @@ public sealed class OutboundMutationLedger
         string evidenceDigest,
         ulong? venueOrderId)
     {
+        var attempts = mutation.Attempts.ToArray();
+        if (attempts.Length > 0
+            && attempts[^1].AmbiguityReason
+                == OutboundAmbiguityReason.ConflictingVenueEvidence
+            && mutation.OperatorEvidence.Any(evidence =>
+                evidence.Decision != OutboundOperatorDecision.LeaveAmbiguous
+                && evidence.EvidenceDigest == evidenceDigest))
+        {
+            attempts[^1] = attempts[^1] with
+            {
+                AmbiguityReason = null,
+            };
+        }
         mutation = mutation with
         {
+            Attempts = attempts,
             State = state,
             StateChangedAtUtc = atUtc,
             Resolution = new OutboundResolutionSnapshot
