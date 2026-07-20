@@ -202,8 +202,13 @@ public sealed class OrderIdempotencyEndpointTests
                 firstPayload = await ReadAsync(first);
             }
 
-            using var secondFactory = TestAppFactory.WithOverrides(overrides);
+            using var secondFactory = TestAppFactory.WithOverrides(
+                overrides,
+                UseImmediateRecoveryGate);
             using var secondHttp = secondFactory.CreateClient();
+            await secondFactory.Services
+                .GetRequiredService<OutboundRecoveryState>()
+                .WaitUntilClassificationCompleteAsync(CancellationToken.None);
             var secondToken = await secondFactory.LoginAsync(secondHttp);
             using var second = await PostAsync(secondHttp, secondToken, "restart-key", Body());
             Assert.Equal(HttpStatusCode.ServiceUnavailable, second.StatusCode);
@@ -322,6 +327,9 @@ public sealed class OrderIdempotencyEndpointTests
             using (var factory = TestAppFactory.WithOverrides(oldConfig))
             using (var http = factory.CreateClient())
             {
+                await factory.Services
+                    .GetRequiredService<OutboundRecoveryState>()
+                    .WaitUntilClassificationCompleteAsync(CancellationToken.None);
                 var token = await factory.LoginAsync(http);
                 using var response = await PostAsync(http, token, "rotation-api-key", Body());
                 Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
@@ -331,9 +339,14 @@ public sealed class OrderIdempotencyEndpointTests
             var retainedConfig = ProtectionConfig("new", ["old", "new"]);
             foreach (var pair in persistence)
                 retainedConfig[pair.Key] = pair.Value;
-            using (var factory = TestAppFactory.WithOverrides(retainedConfig))
+            using (var factory = TestAppFactory.WithOverrides(
+                       retainedConfig,
+                       UseImmediateRecoveryGate))
             using (var http = factory.CreateClient())
             {
+                await factory.Services
+                    .GetRequiredService<OutboundRecoveryState>()
+                    .WaitUntilClassificationCompleteAsync(CancellationToken.None);
                 var token = await factory.LoginAsync(http);
                 using var response = await PostAsync(http, token, "rotation-api-key", Body());
                 Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
@@ -346,8 +359,13 @@ public sealed class OrderIdempotencyEndpointTests
             var missingConfig = ProtectionConfig("new", ["new"]);
             foreach (var pair in persistence)
                 missingConfig[pair.Key] = pair.Value;
-            using var missingFactory = TestAppFactory.WithOverrides(missingConfig);
+            using var missingFactory = TestAppFactory.WithOverrides(
+                missingConfig,
+                UseImmediateRecoveryGate);
             using var missingHttp = missingFactory.CreateClient();
+            await missingFactory.Services
+                .GetRequiredService<OutboundRecoveryState>()
+                .WaitUntilClassificationCompleteAsync(CancellationToken.None);
             var missingToken = await missingFactory.LoginAsync(missingHttp);
             using var unavailable = await PostAsync(
                 missingHttp,
@@ -492,6 +510,12 @@ public sealed class OrderIdempotencyEndpointTests
         string ClOrdId,
         bool Replayed,
         string? Status);
+
+    private static void UseImmediateRecoveryGate(IServiceCollection services)
+    {
+        services.RemoveAll<IOutboundRecoveryGate>();
+        services.AddSingleton<IOutboundRecoveryGate>(ImmediateOutboundRecoveryGate.Instance);
+    }
 
     private sealed class RejectingApprovalStore : IEventStore, IEventStoreHealth
     {

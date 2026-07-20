@@ -39,8 +39,12 @@ public static class OrdersEndpoints
             WorkingOrderBook book,
             SymbolDirectory symbols,
             SubAccountsRegistry subAccounts,
+            IOutboundRecoveryGate recovery,
             CancellationToken ct) =>
         {
+            var firm = ResolveFirm(ctx);
+            if (!recovery.IsBusinessIngressOpen(firm))
+                return RecoveryUnavailable();
             if (!Enum.TryParse<OrderSide>(req.Side, ignoreCase: true, out var side))
                 return Results.BadRequest(new { error = $"invalid side '{req.Side}'" });
             if (!Enum.TryParse<OrderType>(req.Type, ignoreCase: true, out var type))
@@ -98,7 +102,6 @@ public static class OrdersEndpoints
             }
 
             var owner = ResolveOwner(ctx, registry);
-            var firm = ResolveFirm(ctx);
             var idempotencyValues = ctx.Request.Headers["Idempotency-Key"];
             if (idempotencyValues.Count > 1)
                 return Results.BadRequest(new { error = "multiple Idempotency-Key values are not allowed" });
@@ -286,13 +289,16 @@ public static class OrdersEndpoints
             RestOrderIdempotencyStore idempotency,
             OutboundMutationLedger outboundLedger,
             WorkingOrderBook book,
+            IOutboundRecoveryGate recovery,
             CancellationToken ct) =>
         {
+            var firm = ResolveFirm(ctx);
+            if (!recovery.IsBusinessIngressOpen(firm))
+                return RecoveryUnavailable();
             if (!ulong.TryParse(clOrdId, out var clOrdIdU))
                 return Results.NotFound();
 
             var owner = ResolveOwner(ctx, registry);
-            var firm = ResolveFirm(ctx);
             var idempotencyValues = ctx.Request.Headers["Idempotency-Key"];
             if (idempotencyValues.Count > 1)
                 return Results.BadRequest(new { error = "multiple Idempotency-Key values are not allowed" });
@@ -393,13 +399,16 @@ public static class OrdersEndpoints
             RestOrderIdempotencyStore idempotency,
             OutboundMutationLedger outboundLedger,
             WorkingOrderBook book,
+            IOutboundRecoveryGate recovery,
             CancellationToken ct) =>
         {
+            var firm = ResolveFirm(ctx);
+            if (!recovery.IsBusinessIngressOpen(firm))
+                return RecoveryUnavailable();
             if (!ulong.TryParse(clOrdId, out var clOrdIdU))
                 return Results.NotFound();
 
             var owner = ResolveOwner(ctx, registry);
-            var firm = ResolveFirm(ctx);
             var idempotencyValues = ctx.Request.Headers["Idempotency-Key"];
             if (idempotencyValues.Count > 1)
                 return Results.BadRequest(new { error = "multiple Idempotency-Key values are not allowed" });
@@ -481,6 +490,15 @@ public static class OrdersEndpoints
 
         return app;
     }
+
+    private static IResult RecoveryUnavailable() =>
+        Results.Json(
+            new
+            {
+                error = "outbound cold-start recovery is incomplete",
+                code = "outbound_recovery_incomplete",
+            },
+            statusCode: StatusCodes.Status503ServiceUnavailable);
 
     private static IResult MapModifyResult(
         OrderModifyResult result,

@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text.Json;
 using B3.Trading.Api;
 using B3.Trading.Application;
 using B3.Trading.Application.Outbound;
@@ -170,6 +171,71 @@ public sealed class OutboundRecoveryReadinessTests
         });
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task ClosedRecoveryGate_OrderRoutesShortCircuitBeforeValidationAndStateAccess()
+    {
+        var gate = new ClosedRecoveryGate();
+        using var factory = TestAppFactory.WithOverrides(
+            new Dictionary<string, string?>(),
+            services =>
+            {
+                services.RemoveAll<IOutboundRecoveryGate>();
+                services.AddSingleton<IOutboundRecoveryGate>(gate);
+            });
+        using var client = await factory.CreateAuthedClientAsync();
+        var eventStore = factory.Services.GetRequiredService<IEventStore>();
+        var seqBefore = eventStore.CurrentSeq;
+
+        using var submitRequest = new HttpRequestMessage(HttpMethod.Post, "/orders/")
+        {
+            Content = JsonContent.Create(new
+            {
+                Symbol = "",
+                SecurityId = 0UL,
+                Side = "invalid",
+                Type = "invalid",
+                Quantity = 0,
+                Price = (decimal?)null,
+            }),
+        };
+        submitRequest.Headers.TryAddWithoutValidation(
+            "Idempotency-Key",
+            ["duplicate-a", "duplicate-b"]);
+        using var submit = await client.SendAsync(submitRequest);
+
+        using var modifyRequest = new HttpRequestMessage(HttpMethod.Put, "/orders/not-a-number")
+        {
+            Content = JsonContent.Create(new
+            {
+                Quantity = 0,
+                Price = (decimal?)null,
+                TimeInForce = "invalid",
+            }),
+        };
+        modifyRequest.Headers.TryAddWithoutValidation(
+            "Idempotency-Key",
+            ["duplicate-a", "duplicate-b"]);
+        using var modify = await client.SendAsync(modifyRequest);
+
+        using var cancelRequest = new HttpRequestMessage(
+            HttpMethod.Delete,
+            "/orders/not-a-number");
+        cancelRequest.Headers.TryAddWithoutValidation(
+            "Idempotency-Key",
+            ["duplicate-a", "duplicate-b"]);
+        using var cancel = await client.SendAsync(cancelRequest);
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, submit.StatusCode);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, modify.StatusCode);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, cancel.StatusCode);
+        Assert.Equal(
+            "outbound_recovery_incomplete",
+            (await submit.Content.ReadFromJsonAsync<JsonElement>())
+                .GetProperty("code")
+                .GetString());
+        Assert.Equal(seqBefore, eventStore.CurrentSeq);
     }
 
     [Fact]
