@@ -130,6 +130,79 @@ public sealed class OutboundMutationLedgerTests
     }
 
     [Fact]
+    public async Task ColdStartCoordinator_CommitsIntentOnlyProvenUnsent_AndDoesNotResendFramePrepared()
+    {
+        var intentOnly = Fixture.Create();
+        intentOnly.Ledger.Apply(intentOnly.Approved);
+        intentOnly.Ledger.Apply(intentOnly.Intent);
+        var coordinator = new OutboundColdStartRecoveryCoordinator(
+            intentOnly.Ledger,
+            new OutboundProcessEpoch(ProcessEpochId.New()),
+            new EventDispatcher(new NullEventStore()),
+            NullLogger<OutboundColdStartRecoveryCoordinator>.Instance);
+
+        var result = await coordinator.RunAsync();
+
+        Assert.Equal(1, result.ProvenUnsent);
+        AssertState(intentOnly, OutboundMutationState.ProvenUnsent);
+        Assert.Equal(
+            OutboundProvenUnsentEvidence.DeadEpochIntentWithoutFrame,
+            intentOnly.Ledger.SnapshotMutations().Single().Attempts.Single().ProvenUnsentEvidence);
+
+        var framed = Fixture.Create(clOrdId: 202);
+        framed.Ledger.Apply(framed.Approved);
+        framed.Ledger.Apply(framed.Intent);
+        framed.Ledger.Apply(framed.Frame);
+        var framedCoordinator = new OutboundColdStartRecoveryCoordinator(
+            framed.Ledger,
+            new OutboundProcessEpoch(ProcessEpochId.New()),
+            new EventDispatcher(new NullEventStore()),
+            NullLogger<OutboundColdStartRecoveryCoordinator>.Instance);
+
+        result = await framedCoordinator.RunAsync();
+
+        Assert.Equal(1, result.Ambiguous);
+        AssertState(framed, OutboundMutationState.Ambiguous);
+        Assert.Equal(
+            OutboundAmbiguityReason.DeadEpochFramePrepared,
+            framed.Ledger.SnapshotMutations().Single().Attempts.Single().AmbiguityReason);
+    }
+
+    [Fact]
+    public void RecoveryGate_BlocksOnlyFirmsCapturedDuringColdClassification()
+    {
+        var recovered = Fixture.Create();
+        recovered.Ledger.Apply(recovered.Approved);
+        recovered.Ledger.Apply(recovered.Intent);
+        recovered.Ledger.Apply(recovered.Frame);
+        recovered.Ledger.MarkAmbiguous(
+            recovered.MutationId,
+            recovered.AttemptId,
+            OutboundAmbiguityReason.DeadEpochFramePrepared,
+            T0.AddMinutes(1));
+        var state = new OutboundRecoveryState(recovered.Ledger);
+        state.ConfigureRequiredFirms(["F2"]);
+
+        state.Complete();
+
+        Assert.True(state.IsReady);
+        Assert.False(state.IsBusinessIngressOpen("F1"));
+        Assert.True(state.IsBusinessIngressOpen("F2"));
+
+        var live = Fixture.Create(clOrdId: 202);
+        recovered.Ledger.Apply(live.Approved with { FirmId = "F2" });
+        recovered.Ledger.Apply(live.Intent);
+        recovered.Ledger.Apply(live.Frame with { FirmId = "F2" });
+        recovered.Ledger.MarkAmbiguous(
+            live.MutationId,
+            live.AttemptId,
+            OutboundAmbiguityReason.GatewayOutcomeUnknown,
+            T0.AddMinutes(2));
+
+        Assert.True(state.IsBusinessIngressOpen("F2"));
+    }
+
+    [Fact]
     public void RetryAfterProvenUnsent_RequiresFreshAttemptAndClOrdId_AndIsFinite()
     {
         var fixture = Fixture.Create();

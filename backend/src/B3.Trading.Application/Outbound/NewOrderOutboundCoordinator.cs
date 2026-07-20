@@ -123,6 +123,7 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
     private readonly TimeProvider _clock;
     private readonly ILogger<NewOrderOutboundCoordinator> _logger;
     private readonly IOutboundGatewayReadiness _gatewayReadiness;
+    private readonly IOutboundRecoveryGate _recovery;
     private readonly CancellationTokenSource _recoveryShutdown = new();
     private readonly object _recoveryGate = new();
     private readonly object _lifecycleGate = new();
@@ -146,7 +147,8 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
         GtdExpirationScheduler? gtd = null,
         IocFokWatchdog? iocFok = null,
         TimeProvider? clock = null,
-        IOutboundGatewayReadiness? gatewayReadiness = null)
+        IOutboundGatewayReadiness? gatewayReadiness = null,
+        IOutboundRecoveryGate? recovery = null)
     {
         _ledger = ledger;
         _epoch = epoch;
@@ -162,6 +164,7 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
         _clock = clock ?? TimeProvider.System;
         _gatewayReadiness = gatewayReadiness
             ?? ImmediateOutboundGatewayReadiness.Instance;
+        _recovery = recovery ?? ImmediateOutboundRecoveryGate.Instance;
     }
 
     public async Task<NewOrderDispatchResult> EnqueueAsync(
@@ -192,18 +195,33 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
     {
         if (Interlocked.Exchange(ref _recoveryStarted, 1) != 0)
             return Task.CompletedTask;
-        foreach (var mutation in _ledger.GetMutations(
-                     OutboundMutationKind.New,
-                     OutboundMutationState.ApprovedToSend))
-        {
-            var task = RecoverWhenOperationalAsync(
-                mutation.MutationId,
-                mutation.FirmId,
-                _recoveryShutdown.Token);
-            lock (_recoveryGate)
-                _recoveryTasks.Add(task);
-        }
+        var task = RecoverAllAsync(_recoveryShutdown.Token);
+        lock (_recoveryGate)
+            _recoveryTasks.Add(task);
         return Task.CompletedTask;
+    }
+
+    private async Task RecoverAllAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _recovery.WaitUntilClassificationCompleteAsync(cancellationToken)
+                .ConfigureAwait(false);
+            foreach (var mutation in _ledger.GetMutations(
+                         OutboundMutationKind.New,
+                         OutboundMutationState.ApprovedToSend))
+            {
+                var task = RecoverWhenOperationalAsync(
+                    mutation.MutationId,
+                    mutation.FirmId,
+                    cancellationToken);
+                lock (_recoveryGate)
+                    _recoveryTasks.Add(task);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
@@ -232,6 +250,9 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
     {
         try
         {
+            await _recovery.WaitUntilBusinessIngressOpenAsync(
+                firmId,
+                cancellationToken).ConfigureAwait(false);
             await _gatewayReadiness.WaitUntilOperationalAsync(
                 firmId,
                 cancellationToken).ConfigureAwait(false);

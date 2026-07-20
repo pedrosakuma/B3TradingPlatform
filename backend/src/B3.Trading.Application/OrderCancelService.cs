@@ -40,6 +40,7 @@ public sealed class OrderCancelService
     private readonly CancelReplaceOutboundCoordinator? _outboundCoordinator;
     private readonly RestOrderIdempotencyStore? _restIdempotency;
     private readonly TimeProvider _clock;
+    private readonly IOutboundRecoveryGate _outboundRecovery;
 
     public OrderCancelService(
         ClOrdIdPrefixRegistry clOrdIds,
@@ -56,7 +57,8 @@ public sealed class OrderCancelService
         CancelReplaceApprovalFactory? approvalFactory = null,
         CancelReplaceOutboundCoordinator? outboundCoordinator = null,
         RestOrderIdempotencyStore? restIdempotency = null,
-        TimeProvider? clock = null)
+        TimeProvider? clock = null,
+        IOutboundRecoveryGate? outboundRecovery = null)
     {
         _clOrdIds = clOrdIds;
         _ownership = ownership;
@@ -77,6 +79,7 @@ public sealed class OrderCancelService
         _outboundCoordinator = outboundCoordinator;
         _restIdempotency = restIdempotency;
         _clock = clock ?? TimeProvider.System;
+        _outboundRecovery = outboundRecovery ?? ImmediateOutboundRecoveryGate.Instance;
     }
 
     /// <summary>
@@ -111,6 +114,9 @@ public sealed class OrderCancelService
         // not leaked across the firm boundary.
         if (firmId is not null && !string.Equals(order.FirmId, firmId, StringComparison.Ordinal))
             return OrderCancelResult.NotFound;
+        if (!_outboundRecovery.IsBusinessIngressOpen(order.FirmId))
+            return OrderCancelResult.ReconciliationRequired(
+                0, "outbound cold-start recovery is incomplete", null);
         if (order.Status is OrderStatus.Filled or OrderStatus.Cancelled
             or OrderStatus.Rejected or OrderStatus.Replaced)
         {

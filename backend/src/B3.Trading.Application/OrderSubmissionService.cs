@@ -48,6 +48,7 @@ public sealed class OrderSubmissionService
     private readonly NewOrderOutboundCoordinator? _outboundCoordinator;
     private readonly RestOrderIdempotencyStore? _restIdempotency;
     private readonly TimeProvider _clock;
+    private readonly IOutboundRecoveryGate _outboundRecovery;
 
     public OrderSubmissionService(
         ClOrdIdPrefixRegistry clOrdIds,
@@ -70,7 +71,8 @@ public sealed class OrderSubmissionService
         NewOrderApprovalFactory? approvalFactory = null,
         NewOrderOutboundCoordinator? outboundCoordinator = null,
         RestOrderIdempotencyStore? restIdempotency = null,
-        TimeProvider? clock = null)
+        TimeProvider? clock = null,
+        IOutboundRecoveryGate? outboundRecovery = null)
     {
         _clOrdIds = clOrdIds;
         _ownership = ownership;
@@ -93,6 +95,7 @@ public sealed class OrderSubmissionService
         _outboundCoordinator = outboundCoordinator;
         _restIdempotency = restIdempotency;
         _clock = clock ?? TimeProvider.System;
+        _outboundRecovery = outboundRecovery ?? ImmediateOutboundRecoveryGate.Instance;
     }
 
     /// <summary>
@@ -105,7 +108,7 @@ public sealed class OrderSubmissionService
     {
         ArgumentNullException.ThrowIfNull(req);
 
-        if (_drain.IsDraining)
+        if (_drain.IsDraining || !_outboundRecovery.IsBusinessIngressOpen(req.FirmId))
         {
             MetricsRegistry.DrainRejections.Add(1,
                 new KeyValuePair<string, object?>("route", req.Source == OrderSubmissionSource.Algo ? "algo.submit" : "POST /orders"));

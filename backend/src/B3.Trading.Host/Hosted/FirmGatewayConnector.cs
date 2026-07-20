@@ -1,4 +1,5 @@
 using B3.Trading.Infrastructure;
+using B3.Trading.Application.Outbound;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -24,36 +25,27 @@ internal sealed class FirmGatewayConnector : IHostedService
     private static readonly TimeSpan MaxReconnectDelay = TimeSpan.FromSeconds(30);
 
     private readonly FirmGatewayRegistry _registry;
+    private readonly IOutboundRecoveryGate _recovery;
     private readonly ILogger<FirmGatewayConnector> _logger;
     private readonly CancellationTokenSource _shutdownCts = new();
     private readonly List<Task> _backgroundLoops = new();
 
-    public FirmGatewayConnector(FirmGatewayRegistry registry, ILogger<FirmGatewayConnector> logger)
+    public FirmGatewayConnector(
+        FirmGatewayRegistry registry,
+        IOutboundRecoveryGate recovery,
+        ILogger<FirmGatewayConnector> logger)
     {
         _registry = registry;
+        _recovery = recovery;
         _logger = logger;
     }
 
-    public async Task StartAsync(CancellationToken cancellationToken)
+    public Task StartAsync(CancellationToken cancellationToken)
     {
-        // StartAsync's CT is the host's start-budget token, not the
-        // shutdown lifetime. Each firm gets a single attempt up front;
-        // on failure we hand off to a background retry that lives until
-        // StopAsync. This keeps boot non-blocking while still recovering
-        // from a transient peer-side reject without a manual restart.
         foreach (var (firmId, gw) in _registry.Gateways)
-        {
-            try
-            {
-                await gw.ConnectAsync(cancellationToken).ConfigureAwait(false);
-                _logger.LogInformation("EntryPoint session connected for firm {Firm}.", firmId);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "EntryPoint connect failed for firm {Firm}; scheduling background retry with backoff.", firmId);
-                _backgroundLoops.Add(Task.Run(() => RetryConnectAsync(firmId, gw, _shutdownCts.Token)));
-            }
-        }
+            _backgroundLoops.Add(Task.Run(
+                () => ConnectWhenRecoveredAsync(firmId, gw, _shutdownCts.Token)));
+        return Task.CompletedTask;
     }
 
     /// <summary>
@@ -63,21 +55,29 @@ internal sealed class FirmGatewayConnector : IHostedService
     /// hot-path Terminated-driven loop from racing with us if the SDK
     /// happens to fire Terminated mid-attempt.
     /// </summary>
-    private async Task RetryConnectAsync(string firmId, B3EntryPointClientGateway gw, CancellationToken ct)
+    private async Task ConnectWhenRecoveredAsync(
+        string firmId,
+        B3EntryPointClientGateway gw,
+        CancellationToken ct)
     {
+        try
+        {
+            await _recovery.WaitUntilClassificationCompleteAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return;
+        }
+
         var attempt = 0;
         while (!ct.IsCancellationRequested)
         {
             attempt++;
-            var delay = ComputeBackoff(attempt);
-            try { await Task.Delay(delay, ct).ConfigureAwait(false); }
-            catch (OperationCanceledException) { return; }
-
             try
             {
                 await gw.ConnectAsync(ct).ConfigureAwait(false);
                 _logger.LogInformation(
-                    "EntryPoint session connected for firm {Firm} on cold-start retry attempt {N}.",
+                    "EntryPoint session connected for firm {Firm} after outbound recovery (attempt {N}).",
                     firmId, attempt);
                 return;
             }
@@ -91,6 +91,9 @@ internal sealed class FirmGatewayConnector : IHostedService
                     "EntryPoint cold-start connect retry failed for firm {Firm} (attempt {N}); will retry after backoff.",
                     firmId, attempt);
             }
+            var delay = ComputeBackoff(attempt);
+            try { await Task.Delay(delay, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { return; }
         }
     }
 

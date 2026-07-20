@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using B3.Entrypoint.Fixp.Sbe.V6;
 using B3.Trading.Application;
 using B3.Trading.Application.Lifecycle;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.Risk.Accounting;
@@ -15,6 +16,40 @@ namespace B3.Trading.EntryPointListener.Tests.Hosting;
 
 public class FixpOrderAdapterFailClosedTests
 {
+    [Fact]
+    public async Task ColdStartRecovery_RejectsBusinessDispatchBeforeSubmission()
+    {
+        var credentialId = Guid.NewGuid();
+        const ulong externalClOrdId = 77;
+        var adapter = new FixpOrderAdapter(
+            new SymbolDirectory(new SymbolDirectoryOptions()),
+            submit: null!,
+            cancel: null!,
+            new InMemoryUserBotOrderMappingRegistry(),
+            NullLogger.Instance,
+            new ClosedRecoveryGate());
+        var scope = new FixpConnectionScope(
+            "conn-recovering",
+            new BotSessionPrincipal("alice", credentialId, "cred-1", "bot", "FIRM-A"),
+            new BotSessionState(credentialId, 10, 2, 0));
+        var decoded = new DecodedNewOrderSingle
+        {
+            MsgSeqNum = 1,
+            ClOrdId = externalClOrdId,
+        };
+        await using var stream = new MemoryStream();
+
+        var outcome = await adapter.HandleNewOrderSingleAsync(
+            stream, decoded, scope, CancellationToken.None);
+
+        Assert.True(outcome.ShouldKeepSession);
+        var reader = new SofhFrameReader();
+        reader.Append(stream.ToArray());
+        Assert.True(reader.TryReadFrame(out var frame));
+        Assert.Equal((ushort)BusinessMessageRejectData.MESSAGE_ID, frame.TemplateId);
+        Assert.Equal(1005u, BinaryPrimitives.ReadUInt32LittleEndian(frame.Payload[32..]));
+    }
+
     [Fact]
     public async Task NonDefaultCredentialFirm_FlowsIntoSubmittedOrder()
     {
@@ -264,5 +299,25 @@ public class FixpOrderAdapterFailClosedTests
     {
         public bool IsDraining { get; private set; }
         public void BeginDrain(string reason) => IsDraining = true;
+    }
+
+    private sealed class ClosedRecoveryGate : IOutboundRecoveryGate
+    {
+        public OutboundRecoveryPhase Phase => OutboundRecoveryPhase.RestoringPersistence;
+        public bool IsClassificationComplete => false;
+        public bool IsReady => false;
+        public string? FailureReason => null;
+        public IReadOnlyList<FirmOutboundRecoveryStatus> Snapshot() => [];
+        public bool IsBusinessIngressOpen(string firmId) => false;
+        public async ValueTask WaitUntilClassificationCompleteAsync(
+            CancellationToken cancellationToken) =>
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        public async ValueTask WaitUntilBusinessIngressOpenAsync(
+            string firmId,
+            CancellationToken cancellationToken) =>
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        public async ValueTask WaitUntilAllRequiredBusinessIngressOpenAsync(
+            CancellationToken cancellationToken) =>
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
     }
 }

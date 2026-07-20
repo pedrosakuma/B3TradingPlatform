@@ -1,6 +1,7 @@
 using B3.Trading.Api.Lifecycle;
 using B3.Trading.Application.Identity;
 using B3.Trading.Application.Persistence;
+using B3.Trading.Application.Outbound;
 using B3.Trading.EntryPointListener;
 using B3.Trading.Infrastructure;
 using B3.Trading.Infrastructure.Identity;
@@ -19,8 +20,9 @@ namespace B3.Trading.Host.Lifecycle;
 /// <list type="bullet">
 ///   <item><c>/live</c> — process is up. Always 200 unless the runtime
 ///   has died. Used by liveness probes to decide whether to restart.</item>
-///   <item><c>/ready</c> — order ingress is safe: not draining, identity and
-///   WAL healthy, and every required exchange session established.</item>
+///   <item><c>/ready</c> — order ingress is safe: active-host fence held,
+///   outbound recovery resolved, not draining, identity and WAL healthy, and
+///   every required exchange session established.</item>
 ///   <item><c>/health</c> — rich JSON for humans + dashboards. Includes
 ///   uptime, drain state, persistence config snapshot.</item>
 /// </list>
@@ -45,10 +47,16 @@ public static class HealthEndpoints
             ITradingUserDirectory directory,
             IEventStoreHealth wal,
             ExchangeStatus exchange,
+            IOutboundRecoveryGate recovery,
+            ActiveHostFence fence,
             CancellationToken ct) =>
         {
             var sessions = ctx.RequestServices.GetService<IFirmSessionStatusProvider>();
-            if (drain.IsDraining || !wal.IsHealthy || !IsExchangeReady(exchange, sessions))
+            if (drain.IsDraining
+                || !wal.IsHealthy
+                || !fence.IsHeld
+                || !recovery.IsReady
+                || !IsExchangeReady(exchange, sessions))
                 return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
             var identity = await directory.CheckHealthAsync(ct);
             return identity.Ready
@@ -56,7 +64,7 @@ public static class HealthEndpoints
                 : Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
         });
 
-        app.MapGet("/health", async (HttpContext ctx, DrainState drain, IOptions<PersistenceOptions> persist, IOptions<IdentityDirectoryOptions> identityOptions, ITradingUserDirectory directory, IEventStoreHealth wal, CancellationToken ct) =>
+        app.MapGet("/health", async (HttpContext ctx, DrainState drain, IOptions<PersistenceOptions> persist, IOptions<IdentityDirectoryOptions> identityOptions, ITradingUserDirectory directory, IEventStoreHealth wal, IOutboundRecoveryGate recovery, ActiveHostFence fence, CancellationToken ct) =>
         {
             var p = persist.Value;
             var identity = await directory.CheckHealthAsync(ct);
@@ -81,7 +89,11 @@ public static class HealthEndpoints
             {
                 status = drain.IsDraining
                     ? "draining"
-                    : identity.Ready && wal.IsHealthy && (exchange is null || IsExchangeReady(exchange, sessions))
+                    : identity.Ready
+                        && wal.IsHealthy
+                        && fence.IsHeld
+                        && recovery.IsReady
+                        && (exchange is null || IsExchangeReady(exchange, sessions))
                         ? "ready"
                         : "unready",
                 drainReason = drain.Reason,
@@ -112,6 +124,17 @@ public static class HealthEndpoints
                     busyTimeoutMilliseconds = identityOptions.Value.BusyTimeoutMilliseconds,
                 },
                 exchange = exchange is null ? null : BuildExchangeBlock(exchange, sessions),
+                outboundRecovery = new
+                {
+                    phase = recovery.Phase.ToString(),
+                    ready = recovery.IsReady,
+                    failureReason = recovery.FailureReason,
+                    fenceHeld = fence.IsHeld,
+                    processEpoch = fence.IsHeld
+                        ? ctx.RequestServices.GetRequiredService<OutboundProcessEpoch>().Sequence
+                        : (long?)null,
+                    firms = recovery.Snapshot(),
+                },
                 entryPointListener,
             });
         });

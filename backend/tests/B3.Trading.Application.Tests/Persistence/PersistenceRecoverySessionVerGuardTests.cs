@@ -14,12 +14,9 @@ namespace B3.Trading.Application.Tests.Persistence;
 /// SessionVerId has advanced past the verId the snapshot recorded.
 ///
 /// <para>
-/// Per <see href="https://github.com/pedrosakuma/B3TradingPlatform/issues/504">#504</see>
-/// only never-acked PendingNew orders are retired (<see cref="Order.MarkCancelled"/>)
-/// — no venue record possible under any session version. Confirmed
-/// Working/PartiallyFilled orders are NOT marked stale on session roll
-/// because the FIXP protocol handles synchronization via retransmission
-/// during recovery. If no terminal ER arrives, the order is valid.
+/// Per #644, a session roll alone never terminalises PendingNew or releases
+/// its reservation. Confirmed Working/PartiallyFilled orders are not marked
+/// stale by the boot-time numeric comparison either.
 /// </para>
 /// </summary>
 public class PersistenceRecoverySessionVerGuardTests : IDisposable
@@ -54,10 +51,10 @@ public class PersistenceRecoverySessionVerGuardTests : IDisposable
     }
 
     [Fact]
-    public async Task RolledForward_RetiresAllWorkingOrdersForThatFirm()
+    public async Task RolledForward_PreservesPendingNewForThatFirm()
     {
         // Phase 1: snapshot 2 firms with verId 5 each, 2 PendingNew orders each.
-        // PendingNew = no venue ack ever received → cancel-fallback path.
+        // PendingNew remains unresolved without authoritative venue evidence.
         await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
         {
             var (book, _, _, ownership, snapshotter, dispatcher, _, _, _) =
@@ -85,9 +82,7 @@ public class PersistenceRecoverySessionVerGuardTests : IDisposable
         }
 
         // Phase 2: cold boot — provider reports FIRM01 advanced to 8,
-        // FIRM02 still at 5. FIRM01 PendingNew orders take the
-        // cancel-fallback (#419) since they were never acked; FIRM02
-        // keeps everything.
+        // FIRM02 still at 5. Both firms preserve PendingNew.
         await using (var store = new FileEventStore(Opts(), NullLogger<FileEventStore>.Instance))
         {
             var provider = new FakeFirmSessionStatusProvider(new[]
@@ -105,16 +100,14 @@ public class PersistenceRecoverySessionVerGuardTests : IDisposable
 
             await recovery.RunAsync();
 
-            // PendingNew + session-roll → cancelled (no possible venue record).
-            Assert.True(book.TryGet(1UL, out var o1) && o1!.Status == OrderStatus.Cancelled);
+            Assert.True(book.TryGet(1UL, out var o1) && o1!.Status == OrderStatus.PendingNew);
             Assert.False(o1!.IsStale);
-            Assert.True(book.TryGet(2UL, out var o2) && o2!.Status == OrderStatus.Cancelled);
+            Assert.True(book.TryGet(2UL, out var o2) && o2!.Status == OrderStatus.PendingNew);
             Assert.False(o2!.IsStale);
             Assert.True(book.TryGet(10UL, out var o10) && o10!.Status == OrderStatus.PendingNew);
             Assert.True(book.TryGet(11UL, out var o11) && o11!.Status == OrderStatus.PendingNew);
 
-            // Cancelled orders drop out of the "working" view.
-            Assert.Empty(book.EnumerateForFirm("FIRM01"));
+            Assert.Equal(2, book.EnumerateForFirm("FIRM01").Count);
             Assert.Equal(2, book.EnumerateForFirm("FIRM02").Count);
         }
     }

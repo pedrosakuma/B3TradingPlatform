@@ -34,7 +34,6 @@ var app = builder.Build();
 TradingHostStartup.RegisterMetricsSources(app);
 TradingHostStartup.ValidateBootGuards(app);
 await TradingHostStartup.RunIdentityDirectoryStartupAsync(app);
-await TradingHostStartup.RunRecoveryAndSeedingAsync(app);
 
 if (corsOrigins.Length > 0)
     app.UseCors(CorsPolicy);

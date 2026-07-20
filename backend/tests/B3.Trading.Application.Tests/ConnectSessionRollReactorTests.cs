@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using B3.Trading.Application;
 using B3.Trading.Application.Persistence;
+using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
 using B3.Trading.Infrastructure.Persistence;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -11,9 +12,9 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace B3.Trading.Application.Tests;
 
 /// <summary>
-/// #512. The runtime post-connect session-roll reactor reaps un-acked
-/// PendingNew for a firm whose venue session rolled (cold-resume fallback
-/// bump), while leaving Working orders and other firms untouched. Mirrors
+/// #512/#644. The runtime post-connect session-roll reactor preserves un-acked
+/// PendingNew for a firm whose venue session rolled while staling working
+/// projections and leaving other firms untouched. Mirrors
 /// the boot-time #380/#504 baseline reconcile via the shared
 /// <see cref="FirmSessionRollReconciliation"/> helper.
 /// </summary>
@@ -25,7 +26,7 @@ public class ConnectSessionRollReactorTests
     private static EventDispatcher Dispatcher() => new(new NullEventStore());
 
     [Fact]
-    public void OnSessionRolled_WithStaleness_ReapsPendingNew_AndStalesWorkingAndPartiallyFilled()
+    public void OnSessionRolled_WithStaleness_PreservesPendingNew_AndStalesWorkingAndPartiallyFilled()
     {
         var book = new WorkingOrderBook();
         var pending = MakeOrder(1UL, "FIRM_A");
@@ -48,8 +49,7 @@ public class ConnectSessionRollReactorTests
 
         reactor.OnSessionRolled("FIRM_A", fromVerId: 7, toVerId: 8);
 
-        // PendingNew reaped.
-        Assert.Equal(OrderStatus.Cancelled, pending.Status);
+        Assert.Equal(OrderStatus.PendingNew, pending.Status);
         Assert.False(pending.IsStale);
         // Working + PartiallyFilled flagged stale (non-destructive — status kept).
         Assert.Equal(OrderStatus.Working, working.Status);
@@ -64,7 +64,7 @@ public class ConnectSessionRollReactorTests
     }
 
     [Fact]
-    public void OnSessionRolled_NoStalenessService_StillReapsPendingNew_KeepsWorking()
+    public void OnSessionRolled_NoStalenessService_PreservesPendingNew_KeepsWorking()
     {
         var book = new WorkingOrderBook();
         var pending = MakeOrder(1UL, "FIRM_A");
@@ -78,13 +78,13 @@ public class ConnectSessionRollReactorTests
 
         reactor.OnSessionRolled("FIRM_A", 7, 8);
 
-        Assert.Equal(OrderStatus.Cancelled, pending.Status);
+        Assert.Equal(OrderStatus.PendingNew, pending.Status);
         Assert.Equal(OrderStatus.Working, working.Status);
         Assert.False(working.IsStale);
     }
 
     [Fact]
-    public void OnSessionRolled_StalingPhaseThrows_RethrowsAfterReapingPendingNew()
+    public void OnSessionRolled_StalingPhaseThrows_RethrowsAfterPreservingPendingNew()
     {
         var book = new WorkingOrderBook();
         var pending = MakeOrder(1UL, "FIRM_A");
@@ -103,10 +103,7 @@ public class ConnectSessionRollReactorTests
 
         Assert.ThrowsAny<Exception>(() => reactor.OnSessionRolled("FIRM_A", 7, 8));
 
-        // Phase 1 completed (reap is durable via snapshot, not WAL); the
-        // rethrow lets the gateway keep SessionVerId at the old baseline so the
-        // PendingNew boot backstop stays armed.
-        Assert.Equal(OrderStatus.Cancelled, pending.Status);
+        Assert.Equal(OrderStatus.PendingNew, pending.Status);
     }
 
     [Fact]
@@ -117,7 +114,7 @@ public class ConnectSessionRollReactorTests
     }
 
     [Fact]
-    public void OnSessionRolled_CancelsPendingNew_ForFirm_KeepsWorking()
+    public void OnSessionRolled_PreservesPendingNew_ForFirm_KeepsWorking()
     {
         var book = new WorkingOrderBook();
 
@@ -134,8 +131,8 @@ public class ConnectSessionRollReactorTests
 
         reactor.OnSessionRolled("FIRM_A", fromVerId: 7, toVerId: 8);
 
-        Assert.Equal(OrderStatus.Cancelled, pendingA1.Status);
-        Assert.Equal(OrderStatus.Cancelled, pendingA2.Status);
+        Assert.Equal(OrderStatus.PendingNew, pendingA1.Status);
+        Assert.Equal(OrderStatus.PendingNew, pendingA2.Status);
         Assert.Equal(OrderStatus.Working, workingA.Status);
     }
 
@@ -153,12 +150,49 @@ public class ConnectSessionRollReactorTests
 
         reactor.OnSessionRolled("FIRM_A", 5, 6);
 
-        Assert.Equal(OrderStatus.Cancelled, pendingA.Status);
+        Assert.Equal(OrderStatus.PendingNew, pendingA.Status);
         Assert.Equal(OrderStatus.PendingNew, pendingB.Status);
     }
 
     [Fact]
-    public void Helper_ReturnsCancelledCount()
+    public async Task OnSessionRolled_PendingNewReservationRemainsHeldWithoutVenueEvidence()
+    {
+        var options = new RiskOptions();
+        options.Margin.Enabled = true;
+#pragma warning disable CS0618
+        options.Margin.Initial["alice"] = 1_000m;
+#pragma warning restore CS0618
+        var margin = new ReserveOnSubmitMarginProvider(
+            new StaticOptionsMonitor<RiskOptions>(options),
+            NullLogger<ReserveOnSubmitMarginProvider>.Instance);
+        Assert.True((await margin.TryReserveAsync(
+            1,
+            new RiskContext(
+                new EndClientId("alice"),
+                "FIRM_A",
+                "PETR4",
+                OrderSide.Buy,
+                OrderType.Limit,
+                100,
+                10m),
+            CancellationToken.None)).Approved);
+
+        var book = new WorkingOrderBook();
+        var pending = MakeOrder(1, "FIRM_A");
+        book.TryAdd(pending);
+        var reactor = new PendingNewReapingConnectRollReactor(
+            book,
+            Dispatcher(),
+            NullLogger<PendingNewReapingConnectRollReactor>.Instance);
+
+        reactor.OnSessionRolled("FIRM_A", 7, 8);
+
+        Assert.Equal(OrderStatus.PendingNew, pending.Status);
+        Assert.Equal(0m, margin.AvailableForTesting("alice"));
+    }
+
+    [Fact]
+    public void Helper_ReturnsPreservedCount()
     {
         var book = new WorkingOrderBook();
         book.TryAdd(MakeOrder(1UL, "FIRM_A"));
@@ -167,7 +201,7 @@ public class ConnectSessionRollReactorTests
         working.MarkWorking();
         book.TryAdd(working);
 
-        var count = FirmSessionRollReconciliation.CancelPendingNewForRolledFirm(
+        var count = FirmSessionRollReconciliation.PreservePendingNewForRolledFirm(
             book, "FIRM_A", 1, 2, NullLogger.Instance);
 
         Assert.Equal(2, count);
@@ -181,7 +215,7 @@ public class ConnectSessionRollReactorTests
         working.MarkWorking();
         book.TryAdd(working);
 
-        var count = FirmSessionRollReconciliation.CancelPendingNewForRolledFirm(
+        var count = FirmSessionRollReconciliation.PreservePendingNewForRolledFirm(
             book, "FIRM_A", 1, 2, NullLogger.Instance);
 
         Assert.Equal(0, count);
@@ -194,7 +228,7 @@ public class ConnectSessionRollReactorTests
         var book = new WorkingOrderBook();
         book.TryAdd(MakeOrder(1UL, "FIRM_A"));
 
-        var count = FirmSessionRollReconciliation.CancelPendingNewForRolledFirm(
+        var count = FirmSessionRollReconciliation.PreservePendingNewForRolledFirm(
             book, "FIRM_X", 1, 2, NullLogger.Instance);
 
         Assert.Equal(0, count);

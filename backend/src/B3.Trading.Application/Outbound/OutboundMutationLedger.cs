@@ -21,6 +21,7 @@ namespace B3.Trading.Application.Outbound;
 public sealed class OutboundMutationLedger
 {
     private const string UnknownFirm = "<unknown>";
+    public const string UnknownFirmId = UnknownFirm;
     public const int MaxOutboundAttempts = 2;
     public const int MaxRetainedUnmatchedEvidence = 1024;
     public const int MaxEvidenceDiagnostics = 256;
@@ -61,6 +62,29 @@ public sealed class OutboundMutationLedger
                         && (e.MatchedMutationIds.Count == 0
                             || !e.MatchedMutationIds.Any(_mutations.ContainsKey)));
         }
+    }
+
+    public IReadOnlyDictionary<string, int> GetReadinessBlockingCountsByFirm()
+    {
+        lock (_gate)
+        {
+            var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var mutation in _mutations.Values.Where(IsReadinessBlocking))
+                Increment(counts, string.IsNullOrWhiteSpace(mutation.FirmId) ? UnknownFirm : mutation.FirmId);
+            foreach (var evidence in _inboundEvidence.Values.Where(e =>
+                         e.Disposition != InboundVenueEvidenceDisposition.Matched
+                         && (e.MatchedMutationIds.Count == 0
+                             || !e.MatchedMutationIds.Any(_mutations.ContainsKey))))
+            {
+                Increment(
+                    counts,
+                    string.IsNullOrWhiteSpace(evidence.FirmId) ? UnknownFirm : evidence.FirmId);
+            }
+            return counts;
+        }
+
+        static void Increment(Dictionary<string, int> counts, string firmId) =>
+            counts[firmId] = counts.GetValueOrDefault(firmId) + 1;
     }
 
     public int InboundEvidenceCount
@@ -1074,43 +1098,42 @@ public sealed class OutboundMutationLedger
 
     public int ClassifyRecoveredAttempts(ProcessEpochId activeEpoch, DateTimeOffset atUtc)
     {
+        var classifications = PlanRecoveredAttempts(activeEpoch);
         if (activeEpoch.Value == Guid.Empty)
             throw new ArgumentException("Process epoch is required.", nameof(activeEpoch));
         lock (_gate)
         {
             var changed = 0;
-            foreach (var pair in _mutations.ToArray())
+            foreach (var classification in classifications)
             {
-                var mutation = pair.Value;
-                if (mutation.Attempts.Count == 0 || IsTerminal(mutation.State))
+                if (!_mutations.TryGetValue(classification.MutationId, out var mutation)
+                    || mutation.Attempts.Count == 0
+                    || IsTerminal(mutation.State))
                     continue;
                 var attempt = mutation.Attempts[^1];
-                if (attempt.ProcessEpochId == activeEpoch
-                    || attempt.ProvenUnsentEvidence is not null
-                    || attempt.AmbiguityReason is not null)
+                if (attempt.AttemptId != classification.AttemptId)
                     continue;
-                if (attempt.FramePrepared is null)
+                if (classification.Disposition == RecoveredOutboundAttemptDisposition.ProvenUnsent)
                 {
                     var updated = attempt with
                     {
-                        ProvenUnsentEvidence = OutboundProvenUnsentEvidence.DeadEpochIntentWithoutFrame,
+                        ProvenUnsentEvidence = classification.ProvenUnsentEvidence,
                     };
                     var updatedMutation = ReplaceAttempt(
                         mutation, mutation.Attempts.Count - 1, updated,
                         OutboundMutationState.ProvenUnsent, atUtc);
-                    _mutations[pair.Key] = updatedMutation;
+                    _mutations[classification.MutationId] = updatedMutation;
                     AddClOrdCorrelation(
                         updatedMutation, attempt.ClOrdId, terminal: true, atUtc);
                     RemoveActiveOriginalIndex(updatedMutation);
                 }
-
                 else
                 {
-                    var reason = attempt.TransportWriteCompletedAtUtc is null
-                        ? OutboundAmbiguityReason.DeadEpochFramePrepared
-                        : OutboundAmbiguityReason.DeadEpochTransportWriteCompleted;
-                    var updated = attempt with { AmbiguityReason = reason };
-                    _mutations[pair.Key] = ReplaceAttempt(
+                    var updated = attempt with
+                    {
+                        AmbiguityReason = classification.AmbiguityReason,
+                    };
+                    _mutations[classification.MutationId] = ReplaceAttempt(
                         mutation, mutation.Attempts.Count - 1, updated,
                         OutboundMutationState.Ambiguous, atUtc,
                         requiresReconciliation: true);
@@ -1118,6 +1141,50 @@ public sealed class OutboundMutationLedger
                 changed++;
             }
             return changed;
+        }
+    }
+
+    public IReadOnlyList<RecoveredOutboundAttemptClassification> PlanRecoveredAttempts(
+        ProcessEpochId activeEpoch)
+    {
+        if (activeEpoch.Value == Guid.Empty)
+            throw new ArgumentException("Process epoch is required.", nameof(activeEpoch));
+        lock (_gate)
+        {
+            var result = new List<RecoveredOutboundAttemptClassification>();
+            foreach (var mutation in _mutations.Values)
+            {
+                if (mutation.Attempts.Count == 0 || IsTerminal(mutation.State))
+                    continue;
+                var attempt = mutation.Attempts[^1];
+                if (attempt.ProcessEpochId == activeEpoch
+                    || attempt.ProvenUnsentEvidence is not null
+                    || attempt.AmbiguityReason is not null)
+                {
+                    continue;
+                }
+                if (attempt.FramePrepared is null)
+                {
+                    result.Add(new RecoveredOutboundAttemptClassification(
+                        mutation.MutationId,
+                        attempt.AttemptId,
+                        mutation.FirmId,
+                        RecoveredOutboundAttemptDisposition.ProvenUnsent,
+                        OutboundProvenUnsentEvidence.DeadEpochIntentWithoutFrame,
+                        null));
+                    continue;
+                }
+                result.Add(new RecoveredOutboundAttemptClassification(
+                    mutation.MutationId,
+                    attempt.AttemptId,
+                    mutation.FirmId,
+                    RecoveredOutboundAttemptDisposition.Ambiguous,
+                    null,
+                    attempt.TransportWriteCompletedAtUtc is null
+                        ? OutboundAmbiguityReason.DeadEpochFramePrepared
+                        : OutboundAmbiguityReason.DeadEpochTransportWriteCompleted));
+            }
+            return result;
         }
     }
 

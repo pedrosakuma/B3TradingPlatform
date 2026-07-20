@@ -46,6 +46,7 @@ public sealed class OrderModifyService
     private readonly CancelReplaceOutboundCoordinator? _outboundCoordinator;
     private readonly RestOrderIdempotencyStore? _restIdempotency;
     private readonly TimeProvider _clock;
+    private readonly IOutboundRecoveryGate _outboundRecovery;
 
     public OrderModifyService(
         ClOrdIdPrefixRegistry clOrdIds,
@@ -67,7 +68,8 @@ public sealed class OrderModifyService
         CancelReplaceApprovalFactory? approvalFactory = null,
         CancelReplaceOutboundCoordinator? outboundCoordinator = null,
         RestOrderIdempotencyStore? restIdempotency = null,
-        TimeProvider? clock = null)
+        TimeProvider? clock = null,
+        IOutboundRecoveryGate? outboundRecovery = null)
     {
         _clOrdIds = clOrdIds;
         _ownership = ownership;
@@ -93,6 +95,7 @@ public sealed class OrderModifyService
         _outboundCoordinator = outboundCoordinator;
         _restIdempotency = restIdempotency;
         _clock = clock ?? TimeProvider.System;
+        _outboundRecovery = outboundRecovery ?? ImmediateOutboundRecoveryGate.Instance;
     }
 
     /// <summary>
@@ -146,6 +149,8 @@ public sealed class OrderModifyService
         // (same as cross-owner) so existence is not leaked.
         if (req.FirmId is not null && !string.Equals(orig.FirmId, req.FirmId, StringComparison.Ordinal))
             return OrderModifyResult.NotFound;
+        if (!_outboundRecovery.IsBusinessIngressOpen(orig.FirmId))
+            return OrderModifyResult.Drained;
 
         if (orig.Status is OrderStatus.Filled or OrderStatus.Cancelled
             or OrderStatus.Rejected or OrderStatus.Replaced)

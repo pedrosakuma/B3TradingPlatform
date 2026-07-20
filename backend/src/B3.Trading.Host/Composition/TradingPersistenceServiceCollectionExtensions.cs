@@ -1,6 +1,7 @@
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application;
 using B3.Trading.Application.Outbound;
+using B3.Trading.Host.Hosted;
 using B3.Trading.Infrastructure.Persistence;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -42,18 +43,46 @@ public static class TradingPersistenceServiceCollectionExtensions
         services.AddSingleton<IEventStore>(sp =>
         {
             var o = sp.GetRequiredService<IOptions<PersistenceOptions>>().Value;
-            return o.Enabled
-                ? new FileEventStore(o, sp.GetRequiredService<ILogger<FileEventStore>>())
-                : new NullEventStore();
+            var fence = sp.GetRequiredService<ActiveHostFence>();
+            if (!fence.TryAcquire())
+            {
+                return new FaultedEventStore(
+                    fence.Failure ?? new IOException("The active-host fence is unavailable."));
+            }
+            if (!o.Enabled)
+                return new NullEventStore();
+            try
+            {
+                return new FileEventStore(o, sp.GetRequiredService<ILogger<FileEventStore>>());
+            }
+            catch (Exception ex)
+            {
+                fence.RecordStorageFailure(ex);
+                return new FaultedEventStore(ex);
+            }
         });
         services.AddSingleton<IEventStoreHealth>(sp =>
             (IEventStoreHealth)sp.GetRequiredService<IEventStore>());
         services.AddSingleton<IReconciliationMarkerStore>(sp =>
         {
             var o = sp.GetRequiredService<IOptions<PersistenceOptions>>().Value;
-            return o.Enabled
-                ? new FileReconciliationMarkerStore(o)
-                : new InMemoryReconciliationMarkerStore();
+            if (!o.Enabled)
+                return new InMemoryReconciliationMarkerStore();
+            var fence = sp.GetRequiredService<ActiveHostFence>();
+            if (!fence.TryAcquire())
+            {
+                return new FaultedReconciliationMarkerStore(
+                    fence.Failure ?? new IOException("The active-host fence is unavailable."));
+            }
+            try
+            {
+                return new FileReconciliationMarkerStore(o);
+            }
+            catch (Exception ex)
+            {
+                fence.RecordStorageFailure(ex);
+                return new FaultedReconciliationMarkerStore(ex);
+            }
         });
         services.AddSingleton<ReconciliationResolutionWriter>();
         services.AddSingleton<IOutboundNonceSource, CryptographicOutboundNonceSource>();
@@ -88,7 +117,12 @@ public static class TradingPersistenceServiceCollectionExtensions
                 sp.GetRequiredService<IOutboundNonceSource>());
         });
         services.AddSingleton<OutboundMutationLedger>();
-        services.AddSingleton<OutboundProcessEpoch>();
+        services.AddSingleton(_ => OutboundProcessEpoch.CreateUninitialized());
+        services.AddSingleton<OutboundRecoveryState>();
+        services.AddSingleton<IOutboundRecoveryGate>(sp =>
+            sp.GetRequiredService<OutboundRecoveryState>());
+        services.AddSingleton<ActiveHostFence>();
+        services.AddSingleton<OutboundColdStartRecoveryCoordinator>();
         services.AddSingleton<RestOrderIdempotencyStore>();
         services.AddSingleton<NewOrderApprovalFactory>();
         services.AddSingleton<CancelReplaceApprovalFactory>();
@@ -108,7 +142,7 @@ public static class TradingPersistenceServiceCollectionExtensions
                 ? sp.GetRequiredService<EodMaterialiser>()
                 : new DisabledEodMaterialiser();
         });
-        services.AddHostedService<SnapshotService>();
+        services.AddSingleton<SnapshotService>();
         // RFC §5.2 (F2). Resolve all registered IExecutionFanOutSink
         // singletons (WS hub channel sink, bot router) and snapshot
         // them into the dispatcher's flat array so the dispatch hot
@@ -116,17 +150,17 @@ public static class TradingPersistenceServiceCollectionExtensions
         services.AddSingleton<EventDispatcher>(sp => new EventDispatcher(
             sp.GetRequiredService<IEventStore>(),
             sp.GetServices<IExecutionFanOutSink>()));
+        services.AddHostedService<OutboundColdStartRecoveryHostedService>();
+        services.AddHostedService(sp => sp.GetRequiredService<SnapshotService>());
 
         // #512 / #380. Runtime session-roll reactor. On a CONFIRMED roll
         // (Establish-reuse rejected → renegotiate, detected at connect or on a
-        // live Renegotiated reconnect) it reaps un-acked PendingNew under the
-        // dispatcher lock AND flags surviving Working/PartiallyFilled stale via
-        // OrderStalenessService (operator-clearable; WAL-durable). The boot
-        // reconcile stays conservative (PendingNew only) because it cannot tell
-        // a reuse-reject from a benign verId advance. EventDispatcher is always
-        // registered (NullEventStore when persistence is off); OrderStalenessService
-        // is optional so reduced/mock compositions degrade to reap-only (the
-        // reactor logs a warning).
+        // live Renegotiated reconnect) it preserves un-acked PendingNew and
+        // flags Working/PartiallyFilled stale via OrderStalenessService
+        // (operator-clearable; WAL-durable). Session identity alone never
+        // terminalises outbound state or releases capacity. EventDispatcher is
+        // always registered (NullEventStore when persistence is off);
+        // OrderStalenessService is optional in reduced/mock compositions.
         services.AddSingleton<IConnectSessionRollReactor>(sp => new PendingNewReapingConnectRollReactor(
             sp.GetRequiredService<WorkingOrderBook>(),
             sp.GetRequiredService<EventDispatcher>(),

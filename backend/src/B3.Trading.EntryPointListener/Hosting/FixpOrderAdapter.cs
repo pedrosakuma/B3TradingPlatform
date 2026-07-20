@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using B3.Entrypoint.Fixp.Sbe.V6;
 using B3.Trading.Application;
 using B3.Trading.Application.UserBots;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Domain;
 using B3.Trading.EntryPointListener.Framing;
 using Microsoft.Extensions.Logging;
@@ -65,19 +66,22 @@ internal sealed class FixpOrderAdapter
     private readonly OrderCancelService _cancel;
     private readonly IUserBotOrderMappingRegistry _botMappings;
     private readonly ILogger _logger;
+    private readonly IOutboundRecoveryGate _recovery;
 
     public FixpOrderAdapter(
         SymbolDirectory symbols,
         OrderSubmissionService submit,
         OrderCancelService cancel,
         IUserBotOrderMappingRegistry botMappings,
-        ILogger logger)
+        ILogger logger,
+        IOutboundRecoveryGate? recovery = null)
     {
         _symbols = symbols;
         _submit = submit;
         _cancel = cancel;
         _botMappings = botMappings;
         _logger = logger;
+        _recovery = recovery ?? ImmediateOutboundRecoveryGate.Instance;
     }
 
     /// <summary>
@@ -122,6 +126,17 @@ internal sealed class FixpOrderAdapter
         var externalClOrdId = decoded.ClOrdId;
         var securityId = decoded.SecurityId;
         var refSeqNum = decoded.MsgSeqNum;
+        if (!_recovery.IsBusinessIngressOpen(scope.Principal.FirmId))
+        {
+            await WriteBusinessMessageRejectAsync(
+                stream,
+                MessageType.NewOrderSingle,
+                refSeqNum,
+                externalClOrdId,
+                RejectReason.Drained,
+                ct).ConfigureAwait(false);
+            return FixpOrderHandlingResult.Keep;
+        }
 
         // 1. Resolve SecurityId → Symbol. Without a directory entry the
         //    submit pipeline would reject anyway with "symbol is required";
@@ -286,6 +301,17 @@ internal sealed class FixpOrderAdapter
         FixpConnectionScope scope,
         CancellationToken ct)
     {
+        if (!_recovery.IsBusinessIngressOpen(scope.Principal.FirmId))
+        {
+            await WriteBusinessMessageRejectAsync(
+                stream,
+                MessageType.OrderCancelRequest,
+                decoded.MsgSeqNum,
+                decoded.ClOrdId,
+                RejectReason.Drained,
+                ct).ConfigureAwait(false);
+            return;
+        }
         var externalCancelClOrdId = decoded.ClOrdId;
         var externalOrigClOrdId = decoded.OrigClOrdId;
         var securityId = decoded.SecurityId;

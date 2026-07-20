@@ -135,6 +135,7 @@ public sealed class AlgoEngine : BackgroundService
     private readonly CompositeRiskAccountant? _accountant;
     private readonly Lifecycle.IDrainController? _reconciliationDrain;
     private readonly ReconciliationResolutionWriter _resolutionWriter;
+    private readonly Outbound.IOutboundRecoveryGate _outboundRecovery;
 
     // Per-parent runtime state. Owned by the consumer task; the
     // ConcurrentDictionary is only used because TryAdd/TryGetValue are
@@ -166,7 +167,8 @@ public sealed class AlgoEngine : BackgroundService
         SymbolDirectory? symbols = null,
         CompositeRiskAccountant? accountant = null,
         Lifecycle.IDrainController? reconciliationDrain = null,
-        ReconciliationResolutionWriter? resolutionWriter = null)
+        ReconciliationResolutionWriter? resolutionWriter = null,
+        Outbound.IOutboundRecoveryGate? outboundRecovery = null)
     {
         _queue = queue;
         _algos = algos;
@@ -196,6 +198,8 @@ public sealed class AlgoEngine : BackgroundService
             dispatcher,
             Microsoft.Extensions.Logging.Abstractions.NullLogger<
                 ReconciliationResolutionWriter>.Instance);
+        _outboundRecovery = outboundRecovery
+            ?? Outbound.ImmediateOutboundRecoveryGate.Instance;
     }
 
     /// <summary>
@@ -242,6 +246,8 @@ public sealed class AlgoEngine : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        await _outboundRecovery.WaitUntilAllRequiredBusinessIngressOpenAsync(stoppingToken)
+            .ConfigureAwait(false);
         _logger.LogInformation("AlgoEngine consumer task starting.");
         Reconcile();
         try

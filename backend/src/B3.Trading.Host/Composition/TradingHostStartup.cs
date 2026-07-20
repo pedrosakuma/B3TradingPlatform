@@ -190,16 +190,21 @@ internal static class TradingHostStartup
     }
 
     /// <summary>
-    /// Synchronous recovery before any traffic is accepted: load latest
-    /// snapshot, then replay every WAL event past it. Idempotent — safe to
-    /// run on a fresh data dir, on the NullEventStore (no-op), or after a
-    /// graceful shutdown that already snapshotted. Cash seeds are applied
-    /// after snapshot restore but before WAL replay; position seeds are applied
-    /// after recovery.
+    /// Restores the latest snapshot, then replays every WAL event past it.
+    /// The cold-start recovery hosted service invokes this while liveness is
+    /// available and business ingress remains gated. Idempotent — safe on a
+    /// fresh data dir, the NullEventStore, or after a graceful snapshot.
+    /// Cash seeds are applied after snapshot restore but before WAL replay;
+    /// position seeds are applied after recovery.
     /// </summary>
-    public static async Task RunRecoveryAndSeedingAsync(WebApplication app)
+    public static Task RunRecoveryAndSeedingAsync(WebApplication app) =>
+        RunRecoveryAndSeedingAsync(app.Services, CancellationToken.None);
+
+    internal static async Task RunRecoveryAndSeedingAsync(
+        IServiceProvider services,
+        CancellationToken cancellationToken)
     {
-        using var scope = app.Services.CreateScope();
+        using var scope = services.CreateScope();
         void ApplyCashSeeds()
         {
             var cashOpts = scope.ServiceProvider.GetRequiredService<IOptions<CashSeedOptions>>().Value;
@@ -281,7 +286,7 @@ internal static class TradingHostStartup
         if (opts.Enabled)
         {
             var recovery = scope.ServiceProvider.GetRequiredService<PersistenceRecovery>();
-            await recovery.RunAsync(ApplyCashSeeds);
+            await recovery.RunAsync(ApplyCashSeeds, cancellationToken);
         }
         else
         {

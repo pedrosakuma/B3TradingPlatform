@@ -340,9 +340,10 @@ public class FillsTouchEndpointTests
                 ["Trading:Persistence:FsyncOnFlush"] = "false",
             }))
             {
+                await factory2.Services
+                    .GetRequiredService<B3.Trading.Application.Outbound.IOutboundRecoveryGate>()
+                    .WaitUntilClassificationCompleteAsync(CancellationToken.None);
                 var fills = factory2.Services.GetRequiredService<FillProjection>();
-                // Recovery is awaited inside the host startup — projection
-                // should already carry the fill.
                 Assert.True(fills.TryGet(fillId, out var rec),
                     "Cold restart must rehydrate the fill from the WAL.");
                 Assert.NotNull(rec.BookTouch);
