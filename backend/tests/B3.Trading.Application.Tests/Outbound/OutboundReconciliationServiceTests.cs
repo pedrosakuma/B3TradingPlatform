@@ -506,6 +506,114 @@ public sealed class OutboundReconciliationServiceTests
     }
 
     [Fact]
+    public void AuthoritativeContradictoryReplace_ReopensAndAppliesReplacementTerms()
+    {
+        var fixture = Fixture.Create(kind: OutboundMutationKind.Replace);
+        var owner = new EndClientId("CLIENT-SECRET");
+        var intent = new OrderReplacementIntent(
+            OriginalClOrdId: 99,
+            NewClOrdId: 101,
+            Owner: owner,
+            Symbol: "PETR4",
+            SecurityId: 123,
+            Side: OrderSide.Buy,
+            Type: OrderType.Limit,
+            NewQuantity: 10,
+            NewPrice: 30m,
+            FirmId: "F1",
+            ParentAlgoId: null,
+            AlgoSliceSeq: null);
+        Assert.True(fixture.Replacements.TryAdd(intent, T0));
+        Assert.True(fixture.Replacements.MarkAmbiguousMarginHeld(101, T0.AddSeconds(3)));
+
+        var evidenceReference = fixture.RegisterEvidence(
+            OutboundOperatorEvidenceType.OfficialExtract,
+            'f');
+        var proposed = fixture.Service.Resolve(
+            fixture.MutationId,
+            "F1",
+            "maker",
+            new(
+                OutboundOperatorDecision.VenueAbsent,
+                OutboundOperatorEvidenceType.OfficialExtract,
+                evidenceReference,
+                "official_extract_attested"));
+        fixture.Service.Approve(
+            fixture.MutationId,
+            proposed.ProposalId!.Value,
+            "F1",
+            "checker");
+
+        Assert.False(fixture.Replacements.IsOriginalInFlight(99));
+        Assert.True(fixture.Replacements.TryGet(101, out _));
+        var retained = Assert.Single(fixture.Replacements.Snapshot());
+        Assert.True(retained.ReleasedForVenueAbsent);
+        var restoredReplacements = new PendingReplacementRegistry();
+        restoredReplacements.Restore([retained]);
+        Assert.False(restoredReplacements.IsOriginalInFlight(99));
+        Assert.True(restoredReplacements.TryGet(101, out _));
+
+        var ownership = new OrderOwnershipMap();
+        var book = new WorkingOrderBook();
+        var original = new Order(
+            99,
+            owner,
+            "PETR4",
+            123,
+            OrderSide.Buy,
+            OrderType.Limit,
+            20,
+            29m,
+            firmId: "F1");
+        Assert.True(book.TryAdd(original));
+        ownership.Register(original.ClOrdId, owner);
+        ownership.RegisterReplaceLink(original.ClOrdId, intent.NewClOrdId);
+        var processor = new ExecutionReportProcessor(
+            ownership,
+            book,
+            new PositionKeeper(),
+            new NoOpExecutionEventSink(),
+            new NoOpMarginProvider(),
+            NullLogger<ExecutionReportProcessor>.Instance,
+            replacements: restoredReplacements,
+            replaceMargin: fixture.ReplaceMargin);
+        var client = new MockEntryPointClient();
+        using var router = new EntryPointExecutionReportRouter(
+            client,
+            processor,
+            new EventDispatcher(new NullEventStore()),
+            book,
+            bookTop: null,
+            outboundLedger: fixture.Ledger);
+
+        client.EmitExecutionReport(new ExecutionReportEnvelope(
+            intent.NewClOrdId,
+            EpExecType.Replaced,
+            LeavesQuantity: 10,
+            CumulativeQuantity: 0,
+            LastQuantity: 0,
+            LastPrice: 0m,
+            RejectReason: null,
+            OrigClOrdId: intent.OriginalClOrdId,
+            FirmId: "F1",
+            SessionId: 11,
+            SessionVerId: 3,
+            InboundSeqNum: 95,
+            SendingTime: T0.AddMinutes(3)));
+
+        Assert.Equal(OrderStatus.Replaced, original.Status);
+        Assert.True(book.TryGet(intent.NewClOrdId, out var replacement));
+        Assert.NotNull(replacement);
+        Assert.Equal(intent.NewQuantity, replacement.Quantity);
+        Assert.Equal(intent.NewPrice, replacement.Price);
+        Assert.Equal(OrderStatus.Working, replacement.Status);
+        Assert.False(restoredReplacements.TryGet(intent.NewClOrdId, out _));
+        var mutation = fixture.Ledger.SnapshotMutations().Single();
+        Assert.Equal(OutboundMutationState.Ambiguous, mutation.State);
+        Assert.True(mutation.RequiresReconciliation);
+    }
+
+    [Fact]
     public void IdentityConflict_RevokesLateErAuthoritativeStatus()
     {
         var fixture = Fixture.Create();
@@ -702,6 +810,8 @@ public sealed class OutboundReconciliationServiceTests
         public required OutboundMutationLedger Ledger { get; init; }
         public required OutboundReconciliationService Service { get; init; }
         public required RecordingMargin Margin { get; init; }
+        public required RecordingReplaceMargin ReplaceMargin { get; init; }
+        public required PendingReplacementRegistry Replacements { get; init; }
         public required OutboundMutationId MutationId { get; init; }
         public required OutboundAttemptId AttemptId { get; init; }
         public required IOutboundCommandProtector Protector { get; init; }
@@ -808,18 +918,21 @@ public sealed class OutboundReconciliationServiceTests
                 T0.AddSeconds(3));
             var margin = new RecordingMargin();
             var replace = new RecordingReplaceMargin();
+            var replacements = new PendingReplacementRegistry();
             var service = new OutboundReconciliationService(
                 ledger,
                 new EventDispatcher(new NullEventStore()),
                 audit ?? new NullAuditLogger(),
                 margin,
                 replace,
-                new PendingReplacementRegistry());
+                replacements);
             return new Fixture
             {
                 Ledger = ledger,
                 Service = service,
                 Margin = margin,
+                ReplaceMargin = replace,
+                Replacements = replacements,
                 MutationId = mutationId,
                 AttemptId = attemptId,
                 Protector = protector,

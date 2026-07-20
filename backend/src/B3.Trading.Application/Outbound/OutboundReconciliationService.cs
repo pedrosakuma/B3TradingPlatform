@@ -433,7 +433,7 @@ public sealed class OutboundReconciliationService
                 _margin.ReleaseReservation(mutation.PrimaryClOrdId);
                 break;
             case OutboundMutationKind.Replace:
-                _replacements.TryConsume(mutation.PrimaryClOrdId, out _);
+                _replacements.ReleaseForVenueAbsent(mutation.PrimaryClOrdId);
                 _replaceMargin.AbortReplace(mutation.PrimaryClOrdId);
                 break;
         }

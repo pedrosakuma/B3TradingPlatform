@@ -260,7 +260,8 @@ public sealed class StateSnapshotter
                     CreatedAtUtc: s.CreatedAt,
                     AmbiguousMarginHeld: s.AmbiguousMarginHeld,
                     AmbiguousAtUtc: s.AmbiguousAt,
-                    NewRemainingNotional: s.NewRemainingNotional))
+                    NewRemainingNotional: s.NewRemainingNotional,
+                    ReleasedForVenueAbsent: s.ReleasedForVenueAbsent))
                 .ToArray(),
             PendingCancels = _pendingCancels is null
             ? Array.Empty<PendingCancelRaw>()
@@ -522,7 +523,8 @@ public sealed class StateSnapshotter
                 CreatedAtUtc: r.CreatedAtUtc,
                 AmbiguousMarginHeld: r.AmbiguousMarginHeld,
                 AmbiguousAtUtc: r.AmbiguousAtUtc,
-                NewRemainingNotional: r.NewRemainingNotional));
+                NewRemainingNotional: r.NewRemainingNotional,
+                ReleasedForVenueAbsent: r.ReleasedForVenueAbsent));
         }
         pendingReplacements.Sort(static (a, b) => a.NewClOrdId.CompareTo(b.NewClOrdId));
 
@@ -743,7 +745,8 @@ public sealed class StateSnapshotter
                     CreatedAt: p.CreatedAtUtc,
                     AmbiguousMarginHeld: p.AmbiguousMarginHeld,
                     AmbiguousAt: p.AmbiguousAtUtc,
-                    NewRemainingNotional: p.NewRemainingNotional));
+                    NewRemainingNotional: p.NewRemainingNotional,
+                    ReleasedForVenueAbsent: p.ReleasedForVenueAbsent));
             }
             _replacements.Restore(entries);
             foreach (var p in snap.PendingReplacements)
@@ -1390,7 +1393,7 @@ public sealed class EventReplayer
                     }
                     else if (resolvedMutation.Kind == OutboundMutationKind.Replace)
                     {
-                        _replacements?.TryConsume(resolvedMutation.PrimaryClOrdId, out _);
+                        _replacements?.ReleaseForVenueAbsent(resolvedMutation.PrimaryClOrdId);
                         _replaceMargin?.AbortReplace(resolvedMutation.PrimaryClOrdId);
                     }
                 }

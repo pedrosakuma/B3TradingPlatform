@@ -396,7 +396,8 @@ public readonly record struct PendingReplacementRaw(
     DateTimeOffset CreatedAtUtc,
     bool AmbiguousMarginHeld,
     DateTimeOffset? AmbiguousAtUtc,
-    decimal NewRemainingNotional);
+    decimal NewRemainingNotional,
+    bool ReleasedForVenueAbsent = false);
 
 public readonly record struct PendingCancelRaw(
     ulong OriginalClOrdId,
