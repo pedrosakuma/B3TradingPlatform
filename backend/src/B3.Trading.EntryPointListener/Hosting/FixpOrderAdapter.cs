@@ -180,16 +180,28 @@ internal sealed class FixpOrderAdapter
             return FixpOrderHandlingResult.Keep;
         }
 
-        // 3. Pre-emptive duplicate check — a bot retrying the same
-        //    ExternalClOrdId is the most likely cause of #108 firing
-        //    deep inside Submit. Catching it here lets us send back a
-        //    BusinessMessageReject(DuplicateClOrdId) keyed off the
-        //    external id without consuming a platform internal id.
-        if (_botMappings.TryGetByExternal(scope.Principal.CredentialId, externalClOrdId, out _))
+        // Business identity is independent of the live ER-routing map and
+        // of the session-level protocol replay key. Claim it durably before
+        // OrderSubmissionService can allocate an internal ClOrdID.
+        var claim = _botMappings.TryClaimBusinessIdentity(
+            scope.Principal.CredentialId,
+            externalClOrdId,
+            OutboundMutationKind.New,
+            DateTimeOffset.UtcNow,
+            ct);
+        if (claim == BotBusinessIdentityClaimResult.Duplicate)
         {
             await WriteBusinessMessageRejectAsync(stream,
                 MessageType.NewOrderSingle, refSeqNum, externalClOrdId,
                 RejectReason.DuplicateClOrdId, ct).ConfigureAwait(false);
+            return FixpOrderHandlingResult.Keep;
+        }
+        if (claim is BotBusinessIdentityClaimResult.WalBackpressure
+            or BotBusinessIdentityClaimResult.WalFaulted)
+        {
+            await WriteBusinessMessageRejectAsync(stream,
+                MessageType.NewOrderSingle, refSeqNum, externalClOrdId,
+                RejectReason.WalBackpressure, ct).ConfigureAwait(false);
             return FixpOrderHandlingResult.Keep;
         }
 
@@ -245,6 +257,12 @@ internal sealed class FixpOrderAdapter
                 ct).ConfigureAwait(false);
             return FixpOrderHandlingResult.CloseForReconciliation(result.ClOrdId);
         }
+
+        _botMappings.MarkBusinessIdentityResolved(
+            scope.Principal.CredentialId,
+            externalClOrdId,
+            DateTimeOffset.UtcNow,
+            ct);
 
         // RFC §4.7 — ordinary submit-time rejections produce a synthetic
         // ExecutionReport_Reject so the bot sees the same shape it would
@@ -338,6 +356,20 @@ internal sealed class FixpOrderAdapter
         var securityId = decoded.SecurityId;
         var refSeqNum = decoded.MsgSeqNum;
 
+        if (_botMappings.ContainsBusinessIdentity(
+                scope.Principal.CredentialId,
+                externalCancelClOrdId))
+        {
+            await WriteBusinessMessageRejectAsync(
+                stream,
+                MessageType.OrderCancelRequest,
+                refSeqNum,
+                externalCancelClOrdId,
+                RejectReason.DuplicateClOrdId,
+                ct).ConfigureAwait(false);
+            return;
+        }
+
         // Resolve original order via the bot mapping side-registry.
         // The registry's TryGetByExternal already enforces the
         // (credentialId, externalOrigClOrdId) → internal lookup, which
@@ -355,6 +387,36 @@ internal sealed class FixpOrderAdapter
             return;
         }
 
+        var claim = _botMappings.TryClaimBusinessIdentity(
+            scope.Principal.CredentialId,
+            externalCancelClOrdId,
+            OutboundMutationKind.Cancel,
+            DateTimeOffset.UtcNow,
+            ct);
+        if (claim == BotBusinessIdentityClaimResult.Duplicate)
+        {
+            await WriteBusinessMessageRejectAsync(
+                stream,
+                MessageType.OrderCancelRequest,
+                refSeqNum,
+                externalCancelClOrdId,
+                RejectReason.DuplicateClOrdId,
+                ct).ConfigureAwait(false);
+            return;
+        }
+        if (claim is BotBusinessIdentityClaimResult.WalBackpressure
+            or BotBusinessIdentityClaimResult.WalFaulted)
+        {
+            await WriteBusinessMessageRejectAsync(
+                stream,
+                MessageType.OrderCancelRequest,
+                refSeqNum,
+                externalCancelClOrdId,
+                RejectReason.WalBackpressure,
+                ct).ConfigureAwait(false);
+            return;
+        }
+
         var owner = OwnerFor(scope);
         var botOrigin = new BotOrigin(scope.Principal.CredentialId, externalCancelClOrdId);
 
@@ -366,6 +428,15 @@ internal sealed class FixpOrderAdapter
                 firmId: scope.Principal.FirmId)
             .ConfigureAwait(false);
         if (result.Kind == OrderCancelResultKind.Accepted) return;
+
+        if (result.Kind != OrderCancelResultKind.ReconciliationRequired)
+        {
+            _botMappings.MarkBusinessIdentityResolved(
+                scope.Principal.CredentialId,
+                externalCancelClOrdId,
+                DateTimeOffset.UtcNow,
+                ct);
+        }
 
         var reason = result.Kind switch
         {

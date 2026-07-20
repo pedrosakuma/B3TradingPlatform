@@ -221,6 +221,9 @@ public sealed class StateSnapshotter
             BotSessions = _userBotSessions?.RawSnapshot() ?? Array.Empty<BotSessionState>(),
             BotOrderMappings = _userBotMappings?.RawSnapshotOrders() ?? Array.Empty<BotOrderMappingRaw>(),
             BotCancelMappings = _userBotMappings?.RawSnapshotCancels() ?? Array.Empty<BotCancelMappingRaw>(),
+            BotBusinessIdentityTombstones =
+                _userBotMappings?.RawSnapshotBusinessIdentities()
+                ?? Array.Empty<BotBusinessIdentityTombstone>(),
             AuditedExpiredIds = _gtdScheduler?.SnapshotAuditedExpiredIds() ?? Array.Empty<ulong>(),
             PovProgress = _povProgress is null
             ? Array.Empty<PovProgressRaw>()
@@ -476,6 +479,11 @@ public sealed class StateSnapshotter
         }
         botCancelMaps.Sort(static (a, b) => a.CancelInternalClOrdId.CompareTo(b.CancelInternalClOrdId));
 
+        var botBusinessIdentities = raw.BotBusinessIdentityTombstones
+            .OrderBy(t => t.CredentialId)
+            .ThenBy(t => t.ExternalClOrdId)
+            .ToList();
+
         var povProgress = new List<PovProgressSnapshot>(raw.PovProgress.Length);
         for (var i = 0; i < raw.PovProgress.Length; i++)
         {
@@ -571,6 +579,7 @@ public sealed class StateSnapshotter
             BotSessions = sessions,
             BotOrderMappings = botOrderMaps,
             BotCancelMappings = botCancelMaps,
+            BotBusinessIdentityTombstones = botBusinessIdentities,
             AuditedExpiredIds = raw.AuditedExpiredIds,
             PovProgress = povProgress,
             PeggedRepegPending = peggedRepeg,
@@ -675,7 +684,11 @@ public sealed class StateSnapshotter
 
         _userBotCredentials?.Restore(snap.UserBotCredentials);
         _userBotSessions?.Restore(snap.BotSessions);
-        _userBotMappings?.Restore(snap.BotOrderMappings, snap.BotCancelMappings);
+        _userBotMappings?.Restore(
+            snap.BotOrderMappings,
+            snap.BotCancelMappings,
+            snap.BotBusinessIdentityTombstones,
+            snap.CreatedAtUtc);
         // Pass-4 review (#255). Re-mark the in-flight audit-set BEFORE
         // WAL replay starts (PersistenceRecovery calls Restore then
         // ReadFromAsync). EventReplayer.Apply(OrderExpiredEvent) for
@@ -1177,7 +1190,11 @@ public sealed class EventReplayer
                 // registry state.
                 if (o.BotMapping is { } bm && _userBotMappings is not null)
                     _userBotMappings.RegisterOrderInternal(
-                        o.ClOrdId, bm.CredentialId, bm.ExternalClOrdId);
+                        o.ClOrdId,
+                        bm.CredentialId,
+                        bm.ExternalClOrdId,
+                        o.TimestampUtc,
+                        o.MutationId);
                 // Parent state-machine progression on first child accept is
                 // engine-side (slice 5/6); replay only re-creates the order
                 // — the parent's Working/Filled state is reconstructed from
@@ -1208,7 +1225,18 @@ public sealed class EventReplayer
                         cancelInternalClOrdId: ocr.CancelClOrdId,
                         originalInternalClOrdId: ocr.OriginalClOrdId,
                         credentialId: cbm.CredentialId,
-                        externalCancelClOrdId: cbm.ExternalClOrdId);
+                        externalCancelClOrdId: cbm.ExternalClOrdId,
+                        recordedAtUtc: ocr.TimestampUtc,
+                        mutationId: ocr.MutationId);
+                break;
+            case BotBusinessIdentityClaimedEvent claimed:
+                _userBotMappings?.Apply(claimed);
+                break;
+            case BotBusinessIdentityResolvedEvent resolvedIdentity:
+                _userBotMappings?.Apply(resolvedIdentity);
+                break;
+            case BotBusinessIdentityTombstonePurgedEvent purged:
+                _userBotMappings?.Apply(purged);
                 break;
             case OrderCancelPreSendFailedEvent ocf:
                 _pendingCancels?.TryConsumeByCancel(ocf.CancelClOrdId, out _);

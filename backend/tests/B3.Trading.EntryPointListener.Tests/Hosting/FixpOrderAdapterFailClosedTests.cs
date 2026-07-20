@@ -103,6 +103,145 @@ public class FixpOrderAdapterFailClosedTests
     }
 
     [Fact]
+    public async Task TombstonedExternalId_NewSessionRejectsBeforeInternalAllocation()
+    {
+        var credentialId = Guid.NewGuid();
+        const ulong securityId = 4321;
+        const ulong externalClOrdId = 77;
+        var gateway = new RecordingGateway();
+        var mappings = new InMemoryUserBotOrderMappingRegistry();
+        var clOrdIds = new ClOrdIdPrefixRegistry();
+        var baselineClOrdIds = new ClOrdIdPrefixRegistry();
+        var submit = new OrderSubmissionService(
+            clOrdIds,
+            new OrderOwnershipMap(),
+            new WorkingOrderBook(),
+            gateway,
+            new NoOpExecutionEventSink(),
+            new RiskPipeline(Array.Empty<IRiskCheck>()),
+            new NoOpMarginProvider(),
+            new CompositeRiskAccountant(Array.Empty<IRiskAccountant>()),
+            new EventDispatcher(new SyntheticTerminalRejectingStore()),
+            new TestDrainController(),
+            NullLogger<OrderSubmissionService>.Instance,
+            botMappings: mappings);
+        var adapter = new FixpOrderAdapter(
+            new SymbolDirectory(new SymbolDirectoryOptions
+            {
+                SecurityIds = new Dictionary<string, ulong> { ["PETR4"] = securityId },
+            }),
+            submit,
+            cancel: null!,
+            mappings,
+            NullLogger.Instance);
+        var principal = new BotSessionPrincipal(
+            "alice", credentialId, "cred-1", "bot", "FIRM-A");
+        var firstScope = new FixpConnectionScope(
+            "conn-1",
+            principal,
+            new BotSessionState(credentialId, 10, 2, 0));
+        var request = new DecodedNewOrderSingle
+        {
+            MsgSeqNum = 1,
+            ClOrdId = externalClOrdId,
+            SecurityId = securityId,
+            Side = Side.BUY,
+            OrdType = OrdType.LIMIT,
+            OrderQty = 100,
+            PriceMantissa = (long)(30d * PriceOptional.Multiplier),
+            TimeInForce = B3.Entrypoint.Fixp.Sbe.V6.TimeInForce.DAY,
+        };
+
+        await adapter.HandleNewOrderSingleAsync(
+            new MemoryStream(), request, firstScope, CancellationToken.None);
+
+        Assert.Equal(1, gateway.SubmitCount);
+        Assert.True(mappings.TryGetByExternal(
+            credentialId, externalClOrdId, out var internalClOrdId));
+        mappings.Reap(internalClOrdId);
+
+        var secondScope = new FixpConnectionScope(
+            "conn-2",
+            principal,
+            new BotSessionState(credentialId, 11, 9, 0));
+        await using var response = new MemoryStream();
+        await adapter.HandleNewOrderSingleAsync(
+            response,
+            new DecodedNewOrderSingle
+            {
+                MsgSeqNum = 88,
+                ClOrdId = externalClOrdId,
+                SecurityId = securityId,
+                Side = Side.BUY,
+                OrdType = OrdType.LIMIT,
+                OrderQty = 100,
+                PriceMantissa = (long)(30d * PriceOptional.Multiplier),
+                TimeInForce = B3.Entrypoint.Fixp.Sbe.V6.TimeInForce.DAY,
+            },
+            secondScope,
+            CancellationToken.None);
+
+        Assert.Equal(1, gateway.SubmitCount);
+        var owner = new EndClientId("bot:" + principal.CredShortId.ToLowerInvariant());
+        _ = baselineClOrdIds.Generate(owner);
+        Assert.Equal(baselineClOrdIds.Generate(owner), clOrdIds.Generate(owner));
+        var reader = new SofhFrameReader();
+        reader.Append(response.ToArray());
+        Assert.True(reader.TryReadFrame(out var frame));
+        Assert.Equal((ushort)BusinessMessageRejectData.MESSAGE_ID, frame.TemplateId);
+        Assert.Equal(1003u, BinaryPrimitives.ReadUInt32LittleEndian(frame.Payload[32..]));
+    }
+
+    [Fact]
+    public async Task TombstonedCancelId_RejectsBeforeCancelPipeline()
+    {
+        var credentialId = Guid.NewGuid();
+        const ulong securityId = 4321;
+        var mappings = new InMemoryUserBotOrderMappingRegistry();
+        mappings.RegisterOrderInternal(100, credentialId, 77);
+        Assert.Equal(
+            BotBusinessIdentityClaimResult.Claimed,
+            mappings.TryClaimBusinessIdentity(
+                credentialId,
+                78,
+                OutboundMutationKind.Cancel,
+                DateTimeOffset.UtcNow));
+        var adapter = new FixpOrderAdapter(
+            new SymbolDirectory(new SymbolDirectoryOptions
+            {
+                SecurityIds = new Dictionary<string, ulong> { ["PETR4"] = securityId },
+            }),
+            submit: null!,
+            cancel: null!,
+            mappings,
+            NullLogger.Instance);
+        var scope = new FixpConnectionScope(
+            "conn-1",
+            new BotSessionPrincipal("alice", credentialId, "cred-1", "bot", "FIRM-A"),
+            new BotSessionState(credentialId, 10, 2, 0));
+        await using var response = new MemoryStream();
+
+        await adapter.HandleOrderCancelRequestAsync(
+            response,
+            new DecodedOrderCancelRequest
+            {
+                MsgSeqNum = 2,
+                ClOrdId = 78,
+                OrigClOrdId = 77,
+                SecurityId = securityId,
+                Side = Side.BUY,
+            },
+            scope,
+            CancellationToken.None);
+
+        var reader = new SofhFrameReader();
+        reader.Append(response.ToArray());
+        Assert.True(reader.TryReadFrame(out var frame));
+        Assert.Equal((ushort)BusinessMessageRejectData.MESSAGE_ID, frame.TemplateId);
+        Assert.Equal(1003u, BinaryPrimitives.ReadUInt32LittleEndian(frame.Payload[32..]));
+    }
+
+    [Fact]
     public async Task ReconciliationRequired_EmitsNonTerminalBmrAndRequestsSessionClose()
     {
         var credentialId = Guid.NewGuid();
@@ -272,9 +411,11 @@ public class FixpOrderAdapterFailClosedTests
     private sealed class RecordingGateway : IExchangeGateway
     {
         public Order? Submitted { get; private set; }
+        public int SubmitCount { get; private set; }
         public Task SubmitAsync(Order order, CancellationToken ct)
         {
             Submitted = order;
+            SubmitCount++;
             return Task.CompletedTask;
         }
         public Task CancelAsync(Order order, ulong newClOrdId, CancellationToken ct) =>

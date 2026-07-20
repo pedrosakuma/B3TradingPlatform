@@ -122,6 +122,8 @@ public sealed class RawPlatformSnapshot
         Array.Empty<BotOrderMappingRaw>();
     public BotCancelMappingRaw[] BotCancelMappings { get; init; } =
         Array.Empty<BotCancelMappingRaw>();
+    public UserBots.BotBusinessIdentityTombstone[] BotBusinessIdentityTombstones { get; init; } =
+        Array.Empty<UserBots.BotBusinessIdentityTombstone>();
 
     /// <summary>
     /// Pass-4 review (#255). Mirror of

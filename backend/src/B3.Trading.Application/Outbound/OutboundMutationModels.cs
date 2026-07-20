@@ -120,6 +120,10 @@ public enum OutboundMutationOrigin
     Legacy,
 }
 
+public sealed record OutboundBotBusinessIdentity(
+    Guid CredentialId,
+    ulong ExternalClOrdId);
+
 public enum OutboundMutationState
 {
     ApprovedToSend,
@@ -376,6 +380,7 @@ public sealed record OutboundMutationSnapshot
     public required string FirmId { get; init; }
     public required string EndClientRef { get; init; }
     public required OutboundMutationOrigin Origin { get; init; }
+    public OutboundBotBusinessIdentity? BotBusinessIdentity { get; init; }
     public required ulong PrimaryClOrdId { get; init; }
     public ulong? OriginalClOrdId { get; init; }
     public required DateTimeOffset RecordedAtUtc { get; init; }
@@ -449,7 +454,9 @@ public sealed record OutboundMutationDiagnostic(
     int AttemptCount,
     bool RequiresReconciliation,
     string? EncryptionKeyId,
-    int? EncryptionKeyVersion);
+    int? EncryptionKeyVersion,
+    Guid? BotCredentialId,
+    ulong? ExternalClOrdId);
 
 public sealed record OutboundMutationMetricDimensions(
     string FirmId,

@@ -21,6 +21,34 @@ public sealed class OutboundMutationLedgerTests
         new(2026, 7, 18, 1, 2, 3, TimeSpan.Zero);
 
     [Fact]
+    public void BotBusinessIdentity_RoundTripsIntoOperatorDiagnostics()
+    {
+        var fixture = Fixture.Create();
+        var credentialId = Guid.Parse("11111111-1111-1111-1111-111111111111");
+        var approved = fixture.Approved with
+        {
+            Origin = OutboundMutationOrigin.UserBotFixp,
+            BotBusinessIdentity = new OutboundBotBusinessIdentity(credentialId, 77),
+        };
+        fixture.Ledger.Apply(approved);
+
+        var snapshot = Assert.Single(fixture.Ledger.SnapshotMutations());
+        Assert.Equal(credentialId, snapshot.BotBusinessIdentity!.CredentialId);
+        Assert.Equal(77UL, snapshot.BotBusinessIdentity.ExternalClOrdId);
+        var diagnostic = Assert.Single(fixture.Ledger.GetDiagnostics());
+        Assert.Equal(credentialId, diagnostic.BotCredentialId);
+        Assert.Equal(77UL, diagnostic.ExternalClOrdId);
+
+        var restored = new OutboundMutationLedger(fixture.Protector);
+        restored.Restore(
+            fixture.Ledger.SnapshotMutations(),
+            fixture.Ledger.SnapshotCorrelations());
+
+        var restoredSnapshot = Assert.Single(restored.SnapshotMutations());
+        Assert.Equal(snapshot.BotBusinessIdentity, restoredSnapshot.BotBusinessIdentity);
+    }
+
+    [Fact]
     public void StateMachine_AppliesOrderedEvidence_Idempotently()
     {
         var fixture = Fixture.Create();

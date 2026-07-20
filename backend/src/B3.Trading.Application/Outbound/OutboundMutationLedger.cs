@@ -159,6 +159,7 @@ public sealed class OutboundMutationLedger
                 FirmId = evt.FirmId,
                 EndClientRef = evt.EndClientRef,
                 Origin = evt.Origin,
+                BotBusinessIdentity = evt.BotBusinessIdentity,
                 PrimaryClOrdId = evt.PrimaryClOrdId,
                 OriginalClOrdId = evt.OriginalClOrdId,
                 RecordedAtUtc = evt.RecordedAtUtc,
@@ -1387,7 +1388,9 @@ public sealed class OutboundMutationLedger
                     m.Attempts.Count,
                     m.RequiresReconciliation,
                     m.Approval?.SensitiveCommandEnvelope.KeyId,
-                    m.Approval?.SensitiveCommandEnvelope.KeyVersion))
+                    m.Approval?.SensitiveCommandEnvelope.KeyVersion,
+                    m.BotBusinessIdentity?.CredentialId,
+                    m.BotBusinessIdentity?.ExternalClOrdId))
                 .ToArray();
     }
 
@@ -2258,6 +2261,7 @@ public sealed class OutboundMutationLedger
         existing.Kind == evt.MutationKind
         && existing.FirmId == evt.FirmId
         && existing.EndClientRef == evt.EndClientRef
+        && existing.BotBusinessIdentity == evt.BotBusinessIdentity
         && existing.PrimaryClOrdId == evt.PrimaryClOrdId
         && existing.OriginalClOrdId == evt.OriginalClOrdId
         && existing.Approval?.StoredCommandIntegritySha256
@@ -2349,6 +2353,9 @@ public sealed class OutboundMutationLedger
                         AuthenticationTagBase64 = mutation.Approval.SensitiveCommandEnvelope.AuthenticationTagBase64,
                     },
                 },
+            BotBusinessIdentity = mutation.BotBusinessIdentity is null
+                ? null
+                : mutation.BotBusinessIdentity with { },
             Resolution = mutation.Resolution is null ? null : mutation.Resolution with { },
             OperatorEvidence = mutation.OperatorEvidence
                 .Select(e => e with { })
