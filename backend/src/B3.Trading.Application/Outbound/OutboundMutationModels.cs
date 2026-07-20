@@ -14,6 +14,12 @@ public readonly record struct OutboundAttemptId(Guid Value)
     public override string ToString() => Value.ToString("D");
 }
 
+public readonly record struct OutboundResolutionProposalId(Guid Value)
+{
+    public static OutboundResolutionProposalId New() => new(Guid.NewGuid());
+    public override string ToString() => Value.ToString("D");
+}
+
 public readonly record struct ProcessEpochId(Guid Value)
 {
     public static ProcessEpochId New() => new(Guid.NewGuid());
@@ -224,11 +230,14 @@ public enum InboundVenueEvidenceApplyStatus
 }
 
 public readonly record struct InboundVenueEvidenceApplyResult(
-    InboundVenueEvidenceApplyStatus Status)
+    InboundVenueEvidenceApplyStatus Status,
+    bool ReopenedReconciliation = false,
+    bool ApplyDomainDespiteConflict = false)
 {
     public bool ShouldApplyDomain =>
-        Status is InboundVenueEvidenceApplyStatus.RecordedMatched
-            or InboundVenueEvidenceApplyStatus.RecordedUnmatched;
+        (Status is InboundVenueEvidenceApplyStatus.RecordedMatched
+            or InboundVenueEvidenceApplyStatus.RecordedUnmatched)
+        || ApplyDomainDespiteConflict;
 }
 
 public enum OutboundOperatorDecision
@@ -245,6 +254,12 @@ public enum OutboundOperatorEvidenceType
     VenueMassAction,
     OfficialExtract,
     ManualAnnotation,
+}
+
+public enum OutboundAuthoritativeEvidenceSourceType
+{
+    VenueMassAction,
+    OfficialExtract,
 }
 
 public enum OutboundSensitivePayloadAvailability
@@ -375,8 +390,44 @@ public sealed record OutboundOperatorEvidenceSnapshot
     public required OutboundOperatorDecision Decision { get; init; }
     public required OutboundOperatorEvidenceType EvidenceType { get; init; }
     public required string EvidenceDigest { get; init; }
+    public string? EvidenceReference { get; init; }
+    public string? ReasonCode { get; init; }
     public required string OperatorRef { get; init; }
+    public string? MakerRef { get; init; }
+    public string? CheckerRef { get; init; }
+    public OutboundResolutionProposalId? ProposalId { get; init; }
+    public bool CapacityReleased { get; init; }
     public required DateTimeOffset RecordedAtUtc { get; init; }
+}
+
+public sealed record OutboundOperatorResolutionProposalSnapshot
+{
+    public required OutboundResolutionProposalId ProposalId { get; init; }
+    public required OutboundOperatorDecision Decision { get; init; }
+    public required OutboundOperatorEvidenceType EvidenceType { get; init; }
+    public required string EvidenceReference { get; init; }
+    public required string EvidenceDigest { get; init; }
+    public required string ReasonCode { get; init; }
+    public required string MakerRef { get; init; }
+    public required DateTimeOffset ProposedAtUtc { get; init; }
+    public string? CheckerRef { get; init; }
+    public DateTimeOffset? ApprovedAtUtc { get; init; }
+}
+
+public sealed record OutboundAuthoritativeEvidenceSnapshot
+{
+    public required string EvidenceReference { get; init; }
+    public required string EvidenceDigest { get; init; }
+    public required string FirmId { get; init; }
+    public required OutboundAuthoritativeEvidenceSourceType SourceType { get; init; }
+    public required DateTimeOffset CoverageStartUtc { get; init; }
+    public required DateTimeOffset CoverageEndUtc { get; init; }
+    public IReadOnlyList<OutboundMutationId> CoveredMutationIds { get; init; } =
+        Array.Empty<OutboundMutationId>();
+    public required string AttestationReference { get; init; }
+    public required string AttestedBy { get; init; }
+    public required DateTimeOffset AttestedAtUtc { get; init; }
+    public required DateTimeOffset RegisteredAtUtc { get; init; }
 }
 
 public sealed record OutboundLegacyEvidenceSnapshot
@@ -406,6 +457,10 @@ public sealed record OutboundMutationSnapshot
     public OutboundResolutionSnapshot? Resolution { get; init; }
     public IReadOnlyList<OutboundOperatorEvidenceSnapshot> OperatorEvidence { get; init; } =
         Array.Empty<OutboundOperatorEvidenceSnapshot>();
+    public IReadOnlyList<OutboundOperatorResolutionProposalSnapshot> ResolutionProposals { get; init; } =
+        Array.Empty<OutboundOperatorResolutionProposalSnapshot>();
+    public IReadOnlyList<OutboundAuthoritativeEvidenceSnapshot> AuthoritativeEvidence { get; init; } =
+        Array.Empty<OutboundAuthoritativeEvidenceSnapshot>();
     public IReadOnlyList<OutboundLegacyEvidenceSnapshot> LegacyEvidence { get; init; } =
         Array.Empty<OutboundLegacyEvidenceSnapshot>();
     public OutboundSensitivePayloadAvailability SensitivePayloadAvailability { get; init; } =
@@ -434,6 +489,7 @@ public sealed record InboundVenueEvidenceSnapshot
     public ulong? InboundSeqNum { get; init; }
     public DateTimeOffset? SendingTime { get; init; }
     public bool PossibleResend { get; init; }
+    public bool AuthoritativeTerminalContradiction { get; init; }
     public string? MessageKind { get; init; }
     public ulong? ClOrdId { get; init; }
     public ulong? OrigClOrdId { get; init; }
@@ -478,6 +534,21 @@ public sealed record OutboundMutationMetricDimensions(
     OutboundMutationKind Kind,
     OutboundMutationState State,
     OutboundMutationOrigin Origin);
+
+public sealed record OutboundReconciliationMetricSnapshot(
+    string FirmId,
+    OutboundMutationKind Kind,
+    OutboundMutationState State,
+    string AmbiguityReason,
+    string AgeBucket,
+    long Count,
+    double OldestAgeSeconds);
+
+public sealed record OutboundReconciliationHealthSnapshot(
+    int UnresolvedMutationCount,
+    int UnresolvedFirmCount,
+    double OldestAmbiguityAgeSeconds,
+    double OldestLegacyUnknownAgeSeconds);
 
 public sealed class OutboundLedgerRecoveryException : InvalidOperationException
 {

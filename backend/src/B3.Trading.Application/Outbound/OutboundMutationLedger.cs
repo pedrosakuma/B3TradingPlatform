@@ -384,6 +384,98 @@ public sealed class OutboundMutationLedger
         }
     }
 
+    public void Apply(OutboundAuthoritativeEvidenceRegisteredEvent evt)
+    {
+        ArgumentNullException.ThrowIfNull(evt);
+        ArgumentNullException.ThrowIfNull(evt.Evidence);
+        var evidence = evt.Evidence;
+        if (!IsOpaqueReference(evidence.EvidenceReference)
+            || !IsLowerHex(evidence.EvidenceDigest, 64)
+            || !IsOpaqueReference(evidence.AttestationReference)
+            || !IsOpaqueReference(evidence.AttestedBy)
+            || evidence.CoverageEndUtc < evidence.CoverageStartUtc
+            || evidence.AttestedAtUtc > evidence.RegisteredAtUtc
+            || !EvidenceReferenceMatchesSource(
+                evidence.SourceType,
+                evidence.EvidenceReference,
+                evidence.EvidenceDigest))
+            throw TransitionError("Authoritative evidence registration is incomplete.");
+        lock (_gate)
+        {
+            var mutation = RequiredMutation(evt.MutationId);
+            if (!string.Equals(mutation.FirmId, evidence.FirmId, StringComparison.Ordinal)
+                || !evidence.CoveredMutationIds.Contains(evt.MutationId)
+                || mutation.RecordedAtUtc < evidence.CoverageStartUtc
+                || mutation.RecordedAtUtc > evidence.CoverageEndUtc)
+                throw TransitionError("Authoritative evidence does not cover the mutation.");
+            var duplicate = mutation.AuthoritativeEvidence.FirstOrDefault(
+                candidate => candidate.EvidenceReference == evidence.EvidenceReference);
+            if (duplicate is not null)
+            {
+                if (AuthoritativeEvidenceEquals(duplicate, evidence))
+                    return;
+                throw TransitionError("Conflicting authoritative evidence registration.");
+            }
+            var registrations = mutation.AuthoritativeEvidence.ToList();
+            registrations.Add(CloneAuthoritativeEvidence(evidence));
+            _mutations[evt.MutationId] = mutation with
+            {
+                AuthoritativeEvidence = registrations,
+            };
+        }
+    }
+
+    public void Apply(OutboundOperatorResolutionProposedEvent evt)
+    {
+        ArgumentNullException.ThrowIfNull(evt);
+        if (evt.ProposalId.Value == Guid.Empty
+            || !IsLowerHex(evt.EvidenceDigest, 64)
+            || !IsOpaqueReference(evt.EvidenceReference)
+            || !IsOpaqueReference(evt.ReasonCode)
+            || !IsOpaqueReference(evt.MakerRef))
+            throw TransitionError("Operator resolution proposal is incomplete.");
+        ValidateOperatorEvidencePair(evt.Decision, evt.EvidenceType, releaseCapacity: true);
+        lock (_gate)
+        {
+            var mutation = RequiredMutation(evt.MutationId);
+            var duplicate = mutation.ResolutionProposals.FirstOrDefault(
+                proposal => proposal.ProposalId == evt.ProposalId);
+            if (duplicate is not null)
+            {
+                if (duplicate.Decision == evt.Decision
+                    && duplicate.EvidenceType == evt.EvidenceType
+                    && duplicate.EvidenceReference == evt.EvidenceReference
+                    && duplicate.EvidenceDigest == evt.EvidenceDigest
+                    && duplicate.ReasonCode == evt.ReasonCode
+                    && duplicate.MakerRef == evt.MakerRef
+                    && duplicate.ProposedAtUtc == evt.ProposedAtUtc)
+                    return;
+                throw TransitionError("Conflicting operator resolution proposal.");
+            }
+            if (!CanOperatorResolve(mutation))
+                throw TransitionError("Operator resolution is not valid in the current state.");
+            if (mutation.ResolutionProposals.Any(proposal => proposal.ApprovedAtUtc is null))
+                throw TransitionError("A maker/checker proposal is already pending.");
+            var proposals = mutation.ResolutionProposals.ToList();
+            proposals.Add(new OutboundOperatorResolutionProposalSnapshot
+            {
+                ProposalId = evt.ProposalId,
+                Decision = evt.Decision,
+                EvidenceType = evt.EvidenceType,
+                EvidenceReference = evt.EvidenceReference,
+                EvidenceDigest = evt.EvidenceDigest,
+                ReasonCode = evt.ReasonCode,
+                MakerRef = evt.MakerRef,
+                ProposedAtUtc = evt.ProposedAtUtc,
+            });
+            _mutations[evt.MutationId] = mutation with
+            {
+                ResolutionProposals = proposals,
+                RequiresReconciliation = true,
+            };
+        }
+    }
+
     public void Apply(OutboundReconciliationRequiredEvent evt)
     {
         ArgumentNullException.ThrowIfNull(evt);
@@ -403,44 +495,95 @@ public sealed class OutboundMutationLedger
     public void Apply(OutboundOperatorResolvedEvent evt)
     {
         ArgumentNullException.ThrowIfNull(evt);
-        if (evt.EvidenceType == OutboundOperatorEvidenceType.ManualAnnotation
-            && evt.Decision != OutboundOperatorDecision.LeaveAmbiguous)
-            throw TransitionError("Manual annotation cannot terminalise a mutation.");
+        ValidateOperatorEvidencePair(evt.Decision, evt.EvidenceType, evt.ReleaseCapacity);
         if (!IsLowerHex(evt.EvidenceDigest, 64)
-            || !IsOpaqueReference(evt.OperatorRef))
+            || !IsOpaqueReference(evt.OperatorRef)
+            || (evt.EvidenceReference is not null && !IsOpaqueReference(evt.EvidenceReference))
+            || (evt.ReasonCode is not null && !IsOpaqueReference(evt.ReasonCode))
+            || (evt.MakerRef is not null && !IsOpaqueReference(evt.MakerRef))
+            || (evt.CheckerRef is not null && !IsOpaqueReference(evt.CheckerRef)))
             throw TransitionError("Operator resolution evidence is incomplete.");
         lock (_gate)
         {
             var mutation = RequiredMutation(evt.MutationId);
             var duplicate = mutation.OperatorEvidence.FirstOrDefault(e =>
-                e.EvidenceDigest == evt.EvidenceDigest
-                && e.RecordedAtUtc == evt.ResolvedAtUtc);
+                e.EvidenceDigest == evt.EvidenceDigest);
             if (duplicate is not null)
             {
                 if (duplicate.Decision == evt.Decision
                     && duplicate.EvidenceType == evt.EvidenceType
-                    && duplicate.OperatorRef == evt.OperatorRef)
+                    && duplicate.OperatorRef == evt.OperatorRef
+                    && duplicate.ProposalId == evt.ProposalId
+                    && duplicate.CapacityReleased == evt.ReleaseCapacity)
                     return;
                 throw TransitionError("Conflicting operator resolution.");
             }
-            if (mutation.Resolution is not null)
-                throw TransitionError("Conflicting operator resolution.");
-            if (mutation.State is not OutboundMutationState.Ambiguous
-                and not OutboundMutationState.ProvenUnsent
-                and not OutboundMutationState.LegacyUnknown
-                and not OutboundMutationState.LegacyUnknownCancel
-                and not OutboundMutationState.LegacyUnknownReplace)
+            if (evt.EvidenceType == OutboundOperatorEvidenceType.TerminalExecutionReport)
+            {
+                if (evt.EvidenceReference is not { } terminalEvidenceReference
+                    || !HasAuthoritativeTerminalExecutionReportUnsafe(
+                        mutation,
+                        terminalEvidenceReference,
+                        out var terminalEvidence))
+                    throw TransitionError(
+                        "Terminal execution report evidence is not currently authoritative.");
+                if (evt.Decision == OutboundOperatorDecision.VenueAbsent
+                    && IsVenueAcknowledgmentOnlyExecutionReportKind(
+                        terminalEvidence.MessageKind))
+                    throw TransitionError(
+                        "Fill or Replaced execution reports cannot prove venue absence.");
+            }
+            if (mutation.OperatorEvidence.Any(
+                    evidence => evidence.Decision != OutboundOperatorDecision.LeaveAmbiguous)
+                && mutation.State is OutboundMutationState.OperatorResolved
+                    or OutboundMutationState.VenueAcknowledged)
+                throw TransitionError("Outbound mutation already has a terminal operator resolution.");
+            if (!CanOperatorResolve(mutation))
                 throw TransitionError("Operator resolution is not valid in the current state.");
+            var proposals = mutation.ResolutionProposals.ToList();
+            if (evt.ProposalId is { } proposalId)
+            {
+                var proposalIndex = proposals.FindIndex(
+                    proposal => proposal.ProposalId == proposalId);
+                if (proposalIndex < 0)
+                    throw TransitionError("Maker/checker proposal is unknown.");
+                var proposal = proposals[proposalIndex];
+                if (proposal.ApprovedAtUtc is not null)
+                    throw TransitionError("Maker/checker proposal was already approved.");
+                if (proposal.Decision != evt.Decision
+                    || proposal.EvidenceType != evt.EvidenceType
+                    || proposal.EvidenceDigest != evt.EvidenceDigest
+                    || proposal.EvidenceReference != evt.EvidenceReference
+                    || proposal.ReasonCode != evt.ReasonCode
+                    || proposal.MakerRef != evt.MakerRef
+                    || string.Equals(proposal.MakerRef, evt.CheckerRef, StringComparison.Ordinal))
+                    throw TransitionError("Maker/checker approval does not match the proposal.");
+                proposals[proposalIndex] = proposal with
+                {
+                    CheckerRef = evt.CheckerRef,
+                    ApprovedAtUtc = evt.ResolvedAtUtc,
+                };
+            }
             var evidence = mutation.OperatorEvidence.ToList();
             evidence.Add(new OutboundOperatorEvidenceSnapshot
             {
                 Decision = evt.Decision,
                 EvidenceType = evt.EvidenceType,
                 EvidenceDigest = evt.EvidenceDigest,
+                EvidenceReference = evt.EvidenceReference,
+                ReasonCode = evt.ReasonCode,
                 OperatorRef = evt.OperatorRef,
+                MakerRef = evt.MakerRef,
+                CheckerRef = evt.CheckerRef,
+                ProposalId = evt.ProposalId,
+                CapacityReleased = evt.ReleaseCapacity,
                 RecordedAtUtc = evt.ResolvedAtUtc,
             });
-            mutation = mutation with { OperatorEvidence = evidence };
+            mutation = mutation with
+            {
+                OperatorEvidence = evidence,
+                ResolutionProposals = proposals,
+            };
             if (evt.Decision == OutboundOperatorDecision.LeaveAmbiguous)
             {
                 _mutations[evt.MutationId] = mutation with
@@ -640,12 +783,48 @@ public sealed class OutboundMutationLedger
                     && evt.SessionId != frame.SessionId);
             if (positiveIdentityMismatch)
             {
-                MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
+                var reopenedReconciliation = IsTerminal(mutation.State);
+                if (reopenedReconciliation)
+                {
+                    MarkTerminalEvidenceConflict(
+                        mutation,
+                        evt.TimestampUtc,
+                        reopenReconciliation: true);
+                }
+                else
+                {
+                    MarkConflictingVenueEvidence(mutation, evt.ClOrdId, evt.TimestampUtc);
+                }
                 AddInboundEvidenceUnsafe(
                     CreateExecutionReportEvidence(
                         evt, evidenceId, InboundVenueEvidenceDisposition.Conflicting, [id]),
                     evidenceIdentity);
-                return new(InboundVenueEvidenceApplyStatus.RecordedConflicting);
+                return new(
+                    InboundVenueEvidenceApplyStatus.RecordedConflicting,
+                    ReopenedReconciliation: reopenedReconciliation);
+            }
+
+            if (mutation.State == OutboundMutationState.OperatorResolved
+                && mutation.OperatorEvidence.LastOrDefault()?.Decision
+                    == OutboundOperatorDecision.VenueAbsent
+                && HasCompleteExecutionReportIdentity(evt))
+            {
+                MarkTerminalEvidenceConflict(
+                    mutation,
+                    evt.TimestampUtc,
+                    reopenReconciliation: true);
+                AddInboundEvidenceUnsafe(
+                    CreateExecutionReportEvidence(
+                        evt,
+                        evidenceId,
+                        InboundVenueEvidenceDisposition.Conflicting,
+                        [id],
+                        authoritativeTerminalContradiction: true),
+                    evidenceIdentity);
+                return new(
+                    InboundVenueEvidenceApplyStatus.RecordedConflicting,
+                    ReopenedReconciliation: true,
+                    ApplyDomainDespiteConflict: true);
             }
 
             if (activeAttempt.ProvenUnsentEvidence is not null
@@ -660,6 +839,21 @@ public sealed class OutboundMutationLedger
                         evt, evidenceId, InboundVenueEvidenceDisposition.Conflicting, [id]),
                     evidenceIdentity);
                 return new(InboundVenueEvidenceApplyStatus.RecordedConflicting);
+            }
+
+            if (!HasCompleteExecutionReportIdentity(evt))
+            {
+                if (!IsTerminal(mutation.State))
+                    MarkUnmatchedVenueEvidence(
+                        mutation,
+                        evt.ClOrdId,
+                        evt.TimestampUtc,
+                        OutboundAmbiguityReason.IncompleteVenueEvidence);
+                AddInboundEvidenceUnsafe(
+                    CreateExecutionReportEvidence(
+                        evt, evidenceId, InboundVenueEvidenceDisposition.Unmatched, [id]),
+                    evidenceIdentity);
+                return new(InboundVenueEvidenceApplyStatus.RecordedUnmatched);
             }
 
             if (evt.SessionVerId is not null and not 0
@@ -681,21 +875,6 @@ public sealed class OutboundMutationLedger
                 return new(InboundVenueEvidenceApplyStatus.RecordedUnmatched);
             }
 
-            if (!HasCompleteExecutionReportIdentity(evt))
-            {
-                if (!IsTerminal(mutation.State))
-                    MarkUnmatchedVenueEvidence(
-                        mutation,
-                        evt.ClOrdId,
-                        evt.TimestampUtc,
-                        OutboundAmbiguityReason.IncompleteVenueEvidence);
-                AddInboundEvidenceUnsafe(
-                    CreateExecutionReportEvidence(
-                        evt, evidenceId, InboundVenueEvidenceDisposition.Unmatched, [id]),
-                    evidenceIdentity);
-                return new(InboundVenueEvidenceApplyStatus.RecordedUnmatched);
-            }
-
             if (IsTerminal(mutation.State))
             {
                 if (string.Equals(
@@ -703,7 +882,7 @@ public sealed class OutboundMutationLedger
                         "BusinessReject",
                         StringComparison.Ordinal))
                 {
-                    MarkTerminalEvidenceConflict(mutation);
+                    MarkTerminalEvidenceConflict(mutation, evt.TimestampUtc);
                     AddInboundEvidenceUnsafe(
                         CreateExecutionReportEvidence(
                             evt,
@@ -729,7 +908,7 @@ public sealed class OutboundMutationLedger
                         [id]),
                     evidenceIdentity);
                 if (!terminalMatches)
-                    MarkTerminalEvidenceConflict(mutation);
+                    MarkTerminalEvidenceConflict(mutation, evt.TimestampUtc);
                 return new(terminalMatches
                     ? InboundVenueEvidenceApplyStatus.RecordedMatched
                     : InboundVenueEvidenceApplyStatus.RecordedConflicting);
@@ -832,7 +1011,7 @@ public sealed class OutboundMutationLedger
                         "ExecutionReport",
                         StringComparison.Ordinal))
                 {
-                    MarkTerminalEvidenceConflict(mutation);
+                    MarkTerminalEvidenceConflict(mutation, evt.TimestampUtc);
                     AddInboundEvidenceUnsafe(
                         CreateBusinessRejectEvidence(
                             evt,
@@ -857,7 +1036,7 @@ public sealed class OutboundMutationLedger
                         [id]),
                     evidenceIdentity);
                 if (!terminalMatches)
-                    MarkTerminalEvidenceConflict(mutation);
+                    MarkTerminalEvidenceConflict(mutation, evt.TimestampUtc);
                 return new(terminalMatches
                     ? InboundVenueEvidenceApplyStatus.RecordedMatched
                     : InboundVenueEvidenceApplyStatus.RecordedConflicting);
@@ -938,7 +1117,7 @@ public sealed class OutboundMutationLedger
                     continue;
                 if (IsTerminal(mutation.State))
                 {
-                    MarkTerminalEvidenceConflict(mutation);
+                    MarkTerminalEvidenceConflict(mutation, evt.TimestampUtc);
                     disposition = InboundVenueEvidenceDisposition.Conflicting;
                     continue;
                 }
@@ -1313,6 +1492,9 @@ public sealed class OutboundMutationLedger
             var purgeIds = _mutations.Values
                 .Where(m => IsTerminal(m.State)
                     && !m.RequiresReconciliation
+                    && m.OperatorEvidence.Count == 0
+                    && m.ResolutionProposals.Count == 0
+                    && m.AuthoritativeEvidence.Count == 0
                     && m.Resolution is { ResolvedAtUtc: var resolved }
                     && resolved <= cutoff)
                 .Select(m => m.MutationId)
@@ -1464,6 +1646,155 @@ public sealed class OutboundMutationLedger
         }
     }
 
+    public IReadOnlyList<InboundVenueEvidenceSnapshot> GetInboundEvidenceForMutation(
+        OutboundMutationId mutationId)
+    {
+        lock (_gate)
+            return _inboundEvidence.Values
+                .Where(evidence => evidence.MatchedMutationIds.Contains(mutationId))
+                .OrderBy(evidence => evidence.ObservedAtUtc)
+                .ThenBy(evidence => evidence.EvidenceId, StringComparer.Ordinal)
+                .Select(CloneEvidence)
+                .ToArray();
+    }
+
+    public bool HasAuthoritativeEvidence(
+        OutboundMutationId mutationId,
+        OutboundOperatorEvidenceType evidenceType,
+        string evidenceReference)
+    {
+        lock (_gate)
+        {
+            if (!_mutations.TryGetValue(mutationId, out var mutation))
+                return false;
+            return evidenceType switch
+            {
+                OutboundOperatorEvidenceType.TerminalExecutionReport =>
+                    HasAuthoritativeTerminalExecutionReportUnsafe(
+                        mutation,
+                        evidenceReference,
+                        out _),
+                OutboundOperatorEvidenceType.ContractedNotApplied =>
+                    _inboundEvidence.TryGetValue(evidenceReference, out var notApplied)
+                    && notApplied.Kind == InboundVenueEvidenceKind.NotApplied
+                    && notApplied.Disposition == InboundVenueEvidenceDisposition.Matched
+                    && notApplied.MatchedMutationIds.Contains(mutationId),
+                OutboundOperatorEvidenceType.VenueMassAction =>
+                    HasRegisteredAuthoritativeEvidence(
+                        mutation,
+                        OutboundAuthoritativeEvidenceSourceType.VenueMassAction,
+                        evidenceReference),
+                OutboundOperatorEvidenceType.OfficialExtract =>
+                    HasRegisteredAuthoritativeEvidence(
+                        mutation,
+                        OutboundAuthoritativeEvidenceSourceType.OfficialExtract,
+                        evidenceReference),
+                OutboundOperatorEvidenceType.ManualAnnotation => true,
+                _ => false,
+            };
+        }
+    }
+
+    public bool IsTerminalExecutionReportDecisionCompatible(
+        OutboundMutationId mutationId,
+        string evidenceReference,
+        OutboundOperatorDecision decision)
+    {
+        lock (_gate)
+        {
+            if (!_mutations.TryGetValue(mutationId, out var mutation)
+                || !HasAuthoritativeTerminalExecutionReportUnsafe(
+                    mutation,
+                    evidenceReference,
+                    out var evidence))
+                return false;
+            return decision != OutboundOperatorDecision.VenueAbsent
+                || !IsVenueAcknowledgmentOnlyExecutionReportKind(evidence.MessageKind);
+        }
+    }
+
+    private bool HasAuthoritativeTerminalExecutionReportUnsafe(
+        OutboundMutationSnapshot mutation,
+        string evidenceReference,
+        out InboundVenueEvidenceSnapshot evidence)
+    {
+        if (_inboundEvidence.TryGetValue(evidenceReference, out var found)
+            && found.Kind == InboundVenueEvidenceKind.ExecutionReport
+            && (found.Disposition == InboundVenueEvidenceDisposition.Matched
+                || (found.Disposition == InboundVenueEvidenceDisposition.Conflicting
+                    && found.AuthoritativeTerminalContradiction))
+            && found.MatchedMutationIds.Contains(mutation.MutationId)
+            && string.Equals(found.FirmId, mutation.FirmId, StringComparison.Ordinal)
+            && found.SessionId is > 0
+            && found.SessionVerId is > 0
+            && found.InboundSeqNum is > 0
+            && found.SendingTime is not null
+            && IsTerminalExecutionReportKind(found.MessageKind))
+        {
+            evidence = found;
+            return true;
+        }
+        evidence = null!;
+        return false;
+    }
+
+    public IReadOnlyList<OutboundReconciliationMetricSnapshot> GetReconciliationMetrics(
+        DateTimeOffset now)
+    {
+        lock (_gate)
+        {
+            return _mutations.Values
+                .Where(mutation => mutation.RequiresReconciliation)
+                .GroupBy(mutation =>
+                {
+                    var reason = ResolveAmbiguityReason(mutation);
+                    var age = Math.Max(0d, (now - mutation.StateChangedAtUtc).TotalSeconds);
+                    return new
+                    {
+                        mutation.FirmId,
+                        mutation.Kind,
+                        mutation.State,
+                        Reason = reason,
+                        AgeBucket = AgeBucket(age),
+                    };
+                })
+                .Select(group => new OutboundReconciliationMetricSnapshot(
+                    group.Key.FirmId,
+                    group.Key.Kind,
+                    group.Key.State,
+                    group.Key.Reason,
+                    group.Key.AgeBucket,
+                    group.LongCount(),
+                    group.Max(mutation =>
+                        Math.Max(0d, (now - mutation.StateChangedAtUtc).TotalSeconds))))
+                .OrderBy(snapshot => snapshot.FirmId, StringComparer.Ordinal)
+                .ThenBy(snapshot => snapshot.Kind)
+                .ThenBy(snapshot => snapshot.State)
+                .ThenBy(snapshot => snapshot.AmbiguityReason, StringComparer.Ordinal)
+                .ThenBy(snapshot => snapshot.AgeBucket, StringComparer.Ordinal)
+                .ToArray();
+        }
+    }
+
+    public OutboundReconciliationHealthSnapshot GetReconciliationHealth(DateTimeOffset now)
+    {
+        lock (_gate)
+        {
+            var unresolved = _mutations.Values
+                .Where(mutation => mutation.RequiresReconciliation)
+                .ToArray();
+            return new OutboundReconciliationHealthSnapshot(
+                unresolved.Length,
+                unresolved.Select(mutation => mutation.FirmId)
+                    .Distinct(StringComparer.Ordinal)
+                    .Count(),
+                OldestAge(unresolved.Where(mutation =>
+                    mutation.State == OutboundMutationState.Ambiguous), now),
+                OldestAge(unresolved.Where(mutation =>
+                    IsLegacyState(mutation.State)), now));
+        }
+    }
+
     public void Restore(
         IEnumerable<OutboundMutationSnapshot> mutations,
         IEnumerable<OutboundCorrelationTombstone> correlations,
@@ -1525,7 +1856,9 @@ public sealed class OutboundMutationLedger
                             || StateRequiresReconciliation(mutation.State)
                             || mutation.Attempts.Any(a =>
                                 a.AmbiguityReason
-                                == OutboundAmbiguityReason.ConflictingVenueEvidence),
+                                == OutboundAmbiguityReason.ConflictingVenueEvidence)
+                            || mutation.ResolutionProposals.Any(
+                                proposal => proposal.ApprovedAtUtc is null),
                         ExplicitlyRequiresReconciliation =
                             explicitlyRequiresReconciliation,
                     };
@@ -1863,7 +2196,7 @@ public sealed class OutboundMutationLedger
                 continue;
             if (IsTerminal(mutation.State))
             {
-                MarkTerminalEvidenceConflict(mutation);
+                MarkTerminalEvidenceConflict(mutation, atUtc);
                 continue;
             }
 
@@ -1880,6 +2213,7 @@ public sealed class OutboundMutationLedger
         {
             Disposition = InboundVenueEvidenceDisposition.Conflicting,
             MatchedMutationIds = matchedIds,
+            AuthoritativeTerminalContradiction = false,
         };
         return matchedIds;
     }
@@ -1938,7 +2272,8 @@ public sealed class OutboundMutationLedger
         ExecutionReportReceivedEvent evt,
         string evidenceId,
         InboundVenueEvidenceDisposition disposition,
-        IReadOnlyList<OutboundMutationId> matchedMutationIds) =>
+        IReadOnlyList<OutboundMutationId> matchedMutationIds,
+        bool authoritativeTerminalContradiction = false) =>
         new()
         {
             EvidenceId = evidenceId,
@@ -1950,6 +2285,7 @@ public sealed class OutboundMutationLedger
             InboundSeqNum = evt.InboundSeqNum,
             SendingTime = evt.VenueSendingTime,
             PossibleResend = evt.PossibleResend,
+            AuthoritativeTerminalContradiction = authoritativeTerminalContradiction,
             MessageKind = evt.ExecKind,
             ClOrdId = evt.ClOrdId,
             OrigClOrdId = evt.OrigClOrdId == 0 ? null : evt.OrigClOrdId,
@@ -2097,6 +2433,28 @@ public sealed class OutboundMutationLedger
             MatchedMutationIds = evidence.MatchedMutationIds.ToArray(),
         };
 
+    private static OutboundAuthoritativeEvidenceSnapshot CloneAuthoritativeEvidence(
+        OutboundAuthoritativeEvidenceSnapshot evidence) =>
+        evidence with
+        {
+            CoveredMutationIds = evidence.CoveredMutationIds.ToArray(),
+        };
+
+    private static bool AuthoritativeEvidenceEquals(
+        OutboundAuthoritativeEvidenceSnapshot left,
+        OutboundAuthoritativeEvidenceSnapshot right) =>
+        left.EvidenceReference == right.EvidenceReference
+        && left.EvidenceDigest == right.EvidenceDigest
+        && left.FirmId == right.FirmId
+        && left.SourceType == right.SourceType
+        && left.CoverageStartUtc == right.CoverageStartUtc
+        && left.CoverageEndUtc == right.CoverageEndUtc
+        && left.CoveredMutationIds.SequenceEqual(right.CoveredMutationIds)
+        && left.AttestationReference == right.AttestationReference
+        && left.AttestedBy == right.AttestedBy
+        && left.AttestedAtUtc == right.AttestedAtUtc
+        && left.RegisteredAtUtc == right.RegisteredAtUtc;
+
     private void Terminalise(
         OutboundMutationSnapshot mutation,
         OutboundMutationState state,
@@ -2105,8 +2463,22 @@ public sealed class OutboundMutationLedger
         string evidenceDigest,
         ulong? venueOrderId)
     {
+        var attempts = mutation.Attempts.ToArray();
+        if (attempts.Length > 0
+            && attempts[^1].AmbiguityReason
+                == OutboundAmbiguityReason.ConflictingVenueEvidence
+            && mutation.OperatorEvidence.Any(evidence =>
+                evidence.Decision != OutboundOperatorDecision.LeaveAmbiguous
+                && evidence.EvidenceDigest == evidenceDigest))
+        {
+            attempts[^1] = attempts[^1] with
+            {
+                AmbiguityReason = null,
+            };
+        }
         mutation = mutation with
         {
+            Attempts = attempts,
             State = state,
             StateChangedAtUtc = atUtc,
             Resolution = new OutboundResolutionSnapshot
@@ -2193,7 +2565,10 @@ public sealed class OutboundMutationLedger
         MarkCorrelations(mutation, terminal: false, atUtc);
     }
 
-    private void MarkTerminalEvidenceConflict(OutboundMutationSnapshot mutation)
+    private void MarkTerminalEvidenceConflict(
+        OutboundMutationSnapshot mutation,
+        DateTimeOffset atUtc,
+        bool reopenReconciliation = false)
     {
         var attempts = mutation.Attempts.ToArray();
         if (attempts.Length > 0)
@@ -2203,11 +2578,37 @@ public sealed class OutboundMutationLedger
                 AmbiguityReason = OutboundAmbiguityReason.ConflictingVenueEvidence,
             };
         }
-        _mutations[mutation.MutationId] = mutation with
+        var updated = mutation with
         {
             Attempts = attempts,
+            State = reopenReconciliation
+                ? OutboundMutationState.Ambiguous
+                : mutation.State,
+            StateChangedAtUtc = reopenReconciliation
+                ? atUtc
+                : mutation.StateChangedAtUtc,
             RequiresReconciliation = true,
         };
+        _mutations[mutation.MutationId] = updated;
+        if (reopenReconciliation)
+        {
+            MarkCorrelations(updated, terminal: false, atUtc);
+            RestoreActiveOriginalGuard(updated);
+        }
+    }
+
+    private void RestoreActiveOriginalGuard(OutboundMutationSnapshot mutation)
+    {
+        if (mutation.OriginalClOrdId is not { } originalClOrdId)
+            return;
+        var key = new OriginalOrderKey(mutation.FirmId, originalClOrdId);
+        if (!_activeByOriginal.TryGetValue(key, out var existing)
+            || existing == mutation.MutationId
+            || !_mutations.TryGetValue(existing, out var existingMutation)
+            || IsTerminal(existingMutation.State))
+        {
+            _activeByOriginal[key] = mutation.MutationId;
+        }
     }
 
     private static OutboundMutationSnapshot AppendLegacyEvidence(
@@ -2541,10 +2942,124 @@ public sealed class OutboundMutationLedger
             OperatorEvidence = mutation.OperatorEvidence
                 .Select(e => e with { })
                 .ToArray(),
+            ResolutionProposals = mutation.ResolutionProposals
+                .Select(proposal => proposal with { })
+                .ToArray(),
+            AuthoritativeEvidence = mutation.AuthoritativeEvidence
+                .Select(CloneAuthoritativeEvidence)
+                .ToArray(),
             LegacyEvidence = mutation.LegacyEvidence
                 .Select(e => e with { })
                 .ToArray(),
         };
+
+    private static bool CanOperatorResolve(OutboundMutationSnapshot mutation) =>
+        mutation.RequiresReconciliation
+        || mutation.State is OutboundMutationState.Ambiguous
+            or OutboundMutationState.ProvenUnsent
+            or OutboundMutationState.VenueAcknowledged
+            or OutboundMutationState.LegacyUnknown
+            or OutboundMutationState.LegacyUnknownCancel
+            or OutboundMutationState.LegacyUnknownReplace;
+
+    private static bool HasRegisteredAuthoritativeEvidence(
+        OutboundMutationSnapshot mutation,
+        OutboundAuthoritativeEvidenceSourceType sourceType,
+        string evidenceReference) =>
+        mutation.AuthoritativeEvidence.Any(evidence =>
+            evidence.SourceType == sourceType
+            && evidence.EvidenceReference == evidenceReference
+            && string.Equals(evidence.FirmId, mutation.FirmId, StringComparison.Ordinal)
+            && evidence.CoveredMutationIds.Contains(mutation.MutationId)
+            && mutation.RecordedAtUtc >= evidence.CoverageStartUtc
+            && mutation.RecordedAtUtc <= evidence.CoverageEndUtc
+            && EvidenceReferenceMatchesSource(
+                evidence.SourceType,
+                evidence.EvidenceReference,
+                evidence.EvidenceDigest)
+            && IsOpaqueReference(evidence.AttestationReference)
+            && IsOpaqueReference(evidence.AttestedBy)
+            && evidence.AttestedAtUtc <= evidence.RegisteredAtUtc);
+
+    private static bool EvidenceReferenceMatchesSource(
+        OutboundAuthoritativeEvidenceSourceType sourceType,
+        string evidenceReference,
+        string evidenceDigest)
+    {
+        var prefix = sourceType switch
+        {
+            OutboundAuthoritativeEvidenceSourceType.VenueMassAction => "venue-report:",
+            OutboundAuthoritativeEvidenceSourceType.OfficialExtract => "official-extract:",
+            _ => string.Empty,
+        };
+        return prefix.Length > 0
+            && evidenceReference == $"{prefix}{evidenceDigest}"
+            && IsLowerHex(evidenceDigest, 64);
+    }
+
+    private static void ValidateOperatorEvidencePair(
+        OutboundOperatorDecision decision,
+        OutboundOperatorEvidenceType evidenceType,
+        bool releaseCapacity)
+    {
+        if (evidenceType == OutboundOperatorEvidenceType.ManualAnnotation)
+        {
+            if (decision != OutboundOperatorDecision.LeaveAmbiguous || releaseCapacity)
+                throw TransitionError("Manual annotation can only leave a mutation ambiguous.");
+            return;
+        }
+        if (decision == OutboundOperatorDecision.LeaveAmbiguous)
+            throw TransitionError("Leave-ambiguous requires manual annotation evidence.");
+        if (releaseCapacity
+            && evidenceType is not (
+                OutboundOperatorEvidenceType.TerminalExecutionReport
+                or OutboundOperatorEvidenceType.ContractedNotApplied
+                or OutboundOperatorEvidenceType.VenueMassAction
+                or OutboundOperatorEvidenceType.OfficialExtract))
+            throw TransitionError("Capacity release requires authoritative venue evidence.");
+        if (decision == OutboundOperatorDecision.VenueAcknowledged
+            && evidenceType != OutboundOperatorEvidenceType.TerminalExecutionReport)
+            throw TransitionError(
+                "Venue acknowledgment requires terminal execution report evidence.");
+    }
+
+    private static bool IsTerminalExecutionReportKind(string? messageKind) =>
+        messageKind is not null
+        && (messageKind.Equals("Rejected", StringComparison.OrdinalIgnoreCase)
+            || messageKind.Equals("Canceled", StringComparison.OrdinalIgnoreCase)
+            || messageKind.Equals("Fill", StringComparison.OrdinalIgnoreCase)
+            || messageKind.Equals("Replaced", StringComparison.OrdinalIgnoreCase)
+            || messageKind.Equals("Expired", StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsVenueAcknowledgmentOnlyExecutionReportKind(string? messageKind) =>
+        messageKind is not null
+        && (messageKind.Equals("Fill", StringComparison.OrdinalIgnoreCase)
+            || messageKind.Equals("Replaced", StringComparison.OrdinalIgnoreCase));
+
+    private static string ResolveAmbiguityReason(OutboundMutationSnapshot mutation) =>
+        mutation.Attempts.LastOrDefault()?.AmbiguityReason?.ToString()
+        ?? (IsLegacyState(mutation.State) ? "LegacyUnknown" : "Unclassified");
+
+    private static string AgeBucket(double seconds) => seconds switch
+    {
+        < 60d => "lt_1m",
+        < 300d => "1m_5m",
+        < 900d => "5m_15m",
+        < 3600d => "15m_1h",
+        < 21600d => "1h_6h",
+        < 86400d => "6h_24h",
+        _ => "gte_24h",
+    };
+
+    private static double OldestAge(
+        IEnumerable<OutboundMutationSnapshot> mutations,
+        DateTimeOffset now)
+    {
+        var oldest = mutations.Select(mutation =>
+                Math.Max(0d, (now - mutation.StateChangedAtUtc).TotalSeconds))
+            .DefaultIfEmpty(0d);
+        return oldest.Max();
+    }
 
     private static InvalidOperationException TransitionError(string message) =>
         new($"Outbound mutation ledger rejected evidence: {message}");

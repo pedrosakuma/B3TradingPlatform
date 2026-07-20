@@ -28,6 +28,35 @@ groups:
         annotations:
           summary: "FIXP outbound drain was abandoned during shutdown"
 
+      - alert: OutboundContradictoryEvidence
+        expr: increase(trading_outbound_contradictory_evidence_total[5m]) > 0
+        labels:
+          severity: page
+          subsystem: outbound-reconciliation
+        annotations:
+          summary: "Late venue evidence contradicted an operator resolution"
+          runbook_url: "https://github.com/pedrosakuma/B3TradingPlatform/blob/main/docs/RUNBOOK.md#01-outbound-mutation-reconciliation-647"
+
+      - alert: OutboundAmbiguityAging
+        expr: max by (firm) (trading_outbound_oldest_ambiguous_age_seconds) > 900
+        for: 15m
+        labels:
+          severity: ticket
+          subsystem: outbound-reconciliation
+        annotations:
+          summary: "Outbound ambiguity has remained unresolved for more than 15 minutes"
+          runbook_url: "https://github.com/pedrosakuma/B3TradingPlatform/blob/main/docs/RUNBOOK.md#01-outbound-mutation-reconciliation-647"
+
+      - alert: OutboundLegacyUnknownPresent
+        expr: max by (firm) (trading_outbound_legacy_unknown) > 0
+        for: 5m
+        labels:
+          severity: page
+          subsystem: outbound-reconciliation
+        annotations:
+          summary: "Legacy-unknown outbound mutations require operator reconciliation"
+          runbook_url: "https://github.com/pedrosakuma/B3TradingPlatform/blob/main/docs/RUNBOOK.md#01-outbound-mutation-reconciliation-647"
+
       - alert: PublicAuthNegotiateRejectSpike
         expr: sum(rate(entrypoint_listener_negotiate_total{outcome=~"reject:.*"}[5m])) > 1
         for: 5m

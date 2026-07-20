@@ -294,9 +294,26 @@ public sealed class PersistenceRecovery
 
         if (_marginProvider is not null && _orders is not null)
         {
+            var capacityReleasedNewIds = _outboundLedger?.SnapshotMutations()
+                .Where(mutation =>
+                    mutation.Kind == OutboundMutationKind.New
+                    && mutation.OperatorEvidence.Any(evidence => evidence.CapacityReleased))
+                .Select(mutation => mutation.PrimaryClOrdId)
+                .ToHashSet()
+                ?? new HashSet<ulong>();
+            var capacityReleasedReplaceIds = _outboundLedger?.SnapshotMutations()
+                .Where(mutation =>
+                    mutation.Kind == OutboundMutationKind.Replace
+                    && mutation.OperatorEvidence.Any(evidence => evidence.CapacityReleased))
+                .Select(mutation => mutation.PrimaryClOrdId)
+                .ToHashSet()
+                ?? new HashSet<ulong>();
             var restoredReservations = _marginProvider.RestoreRecoveryState(
-                _orders.Snapshot(),
-                _replacements?.Snapshot());
+                _orders.Snapshot().Where(order =>
+                    !capacityReleasedNewIds.Contains(order.ClOrdId)),
+                (_replacements?.Snapshot() ?? Array.Empty<PendingReplacementEntrySnapshot>())
+                    .Where(replacement =>
+                        !capacityReleasedReplaceIds.Contains(replacement.Intent.NewClOrdId)));
             _logger.LogInformation(
                 "Persistence recovery: restored {Orders} order margin reservations and {Replacements} pending-replace reservations.",
                 restoredReservations.Orders,

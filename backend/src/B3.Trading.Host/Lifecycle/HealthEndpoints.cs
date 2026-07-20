@@ -64,12 +64,14 @@ public static class HealthEndpoints
                 : Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
         });
 
-        app.MapGet("/health", async (HttpContext ctx, DrainState drain, IOptions<PersistenceOptions> persist, IOptions<IdentityDirectoryOptions> identityOptions, ITradingUserDirectory directory, IEventStoreHealth wal, IOutboundRecoveryGate recovery, ActiveHostFence fence, CancellationToken ct) =>
+        app.MapGet("/health", async (HttpContext ctx, DrainState drain, IOptions<PersistenceOptions> persist, IOptions<IdentityDirectoryOptions> identityOptions, ITradingUserDirectory directory, IEventStoreHealth wal, IOutboundRecoveryGate recovery, OutboundMutationLedger outboundLedger, ActiveHostFence fence, CancellationToken ct) =>
         {
             var p = persist.Value;
             var identity = await directory.CheckHealthAsync(ct);
             var exchange = ctx.RequestServices.GetService<ExchangeStatus>();
             var sessions = ctx.RequestServices.GetService<IFirmSessionStatusProvider>();
+            var reconciliation = outboundLedger.GetReconciliationHealth(DateTimeOffset.UtcNow);
+            var recoveryFirms = recovery.Snapshot();
 
             // FIXP listener status
             var listenerOpts = ctx.RequestServices.GetService<IOptions<EntryPointListenerOptions>>()?.Value;
@@ -133,7 +135,13 @@ public static class HealthEndpoints
                     processEpoch = fence.IsHeld
                         ? ctx.RequestServices.GetRequiredService<OutboundProcessEpoch>().Sequence
                         : (long?)null,
-                    firms = recovery.Snapshot(),
+                    unresolvedRequiredFirmCount = recoveryFirms.Count(firm =>
+                        firm.Required && firm.BlockingMutations > 0),
+                    reconciliation.UnresolvedMutationCount,
+                    reconciliation.UnresolvedFirmCount,
+                    reconciliation.OldestAmbiguityAgeSeconds,
+                    reconciliation.OldestLegacyUnknownAgeSeconds,
+                    firms = recoveryFirms,
                 },
                 entryPointListener,
             });

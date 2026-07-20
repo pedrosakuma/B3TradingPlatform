@@ -1,4 +1,5 @@
 using System.Diagnostics.Metrics;
+using B3.Trading.Application.Outbound;
 
 namespace B3.Trading.Application.Observability;
 
@@ -799,6 +800,10 @@ public static class MetricsRegistry
         Meter.CreateCounter<long>("trading.entrypoint.business_rejects");
     public static readonly Counter<long> OutboundUnmatchedVenueEvidence =
         Meter.CreateCounter<long>("trading.outbound.unmatched_venue_evidence_total");
+    public static readonly Counter<long> OutboundOperatorResolutions =
+        Meter.CreateCounter<long>("trading.outbound.operator_resolution_total");
+    public static readonly Counter<long> OutboundContradictoryEvidence =
+        Meter.CreateCounter<long>("trading.outbound.contradictory_evidence_total");
     public static readonly Counter<long> EntryPointTerminated =
         Meter.CreateCounter<long>("trading.entrypoint.terminated");
 
@@ -1016,4 +1021,84 @@ public static class MetricsRegistry
     /// </summary>
     public static readonly Counter<long> RateLimitRejected =
         Meter.CreateCounter<long>("trading.ratelimit.rejected_total");
+
+    private static volatile Func<IReadOnlyList<OutboundReconciliationMetricSnapshot>>?
+        _outboundReconciliationSource;
+
+    public static readonly ObservableGauge<long> OutboundAmbiguous =
+        Meter.CreateObservableGauge(
+            "trading.outbound.ambiguous",
+            ObserveOutboundAmbiguous);
+
+    public static readonly ObservableGauge<long> OutboundLegacyUnknown =
+        Meter.CreateObservableGauge(
+            "trading.outbound.legacy_unknown",
+            ObserveOutboundLegacyUnknown);
+
+    public static readonly ObservableGauge<double> OutboundOldestAmbiguousAgeSeconds =
+        Meter.CreateObservableGauge(
+            "trading.outbound.oldest_ambiguous_age_seconds",
+            () => ObserveOldestAge(legacy: false),
+            unit: "s");
+
+    public static readonly ObservableGauge<double> OutboundOldestLegacyUnknownAgeSeconds =
+        Meter.CreateObservableGauge(
+            "trading.outbound.oldest_legacy_unknown_age_seconds",
+            () => ObserveOldestAge(legacy: true),
+            unit: "s");
+
+    public static void RegisterOutboundReconciliationSource(
+        Func<IReadOnlyList<OutboundReconciliationMetricSnapshot>> source) =>
+        _outboundReconciliationSource = source;
+
+    private static IEnumerable<Measurement<long>> ObserveOutboundAmbiguous()
+    {
+        var source = _outboundReconciliationSource;
+        if (source is null)
+            return Array.Empty<Measurement<long>>();
+        return source()
+            .Where(snapshot => snapshot.State == OutboundMutationState.Ambiguous)
+            .Select(snapshot => new Measurement<long>(
+                snapshot.Count,
+                new("firm", snapshot.FirmId),
+                new("kind", snapshot.Kind.ToString().ToLowerInvariant()),
+                new("age_bucket", snapshot.AgeBucket),
+                new("ambiguity_reason", snapshot.AmbiguityReason.ToLowerInvariant())))
+            .ToArray();
+    }
+
+    private static IEnumerable<Measurement<long>> ObserveOutboundLegacyUnknown()
+    {
+        var source = _outboundReconciliationSource;
+        if (source is null)
+            return Array.Empty<Measurement<long>>();
+        return source()
+            .Where(snapshot => snapshot.State is OutboundMutationState.LegacyUnknown
+                or OutboundMutationState.LegacyUnknownCancel
+                or OutboundMutationState.LegacyUnknownReplace)
+            .Select(snapshot => new Measurement<long>(
+                snapshot.Count,
+                new("firm", snapshot.FirmId),
+                new("kind", snapshot.Kind.ToString().ToLowerInvariant()),
+                new("ambiguity_reason", snapshot.AmbiguityReason.ToLowerInvariant())))
+            .ToArray();
+    }
+
+    private static IEnumerable<Measurement<double>> ObserveOldestAge(bool legacy)
+    {
+        var source = _outboundReconciliationSource;
+        if (source is null)
+            return Array.Empty<Measurement<double>>();
+        return source()
+            .Where(snapshot => legacy
+                ? snapshot.State is OutboundMutationState.LegacyUnknown
+                    or OutboundMutationState.LegacyUnknownCancel
+                    or OutboundMutationState.LegacyUnknownReplace
+                : snapshot.State == OutboundMutationState.Ambiguous)
+            .GroupBy(snapshot => snapshot.FirmId, StringComparer.Ordinal)
+            .Select(group => new Measurement<double>(
+                group.Max(snapshot => snapshot.OldestAgeSeconds),
+                new KeyValuePair<string, object?>("firm", group.Key)))
+            .ToArray();
+    }
 }

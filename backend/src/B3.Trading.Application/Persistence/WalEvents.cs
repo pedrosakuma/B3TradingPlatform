@@ -70,6 +70,8 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(OutboundFramePreparedEvent), "outbound.frame-prepared")]
 [JsonDerivedType(typeof(OutboundTransportWriteCompletedEvent), "outbound.transport-write-completed")]
 [JsonDerivedType(typeof(OutboundProvenUnsentEvent), "outbound.proven-unsent")]
+[JsonDerivedType(typeof(OutboundAuthoritativeEvidenceRegisteredEvent), "outbound.authoritative-evidence-registered")]
+[JsonDerivedType(typeof(OutboundOperatorResolutionProposedEvent), "outbound.operator-resolution-proposed")]
 [JsonDerivedType(typeof(OutboundReconciliationRequiredEvent), "outbound.reconciliation-required")]
 [JsonDerivedType(typeof(OutboundOperatorResolvedEvent), "outbound.operator-resolved")]
 [JsonDerivedType(typeof(RestOrderIdempotencyBoundEvent), "outbound.rest-idempotency-bound")]
@@ -509,6 +511,25 @@ public sealed record OutboundProvenUnsentEvent : WalEvent
     public required OutboundProvenUnsentEvidence Evidence { get; init; }
 }
 
+public sealed record OutboundAuthoritativeEvidenceRegisteredEvent : WalEvent
+{
+    public required OutboundMutationId MutationId { get; init; }
+    public required OutboundAuthoritativeEvidenceSnapshot Evidence { get; init; }
+}
+
+public sealed record OutboundOperatorResolutionProposedEvent : WalEvent
+{
+    public required OutboundMutationId MutationId { get; init; }
+    public required OutboundResolutionProposalId ProposalId { get; init; }
+    public required OutboundOperatorDecision Decision { get; init; }
+    public required OutboundOperatorEvidenceType EvidenceType { get; init; }
+    public required string EvidenceReference { get; init; }
+    public required string EvidenceDigest { get; init; }
+    public required string ReasonCode { get; init; }
+    public required string MakerRef { get; init; }
+    public required DateTimeOffset ProposedAtUtc { get; init; }
+}
+
 public sealed record OutboundReconciliationRequiredEvent : WalEvent
 {
     public required OutboundMutationId MutationId { get; init; }
@@ -521,7 +542,13 @@ public sealed record OutboundOperatorResolvedEvent : WalEvent
     public required OutboundOperatorDecision Decision { get; init; }
     public required OutboundOperatorEvidenceType EvidenceType { get; init; }
     public required string EvidenceDigest { get; init; }
+    public string? EvidenceReference { get; init; }
+    public string? ReasonCode { get; init; }
     public required string OperatorRef { get; init; }
+    public string? MakerRef { get; init; }
+    public string? CheckerRef { get; init; }
+    public OutboundResolutionProposalId? ProposalId { get; init; }
+    public bool ReleaseCapacity { get; init; }
     public required DateTimeOffset ResolvedAtUtc { get; init; }
 }
 

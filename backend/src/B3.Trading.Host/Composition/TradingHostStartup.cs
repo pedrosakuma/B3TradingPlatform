@@ -40,6 +40,10 @@ internal static class TradingHostStartup
         B3.Trading.Application.Observability.MetricsRegistry.RegisterOrderRateSources(
             () => rate.EndClientLedger.ActiveBucketCount,
             () => rate.FirmLedger.ActiveBucketCount);
+        var outboundLedger = app.Services.GetRequiredService<
+            B3.Trading.Application.Outbound.OutboundMutationLedger>();
+        B3.Trading.Application.Observability.MetricsRegistry.RegisterOutboundReconciliationSource(
+            () => outboundLedger.GetReconciliationMetrics(DateTimeOffset.UtcNow));
         var marginProvider = app.Services.GetService<ReserveOnSubmitMarginProvider>();
         if (marginProvider is not null)
         {

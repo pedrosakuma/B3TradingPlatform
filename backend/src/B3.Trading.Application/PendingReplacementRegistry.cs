@@ -64,6 +64,7 @@ public sealed class PendingReplacementRegistry
         // with the same value the pre-crash dispatch used.
         public decimal NewRemainingNotional { get; set; }
         public bool RecoveryFenced { get; set; }
+        public bool ReleasedForVenueAbsent { get; set; }
         public Entry(OrderReplacementIntent intent, DateTimeOffset createdAt)
         {
             Intent = intent;
@@ -174,7 +175,8 @@ public sealed class PendingReplacementRegistry
     {
         if (_byNewClOrdId.TryRemove(newClOrdId, out var found))
         {
-            _byOriginalClOrdId.TryRemove(found.Intent.OriginalClOrdId, out _);
+            ((ICollection<KeyValuePair<ulong, ulong>>)_byOriginalClOrdId)
+                .Remove(new(found.Intent.OriginalClOrdId, newClOrdId));
             _ambiguous.TryRemove(newClOrdId, out _);
             _ambiguousAlerted.TryRemove(newClOrdId, out _);
             intent = found.Intent;
@@ -182,6 +184,28 @@ public sealed class PendingReplacementRegistry
         }
         intent = null;
         return false;
+    }
+
+    /// <summary>
+    /// Releases the in-flight original-order guard after an authoritative
+    /// venue-absent resolution while retaining the replacement intent for a
+    /// contradictory late Replaced ER. The retained entry is snapshot-backed
+    /// and remains consumable through <see cref="TryConsume"/>.
+    /// </summary>
+    public bool ReleaseForVenueAbsent(ulong newClOrdId)
+    {
+        if (!_byNewClOrdId.TryGetValue(newClOrdId, out var found))
+            return false;
+
+        found.ReleasedForVenueAbsent = true;
+        found.AmbiguousMarginHeld = false;
+        found.AmbiguousAt = null;
+        found.NewRemainingNotional = 0m;
+        ((ICollection<KeyValuePair<ulong, ulong>>)_byOriginalClOrdId)
+            .Remove(new(found.Intent.OriginalClOrdId, newClOrdId));
+        _ambiguous.TryRemove(newClOrdId, out _);
+        _ambiguousAlerted.TryRemove(newClOrdId, out _);
+        return true;
     }
 
     /// <summary>
@@ -277,6 +301,8 @@ public sealed class PendingReplacementRegistry
     {
         if (_byNewClOrdId.TryGetValue(newClOrdId, out var found))
         {
+            if (found.ReleasedForVenueAbsent)
+                return false;
             found.AmbiguousMarginHeld = true;
             found.AmbiguousAt = ambiguousAt;
             found.NewRemainingNotional = newRemainingNotional;
@@ -382,7 +408,8 @@ public sealed class PendingReplacementRegistry
                 CreatedAt: e.CreatedAt,
                 AmbiguousMarginHeld: e.AmbiguousMarginHeld,
                 AmbiguousAt: e.AmbiguousAt,
-                NewRemainingNotional: e.NewRemainingNotional);
+                NewRemainingNotional: e.NewRemainingNotional,
+                ReleasedForVenueAbsent: e.ReleasedForVenueAbsent);
         }
         return snaps;
     }
@@ -407,19 +434,23 @@ public sealed class PendingReplacementRegistry
         {
             var entry = new Entry(s.Intent, s.CreatedAt)
             {
-                AmbiguousMarginHeld = s.AmbiguousMarginHeld,
-                AmbiguousAt = s.AmbiguousAt,
-                NewRemainingNotional = s.NewRemainingNotional,
+                AmbiguousMarginHeld = s.AmbiguousMarginHeld && !s.ReleasedForVenueAbsent,
+                AmbiguousAt = s.ReleasedForVenueAbsent ? null : s.AmbiguousAt,
+                NewRemainingNotional = s.ReleasedForVenueAbsent
+                    ? 0m
+                    : s.NewRemainingNotional,
                 RecoveryFenced = true,
+                ReleasedForVenueAbsent = s.ReleasedForVenueAbsent,
             };
-            if (!_byOriginalClOrdId.TryAdd(s.Intent.OriginalClOrdId, s.Intent.NewClOrdId))
-                continue;
             if (!_byNewClOrdId.TryAdd(s.Intent.NewClOrdId, entry))
+                continue;
+            if (!s.ReleasedForVenueAbsent
+                && !_byOriginalClOrdId.TryAdd(s.Intent.OriginalClOrdId, s.Intent.NewClOrdId))
             {
-                _byOriginalClOrdId.TryRemove(s.Intent.OriginalClOrdId, out _);
+                _byNewClOrdId.TryRemove(s.Intent.NewClOrdId, out _);
                 continue;
             }
-            if (s.AmbiguousMarginHeld)
+            if (entry.AmbiguousMarginHeld)
                 _ambiguous.TryAdd(s.Intent.NewClOrdId, 0);
         }
     }
@@ -483,4 +514,5 @@ public sealed record PendingReplacementEntrySnapshot(
     DateTimeOffset CreatedAt,
     bool AmbiguousMarginHeld,
     DateTimeOffset? AmbiguousAt,
-    decimal NewRemainingNotional);
+    decimal NewRemainingNotional,
+    bool ReleasedForVenueAbsent = false);

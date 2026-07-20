@@ -182,6 +182,13 @@ public sealed class EntryPointExecutionReportRouter : IDisposable
                     }
                 });
             RecordEvidenceMetric(result, InboundVenueEvidenceKind.ExecutionReport, er.FirmId);
+            if (result?.ReopenedReconciliation == true)
+            {
+                MetricsRegistry.OutboundContradictoryEvidence.Add(
+                    1,
+                    new("firm", er.FirmId),
+                    new("evidence_type", "execution_report"));
+            }
         }
         catch (Exception ex) when (ex is WalBackpressureException or WalFaultedException)
         {
