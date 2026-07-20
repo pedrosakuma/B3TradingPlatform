@@ -406,6 +406,7 @@ public sealed record OutboundMutationSnapshot
     public OutboundSensitivePayloadAvailability SensitivePayloadAvailability { get; init; } =
         OutboundSensitivePayloadAvailability.Available;
     public bool RequiresReconciliation { get; init; }
+    public bool ExplicitlyRequiresReconciliation { get; init; }
 }
 
 public sealed record OutboundCorrelationTombstone

@@ -3405,7 +3405,33 @@ public sealed class OutboundMutationLedgerTests
         var mutation = Assert.Single(ledger.SnapshotMutations());
         Assert.Equal(OutboundMutationState.ProvenUnsent, mutation.State);
         Assert.True(mutation.RequiresReconciliation);
+        Assert.True(mutation.ExplicitlyRequiresReconciliation);
         Assert.Equal(flaggedAt, mutation.StateChangedAtUtc);
+    }
+
+    [Fact]
+    public void ReconciliationRequiredEvent_SnapshotRestorePreservesExplicitFlag()
+    {
+        var writer = Fixture.Create();
+        writer.Ledger.Apply(writer.Approved);
+        writer.Ledger.Apply(writer.Intent);
+        writer.Ledger.Apply(writer.Unsent);
+        writer.Ledger.Apply(new OutboundReconciliationRequiredEvent
+        {
+            MutationId = writer.MutationId,
+            Reason = "AlgoRepegAttemptCapExhausted",
+            TimestampUtc = T0.AddMinutes(1),
+        });
+
+        var restored = RestoreLedger(writer);
+
+        var mutation = Assert.Single(restored.SnapshotMutations());
+        Assert.Equal(OutboundMutationState.ProvenUnsent, mutation.State);
+        Assert.Equal(
+            OutboundSensitivePayloadAvailability.Available,
+            mutation.SensitivePayloadAvailability);
+        Assert.True(mutation.RequiresReconciliation);
+        Assert.True(mutation.ExplicitlyRequiresReconciliation);
     }
 
     [Fact]

@@ -389,10 +389,11 @@ public sealed class OutboundMutationLedger
         lock (_gate)
         {
             var mutation = RequiredMutation(evt.MutationId);
-            if (mutation.RequiresReconciliation) return;
+            if (mutation.ExplicitlyRequiresReconciliation) return;
             _mutations[mutation.MutationId] = mutation with
             {
                 RequiresReconciliation = true,
+                ExplicitlyRequiresReconciliation = true,
                 StateChangedAtUtc = evt.TimestampUtc,
             };
         }
@@ -1500,16 +1501,30 @@ public sealed class OutboundMutationLedger
                 {
                     if (!AeadOutboundCommandProtector.IntegrityMatches(approval))
                         throw new OutboundLedgerRecoveryException("Outbound ledger command integrity validation failed.");
+                    var snapshotDerivedReconciliation =
+                        mutation.SensitivePayloadAvailability
+                            != OutboundSensitivePayloadAvailability.Available
+                        || StateRequiresReconciliation(mutation.State)
+                        || mutation.Attempts.Any(a =>
+                            a.AmbiguityReason
+                            == OutboundAmbiguityReason.ConflictingVenueEvidence);
+                    var explicitlyRequiresReconciliation =
+                        mutation.ExplicitlyRequiresReconciliation
+                        || (mutation.RequiresReconciliation
+                            && !snapshotDerivedReconciliation);
                     var availability = CheckPayloadAvailability(mutation.MutationId, mutation.FirmId, approval);
                     mutation = mutation with
                     {
                         SensitivePayloadAvailability = availability,
                         RequiresReconciliation =
-                            availability != OutboundSensitivePayloadAvailability.Available
+                            explicitlyRequiresReconciliation
+                            || availability != OutboundSensitivePayloadAvailability.Available
                             || StateRequiresReconciliation(mutation.State)
                             || mutation.Attempts.Any(a =>
                                 a.AmbiguityReason
                                 == OutboundAmbiguityReason.ConflictingVenueEvidence),
+                        ExplicitlyRequiresReconciliation =
+                            explicitlyRequiresReconciliation,
                     };
                 }
                 if (!_mutations.TryAdd(mutation.MutationId, mutation))
@@ -2102,6 +2117,7 @@ public sealed class OutboundMutationLedger
             RequiresReconciliation =
                 mutation.SensitivePayloadAvailability
                 != OutboundSensitivePayloadAvailability.Available,
+            ExplicitlyRequiresReconciliation = false,
         };
         _mutations[mutation.MutationId] = mutation;
         MarkCorrelations(mutation, terminal: true, atUtc);
