@@ -16,7 +16,6 @@ public sealed class OutboundReconciliationServiceTests
         new(2026, 7, 20, 12, 0, 0, TimeSpan.Zero);
 
     [Theory]
-    [InlineData(OutboundOperatorEvidenceType.TerminalExecutionReport)]
     [InlineData(OutboundOperatorEvidenceType.ContractedNotApplied)]
     [InlineData(OutboundOperatorEvidenceType.VenueMassAction)]
     [InlineData(OutboundOperatorEvidenceType.OfficialExtract)]
@@ -79,6 +78,97 @@ public sealed class OutboundReconciliationServiceTests
         Assert.True(fixture.Ledger.TryGet(fixture.MutationId, out var mutation));
         Assert.True(mutation!.RequiresReconciliation);
         Assert.Equal(OutboundMutationState.Ambiguous, mutation.State);
+    }
+
+    [Fact]
+    public void VenueAcknowledgedReplace_CannotBeResolvedVenueAbsent()
+    {
+        var fixture = Fixture.Create(kind: OutboundMutationKind.Replace);
+        var owner = new EndClientId("CLIENT-SECRET");
+        var intent = new OrderReplacementIntent(
+            OriginalClOrdId: 99,
+            NewClOrdId: 101,
+            Owner: owner,
+            Symbol: "PETR4",
+            SecurityId: 123,
+            Side: OrderSide.Buy,
+            Type: OrderType.Limit,
+            NewQuantity: 10,
+            NewPrice: 30m,
+            FirmId: "F1",
+            ParentAlgoId: null,
+            AlgoSliceSeq: null);
+        Assert.True(fixture.Replacements.TryAdd(intent, T0));
+        var ownership = new OrderOwnershipMap();
+        var book = new WorkingOrderBook();
+        var original = new Order(
+            intent.OriginalClOrdId,
+            owner,
+            intent.Symbol,
+            intent.SecurityId,
+            intent.Side,
+            intent.Type,
+            20,
+            29m,
+            firmId: intent.FirmId);
+        Assert.True(book.TryAdd(original));
+        ownership.Register(original.ClOrdId, owner);
+        ownership.RegisterReplaceLink(original.ClOrdId, intent.NewClOrdId);
+        var processor = new ExecutionReportProcessor(
+            ownership,
+            book,
+            new PositionKeeper(),
+            new NoOpExecutionEventSink(),
+            new NoOpMarginProvider(),
+            NullLogger<ExecutionReportProcessor>.Instance,
+            replacements: fixture.Replacements,
+            replaceMargin: fixture.ReplaceMargin);
+        var client = new MockEntryPointClient();
+        using var router = new EntryPointExecutionReportRouter(
+            client,
+            processor,
+            new EventDispatcher(new NullEventStore()),
+            book,
+            bookTop: null,
+            outboundLedger: fixture.Ledger);
+        client.EmitExecutionReport(new ExecutionReportEnvelope(
+            intent.NewClOrdId,
+            EpExecType.Replaced,
+            LeavesQuantity: intent.NewQuantity,
+            CumulativeQuantity: 0,
+            LastQuantity: 0,
+            LastPrice: 0m,
+            RejectReason: null,
+            OrigClOrdId: intent.OriginalClOrdId,
+            FirmId: intent.FirmId,
+            SessionId: 11,
+            SessionVerId: 2,
+            InboundSeqNum: 90,
+            SendingTime: T0.AddMinutes(2)));
+
+        Assert.True(book.TryGet(intent.NewClOrdId, out var replacement));
+        Assert.Equal(OrderStatus.Working, replacement!.Status);
+        Assert.Equal(1, fixture.ReplaceMargin.CommitCount);
+        Assert.Equal(0, fixture.ReplaceMargin.AbortCount);
+        var evidence = Assert.Single(
+            fixture.Ledger.GetInboundEvidenceForMutation(fixture.MutationId));
+
+        Assert.Throws<OutboundReconciliationValidationException>(() =>
+            fixture.Service.Resolve(
+                fixture.MutationId,
+                "F1",
+                "maker",
+                new(
+                    OutboundOperatorDecision.VenueAbsent,
+                    OutboundOperatorEvidenceType.TerminalExecutionReport,
+                    evidence.EvidenceId,
+                    "terminal_er_verified")));
+
+        var mutation = fixture.Ledger.SnapshotMutations().Single();
+        Assert.Equal(OutboundMutationState.VenueAcknowledged, mutation.State);
+        Assert.Empty(mutation.ResolutionProposals);
+        Assert.Equal(0, fixture.ReplaceMargin.AbortCount);
+        Assert.Equal(OrderStatus.Working, replacement.Status);
     }
 
     [Theory]
@@ -316,17 +406,18 @@ public sealed class OutboundReconciliationServiceTests
     public void SnapshotRestore_PreservesPendingProposalReconciliationFlag()
     {
         var fixture = Fixture.Create();
-        var terminalEvidence = fixture.PrepareEvidence(
-            OutboundOperatorEvidenceType.TerminalExecutionReport);
+        var evidenceReference = fixture.RegisterEvidence(
+            OutboundOperatorEvidenceType.OfficialExtract,
+            '8');
         fixture.Service.Resolve(
             fixture.MutationId,
             "F1",
             "maker",
             new(
                 OutboundOperatorDecision.VenueAbsent,
-                OutboundOperatorEvidenceType.TerminalExecutionReport,
-                terminalEvidence,
-                "terminal_er_verified"));
+                OutboundOperatorEvidenceType.OfficialExtract,
+                evidenceReference,
+                "official_extract_attested"));
         var snapshot = fixture.Ledger.CaptureSnapshot();
         var restored = new OutboundMutationLedger(fixture.Protector);
 
@@ -336,7 +427,7 @@ public sealed class OutboundReconciliationServiceTests
             snapshot.InboundEvidence);
 
         var mutation = Assert.Single(restored.SnapshotMutations());
-        Assert.Equal(OutboundMutationState.VenueAcknowledged, mutation.State);
+        Assert.Equal(OutboundMutationState.Ambiguous, mutation.State);
         Assert.True(mutation.RequiresReconciliation);
         Assert.Null(Assert.Single(mutation.ResolutionProposals).ApprovedAtUtc);
     }
@@ -1123,6 +1214,9 @@ public sealed class OutboundReconciliationServiceTests
 
     private sealed class RecordingReplaceMargin : IReplaceMarginCoordinator
     {
+        public int AbortCount { get; private set; }
+        public int CommitCount { get; private set; }
+
         public Task<RiskDecision> PrepareReplaceAsync(
             ulong originalClOrdId,
             ulong newClOrdId,
@@ -1136,9 +1230,10 @@ public sealed class OutboundReconciliationServiceTests
             ulong newClOrdId,
             decimal confirmedRemainingNotional)
         {
+            CommitCount++;
         }
 
-        public void AbortReplace(ulong newClOrdId) { }
+        public void AbortReplace(ulong newClOrdId) => AbortCount++;
     }
 
     private sealed class ThrowingAuditLogger : IAuditLogger

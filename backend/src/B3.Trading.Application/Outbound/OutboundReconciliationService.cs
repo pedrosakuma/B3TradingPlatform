@@ -564,6 +564,10 @@ public sealed class OutboundReconciliationService
             && request.EvidenceType == OutboundOperatorEvidenceType.ContractedNotApplied)
             throw new OutboundReconciliationValidationException(
                 "Contracted NotApplied cannot prove venue acknowledgment.");
+        if (mutation.State == OutboundMutationState.VenueAcknowledged
+            && request.Decision != OutboundOperatorDecision.VenueAcknowledged)
+            throw new OutboundReconciliationValidationException(
+                "Venue-acknowledged mutations can only be resolved as venue acknowledged.");
         if (!_ledger.HasAuthoritativeEvidence(
                 mutation.MutationId,
                 request.EvidenceType,

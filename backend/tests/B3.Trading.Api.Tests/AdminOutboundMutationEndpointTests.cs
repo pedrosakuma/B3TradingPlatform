@@ -67,7 +67,6 @@ public sealed class AdminOutboundMutationEndpointTests
     }
 
     [Theory]
-    [InlineData("terminal_er", "terminal_er_verified")]
     [InlineData("contracted_not_applied", "contracted_not_applied_verified")]
     [InlineData("venue_mass_action", "venue_mass_action_verified")]
     [InlineData("official_extract", "official_extract_attested")]
@@ -112,6 +111,49 @@ public sealed class AdminOutboundMutationEndpointTests
 
         Assert.Equal(HttpStatusCode.OK, approve.StatusCode);
         Assert.Equal(1, margin.ReleaseCount);
+    }
+
+    [Fact]
+    public async Task VenueAcknowledgedMutation_CannotBeResolvedVenueAbsent()
+    {
+        using var factory = NewFactory(out _);
+        var fixture = SeedAmbiguousMutation(factory, "F1", 64708);
+        var ledger = factory.Services.GetRequiredService<OutboundMutationLedger>();
+        ledger.ApplyVenueAcknowledgement(new ExecutionReportReceivedEvent
+        {
+            ClOrdId = fixture.ClOrdId,
+            ExecKind = "Fill",
+            LeavesQuantity = 0,
+            CumulativeQuantity = 10,
+            LastQuantity = 10,
+            LastPrice = 30m,
+            Synthetic = false,
+            FirmId = "F1",
+            SessionId = 11,
+            SessionVerId = 2,
+            InboundSeqNum = 91,
+            VenueSendingTime = T0.AddMinutes(1),
+            TimestampUtc = T0.AddMinutes(1),
+        });
+        var evidence = Assert.Single(
+            ledger.GetInboundEvidenceForMutation(fixture.MutationId));
+        using var admin = CreateAdminClient(factory, "maker", "F1");
+
+        var response = await admin.PostAsJsonAsync(
+            $"/admin/outbound-mutations/{fixture.MutationId}/resolve",
+            new
+            {
+                decision = "venue_absent",
+                evidenceType = "terminal_er",
+                evidenceReference = evidence.EvidenceId,
+                reason = "terminal_er_verified",
+            });
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+        var mutation = ledger.SnapshotMutations().Single(
+            item => item.MutationId == fixture.MutationId);
+        Assert.Equal(OutboundMutationState.VenueAcknowledged, mutation.State);
+        Assert.Empty(mutation.ResolutionProposals);
     }
 
     [Theory]
