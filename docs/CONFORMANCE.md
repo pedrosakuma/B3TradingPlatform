@@ -130,3 +130,68 @@ Add a new scenario by:
 2. Writing one `[ConformanceFact]` per testable requirement; one
    assertion per scenario, contract-level only — no white-box.
 3. Updating this inventory.
+
+## Durable outbound mutation release gate (#648)
+
+Outbound crash recovery is a release-blocking contract. The `Docker` workflow's
+`Outbound recovery conformance release gate` check depends on unavailable-mode
+conformance, the backup/recovery drill, and real-stack conformance. A failure is
+not an allowed flaky-test skip and prevents candidate promotion.
+
+### RFC §9 crash matrix
+
+`OutboundCrashMatrixReleaseGateTests` is the executable inventory: it has one
+named gate for C1-C25 and fails if any mapped behavioral test is removed,
+renamed, or skipped.
+
+| Row | Behavioral test |
+| --- | --- |
+| C1 | `RestOrderIdempotencyStoreTests.SnapshotRestore_PreservesReplayAndConflictSemantics` |
+| C2 | `CommittedPrefixFileEventStoreTests.CrashBeforeMarkerPublication_DoesNotReplaySurvivor` |
+| C3 | `DurableOrderSubmissionServiceTests.ApprovedSubmit_CommitsPendingApprovalIntentFrameAndWriteInOrder` |
+| C4 | `DurableOrderSubmissionServiceTests.RiskReject_IsDurableBeforeApprovalAndNeverEntersGateway` |
+| C5 | `DurableOrderSubmissionServiceTests.ApprovalAppendFailure_TerminalisesNoWriteBeforeMarginRelease` |
+| C6 | `NewOrderOutboundCoordinatorTests.RecoveryStart_EntersApprovedMutationExactlyOnce` |
+| C7 | `CommittedPrefixFileEventStoreTests.CrashBeforeMarkerPublication_DoesNotReplaySurvivor` |
+| C8 | `OutboundMutationLedgerTests.ColdStartCoordinator_CommitsIntentOnlyProvenUnsent_AndDoesNotResendFramePrepared` |
+| C9 | `NewOrderOutboundCoordinatorTests.FramePersistenceFailure_PreventsWriteAndRequiresReconciliation` |
+| C10 | `OutboundMutationLedgerTests.ColdStartCoordinator_CommitsIntentOnlyProvenUnsent_AndDoesNotResendFramePrepared` |
+| C11 | `NewOrderOutboundCoordinatorTests.TypedPreFrameFailure_IsProvenUnsentAndRetainsMarginUntilDomainTerminalCommit` |
+| C12-C13 | `NewOrderOutboundCoordinatorTests.ExceptionAfterFrame_IsAmbiguousAndDoesNotReleaseMargin` |
+| C14 | `CommittedPrefixFileEventStoreTests.CrashBeforeMarkerPublication_DoesNotReplaySurvivor` |
+| C15 | `OutboundMutationLedgerTests.Recovery_IntentOnlyIsProvenUnsent_FrameAndWriteAreAmbiguous` |
+| C16-C18 | `OutboundMutationLedgerTests.CommitBeforeApply_CrashWindowReplaysEvidenceDeterministically` |
+| C19 | `OutboundMutationLedgerTests.BusinessReject_CorrelatesOnlyExactFirmSessionVersionAndSequence` |
+| C20 | `OutboundMutationLedgerTests.BusinessReject_MissingIdentityRemainsUnmatchedAndDoesNotUseText` |
+| C21 | `OutboundMutationLedgerTests.NotApplied_UsesOverflowSafeHalfOpenRange_AndNeverAutoResends` |
+| C22 | `OutboundMutationLedgerTests.RecoveryGate_BlocksOnlyFirmsCapturedDuringColdClassification` |
+| C23 | `CommittedPrefixFileEventStoreTests.MarkerFault_IsStickyAndFailsEveryOutstandingFence` |
+| C24 | `SnapshotCommittedPrefixTests.Recovery_IgnoresOnDiskSnapshotAheadOfCommittedMarker` |
+| C25 | `ActiveHostFenceTests.SecondHostLoses_AndNextExclusiveAcquisitionAdvancesDurableEpoch` |
+
+The marker-prefix property is
+`OutboundMutationLedgerTests.Property_RestoredPrefixPlusTail_EqualsFullCommittedPrefix`;
+concurrent snapshot capture is separately checked by
+`ConcurrentSnapshotCapture_AlwaysRestoresACommittedLedgerPrefix`.
+
+### RFC §20 and real-stack evidence
+
+| Contract | Executable evidence |
+| --- | --- |
+| Commit-before-gateway and O2 callback boundary | `ApprovedMutation_CommitsIntentFrameAndWriteBeforeReturning`, `FramePersistenceFailure_PreventsWriteAndRequiresReconciliation` |
+| Finite fresh-ClOrdID attempts | `RetryAfterProvenUnsent_RequiresFreshAttemptAndClOrdId_AndIsFinite`, `ProvenUnsent_RetryUsesFreshId_PreservesTombstones_AndCapsAttempts` |
+| No synthetic reject after ambiguous gateway failure | `ExceptionAfterFrame_IsAmbiguousAndDoesNotReleaseMargin` |
+| Exact ER/BusinessReject/NotApplied correlation | `BusinessReject_CorrelatesOnlyExactFirmSessionVersionAndSequence`, `NotApplied_UsesOverflowSafeHalfOpenRange_AndNeverAutoResends` |
+| Same-session reattach and post-recovery trading | `SuspendedTimeoutBoundarySpecTests.WithinSuspendedTimeout_Reattaches_OrderSurvivesNoStaleFlag` |
+| Late/retransmitted ER converges once | `TradingHostCrashRestartSpecTests.SigKillRestart_FillDuringOutage_ReplaysMissedExecutionReport`, `ExecutionReport_DuplicatePossResendAndConflictingSameIdentityAreMonotonic` |
+| Rolled session remains evidence-conservative | `MatchingPlatformRestartSpecTests.Restart_Renegotiates_SurvivingOrderFlaggedStale_BookSurvives_FreshTradingRecovers`, `ManualAnnotationAndSessionRollEvidence_NeverReleaseCapacity` |
+| Authoritative operator resolution | `AuthoritativeEvidence_RequiresDistinctCheckerAndReleasesCapacity` |
+| Manual absence/risk release rejected | `ManualAnnotationAndSessionRollEvidence_NeverReleaseCapacity` |
+| Durable REST/FIXP identities | `OrderIdempotencyEndpointTests.SameKeyAfterRestart_ReplaysDurableBinding`, `FixpOrderAdapterFailClosedTests.TombstonedCancelId_RejectsBeforeCancelPipeline` |
+| Startup ingress stays closed | `OutboundRecoveryReadinessTests.ClosedRecoveryGate_RejectsAlgoAndOrderMutationsBeforeStateAccess` |
+| Sensitive artifact absence | `SerializationAndDiagnostics_NeverExposeSensitivePlaintext`, `SnapshotAndAuditPayloads_NeverContainSensitivePlaintext`, `AdminOutboundMutationEndpointTests.Timelines_AreFirmScopedAndRedacted`, `LogCapture_ContainsOnlyCountsAndNeverCustomerValues` |
+
+V0 deliberately does not claim exact same-sequence outbound replay. The SDK
+does not expose a supported original-frame replay operation; the accepted
+contract is same-session inbound retransmission plus fail-closed ambiguity, as
+recorded in RFC §18.7 and B3EntryPointClient#223.
