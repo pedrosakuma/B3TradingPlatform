@@ -237,6 +237,12 @@ public enum OutboundOperatorEvidenceType
     ManualAnnotation,
 }
 
+public enum OutboundAuthoritativeEvidenceSourceType
+{
+    VenueMassAction,
+    OfficialExtract,
+}
+
 public enum OutboundSensitivePayloadAvailability
 {
     Available,
@@ -389,6 +395,22 @@ public sealed record OutboundOperatorResolutionProposalSnapshot
     public DateTimeOffset? ApprovedAtUtc { get; init; }
 }
 
+public sealed record OutboundAuthoritativeEvidenceSnapshot
+{
+    public required string EvidenceReference { get; init; }
+    public required string EvidenceDigest { get; init; }
+    public required string FirmId { get; init; }
+    public required OutboundAuthoritativeEvidenceSourceType SourceType { get; init; }
+    public required DateTimeOffset CoverageStartUtc { get; init; }
+    public required DateTimeOffset CoverageEndUtc { get; init; }
+    public IReadOnlyList<OutboundMutationId> CoveredMutationIds { get; init; } =
+        Array.Empty<OutboundMutationId>();
+    public required string AttestationReference { get; init; }
+    public required string AttestedBy { get; init; }
+    public required DateTimeOffset AttestedAtUtc { get; init; }
+    public required DateTimeOffset RegisteredAtUtc { get; init; }
+}
+
 public sealed record OutboundLegacyEvidenceSnapshot
 {
     public required string EvidenceKind { get; init; }
@@ -416,6 +438,8 @@ public sealed record OutboundMutationSnapshot
         Array.Empty<OutboundOperatorEvidenceSnapshot>();
     public IReadOnlyList<OutboundOperatorResolutionProposalSnapshot> ResolutionProposals { get; init; } =
         Array.Empty<OutboundOperatorResolutionProposalSnapshot>();
+    public IReadOnlyList<OutboundAuthoritativeEvidenceSnapshot> AuthoritativeEvidence { get; init; } =
+        Array.Empty<OutboundAuthoritativeEvidenceSnapshot>();
     public IReadOnlyList<OutboundLegacyEvidenceSnapshot> LegacyEvidence { get; init; } =
         Array.Empty<OutboundLegacyEvidenceSnapshot>();
     public OutboundSensitivePayloadAvailability SensitivePayloadAvailability { get; init; } =
@@ -443,6 +467,7 @@ public sealed record InboundVenueEvidenceSnapshot
     public ulong? InboundSeqNum { get; init; }
     public DateTimeOffset? SendingTime { get; init; }
     public bool PossibleResend { get; init; }
+    public bool AuthoritativeTerminalContradiction { get; init; }
     public string? MessageKind { get; init; }
     public ulong? ClOrdId { get; init; }
     public ulong? OrigClOrdId { get; init; }

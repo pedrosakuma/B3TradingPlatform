@@ -40,12 +40,16 @@ public sealed class AdminOutboundMutationEndpointTests
             $"/admin/outbound-mutations/{fixture.MutationId}");
         var foreignList = await firmA.GetAsync(
             "/admin/outbound-mutations/?firmId=F2");
+        var foreignEvidence = await firmB.PostAsJsonAsync(
+            $"/admin/outbound-mutations/{fixture.MutationId}/evidence",
+            EvidenceRegistrationBody("official_extract", '0'));
         var health = await firmA.GetAsync("/health");
 
         Assert.Equal(HttpStatusCode.OK, list.StatusCode);
         Assert.Equal(HttpStatusCode.OK, detail.StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, foreignDetail.StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, foreignList.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, foreignEvidence.StatusCode);
         using var healthJson = JsonDocument.Parse(
             await health.Content.ReadAsStringAsync());
         var outboundRecovery = healthJson.RootElement.GetProperty("outboundRecovery");
@@ -73,9 +77,13 @@ public sealed class AdminOutboundMutationEndpointTests
     {
         using var factory = NewFactory(out var margin);
         var fixture = SeedAmbiguousMutation(factory, "F1", 64702);
-        var reference = PrepareEvidence(factory, fixture, evidenceType);
         using var maker = CreateAdminClient(factory, "maker", "F1");
         using var checker = CreateAdminClient(factory, "checker", "F1");
+        var reference = await PrepareEvidenceAsync(
+            factory,
+            fixture,
+            evidenceType,
+            maker);
 
         var propose = await maker.PostAsJsonAsync(
             $"/admin/outbound-mutations/{fixture.MutationId}/resolve",
@@ -104,6 +112,61 @@ public sealed class AdminOutboundMutationEndpointTests
 
         Assert.Equal(HttpStatusCode.OK, approve.StatusCode);
         Assert.Equal(1, margin.ReleaseCount);
+    }
+
+    [Theory]
+    [InlineData("venue_mass_action", "venue_mass_action_verified", '7')]
+    [InlineData("official_extract", "official_extract_attested", '8')]
+    public async Task BareExternalDigest_IsRejectedUntilCoveringEvidenceIsRegistered(
+        string evidenceType,
+        string reason,
+        char digestCharacter)
+    {
+        using var factory = NewFactory(out _);
+        var fixture = SeedAmbiguousMutation(factory, "F1", 64707);
+        using var maker = CreateAdminClient(factory, "maker", "F1");
+        var prefix = evidenceType == "venue_mass_action"
+            ? "venue-report:"
+            : "official-extract:";
+        var reference = $"{prefix}{new string(digestCharacter, 64)}";
+
+        var bare = await maker.PostAsJsonAsync(
+            $"/admin/outbound-mutations/{fixture.MutationId}/resolve",
+            new
+            {
+                decision = "venue_absent",
+                evidenceType,
+                evidenceReference = reference,
+                reason,
+            });
+        var nonCovering = await maker.PostAsJsonAsync(
+            $"/admin/outbound-mutations/{fixture.MutationId}/evidence",
+            new
+            {
+                sourceType = evidenceType,
+                evidenceReference = reference,
+                coverageStartUtc = T0.AddDays(1),
+                coverageEndUtc = T0.AddDays(2),
+                attestationReference =
+                    $"attestation:{new string(digestCharacter, 64)}",
+            });
+        var registered = await maker.PostAsJsonAsync(
+            $"/admin/outbound-mutations/{fixture.MutationId}/evidence",
+            EvidenceRegistrationBody(evidenceType, digestCharacter));
+        var proposed = await maker.PostAsJsonAsync(
+            $"/admin/outbound-mutations/{fixture.MutationId}/resolve",
+            new
+            {
+                decision = "venue_absent",
+                evidenceType,
+                evidenceReference = reference,
+                reason,
+            });
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, bare.StatusCode);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, nonCovering.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, registered.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, proposed.StatusCode);
     }
 
     [Fact]
@@ -168,6 +231,7 @@ public sealed class AdminOutboundMutationEndpointTests
                 services.AddSingleton<IMarginProvider, RecordingMargin>();
             });
         var fixture = SeedAmbiguousMutation(factory, "F1", 64704);
+        SeedRegisteredEvidence(factory, fixture, "official_extract", 'd');
         using var admin = CreateAdminClient(factory, "maker", "F1");
 
         var response = await admin.PostAsJsonAsync(
@@ -201,6 +265,10 @@ public sealed class AdminOutboundMutationEndpointTests
         var fixture = SeedAmbiguousMutation(factory, "F1", 64706);
         using var maker = CreateAdminClient(factory, "maker", "F1");
         using var checker = CreateAdminClient(factory, "checker", "F1");
+        var registered = await maker.PostAsJsonAsync(
+            $"/admin/outbound-mutations/{fixture.MutationId}/evidence",
+            EvidenceRegistrationBody("official_extract", '9'));
+        Assert.Equal(HttpStatusCode.OK, registered.StatusCode);
         var proposed = await maker.PostAsJsonAsync(
             $"/admin/outbound-mutations/{fixture.MutationId}/resolve",
             new
@@ -241,7 +309,7 @@ public sealed class AdminOutboundMutationEndpointTests
             RejectReason: "VENUE_REJECTED",
             FirmId: "F1",
             SessionId: 11,
-            SessionVerId: 2,
+            SessionVerId: 3,
             InboundSeqNum: 99,
             SendingTime: T0.AddMinutes(5)));
 
@@ -251,10 +319,30 @@ public sealed class AdminOutboundMutationEndpointTests
         Assert.Contains("\"state\":\"ambiguous\"", body, StringComparison.Ordinal);
         Assert.Contains("\"requiresReconciliation\":true", body, StringComparison.Ordinal);
         Assert.Contains("\"disposition\":\"conflicting\"", body, StringComparison.Ordinal);
+        Assert.Contains(
+            "\"authoritativeTerminalContradiction\":true",
+            body,
+            StringComparison.Ordinal);
         Assert.Equal(1, alertCount);
         Assert.DoesNotContain(AccountSecret, body, StringComparison.Ordinal);
         Assert.DoesNotContain(InvestorSecret, body, StringComparison.Ordinal);
         Assert.DoesNotContain(EndClientSecret, body, StringComparison.Ordinal);
+
+        using var detailJson = JsonDocument.Parse(body);
+        var lateEvidenceId = detailJson.RootElement
+            .GetProperty("inboundEvidence")[0]
+            .GetProperty("evidenceId")
+            .GetString();
+        var followUp = await checker.PostAsJsonAsync(
+            $"/admin/outbound-mutations/{fixture.MutationId}/resolve",
+            new
+            {
+                decision = "venue_acknowledged",
+                evidenceType = "terminal_er",
+                evidenceReference = lateEvidenceId,
+                reason = "late_contradiction_reconciled",
+            });
+        Assert.Equal(HttpStatusCode.OK, followUp.StatusCode);
     }
 
     [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 100)]
@@ -407,10 +495,11 @@ public sealed class AdminOutboundMutationEndpointTests
         return new SeededMutation(mutationId, attemptId, clOrdId, endClientRef);
     }
 
-    private static string PrepareEvidence(
+    private static async Task<string> PrepareEvidenceAsync(
         TestAppFactory factory,
         SeededMutation mutation,
-        string evidenceType)
+        string evidenceType,
+        HttpClient admin)
     {
         var ledger = factory.Services.GetRequiredService<OutboundMutationLedger>();
         if (evidenceType == "terminal_er")
@@ -452,9 +541,64 @@ public sealed class AdminOutboundMutationEndpointTests
                 .Single()
                 .EvidenceId;
         }
-        return evidenceType == "venue_mass_action"
+        var reference = evidenceType == "venue_mass_action"
             ? $"venue-report:{new string('e', 64)}"
             : $"official-extract:{new string('f', 64)}";
+        var response = await admin.PostAsJsonAsync(
+            $"/admin/outbound-mutations/{mutation.MutationId}/evidence",
+            EvidenceRegistrationBody(
+                evidenceType,
+                evidenceType == "venue_mass_action" ? 'e' : 'f'));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        return reference;
+    }
+
+    private static object EvidenceRegistrationBody(
+        string sourceType,
+        char digestCharacter) => new
+        {
+            sourceType,
+            evidenceReference = sourceType == "venue_mass_action"
+                ? $"venue-report:{new string(digestCharacter, 64)}"
+                : $"official-extract:{new string(digestCharacter, 64)}",
+            coverageStartUtc = T0.AddHours(-1),
+            coverageEndUtc = T0.AddHours(1),
+            attestationReference =
+                $"attestation:{new string(digestCharacter, 64)}",
+        };
+
+    private static void SeedRegisteredEvidence(
+        TestAppFactory factory,
+        SeededMutation mutation,
+        string sourceType,
+        char digestCharacter)
+    {
+        var ledger = factory.Services.GetRequiredService<OutboundMutationLedger>();
+        var venueMassAction = sourceType == "venue_mass_action";
+        var prefix = venueMassAction ? "venue-report:" : "official-extract:";
+        ledger.Apply(new OutboundAuthoritativeEvidenceRegisteredEvent
+        {
+            MutationId = mutation.MutationId,
+            Evidence = new OutboundAuthoritativeEvidenceSnapshot
+            {
+                EvidenceReference =
+                    $"{prefix}{new string(digestCharacter, 64)}",
+                EvidenceDigest = new string(digestCharacter, 64),
+                FirmId = "F1",
+                SourceType = venueMassAction
+                    ? OutboundAuthoritativeEvidenceSourceType.VenueMassAction
+                    : OutboundAuthoritativeEvidenceSourceType.OfficialExtract,
+                CoverageStartUtc = T0.AddHours(-1),
+                CoverageEndUtc = T0.AddHours(1),
+                CoveredMutationIds = [mutation.MutationId],
+                AttestationReference =
+                    $"attestation:{new string(digestCharacter, 64)}",
+                AttestedBy = "evidence-attestor",
+                AttestedAtUtc = T0.AddMinutes(1),
+                RegisteredAtUtc = T0.AddMinutes(1),
+            },
+            TimestampUtc = T0.AddMinutes(1),
+        });
     }
 
     private sealed record SeededMutation(

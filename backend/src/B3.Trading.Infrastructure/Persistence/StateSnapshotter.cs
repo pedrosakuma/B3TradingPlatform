@@ -1372,6 +1372,9 @@ public sealed class EventReplayer
             case OutboundProvenUnsentEvent unsent:
                 _outboundLedger?.Apply(unsent);
                 break;
+            case OutboundAuthoritativeEvidenceRegisteredEvent authoritativeEvidence:
+                _outboundLedger?.Apply(authoritativeEvidence);
+                break;
             case OutboundOperatorResolutionProposedEvent proposed:
                 _outboundLedger?.Apply(proposed);
                 break;

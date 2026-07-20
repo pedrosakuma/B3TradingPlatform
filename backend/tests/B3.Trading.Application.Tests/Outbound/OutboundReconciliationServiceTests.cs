@@ -105,6 +105,9 @@ public sealed class OutboundReconciliationServiceTests
     public void AuditFailure_DoesNotWriteProposalOrReleaseCapacity()
     {
         var fixture = Fixture.Create(new ThrowingAuditLogger());
+        var evidenceReference = fixture.SeedRegisteredEvidence(
+            OutboundOperatorEvidenceType.OfficialExtract,
+            'b');
 
         Assert.Throws<OutboundReconciliationUnavailableException>(() =>
             fixture.Service.Resolve(
@@ -114,13 +117,76 @@ public sealed class OutboundReconciliationServiceTests
                 new(
                     OutboundOperatorDecision.VenueAbsent,
                     OutboundOperatorEvidenceType.OfficialExtract,
-                    $"official-extract:{new string('b', 64)}",
+                    evidenceReference,
                     "official_extract_attested")));
 
         var mutation = fixture.Ledger.SnapshotMutations().Single();
         Assert.Empty(mutation.ResolutionProposals);
         Assert.Empty(mutation.OperatorEvidence);
         Assert.Equal(0, fixture.Margin.ReleaseCount);
+    }
+
+    [Theory]
+    [InlineData(OutboundOperatorEvidenceType.VenueMassAction, '4')]
+    [InlineData(OutboundOperatorEvidenceType.OfficialExtract, '5')]
+    public void BareExternalEvidenceDigest_CannotAuthorizeCapacityRelease(
+        OutboundOperatorEvidenceType evidenceType,
+        char digestCharacter)
+    {
+        var fixture = Fixture.Create();
+        var prefix = evidenceType == OutboundOperatorEvidenceType.VenueMassAction
+            ? "venue-report:"
+            : "official-extract:";
+
+        Assert.Throws<OutboundReconciliationValidationException>(() =>
+            fixture.Service.Resolve(
+                fixture.MutationId,
+                "F1",
+                "maker",
+                new(
+                    OutboundOperatorDecision.VenueAbsent,
+                    evidenceType,
+                    $"{prefix}{new string(digestCharacter, 64)}",
+                    ReasonFor(evidenceType))));
+        Assert.Empty(fixture.Ledger.SnapshotMutations().Single().ResolutionProposals);
+    }
+
+    [Fact]
+    public void ExternalEvidenceRegistration_MustCoverMutationTimestamp()
+    {
+        var fixture = Fixture.Create();
+
+        Assert.Throws<OutboundReconciliationValidationException>(() =>
+            fixture.Service.RegisterAuthoritativeEvidence(
+                fixture.MutationId,
+                "F1",
+                "attestor",
+                new(
+                    OutboundAuthoritativeEvidenceSourceType.OfficialExtract,
+                    $"official-extract:{new string('3', 64)}",
+                    T0.AddDays(1),
+                    T0.AddDays(2),
+                    $"attestation:{new string('2', 64)}")));
+        Assert.Empty(fixture.Ledger.SnapshotMutations().Single().AuthoritativeEvidence);
+    }
+
+    [Fact]
+    public void EvidenceRegistrationAuditFailure_DoesNotPersistRecord()
+    {
+        var fixture = Fixture.Create(new ThrowingAuditLogger());
+
+        Assert.Throws<OutboundReconciliationUnavailableException>(() =>
+            fixture.Service.RegisterAuthoritativeEvidence(
+                fixture.MutationId,
+                "F1",
+                "attestor",
+                new(
+                    OutboundAuthoritativeEvidenceSourceType.VenueMassAction,
+                    $"venue-report:{new string('9', 64)}",
+                    T0.AddHours(-1),
+                    T0.AddHours(1),
+                    $"attestation:{new string('9', 64)}")));
+        Assert.Empty(fixture.Ledger.SnapshotMutations().Single().AuthoritativeEvidence);
     }
 
     [Fact]
@@ -152,6 +218,9 @@ public sealed class OutboundReconciliationServiceTests
     {
         var audit = new CallbackAuditLogger();
         var fixture = Fixture.Create(audit);
+        var evidenceReference = fixture.RegisterEvidence(
+            OutboundOperatorEvidenceType.OfficialExtract,
+            '8');
         var proposed = fixture.Service.Resolve(
             fixture.MutationId,
             "F1",
@@ -159,7 +228,7 @@ public sealed class OutboundReconciliationServiceTests
             new(
                 OutboundOperatorDecision.VenueAbsent,
                 OutboundOperatorEvidenceType.OfficialExtract,
-                $"official-extract:{new string('8', 64)}",
+                evidenceReference,
                 "official_extract_attested"));
         audit.OnCommitted = () =>
         {
@@ -186,6 +255,9 @@ public sealed class OutboundReconciliationServiceTests
     {
         var audit = new CallbackAuditLogger();
         var fixture = Fixture.Create(audit);
+        var evidenceReference = fixture.RegisterEvidence(
+            OutboundOperatorEvidenceType.OfficialExtract,
+            '7');
         audit.OnCommitted = () =>
         {
             audit.OnCommitted = null;
@@ -200,7 +272,7 @@ public sealed class OutboundReconciliationServiceTests
                 new(
                     OutboundOperatorDecision.VenueAbsent,
                     OutboundOperatorEvidenceType.OfficialExtract,
-                    $"official-extract:{new string('7', 64)}",
+                    evidenceReference,
                     "official_extract_attested")));
 
         Assert.Empty(fixture.Ledger.SnapshotMutations().Single().ResolutionProposals);
@@ -211,6 +283,9 @@ public sealed class OutboundReconciliationServiceTests
     public void NonOpaqueOperatorSubjects_AreCanonicalizedBeforePersistence()
     {
         var fixture = Fixture.Create();
+        var evidenceReference = fixture.RegisterEvidence(
+            OutboundOperatorEvidenceType.OfficialExtract,
+            '6');
         var proposed = fixture.Service.Resolve(
             fixture.MutationId,
             "F1",
@@ -218,7 +293,7 @@ public sealed class OutboundReconciliationServiceTests
             new(
                 OutboundOperatorDecision.VenueAbsent,
                 OutboundOperatorEvidenceType.OfficialExtract,
-                $"official-extract:{new string('6', 64)}",
+                evidenceReference,
                 "official_extract_attested"));
         fixture.Service.Approve(
             fixture.MutationId,
@@ -268,6 +343,9 @@ public sealed class OutboundReconciliationServiceTests
     public void LateContradictoryExecutionReport_IsRetainedAndReopensReconciliation()
     {
         var fixture = Fixture.Create();
+        var evidenceReference = fixture.RegisterEvidence(
+            OutboundOperatorEvidenceType.OfficialExtract,
+            'c');
         var proposed = fixture.Service.Resolve(
             fixture.MutationId,
             "F1",
@@ -275,7 +353,7 @@ public sealed class OutboundReconciliationServiceTests
             new(
                 OutboundOperatorDecision.VenueAbsent,
                 OutboundOperatorEvidenceType.OfficialExtract,
-                $"official-extract:{new string('c', 64)}",
+                evidenceReference,
                 "official_extract_attested"));
         fixture.Service.Approve(
             fixture.MutationId,
@@ -296,9 +374,166 @@ public sealed class OutboundReconciliationServiceTests
     }
 
     [Fact]
+    public void PostSessionRollContradictoryEr_ReopensAndCanResolveReopenedMutation()
+    {
+        var fixture = Fixture.Create();
+        var evidenceReference = fixture.RegisterEvidence(
+            OutboundOperatorEvidenceType.OfficialExtract,
+            '1');
+        var proposed = fixture.Service.Resolve(
+            fixture.MutationId,
+            "F1",
+            "maker",
+            new(
+                OutboundOperatorDecision.VenueAbsent,
+                OutboundOperatorEvidenceType.OfficialExtract,
+                evidenceReference,
+                "official_extract_attested"));
+        fixture.Service.Approve(
+            fixture.MutationId,
+            proposed.ProposalId!.Value,
+            "F1",
+            "checker");
+        var postRollEr = fixture.TerminalEr() with
+        {
+            SessionVerId = 3,
+            InboundSeqNum = 91,
+            TimestampUtc = T0.AddMinutes(3),
+        };
+
+        var result = fixture.Ledger.ApplyVenueAcknowledgement(postRollEr);
+        var lateEvidence = Assert.Single(
+            fixture.Ledger.GetInboundEvidenceForMutation(fixture.MutationId));
+
+        Assert.True(result.ReopenedReconciliation);
+        Assert.Equal(InboundVenueEvidenceDisposition.Conflicting, lateEvidence.Disposition);
+        Assert.True(lateEvidence.AuthoritativeTerminalContradiction);
+        var resolved = fixture.Service.Resolve(
+            fixture.MutationId,
+            "F1",
+            "second-operator",
+            new(
+                OutboundOperatorDecision.VenueAcknowledged,
+                OutboundOperatorEvidenceType.TerminalExecutionReport,
+                lateEvidence.EvidenceId,
+                "late_contradiction_reconciled"));
+        Assert.Equal(OutboundOperatorResolutionStatus.Resolved, resolved.Status);
+        Assert.False(resolved.RequiresReconciliation);
+        Assert.Equal(
+            OutboundMutationState.VenueAcknowledged,
+            fixture.Ledger.SnapshotMutations().Single().State);
+    }
+
+    [Fact]
+    public void IdentityConflict_RevokesLateErAuthoritativeStatus()
+    {
+        var fixture = Fixture.Create();
+        var evidenceReference = fixture.RegisterEvidence(
+            OutboundOperatorEvidenceType.OfficialExtract,
+            '0');
+        var proposed = fixture.Service.Resolve(
+            fixture.MutationId,
+            "F1",
+            "maker",
+            new(
+                OutboundOperatorDecision.VenueAbsent,
+                OutboundOperatorEvidenceType.OfficialExtract,
+                evidenceReference,
+                "official_extract_attested"));
+        fixture.Service.Approve(
+            fixture.MutationId,
+            proposed.ProposalId!.Value,
+            "F1",
+            "checker");
+        var lateEr = fixture.TerminalEr() with
+        {
+            SessionVerId = 3,
+            InboundSeqNum = 92,
+            TimestampUtc = T0.AddMinutes(3),
+        };
+        fixture.Ledger.ApplyVenueAcknowledgement(lateEr);
+        var authoritativeId = Assert.Single(
+            fixture.Ledger.GetInboundEvidenceForMutation(fixture.MutationId))
+            .EvidenceId;
+
+        fixture.Ledger.ApplyVenueAcknowledgement(lateEr with
+        {
+            ExecKind = "Canceled",
+            RejectReason = null,
+            TimestampUtc = T0.AddMinutes(4),
+        });
+
+        var original = fixture.Ledger
+            .GetInboundEvidenceForMutation(fixture.MutationId)
+            .Single(evidence => evidence.EvidenceId == authoritativeId);
+        Assert.False(original.AuthoritativeTerminalContradiction);
+        Assert.Throws<OutboundReconciliationValidationException>(() =>
+            fixture.Service.Resolve(
+                fixture.MutationId,
+                "F1",
+                "second-operator",
+                new(
+                    OutboundOperatorDecision.VenueAcknowledged,
+                    OutboundOperatorEvidenceType.TerminalExecutionReport,
+                    authoritativeId,
+                    "late_contradiction_reconciled")));
+    }
+
+    [Fact]
+    public void ReopenedReplace_RestoresOriginalGuardAndReplacedErCanResolve()
+    {
+        var fixture = Fixture.Create(kind: OutboundMutationKind.Replace);
+        var evidenceReference = fixture.RegisterEvidence(
+            OutboundOperatorEvidenceType.OfficialExtract,
+            'a');
+        var proposed = fixture.Service.Resolve(
+            fixture.MutationId,
+            "F1",
+            "maker",
+            new(
+                OutboundOperatorDecision.VenueAbsent,
+                OutboundOperatorEvidenceType.OfficialExtract,
+                evidenceReference,
+                "official_extract_attested"));
+        fixture.Service.Approve(
+            fixture.MutationId,
+            proposed.ProposalId!.Value,
+            "F1",
+            "checker");
+        var result = fixture.Ledger.ApplyVenueAcknowledgement(
+            fixture.TerminalEr() with
+            {
+                ExecKind = "Replaced",
+                OrigClOrdId = 99,
+                SessionVerId = 3,
+                InboundSeqNum = 93,
+                TimestampUtc = T0.AddMinutes(3),
+            });
+        var lateEvidence = Assert.Single(
+            fixture.Ledger.GetInboundEvidenceForMutation(fixture.MutationId));
+
+        Assert.True(result.ReopenedReconciliation);
+        Assert.Throws<InvalidOperationException>(() =>
+            fixture.Ledger.Apply(fixture.CreateCompetingApproval()));
+        var resolved = fixture.Service.Resolve(
+            fixture.MutationId,
+            "F1",
+            "second-operator",
+            new(
+                OutboundOperatorDecision.VenueAcknowledged,
+                OutboundOperatorEvidenceType.TerminalExecutionReport,
+                lateEvidence.EvidenceId,
+                "late_contradiction_reconciled"));
+        Assert.Equal(OutboundOperatorResolutionStatus.Resolved, resolved.Status);
+    }
+
+    [Fact]
     public void OperatorResolutionRecords_AreNotPurgedWithTerminalCorrelations()
     {
         var fixture = Fixture.Create();
+        var evidenceReference = fixture.RegisterEvidence(
+            OutboundOperatorEvidenceType.VenueMassAction,
+            'd');
         var proposed = fixture.Service.Resolve(
             fixture.MutationId,
             "F1",
@@ -306,7 +541,7 @@ public sealed class OutboundReconciliationServiceTests
             new(
                 OutboundOperatorDecision.VenueAbsent,
                 OutboundOperatorEvidenceType.VenueMassAction,
-                $"venue-report:{new string('d', 64)}",
+                evidenceReference,
                 "venue_mass_action_verified"));
         fixture.Service.Approve(
             fixture.MutationId,
@@ -343,6 +578,7 @@ public sealed class OutboundReconciliationServiceTests
     {
         var audit = new CapturingAuditLogger();
         var fixture = Fixture.Create(audit);
+        fixture.RegisterEvidence(OutboundOperatorEvidenceType.OfficialExtract, 'f');
         fixture.Service.Resolve(
             fixture.MutationId,
             "F1",
@@ -363,6 +599,7 @@ public sealed class OutboundReconciliationServiceTests
         Assert.DoesNotContain("INVESTOR-SECRET", payload, StringComparison.Ordinal);
         Assert.DoesNotContain("CLIENT-SECRET", payload, StringComparison.Ordinal);
         Assert.DoesNotContain("CiphertextBase64\":\"ACCOUNT", payload, StringComparison.Ordinal);
+        Assert.Single(fixture.Ledger.SnapshotMutations().Single().AuthoritativeEvidence);
     }
 
     private static string ReasonFor(OutboundOperatorEvidenceType evidenceType) =>
@@ -387,8 +624,11 @@ public sealed class OutboundReconciliationServiceTests
         public required OutboundMutationId MutationId { get; init; }
         public required OutboundAttemptId AttemptId { get; init; }
         public required IOutboundCommandProtector Protector { get; init; }
+        public required OutboundMutationKind Kind { get; init; }
 
-        public static Fixture Create(IAuditLogger? audit = null)
+        public static Fixture Create(
+            IAuditLogger? audit = null,
+            OutboundMutationKind kind = OutboundMutationKind.New)
         {
             var key = Convert.ToBase64String(Enumerable.Range(1, 32)
                 .Select(value => (byte)value)
@@ -417,6 +657,7 @@ public sealed class OutboundReconciliationServiceTests
             var canonical = new OutboundCanonicalCommand
             {
                 ClOrdId = 101,
+                OriginalClOrdId = kind == OutboundMutationKind.New ? null : 99,
                 SecurityId = 123,
                 Symbol = "PETR4",
                 Side = "Buy",
@@ -446,11 +687,12 @@ public sealed class OutboundReconciliationServiceTests
             ledger.Apply(new OutboundApprovedEvent
             {
                 MutationId = mutationId,
-                MutationKind = OutboundMutationKind.New,
+                MutationKind = kind,
                 FirmId = "F1",
                 EndClientRef = protector.CreateStableEndClientRef("F1", sensitive.EndClientId),
                 Origin = OutboundMutationOrigin.Rest,
                 PrimaryClOrdId = 101,
+                OriginalClOrdId = kind == OutboundMutationKind.New ? null : 99,
                 RecordedAtUtc = T0,
                 Approval = approval,
                 TimestampUtc = T0,
@@ -500,6 +742,7 @@ public sealed class OutboundReconciliationServiceTests
                 MutationId = mutationId,
                 AttemptId = attemptId,
                 Protector = protector,
+                Kind = kind,
             };
         }
 
@@ -524,9 +767,81 @@ public sealed class OutboundReconciliationServiceTests
                 });
                 return Ledger.GetInboundEvidenceForMutation(MutationId).Single().EvidenceId;
             }
-            return evidenceType == OutboundOperatorEvidenceType.VenueMassAction
-                ? $"venue-report:{new string('a', 64)}"
-                : $"official-extract:{new string('b', 64)}";
+            return RegisterEvidence(
+                evidenceType,
+                evidenceType == OutboundOperatorEvidenceType.VenueMassAction
+                    ? 'a'
+                    : 'b');
+        }
+
+        public string RegisterEvidence(
+            OutboundOperatorEvidenceType evidenceType,
+            char digestCharacter)
+        {
+            var sourceType = evidenceType switch
+            {
+                OutboundOperatorEvidenceType.VenueMassAction =>
+                    OutboundAuthoritativeEvidenceSourceType.VenueMassAction,
+                OutboundOperatorEvidenceType.OfficialExtract =>
+                    OutboundAuthoritativeEvidenceSourceType.OfficialExtract,
+                _ => throw new ArgumentOutOfRangeException(nameof(evidenceType)),
+            };
+            var prefix = sourceType
+                == OutboundAuthoritativeEvidenceSourceType.VenueMassAction
+                ? "venue-report:"
+                : "official-extract:";
+            var reference = $"{prefix}{new string(digestCharacter, 64)}";
+            Service.RegisterAuthoritativeEvidence(
+                MutationId,
+                "F1",
+                "evidence-attestor",
+                new(
+                    sourceType,
+                    reference,
+                    T0.AddHours(-1),
+                    T0.AddHours(1),
+                    $"attestation:{new string(digestCharacter, 64)}"));
+            return reference;
+        }
+
+        public string SeedRegisteredEvidence(
+            OutboundOperatorEvidenceType evidenceType,
+            char digestCharacter)
+        {
+            var sourceType = evidenceType switch
+            {
+                OutboundOperatorEvidenceType.VenueMassAction =>
+                    OutboundAuthoritativeEvidenceSourceType.VenueMassAction,
+                OutboundOperatorEvidenceType.OfficialExtract =>
+                    OutboundAuthoritativeEvidenceSourceType.OfficialExtract,
+                _ => throw new ArgumentOutOfRangeException(nameof(evidenceType)),
+            };
+            var prefix = sourceType
+                == OutboundAuthoritativeEvidenceSourceType.VenueMassAction
+                ? "venue-report:"
+                : "official-extract:";
+            var reference = $"{prefix}{new string(digestCharacter, 64)}";
+            Ledger.Apply(new OutboundAuthoritativeEvidenceRegisteredEvent
+            {
+                MutationId = MutationId,
+                Evidence = new OutboundAuthoritativeEvidenceSnapshot
+                {
+                    EvidenceReference = reference,
+                    EvidenceDigest = new string(digestCharacter, 64),
+                    FirmId = "F1",
+                    SourceType = sourceType,
+                    CoverageStartUtc = T0.AddHours(-1),
+                    CoverageEndUtc = T0.AddHours(1),
+                    CoveredMutationIds = [MutationId],
+                    AttestationReference =
+                        $"attestation:{new string(digestCharacter, 64)}",
+                    AttestedBy = "evidence-attestor",
+                    AttestedAtUtc = T0.AddMinutes(5),
+                    RegisteredAtUtc = T0.AddMinutes(5),
+                },
+                TimestampUtc = T0.AddMinutes(5),
+            });
+            return reference;
         }
 
         public ExecutionReportReceivedEvent TerminalEr() => new()
@@ -546,6 +861,57 @@ public sealed class OutboundReconciliationServiceTests
             VenueSendingTime = T0.AddMinutes(2),
             TimestampUtc = T0.AddMinutes(2),
         };
+
+        public OutboundApprovedEvent CreateCompetingApproval()
+        {
+            if (Kind == OutboundMutationKind.New)
+                throw new InvalidOperationException("New mutations have no original order guard.");
+            var mutationId = new OutboundMutationId(Guid.Parse(
+                "22222222-3333-4444-5555-666666666666"));
+            var canonical = new OutboundCanonicalCommand
+            {
+                ClOrdId = 202,
+                OriginalClOrdId = 99,
+                SecurityId = 123,
+                Symbol = "PETR4",
+                Side = "Buy",
+                OrderType = "Limit",
+                Quantity = 10,
+                Price = 30m,
+            };
+            var sensitive = new SensitiveOutboundCommand
+            {
+                Account = "ACCOUNT-SECRET",
+                InvestorId = "INVESTOR-SECRET",
+                EndClientId = "CLIENT-SECRET",
+            };
+            return new OutboundApprovedEvent
+            {
+                MutationId = mutationId,
+                MutationKind = Kind,
+                FirmId = "F1",
+                EndClientRef = Protector.CreateStableEndClientRef(
+                    "F1",
+                    sensitive.EndClientId),
+                Origin = OutboundMutationOrigin.Rest,
+                PrimaryClOrdId = 202,
+                OriginalClOrdId = 99,
+                RecordedAtUtc = T0.AddMinutes(4),
+                Approval = OutboundApprovalFactory.Create(
+                    mutationId,
+                    "F1",
+                    canonical,
+                    sensitive,
+                    [
+                        OutboundSensitiveFieldRef.Account,
+                        OutboundSensitiveFieldRef.InvestorId,
+                        OutboundSensitiveFieldRef.EndClientId,
+                    ],
+                    Protector,
+                    T0.AddMinutes(4)),
+                TimestampUtc = T0.AddMinutes(4),
+            };
+        }
     }
 
     private sealed class RecordingMargin : IMarginProvider

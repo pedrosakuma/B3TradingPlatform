@@ -168,6 +168,7 @@ recomputable from the WAL.
 
 ### Outbound operator reconciliation
 
+`OutboundAuthoritativeEvidenceRegisteredEvent`,
 `OutboundOperatorResolutionProposedEvent` and
 `OutboundOperatorResolvedEvent` are Class L operator authority records. A
 capacity-releasing ambiguous New/Replace first commits an audit event, then a
@@ -175,6 +176,11 @@ maker proposal. Approval requires a distinct checker; the approval audit event
 commits first, followed by the resolution event, and only then is held
 New/Replace capacity released. Audit or resolution append/commit failure leaves
 the mutation ambiguous and capacity held.
+
+Mass-action reports and official extracts must first be registered with firm
+scope, an exact covered mutation set, a coverage time window, source type,
+digest, and opaque attestation metadata. Resolution validation looks up this
+durable record; a syntactically valid bare digest is not evidence.
 
 The records contain non-sensitive mutation/firm identifiers, bounded decision,
 evidence-type and reason values, operator references, and opaque evidence
@@ -188,7 +194,10 @@ by a committed operator resolution. Ordinary terminal-correlation compaction
 must retain every mutation containing an operator proposal or resolution;
 operator/audit retention is governed separately from correlation tombstones.
 A later contradictory ER is appended normally, retained as conflicting inbound
-evidence, and reopens the mutation for reconciliation.
+evidence, and reopens the mutation for reconciliation even across a session
+roll. Only that identity-valid, mutation-matched contradiction is marked as
+authoritative terminal evidence for a follow-up resolution; other conflicting
+ERs remain ineligible.
 
 ### Schema evolution
 

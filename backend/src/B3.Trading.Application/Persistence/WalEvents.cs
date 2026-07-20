@@ -67,6 +67,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(OutboundFramePreparedEvent), "outbound.frame-prepared")]
 [JsonDerivedType(typeof(OutboundTransportWriteCompletedEvent), "outbound.transport-write-completed")]
 [JsonDerivedType(typeof(OutboundProvenUnsentEvent), "outbound.proven-unsent")]
+[JsonDerivedType(typeof(OutboundAuthoritativeEvidenceRegisteredEvent), "outbound.authoritative-evidence-registered")]
 [JsonDerivedType(typeof(OutboundOperatorResolutionProposedEvent), "outbound.operator-resolution-proposed")]
 [JsonDerivedType(typeof(OutboundOperatorResolvedEvent), "outbound.operator-resolved")]
 [JsonDerivedType(typeof(RestOrderIdempotencyBoundEvent), "outbound.rest-idempotency-bound")]
@@ -473,6 +474,12 @@ public sealed record OutboundProvenUnsentEvent : WalEvent
     public required OutboundMutationId MutationId { get; init; }
     public required OutboundAttemptId AttemptId { get; init; }
     public required OutboundProvenUnsentEvidence Evidence { get; init; }
+}
+
+public sealed record OutboundAuthoritativeEvidenceRegisteredEvent : WalEvent
+{
+    public required OutboundMutationId MutationId { get; init; }
+    public required OutboundAuthoritativeEvidenceSnapshot Evidence { get; init; }
 }
 
 public sealed record OutboundOperatorResolutionProposedEvent : WalEvent

@@ -13,6 +13,13 @@ public sealed record AdminOutboundResolutionRequest(
     string? EvidenceReference,
     string? Reason);
 
+public sealed record AdminOutboundEvidenceRegistrationRequest(
+    string? SourceType,
+    string? EvidenceReference,
+    DateTimeOffset? CoverageStartUtc,
+    DateTimeOffset? CoverageEndUtc,
+    string? AttestationReference);
+
 public static class AdminOutboundMutationEndpoints
 {
     public static IEndpointRouteBuilder MapAdminOutboundMutations(
@@ -74,6 +81,33 @@ public static class AdminOutboundMutationEndpoints
             return Results.Ok(ProjectDetail(
                 mutation,
                 ledger.GetInboundEvidenceForMutation(id)));
+        });
+
+        group.MapPost("/{mutationId:guid}/evidence", (
+            HttpContext context,
+            Guid mutationId,
+            AdminOutboundEvidenceRegistrationRequest request,
+            OutboundReconciliationService service,
+            CancellationToken cancellationToken) =>
+        {
+            if (!TryParseEvidenceRegistration(request, out var parsed))
+                return Error(
+                    StatusCodes.Status400BadRequest,
+                    "invalid_evidence_registration");
+            try
+            {
+                var evidence = service.RegisterAuthoritativeEvidence(
+                    new OutboundMutationId(mutationId),
+                    ResolveCallerFirm(context),
+                    ResolveOperator(context),
+                    parsed!,
+                    cancellationToken);
+                return Results.Ok(ProjectAuthoritativeEvidence(evidence));
+            }
+            catch (Exception exception)
+            {
+                return MapException(exception);
+            }
         });
 
         group.MapPost("/{mutationId:guid}/resolve", (
@@ -195,6 +229,7 @@ public static class AdminOutboundMutationEndpoints
                 evidence.InboundSeqNum,
                 evidence.SendingTime,
                 evidence.PossibleResend,
+                evidence.AuthoritativeTerminalContradiction,
                 evidence.MessageKind,
                 evidence.ClOrdId,
                 evidence.OrigClOrdId,
@@ -217,6 +252,8 @@ public static class AdminOutboundMutationEndpoints
                 proposal.CheckerRef,
                 proposal.ApprovedAtUtc,
             }),
+            authoritativeEvidence = mutation.AuthoritativeEvidence.Select(
+                ProjectAuthoritativeEvidence),
             operatorEvidence = mutation.OperatorEvidence.Select(evidence => new
             {
                 decision = ToWire(evidence.Decision),
@@ -247,6 +284,24 @@ public static class AdminOutboundMutationEndpoints
                     mutation.Resolution.EvidenceDigest,
                     mutation.Resolution.VenueOrderId,
                 },
+        };
+
+    private static object ProjectAuthoritativeEvidence(
+        OutboundAuthoritativeEvidenceSnapshot evidence) => new
+        {
+            evidence.EvidenceReference,
+            evidence.EvidenceDigest,
+            evidence.FirmId,
+            sourceType = ToWire(evidence.SourceType),
+            evidence.CoverageStartUtc,
+            evidence.CoverageEndUtc,
+            coveredMutationIds = evidence.CoveredMutationIds
+                .Select(id => id.ToString())
+                .ToArray(),
+            evidence.AttestationReference,
+            evidence.AttestedBy,
+            evidence.AttestedAtUtc,
+            evidence.RegisteredAtUtc,
         };
 
     private static object ProjectEncryptedFieldReferences(
@@ -306,6 +361,34 @@ public static class AdminOutboundMutationEndpoints
             evidenceType,
             request.EvidenceReference,
             request.Reason);
+        return true;
+    }
+
+    private static bool TryParseEvidenceRegistration(
+        AdminOutboundEvidenceRegistrationRequest request,
+        out OutboundAuthoritativeEvidenceRegistrationRequest? parsed)
+    {
+        parsed = null;
+        var sourceType = request.SourceType switch
+        {
+            "venue_mass_action" =>
+                OutboundAuthoritativeEvidenceSourceType.VenueMassAction,
+            "official_extract" =>
+                OutboundAuthoritativeEvidenceSourceType.OfficialExtract,
+            _ => (OutboundAuthoritativeEvidenceSourceType?)null,
+        };
+        if (sourceType is null
+            || string.IsNullOrWhiteSpace(request.EvidenceReference)
+            || request.CoverageStartUtc is null
+            || request.CoverageEndUtc is null
+            || string.IsNullOrWhiteSpace(request.AttestationReference))
+            return false;
+        parsed = new OutboundAuthoritativeEvidenceRegistrationRequest(
+            sourceType.Value,
+            request.EvidenceReference,
+            request.CoverageStartUtc.Value,
+            request.CoverageEndUtc.Value,
+            request.AttestationReference);
         return true;
     }
 

@@ -13,6 +13,13 @@ public sealed record OutboundOperatorResolutionRequest(
     string EvidenceReference,
     string ReasonCode);
 
+public sealed record OutboundAuthoritativeEvidenceRegistrationRequest(
+    OutboundAuthoritativeEvidenceSourceType SourceType,
+    string EvidenceReference,
+    DateTimeOffset CoverageStartUtc,
+    DateTimeOffset CoverageEndUtc,
+    string AttestationReference);
+
 public enum OutboundOperatorResolutionStatus
 {
     PendingApproval,
@@ -169,6 +176,80 @@ public sealed class OutboundReconciliationService
             null,
             CapacityReleased: false,
             RequiresReconciliation: status == OutboundOperatorResolutionStatus.Annotated);
+    }
+
+    public OutboundAuthoritativeEvidenceSnapshot RegisterAuthoritativeEvidence(
+        OutboundMutationId mutationId,
+        string callerFirmId,
+        string operatorRef,
+        OutboundAuthoritativeEvidenceRegistrationRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        operatorRef = CanonicalizeOperatorRef(operatorRef);
+        var mutation = GetScopedMutation(mutationId, callerFirmId);
+        ValidateEvidenceRegistration(mutation, request);
+        var existing = mutation.AuthoritativeEvidence.FirstOrDefault(evidence =>
+            evidence.EvidenceReference == request.EvidenceReference);
+        if (existing is not null)
+        {
+            if (existing.SourceType == request.SourceType
+                && existing.CoverageStartUtc == request.CoverageStartUtc
+                && existing.CoverageEndUtc == request.CoverageEndUtc
+                && existing.AttestationReference == request.AttestationReference)
+                return existing;
+            throw new OutboundReconciliationConflictException(
+                "Authoritative evidence reference is already registered.");
+        }
+        var atUtc = _clock.GetUtcNow();
+        var prefixLength = request.SourceType
+            == OutboundAuthoritativeEvidenceSourceType.VenueMassAction
+            ? "venue-report:".Length
+            : "official-extract:".Length;
+        var evidence = new OutboundAuthoritativeEvidenceSnapshot
+        {
+            EvidenceReference = request.EvidenceReference,
+            EvidenceDigest = request.EvidenceReference[prefixLength..],
+            FirmId = mutation.FirmId,
+            SourceType = request.SourceType,
+            CoverageStartUtc = request.CoverageStartUtc,
+            CoverageEndUtc = request.CoverageEndUtc,
+            CoveredMutationIds = [mutationId],
+            AttestationReference = request.AttestationReference,
+            AttestedBy = operatorRef,
+            AttestedAtUtc = atUtc,
+            RegisteredAtUtc = atUtc,
+        };
+        var registered = new OutboundAuthoritativeEvidenceRegisteredEvent
+        {
+            MutationId = mutationId,
+            Evidence = evidence,
+            TimestampUtc = atUtc,
+        };
+        AuditEvidenceRegistration(
+            mutation,
+            operatorRef,
+            evidence,
+            cancellationToken);
+        try
+        {
+            var outcome = _dispatcher.DispatchCommittedIf(
+                registered,
+                () => IsEvidenceRegistrationStillEligible(registered),
+                () => _ledger.Apply(registered),
+                cancellationToken);
+            if (!outcome.Applied)
+                throw new OutboundReconciliationConflictException(
+                    "Outbound mutation changed before evidence registration committed.");
+        }
+        catch (OutboundReconciliationConflictException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw new OutboundReconciliationUnavailableException(ex);
+        }
+        return evidence;
     }
 
     public OutboundOperatorResolutionResult Approve(
@@ -402,6 +483,46 @@ public sealed class OutboundReconciliationService
         }
     }
 
+    private void AuditEvidenceRegistration(
+        OutboundMutationSnapshot mutation,
+        string operatorRef,
+        OutboundAuthoritativeEvidenceSnapshot evidence,
+        CancellationToken cancellationToken)
+    {
+        var evt = new AuditLogEvent
+        {
+            EventType = AuditEventTypes.AdminOutboundResolution,
+            Outcome = AuditOutcomes.Success,
+            ActorUserId = operatorRef,
+            ActorUsername = operatorRef,
+            ActorFirm = mutation.FirmId,
+            ActorRole = "admin",
+            ResourcePath =
+                $"/admin/outbound-mutations/{mutation.MutationId}/evidence",
+            ReasonCode = "authoritative_evidence_registered",
+            Details = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["target_firm"] = mutation.FirmId,
+                ["mutation_id"] = mutation.MutationId.ToString(),
+                ["action"] = "outbound_evidence_register",
+                ["source_type"] = ToMetricValue(evidence.SourceType),
+                ["evidence_digest"] = evidence.EvidenceDigest,
+                ["attestation_reference"] = evidence.AttestationReference,
+                ["coverage_start_utc"] = evidence.CoverageStartUtc.ToString("O"),
+                ["coverage_end_utc"] = evidence.CoverageEndUtc.ToString("O"),
+            },
+            TimestampUtc = _clock.GetUtcNow(),
+        };
+        try
+        {
+            _audit.LogCommittedOrFail(evt, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            throw new OutboundReconciliationUnavailableException(ex);
+        }
+    }
+
     private OutboundMutationSnapshot GetScopedMutation(
         OutboundMutationId mutationId,
         string callerFirmId)
@@ -456,6 +577,56 @@ public sealed class OutboundReconciliationService
             && request.Decision != OutboundOperatorDecision.LeaveAmbiguous)
             throw new OutboundReconciliationConflictException(
                 "Outbound mutation does not require reconciliation.");
+    }
+
+    private static void ValidateEvidenceRegistration(
+        OutboundMutationSnapshot mutation,
+        OutboundAuthoritativeEvidenceRegistrationRequest request)
+    {
+        var validReference = request.SourceType switch
+        {
+            OutboundAuthoritativeEvidenceSourceType.VenueMassAction =>
+                HasDigestPrefix(request.EvidenceReference, "venue-report:"),
+            OutboundAuthoritativeEvidenceSourceType.OfficialExtract =>
+                HasDigestPrefix(request.EvidenceReference, "official-extract:"),
+            _ => false,
+        };
+        if (!validReference
+            || !HasDigestPrefix(request.AttestationReference, "attestation:")
+            || request.CoverageEndUtc < request.CoverageStartUtc
+            || mutation.RecordedAtUtc < request.CoverageStartUtc
+            || mutation.RecordedAtUtc > request.CoverageEndUtc)
+            throw new OutboundReconciliationValidationException(
+                "Authoritative evidence registration is invalid or does not cover the mutation.");
+    }
+
+    private bool IsEvidenceRegistrationStillEligible(
+        OutboundAuthoritativeEvidenceRegisteredEvent registered)
+    {
+        if (!_ledger.TryGet(registered.MutationId, out var current)
+            || current is null
+            || !string.Equals(
+                current.FirmId,
+                registered.Evidence.FirmId,
+                StringComparison.Ordinal))
+            return false;
+        try
+        {
+            ValidateEvidenceRegistration(
+                current,
+                new OutboundAuthoritativeEvidenceRegistrationRequest(
+                    registered.Evidence.SourceType,
+                    registered.Evidence.EvidenceReference,
+                    registered.Evidence.CoverageStartUtc,
+                    registered.Evidence.CoverageEndUtc,
+                    registered.Evidence.AttestationReference));
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+        return !current.AuthoritativeEvidence.Any(evidence =>
+            evidence.EvidenceReference == registered.Evidence.EvidenceReference);
     }
 
     private bool IsProposalStillEligible(

@@ -107,11 +107,20 @@ identity needed to diagnose historical-key availability.
      (`venue_mass_action`, `venue-report:<sha256>`);
    - an operator-attested official venue, drop-copy, or back-office extract
      (`official_extract`, `official-extract:<sha256>`).
-3. A manual comparison may only append `leave_ambiguous` with
+3. Before using `venue_mass_action` or `official_extract`, register the
+   evidence against the mutation with
+   `POST /admin/outbound-mutations/{mutationId}/evidence`. Supply the source
+   type, prefixed SHA-256 evidence reference, coverage start/end timestamps
+   that include the mutation timestamp, and an
+   `attestation:<sha256>` reference. Registration is firm-scoped,
+   audit-first, WAL-durable, and visible on the detail timeline. A bare digest
+   that has not been registered, is registered for another firm, or does not
+   cover the mutation is rejected.
+4. A manual comparison may only append `leave_ambiguous` with
    `manual_annotation`, `annotation:<sha256>`, and
    `manual_comparison_recorded`. It does not release margin or make any claim
    about venue acknowledgment/absence.
-4. Session roll, timeout, TTL, or elapsed time is alerting context only. The API
+5. Session roll, timeout, TTL, or elapsed time is alerting context only. The API
    rejects it as resolution evidence.
 
 Reason codes are fixed: `terminal_er_verified`,
@@ -134,8 +143,11 @@ restored.
 
 If `trading.outbound.contradictory_evidence_total` increments after a
 `venue_absent` decision, the late ER is retained and the mutation is reopened
-as ambiguous. Stop relying on the earlier resolution, preserve both evidence
-sets, and repeat maker/checker review with the official source. Operator
+as ambiguous even when it arrived after a session-version roll. The
+identity-valid contradictory ER remains eligible as `terminal_er` evidence for
+the follow-up resolution; identity-invalid conflicts do not. Stop relying on
+the earlier resolution, preserve both evidence sets, and repeat review.
+Operator
 proposal, resolution, and audit records are permanent and are not removed by
 ordinary correlation compaction.
 
