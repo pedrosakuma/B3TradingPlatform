@@ -489,6 +489,14 @@ public sealed class OutboundMutationLedger
                     return;
                 throw TransitionError("Conflicting operator resolution.");
             }
+            if (evt.Decision == OutboundOperatorDecision.VenueAbsent
+                && evt.EvidenceType == OutboundOperatorEvidenceType.TerminalExecutionReport
+                && evt.EvidenceReference is { } evidenceReference
+                && _inboundEvidence.TryGetValue(evidenceReference, out var terminalEvidence)
+                && terminalEvidence.MatchedMutationIds.Contains(evt.MutationId)
+                && IsVenueAcknowledgmentOnlyExecutionReportKind(terminalEvidence.MessageKind))
+                throw TransitionError(
+                    "Fill or Replaced execution reports cannot prove venue absence.");
             if (mutation.OperatorEvidence.Any(
                     evidence => evidence.Decision != OutboundOperatorDecision.LeaveAmbiguous)
                 && mutation.State is OutboundMutationState.OperatorResolved
@@ -1648,6 +1656,25 @@ public sealed class OutboundMutationLedger
         }
     }
 
+    public bool IsTerminalExecutionReportDecisionCompatible(
+        OutboundMutationId mutationId,
+        string evidenceReference,
+        OutboundOperatorDecision decision)
+    {
+        lock (_gate)
+        {
+            if (!_mutations.TryGetValue(mutationId, out var mutation)
+                || !_inboundEvidence.TryGetValue(evidenceReference, out var evidence)
+                || evidence.Kind != InboundVenueEvidenceKind.ExecutionReport
+                || !evidence.MatchedMutationIds.Contains(mutationId)
+                || !string.Equals(evidence.FirmId, mutation.FirmId, StringComparison.Ordinal)
+                || !IsTerminalExecutionReportKind(evidence.MessageKind))
+                return false;
+            return decision != OutboundOperatorDecision.VenueAbsent
+                || !IsVenueAcknowledgmentOnlyExecutionReportKind(evidence.MessageKind);
+        }
+    }
+
     public IReadOnlyList<OutboundReconciliationMetricSnapshot> GetReconciliationMetrics(
         DateTimeOffset now)
     {
@@ -2768,6 +2795,11 @@ public sealed class OutboundMutationLedger
             || messageKind.Equals("Fill", StringComparison.OrdinalIgnoreCase)
             || messageKind.Equals("Replaced", StringComparison.OrdinalIgnoreCase)
             || messageKind.Equals("Expired", StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsVenueAcknowledgmentOnlyExecutionReportKind(string? messageKind) =>
+        messageKind is not null
+        && (messageKind.Equals("Fill", StringComparison.OrdinalIgnoreCase)
+            || messageKind.Equals("Replaced", StringComparison.OrdinalIgnoreCase));
 
     private static string ResolveAmbiguityReason(OutboundMutationSnapshot mutation) =>
         mutation.Attempts.LastOrDefault()?.AmbiguityReason?.ToString()

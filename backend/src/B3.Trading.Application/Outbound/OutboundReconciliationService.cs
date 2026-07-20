@@ -586,6 +586,13 @@ public sealed class OutboundReconciliationService
                 request.EvidenceReference))
             throw new OutboundReconciliationValidationException(
                 "Authoritative evidence does not cover this mutation.");
+        if (request.EvidenceType == OutboundOperatorEvidenceType.TerminalExecutionReport
+            && !_ledger.IsTerminalExecutionReportDecisionCompatible(
+                mutation.MutationId,
+                request.EvidenceReference,
+                request.Decision))
+            throw new OutboundReconciliationValidationException(
+                "The terminal execution report does not support the requested decision.");
         if (!mutation.RequiresReconciliation
             && !(mutation.State == OutboundMutationState.VenueAcknowledged
                 && request.EvidenceType

@@ -695,9 +695,38 @@ public sealed class OutboundReconciliationServiceTests
         Assert.Equal(10, order.CumulativeQuantity);
         Assert.Equal(10, positions.GetOrCreate("F1", owner, "PETR4").NetQuantity);
         Assert.Equal(-300m, cash.GetAvailable("F1", owner));
+        var lateEvidence = Assert.Single(
+            fixture.Ledger.GetInboundEvidenceForMutation(fixture.MutationId));
+        Assert.Throws<OutboundReconciliationValidationException>(() =>
+            fixture.Service.Resolve(
+                fixture.MutationId,
+                "F1",
+                "second-maker",
+                new(
+                    OutboundOperatorDecision.VenueAbsent,
+                    OutboundOperatorEvidenceType.TerminalExecutionReport,
+                    lateEvidence.EvidenceId,
+                    "terminal_er_verified")));
+        Assert.Throws<InvalidOperationException>(() =>
+            fixture.Ledger.Apply(new OutboundOperatorResolvedEvent
+            {
+                MutationId = fixture.MutationId,
+                Decision = OutboundOperatorDecision.VenueAbsent,
+                EvidenceType = OutboundOperatorEvidenceType.TerminalExecutionReport,
+                EvidenceReference = lateEvidence.EvidenceId,
+                EvidenceDigest = new string('a', 64),
+                ReasonCode = "terminal_er_verified",
+                OperatorRef = "second-checker",
+                ReleaseCapacity = false,
+                ResolvedAtUtc = T0.AddMinutes(4),
+                TimestampUtc = T0.AddMinutes(4),
+            }));
+        Assert.Equal(1, fixture.Margin.ReleaseCount);
         var mutation = fixture.Ledger.SnapshotMutations().Single();
         Assert.Equal(OutboundMutationState.Ambiguous, mutation.State);
         Assert.True(mutation.RequiresReconciliation);
+        Assert.Single(mutation.OperatorEvidence);
+        Assert.Single(mutation.ResolutionProposals);
     }
 
     [Fact]
@@ -803,6 +832,19 @@ public sealed class OutboundReconciliationServiceTests
         Assert.Equal(intent.NewPrice, replacement.Price);
         Assert.Equal(OrderStatus.Working, replacement.Status);
         Assert.False(restoredReplacements.TryGet(intent.NewClOrdId, out _));
+        var lateEvidence = Assert.Single(
+            fixture.Ledger.GetInboundEvidenceForMutation(fixture.MutationId));
+        Assert.Throws<OutboundReconciliationValidationException>(() =>
+            fixture.Service.Resolve(
+                fixture.MutationId,
+                "F1",
+                "second-maker",
+                new(
+                    OutboundOperatorDecision.VenueAbsent,
+                    OutboundOperatorEvidenceType.TerminalExecutionReport,
+                    lateEvidence.EvidenceId,
+                    "terminal_er_verified")));
+        Assert.Equal(1, fixture.ReplaceMargin.AbortCount);
         var mutation = fixture.Ledger.SnapshotMutations().Single();
         Assert.Equal(OutboundMutationState.Ambiguous, mutation.State);
         Assert.True(mutation.RequiresReconciliation);

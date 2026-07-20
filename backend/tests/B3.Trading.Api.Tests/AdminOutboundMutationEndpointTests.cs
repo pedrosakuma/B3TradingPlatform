@@ -316,7 +316,7 @@ public sealed class AdminOutboundMutationEndpointTests
     [Fact]
     public async Task LateContradictoryExecutionReport_ReopensTimelineAndRaisesAlertMetric()
     {
-        using var factory = NewFactory(out _);
+        using var factory = NewFactory(out var margin);
         var fixture = SeedAmbiguousMutation(factory, "F1", 64706);
         using var maker = CreateAdminClient(factory, "maker", "F1");
         using var checker = CreateAdminClient(factory, "checker", "F1");
@@ -356,12 +356,12 @@ public sealed class AdminOutboundMutationEndpointTests
             factory.Services.GetRequiredService<IEntryPointClient>());
         mock.EmitExecutionReport(new ExecutionReportEnvelope(
             fixture.ClOrdId,
-            EpExecType.Rejected,
+            EpExecType.Fill,
             LeavesQuantity: 0,
-            CumulativeQuantity: 0,
-            LastQuantity: 0,
-            LastPrice: 0m,
-            RejectReason: "VENUE_REJECTED",
+            CumulativeQuantity: 10,
+            LastQuantity: 10,
+            LastPrice: 30m,
+            RejectReason: null,
             FirmId: "F1",
             SessionId: 11,
             SessionVerId: 3,
@@ -388,6 +388,17 @@ public sealed class AdminOutboundMutationEndpointTests
             .GetProperty("inboundEvidence")[0]
             .GetProperty("evidenceId")
             .GetString();
+        var invalidAbsent = await maker.PostAsJsonAsync(
+            $"/admin/outbound-mutations/{fixture.MutationId}/resolve",
+            new
+            {
+                decision = "venue_absent",
+                evidenceType = "terminal_er",
+                evidenceReference = lateEvidenceId,
+                reason = "terminal_er_verified",
+            });
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, invalidAbsent.StatusCode);
+        Assert.Equal(1, margin.ReleaseCount);
         var followUp = await checker.PostAsJsonAsync(
             $"/admin/outbound-mutations/{fixture.MutationId}/resolve",
             new
