@@ -1172,7 +1172,10 @@ public class PeggedAlgoEndpointTests
 
         var gateway = f.Services.GetRequiredService<ProvenUnsentCancelGateway>();
         gateway.ProvenUnsentReplaceFailuresRemaining = 1;
-        var algoId = await PostAlgo(http, token, PeggedBody(total: 100));
+        var algoId = await PostAlgo(
+            http,
+            token,
+            PeggedBody(total: 100, repegMs: 1000));
         var book = f.Services.GetRequiredService<WorkingOrderBook>();
         var child = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
         var mock = f.Services.GetRequiredService<MockEntryPointClient>();
@@ -1182,6 +1185,12 @@ public class PeggedAlgoEndpointTests
             "initial child was not dispatched");
 
         cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+        await WaitFor(
+            () => gateway.AttemptedReplaceClOrdIds.Count == 1,
+            TimeSpan.FromSeconds(3),
+            "initial repeg did not become ProvenUnsent");
+        var frozenPrice = gateway.AttemptedReplacePrices.Single();
+        cache.UpdateBookTop("PETR4", 31.5m, 32.5m, DateTimeOffset.UtcNow);
         await WaitFor(
             () => gateway.AttemptedReplaceClOrdIds.Count == 2,
             TimeSpan.FromSeconds(3),
@@ -1207,6 +1216,9 @@ public class PeggedAlgoEndpointTests
         Assert.Equal(
             gateway.AttemptedReplaceClOrdIds.ElementAt(1),
             mock.SubmittedReplaces.Single().NewClOrdId);
+        Assert.Equal([frozenPrice, frozenPrice], gateway.AttemptedReplacePrices);
+        Assert.Equal(31m, frozenPrice);
+        Assert.Equal(frozenPrice, mock.SubmittedReplaces.Single().NewPrice);
     }
 
     [Fact]
@@ -1993,6 +2005,9 @@ public class PeggedAlgoEndpointTests
         public System.Collections.Concurrent.ConcurrentQueue<ulong>
             AttemptedReplaceClOrdIds
         { get; } = new();
+        public System.Collections.Concurrent.ConcurrentQueue<decimal?>
+            AttemptedReplacePrices
+        { get; } = new();
         public int ProvenUnsentReplaceFailuresRemaining
         {
             get => Volatile.Read(ref _provenUnsentReplaceFailuresRemaining);
@@ -2060,6 +2075,7 @@ public class PeggedAlgoEndpointTests
             CancellationToken cancellationToken)
         {
             AttemptedReplaceClOrdIds.Enqueue(command.Canonical.ClOrdId);
+            AttemptedReplacePrices.Enqueue(command.Canonical.Price);
             if (Interlocked.Decrement(ref _provenUnsentReplaceFailuresRemaining) >= 0)
             {
                 return Task.FromException<ExchangeGatewayReceipt>(

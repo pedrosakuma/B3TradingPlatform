@@ -2378,15 +2378,19 @@ public sealed class AlgoEngine : BackgroundService
         // Resolved). The next scheduler tick re-evaluates drift; if
         // it was an ambiguous send the #329 watchdog +
         // AlgoScheduler.SweepAmbiguousReplaceIntents bound recovery.
+        var explicitRetry = FindSoleRetryableProvenUnsentMutation(
+            algo,
+            child.ClOrdId,
+            AlgoOutboundActionKind.Repeg);
+        var retryCommand =
+            explicitRetry?.Approval?.CanonicalCommandNonSensitive;
+        var dispatchQuantity = retryCommand?.Quantity ?? child.Quantity;
+        var dispatchPrice = retryCommand?.Price ?? target.Value;
         bool replaced;
         try
         {
-            var explicitRetry = FindSoleRetryableProvenUnsentMutation(
-                algo,
-                child.ClOrdId,
-                AlgoOutboundActionKind.Repeg);
             replaced = await TryReplaceChildAsync(
-                algo, child, child.Quantity, target.Value,
+                algo, child, dispatchQuantity, dispatchPrice,
                 reason: "AlgoInternal", AlgoOutboundActionKind.Repeg, ct,
                 explicitRetry?.AlgoOriginIdentity).ConfigureAwait(false);
         }
@@ -2448,7 +2452,7 @@ public sealed class AlgoEngine : BackgroundService
             var firmIdSnap = algo.FirmId;
             var algoIdSnap = algo.AlgoId;
             var cancelledIdSnap = liveChildClOrdId;
-            var targetSnap = target.Value;
+            var targetSnap = dispatchPrice;
             var atUtcSnap = now;
             var book = _peggedRepeg;
             _dispatcher.Dispatch(
@@ -2466,7 +2470,7 @@ public sealed class AlgoEngine : BackgroundService
                     // replayer keys only on CancelledChildClOrdId
                     // and the field is audit-only.
                     NewClOrdId = 0UL,
-                    TargetPrice = target.Value,
+                    TargetPrice = dispatchPrice,
                     AtUtc = now,
                 },
                 () => book?.Set(firmIdSnap, algoIdSnap, cancelledIdSnap, targetSnap, atUtcSnap));
@@ -2482,7 +2486,7 @@ public sealed class AlgoEngine : BackgroundService
             // book lookup is the discriminator under approach (b)).
             // Recovery for this specific cycle is best-effort;
             // Reconcile's orphan-prune covers any drift on restart.
-            _peggedRepeg?.Set(algo.FirmId, algo.AlgoId, liveChildClOrdId, target.Value, now);
+            _peggedRepeg?.Set(algo.FirmId, algo.AlgoId, liveChildClOrdId, dispatchPrice, now);
         }
 
         // Best-effort audit envelope; WAL backpressure is non-fatal
@@ -2500,7 +2504,7 @@ public sealed class AlgoEngine : BackgroundService
                     RefKind = pgp.Ref.ToString(),
                     RefPrice = refForAudit,
                     OldChildPrice = oldChildPrice,
-                    NewTargetPrice = target.Value,
+                    NewTargetPrice = dispatchPrice,
                     AtUtc = now,
                 },
                 static () => { });
