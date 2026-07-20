@@ -105,6 +105,7 @@ staging metadata after it.
 
 - order submit/cancel/replace intent and terminal transitions;
 - inbound real and synthetic execution reports;
+- outbound operator-resolution proposals and committed evidence decisions;
 - kill-switch, halt, session-phase and staleness controls;
 - algo lifecycle and scheduling progress;
 - bot credentials, session versions and sequence checkpoints;
@@ -164,6 +165,30 @@ ordinary retries remain blocked until operator reconciliation.
 
 WebSocket fan-out frames are **not** persisted — they are projections
 recomputable from the WAL.
+
+### Outbound operator reconciliation
+
+`OutboundOperatorResolutionProposedEvent` and
+`OutboundOperatorResolvedEvent` are Class L operator authority records. A
+capacity-releasing ambiguous New/Replace first commits an audit event, then a
+maker proposal. Approval requires a distinct checker; the approval audit event
+commits first, followed by the resolution event, and only then is held
+New/Replace capacity released. Audit or resolution append/commit failure leaves
+the mutation ambiguous and capacity held.
+
+The records contain non-sensitive mutation/firm identifiers, bounded decision,
+evidence-type and reason values, operator references, and opaque evidence
+digests/references only. Official artifacts and all account, investor and
+end-client values stay outside plaintext WAL fields. Sensitive outbound command
+fields remain exclusively inside the existing authenticated encrypted envelope.
+
+Replay reapplies proposals/resolutions idempotently and repeats the associated
+capacity cleanup. Snapshot restore does not recreate capacity already released
+by a committed operator resolution. Ordinary terminal-correlation compaction
+must retain every mutation containing an operator proposal or resolution;
+operator/audit retention is governed separately from correlation tombstones.
+A later contradictory ER is appended normally, retained as conflicting inbound
+evidence, and reopens the mutation for reconciliation.
 
 ### Schema evolution
 

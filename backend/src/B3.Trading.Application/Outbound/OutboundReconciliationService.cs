@@ -1,0 +1,622 @@
+using System.Security.Cryptography;
+using System.Text;
+using B3.Trading.Application.Audit;
+using B3.Trading.Application.Observability;
+using B3.Trading.Application.Persistence;
+using B3.Trading.Application.Risk;
+
+namespace B3.Trading.Application.Outbound;
+
+public sealed record OutboundOperatorResolutionRequest(
+    OutboundOperatorDecision Decision,
+    OutboundOperatorEvidenceType EvidenceType,
+    string EvidenceReference,
+    string ReasonCode);
+
+public enum OutboundOperatorResolutionStatus
+{
+    PendingApproval,
+    Annotated,
+    Resolved,
+}
+
+public sealed record OutboundOperatorResolutionResult(
+    OutboundMutationId MutationId,
+    OutboundOperatorResolutionStatus Status,
+    OutboundResolutionProposalId? ProposalId,
+    bool CapacityReleased,
+    bool RequiresReconciliation);
+
+public sealed class OutboundReconciliationValidationException : InvalidOperationException
+{
+    public OutboundReconciliationValidationException(string message) : base(message) { }
+}
+
+public sealed class OutboundReconciliationNotFoundException : InvalidOperationException
+{
+    public OutboundReconciliationNotFoundException() : base("Outbound mutation was not found.") { }
+}
+
+public sealed class OutboundReconciliationForbiddenException : InvalidOperationException
+{
+    public OutboundReconciliationForbiddenException() : base("Outbound mutation is outside the caller firm scope.") { }
+}
+
+public sealed class OutboundReconciliationConflictException : InvalidOperationException
+{
+    public OutboundReconciliationConflictException(string message) : base(message) { }
+}
+
+public sealed class OutboundReconciliationUnavailableException : InvalidOperationException
+{
+    public OutboundReconciliationUnavailableException(Exception innerException)
+        : base("Outbound reconciliation durability is unavailable.", innerException)
+    {
+    }
+}
+
+public sealed class OutboundReconciliationService
+{
+    private static readonly HashSet<string> AllowedReasonCodes =
+    [
+        "terminal_er_verified",
+        "contracted_not_applied_verified",
+        "venue_mass_action_verified",
+        "official_extract_attested",
+        "manual_comparison_recorded",
+        "late_contradiction_reconciled",
+    ];
+
+    private readonly OutboundMutationLedger _ledger;
+    private readonly EventDispatcher _dispatcher;
+    private readonly IAuditLogger _audit;
+    private readonly IMarginProvider _margin;
+    private readonly IReplaceMarginCoordinator _replaceMargin;
+    private readonly PendingReplacementRegistry _replacements;
+    private readonly TimeProvider _clock;
+
+    public OutboundReconciliationService(
+        OutboundMutationLedger ledger,
+        EventDispatcher dispatcher,
+        IAuditLogger audit,
+        IMarginProvider margin,
+        IReplaceMarginCoordinator replaceMargin,
+        PendingReplacementRegistry replacements,
+        TimeProvider? clock = null)
+    {
+        _ledger = ledger;
+        _dispatcher = dispatcher;
+        _audit = audit;
+        _margin = margin;
+        _replaceMargin = replaceMargin;
+        _replacements = replacements;
+        _clock = clock ?? TimeProvider.System;
+    }
+
+    public OutboundOperatorResolutionResult Resolve(
+        OutboundMutationId mutationId,
+        string callerFirmId,
+        string operatorRef,
+        OutboundOperatorResolutionRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        operatorRef = CanonicalizeOperatorRef(operatorRef);
+        var mutation = GetScopedMutation(mutationId, callerFirmId);
+        ValidateRequest(mutation, request);
+        var evidenceDigest = DigestResolution(mutationId, request);
+        var existing = mutation.OperatorEvidence.FirstOrDefault(
+            evidence => evidence.EvidenceDigest == evidenceDigest);
+        if (existing is not null)
+            return ResultFromEvidence(mutation, existing);
+
+        var releaseCapacity = ReleasesCapacity(mutation, request.Decision);
+        if (releaseCapacity)
+        {
+            var pending = mutation.ResolutionProposals.FirstOrDefault(proposal =>
+                proposal.ApprovedAtUtc is null
+                && proposal.EvidenceDigest == evidenceDigest
+                && proposal.MakerRef == operatorRef);
+            if (pending is not null)
+            {
+                return new OutboundOperatorResolutionResult(
+                    mutationId,
+                    OutboundOperatorResolutionStatus.PendingApproval,
+                    pending.ProposalId,
+                    CapacityReleased: false,
+                    RequiresReconciliation: true);
+            }
+            return Propose(
+                mutation,
+                operatorRef,
+                request,
+                evidenceDigest,
+                cancellationToken);
+        }
+
+        var atUtc = _clock.GetUtcNow();
+        var resolved = new OutboundOperatorResolvedEvent
+        {
+            MutationId = mutationId,
+            Decision = request.Decision,
+            EvidenceType = request.EvidenceType,
+            EvidenceReference = request.EvidenceReference,
+            EvidenceDigest = evidenceDigest,
+            ReasonCode = request.ReasonCode,
+            OperatorRef = operatorRef,
+            ReleaseCapacity = false,
+            ResolvedAtUtc = atUtc,
+            TimestampUtc = atUtc,
+        };
+        AuditFirst(
+            mutation,
+            operatorRef,
+            "outbound_resolution_commit",
+            request,
+            evidenceDigest,
+            proposalId: null,
+            cancellationToken);
+        DispatchResolution(
+            resolved,
+            mutation.FirmId,
+            releaseCapacity: false,
+            cancellationToken);
+        var status = request.Decision == OutboundOperatorDecision.LeaveAmbiguous
+            ? OutboundOperatorResolutionStatus.Annotated
+            : OutboundOperatorResolutionStatus.Resolved;
+        return new OutboundOperatorResolutionResult(
+            mutationId,
+            status,
+            null,
+            CapacityReleased: false,
+            RequiresReconciliation: status == OutboundOperatorResolutionStatus.Annotated);
+    }
+
+    public OutboundOperatorResolutionResult Approve(
+        OutboundMutationId mutationId,
+        OutboundResolutionProposalId proposalId,
+        string callerFirmId,
+        string checkerRef,
+        CancellationToken cancellationToken = default)
+    {
+        checkerRef = CanonicalizeOperatorRef(checkerRef);
+        var mutation = GetScopedMutation(mutationId, callerFirmId);
+        var proposal = mutation.ResolutionProposals.FirstOrDefault(
+            candidate => candidate.ProposalId == proposalId)
+            ?? throw new OutboundReconciliationNotFoundException();
+        if (proposal.ApprovedAtUtc is not null)
+        {
+            var committed = mutation.OperatorEvidence.FirstOrDefault(
+                evidence => evidence.ProposalId == proposalId);
+            if (committed is null)
+                throw new OutboundReconciliationConflictException(
+                    "Approved proposal has no committed resolution.");
+            return ResultFromEvidence(mutation, committed);
+        }
+        if (string.Equals(proposal.MakerRef, checkerRef, StringComparison.Ordinal))
+            throw new OutboundReconciliationValidationException(
+                "Maker and checker must be different operators.");
+        var request = new OutboundOperatorResolutionRequest(
+            proposal.Decision,
+            proposal.EvidenceType,
+            proposal.EvidenceReference,
+            proposal.ReasonCode);
+        ValidateRequest(mutation, request);
+        var atUtc = _clock.GetUtcNow();
+        var resolved = new OutboundOperatorResolvedEvent
+        {
+            MutationId = mutationId,
+            Decision = proposal.Decision,
+            EvidenceType = proposal.EvidenceType,
+            EvidenceReference = proposal.EvidenceReference,
+            EvidenceDigest = proposal.EvidenceDigest,
+            ReasonCode = proposal.ReasonCode,
+            OperatorRef = checkerRef,
+            MakerRef = proposal.MakerRef,
+            CheckerRef = checkerRef,
+            ProposalId = proposalId,
+            ReleaseCapacity = true,
+            ResolvedAtUtc = atUtc,
+            TimestampUtc = atUtc,
+        };
+        AuditFirst(
+            mutation,
+            checkerRef,
+            "outbound_resolution_approve",
+            request,
+            proposal.EvidenceDigest,
+            proposalId,
+            cancellationToken);
+        DispatchResolution(
+            resolved,
+            mutation.FirmId,
+            releaseCapacity: true,
+            cancellationToken);
+        return new OutboundOperatorResolutionResult(
+            mutationId,
+            OutboundOperatorResolutionStatus.Resolved,
+            proposalId,
+            CapacityReleased: true,
+            RequiresReconciliation: false);
+    }
+
+    private OutboundOperatorResolutionResult Propose(
+        OutboundMutationSnapshot mutation,
+        string makerRef,
+        OutboundOperatorResolutionRequest request,
+        string evidenceDigest,
+        CancellationToken cancellationToken)
+    {
+        var atUtc = _clock.GetUtcNow();
+        var proposalId = OutboundResolutionProposalId.New();
+        var proposed = new OutboundOperatorResolutionProposedEvent
+        {
+            MutationId = mutation.MutationId,
+            ProposalId = proposalId,
+            Decision = request.Decision,
+            EvidenceType = request.EvidenceType,
+            EvidenceReference = request.EvidenceReference,
+            EvidenceDigest = evidenceDigest,
+            ReasonCode = request.ReasonCode,
+            MakerRef = makerRef,
+            ProposedAtUtc = atUtc,
+            TimestampUtc = atUtc,
+        };
+        AuditFirst(
+            mutation,
+            makerRef,
+            "outbound_resolution_propose",
+            request,
+            evidenceDigest,
+            proposalId,
+            cancellationToken);
+        try
+        {
+            var outcome = _dispatcher.DispatchCommittedIf(
+                proposed,
+                () => IsProposalStillEligible(proposed, mutation.FirmId),
+                () => _ledger.Apply(proposed),
+                cancellationToken);
+            if (!outcome.Applied)
+                throw new OutboundReconciliationConflictException(
+                    "Outbound mutation changed before the proposal committed.");
+        }
+        catch (OutboundReconciliationConflictException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw new OutboundReconciliationUnavailableException(ex);
+        }
+        MetricsRegistry.OutboundOperatorResolutions.Add(
+            1,
+            new("firm", mutation.FirmId),
+            new("decision", ToMetricValue(request.Decision)),
+            new("evidence_type", ToMetricValue(request.EvidenceType)),
+            new("result", "pending_approval"));
+        return new OutboundOperatorResolutionResult(
+            mutation.MutationId,
+            OutboundOperatorResolutionStatus.PendingApproval,
+            proposalId,
+            CapacityReleased: false,
+            RequiresReconciliation: true);
+    }
+
+    private void DispatchResolution(
+        OutboundOperatorResolvedEvent resolved,
+        string firmId,
+        bool releaseCapacity,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var outcome = _dispatcher.DispatchCommittedIf(
+                resolved,
+                () => IsResolutionStillEligible(resolved),
+                () =>
+                {
+                    _ledger.Apply(resolved);
+                    if (releaseCapacity)
+                        ReleaseCapacity(resolved.MutationId);
+                },
+                cancellationToken);
+            if (!outcome.Applied)
+                throw new OutboundReconciliationConflictException(
+                    "Outbound mutation changed before the resolution committed.");
+        }
+        catch (OutboundReconciliationConflictException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw new OutboundReconciliationUnavailableException(ex);
+        }
+        MetricsRegistry.OutboundOperatorResolutions.Add(
+            1,
+            new("firm", firmId),
+            new("decision", ToMetricValue(resolved.Decision)),
+            new("evidence_type", ToMetricValue(resolved.EvidenceType)),
+            new("result", resolved.Decision == OutboundOperatorDecision.LeaveAmbiguous
+                ? "annotated"
+                : "resolved"));
+    }
+
+    private void ReleaseCapacity(OutboundMutationId mutationId)
+    {
+        if (!_ledger.TryGet(mutationId, out var mutation) || mutation is null)
+            throw new InvalidOperationException("Committed outbound mutation disappeared.");
+        switch (mutation.Kind)
+        {
+            case OutboundMutationKind.New:
+                _margin.ReleaseReservation(mutation.PrimaryClOrdId);
+                break;
+            case OutboundMutationKind.Replace:
+                _replacements.TryConsume(mutation.PrimaryClOrdId, out _);
+                _replaceMargin.AbortReplace(mutation.PrimaryClOrdId);
+                break;
+        }
+    }
+
+    private void AuditFirst(
+        OutboundMutationSnapshot mutation,
+        string operatorRef,
+        string action,
+        OutboundOperatorResolutionRequest request,
+        string evidenceDigest,
+        OutboundResolutionProposalId? proposalId,
+        CancellationToken cancellationToken)
+    {
+        var details = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["target_firm"] = mutation.FirmId,
+            ["mutation_id"] = mutation.MutationId.ToString(),
+            ["action"] = action,
+            ["decision"] = ToMetricValue(request.Decision),
+            ["evidence_type"] = ToMetricValue(request.EvidenceType),
+            ["evidence_digest"] = evidenceDigest,
+            ["reason_code"] = request.ReasonCode,
+        };
+        if (proposalId is { } id)
+            details["proposal_id"] = id.ToString();
+        var evt = new AuditLogEvent
+        {
+            EventType = AuditEventTypes.AdminOutboundResolution,
+            Outcome = AuditOutcomes.Success,
+            ActorUserId = operatorRef,
+            ActorUsername = operatorRef,
+            ActorFirm = mutation.FirmId,
+            ActorRole = "admin",
+            ResourcePath = $"/admin/outbound-mutations/{mutation.MutationId}/resolve",
+            ReasonCode = request.ReasonCode,
+            Details = details,
+            TimestampUtc = _clock.GetUtcNow(),
+        };
+        try
+        {
+            _audit.LogCommittedOrFail(evt, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            throw new OutboundReconciliationUnavailableException(ex);
+        }
+    }
+
+    private OutboundMutationSnapshot GetScopedMutation(
+        OutboundMutationId mutationId,
+        string callerFirmId)
+    {
+        if (!_ledger.TryGet(mutationId, out var mutation) || mutation is null)
+            throw new OutboundReconciliationNotFoundException();
+        if (!string.Equals(mutation.FirmId, callerFirmId, StringComparison.Ordinal))
+            throw new OutboundReconciliationForbiddenException();
+        return mutation;
+    }
+
+    private void ValidateRequest(
+        OutboundMutationSnapshot mutation,
+        OutboundOperatorResolutionRequest request)
+    {
+        if (!IsOpaqueReference(request.EvidenceReference)
+            || !AllowedReasonCodes.Contains(request.ReasonCode))
+            throw new OutboundReconciliationValidationException(
+                "Evidence reference or reason code is invalid.");
+        if (!HasSafeEvidenceReferenceShape(request.EvidenceType, request.EvidenceReference))
+            throw new OutboundReconciliationValidationException(
+                "Evidence reference must be an allow-listed digest identifier.");
+        if (LooksLikeForbiddenTimeOrSessionEvidence(request.EvidenceReference)
+            || LooksLikeForbiddenTimeOrSessionEvidence(request.ReasonCode))
+            throw new OutboundReconciliationValidationException(
+                "Session roll and elapsed time are not resolution evidence.");
+        if (request.EvidenceType == OutboundOperatorEvidenceType.ManualAnnotation)
+        {
+            if (request.Decision != OutboundOperatorDecision.LeaveAmbiguous)
+                throw new OutboundReconciliationValidationException(
+                    "Manual annotation can only leave a mutation ambiguous.");
+        }
+        else if (request.Decision == OutboundOperatorDecision.LeaveAmbiguous)
+        {
+            throw new OutboundReconciliationValidationException(
+                "Leave-ambiguous requires manual annotation evidence.");
+        }
+        if (request.Decision == OutboundOperatorDecision.VenueAcknowledged
+            && request.EvidenceType == OutboundOperatorEvidenceType.ContractedNotApplied)
+            throw new OutboundReconciliationValidationException(
+                "Contracted NotApplied cannot prove venue acknowledgment.");
+        if (!_ledger.HasAuthoritativeEvidence(
+                mutation.MutationId,
+                request.EvidenceType,
+                request.EvidenceReference))
+            throw new OutboundReconciliationValidationException(
+                "Authoritative evidence does not cover this mutation.");
+        if (!mutation.RequiresReconciliation
+            && !(mutation.State == OutboundMutationState.VenueAcknowledged
+                && request.EvidenceType
+                    == OutboundOperatorEvidenceType.TerminalExecutionReport)
+            && request.Decision != OutboundOperatorDecision.LeaveAmbiguous)
+            throw new OutboundReconciliationConflictException(
+                "Outbound mutation does not require reconciliation.");
+    }
+
+    private bool IsProposalStillEligible(
+        OutboundOperatorResolutionProposedEvent proposed,
+        string firmId) =>
+        IsProposalStillEligibleCore(proposed, firmId);
+
+    private bool IsProposalStillEligibleCore(
+        OutboundOperatorResolutionProposedEvent proposed,
+        string firmId)
+    {
+        if (!_ledger.TryGet(proposed.MutationId, out var current)
+            || current is null
+            || !string.Equals(current.FirmId, firmId, StringComparison.Ordinal)
+            || current.ResolutionProposals.Any(proposal => proposal.ApprovedAtUtc is null))
+            return false;
+        try
+        {
+            ValidateRequest(
+                current,
+                new OutboundOperatorResolutionRequest(
+                    proposed.Decision,
+                    proposed.EvidenceType,
+                    proposed.EvidenceReference,
+                    proposed.ReasonCode));
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+        return !current.OperatorEvidence.Any(
+            evidence => evidence.EvidenceDigest == proposed.EvidenceDigest);
+    }
+
+    private bool IsResolutionStillEligible(OutboundOperatorResolvedEvent resolved)
+    {
+        if (!_ledger.TryGet(resolved.MutationId, out var current) || current is null)
+            return false;
+        if (current.OperatorEvidence.Any(
+                evidence => evidence.EvidenceDigest == resolved.EvidenceDigest))
+            return false;
+        if (resolved.ProposalId is not { } proposalId)
+            return current.RequiresReconciliation;
+        var proposal = current.ResolutionProposals.FirstOrDefault(
+            candidate => candidate.ProposalId == proposalId);
+        if (proposal is null
+            || proposal.ApprovedAtUtc is not null
+            || !string.Equals(proposal.MakerRef, resolved.MakerRef, StringComparison.Ordinal)
+            || string.Equals(proposal.MakerRef, resolved.CheckerRef, StringComparison.Ordinal))
+            return false;
+        try
+        {
+            ValidateRequest(
+                current,
+                new OutboundOperatorResolutionRequest(
+                    proposal.Decision,
+                    proposal.EvidenceType,
+                    proposal.EvidenceReference,
+                    proposal.ReasonCode));
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+        return proposal.Decision == resolved.Decision
+            && proposal.EvidenceType == resolved.EvidenceType
+            && proposal.EvidenceReference == resolved.EvidenceReference
+            && proposal.EvidenceDigest == resolved.EvidenceDigest
+            && proposal.ReasonCode == resolved.ReasonCode
+            && (current.RequiresReconciliation
+                || (current.State == OutboundMutationState.VenueAcknowledged
+                    && proposal.EvidenceType
+                        == OutboundOperatorEvidenceType.TerminalExecutionReport));
+    }
+
+    private static bool ReleasesCapacity(
+        OutboundMutationSnapshot mutation,
+        OutboundOperatorDecision decision) =>
+        decision == OutboundOperatorDecision.VenueAbsent
+        && mutation.Kind is OutboundMutationKind.New or OutboundMutationKind.Replace
+        && mutation.State != OutboundMutationState.ProvenUnsent;
+
+    private static OutboundOperatorResolutionResult ResultFromEvidence(
+        OutboundMutationSnapshot mutation,
+        OutboundOperatorEvidenceSnapshot evidence) =>
+        new(
+            mutation.MutationId,
+            evidence.Decision == OutboundOperatorDecision.LeaveAmbiguous
+                ? OutboundOperatorResolutionStatus.Annotated
+                : OutboundOperatorResolutionStatus.Resolved,
+            evidence.ProposalId,
+            evidence.CapacityReleased,
+            evidence.Decision == OutboundOperatorDecision.LeaveAmbiguous
+                || mutation.RequiresReconciliation);
+
+    private static string DigestResolution(
+        OutboundMutationId mutationId,
+        OutboundOperatorResolutionRequest request)
+    {
+        var canonical = string.Join(
+            "|",
+            mutationId,
+            request.Decision,
+            request.EvidenceType,
+            request.EvidenceReference,
+            request.ReasonCode);
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)))
+            .ToLowerInvariant();
+    }
+
+    private static bool IsOpaqueReference(string? value) =>
+        value is { Length: > 0 and <= 128 }
+        && value.All(static character =>
+            char.IsAsciiLetterOrDigit(character)
+            || character is '-' or '_' or '.' or ':');
+
+    private static bool LooksLikeForbiddenTimeOrSessionEvidence(string value)
+    {
+        var normalized = value.Replace('-', '_').Replace('.', '_');
+        return normalized.Contains("session_roll", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("session_rolled", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("elapsed_time", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("timeout", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("ttl", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool HasSafeEvidenceReferenceShape(
+        OutboundOperatorEvidenceType evidenceType,
+        string evidenceReference) =>
+        evidenceType switch
+        {
+            OutboundOperatorEvidenceType.TerminalExecutionReport
+                or OutboundOperatorEvidenceType.ContractedNotApplied =>
+                IsLowerHexDigest(evidenceReference),
+            OutboundOperatorEvidenceType.VenueMassAction =>
+                HasDigestPrefix(evidenceReference, "venue-report:"),
+            OutboundOperatorEvidenceType.OfficialExtract =>
+                HasDigestPrefix(evidenceReference, "official-extract:"),
+            OutboundOperatorEvidenceType.ManualAnnotation =>
+                HasDigestPrefix(evidenceReference, "annotation:"),
+            _ => false,
+        };
+
+    private static bool HasDigestPrefix(string value, string prefix) =>
+        value.StartsWith(prefix, StringComparison.Ordinal)
+        && IsLowerHexDigest(value[prefix.Length..]);
+
+    private static bool IsLowerHexDigest(string value) =>
+        value.Length == 64
+        && value.All(static character =>
+            character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static string CanonicalizeOperatorRef(string operatorRef)
+    {
+        if (IsOpaqueReference(operatorRef))
+            return operatorRef;
+        var digest = SHA256.HashData(
+            Encoding.UTF8.GetBytes(operatorRef ?? string.Empty));
+        return $"operator:{Convert.ToHexString(digest).ToLowerInvariant()}";
+    }
+
+    private static string ToMetricValue<T>(T value) where T : struct, Enum =>
+        value.ToString().ToLowerInvariant();
+}

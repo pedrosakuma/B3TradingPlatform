@@ -42,6 +42,7 @@ public static class AuditEventTypes
     public const string AdminConfigChange = "admin.config.change";
     public const string AdminSubAccountCreate = "admin.subaccount.create";
     public const string AdminSubAccountDeactivate = "admin.subaccount.deactivate";
+    public const string AdminOutboundResolution = "admin.outbound_resolution";
 
     /// <summary>Q4.6 (#306). Drop-copy WS session opened by a compliance / admin principal.</summary>
     public const string DropCopyConnect = "audit.dropcopy.connect";

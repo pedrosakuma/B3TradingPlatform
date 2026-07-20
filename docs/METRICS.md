@@ -63,6 +63,12 @@ One `AddMeter(MetricsRegistry.Meter.Name)` call wires the lot.
 | `trading.entrypoint.translation_errors` | Counter | `firm` |
 | `trading.entrypoint.business_rejects` | Counter | `firm`, `code` |
 | `trading.entrypoint.terminated` | Counter | `firm`, `cause` |
+| `trading.outbound.operator_resolution_total` | Counter | `firm`, `decision`, `evidence_type`, `result` |
+| `trading.outbound.contradictory_evidence_total` | Counter | `firm`, `evidence_type` |
+| `trading.outbound.ambiguous` | Observable Gauge | `firm`, `kind`, `age_bucket`, `ambiguity_reason` |
+| `trading.outbound.legacy_unknown` | Observable Gauge | `firm`, `kind`, `ambiguity_reason` |
+| `trading.outbound.oldest_ambiguous_age_seconds` | Observable Gauge | `firm` |
+| `trading.outbound.oldest_legacy_unknown_age_seconds` | Observable Gauge | `firm` |
 | `trading.marketdata.subscribe_errors` | Counter | `symbol`, `reason` |
 | `trading.risk.refprice.lookups` | Counter | `source` (live/fallback/missing) |
 | `trading.risk.refprice.staleness_seconds` | Observable Gauge | `symbol` |
@@ -94,6 +100,15 @@ v0 algo pipeline is documented in
 C1, `parentAlgoId` is intentionally **not** a metric tag (cardinality
 would explode); per-algo drill-down lives in structured logs and
 traces.
+
+The `trading.outbound.*` reconciliation series use only configured firm IDs
+and bounded categorical values. Mutation IDs, ClOrdIDs, evidence references,
+accounts, investors, and end-client identifiers are never labels. `/health`
+adds unresolved mutation/firm counts and oldest ambiguity/legacy ages under
+`outboundRecovery`; `/ready` remains the fail-closed gate for required firms.
+Executable alerts page on contradictory evidence and surface aging
+ambiguity/legacy work in
+[`b3-trading.rules.yml`](../docker/observability/prometheus/rules/v1/b3-trading.rules.yml).
 
 ## Extended application instruments (#369)
 

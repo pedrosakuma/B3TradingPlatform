@@ -117,6 +117,7 @@ public static class TradingPersistenceServiceCollectionExtensions
                 sp.GetRequiredService<IOutboundNonceSource>());
         });
         services.AddSingleton<OutboundMutationLedger>();
+        services.AddSingleton<OutboundReconciliationService>();
         services.AddSingleton(_ => OutboundProcessEpoch.CreateUninitialized());
         services.AddSingleton<OutboundRecoveryState>();
         services.AddSingleton<IOutboundRecoveryGate>(sp =>

@@ -73,6 +73,9 @@ public interface IAuditLogger
     /// audit-first ordering contract.
     /// </summary>
     void LogOrFail(AuditLogEvent evt);
+
+    void LogCommittedOrFail(AuditLogEvent evt, CancellationToken cancellationToken = default) =>
+        LogOrFail(evt);
 }
 
 /// <summary>Concrete <see cref="IAuditLogger"/> backed by the dispatcher + keeper.</summary>
@@ -155,6 +158,29 @@ public sealed class AuditLogger : IAuditLogger
         RecordEmitMetric(evt);
     }
 
+    public void LogCommittedOrFail(
+        AuditLogEvent evt,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(evt);
+        try
+        {
+            _dispatcher.DispatchCommitted(
+                evt,
+                () => _keeper.Apply(_dispatcher.CurrentSeq, evt),
+                cancellationToken);
+        }
+        catch (WalBackpressureException)
+        {
+            MetricsRegistry.WalBackpressure.Add(1,
+                new KeyValuePair<string, object?>("call_site", "audit.log_committed_or_fail"));
+            RecordDropMetric(evt, reason: "wal_backpressure");
+            RecordEmitMetric(evt);
+            throw;
+        }
+        RecordEmitMetric(evt);
+    }
+
     private void DispatchUnderLock(AuditLogEvent evt)
     {
         // Dispatch under the lock so the WAL seq assigned by Append
@@ -216,4 +242,5 @@ public sealed class NullAuditLogger : IAuditLogger
 {
     public void Log(AuditLogEvent evt) { }
     public void LogOrFail(AuditLogEvent evt) { }
+    public void LogCommittedOrFail(AuditLogEvent evt, CancellationToken cancellationToken = default) { }
 }

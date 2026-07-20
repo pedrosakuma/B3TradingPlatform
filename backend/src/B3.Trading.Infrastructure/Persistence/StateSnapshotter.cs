@@ -1021,6 +1021,7 @@ public sealed class EventReplayer
     private readonly PeggedRepegBook? _peggedRepeg;
     private readonly OutboundMutationLedger? _outboundLedger;
     private readonly RestOrderIdempotencyStore? _restOrderIdempotency;
+    private readonly IMarginProvider? _marginProvider;
 
     public EventReplayer(
         WorkingOrderBook orders,
@@ -1062,7 +1063,8 @@ public sealed class EventReplayer
         AuditLogKeeper? auditKeeper = null,
         PendingCancelRegistry? pendingCancels = null,
         OutboundMutationLedger? outboundLedger = null,
-        RestOrderIdempotencyStore? restOrderIdempotency = null)
+        RestOrderIdempotencyStore? restOrderIdempotency = null,
+        IMarginProvider? marginProvider = null)
     {
         _orders = orders;
         _ownership = ownership;
@@ -1092,6 +1094,7 @@ public sealed class EventReplayer
         _pendingCancels = pendingCancels;
         _outboundLedger = outboundLedger;
         _restOrderIdempotency = restOrderIdempotency;
+        _marginProvider = marginProvider;
     }
 
     /// <summary>
@@ -1369,8 +1372,25 @@ public sealed class EventReplayer
             case OutboundProvenUnsentEvent unsent:
                 _outboundLedger?.Apply(unsent);
                 break;
+            case OutboundOperatorResolutionProposedEvent proposed:
+                _outboundLedger?.Apply(proposed);
+                break;
             case OutboundOperatorResolvedEvent resolved:
                 _outboundLedger?.Apply(resolved);
+                if (resolved.ReleaseCapacity
+                    && _outboundLedger?.TryGet(resolved.MutationId, out var resolvedMutation) == true
+                    && resolvedMutation is not null)
+                {
+                    if (resolvedMutation.Kind == OutboundMutationKind.New)
+                    {
+                        _marginProvider?.ReleaseReservation(resolvedMutation.PrimaryClOrdId);
+                    }
+                    else if (resolvedMutation.Kind == OutboundMutationKind.Replace)
+                    {
+                        _replacements?.TryConsume(resolvedMutation.PrimaryClOrdId, out _);
+                        _replaceMargin?.AbortReplace(resolvedMutation.PrimaryClOrdId);
+                    }
+                }
                 break;
             case ExecutionReportReceivedEvent er:
                 var evidenceResult = _outboundLedger?.ApplyVenueAcknowledgement(er);

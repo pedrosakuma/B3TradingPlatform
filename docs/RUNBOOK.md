@@ -82,6 +82,63 @@ managed-schema, full SQLite integrity, foreign-key, and identity invariant
 checks. A missing, corrupt, or unsupported database returns non-zero and is
 never created, migrated, or reset.
 
+## 0.1 Outbound mutation reconciliation (#647)
+
+Use the firm-scoped `/admin/outbound-mutations/` timeline when `/ready` is
+closed by outbound recovery or the reconciliation gauges show ambiguous or
+legacy-unknown work. The response deliberately contains no account, investor,
+end-client, ciphertext, or customer identifier. `encryptedFieldReferences`
+contains only the stable end-client token, encrypted-field categories, and key
+identity needed to diagnose historical-key availability.
+
+### Investigation and evidence
+
+1. List unresolved rows with
+   `GET /admin/outbound-mutations/?requiresReconciliation=true`, then fetch the
+   mutation timeline by its opaque mutation UUID. Never paste customer values
+   into a reason or evidence reference.
+2. Match the attempt's firm/session/version/sequence and ClOrdID against an
+   authoritative source. Capacity release accepts only:
+   - a terminal ER already correlated to this mutation (`terminal_er`, using
+     its 64-hex timeline evidence ID);
+   - an exact contracted NotApplied range already correlated to this mutation
+     (`contracted_not_applied`, using its 64-hex evidence ID);
+   - a covering venue mass-action report
+     (`venue_mass_action`, `venue-report:<sha256>`);
+   - an operator-attested official venue, drop-copy, or back-office extract
+     (`official_extract`, `official-extract:<sha256>`).
+3. A manual comparison may only append `leave_ambiguous` with
+   `manual_annotation`, `annotation:<sha256>`, and
+   `manual_comparison_recorded`. It does not release margin or make any claim
+   about venue acknowledgment/absence.
+4. Session roll, timeout, TTL, or elapsed time is alerting context only. The API
+   rejects it as resolution evidence.
+
+Reason codes are fixed: `terminal_er_verified`,
+`contracted_not_applied_verified`, `venue_mass_action_verified`,
+`official_extract_attested`, or `manual_comparison_recorded`. Hash the official
+artifact in the controlled evidence repository; do not upload it or its
+customer fields to this API.
+
+### Maker/checker and failure handling
+
+`venue_absent` for an ambiguous New/Replace is capacity-releasing and therefore
+returns `202 pending_approval`. A different firm-scoped admin must approve the
+proposal at
+`POST /admin/outbound-mutations/{mutationId}/resolve/{proposalId}/approve`.
+Self-approval is rejected. The audit WAL record is committed before the
+proposal/resolution record; the resolution WAL record commits before held
+capacity is released. A `503 reconciliation_unavailable` means no resolution
+effect occurred: keep the mutation/risk held and retry only after WAL health is
+restored.
+
+If `trading.outbound.contradictory_evidence_total` increments after a
+`venue_absent` decision, the late ER is retained and the mutation is reopened
+as ambiguous. Stop relying on the earlier resolution, preserve both evidence
+sets, and repeat maker/checker review with the official source. Operator
+proposal, resolution, and audit records are permanent and are not removed by
+ordinary correlation compaction.
+
 ## 1. Perf hardening v0 — what to watch
 
 The perf-hardening v0 RFC ([`rfcs/perf-hardening-v0.md`](rfcs/perf-hardening-v0.md))
