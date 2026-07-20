@@ -564,6 +564,14 @@ public sealed class OutboundReconciliationService
             throw new OutboundReconciliationValidationException(
                 "Leave-ambiguous requires manual annotation evidence.");
         }
+        // A genuine contradictory ER reopens the state to Ambiguous and must
+        // remain correctable. Payload unavailability leaves the terminal state
+        // intact, so only exact duplicates (handled by Resolve) are allowed.
+        if (HasCommittedTerminalResolution(mutation)
+            && mutation.State is OutboundMutationState.OperatorResolved
+                or OutboundMutationState.VenueAcknowledged)
+            throw new OutboundReconciliationValidationException(
+                "The outbound mutation already has a terminal operator resolution.");
         if (request.Decision == OutboundOperatorDecision.VenueAcknowledged
             && request.EvidenceType == OutboundOperatorEvidenceType.ContractedNotApplied)
             throw new OutboundReconciliationValidationException(
@@ -676,6 +684,10 @@ public sealed class OutboundReconciliationService
         if (current.OperatorEvidence.Any(
                 evidence => evidence.EvidenceDigest == resolved.EvidenceDigest))
             return false;
+        if (HasCommittedTerminalResolution(current)
+            && current.State is OutboundMutationState.OperatorResolved
+                or OutboundMutationState.VenueAcknowledged)
+            return false;
         if (resolved.ProposalId is not { } proposalId)
             return current.RequiresReconciliation;
         var proposal = current.ResolutionProposals.FirstOrDefault(
@@ -716,6 +728,11 @@ public sealed class OutboundReconciliationService
         decision == OutboundOperatorDecision.VenueAbsent
         && mutation.Kind is OutboundMutationKind.New or OutboundMutationKind.Replace
         && mutation.State != OutboundMutationState.ProvenUnsent;
+
+    private static bool HasCommittedTerminalResolution(
+        OutboundMutationSnapshot mutation) =>
+        mutation.OperatorEvidence.Any(
+            evidence => evidence.Decision != OutboundOperatorDecision.LeaveAmbiguous);
 
     private static OutboundOperatorResolutionResult ResultFromEvidence(
         OutboundMutationSnapshot mutation,

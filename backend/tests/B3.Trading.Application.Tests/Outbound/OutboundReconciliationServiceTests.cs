@@ -76,6 +76,94 @@ public sealed class OutboundReconciliationServiceTests
     }
 
     [Fact]
+    public void TerminalResolution_WithUnavailablePayload_RejectsDifferentFollowUp()
+    {
+        var writer = Fixture.Create();
+        var firstReference = writer.RegisterEvidence(
+            OutboundOperatorEvidenceType.OfficialExtract,
+            '1');
+        var secondReference = writer.RegisterEvidence(
+            OutboundOperatorEvidenceType.OfficialExtract,
+            '2');
+        var snapshot = writer.Ledger.CaptureSnapshot();
+        var ledger = new OutboundMutationLedger(CreateProtector("replacement"));
+        ledger.Restore(
+            snapshot.Mutations,
+            snapshot.Correlations,
+            snapshot.InboundEvidence);
+        var margin = new RecordingMargin();
+        var service = new OutboundReconciliationService(
+            ledger,
+            new EventDispatcher(new NullEventStore()),
+            new NullAuditLogger(),
+            margin,
+            new RecordingReplaceMargin(),
+            new PendingReplacementRegistry());
+        var firstRequest = new OutboundOperatorResolutionRequest(
+            OutboundOperatorDecision.VenueAbsent,
+            OutboundOperatorEvidenceType.OfficialExtract,
+            firstReference,
+            "official_extract_attested");
+        var proposed = service.Resolve(
+            writer.MutationId,
+            "F1",
+            "maker",
+            firstRequest);
+        var approved = service.Approve(
+            writer.MutationId,
+            proposed.ProposalId!.Value,
+            "F1",
+            "checker");
+
+        Assert.True(approved.CapacityReleased);
+        Assert.Equal(1, margin.ReleaseCount);
+        var terminal = Assert.Single(ledger.SnapshotMutations());
+        Assert.Equal(
+            OutboundSensitivePayloadAvailability.MissingHistoricalKey,
+            terminal.SensitivePayloadAvailability);
+        Assert.Equal(OutboundMutationState.OperatorResolved, terminal.State);
+        Assert.True(terminal.RequiresReconciliation);
+
+        var duplicate = service.Resolve(
+            writer.MutationId,
+            "F1",
+            "maker",
+            firstRequest);
+        Assert.Equal(OutboundOperatorResolutionStatus.Resolved, duplicate.Status);
+        Assert.Equal(1, margin.ReleaseCount);
+
+        Assert.Throws<OutboundReconciliationValidationException>(() =>
+            service.Resolve(
+                writer.MutationId,
+                "F1",
+                "maker",
+                new(
+                    OutboundOperatorDecision.VenueAbsent,
+                    OutboundOperatorEvidenceType.OfficialExtract,
+                    secondReference,
+                    "official_extract_attested")));
+        Assert.Throws<InvalidOperationException>(() =>
+            ledger.Apply(new OutboundOperatorResolvedEvent
+            {
+                MutationId = writer.MutationId,
+                Decision = OutboundOperatorDecision.VenueAcknowledged,
+                EvidenceType = OutboundOperatorEvidenceType.OfficialExtract,
+                EvidenceReference = secondReference,
+                EvidenceDigest = new string('d', 64),
+                ReasonCode = "official_extract_attested",
+                OperatorRef = "second-operator",
+                ReleaseCapacity = false,
+                ResolvedAtUtc = T0.AddMinutes(10),
+                TimestampUtc = T0.AddMinutes(10),
+            }));
+
+        terminal = Assert.Single(ledger.SnapshotMutations());
+        Assert.Single(terminal.OperatorEvidence);
+        Assert.Single(terminal.ResolutionProposals);
+        Assert.Equal(1, margin.ReleaseCount);
+    }
+
+    [Fact]
     public void ManualAnnotation_NeverReleasesCapacity()
     {
         var fixture = Fixture.Create();
@@ -912,6 +1000,30 @@ public sealed class OutboundReconciliationServiceTests
             _ => throw new ArgumentOutOfRangeException(nameof(evidenceType)),
         };
 
+    private static IOutboundCommandProtector CreateProtector(string keyId)
+    {
+        var key = Convert.ToBase64String(Enumerable.Range(1, 32)
+            .Select(value => (byte)value)
+            .ToArray());
+        return new AeadOutboundCommandProtector(
+            new OutboundCommandProtectionOptions
+            {
+                ActiveKeyId = keyId,
+                ActiveKeyVersion = 1,
+                StableReferenceKeyId = keyId,
+                StableReferenceKeyVersion = 1,
+                Keys =
+                [
+                    new OutboundCommandProtectionKeyOptions
+                    {
+                        KeyId = keyId,
+                        Version = 1,
+                        KeyBase64 = key,
+                    },
+                ],
+            });
+    }
+
     private sealed class Fixture
     {
         public required OutboundMutationLedger Ledger { get; init; }
@@ -928,26 +1040,7 @@ public sealed class OutboundReconciliationServiceTests
             IAuditLogger? audit = null,
             OutboundMutationKind kind = OutboundMutationKind.New)
         {
-            var key = Convert.ToBase64String(Enumerable.Range(1, 32)
-                .Select(value => (byte)value)
-                .ToArray());
-            var protector = new AeadOutboundCommandProtector(
-                new OutboundCommandProtectionOptions
-                {
-                    ActiveKeyId = "test",
-                    ActiveKeyVersion = 1,
-                    StableReferenceKeyId = "test",
-                    StableReferenceKeyVersion = 1,
-                    Keys =
-                    [
-                        new OutboundCommandProtectionKeyOptions
-                        {
-                            KeyId = "test",
-                            Version = 1,
-                            KeyBase64 = key,
-                        },
-                    ],
-                });
+            var protector = CreateProtector("test");
             var mutationId = new OutboundMutationId(Guid.Parse(
                 "11111111-2222-3333-4444-555555555555"));
             var attemptId = new OutboundAttemptId(Guid.Parse(

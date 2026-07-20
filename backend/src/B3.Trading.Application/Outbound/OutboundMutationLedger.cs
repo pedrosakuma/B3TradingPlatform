@@ -489,6 +489,11 @@ public sealed class OutboundMutationLedger
                     return;
                 throw TransitionError("Conflicting operator resolution.");
             }
+            if (mutation.OperatorEvidence.Any(
+                    evidence => evidence.Decision != OutboundOperatorDecision.LeaveAmbiguous)
+                && mutation.State is OutboundMutationState.OperatorResolved
+                    or OutboundMutationState.VenueAcknowledged)
+                throw TransitionError("Outbound mutation already has a terminal operator resolution.");
             if (!CanOperatorResolve(mutation))
                 throw TransitionError("Operator resolution is not valid in the current state.");
             var proposals = mutation.ResolutionProposals.ToList();
