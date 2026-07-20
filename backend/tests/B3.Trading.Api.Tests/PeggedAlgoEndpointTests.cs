@@ -1160,6 +1160,72 @@ public class PeggedAlgoEndpointTests
                 .TryGetLiveChildClOrdId("default", algoIdValue));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Pegged_DroppedPartialFillSignal_DoesNotConsumePendingModify(
+        bool targetChildExplicitly)
+    {
+        using var f = WithDroppingSignals();
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(
+            http,
+            token,
+            PeggedBody(total: 100, repegMs: 30_000));
+        var algoIdValue = ulong.Parse(algoId);
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        await WaitFor(
+            () => mock.SubmittedNewOrders.Any(order =>
+                order.ClOrdId == child.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "initial child submission was not recorded");
+        var signals = f.Services.GetRequiredService<DroppingAlgoSignalQueue>();
+        signals.DropNextChildExecutionSignal(child.ClOrdId);
+
+        await InjectEr(
+            http,
+            adminToken,
+            child.ClOrdId,
+            "PartialFill",
+            lastQty: 40);
+        Assert.Equal(1, signals.DroppedSignals);
+
+        var modifyRequest = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"/algo/{algoId}/modify")
+        {
+            Content = JsonContent.Create(new
+            {
+                ChildClOrdId = targetChildExplicitly
+                    ? child.ClOrdId
+                    : (ulong?)null,
+                NewPrice = 30.5m,
+            }),
+        };
+        modifyRequest.Headers.Authorization =
+            new AuthenticationHeaderValue("Bearer", token);
+        var modifyResponse = await http.SendAsync(modifyRequest);
+        Assert.Equal(HttpStatusCode.Accepted, modifyResponse.StatusCode);
+
+        await WaitFor(
+            () => mock.SubmittedReplaces.Any(replace =>
+                replace.OriginalClOrdId == child.ClOrdId
+                && replace.NewPrice == 30.5m),
+            TimeSpan.FromSeconds(3),
+            "modify was consumed while reconciling the dropped partial fill");
+        Assert.True(
+            f.Services.GetRequiredService<AlgoBook>()
+                .TryGet("default", algoIdValue, out var algo));
+        Assert.Equal(40, algo!.FilledQuantity);
+    }
+
     [Fact]
     public async Task Pegged_DroppedCancelConfirmation_CompletesParentCancellation()
     {

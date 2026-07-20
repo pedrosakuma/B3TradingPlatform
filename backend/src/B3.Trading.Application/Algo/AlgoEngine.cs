@@ -662,7 +662,8 @@ public sealed class AlgoEngine : BackgroundService
     {
         if (!_outboundRecovery.IsBusinessIngressOpen(algo.FirmId)) return;
         if (algo.IsTerminal) return;
-        if (await ReconcileLiveChildAgainstBookAsync(algo, rt, ct).ConfigureAwait(false))
+        if (await ReconcileLiveChildAgainstBookAsync(algo, rt, ct).ConfigureAwait(false)
+            != LiveChildReconciliationOutcome.None)
             return;
         if (algo.Status == AlgoStatus.Cancelling)
         {
@@ -1290,13 +1291,13 @@ public sealed class AlgoEngine : BackgroundService
         }
     }
 
-    private async Task<bool> ReconcileLiveChildAgainstBookAsync(
+    private async Task<LiveChildReconciliationOutcome> ReconcileLiveChildAgainstBookAsync(
         Algo algo,
         AlgoParentRuntime rt,
         CancellationToken ct)
     {
         if (rt.LiveChildClOrdId is not { } liveChildClOrdId)
-            return false;
+            return LiveChildReconciliationOutcome.None;
 
         if (!_orders.TryGet(liveChildClOrdId, out var child) || child is null)
         {
@@ -1306,7 +1307,7 @@ public sealed class AlgoEngine : BackgroundService
                 liveChildClOrdId,
                 "runtime live child is missing from the working-order book")
                 .ConfigureAwait(false);
-            return true;
+            return LiveChildReconciliationOutcome.StopProcessing;
         }
 
         if (!IsChildTerminal(child)
@@ -1323,13 +1324,20 @@ public sealed class AlgoEngine : BackgroundService
                     ChildClOrdId = child.ClOrdId,
                 },
                 ct).ConfigureAwait(false);
-            return true;
+            return !algo.IsTerminal
+                && algo.Status != AlgoStatus.Cancelling
+                && rt.LiveChildClOrdId == child.ClOrdId
+                && _orders.TryGet(child.ClOrdId, out var reconciledChild)
+                && reconciledChild is not null
+                && !IsChildTerminal(reconciledChild)
+                    ? LiveChildReconciliationOutcome.NonTerminalFillRecovered
+                    : LiveChildReconciliationOutcome.StopProcessing;
         }
 
         if (!IsChildTerminal(child))
         {
             rt.ReplacedAdoptionHoldTicks = 0;
-            return false;
+            return LiveChildReconciliationOutcome.None;
         }
 
         if (child.Status == OrderStatus.Replaced)
@@ -1338,7 +1346,7 @@ public sealed class AlgoEngine : BackgroundService
             if (rt.ReplacedAdoptionHoldTicks
                 < AlgoParentRuntime.ReplacedAdoptionHoldMaxTicks)
             {
-                return true;
+                return LiveChildReconciliationOutcome.StopProcessing;
             }
 
             var replacements = _orders
@@ -1373,7 +1381,7 @@ public sealed class AlgoEngine : BackgroundService
                 if (algo.IsTerminal
                     || rt.LiveChildClOrdId == replacement.ClOrdId)
                 {
-                    return true;
+                    return LiveChildReconciliationOutcome.StopProcessing;
                 }
             }
 
@@ -1387,7 +1395,7 @@ public sealed class AlgoEngine : BackgroundService
                     1 => "hydrated replacement could not be adopted",
                     _ => "dropped adoption signal matched multiple replacement children",
                 }).ConfigureAwait(false);
-            return true;
+            return LiveChildReconciliationOutcome.StopProcessing;
         }
 
         rt.ReplacedAdoptionHoldTicks = 0;
@@ -1401,7 +1409,14 @@ public sealed class AlgoEngine : BackgroundService
                 ChildClOrdId = child.ClOrdId,
             },
             ct).ConfigureAwait(false);
-        return true;
+        return LiveChildReconciliationOutcome.StopProcessing;
+    }
+
+    private enum LiveChildReconciliationOutcome
+    {
+        None,
+        NonTerminalFillRecovered,
+        StopProcessing,
     }
 
     private async Task FailClosedStaleLiveChildAsync(
@@ -1489,8 +1504,9 @@ public sealed class AlgoEngine : BackgroundService
                 new KeyValuePair<string, object?>("reason", "algo_cancelling"));
             return;
         }
-        if (sig.TargetChildClOrdId is null
-            && await ReconcileLiveChildAgainstBookAsync(algo, rt, ct).ConfigureAwait(false))
+        var reconciliation =
+            await ReconcileLiveChildAgainstBookAsync(algo, rt, ct).ConfigureAwait(false);
+        if (reconciliation == LiveChildReconciliationOutcome.StopProcessing)
         {
             return;
         }
@@ -1773,7 +1789,8 @@ public sealed class AlgoEngine : BackgroundService
             return;
         }
 
-        if (await ReconcileLiveChildAgainstBookAsync(algo, rt, ct).ConfigureAwait(false))
+        if (await ReconcileLiveChildAgainstBookAsync(algo, rt, ct).ConfigureAwait(false)
+            != LiveChildReconciliationOutcome.None)
             return;
 
         OutboundMutationSnapshot? retryMutation = null;
