@@ -44,7 +44,6 @@ public sealed class RolledSessionFailClosedSpecTests
                 maker,
                 "PETR4"));
 
-        IReadOnlyList<MutationSummary> unresolved;
         await using (var paused = await docker.PauseMatchingAsync())
         {
             var submissions = Enumerable.Range(0, 4)
@@ -56,7 +55,7 @@ public sealed class RolledSessionFailClosedSpecTests
                     index))
                 .ToArray();
             await Task.WhenAll(submissions);
-            unresolved = await WaitForNewUnresolvedMutationsAsync(
+            _ = await WaitForNewAttemptedMutationsAsync(
                 http,
                 maker,
                 baseline);
@@ -76,6 +75,10 @@ public sealed class RolledSessionFailClosedSpecTests
             maker,
             priorVerId: before.SessionVerId,
             expectAdvance: true);
+        var unresolved = await WaitForNewUnresolvedMutationsAsync(
+            http,
+            maker,
+            baseline);
 
         Assert.Contains(
             unresolved,
@@ -159,6 +162,34 @@ public sealed class RolledSessionFailClosedSpecTests
     }
 
     private static async Task<IReadOnlyList<MutationSummary>>
+        WaitForNewAttemptedMutationsAsync(
+            HttpClient http,
+            AuthenticationHeaderValue auth,
+            IReadOnlySet<string> baseline)
+    {
+        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(30);
+        IReadOnlyList<MutationSummary> last = [];
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            last = (await GetMutationsAsync(http, auth))
+                .Where(mutation => !baseline.Contains(mutation.MutationId))
+                .ToArray();
+            if (last.Any(mutation => mutation.State is
+                    "frame_prepared" or "transport_write_completed" or "ambiguous"))
+            {
+                return last;
+            }
+
+            await Task.Delay(SessionRollSpecSupport.PollInterval);
+        }
+
+        Assert.Fail(
+            "The real transport fault did not cross the SDK frame-prepared boundary. " +
+            $"Last new rows: {JsonSerializer.Serialize(last)}");
+        return [];
+    }
+
+    private static async Task<IReadOnlyList<MutationSummary>>
         WaitForNewUnresolvedMutationsAsync(
             HttpClient http,
             AuthenticationHeaderValue auth,
@@ -193,7 +224,7 @@ public sealed class RolledSessionFailClosedSpecTests
     {
         using var request = new HttpRequestMessage(
             HttpMethod.Get,
-            "/admin/outbound-mutations/?requiresReconciliation=true");
+            "/admin/outbound-mutations/");
         request.Headers.Authorization = auth;
         using var response = await http.SendAsync(request);
         response.EnsureSuccessStatusCode();
