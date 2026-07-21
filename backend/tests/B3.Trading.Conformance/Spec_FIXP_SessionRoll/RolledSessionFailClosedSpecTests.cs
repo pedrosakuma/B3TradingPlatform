@@ -96,7 +96,15 @@ public sealed class RolledSessionFailClosedSpecTests
             $"{runId}-blocked-after-roll");
         Assert.Equal(HttpStatusCode.ServiceUnavailable, blocked.StatusCode);
 
-        foreach (var mutation in unresolved)
+        var blocking = (await GetMutationsAsync(http, maker))
+            .Where(mutation => mutation.RequiresReconciliation)
+            .ToArray();
+        Assert.All(
+            unresolved,
+            mutation => Assert.Contains(
+                blocking,
+                candidate => candidate.MutationId == mutation.MutationId));
+        foreach (var mutation in blocking)
             await ResolveVenueAbsentAsync(http, maker, checker, mutation.MutationId);
 
         await WaitForReadyAsync(http);
