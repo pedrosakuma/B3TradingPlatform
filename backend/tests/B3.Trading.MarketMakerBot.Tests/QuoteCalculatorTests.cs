@@ -60,4 +60,23 @@ public class QuoteCalculatorTests
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => QuoteCalculator.RoundToTick(1m, 0m));
     }
+
+    [Fact]
+    public void ComputeQuotePrice_WithExplicitReferencePrice_AnchorsOnThatInsteadOfConfiguredRefPrice()
+    {
+        // Config RefPrice is 30, but a live market-data anchor of 50
+        // should win when explicitly passed — this is the overload the
+        // worker uses once market data is flowing.
+        var instr = Instrument(refPrice: 30m, tickSize: 0.01m, spreadTicks: 5);
+        Assert.Equal(49.95m, QuoteCalculator.ComputeQuotePrice(instr, isBuy: true, referencePrice: 50m));
+        Assert.Equal(50.05m, QuoteCalculator.ComputeQuotePrice(instr, isBuy: false, referencePrice: 50m));
+    }
+
+    [Fact]
+    public void ComputeQuotePrice_TwoArgOverload_DelegatesToConfiguredRefPrice()
+    {
+        var instr = Instrument(refPrice: 30m, tickSize: 0.01m, spreadTicks: 5);
+        Assert.Equal(QuoteCalculator.ComputeQuotePrice(instr, isBuy: true, instr.RefPrice),
+            QuoteCalculator.ComputeQuotePrice(instr, isBuy: true));
+    }
 }

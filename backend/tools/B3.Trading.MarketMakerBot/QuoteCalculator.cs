@@ -2,11 +2,8 @@ namespace B3.Trading.MarketMakerBot;
 
 /// <summary>
 /// Pure, deterministic bid/ask pricing for the market maker. No
-/// randomness: given the same <see cref="InstrumentConfig"/> and side,
-/// this always produces the same quote. Anchors on the configured
-/// <see cref="InstrumentConfig.RefPrice"/> for now; a follow-up will
-/// swap that anchor for the live book mid once the bot consumes market
-/// data (see issue #683, item "mm-marketdata-conn").
+/// randomness: given the same reference price, instrument, and side,
+/// this always produces the same quote.
 /// </summary>
 public static class QuoteCalculator
 {
@@ -14,11 +11,21 @@ public static class QuoteCalculator
     /// symmetric around <see cref="InstrumentConfig.RefPrice"/> by
     /// <see cref="InstrumentConfig.SpreadTicks"/> ticks, rounded to
     /// <see cref="InstrumentConfig.TickSize"/>.</summary>
-    public static decimal ComputeQuotePrice(InstrumentConfig instrument, bool isBuy)
+    public static decimal ComputeQuotePrice(InstrumentConfig instrument, bool isBuy) =>
+        ComputeQuotePrice(instrument, isBuy, instrument?.RefPrice ?? 0m);
+
+    /// <summary>Same as <see cref="ComputeQuotePrice(InstrumentConfig, bool)"/>
+    /// but anchored on <paramref name="referencePrice"/> instead of the
+    /// instrument's static <see cref="InstrumentConfig.RefPrice"/> — used
+    /// by the worker to quote off the live market-data reference price
+    /// once available (see <see cref="MarketPriceTracker"/>), falling
+    /// back to the config value only before the first market-data update
+    /// arrives or while the feed is disconnected.</summary>
+    public static decimal ComputeQuotePrice(InstrumentConfig instrument, bool isBuy, decimal referencePrice)
     {
         ArgumentNullException.ThrowIfNull(instrument);
         var offset = instrument.SpreadTicks * instrument.TickSize;
-        var raw = isBuy ? instrument.RefPrice - offset : instrument.RefPrice + offset;
+        var raw = isBuy ? referencePrice - offset : referencePrice + offset;
         return RoundToTick(raw, instrument.TickSize);
     }
 

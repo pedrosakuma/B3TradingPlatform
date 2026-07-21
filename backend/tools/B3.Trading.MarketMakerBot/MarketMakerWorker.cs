@@ -22,15 +22,22 @@ internal sealed class MarketMakerWorker : BackgroundService
 {
     private readonly MarketMakerBotOptions _options;
     private readonly OrderTracker _tracker;
+    private readonly MarketPriceTracker _priceTracker;
+    private readonly MarketDataFeed _marketData;
+    private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<MarketMakerWorker> _log;
     private long _nextClOrdId;
     private EntryPointClient? _client;
 
     public MarketMakerWorker(IOptions<MarketMakerBotOptions> options, OrderTracker tracker,
+        MarketPriceTracker priceTracker, MarketDataFeed marketData, ILoggerFactory loggerFactory,
         ILogger<MarketMakerWorker> log)
     {
         _options = options.Value;
         _tracker = tracker;
+        _priceTracker = priceTracker;
+        _marketData = marketData;
+        _loggerFactory = loggerFactory;
         _log = log;
         // Time-of-day high bits + monotonic low bits give unique ClOrdIDs
         // across restarts within the same SessionVerId. The SDK's
@@ -84,6 +91,10 @@ internal sealed class MarketMakerWorker : BackgroundService
             _log.LogInformation("[mm] connected; instruments={Count} reconcile={Interval}",
                 _options.Instruments.Count, _options.ReconcileInterval);
 
+            // Market data is best-effort and never blocks FIXP quoting —
+            // see MarketDataFeed's doc comment for why.
+            await _marketData.StartAsync(_options.MarketData, _options.Instruments, _loggerFactory, stoppingToken);
+
             // Prime the book: one resting bid + ask per instrument before
             // anything else runs, so a fresh boot doesn't leave a window
             // with zero MM depth.
@@ -108,6 +119,7 @@ internal sealed class MarketMakerWorker : BackgroundService
         finally
         {
             try { await _client.DisposeAsync(); } catch { /* ignore */ }
+            await _marketData.DisposeAsync();
         }
     }
 
@@ -200,6 +212,7 @@ internal sealed class MarketMakerWorker : BackgroundService
 
             foreach (var instr in _options.Instruments)
             {
+                if (_priceTracker.IsDelisted(instr.Symbol)) continue;
                 if (!_tracker.HasOpenSide(instr.Symbol, isBuy: true))
                     await QuoteSideAsync(client, instr, isBuy: true, ct);
                 if (!_tracker.HasOpenSide(instr.Symbol, isBuy: false))
@@ -210,7 +223,9 @@ internal sealed class MarketMakerWorker : BackgroundService
 
     private async Task QuoteSideAsync(EntryPointClient client, InstrumentConfig instr, bool isBuy, CancellationToken ct)
     {
-        var price = QuoteCalculator.ComputeQuotePrice(instr, isBuy);
+        if (_priceTracker.IsDelisted(instr.Symbol)) return;
+        var refPrice = _priceTracker.TryGetReferencePrice(instr.Symbol, out var live) ? live : instr.RefPrice;
+        var price = QuoteCalculator.ComputeQuotePrice(instr, isBuy, refPrice);
         var quantity = QuoteCalculator.QuoteQuantity(instr);
         if (price <= 0m) return; // pathological config; skip silently.
 

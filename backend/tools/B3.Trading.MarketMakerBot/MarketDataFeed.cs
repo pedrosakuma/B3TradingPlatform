@@ -1,0 +1,118 @@
+using B3.MarketData.WebSocketClient;
+using Microsoft.Extensions.Logging;
+
+namespace B3.Trading.MarketMakerBot;
+
+/// <summary>
+/// Thin wrapper around B3MarketDataPlatform's WebSocket SDK
+/// (<see cref="MarketDataClient"/>) that feeds live reference prices
+/// (and delisting notices) into <see cref="MarketPriceTracker"/>.
+///
+/// Deliberately does NOT own instrument identity: <see
+/// cref="InstrumentConfig.SecurityId"/>/<see cref="InstrumentConfig.TickSize"/>/<see
+/// cref="InstrumentConfig.LotSize"/> stay config-driven because those
+/// are matching-platform's wire truth for FIXP order construction, and
+/// the market-data feed's own SecurityId numbering is a separate
+/// namespace that doesn't necessarily line up with it — conflating the
+/// two would be a correctness risk, not a simplification. Market data
+/// only sharpens the quote anchor and tells us when to stop quoting a
+/// symbol (<see cref="MarketDataClient.SymbolDelisted"/>); it never
+/// gates the bot's ability to submit an order in the first place. If
+/// <see cref="MarketDataOptions.WsUrl"/> is unset, or the feed fails to
+/// connect, the worker just keeps quoting off each instrument's
+/// configured <see cref="InstrumentConfig.RefPrice"/> — same
+/// degrade-gracefully shape as the trading-host's own market-data gate.
+/// </summary>
+internal sealed class MarketDataFeed : IAsyncDisposable
+{
+    private readonly MarketPriceTracker _tracker;
+    private readonly ILogger _log;
+    private MarketDataClient? _client;
+
+    public MarketDataFeed(MarketPriceTracker tracker, ILogger log)
+    {
+        _tracker = tracker;
+        _log = log;
+    }
+
+    public bool IsConnected => _client is not null;
+
+    public async Task StartAsync(MarketDataOptions options, IReadOnlyList<InstrumentConfig> instruments,
+        ILoggerFactory loggerFactory, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(options.WsUrl))
+        {
+            _log.LogInformation("[mm] MarketData:WsUrl not set; quoting off static RefPrice anchors only.");
+            return;
+        }
+
+        var clientOptions = new MarketDataClientOptions
+        {
+            Endpoint = new Uri(options.WsUrl),
+            AutoResubscribeOnReconnect = true,
+            BackPressure = BackPressurePolicy.DropOldest,
+        };
+
+        var client = new MarketDataClient(clientOptions, loggerFactory.CreateLogger<MarketDataClient>());
+        client.Trade += OnTrade;
+        client.InfoSnapshot += OnInfoSnapshot;
+        client.SymbolDelisted += OnSymbolDelisted;
+        client.ConnectionStateChanged += OnConnectionStateChanged;
+        client.SubscribeError += OnSubscribeError;
+
+        try
+        {
+            await client.ConnectAsync(ct).ConfigureAwait(false);
+            foreach (var instr in instruments)
+            {
+                await client.SubscribeAsync(instr.Symbol, SubscribeFlags.Trades | SubscribeFlags.Info, ct)
+                    .ConfigureAwait(false);
+            }
+            _client = client;
+            _log.LogInformation("[mm] MarketData connected to {WsUrl}; subscribed to {Count} instrument(s).",
+                options.WsUrl, instruments.Count);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "[mm] MarketData connect/subscribe to {WsUrl} failed; continuing with static RefPrice anchors only.",
+                options.WsUrl);
+            client.Trade -= OnTrade;
+            client.InfoSnapshot -= OnInfoSnapshot;
+            client.SymbolDelisted -= OnSymbolDelisted;
+            client.ConnectionStateChanged -= OnConnectionStateChanged;
+            client.SubscribeError -= OnSubscribeError;
+            await client.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    private void OnTrade(TradeEvent ev) => _tracker.OnTrade(ev.Symbol, ev.Price);
+
+    private void OnInfoSnapshot(InfoSnapshotEvent ev) =>
+        _tracker.OnInfoSnapshot(ev.Symbol, ev.TradingReferencePrice, ev.LastTradePrice);
+
+    private void OnSymbolDelisted(SymbolDelistedEvent ev)
+    {
+        _log.LogWarning("[mm] MarketData reports {Symbol} delisted; pausing quotes for it.", ev.Symbol);
+        _tracker.OnSymbolDelisted(ev.Symbol);
+    }
+
+    private void OnConnectionStateChanged(ConnectionStateChangedEvent ev) =>
+        _log.LogInformation("[mm] MarketData connection state: {State}", ev.State);
+
+    private void OnSubscribeError(SubscribeErrorEvent ev) =>
+        _log.LogWarning("[mm] MarketData subscribe error for {Symbol}: {Error}", ev.Symbol, ev.ErrorCode);
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_client is null) return;
+        _client.Trade -= OnTrade;
+        _client.InfoSnapshot -= OnInfoSnapshot;
+        _client.SymbolDelisted -= OnSymbolDelisted;
+        _client.ConnectionStateChanged -= OnConnectionStateChanged;
+        _client.SubscribeError -= OnSubscribeError;
+        try { await _client.DisposeAsync().ConfigureAwait(false); }
+        catch { /* best-effort cleanup on shutdown */ }
+    }
+}
