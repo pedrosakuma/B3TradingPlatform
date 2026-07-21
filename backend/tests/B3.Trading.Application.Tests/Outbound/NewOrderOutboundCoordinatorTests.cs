@@ -105,6 +105,71 @@ public sealed class NewOrderOutboundCoordinatorTests
     }
 
     [Fact]
+    public async Task C07_AttemptIntentAppendedButNotCommitted_RestartsApprovedWithoutGatewayEntry()
+    {
+        var gateway = new CompletingGateway();
+        var store = new UncommittedEventStore<OutboundAttemptIntentPreparedEvent>();
+        var fixture = CreateFixture(gateway, store: store);
+
+        var result = await fixture.Coordinator.EnqueueAsync(
+            fixture.MutationId,
+            CancellationToken.None);
+
+        Assert.Equal(NewOrderDispatchOutcome.ReconciliationRequired, result.Outcome);
+        Assert.Equal(0, gateway.CallCount);
+        Assert.Contains(store.Events, evt => evt is OutboundAttemptIntentPreparedEvent);
+        Assert.DoesNotContain(
+            store.CommittedEvents,
+            evt => evt is OutboundAttemptIntentPreparedEvent);
+
+        var recovered = ReplayCommittedPrefix(
+            fixture.Protector,
+            store.CommittedEvents);
+        Assert.True(recovered.TryGet(fixture.MutationId, out var mutation));
+        Assert.Equal(OutboundMutationState.ApprovedToSend, mutation!.State);
+        Assert.Empty(mutation.Attempts);
+    }
+
+    [Fact]
+    public async Task C13_WriteReturnsSuccessBeforeCompletionAdmission_RestartsAmbiguousFromFrame()
+    {
+        var gateway = new CompletingGateway();
+        var store = new RecordingCommittedStore();
+        var fixture = CreateFixture(
+            gateway,
+            store: store,
+            faultInjector: new ThrowingNewOrderFaultInjector(
+                NewOrderOutboundFaultPoint.AfterTransportWriteBeforeCompletionAdmission));
+
+        var result = await fixture.Coordinator.EnqueueAsync(
+            fixture.MutationId,
+            CancellationToken.None);
+
+        Assert.Equal(NewOrderDispatchOutcome.ReconciliationRequired, result.Outcome);
+        Assert.Equal(1, gateway.CallCount);
+        Assert.DoesNotContain(
+            store.Events,
+            evt => evt is OutboundTransportWriteCompletedEvent);
+
+        var recovered = ReplayCommittedPrefix(
+            fixture.Protector,
+            store.CommittedEvents);
+        Assert.Equal(
+            1,
+            recovered.ClassifyRecoveredAttempts(
+                new ProcessEpochId(Guid.NewGuid()),
+                DateTimeOffset.Parse("2026-07-19T00:01:00Z")));
+        Assert.True(recovered.TryGet(fixture.MutationId, out var mutation));
+        Assert.Equal(OutboundMutationState.Ambiguous, mutation!.State);
+        var attempt = Assert.Single(mutation.Attempts);
+        Assert.NotNull(attempt.FramePrepared);
+        Assert.Null(attempt.TransportWriteCompletedAtUtc);
+        Assert.Equal(
+            OutboundAmbiguityReason.DeadEpochFramePrepared,
+            attempt.AmbiguityReason);
+    }
+
+    [Fact]
     public async Task RecoveryStart_WaitsForFirmConnectionBeforePreparingAttempt()
     {
         var readiness = new ControlledGatewayReadiness();
@@ -348,7 +413,8 @@ public sealed class NewOrderOutboundCoordinatorTests
         IExchangeGateway gateway,
         RecordingMarginProvider? margin = null,
         RecordingCommittedStore? store = null,
-        IOutboundGatewayReadiness? readiness = null)
+        IOutboundGatewayReadiness? readiness = null,
+        INewOrderOutboundFaultInjector? faultInjector = null)
     {
         var protector = CreateProtector();
         var ledger = new OutboundMutationLedger(protector);
@@ -416,7 +482,8 @@ public sealed class NewOrderOutboundCoordinatorTests
             margin ?? new RecordingMarginProvider(),
             drain,
             NullLogger<NewOrderOutboundCoordinator>.Instance,
-            gatewayReadiness: readiness);
+            gatewayReadiness: readiness,
+            faultInjector: faultInjector);
         return new Fixture(
             coordinator,
             ledger,
@@ -518,6 +585,32 @@ public sealed class NewOrderOutboundCoordinatorTests
                     },
                 ],
             });
+
+    private static OutboundMutationLedger ReplayCommittedPrefix(
+        AeadOutboundCommandProtector protector,
+        IEnumerable<WalEvent> events)
+    {
+        var ledger = new OutboundMutationLedger(protector);
+        foreach (var evt in events)
+        {
+            switch (evt)
+            {
+                case OutboundApprovedEvent approved:
+                    ledger.Apply(approved);
+                    break;
+                case OutboundAttemptIntentPreparedEvent intent:
+                    ledger.Apply(intent);
+                    break;
+                case OutboundFramePreparedEvent frame:
+                    ledger.Apply(frame);
+                    break;
+                case OutboundTransportWriteCompletedEvent write:
+                    ledger.Apply(write);
+                    break;
+            }
+        }
+        return ledger;
+    }
 
     private sealed record Fixture(
         NewOrderOutboundCoordinator Coordinator,
@@ -723,9 +816,12 @@ public sealed class NewOrderOutboundCoordinatorTests
     private class RecordingCommittedStore : IEventStore
     {
         private long _seq;
+        private long _lastCommittedSeq;
         public List<WalEvent> Events { get; } = new();
+        public IReadOnlyList<WalEvent> CommittedEvents =>
+            Events.Take(checked((int)_lastCommittedSeq)).ToArray();
         public long CurrentSeq => _seq;
-        public long LastCommittedSeq => _seq;
+        public long LastCommittedSeq => _lastCommittedSeq;
 
         public long Append(WalEvent evt) => Append(evt, ReadOnlyMemory<byte>.Empty);
 
@@ -738,8 +834,11 @@ public sealed class NewOrderOutboundCoordinatorTests
         public ValueTask FlushAsync(CancellationToken ct = default) =>
             ValueTask.CompletedTask;
 
-        public ValueTask FlushThroughAsync(long seq, CancellationToken ct = default) =>
-            ValueTask.CompletedTask;
+        public virtual ValueTask FlushThroughAsync(long seq, CancellationToken ct = default)
+        {
+            _lastCommittedSeq = Math.Max(_lastCommittedSeq, seq);
+            return ValueTask.CompletedTask;
+        }
 
         public async IAsyncEnumerable<(long Seq, WalEvent Event)> ReadFromAsync(
             long sinceSeqExclusive,
@@ -801,5 +900,45 @@ public sealed class NewOrderOutboundCoordinatorTests
                 throw new WalBackpressureException("frame persistence failed");
             return base.Append(evt, preSerialisedPayload);
         }
+
     }
+
+    private sealed class UncommittedEventStore<TEvent> : RecordingCommittedStore
+        where TEvent : WalEvent
+    {
+        private long? _uncommittedSeq;
+
+        public override long Append(
+            WalEvent evt,
+            ReadOnlyMemory<byte> preSerialisedPayload)
+        {
+            var seq = base.Append(evt, preSerialisedPayload);
+            if (evt is TEvent)
+                _uncommittedSeq = seq;
+            return seq;
+        }
+
+        public override ValueTask FlushThroughAsync(
+            long seq,
+            CancellationToken ct = default) =>
+            _uncommittedSeq == seq
+                ? ValueTask.FromException(
+                    new WalBackpressureException(
+                        $"{typeof(TEvent).Name} appended but marker not committed"))
+                : base.FlushThroughAsync(seq, ct);
+    }
+
+    private sealed class ThrowingNewOrderFaultInjector(
+        NewOrderOutboundFaultPoint target) : INewOrderOutboundFaultInjector
+    {
+        public void OnBoundary(NewOrderOutboundFaultPoint point)
+        {
+            if (point == target)
+                throw new SimulatedNewOrderCrashException(point);
+        }
+    }
+
+    private sealed class SimulatedNewOrderCrashException(
+        NewOrderOutboundFaultPoint point)
+        : Exception($"Simulated new-order crash at {point}.");
 }

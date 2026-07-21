@@ -204,6 +204,30 @@ public sealed class DurableOrderSubmissionServiceTests
     }
 
     [Fact]
+    public async Task C05_ApprovalAppendedButNotCommitted_RestartsPendingApprovalWithoutGatewayCall()
+    {
+        var store = new UncommittedApprovalCrashStore();
+        var fixture = CreateFixture(Array.Empty<IRiskCheck>(), store: store);
+
+        await Assert.ThrowsAsync<SimulatedApprovalCommitCrashException>(
+            () => fixture.Service.SubmitAsync(Request(), CancellationToken.None));
+
+        Assert.Collection(
+            store.Events,
+            evt => Assert.IsType<OrderSubmittedEvent>(evt),
+            evt => Assert.IsType<OutboundApprovedEvent>(evt));
+        Assert.Equal(1, store.LastCommittedSeq);
+        Assert.Equal(0, fixture.Gateway.CallCount);
+
+        var submitted = Assert.IsType<OrderSubmittedEvent>(
+            Assert.Single(store.CommittedEvents));
+        Assert.Equal(1UL, submitted.ClOrdId);
+        Assert.DoesNotContain(
+            store.CommittedEvents,
+            evt => evt is OutboundApprovedEvent);
+    }
+
+    [Fact]
     public async Task NoWriteTerminalCommitFailure_HoldsMarginAndDrains()
     {
         var fixture = CreateFixture(
@@ -422,9 +446,12 @@ public sealed class DurableOrderSubmissionServiceTests
     private class RecordingStore : IEventStore
     {
         private long _seq;
+        private long _lastCommittedSeq;
         public List<WalEvent> Events { get; } = new();
+        public IReadOnlyList<WalEvent> CommittedEvents =>
+            Events.Take(checked((int)_lastCommittedSeq)).ToArray();
         public long CurrentSeq => _seq;
-        public long LastCommittedSeq => _seq;
+        public virtual long LastCommittedSeq => _lastCommittedSeq;
 
         public long Append(WalEvent evt) => Append(evt, ReadOnlyMemory<byte>.Empty);
 
@@ -437,8 +464,11 @@ public sealed class DurableOrderSubmissionServiceTests
         public ValueTask FlushAsync(CancellationToken ct = default) =>
             ValueTask.CompletedTask;
 
-        public ValueTask FlushThroughAsync(long seq, CancellationToken ct = default) =>
-            ValueTask.CompletedTask;
+        public virtual ValueTask FlushThroughAsync(long seq, CancellationToken ct = default)
+        {
+            _lastCommittedSeq = Math.Max(_lastCommittedSeq, seq);
+            return ValueTask.CompletedTask;
+        }
 
         public async IAsyncEnumerable<(long Seq, WalEvent Event)> ReadFromAsync(
             long sinceSeqExclusive,
@@ -462,4 +492,31 @@ public sealed class DurableOrderSubmissionServiceTests
             return base.Append(evt, preSerialisedPayload);
         }
     }
+
+    private sealed class UncommittedApprovalCrashStore : RecordingStore
+    {
+        private long? _approvalSeq;
+
+        public override long Append(
+            WalEvent evt,
+            ReadOnlyMemory<byte> preSerialisedPayload)
+        {
+            var seq = base.Append(evt, preSerialisedPayload);
+            if (evt is OutboundApprovedEvent)
+                _approvalSeq = seq;
+            return seq;
+        }
+
+        public override ValueTask FlushThroughAsync(
+            long seq,
+            CancellationToken ct = default)
+        {
+            if (_approvalSeq == seq)
+                throw new SimulatedApprovalCommitCrashException();
+            return base.FlushThroughAsync(seq, ct);
+        }
+    }
+
+    private sealed class SimulatedApprovalCommitCrashException()
+        : Exception("Simulated crash after approval append and before marker commit.");
 }

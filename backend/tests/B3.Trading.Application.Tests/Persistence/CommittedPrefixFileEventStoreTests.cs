@@ -1,4 +1,5 @@
 using System.Text.Json;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Infrastructure.Persistence;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -278,6 +279,62 @@ public sealed class CommittedPrefixFileEventStoreTests : IDisposable
         await using var final = NewStore(options);
         var replayed = Assert.Single(await ReplayEvents(final));
         Assert.True(Assert.IsType<ExecutionReportReceivedEvent>(replayed).PossibleResend);
+    }
+
+    [Fact]
+    public async Task C14_WriteCompletionAppendedButNotCommitted_RestartsAmbiguousFromCommittedFrame()
+    {
+        var options = Options("write-completion-uncommitted-tail");
+        var sequence = NewOutboundSequence();
+        await using (var store = NewStore(
+                         options,
+                         new ThrowAtBoundaryHooks(
+                             WalCommitBoundary.LogFsynced,
+                             targetSeq: 4)))
+        {
+            foreach (var evt in new WalEvent[]
+                     {
+                         sequence.Approved,
+                         sequence.Intent,
+                         sequence.Frame,
+                     })
+            {
+                var seq = store.Append(evt);
+                await store.FlushThroughAsync(seq);
+            }
+
+            var write = store.Append(sequence.Write);
+            await Assert.ThrowsAsync<WalFaultedException>(
+                () => store.FlushThroughAsync(write).AsTask());
+        }
+
+        await using var recovered = NewStore(options);
+        var replayed = await ReplayEvents(recovered);
+        Assert.Collection(
+            replayed,
+            evt => Assert.IsType<OutboundApprovedEvent>(evt),
+            evt => Assert.IsType<OutboundAttemptIntentPreparedEvent>(evt),
+            evt => Assert.IsType<OutboundFramePreparedEvent>(evt));
+        Assert.DoesNotContain(
+            replayed,
+            evt => evt is OutboundTransportWriteCompletedEvent);
+
+        var ledger = new OutboundMutationLedger(sequence.Protector);
+        foreach (var evt in replayed)
+            ApplyOutbound(ledger, evt);
+        Assert.Equal(
+            1,
+            ledger.ClassifyRecoveredAttempts(
+                new ProcessEpochId(Guid.NewGuid()),
+                sequence.Write.TimestampUtc.AddMinutes(1)));
+        Assert.True(ledger.TryGet(sequence.Approved.MutationId, out var mutation));
+        Assert.Equal(OutboundMutationState.Ambiguous, mutation!.State);
+        var attempt = Assert.Single(mutation.Attempts);
+        Assert.NotNull(attempt.FramePrepared);
+        Assert.Null(attempt.TransportWriteCompletedAtUtc);
+        Assert.Equal(
+            OutboundAmbiguityReason.DeadEpochFramePrepared,
+            attempt.AmbiguityReason);
     }
 
     [Fact]
@@ -806,6 +863,124 @@ public sealed class CommittedPrefixFileEventStoreTests : IDisposable
             1,
             TimeSpan.Zero),
     };
+
+    private static OutboundSequence NewOutboundSequence()
+    {
+        var protector = new AeadOutboundCommandProtector(
+            new OutboundCommandProtectionOptions
+            {
+                ActiveKeyId = "test",
+                ActiveKeyVersion = 1,
+                Keys =
+                [
+                    new OutboundCommandProtectionKeyOptions
+                    {
+                        KeyId = "test",
+                        Version = 1,
+                        KeyBase64 = Convert.ToBase64String(
+                            System.Security.Cryptography.SHA256.HashData(
+                                System.Text.Encoding.UTF8.GetBytes(
+                                    "committed-prefix-outbound-tests"))),
+                    },
+                ],
+            });
+        var mutationId = new OutboundMutationId(
+            Guid.Parse("11111111-2222-3333-4444-555555555555"));
+        var attemptId = new OutboundAttemptId(
+            Guid.Parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"));
+        var at = DateTimeOffset.Parse("2026-07-20T00:00:00Z");
+        var command = new OutboundCanonicalCommand
+        {
+            ClOrdId = 1,
+            SecurityId = 4321,
+            Symbol = "PETR4",
+            Side = "Buy",
+            OrderType = "Limit",
+            Quantity = 100,
+            Price = 30m,
+        };
+        var approval = OutboundApprovalFactory.Create(
+            mutationId,
+            "TEST",
+            command,
+            new SensitiveOutboundCommand { EndClientId = "alice" },
+            [OutboundSensitiveFieldRef.EndClientId],
+            protector,
+            at);
+        return new OutboundSequence(
+            protector,
+            new OutboundApprovedEvent
+            {
+                MutationId = mutationId,
+                MutationKind = OutboundMutationKind.New,
+                FirmId = "TEST",
+                EndClientRef = protector.CreateStableEndClientRef(
+                    "TEST",
+                    "alice"),
+                Origin = OutboundMutationOrigin.Rest,
+                PrimaryClOrdId = 1,
+                RecordedAtUtc = at,
+                Approval = approval,
+                TimestampUtc = at,
+            },
+            new OutboundAttemptIntentPreparedEvent
+            {
+                MutationId = mutationId,
+                AttemptId = attemptId,
+                AttemptNo = 1,
+                ClOrdId = 1,
+                ProcessEpochId = new ProcessEpochId(
+                    Guid.Parse("99999999-8888-7777-6666-555555555555")),
+                IntentPreparedAtUtc = at.AddSeconds(1),
+                TimestampUtc = at.AddSeconds(1),
+            },
+            new OutboundFramePreparedEvent
+            {
+                MutationId = mutationId,
+                AttemptId = attemptId,
+                FirmId = "TEST",
+                SessionId = 11,
+                SessionVerId = 2,
+                OutboundSeqNum = 77,
+                EncodedFrameSha256 = new string('f', 64),
+                PreparedAtUtc = at.AddSeconds(2),
+                TimestampUtc = at.AddSeconds(2),
+            },
+            new OutboundTransportWriteCompletedEvent
+            {
+                MutationId = mutationId,
+                AttemptId = attemptId,
+                CompletedAtUtc = at.AddSeconds(3),
+                GatewayReceiptVersion = 1,
+                TimestampUtc = at.AddSeconds(3),
+            });
+    }
+
+    private static void ApplyOutbound(OutboundMutationLedger ledger, WalEvent evt)
+    {
+        switch (evt)
+        {
+            case OutboundApprovedEvent approved:
+                ledger.Apply(approved);
+                break;
+            case OutboundAttemptIntentPreparedEvent intent:
+                ledger.Apply(intent);
+                break;
+            case OutboundFramePreparedEvent frame:
+                ledger.Apply(frame);
+                break;
+            case OutboundTransportWriteCompletedEvent write:
+                ledger.Apply(write);
+                break;
+        }
+    }
+
+    private sealed record OutboundSequence(
+        AeadOutboundCommandProtector Protector,
+        OutboundApprovedEvent Approved,
+        OutboundAttemptIntentPreparedEvent Intent,
+        OutboundFramePreparedEvent Frame,
+        OutboundTransportWriteCompletedEvent Write);
 
     private sealed class ThrowAtBoundaryHooks(
         WalCommitBoundary target,

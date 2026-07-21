@@ -95,12 +95,11 @@ public sealed class OutboundCrashMatrixReleaseGateTests
             [4] = Map<DurableOrderSubmissionServiceTests>(
                 nameof(DurableOrderSubmissionServiceTests.C04_CrashAfterRiskRejectBeforeCommit_ReevaluatesAsUnknownNotPriorReject)),
             [5] = Map<DurableOrderSubmissionServiceTests>(
-                nameof(DurableOrderSubmissionServiceTests.ApprovalAppendFailure_TerminalisesNoWriteBeforeMarginRelease)),
+                nameof(DurableOrderSubmissionServiceTests.C05_ApprovalAppendedButNotCommitted_RestartsPendingApprovalWithoutGatewayCall)),
             [6] = Map<NewOrderOutboundCoordinatorTests>(
                 nameof(NewOrderOutboundCoordinatorTests.RecoveryStart_EntersApprovedMutationExactlyOnce)),
-            [7] = Map<CommittedPrefixFileEventStoreTests>(
-                "CrashBeforeMarkerPublication_DoesNotReplaySurvivor",
-                WalCommitBoundary.BeforeMarkerStage),
+            [7] = Map<NewOrderOutboundCoordinatorTests>(
+                nameof(NewOrderOutboundCoordinatorTests.C07_AttemptIntentAppendedButNotCommitted_RestartsApprovedWithoutGatewayEntry)),
             [8] = Map<OutboundMutationLedgerTests>(
                 nameof(OutboundMutationLedgerTests.ColdStartCoordinator_CommitsIntentOnlyProvenUnsent_AndDoesNotResendFramePrepared)),
             [9] = Map<NewOrderOutboundCoordinatorTests>(
@@ -112,10 +111,9 @@ public sealed class OutboundCrashMatrixReleaseGateTests
             [12] = Map<NewOrderOutboundCoordinatorTests>(
                 nameof(NewOrderOutboundCoordinatorTests.ExceptionAfterFrame_IsAmbiguousAndDoesNotReleaseMargin)),
             [13] = Map<NewOrderOutboundCoordinatorTests>(
-                nameof(NewOrderOutboundCoordinatorTests.ExceptionAfterFrame_IsAmbiguousAndDoesNotReleaseMargin)),
+                nameof(NewOrderOutboundCoordinatorTests.C13_WriteReturnsSuccessBeforeCompletionAdmission_RestartsAmbiguousFromFrame)),
             [14] = Map<CommittedPrefixFileEventStoreTests>(
-                "CrashBeforeMarkerPublication_DoesNotReplaySurvivor",
-                WalCommitBoundary.MarkerStagedAndFsynced),
+                nameof(CommittedPrefixFileEventStoreTests.C14_WriteCompletionAppendedButNotCommitted_RestartsAmbiguousFromCommittedFrame)),
             [15] = Map<OutboundMutationLedgerTests>(
                 nameof(OutboundMutationLedgerTests.Recovery_IntentOnlyIsProvenUnsent_FrameAndWriteAreAmbiguous)),
             [16] = Map<OutboundMutationLedgerTests>(
