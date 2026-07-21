@@ -10,10 +10,11 @@ namespace B3.Trading.Conformance.Spec_HTTP_MarketMaker;
 /// Spec — market-maker sandbox liquidity (#683 item 4). An ordinary
 /// end-client self-deposits cash via the sandbox-only <c>POST
 /// /balance/deposit</c> endpoint, then crosses the market-maker bot's
-/// resting quotes on both sides. Guards the whole point of the overlay
+/// resting quotes: buy into the ask, buy again to prove the bot
+/// re-quoted a fresh ask after the fill, then sell into the (still
+/// resting) bid. Guards the whole point of the overlay
 /// (docker-compose.market-maker.yml): a freshly self-funded end-client can
-/// actually trade — buy AND sell — without any other counterparty present,
-/// and the bot re-quotes fast enough for a second cross to fill too.
+/// actually trade against a bot that keeps reacting to its own fills.
 /// </summary>
 /// <remarks>
 /// Gated on <see cref="ConformanceFactAttribute.RequiresMarketMakerSandbox"/>
@@ -33,6 +34,13 @@ public class MarketMakerLiquiditySpecTests
 {
     private const string Symbol = "PETR4";
     private const long CrossQuantity = 100; // must match MarketMaker__Instruments__0__QuoteLots * LotSize
+
+    // docker-compose.market-maker-conformance.yml zeroes alice's
+    // conformance.yml cash seed for this job, so this deposit is what
+    // actually funds the crosses below (~3,290 BRL notional for the
+    // tightest leg) — otherwise the self-deposit assertion would be
+    // meaningless (the trade would succeed even if deposit and margin
+    // were completely disconnected).
     private const decimal DepositAmount = 5_000.00m;
 
     // PETR4 RefPrice=30.00, SpreadTicks=5, TickSize=0.01 (docker-compose.market-maker.yml)
@@ -69,11 +77,22 @@ public class MarketMakerLiquiditySpecTests
             FillTimeout,
             $"{Symbol} buy order to fill against the market-maker bot's resting ask");
 
-        // Leg 2: the bot must have re-quoted a fresh bid after the fill
-        // above absorbed its ask-side liquidity (event-driven re-quote,
-        // see MarketMakerWorker). Selling back into that fresh bid
-        // (29.95) proves the bot is reacting to the book, not just
-        // resting a one-shot quote.
+        // Leg 2: buy again at the same marketable price. The original ask
+        // was fully consumed by leg 1, so this only fills if the bot
+        // re-quoted a fresh ask after the fill (event-driven re-quote, see
+        // MarketMakerWorker) — proving the bot reacts to the book instead
+        // of resting a one-shot quote. Crossing the SAME side twice is the
+        // point: the untouched original bid (still resting from before
+        // leg 1) would let a Sell fill here even if re-quoting were
+        // completely broken, so a Sell wouldn't prove anything.
+        var buyClOrdId2 = await SubmitOrderAndAssertAcceptedAsync(http, auth, Symbol, MarketableBuyPrice, side: "Buy");
+        await WaitForOrderAsync(http, auth, buyClOrdId2,
+            order => order.Status == "Filled" && order.CumulativeQuantity == CrossQuantity,
+            FillTimeout,
+            $"{Symbol} second buy order to fill against the market-maker bot's re-quoted ask");
+
+        // Leg 3: sell back into the bid side, confirming the bot quotes
+        // two-sided (not ask-only) liquidity.
         var sellClOrdId = await SubmitOrderAndAssertAcceptedAsync(http, auth, Symbol, MarketableSellPrice, side: "Sell");
         await WaitForOrderAsync(http, auth, sellClOrdId,
             order => order.Status == "Filled" && order.CumulativeQuantity == CrossQuantity,

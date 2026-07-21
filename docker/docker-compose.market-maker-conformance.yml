@@ -33,3 +33,15 @@ services:
     environment:
       B3T_MARKET_MAKER_SANDBOX: "true"
       B3T_REQUIRE_READY: "true"
+
+  # docker-compose.conformance.yml seeds alice with a flat 100,000.00 BRL
+  # so specs that assume pre-funded margin (e.g. RequiresSandboxMatching's
+  # same-user crosses) don't need to think about buying power. That seed
+  # would make MarketMakerLiquiditySpecTests' self-deposit assertion
+  # meaningless — the test would still pass even if POST /balance/deposit
+  # were completely disconnected from margin availability, since alice
+  # could already afford the cross without it. Zero it out here, scoped to
+  # this job/overlay only, so the deposit is what actually funds the trade.
+  trading-host:
+    environment:
+      Trading__Cash__Seeds__2__InitialAvailable: "0.00"
