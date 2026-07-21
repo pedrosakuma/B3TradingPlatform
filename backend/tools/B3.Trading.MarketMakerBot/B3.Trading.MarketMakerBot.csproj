@@ -11,6 +11,7 @@
     <PackageReference Include="Microsoft.Extensions.Hosting" />
     <PackageReference Include="Microsoft.Extensions.Options.DataAnnotations" />
     <PackageReference Include="B3.EntryPoint.Client" />
+    <PackageReference Include="B3.MarketData.WebSocketClient" />
   </ItemGroup>
 
 </Project>

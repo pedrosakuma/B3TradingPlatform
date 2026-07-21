@@ -50,6 +50,25 @@ public sealed class MarketMakerBotOptions
 
     [Required, MinLength(1)]
     public List<InstrumentConfig> Instruments { get; set; } = new();
+
+    /// <summary>Live market-data anchor. Optional by design: if unset the
+    /// bot degrades gracefully to quoting off each instrument's static
+    /// <see cref="InstrumentConfig.RefPrice"/> only (same fallback shape
+    /// as the trading-host's own market-data gate) rather than failing to
+    /// start — a co-located bot without a feed is still useful liquidity
+    /// in a pinch.</summary>
+    public MarketDataOptions MarketData { get; set; } = new();
+}
+
+/// <summary>Connection to B3MarketDataPlatform's WebSocket feed (see
+/// <c>B3.MarketData.WebSocketClient</c>). Anchors quote pricing on the
+/// live market instead of a static config value and pauses quoting on
+/// <c>SymbolDelisted</c> — see <see cref="MarketDataFeed"/>.</summary>
+public sealed class MarketDataOptions
+{
+    /// <summary>WebSocket endpoint, e.g. <c>ws://market-data-platform:8080/ws</c>.
+    /// Leave unset to run with static RefPrice anchors only.</summary>
+    public string? WsUrl { get; set; }
 }
 
 /// <summary>One instrument the bot quotes. <see cref="SecurityId"/> must
