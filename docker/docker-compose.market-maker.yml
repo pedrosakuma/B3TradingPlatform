@@ -64,7 +64,7 @@ services:
     build:
       context: ..
       dockerfile: backend/tools/B3.Trading.MarketMakerBot/Dockerfile
-    image: ${MARKET_MAKER_BOT_IMAGE:-b3-market-maker-bot:dev}
+    image: ${MARKET_MAKER_BOT_IMAGE:-ghcr.io/pedrosakuma/b3-market-maker-bot:latest}
     container_name: b3-market-maker-bot
     restart: unless-stopped
     networks:
