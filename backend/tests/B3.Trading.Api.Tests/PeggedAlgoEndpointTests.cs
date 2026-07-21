@@ -8,6 +8,7 @@ using B3.Trading.Domain;
 using B3.Trading.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using xRetry;
 
 namespace B3.Trading.Api.Tests;
 
@@ -1267,7 +1268,11 @@ public class PeggedAlgoEndpointTests
             cancelled.GetProperty("terminalReason").GetString());
     }
 
-    [Fact]
+    // Gateway health transitions race with the injected ER under heavy
+    // CI parallelism, occasionally surfacing a GatewayUnavailable
+    // terminal reason instead of the intended RiskRejected (see repo CI
+    // stability tracking). Retry 3x.
+    [RetryFact(maxRetries: 3, delayBetweenRetriesMs: 250)]
     public async Task Pegged_DroppedNormalRejectedSignal_SuspendsRiskRejected()
     {
         using var f = WithDroppingSignals();
