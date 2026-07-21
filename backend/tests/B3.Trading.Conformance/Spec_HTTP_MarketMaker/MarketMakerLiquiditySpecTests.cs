@@ -37,11 +37,15 @@ public class MarketMakerLiquiditySpecTests
 
     // docker-compose.market-maker-conformance.yml zeroes alice's
     // conformance.yml cash seed for this job, so this deposit is what
-    // actually funds the crosses below (~3,290 BRL notional for the
-    // tightest leg) — otherwise the self-deposit assertion would be
-    // meaningless (the trade would succeed even if deposit and margin
-    // were completely disconnected).
-    private const decimal DepositAmount = 5_000.00m;
+    // actually funds the crosses below — otherwise the self-deposit
+    // assertion would be meaningless (the trade would succeed even if
+    // deposit and margin were completely disconnected). The two
+    // sequential buy legs each risk-check at up to ~3,290 BRL notional
+    // (MarketableBuyPrice * CrossQuantity, the pessimistic pre-trade
+    // margin check uses the limit price, not the better fill price), so
+    // size the deposit to comfortably cover both without relying on the
+    // first leg's fill freeing exactly enough margin for the second.
+    private const decimal DepositAmount = 10_000.00m;
 
     // PETR4 RefPrice=30.00, SpreadTicks=5, TickSize=0.01 (docker-compose.market-maker.yml)
     // => bot rests Buy@29.95 / Sell@30.05. These marketable limits sit
