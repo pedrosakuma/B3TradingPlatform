@@ -12,11 +12,20 @@
 #       -f docker/docker-compose.market-maker.yml \
 #       up -d
 #
-# This overlay is ADDITIVE — it does NOT replace docker-compose.demo.yml.
-# Stacking demo + market-maker is supported and, for a sandbox, expected:
-# demo enables self-service cash deposit (#679/#681) so end-clients have
-# balance to trade with, and this overlay ensures there's a counterparty
-# on the book.
+# This is the canonical real-market sandbox recipe (#683 item 3): it
+# ALSO flips trading-host's Trading__Sandbox__AllowSelfCashDeposit to
+# true, so any logged-in end-client can self-service `POST
+# /balance/deposit` for buying power and then actually trade against
+# the bot's resting quotes. See docs/DOCKER.md "Market-maker overlay"
+# for the full walkthrough and the safety notes below.
+#
+# Do NOT additionally stack docker-compose.demo.yml on top of this
+# overlay: demo.yml flips trading-host to Mode=Mock, which serves
+# end-client orders from an in-process MockEntryPointClient instead of
+# routing them to matching-platform — so end-client orders would never
+# actually reach the order book the bot is quoting into, defeating the
+# whole point of this overlay. demo.yml's ER-injection story and this
+# overlay's real-market story are mutually exclusive.
 #
 # The bot connects on FIXP session 10102 (NOT 10101 — that one belongs to
 # trading-host's FIRM01 wiring). Both sessions are pre-declared in
@@ -34,6 +43,23 @@
 name: b3trading
 
 services:
+  trading-host:
+    environment:
+      # Self-service cash deposit (#679/#681): lets any authenticated
+      # end-client top up their own CashLedger balance via `POST
+      # /balance/deposit` instead of requiring an admin round-trip —
+      # the actual motivator for this whole overlay, since a market
+      # maker resting quotes is only useful if end-clients have buying
+      # power to trade against them. Disabled by default in the base
+      # stack; this overlay is the one place it's turned on.
+      #
+      # SAFETY: the host refuses to boot with this true in
+      # ASPNETCORE_ENVIRONMENT=Production unless
+      # Trading__Sandbox__AllowSelfCashDepositInProduction=true is ALSO
+      # set (SandboxCashDepositBootGuard) — do not flip that opt-out
+      # for a real deployment; this overlay is sandbox/demo-only.
+      Trading__Sandbox__AllowSelfCashDeposit: "true"
+
   market-maker-bot:
     build:
       context: ..

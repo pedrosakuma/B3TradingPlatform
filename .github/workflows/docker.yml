@@ -354,6 +354,7 @@ jobs:
           docker compose -f docker/docker-compose.yml -f docker/docker-compose.observability.yml -f docker/docker-compose.alert-smoke.yml config --quiet
           docker compose -f docker/docker-compose.yml -f docker/docker-compose.conformance.yml config --quiet
           docker compose -f docker/docker-compose.yml -f docker/docker-compose.demo.yml config --quiet
+          docker compose -f docker/docker-compose.yml -f docker/docker-compose.market-maker.yml config --quiet
 
       - name: docker compose auth mode wiring smoke
         run: python3 docker/test/compose-auth-config-smoke.py
