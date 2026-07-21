@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <RootNamespace>B3.Trading.SimulatorBot</RootNamespace>
+    <RootNamespace>B3.Trading.MarketMakerBot</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
     <ServerGarbageCollection>true</ServerGarbageCollection>
   </PropertyGroup>

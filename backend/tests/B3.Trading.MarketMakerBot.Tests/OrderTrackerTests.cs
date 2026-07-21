@@ -1,6 +1,6 @@
-using B3.Trading.SimulatorBot;
+using B3.Trading.MarketMakerBot;
 
-namespace B3.Trading.SimulatorBot.Tests;
+namespace B3.Trading.MarketMakerBot.Tests;
 
 public class OrderTrackerTests
 {
@@ -60,30 +60,32 @@ public class OrderTrackerTests
     }
 
     [Fact]
-    public void SnapshotStaleOpen_OnlyReturnsOldEnoughOpenOrders()
+    public void HasOpenSide_TrueWhileResting_FalseAfterTerminal()
     {
-        var clock = new FakeClock(DateTimeOffset.UtcNow);
-        var t = new OrderTracker(clock);
-        t.RegisterSubmit(1UL, "PETR4", 30m, 100, true);  // submitted now
-        clock.Advance(TimeSpan.FromSeconds(40));
-        t.RegisterSubmit(2UL, "PETR4", 30m, 100, true);  // submitted at +40s
-        clock.Advance(TimeSpan.FromSeconds(10));         // now at +50s
+        var t = new OrderTracker();
+        Assert.False(t.HasOpenSide("PETR4", isBuy: true));
 
-        // Threshold = 30s ⇒ only order #1 (submitted 50s ago) qualifies.
-        var stale = t.SnapshotStaleOpen(TimeSpan.FromSeconds(30));
-        Assert.Single(stale);
-        Assert.Equal(1UL, stale[0].ClOrdId);
+        t.RegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+        Assert.True(t.HasOpenSide("PETR4", isBuy: true));
+        Assert.False(t.HasOpenSide("PETR4", isBuy: false));
+
+        t.OnTerminal(1UL);
+        Assert.False(t.HasOpenSide("PETR4", isBuy: true));
     }
 
     [Fact]
-    public void SnapshotStaleOpen_SkipsClosedOrders()
+    public void HasOpenSide_DistinguishesSymbolAndSide()
     {
-        var clock = new FakeClock(DateTimeOffset.UtcNow);
-        var t = new OrderTracker(clock);
-        t.RegisterSubmit(1UL, "PETR4", 30m, 100, true);
-        t.OnTerminal(1UL);
-        clock.Advance(TimeSpan.FromMinutes(5));
-        Assert.Empty(t.SnapshotStaleOpen(TimeSpan.FromSeconds(30)));
+        var t = new OrderTracker();
+        t.RegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+        t.RegisterSubmit(2UL, "PETR4", 31m, 100, isBuy: false);
+        t.RegisterSubmit(3UL, "VALE3", 70m, 100, isBuy: true);
+
+        Assert.True(t.HasOpenSide("PETR4", isBuy: true));
+        Assert.True(t.HasOpenSide("PETR4", isBuy: false));
+        Assert.True(t.HasOpenSide("VALE3", isBuy: true));
+        Assert.False(t.HasOpenSide("VALE3", isBuy: false));
+        Assert.False(t.HasOpenSide("MGLU3", isBuy: true));
     }
 
     private sealed class FakeClock : TimeProvider

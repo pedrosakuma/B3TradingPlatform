@@ -1,6 +1,6 @@
-using B3.Trading.SimulatorBot;
+using B3.Trading.MarketMakerBot;
 
-namespace B3.Trading.SimulatorBot.Tests;
+namespace B3.Trading.MarketMakerBot.Tests;
 
 public class WorkerEndpointParseTests
 {

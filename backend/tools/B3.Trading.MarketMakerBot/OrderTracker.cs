@@ -1,14 +1,15 @@
 using System.Collections.Concurrent;
 
-namespace B3.Trading.SimulatorBot;
+namespace B3.Trading.MarketMakerBot;
 
 /// <summary>
 /// In-memory ClOrdID-keyed view of bot-submitted orders. The bot needs
-/// to (a) cap in-flight per symbol, (b) recognise cancels/fills from
-/// the ER stream, and (c) discover candidates for auto-cancel —
-/// <see cref="OrderTracker"/> is the single source of truth for all
-/// three. State lives in process; no persistence beyond what the SDK's
-/// session state store gives us for SessionVerId.
+/// to (a) recognise fills/cancels/rejects from the ER stream so it can
+/// immediately re-quote the affected side, and (b) let the defensive
+/// reconciliation loop discover a (symbol, side) that currently has no
+/// resting order — <see cref="OrderTracker"/> is the single source of
+/// truth for both. State lives in process; no persistence beyond what
+/// the SDK's session state store gives us for SessionVerId.
 /// </summary>
 public sealed class OrderTracker
 {
@@ -29,6 +30,20 @@ public sealed class OrderTracker
                 count++;
         }
         return count;
+    }
+
+    /// <summary>True when at least one order is currently tracked as open
+    /// for this (symbol, side). The market maker keeps at most one
+    /// resting order per side per instrument, so this doubles as "is this
+    /// side currently quoted".</summary>
+    public bool HasOpenSide(string symbol, bool isBuy)
+    {
+        foreach (var o in _orders.Values)
+        {
+            if (o.IsOpen && o.IsBuy == isBuy && string.Equals(o.Symbol, symbol, StringComparison.Ordinal))
+                return true;
+        }
+        return false;
     }
 
     public void RegisterSubmit(ulong clOrdId, string symbol, decimal price, long quantity, bool isBuy)
@@ -90,19 +105,6 @@ public sealed class OrderTracker
         }
     }
 
-    /// <summary>Snapshot the open orders older than <paramref name="threshold"/>
-    /// at the current clock — candidates for auto-cancel.</summary>
-    public IReadOnlyList<TrackedOrder> SnapshotStaleOpen(TimeSpan threshold)
-    {
-        var cutoff = _clock.GetUtcNow() - threshold;
-        var result = new List<TrackedOrder>();
-        foreach (var o in _orders.Values)
-        {
-            if (o.IsOpen && o.SubmittedAtUtc <= cutoff)
-                result.Add(o);
-        }
-        return result;
-    }
 }
 
 public sealed class TrackedOrder
