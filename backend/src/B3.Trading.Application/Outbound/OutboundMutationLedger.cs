@@ -119,7 +119,7 @@ public sealed class OutboundMutationLedger
         {
             if (_mutations.TryGetValue(evt.MutationId, out var existing))
             {
-                if (IsLegacyState(existing.State)
+                if (IsApprovalReplaceableState(existing.State)
                     && existing.PrimaryClOrdId == evt.PrimaryClOrdId
                     && existing.Kind == evt.MutationKind)
                 {
@@ -134,7 +134,7 @@ public sealed class OutboundMutationLedger
             if (_byClOrdId.TryGetValue(evt.PrimaryClOrdId, out var existingMutation))
             {
                 if (_mutations.TryGetValue(existingMutation, out var legacy)
-                    && IsLegacyState(legacy.State))
+                    && IsApprovalReplaceableState(legacy.State))
                 {
                     RemoveMutationIndexes(legacy);
                     _mutations.Remove(existingMutation);
@@ -673,6 +673,20 @@ public sealed class OutboundMutationLedger
             if (evt.Synthetic)
             {
                 if (hasDirect
+                    && mutation.State == OutboundMutationState.RecordedPendingApproval
+                    && evt.ClOrdId == mutation.PrimaryClOrdId)
+                {
+                    Terminalise(
+                        mutation,
+                        OutboundMutationState.OperatorResolved,
+                        evt.TimestampUtc,
+                        "OutboundProvenNoWrite",
+                        DigestEvidence(
+                            $"{mutation.MutationId}|{evt.ClOrdId}|{evt.RejectReason}"),
+                        venueOrderId: null);
+                    return new(InboundVenueEvidenceApplyStatus.RecordedMatched);
+                }
+                if (hasDirect
                     && IsLegacyState(mutation.State)
                     && evt.ClOrdId == mutation.PrimaryClOrdId)
                 {
@@ -1158,9 +1172,17 @@ public sealed class OutboundMutationLedger
     public void ImportLegacyNew(OrderSubmittedEvent evt)
     {
         ArgumentNullException.ThrowIfNull(evt);
+        var durableMutationId = evt.MutationId is { Value: var value } mutationId
+            && value != Guid.Empty
+                ? mutationId
+                : (OutboundMutationId?)null;
         ImportLegacy(
             OutboundMutationKind.New, evt.FirmId, evt.ClOrdId, null,
-            evt.TimestampUtc, OutboundMutationState.LegacyUnknown);
+            evt.TimestampUtc,
+            durableMutationId is not null
+                ? OutboundMutationState.RecordedPendingApproval
+                : OutboundMutationState.LegacyUnknown,
+            durableMutationId);
     }
 
     public void ImportLegacyCancel(
@@ -2873,12 +2895,14 @@ public sealed class OutboundMutationLedger
 
     private static bool StateRequiresReconciliation(OutboundMutationState state) =>
         state is OutboundMutationState.Ambiguous
+            or OutboundMutationState.RecordedPendingApproval
             or OutboundMutationState.LegacyUnknown
             or OutboundMutationState.LegacyUnknownCancel
             or OutboundMutationState.LegacyUnknownReplace;
 
     private static bool IsAlgoActionBlocking(OutboundMutationState state) =>
-        state is OutboundMutationState.ApprovedToSend
+        state is OutboundMutationState.RecordedPendingApproval
+            or OutboundMutationState.ApprovedToSend
             or OutboundMutationState.AttemptIntentPrepared
             or OutboundMutationState.FramePrepared
             or OutboundMutationState.ProvenUnsent
@@ -2891,6 +2915,10 @@ public sealed class OutboundMutationLedger
         state is OutboundMutationState.LegacyUnknown
             or OutboundMutationState.LegacyUnknownCancel
             or OutboundMutationState.LegacyUnknownReplace;
+
+    private static bool IsApprovalReplaceableState(OutboundMutationState state) =>
+        state == OutboundMutationState.RecordedPendingApproval
+        || IsLegacyState(state);
 
     private static bool IsTerminal(OutboundMutationState state) =>
         state is OutboundMutationState.VenueAcknowledged

@@ -11,6 +11,81 @@ namespace B3.Trading.Application.Tests;
 public sealed class DurableOrderSubmissionServiceTests
 {
     [Fact]
+    public async Task C01_CrashBeforeRecordedIntentAdmission_RetryReusesUncommittedClOrdId()
+    {
+        var crashed = CreateFixture(
+            Array.Empty<IRiskCheck>(),
+            faultInjector: new ThrowingFaultInjector(
+                OutboundSubmissionFaultPoint.BeforeRecordedIntentAdmission));
+
+        await Assert.ThrowsAsync<SimulatedCrashException>(
+            () => crashed.Service.SubmitAsync(Request(), CancellationToken.None));
+
+        Assert.Empty(crashed.Store.Events);
+        Assert.Equal(0, crashed.Gateway.CallCount);
+
+        var restarted = CreateFixture(Array.Empty<IRiskCheck>());
+        var retry = await restarted.Service.SubmitAsync(
+            Request(),
+            CancellationToken.None);
+
+        Assert.Equal(OrderSubmissionResultKind.Accepted, retry.Kind);
+        Assert.Equal(1UL, retry.ClOrdId);
+        Assert.Equal(1, restarted.Gateway.CallCount);
+    }
+
+    [Fact]
+    public async Task C03_CrashAfterIntentCommitBeforeRisk_RestartsFailClosedWithoutPolicyVersion()
+    {
+        var fixture = CreateFixture(
+            Array.Empty<IRiskCheck>(),
+            faultInjector: new ThrowingFaultInjector(
+                OutboundSubmissionFaultPoint.AfterRecordedIntentCommittedBeforeRisk));
+
+        await Assert.ThrowsAsync<SimulatedCrashException>(
+            () => fixture.Service.SubmitAsync(Request(), CancellationToken.None));
+
+        var submitted = Assert.IsType<OrderSubmittedEvent>(
+            Assert.Single(fixture.Store.Events));
+        Assert.Equal(0, fixture.Gateway.CallCount);
+
+        var recovered = RecoverIntentOnly(submitted);
+        var mutation = Assert.Single(recovered.SnapshotMutations());
+        Assert.Equal(
+            OutboundMutationState.RecordedPendingApproval,
+            mutation.State);
+        Assert.True(mutation.RequiresReconciliation);
+        Assert.Equal(1, recovered.ReadinessBlockingCount);
+    }
+
+    [Fact]
+    public async Task C04_CrashAfterRiskRejectBeforeCommit_ReevaluatesAsPendingApprovalNotPriorReject()
+    {
+        var fixture = CreateFixture(
+            [new RejectingRiskCheck()],
+            faultInjector: new ThrowingFaultInjector(
+                OutboundSubmissionFaultPoint.AfterRiskRejectedBeforeRejectionCommit));
+
+        await Assert.ThrowsAsync<SimulatedCrashException>(
+            () => fixture.Service.SubmitAsync(Request(), CancellationToken.None));
+
+        var submitted = Assert.IsType<OrderSubmittedEvent>(
+            Assert.Single(fixture.Store.Events));
+        Assert.DoesNotContain(
+            fixture.Store.Events,
+            evt => evt is ExecutionReportReceivedEvent);
+        Assert.Equal(0, fixture.Gateway.CallCount);
+
+        var recovered = RecoverIntentOnly(submitted);
+        var mutation = Assert.Single(recovered.SnapshotMutations());
+        Assert.Equal(
+            OutboundMutationState.RecordedPendingApproval,
+            mutation.State);
+        Assert.Null(mutation.Resolution);
+        Assert.True(mutation.RequiresReconciliation);
+    }
+
+    [Fact]
     public async Task ApprovedSubmit_CommitsPendingApprovalIntentFrameAndWriteInOrder()
     {
         var fixture = CreateFixture(Array.Empty<IRiskCheck>());
@@ -50,6 +125,23 @@ public sealed class DurableOrderSubmissionServiceTests
             });
         Assert.DoesNotContain(fixture.Store.Events, e => e is OutboundApprovedEvent);
         Assert.Equal(0, fixture.Gateway.CallCount);
+
+        var submitted = Assert.IsType<OrderSubmittedEvent>(fixture.Store.Events[0]);
+        var rejection = Assert.IsType<ExecutionReportReceivedEvent>(
+            fixture.Store.Events[1]);
+        var recovered = new OutboundMutationLedger();
+        recovered.ImportLegacyNew(submitted);
+        var replayResult = recovered.ApplyVenueAcknowledgement(rejection);
+        Assert.Equal(
+            InboundVenueEvidenceApplyStatus.RecordedMatched,
+            replayResult.Status);
+        var mutationId = Assert.IsType<OutboundMutationId>(submitted.MutationId);
+        Assert.True(recovered.TryGet(mutationId, out var mutation));
+        Assert.Equal(OutboundMutationState.OperatorResolved, mutation!.State);
+        Assert.Equal(
+            "OutboundProvenNoWrite",
+            mutation.Resolution?.EvidenceKind);
+        Assert.False(mutation.RequiresReconciliation);
     }
 
     [Fact]
@@ -133,6 +225,42 @@ public sealed class DurableOrderSubmissionServiceTests
     }
 
     [Fact]
+    public async Task C05_ApprovalAppendedButNotCommitted_RestartsPendingApprovalWithoutGatewayCall()
+    {
+        var store = new UncommittedApprovalCrashStore();
+        var fixture = CreateFixture(Array.Empty<IRiskCheck>(), store: store);
+
+        await Assert.ThrowsAsync<SimulatedApprovalCommitCrashException>(
+            () => fixture.Service.SubmitAsync(Request(), CancellationToken.None));
+
+        Assert.Collection(
+            store.Events,
+            evt => Assert.IsType<OrderSubmittedEvent>(evt),
+            evt => Assert.IsType<OutboundApprovedEvent>(evt));
+        Assert.Equal(1, store.LastCommittedSeq);
+        Assert.Equal(0, fixture.Gateway.CallCount);
+
+        var submitted = Assert.IsType<OrderSubmittedEvent>(
+            Assert.Single(store.CommittedEvents));
+        Assert.Equal(1UL, submitted.ClOrdId);
+        Assert.DoesNotContain(
+            store.CommittedEvents,
+            evt => evt is OutboundApprovedEvent);
+
+        var recovered = new OutboundMutationLedger();
+        foreach (var evt in store.CommittedEvents)
+            recovered.ImportLegacyNew(Assert.IsType<OrderSubmittedEvent>(evt));
+        var recoveredMutationId = Assert.IsType<OutboundMutationId>(
+            submitted.MutationId);
+        Assert.True(recovered.TryGet(recoveredMutationId, out var mutation));
+        Assert.Equal(
+            OutboundMutationState.RecordedPendingApproval,
+            mutation!.State);
+        Assert.Empty(mutation.Attempts);
+        Assert.True(mutation.RequiresReconciliation);
+    }
+
+    [Fact]
     public async Task NoWriteTerminalCommitFailure_HoldsMarginAndDrains()
     {
         var fixture = CreateFixture(
@@ -154,7 +282,8 @@ public sealed class DurableOrderSubmissionServiceTests
     private static Fixture CreateFixture(
         IEnumerable<IRiskCheck> checks,
         CompletingGateway? gateway = null,
-        RecordingStore? store = null)
+        RecordingStore? store = null,
+        IOutboundSubmissionFaultInjector? faultInjector = null)
     {
         var protector = new AeadOutboundCommandProtector(
             new OutboundCommandProtectionOptions
@@ -206,8 +335,17 @@ public sealed class DurableOrderSubmissionServiceTests
             NullLogger<OrderSubmissionService>.Instance,
             outboundLedger: ledger,
             approvalFactory: new NewOrderApprovalFactory(protector),
-            outboundCoordinator: coordinator);
+            outboundCoordinator: coordinator,
+            faultInjector: faultInjector);
         return new Fixture(service, store, gateway, margin, book, ledger, drain);
+    }
+
+    private static OutboundMutationLedger RecoverIntentOnly(
+        OrderSubmittedEvent submitted)
+    {
+        var ledger = new OutboundMutationLedger();
+        ledger.ImportLegacyNew(submitted);
+        return ledger;
     }
 
     private static OrderSubmissionRequest Request() =>
@@ -240,6 +378,19 @@ public sealed class DurableOrderSubmissionServiceTests
         public RiskDecision Check(RiskContext ctx) =>
             RiskDecision.Reject("test_reject", "rejected by test");
     }
+
+    private sealed class ThrowingFaultInjector(OutboundSubmissionFaultPoint target)
+        : IOutboundSubmissionFaultInjector
+    {
+        public void OnBoundary(OutboundSubmissionFaultPoint point)
+        {
+            if (point == target)
+                throw new SimulatedCrashException(point);
+        }
+    }
+
+    private sealed class SimulatedCrashException(OutboundSubmissionFaultPoint point)
+        : Exception($"Simulated process crash at {point}.");
 
     private class CompletingGateway : IExchangeGateway
     {
@@ -328,9 +479,12 @@ public sealed class DurableOrderSubmissionServiceTests
     private class RecordingStore : IEventStore
     {
         private long _seq;
+        private long _lastCommittedSeq;
         public List<WalEvent> Events { get; } = new();
+        public IReadOnlyList<WalEvent> CommittedEvents =>
+            Events.Take(checked((int)_lastCommittedSeq)).ToArray();
         public long CurrentSeq => _seq;
-        public long LastCommittedSeq => _seq;
+        public virtual long LastCommittedSeq => _lastCommittedSeq;
 
         public long Append(WalEvent evt) => Append(evt, ReadOnlyMemory<byte>.Empty);
 
@@ -343,8 +497,11 @@ public sealed class DurableOrderSubmissionServiceTests
         public ValueTask FlushAsync(CancellationToken ct = default) =>
             ValueTask.CompletedTask;
 
-        public ValueTask FlushThroughAsync(long seq, CancellationToken ct = default) =>
-            ValueTask.CompletedTask;
+        public virtual ValueTask FlushThroughAsync(long seq, CancellationToken ct = default)
+        {
+            _lastCommittedSeq = Math.Max(_lastCommittedSeq, seq);
+            return ValueTask.CompletedTask;
+        }
 
         public async IAsyncEnumerable<(long Seq, WalEvent Event)> ReadFromAsync(
             long sinceSeqExclusive,
@@ -368,4 +525,31 @@ public sealed class DurableOrderSubmissionServiceTests
             return base.Append(evt, preSerialisedPayload);
         }
     }
+
+    private sealed class UncommittedApprovalCrashStore : RecordingStore
+    {
+        private long? _approvalSeq;
+
+        public override long Append(
+            WalEvent evt,
+            ReadOnlyMemory<byte> preSerialisedPayload)
+        {
+            var seq = base.Append(evt, preSerialisedPayload);
+            if (evt is OutboundApprovedEvent)
+                _approvalSeq = seq;
+            return seq;
+        }
+
+        public override ValueTask FlushThroughAsync(
+            long seq,
+            CancellationToken ct = default)
+        {
+            if (_approvalSeq == seq)
+                throw new SimulatedApprovalCommitCrashException();
+            return base.FlushThroughAsync(seq, ct);
+        }
+    }
+
+    private sealed class SimulatedApprovalCommitCrashException()
+        : Exception("Simulated crash after approval append and before marker commit.");
 }

@@ -108,6 +108,16 @@ public sealed record NewOrderDispatchResult(
     NewOrderDispatchOutcome Outcome,
     Exception? Exception = null);
 
+public enum NewOrderOutboundFaultPoint
+{
+    AfterTransportWriteBeforeCompletionAdmission,
+}
+
+public interface INewOrderOutboundFaultInjector
+{
+    void OnBoundary(NewOrderOutboundFaultPoint point);
+}
+
 public sealed class NewOrderOutboundCoordinator : IHostedService
 {
     private readonly OutboundMutationLedger _ledger;
@@ -124,6 +134,7 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
     private readonly ILogger<NewOrderOutboundCoordinator> _logger;
     private readonly IOutboundGatewayReadiness _gatewayReadiness;
     private readonly IOutboundRecoveryGate _recovery;
+    private readonly INewOrderOutboundFaultInjector? _faultInjector;
     private readonly CancellationTokenSource _recoveryShutdown = new();
     private readonly object _recoveryGate = new();
     private readonly object _lifecycleGate = new();
@@ -148,7 +159,8 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
         IocFokWatchdog? iocFok = null,
         TimeProvider? clock = null,
         IOutboundGatewayReadiness? gatewayReadiness = null,
-        IOutboundRecoveryGate? recovery = null)
+        IOutboundRecoveryGate? recovery = null,
+        INewOrderOutboundFaultInjector? faultInjector = null)
     {
         _ledger = ledger;
         _epoch = epoch;
@@ -165,6 +177,7 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
         _gatewayReadiness = gatewayReadiness
             ?? ImmediateOutboundGatewayReadiness.Instance;
         _recovery = recovery ?? ImmediateOutboundRecoveryGate.Instance;
+        _faultInjector = faultInjector;
     }
 
     public async Task<NewOrderDispatchResult> EnqueueAsync(
@@ -400,6 +413,8 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
             if (committedFrame is null || receipt.Frame != committedFrame)
                 return MarkAmbiguous(mutation, attemptId, "gateway receipt did not match committed frame");
 
+            _faultInjector?.OnBoundary(
+                NewOrderOutboundFaultPoint.AfterTransportWriteBeforeCompletionAdmission);
             var completedAt = _clock.GetUtcNow();
             var completed = new OutboundTransportWriteCompletedEvent
             {

@@ -157,6 +157,7 @@ public enum OutboundMutationState
     LegacyUnknownCancel,
     LegacyUnknownReplace,
     LegacyTerminal,
+    RecordedPendingApproval,
 }
 
 public enum OutboundSensitiveFieldRef

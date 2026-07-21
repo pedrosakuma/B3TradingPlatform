@@ -34,6 +34,13 @@ internal sealed class DockerVenueTransportController
         return new DetachedMatchingNetwork(this, network);
     }
 
+    public async Task<PausedMatchingContainer> PauseMatchingAsync(CancellationToken ct = default)
+    {
+        await EnsureDockerAvailableAsync(ct);
+        await RunDockerAsync(new[] { "pause", _matchingContainer }, ct);
+        return new PausedMatchingContainer(this);
+    }
+
     public async Task<DetachedMarketDataNetwork> DisconnectMarketDataAsync(CancellationToken ct = default)
     {
         await EnsureDockerAvailableAsync(ct);
@@ -195,6 +202,24 @@ internal sealed class DockerVenueTransportController
         {
             throw new InvalidOperationException(
                 $"docker restart {_matchingContainer} exited {process.ExitCode}.{Environment.NewLine}stdout:{Environment.NewLine}{stdout}{Environment.NewLine}stderr:{Environment.NewLine}{stderr}");
+        }
+
+        await WaitForContainerReadyAsync(_matchingContainer, readinessTimeout, ct);
+    }
+
+    private async Task RestartPausedMatchingAsync(
+        TimeSpan readinessTimeout,
+        CancellationToken ct)
+    {
+        await RunDockerAsync(new[] { "kill", _matchingContainer }, ct);
+        var start = await RunDockerAsync(
+            new[] { "start", _matchingContainer },
+            ct,
+            allowNonZeroExit: true);
+        if (start.ExitCode != 0 && !IsBenignStartConflict(start))
+        {
+            throw new InvalidOperationException(
+                $"docker start {_matchingContainer} exited {start.ExitCode}.{Environment.NewLine}stdout:{Environment.NewLine}{start.StdOut}{Environment.NewLine}stderr:{Environment.NewLine}{start.StdErr}");
         }
 
         await WaitForContainerReadyAsync(_matchingContainer, readinessTimeout, ct);
@@ -549,6 +574,39 @@ internal sealed class DockerVenueTransportController
         {
             if (!_reconnected)
                 await ReconnectAsync();
+        }
+    }
+
+    internal sealed class PausedMatchingContainer : IAsyncDisposable
+    {
+        private readonly DockerVenueTransportController _owner;
+        private bool _resumed;
+
+        internal PausedMatchingContainer(DockerVenueTransportController owner)
+        {
+            _owner = owner;
+        }
+
+        public async Task RestartAsync(
+            TimeSpan readinessTimeout,
+            CancellationToken ct = default)
+        {
+            if (_resumed)
+                return;
+
+            await _owner.RestartPausedMatchingAsync(readinessTimeout, ct);
+            _resumed = true;
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (_resumed)
+                return;
+
+            await _owner.RunDockerAsync(
+                new[] { "unpause", _owner._matchingContainer },
+                CancellationToken.None,
+                allowNonZeroExit: true);
         }
     }
 
