@@ -204,6 +204,14 @@ injection vs. a real matching engine) and are not meant to compose.
 | `trading-host` | stays `Mode=Real` (base default); `Trading__Sandbox__AllowSelfCashDeposit` flipped to `true` |
 | `market-maker-bot` | FIXP session 10102; one resting bid + ask per configured instrument; connects to the `marketdata` WS feed (best-effort) to anchor quotes on the live reference price instead of the static config `RefPrice` |
 
+`market-maker-bot` is now published the same way as `trading-host`/`frontend`:
+CI builds+pushes a `candidate-<sha>` digest in the `trading-host` job,
+`market-maker-conformance` proves that exact digest boots and negotiates
+against the real stack, and `promote` retags the tested digest to
+`ghcr.io/pedrosakuma/b3-market-maker-bot:latest` (+ semver/branch tags) on
+merge to `main` — set `MARKET_MAKER_BOT_IMAGE=ghcr.io/pedrosakuma/b3-market-maker-bot:latest`
+(the compose file's own default) to run it without a local build.
+
 ### Safety
 
 `Trading__Sandbox__AllowSelfCashDeposit=true` lets **any** authenticated

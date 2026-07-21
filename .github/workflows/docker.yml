@@ -62,6 +62,7 @@ jobs:
     outputs:
       host_digest: ${{ steps.host-candidate.outputs.digest }}
       frontend_digest: ${{ steps.frontend-candidate.outputs.digest }}
+      market_maker_bot_digest: ${{ steps.market-maker-bot-candidate.outputs.digest }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -138,6 +139,54 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,scope=frontend,mode=max
+
+      - name: Compute PR market-maker-bot image metadata
+        if: github.event_name == 'pull_request'
+        id: mm-bot-meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/b3-market-maker-bot
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Validate pull-request market-maker-bot build
+        # #683/#687 follow-up: the bot was only ever built ephemerally
+        # inside the market-maker-conformance job (`docker compose build`),
+        # never published — an operator standing up the overlay outside
+        # CI had to build it locally too. Give it the same
+        # candidate/promote treatment as trading-host and the frontend.
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: backend/tools/B3.Trading.MarketMakerBot/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: false
+          tags: ${{ steps.mm-bot-meta.outputs.tags }}
+          labels: ${{ steps.mm-bot-meta.outputs.labels }}
+          cache-from: type=gha,scope=market-maker-bot
+          cache-to:   type=gha,scope=market-maker-bot,mode=max
+
+      - name: Build immutable market-maker-bot candidate
+        if: github.event_name != 'pull_request'
+        id: market-maker-bot-candidate
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: backend/tools/B3.Trading.MarketMakerBot/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/b3-market-maker-bot:candidate-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=market-maker-bot
+          cache-to: type=gha,scope=market-maker-bot,mode=max
 
   identity-directory-arm64-smoke:
     name: ARM64 identity directory smoke
@@ -765,9 +814,17 @@ jobs:
         # trading-host reports healthy; the bot itself only needs
         # matching-platform healthy + marketdata started (see its
         # depends_on), so it's up well before conformance runs.
+        #
+        # On push events, pull the immutable market-maker-bot candidate
+        # the trading-host job just built/pushed instead of rebuilding it
+        # here from source (mirrors trading-host's own candidate-pull
+        # pattern) — this is the run that proves the published image
+        # actually boots and negotiates, not just that it compiles.
         env:
           CANDIDATE_DIGEST: ${{ needs.trading-host.outputs.host_digest }}
           HOST_IMAGE: ghcr.io/${{ github.repository_owner }}/b3-trading-host
+          MM_BOT_CANDIDATE_DIGEST: ${{ needs.trading-host.outputs.market_maker_bot_digest }}
+          MM_BOT_IMAGE: ghcr.io/${{ github.repository_owner }}/b3-market-maker-bot
         run: |
           set -euo pipefail
           compose=(
@@ -778,16 +835,21 @@ jobs:
             -f docker/docker-compose.conformance.yml
             -f docker/docker-compose.market-maker-conformance.yml
           )
-          "${compose[@]}" build conformance market-maker-bot
+          "${compose[@]}" build conformance
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            "${compose[@]}" build market-maker-bot
             "${compose[@]}" up -d --build --wait trading-host market-maker-bot
           else
             test -n "$CANDIDATE_DIGEST"
+            test -n "$MM_BOT_CANDIDATE_DIGEST"
             export TRADING_IMAGE="$HOST_IMAGE@$CANDIDATE_DIGEST"
+            export MARKET_MAKER_BOT_IMAGE="$MM_BOT_IMAGE@$MM_BOT_CANDIDATE_DIGEST"
             docker pull "$TRADING_IMAGE"
+            docker pull "$MARKET_MAKER_BOT_IMAGE"
             "${compose[@]}" up -d --no-build --wait trading-host
             "${compose[@]}" up -d --no-build market-maker-bot
             test "$(docker inspect -f '{{.Config.Image}}' b3-trading-host)" = "$TRADING_IMAGE"
+            test "$(docker inspect -f '{{.Config.Image}}' b3-market-maker-bot)" = "$MARKET_MAKER_BOT_IMAGE"
           fi
 
       - name: Run conformance
@@ -933,6 +995,34 @@ jobs:
           DIGEST: ${{ needs.trading-host.outputs.frontend_digest }}
           IMAGE: ghcr.io/${{ github.repository_owner }}/b3-trading-frontend
           TAGS: ${{ steps.frontend-meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          test -n "$DIGEST"
+          while IFS= read -r tag; do
+            [[ -n "$tag" ]] && docker buildx imagetools create --tag "$tag" "$IMAGE@$DIGEST"
+          done <<<"$TAGS"
+
+      - name: Compute market-maker-bot promotion tags
+        id: market-maker-bot-meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/b3-market-maker-bot
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Promote tested market-maker-bot digest
+        # market-maker-conformance already proved this exact digest boots
+        # and negotiates against the real stack (see that job's bring-up
+        # step) — same tested-artifact promotion as host/frontend above,
+        # just no rebuild.
+        env:
+          DIGEST: ${{ needs.trading-host.outputs.market_maker_bot_digest }}
+          IMAGE: ghcr.io/${{ github.repository_owner }}/b3-market-maker-bot
+          TAGS: ${{ steps.market-maker-bot-meta.outputs.tags }}
         run: |
           set -euo pipefail
           test -n "$DIGEST"
