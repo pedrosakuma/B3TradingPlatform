@@ -161,12 +161,13 @@ internal sealed class MarketMakerWorker : BackgroundService
                     var symbol = known ? o.Symbol : "?";
                     MarketMakerMetrics.Rejects.Add(1, new KeyValuePair<string, object?>("symbol", symbol));
                     _tracker.OnTerminal(r.ClOrdID.Value);
-                    // A rejected quote must still be replaced — otherwise a
-                    // transient reject (e.g. a trading halt) permanently
-                    // empties that side. The reconcile loop would
-                    // eventually catch this too, but re-quoting immediately
-                    // keeps the gap minimal.
-                    if (known) await RequoteAsync(client, o.Symbol, o.IsBuy, ct);
+                    // Deliberately do NOT re-quote immediately here: an
+                    // instrument-level reject (bad config, halt, risk
+                    // limit) would otherwise repeat identically forever,
+                    // flooding the session with reject→submit→reject
+                    // churn. The low-frequency ReconcileLoopAsync is the
+                    // right place to retry a rejected side — it naturally
+                    // rate-limits retries to ReconcileInterval.
                     break;
                 }
             case UpModels.OrderModified m:
@@ -214,9 +215,15 @@ internal sealed class MarketMakerWorker : BackgroundService
         if (price <= 0m) return; // pathological config; skip silently.
 
         var clOrdId = (ulong)Interlocked.Increment(ref _nextClOrdId);
-        // Register BEFORE the SDK await — the matching ER can race ahead
-        // of the await on a fast wire (mirrors trading-host's pattern).
-        _tracker.RegisterSubmit(clOrdId, instr.Symbol, price, quantity, isBuy);
+        // Atomic check-and-reserve: if another caller (the event-driven
+        // requote path or the reconcile safety net) already reserved this
+        // (symbol, side) between our HasOpenSide check and now, this
+        // returns false and we skip — preventing two resting orders on
+        // the same side. Register BEFORE the SDK await — the matching ER
+        // can race ahead of the await on a fast wire (mirrors
+        // trading-host's pattern).
+        if (!_tracker.TryRegisterSubmit(clOrdId, instr.Symbol, price, quantity, isBuy))
+            return;
         var req = new UpModels.NewOrderRequest
         {
             ClOrdID = new UpModels.ClOrdID(clOrdId),

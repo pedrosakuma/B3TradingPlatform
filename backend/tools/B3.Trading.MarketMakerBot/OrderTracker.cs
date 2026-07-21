@@ -10,10 +10,19 @@ namespace B3.Trading.MarketMakerBot;
 /// resting order — <see cref="OrderTracker"/> is the single source of
 /// truth for both. State lives in process; no persistence beyond what
 /// the SDK's session state store gives us for SessionVerId.
+///
+/// <see cref="_activeSides"/> is the atomicity guard: the event-driven
+/// requote path and the defensive reconcile loop can race to replace
+/// the same (symbol, side), so reserving a side is a single
+/// check-and-set under <see cref="_sideLock"/> via
+/// <see cref="TryRegisterSubmit"/> rather than a separate "is it open"
+/// check followed by a separate submit.
 /// </summary>
 public sealed class OrderTracker
 {
     private readonly ConcurrentDictionary<ulong, TrackedOrder> _orders = new();
+    private readonly HashSet<(string Symbol, bool IsBuy)> _activeSides = new();
+    private readonly object _sideLock = new();
     private readonly TimeProvider _clock;
 
     public OrderTracker(TimeProvider? clock = null)
@@ -32,22 +41,34 @@ public sealed class OrderTracker
         return count;
     }
 
-    /// <summary>True when at least one order is currently tracked as open
-    /// for this (symbol, side). The market maker keeps at most one
-    /// resting order per side per instrument, so this doubles as "is this
-    /// side currently quoted".</summary>
+    /// <summary>True when this (symbol, side) currently has a resting
+    /// order or a just-submitted-but-not-yet-acknowledged one. The
+    /// market maker keeps at most one resting order per side per
+    /// instrument, so this doubles as "is this side currently quoted /
+    /// spoken for".</summary>
     public bool HasOpenSide(string symbol, bool isBuy)
     {
-        foreach (var o in _orders.Values)
+        lock (_sideLock)
         {
-            if (o.IsOpen && o.IsBuy == isBuy && string.Equals(o.Symbol, symbol, StringComparison.Ordinal))
-                return true;
+            return _activeSides.Contains((symbol, isBuy));
         }
-        return false;
     }
 
-    public void RegisterSubmit(ulong clOrdId, string symbol, decimal price, long quantity, bool isBuy)
+    /// <summary>
+    /// Atomically reserves (symbol, side) and registers the order if — and
+    /// only if — that side wasn't already spoken for. Returns <c>false</c>
+    /// without registering anything when the side is already active, so
+    /// the event-driven requote path and the reconcile safety net can
+    /// never both submit a replacement for the same side.
+    /// </summary>
+    public bool TryRegisterSubmit(ulong clOrdId, string symbol, decimal price, long quantity, bool isBuy)
     {
+        lock (_sideLock)
+        {
+            if (!_activeSides.Add((symbol, isBuy)))
+                return false;
+        }
+
         var now = _clock.GetUtcNow();
         _orders[clOrdId] = new TrackedOrder
         {
@@ -62,6 +83,7 @@ public sealed class OrderTracker
             IsOpen = true,
             Leaves = quantity,
         };
+        return true;
     }
 
     /// <summary>Returns true when this order is currently tracked as the
@@ -83,7 +105,8 @@ public sealed class OrderTracker
         if (_orders.TryGetValue(clOrdId, out var o))
         {
             o.Leaves = leaves;
-            o.IsOpen = leaves > 0;
+            if (leaves > 0) o.IsOpen = true;
+            else Close(o);
         }
     }
 
@@ -92,7 +115,8 @@ public sealed class OrderTracker
         if (_orders.TryGetValue(clOrdId, out var o))
         {
             o.Leaves = leaves;
-            o.IsOpen = leaves > 0;
+            if (leaves > 0) o.IsOpen = true;
+            else Close(o);
         }
     }
 
@@ -101,10 +125,20 @@ public sealed class OrderTracker
         if (_orders.TryGetValue(clOrdId, out var o))
         {
             o.Leaves = 0;
-            o.IsOpen = false;
+            Close(o);
         }
     }
 
+    /// <summary>Marks the order closed and frees its (symbol, side)
+    /// reservation so a future requote/reconcile pass may take it.</summary>
+    private void Close(TrackedOrder o)
+    {
+        o.IsOpen = false;
+        lock (_sideLock)
+        {
+            _activeSides.Remove((o.Symbol, o.IsBuy));
+        }
+    }
 }
 
 public sealed class TrackedOrder
@@ -118,3 +152,4 @@ public sealed class TrackedOrder
     public DateTimeOffset SubmittedAtUtc { get; set; }
     public bool IsOpen { get; set; }
 }
+

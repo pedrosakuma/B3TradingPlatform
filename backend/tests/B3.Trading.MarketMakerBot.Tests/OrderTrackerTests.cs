@@ -8,19 +8,41 @@ public class OrderTrackerTests
     public void RegisterSubmit_ReflectedInInFlightCount()
     {
         var t = new OrderTracker();
-        t.RegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
-        t.RegisterSubmit(2UL, "PETR4", 30m, 100, isBuy: true);
-        t.RegisterSubmit(3UL, "VALE3", 70m, 100, isBuy: false);
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+        t.TryRegisterSubmit(2UL, "PETR4", 30.5m, 100, isBuy: false);
+        t.TryRegisterSubmit(3UL, "VALE3", 70m, 100, isBuy: false);
         Assert.Equal(2, t.InFlightCount("PETR4"));
         Assert.Equal(1, t.InFlightCount("VALE3"));
         Assert.Equal(0, t.InFlightCount("MGLU3"));
     }
 
     [Fact]
+    public void TryRegisterSubmit_SameSideAlreadyActive_ReturnsFalseAndDoesNotOverwrite()
+    {
+        var t = new OrderTracker();
+        Assert.True(t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true));
+        Assert.False(t.TryRegisterSubmit(2UL, "PETR4", 29m, 100, isBuy: true));
+
+        // The second (rejected) registration must not have been recorded.
+        Assert.False(t.TryGet(2UL, out _));
+        Assert.Equal(1, t.InFlightCount("PETR4"));
+    }
+
+    [Fact]
+    public void TryRegisterSubmit_AfterSideCloses_CanReserveAgain()
+    {
+        var t = new OrderTracker();
+        Assert.True(t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true));
+        t.OnTerminal(1UL);
+        Assert.True(t.TryRegisterSubmit(2UL, "PETR4", 29m, 100, isBuy: true));
+        Assert.Equal(1, t.InFlightCount("PETR4"));
+    }
+
+    [Fact]
     public void OnTrade_LeavesZero_ClosesOrder()
     {
         var t = new OrderTracker();
-        t.RegisterSubmit(1UL, "PETR4", 30m, 100, true);
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, true);
         t.OnTrade(1UL, leaves: 0);
         Assert.Equal(0, t.InFlightCount("PETR4"));
     }
@@ -29,7 +51,7 @@ public class OrderTrackerTests
     public void OnTrade_PartialFill_StaysOpen()
     {
         var t = new OrderTracker();
-        t.RegisterSubmit(1UL, "PETR4", 30m, 200, true);
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 200, true);
         t.OnTrade(1UL, leaves: 100);
         Assert.Equal(1, t.InFlightCount("PETR4"));
     }
@@ -38,7 +60,7 @@ public class OrderTrackerTests
     public void OnTerminal_ClosesOrder()
     {
         var t = new OrderTracker();
-        t.RegisterSubmit(1UL, "PETR4", 30m, 100, true);
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, true);
         t.OnTerminal(1UL);
         Assert.Equal(0, t.InFlightCount("PETR4"));
     }
@@ -47,7 +69,7 @@ public class OrderTrackerTests
     public void OnAccepted_NoFill_StaysOpenWithLeaves()
     {
         var t = new OrderTracker();
-        t.RegisterSubmit(1UL, "PETR4", 30m, 100, true);
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, true);
         t.OnAccepted(1UL, leaves: 100);
         Assert.Equal(1, t.InFlightCount("PETR4"));
     }
@@ -65,7 +87,7 @@ public class OrderTrackerTests
         var t = new OrderTracker();
         Assert.False(t.HasOpenSide("PETR4", isBuy: true));
 
-        t.RegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
         Assert.True(t.HasOpenSide("PETR4", isBuy: true));
         Assert.False(t.HasOpenSide("PETR4", isBuy: false));
 
@@ -77,9 +99,9 @@ public class OrderTrackerTests
     public void HasOpenSide_DistinguishesSymbolAndSide()
     {
         var t = new OrderTracker();
-        t.RegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
-        t.RegisterSubmit(2UL, "PETR4", 31m, 100, isBuy: false);
-        t.RegisterSubmit(3UL, "VALE3", 70m, 100, isBuy: true);
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+        t.TryRegisterSubmit(2UL, "PETR4", 31m, 100, isBuy: false);
+        t.TryRegisterSubmit(3UL, "VALE3", 70m, 100, isBuy: true);
 
         Assert.True(t.HasOpenSide("PETR4", isBuy: true));
         Assert.True(t.HasOpenSide("PETR4", isBuy: false));

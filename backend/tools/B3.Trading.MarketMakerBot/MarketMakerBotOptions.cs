@@ -63,16 +63,22 @@ public sealed class InstrumentConfig
     public decimal RefPrice { get; set; }
 
     /// <summary>Minimum price increment. Quotes are rounded to this.</summary>
+    [Range(typeof(decimal), "0.0001", "100000")]
     public decimal TickSize { get; set; } = 0.01m;
 
     /// <summary>Round-lot size; quote quantity is a multiple of this.</summary>
+    [Range(1, long.MaxValue)]
     public long LotSize { get; set; } = 100;
 
     /// <summary>Quote size for each side, in lots.</summary>
+    [Range(1, int.MaxValue)]
     public int QuoteLots { get; set; } = 1;
 
     /// <summary>Distance in ticks from <see cref="RefPrice"/> for each
     /// side's quote (symmetric spread). E.g. <c>SpreadTicks=5</c>,
-    /// <c>TickSize=0.01</c> → bid = RefPrice - 0.05, ask = RefPrice + 0.05.</summary>
+    /// <c>TickSize=0.01</c> → bid = RefPrice - 0.05, ask = RefPrice + 0.05.
+    /// Must be small enough that the bid stays positive; see
+    /// <see cref="RefPrice"/>.</summary>
+    [Range(0, int.MaxValue)]
     public int SpreadTicks { get; set; } = 5;
 }
