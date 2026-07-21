@@ -164,6 +164,78 @@ Override via `DEMO_BOT_A_HASH` / `DEMO_BOT_A_SALT` (and `_B_`, `_ADMIN_`)
   via `DEMO_MAX_OPEN_ORDERS`, but stale working orders accumulate
   during long runs.
 
+## Market-maker overlay (opt-in, real-market sandbox demo)
+
+```bash
+docker compose \
+    -f docker/docker-compose.yml \
+    -f docker/docker-compose.market-maker.yml \
+    up -d --build
+```
+
+The counterpart to the Demo overlay above for a *real* order-matching
+story (#683, evolved from the original simulator-bot in #134):
+`trading-host` stays `Mode=Real` (the default) and a standalone FIXP
+client
+([`backend/tools/B3.Trading.MarketMakerBot`](../backend/tools/B3.Trading.MarketMakerBot))
+connects on its own session (10102) and behaves as a co-located,
+continuous two-sided market maker — one resting bid + one resting ask
+per configured instrument, re-quoted immediately on fill/cancel and
+(with a defensive delay) on reject. Any end-client can then actually
+buy/sell PETR4/VALE3/ITUB4 against the bot's resting liquidity through
+the real matching engine, not a synthetic ER injector.
+
+This overlay also flips `Trading__Sandbox__AllowSelfCashDeposit=true`
+(#679/#681) on `trading-host`, so a logged-in end-client can
+self-service `POST /balance/deposit` for buying power instead of
+needing an admin round-trip — without it there'd be a market but no way
+for a fresh sandbox account to fund a trade against it.
+
+**Do not additionally stack `docker-compose.demo.yml` on top of this
+overlay.** `demo.yml` flips `trading-host` to `Mode=Mock`, which serves
+end-client orders from an in-process `MockEntryPointClient` instead of
+routing them to `matching-platform` — end-client orders would never
+reach the book the bot is quoting into, defeating the whole point of
+this overlay. The two overlays tell mutually exclusive stories (ER
+injection vs. a real matching engine) and are not meant to compose.
+
+| Service | What it does |
+|---|---|
+| `trading-host` | stays `Mode=Real` (base default); `Trading__Sandbox__AllowSelfCashDeposit` flipped to `true` |
+| `market-maker-bot` | FIXP session 10102; one resting bid + ask per configured instrument; connects to the `marketdata` WS feed (best-effort) to anchor quotes on the live reference price instead of the static config `RefPrice` |
+
+### Safety
+
+`Trading__Sandbox__AllowSelfCashDeposit=true` lets **any** authenticated
+end-client mint their own buying power. The host refuses to boot in
+`ASPNETCORE_ENVIRONMENT=Production` with it set unless
+`Trading__Sandbox__AllowSelfCashDepositInProduction=true` is also set
+(`SandboxCashDepositBootGuard`) — do not flip that opt-out for a real
+deployment; this overlay is sandbox/demo-only, same posture as the Demo
+overlay's `AllowErInjection`.
+
+### Tuning
+
+The bot's instruments (`Symbol`/`SecurityId`/`RefPrice`/`TickSize`/
+`LotSize`/`QuoteLots`/`SpreadTicks`) and reconcile interval are set via
+`MarketMaker__*` env vars in `docker-compose.market-maker.yml` — see
+that file's inline comments for the full list. `MarketMaker__Instruments`
+must line up with `docker/real/instruments-eqt.json`'s `SecurityId`s
+(matching-platform's wire truth), which is independent of whatever
+`SecurityId` numbering `marketdata` itself uses for the same symbols.
+
+### Out of scope
+
+- No live-order-book-depth reaction: quotes anchor on
+  `TradingReferencePrice`/`LastTradePrice`, not the SDK's `BookFeed`
+  top-of-book. A closer-to-the-book anchor is a reasonable follow-up.
+- No dynamic instrument discovery: the bot's instrument list is
+  config-driven, not derived from `marketdata`'s `SecurityDefinition`
+  stream — see `MarketDataFeed`'s doc comment for why (SecurityId
+  namespaces don't line up).
+- No automated conformance coverage yet (self-deposit → buy/sell
+  against the bot, bounded fill latency) — tracked as #683 item 4.
+
 ## Honest no-broker mode
 
 The trading-host has four exchange modes, configured via

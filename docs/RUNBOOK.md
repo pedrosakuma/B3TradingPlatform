@@ -529,3 +529,5 @@ public overlay is in `docs/operations/fixp-listener.md` and
 - **mTLS RFC.** [`rfcs/user-bot-fixp-mtls-v0.md`](rfcs/user-bot-fixp-mtls-v0.md)
 - **Rotation RFC.** [`rfcs/user-bot-fixp-rotation-v0.md`](rfcs/user-bot-fixp-rotation-v0.md)
 - **Edge-topology RFC.** [`rfcs/user-bot-fixp-edge-topology-v0.md`](rfcs/user-bot-fixp-edge-topology-v0.md)
+- **Market-maker sandbox overlay** (real-market demo recipe: self-deposit
+  + a co-located liquidity bot). [`DOCKER.md`](DOCKER.md#market-maker-overlay-opt-in-real-market-sandbox-demo)
