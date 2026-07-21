@@ -1,4 +1,4 @@
-namespace B3.Trading.SimulatorBot;
+namespace B3.Trading.MarketMakerBot;
 
 /// <summary>Pure host:port parser. Returns a <see cref="System.Net.DnsEndPoint"/>
 /// (no DNS resolution). The worker DNS-resolves at connect time

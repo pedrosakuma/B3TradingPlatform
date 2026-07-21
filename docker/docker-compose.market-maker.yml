@@ -1,0 +1,89 @@
+# Market-maker bot overlay (#683, evolved from the simulator-bot in
+# #134). Stacks on top of the default real stack to add a single
+# external FIXP client that behaves as a co-located two-sided market
+# maker: it submits one resting bid + one resting ask per configured
+# instrument and re-quotes immediately on fill/cancel/reject — so
+# sandbox/demo instruments always have a market to trade against. The
+# trading-host stays Real; the bot provides liquidity from the outside.
+#
+# Usage:
+#   docker compose \
+#       -f docker/docker-compose.yml \
+#       -f docker/docker-compose.market-maker.yml \
+#       up -d
+#
+# This overlay is ADDITIVE — it does NOT replace docker-compose.demo.yml.
+# Stacking demo + market-maker is supported and, for a sandbox, expected:
+# demo enables self-service cash deposit (#679/#681) so end-clients have
+# balance to trade with, and this overlay ensures there's a counterparty
+# on the book.
+#
+# The bot connects on FIXP session 10102 (NOT 10101 — that one belongs to
+# trading-host's FIRM01 wiring). Both sessions are pre-declared in
+# docker/real/exchange-simulator.bridge.json so matching-platform accepts
+# the bot's Negotiate without operator intervention.
+
+name: b3trading
+
+services:
+  market-maker-bot:
+    build:
+      context: ..
+      dockerfile: backend/tools/B3.Trading.MarketMakerBot/Dockerfile
+    image: ${MARKET_MAKER_BOT_IMAGE:-b3-market-maker-bot:dev}
+    container_name: b3-market-maker-bot
+    restart: unless-stopped
+    networks:
+      - b3-net
+    depends_on:
+      matching-platform:
+        condition: service_healthy
+    environment:
+      # ── FIXP session ───────────────────────────────────────────────
+      MarketMaker__Endpoint: matching-platform:9876
+      MarketMaker__SessionId: "10102"
+      MarketMaker__SessionVerId: "1"
+      MarketMaker__EnteringFirm: "100"  # FIRM01 enteringFirmCode
+      # Matching's FixpSession parses Credentials as JSON expecting
+      # {auth_type, username, access_key} — see docker/docker-compose.yml
+      # for the same shape on trading-host's session 10101.
+      MarketMaker__AccessKey: '{"auth_type":"basic","username":"10102","access_key":"dev-key-2"}'
+      MarketMaker__SenderLocation: SP
+      MarketMaker__EnteringTrader: MM
+
+      # ── Behaviour ──────────────────────────────────────────────────
+      MarketMaker__StateDirectory: /var/lib/b3-market-maker-bot
+      # Defensive safety net only — the primary re-quote path is
+      # event-driven (fills/cancels/rejects), see MarketMakerWorker.
+      MarketMaker__ReconcileInterval: "00:00:05"
+
+      # ── Instruments (must match docker/real/instruments-eqt.json) ──
+      MarketMaker__Instruments__0__Symbol: PETR4
+      MarketMaker__Instruments__0__SecurityId: "900000000001"
+      MarketMaker__Instruments__0__RefPrice: "30.00"
+      MarketMaker__Instruments__0__TickSize: "0.01"
+      MarketMaker__Instruments__0__LotSize: "100"
+      MarketMaker__Instruments__0__QuoteLots: "1"
+      MarketMaker__Instruments__0__SpreadTicks: "5"
+
+      MarketMaker__Instruments__1__Symbol: VALE3
+      MarketMaker__Instruments__1__SecurityId: "900000000002"
+      MarketMaker__Instruments__1__RefPrice: "70.00"
+      MarketMaker__Instruments__1__TickSize: "0.01"
+      MarketMaker__Instruments__1__LotSize: "100"
+      MarketMaker__Instruments__1__QuoteLots: "1"
+      MarketMaker__Instruments__1__SpreadTicks: "5"
+
+      MarketMaker__Instruments__2__Symbol: ITUB4
+      MarketMaker__Instruments__2__SecurityId: "900000000003"
+      MarketMaker__Instruments__2__RefPrice: "32.00"
+      MarketMaker__Instruments__2__TickSize: "0.01"
+      MarketMaker__Instruments__2__LotSize: "100"
+      MarketMaker__Instruments__2__QuoteLots: "1"
+      MarketMaker__Instruments__2__SpreadTicks: "5"
+    volumes:
+      - market-maker-bot-state:/var/lib/b3-market-maker-bot
+
+volumes:
+  market-maker-bot-state:
+    driver: local

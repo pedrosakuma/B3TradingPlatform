@@ -1,17 +1,17 @@
 using System.Diagnostics.Metrics;
 
-namespace B3.Trading.SimulatorBot;
+namespace B3.Trading.MarketMakerBot;
 
 /// <summary>
 /// <see cref="System.Diagnostics.Metrics"/> instruments emitted by the
 /// bot. Visible to any host that registers the meter
-/// <c>"B3.Trading.SimulatorBot"</c> with an OpenTelemetry exporter.
+/// <c>"B3.Trading.MarketMakerBot"</c> with an OpenTelemetry exporter.
 /// MVP scope: log-shaped only — wiring an OTLP exporter is left to a
 /// follow-up if/when the bot lands in observability dashboards.
 /// </summary>
-public static class SimulatorBotMetrics
+public static class MarketMakerMetrics
 {
-    public const string MeterName = "B3.Trading.SimulatorBot";
+    public const string MeterName = "B3.Trading.MarketMakerBot";
 
     public static readonly Meter Meter = new(MeterName, "0.1.0");
 
@@ -24,10 +24,6 @@ public static class SimulatorBotMetrics
     /// (transport error, terminated session, etc).</summary>
     public static readonly Counter<long> OrdersSubmitFailed =
         Meter.CreateCounter<long>("bot.orders.submit_failed");
-
-    /// <summary>Cancel requests sent. Tagged <c>{reason=auto|shutdown}</c>.</summary>
-    public static readonly Counter<long> CancelsSent =
-        Meter.CreateCounter<long>("bot.orders.cancels_sent");
 
     /// <summary>Trades observed via OrderTrade events. Tagged <c>{symbol}</c>.</summary>
     public static readonly Counter<long> Fills =

@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <RootNamespace>B3.Trading.SimulatorBot.Tests</RootNamespace>
+    <RootNamespace>B3.Trading.MarketMakerBot.Tests</RootNamespace>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
   </PropertyGroup>
@@ -13,7 +13,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\tools\B3.Trading.SimulatorBot\B3.Trading.SimulatorBot.csproj" />
+    <ProjectReference Include="..\..\tools\B3.Trading.MarketMakerBot\B3.Trading.MarketMakerBot.csproj" />
   </ItemGroup>
 
   <ItemGroup>
