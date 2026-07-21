@@ -51,13 +51,15 @@ public sealed class DurableOrderSubmissionServiceTests
 
         var recovered = RecoverIntentOnly(submitted);
         var mutation = Assert.Single(recovered.SnapshotMutations());
-        Assert.Equal(OutboundMutationState.LegacyUnknown, mutation.State);
+        Assert.Equal(
+            OutboundMutationState.RecordedPendingApproval,
+            mutation.State);
         Assert.True(mutation.RequiresReconciliation);
         Assert.Equal(1, recovered.ReadinessBlockingCount);
     }
 
     [Fact]
-    public async Task C04_CrashAfterRiskRejectBeforeCommit_ReevaluatesAsUnknownNotPriorReject()
+    public async Task C04_CrashAfterRiskRejectBeforeCommit_ReevaluatesAsPendingApprovalNotPriorReject()
     {
         var fixture = CreateFixture(
             [new RejectingRiskCheck()],
@@ -76,7 +78,9 @@ public sealed class DurableOrderSubmissionServiceTests
 
         var recovered = RecoverIntentOnly(submitted);
         var mutation = Assert.Single(recovered.SnapshotMutations());
-        Assert.Equal(OutboundMutationState.LegacyUnknown, mutation.State);
+        Assert.Equal(
+            OutboundMutationState.RecordedPendingApproval,
+            mutation.State);
         Assert.Null(mutation.Resolution);
         Assert.True(mutation.RequiresReconciliation);
     }
@@ -121,6 +125,23 @@ public sealed class DurableOrderSubmissionServiceTests
             });
         Assert.DoesNotContain(fixture.Store.Events, e => e is OutboundApprovedEvent);
         Assert.Equal(0, fixture.Gateway.CallCount);
+
+        var submitted = Assert.IsType<OrderSubmittedEvent>(fixture.Store.Events[0]);
+        var rejection = Assert.IsType<ExecutionReportReceivedEvent>(
+            fixture.Store.Events[1]);
+        var recovered = new OutboundMutationLedger();
+        recovered.ImportLegacyNew(submitted);
+        var replayResult = recovered.ApplyVenueAcknowledgement(rejection);
+        Assert.Equal(
+            InboundVenueEvidenceApplyStatus.RecordedMatched,
+            replayResult.Status);
+        var mutationId = Assert.IsType<OutboundMutationId>(submitted.MutationId);
+        Assert.True(recovered.TryGet(mutationId, out var mutation));
+        Assert.Equal(OutboundMutationState.OperatorResolved, mutation!.State);
+        Assert.Equal(
+            "OutboundProvenNoWrite",
+            mutation.Resolution?.EvidenceKind);
+        Assert.False(mutation.RequiresReconciliation);
     }
 
     [Fact]
@@ -225,6 +246,18 @@ public sealed class DurableOrderSubmissionServiceTests
         Assert.DoesNotContain(
             store.CommittedEvents,
             evt => evt is OutboundApprovedEvent);
+
+        var recovered = new OutboundMutationLedger();
+        foreach (var evt in store.CommittedEvents)
+            recovered.ImportLegacyNew(Assert.IsType<OrderSubmittedEvent>(evt));
+        var recoveredMutationId = Assert.IsType<OutboundMutationId>(
+            submitted.MutationId);
+        Assert.True(recovered.TryGet(recoveredMutationId, out var mutation));
+        Assert.Equal(
+            OutboundMutationState.RecordedPendingApproval,
+            mutation!.State);
+        Assert.Empty(mutation.Attempts);
+        Assert.True(mutation.RequiresReconciliation);
     }
 
     [Fact]

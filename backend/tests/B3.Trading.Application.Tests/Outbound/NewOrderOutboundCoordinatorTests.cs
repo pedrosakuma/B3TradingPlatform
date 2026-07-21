@@ -105,6 +105,42 @@ public sealed class NewOrderOutboundCoordinatorTests
     }
 
     [Fact]
+    public async Task C09_FrameAppendedButNotCommitted_RestartsIntentOnlyAsProvenUnsent()
+    {
+        var gateway = new CompletingGateway();
+        var store = new UncommittedEventStore<OutboundFramePreparedEvent>();
+        var fixture = CreateFixture(gateway, store: store);
+
+        var result = await fixture.Coordinator.EnqueueAsync(
+            fixture.MutationId,
+            CancellationToken.None);
+
+        Assert.Equal(NewOrderDispatchOutcome.ReconciliationRequired, result.Outcome);
+        Assert.Equal(1, gateway.CallCount);
+        Assert.Equal(0, gateway.TransportWriteCount);
+        Assert.Contains(store.Events, evt => evt is OutboundFramePreparedEvent);
+        Assert.DoesNotContain(
+            store.CommittedEvents,
+            evt => evt is OutboundFramePreparedEvent);
+
+        var recovered = ReplayCommittedPrefix(
+            fixture.Protector,
+            store.CommittedEvents);
+        Assert.Equal(
+            1,
+            recovered.ClassifyRecoveredAttempts(
+                new ProcessEpochId(Guid.NewGuid()),
+                DateTimeOffset.Parse("2026-07-19T00:01:00Z")));
+        Assert.True(recovered.TryGet(fixture.MutationId, out var mutation));
+        Assert.Equal(OutboundMutationState.ProvenUnsent, mutation!.State);
+        var attempt = Assert.Single(mutation.Attempts);
+        Assert.Null(attempt.FramePrepared);
+        Assert.Equal(
+            OutboundProvenUnsentEvidence.DeadEpochIntentWithoutFrame,
+            attempt.ProvenUnsentEvidence);
+    }
+
+    [Fact]
     public async Task C07_AttemptIntentAppendedButNotCommitted_RestartsApprovedWithoutGatewayEntry()
     {
         var gateway = new CompletingGateway();
@@ -627,7 +663,9 @@ public sealed class NewOrderOutboundCoordinatorTests
     private class CompletingGateway : IExchangeGateway
     {
         private int _callCount;
+        private int _transportWriteCount;
         public int CallCount => Volatile.Read(ref _callCount);
+        public int TransportWriteCount => Volatile.Read(ref _transportWriteCount);
         public System.Collections.Concurrent.ConcurrentQueue<string> CalledFirms { get; } = new();
 
         public Task SubmitAsync(Order order, CancellationToken cancellationToken) =>
@@ -641,6 +679,7 @@ public sealed class NewOrderOutboundCoordinatorTests
             RecordCall(command.FirmId);
             var frame = Frame(command);
             await onFramePrepared(frame, cancellationToken);
+            Interlocked.Increment(ref _transportWriteCount);
             return new ExchangeGatewayReceipt(
                 frame,
                 ExchangeGatewayAttemptStage.TransportWriteCompleted);

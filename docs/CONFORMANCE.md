@@ -149,12 +149,12 @@ and also fails if that test is removed, renamed, or skipped.
 | C1 | `DurableOrderSubmissionServiceTests.C01_CrashBeforeRecordedIntentAdmission_RetryReusesUncommittedClOrdId` |
 | C2 | `CommittedPrefixFileEventStoreTests.CrashBeforeMarkerPublication_DoesNotReplaySurvivor` |
 | C3 | `DurableOrderSubmissionServiceTests.C03_CrashAfterIntentCommitBeforeRisk_RestartsFailClosedWithoutPolicyVersion` |
-| C4 | `DurableOrderSubmissionServiceTests.C04_CrashAfterRiskRejectBeforeCommit_ReevaluatesAsUnknownNotPriorReject` |
+| C4 | `DurableOrderSubmissionServiceTests.C04_CrashAfterRiskRejectBeforeCommit_ReevaluatesAsPendingApprovalNotPriorReject` |
 | C5 | `DurableOrderSubmissionServiceTests.C05_ApprovalAppendedButNotCommitted_RestartsPendingApprovalWithoutGatewayCall` |
 | C6 | `NewOrderOutboundCoordinatorTests.RecoveryStart_EntersApprovedMutationExactlyOnce` |
 | C7 | `NewOrderOutboundCoordinatorTests.C07_AttemptIntentAppendedButNotCommitted_RestartsApprovedWithoutGatewayEntry` |
 | C8 | `OutboundMutationLedgerTests.ColdStartCoordinator_CommitsIntentOnlyProvenUnsent_AndDoesNotResendFramePrepared` |
-| C9 | `NewOrderOutboundCoordinatorTests.FramePersistenceFailure_PreventsWriteAndRequiresReconciliation` |
+| C9 | `NewOrderOutboundCoordinatorTests.C09_FrameAppendedButNotCommitted_RestartsIntentOnlyAsProvenUnsent` |
 | C10 | `OutboundMutationLedgerTests.ColdStartCoordinator_CommitsIntentOnlyProvenUnsent_AndDoesNotResendFramePrepared` |
 | C11 | `NewOrderOutboundCoordinatorTests.TypedPreFrameFailure_IsProvenUnsentAndRetainsMarginUntilDomainTerminalCommit` |
 | C12 | `NewOrderOutboundCoordinatorTests.ExceptionAfterFrame_IsAmbiguousAndDoesNotReleaseMargin` |

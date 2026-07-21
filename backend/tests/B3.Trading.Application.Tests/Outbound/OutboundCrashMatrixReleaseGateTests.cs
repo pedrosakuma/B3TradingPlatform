@@ -93,7 +93,7 @@ public sealed class OutboundCrashMatrixReleaseGateTests
             [3] = Map<DurableOrderSubmissionServiceTests>(
                 nameof(DurableOrderSubmissionServiceTests.C03_CrashAfterIntentCommitBeforeRisk_RestartsFailClosedWithoutPolicyVersion)),
             [4] = Map<DurableOrderSubmissionServiceTests>(
-                nameof(DurableOrderSubmissionServiceTests.C04_CrashAfterRiskRejectBeforeCommit_ReevaluatesAsUnknownNotPriorReject)),
+                nameof(DurableOrderSubmissionServiceTests.C04_CrashAfterRiskRejectBeforeCommit_ReevaluatesAsPendingApprovalNotPriorReject)),
             [5] = Map<DurableOrderSubmissionServiceTests>(
                 nameof(DurableOrderSubmissionServiceTests.C05_ApprovalAppendedButNotCommitted_RestartsPendingApprovalWithoutGatewayCall)),
             [6] = Map<NewOrderOutboundCoordinatorTests>(
@@ -103,7 +103,7 @@ public sealed class OutboundCrashMatrixReleaseGateTests
             [8] = Map<OutboundMutationLedgerTests>(
                 nameof(OutboundMutationLedgerTests.ColdStartCoordinator_CommitsIntentOnlyProvenUnsent_AndDoesNotResendFramePrepared)),
             [9] = Map<NewOrderOutboundCoordinatorTests>(
-                nameof(NewOrderOutboundCoordinatorTests.FramePersistenceFailure_PreventsWriteAndRequiresReconciliation)),
+                nameof(NewOrderOutboundCoordinatorTests.C09_FrameAppendedButNotCommitted_RestartsIntentOnlyAsProvenUnsent)),
             [10] = Map<OutboundMutationLedgerTests>(
                 nameof(OutboundMutationLedgerTests.ColdStartCoordinator_CommitsIntentOnlyProvenUnsent_AndDoesNotResendFramePrepared)),
             [11] = Map<NewOrderOutboundCoordinatorTests>(
