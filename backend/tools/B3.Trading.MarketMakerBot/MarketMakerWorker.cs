@@ -239,6 +239,18 @@ internal sealed class MarketMakerWorker : BackgroundService
         // trading-host's pattern).
         if (!_tracker.TryRegisterSubmit(clOrdId, instr.Symbol, price, quantity, isBuy))
             return;
+        // A SymbolDelisted event can still land between the check above
+        // and here; re-checking right before submit shrinks that window.
+        // A residual race (delisted arriving during the SubmitAsync
+        // await itself) is accepted for this sandbox tool — worst case
+        // is one resting order on an already-halted symbol, which the
+        // reconcile loop's IsDelisted check then leaves alone (it won't
+        // re-quote it, but also won't cancel the stray one automatically).
+        if (_priceTracker.IsDelisted(instr.Symbol))
+        {
+            _tracker.OnTerminal(clOrdId);
+            return;
+        }
         var req = new UpModels.NewOrderRequest
         {
             ClOrdID = new UpModels.ClOrdID(clOrdId),

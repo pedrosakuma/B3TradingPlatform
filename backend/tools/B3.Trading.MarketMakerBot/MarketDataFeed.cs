@@ -69,21 +69,27 @@ internal sealed class MarketDataFeed : IAsyncDisposable
                     .ConfigureAwait(false);
             }
             _client = client;
+            _tracker.SetConnected(true);
             _log.LogInformation("[mm] MarketData connected to {WsUrl}; subscribed to {Count} instrument(s).",
                 options.WsUrl, instruments.Count);
         }
-        catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
-            _log.LogWarning(ex,
-                "[mm] MarketData connect/subscribe to {WsUrl} failed; continuing with static RefPrice anchors only.",
-                options.WsUrl);
+            // Covers OperationCanceledException too — on shutdown mid-
+            // connect/subscribe we still must unhook handlers and
+            // dispose the partially-initialized client before
+            // propagating, otherwise it leaks (never assigned to
+            // _client, so DisposeAsync above would be a no-op).
             client.Trade -= OnTrade;
             client.InfoSnapshot -= OnInfoSnapshot;
             client.SymbolDelisted -= OnSymbolDelisted;
             client.ConnectionStateChanged -= OnConnectionStateChanged;
             client.SubscribeError -= OnSubscribeError;
             await client.DisposeAsync().ConfigureAwait(false);
+            if (ex is OperationCanceledException) throw;
+            _log.LogWarning(ex,
+                "[mm] MarketData connect/subscribe to {WsUrl} failed; continuing with static RefPrice anchors only.",
+                options.WsUrl);
         }
     }
 
@@ -98,8 +104,15 @@ internal sealed class MarketDataFeed : IAsyncDisposable
         _tracker.OnSymbolDelisted(ev.Symbol);
     }
 
-    private void OnConnectionStateChanged(ConnectionStateChangedEvent ev) =>
+    private void OnConnectionStateChanged(ConnectionStateChangedEvent ev)
+    {
         _log.LogInformation("[mm] MarketData connection state: {State}", ev.State);
+        // Only trust cached prices while genuinely Connected — a stale
+        // last-known price served through a Reconnecting/Faulted gap
+        // could anchor quotes far from the real market. See
+        // MarketPriceTracker.TryGetReferencePrice.
+        _tracker.SetConnected(ev.State == ConnectionState.Connected);
+    }
 
     private void OnSubscribeError(SubscribeErrorEvent ev) =>
         _log.LogWarning("[mm] MarketData subscribe error for {Symbol}: {Error}", ev.Symbol, ev.ErrorCode);

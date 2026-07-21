@@ -16,9 +16,22 @@ public sealed class MarketPriceTracker
 {
     private readonly ConcurrentDictionary<string, decimal> _referencePrice = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> _delisted = new(StringComparer.Ordinal);
+    private volatile bool _connected;
 
-    public bool TryGetReferencePrice(string symbol, out decimal price) =>
-        _referencePrice.TryGetValue(symbol, out price);
+    /// <summary>Returns the last live price for <paramref name="symbol"/>
+    /// only while the feed is actually connected — once disconnected the
+    /// cached value is considered stale and callers must fall back to
+    /// the configured <see cref="InstrumentConfig.RefPrice"/> rather than
+    /// quoting off a price that may no longer reflect the market.</summary>
+    public bool TryGetReferencePrice(string symbol, out decimal price)
+    {
+        if (!_connected)
+        {
+            price = default;
+            return false;
+        }
+        return _referencePrice.TryGetValue(symbol, out price);
+    }
 
     public bool IsDelisted(string symbol) => _delisted.ContainsKey(symbol);
 
@@ -38,4 +51,11 @@ public sealed class MarketPriceTracker
     }
 
     public void OnSymbolDelisted(string symbol) => _delisted[symbol] = 0;
+
+    /// <summary>Toggled by <see cref="MarketDataFeed"/> as the SDK's
+    /// connection state changes. Cached prices are kept (not cleared) so
+    /// a reconnect resumes anchoring immediately, but
+    /// <see cref="TryGetReferencePrice"/> refuses to serve them while
+    /// disconnected.</summary>
+    public void SetConnected(bool connected) => _connected = connected;
 }
