@@ -19,6 +19,7 @@ public sealed class AuthOptions
     public bool? LocalLoginEnabled { get; set; }
     public bool? SignupEnabled { get; set; }
     public bool? TotpEnabled { get; set; }
+    public bool? WebAuthnEnabled { get; set; }
     public bool? ExchangeEnabled { get; set; }
     public List<UserConfig> Users { get; set; } = new();
     public ExternalIdentityOptions ExternalIdentity { get; set; } = new();
@@ -76,6 +77,14 @@ public sealed class AuthOptions
         AuthModeKind.Local => TotpEnabled ?? true,
         AuthModeKind.Hybrid => IsLocalLoginEnabled() && (TotpEnabled ?? true),
         AuthModeKind.Entra => TotpEnabled ?? false,
+        _ => false,
+    };
+
+    public bool IsWebAuthnEnabled() => ResolveMode() switch
+    {
+        AuthModeKind.Local => WebAuthnEnabled ?? true,
+        AuthModeKind.Hybrid => IsLocalLoginEnabled() && (WebAuthnEnabled ?? true),
+        AuthModeKind.Entra => WebAuthnEnabled ?? false,
         _ => false,
     };
 
@@ -171,7 +180,14 @@ public sealed class UserConfig
     public UserTotpConfig? Totp { get; set; }
 
     /// <summary>
-    /// When true, the user MUST enroll a TOTP factor; login returns
+    /// WebAuthn credentials enrolled by this user. Credential IDs, public
+    /// keys, and user handles are Data-Protection ciphertexts; only the
+    /// SHA-256 lookup hash is stored in the clear.
+    /// </summary>
+    public List<UserWebAuthnCredential> WebAuthnCredentials { get; set; } = new();
+
+    /// <summary>
+    /// When true, the user MUST enroll a local second factor; login returns
     /// <c>requires2faEnrollment=true</c> with a short-lived enrollment
     /// token instead of a JWT. Defaults to false.
     /// </summary>
@@ -237,4 +253,18 @@ public sealed class UserTotpConfig
     /// recorded" — the first verify after restart simply seeds it.
     /// </summary>
     public long? LastUsedTimeStep { get; set; }
+}
+
+public sealed class UserWebAuthnCredential
+{
+    public string Name { get; set; } = string.Empty;
+    public string CredentialIdHash { get; set; } = string.Empty;
+    public string ProtectedCredentialId { get; set; } = string.Empty;
+    public string ProtectedPublicKey { get; set; } = string.Empty;
+    public string ProtectedUserHandle { get; set; } = string.Empty;
+    public uint SignatureCounter { get; set; }
+    public DateTimeOffset RegisteredAt { get; set; }
+    public Guid AaGuid { get; set; }
+    public bool IsBackupEligible { get; set; }
+    public bool IsBackedUp { get; set; }
 }

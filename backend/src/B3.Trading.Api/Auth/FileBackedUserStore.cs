@@ -137,6 +137,7 @@ public sealed class FileBackedUserStore : IUserStore, ILegacyUserSnapshotProvide
             if (_seeded.TryGetValue(user.Username, out var seeded))
             {
                 seeded.Totp = user.Totp;
+                seeded.WebAuthnCredentials = user.WebAuthnCredentials;
                 seeded.Require2FA = user.Require2FA;
                 return true;
             }
@@ -228,6 +229,7 @@ public sealed class FileBackedUserStore : IUserStore, ILegacyUserSnapshotProvide
                 if (string.Equals(user.Totp.RecoveryCodes[i], codeHash, StringComparison.Ordinal))
                     idx = i;
             }
+
             if (idx < 0)
             {
                 for (var i = 0; i < user.Totp.ConsumedRecoveryCodes.Count; i++)
@@ -270,6 +272,130 @@ public sealed class FileBackedUserStore : IUserStore, ILegacyUserSnapshotProvide
 
             updatedUser = user;
             return RecoveryCodeConsumeResult.Consumed;
+        }
+    }
+
+    public bool IsWebAuthnCredentialIdUnique(string credentialIdHash)
+    {
+        if (string.IsNullOrEmpty(credentialIdHash)) return false;
+        lock (_writeGate)
+        {
+            return _seeded.Values.Concat(_runtime.Values)
+                .SelectMany(static user => user.WebAuthnCredentials)
+                .All(credential => !string.Equals(
+                    credential.CredentialIdHash, credentialIdHash, StringComparison.Ordinal));
+        }
+    }
+
+    public bool TryAddWebAuthnCredential(
+        string username,
+        UserWebAuthnCredential credential,
+        IReadOnlyList<string>? recoveryCodeHashes,
+        out bool recoveryCodesStored,
+        out UserConfig? updatedUser)
+    {
+        recoveryCodesStored = false;
+        updatedUser = null;
+        if (string.IsNullOrWhiteSpace(username)
+            || string.IsNullOrEmpty(credential.CredentialIdHash))
+            return false;
+
+        lock (_writeGate)
+        {
+            if (!TryGet(username, out var user) || user is null)
+                return false;
+            if (_seeded.Values.Concat(_runtime.Values)
+                .SelectMany(static item => item.WebAuthnCredentials)
+                .Any(item => string.Equals(
+                    item.CredentialIdHash, credential.CredentialIdHash, StringComparison.Ordinal)))
+                return false;
+
+            user.WebAuthnCredentials.Add(credential);
+            var previousTotp = user.Totp;
+            var previousRecoveryCodes = previousTotp is null
+                ? null
+                : new List<string>(previousTotp.RecoveryCodes);
+            if (recoveryCodeHashes is { Count: > 0 }
+                && (user.Totp is null || user.Totp.RecoveryCodes.Count == 0))
+            {
+                user.Totp ??= new UserTotpConfig();
+                user.Totp.RecoveryCodes = recoveryCodeHashes.ToList();
+                recoveryCodesStored = true;
+            }
+            if (_seeded.ContainsKey(username))
+            {
+                updatedUser = user;
+                return true;
+            }
+
+            try
+            {
+                PersistRuntimeUsersLocked();
+            }
+            catch
+            {
+                user.WebAuthnCredentials.Remove(credential);
+                user.Totp = previousTotp;
+                if (previousRecoveryCodes is not null)
+                {
+                    previousTotp!.RecoveryCodes.Clear();
+                    previousTotp.RecoveryCodes.AddRange(previousRecoveryCodes);
+                }
+                recoveryCodesStored = false;
+                throw;
+            }
+
+            updatedUser = user;
+            return true;
+        }
+    }
+
+    public bool TryUpdateWebAuthnCounter(
+        string username,
+        string credentialIdHash,
+        uint expectedCounter,
+        uint newCounter,
+        bool isBackedUp,
+        out UserConfig? updatedUser)
+    {
+        updatedUser = null;
+        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrEmpty(credentialIdHash))
+            return false;
+
+        lock (_writeGate)
+        {
+            if (!TryGet(username, out var user) || user is null)
+                return false;
+            var credential = user.WebAuthnCredentials.FirstOrDefault(item =>
+                string.Equals(item.CredentialIdHash, credentialIdHash, StringComparison.Ordinal));
+            if (credential is null || credential.SignatureCounter != expectedCounter)
+                return false;
+            if (newCounter != 0 && newCounter <= expectedCounter)
+                return false;
+
+            var previousCounter = credential.SignatureCounter;
+            var previousBackup = credential.IsBackedUp;
+            credential.SignatureCounter = newCounter;
+            credential.IsBackedUp = isBackedUp;
+            if (_seeded.ContainsKey(username))
+            {
+                updatedUser = user;
+                return true;
+            }
+
+            try
+            {
+                PersistRuntimeUsersLocked();
+            }
+            catch
+            {
+                credential.SignatureCounter = previousCounter;
+                credential.IsBackedUp = previousBackup;
+                throw;
+            }
+
+            updatedUser = user;
+            return true;
         }
     }
 

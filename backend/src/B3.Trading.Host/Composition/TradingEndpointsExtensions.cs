@@ -1,6 +1,7 @@
 using B3.Trading.Api;
 using B3.Trading.Api.Auth;
 using B3.Trading.Api.Auth.Totp;
+using B3.Trading.Api.Auth.WebAuthn;
 using B3.Trading.Api.Lifecycle;
 using B3.Trading.Api.WebSockets;
 using B3.Trading.Api.WebSockets.DropCopy;
@@ -28,6 +29,7 @@ public static class TradingEndpointsExtensions
 
         app.MapAuth();
         app.MapTotp();
+        app.MapWebAuthn();
         app.MapExternalIdentityExchange();
         app.MapIdentityAdmin();
         app.MapOrders();

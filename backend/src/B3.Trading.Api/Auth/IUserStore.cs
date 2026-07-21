@@ -63,6 +63,23 @@ public interface IUserStore
     /// <see cref="RecoveryCodeConsumeResult.AlreadyConsumed"/>.
     /// </summary>
     RecoveryCodeConsumeResult TryConsumeRecoveryCode(string username, string codeHash, out UserConfig? updatedUser);
+
+    bool IsWebAuthnCredentialIdUnique(string credentialIdHash);
+
+    bool TryAddWebAuthnCredential(
+        string username,
+        UserWebAuthnCredential credential,
+        IReadOnlyList<string>? recoveryCodeHashes,
+        out bool recoveryCodesStored,
+        out UserConfig? updatedUser);
+
+    bool TryUpdateWebAuthnCounter(
+        string username,
+        string credentialIdHash,
+        uint expectedCounter,
+        uint newCounter,
+        bool isBackedUp,
+        out UserConfig? updatedUser);
 }
 
 /// <summary>

@@ -107,9 +107,16 @@ public static class AuthEndpoints
             // 2FA-pending login doesn't pile up password failures.
             lockout.RecordSuccess(user.Username);
 
-            // 2FA branch #1: user has an active TOTP enrollment. Mint a
-            // short-lived challenge token and bail before issuing a JWT.
+            var factors = new List<string>(2);
             if (user.Totp is { EnrolledAt: not null, SharedSecret.Length: > 0 })
+                factors.Add("totp");
+            if (user.WebAuthnCredentials.Count > 0)
+                factors.Add("webauthn");
+
+            // 2FA branch #1: user has at least one active factor. Mint one
+            // short-lived challenge token shared by both verification
+            // endpoints and list the available factor routes.
+            if (factors.Count > 0)
             {
                 var token = totpChallenges.Issue(user.Username, TotpChallengeKind.Verify);
                 audit.Log(new AuditLogEvent
@@ -126,7 +133,11 @@ public static class AuthEndpoints
                 });
                 return Results.Ok(new LoginTwoFactorRequiredResponse(
                     Requires2fa: true,
-                    TotpChallengeToken: token));
+                    ChallengeToken: token,
+                    Factors: factors,
+                    TotpChallengeToken: factors.Contains("totp", StringComparer.Ordinal)
+                        ? token
+                        : null));
             }
 
             // 2FA branch #2: user is REQUIRED to enroll (admin-forced)
@@ -363,11 +374,15 @@ public sealed record LoginResponse(string Token, DateTimeOffset ExpiresAt);
 public sealed record SignupRequest(string Username, string Password);
 
 /// <summary>
-/// Returned by <c>/auth/login</c> when the user has an active TOTP
-/// enrollment. The client must POST <c>{ totpChallengeToken, code }</c>
-/// to <c>/auth/2fa/verify</c> to receive the real JWT. (#303)
+/// Returned by <c>/auth/login</c> when the user has one or more active
+/// second factors. <see cref="Factors"/> tells the client whether to route
+/// to TOTP, WebAuthn, or either endpoint.
 /// </summary>
-public sealed record LoginTwoFactorRequiredResponse(bool Requires2fa, string TotpChallengeToken);
+public sealed record LoginTwoFactorRequiredResponse(
+    bool Requires2fa,
+    string ChallengeToken,
+    IReadOnlyList<string> Factors,
+    string? TotpChallengeToken);
 
 /// <summary>
 /// Returned by <c>/auth/login</c> when the user has

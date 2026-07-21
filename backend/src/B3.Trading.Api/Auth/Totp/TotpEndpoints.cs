@@ -161,33 +161,43 @@ public static class TotpEndpoints
                 if (lockout.IsLocked(ch.Username, out var retry))
                     return TooManyRequests(retry);
 
-                if (!users.TryGet(ch.Username, out var user) || user is null || user.Totp is null
-                    || user.Totp.EnrolledAt is null || string.IsNullOrEmpty(user.Totp.SharedSecret))
+                if (!users.TryGet(ch.Username, out var user) || user is null)
                 {
-                    // Challenge referenced a user that has since lost
-                    // their TOTP. Reject with a generic 401; do NOT
-                    // fall through to JWT issuance — the client should
-                    // re-POST /auth/login (which will not return a
-                    // 2fa challenge for an un-enrolled user).
                     challenges.Invalidate(req.TotpChallengeToken);
                     return Results.Json(new { error = "invalid or expired challenge" },
                         statusCode: StatusCodes.Status401Unauthorized);
                 }
 
-                string base32;
-                try { base32 = protector.Unprotect(user.Totp.SharedSecret); }
-                catch
+                var hasTotp = user.Totp is { EnrolledAt: not null, SharedSecret.Length: > 0 };
+                var hasWebAuthn = user.WebAuthnCredentials.Count > 0;
+                if (!hasTotp && !hasWebAuthn)
                 {
+                    challenges.Invalidate(req.TotpChallengeToken);
                     return Results.Json(new { error = "invalid or expired challenge" },
-                    statusCode: StatusCodes.Status401Unauthorized);
+                        statusCode: StatusCodes.Status401Unauthorized);
                 }
 
-                var (totpOk, matchedStep) = totp.Verify(base32, req.Code);
+                var totpOk = false;
+                long matchedStep = 0;
+                if (hasTotp)
+                {
+                    try
+                    {
+                        var base32 = protector.Unprotect(user.Totp!.SharedSecret);
+                        (totpOk, matchedStep) = totp.Verify(base32, req.Code);
+                    }
+                    catch
+                    {
+                        return Results.Json(new { error = "invalid or expired challenge" },
+                            statusCode: StatusCodes.Status401Unauthorized);
+                    }
+                }
+
                 var recoveryHash = totpOk ? null : totp.HashRecoveryCode(req.Code);
                 var recoveryCandidate = recoveryHash is not null
-                    && user.Totp.RecoveryCodes.Contains(recoveryHash, StringComparer.Ordinal);
+                    && user.Totp?.RecoveryCodes.Contains(recoveryHash, StringComparer.Ordinal) == true;
                 var recoveryAlreadyConsumed = recoveryHash is not null
-                    && user.Totp.ConsumedRecoveryCodes.Contains(recoveryHash, StringComparer.Ordinal);
+                    && user.Totp?.ConsumedRecoveryCodes.Contains(recoveryHash, StringComparer.Ordinal) == true;
 
                 if (!totpOk && !recoveryCandidate)
                 {
@@ -409,7 +419,13 @@ public static class TotpEndpoints
             }
 
             lockout.RecordSuccess(subject);
-            user.Totp = null;
+            user.Totp = user.WebAuthnCredentials.Count == 0
+                ? null
+                : new UserTotpConfig
+                {
+                    RecoveryCodes = user.Totp.RecoveryCodes,
+                    ConsumedRecoveryCodes = user.Totp.ConsumedRecoveryCodes,
+                };
             users.TryUpdate(user);
             pending.Remove(user.Username);
             audit.Log(new AuditLogEvent
