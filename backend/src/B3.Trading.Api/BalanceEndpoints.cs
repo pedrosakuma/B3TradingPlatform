@@ -74,15 +74,6 @@ public static class BalanceEndpoints
             var firmId = ctx.User.FindFirstValue(JwtIssuer.FirmClaim) ?? "default";
             var currency = "BRL"; // v0 whitelist, mirrors /admin/cash.
 
-            var projectedBalance = keeper.GetAvailable(firmId, owner) + req.Amount;
-            if (projectedBalance > opts.MaxBalanceAfterDeposit)
-                return Results.UnprocessableEntity(new
-                {
-                    error = "balance_exceeds_limit",
-                    maxBalanceAfterDeposit = opts.MaxBalanceAfterDeposit,
-                    current = keeper.GetAvailable(firmId, owner),
-                });
-
             try
             {
                 // Audit-first ordering (mirrors AdminEndpoints.HandleCashLedger):
@@ -106,7 +97,15 @@ public static class BalanceEndpoints
                 };
                 audit.LogOrFail(auditEvt);
 
-                dispatcher.Dispatch(
+                // #679 review fix: the balance-cap check must run against
+                // CashLedger (the ledger the cap and GET /balance actually
+                // describe — CashKeeper excludes fills/fees so it can
+                // diverge from the real spendable balance) AND must be
+                // evaluated atomically under the dispatcher's snapshot
+                // lock via DispatchWithPreApply — otherwise two concurrent
+                // deposits can each observe a pre-cap balance and both
+                // commit, exceeding MaxBalanceAfterDeposit.
+                var outcome = dispatcher.DispatchWithPreApply(
                     new CashLedgerEvent
                     {
                         EndClientId = sub,
@@ -117,11 +116,30 @@ public static class BalanceEndpoints
                         Reference = "self-service",
                         OperatorId = sub,
                     },
-                    () =>
+                    preApply: () =>
                     {
+                        var projectedBalance = cashLedger.GetAvailable(firmId, owner) + req.Amount;
+                        if (projectedBalance > opts.MaxBalanceAfterDeposit)
+                            return false;
                         keeper.ApplyDeposit(firmId, owner, req.Amount);
                         cashLedger.ApplyDeposit(firmId, owner, req.Amount);
+                        return true;
+                    },
+                    rollback: () =>
+                    {
+                        keeper.TryWithdraw(firmId, owner, req.Amount);
+                        cashLedger.ApplyWithdrawal(firmId, owner, req.Amount);
                     });
+
+                if (!outcome.Applied)
+                {
+                    return Results.UnprocessableEntity(new
+                    {
+                        error = "balance_exceeds_limit",
+                        maxBalanceAfterDeposit = opts.MaxBalanceAfterDeposit,
+                        current = cashLedger.GetAvailable(firmId, owner),
+                    });
+                }
 
                 return Results.Ok(new
                 {

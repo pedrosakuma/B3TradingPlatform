@@ -96,4 +96,31 @@ public class SelfDepositEndpointTests
         var second = await client.PostAsJsonAsync("/balance/deposit", new { amount = 200m });
         Assert.Equal(HttpStatusCode.UnprocessableEntity, second.StatusCode);
     }
+
+    [Fact]
+    public async Task ConcurrentDeposits_NeverExceedMaxBalanceAfterDeposit()
+    {
+        // Review fix (#679): the cap check must be atomic w.r.t. the
+        // dispatcher's snapshot lock (DispatchWithPreApply), otherwise
+        // two concurrent requests could both observe a pre-cap balance
+        // and both commit, exceeding MaxBalanceAfterDeposit.
+        var overrides = Enabled();
+        overrides["Trading:Sandbox:MaxBalanceAfterDeposit"] = "1000";
+        await using var factory = TestAppFactory.WithOverrides(overrides);
+        var client = await factory.CreateAuthedClientAsync();
+
+        var tasks = Enumerable.Range(0, 10)
+            .Select(_ => client.PostAsJsonAsync("/balance/deposit", new { amount = 200m }))
+            .ToArray();
+        var responses = await Task.WhenAll(tasks);
+
+        var okCount = responses.Count(r => r.StatusCode == HttpStatusCode.OK);
+        var rejectedCount = responses.Count(r => r.StatusCode == HttpStatusCode.UnprocessableEntity);
+        Assert.Equal(10, okCount + rejectedCount);
+        // At most 5 deposits of 200 fit under the 1000 cap.
+        Assert.True(okCount <= 5, $"Expected at most 5 accepted deposits, got {okCount}");
+
+        var final = await client.GetFromJsonAsync<BalanceDto>("/balance");
+        Assert.True(final!.Available <= 1000m, $"Final balance {final.Available} exceeded the cap");
+    }
 }
