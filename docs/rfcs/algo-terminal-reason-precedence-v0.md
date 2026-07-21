@@ -2,7 +2,7 @@
 
 | Field    | Value                                                                |
 | -------- | --------------------------------------------------------------------|
-| Status   | Proposed                                                             |
+| Status   | Withdrawn                                                            |
 | Tracking | [#674](https://github.com/pedrosakuma/B3TradingPlatform/issues/674)  |
 | Related  | #347 (known CI flake predecessor), #673 (RetryFact stopgap)          |
 | Replaces | n/a                                                                  |
@@ -105,11 +105,26 @@ different producer pair is found to exhibit the same ambiguity — over-
 engineering a general priority system for a single observed collision isn't
 justified yet.
 
-## 5. Decision (pending sign-off)
+## 5. Decision (withdrawn)
 
-Not yet decided — awaiting review before implementation. Do not start coding
-against this RFC until Status flips to Accepted and the tracking issue (#674)
-is updated to reflect the chosen option.
+**Withdrawn — the hypothesized gap does not reproduce against current
+`main`.** The RFC's investigation (and this author's initial follow-up
+analysis on #674) was, by mistake, cross-checked against a stale/dirty
+branch rather than `main` HEAD. Re-verifying against `main` (`e0b3bf0`)
+in a clean worktree showed that `AlgoEngine.OnCreatedAsync` already calls
+`ReconcileLiveChildAgainstBookAsync` *before* `EvaluatePeggedRepegAsync`
+runs, and that helper already routes any terminal, non-`Replaced` child
+(including `Rejected`) through `OnChildErAsync` for correct terminal-reason
+classification — closing the exact resubmission-race window this RFC set
+out to fix. Local reproduction attempts (the specific repro test run 15x
+isolated, and the full `B3.Trading.Api.Tests` suite run 3x under full
+xunit parallelism, 624/624 passing each time) found no failure.
+
+The CI failures that originally motivated #674 are, with much higher
+likelihood, GitHub Actions runner resource contention under xunit
+parallelism — already mitigated by the `[RetryFact]` stopgap landed in
+PR #673. No further code change is planned under this RFC. See #674 for
+the full corrected analysis and closure comment.
 
 ## 6. Out of scope
 
