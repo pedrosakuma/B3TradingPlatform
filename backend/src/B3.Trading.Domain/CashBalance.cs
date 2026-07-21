@@ -53,6 +53,35 @@ public sealed class CashBalance
     }
 
     /// <summary>
+    /// #679. Credit an operator- or self-service-driven cash movement
+    /// (admin <c>/admin/cash</c> deposit, or sandbox self-deposit) into
+    /// <see cref="Available"/> — i.e. the same spendable balance the
+    /// margin provider and <c>GET /balance</c> read. Distinct from
+    /// <see cref="ApplyFill"/> (fill-driven) and unconditional like
+    /// <see cref="ApplyFee"/>; caller owns idempotency/audit.
+    /// </summary>
+    public void ApplyDeposit(decimal amount)
+    {
+        if (amount <= 0m)
+            throw new ArgumentOutOfRangeException(nameof(amount), "deposit amount must be > 0");
+        Available += amount;
+    }
+
+    /// <summary>
+    /// #679. Mirror of <see cref="ApplyDeposit"/> for operator-driven
+    /// withdrawals. Unconditional — the insufficient-funds gate lives
+    /// upstream (<c>CashKeeper.TryWithdraw</c> is the authoritative
+    /// check for <c>/admin/cash</c>); this just keeps the spendable
+    /// balance consistent with that decision.
+    /// </summary>
+    public void ApplyWithdrawal(decimal amount)
+    {
+        if (amount <= 0m)
+            throw new ArgumentOutOfRangeException(nameof(amount), "withdrawal amount must be > 0");
+        Available -= amount;
+    }
+
+    /// <summary>
     /// Recovery / seed-only constructor used by snapshot replay and
     /// startup seeding. Skips the ApplyFill arithmetic so a snapshot
     /// loaded with a negative or zero balance round-trips exactly.

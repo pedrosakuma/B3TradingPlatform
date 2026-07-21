@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using B3.Trading.Api.WebSockets;
 
 namespace B3.Trading.Api.Tests;
 
@@ -182,6 +183,33 @@ public class CashLedgerAdminEndpointTests : IClassFixture<TestAppFactory>
             currency = "BRL",
         });
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Deposit_AlsoIncreasesSpendableBalance()
+    {
+        // #679. Admin deposits must fold into CashLedger (the balance
+        // GET /balance and the margin provider read), not just
+        // CashKeeper's operator-facing counter — otherwise a deposit
+        // never affects real buying power. Uses the shared TestUser
+        // ("alice") deliberately since GET /balance requires an
+        // authenticated principal matching the deposited end-client.
+        using var admin = await _factory.CreateAuthedClientAsync("admin");
+        using var alice = await _factory.CreateAuthedClientAsync();
+
+        var before = await alice.GetFromJsonAsync<BalanceDto>("/balance");
+
+        var resp = await admin.PostAsJsonAsync("/admin/cash", new
+        {
+            endclient = TestAppFactory.TestUser,
+            kind = "Deposit",
+            amount = 750m,
+            currency = "BRL",
+        });
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        var after = await alice.GetFromJsonAsync<BalanceDto>("/balance");
+        Assert.Equal(before!.Available + 750m, after!.Available);
     }
 
     private sealed record CashResponse(string Endclient, string Kind, decimal Amount, string Currency, decimal Available);

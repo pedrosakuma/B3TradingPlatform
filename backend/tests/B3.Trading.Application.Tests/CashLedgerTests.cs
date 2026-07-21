@@ -139,6 +139,50 @@ public class CashLedgerTests
             ledger.ApplyFee(new EndClientId("alice"), -1m));
     }
 
+    // #679. Closes the gap where CashKeeper (operator deposits/
+    // withdrawals) never affected the spendable/margin balance —
+    // AdminEndpoints.HandleCashLedger now folds the same
+    // CashLedgerEvent into CashLedger too via these methods.
+    [Fact]
+    public void ApplyDeposit_CreditsAvailable()
+    {
+        var ledger = new CashLedger();
+        var alice = new EndClientId("alice");
+
+        ledger.ApplyDeposit(alice, 1_000m);
+        ledger.ApplyDeposit(alice, 250m);
+
+        Assert.Equal(1_250m, ledger.GetAvailable(alice));
+    }
+
+    [Fact]
+    public void ApplyDeposit_NonPositiveAmount_Throws()
+    {
+        var ledger = new CashLedger();
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            ledger.ApplyDeposit(new EndClientId("alice"), 0m));
+    }
+
+    [Fact]
+    public void ApplyWithdrawal_DebitsAvailable()
+    {
+        var ledger = new CashLedger();
+        var alice = new EndClientId("alice");
+        ledger.SeedIfAbsent(alice, 1_000m);
+
+        ledger.ApplyWithdrawal(alice, 400m);
+
+        Assert.Equal(600m, ledger.GetAvailable(alice));
+    }
+
+    [Fact]
+    public void ApplyWithdrawal_NonPositiveAmount_Throws()
+    {
+        var ledger = new CashLedger();
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            ledger.ApplyWithdrawal(new EndClientId("alice"), -1m));
+    }
+
     [Fact]
     public void SameOwner_IsFirmSegregated_ThroughSnapshotRestore()
     {

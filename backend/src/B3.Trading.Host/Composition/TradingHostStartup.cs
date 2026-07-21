@@ -161,6 +161,17 @@ internal static class TradingHostStartup
         if (listenerWarning is not null)
             app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("EntryPointListener").LogWarning("{Warning}", listenerWarning);
 
+        // #679. Self-service cash deposit boot guard: enforce Production
+        // safety rules and emit a warning banner when enabled. Mirrors
+        // ErInjectionBootGuard — letting any authenticated end-client mint
+        // their own buying power is a real-money risk outside a sandbox.
+        var sandboxCashOpts = app.Services.GetRequiredService<IOptions<SandboxCashOptions>>().Value;
+        SandboxCashDepositBootGuard.Validate(app.Environment.EnvironmentName, sandboxCashOpts.AllowSelfCashDeposit, sandboxCashOpts.AllowSelfCashDepositInProduction);
+        var sandboxCashWarning = SandboxCashDepositBootGuard.BuildWarning(app.Environment.EnvironmentName, sandboxCashOpts.AllowSelfCashDeposit, sandboxCashOpts.AllowSelfCashDepositInProduction);
+        if (sandboxCashWarning is not null)
+            app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("SandboxCashDeposit").LogWarning("{Warning}", sandboxCashWarning);
+
+
         // Pass-1 review (#325) P1. CVM 35/505 LGPD opacification salt is
         // required everywhere; the TestOnly sentinel is only accepted in
         // Development (mirrors AuthSigningKeyValidator). Fail fast so an
