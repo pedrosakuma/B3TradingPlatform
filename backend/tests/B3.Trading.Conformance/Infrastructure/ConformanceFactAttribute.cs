@@ -54,6 +54,17 @@ public sealed class ConformanceFactAttribute : FactAttribute
     public bool RequiresSandboxMatching { get; init; }
 
     /// <summary>
+    /// When true, the scenario requires the dedicated market-maker sandbox
+    /// stack — real matching + the market-maker-bot overlay resting live
+    /// quotes + <c>Trading__Sandbox__AllowSelfCashDeposit=true</c> (operator
+    /// opts in via <c>B3T_MARKET_MAKER_SANDBOX=true</c>, #683 item 4). Kept
+    /// distinct from <see cref="RequiresSandboxMatching"/> so it runs
+    /// against its own isolated CI job/stack instead of one shared with the
+    /// self-cross specs the bot's resting orders would otherwise disturb.
+    /// </summary>
+    public bool RequiresMarketMakerSandbox { get; init; }
+
+    /// <summary>
     /// When true, the scenario needs the host's HS256 JWT signing key
     /// (env <c>B3T_AUTH_SIGNING_KEY</c>) so it can mint authentically
     /// signed tokens with custom claims/expiry. Skipped at discovery
@@ -125,6 +136,8 @@ public sealed class ConformanceFactAttribute : FactAttribute
                 return PlatformEndpoint.SimulatorSkipReason;
             if (RequiresSandboxMatching && !PlatformEndpoint.IsRealStackConformance())
                 return PlatformEndpoint.RealStackConformanceSkipReason;
+            if (RequiresMarketMakerSandbox && !PlatformEndpoint.IsMarketMakerSandboxEnabled())
+                return PlatformEndpoint.MarketMakerSandboxSkipReason;
             if (RequiresDockerControl && !PlatformEndpoint.IsDockerControlEnabled())
                 return PlatformEndpoint.DockerControlSkipReason;
             if (RequiresAuthSigningKey && !PlatformEndpoint.IsAuthSigningKeyConfigured())

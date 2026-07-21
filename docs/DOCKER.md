@@ -233,8 +233,24 @@ must line up with `docker/real/instruments-eqt.json`'s `SecurityId`s
   config-driven, not derived from `marketdata`'s `SecurityDefinition`
   stream — see `MarketDataFeed`'s doc comment for why (SecurityId
   namespaces don't line up).
-- No automated conformance coverage yet (self-deposit → buy/sell
-  against the bot, bounded fill latency) — tracked as #683 item 4.
+
+### Conformance coverage (#683 item 4)
+
+`backend/tests/B3.Trading.Conformance/Spec_HTTP_MarketMaker/MarketMakerLiquiditySpecTests.cs`
+self-deposits cash as an ordinary end-client, then crosses the bot's
+resting quote on both sides (buy into the ask, sell back into the
+re-quoted bid) and asserts each leg fills within a bounded window. It's
+gated on `RequiresMarketMakerSandbox` (operator sets
+`B3T_MARKET_MAKER_SANDBOX=true`) — a flag deliberately separate from
+`RequiresSandboxMatching`, because the bot's resting bid/ask would
+otherwise intercept the same-user Buy+Sell pairs the
+`RequiresSandboxMatching` specs submit to observe a self-print. CI runs
+this scenario in its own job (`market-maker-conformance` in
+`.github/workflows/docker.yml`) against
+`docker-compose.yml` + `docker-compose.real.yml` +
+`docker-compose.market-maker.yml` + `docker-compose.conformance.yml` +
+`docker-compose.market-maker-conformance.yml`, so it never shares an
+order book with the `real-stack-conformance` job.
 
 ## Honest no-broker mode
 

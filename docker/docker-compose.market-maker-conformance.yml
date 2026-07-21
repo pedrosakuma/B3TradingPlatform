@@ -1,0 +1,35 @@
+# Tiny merge overlay for the (real-stack + market-maker + conformance)
+# combination (#683 item 4).
+#
+# The conformance service is defined in docker-compose.conformance.yml.
+# When stacked on top of docker-compose.real.yml + docker-compose.market-maker.yml,
+# this sets the env flag that opts the run into RequiresMarketMakerSandbox
+# specs (Spec_HTTP_MarketMaker/MarketMakerLiquiditySpecTests). Deliberately
+# does NOT set B3T_REAL_STACK_CONFORMANCE: the market-maker-bot rests a
+# tight bid/ask on every configured instrument, which would otherwise
+# intercept the same-user Buy+Sell pairs the RequiresSandboxMatching specs
+# (docker-compose.real-conformance.yml) submit to observe a self-print —
+# those specs assume their own Buy fills their own Sell 1:1, which the
+# venue can't guarantee once a better-priced third-party quote is resting
+# in the book. Keeping the two profiles on separate env flags means they
+# can run in the same or different CI jobs without ever sharing an order
+# book expectation.
+#
+# Usage:
+#   docker compose \
+#       -f docker/docker-compose.yml \
+#       -f docker/docker-compose.real.yml \
+#       -f docker/docker-compose.market-maker.yml \
+#       -f docker/docker-compose.conformance.yml \
+#       -f docker/docker-compose.market-maker-conformance.yml \
+#       run --rm conformance
+#
+# Kept as a separate file (mirrors real-conformance.yml) so
+# docker-compose.market-maker.yml can be combined with overlays that don't
+# define a `conformance` service without tripping compose's "service has
+# neither image nor build" validation.
+services:
+  conformance:
+    environment:
+      B3T_MARKET_MAKER_SANDBOX: "true"
+      B3T_REQUIRE_READY: "true"
