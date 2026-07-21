@@ -36,6 +36,7 @@ public sealed record PlatformEndpoint(
     public const string EnvSimulatorMode = "B3T_SIMULATOR_MODE";
     public const string EnvErInjection = "B3T_ER_INJECTION";
     public const string EnvRealStackConformance = "B3T_REAL_STACK_CONFORMANCE";
+    public const string EnvMarketMakerSandbox = "B3T_MARKET_MAKER_SANDBOX";
     public const string EnvDockerControl = "B3T_DOCKER_CONTROL";
     public const string EnvAuthSigningKey = "B3T_AUTH_SIGNING_KEY";
     public const string EnvAuthIssuer = "B3T_AUTH_ISSUER";
@@ -123,6 +124,27 @@ public sealed record PlatformEndpoint(
     }
 
     /// <summary>
+    /// True when the operator declared the target is the dedicated
+    /// docker-compose real-stack sandbox WITH the market-maker bot overlay
+    /// stacked on top (env var <c>B3T_MARKET_MAKER_SANDBOX=true</c>, #683
+    /// item 4). Deliberately a separate flag from
+    /// <see cref="IsRealStackConformance"/>: the bot rests its own bid/ask
+    /// on each configured instrument, which would otherwise cross with the
+    /// same-user Buy+Sell pairs several <c>RequiresSandboxMatching</c>
+    /// specs submit to observe a self-print (e.g. <c>MarketDataOutageSpecTests</c>,
+    /// <c>ReferencePriceLiveSpecTests</c>) — the venue would match those
+    /// against the bot's better-priced resting order instead of the
+    /// end-client's own opposite leg, breaking their 1:1 self-fill
+    /// assumption. CI runs this scenario against its own isolated stack/job
+    /// so the two profiles never share an order book.
+    /// </summary>
+    public static bool IsMarketMakerSandboxEnabled()
+    {
+        var v = Environment.GetEnvironmentVariable(EnvMarketMakerSandbox);
+        return string.Equals(v, "true", StringComparison.OrdinalIgnoreCase) || v == "1";
+    }
+
+    /// <summary>
     /// True when the operator declared the test process may actively control
     /// the dockerized real-stack transport (env var
     /// <c>B3T_DOCKER_CONTROL=true</c>). Used by destructive session-roll
@@ -172,6 +194,9 @@ public sealed record PlatformEndpoint(
 
     public const string RealStackConformanceSkipReason =
         "Real-stack scenario skipped: B3T_REAL_STACK_CONFORMANCE=true not set (host is not the docker-compose real-stack sandbox).";
+
+    public const string MarketMakerSandboxSkipReason =
+        "Market-maker scenario skipped: B3T_MARKET_MAKER_SANDBOX=true not set (target does not have the market-maker-bot overlay + self-cash-deposit stacked on).";
 
     public const string DockerControlSkipReason =
         "Docker-control scenario skipped: B3T_DOCKER_CONTROL=true not set (test process cannot sever/reconnect the matching-platform transport).";

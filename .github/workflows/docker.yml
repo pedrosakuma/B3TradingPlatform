@@ -355,6 +355,7 @@ jobs:
           docker compose -f docker/docker-compose.yml -f docker/docker-compose.conformance.yml config --quiet
           docker compose -f docker/docker-compose.yml -f docker/docker-compose.demo.yml config --quiet
           docker compose -f docker/docker-compose.yml -f docker/docker-compose.market-maker.yml config --quiet
+          docker compose -f docker/docker-compose.yml -f docker/docker-compose.real.yml -f docker/docker-compose.market-maker.yml -f docker/docker-compose.conformance.yml -f docker/docker-compose.market-maker-conformance.yml config --quiet
 
       - name: docker compose auth mode wiring smoke
         run: python3 docker/test/compose-auth-config-smoke.py
@@ -728,6 +729,103 @@ jobs:
               -f docker/docker-compose.real-conformance.yml \
               down -v
 
+  market-maker-conformance:
+    name: Run conformance against candidate (market-maker sandbox)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: trading-host
+    env:
+      # Same CI placeholders as the conformance jobs above (alice/wonderland).
+      TRADING_AUTH_SIGNING_KEY: ci-conformance-placeholder-key-min-32-bytes-long-aaaaa
+      TRADING_SEED_USER: alice
+      TRADING_SEED_PASSWORD: wonderland
+      TRADING_SEED_PASSWORD_HASH: ZDzDHANAHq8NDQK3BWk/YZjybKLCMKdRzw0z9Da5wic=
+      TRADING_SEED_PASSWORD_SALT: rXA+be7/gEYYZQrQDsUr2g==
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bring up real stack + market-maker bot (#683 item 4)
+        # Same real-stack bring-up as real-stack-conformance, plus
+        # docker-compose.market-maker.yml (bot + AllowSelfCashDeposit).
+        # Deliberately its own job/stack — see
+        # docker-compose.market-maker-conformance.yml's header comment for
+        # why this can't share an order book with the RequiresSandboxMatching
+        # specs. --wait blocks until matching's healthcheck passes AND
+        # trading-host reports healthy; the bot itself only needs
+        # matching-platform healthy + marketdata started (see its
+        # depends_on), so it's up well before conformance runs.
+        env:
+          CANDIDATE_DIGEST: ${{ needs.trading-host.outputs.host_digest }}
+          HOST_IMAGE: ghcr.io/${{ github.repository_owner }}/b3-trading-host
+        run: |
+          set -euo pipefail
+          compose=(
+            docker compose
+            -f docker/docker-compose.yml
+            -f docker/docker-compose.real.yml
+            -f docker/docker-compose.market-maker.yml
+            -f docker/docker-compose.conformance.yml
+            -f docker/docker-compose.market-maker-conformance.yml
+          )
+          "${compose[@]}" build conformance market-maker-bot
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            "${compose[@]}" up -d --build --wait trading-host market-maker-bot
+          else
+            test -n "$CANDIDATE_DIGEST"
+            export TRADING_IMAGE="$HOST_IMAGE@$CANDIDATE_DIGEST"
+            docker pull "$TRADING_IMAGE"
+            "${compose[@]}" up -d --no-build --wait trading-host
+            "${compose[@]}" up -d --no-build market-maker-bot
+            test "$(docker inspect -f '{{.Config.Image}}' b3-trading-host)" = "$TRADING_IMAGE"
+          fi
+
+      - name: Run conformance
+        run: |
+          docker compose \
+              -f docker/docker-compose.yml \
+              -f docker/docker-compose.real.yml \
+              -f docker/docker-compose.market-maker.yml \
+              -f docker/docker-compose.conformance.yml \
+              -f docker/docker-compose.market-maker-conformance.yml \
+              run --rm --no-deps conformance
+
+      - name: Logs (always)
+        if: always()
+        run: |
+          for svc in trading-host matching-platform marketdata market-maker-bot; do
+            echo "::group::$svc"
+            docker compose \
+                -f docker/docker-compose.yml \
+                -f docker/docker-compose.real.yml \
+                -f docker/docker-compose.market-maker.yml \
+                -f docker/docker-compose.conformance.yml \
+                -f docker/docker-compose.market-maker-conformance.yml \
+                logs --no-color --timestamps "$svc" || true
+            echo "::endgroup::"
+          done
+
+      - name: Tear down
+        if: always()
+        run: |
+          docker compose \
+              -f docker/docker-compose.yml \
+              -f docker/docker-compose.real.yml \
+              -f docker/docker-compose.market-maker.yml \
+              -f docker/docker-compose.conformance.yml \
+              -f docker/docker-compose.market-maker-conformance.yml \
+              down -v
+
   outbound-recovery-release-gate:
     name: Outbound recovery conformance release gate
     if: always()
@@ -736,17 +834,20 @@ jobs:
       - recovery-drill
       - conformance
       - real-stack-conformance
+      - market-maker-conformance
     steps:
       - name: Require every outbound recovery profile
         env:
           RECOVERY_DRILL: ${{ needs.recovery-drill.result }}
           UNAVAILABLE_CONFORMANCE: ${{ needs.conformance.result }}
           REAL_STACK_CONFORMANCE: ${{ needs.real-stack-conformance.result }}
+          MARKET_MAKER_CONFORMANCE: ${{ needs.market-maker-conformance.result }}
         run: |
           set -euo pipefail
           test "$RECOVERY_DRILL" = success
           test "$UNAVAILABLE_CONFORMANCE" = success
           test "$REAL_STACK_CONFORMANCE" = success
+          test "$MARKET_MAKER_CONFORMANCE" = success
 
   promote:
     name: Promote tested image digests
@@ -762,6 +863,7 @@ jobs:
       needs.recovery-drill.result == 'success' &&
       needs.conformance.result == 'success' &&
       needs.real-stack-conformance.result == 'success' &&
+      needs.market-maker-conformance.result == 'success' &&
       needs.outbound-recovery-release-gate.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -775,6 +877,7 @@ jobs:
       - recovery-drill
       - conformance
       - real-stack-conformance
+      - market-maker-conformance
       - outbound-recovery-release-gate
     steps:
       - uses: actions/checkout@v6
