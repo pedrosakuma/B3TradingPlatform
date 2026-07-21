@@ -167,6 +167,9 @@ services:
       Trading__Auth__LocalLoginEnabled: ${AUTH_LOCAL_LOGIN_ENABLED:-}
       Trading__Auth__SignupEnabled: ${AUTH_SIGNUP_ENABLED:-}
       Trading__Auth__TotpEnabled: ${AUTH_TOTP_ENABLED:-}
+      Trading__Auth__WebAuthnEnabled: ${AUTH_WEBAUTHN_ENABLED:-}
+      Trading__Auth__WebAuthn__RelyingPartyId: ${AUTH_WEBAUTHN_RP_ID:-localhost}
+      Trading__Auth__WebAuthn__Origins__0: ${AUTH_WEBAUTHN_ORIGIN:-http://localhost:8080}
       Trading__Auth__ExternalIdentity__Authority: ${AUTH_AUTHORITY:-}
       Trading__Auth__ExternalIdentity__Issuer: ${AUTH_ISSUER:-}
       Trading__Auth__ExternalIdentity__TenantId: ${AUTH_TENANT_ID:-}

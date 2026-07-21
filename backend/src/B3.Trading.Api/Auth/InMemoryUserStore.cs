@@ -18,6 +18,7 @@ public sealed class InMemoryUserStore : IUserStore, ILegacyUserSnapshotProvider
         new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, object> _userLocks =
         new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _webAuthnGate = new();
 
     public InMemoryUserStore(IOptions<AuthOptions> options)
     {
@@ -70,6 +71,7 @@ public sealed class InMemoryUserStore : IUserStore, ILegacyUserSnapshotProvider
             if (_seeded.TryGetValue(user.Username, out var seeded))
             {
                 seeded.Totp = user.Totp;
+                seeded.WebAuthnCredentials = user.WebAuthnCredentials;
                 seeded.Require2FA = user.Require2FA;
                 return true;
             }
@@ -119,6 +121,7 @@ public sealed class InMemoryUserStore : IUserStore, ILegacyUserSnapshotProvider
                 if (string.Equals(user.Totp.RecoveryCodes[i], codeHash, StringComparison.Ordinal))
                     idx = i;
             }
+
             if (idx < 0)
             {
                 // Distinguish race-loser / replay from a wrong code so
@@ -135,6 +138,84 @@ public sealed class InMemoryUserStore : IUserStore, ILegacyUserSnapshotProvider
             AppendConsumed(user.Totp, codeHash);
             updatedUser = user;
             return RecoveryCodeConsumeResult.Consumed;
+        }
+    }
+
+    public bool IsWebAuthnCredentialIdUnique(string credentialIdHash)
+    {
+        if (string.IsNullOrEmpty(credentialIdHash)) return false;
+        lock (_webAuthnGate)
+        {
+            return IsWebAuthnCredentialIdUniqueLocked(credentialIdHash);
+        }
+    }
+
+    public bool TryAddWebAuthnCredential(
+        string username,
+        UserWebAuthnCredential credential,
+        IReadOnlyList<string>? recoveryCodeHashes,
+        out bool recoveryCodesStored,
+        out UserConfig? updatedUser)
+    {
+        recoveryCodesStored = false;
+        updatedUser = null;
+        if (string.IsNullOrWhiteSpace(username)
+            || string.IsNullOrEmpty(credential.CredentialIdHash))
+            return false;
+
+        lock (_webAuthnGate)
+        {
+            lock (LockFor(username))
+            {
+                if (!TryGet(username, out var user) || user is null
+                    || !IsWebAuthnCredentialIdUniqueLocked(credential.CredentialIdHash))
+                    return false;
+                user.WebAuthnCredentials.Add(credential);
+                if (recoveryCodeHashes is { Count: > 0 }
+                    && (user.Totp is null || user.Totp.RecoveryCodes.Count == 0))
+                {
+                    user.Totp ??= new UserTotpConfig();
+                    user.Totp.RecoveryCodes = recoveryCodeHashes.ToList();
+                    recoveryCodesStored = true;
+                }
+                updatedUser = user;
+                return true;
+            }
+        }
+    }
+
+    private bool IsWebAuthnCredentialIdUniqueLocked(string credentialIdHash) =>
+        _seeded.Values.Concat(_runtime.Values)
+            .SelectMany(static user => user.WebAuthnCredentials)
+            .All(credential => !string.Equals(
+                credential.CredentialIdHash, credentialIdHash, StringComparison.Ordinal));
+
+    public bool TryUpdateWebAuthnCounter(
+        string username,
+        string credentialIdHash,
+        uint expectedCounter,
+        uint newCounter,
+        bool isBackedUp,
+        out UserConfig? updatedUser)
+    {
+        updatedUser = null;
+        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrEmpty(credentialIdHash))
+            return false;
+
+        lock (LockFor(username))
+        {
+            if (!TryGet(username, out var user) || user is null)
+                return false;
+            var credential = user.WebAuthnCredentials.FirstOrDefault(item =>
+                string.Equals(item.CredentialIdHash, credentialIdHash, StringComparison.Ordinal));
+            if (credential is null || credential.SignatureCounter != expectedCounter)
+                return false;
+            if (newCounter != 0 && newCounter <= expectedCounter)
+                return false;
+            credential.SignatureCounter = newCounter;
+            credential.IsBackedUp = isBackedUp;
+            updatedUser = user;
+            return true;
         }
     }
 

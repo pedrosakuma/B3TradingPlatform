@@ -1,6 +1,8 @@
 using B3.Trading.Api.Auth;
 using B3.Trading.Api.Auth.Totp;
+using B3.Trading.Api.Auth.WebAuthn;
 using B3.Trading.Application;
+using Fido2NetLib;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -35,13 +37,55 @@ public static class TradingAuthServiceCollectionExtensions
             configuration.GetSection(TotpOptions.SectionName));
         services.Configure<TotpLockoutOptions>(
             configuration.GetSection(TotpLockoutOptions.SectionName));
+        services.Configure<WebAuthnOptions>(
+            configuration.GetSection(WebAuthnOptions.SectionName));
+        services.PostConfigure<WebAuthnOptions>(options =>
+        {
+            var auth = configuration.GetSection(AuthOptions.SectionName).Get<AuthOptions>()
+                ?? new AuthOptions();
+            if (options.Origins.Count == 0)
+            {
+                if (Uri.TryCreate(auth.Issuer, UriKind.Absolute, out var issuer)
+                    && (issuer.Scheme == Uri.UriSchemeHttp || issuer.Scheme == Uri.UriSchemeHttps))
+                {
+                    options.Origins.Add(issuer.GetLeftPart(UriPartial.Authority));
+                }
+                else
+                {
+                    options.Origins.Add("http://localhost:8080");
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(options.RelyingPartyId))
+            {
+                options.RelyingPartyId = Uri.TryCreate(
+                    options.Origins[0], UriKind.Absolute, out var origin)
+                    ? origin.Host
+                    : "localhost";
+            }
+        });
         services.AddSingleton<IValidateOptions<AuthOptions>, AuthOptionsValidator>();
+        services.AddSingleton<IValidateOptions<WebAuthnOptions>, WebAuthnOptionsValidator>();
         services.AddSingleton<ILoginAttemptTracker, InMemoryLoginAttemptTracker>();
         services.AddSingleton<ITotpAttemptTracker, InMemoryTotpAttemptTracker>();
         services.AddSingleton<ITotpService, TotpService>();
         services.AddSingleton<ITotpSecretProtector, TotpSecretProtector>();
         services.AddSingleton<IPendingTotpEnrollmentStore, InMemoryPendingTotpEnrollmentStore>();
         services.AddSingleton<ITotpChallengeStore, InMemoryTotpChallengeStore>();
+        services.AddSingleton<IWebAuthnCredentialProtector, WebAuthnCredentialProtector>();
+        services.AddSingleton<IWebAuthnChallengeStore, InMemoryWebAuthnChallengeStore>();
+        services.AddSingleton<IFido2>(sp =>
+        {
+            var options = sp.GetRequiredService<IOptions<WebAuthnOptions>>().Value;
+            return new Fido2(new Fido2Configuration
+            {
+                ServerDomain = options.RelyingPartyId,
+                ServerName = options.RelyingPartyName,
+                Origins = options.Origins.ToHashSet(StringComparer.OrdinalIgnoreCase),
+                Timeout = options.TimeoutMilliseconds,
+                ChallengeSize = 32,
+            });
+        });
         services.AddAuthRateLimiter();
 
         // Slice 3 of #97: when Trading:Auth:UserStore:Enabled is true (the
