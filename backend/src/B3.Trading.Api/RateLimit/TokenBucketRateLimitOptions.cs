@@ -129,6 +129,17 @@ public sealed class TokenBucketRateLimitOptions
             Burst = 3,
             RefillPerSecond = 1,
         },
+        // #679. Self-service sandbox cash deposit: tight bucket since
+        // it directly mints buying power — even in a sandbox deployment
+        // a runaway script shouldn't be able to hammer the WAL with
+        // deposit spam.
+        new TokenBucketRule
+        {
+            PathPattern = "/balance/deposit",
+            Methods = new() { "POST" },
+            Burst = 5,
+            RefillPerSecond = 1,
+        },
         // Generic write/read fall-through. Catch-all patterns kick in
         // when no explicit rule matched the request. Read defaults
         // are deliberately generous since they are typically polling

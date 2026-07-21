@@ -27,6 +27,8 @@ public static class TradingPersistenceServiceCollectionExtensions
             configuration.GetSection(PositionSeedOptions.SectionName));
         services.Configure<CashSeedOptions>(
             configuration.GetSection(CashSeedOptions.SectionName));
+        services.Configure<SandboxCashOptions>(
+            configuration.GetSection(SandboxCashOptions.SectionName));
         services.Configure<OutboundCommandProtectionOptions>(
             configuration.GetSection(OutboundCommandProtectionOptions.SectionName));
 

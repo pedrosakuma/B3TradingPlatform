@@ -1038,6 +1038,17 @@ public sealed class EventReplayer
     private readonly OutboundMutationLedger? _outboundLedger;
     private readonly RestOrderIdempotencyStore? _restOrderIdempotency;
     private readonly IMarginProvider? _marginProvider;
+    /// <summary>
+    /// #679. Optional. When wired, replay of <see cref="CashLedgerEvent"/>
+    /// also folds the deposit/withdrawal into the spendable/margin
+    /// balance (alongside the unconditional <see cref="_cashKeeper"/>
+    /// fold), keeping the two consistent across cold-start recovery —
+    /// see <see cref="AdminEndpoints.HandleCashLedger"/> for the live
+    /// path this mirrors. Nullable so pre-existing test compositions
+    /// that construct <see cref="EventReplayer"/> without a
+    /// <see cref="CashLedger"/> keep working unchanged.
+    /// </summary>
+    private readonly CashLedger? _cash;
 
     public EventReplayer(
         WorkingOrderBook orders,
@@ -1080,7 +1091,8 @@ public sealed class EventReplayer
         PendingCancelRegistry? pendingCancels = null,
         OutboundMutationLedger? outboundLedger = null,
         RestOrderIdempotencyStore? restOrderIdempotency = null,
-        IMarginProvider? marginProvider = null)
+        IMarginProvider? marginProvider = null,
+        CashLedger? cash = null)
     {
         _orders = orders;
         _ownership = ownership;
@@ -1111,6 +1123,7 @@ public sealed class EventReplayer
         _outboundLedger = outboundLedger;
         _restOrderIdempotency = restOrderIdempotency;
         _marginProvider = marginProvider;
+        _cash = cash;
     }
 
     /// <summary>
@@ -1608,6 +1621,19 @@ public sealed class EventReplayer
                     cle.Operation,
                     new EndClientId(cle.EndClientId),
                     cle.Amount);
+                // #679. Also fold into CashLedger — the spendable/margin
+                // balance GET /balance and the margin provider read —
+                // so operator (and future self-service) cash movements
+                // survive cold-start recovery consistently with the
+                // live path (see AdminEndpoints.HandleCashLedger).
+                if (string.Equals(cle.Operation, "Deposit", StringComparison.Ordinal))
+                {
+                    _cash?.ApplyDeposit(cle.FirmId, new EndClientId(cle.EndClientId), cle.Amount);
+                }
+                else if (string.Equals(cle.Operation, "Withdrawal", StringComparison.Ordinal))
+                {
+                    _cash?.ApplyWithdrawal(cle.FirmId, new EndClientId(cle.EndClientId), cle.Amount);
+                }
                 break;
             case FeeAccruedEvent fae:
                 // Q2.3 (#270). Forward the accrual to FeeKeeper. The

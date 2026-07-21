@@ -53,6 +53,9 @@ public static class AuditEventTypes
     /// <summary>Q4.8 (#308). CVM 35/505 transaction report downloaded by a compliance/admin principal.</summary>
     public const string ReportCvmDownload = "report.cvm.download";
 
+    /// <summary>#679. Self-service sandbox cash deposit via <c>POST /balance/deposit</c> (as opposed to operator-driven <c>admin.config.change</c> via <c>/admin/cash</c>).</summary>
+    public const string SandboxCashSelfDeposit = "sandbox.cash.self_deposit";
+
     // Prefix helpers used by the read-path filter for type=auth.* style globs.
     public const string AuthPrefix = "auth.";
     public const string AdminPrefix = "admin.";

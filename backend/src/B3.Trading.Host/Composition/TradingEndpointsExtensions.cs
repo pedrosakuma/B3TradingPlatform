@@ -62,6 +62,17 @@ public static class TradingEndpointsExtensions
             var lo = app.Services.GetRequiredService<IOptions<EntryPointListenerOptions>>().Value;
             if (lo.Enabled) app.MapAdminFixp();
         }
+        {
+            // #679. Self-service cash deposit is mounted conditionally so
+            // the route stays entirely absent (404, not 403) unless the
+            // operator has explicitly opted in — mirrors the
+            // MapSimulatorEndpoints gating above.
+            var sandboxCashOpts = app.Services.GetRequiredService<IOptions<SandboxCashOptions>>().Value;
+            if (sandboxCashOpts.AllowSelfCashDeposit)
+            {
+                app.MapBalanceSelfDeposit();
+            }
+        }
         app.MapUserBotCredentials();
         app.MapWebSocketHub();
         app.MapDropCopyWebSocket();

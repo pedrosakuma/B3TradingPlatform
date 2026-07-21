@@ -153,6 +153,48 @@ public sealed class CashLedger
         ApplyFee(DefaultFirmId, owner, amount);
 
     /// <summary>
+    /// #679. Folds an operator-driven (<c>/admin/cash</c>) or
+    /// self-service sandbox cash deposit into the spendable balance —
+    /// closing the gap where <c>CashKeeper</c> tracked operator cash
+    /// movements in complete isolation from the balance the margin
+    /// provider and <c>GET /balance</c> actually read. Unconditional
+    /// (mirrors <see cref="ApplyFee"/>); callers own idempotency via the
+    /// WAL event fold and any insufficient-funds gate.
+    /// </summary>
+    public void ApplyDeposit(string firmId, EndClientId owner, decimal amount)
+    {
+        var balance = GetOrCreate(firmId, owner);
+        lock (balance)
+        {
+            balance.ApplyDeposit(amount);
+            RaiseBalanceChanged(firmId, owner, balance.Available);
+        }
+    }
+
+    public void ApplyDeposit(EndClientId owner, decimal amount) =>
+        ApplyDeposit(DefaultFirmId, owner, amount);
+
+    /// <summary>
+    /// #679. Mirror of <see cref="ApplyDeposit(string, EndClientId, decimal)"/>
+    /// for operator-driven withdrawals. The insufficient-funds check
+    /// stays on <c>CashKeeper.TryWithdraw</c> (unchanged, authoritative
+    /// for <c>/admin/cash</c>) — this call only keeps the spendable
+    /// balance consistent with an already-approved debit.
+    /// </summary>
+    public void ApplyWithdrawal(string firmId, EndClientId owner, decimal amount)
+    {
+        var balance = GetOrCreate(firmId, owner);
+        lock (balance)
+        {
+            balance.ApplyWithdrawal(amount);
+            RaiseBalanceChanged(firmId, owner, balance.Available);
+        }
+    }
+
+    public void ApplyWithdrawal(EndClientId owner, decimal amount) =>
+        ApplyWithdrawal(DefaultFirmId, owner, amount);
+
+    /// <summary>
     /// Read-only convenience for risk / API callers. Returns <c>0</c> for
     /// an unknown owner without materialising an entry, so probing the
     /// balance can't pollute the dictionary.

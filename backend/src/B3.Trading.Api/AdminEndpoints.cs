@@ -383,8 +383,8 @@ public static class AdminEndpoints
         // CashLedgerEvent on the WAL and projected into CashKeeper.
         // Decoupled from ER fills — fill-driven cash deltas land via
         // the existing CashLedger and the future P&L engine (#271).
-        group.MapPost("/cash", (CashLedgerRequest? req, HttpContext ctx, CashKeeper keeper, EventDispatcher dispatcher, IAuditLogger audit) =>
-            HandleCashLedger(req, ctx, keeper, dispatcher, audit));
+        group.MapPost("/cash", (CashLedgerRequest? req, HttpContext ctx, CashKeeper keeper, CashLedger cashLedger, EventDispatcher dispatcher, IAuditLogger audit) =>
+            HandleCashLedger(req, ctx, keeper, cashLedger, dispatcher, audit));
 
         // POST /admin/simulator/er — synthetic ER injection (formerly the
         // ExchangeMode.Simulator-only route; merged into Mock+AllowErInjection
@@ -414,6 +414,7 @@ public static class AdminEndpoints
         CashLedgerRequest? req,
         HttpContext ctx,
         CashKeeper keeper,
+        CashLedger cashLedger,
         EventDispatcher dispatcher,
         IAuditLogger audit)
     {
@@ -489,8 +490,24 @@ public static class AdminEndpoints
                         Reference = req.Reference,
                         OperatorId = operatorId,
                     },
-                    preApply: () => keeper.TryWithdraw(firmId, owner, req.Amount),
-                    rollback: () => keeper.ApplyDeposit(firmId, owner, req.Amount));
+                    preApply: () =>
+                    {
+                        // #679. CashKeeper stays the authoritative
+                        // insufficient-funds gate (unchanged semantics,
+                        // preserves CashWithdrawalAtomicityTests); once
+                        // approved, mirror the debit onto CashLedger so
+                        // the spendable/margin balance stops diverging
+                        // from the operator-facing counter.
+                        if (!keeper.TryWithdraw(firmId, owner, req.Amount))
+                            return false;
+                        cashLedger.ApplyWithdrawal(firmId, owner, req.Amount);
+                        return true;
+                    },
+                    rollback: () =>
+                    {
+                        keeper.ApplyDeposit(firmId, owner, req.Amount);
+                        cashLedger.ApplyDeposit(firmId, owner, req.Amount);
+                    });
 
                 if (!outcome.Applied)
                 {
@@ -515,7 +532,11 @@ public static class AdminEndpoints
                         Reference = req.Reference,
                         OperatorId = operatorId,
                     },
-                    () => keeper.ApplyDeposit(firmId, owner, req.Amount));
+                    () =>
+                    {
+                        keeper.ApplyDeposit(firmId, owner, req.Amount);
+                        cashLedger.ApplyDeposit(firmId, owner, req.Amount);
+                    });
             }
 
             return Results.Ok(new
