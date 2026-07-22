@@ -1,0 +1,105 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "b3-market-maker-bot.fullname" . }}
+  labels:
+    {{- include "b3-market-maker-bot.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "b3-market-maker-bot.fullname" . }}
+  # Hardcoded to 1 — see values.yaml replicaCount comment. The bot's FIXP
+  # session (sessionId/sessionVerId below) is single-writer against
+  # matching-platform, same posture as b3-trading-host's WAL; a
+  # volumeClaimTemplates-backed StatefulSet (rather than a bare
+  # Deployment + standalone PVC) both matches that chart's precedent and
+  # means the PVC survives `helm uninstall`/reinstall instead of being
+  # deleted as a chart-owned resource — losing the session-state
+  # watermark would otherwise wedge the bot in a permanent
+  # SessionVerId-reuse reconnect loop against matching-platform.
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "b3-market-maker-bot.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "b3-market-maker-bot.labels" . | nindent 8 }}
+    spec:
+      # The image runs as non-root uid/gid 10001 (bot). The mounted PVC
+      # roots as root:root, so fsGroup is REQUIRED — see values.yaml
+      # securityContext comment.
+      securityContext:
+        fsGroup: {{ .Values.securityContext.fsGroup }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: market-maker-bot
+          image: {{ include "b3-market-maker-bot.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            # ── FIXP session ─────────────────────────────────────────────
+            - name: MarketMaker__Endpoint
+              value: {{ .Values.session.endpoint | quote }}
+            - name: MarketMaker__SessionId
+              value: {{ .Values.session.sessionId | quote }}
+            - name: MarketMaker__SessionVerId
+              value: {{ .Values.session.sessionVerId | quote }}
+            - name: MarketMaker__EnteringFirm
+              value: {{ .Values.session.enteringFirm | quote }}
+            - name: MarketMaker__AccessKey
+              value: {{ .Values.session.accessKey | quote }}
+            - name: MarketMaker__SenderLocation
+              value: {{ .Values.session.senderLocation | quote }}
+            - name: MarketMaker__EnteringTrader
+              value: {{ .Values.session.enteringTrader | quote }}
+            # ── Market data (best-effort quote anchor) ──────────────────
+            - name: MarketMaker__MarketData__WsUrl
+              value: {{ .Values.marketData.wsUrl | quote }}
+            # ── Behaviour ────────────────────────────────────────────────
+            - name: MarketMaker__StateDirectory
+              value: /var/lib/b3-market-maker-bot
+            - name: MarketMaker__ReconcileInterval
+              value: {{ .Values.behaviour.reconcileInterval | quote }}
+            # ── Instruments (must match matching's instruments-eqt.json) ─
+            {{- range $i, $instrument := .Values.instruments }}
+            - name: {{ printf "MarketMaker__Instruments__%d__Symbol" $i }}
+              value: {{ $instrument.symbol | quote }}
+            - name: {{ printf "MarketMaker__Instruments__%d__SecurityId" $i }}
+              value: {{ $instrument.securityId | quote }}
+            - name: {{ printf "MarketMaker__Instruments__%d__RefPrice" $i }}
+              value: {{ $instrument.refPrice | quote }}
+            - name: {{ printf "MarketMaker__Instruments__%d__TickSize" $i }}
+              value: {{ $instrument.tickSize | quote }}
+            - name: {{ printf "MarketMaker__Instruments__%d__LotSize" $i }}
+              value: {{ $instrument.lotSize | quote }}
+            - name: {{ printf "MarketMaker__Instruments__%d__QuoteLots" $i }}
+              value: {{ $instrument.quoteLots | quote }}
+            - name: {{ printf "MarketMaker__Instruments__%d__SpreadTicks" $i }}
+              value: {{ $instrument.spreadTicks | quote }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/b3-market-maker-bot
+  volumeClaimTemplates:
+    - metadata:
+        name: state
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: {{ .Values.persistence.storageClassName }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}

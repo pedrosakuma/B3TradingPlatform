@@ -1,12 +1,13 @@
 # Helm charts
 
-Two per-service Helm charts, published as OCI artifacts alongside the images
-built by [`.github/workflows/docker.yml`](../.github/workflows/docker.yml):
+Three per-service Helm charts, published as OCI artifacts alongside the
+images built by [`.github/workflows/docker.yml`](../.github/workflows/docker.yml):
 
 | Chart                  | Replaces (b3deploy manifest)                                  | Publishes to                                              |
 | ----------------------- | -------------------------------------------------------------- | ----------------------------------------------------------- |
 | `b3-trading-host`       | `envs/prod/trading-host.yaml` + `envs/prod/secret-provider.yaml` | `oci://ghcr.io/pedrosakuma/charts/b3-trading-host`         |
 | `b3-trading-frontend`   | `envs/prod/frontend.yaml`                                       | `oci://ghcr.io/pedrosakuma/charts/b3-trading-frontend`     |
+| `b3-market-maker-bot`   | (new — no prior b3deploy manifest; sandbox/demo liquidity only) | `oci://ghcr.io/pedrosakuma/charts/b3-market-maker-bot`     |
 
 This is Layer-1 (component-local) per the [deploy topology RFC](../docs/rfcs)
 (#557): the templates and their default values live here, next to the images
@@ -27,6 +28,9 @@ helm template my-release charts/b3-trading-frontend \
   --set nginx.resolver=10.0.0.10 \
   --set nginx.tradingUpstream=trading-host.<namespace>.svc.cluster.local:5000
 
+helm template my-release charts/b3-market-maker-bot \
+  --set persistence.storageClassName=managed-csi-premium
+
 # install from the published OCI artifact (once #568's CI job has pushed a version)
 helm install trading-host oci://ghcr.io/pedrosakuma/charts/b3-trading-host \
   --version <chart-version> \
@@ -45,13 +49,21 @@ used at install time. b3deploy pins both `chart@version` and
 `image@sha256:...` — the two need not move in lockstep, but a chart release
 should always be validated against the appVersion it declares.
 
-CI (`.github/workflows/helm-charts.yml`) lints + templates both charts on
+CI (`.github/workflows/helm-charts.yml`) lints + templates all three charts on
 every PR touching `charts/**`, and packages + pushes to GHCR on `main` —
 skipping the push if that exact `chart@version` is already published (OCI
 tags are treated as immutable once released).
 
 ## Known prerequisites
 
+- `b3-market-maker-bot` is sandbox/demo-only (#683) — it flips no
+  production posture by itself, but it only makes sense deployed alongside
+  a `b3-trading-host` release with `Trading__Sandbox__AllowSelfCashDeposit`
+  enabled (see the `docker-compose.market-maker.yml` overlay this chart
+  mirrors) and matching-platform's FIXP session 10102 pre-declared. It has
+  no Key Vault wiring; `session.accessKey` is a plain values.yaml field
+  today (same treatment as `b3-trading-host`'s `exchange.firms[].accessKey`
+  — it's a wire credential, not one of the app's boot-guarded secrets).
 - `b3-trading-frontend`'s `nginx.tradingUpstream` requires the image built
   from this repo's `frontend/` directory to support `TRADING_UPSTREAM`
   (#564) — without it, the upstream is hardcoded to the Docker Compose short

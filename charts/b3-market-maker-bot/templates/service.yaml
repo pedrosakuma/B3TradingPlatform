@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "b3-market-maker-bot.fullname" . }}
+  labels:
+    {{- include "b3-market-maker-bot.labels" . | nindent 4 }}
+spec:
+  # Headless — this is only the StatefulSet's required governing Service
+  # (no ports: the bot serves nothing, see the chart's NetworkPolicy
+  # comment). Nothing looks this Service up by DNS today.
+  clusterIP: None
+  selector:
+    {{- include "b3-market-maker-bot.selectorLabels" . | nindent 4 }}

@@ -210,7 +210,12 @@ CI builds+pushes a `candidate-<sha>` digest in the `trading-host` job,
 against the real stack, and `promote` retags the tested digest to
 `ghcr.io/pedrosakuma/b3-market-maker-bot:latest` (+ semver/branch tags) on
 merge to `main` — set `MARKET_MAKER_BOT_IMAGE=ghcr.io/pedrosakuma/b3-market-maker-bot:latest`
-(the compose file's own default) to run it without a local build.
+(the compose file's own default) to run it without a local build. A
+Kubernetes deploy of this same overlay is available as the
+[`charts/b3-market-maker-bot`](../charts/b3-market-maker-bot) Helm chart
+(published to `oci://ghcr.io/pedrosakuma/charts/b3-market-maker-bot`,
+see `charts/README.md`) — a single-replica StatefulSet + small RWO PVC for
+the bot's FIXP session-state watermark, no Service/ports (outbound-only).
 
 ### Safety
 
