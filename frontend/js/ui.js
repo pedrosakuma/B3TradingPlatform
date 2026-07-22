@@ -55,6 +55,12 @@ let _execSymbolFilter = "";
 let _pendingLiveOrderId = null;
 // FE-OPT-3 (#499). Grouping state.
 let _positionsGrouped = false;
+// #694: tracks which symbol we last auto-filled into #ticket-symbol so a
+// subsequent selectedSymbol change (manual dropdown, watchlist/heatmap
+// cell click, or the watchlist's own auto-pick-first symbol) can safely
+// overwrite it — but a value the trader is actively editing for a
+// different name is never clobbered.
+let _lastAutoFilledTicketSymbol = null;
 
 function readPositionsSort() {
   try {
@@ -2206,6 +2212,15 @@ export function renderForSlice(slice) {
   }
   if (slice === "currentView" || slice === "all") applyCurrentView(getState().currentView);
   if (slice === "watchlist" || slice === "selectedSymbol" || slice === "all") renderSelectedSymbol();
+  // #694: keep #ticket-symbol + Trading Readiness's "Session phase"
+  // signal in sync with selectedSymbol regardless of how it changed —
+  // manual dropdown, watchlist/heatmap cell click, or the watchlist's
+  // own auto-pick-first symbol (state.js setWatchlist), which used to
+  // bypass this and leave the readiness banner stuck on "Select symbol".
+  if (slice === "selectedSymbol" || slice === "all") {
+    syncTicketSymbolWithSelection();
+    renderTradingReadiness();
+  }
   if (slice === "watchlist" || slice === "selectedSymbol" || slice === "book" || slice === "all") renderDob();
   if (slice === "watchlist" || slice === "selectedSymbol" || slice === "chartResolution" || slice === "candles" || slice === "all") scheduleChartRender();
   if (slice === "watchlist" || slice === "selectedSymbol" || slice === "tapeShowAll" || slice === "tape" || slice === "all") scheduleTapeRender();
@@ -2677,6 +2692,24 @@ export function renderTicketPhaseCoupling() {
   }
   applySubmitDisabled();
   renderTradingReadiness();
+}
+
+// #694: auto-fill the ticket-symbol input when it's empty or still
+// tracking a previously auto-filled symbol. We never clobber a value the
+// trader is actively editing for a different name — wrong-symbol orders
+// are the worst class of mistake we can prevent here. Runs on every
+// selectedSymbol change (see renderForSlice) so it stays in sync whether
+// the symbol came from a manual pick or the watchlist's auto-pick-first.
+function syncTicketSymbolWithSelection() {
+  const symbol = getState().selectedSymbol;
+  if (!symbol) return;
+  const sym = $("ticket-symbol");
+  if (!sym) return;
+  const cur = (sym.value || "").trim().toUpperCase();
+  if (!cur || cur === _lastAutoFilledTicketSymbol) {
+    sym.value = symbol;
+    _lastAutoFilledTicketSymbol = symbol;
+  }
 }
 
 export function renderTradingReadiness() {

@@ -1198,27 +1198,15 @@ function handleApplyMd({ symbols }) {
 // watchlist symbol subscribed once at the marketdata WS). No
 // per-selection promotion needed; selectedSymbol just drives which
 // ladder the DOB renders.
-let lastAutoFilledTicketSymbol = null;
-
 function handleSelectSymbol(symbol) {
   // Single global selector drives DOB, chart and tape. The DOB reads
   // the per-symbol entry from state.book that mdWorker already keeps
   // up to date via MBP — no public-channel resync is required here.
+  // Ticket-symbol auto-fill + Trading Readiness re-render live in
+  // ui.js's renderForSlice (#694) so the watchlist's own auto-pick-first
+  // path (state.js setWatchlist), which sets selectedSymbol directly
+  // without going through this handler, stays in sync too.
   state.setSelectedSymbol(symbol || null);
-  // Auto-fill the ticket-symbol input when it's empty or still tracking
-  // a previously auto-filled symbol. We never clobber a value the trader
-  // is actively editing for a different name — wrong-symbol orders are
-  // the worst class of mistake we can prevent here.
-  if (symbol) {
-    const sym = document.getElementById("ticket-symbol");
-    if (sym) {
-      const cur = (sym.value || "").trim().toUpperCase();
-      if (!cur || cur === lastAutoFilledTicketSymbol) {
-        sym.value = symbol;
-        lastAutoFilledTicketSymbol = symbol;
-      }
-    }
-  }
 }
 
 function onMdWorkerMessage(msg) {
