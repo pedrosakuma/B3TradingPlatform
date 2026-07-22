@@ -22,9 +22,9 @@ public static class WebAuthnEndpoints
         if (!authOptions.IsWebAuthnEnabled())
             return app;
 
-        app.MapPost("/auth/webauthn/register", RegisterAsync)
+        app.MapPost("/api/auth/webauthn/register", RegisterAsync)
             .RequireAuthorization();
-        app.MapPost("/auth/webauthn/authenticate", AuthenticateAsync);
+        app.MapPost("/api/auth/webauthn/authenticate", AuthenticateAsync);
 
         return app;
     }
@@ -155,7 +155,7 @@ public static class WebAuthnEndpoints
                 ActorFirm = user.Firm,
                 ActorRole = user.Role,
                 SourceIp = http.Connection.RemoteIpAddress?.ToString(),
-                ResourcePath = "/auth/webauthn/register",
+                ResourcePath = "/api/auth/webauthn/register",
                 Details = new Dictionary<string, string> { ["factor"] = "webauthn" },
             });
             return Results.Ok(new WebAuthnRegistrationResponse(
@@ -310,7 +310,7 @@ public static class WebAuthnEndpoints
                 ActorFirm = session.Firm,
                 ActorRole = session.Role,
                 SourceIp = http.Connection.RemoteIpAddress?.ToString(),
-                ResourcePath = "/auth/webauthn/authenticate",
+                ResourcePath = "/api/auth/webauthn/authenticate",
                 Details = new Dictionary<string, string> { ["factor"] = "webauthn" },
             });
             return Results.Ok(new LoginResponse(session.Token!, session.ExpiresAt!.Value));

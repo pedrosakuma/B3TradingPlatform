@@ -11,7 +11,7 @@ namespace B3.Trading.Conformance.Spec_HTTP_Algo;
 /// reactor's three contract points against a deployed peer:
 /// (1) Created → first child sliced at <c>displayQuantity</c>;
 /// (2) Filled child → next child auto-refilled by the engine;
-/// (3) <c>DELETE /algo/{id}</c> + cancel ER on the live child →
+/// (3) <c>DELETE /api/algo/{id}</c> + cancel ER on the live child →
 ///     parent terminalises to <c>Cancelled/UserRequested</c>.
 ///
 /// Skipped unless the peer opted into ER injection
@@ -36,7 +36,7 @@ public class IcebergLifecycleSpecTests
         //    submit slice 0 immediately and refill on terminal-fill.
         var algoId = await CreateIcebergAsync(http, userAuth, total: 300, display: 100, price: 30m);
 
-        // 2. Slice 0 should appear on /orders for the same end-client,
+        // 2. Slice 0 should appear on /api/orders for the same end-client,
         //    tagged with the parent algoId + sliceSeq=0.
         var slice0 = await WaitForChildAsync(http, userAuth, algoId, expectedSeq: 0);
         Assert.Equal(100, slice0.Quantity);
@@ -52,10 +52,10 @@ public class IcebergLifecycleSpecTests
         //    flips parent to Cancelling and waits for a terminal ER on
         //    the live child before terminalising — without an explicit
         //    Canceled ER the parent stays in Cancelling forever.
-        var cancelResp = await SendAsync(http, HttpMethod.Delete, $"/algo/{algoId}", userAuth);
+        var cancelResp = await SendAsync(http, HttpMethod.Delete, $"/api/algo/{algoId}", userAuth);
         Assert.True(cancelResp.StatusCode == HttpStatusCode.Accepted ||
                     cancelResp.StatusCode == HttpStatusCode.NoContent,
-            $"DELETE /algo expected 202/204, got {(int)cancelResp.StatusCode}");
+            $"DELETE /api/algo expected 202/204, got {(int)cancelResp.StatusCode}");
 
         // 5. Drive the simulator to ack the cancel on slice 1.
         await InjectErAsync(http, adminAuth, slice1.ClOrdId, "Canceled");
@@ -74,7 +74,7 @@ public class IcebergLifecycleSpecTests
     private static async Task<string> CreateIcebergAsync(
         HttpClient http, System.Net.Http.Headers.AuthenticationHeaderValue auth, long total, long display, decimal price)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        using var req = new HttpRequestMessage(HttpMethod.Post, "/api/algo/")
         {
             Content = JsonContent.Create(new
             {
@@ -101,7 +101,7 @@ public class IcebergLifecycleSpecTests
         var deadline = DateTime.UtcNow.AddSeconds(15);
         while (DateTime.UtcNow < deadline)
         {
-            using var req = new HttpRequestMessage(HttpMethod.Get, "/orders/");
+            using var req = new HttpRequestMessage(HttpMethod.Get, "/api/orders/");
             req.Headers.Authorization = auth;
             var resp = await http.SendAsync(req);
             resp.EnsureSuccessStatusCode();
@@ -123,7 +123,7 @@ public class IcebergLifecycleSpecTests
             await Task.Delay(150);
         }
         throw new TimeoutException(
-            $"Algo {algoId} child slice {expectedSeq} did not appear in /orders within 15s.");
+            $"Algo {algoId} child slice {expectedSeq} did not appear in /api/orders within 15s.");
     }
 
     private static async Task InjectErAsync(
@@ -136,7 +136,7 @@ public class IcebergLifecycleSpecTests
             (long q, null) => new { ClOrdId = clOrdId, Type = type, LastQty = q },
             _ => new { ClOrdId = clOrdId, Type = type },
         };
-        using var req = new HttpRequestMessage(HttpMethod.Post, "/admin/simulator/er")
+        using var req = new HttpRequestMessage(HttpMethod.Post, "/api/admin/simulator/er")
         {
             Content = JsonContent.Create(body),
         };
@@ -164,7 +164,7 @@ public class IcebergLifecycleSpecTests
     private static async Task<JsonElement> GetAlgoAsync(
         HttpClient http, System.Net.Http.Headers.AuthenticationHeaderValue auth, string algoId)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Get, $"/algo/{algoId}");
+        using var req = new HttpRequestMessage(HttpMethod.Get, $"/api/algo/{algoId}");
         req.Headers.Authorization = auth;
         var resp = await http.SendAsync(req);
         resp.EnsureSuccessStatusCode();

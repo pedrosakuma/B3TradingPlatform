@@ -48,7 +48,7 @@ public class AdminCredentialDefaultGuardTests
     public void Validate_AllowErInjectionTrue_OnlyUserRoleHasDefaults_DoesNotThrow()
     {
         // The plain `user` role is allowed to keep the dev defaults
-        // because it cannot reach POST /admin/simulator/er.
+        // because it cannot reach POST /api/admin/simulator/er.
         AdminCredentialDefaultGuard.Validate(
             allowErInjection: true,
             seededUsers: new[]

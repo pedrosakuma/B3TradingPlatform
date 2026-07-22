@@ -62,7 +62,7 @@ public static class SimulatorEndpoint
     public const string SimulatorErEventType = "admin.simulator.er_inject";
 
     /// <summary>
-    /// Maps <c>POST /admin/simulator/er</c> under the admin authorization
+    /// Maps <c>POST /api/admin/simulator/er</c> under the admin authorization
     /// policy. URL kept stable for conformance-contract compatibility
     /// (#163) — callers must check <c>ExchangeOptions.ResolveMode()==Mock
     /// &amp;&amp; AllowErInjection</c> before invoking; the validator
@@ -71,7 +71,7 @@ public static class SimulatorEndpoint
     /// </summary>
     public static IEndpointRouteBuilder MapSimulatorEndpoints(this IEndpointRouteBuilder app)
     {
-        app.MapPost("/admin/simulator/er", Inject)
+        app.MapPost("/api/admin/simulator/er", Inject)
             .RequireAuthorization("admin");
         return app;
     }
@@ -263,7 +263,7 @@ public static class SimulatorEndpoint
             ActorFirm = ctx.User.FindFirstValue("firm"),
             ActorRole = ctx.User.FindFirstValue("role"),
             SourceIp = ctx.Connection.RemoteIpAddress?.ToString(),
-            ResourcePath = "/admin/simulator/er",
+            ResourcePath = "/api/admin/simulator/er",
             ReasonCode = reasonCode,
             Details = details.Count == 0 ? null : details,
         });

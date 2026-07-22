@@ -104,7 +104,7 @@ DB-backed registry is a follow-up when issuance becomes dynamic.
 
 ### 3.3 Action semantics (explicit, no defaults)
 
-For any **mutation** (`POST /orders`, `POST /algos`, modify), the
+For any **mutation** (`POST /api/orders`, `POST /algos`, modify), the
 request **must** name the end-client it is for via `onBehalfOf` (or
 the equivalent FIXP field). Resolver verifies:
 
@@ -124,7 +124,7 @@ the domain instead of buried in auth defaults.)
 
 ### 3.4 Read semantics (explicit role, not implicit fan-out)
 
-A read query (`GET /history`, `/positions`, `/pnl`, etc., and the WS
+A read query (`GET /history`, `/api/positions`, `/api/pnl`, etc., and the WS
 hub) takes a required selector:
 
 - `?onBehalfOf=<endClient>` — query one end-client; mandate

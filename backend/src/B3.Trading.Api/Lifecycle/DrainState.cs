@@ -12,7 +12,7 @@ namespace B3.Trading.Api.Lifecycle;
 /// Once draining:
 /// <list type="bullet">
 ///   <item><c>/ready</c> returns 503 so an upstream LB stops sending traffic.</item>
-///   <item><c>POST /orders</c> returns 503 — no new orders accepted.</item>
+///   <item><c>POST /api/orders</c> returns 503 — no new orders accepted.</item>
 ///   <item>In-flight requests complete; ER router and WAL keep running so
 ///   replies for already-submitted orders flush out.</item>
 /// </list>

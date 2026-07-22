@@ -14,8 +14,8 @@ namespace B3.Trading.Conformance.Infrastructure;
 /// Q1.7 (#259). Helper used by the (OrderType × TimeInForce) golden
 /// snapshot scenarios. Encapsulates the four operations every scenario
 /// repeats verbatim: login (user + optional admin), submit a NewOrder via
-/// <c>POST /orders/</c>, drive synthetic ER sequences via
-/// <c>POST /admin/simulator/er</c>, and capture the WS
+/// <c>POST /api/orders/</c>, drive synthetic ER sequences via
+/// <c>POST /api/admin/simulator/er</c>, and capture the WS
 /// <c>executions.me</c> stream for the order under test, normalising the
 /// captured ERs into a deterministic JSON shape suitable for byte-for-byte
 /// comparison against a checked-in golden.
@@ -99,7 +99,7 @@ public sealed class ConformanceRunner : IAsyncDisposable
     private static async Task<(AuthenticationHeaderValue Header, string Token)> LoginCapturingTokenAsync(
         HttpClient http, string username, string password)
     {
-        var resp = await http.PostAsJsonAsync("/auth/login", new { username, password });
+        var resp = await http.PostAsJsonAsync("/api/auth/login", new { username, password });
         if (!resp.IsSuccessStatusCode)
             throw new InvalidOperationException($"login failed for '{username}': {(int)resp.StatusCode} {await resp.Content.ReadAsStringAsync()}");
         var payload = await resp.Content.ReadFromJsonAsync<LoginResponse>()
@@ -109,10 +109,10 @@ public sealed class ConformanceRunner : IAsyncDisposable
 
     private sealed record LoginResponse(string Token, DateTimeOffset ExpiresAt);
 
-    /// <summary>POST /orders/ as the user; returns the assigned ClOrdID.</summary>
+    /// <summary>POST /api/orders/ as the user; returns the assigned ClOrdID.</summary>
     public async Task<ulong> SubmitOrderAsync(object payload, CancellationToken ct = default)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Post, "/orders/")
+        using var req = new HttpRequestMessage(HttpMethod.Post, "/api/orders/")
         {
             Content = JsonContent.Create(payload),
         };
@@ -127,7 +127,7 @@ public sealed class ConformanceRunner : IAsyncDisposable
         return ulong.Parse(ack.GetProperty("clOrdId").GetString()!);
     }
 
-    /// <summary>POST /admin/simulator/er — see <see cref="Infrastructure"/> SimulatorEndpoint.</summary>
+    /// <summary>POST /api/admin/simulator/er — see <see cref="Infrastructure"/> SimulatorEndpoint.</summary>
     public async Task InjectErAsync(
         ulong clOrdId, string type,
         long? lastQty = null, decimal? lastPx = null, string? rejectReason = null,
@@ -143,7 +143,7 @@ public sealed class ConformanceRunner : IAsyncDisposable
             (null, null, string r) => new { ClOrdId = clOrdId, Type = type, RejectReason = r },
             _ => new { ClOrdId = clOrdId, Type = type },
         };
-        using var req = new HttpRequestMessage(HttpMethod.Post, "/admin/simulator/er")
+        using var req = new HttpRequestMessage(HttpMethod.Post, "/api/admin/simulator/er")
         {
             Content = JsonContent.Create(body),
         };
@@ -156,10 +156,10 @@ public sealed class ConformanceRunner : IAsyncDisposable
         }
     }
 
-    /// <summary>GET /orders/{clOrdId} via the listing endpoint (no by-id route exists).</summary>
+    /// <summary>GET /api/orders/{clOrdId} via the listing endpoint (no by-id route exists).</summary>
     public async Task<JsonElement?> GetOrderAsync(ulong clOrdId, CancellationToken ct = default)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Get, "/orders/");
+        using var req = new HttpRequestMessage(HttpMethod.Get, "/api/orders/");
         req.Headers.Authorization = UserAuth;
         var resp = await Http.SendAsync(req, ct);
         resp.EnsureSuccessStatusCode();

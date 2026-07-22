@@ -18,7 +18,7 @@ public sealed class AuthRateLimitOptions
 {
     public const string SectionName = "Trading:Auth:RateLimit";
 
-    /// <summary>Per-IP throttle for <c>POST /auth/signup</c>.</summary>
+    /// <summary>Per-IP throttle for <c>POST /api/auth/signup</c>.</summary>
     public RateLimitPolicyOptions SignupPerIp { get; set; } = new()
     {
         Enabled = true,
@@ -26,7 +26,7 @@ public sealed class AuthRateLimitOptions
         WindowSeconds = 3600,
     };
 
-    /// <summary>Global fuse for <c>POST /auth/signup</c>; second link of the chain.</summary>
+    /// <summary>Global fuse for <c>POST /api/auth/signup</c>; second link of the chain.</summary>
     public RateLimitPolicyOptions SignupGlobal { get; set; } = new()
     {
         Enabled = true,
@@ -35,7 +35,7 @@ public sealed class AuthRateLimitOptions
     };
 
     /// <summary>
-    /// Per-IP throttle for <c>POST /auth/login</c>. Defense-in-depth
+    /// Per-IP throttle for <c>POST /api/auth/login</c>. Defense-in-depth
     /// against credential stuffing while slice 4 (per-username failed-
     /// login lockout) is not in place. Counts ALL login attempts (incl.
     /// successful) since this is endpoint-level — not a substitute for
@@ -48,7 +48,7 @@ public sealed class AuthRateLimitOptions
         WindowSeconds = 300,
     };
 
-    /// <summary>Per-IP throttle for <c>POST /auth/exchange</c>.</summary>
+    /// <summary>Per-IP throttle for <c>POST /api/auth/exchange</c>.</summary>
     public RateLimitPolicyOptions ExchangePerIp { get; set; } = new()
     {
         Enabled = true,

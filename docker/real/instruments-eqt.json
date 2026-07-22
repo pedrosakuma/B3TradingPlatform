@@ -9,8 +9,8 @@
   // schema change becomes a CI failure on the next PR.
   //
   // The trading-host overlay (docker-compose.real.yml) does NOT need to
-  // know these securityIds — conformance specs that submit to /orders or
-  // /algo either get rejected by the risk pipeline before reaching the
+  // know these securityIds — conformance specs that submit to /api/orders or
+  // /api/algo either get rejected by the risk pipeline before reaching the
   // gateway (RiskRejectionShape) or skip when the simulator endpoint is
   // absent (Algo, Simulator). v2 follow-ups that submit through-and-back
   // would map Trading__SymbolDirectory__SecurityIds__* to these ids.

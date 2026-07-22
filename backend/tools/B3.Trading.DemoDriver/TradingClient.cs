@@ -8,7 +8,7 @@ namespace B3.Trading.DemoDriver;
 /// <summary>
 /// Thin HTTP client over the trading-host REST surface used by both the
 /// submitter and injector workers. Caches the JWT internally and refreshes
-/// transparently when /auth/login responses surface an expiresAt within the
+/// transparently when /api/auth/login responses surface an expiresAt within the
 /// next minute.
 /// </summary>
 internal sealed class TradingClient
@@ -36,11 +36,11 @@ internal sealed class TradingClient
         if (_token is not null && DateTimeOffset.UtcNow < _expiresAt - TimeSpan.FromMinutes(1))
             return;
 
-        var resp = await _http.PostAsJsonAsync("/auth/login",
+        var resp = await _http.PostAsJsonAsync("/api/auth/login",
             new LoginRequest(_creds.Username, _creds.Password), JsonOpts, ct);
         resp.EnsureSuccessStatusCode();
         var payload = await resp.Content.ReadFromJsonAsync<LoginResponse>(JsonOpts, ct)
-            ?? throw new InvalidOperationException("Empty /auth/login response");
+            ?? throw new InvalidOperationException("Empty /api/auth/login response");
         _token = payload.Token;
         _expiresAt = payload.ExpiresAt;
         _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _token);
@@ -62,7 +62,7 @@ internal sealed class TradingClient
     public async Task<SubmitResult> SubmitOrderAsync(string symbol, string side, long qty, decimal price, CancellationToken ct)
     {
         await EnsureAuthenticatedAsync(ct);
-        var resp = await _http.PostAsJsonAsync("/orders", new SubmitOrderRequest(
+        var resp = await _http.PostAsJsonAsync("/api/orders", new SubmitOrderRequest(
             Symbol: symbol,
             SecurityId: 0,
             Side: side,
@@ -91,7 +91,7 @@ internal sealed class TradingClient
         if (!ulong.TryParse(clOrdId, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var clOrdIdNum))
             return InjectResult.Failed($"non-numeric clOrdId '{clOrdId}'");
 
-        var resp = await _http.PostAsJsonAsync("/admin/simulator/er",
+        var resp = await _http.PostAsJsonAsync("/api/admin/simulator/er",
             new InjectErRequest(clOrdIdNum, type, lastQty, lastPx, RejectReason: null), JsonOpts, ct);
 
         if (resp.StatusCode == System.Net.HttpStatusCode.Accepted)

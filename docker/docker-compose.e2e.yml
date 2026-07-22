@@ -1,10 +1,10 @@
 # Overlay used by the opt-in frontend smoke E2E (workflow_dispatch).
 #
 # Default `docker-compose.yml` brings the trading-host up in
-# Mode=Unavailable (fail-closed: POST /orders → 502). For a UI smoke
+# Mode=Unavailable (fail-closed: POST /api/orders → 502). For a UI smoke
 # test we need an in-process gateway that produces ExecutionReports
 # without touching B3 — that is StubExchangeGateway. The overlay only
-# flips the mode and adds a single seeded firm so /admin/firms shows
+# flips the mode and adds a single seeded firm so /api/admin/firms shows
 # something real.
 
 services:

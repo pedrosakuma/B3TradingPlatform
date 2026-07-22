@@ -29,14 +29,14 @@ public sealed record FirmDirectoryEntry(
 /// Aggregate snapshot returned by <see cref="IFirmDirectory.Snapshot"/>.
 /// </summary>
 /// <param name="Mode">Effective <c>ExchangeMode</c> name (e.g. <c>Real</c>,
-/// <c>Mock</c>) — surfaced verbatim on <c>/admin/firms</c>.</param>
+/// <c>Mock</c>) — surfaced verbatim on <c>/api/admin/firms</c>.</param>
 /// <param name="Firms">Per-firm entries; empty in <c>Unavailable</c> mode.</param>
 public sealed record FirmDirectorySnapshot(
     string Mode,
     IReadOnlyList<FirmDirectoryEntry> Firms);
 
 /// <summary>
-/// Application-layer port that the <c>/admin/firms</c> endpoint consumes to
+/// Application-layer port that the <c>/api/admin/firms</c> endpoint consumes to
 /// list per-firm wire configuration plus optional live FIXP session state.
 /// Decouples the Api layer from the Infrastructure-owned
 /// <c>FirmGatewayRegistry</c> / <c>ExchangeOptions</c> concretions.

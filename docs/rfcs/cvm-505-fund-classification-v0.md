@@ -150,7 +150,7 @@ resolver (§4.4) checks sub-account first, then end-client.
 No change to `SubmitOrderRequest`. Instead, the existing sub-account /
 end-client admin endpoints gain the optional classifier:
 
-- `POST /sub-accounts` (and the end-client equivalent) accept an
+- `POST /api/sub-accounts` (and the end-client equivalent) accept an
   optional `fund: { cnpj, internalCode }` block.
 - `GET` surfaces it so an operator can audit which accounts are
   fund-classified.

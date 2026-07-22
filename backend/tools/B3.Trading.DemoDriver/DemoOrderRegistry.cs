@@ -8,7 +8,7 @@ namespace B3.Trading.DemoDriver;
 ///
 /// Per the rubber-duck design review (D1 plan): only orders accepted by the
 /// trading-host (i.e., 202 with no terminal Status) are tracked. The injector
-/// updates leaves/cum from the response of POST /admin/simulator/er and evicts
+/// updates leaves/cum from the response of POST /api/admin/simulator/er and evicts
 /// entries when the order reaches a terminal state (Filled, Cancelled, Rejected).
 /// </summary>
 internal sealed class DemoOrderRegistry

@@ -9,7 +9,7 @@ namespace B3.Trading.Conformance.Spec_HTTP_MarketMaker;
 /// <summary>
 /// Spec — market-maker sandbox liquidity (#683 item 4). An ordinary
 /// end-client self-deposits cash via the sandbox-only <c>POST
-/// /balance/deposit</c> endpoint, then crosses the market-maker bot's
+/// /api/balance/deposit</c> endpoint, then crosses the market-maker bot's
 /// resting quotes: buy into the ask, buy again to prove the bot
 /// re-quoted a fresh ask after the fill, then sell into the (still
 /// resting) bid. Guards the whole point of the overlay
@@ -106,7 +106,7 @@ public class MarketMakerLiquiditySpecTests
 
     private static async Task<decimal> GetAvailableBalanceAsync(HttpClient http, AuthenticationHeaderValue auth)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Get, "/balance");
+        using var req = new HttpRequestMessage(HttpMethod.Get, "/api/balance");
         req.Headers.Authorization = auth;
         var resp = await http.SendAsync(req);
         resp.EnsureSuccessStatusCode();
@@ -116,7 +116,7 @@ public class MarketMakerLiquiditySpecTests
 
     private static async Task<SelfDepositResult> SelfDepositAsync(HttpClient http, AuthenticationHeaderValue auth, decimal amount)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Post, "/balance/deposit")
+        using var req = new HttpRequestMessage(HttpMethod.Post, "/api/balance/deposit")
         {
             Headers = { Authorization = auth },
             Content = JsonContent.Create(new { amount }),
@@ -125,7 +125,7 @@ public class MarketMakerLiquiditySpecTests
         var resp = await http.SendAsync(req);
         var body = await resp.Content.ReadAsStringAsync();
         Assert.True(resp.StatusCode == HttpStatusCode.OK,
-            $"POST /balance/deposit expected 200 OK (is Trading__Sandbox__AllowSelfCashDeposit=true set on the target?), got {(int)resp.StatusCode}: {body}");
+            $"POST /api/balance/deposit expected 200 OK (is Trading__Sandbox__AllowSelfCashDeposit=true set on the target?), got {(int)resp.StatusCode}: {body}");
 
         var json = JsonDocument.Parse(body).RootElement;
         return new SelfDepositResult(json.GetProperty("amount").GetDecimal(), json.GetProperty("available").GetDecimal());
@@ -141,12 +141,12 @@ public class MarketMakerLiquiditySpecTests
 
             foreach (var clOrdId in openOrders)
             {
-                using var cancel = new HttpRequestMessage(HttpMethod.Delete, $"/orders/{clOrdId}");
+                using var cancel = new HttpRequestMessage(HttpMethod.Delete, $"/api/orders/{clOrdId}");
                 cancel.Headers.Authorization = auth;
                 var resp = await http.SendAsync(cancel);
                 Assert.True(
                     resp.StatusCode is HttpStatusCode.NoContent or HttpStatusCode.NotFound or HttpStatusCode.Conflict,
-                    $"DELETE /orders/{clOrdId} expected 204/404/409 while clearing {symbol}, got {(int)resp.StatusCode}: {await resp.Content.ReadAsStringAsync()}");
+                    $"DELETE /api/orders/{clOrdId} expected 204/404/409 while clearing {symbol}, got {(int)resp.StatusCode}: {await resp.Content.ReadAsStringAsync()}");
             }
 
             var deadline = DateTimeOffset.UtcNow + FillTimeout;
@@ -164,7 +164,7 @@ public class MarketMakerLiquiditySpecTests
 
     private static async Task<List<ulong>> ListOpenOrdersForSymbolAsync(HttpClient http, AuthenticationHeaderValue auth, string symbol)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Get, "/orders");
+        using var req = new HttpRequestMessage(HttpMethod.Get, "/api/orders");
         req.Headers.Authorization = auth;
         var resp = await http.SendAsync(req);
         resp.EnsureSuccessStatusCode();
@@ -187,7 +187,7 @@ public class MarketMakerLiquiditySpecTests
     private static async Task<ulong> SubmitOrderAndAssertAcceptedAsync(
         HttpClient http, AuthenticationHeaderValue auth, string symbol, decimal price, string side)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Post, "/orders")
+        using var req = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
         {
             Headers = { Authorization = auth },
             Content = JsonContent.Create(new
@@ -203,14 +203,14 @@ public class MarketMakerLiquiditySpecTests
         var resp = await http.SendAsync(req);
         var body = await resp.Content.ReadAsStringAsync();
         Assert.True(resp.StatusCode == HttpStatusCode.Accepted,
-            $"{side} POST /orders expected 202 Accepted, got {(int)resp.StatusCode}: {body}");
+            $"{side} POST /api/orders expected 202 Accepted, got {(int)resp.StatusCode}: {body}");
 
         var json = JsonDocument.Parse(body).RootElement;
         if (json.TryGetProperty("status", out var statusProp))
         {
             var status = statusProp.GetString();
             Assert.True(!string.Equals(status, "Rejected", StringComparison.OrdinalIgnoreCase),
-                $"{side} POST /orders was risk-rejected before reaching matching: {body}");
+                $"{side} POST /api/orders was risk-rejected before reaching matching: {body}");
         }
 
         return ulong.Parse(json.GetProperty("clOrdId").GetString()!);
@@ -237,7 +237,7 @@ public class MarketMakerLiquiditySpecTests
 
     private static async Task<OrderSnapshot?> TryGetOrderAsync(HttpClient http, AuthenticationHeaderValue auth, ulong clOrdId)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Get, "/orders");
+        using var req = new HttpRequestMessage(HttpMethod.Get, "/api/orders");
         req.Headers.Authorization = auth;
         var resp = await http.SendAsync(req);
         resp.EnsureSuccessStatusCode();

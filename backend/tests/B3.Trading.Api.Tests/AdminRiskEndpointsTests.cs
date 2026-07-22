@@ -15,7 +15,7 @@ public class AdminRiskEndpointsTests : IClassFixture<TestAppFactory>
     public async Task GetLimits_RequiresAdminRole()
     {
         using var user = await _factory.CreateAuthedClientAsync(); // role=user
-        var resp = await user.GetAsync("/admin/risk/limits?symbol=PETR4");
+        var resp = await user.GetAsync("/api/admin/risk/limits?symbol=PETR4");
         Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
     }
 
@@ -23,7 +23,7 @@ public class AdminRiskEndpointsTests : IClassFixture<TestAppFactory>
     public async Task GetLimits_ReturnsResolvedDefaults_WhenOnlyDefaultIsConfigured()
     {
         using var admin = await _factory.CreateAuthedClientAsync("admin");
-        var resp = await admin.GetAsync("/admin/risk/limits?symbol=PETR4");
+        var resp = await admin.GetAsync("/api/admin/risk/limits?symbol=PETR4");
         resp.EnsureSuccessStatusCode();
 
         var body = await resp.Content.ReadFromJsonAsync<JsonElement>(JsonOptions);
@@ -44,7 +44,7 @@ public class AdminRiskEndpointsTests : IClassFixture<TestAppFactory>
             ["Trading:Risk:PerEndClient:alice:MaxQuantity"] = "7",
         });
         using var admin = await f.CreateAuthedClientAsync("admin");
-        var resp = await admin.GetAsync("/admin/risk/limits?endClient=alice&symbol=PETR4");
+        var resp = await admin.GetAsync("/api/admin/risk/limits?endClient=alice&symbol=PETR4");
         resp.EnsureSuccessStatusCode();
         var body = await resp.Content.ReadFromJsonAsync<JsonElement>(JsonOptions);
         Assert.Equal(7, body.GetProperty("limits").GetProperty("maxQuantity").GetInt64());
@@ -58,7 +58,7 @@ public class AdminRiskEndpointsTests : IClassFixture<TestAppFactory>
             ["Trading:Risk:PerFirm:broker-a:MaxQuantity"] = "42",
         });
         using var admin = await f.CreateAuthedClientAsync("admin");
-        var resp = await admin.GetAsync("/admin/risk/limits?endClient=bob&firmId=broker-a&symbol=PETR4");
+        var resp = await admin.GetAsync("/api/admin/risk/limits?endClient=bob&firmId=broker-a&symbol=PETR4");
         resp.EnsureSuccessStatusCode();
         var body = await resp.Content.ReadFromJsonAsync<JsonElement>(JsonOptions);
         Assert.Equal(42, body.GetProperty("limits").GetProperty("maxQuantity").GetInt64());
@@ -68,7 +68,7 @@ public class AdminRiskEndpointsTests : IClassFixture<TestAppFactory>
     public async Task PostReload_RequiresAdminRole()
     {
         using var user = await _factory.CreateAuthedClientAsync();
-        var resp = await user.PostAsync("/admin/risk/reload", content: null);
+        var resp = await user.PostAsync("/api/admin/risk/reload", content: null);
         Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
     }
 
@@ -79,7 +79,7 @@ public class AdminRiskEndpointsTests : IClassFixture<TestAppFactory>
         // host (we rely on the appsettings file watcher), so the
         // endpoint short-circuits to 204 without doing anything.
         using var admin = await _factory.CreateAuthedClientAsync("admin");
-        var resp = await admin.PostAsync("/admin/risk/reload", content: null);
+        var resp = await admin.PostAsync("/api/admin/risk/reload", content: null);
         Assert.Equal(HttpStatusCode.NoContent, resp.StatusCode);
     }
 }

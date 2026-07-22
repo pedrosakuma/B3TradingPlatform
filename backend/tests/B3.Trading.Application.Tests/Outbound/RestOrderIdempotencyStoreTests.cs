@@ -16,7 +16,7 @@ public sealed class RestOrderIdempotencyStoreTests
             "FIRM-A",
             "alice",
             "alice",
-            "POST /orders",
+            "POST /api/orders",
             "restart-key");
         var hash = Hash("request-a");
         var created = await store.ExecuteAsync(
@@ -97,7 +97,7 @@ public sealed class RestOrderIdempotencyStoreTests
                 "FIRM-A",
                 owner,
                 owner,
-                "POST /orders",
+                "POST /api/orders",
                 key),
             Hash("request"),
             context =>
@@ -142,7 +142,7 @@ public sealed class RestOrderIdempotencyStoreTests
             "FIRM-A",
             "alice",
             "alice",
-            "POST /orders"));
+            "POST /api/orders"));
     }
 
     [Fact]
@@ -180,7 +180,7 @@ public sealed class RestOrderIdempotencyStoreTests
             .ToLowerInvariant();
 
     private static RestOrderIdempotencyIdentity Identity(string key) =>
-        new("FIRM-A", "alice", "alice", "POST /orders", key);
+        new("FIRM-A", "alice", "alice", "POST /api/orders", key);
 
     private static AeadOutboundCommandProtector CreateProtector() =>
         CreateProtector("test", ["test"]);

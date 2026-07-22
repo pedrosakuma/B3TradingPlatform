@@ -14,14 +14,14 @@ namespace B3.Trading.Api.Tests;
 /// Q4.4 (#304). End-to-end + unit coverage for the per-user × endpoint
 /// token-bucket rate limiter. Every HTTP-flavoured test opts in to the
 /// limiter via <c>WithOverrides</c> — the test factory defaults it OFF
-/// so the rest of the suite (which hammers /orders / /algo) is
+/// so the rest of the suite (which hammers /api/orders / /api/algo) is
 /// unaffected.
 /// </summary>
 public class TokenBucketRateLimitTests
 {
     /// <summary>
     /// Shared overrides for the HTTP integration tests: enable the
-    /// limiter and pin the /orders POST rule to burst=5 with a glacial
+    /// limiter and pin the /api/orders POST rule to burst=5 with a glacial
     /// refill so the assertions are not racing the token-bucket
     /// regeneration on a busy CI host. The default refill (5/s) plus
     /// HTTP round-trip latency under parallel test execution would
@@ -30,14 +30,14 @@ public class TokenBucketRateLimitTests
     private static Dictionary<string, string?> EnableLimiterDeterministic() => new()
     {
         ["Trading:RateLimit:Enabled"] = "true",
-        ["Trading:RateLimit:Rules:0:PathPattern"] = "/orders",
+        ["Trading:RateLimit:Rules:0:PathPattern"] = "/api/orders",
         ["Trading:RateLimit:Rules:0:Methods:0"] = "POST",
         ["Trading:RateLimit:Rules:0:Methods:1"] = "PUT",
         ["Trading:RateLimit:Rules:0:Methods:2"] = "DELETE",
         ["Trading:RateLimit:Rules:0:Methods:3"] = "PATCH",
         ["Trading:RateLimit:Rules:0:Burst"] = "5",
         ["Trading:RateLimit:Rules:0:RefillPerSecond"] = "0.01",
-        ["Trading:RateLimit:Rules:1:PathPattern"] = "/auth/login",
+        ["Trading:RateLimit:Rules:1:PathPattern"] = "/api/auth/login",
         ["Trading:RateLimit:Rules:1:Burst"] = "3",
         ["Trading:RateLimit:Rules:1:RefillPerSecond"] = "0.01",
     };
@@ -52,10 +52,10 @@ public class TokenBucketRateLimitTests
 
         for (var i = 0; i < 5; i++)
         {
-            Assert.True(limiter.TryAcquire("u", "/orders", burst: 5, refillPerSecond: 5, out _));
+            Assert.True(limiter.TryAcquire("u", "/api/orders", burst: 5, refillPerSecond: 5, out _));
         }
 
-        var ok = limiter.TryAcquire("u", "/orders", burst: 5, refillPerSecond: 5, out var retry);
+        var ok = limiter.TryAcquire("u", "/api/orders", burst: 5, refillPerSecond: 5, out var retry);
         Assert.False(ok);
         // No time elapsed and 0 tokens left → wait 1/5s = 0.2s.
         Assert.InRange(retry, 0.15, 0.25);
@@ -68,15 +68,15 @@ public class TokenBucketRateLimitTests
         var limiter = new TokenBucketRateLimiter(() => clock, startSweeper: false);
 
         for (var i = 0; i < 5; i++)
-            Assert.True(limiter.TryAcquire("u", "/orders", 5, 5, out _));
-        Assert.False(limiter.TryAcquire("u", "/orders", 5, 5, out _));
+            Assert.True(limiter.TryAcquire("u", "/api/orders", 5, 5, out _));
+        Assert.False(limiter.TryAcquire("u", "/api/orders", 5, 5, out _));
 
         // Advance 1.1 s; with refill=5/s that gives 5.5 tokens
         // (capped at burst=5). Five more must succeed.
         clock = clock.AddMilliseconds(1100);
         for (var i = 0; i < 5; i++)
-            Assert.True(limiter.TryAcquire("u", "/orders", 5, 5, out _));
-        Assert.False(limiter.TryAcquire("u", "/orders", 5, 5, out _));
+            Assert.True(limiter.TryAcquire("u", "/api/orders", 5, 5, out _));
+        Assert.False(limiter.TryAcquire("u", "/api/orders", 5, 5, out _));
     }
 
     [Fact]
@@ -87,12 +87,12 @@ public class TokenBucketRateLimitTests
 
         // Exhaust user A.
         for (var i = 0; i < 5; i++)
-            Assert.True(limiter.TryAcquire("alice", "/orders", 5, 5, out _));
-        Assert.False(limiter.TryAcquire("alice", "/orders", 5, 5, out _));
+            Assert.True(limiter.TryAcquire("alice", "/api/orders", 5, 5, out _));
+        Assert.False(limiter.TryAcquire("alice", "/api/orders", 5, 5, out _));
 
         // User B is untouched — still has a full bucket.
         for (var i = 0; i < 5; i++)
-            Assert.True(limiter.TryAcquire("bob", "/orders", 5, 5, out _));
+            Assert.True(limiter.TryAcquire("bob", "/api/orders", 5, 5, out _));
     }
 
     [Fact]
@@ -102,11 +102,11 @@ public class TokenBucketRateLimitTests
         var limiter = new TokenBucketRateLimiter(() => clock, startSweeper: false);
 
         for (var i = 0; i < 5; i++)
-            Assert.True(limiter.TryAcquire("alice", "/orders", 5, 5, out _));
-        Assert.False(limiter.TryAcquire("alice", "/orders", 5, 5, out _));
+            Assert.True(limiter.TryAcquire("alice", "/api/orders", 5, 5, out _));
+        Assert.False(limiter.TryAcquire("alice", "/api/orders", 5, 5, out _));
 
         // Same user, different endpoint key — independent bucket.
-        Assert.True(limiter.TryAcquire("alice", "/positions", 100, 100, out _));
+        Assert.True(limiter.TryAcquire("alice", "/api/positions", 100, 100, out _));
     }
 
     [Fact]
@@ -115,7 +115,7 @@ public class TokenBucketRateLimitTests
         var clock = new DateTime(2025, 1, 1, 0, 0, 0, DateTimeKind.Utc);
         var limiter = new TokenBucketRateLimiter(() => clock, startSweeper: false);
 
-        limiter.TryAcquire("ghost", "/orders", 5, 5, out _);
+        limiter.TryAcquire("ghost", "/api/orders", 5, 5, out _);
         Assert.Equal(1, limiter.BucketCount);
 
         // Advance past the 1-hour idle TTL.
@@ -139,7 +139,7 @@ public class TokenBucketRateLimitTests
         const double refill = 5;
 
         // Prime bucket B1.
-        Assert.True(limiter.TryAcquire("u", "/orders", burst, refill, out _));
+        Assert.True(limiter.TryAcquire("u", "/api/orders", burst, refill, out _));
 
         // On the NEXT TryAcquire, after GetOrAdd returns the existing
         // bucket but before the lock is taken, simulate the race:
@@ -155,16 +155,16 @@ public class TokenBucketRateLimitTests
             clock = clock.AddHours(2);
             limiter.SweepIdleBucketsForTest();
             for (var i = 0; i < burst; i++)
-                Assert.True(limiter.TryAcquire("u", "/orders", burst, refill, out _));
+                Assert.True(limiter.TryAcquire("u", "/api/orders", burst, refill, out _));
         };
 
-        var granted = limiter.TryAcquire("u", "/orders", burst, refill, out _);
+        var granted = limiter.TryAcquire("u", "/api/orders", burst, refill, out _);
         Assert.False(granted);
 
         // Sanity: total tokens consumed = 1 (prime) + 5 (nested) = 6;
         // the outer attempt that lost the race against the sweep must
         // not push that over 6 (i.e. burst+1 across two generations).
-        var nextOk = limiter.TryAcquire("u", "/orders", burst, refill, out _);
+        var nextOk = limiter.TryAcquire("u", "/api/orders", burst, refill, out _);
         Assert.False(nextOk);
     }
 
@@ -177,7 +177,7 @@ public class TokenBucketRateLimitTests
 
         var http = await factory.CreateAuthedClientAsync();
 
-        // First 5 POSTs against /orders ride the default burst=5
+        // First 5 POSTs against /api/orders ride the default burst=5
         // rule and are accepted (Accepted/OK status — never 429).
         for (var i = 0; i < 5; i++)
         {
@@ -226,9 +226,9 @@ public class TokenBucketRateLimitTests
         var ordersBlocked = await PostMinimalOrder(http);
         Assert.Equal(HttpStatusCode.TooManyRequests, ordersBlocked.StatusCode);
 
-        // GET /positions rides the generic-read rule (burst=100); it
-        // must NOT inherit the /orders write bucket's exhaustion.
-        var positions = await http.GetAsync("/positions");
+        // GET /api/positions rides the generic-read rule (burst=100); it
+        // must NOT inherit the /api/orders write bucket's exhaustion.
+        var positions = await http.GetAsync("/api/positions");
         Assert.NotEqual(HttpStatusCode.TooManyRequests, positions.StatusCode);
     }
 
@@ -237,7 +237,7 @@ public class TokenBucketRateLimitTests
     {
         await using var factory = TestAppFactory.WithOverrides(EnableLimiterDeterministic());
 
-        // Default /auth/login rule: burst=3, refill=1/s. From the same
+        // Default /api/auth/login rule: burst=3, refill=1/s. From the same
         // IP (localhost in the test host) the 4th attempt — within the
         // same second — must be rejected with 429. Use a deliberately
         // bad password so the test isn't sensitive to login success
@@ -246,11 +246,11 @@ public class TokenBucketRateLimitTests
 
         for (var i = 0; i < 3; i++)
         {
-            var resp = await http.PostAsJsonAsync("/auth/login",
+            var resp = await http.PostAsJsonAsync("/api/auth/login",
                 new LoginRequest("does-not-exist", "wrong"));
             Assert.NotEqual(HttpStatusCode.TooManyRequests, resp.StatusCode);
         }
-        var rejected = await http.PostAsJsonAsync("/auth/login",
+        var rejected = await http.PostAsJsonAsync("/api/auth/login",
             new LoginRequest("does-not-exist", "wrong"));
         Assert.Equal(HttpStatusCode.TooManyRequests, rejected.StatusCode);
         Assert.True(rejected.Headers.Contains("Retry-After"));
@@ -295,7 +295,7 @@ public class TokenBucketRateLimitTests
         Assert.Equal(HttpStatusCode.TooManyRequests, rejected.StatusCode);
 
         Assert.True(total >= 1);
-        Assert.Equal("/orders", observedPath);
+        Assert.Equal("/api/orders", observedPath);
         Assert.Equal("user", observedPrincipalKind);
         Assert.False(userTagSeen,
             "The `user` tag must be dropped to keep the metric cardinality bounded; "
@@ -311,7 +311,7 @@ public class TokenBucketRateLimitTests
         });
 
         // Mint an admin JWT directly via the issuer so we don't even
-        // burn an /auth/login token to do the test.
+        // burn an /api/auth/login token to do the test.
         var issuer = factory.Services.GetRequiredService<JwtIssuer>();
         var (token, _) = issuer.Issue("admin", "admin");
 
@@ -331,7 +331,7 @@ public class TokenBucketRateLimitTests
     public async Task MultiFirm_BucketKeyedByUsernameOnly_LimitsAcrossFirms()
     {
         // Documented design choice: the bucket key is the JWT sub
-        // alone, NOT (sub, firm). So the same login flooding /orders
+        // alone, NOT (sub, firm). So the same login flooding /api/orders
         // across FIRM01 and FIRM02 hits the same bucket — i.e. the
         // limiter clamps the user, not the user-in-a-firm.
         await using var factory = TestAppFactory.WithOverrides(EnableLimiterDeterministic());
@@ -345,7 +345,7 @@ public class TokenBucketRateLimitTests
         using var http2 = factory.CreateClient();
         http2.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", firm2);
 
-        // Pre-register the owner so /orders POST doesn't 404 on
+        // Pre-register the owner so /api/orders POST doesn't 404 on
         // EndClient resolution. Both firm tokens share the same
         // sub-claim so a single Register() call covers both.
         var registry = factory.Services.GetRequiredService<EndClientRegistry>();
@@ -369,7 +369,7 @@ public class TokenBucketRateLimitTests
     {
         // Regression guard: the test factory MUST default the limiter
         // off so the broad suite (which fires hundreds of writes) is
-        // unaffected. Hammer /orders past the burst and assert no 429.
+        // unaffected. Hammer /api/orders past the burst and assert no 429.
         using var factory = new TestAppFactory();
         var http = await factory.CreateAuthedClientAsync();
 
@@ -396,6 +396,6 @@ public class TokenBucketRateLimitTests
             Quantity = 10,
             Price = 30.0m,
         };
-        return http.PostAsJsonAsync("/orders", payload);
+        return http.PostAsJsonAsync("/api/orders", payload);
     }
 }

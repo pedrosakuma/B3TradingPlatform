@@ -69,7 +69,7 @@ public class MetricsFirmTagTests
 
         using var client = factory.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
-        var resp = await client.PostAsJsonAsync("/orders/", new
+        var resp = await client.PostAsJsonAsync("/api/orders/", new
         {
             Symbol = "PETR4",
             SecurityId = 4321UL,

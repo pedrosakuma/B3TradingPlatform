@@ -3,13 +3,13 @@
 D+1 reconciliation between the matching platform's EOD fills CSV
 ([B3MatchingPlatform#330](https://github.com/pedrosakuma/B3MatchingPlatform/issues/330))
 and the trading-host's daily statement
-(`GET /statement/{date}.csv`). Closes the trading-host side of
+(`GET /api/statement/{date}.csv`). Closes the trading-host side of
 [B3TradingPlatform#274](https://github.com/pedrosakuma/B3TradingPlatform/issues/274).
 
 ## Inputs
 
 * **Matching CSV drop** — produced by `EodFillsExporter` at
-  `{dropRoot}/{channel}/{yyyy-MM-dd}/fills.csv` (consumer-visible
+  `{dropRoot}/{channel}/{yyyy-MM-dd}/api/fills.csv` (consumer-visible
   when the `.done` sidecar appears). Columns (frozen by ADR-0001):
 
   ```
@@ -20,7 +20,7 @@ and the trading-host's daily statement
   file bytes and rejects partial / corrupt drops.
 
 * **Trading-host statement** — fetched via
-  `GET {tradingHostUrl}/statement/{date}.csv` with a Bearer token.
+  `GET {tradingHostUrl}/api/statement/{date}.csv` with a Bearer token.
   Multi-section CSV; only the *fills* section is consumed.
 
 ## What it checks

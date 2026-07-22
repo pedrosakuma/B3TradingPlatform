@@ -21,7 +21,7 @@ namespace B3.Trading.Domain;
 ///
 /// <para>
 /// <b>Identifier shape.</b> Case-sensitive string keyed verbatim
-/// off the wire (POST /sub-accounts body). The constructor rejects
+/// off the wire (POST /api/sub-accounts body). The constructor rejects
 /// empty/whitespace and any token longer than 64 characters or
 /// containing characters outside <c>[A-Za-z0-9._-]</c> so the id
 /// can flow safely through JSON payloads, log messages, and metric

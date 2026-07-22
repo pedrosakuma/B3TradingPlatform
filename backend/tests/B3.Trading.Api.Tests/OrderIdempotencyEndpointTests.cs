@@ -133,7 +133,7 @@ public sealed class OrderIdempotencyEndpointTests
         Assert.NotEqual(alicePayload.MutationId, bobPayload.MutationId);
         using var lookup = new HttpRequestMessage(
             HttpMethod.Get,
-            $"/orders/mutations/{alicePayload.MutationId}");
+            $"/api/orders/mutations/{alicePayload.MutationId}");
         lookup.Headers.Authorization = new AuthenticationHeaderValue("Bearer", bob);
         using var lookupResponse = await http.SendAsync(lookup);
         Assert.Equal(HttpStatusCode.NotFound, lookupResponse.StatusCode);
@@ -145,7 +145,7 @@ public sealed class OrderIdempotencyEndpointTests
         using var factory = new TestAppFactory();
         using var http = factory.CreateClient();
         var token = await factory.LoginAsync(http);
-        using var request = new HttpRequestMessage(HttpMethod.Post, "/orders/")
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/orders/")
         {
             Content = JsonContent.Create(Body()),
         };
@@ -446,7 +446,7 @@ public sealed class OrderIdempotencyEndpointTests
         string key,
         object body)
     {
-        var request = new HttpRequestMessage(HttpMethod.Post, "/orders/")
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/orders/")
         {
             Content = JsonContent.Create(body),
         };

@@ -4,7 +4,7 @@
 This intentionally uses only the Python standard library so it can run in CI
 before any package restore. It catches the #608 class of regression where the
 frontend AUTH_MODE changes but trading-host remains Local and therefore never
-maps /auth/exchange.
+maps /api/auth/exchange.
 """
 from pathlib import Path
 

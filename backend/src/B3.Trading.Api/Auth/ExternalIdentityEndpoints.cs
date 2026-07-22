@@ -19,7 +19,7 @@ public static class ExternalIdentityEndpoints
         if (!opts.IsExchangeEnabled())
             return app;
 
-        app.MapPost("/auth/exchange", async (
+        app.MapPost("/api/auth/exchange", async (
             HttpContext http,
             IExternalIdentityTokenValidator tokenValidator,
             ITradingUserDirectory directory,
@@ -87,7 +87,7 @@ public static class ExternalIdentityEndpoints
                     ActorFirm = session.Firm,
                     ActorRole = session.Role,
                     SourceIp = http.Connection.RemoteIpAddress?.ToString(),
-                    ResourcePath = "/auth/exchange",
+                    ResourcePath = "/api/auth/exchange",
                     Details = BuildDetails(issuerAlias, user, validation.Issuer, validation.Subject),
                 });
                 return Results.Ok(new LoginResponse(session.Token!, session.ExpiresAt!.Value));
@@ -140,7 +140,7 @@ public static class ExternalIdentityEndpoints
             ActorFirm = user?.FirmId,
             ActorRole = user?.Role,
             SourceIp = http.Connection.RemoteIpAddress?.ToString(),
-            ResourcePath = "/auth/exchange",
+            ResourcePath = "/api/auth/exchange",
             ReasonCode = BoundedReason(reason),
             Details = new Dictionary<string, string> { ["issuer_alias"] = issuerAlias },
         });

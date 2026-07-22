@@ -32,7 +32,7 @@ public class WebAuthnEndpointTests
                 ["Trading:Persistence:DataDirectory"] = dataDir,
             });
             var http = factory.CreateClient();
-            var signup = await http.PostAsJsonAsync("/auth/signup",
+            var signup = await http.PostAsJsonAsync("/api/auth/signup",
                 new { username = "passkey-user", password = "Wonderland1!" });
             signup.EnsureSuccessStatusCode();
             var session = (await signup.Content.ReadFromJsonAsync<LoginResponse>())!;
@@ -65,15 +65,15 @@ public class WebAuthnEndpointTests
         var second = await RegisterAsync(authed, "security key", "credential-key");
         Assert.Empty(second.RecoveryCodes);
 
-        var totpEnroll = await authed.PostAsJsonAsync("/auth/2fa/enroll", new { });
+        var totpEnroll = await authed.PostAsJsonAsync("/api/auth/2fa/enroll", new { });
         totpEnroll.EnsureSuccessStatusCode();
         var totp = await totpEnroll.Content.ReadFromJsonAsync<JsonElement>();
         var secret = totp.GetProperty("secret").GetString()!;
         var code = new OtpNet.Totp(OtpNet.Base32Encoding.ToBytes(secret)).ComputeTotp();
-        (await authed.PostAsJsonAsync("/auth/2fa/verify", new { code })).EnsureSuccessStatusCode();
+        (await authed.PostAsJsonAsync("/api/auth/2fa/verify", new { code })).EnsureSuccessStatusCode();
 
         var plain = factory.CreateClient();
-        var login = await plain.PostAsJsonAsync("/auth/login",
+        var login = await plain.PostAsJsonAsync("/api/auth/login",
             new { username = "alice", password = "wonderland" });
         var body = await login.Content.ReadFromJsonAsync<JsonElement>();
         var factors = body.GetProperty("factors")
@@ -94,7 +94,7 @@ public class WebAuthnEndpointTests
         var login = await LoginForChallengeAsync(plain);
         var options = await StartAuthenticationAsync(plain, login, "credential-auth");
         var assertion = Assertion("credential-auth", UserHandle("alice"));
-        var authenticated = await plain.PostAsJsonAsync("/auth/webauthn/authenticate", new
+        var authenticated = await plain.PostAsJsonAsync("/api/auth/webauthn/authenticate", new
         {
             ceremonyToken = options.CeremonyToken,
             credential = assertion,
@@ -103,7 +103,7 @@ public class WebAuthnEndpointTests
         Assert.False(string.IsNullOrEmpty(
             (await authenticated.Content.ReadFromJsonAsync<LoginResponse>())!.Token));
 
-        var replay = await plain.PostAsJsonAsync("/auth/webauthn/authenticate", new
+        var replay = await plain.PostAsJsonAsync("/api/auth/webauthn/authenticate", new
         {
             ceremonyToken = options.CeremonyToken,
             credential = assertion,
@@ -122,7 +122,7 @@ public class WebAuthnEndpointTests
 
         var login = await LoginForChallengeAsync(plain);
         var wrongRpOptions = await StartAuthenticationAsync(plain, login, "credential-security");
-        var wrongRp = await plain.PostAsJsonAsync("/auth/webauthn/authenticate", new
+        var wrongRp = await plain.PostAsJsonAsync("/api/auth/webauthn/authenticate", new
         {
             ceremonyToken = wrongRpOptions.CeremonyToken,
             credential = Assertion(
@@ -132,7 +132,7 @@ public class WebAuthnEndpointTests
         });
         Assert.Equal(HttpStatusCode.Unauthorized, wrongRp.StatusCode);
 
-        var tampered = await plain.PostAsJsonAsync("/auth/webauthn/authenticate", new
+        var tampered = await plain.PostAsJsonAsync("/api/auth/webauthn/authenticate", new
         {
             ceremonyToken = "tampered-token",
             credential = Assertion("credential-security", UserHandle("alice")),
@@ -141,7 +141,7 @@ public class WebAuthnEndpointTests
 
         var staleLogin = await LoginForChallengeAsync(plain);
         var staleOptions = await StartAuthenticationAsync(plain, staleLogin, "stale-counter");
-        var stale = await plain.PostAsJsonAsync("/auth/webauthn/authenticate", new
+        var stale = await plain.PostAsJsonAsync("/api/auth/webauthn/authenticate", new
         {
             ceremonyToken = staleOptions.CeremonyToken,
             credential = Assertion("stale-counter", UserHandle("alice")),
@@ -190,7 +190,7 @@ public class WebAuthnEndpointTests
 
         var plain = factory.CreateClient();
         var login = await LoginForChallengeAsync(plain);
-        var recovered = await plain.PostAsJsonAsync("/auth/2fa/verify", new
+        var recovered = await plain.PostAsJsonAsync("/api/auth/2fa/verify", new
         {
             code = recoveryCode,
             totpChallengeToken = login,
@@ -198,7 +198,7 @@ public class WebAuthnEndpointTests
         Assert.Equal(HttpStatusCode.OK, recovered.StatusCode);
 
         var secondLogin = await LoginForChallengeAsync(plain);
-        var replay = await plain.PostAsJsonAsync("/auth/2fa/verify", new
+        var replay = await plain.PostAsJsonAsync("/api/auth/2fa/verify", new
         {
             code = recoveryCode,
             totpChallengeToken = secondLogin,
@@ -244,7 +244,7 @@ public class WebAuthnEndpointTests
         string name)
     {
         var response = await http.PostAsJsonAsync(
-            "/auth/webauthn/register", new { name });
+            "/api/auth/webauthn/register", new { name });
         response.EnsureSuccessStatusCode();
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal(
@@ -259,7 +259,7 @@ public class WebAuthnEndpointTests
         HttpClient http,
         string ceremonyToken,
         string credentialId) =>
-        http.PostAsJsonAsync("/auth/webauthn/register", new
+        http.PostAsJsonAsync("/api/auth/webauthn/register", new
         {
             ceremonyToken,
             credential = Attestation(credentialId),
@@ -267,7 +267,7 @@ public class WebAuthnEndpointTests
 
     private static async Task<string> LoginForChallengeAsync(HttpClient http)
     {
-        var response = await http.PostAsJsonAsync("/auth/login",
+        var response = await http.PostAsJsonAsync("/api/auth/login",
             new { username = "alice", password = "wonderland" });
         response.EnsureSuccessStatusCode();
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
@@ -283,7 +283,7 @@ public class WebAuthnEndpointTests
         string expectedCredential)
     {
         var response = await http.PostAsJsonAsync(
-            "/auth/webauthn/authenticate", new { challengeToken });
+            "/api/auth/webauthn/authenticate", new { challengeToken });
         response.EnsureSuccessStatusCode();
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("localhost", body.GetProperty("options").GetProperty("rpId").GetString());

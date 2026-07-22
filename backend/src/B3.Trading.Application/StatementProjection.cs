@@ -5,7 +5,7 @@ namespace B3.Trading.Application;
 
 /// <summary>
 /// Q2.5 (#272). Pure projection that turns a WAL slice into the daily
-/// statement DTO consumed by <c>GET /statement/{dayKey}</c> (JSON and
+/// statement DTO consumed by <c>GET /api/statement/{dayKey}</c> (JSON and
 /// CSV). Lives in Application (not in the HTTP layer) so it is trivially
 /// unit-testable without spinning the host.
 ///

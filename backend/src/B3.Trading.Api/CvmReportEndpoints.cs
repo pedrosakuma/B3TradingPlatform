@@ -23,8 +23,8 @@ namespace B3.Trading.Api;
 /// implicitly by WAL segment retention.
 ///
 /// <list type="bullet">
-///   <item><c>GET /reports/cvm/35/{date:yyyy-MM-dd}?firmId=</c></item>
-///   <item><c>GET /reports/cvm/505/{date:yyyy-MM-dd}?firmId=</c></item>
+///   <item><c>GET /api/reports/cvm/35/{date:yyyy-MM-dd}?firmId=</c></item>
+///   <item><c>GET /api/reports/cvm/505/{date:yyyy-MM-dd}?firmId=</c></item>
 /// </list>
 ///
 /// <para><b>Auth.</b> Requires the <c>ComplianceOrAdmin</c> policy.
@@ -51,7 +51,7 @@ public static class CvmReportEndpoints
 
     public static IEndpointRouteBuilder MapCvmReports(this IEndpointRouteBuilder app)
     {
-        var group = app.MapGroup("/reports/cvm").RequireAuthorization(PolicyName);
+        var group = app.MapGroup("/api/reports/cvm").RequireAuthorization(PolicyName);
 
         group.MapGet("/35/{date}", (string date, HttpContext ctx,
                 CvmReportSource source, CvmReportWriter writer, IAuditLogger audit, IEventStore store) =>

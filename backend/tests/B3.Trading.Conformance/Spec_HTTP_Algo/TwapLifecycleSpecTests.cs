@@ -70,7 +70,7 @@ public class TwapLifecycleSpecTests
         HttpClient http, AuthenticationHeaderValue auth,
         long total, int sliceCount, DateTimeOffset start, DateTimeOffset end, decimal? childPrice)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        using var req = new HttpRequestMessage(HttpMethod.Post, "/api/algo/")
         {
             Content = JsonContent.Create(new
             {
@@ -102,7 +102,7 @@ public class TwapLifecycleSpecTests
         var deadline = DateTime.UtcNow.AddSeconds(15);
         while (DateTime.UtcNow < deadline)
         {
-            using var req = new HttpRequestMessage(HttpMethod.Get, "/orders/");
+            using var req = new HttpRequestMessage(HttpMethod.Get, "/api/orders/");
             req.Headers.Authorization = auth;
             var resp = await http.SendAsync(req);
             resp.EnsureSuccessStatusCode();
@@ -124,7 +124,7 @@ public class TwapLifecycleSpecTests
             await Task.Delay(150);
         }
         throw new TimeoutException(
-            $"TWAP {algoId} child slice {expectedSeq} did not appear in /orders within 15s.");
+            $"TWAP {algoId} child slice {expectedSeq} did not appear in /api/orders within 15s.");
     }
 
     private static async Task InjectErAsync(
@@ -137,7 +137,7 @@ public class TwapLifecycleSpecTests
             (long q, null) => new { ClOrdId = clOrdId, Type = type, LastQty = q },
             _ => new { ClOrdId = clOrdId, Type = type },
         };
-        using var req = new HttpRequestMessage(HttpMethod.Post, "/admin/simulator/er")
+        using var req = new HttpRequestMessage(HttpMethod.Post, "/api/admin/simulator/er")
         {
             Content = JsonContent.Create(body),
         };
@@ -165,7 +165,7 @@ public class TwapLifecycleSpecTests
     private static async Task<JsonElement> GetAlgoAsync(
         HttpClient http, AuthenticationHeaderValue auth, string algoId)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Get, $"/algo/{algoId}");
+        using var req = new HttpRequestMessage(HttpMethod.Get, $"/api/algo/{algoId}");
         req.Headers.Authorization = auth;
         var resp = await http.SendAsync(req);
         resp.EnsureSuccessStatusCode();

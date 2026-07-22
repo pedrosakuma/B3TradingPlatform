@@ -145,7 +145,7 @@ public class OrderReplaceRejectedEventTests
                 seed.FirmId,
                 seed.Owner.Value,
                 seed.Owner.Value,
-                "PUT /orders/{clOrdId}",
+                "PUT /api/orders/{clOrdId}",
                 "rejected-modify"),
             new string('a', 64),
             context =>

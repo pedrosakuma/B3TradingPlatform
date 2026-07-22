@@ -4,7 +4,7 @@ namespace B3.Trading.Reconciliation;
 
 /// <summary>
 /// Parser for the fills section of the trading-host statement CSV
-/// emitted by <c>GET /statement/{dayKey}.csv</c>. The CSV is
+/// emitted by <c>GET /api/statement/{dayKey}.csv</c>. The CSV is
 /// multi-section (positions, fills, fees, pnl, ir-day-trade) separated
 /// by blank lines and re-headered for each section. We only care about
 /// the fills section here; we identify it by header text and tolerate

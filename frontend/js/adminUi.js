@@ -159,7 +159,7 @@ function renderFirms() {
   const fh = getState().firmsHealth;
   const ks = getState().killStatus;
   if (!fh || !Array.isArray(fh.firms)) {
-    body.innerHTML = `<tr><td colspan="6" class="muted">awaiting /admin/firms…</td></tr>`;
+    body.innerHTML = `<tr><td colspan="6" class="muted">awaiting /api/admin/firms…</td></tr>`;
     setText("admin-mode", "—");
     return;
   }
@@ -200,7 +200,7 @@ function renderEndClients() {
   if (!body) return;
   const ks = getState().killStatus;
   if (!ks) {
-    body.innerHTML = `<tr><td colspan="2" class="muted">awaiting /admin/kill…</td></tr>`;
+    body.innerHTML = `<tr><td colspan="2" class="muted">awaiting /api/admin/kill…</td></tr>`;
     return;
   }
   const list = ks.endClients ?? [];
@@ -219,7 +219,7 @@ function renderHalts() {
   if (!body) return;
   const hs = getState().haltStatus;
   if (!hs) {
-    body.innerHTML = `<tr><td colspan="2" class="muted">awaiting /admin/halts…</td></tr>`;
+    body.innerHTML = `<tr><td colspan="2" class="muted">awaiting /api/admin/halts…</td></tr>`;
     return;
   }
   const list = hs.symbols ?? [];

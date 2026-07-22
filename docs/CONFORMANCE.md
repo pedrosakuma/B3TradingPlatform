@@ -42,8 +42,8 @@ dotnet test backend/tests/B3.Trading.Conformance --filter "Category=Conformance"
 ### Bootstrap (this PR)
 
 - **`Spec_HTTP_Auth/HelloLoginTests`** — single happy-path scenario:
-  `POST /auth/login` with valid credentials returns a JWT, and that JWT
-  is accepted on a protected endpoint (`GET /orders`). Smallest
+  `POST /api/auth/login` with valid credentials returns a JWT, and that JWT
+  is accepted on a protected endpoint (`GET /api/orders`). Smallest
   possible end-to-end: platform up, JWT pipeline wired, user store
   loaded.
 
@@ -63,8 +63,8 @@ dotnet test backend/tests/B3.Trading.Conformance --filter "Category=Conformance"
   flag; disconnect **past** the timeout and assert the surviving order
   is flagged stale after renegotiation. Both recovery paths then submit
   a fresh post-reconnect crossed pair and assert trading is genuinely
-  back: the new order becomes `Working` in `GET /orders`, then both legs
-  transition to `Filled` (note: `GET /orders` is full history, so
+  back: the new order becomes `Working` in `GET /api/orders`, then both legs
+  transition to `Filled` (note: `GET /api/orders` is full history, so
   "leaves the book" is asserted as `Working` → terminal, not literal
   disappearance from the response). Requires the real-stack sandbox
   (`B3T_REAL_STACK_CONFORMANCE=true`) plus docker CLI/socket access for
@@ -73,8 +73,8 @@ dotnet test backend/tests/B3.Trading.Conformance --filter "Category=Conformance"
 - **`Spec_HTTP_MarketData/MarketDataOutageSpecTests`** — marketdata-leg
   resilience on the real stack: sever the `b3-marketdata` container's
   `b3-net` attachment, prove
-  `GET /admin/marketdata/reference-prices` stays on the last-known-good
-  live cache instead of crashing, prove `POST /orders` / matching fills
+  `GET /api/admin/marketdata/reference-prices` stays on the last-known-good
+  live cache instead of crashing, prove `POST /api/orders` / matching fills
   still work while the feed is down, then reconnect and assert a fresh
   crossed trade advances the live ref-price again. Pairs with the
   operational guidance in
@@ -87,11 +87,11 @@ dotnet test backend/tests/B3.Trading.Conformance --filter "Category=Conformance"
   sibling contracts: (a) a pre-crash resting order still comes back with
   the same working-state leaves/cum quantities, pre-crash
   cash/position/realized-PnL state from a real fill survived WAL replay,
-  `/admin/firms` shows both FIRM01 and FIRM02 FIXP sessions back in
+  `/api/admin/firms` shows both FIRM01 and FIRM02 FIXP sessions back in
   `established`, and a fresh post-restart crossed pair still trades
   through to `Filled`; and (b) an external FIXP counterparty on session
   `10102` can fill a trading-host-owned order **while the host is down**,
-  with the missed ER replayed on restart so `GET /orders` shows the
+  with the missed ER replayed on restart so `GET /api/orders` shows the
   correct terminal fill instead of a stale `Working` snapshot. Also uses
   the docker-control gate and real-stack sandbox overlay.
 - **`Spec_FIXP_SessionRoll/MatchingPlatformRestartSpecTests`** —
@@ -105,9 +105,9 @@ dotnet test backend/tests/B3.Trading.Conformance --filter "Category=Conformance"
 
 ### Backlog (separate scenarios; add as the contract solidifies)
 
-- **`Spec_HTTP_Orders/`** — `POST /orders` happy path + validation
+- **`Spec_HTTP_Orders/`** — `POST /api/orders` happy path + validation
   errors (missing fields, invalid side/type, `securityId == 0`,
-  negative qty), `GET /orders` listing, `DELETE /orders/{id}` flow.
+  negative qty), `GET /api/orders` listing, `DELETE /api/orders/{id}` flow.
 - **`Spec_HTTP_Risk/`** — kill-switch toggle round-trip, fat-finger
   rejection (price collar / max qty / max notional), position-limit
   rejection, all surfacing as synthetic ERs with the same shape as
@@ -120,8 +120,8 @@ dotnet test backend/tests/B3.Trading.Conformance --filter "Category=Conformance"
 - **`Spec_Multi_Firm/`** — orders submitted under a JWT scoped to
   firm A do not appear in WebSocket fan-out subscribed under firm B.
 - **`Spec_Lifecycle/`** — `/health`, `/ready`, `/live` shape;
-  SIGTERM drain (`/ready` flips to 503; in-flight `POST /orders`
-  completes; new `POST /orders` returns 503; WAL flushes; final
+  SIGTERM drain (`/ready` flips to 503; in-flight `POST /api/orders`
+  completes; new `POST /api/orders` returns 503; WAL flushes; final
   snapshot lands).
 
 Add a new scenario by:

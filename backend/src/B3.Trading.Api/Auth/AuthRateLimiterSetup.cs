@@ -10,7 +10,7 @@ namespace B3.Trading.Api.Auth;
 
 /// <summary>
 /// Slice 2 of #97 hardening: anti-abuse rate limiting for the public
-/// auth endpoints (<c>/auth/signup</c>, <c>/auth/login</c>).
+/// auth endpoints (<c>/api/auth/signup</c>, <c>/api/auth/login</c>).
 /// </summary>
 /// <remarks>
 /// <para>
@@ -36,9 +36,9 @@ namespace B3.Trading.Api.Auth;
 /// </remarks>
 internal static class AuthRateLimiterSetup
 {
-    private const string SignupPath = "/auth/signup";
-    private const string LoginPath = "/auth/login";
-    private const string ExchangePath = "/auth/exchange";
+    private const string SignupPath = "/api/auth/signup";
+    private const string LoginPath = "/api/auth/login";
+    private const string ExchangePath = "/api/auth/exchange";
 
     public static void AddAuthRateLimiter(this IServiceCollection services)
     {

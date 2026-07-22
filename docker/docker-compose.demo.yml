@@ -27,7 +27,7 @@ services:
   trading-host:
     environment:
       # Flip to Mock + ER-injection so the InjectorWorker can
-      # POST /admin/simulator/er. The demo-driver auto-detects this via
+      # POST /api/admin/simulator/er. The demo-driver auto-detects this via
       # health.exchange.erInjectionEnabled — no DEMO_MODE override needed.
       Trading__Exchange__Mode: Mock
       Trading__Exchange__AllowErInjection: "true"
@@ -105,7 +105,7 @@ services:
       Trading__Risk__PerEndClient__bot-clientA__AllowShortSell: "true"
       Trading__Risk__PerEndClient__bot-clientB__AllowShortSell: "true"
 
-      # SecurityId mapping so POST /orders can resolve symbol → SecurityId
+      # SecurityId mapping so POST /api/orders can resolve symbol → SecurityId
       # (the demo-driver leaves SecurityId=0 in the request payload — the
       # ResolveOwner path looks the symbol up in this directory). Same IDs
       # used by the real-stack overlay so a host that is later flipped to

@@ -10,7 +10,7 @@ namespace B3.Trading.Api.Tests;
 
 /// <summary>
 /// Q4.14 (#314). Coverage for the compliance role's access to
-/// <c>GET /admin/audit</c>: the policy admits compliance principals,
+/// <c>GET /api/admin/audit</c>: the policy admits compliance principals,
 /// but the result set is forced firm-scoped at the server (the
 /// caller's <c>firm</c> JWT claim is pushed into
 /// <see cref="Application.Audit.AuditLogKeeper.Query"/> as
@@ -51,7 +51,7 @@ public class AdminAuditComplianceTests : IClassFixture<TestAppFactory>
 
     private static async Task<AuditPage> QueryAuditAsync(HttpClient http, string queryString = "")
     {
-        var resp = await http.GetAsync($"/admin/audit{queryString}");
+        var resp = await http.GetAsync($"/api/admin/audit{queryString}");
         resp.EnsureSuccessStatusCode();
         return (await resp.Content.ReadFromJsonAsync<AuditPage>(Json))!;
     }
@@ -64,8 +64,8 @@ public class AdminAuditComplianceTests : IClassFixture<TestAppFactory>
         // (firm FIRM01). Failure is fine — the audit envelope is
         // emitted either way.
         using var anon = _factory.CreateClient();
-        await anon.PostAsJsonAsync("/auth/login", new { username = "alice", password = TestAppFactory.TestPassword });
-        await anon.PostAsJsonAsync("/auth/login", new { username = "dave", password = TestAppFactory.TestPassword });
+        await anon.PostAsJsonAsync("/api/auth/login", new { username = "alice", password = TestAppFactory.TestPassword });
+        await anon.PostAsJsonAsync("/api/auth/login", new { username = "dave", password = TestAppFactory.TestPassword });
 
         using var compliance = ClientFor("dave", Roles.Compliance, "FIRM01");
         var page = await QueryAuditAsync(compliance, "?limit=200");
@@ -90,7 +90,7 @@ public class AdminAuditComplianceTests : IClassFixture<TestAppFactory>
     public async Task Compliance_CannotEscapeFirmScopeViaQueryArg()
     {
         using var anon = _factory.CreateClient();
-        await anon.PostAsJsonAsync("/auth/login", new { username = "alice", password = TestAppFactory.TestPassword });
+        await anon.PostAsJsonAsync("/api/auth/login", new { username = "alice", password = TestAppFactory.TestPassword });
 
         using var compliance = ClientFor("dave", Roles.Compliance, "FIRM01");
         // Compliance attempts to probe firm "default" via ?firmId=.
@@ -108,7 +108,7 @@ public class AdminAuditComplianceTests : IClassFixture<TestAppFactory>
     public async Task PlainUser_StillReturns403()
     {
         using var trader = await _factory.CreateAuthedClientAsync(); // alice (user)
-        var resp = await trader.GetAsync("/admin/audit");
+        var resp = await trader.GetAsync("/api/admin/audit");
         Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
     }
 
@@ -116,8 +116,8 @@ public class AdminAuditComplianceTests : IClassFixture<TestAppFactory>
     public async Task Admin_UnchangedSeesAllFirms()
     {
         using var anon = _factory.CreateClient();
-        await anon.PostAsJsonAsync("/auth/login", new { username = "alice", password = TestAppFactory.TestPassword });
-        await anon.PostAsJsonAsync("/auth/login", new { username = "dave", password = TestAppFactory.TestPassword });
+        await anon.PostAsJsonAsync("/api/auth/login", new { username = "alice", password = TestAppFactory.TestPassword });
+        await anon.PostAsJsonAsync("/api/auth/login", new { username = "dave", password = TestAppFactory.TestPassword });
 
         using var admin = await _factory.CreateAuthedClientAsync("admin");
         var page = await QueryAuditAsync(admin, "?limit=200");
@@ -131,8 +131,8 @@ public class AdminAuditComplianceTests : IClassFixture<TestAppFactory>
     public async Task Admin_CanScopeToSpecificFirmViaQueryArg()
     {
         using var anon = _factory.CreateClient();
-        await anon.PostAsJsonAsync("/auth/login", new { username = "alice", password = TestAppFactory.TestPassword });
-        await anon.PostAsJsonAsync("/auth/login", new { username = "dave", password = TestAppFactory.TestPassword });
+        await anon.PostAsJsonAsync("/api/auth/login", new { username = "alice", password = TestAppFactory.TestPassword });
+        await anon.PostAsJsonAsync("/api/auth/login", new { username = "dave", password = TestAppFactory.TestPassword });
 
         using var admin = await _factory.CreateAuthedClientAsync("admin");
         var page = await QueryAuditAsync(admin, "?firmId=FIRM01&limit=200");
@@ -168,7 +168,7 @@ public class AdminAuditComplianceTests : IClassFixture<TestAppFactory>
     public async Task Compliance_EntriesOmitSeq_AdminEntriesKeepSeq()
     {
         using var anon = _factory.CreateClient();
-        await anon.PostAsJsonAsync("/auth/login", new { username = "dave", password = TestAppFactory.TestPassword });
+        await anon.PostAsJsonAsync("/api/auth/login", new { username = "dave", password = TestAppFactory.TestPassword });
 
         using var compliance = ClientFor("dave", Roles.Compliance, "FIRM01");
         var compPage = await QueryAuditAsync(compliance, "?limit=50");
@@ -190,7 +190,7 @@ public class AdminAuditComplianceTests : IClassFixture<TestAppFactory>
     {
         using var anon = _factory.CreateClient();
         for (var i = 0; i < 5; i++)
-            await anon.PostAsJsonAsync("/auth/login", new { username = "dave", password = TestAppFactory.TestPassword });
+            await anon.PostAsJsonAsync("/api/auth/login", new { username = "dave", password = TestAppFactory.TestPassword });
 
         using var compliance = ClientFor("dave", Roles.Compliance, "FIRM01");
 
@@ -201,11 +201,11 @@ public class AdminAuditComplianceTests : IClassFixture<TestAppFactory>
         // 1. Plain base64(seq) — the admin/legacy format — is NOT
         //    a valid compliance cursor; the endpoint must reject it.
         var rawSeqCursor = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("1000000"));
-        var bad = await compliance.GetAsync($"/admin/audit?limit=1&cursor={Uri.EscapeDataString(rawSeqCursor)}");
+        var bad = await compliance.GetAsync($"/api/admin/audit?limit=1&cursor={Uri.EscapeDataString(rawSeqCursor)}");
         Assert.Equal(HttpStatusCode.BadRequest, bad.StatusCode);
 
         // 2. Server-issued cursor round-trips and lets pagination advance.
-        var second = await compliance.GetAsync($"/admin/audit?limit=1&cursor={Uri.EscapeDataString(firstPage.NextCursor!)}");
+        var second = await compliance.GetAsync($"/api/admin/audit?limit=1&cursor={Uri.EscapeDataString(firstPage.NextCursor!)}");
         Assert.Equal(HttpStatusCode.OK, second.StatusCode);
         var secondPage = (await second.Content.ReadFromJsonAsync<AuditPage>(Json))!;
         Assert.NotEmpty(secondPage.Entries);
@@ -235,7 +235,7 @@ public class AdminAuditComplianceTests : IClassFixture<TestAppFactory>
             ActorFirm = "default",
             ActorRole = "admin",
             SourceIp = "10.0.0.1",
-            ResourcePath = "/admin/test",
+            ResourcePath = "/api/admin/test",
             Details = new Dictionary<string, string>
             {
                 ["firmId"] = "FIRM01",
@@ -280,7 +280,7 @@ public class AdminAuditComplianceTests : IClassFixture<TestAppFactory>
             ActorFirm = "FIRM01",
             ActorRole = "compliance",
             SourceIp = "10.0.0.2",
-            ResourcePath = "/admin/test",
+            ResourcePath = "/api/admin/test",
             Details = new Dictionary<string, string>
             {
                 ["firm"] = "OTHERFIRM",
@@ -311,7 +311,7 @@ public class AdminAuditComplianceTests : IClassFixture<TestAppFactory>
     {
         // Synthesize the audit emission shape AdminEndpoints.ToggleKill
         // produces for scope=="firm" after the pass-2 fix. We don't go
-        // through the real /admin/kill endpoint because that requires
+        // through the real /api/admin/kill endpoint because that requires
         // an admin client and side-effects we don't want here.
         var audit = _factory.Services.GetRequiredService<Application.Audit.IAuditLogger>();
         audit.Log(new Application.Persistence.AuditLogEvent
@@ -323,7 +323,7 @@ public class AdminAuditComplianceTests : IClassFixture<TestAppFactory>
             ActorFirm = "default",
             ActorRole = "admin",
             SourceIp = "10.0.0.1",
-            ResourcePath = "/admin/kill",
+            ResourcePath = "/api/admin/kill",
             Details = new Dictionary<string, string>
             {
                 ["scope"] = scope,
@@ -337,7 +337,7 @@ public class AdminAuditComplianceTests : IClassFixture<TestAppFactory>
 
         // The target firm's compliance officer must see the kill-
         // switch toggle taken against their firm.
-        var hit = Assert.Single(page.Entries, e => e.ResourcePath == "/admin/kill");
+        var hit = Assert.Single(page.Entries, e => e.ResourcePath == "/api/admin/kill");
         Assert.Null(hit.ActorFirm);
         Assert.Equal("(other firm)", hit.ActorUsername);
         Assert.NotNull(hit.Details);
@@ -404,7 +404,7 @@ public class AdminAuditComplianceTests : IClassFixture<TestAppFactory>
             ActorFirm = "default",
             ActorRole = "admin",
             SourceIp = "10.0.0.1",
-            ResourcePath = "/admin/test",
+            ResourcePath = "/api/admin/test",
             Details = new Dictionary<string, string> { ["firmId"] = "FIRM01" },
         });
 
@@ -467,7 +467,7 @@ public class AdminAuditComplianceTests : IClassFixture<TestAppFactory>
             ActorFirm = "default",
             ActorRole = "admin",
             SourceIp = "10.0.0.1",
-            ResourcePath = "/reports/cvm",
+            ResourcePath = "/api/reports/cvm",
             Details = new Dictionary<string, string>
             {
                 ["firmId"] = "FIRM01",

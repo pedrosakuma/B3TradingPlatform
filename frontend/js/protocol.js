@@ -47,7 +47,7 @@ async function jsonOrThrow(resp) {
 }
 
 export async function login(backend, username, password) {
-  const resp = await fetch(`${backend}/auth/login`, {
+  const resp = await fetch(`${backend}/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username, password }),
@@ -56,7 +56,7 @@ export async function login(backend, username, password) {
 }
 
 export async function exchangeExternalToken(backend, accessToken) {
-  const resp = await fetch(`${backend}/auth/exchange`, {
+  const resp = await fetch(`${backend}/api/auth/exchange`, {
     method: "POST",
     headers: { Authorization: `Bearer ${accessToken}` },
   });
@@ -72,7 +72,7 @@ export async function verifyTotp(backend, { code, totpChallengeToken, token }) {
   const headers = { "Content-Type": "application/json" };
   if (token) headers.Authorization = `Bearer ${token}`;
   const body = totpChallengeToken ? { code, totpChallengeToken } : { code };
-  const resp = await fetch(`${backend}/auth/2fa/verify`, {
+  const resp = await fetch(`${backend}/api/auth/2fa/verify`, {
     method: "POST",
     headers,
     body: JSON.stringify(body),
@@ -81,7 +81,7 @@ export async function verifyTotp(backend, { code, totpChallengeToken, token }) {
 }
 
 export async function getTotpStatus(backend, token) {
-  const resp = await fetch(`${backend}/auth/2fa/status`, {
+  const resp = await fetch(`${backend}/api/auth/2fa/status`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   return jsonOrThrow(resp);
@@ -95,7 +95,7 @@ export async function getTotpStatus(backend, token) {
 export async function enrollTotp(backend, token, enrollmentToken) {
   const headers = { "Content-Type": "application/json" };
   if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetch(`${backend}/auth/2fa/enroll`, {
+  const resp = await fetch(`${backend}/api/auth/2fa/enroll`, {
     method: "POST",
     headers,
     body: JSON.stringify(enrollmentToken ? { enrollmentToken } : {}),
@@ -105,7 +105,7 @@ export async function enrollTotp(backend, token, enrollmentToken) {
 
 // Disable TOTP. Requires a currently-valid TOTP code (or recovery code).
 export async function disableTotp(backend, token, code) {
-  const resp = await fetch(`${backend}/auth/2fa/disable`, {
+  const resp = await fetch(`${backend}/api/auth/2fa/disable`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
     body: JSON.stringify({ code }),
@@ -113,12 +113,12 @@ export async function disableTotp(backend, token, code) {
   return jsonOrThrow(resp);
 }
 
-// Self-service signup. Returns the same shape as /auth/login (token +
+// Self-service signup. Returns the same shape as /api/auth/login (token +
 // expiresAt) so the caller can drop the new user straight into the
 // trader view without a follow-up login round-trip. v0 is FIRM01-only,
 // role=user — see backend AuthEndpoints for the policy.
 export async function signup(backend, username, password) {
-  const resp = await fetch(`${backend}/auth/signup`, {
+  const resp = await fetch(`${backend}/api/auth/signup`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username, password }),
@@ -131,7 +131,7 @@ export async function signup(backend, username, password) {
 // rotated). Returns true on 2xx, false on 401/403, throws on network
 // errors so the caller can fall back to the optimistic path.
 export async function validateSession(backend, token) {
-  const resp = await fetch(`${backend}/positions`, {
+  const resp = await fetch(`${backend}/api/positions`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   if (resp.status === 401 || resp.status === 403) return false;
@@ -144,14 +144,14 @@ export async function validateSession(backend, token) {
 // `{ maxGtdHorizonDays: number }` on 2xx; throws on auth/network
 // failure so the caller can decide to fall back silently.
 export async function getRiskPolicy(backend, token) {
-  const resp = await fetch(`${backend}/policy/risk`, {
+  const resp = await fetch(`${backend}/api/policy/risk`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   return jsonOrThrow(resp);
 }
 
 export async function selfDeposit(backend, token, amount) {
-  const resp = await fetch(`${backend}/balance/deposit`, {
+  const resp = await fetch(`${backend}/api/balance/deposit`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
     body: JSON.stringify({ amount }),
@@ -160,7 +160,7 @@ export async function selfDeposit(backend, token, amount) {
 }
 
 export async function submitOrder(backend, token, payload) {
-  const resp = await fetch(`${backend}/orders`, {
+  const resp = await fetch(`${backend}/api/orders`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
@@ -169,7 +169,7 @@ export async function submitOrder(backend, token, payload) {
 }
 
 export async function cancelOrder(backend, token, clOrdId) {
-  const resp = await fetch(`${backend}/orders/${encodeURIComponent(clOrdId)}`, {
+  const resp = await fetch(`${backend}/api/orders/${encodeURIComponent(clOrdId)}`, {
     method: "DELETE",
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -183,7 +183,7 @@ export async function cancelOrder(backend, token, clOrdId) {
 // codes (404 / 409 / 400 / 422 / 502 / 503) bubble up via jsonOrThrow
 // so the caller can surface a user-readable reason.
 export async function modifyOrder(backend, token, clOrdId, payload) {
-  const resp = await fetch(`${backend}/orders/${encodeURIComponent(clOrdId)}`, {
+  const resp = await fetch(`${backend}/api/orders/${encodeURIComponent(clOrdId)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
@@ -200,7 +200,7 @@ export async function modifyOrder(backend, token, clOrdId, payload) {
 // accept and 404 / 409 on miss / terminal — all surfaced via
 // jsonOrThrow so the UI can show a readable reason.
 export async function listAlgos(backend, token, { includeTerminal = false } = {}) {
-  const url = new URL(`${backend}/algo/`);
+  const url = new URL(`${backend}/api/algo/`);
   if (includeTerminal) url.searchParams.set("includeTerminal", "true");
   const resp = await fetch(url.toString(), {
     headers: { Authorization: `Bearer ${token}` },
@@ -209,14 +209,14 @@ export async function listAlgos(backend, token, { includeTerminal = false } = {}
 }
 
 export async function getAlgo(backend, token, algoId) {
-  const resp = await fetch(`${backend}/algo/${encodeURIComponent(algoId)}`, {
+  const resp = await fetch(`${backend}/api/algo/${encodeURIComponent(algoId)}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   return jsonOrThrow(resp);
 }
 
 export async function createAlgo(backend, token, payload) {
-  const resp = await fetch(`${backend}/algo`, {
+  const resp = await fetch(`${backend}/api/algo`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
@@ -225,7 +225,7 @@ export async function createAlgo(backend, token, payload) {
 }
 
 export async function cancelAlgo(backend, token, algoId) {
-  const resp = await fetch(`${backend}/algo/${encodeURIComponent(algoId)}`, {
+  const resp = await fetch(`${backend}/api/algo/${encodeURIComponent(algoId)}`, {
     method: "DELETE",
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -234,7 +234,7 @@ export async function cancelAlgo(backend, token, algoId) {
 }
 
 export async function modifyAlgo(backend, token, algoId, payload) {
-  const resp = await fetch(`${backend}/algo/${encodeURIComponent(algoId)}/modify`, {
+  const resp = await fetch(`${backend}/api/algo/${encodeURIComponent(algoId)}/modify`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
@@ -246,16 +246,16 @@ export async function modifyAlgo(backend, token, algoId, payload) {
 // callers — the UI must gate the call by inspecting the JWT role
 // before invoking this. Schema mirrors AdminEndpoints.MapAdmin /firms.
 export async function getAdminFirms(backend, token) {
-  const resp = await fetch(`${backend}/admin/firms`, {
+  const resp = await fetch(`${backend}/api/admin/firms`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   return jsonOrThrow(resp);
 }
 
 // Admin-only: current killswitch state (lists of killed firms /
-// end-clients). Backend: GET /admin/kill -> { EndClients, Firms }.
+// end-clients). Backend: GET /api/admin/kill -> { EndClients, Firms }.
 export async function getKillStatus(backend, token) {
-  const resp = await fetch(`${backend}/admin/kill`, {
+  const resp = await fetch(`${backend}/api/admin/kill`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   return jsonOrThrow(resp);
@@ -265,7 +265,7 @@ export async function getKillStatus(backend, token) {
 // Returns 204 on success, 503 on WAL backpressure.
 async function toggleKill(backend, token, scope, id, engage) {
   const resp = await fetch(
-    `${backend}/admin/kill/${scope}/${encodeURIComponent(id)}`,
+    `${backend}/api/admin/kill/${scope}/${encodeURIComponent(id)}`,
     {
       method: engage ? "POST" : "DELETE",
       headers: { Authorization: `Bearer ${token}` },
@@ -280,9 +280,9 @@ export const killEndClient   = (b, t, id) => toggleKill(b, t, "end-client", id, 
 export const reviveEndClient = (b, t, id) => toggleKill(b, t, "end-client", id, false);
 
 // Admin-only: current per-symbol trading halt set.
-// Backend: GET /admin/halts -> { Symbols: [...] }.
+// Backend: GET /api/admin/halts -> { Symbols: [...] }.
 export async function getHaltStatus(backend, token) {
-  const resp = await fetch(`${backend}/admin/halts`, {
+  const resp = await fetch(`${backend}/api/admin/halts`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   return jsonOrThrow(resp);
@@ -292,7 +292,7 @@ export async function getHaltStatus(backend, token) {
 // Returns 204 on success, 503 on WAL backpressure.
 async function toggleHalt(backend, token, symbol, halt) {
   const resp = await fetch(
-    `${backend}/admin/halts/${encodeURIComponent(symbol)}`,
+    `${backend}/api/admin/halts/${encodeURIComponent(symbol)}`,
     {
       method: halt ? "POST" : "DELETE",
       headers: { Authorization: `Bearer ${token}` },
@@ -305,14 +305,14 @@ export const haltSymbol   = (b, t, sym) => toggleHalt(b, t, sym, true);
 export const resumeSymbol = (b, t, sym) => toggleHalt(b, t, sym, false);
 
 export async function listSubAccounts(backend, token, { includeDeactivated = false } = {}) {
-  const url = new URL(`${backend}/sub-accounts/`);
+  const url = new URL(`${backend}/api/sub-accounts/`);
   if (includeDeactivated) url.searchParams.set("includeDeactivated", "true");
   const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
   return jsonOrThrow(resp);
 }
 
 export async function createSubAccount(backend, token, payload) {
-  const resp = await fetch(`${backend}/sub-accounts/`, {
+  const resp = await fetch(`${backend}/api/sub-accounts/`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
@@ -321,7 +321,7 @@ export async function createSubAccount(backend, token, payload) {
 }
 
 export async function deactivateSubAccount(backend, token, id) {
-  const resp = await fetch(`${backend}/sub-accounts/${encodeURIComponent(id)}`, {
+  const resp = await fetch(`${backend}/api/sub-accounts/${encodeURIComponent(id)}`, {
     method: "DELETE",
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -330,7 +330,7 @@ export async function deactivateSubAccount(backend, token, id) {
 }
 
 export async function getSessionPhase(backend, token) {
-  const resp = await fetch(`${backend}/admin/session-phase`, {
+  const resp = await fetch(`${backend}/api/admin/session-phase`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   return jsonOrThrow(resp);
@@ -338,8 +338,8 @@ export async function getSessionPhase(backend, token) {
 
 export async function setSessionPhase(backend, token, { symbol, phase }) {
   const path = symbol
-    ? `/admin/session-phase/${encodeURIComponent(symbol)}`
-    : "/admin/session-phase/default";
+    ? `/api/admin/session-phase/${encodeURIComponent(symbol)}`
+    : "/api/admin/session-phase/default";
   const resp = await fetch(`${backend}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
@@ -350,7 +350,7 @@ export async function setSessionPhase(backend, token, { symbol, phase }) {
 }
 
 export async function clearSessionPhase(backend, token, symbol) {
-  const resp = await fetch(`${backend}/admin/session-phase/${encodeURIComponent(symbol)}`, {
+  const resp = await fetch(`${backend}/api/admin/session-phase/${encodeURIComponent(symbol)}`, {
     method: "DELETE",
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -359,7 +359,7 @@ export async function clearSessionPhase(backend, token, symbol) {
 }
 
 export async function getAdminRiskLimits(backend, token, query = {}) {
-  const url = new URL(`${backend}/admin/risk/limits`);
+  const url = new URL(`${backend}/api/admin/risk/limits`);
   for (const key of ["endClient", "firmId", "symbol"]) {
     if (query[key]) url.searchParams.set(key, query[key]);
   }
@@ -368,7 +368,7 @@ export async function getAdminRiskLimits(backend, token, query = {}) {
 }
 
 export async function reloadAdminRisk(backend, token) {
-  const resp = await fetch(`${backend}/admin/risk/reload`, {
+  const resp = await fetch(`${backend}/api/admin/risk/reload`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -377,14 +377,14 @@ export async function reloadAdminRisk(backend, token) {
 }
 
 export async function getReferencePrices(backend, token, symbols) {
-  const url = new URL(`${backend}/admin/marketdata/reference-prices`);
+  const url = new URL(`${backend}/api/admin/marketdata/reference-prices`);
   if (symbols) url.searchParams.set("symbols", symbols);
   const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
   return jsonOrThrow(resp);
 }
 
 export async function mutateCash(backend, token, payload) {
-  const resp = await fetch(`${backend}/admin/cash`, {
+  const resp = await fetch(`${backend}/api/admin/cash`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
@@ -395,7 +395,7 @@ export async function mutateCash(backend, token, payload) {
 export async function setOrderStale(backend, token, { firmId, clOrdId, stale, reason }) {
   const action = stale ? "mark-stale" : "clear-stale";
   const resp = await fetch(
-    `${backend}/admin/firms/${encodeURIComponent(firmId)}/orders/${encodeURIComponent(clOrdId)}/${action}`,
+    `${backend}/api/admin/firms/${encodeURIComponent(firmId)}/orders/${encodeURIComponent(clOrdId)}/${action}`,
     {
       method: "POST",
       headers: {
@@ -412,7 +412,7 @@ export async function setOrderStale(backend, token, { firmId, clOrdId, stale, re
 // Admin-only: trigger EOD materialisation. Returns the report or 409
 // when persistence is disabled.
 export async function runEod(backend, token) {
-  const resp = await fetch(`${backend}/admin/eod`, {
+  const resp = await fetch(`${backend}/api/admin/eod`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -436,7 +436,7 @@ function _appendHistoryQuery(url, { from, to, symbol, cursor, limit } = {}) {
 }
 
 export async function getOrdersHistory(backend, token, opts = {}) {
-  const url = new URL(`${backend}/orders/history`);
+  const url = new URL(`${backend}/api/orders/history`);
   _appendHistoryQuery(url, opts);
   const resp = await fetch(url.toString(), {
     headers: { Authorization: `Bearer ${token}` },
@@ -445,7 +445,7 @@ export async function getOrdersHistory(backend, token, opts = {}) {
 }
 
 export async function getExecutionsHistory(backend, token, opts = {}) {
-  const url = new URL(`${backend}/executions/history`);
+  const url = new URL(`${backend}/api/executions/history`);
   _appendHistoryQuery(url, opts);
   const resp = await fetch(url.toString(), {
     headers: { Authorization: `Bearer ${token}` },
@@ -454,17 +454,17 @@ export async function getExecutionsHistory(backend, token, opts = {}) {
 }
 
 export async function getPnlToday(backend, token) {
-  const resp = await fetch(`${backend}/pnl/today`, {
+  const resp = await fetch(`${backend}/api/pnl/today`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   return jsonOrThrow(resp);
 }
 
 // Q2.6 (#273). Statement JSON for a specific dayKey (YYYY-MM-DD), or
-// today when dayKey is null/empty. Backend serves /statement/{dayKey?}
+// today when dayKey is null/empty. Backend serves /api/statement/{dayKey?}
 // — the trailing slash variant returns today.
 export async function getStatement(backend, token, dayKey) {
-  const path = dayKey ? `/statement/${encodeURIComponent(dayKey)}` : `/statement`;
+  const path = dayKey ? `/api/statement/${encodeURIComponent(dayKey)}` : `/api/statement`;
   const resp = await fetch(`${backend}${path}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -515,7 +515,7 @@ function throwUnexpectedDownloadContentType(resp, expectedLabel, expectedTypes) 
 // without dragging in the browser download plumbing).
 export async function downloadStatementCsv(backend, token, dayKey) {
   if (!dayKey) throw new Error("dayKey is required for CSV download");
-  const url = `${backend}/statement/${encodeURIComponent(dayKey)}.csv`;
+  const url = `${backend}/api/statement/${encodeURIComponent(dayKey)}.csv`;
   const resp = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -612,13 +612,13 @@ export async function deleteUserBotCredential(backend, token, id) {
 // and the drop-copy WebSocket URL helper. All four are read-only;
 // none accept POST/PUT/DELETE on the compliance side.
 
-// GET /admin/audit — admin or compliance. Compliance is firm-scoped
+// GET /api/admin/audit — admin or compliance. Compliance is firm-scoped
 // server-side (the caller's JWT firm forces a filter; ?firmId= is
 // ignored for compliance). Filters are all optional; omitted entries
 // are not sent so the server applies its defaults (last 24h, limit
 // 100). Returns `{ entries, nextCursor }`.
 export async function searchAuditLog(backend, token, opts = {}) {
-  const url = new URL(`${backend}/admin/audit`);
+  const url = new URL(`${backend}/api/admin/audit`);
   if (opts.since)    url.searchParams.set("since",   opts.since);
   if (opts.until)    url.searchParams.set("until",   opts.until);
   if (opts.user)     url.searchParams.set("user",    opts.user);
@@ -632,7 +632,7 @@ export async function searchAuditLog(backend, token, opts = {}) {
   return jsonOrThrow(resp);
 }
 
-// GET /fills/{id}/touch — best-execution book-touch snapshot for a
+// GET /api/fills/{id}/touch — best-execution book-touch snapshot for a
 // specific fill, keyed by the canonical id `{ClOrdId}:{cumQty}`.
 // Returns `{ BestBid, BestAsk, MidPrice, LastTradePrice,
 // CapturedAtUtc, Stale }`. 404 when the fill is unknown OR belongs
@@ -640,12 +640,12 @@ export async function searchAuditLog(backend, token, opts = {}) {
 export async function getFillTouch(backend, token, id) {
   if (!id) throw new Error("fill id is required");
   const resp = await fetch(
-    `${backend}/fills/${encodeURIComponent(id)}/touch`,
+    `${backend}/api/fills/${encodeURIComponent(id)}/touch`,
     { headers: { Authorization: `Bearer ${token}` } });
   return jsonOrThrow(resp);
 }
 
-// GET /reports/cvm/{model}/{yyyy-MM-dd} — streams an XML body.
+// GET /api/reports/cvm/{model}/{yyyy-MM-dd} — streams an XML body.
 // Returns `{ blob, filename }`. The caller wires it through
 // URL.createObjectURL + a synthetic anchor click (kept here so unit
 // tests can stub fetch without touching the browser download
@@ -656,7 +656,7 @@ export async function downloadCvmReport(backend, token, model, dayKey) {
   if (model !== 35 && model !== 505 && model !== "35" && model !== "505")
     throw new Error("model must be 35 or 505");
   if (!dayKey) throw new Error("dayKey is required");
-  const url = `${backend}/reports/cvm/${model}/${encodeURIComponent(dayKey)}`;
+  const url = `${backend}/api/reports/cvm/${model}/${encodeURIComponent(dayKey)}`;
   const resp = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -684,7 +684,7 @@ export async function getInstruments(backend, token, { underlying, type } = {}) 
   if (underlying) params.set("underlying", underlying);
   if (type) params.set("type", type);
   const qs = params.toString();
-  const url = `${backend}/instruments${qs ? "?" + qs : ""}`;
+  const url = `${backend}/api/instruments${qs ? "?" + qs : ""}`;
   const resp = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
   });

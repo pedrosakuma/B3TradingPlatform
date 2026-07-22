@@ -65,7 +65,7 @@ test("administrative mutations use the authorized backend routes", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, init = {}) => {
     requests.push({ url: String(url), init });
-    if (String(url).endsWith("/sub-accounts/")) {
+    if (String(url).endsWith("/api/sub-accounts/")) {
       return new Response(JSON.stringify(fixture.subAccounts[0]), {
         status: 201,
         headers: { "Content-Type": "application/json" },
@@ -84,10 +84,10 @@ test("administrative mutations use the authorized backend routes", async () => {
     globalThis.fetch = originalFetch;
   }
 
-  assert.match(requests[0].url, /\/sub-accounts\/$/);
-  assert.match(requests[1].url, /\/admin\/session-phase\/PETR4$/);
-  assert.match(requests[2].url, /\/admin\/risk\/reload$/);
-  assert.match(requests[3].url, /\/admin\/firms\/default\/orders\/123\/mark-stale$/);
+  assert.match(requests[0].url, /\/api\/sub-accounts\/$/);
+  assert.match(requests[1].url, /\/api\/admin\/session-phase\/PETR4$/);
+  assert.match(requests[2].url, /\/api\/admin\/risk\/reload$/);
+  assert.match(requests[3].url, /\/api\/admin\/firms\/default\/orders\/123\/mark-stale$/);
   for (const request of requests) {
     assert.equal(request.init.headers.Authorization, "Bearer tok");
   }

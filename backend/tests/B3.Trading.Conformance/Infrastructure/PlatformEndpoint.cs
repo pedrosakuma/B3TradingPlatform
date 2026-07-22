@@ -92,7 +92,7 @@ public sealed record PlatformEndpoint(
     /// <c>B3T_SIMULATOR_MODE</c> is honored as a fallback for
     /// runbooks/.env files that predate #163's
     /// <c>Mode=Simulator</c> → <c>Mode=Mock + AllowErInjection</c> migration.
-    /// Specs that depend on <c>POST /admin/simulator/er</c> being mapped
+    /// Specs that depend on <c>POST /api/admin/simulator/er</c> being mapped
     /// skip when neither env var is set — the same suite stays valid
     /// against Real / Stub / plain-Mock deployments without false failures.
     /// </summary>
@@ -190,7 +190,7 @@ public sealed record PlatformEndpoint(
         "Admin scenario skipped: B3T_ADMIN_USER / B3T_ADMIN_PASS not configured.";
 
     public const string SimulatorSkipReason =
-        "ER-injection scenario skipped: neither B3T_ER_INJECTION nor B3T_SIMULATOR_MODE (legacy) is true (host has not opted into POST /admin/simulator/er).";
+        "ER-injection scenario skipped: neither B3T_ER_INJECTION nor B3T_SIMULATOR_MODE (legacy) is true (host has not opted into POST /api/admin/simulator/er).";
 
     public const string RealStackConformanceSkipReason =
         "Real-stack scenario skipped: B3T_REAL_STACK_CONFORMANCE=true not set (host is not the docker-compose real-stack sandbox).";

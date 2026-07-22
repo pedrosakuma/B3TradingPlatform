@@ -360,7 +360,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
     /// Lower-snake-case tag of the live SDK <c>FixpClientState</c> (e.g.
     /// <c>established</c>, <c>terminated</c>). Mirrors the
     /// <c>trading.entrypoint.session_state</c> metric and is the canonical
-    /// per-firm status read by the <c>/admin/firms</c> endpoint.
+    /// per-firm status read by the <c>/api/admin/firms</c> endpoint.
     /// </summary>
     public string SessionStateTag =>
         FixpStateGaugeProjector.Project(OperationalState).Single(r => r.Value == 1).Key;

@@ -9,7 +9,7 @@ namespace B3.Trading.Api.Tests;
 /// (slice 4 of pre-trade risk v2). Verifies that when margin is
 /// enabled via config, buy orders consume an end-client's available
 /// balance, are rejected when depleted, and that releasing a prior
-/// reservation (admin cancel via DELETE /orders/{clOrdId}) frees the
+/// reservation (admin cancel via DELETE /api/orders/{clOrdId}) frees the
 /// balance for new submissions.
 /// </summary>
 public class MarginCheckIntegrationTests
@@ -94,7 +94,7 @@ public class MarginCheckIntegrationTests
     private static async Task<HttpResponseMessage> PostOrder(
         HttpClient http, string token, int qty, decimal price, string side = "Buy")
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/orders")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
         {
             Content = JsonContent.Create(new
             {

@@ -164,7 +164,7 @@ public class HistoryEndpointTests : IDisposable
         var token = await f.LoginAsync(http);
 
         var req = new HttpRequestMessage(HttpMethod.Get,
-            "/orders/history?cursor=" + Uri.EscapeDataString("!!!not-base64!!!"));
+            "/api/orders/history?cursor=" + Uri.EscapeDataString("!!!not-base64!!!"));
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         var resp = await http.SendAsync(req);
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
@@ -196,7 +196,7 @@ public class HistoryEndpointTests : IDisposable
         var from = DateTimeOffset.UtcNow.ToString("O");
         var to = DateTimeOffset.UtcNow.AddHours(-1).ToString("O");
         var req = new HttpRequestMessage(HttpMethod.Get,
-            $"/orders/history?from={Uri.EscapeDataString(from)}&to={Uri.EscapeDataString(to)}");
+            $"/api/orders/history?from={Uri.EscapeDataString(from)}&to={Uri.EscapeDataString(to)}");
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         var resp = await http.SendAsync(req);
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
@@ -207,7 +207,7 @@ public class HistoryEndpointTests : IDisposable
     {
         using var f = TestAppFactory.WithOverrides(Overrides());
         using var http = f.CreateClient();
-        var resp = await http.GetAsync("/orders/history");
+        var resp = await http.GetAsync("/api/orders/history");
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
     }
 
@@ -288,7 +288,7 @@ public class HistoryEndpointTests : IDisposable
 
         // PUT modifies → the platform writes OrderReplaceRequestedEvent
         // for the new ClOrdID and dispatches a CancelReplace to the wire.
-        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origClOrdIdStr}")
+        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/api/orders/{origClOrdIdStr}")
         {
             Content = JsonContent.Create(new { Quantity = 10L, Price = 31m }),
         };
@@ -353,7 +353,7 @@ public class HistoryEndpointTests : IDisposable
         // [ReplaceRequested(A→B), Fill(A), Replaced(B,Orig=A)] the
         // projector must mirror Order.MarkReplaced and leave A at Filled.
         // The previous ApplyReplacedTerminal unconditionally overwrote
-        // status with Replaced, so /orders/history reported A=Replaced
+        // status with Replaced, so /api/orders/history reported A=Replaced
         // while the live runtime (which short-circuits the late Replaced
         // ack via MarkReplaced's terminal-state guard) reported Filled.
         using var f = TestAppFactory.WithOverrides(Overrides());
@@ -367,7 +367,7 @@ public class HistoryEndpointTests : IDisposable
 
         // Kick off a replace — A is still in the book, so the modify is
         // accepted and a new ClOrdID B is registered.
-        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origClOrdIdStr}")
+        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/api/orders/{origClOrdIdStr}")
         {
             Content = JsonContent.Create(new { Quantity = 10L, Price = 31m }),
         };
@@ -428,7 +428,7 @@ public class HistoryEndpointTests : IDisposable
         var origClOrdId = ulong.Parse(origClOrdIdStr);
         await InjectEr(http, adminToken, new { ClOrdId = origClOrdId, Type = "New" });
 
-        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origClOrdIdStr}")
+        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/api/orders/{origClOrdIdStr}")
         {
             Content = JsonContent.Create(new { Quantity = 10L, Price = 31m }),
         };
@@ -483,7 +483,7 @@ public class HistoryEndpointTests : IDisposable
         await InjectEr(http, adminToken, new { ClOrdId = aId, Type = "New" });
 
         // First replace A→B.
-        var put1 = new HttpRequestMessage(HttpMethod.Put, $"/orders/{aIdStr}")
+        var put1 = new HttpRequestMessage(HttpMethod.Put, $"/api/orders/{aIdStr}")
         {
             Content = JsonContent.Create(new { Quantity = 10L, Price = 31m }),
         };
@@ -507,7 +507,7 @@ public class HistoryEndpointTests : IDisposable
             OrigClOrdId: aId));
 
         // Second replace B→C (B is now Working in the runtime book).
-        var put2 = new HttpRequestMessage(HttpMethod.Put, $"/orders/{bId}")
+        var put2 = new HttpRequestMessage(HttpMethod.Put, $"/api/orders/{bId}")
         {
             Content = JsonContent.Create(new { Quantity = 10L, Price = 32m }),
         };
@@ -568,7 +568,7 @@ public class HistoryEndpointTests : IDisposable
         var origId = ulong.Parse(origStr);
         await InjectEr(http, adminToken, new { ClOrdId = origId, Type = "New" });
 
-        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origStr}")
+        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/api/orders/{origStr}")
         {
             Content = JsonContent.Create(new { Quantity = 10L, Price = 31m }),
         };
@@ -618,7 +618,7 @@ public class HistoryEndpointTests : IDisposable
         // the runtime's Order.ApplyCumulativeFill keeps A=Cancelled
         // (terminal status preserved on late fill). The pre-fix
         // ApplyEr unconditionally re-mapped Fill → Filled, so
-        // /orders/history reported A=Filled while the live runtime
+        // /api/orders/history reported A=Filled while the live runtime
         // reported A=Cancelled.
         using var f = TestAppFactory.WithOverrides(Overrides());
         using var http = f.CreateClient();
@@ -681,7 +681,7 @@ public class HistoryEndpointTests : IDisposable
         var mock = (B3.Trading.Infrastructure.MockEntryPointClient)
             f.Services.GetRequiredService<B3.Trading.Infrastructure.IEntryPointClient>();
         var cancelsBefore = mock.SubmittedCancels.Count;
-        var del = new HttpRequestMessage(HttpMethod.Delete, $"/orders/{origStr}");
+        var del = new HttpRequestMessage(HttpMethod.Delete, $"/api/orders/{origStr}");
         del.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         var delResp = await http.SendAsync(del);
         Assert.Equal(HttpStatusCode.NoContent, delResp.StatusCode);
@@ -711,7 +711,7 @@ public class HistoryEndpointTests : IDisposable
         Assert.True(byId.ContainsKey(origStr), "original must surface in history");
         Assert.Equal("Cancelled", byId[origStr].GetProperty("status").GetString());
 
-        // /executions/history: the cancel ack itself must also appear,
+        // /api/executions/history: the cancel ack itself must also appear,
         // resolved through the cancel-link map for firm-isolation.
         var execPage = await GetExecutionsHistory(http, token);
         Assert.Contains(execPage.Items,
@@ -737,7 +737,7 @@ public class HistoryEndpointTests : IDisposable
         var origId = ulong.Parse(origStr);
         await InjectEr(http, adminToken, new { ClOrdId = origId, Type = "New" });
 
-        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origStr}")
+        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/api/orders/{origStr}")
         {
             Content = JsonContent.Create(new { Quantity = 10L, Price = 31m }),
         };
@@ -795,7 +795,7 @@ public class HistoryEndpointTests : IDisposable
         var origId = ulong.Parse(origStr);
         await InjectEr(http, adminToken, new { ClOrdId = origId, Type = "New" });
 
-        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origStr}")
+        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/api/orders/{origStr}")
         {
             Content = JsonContent.Create(new { Quantity = 10L, Price = 31m }),
         };
@@ -860,7 +860,7 @@ public class HistoryEndpointTests : IDisposable
         var origId = ulong.Parse(origStr);
         await InjectEr(http, adminToken, new { ClOrdId = origId, Type = "New" });
 
-        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origStr}")
+        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/api/orders/{origStr}")
         {
             Content = JsonContent.Create(new { Quantity = 10L, Price = 31m }),
         };
@@ -889,7 +889,7 @@ public class HistoryEndpointTests : IDisposable
         // against the replacement order, which allocates a fresh cancel-side
         // ClOrdID linked back to `newId`.
         var cancelsBefore = mock.SubmittedCancels.Count;
-        var del = new HttpRequestMessage(HttpMethod.Delete, $"/orders/{newId}");
+        var del = new HttpRequestMessage(HttpMethod.Delete, $"/api/orders/{newId}");
         del.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         var delResp = await http.SendAsync(del);
         Assert.Equal(HttpStatusCode.NoContent, delResp.StatusCode);
@@ -935,7 +935,7 @@ public class HistoryEndpointTests : IDisposable
         var origId = ulong.Parse(origStr);
         await InjectEr(http, adminToken, new { ClOrdId = origId, Type = "New" });
 
-        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origStr}")
+        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/api/orders/{origStr}")
         {
             Content = JsonContent.Create(new { Quantity = 10L, Price = 31m }),
         };
@@ -1013,7 +1013,7 @@ public class HistoryEndpointTests : IDisposable
         // Modify to a DIFFERENT new quantity (8) so the assertion proves the
         // value came from the replace intent, not coincidentally from the
         // original quantity, leaves, or cum.
-        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origStr}")
+        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/api/orders/{origStr}")
         {
             Content = JsonContent.Create(new { Quantity = 8L, Price = 31m }),
         };
@@ -1060,7 +1060,7 @@ public class HistoryEndpointTests : IDisposable
         // Status — it does NOT touch leaves/cum. A real venue Canceled
         // ER typically carries LeavesQuantity=0, so the previous
         // ApplyEr (which copied er.LeavesQuantity into the projection)
-        // showed a 10-lot working order as leaves=0 in /orders/history
+        // showed a 10-lot working order as leaves=0 in /api/orders/history
         // while the live runtime kept leaves=10.
         using var f = TestAppFactory.WithOverrides(Overrides());
         using var http = f.CreateClient();
@@ -1205,7 +1205,7 @@ public class HistoryEndpointTests : IDisposable
         // GoodTillDate from the original when the modify request omits
         // them. The projector previously treated the request fields as
         // final values, so a quantity-only replace of a GTD order
-        // surfaced TIF=Day + GoodTillDate=null in /orders/history while
+        // surfaced TIF=Day + GoodTillDate=null in /api/orders/history while
         // the live runtime kept GTD + the original expiry.
         using var f = TestAppFactory.WithOverrides(Overrides());
         using var http = f.CreateClient();
@@ -1218,7 +1218,7 @@ public class HistoryEndpointTests : IDisposable
         await InjectEr(http, adminToken, new { ClOrdId = origId, Type = "New" });
 
         // Quantity-only modify — TIF / StopPrice / GoodTillDate omitted.
-        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origStr}")
+        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/api/orders/{origStr}")
         {
             Content = JsonContent.Create(new { Quantity = 20L }),
         };
@@ -1273,7 +1273,7 @@ public class HistoryEndpointTests : IDisposable
         var origId = ulong.Parse(origStr);
         await InjectEr(http, adminToken, new { ClOrdId = origId, Type = "New" });
 
-        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origStr}")
+        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/api/orders/{origStr}")
         {
             // Price is supplied explicitly because the modify pipeline
             // requires NewPrice on stop-limit (limit-vs-stop sanity is
@@ -1335,7 +1335,7 @@ public class HistoryEndpointTests : IDisposable
         var origId = ulong.Parse(origStr);
         await InjectEr(http, adminToken, new { ClOrdId = origId, Type = "New" });
 
-        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origStr}")
+        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/api/orders/{origStr}")
         {
             Content = JsonContent.Create(new { Quantity = 10L, TimeInForce = "Day" }),
         };
@@ -1379,14 +1379,14 @@ public class HistoryEndpointTests : IDisposable
         HttpClient http, string token, int? limit = null, string? cursor = null,
         string? from = null, string? to = null, string? symbol = null)
     {
-        return await GetHistory(http, token, "/orders/history", limit, cursor, from, to, symbol);
+        return await GetHistory(http, token, "/api/orders/history", limit, cursor, from, to, symbol);
     }
 
     private static async Task<HistoryPage> GetExecutionsHistory(
         HttpClient http, string token, int? limit = null, string? cursor = null,
         string? from = null, string? to = null, string? symbol = null)
     {
-        return await GetHistory(http, token, "/executions/history", limit, cursor, from, to, symbol);
+        return await GetHistory(http, token, "/api/executions/history", limit, cursor, from, to, symbol);
     }
 
     private static async Task<HistoryPage> GetHistory(
@@ -1423,19 +1423,19 @@ public class HistoryEndpointTests : IDisposable
     {
         // Pass-2 review (#297) P2 regression. Before the fix, OrderProjection
         // / OrderHistoryItemDto carried no DisplayQty or DisplayResetPolicy,
-        // so /orders/history made iceberg orders indistinguishable from
-        // full-disclosure orders. Live GET /orders + WS were fixed in
+        // so /api/orders/history made iceberg orders indistinguishable from
+        // full-disclosure orders. Live GET /api/orders + WS were fixed in
         // pass-1; this test guards the historical projection path.
         //
         // Flow exercised:
-        //   1. POST /orders with DisplayQty=25, Policy=Always (qty=100)
+        //   1. POST /api/orders with DisplayQty=25, Policy=Always (qty=100)
         //   2. Drive to Working + partial fill (4@30)
-        //   3. PUT /orders/{id} shrinking quantity to 15 → replacement
+        //   3. PUT /api/orders/{id} shrinking quantity to 15 → replacement
         //      ClOrdID inherits DisplayQty but it MUST be clamped to 15
         //      (mirroring Order.HydrateReplacement's clamp semantics so
         //      the projection matches what the venue actually sees via
         //      the gateway's MaxFloor send on cancel-replace).
-        //   4. GET /orders/history exposes DisplayQty + Policy on the
+        //   4. GET /api/orders/history exposes DisplayQty + Policy on the
         //      original row AND the replacement row.
         using var f = TestAppFactory.WithOverrides(Overrides());
         using var http = f.CreateClient();
@@ -1466,7 +1466,7 @@ public class HistoryEndpointTests : IDisposable
 
         // Quantity-shrink replace down to 15. The clamp branch in
         // OrderProjection.FromReplace must drop DisplayQty 25 → 15.
-        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origClOrdIdStr}")
+        var modifyReq = new HttpRequestMessage(HttpMethod.Put, $"/api/orders/{origClOrdIdStr}")
         {
             Content = JsonContent.Create(new { Quantity = 15L, Price = 30m }),
         };
@@ -1528,7 +1528,7 @@ public class HistoryEndpointTests : IDisposable
         HttpClient http, string token, int qty, decimal price,
         long displayQty, string policy, string symbol = "PETR4")
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/orders")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
         {
             Content = JsonContent.Create(new
             {
@@ -1552,7 +1552,7 @@ public class HistoryEndpointTests : IDisposable
     private static async Task<string> SubmitOrder(
         HttpClient http, string token, int qty, decimal price, string symbol = "PETR4")
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/orders")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
         {
             Content = JsonContent.Create(new
             {
@@ -1575,7 +1575,7 @@ public class HistoryEndpointTests : IDisposable
         HttpClient http, string token, int qty, decimal price, DateTimeOffset goodTillDate,
         string symbol = "PETR4")
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/orders")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
         {
             Content = JsonContent.Create(new
             {
@@ -1600,7 +1600,7 @@ public class HistoryEndpointTests : IDisposable
         HttpClient http, string token, int qty, decimal price, decimal stopPrice,
         string symbol = "PETR4")
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/orders")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
         {
             Content = JsonContent.Create(new
             {
@@ -1622,7 +1622,7 @@ public class HistoryEndpointTests : IDisposable
 
     private static async Task<HttpResponseMessage> InjectEr(HttpClient http, string token, object body)
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/admin/simulator/er")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/admin/simulator/er")
         {
             Content = JsonContent.Create(body),
         };

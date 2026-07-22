@@ -155,7 +155,7 @@ public sealed class PersistenceRecovery
             // is not part of the snapshot envelope (the WAL is the source
             // of truth — same design as the audit ring), so without this
             // pre-pass every Fill / PartialFill captured before the
-            // snapshot would be invisible to GET /fills/{id}/touch after
+            // snapshot would be invisible to GET /api/fills/{id}/touch after
             // restart. Resolves Symbol / Side / FirmId from the restored
             // WorkingOrderBook and Owner from OrderOwnershipMap — both
             // are restored above. We deliberately do NOT re-run the full

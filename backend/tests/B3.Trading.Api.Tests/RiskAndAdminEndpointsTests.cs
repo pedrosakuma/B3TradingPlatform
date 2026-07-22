@@ -28,7 +28,7 @@ public class RiskAndAdminEndpointsTests : IClassFixture<TestAppFactory>
     public async Task AdminKillSwitchEndpoints_RequireAdminRole()
     {
         using var userClient = await _factory.CreateAuthedClientAsync(); // alice (user role)
-        var resp = await userClient.PostAsync("/admin/kill/end-client/whoever", content: null);
+        var resp = await userClient.PostAsync("/api/admin/kill/end-client/whoever", content: null);
         Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
     }
 
@@ -37,21 +37,21 @@ public class RiskAndAdminEndpointsTests : IClassFixture<TestAppFactory>
     {
         using var admin = await _factory.CreateAuthedClientAsync("admin");
         // Clean any state from a previous test in the shared factory.
-        await admin.DeleteAsync("/admin/kill/end-client/zelda");
+        await admin.DeleteAsync("/api/admin/kill/end-client/zelda");
 
-        await admin.PostAsync("/admin/kill/end-client/zelda", content: null);
-        var state = await admin.GetFromJsonAsync<KillStateDto>("/admin/kill");
+        await admin.PostAsync("/api/admin/kill/end-client/zelda", content: null);
+        var state = await admin.GetFromJsonAsync<KillStateDto>("/api/admin/kill");
         Assert.Contains("zelda", state!.EndClients);
-        await admin.DeleteAsync("/admin/kill/end-client/zelda");
+        await admin.DeleteAsync("/api/admin/kill/end-client/zelda");
     }
 
     [Fact]
     public async Task AdminHaltsEndpoints_RequireAdminRole()
     {
         using var userClient = await _factory.CreateAuthedClientAsync(); // alice (user role)
-        var post = await userClient.PostAsync("/admin/halts/PETR4", content: null);
+        var post = await userClient.PostAsync("/api/admin/halts/PETR4", content: null);
         Assert.Equal(HttpStatusCode.Forbidden, post.StatusCode);
-        var get = await userClient.GetAsync("/admin/halts");
+        var get = await userClient.GetAsync("/api/admin/halts");
         Assert.Equal(HttpStatusCode.Forbidden, get.StatusCode);
     }
 
@@ -60,12 +60,12 @@ public class RiskAndAdminEndpointsTests : IClassFixture<TestAppFactory>
     {
         using var admin = await _factory.CreateAuthedClientAsync("admin");
         // Clean any state from a previous test in the shared factory.
-        await admin.DeleteAsync("/admin/halts/ABEV3");
+        await admin.DeleteAsync("/api/admin/halts/ABEV3");
 
-        await admin.PostAsync("/admin/halts/ABEV3", content: null);
-        var state = await admin.GetFromJsonAsync<HaltStateDto>("/admin/halts");
+        await admin.PostAsync("/api/admin/halts/ABEV3", content: null);
+        var state = await admin.GetFromJsonAsync<HaltStateDto>("/api/admin/halts");
         Assert.Contains("ABEV3", state!.Symbols);
-        await admin.DeleteAsync("/admin/halts/ABEV3");
+        await admin.DeleteAsync("/api/admin/halts/ABEV3");
     }
 
     [Fact]
@@ -75,20 +75,20 @@ public class RiskAndAdminEndpointsTests : IClassFixture<TestAppFactory>
         var halts = _factory.Services.GetRequiredService<SymbolHaltService>();
         // Distinct symbol to avoid contaminating the shared factory.
         halts.Resume("CSNA3", HaltOrigin.Venue);
-        await admin.DeleteAsync("/admin/halts/CSNA3");
+        await admin.DeleteAsync("/api/admin/halts/CSNA3");
 
         // A venue halt observed via market data plus an operator halt.
         halts.Halt("CSNA3", HaltOrigin.Venue);
-        await admin.PostAsync("/admin/halts/CSNA3", content: null);
+        await admin.PostAsync("/api/admin/halts/CSNA3", content: null);
         try
         {
-            var state = await admin.GetFromJsonAsync<HaltStateDto>("/admin/halts");
+            var state = await admin.GetFromJsonAsync<HaltStateDto>("/api/admin/halts");
             var entry = Assert.Single(state!.Halts, h => h.Symbol == "CSNA3");
             Assert.Equal("operator+venue", entry.Origin);
         }
         finally
         {
-            await admin.DeleteAsync("/admin/halts/CSNA3");
+            await admin.DeleteAsync("/api/admin/halts/CSNA3");
             halts.Resume("CSNA3", HaltOrigin.Venue);
         }
     }
@@ -101,18 +101,18 @@ public class RiskAndAdminEndpointsTests : IClassFixture<TestAppFactory>
         using var admin = await _factory.CreateAuthedClientAsync("admin");
         var halts = _factory.Services.GetRequiredService<SymbolHaltService>();
         halts.Resume("USIM5", HaltOrigin.Venue);
-        await admin.DeleteAsync("/admin/halts/USIM5");
+        await admin.DeleteAsync("/api/admin/halts/USIM5");
 
         // Venue halts the symbol (observed via market data), operator
         // also halts it manually.
         halts.Halt("USIM5", HaltOrigin.Venue);
-        await admin.PostAsync("/admin/halts/USIM5", content: null);
+        await admin.PostAsync("/api/admin/halts/USIM5", content: null);
         try
         {
             // Operator clears their own halt — but the venue still
             // holds it, so the endpoint must report the residual venue
             // halt instead of a bare 204.
-            var resume = await admin.DeleteAsync("/admin/halts/USIM5");
+            var resume = await admin.DeleteAsync("/api/admin/halts/USIM5");
             Assert.Equal(HttpStatusCode.OK, resume.StatusCode);
             var body = await resume.Content.ReadFromJsonAsync<ResumeResidualDto>();
             Assert.False(body!.Resumed);
@@ -121,7 +121,7 @@ public class RiskAndAdminEndpointsTests : IClassFixture<TestAppFactory>
             // And the symbol genuinely stays halted on the order path.
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             var ws = await OpenSubscribedAsync(token, Channels.ExecutionsMe);
-            var blocked = await PostAsync(http, token, "/orders",
+            var blocked = await PostAsync(http, token, "/api/orders",
                 new { Symbol = "USIM5", SecurityId = 7777UL, Side = "Buy", Type = "Limit", Quantity = 1, Price = 10m });
             Assert.Equal(HttpStatusCode.Accepted, blocked.StatusCode);
             var delta = await ReadJsonAsync(ws, cts.Token);
@@ -144,10 +144,10 @@ public class RiskAndAdminEndpointsTests : IClassFixture<TestAppFactory>
         var ws = await OpenSubscribedAsync(token, Channels.ExecutionsMe);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
 
-        await admin.PostAsync("/admin/halts/PETR4", content: null);
+        await admin.PostAsync("/api/admin/halts/PETR4", content: null);
         try
         {
-            var blocked = await PostAsync(http, token, "/orders",
+            var blocked = await PostAsync(http, token, "/api/orders",
                 new { Symbol = "PETR4", SecurityId = 4321UL, Side = "Buy", Type = "Limit", Quantity = 1, Price = 30m });
             Assert.Equal(HttpStatusCode.Accepted, blocked.StatusCode);
             var delta = await ReadJsonAsync(ws, cts.Token);
@@ -156,7 +156,7 @@ public class RiskAndAdminEndpointsTests : IClassFixture<TestAppFactory>
         }
         finally
         {
-            await admin.DeleteAsync("/admin/halts/PETR4");
+            await admin.DeleteAsync("/api/admin/halts/PETR4");
         }
     }
 
@@ -170,7 +170,7 @@ public class RiskAndAdminEndpointsTests : IClassFixture<TestAppFactory>
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
 
         // Default MaxQuantity in TestAppFactory is 1000.
-        var resp = await PostAsync(http, token, "/orders",
+        var resp = await PostAsync(http, token, "/api/orders",
             new { Symbol = "PETR4", SecurityId = 4321UL, Side = "Buy", Type = "Limit", Quantity = 5000, Price = 30m });
         Assert.Equal(HttpStatusCode.Accepted, resp.StatusCode);
 
@@ -192,10 +192,10 @@ public class RiskAndAdminEndpointsTests : IClassFixture<TestAppFactory>
         var ws = await OpenSubscribedAsync(aliceToken, Channels.ExecutionsMe);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
 
-        await admin.PostAsync("/admin/kill/end-client/bob", content: null);
+        await admin.PostAsync("/api/admin/kill/end-client/bob", content: null);
         try
         {
-            var blocked = await PostAsync(http, aliceToken, "/orders",
+            var blocked = await PostAsync(http, aliceToken, "/api/orders",
                 new { Symbol = "PETR4", SecurityId = 4321UL, Side = "Buy", Type = "Limit", Quantity = 1, Price = 30m });
             Assert.Equal(HttpStatusCode.Accepted, blocked.StatusCode);
             var delta = await ReadJsonAsync(ws, cts.Token);
@@ -204,7 +204,7 @@ public class RiskAndAdminEndpointsTests : IClassFixture<TestAppFactory>
         }
         finally
         {
-            await admin.DeleteAsync("/admin/kill/end-client/bob");
+            await admin.DeleteAsync("/api/admin/kill/end-client/bob");
         }
     }
 
@@ -212,9 +212,9 @@ public class RiskAndAdminEndpointsTests : IClassFixture<TestAppFactory>
     public async Task AdminSessionPhaseEndpoints_RequireAdminRole()
     {
         using var userClient = await _factory.CreateAuthedClientAsync(); // alice (user role)
-        var get = await userClient.GetAsync("/admin/session-phase");
+        var get = await userClient.GetAsync("/api/admin/session-phase");
         Assert.Equal(HttpStatusCode.Forbidden, get.StatusCode);
-        var post = await userClient.PostAsJsonAsync("/admin/session-phase/PETR4", new { phase = "Closed" });
+        var post = await userClient.PostAsJsonAsync("/api/admin/session-phase/PETR4", new { phase = "Closed" });
         Assert.Equal(HttpStatusCode.Forbidden, post.StatusCode);
     }
 
@@ -222,19 +222,19 @@ public class RiskAndAdminEndpointsTests : IClassFixture<TestAppFactory>
     public async Task AdminSessionPhase_SetGetClear_RoundTrips()
     {
         using var admin = await _factory.CreateAuthedClientAsync("admin");
-        await admin.DeleteAsync("/admin/session-phase/WEGE3"); // clean
+        await admin.DeleteAsync("/api/admin/session-phase/WEGE3"); // clean
 
-        var setResp = await admin.PostAsJsonAsync("/admin/session-phase/WEGE3", new { phase = "OpeningAuction" });
+        var setResp = await admin.PostAsJsonAsync("/api/admin/session-phase/WEGE3", new { phase = "OpeningAuction" });
         Assert.Equal(HttpStatusCode.NoContent, setResp.StatusCode);
 
-        var state = await admin.GetFromJsonAsync<SessionPhaseStateDto>("/admin/session-phase");
+        var state = await admin.GetFromJsonAsync<SessionPhaseStateDto>("/api/admin/session-phase");
         Assert.NotNull(state);
         Assert.Equal("OpeningAuction", state!.Overrides["WEGE3"]);
 
-        var clr = await admin.DeleteAsync("/admin/session-phase/WEGE3");
+        var clr = await admin.DeleteAsync("/api/admin/session-phase/WEGE3");
         Assert.Equal(HttpStatusCode.NoContent, clr.StatusCode);
 
-        state = await admin.GetFromJsonAsync<SessionPhaseStateDto>("/admin/session-phase");
+        state = await admin.GetFromJsonAsync<SessionPhaseStateDto>("/api/admin/session-phase");
         Assert.False(state!.Overrides.ContainsKey("WEGE3"));
     }
 
@@ -242,7 +242,7 @@ public class RiskAndAdminEndpointsTests : IClassFixture<TestAppFactory>
     public async Task AdminSessionPhase_RejectsBadPhase()
     {
         using var admin = await _factory.CreateAuthedClientAsync("admin");
-        var resp = await admin.PostAsJsonAsync("/admin/session-phase/PETR4", new { phase = "Banana" });
+        var resp = await admin.PostAsJsonAsync("/api/admin/session-phase/PETR4", new { phase = "Banana" });
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
     }
 
@@ -258,11 +258,11 @@ public class RiskAndAdminEndpointsTests : IClassFixture<TestAppFactory>
         var ws = await OpenSubscribedAsync(token, Channels.ExecutionsMe);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
 
-        await admin.PostAsJsonAsync($"/admin/session-phase/{sym}", new { phase = "OpeningAuction" });
+        await admin.PostAsJsonAsync($"/api/admin/session-phase/{sym}", new { phase = "OpeningAuction" });
         try
         {
             // Market order in auction → reject with phase_not_allowed:auction.
-            var blocked = await PostAsync(http, token, "/orders",
+            var blocked = await PostAsync(http, token, "/api/orders",
                 new { Symbol = sym, SecurityId = 4321UL, Side = "Buy", Type = "Market", Quantity = 1, Price = (decimal?)null });
             Assert.Equal(HttpStatusCode.Accepted, blocked.StatusCode);
             var delta = await ReadJsonAsync(ws, cts.Token);
@@ -271,7 +271,7 @@ public class RiskAndAdminEndpointsTests : IClassFixture<TestAppFactory>
         }
         finally
         {
-            await admin.DeleteAsync($"/admin/session-phase/{sym}");
+            await admin.DeleteAsync($"/api/admin/session-phase/{sym}");
         }
     }
 

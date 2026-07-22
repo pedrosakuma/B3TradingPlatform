@@ -19,7 +19,7 @@ using B3.Trading.Reconciliation;
 //     --auth-token "$TRADING_HOST_TOKEN"
 //
 // The trading-host statement is fetched from
-// {tradingHostUrl}/statement/{date}.csv with a Bearer token.
+// {tradingHostUrl}/api/statement/{date}.csv with a Bearer token.
 
 try
 {
@@ -34,7 +34,7 @@ try
     http.DefaultRequestHeaders.Authorization =
         new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", parsed.AuthToken);
     var statementCsv = await http.GetStringAsync(
-        $"/statement/{parsed.Date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}.csv");
+        $"/api/statement/{parsed.Date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}.csv");
     var hostFills = TradingHostStatementParser.ParseFills(statementCsv);
     Console.Error.WriteLine($"loaded trading-host statement: fillRows={hostFills.Count}");
 

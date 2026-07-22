@@ -4,7 +4,7 @@ using B3.Trading.Conformance.Infrastructure;
 namespace B3.Trading.Conformance.Spec_HTTP_Auth;
 
 /// <summary>
-/// Spec — Auth. Bootstrap "Hello-Login": <c>POST /auth/login</c> with valid
+/// Spec — Auth. Bootstrap "Hello-Login": <c>POST /api/auth/login</c> with valid
 /// credentials returns a JWT, and that JWT is accepted on a protected
 /// endpoint. The smallest possible end-to-end check that the platform is
 /// up, the JWT pipeline is wired, and the user store is loaded.
@@ -18,7 +18,7 @@ public class HelloLoginTests
         var peer = PlatformEndpoint.TryResolve()!;
         using var http = new HttpClient { BaseAddress = peer.BaseUrl };
 
-        var loginResp = await http.PostAsJsonAsync("/auth/login",
+        var loginResp = await http.PostAsJsonAsync("/api/auth/login",
             new { username = peer.Username, password = peer.Password });
 
         Assert.True(loginResp.IsSuccessStatusCode,
@@ -28,14 +28,14 @@ public class HelloLoginTests
         Assert.False(string.IsNullOrWhiteSpace(payload!.Token), "token must be non-empty");
         Assert.True(payload.ExpiresAt > DateTimeOffset.UtcNow, "token must expire in the future");
 
-        // Protected endpoint must accept the freshly-issued token. /orders
+        // Protected endpoint must accept the freshly-issued token. /api/orders
         // is the smallest protected GET on the platform.
-        using var protectedReq = new HttpRequestMessage(HttpMethod.Get, "/orders");
+        using var protectedReq = new HttpRequestMessage(HttpMethod.Get, "/api/orders");
         protectedReq.Headers.Authorization = new("Bearer", payload.Token);
         var protectedResp = await http.SendAsync(protectedReq);
 
         Assert.True(protectedResp.IsSuccessStatusCode,
-            $"protected GET /orders rejected the token: {(int)protectedResp.StatusCode}");
+            $"protected GET /api/orders rejected the token: {(int)protectedResp.StatusCode}");
     }
 
     private sealed record LoginResponse(string Token, DateTimeOffset ExpiresAt);

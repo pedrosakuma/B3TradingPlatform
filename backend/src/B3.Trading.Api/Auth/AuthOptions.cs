@@ -227,7 +227,7 @@ public sealed class UserTotpConfig
     /// persisted footprint small.
     /// <para>
     /// Trade-off: an attacker who learns a hash that has already been
-    /// consumed can hit /auth/2fa/verify forever without tripping
+    /// consumed can hit /api/auth/2fa/verify forever without tripping
     /// lockout. That is acceptable — knowing a consumed code is no
     /// stronger than knowing the JWT the code originally produced, and
     /// the alternative (counting consumed-list hits as failures) would

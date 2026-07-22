@@ -153,11 +153,11 @@ public sealed class CashLedger
         ApplyFee(DefaultFirmId, owner, amount);
 
     /// <summary>
-    /// #679. Folds an operator-driven (<c>/admin/cash</c>) or
+    /// #679. Folds an operator-driven (<c>/api/admin/cash</c>) or
     /// self-service sandbox cash deposit into the spendable balance —
     /// closing the gap where <c>CashKeeper</c> tracked operator cash
     /// movements in complete isolation from the balance the margin
-    /// provider and <c>GET /balance</c> actually read. Unconditional
+    /// provider and <c>GET /api/balance</c> actually read. Unconditional
     /// (mirrors <see cref="ApplyFee"/>); callers own idempotency via the
     /// WAL event fold and any insufficient-funds gate.
     /// </summary>
@@ -178,7 +178,7 @@ public sealed class CashLedger
     /// #679. Mirror of <see cref="ApplyDeposit(string, EndClientId, decimal)"/>
     /// for operator-driven withdrawals. The insufficient-funds check
     /// stays on <c>CashKeeper.TryWithdraw</c> (unchanged, authoritative
-    /// for <c>/admin/cash</c>) — this call only keeps the spendable
+    /// for <c>/api/admin/cash</c>) — this call only keeps the spendable
     /// balance consistent with an already-approved debit.
     /// </summary>
     public void ApplyWithdrawal(string firmId, EndClientId owner, decimal amount)

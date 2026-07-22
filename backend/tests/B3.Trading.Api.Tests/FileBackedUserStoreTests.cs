@@ -48,7 +48,7 @@ public class FileBackedUserStoreTests : IDisposable
         using (var factory = MakeFactory())
         using (var client = factory.CreateClient())
         {
-            var resp = await client.PostAsJsonAsync("/auth/signup",
+            var resp = await client.PostAsJsonAsync("/api/auth/signup",
                 new SignupRequest(username, "wonderland-1"));
             Assert.Equal(HttpStatusCode.Created, resp.StatusCode);
         }
@@ -66,7 +66,7 @@ public class FileBackedUserStoreTests : IDisposable
         using (var factory = MakeFactory())
         using (var client = factory.CreateClient())
         {
-            var login = await client.PostAsJsonAsync("/auth/login",
+            var login = await client.PostAsJsonAsync("/api/auth/login",
                 new LoginRequest(username, "wonderland-1"));
             Assert.Equal(HttpStatusCode.OK, login.StatusCode);
         }
@@ -82,7 +82,7 @@ public class FileBackedUserStoreTests : IDisposable
         using (var factory = MakeFactory())
         using (var client = factory.CreateClient())
         {
-            var resp = await client.PostAsJsonAsync("/auth/signup",
+            var resp = await client.PostAsJsonAsync("/api/auth/signup",
                 new SignupRequest(runtimeUser, "wonderland-1"));
             Assert.Equal(HttpStatusCode.Created, resp.StatusCode);
         }
@@ -105,13 +105,13 @@ public class FileBackedUserStoreTests : IDisposable
         using var client = factory.CreateClient();
 
         // Env-seeded login still works.
-        var aliceLogin = await client.PostAsJsonAsync("/auth/login",
+        var aliceLogin = await client.PostAsJsonAsync("/api/auth/login",
             new LoginRequest("alice", "wonderland"));
         Assert.Equal(HttpStatusCode.OK, aliceLogin.StatusCode);
 
         // Signup still works (and the corrupt file gets overwritten).
         var fresh = FreshUsername();
-        var signup = await client.PostAsJsonAsync("/auth/signup",
+        var signup = await client.PostAsJsonAsync("/api/auth/signup",
             new SignupRequest(fresh, "wonderland-1"));
         Assert.Equal(HttpStatusCode.Created, signup.StatusCode);
 
@@ -141,12 +141,12 @@ public class FileBackedUserStoreTests : IDisposable
         using var client = factory.CreateClient();
 
         // Real alice still authenticates with the env-seeded password.
-        var login = await client.PostAsJsonAsync("/auth/login",
+        var login = await client.PostAsJsonAsync("/api/auth/login",
             new LoginRequest("alice", "wonderland"));
         Assert.Equal(HttpStatusCode.OK, login.StatusCode);
 
         // Attempt to signup as alice → 409 (env collision check).
-        var signup = await client.PostAsJsonAsync("/auth/signup",
+        var signup = await client.PostAsJsonAsync("/api/auth/signup",
             new SignupRequest("alice", "wonderland-1"));
         Assert.Equal(HttpStatusCode.Conflict, signup.StatusCode);
     }
@@ -158,11 +158,11 @@ public class FileBackedUserStoreTests : IDisposable
         using var factory = MakeFactory();
         using var client = factory.CreateClient();
 
-        var first = await client.PostAsJsonAsync("/auth/signup",
+        var first = await client.PostAsJsonAsync("/api/auth/signup",
             new SignupRequest(username, "wonderland-1"));
         Assert.Equal(HttpStatusCode.Created, first.StatusCode);
 
-        var second = await client.PostAsJsonAsync("/auth/signup",
+        var second = await client.PostAsJsonAsync("/api/auth/signup",
             new SignupRequest(username, "wonderland-2"));
         Assert.Equal(HttpStatusCode.Conflict, second.StatusCode);
 

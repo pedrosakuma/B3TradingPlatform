@@ -67,7 +67,7 @@ test.describe("Entra External ID frontend harness", () => {
     await installFakeMsal(page, {
       redirectResult: { accessToken: "external-access", account: { homeAccountId: "entra-account", username: "person@example.com" } },
     });
-    await page.route("**/auth/exchange", async (route) => {
+    await page.route("**/api/auth/exchange", async (route) => {
       expect(route.request().headers().authorization).toBe("Bearer external-access");
       await route.fulfill({
         contentType: "application/json",
@@ -114,7 +114,7 @@ test.describe("Entra External ID frontend harness", () => {
   test("account_not_provisioned is stable and accessible", async ({ page }) => {
     await serveConfig(page, entraAuth);
     await installFakeMsal(page, { redirectResult: { accessToken: "external-access", account: { homeAccountId: "a" } } });
-    await page.route("**/auth/exchange", async (route) => {
+    await page.route("**/api/auth/exchange", async (route) => {
       await route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: "account_not_provisioned" }) });
     });
     await page.goto("/?code=abc&state=opaque");
@@ -127,7 +127,7 @@ test.describe("Entra External ID frontend harness", () => {
   test("logout clears internal state and delegates Entra logout once", async ({ page }) => {
     await serveConfig(page, entraAuth);
     await installFakeMsal(page, { redirectResult: { accessToken: "external-access", account: { homeAccountId: "a" } } });
-    await page.route("**/auth/exchange", async (route) => {
+    await page.route("**/api/auth/exchange", async (route) => {
       await route.fulfill({
         contentType: "application/json",
         body: JSON.stringify({
@@ -146,7 +146,7 @@ test.describe("Entra External ID frontend harness", () => {
   test("Entra mode hides Security 2FA subtab and ignores #settings/security", async ({ page }) => {
     await serveConfig(page, entraAuth);
     await installFakeMsal(page, { redirectResult: { accessToken: "external-access", account: { homeAccountId: "a" } } });
-    await page.route("**/auth/exchange", async (route) => {
+    await page.route("**/api/auth/exchange", async (route) => {
       await route.fulfill({
         contentType: "application/json",
         body: JSON.stringify({
@@ -183,7 +183,7 @@ test.describe("Entra External ID frontend harness", () => {
     for (const p of [page, other]) {
       await serveConfig(p, entraAuth);
       await installFakeMsal(p, { redirectResult: { accessToken: "external-access", account: { homeAccountId: "a" } } });
-      await p.route("**/auth/exchange", async (route) => {
+      await p.route("**/api/auth/exchange", async (route) => {
         await route.fulfill({
           contentType: "application/json",
           body: JSON.stringify({

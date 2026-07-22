@@ -15,7 +15,7 @@ public class AdminFirmsEndpointTests : IClassFixture<TestAppFactory>
     public async Task AdminFirms_RequiresAdminRole()
     {
         using var userClient = await _factory.CreateAuthedClientAsync(); // alice (user role)
-        var resp = await userClient.GetAsync("/admin/firms");
+        var resp = await userClient.GetAsync("/api/admin/firms");
         Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
     }
 
@@ -23,7 +23,7 @@ public class AdminFirmsEndpointTests : IClassFixture<TestAppFactory>
     public async Task AdminFirms_ReturnsConfiguredShapeInMockMode()
     {
         using var admin = await _factory.CreateAuthedClientAsync("admin");
-        var resp = await admin.GetAsync("/admin/firms");
+        var resp = await admin.GetAsync("/api/admin/firms");
         resp.EnsureSuccessStatusCode();
 
         var body = await resp.Content.ReadFromJsonAsync<FirmsResponse>(JsonOptions);

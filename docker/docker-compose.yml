@@ -4,7 +4,7 @@
 # real stack online: matching-platform (FIXP TCP 9876) + marketdata (UMDF
 # unicast → WS 8080) + trading-host (Mode=Real, FIRM01 wired) + frontend
 # (nginx reverse-proxy on host port 8080). The trading-host actually
-# routes /orders submissions through matching, prints trades on the book
+# routes /api/orders submissions through matching, prints trades on the book
 # in marketdata, and surfaces live ref-prices back to the risk layer —
 # no synthetic ER injection, no stub gateway, no "honest no-broker"
 # fallback.
@@ -33,7 +33,7 @@
 #   - docker-compose.unavailable.yml  → flip trading-host to
 #       Mode=Unavailable + suppress matching/marketdata via profiles.
 #       Useful for testing the no-broker fail-closed path
-#       (POST /orders → 502 BadGateway, /health readyForOrders=false).
+#       (POST /api/orders → 502 BadGateway, /health readyForOrders=false).
 #   - docker-compose.observability.yml → Prometheus + Grafana sidecars.
 #   - docker-compose.conformance.yml  → one-shot conformance suite runner
 #       (carol admin seed). Combine with real-conformance.yml when running
@@ -77,7 +77,7 @@ services:
       - b3-net
     expose:
       - "9876"   # FIXP TCP listener consumed by trading-host
-      - "8080"   # /metrics + /sessions HTTP surface + /admin/channels/*
+      - "8080"   # /metrics + /sessions HTTP surface + /api/admin/channels/*
     volumes:
       - ./real/exchange-simulator.bridge.json:/app/config/exchange-simulator.bridge.json:ro
       - ./real/instruments-eqt.json:/app/config/instruments-eqt.json:ro
@@ -160,7 +160,7 @@ services:
       # otherwise. Reading from .env keeps the secret out of the YAML.
       Trading__Auth__SigningKey: ${TRADING_AUTH_SIGNING_KEY:?Set TRADING_AUTH_SIGNING_KEY in .env (>= 32 chars, not the dev default)}
       # Auth mode must match the public frontend AUTH_MODE below. Local is the
-      # compatibility default; Hybrid/Entra enable /auth/exchange and the host
+      # compatibility default; Hybrid/Entra enable /api/auth/exchange and the host
       # options validator fails closed if any ExternalIdentity value below is
       # missing or malformed.
       Trading__Auth__Mode: ${AUTH_MODE:-Local}
@@ -275,7 +275,7 @@ services:
       Trading__Exchange__Firms__2__SenderLocation: SP
       Trading__Exchange__Firms__2__EnteringTrader: CARL3
       # Map the conformance-driven symbols onto the SecurityIds matching
-      # advertises in instruments-eqt.json so /orders submissions for
+      # advertises in instruments-eqt.json so /api/orders submissions for
       # PETR4/VALE3/ITUB4 hit a real instrument and can print trades.
       Trading__SymbolDirectory__SecurityIds__PETR4: "900000000001"
       Trading__SymbolDirectory__SecurityIds__VALE3: "900000000002"

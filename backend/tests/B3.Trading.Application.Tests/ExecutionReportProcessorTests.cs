@@ -354,7 +354,7 @@ public class ExecutionReportProcessorTests
     [Fact]
     public void ApplyReplaceRejected_EmitsUiVisibleEvent_ScopedToOriginalClOrdId()
     {
-        // #381 regression: a venue replace-reject (PUT /orders/{orig} ->
+        // #381 regression: a venue replace-reject (PUT /api/orders/{orig} ->
         // venue rejected the new ClOrdID) used to publish ONLY the synthetic
         // Rejected event tagged BotRouter-only (per #172 F), so the WS hub
         // never observed the rejection. The trader who clicked Modify saw

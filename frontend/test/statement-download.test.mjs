@@ -82,7 +82,7 @@ test("downloadStatementCsv fetches CSV with bearer auth and returns blob + filen
   };
   const { blob, filename } = await downloadStatementCsv("http://host", "tok", "2025-01-15");
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].url, "http://host/statement/2025-01-15.csv");
+  assert.equal(calls[0].url, "http://host/api/statement/2025-01-15.csv");
   assert.equal(calls[0].opts.headers.Authorization, "Bearer tok");
   assert.equal(filename, "statement-2025-01-15.csv");
   assert.ok(blob, "blob is returned");

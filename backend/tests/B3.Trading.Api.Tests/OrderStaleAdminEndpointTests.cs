@@ -29,7 +29,7 @@ public class OrderStaleAdminEndpointTests : IClassFixture<TestAppFactory>
     {
         SeedWorkingOrder(_factory, 9000UL);
         using var user = await _factory.CreateAuthedClientAsync(); // alice
-        var resp = await user.PostAsJsonAsync("/admin/firms/TEST/orders/9000/mark-stale", new { reason = "x" });
+        var resp = await user.PostAsJsonAsync("/api/admin/firms/TEST/orders/9000/mark-stale", new { reason = "x" });
         Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
     }
 
@@ -40,7 +40,7 @@ public class OrderStaleAdminEndpointTests : IClassFixture<TestAppFactory>
         using var admin = await _factory.CreateAuthedClientAsync("admin");
 
         var resp = await admin.PostAsJsonAsync(
-            "/admin/firms/TEST/orders/9001/mark-stale",
+            "/api/admin/firms/TEST/orders/9001/mark-stale",
             new { reason = "matching restart" });
 
         Assert.Equal(HttpStatusCode.NoContent, resp.StatusCode);
@@ -53,9 +53,9 @@ public class OrderStaleAdminEndpointTests : IClassFixture<TestAppFactory>
     {
         SeedWorkingOrder(_factory, 9002UL);
         using var admin = await _factory.CreateAuthedClientAsync("admin");
-        await admin.PostAsJsonAsync("/admin/firms/TEST/orders/9002/mark-stale", new { reason = "x" });
+        await admin.PostAsJsonAsync("/api/admin/firms/TEST/orders/9002/mark-stale", new { reason = "x" });
 
-        var resp = await admin.PostAsJsonAsync("/admin/firms/TEST/orders/9002/mark-stale", new { reason = "y" });
+        var resp = await admin.PostAsJsonAsync("/api/admin/firms/TEST/orders/9002/mark-stale", new { reason = "y" });
         Assert.Equal(HttpStatusCode.NoContent, resp.StatusCode);
     }
 
@@ -63,7 +63,7 @@ public class OrderStaleAdminEndpointTests : IClassFixture<TestAppFactory>
     public async Task MarkStale_UnknownClOrdId_ReturnsNotFound()
     {
         using var admin = await _factory.CreateAuthedClientAsync("admin");
-        var resp = await admin.PostAsJsonAsync("/admin/firms/TEST/orders/99999/mark-stale", new { reason = "x" });
+        var resp = await admin.PostAsJsonAsync("/api/admin/firms/TEST/orders/99999/mark-stale", new { reason = "x" });
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
     }
 
@@ -72,7 +72,7 @@ public class OrderStaleAdminEndpointTests : IClassFixture<TestAppFactory>
     {
         SeedWorkingOrder(_factory, 9003UL, firmId: "TEST");
         using var admin = await _factory.CreateAuthedClientAsync("admin");
-        var resp = await admin.PostAsJsonAsync("/admin/firms/OTHER/orders/9003/mark-stale", new { reason = "x" });
+        var resp = await admin.PostAsJsonAsync("/api/admin/firms/OTHER/orders/9003/mark-stale", new { reason = "x" });
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
     }
 
@@ -81,10 +81,10 @@ public class OrderStaleAdminEndpointTests : IClassFixture<TestAppFactory>
     {
         var order = SeedWorkingOrder(_factory, 9004UL);
         using var admin = await _factory.CreateAuthedClientAsync("admin");
-        await admin.PostAsJsonAsync("/admin/firms/TEST/orders/9004/mark-stale", new { reason = "x" });
+        await admin.PostAsJsonAsync("/api/admin/firms/TEST/orders/9004/mark-stale", new { reason = "x" });
         Assert.True(order.IsStale);
 
-        var resp = await admin.PostAsync("/admin/firms/TEST/orders/9004/clear-stale", content: null);
+        var resp = await admin.PostAsync("/api/admin/firms/TEST/orders/9004/clear-stale", content: null);
         Assert.Equal(HttpStatusCode.NoContent, resp.StatusCode);
         Assert.False(order.IsStale);
     }
@@ -98,12 +98,12 @@ public class OrderStaleAdminEndpointTests : IClassFixture<TestAppFactory>
         // by the cross-firm NotFound check on cancel).
         var order = SeedWorkingOrder(_factory, 9005UL, firmId: "default");
         using var admin = await _factory.CreateAuthedClientAsync("admin");
-        await admin.PostAsJsonAsync("/admin/firms/default/orders/9005/mark-stale", new { reason = "x" });
+        await admin.PostAsJsonAsync("/api/admin/firms/default/orders/9005/mark-stale", new { reason = "x" });
         Assert.True(order.IsStale);
 
         // alice owns the order; she gets 409 trying to cancel.
         using var alice = await _factory.CreateAuthedClientAsync();
-        var resp = await alice.DeleteAsync("/orders/9005");
+        var resp = await alice.DeleteAsync("/api/orders/9005");
         Assert.Equal(HttpStatusCode.Conflict, resp.StatusCode);
     }
 
@@ -115,10 +115,10 @@ public class OrderStaleAdminEndpointTests : IClassFixture<TestAppFactory>
         // gate is reached.
         var order = SeedWorkingOrder(_factory, 9006UL, firmId: "default");
         using var admin = await _factory.CreateAuthedClientAsync("admin");
-        await admin.PostAsJsonAsync("/admin/firms/default/orders/9006/mark-stale", new { reason = "x" });
+        await admin.PostAsJsonAsync("/api/admin/firms/default/orders/9006/mark-stale", new { reason = "x" });
 
         using var alice = await _factory.CreateAuthedClientAsync();
-        var resp = await alice.PutAsJsonAsync("/orders/9006", new { quantity = 200, price = 30m });
+        var resp = await alice.PutAsJsonAsync("/api/orders/9006", new { quantity = 200, price = 30m });
         Assert.Equal(HttpStatusCode.Conflict, resp.StatusCode);
     }
 }

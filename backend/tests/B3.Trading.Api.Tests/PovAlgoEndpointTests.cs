@@ -57,7 +57,7 @@ public class PovAlgoEndpointTests
         using var http = f.CreateClient();
         var token = await f.LoginAsync(http);
 
-        var req = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/algo/")
         {
             Content = JsonContent.Create(new
             {
@@ -80,7 +80,7 @@ public class PovAlgoEndpointTests
         var token = await f.LoginAsync(http);
 
         var now = DateTimeOffset.UtcNow;
-        var req = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/algo/")
         {
             Content = JsonContent.Create(PovBody(100, now.AddMinutes(5), now.AddMinutes(1))),
         };
@@ -97,7 +97,7 @@ public class PovAlgoEndpointTests
         var token = await f.LoginAsync(http);
 
         var now = DateTimeOffset.UtcNow;
-        var req = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/algo/")
         {
             Content = JsonContent.Create(PovBody(100, now, now.AddMinutes(1), participationRate: 1.5m)),
         };
@@ -105,7 +105,7 @@ public class PovAlgoEndpointTests
         var resp = await http.SendAsync(req);
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
 
-        var req2 = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        var req2 = new HttpRequestMessage(HttpMethod.Post, "/api/algo/")
         {
             Content = JsonContent.Create(PovBody(100, now, now.AddMinutes(1), participationRate: 0m)),
         };
@@ -122,7 +122,7 @@ public class PovAlgoEndpointTests
         var token = await f.LoginAsync(http);
 
         var now = DateTimeOffset.UtcNow;
-        var req = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/algo/")
         {
             Content = JsonContent.Create(PovBody(100, now, now.AddMinutes(1), childPrice: null)),
         };
@@ -139,7 +139,7 @@ public class PovAlgoEndpointTests
         var token = await f.LoginAsync(http);
 
         var now = DateTimeOffset.UtcNow;
-        var req = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/algo/")
         {
             Content = JsonContent.Create(PovBody(100, now, now.AddMinutes(1), minSliceQty: 0)),
         };
@@ -341,7 +341,7 @@ public class PovAlgoEndpointTests
         var book = f.Services.GetRequiredService<WorkingOrderBook>();
         var inFlight = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(5));
 
-        var req = new HttpRequestMessage(HttpMethod.Delete, $"/algo/{algoId}");
+        var req = new HttpRequestMessage(HttpMethod.Delete, $"/api/algo/{algoId}");
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", userToken);
         var del = await http.SendAsync(req);
         Assert.Equal(HttpStatusCode.Accepted, del.StatusCode);
@@ -353,7 +353,7 @@ public class PovAlgoEndpointTests
         Assert.Equal("UserCancelled", snap1.GetProperty("terminalReason").GetString());
         var terminalAt1 = snap1.GetProperty("terminalAtUtc").GetDateTimeOffset();
 
-        var req2 = new HttpRequestMessage(HttpMethod.Delete, $"/algo/{algoId}");
+        var req2 = new HttpRequestMessage(HttpMethod.Delete, $"/api/algo/{algoId}");
         req2.Headers.Authorization = new AuthenticationHeaderValue("Bearer", userToken);
         var del2 = await http.SendAsync(req2);
         Assert.Equal(HttpStatusCode.Conflict, del2.StatusCode);
@@ -512,7 +512,7 @@ public class PovAlgoEndpointTests
                 var povBook = f.Services.GetRequiredService<PovProgressBook>();
                 Assert.NotNull(povBook.TryGet("default", algoIdNum));
 
-                var del = new HttpRequestMessage(HttpMethod.Delete, $"/algo/{algoIdStr}");
+                var del = new HttpRequestMessage(HttpMethod.Delete, $"/api/algo/{algoIdStr}");
                 del.Headers.Authorization = new AuthenticationHeaderValue("Bearer", userToken);
                 var delResp = await http.SendAsync(del);
                 Assert.Equal(HttpStatusCode.Accepted, delResp.StatusCode);
@@ -612,7 +612,7 @@ public class PovAlgoEndpointTests
 
     private static async Task<string> PostAlgo(HttpClient http, string token, object body)
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/algo/")
         {
             Content = JsonContent.Create(body),
         };
@@ -627,7 +627,7 @@ public class PovAlgoEndpointTests
         HttpClient http, string adminToken, ulong childClOrdId,
         string type, long? lastQty = null, decimal lastPx = 30m)
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/admin/simulator/er")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/admin/simulator/er")
         {
             Content = JsonContent.Create(new
             {
@@ -645,7 +645,7 @@ public class PovAlgoEndpointTests
 
     private static async Task<JsonElement> GetAlgo(HttpClient http, string token, string algoId)
     {
-        var req = new HttpRequestMessage(HttpMethod.Get, $"/algo/{algoId}");
+        var req = new HttpRequestMessage(HttpMethod.Get, $"/api/algo/{algoId}");
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         var resp = await http.SendAsync(req);
         resp.EnsureSuccessStatusCode();

@@ -1,4 +1,4 @@
-# RFC: Indexed reader for `/orders/history` v0
+# RFC: Indexed reader for `/api/orders/history` v0
 
 | Field    | Value                                                                |
 | -------- | -------------------------------------------------------------------- |
@@ -9,7 +9,7 @@
 
 ## 1. Context
 
-`GET /orders/history` and `GET /executions/history` (RFC §4.2) are the
+`GET /api/orders/history` and `GET /api/executions/history` (RFC §4.2) are the
 operator/trader-facing read surfaces over the order lifecycle. Today both
 materialise their result by walking the **entire WAL from genesis** on
 every request:
@@ -220,7 +220,7 @@ coherent across recovery for no measured user-facing win.
 
 - Sustained WAL retention crosses ~250k events (≈ 8+ trading days at the
   RFC §4.2 ceiling), **or**
-- A measured `/orders/history` p99 crosses ~50 ms on the production
+- A measured `/api/orders/history` p99 crosses ~50 ms on the production
   pool, **or**
 - A compliance/audit requirement forces longer online retention.
 

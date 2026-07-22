@@ -70,7 +70,7 @@ public class PeggedAlgoEndpointTests
         using var http = f.CreateClient();
         var token = await f.LoginAsync(http);
 
-        var req = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/algo/")
         {
             Content = JsonContent.Create(new
             {
@@ -92,7 +92,7 @@ public class PeggedAlgoEndpointTests
         using var http = f.CreateClient();
         var token = await f.LoginAsync(http);
 
-        var req = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/algo/")
         {
             Content = JsonContent.Create(PeggedBody(100, pegRef: "Bogus")),
         };
@@ -108,7 +108,7 @@ public class PeggedAlgoEndpointTests
         using var http = f.CreateClient();
         var token = await f.LoginAsync(http);
 
-        var req = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/algo/")
         {
             Content = JsonContent.Create(PeggedBody(100, tickSize: 0m)),
         };
@@ -124,7 +124,7 @@ public class PeggedAlgoEndpointTests
         using var http = f.CreateClient();
         var token = await f.LoginAsync(http);
 
-        var req = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/algo/")
         {
             Content = JsonContent.Create(PeggedBody(100, childType: "Market")),
         };
@@ -352,7 +352,7 @@ public class PeggedAlgoEndpointTests
         var book = f.Services.GetRequiredService<WorkingOrderBook>();
         var inFlight = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
 
-        var req = new HttpRequestMessage(HttpMethod.Delete, $"/algo/{algoId}");
+        var req = new HttpRequestMessage(HttpMethod.Delete, $"/api/algo/{algoId}");
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", userToken);
         var del = await http.SendAsync(req);
         Assert.Equal(HttpStatusCode.Accepted, del.StatusCode);
@@ -365,7 +365,7 @@ public class PeggedAlgoEndpointTests
 
         // Idempotent terminal — even after a follow-up DELETE there
         // must be exactly one terminal publish.
-        var req2 = new HttpRequestMessage(HttpMethod.Delete, $"/algo/{algoId}");
+        var req2 = new HttpRequestMessage(HttpMethod.Delete, $"/api/algo/{algoId}");
         req2.Headers.Authorization = new AuthenticationHeaderValue("Bearer", userToken);
         var del2 = await http.SendAsync(req2);
         Assert.Equal(HttpStatusCode.Conflict, del2.StatusCode);
@@ -1200,7 +1200,7 @@ public class PeggedAlgoEndpointTests
 
         var modifyRequest = new HttpRequestMessage(
             HttpMethod.Post,
-            $"/algo/{algoId}/modify")
+            $"/api/algo/{algoId}/modify")
         {
             Content = JsonContent.Create(new
             {
@@ -1244,7 +1244,7 @@ public class PeggedAlgoEndpointTests
             TimeSpan.FromSeconds(3));
         var cancelRequest = new HttpRequestMessage(
             HttpMethod.Delete,
-            $"/algo/{algoId}");
+            $"/api/algo/{algoId}");
         cancelRequest.Headers.Authorization =
             new AuthenticationHeaderValue("Bearer", token);
         var cancelResponse = await http.SendAsync(cancelRequest);
@@ -1383,7 +1383,7 @@ public class PeggedAlgoEndpointTests
             TimeSpan.FromSeconds(3),
             "replace mutation did not become ambiguous");
 
-        var cancel = new HttpRequestMessage(HttpMethod.Delete, $"/algo/{algoId}");
+        var cancel = new HttpRequestMessage(HttpMethod.Delete, $"/api/algo/{algoId}");
         cancel.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         Assert.Equal(
             HttpStatusCode.ServiceUnavailable,
@@ -1423,7 +1423,7 @@ public class PeggedAlgoEndpointTests
         var replace = mock.SubmittedReplaces.Single(replace =>
             replace.OriginalClOrdId == child.ClOrdId);
 
-        var cancel = new HttpRequestMessage(HttpMethod.Delete, $"/algo/{algoId}");
+        var cancel = new HttpRequestMessage(HttpMethod.Delete, $"/api/algo/{algoId}");
         cancel.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         Assert.Equal(HttpStatusCode.Accepted, (await http.SendAsync(cancel)).StatusCode);
 
@@ -1466,7 +1466,7 @@ public class PeggedAlgoEndpointTests
             TimeSpan.FromSeconds(3),
             "initial child was not dispatched");
 
-        var cancel = new HttpRequestMessage(HttpMethod.Delete, $"/algo/{algoId}");
+        var cancel = new HttpRequestMessage(HttpMethod.Delete, $"/api/algo/{algoId}");
         cancel.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         Assert.Equal(HttpStatusCode.Accepted, (await http.SendAsync(cancel)).StatusCode);
         await WaitFor(
@@ -1538,7 +1538,7 @@ public class PeggedAlgoEndpointTests
 
         async Task<HttpStatusCode> DeleteAlgo()
         {
-            var request = new HttpRequestMessage(HttpMethod.Delete, $"/algo/{algoId}");
+            var request = new HttpRequestMessage(HttpMethod.Delete, $"/api/algo/{algoId}");
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
             return (await http.SendAsync(request)).StatusCode;
         }
@@ -1613,7 +1613,7 @@ public class PeggedAlgoEndpointTests
         {
             var request = new HttpRequestMessage(
                 HttpMethod.Post,
-                $"/algo/{algoId}/modify")
+                $"/api/algo/{algoId}/modify")
             {
                 Content = JsonContent.Create(new
                 {
@@ -2296,7 +2296,7 @@ public class PeggedAlgoEndpointTests
 
     private static async Task<string> PostAlgo(HttpClient http, string token, object body)
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/algo/")
         {
             Content = JsonContent.Create(body),
         };
@@ -2417,7 +2417,7 @@ public class PeggedAlgoEndpointTests
         // consumed it) — the ER becomes a phantom replacement that
         // must be dropped without altering parent state.
         var replace = mock.SubmittedReplaces.Single(r => r.OriginalClOrdId == child1.ClOrdId);
-        var lateReplacedReq = new HttpRequestMessage(HttpMethod.Post, "/admin/simulator/er")
+        var lateReplacedReq = new HttpRequestMessage(HttpMethod.Post, "/api/admin/simulator/er")
         {
             Content = JsonContent.Create(new
             {
@@ -2444,7 +2444,7 @@ public class PeggedAlgoEndpointTests
         string type, long? lastQty = null, decimal lastPx = 30m,
         string? rejectReason = null)
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/admin/simulator/er")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/admin/simulator/er")
         {
             Content = JsonContent.Create(new
             {
@@ -2475,7 +2475,7 @@ public class PeggedAlgoEndpointTests
         HttpClient http, string adminToken, ulong newClOrdId, ulong origClOrdId, long leavesQuantity,
         long? cumQty = null)
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/admin/simulator/er")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/admin/simulator/er")
         {
             Content = JsonContent.Create(new
             {
@@ -2494,7 +2494,7 @@ public class PeggedAlgoEndpointTests
 
     private static async Task<JsonElement> GetAlgo(HttpClient http, string token, string algoId)
     {
-        var req = new HttpRequestMessage(HttpMethod.Get, $"/algo/{algoId}");
+        var req = new HttpRequestMessage(HttpMethod.Get, $"/api/algo/{algoId}");
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         var resp = await http.SendAsync(req);
         resp.EnsureSuccessStatusCode();

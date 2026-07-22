@@ -14,7 +14,7 @@ namespace B3.Trading.Api.Tests.Lifecycle;
 
 /// <summary>
 /// End-to-end behavior of <c>Trading:Exchange:Mode = Unavailable</c>:
-/// process boots, /health surfaces the mode, and POST /orders is rejected
+/// process boots, /health surfaces the mode, and POST /api/orders is rejected
 /// with a durable proven-no-write rejection instead of being silently accepted
 /// by a stub. Recovered approved mutations remain deferred until shutdown.
 /// </summary>
@@ -65,7 +65,7 @@ public class UnavailableModeTests
         using var factory = MakeUnavailableFactory();
         using var client = await factory.CreateAuthedClientAsync();
 
-        var resp = await client.PostAsJsonAsync("/orders/", new
+        var resp = await client.PostAsJsonAsync("/api/orders/", new
         {
             Symbol = "PETR4",
             SecurityId = 12345UL,

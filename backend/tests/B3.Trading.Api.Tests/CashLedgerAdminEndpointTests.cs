@@ -23,7 +23,7 @@ public class CashLedgerAdminEndpointTests : IClassFixture<TestAppFactory>
     public async Task Post_RequiresAdminRole_TraderGets403()
     {
         using var trader = await _factory.CreateAuthedClientAsync(); // alice (user role)
-        var resp = await trader.PostAsJsonAsync("/admin/cash", new
+        var resp = await trader.PostAsJsonAsync("/api/admin/cash", new
         {
             endclient = "anyone",
             kind = "Deposit",
@@ -39,7 +39,7 @@ public class CashLedgerAdminEndpointTests : IClassFixture<TestAppFactory>
         using var admin = await _factory.CreateAuthedClientAsync("admin");
         var endclient = UniqueClient("alice");
 
-        var resp = await admin.PostAsJsonAsync("/admin/cash", new
+        var resp = await admin.PostAsJsonAsync("/api/admin/cash", new
         {
             endclient,
             kind = "Deposit",
@@ -52,7 +52,7 @@ public class CashLedgerAdminEndpointTests : IClassFixture<TestAppFactory>
         Assert.Equal(1_000m, body!.Available);
 
         // Second deposit accumulates.
-        var resp2 = await admin.PostAsJsonAsync("/admin/cash", new
+        var resp2 = await admin.PostAsJsonAsync("/api/admin/cash", new
         {
             endclient,
             kind = "Deposit",
@@ -70,14 +70,14 @@ public class CashLedgerAdminEndpointTests : IClassFixture<TestAppFactory>
         using var admin = await _factory.CreateAuthedClientAsync("admin");
         var endclient = UniqueClient("bob");
 
-        await admin.PostAsJsonAsync("/admin/cash", new
+        await admin.PostAsJsonAsync("/api/admin/cash", new
         {
             endclient,
             kind = "Deposit",
             amount = 1_000m,
             currency = "BRL",
         });
-        var resp = await admin.PostAsJsonAsync("/admin/cash", new
+        var resp = await admin.PostAsJsonAsync("/api/admin/cash", new
         {
             endclient,
             kind = "Withdrawal",
@@ -95,14 +95,14 @@ public class CashLedgerAdminEndpointTests : IClassFixture<TestAppFactory>
         using var admin = await _factory.CreateAuthedClientAsync("admin");
         var endclient = UniqueClient("carol");
 
-        await admin.PostAsJsonAsync("/admin/cash", new
+        await admin.PostAsJsonAsync("/api/admin/cash", new
         {
             endclient,
             kind = "Deposit",
             amount = 100m,
             currency = "BRL",
         });
-        var resp = await admin.PostAsJsonAsync("/admin/cash", new
+        var resp = await admin.PostAsJsonAsync("/api/admin/cash", new
         {
             endclient,
             kind = "Withdrawal",
@@ -116,7 +116,7 @@ public class CashLedgerAdminEndpointTests : IClassFixture<TestAppFactory>
         Assert.Equal(250m, doc.RootElement.GetProperty("requested").GetDecimal());
 
         // Balance unchanged after the rejected withdrawal.
-        var probe = await admin.PostAsJsonAsync("/admin/cash", new
+        var probe = await admin.PostAsJsonAsync("/api/admin/cash", new
         {
             endclient,
             kind = "Deposit",
@@ -131,7 +131,7 @@ public class CashLedgerAdminEndpointTests : IClassFixture<TestAppFactory>
     public async Task UnknownCurrency_Returns400()
     {
         using var admin = await _factory.CreateAuthedClientAsync("admin");
-        var resp = await admin.PostAsJsonAsync("/admin/cash", new
+        var resp = await admin.PostAsJsonAsync("/api/admin/cash", new
         {
             endclient = UniqueClient("dave"),
             kind = "Deposit",
@@ -147,7 +147,7 @@ public class CashLedgerAdminEndpointTests : IClassFixture<TestAppFactory>
     public async Task NonPositiveAmount_Returns400(decimal amount)
     {
         using var admin = await _factory.CreateAuthedClientAsync("admin");
-        var resp = await admin.PostAsJsonAsync("/admin/cash", new
+        var resp = await admin.PostAsJsonAsync("/api/admin/cash", new
         {
             endclient = UniqueClient("eve"),
             kind = "Deposit",
@@ -161,7 +161,7 @@ public class CashLedgerAdminEndpointTests : IClassFixture<TestAppFactory>
     public async Task UnknownKind_Returns400()
     {
         using var admin = await _factory.CreateAuthedClientAsync("admin");
-        var resp = await admin.PostAsJsonAsync("/admin/cash", new
+        var resp = await admin.PostAsJsonAsync("/api/admin/cash", new
         {
             endclient = UniqueClient("frank"),
             kind = "Transfer",
@@ -175,7 +175,7 @@ public class CashLedgerAdminEndpointTests : IClassFixture<TestAppFactory>
     public async Task MissingEndclient_Returns400()
     {
         using var admin = await _factory.CreateAuthedClientAsync("admin");
-        var resp = await admin.PostAsJsonAsync("/admin/cash", new
+        var resp = await admin.PostAsJsonAsync("/api/admin/cash", new
         {
             endclient = "",
             kind = "Deposit",
@@ -189,17 +189,17 @@ public class CashLedgerAdminEndpointTests : IClassFixture<TestAppFactory>
     public async Task Deposit_AlsoIncreasesSpendableBalance()
     {
         // #679. Admin deposits must fold into CashLedger (the balance
-        // GET /balance and the margin provider read), not just
+        // GET /api/balance and the margin provider read), not just
         // CashKeeper's operator-facing counter — otherwise a deposit
         // never affects real buying power. Uses the shared TestUser
-        // ("alice") deliberately since GET /balance requires an
+        // ("alice") deliberately since GET /api/balance requires an
         // authenticated principal matching the deposited end-client.
         using var admin = await _factory.CreateAuthedClientAsync("admin");
         using var alice = await _factory.CreateAuthedClientAsync();
 
-        var before = await alice.GetFromJsonAsync<BalanceDto>("/balance");
+        var before = await alice.GetFromJsonAsync<BalanceDto>("/api/balance");
 
-        var resp = await admin.PostAsJsonAsync("/admin/cash", new
+        var resp = await admin.PostAsJsonAsync("/api/admin/cash", new
         {
             endclient = TestAppFactory.TestUser,
             kind = "Deposit",
@@ -208,7 +208,7 @@ public class CashLedgerAdminEndpointTests : IClassFixture<TestAppFactory>
         });
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var after = await alice.GetFromJsonAsync<BalanceDto>("/balance");
+        var after = await alice.GetFromJsonAsync<BalanceDto>("/api/balance");
         Assert.Equal(before!.Available + 750m, after!.Available);
     }
 

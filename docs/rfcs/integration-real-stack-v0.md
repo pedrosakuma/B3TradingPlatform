@@ -12,7 +12,7 @@ The family compose ships three modes today, all honest and all
 in-process from the trading-host's point of view:
 
 - **Default** (`docker compose up`) — `Trading__Exchange__Mode=Unavailable`.
-  `POST /orders` returns `502 BadGateway`, `/health` reports
+  `POST /api/orders` returns `502 BadGateway`, `/health` reports
   `readyForOrders=false`. There is no broker.
 - **`docker-compose.e2e.yml`** — `Mode=Stub`. `StubExchangeGateway`
   echoes ERs synchronously so the Playwright smoke can drive the UI
@@ -213,7 +213,7 @@ services:
       Trading__Exchange__Firms__0__SessionId: "10101"
       Trading__Exchange__Firms__0__AccessKey: dev-key-1
       Trading__Exchange__Firms__0__EnteringFirmCode: "100"
-      # Resolve PETR4 / VALE3 to numeric SecurityIds so /algo + /orders
+      # Resolve PETR4 / VALE3 to numeric SecurityIds so /api/algo + /api/orders
       # don't 400 on symbol lookup. Same ids the e2e overlay uses.
       Trading__SymbolDirectory__SecurityIds__PETR4: "4321"
       Trading__SymbolDirectory__SecurityIds__VALE3: "1234"
@@ -377,7 +377,7 @@ pass against a real FIXP wire:
 | Spec area | What real-mode adds beyond `Mode=Unavailable` |
 |---|---|
 | `Spec_HTTP_Auth` | Same shape; no FIXP involvement. |
-| `Spec_HTTP_Admin/AdminFirmsSpecTests` | `/admin/firms` now lists a firm with `connected=true` instead of `unavailable`. |
+| `Spec_HTTP_Admin/AdminFirmsSpecTests` | `/api/admin/firms` now lists a firm with `connected=true` instead of `unavailable`. |
 | `Spec_HTTP_Risk/RiskRejectionShapeSpecTests` | Real venue ER path on accept; rejection shape unchanged. |
 | `Spec_HTTP_Simulator/SimulatorErInjectionSpecTests` | Skipped — simulator endpoint only exists in `Mode=Simulator`. Marker stays. |
 | `Spec_HTTP_Algo` (3 specs) | Iceberg + TWAP children submit through the real EntryPoint client; ERs return via the same wire; parent state machine assertions still hold. |
@@ -632,10 +632,10 @@ destructive conformance scenario gated behind a dedicated env flag.
     Raw-string accessKey was rejected at Negotiate
     (`'d' is an invalid start of a value`).
 - **New spec** `Spec_HTTP_MarketData/ReferencePriceLiveSpecTests.cs`:
-  1. admin login → GET `/admin/marketdata/reference-prices?symbols=ITUB4`
+  1. admin login → GET `/api/admin/marketdata/reference-prices?symbols=ITUB4`
      → capture baseline (don't assert source — `InfoSnapshot` may
      pre-populate the cache).
-  2. user login → POST `/orders` ITUB4 BUY 100 @ 31.00 + SELL 100 @
+  2. user login → POST `/api/orders` ITUB4 BUY 100 @ 31.00 + SELL 100 @
      31.00. Assert both 202 with no `Rejected` status (failure mode
      `gateway unavailable` would surface as 502 with body).
   3. Poll diagnostics endpoint every 250ms up to 30s for
@@ -657,7 +657,7 @@ Passed B3.Trading.Conformance.Spec_HTTP_MarketData.ReferencePriceLiveSpecTests
 Total tests: 12  Passed: 9  Skipped: 3 (simulator-only)
 ```
 
-End-to-end latency `POST /orders → live cache update` < 1s on the local
+End-to-end latency `POST /api/orders → live cache update` < 1s on the local
 real stack.
 
 ### Upstream interop bugs surfaced en route

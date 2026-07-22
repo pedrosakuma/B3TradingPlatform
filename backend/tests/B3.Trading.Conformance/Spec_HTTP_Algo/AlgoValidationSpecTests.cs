@@ -7,7 +7,7 @@ using B3.Trading.Conformance.Infrastructure;
 namespace B3.Trading.Conformance.Spec_HTTP_Algo;
 
 /// <summary>
-/// Spec — POST /algo validation contract (RFC algo-orders-v0 §4.8).
+/// Spec — POST /api/algo validation contract (RFC algo-orders-v0 §4.8).
 /// The §4.8 quantity-rounding rule is part of the public contract: a
 /// TWAP whose <c>floor(totalQuantity / sliceCount)</c> rounds to zero
 /// MUST be rejected at submit time (before the engine ever sees it),
@@ -34,7 +34,7 @@ public class AlgoValidationSpecTests
         // (1-minute, in the future) so the §4.8 check is the only path
         // that can fire.
         var now = DateTimeOffset.UtcNow;
-        using var req = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        using var req = new HttpRequestMessage(HttpMethod.Post, "/api/algo/")
         {
             Content = JsonContent.Create(new
             {

@@ -421,7 +421,7 @@ public static class RiskLimitsResolver
 
     /// <summary>
     /// Convenience: resolve every <see cref="RiskLimits"/> field in
-    /// one pass. Used by <c>GET /admin/risk/limits</c> to surface
+    /// one pass. Used by <c>GET /api/admin/risk/limits</c> to surface
     /// what the system actually thinks the cap is for a given
     /// (endClient, firm, symbol) tuple.
     /// </summary>

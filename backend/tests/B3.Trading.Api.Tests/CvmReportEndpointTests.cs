@@ -54,7 +54,7 @@ public class CvmReportEndpointTests : IDisposable
 
     private static async Task<string> SubmitOrder(HttpClient http, string token, decimal price = 30m, int qty = 10, string symbol = "PETR4")
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/orders")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
         {
             Content = JsonContent.Create(new
             {
@@ -75,7 +75,7 @@ public class CvmReportEndpointTests : IDisposable
 
     private static async Task InjectEr(HttpClient http, string token, object body)
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/admin/simulator/er")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/admin/simulator/er")
         {
             Content = JsonContent.Create(body),
         };
@@ -97,17 +97,17 @@ public class CvmReportEndpointTests : IDisposable
             LastPx = 30.0m,
         });
 
-        // /admin/simulator/er returns 202 once the ER is enqueued on the
+        // /api/admin/simulator/er returns 202 once the ER is enqueued on the
         // mock gateway channel; the ExecutionReportProcessor drains the
         // channel on a background task. Without an explicit wait the
         // CVM report query can race past the in-flight Fill, see zero
-        // rows, and return 404. Poll /executions/history (user scope)
+        // rows, and return 404. Poll /api/executions/history (user scope)
         // until the fill is observable. Bounded at ~3s wall clock;
         // empirically completes in <20ms locally.
         var deadline = DateTime.UtcNow.AddSeconds(3);
         while (DateTime.UtcNow < deadline)
         {
-            var req = new HttpRequestMessage(HttpMethod.Get, "/executions/history?limit=10");
+            var req = new HttpRequestMessage(HttpMethod.Get, "/api/executions/history?limit=10");
             req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", userToken);
             using var resp = await userHttp.SendAsync(req);
             if (resp.IsSuccessStatusCode)
@@ -118,7 +118,7 @@ public class CvmReportEndpointTests : IDisposable
             }
             await Task.Delay(20);
         }
-        throw new Xunit.Sdk.XunitException("SeedOneFillAsync timed out waiting for fill to be visible in /executions/history.");
+        throw new Xunit.Sdk.XunitException("SeedOneFillAsync timed out waiting for fill to be visible in /api/executions/history.");
     }
 
     private static DateOnly TodayUtc()
@@ -140,7 +140,7 @@ public class CvmReportEndpointTests : IDisposable
     {
         using var f = TestAppFactory.WithOverrides(Overrides());
         using var http = await f.CreateAuthedClientAsync(); // alice (user)
-        var resp = await http.GetAsync($"/reports/cvm/35/{TodayUtc():yyyy-MM-dd}");
+        var resp = await http.GetAsync($"/api/reports/cvm/35/{TodayUtc():yyyy-MM-dd}");
         Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
     }
 
@@ -149,7 +149,7 @@ public class CvmReportEndpointTests : IDisposable
     {
         using var f = TestAppFactory.WithOverrides(Overrides());
         using var http = f.CreateClient();
-        var resp = await http.GetAsync($"/reports/cvm/35/{TodayUtc():yyyy-MM-dd}");
+        var resp = await http.GetAsync($"/api/reports/cvm/35/{TodayUtc():yyyy-MM-dd}");
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
     }
 
@@ -158,7 +158,7 @@ public class CvmReportEndpointTests : IDisposable
     {
         using var f = TestAppFactory.WithOverrides(Overrides());
         using var admin = await f.CreateAuthedClientAsync("admin");
-        var resp = await admin.GetAsync($"/reports/cvm/35/{TodayUtc():yyyy-MM-dd}");
+        var resp = await admin.GetAsync($"/api/reports/cvm/35/{TodayUtc():yyyy-MM-dd}");
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
     }
 
@@ -167,7 +167,7 @@ public class CvmReportEndpointTests : IDisposable
     {
         using var f = TestAppFactory.WithOverrides(Overrides());
         using var admin = await f.CreateAuthedClientAsync("admin");
-        var resp = await admin.GetAsync("/reports/cvm/35/not-a-date");
+        var resp = await admin.GetAsync("/api/reports/cvm/35/not-a-date");
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
     }
 
@@ -180,7 +180,7 @@ public class CvmReportEndpointTests : IDisposable
         await SeedOneFillAsync(user, await f.LoginAsync(user, "alice"), admin, await f.LoginAsync(admin, "admin"));
 
         var today = TodayUtc();
-        var resp = await admin.GetAsync($"/reports/cvm/35/{today:yyyy-MM-dd}");
+        var resp = await admin.GetAsync($"/api/reports/cvm/35/{today:yyyy-MM-dd}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         Assert.Equal("application/xml", resp.Content.Headers.ContentType?.MediaType);
         var disp = resp.Content.Headers.ContentDisposition;
@@ -216,7 +216,7 @@ public class CvmReportEndpointTests : IDisposable
         await SeedOneFillAsync(user, await f.LoginAsync(user, "alice"), admin, await f.LoginAsync(admin, "admin"));
 
         var today = TodayUtc();
-        var resp = await admin.GetAsync($"/reports/cvm/505/{today:yyyy-MM-dd}");
+        var resp = await admin.GetAsync($"/api/reports/cvm/505/{today:yyyy-MM-dd}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         Assert.Equal($"cvm-505-default-{today:yyyyMMdd}.xml",
             resp.Content.Headers.ContentDisposition!.FileName);
@@ -239,7 +239,7 @@ public class CvmReportEndpointTests : IDisposable
         // dave is compliance @ FIRM01; attempting to scope to "default"
         // (admin's firm) must be denied.
         using var dave = await f.CreateAuthedClientAsync("dave");
-        var resp = await dave.GetAsync($"/reports/cvm/35/{TodayUtc():yyyy-MM-dd}?firmId=default");
+        var resp = await dave.GetAsync($"/api/reports/cvm/35/{TodayUtc():yyyy-MM-dd}?firmId=default");
         Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
     }
 
@@ -250,7 +250,7 @@ public class CvmReportEndpointTests : IDisposable
         using var dave = await f.CreateAuthedClientAsync("dave"); // compliance @ FIRM01
         // No fills exist for FIRM01 in this fixture, so we expect 404
         // (rather than a 200 leaking other firms' data).
-        var resp = await dave.GetAsync($"/reports/cvm/35/{TodayUtc():yyyy-MM-dd}");
+        var resp = await dave.GetAsync($"/api/reports/cvm/35/{TodayUtc():yyyy-MM-dd}");
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
     }
 
@@ -263,7 +263,7 @@ public class CvmReportEndpointTests : IDisposable
         await SeedOneFillAsync(user, await f.LoginAsync(user, "alice"), admin, await f.LoginAsync(admin, "admin"));
 
         var today = TodayUtc();
-        var resp = await admin.GetAsync($"/reports/cvm/35/{today:yyyy-MM-dd}?firmId=default");
+        var resp = await admin.GetAsync($"/api/reports/cvm/35/{today:yyyy-MM-dd}?firmId=default");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         Assert.Equal($"cvm-35-default-{today:yyyyMMdd}.xml",
             resp.Content.Headers.ContentDisposition!.FileName);
@@ -278,10 +278,10 @@ public class CvmReportEndpointTests : IDisposable
         await SeedOneFillAsync(user, await f.LoginAsync(user, "alice"), admin, await f.LoginAsync(admin, "admin"));
 
         var today = TodayUtc();
-        var resp = await admin.GetAsync($"/reports/cvm/35/{today:yyyy-MM-dd}");
+        var resp = await admin.GetAsync($"/api/reports/cvm/35/{today:yyyy-MM-dd}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var auditResp = await admin.GetAsync("/admin/audit?type=report.cvm.download&limit=50");
+        var auditResp = await admin.GetAsync("/api/admin/audit?type=report.cvm.download&limit=50");
         auditResp.EnsureSuccessStatusCode();
         var page = await auditResp.Content.ReadFromJsonAsync<AuditPage>(Json);
         Assert.NotNull(page);

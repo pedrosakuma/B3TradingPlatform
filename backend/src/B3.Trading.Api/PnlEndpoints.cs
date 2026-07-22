@@ -10,7 +10,7 @@ using Microsoft.AspNetCore.Routing;
 namespace B3.Trading.Api;
 
 /// <summary>
-/// Q2.4 (#271). GET /pnl/today — projects the authenticated end-client's
+/// Q2.4 (#271). GET /api/pnl/today — projects the authenticated end-client's
 /// realized + unrealized P&amp;L for the current UTC day.
 ///
 /// <para>
@@ -33,7 +33,7 @@ namespace B3.Trading.Api;
 /// </para>
 ///
 /// <para>
-/// Auth: same shape as /positions and /balance — JWT <c>sub</c> is the
+/// Auth: same shape as /api/positions and /api/balance — JWT <c>sub</c> is the
 /// end-client identity, query parameters are ignored. The spec mentions
 /// <c>?endClient=…</c> but cross-account reads are not allowed in v1.
 /// </para>
@@ -42,7 +42,7 @@ public static class PnlEndpoints
 {
     public static IEndpointRouteBuilder MapPnl(this IEndpointRouteBuilder app)
     {
-        app.MapGet("/pnl/today", [Authorize] (
+        app.MapGet("/api/pnl/today", [Authorize] (
             HttpContext ctx,
             EndClientRegistry registry,
             PnlKeeper pnl,

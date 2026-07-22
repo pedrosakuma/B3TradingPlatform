@@ -24,7 +24,7 @@ public sealed record AlgoCreatedSignal : AlgoSignal
 }
 
 /// <summary>
-/// An operator has called <c>DELETE /algo/{id}</c>. The parent is
+/// An operator has called <c>DELETE /api/algo/{id}</c>. The parent is
 /// already in <c>Cancelling</c>; the engine must cancel any live child
 /// and then mark the parent terminal.
 /// </summary>

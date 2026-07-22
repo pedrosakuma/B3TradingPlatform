@@ -153,7 +153,7 @@ public sealed class RolledSessionFailClosedSpecTests
         string idempotencyKey,
         CancellationToken cancellationToken = default)
     {
-        var request = new HttpRequestMessage(HttpMethod.Post, "/orders")
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
         {
             Content = JsonContent.Create(new
             {
@@ -232,7 +232,7 @@ public sealed class RolledSessionFailClosedSpecTests
     {
         using var request = new HttpRequestMessage(
             HttpMethod.Get,
-            "/admin/outbound-mutations/");
+            "/api/admin/outbound-mutations/");
         request.Headers.Authorization = auth;
         using var response = await http.SendAsync(request);
         response.EnsureSuccessStatusCode();
@@ -254,7 +254,7 @@ public sealed class RolledSessionFailClosedSpecTests
         var now = DateTimeOffset.UtcNow;
         using var evidenceRequest = new HttpRequestMessage(
             HttpMethod.Post,
-            $"/admin/outbound-mutations/{mutationId}/evidence")
+            $"/api/admin/outbound-mutations/{mutationId}/evidence")
         {
             Content = JsonContent.Create(new
             {
@@ -271,7 +271,7 @@ public sealed class RolledSessionFailClosedSpecTests
 
         using var resolutionRequest = new HttpRequestMessage(
             HttpMethod.Post,
-            $"/admin/outbound-mutations/{mutationId}/resolve")
+            $"/api/admin/outbound-mutations/{mutationId}/resolve")
         {
             Content = JsonContent.Create(new
             {
@@ -297,7 +297,7 @@ public sealed class RolledSessionFailClosedSpecTests
             .GetString();
         using var approvalRequest = new HttpRequestMessage(
             HttpMethod.Post,
-            $"/admin/outbound-mutations/{mutationId}/resolve/{proposalId}/approve");
+            $"/api/admin/outbound-mutations/{mutationId}/resolve/{proposalId}/approve");
         approvalRequest.Headers.Authorization = checker;
         using var approvalResponse = await http.SendAsync(approvalRequest);
         approvalResponse.EnsureSuccessStatusCode();

@@ -75,7 +75,7 @@ public static class SecurityTradingStatusCodes
 /// </summary>
 public enum HaltOrigin
 {
-    /// <summary>Local operator halt via <c>/admin/halts</c>.</summary>
+    /// <summary>Local operator halt via <c>/api/admin/halts</c>.</summary>
     Operator = 0,
 
     /// <summary>Venue-originated halt observed via market data

@@ -4,7 +4,7 @@
 // hosts three independent panels:
 //
 //   1. P&L panel — totals + per-symbol table. Initial values are seeded
-//      by GET /pnl/today; the `pnl.me` WS channel delivers live updates
+//      by GET /api/pnl/today; the `pnl.me` WS channel delivers live updates
 //      (worker.js subscribes statically, state.applyPnlSnapshot/Delta
 //      replaces wholesale). This module is render-only — the slice
 //      reducers live in state.js.

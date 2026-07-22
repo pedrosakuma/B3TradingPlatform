@@ -9,7 +9,7 @@ namespace B3.Trading.Api.Tests;
 
 /// <summary>
 /// Slice 4 of #122 — HTTP integration coverage for
-/// <c>PUT /orders/{clOrdId}</c>. Asserts the mapping from
+/// <c>PUT /api/orders/{clOrdId}</c>. Asserts the mapping from
 /// <see cref="B3.Trading.Application.OrderModifyResultKind"/> values
 /// to status codes and the side-effect contract (in-flight guard,
 /// owner-isolation, cum-quantity floor).
@@ -120,7 +120,7 @@ public class OrdersModifyEndpointTests
         var origAck = await posted.Content.ReadFromJsonAsync<OrderAck>();
 
         var future = DateTimeOffset.UtcNow.AddDays(7);
-        var req = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origAck!.ClOrdId}")
+        var req = new HttpRequestMessage(HttpMethod.Put, $"/api/orders/{origAck!.ClOrdId}")
         {
             Content = JsonContent.Create(new
             {
@@ -146,7 +146,7 @@ public class OrdersModifyEndpointTests
         var posted = await PostOrder(http, token, qty: 100, price: 30m);
         var origAck = await posted.Content.ReadFromJsonAsync<OrderAck>();
 
-        var req = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origAck!.ClOrdId}")
+        var req = new HttpRequestMessage(HttpMethod.Put, $"/api/orders/{origAck!.ClOrdId}")
         {
             Content = JsonContent.Create(new { Quantity = 200, Price = 30m, TimeInForce = "Garbage" }),
         };
@@ -169,7 +169,7 @@ public class OrdersModifyEndpointTests
         var origAck = await posted.Content.ReadFromJsonAsync<OrderAck>();
 
         // Body literally omits TimeInForce — must accept and not blow up.
-        var req = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origAck!.ClOrdId}")
+        var req = new HttpRequestMessage(HttpMethod.Put, $"/api/orders/{origAck!.ClOrdId}")
         {
             Content = JsonContent.Create(new { Quantity = 200, Price = 30m }),
         };
@@ -391,7 +391,7 @@ public class OrdersModifyEndpointTests
     private static async Task<HttpResponseMessage> PostOrder(
         HttpClient http, string token, int qty, decimal price, string side = "Buy")
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/orders")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
         {
             Content = JsonContent.Create(new
             {
@@ -415,7 +415,7 @@ public class OrdersModifyEndpointTests
         decimal? price,
         string? idempotencyKey = null)
     {
-        var req = new HttpRequestMessage(HttpMethod.Put, $"/orders/{clOrdId}")
+        var req = new HttpRequestMessage(HttpMethod.Put, $"/api/orders/{clOrdId}")
         {
             Content = JsonContent.Create(new { Quantity = qty, Price = price })
         };
@@ -431,7 +431,7 @@ public class OrdersModifyEndpointTests
         string clOrdId,
         string? idempotencyKey = null)
     {
-        var req = new HttpRequestMessage(HttpMethod.Delete, $"/orders/{clOrdId}");
+        var req = new HttpRequestMessage(HttpMethod.Delete, $"/api/orders/{clOrdId}");
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         if (idempotencyKey is not null)
             req.Headers.Add("Idempotency-Key", idempotencyKey);

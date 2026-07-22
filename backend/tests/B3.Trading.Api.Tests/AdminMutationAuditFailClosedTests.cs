@@ -77,7 +77,7 @@ public class AdminMutationAuditFailClosedTests
         var ec = new EndClientId("victim-1");
         Assert.False(svc.IsEndClientKilled(ec));
 
-        var resp = await admin.PostAsync("/admin/kill/end-client/victim-1", content: null);
+        var resp = await admin.PostAsync("/api/admin/kill/end-client/victim-1", content: null);
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, resp.StatusCode);
         Assert.True(fake.LogOrFailCalls >= 1, "expected LogOrFail invoked (audit-first ordering)");
@@ -99,7 +99,7 @@ public class AdminMutationAuditFailClosedTests
         var before = registry.ListForFirm(firm).Count;
 
         var resp = await admin.PostAsJsonAsync(
-            "/sub-accounts/",
+            "/api/sub-accounts/",
             new SubAccountCreateRequest("subA", "Display"));
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, resp.StatusCode);
@@ -140,7 +140,7 @@ public class AdminMutationAuditFailClosedTests
         var before = await directory.GetUserAsync("alice");
 
         var resp = await admin.PostAsJsonAsync(
-            "/admin/identity/users/alice/external-bindings",
+            "/api/admin/identity/users/alice/external-bindings",
             new { externalAccessToken = "bounded-token", expectedRowVersion = before!.RowVersion });
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, resp.StatusCode);
@@ -166,7 +166,7 @@ public class AdminMutationAuditFailClosedTests
             alice!.RowVersion);
         var before = await directory.GetUserAsync("alice");
 
-        using var req = new HttpRequestMessage(HttpMethod.Delete, $"/admin/identity/users/alice/external-bindings/{binding.Id}")
+        using var req = new HttpRequestMessage(HttpMethod.Delete, $"/api/admin/identity/users/alice/external-bindings/{binding.Id}")
         {
             Content = JsonContent.Create(new { expectedRowVersion = before!.RowVersion }),
         };
@@ -191,7 +191,7 @@ public class AdminMutationAuditFailClosedTests
         var before = await directory.GetUserAsync("alice");
 
         var resp = await admin.PutAsJsonAsync(
-            "/admin/identity/users/alice/status",
+            "/api/admin/identity/users/alice/status",
             new { status = TradingUserDirectoryConstants.StatusDisabled, expectedRowVersion = before!.RowVersion });
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, resp.StatusCode);
@@ -213,7 +213,7 @@ public class AdminMutationAuditFailClosedTests
         var before = await directory.GetUserAsync("alice");
 
         var resp = await admin.PutAsJsonAsync(
-            "/admin/identity/users/alice/authorization",
+            "/api/admin/identity/users/alice/authorization",
             new { firmId = "FIRM77", role = TradingUserDirectoryConstants.RoleCompliance, expectedRowVersion = before!.RowVersion });
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, resp.StatusCode);

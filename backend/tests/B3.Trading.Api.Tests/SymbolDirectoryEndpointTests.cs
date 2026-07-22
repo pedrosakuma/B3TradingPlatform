@@ -4,7 +4,7 @@ using System.Net.Http.Json;
 namespace B3.Trading.Api.Tests;
 
 /// <summary>
-/// Validates that POST /orders accepts a payload without an explicit
+/// Validates that POST /api/orders accepts a payload without an explicit
 /// SecurityId when a <c>Trading:SymbolDirectory</c> mapping covers the
 /// symbol. This is the contract that lets the trader UI submit by
 /// symbol; the conformance suite (which always sends explicit
@@ -28,7 +28,7 @@ public class SymbolDirectoryEndpointTests
         using var factory = NewFactoryWithDirectory();
         using var client = await factory.CreateAuthedClientAsync();
 
-        var resp = await client.PostAsJsonAsync("/orders/", new
+        var resp = await client.PostAsJsonAsync("/api/orders/", new
         {
             Symbol = "PETR4",
             Side = "Buy",
@@ -52,7 +52,7 @@ public class SymbolDirectoryEndpointTests
         using var factory = NewFactoryWithDirectory();
         using var client = await factory.CreateAuthedClientAsync();
 
-        var resp = await client.PostAsJsonAsync("/orders/", new
+        var resp = await client.PostAsJsonAsync("/api/orders/", new
         {
             Symbol = "UNKNOWN",
             Side = "Buy",
@@ -76,7 +76,7 @@ public class SymbolDirectoryEndpointTests
         using var factory = NewFactoryWithDirectory();
         using var client = await factory.CreateAuthedClientAsync();
 
-        var resp = await client.PostAsJsonAsync("/orders/", new
+        var resp = await client.PostAsJsonAsync("/api/orders/", new
         {
             Symbol = "PETR4",
             SecurityId = 99999UL, // ≠ directory entry 4321
@@ -95,7 +95,7 @@ public class SymbolDirectoryEndpointTests
         using var factory = NewFactoryWithDirectory(register: false);
         using var client = await factory.CreateAuthedClientAsync();
 
-        var resp = await client.PostAsJsonAsync("/orders/", new
+        var resp = await client.PostAsJsonAsync("/api/orders/", new
         {
             Symbol = "PETR4",
             Side = "Buy",

@@ -19,7 +19,7 @@ matching engine, prints on the book, and the live tape lights up.
 That's the **default Real stack** — see
 [What runs by default](#what-runs-by-default) below.
 
-To validate the no-broker fail-closed surface instead (POST /orders →
+To validate the no-broker fail-closed surface instead (POST /api/orders →
 502, /health `readyForOrders=false`), stack the unavailable overlay:
 
 ```bash
@@ -33,7 +33,7 @@ docker compose \
 
 | Service | Image | Port (host) | Purpose |
 |---|---|---|---|
-| `matching-platform` | `ghcr.io/pedrosakuma/b3-matching@sha256:…` (pinned — see [Bumping the matching image](#bumping-the-matching-image)) | (internal `:9876`, `:8080`) | FIXP TCP listener + UMDF unicast publisher + `/admin/channels/*` snapshot ops |
+| `matching-platform` | `ghcr.io/pedrosakuma/b3-matching@sha256:…` (pinned — see [Bumping the matching image](#bumping-the-matching-image)) | (internal `:9876`, `:8080`) | FIXP TCP listener + UMDF unicast publisher + `/api/admin/channels/*` snapshot ops |
 | `marketdata` | `ghcr.io/pedrosakuma/b3-marketdata:latest` | `8081` | UMDF unicast consumer (`30084/30184/31084 udp`) + WebSocket fanout (`:8080`) |
 | `trading-host` | `ghcr.io/pedrosakuma/b3-trading-host:latest` | `5000` | REST + WebSocket; `Mode=Real`, FIRM01 session against matching, live `IReferencePrice` wired through marketdata WS |
 | `frontend` | `ghcr.io/pedrosakuma/b3-trading-frontend:latest` | `8080` | nginx serving the static UI + reverse-proxy to trading-host |
@@ -76,9 +76,9 @@ Flips trading-host back to `Mode=Unavailable` and suppresses
 `matching-platform` + `marketdata` so only `trading-host + frontend`
 come up. Useful for:
 
-- Validating the fail-closed surface (POST /orders → 502 BadGateway,
+- Validating the fail-closed surface (POST /api/orders → 502 BadGateway,
   /health `readyForOrders=false`, ticket disabled).
-- Auth/admin-only flows (login, /admin/firms CRUD) without paying the
+- Auth/admin-only flows (login, /api/admin/firms CRUD) without paying the
   matching+marketdata startup cost.
 - CI conformance jobs that exercise the Unavailable contract
   (admin/firms tests, risk-rejection-shape).
@@ -115,7 +115,7 @@ which:
   sessions establish),
 - submits random buy/sell limit orders around the configured reference
   prices at `DEMO_SUBMIT_RATE_HZ` (default 0.5 Hz per bot),
-- logs in as `demo-admin` (role=admin) and POSTs `/admin/simulator/er`
+- logs in as `demo-admin` (role=admin) and POSTs `/api/admin/simulator/er`
   to inject synthetic Fill / PartialFill ERs at `DEMO_INJECT_RATE_HZ`
   (default 0.3 Hz across the registry).
 
@@ -187,7 +187,7 @@ the real matching engine, not a synthetic ER injector.
 
 This overlay also flips `Trading__Sandbox__AllowSelfCashDeposit=true`
 (#679/#681) on `trading-host`, so a logged-in end-client can
-self-service `POST /balance/deposit` for buying power instead of
+self-service `POST /api/balance/deposit` for buying power instead of
 needing an admin round-trip — without it there'd be a market but no way
 for a fresh sandbox account to fund a trade against it.
 
@@ -283,7 +283,7 @@ overrides it to `Mode=Real` and supplies matching-platform plus three firm
 sessions. Use `docker-compose.unavailable.yml` for the honest no-broker mode:
 
 - `GET /health` returns `exchange.mode=Unavailable` and `readyForOrders=false`.
-- `POST /orders` returns `502 BadGateway` with `reason: gateway unavailable`.
+- `POST /api/orders` returns `502 BadGateway` with `reason: gateway unavailable`.
 - Auth, WebSocket subscriptions, positions read-side, kill-switch admin —
   all keep working. The trader UI logs in and shows an empty book.
 
@@ -315,10 +315,10 @@ laptop demo.**
 
 ```bash
 # verify the seed user works once the stack is up
-TOKEN=$(curl -sS -X POST http://localhost:8080/auth/login \
+TOKEN=$(curl -sS -X POST http://localhost:8080/api/auth/login \
     -H 'Content-Type: application/json' \
     -d '{"username":"alice","password":"wonderland"}' | jq -r .token)
-curl -sS -H "Authorization: Bearer $TOKEN" http://localhost:8080/positions
+curl -sS -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/positions
 # []  (no broker connected — see Honest no-broker mode)
 ```
 
@@ -336,7 +336,7 @@ a real environment.
 For Entra rollout set `Trading__Auth__Mode=Hybrid` or `Entra` and configure
 `Trading__Auth__ExternalIdentity__Authority`, `Issuer`, `TenantId`,
 `Audience`, `RequiredScope` and `AllowedClientApplicationIds__0`. Local mode
-is still the default; external tokens are accepted only by `POST /auth/exchange`
+is still the default; external tokens are accepted only by `POST /api/auth/exchange`
 and are exchanged for the internal 10-minute trading JWT. `Entra` mode also
 requires at least one active externally linked admin in the identity directory;
 use the Hybrid admin binding route and runbook before flipping the mode.
@@ -488,7 +488,7 @@ deploy-time env vars:
 | -------- | ------- | ------ |
 | `MARKETDATA_WS_URL` | empty | Seeds `window.__B3_CONFIG__.marketDataWsUrl` for the Market Data panel; empty preserves the localhost/off-localhost fallback chain in `frontend/js/protocol.js`. |
 | `APP_TITLE` | `B3TradingPlatform` | Seeds `window.__B3_CONFIG__.appTitle`, which `frontend/js/app.js` applies to the browser `<title>`, login heading, and topbar brand text. |
-| `AUTH_MODE` | `Local` | Shared frontend + trading-host auth mode: `Local`, `Hybrid`, or `Entra`. Local preserves password/TOTP/signup compatibility and leaves `/auth/exchange` absent. |
+| `AUTH_MODE` | `Local` | Shared frontend + trading-host auth mode: `Local`, `Hybrid`, or `Entra`. Local preserves password/TOTP/signup compatibility and leaves `/api/auth/exchange` absent. |
 | `AUTH_LOCAL_LOGIN_ENABLED` | empty | Optional override for showing local password login in Hybrid; Entra mode should leave this disabled. |
 | `AUTH_SIGNUP_ENABLED` | empty | Optional override for local signup. Defaults: Local on, Hybrid/Entra off. |
 | `AUTH_TOTP_ENABLED` | empty | Optional override for local TOTP controls. Entra mode hides them. |

@@ -53,7 +53,7 @@ public static class AuditEventTypes
     /// <summary>Q4.8 (#308). CVM 35/505 transaction report downloaded by a compliance/admin principal.</summary>
     public const string ReportCvmDownload = "report.cvm.download";
 
-    /// <summary>#679. Self-service sandbox cash deposit via <c>POST /balance/deposit</c> (as opposed to operator-driven <c>admin.config.change</c> via <c>/admin/cash</c>).</summary>
+    /// <summary>#679. Self-service sandbox cash deposit via <c>POST /api/balance/deposit</c> (as opposed to operator-driven <c>admin.config.change</c> via <c>/api/admin/cash</c>).</summary>
     public const string SandboxCashSelfDeposit = "sandbox.cash.self_deposit";
 
     // Prefix helpers used by the read-path filter for type=auth.* style globs.
@@ -65,7 +65,7 @@ public static class AuditEventTypes
 /// Q4.5 (#305). Read-side projection of <see cref="AuditLogEvent"/>:
 /// the WAL envelope plus the monotonic sequence number assigned at
 /// append time. Used as the API response shape for <c>GET
-/// /admin/audit</c> and as the opaque-cursor anchor (the cursor is a
+/// /api/admin/audit</c> and as the opaque-cursor anchor (the cursor is a
 /// base64-encoded packing of <see cref="Seq"/> + <see cref="TimestampUtc"/>).
 /// </summary>
 public sealed record AuditEntry(
@@ -86,7 +86,7 @@ public sealed record AuditEntry(
 /// <summary>
 /// Q4.5 (#305). Bounded in-memory ring-buffer projection of every
 /// <see cref="AuditLogEvent"/> that lands on the WAL. Backs
-/// <c>GET /admin/audit</c>. Append is synchronous and called from
+/// <c>GET /api/admin/audit</c>. Append is synchronous and called from
 /// both the live capture path (under the dispatcher lock, via
 /// <see cref="EventDispatcher.Dispatch(WalEvent, System.Action)"/>)
 /// and the recovery replayer (single-threaded). Reads are taken
@@ -253,7 +253,7 @@ public sealed class AuditLogKeeper
                 // actor was in that firm OR the action targeted that firm
                 // (a well-known Details key carries the target firm id).
                 // Used to restrict compliance principals to their own firm
-                // at /admin/audit; never trusted from the query string.
+                // at /api/admin/audit; never trusted from the query string.
                 //
                 // Pass-1 review (#327) P1.1: previously matched only on
                 // ActorFirm, which (a) leaked cross-firm targets when an

@@ -15,7 +15,7 @@ namespace B3.Trading.Infrastructure;
 /// enables ER injection AND seeds an admin role; without this guard a
 /// careless operator could bring up the conformance stack with the
 /// committed defaults, which would expose
-/// <c>POST /admin/simulator/er</c> to anyone with a copy of this repo.
+/// <c>POST /api/admin/simulator/er</c> to anyone with a copy of this repo.
 /// The guard is pure-static so it can be unit-tested without spinning
 /// up the host.</para>
 ///
@@ -74,7 +74,7 @@ public static class AdminCredentialDefaultGuard
                     $"Trading:Exchange:AllowErInjection=true is enabled AND a seeded user with role='{role}' is " +
                     "using the committed dev-default password material from docker/.env.example " +
                     "(TRADING_SEED_PASSWORD_HASH/_SALT, plaintext 'wonderland'). " +
-                    "Refusing to boot — anyone with a copy of this repo could call POST /admin/simulator/er. " +
+                    "Refusing to boot — anyone with a copy of this repo could call POST /api/admin/simulator/er. " +
                     "Set B3T_CONFORMANCE_ADMIN_PASSWORD_HASH + B3T_CONFORMANCE_ADMIN_PASSWORD_SALT to a freshly " +
                     "generated PBKDF2 hash/salt pair before bringing up the conformance overlay.");
             }

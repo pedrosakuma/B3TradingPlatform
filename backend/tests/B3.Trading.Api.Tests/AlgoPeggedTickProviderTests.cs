@@ -6,7 +6,7 @@ using System.Text.Json;
 namespace B3.Trading.Api.Tests;
 
 /// <summary>
-/// #454 Fase 1. Exercises the POST /algo Pegged path through the new
+/// #454 Fase 1. Exercises the POST /api/algo Pegged path through the new
 /// <c>ITickSizeProvider</c> seam: explicit override wins, provider
 /// resolves from <c>SymbolDirectory</c> when override is omitted, and
 /// the request rejects (400) when neither is available — closing the
@@ -78,7 +78,7 @@ public class AlgoPeggedTickProviderTests
         using var http = f.CreateClient();
         var token = await f.LoginAsync(http);
 
-        var req = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/algo/")
         {
             Content = JsonContent.Create(PeggedBody("VALE3", tickSize: null)),
         };
@@ -93,7 +93,7 @@ public class AlgoPeggedTickProviderTests
 
     private static async Task<string> PostAlgo(HttpClient http, string token, object body)
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/algo/")
         {
             Content = JsonContent.Create(body),
         };
@@ -106,7 +106,7 @@ public class AlgoPeggedTickProviderTests
 
     private static async Task<JsonElement> GetAlgo(HttpClient http, string token, string algoId)
     {
-        var req = new HttpRequestMessage(HttpMethod.Get, $"/algo/{algoId}");
+        var req = new HttpRequestMessage(HttpMethod.Get, $"/api/algo/{algoId}");
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         var resp = await http.SendAsync(req);
         resp.EnsureSuccessStatusCode();

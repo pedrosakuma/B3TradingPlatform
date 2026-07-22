@@ -200,7 +200,7 @@ checks pass.
 **Verify.**
 - `df` shows free space > 20%.
 - `trading_wal_backpressure_total` rate returns to zero.
-- `Append` no longer throws (a fresh order submission via `POST /orders`
+- `Append` no longer throws (a fresh order submission via `POST /api/orders`
   succeeds end-to-end).
 
 ### 1.5 WAL backpressure storm (sustained without disk pressure)
@@ -232,7 +232,7 @@ checks pass.
 **Verify.**
 - Rate returns to zero.
 - No order rejections attributable to `wal_backpressure` in the last
-  15 minutes (algo logs / `GET /orders/history`).
+  15 minutes (algo logs / `GET /api/orders/history`).
 
 ### 1.6 Snapshot capture stuck
 
@@ -289,13 +289,13 @@ checks pass.
   docker/docker-compose.yml up -d matching-platform`).
 - Trading-host will auto-reconnect; **no** trading-host restart is
   needed.
-- New `POST /orders` will return 502 BadGateway until the FIXP session
+- New `POST /api/orders` will return 502 BadGateway until the FIXP session
   re-establishes. This is the **honest no-broker** posture — orders
   are not silently queued.
 
 **Verify.**
 - `health.exchange.readyForOrders=true`.
-- A fresh `POST /orders` succeeds and the ER round-trips.
+- A fresh `POST /api/orders` succeeds and the ER round-trips.
 - No duplicate clOrdIds were generated during the outage (the
   `ClOrdIdPrefixRegistry` is recovery-safe; replayed under
   `PersistenceRecovery`).
@@ -386,14 +386,14 @@ checks pass.
 - **No event loss.** Asserted as:
   - WAL `CurrentSeq` is monotonic across the partition.
   - No duplicate clOrdIds in the fill projection
-    (`GET /fills/{id}/touch`).
+    (`GET /api/fills/{id}/touch`).
 - This is the exact invariant the `network-partition` chaos drill
   exercises (§6.2).
 
 ### 1.11 Self-trade prevention / risk-check storm
 
 **Detect.**
-- Sudden surge in `POST /orders` 4xx rate, dominated by STP or
+- Sudden surge in `POST /api/orders` 4xx rate, dominated by STP or
   risk-gate rejects.
 - `trading.reference_price.collar_no_bypass_counter` or related
   surfaces from
@@ -466,8 +466,8 @@ potentially alive underneath the advisory stale flags.
   `trading.entrypoint.session_roll_stale_reconcile_failed`
   ([`MetricsRegistry.cs`](../../backend/src/B3.Trading.Application/Observability/MetricsRegistry.cs)).
 - Operators see the affected orders carry `isStale=true` /
-  `staleReason=session_rolled:{from}-{to}` in `GET /orders/` and
-  `GET /orders/history`.
+  `staleReason=session_rolled:{from}-{to}` in `GET /api/orders/` and
+  `GET /api/orders/history`.
 
 **Triage.**
 1. Confirm whether `SessionVerId` advanced across the reconnect. A bumped
@@ -484,18 +484,18 @@ potentially alive underneath the advisory stale flags.
 - `Reattached`: nothing to do — confirm orders re-synced.
 - `Renegotiated`: review the stale orders in the blotter; clear the flag
   once reconciled against the venue, via
-  `POST /admin/firms/{firmId}/orders/{clOrdId}/clear-stale`
+  `POST /api/admin/firms/{firmId}/orders/{clOrdId}/clear-stale`
   ([`AdminEndpoints.cs`](../../backend/src/B3.Trading.Api/AdminEndpoints.cs)).
   A stale flag also **auto-clears** when a terminal ER arrives for the
   order.
 - `session_roll_stale_reconcile_failed`: treat as a WAL incident (§1.4),
   and manually mark-stale any surviving working orders for the firm via
-  `POST /admin/firms/{firmId}/orders/{clOrdId}/mark-stale`.
+  `POST /api/admin/firms/{firmId}/orders/{clOrdId}/mark-stale`.
 
 **Verify.**
 - After `Reattached`: working orders present pre-disconnect are still
   live and not flagged stale; the platform should also accept a fresh
-  order, surface it as `Working` in `GET /orders`, and let it execute to
+  order, surface it as `Working` in `GET /api/orders`, and let it execute to
   `Filled`.
 - After `Renegotiated`: surviving `Working`/`PartiallyFilled` orders for
   the rolled firm are flagged stale; un-acked `PendingNew` are cancelled;
@@ -575,7 +575,7 @@ data corruption (after taking a backup).
    in the snapshot envelope).
 4. Q4.7 fill-projection pre-pass: same shape, repopulates
    `FillProjection` from `ExecutionReportReceivedEvent` history so
-   `GET /fills/{id}/touch` works post-restart.
+   `GET /api/fills/{id}/touch` works post-restart.
 5. Main replay: `IEventStore.ReadFromAsync(snap.Seq + 1)` →
    `EventReplayer.Apply` for each event.
 6. `/ready` flips to 200; FIXP `Negotiate` runs; B3 replays the post-
@@ -639,7 +639,7 @@ stream remains canonical and is replayed on FIXP recovery.
 **Q4.7 pre-pass for additive ER fields.** Snapshots written by older
 binaries lack the Q4.7 best-execution touch fields; the pre-pass
 re-derives them from the WAL `ExecutionReportReceivedEvent` stream.
-With snapshot-only recovery, expect `GET /fills/{id}/touch` to return
+With snapshot-only recovery, expect `GET /api/fills/{id}/touch` to return
 404 for pre-snapshot fills.
 
 ### 2.4 WAL repair: truncated / torn-write detection & manual recovery

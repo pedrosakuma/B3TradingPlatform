@@ -104,7 +104,7 @@ submit_order() {
     -H "$auth_header" \
     -H 'Content-Type: application/json' \
     -d "{\"symbol\":\"PETR4\",\"securityId\":900000000001,\"side\":\"${side}\",\"type\":\"Limit\",\"quantity\":100,\"price\":${price}}" \
-    "${base_url}/orders")"
+    "${base_url}/api/orders")"
   status="${response##*$'\n'}"
   body="${response%$'\n'*}"
   if [[ "$status" != "202" ]]; then
@@ -123,7 +123,7 @@ assert_real_trade() {
   sell="$(submit_order "$base_url" "$auth_header" Sell "$price")"
   deadline=$((SECONDS + 30))
   while (( SECONDS < deadline )); do
-    orders="$(curl -fsS --max-time 5 -H "$auth_header" "${base_url}/orders")"
+    orders="$(curl -fsS --max-time 5 -H "$auth_header" "${base_url}/api/orders")"
     if BUY="$buy" SELL="$sell" python3 -c '
 import json,os,sys
 by_id={str(o.get("clOrdId")):o for o in json.load(sys.stdin)}

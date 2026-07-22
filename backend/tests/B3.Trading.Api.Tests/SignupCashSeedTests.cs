@@ -8,9 +8,9 @@ using Microsoft.Extensions.DependencyInjection;
 namespace B3.Trading.Api.Tests;
 
 /// <summary>
-/// Slice 3 of #107 — POST /auth/signup pre-funds new accounts via
+/// Slice 3 of #107 — POST /api/auth/signup pre-funds new accounts via
 /// CashSeedOptions.SignupInitialBalance. Verifies the wiring round-trips
-/// through GET /balance and that the CashLedger holds the expected
+/// through GET /api/balance and that the CashLedger holds the expected
 /// amount for the freshly-registered owner.
 /// </summary>
 public class SignupCashSeedTests
@@ -19,7 +19,7 @@ public class SignupCashSeedTests
 
     private static async Task<string> SignupAsync(HttpClient client, string user)
     {
-        var resp = await client.PostAsJsonAsync("/auth/signup", new SignupRequest(user, "wonderland-1"));
+        var resp = await client.PostAsJsonAsync("/api/auth/signup", new SignupRequest(user, "wonderland-1"));
         resp.EnsureSuccessStatusCode();
         var body = await resp.Content.ReadFromJsonAsync<LoginResponse>();
         return body!.Token;
@@ -39,7 +39,7 @@ public class SignupCashSeedTests
 
         client.DefaultRequestHeaders.Authorization =
             new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
-        var balance = await client.GetFromJsonAsync<BalanceDto>("/balance");
+        var balance = await client.GetFromJsonAsync<BalanceDto>("/api/balance");
         Assert.Equal(50_000m, balance!.Available);
 
         // And the ledger snapshot now contains the new owner.
@@ -51,7 +51,7 @@ public class SignupCashSeedTests
     public async Task SignupInitialBalance_Unset_NewAccountStartsAtZero()
     {
         // Without SignupInitialBalance configured, signup leaves the
-        // ledger empty for the new owner — GET /balance returns 0.
+        // ledger empty for the new owner — GET /api/balance returns 0.
         await using var factory = TestAppFactory.WithOverrides(new Dictionary<string, string?>());
 
         var client = factory.CreateClient();
@@ -60,7 +60,7 @@ public class SignupCashSeedTests
 
         client.DefaultRequestHeaders.Authorization =
             new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
-        var balance = await client.GetFromJsonAsync<BalanceDto>("/balance");
+        var balance = await client.GetFromJsonAsync<BalanceDto>("/api/balance");
         Assert.Equal(0m, balance!.Available);
     }
 
@@ -93,7 +93,7 @@ public class SignupCashSeedTests
         // Slice 3's contract is: signup populates the CashLedger, which
         // slice 2 already proved is the source of truth for the margin
         // provider. We assert the ledger directly here rather than
-        // round-tripping through POST /orders (orthogonal firm/security
+        // round-tripping through POST /api/orders (orthogonal firm/security
         // wiring) — the slice-2 unit tests already cover the margin
         // path against a populated ledger.
         await using var factory = TestAppFactory.WithOverrides(new Dictionary<string, string?>

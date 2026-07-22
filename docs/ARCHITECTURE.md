@@ -11,7 +11,7 @@ deliberately did **not** resolve.
 ```
                 ┌──────────┐  ┌────────────┐  ┌──────────────────┐
 inbound ───►    │  REST    │  │ WebSocket  │  │ FIXP/SBE TCP     │
-                │  /orders │  │   /ws      │  │ (user-bot listener)│
+                │  /api/orders │  │   /ws      │  │ (user-bot listener)│
                 └────┬─────┘  └─────┬──────┘  └─────────┬────────┘
                      │              │                   │
 ┌────────────────────▼──────────────▼───────────────────▼─────────┐
@@ -76,7 +76,7 @@ because state is ephemeral by design.
 
 Mirror of `OrderOwnershipMap` on the matching side, but participant-side:
 `ClOrdID → endClientId`. Lives in `B3.Trading.Application.OrderOwnershipMap`,
-populated by `OrdersEndpoints.POST /orders` immediately after
+populated by `OrdersEndpoints.POST /api/orders` immediately after
 `WorkingOrderBook.TryAdd` (registration is intentionally synchronous with
 the book mutation so an immediate ER cannot race the routing path).
 
@@ -115,7 +115,7 @@ swappable detail.
   | Mode          | Gateway                      | Use                                  |
   | ------------- | ---------------------------- | ------------------------------------ |
   | `Stub`        | `StubExchangeGateway`        | No-op; CI smoke / API-only           |
-  | `Mock`        | `EntryPointClientGateway` + `MockEntryPointClient` | Dev loop, integration tests. With `AllowErInjection=true`, also maps admin-gated `POST /admin/simulator/er` (slice-4 algo engine harness; #163 merged the legacy `Simulator` variant here). |
+  | `Mock`        | `EntryPointClientGateway` + `MockEntryPointClient` | Dev loop, integration tests. With `AllowErInjection=true`, also maps admin-gated `POST /api/admin/simulator/er` (slice-4 algo engine harness; #163 merged the legacy `Simulator` variant here). |
   | `Real`        | `MultiFirmExchangeGateway` over per-firm `B3EntryPointClient` | Production, UAT |
   | `Unavailable` | `UnavailableExchangeGateway` | Fail-closed no-broker (Docker bootstrap) — submits return 502 |
 
@@ -143,9 +143,9 @@ only depends on the small POCO contract declared alongside the interface.
 
 The participant-side platform exposes three inbound channels:
 
-- **REST + internal JWT.** Local mode keeps `POST /auth/login` against
+- **REST + internal JWT.** Local mode keeps `POST /api/auth/login` against
   the local user store (PBKDF2-SHA256, 600k iterations by default). Hybrid
-  and Entra add `POST /auth/exchange`, which validates a Microsoft Entra
+  and Entra add `POST /api/auth/exchange`, which validates a Microsoft Entra
   External ID **access token** under the named `EntraExternal` scheme, then
   issues the existing HS256 internal JWT from the SQLite trading-user
   directory. External tokens never authenticate REST or WebSocket routes
@@ -172,7 +172,7 @@ The participant-side platform exposes three inbound channels:
   `slow_consumer_resync_required` and closes the socket so the client
   can reconnect and re-snapshot.
 - **Cross-tenant safety.** REST endpoints derive owner from the JWT
-  `sub` claim (never from request payload). `DELETE /orders/{clOrdId}`
+  `sub` claim (never from request payload). `DELETE /api/orders/{clOrdId}`
   returns 404 if the order belongs to a different end-client — the
   authenticated tenant cannot see, much less mutate, foreign orders.
 
@@ -190,7 +190,7 @@ replay on (re)connect. Revisit when the matching side does.
 - **End-client ↔ platform.** `Trading:Auth:Mode=Local` preserves local
   password/TOTP + HS256 JWTs (default 60 min). `Hybrid` keeps local login
   only as a migration bridge but reads firm/role/status from
-  `ITradingUserDirectory`; `Entra` maps only `/auth/exchange`. Hybrid/Entra
+  `ITradingUserDirectory`; `Entra` maps only `/api/auth/exchange`. Hybrid/Entra
   internal sessions are 10 minutes, have no refresh token, and must be
   renewed by exchanging a valid Entra access token again. Operators must
   provide `Trading:Auth:SigningKey` ≥ 32 bytes via environment /
@@ -242,11 +242,11 @@ ER stream behave consistently.
 **Kill-switch admin API** (require `admin` role claim):
 
 ```
-GET    /admin/kill                       → { endClients, firms }
-POST   /admin/kill/end-client/{id}       enable
-DELETE /admin/kill/end-client/{id}       disable
-POST   /admin/kill/firm/{id}             enable
-DELETE /admin/kill/firm/{id}             disable
+GET    /api/admin/kill                       → { endClients, firms }
+POST   /api/admin/kill/end-client/{id}       enable
+DELETE /api/admin/kill/end-client/{id}       disable
+POST   /api/admin/kill/firm/{id}             enable
+DELETE /api/admin/kill/firm/{id}             disable
 ```
 
 State is in-memory; toggles take effect on the very next order

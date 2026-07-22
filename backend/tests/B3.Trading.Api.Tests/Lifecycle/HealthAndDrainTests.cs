@@ -86,7 +86,7 @@ public class HealthAndDrainTests : IClassFixture<TestAppFactory>
         var drain = factory.Services.GetRequiredService<DrainState>();
         drain.BeginDrain();
 
-        var resp = await client.PostAsJsonAsync("/orders/", new
+        var resp = await client.PostAsJsonAsync("/api/orders/", new
         {
             Symbol = "PETR4",
             SecurityId = 4321UL,
@@ -142,7 +142,7 @@ public class HealthAndDrainTests : IClassFixture<TestAppFactory>
         listener.SetMeasurementEventCallback<long>((_, value, _, _) => Interlocked.Add(ref observed, value));
         listener.Start();
 
-        var resp = await client.PostAsJsonAsync("/orders/", new
+        var resp = await client.PostAsJsonAsync("/api/orders/", new
         {
             Symbol = "PETR4",
             SecurityId = 4321UL,

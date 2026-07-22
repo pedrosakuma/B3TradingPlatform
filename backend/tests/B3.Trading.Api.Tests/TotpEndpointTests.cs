@@ -42,7 +42,7 @@ public class TotpEndpointTests
     {
         await using var factory = new TestAppFactory();
         var http = factory.CreateClient();
-        var resp = await http.PostAsJsonAsync("/auth/login", new { username = "alice", password = "wonderland" });
+        var resp = await http.PostAsJsonAsync("/api/auth/login", new { username = "alice", password = "wonderland" });
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
         Assert.True(body.TryGetProperty("token", out var tokenEl));
@@ -59,24 +59,24 @@ public class TotpEndpointTests
         });
         var http = factory.CreateClient();
 
-        var login = await http.PostAsJsonAsync("/auth/login",
+        var login = await http.PostAsJsonAsync("/api/auth/login",
             new { username = "alice", password = "wonderland" });
         Assert.Equal(HttpStatusCode.OK, login.StatusCode);
         var required = await login.Content.ReadFromJsonAsync<LoginEnrollmentRequiredDto>();
         Assert.True(required!.Requires2faEnrollment);
 
-        var enrollResponse = await http.PostAsJsonAsync("/auth/2fa/enroll",
+        var enrollResponse = await http.PostAsJsonAsync("/api/auth/2fa/enroll",
             new { enrollmentToken = required.EnrollmentToken });
         Assert.Equal(HttpStatusCode.OK, enrollResponse.StatusCode);
         var enroll = await enrollResponse.Content.ReadFromJsonAsync<EnrollResponseDto>();
         Assert.NotNull(enroll);
         Assert.False(string.IsNullOrEmpty(enroll!.TotpChallengeToken));
 
-        var replayEnroll = await http.PostAsJsonAsync("/auth/2fa/enroll",
+        var replayEnroll = await http.PostAsJsonAsync("/api/auth/2fa/enroll",
             new { enrollmentToken = required.EnrollmentToken });
         Assert.Equal(HttpStatusCode.Unauthorized, replayEnroll.StatusCode);
 
-        var verify = await http.PostAsJsonAsync("/auth/2fa/verify", new
+        var verify = await http.PostAsJsonAsync("/api/auth/2fa/verify", new
         {
             code = ComputeCode(enroll.Secret),
             totpChallengeToken = enroll.TotpChallengeToken,
@@ -85,7 +85,7 @@ public class TotpEndpointTests
         var session = await verify.Content.ReadFromJsonAsync<LoginResponse>();
         Assert.False(string.IsNullOrEmpty(session!.Token));
 
-        var replayVerify = await http.PostAsJsonAsync("/auth/2fa/verify", new
+        var replayVerify = await http.PostAsJsonAsync("/api/auth/2fa/verify", new
         {
             code = ComputeCode(enroll.Secret, stepOffset: 1),
             totpChallengeToken = enroll.TotpChallengeToken,
@@ -103,17 +103,17 @@ public class TotpEndpointTests
         });
         var http = factory.CreateClient();
 
-        var aliceRequired = (await (await http.PostAsJsonAsync("/auth/login",
+        var aliceRequired = (await (await http.PostAsJsonAsync("/api/auth/login",
             new { username = "alice", password = "wonderland" }))
             .Content.ReadFromJsonAsync<LoginEnrollmentRequiredDto>())!;
-        var aliceEnroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll",
+        var aliceEnroll = (await (await http.PostAsJsonAsync("/api/auth/2fa/enroll",
             new { enrollmentToken = aliceRequired.EnrollmentToken }))
             .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
 
-        var bobRequired = (await (await http.PostAsJsonAsync("/auth/login",
+        var bobRequired = (await (await http.PostAsJsonAsync("/api/auth/login",
             new { username = "bob", password = "wonderland" }))
             .Content.ReadFromJsonAsync<LoginEnrollmentRequiredDto>())!;
-        var bobEnroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll",
+        var bobEnroll = (await (await http.PostAsJsonAsync("/api/auth/2fa/enroll",
             new { enrollmentToken = bobRequired.EnrollmentToken }))
             .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
 
@@ -122,14 +122,14 @@ public class TotpEndpointTests
         var bobCode = Enumerable.Range(-1, 3)
             .Select(offset => ComputeCode(bobEnroll.Secret, offset))
             .First(code => !aliceWindow.Contains(code));
-        var crossed = await http.PostAsJsonAsync("/auth/2fa/verify", new
+        var crossed = await http.PostAsJsonAsync("/api/auth/2fa/verify", new
         {
             code = bobCode,
             totpChallengeToken = aliceEnroll.TotpChallengeToken,
         });
         Assert.Equal(HttpStatusCode.Unauthorized, crossed.StatusCode);
 
-        var bobVerified = await http.PostAsJsonAsync("/auth/2fa/verify", new
+        var bobVerified = await http.PostAsJsonAsync("/api/auth/2fa/verify", new
         {
             code = bobCode,
             totpChallengeToken = bobEnroll.TotpChallengeToken,
@@ -146,14 +146,14 @@ public class TotpEndpointTests
             ["Trading:Auth:Totp:ChallengeTokenTtl"] = "00:00:01",
         });
         var http = factory.CreateClient();
-        var required = (await (await http.PostAsJsonAsync("/auth/login",
+        var required = (await (await http.PostAsJsonAsync("/api/auth/login",
             new { username = "alice", password = "wonderland" }))
             .Content.ReadFromJsonAsync<LoginEnrollmentRequiredDto>())!;
-        var enroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll",
+        var enroll = (await (await http.PostAsJsonAsync("/api/auth/2fa/enroll",
             new { enrollmentToken = required.EnrollmentToken }))
             .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
         await Task.Delay(1500);
-        var expired = await http.PostAsJsonAsync("/auth/2fa/verify", new
+        var expired = await http.PostAsJsonAsync("/api/auth/2fa/verify", new
         {
             code = ComputeCode(enroll.Secret),
             totpChallengeToken = enroll.TotpChallengeToken,
@@ -167,17 +167,17 @@ public class TotpEndpointTests
         await using var factory = new TestAppFactory();
         var authed = await factory.CreateAuthedClientAsync();
         var initialToken = authed.DefaultRequestHeaders.Authorization!.Parameter;
-        var enroll = (await (await authed.PostAsJsonAsync("/auth/2fa/enroll", new { }))
+        var enroll = (await (await authed.PostAsJsonAsync("/api/auth/2fa/enroll", new { }))
             .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
-        await authed.PostAsJsonAsync("/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
+        await authed.PostAsJsonAsync("/api/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
 
         var renewalClient = factory.CreateClient();
-        var passwordResponse = await renewalClient.PostAsJsonAsync("/auth/login",
+        var passwordResponse = await renewalClient.PostAsJsonAsync("/api/auth/login",
             new { username = "alice", password = "wonderland" });
         var challenge = await passwordResponse.Content.ReadFromJsonAsync<LoginRequiresDto>();
         Assert.True(challenge!.Requires2fa);
 
-        var renewedResponse = await renewalClient.PostAsJsonAsync("/auth/2fa/verify", new
+        var renewedResponse = await renewalClient.PostAsJsonAsync("/api/auth/2fa/verify", new
         {
             code = ComputeCode(enroll.Secret, stepOffset: 1),
             totpChallengeToken = challenge.TotpChallengeToken,
@@ -194,7 +194,7 @@ public class TotpEndpointTests
         await using var factory = new TestAppFactory();
         var http = await factory.CreateAuthedClientAsync();
 
-        var enrollResp = await http.PostAsJsonAsync("/auth/2fa/enroll", new { });
+        var enrollResp = await http.PostAsJsonAsync("/api/auth/2fa/enroll", new { });
         Assert.Equal(HttpStatusCode.OK, enrollResp.StatusCode);
         var enroll = await enrollResp.Content.ReadFromJsonAsync<EnrollResponseDto>();
         Assert.NotNull(enroll);
@@ -202,23 +202,23 @@ public class TotpEndpointTests
         Assert.StartsWith("otpauth://totp/B3:alice?", enroll.OtpauthUri);
 
         var code = ComputeCode(enroll.Secret);
-        var verifyResp = await http.PostAsJsonAsync("/auth/2fa/verify", new { code });
+        var verifyResp = await http.PostAsJsonAsync("/api/auth/2fa/verify", new { code });
         Assert.Equal(HttpStatusCode.OK, verifyResp.StatusCode);
 
         // Subsequent login: returns challenge token, NOT a JWT.
         var plainClient = factory.CreateClient();
-        var login = await plainClient.PostAsJsonAsync("/auth/login", new { username = "alice", password = "wonderland" });
+        var login = await plainClient.PostAsJsonAsync("/api/auth/login", new { username = "alice", password = "wonderland" });
         Assert.Equal(HttpStatusCode.OK, login.StatusCode);
         var loginBody = await login.Content.ReadFromJsonAsync<JsonElement>();
         Assert.True(loginBody.GetProperty("requires2fa").GetBoolean());
         var challenge = loginBody.GetProperty("totpChallengeToken").GetString();
         Assert.False(string.IsNullOrEmpty(challenge));
 
-        // Now /auth/2fa/verify with the challenge + a fresh code → real JWT.
+        // Now /api/auth/2fa/verify with the challenge + a fresh code → real JWT.
         // Use step offset = 1 to advance past the step consumed during
         // enrollment confirm (server seeds LastUsedTimeStep there).
         var freshCode = ComputeCode(enroll.Secret, stepOffset: 1);
-        var second = await plainClient.PostAsJsonAsync("/auth/2fa/verify",
+        var second = await plainClient.PostAsJsonAsync("/api/auth/2fa/verify",
             new { code = freshCode, totpChallengeToken = challenge });
         Assert.Equal(HttpStatusCode.OK, second.StatusCode);
         var jwtBody = await second.Content.ReadFromJsonAsync<JsonElement>();
@@ -236,24 +236,24 @@ public class TotpEndpointTests
             ["Trading:Auth:TotpLockout:LockoutDuration"] = "00:05:00",
         });
         var http = await factory.CreateAuthedClientAsync();
-        var enroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll", new { }))
+        var enroll = (await (await http.PostAsJsonAsync("/api/auth/2fa/enroll", new { }))
             .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
-        await http.PostAsJsonAsync("/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
+        await http.PostAsJsonAsync("/api/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
 
         var plain = factory.CreateClient();
-        var loginBody = await (await plain.PostAsJsonAsync("/auth/login",
+        var loginBody = await (await plain.PostAsJsonAsync("/api/auth/login",
             new { username = "alice", password = "wonderland" }))
             .Content.ReadFromJsonAsync<LoginRequiresDto>();
         var challenge = loginBody!.TotpChallengeToken;
 
         for (var i = 0; i < 5; i++)
         {
-            var r = await plain.PostAsJsonAsync("/auth/2fa/verify",
+            var r = await plain.PostAsJsonAsync("/api/auth/2fa/verify",
                 new { code = "000000", totpChallengeToken = challenge });
             Assert.Equal(HttpStatusCode.Unauthorized, r.StatusCode);
         }
 
-        var locked = await plain.PostAsJsonAsync("/auth/2fa/verify",
+        var locked = await plain.PostAsJsonAsync("/api/auth/2fa/verify",
             new { code = ComputeCode(enroll.Secret), totpChallengeToken = challenge });
         Assert.Equal(HttpStatusCode.TooManyRequests, locked.StatusCode);
         Assert.NotNull(locked.Headers.RetryAfter);
@@ -264,25 +264,25 @@ public class TotpEndpointTests
     {
         await using var factory = new TestAppFactory();
         var http = await factory.CreateAuthedClientAsync();
-        var enroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll", new { }))
+        var enroll = (await (await http.PostAsJsonAsync("/api/auth/2fa/enroll", new { }))
             .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
-        await http.PostAsJsonAsync("/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
+        await http.PostAsJsonAsync("/api/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
 
         var recovery = enroll.RecoveryCodes[0];
 
         var plain = factory.CreateClient();
-        var login1 = await (await plain.PostAsJsonAsync("/auth/login",
+        var login1 = await (await plain.PostAsJsonAsync("/api/auth/login",
             new { username = "alice", password = "wonderland" }))
             .Content.ReadFromJsonAsync<LoginRequiresDto>();
-        var first = await plain.PostAsJsonAsync("/auth/2fa/verify",
+        var first = await plain.PostAsJsonAsync("/api/auth/2fa/verify",
             new { code = recovery, totpChallengeToken = login1!.TotpChallengeToken });
         Assert.Equal(HttpStatusCode.OK, first.StatusCode);
 
         // Second login attempt with the same recovery code: must be rejected.
-        var login2 = await (await plain.PostAsJsonAsync("/auth/login",
+        var login2 = await (await plain.PostAsJsonAsync("/api/auth/login",
             new { username = "alice", password = "wonderland" }))
             .Content.ReadFromJsonAsync<LoginRequiresDto>();
-        var second = await plain.PostAsJsonAsync("/auth/2fa/verify",
+        var second = await plain.PostAsJsonAsync("/api/auth/2fa/verify",
             new { code = recovery, totpChallengeToken = login2!.TotpChallengeToken });
         Assert.Equal(HttpStatusCode.Unauthorized, second.StatusCode);
     }
@@ -292,22 +292,22 @@ public class TotpEndpointTests
     {
         await using var factory = new TestAppFactory();
         var http = await factory.CreateAuthedClientAsync();
-        var enroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll", new { }))
+        var enroll = (await (await http.PostAsJsonAsync("/api/auth/2fa/enroll", new { }))
             .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
-        await http.PostAsJsonAsync("/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
+        await http.PostAsJsonAsync("/api/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
 
         // Wrong code: rejected.
-        var bad = await http.PostAsJsonAsync("/auth/2fa/disable", new { code = "000000" });
+        var bad = await http.PostAsJsonAsync("/api/auth/2fa/disable", new { code = "000000" });
         Assert.Equal(HttpStatusCode.Unauthorized, bad.StatusCode);
 
         // Correct code: disables. Offset by one step so we don't trip
         // the same-window replay guard against the enrollment-confirm
         // step.
-        var ok = await http.PostAsJsonAsync("/auth/2fa/disable", new { code = ComputeCode(enroll.Secret, stepOffset: 1) });
+        var ok = await http.PostAsJsonAsync("/api/auth/2fa/disable", new { code = ComputeCode(enroll.Secret, stepOffset: 1) });
         Assert.Equal(HttpStatusCode.OK, ok.StatusCode);
 
         // Re-enroll works (no 409 because disabled cleared the prior state).
-        var reenroll = await http.PostAsJsonAsync("/auth/2fa/enroll", new { });
+        var reenroll = await http.PostAsJsonAsync("/api/auth/2fa/enroll", new { });
         Assert.Equal(HttpStatusCode.OK, reenroll.StatusCode);
     }
 
@@ -317,16 +317,16 @@ public class TotpEndpointTests
         await using var factory = new TestAppFactory();
         var http = await factory.CreateAuthedClientAsync();
 
-        var enroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll", new { }))
+        var enroll = (await (await http.PostAsJsonAsync("/api/auth/2fa/enroll", new { }))
             .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
 
-        var invalid = await http.PostAsJsonAsync("/auth/2fa/verify", new { code = "000000" });
+        var invalid = await http.PostAsJsonAsync("/api/auth/2fa/verify", new { code = "000000" });
         Assert.Equal(HttpStatusCode.Unauthorized, invalid.StatusCode);
 
-        var valid = await http.PostAsJsonAsync("/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
+        var valid = await http.PostAsJsonAsync("/api/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
         Assert.Equal(HttpStatusCode.OK, valid.StatusCode);
 
-        var status = await http.GetFromJsonAsync<TotpStatusDto>("/auth/2fa/status");
+        var status = await http.GetFromJsonAsync<TotpStatusDto>("/api/auth/2fa/status");
         Assert.NotNull(status);
         Assert.True(status!.Enrolled);
     }
@@ -337,14 +337,14 @@ public class TotpEndpointTests
         await using var factory = new TestAppFactory();
         var http = await factory.CreateAuthedClientAsync();
 
-        var enroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll", new { }))
+        var enroll = (await (await http.PostAsJsonAsync("/api/auth/2fa/enroll", new { }))
             .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
-        await http.PostAsJsonAsync("/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
+        await http.PostAsJsonAsync("/api/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
 
-        var disable = await http.PostAsJsonAsync("/auth/2fa/disable", new { code = enroll.RecoveryCodes[0] });
+        var disable = await http.PostAsJsonAsync("/api/auth/2fa/disable", new { code = enroll.RecoveryCodes[0] });
         Assert.Equal(HttpStatusCode.OK, disable.StatusCode);
 
-        var status = await http.GetFromJsonAsync<TotpStatusDto>("/auth/2fa/status");
+        var status = await http.GetFromJsonAsync<TotpStatusDto>("/api/auth/2fa/status");
         Assert.NotNull(status);
         Assert.False(status!.Enrolled);
     }
@@ -354,11 +354,11 @@ public class TotpEndpointTests
     {
         await using var factory = new TestAppFactory();
         var http = await factory.CreateAuthedClientAsync();
-        var enroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll", new { }))
+        var enroll = (await (await http.PostAsJsonAsync("/api/auth/2fa/enroll", new { }))
             .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
-        await http.PostAsJsonAsync("/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
+        await http.PostAsJsonAsync("/api/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
 
-        var reenroll = await http.PostAsJsonAsync("/auth/2fa/enroll", new { });
+        var reenroll = await http.PostAsJsonAsync("/api/auth/2fa/enroll", new { });
         Assert.Equal(HttpStatusCode.Conflict, reenroll.StatusCode);
     }
 
@@ -370,11 +370,11 @@ public class TotpEndpointTests
             ["Trading:Auth:Totp:PendingEnrollmentTtl"] = "00:00:01",
         });
         var http = await factory.CreateAuthedClientAsync();
-        var enroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll", new { }))
+        var enroll = (await (await http.PostAsJsonAsync("/api/auth/2fa/enroll", new { }))
             .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
         await Task.Delay(1500);
 
-        var verify = await http.PostAsJsonAsync("/auth/2fa/verify",
+        var verify = await http.PostAsJsonAsync("/api/auth/2fa/verify",
             new { code = ComputeCode(enroll.Secret) });
         Assert.Equal(HttpStatusCode.BadRequest, verify.StatusCode);
     }
@@ -385,22 +385,22 @@ public class TotpEndpointTests
         await using var factory = new TestAppFactory();
         var http = await factory.CreateAuthedClientAsync();
 
-        var initial = await http.GetFromJsonAsync<TotpStatusDto>("/auth/2fa/status");
+        var initial = await http.GetFromJsonAsync<TotpStatusDto>("/api/auth/2fa/status");
         Assert.NotNull(initial);
         Assert.False(initial!.Enrolled);
 
-        var enroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll", new { }))
+        var enroll = (await (await http.PostAsJsonAsync("/api/auth/2fa/enroll", new { }))
             .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
-        await http.PostAsJsonAsync("/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
+        await http.PostAsJsonAsync("/api/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
 
-        var enrolled = await http.GetFromJsonAsync<TotpStatusDto>("/auth/2fa/status");
+        var enrolled = await http.GetFromJsonAsync<TotpStatusDto>("/api/auth/2fa/status");
         Assert.NotNull(enrolled);
         Assert.True(enrolled!.Enrolled);
 
-        var disable = await http.PostAsJsonAsync("/auth/2fa/disable", new { code = ComputeCode(enroll.Secret, stepOffset: 1) });
+        var disable = await http.PostAsJsonAsync("/api/auth/2fa/disable", new { code = ComputeCode(enroll.Secret, stepOffset: 1) });
         Assert.Equal(HttpStatusCode.OK, disable.StatusCode);
 
-        var disabled = await http.GetFromJsonAsync<TotpStatusDto>("/auth/2fa/status");
+        var disabled = await http.GetFromJsonAsync<TotpStatusDto>("/api/auth/2fa/status");
         Assert.NotNull(disabled);
         Assert.False(disabled!.Enrolled);
     }
@@ -423,15 +423,15 @@ public class TotpEndpointTests
             });
 
             var http = factory.CreateClient();
-            var signup = await http.PostAsJsonAsync("/auth/signup",
+            var signup = await http.PostAsJsonAsync("/api/auth/signup",
                 new { username = "carol", password = "Wonderland1!" });
             signup.EnsureSuccessStatusCode();
             var token = (await signup.Content.ReadFromJsonAsync<LoginResponse>())!.Token;
             http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
-            var enroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll", new { }))
+            var enroll = (await (await http.PostAsJsonAsync("/api/auth/2fa/enroll", new { }))
                 .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
-            await http.PostAsJsonAsync("/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
+            await http.PostAsJsonAsync("/api/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
 
             var json = await File.ReadAllTextAsync(usersPath);
             Assert.Contains("carol", json);
@@ -460,9 +460,9 @@ public class TotpEndpointTests
             ["Trading:Auth:TotpLockout:LockoutDuration"] = "00:05:00",
         });
         var http = await factory.CreateAuthedClientAsync();
-        var enroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll", new { }))
+        var enroll = (await (await http.PostAsJsonAsync("/api/auth/2fa/enroll", new { }))
             .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
-        await http.PostAsJsonAsync("/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
+        await http.PostAsJsonAsync("/api/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
 
         var plain = factory.CreateClient();
         // Offset by 1 so the test code is NOT the one consumed during
@@ -470,10 +470,10 @@ public class TotpEndpointTests
         var code = ComputeCode(enroll.Secret, stepOffset: 1);
 
         // First login: code accepted, JWT issued.
-        var login1 = (await (await plain.PostAsJsonAsync("/auth/login",
+        var login1 = (await (await plain.PostAsJsonAsync("/api/auth/login",
             new { username = "alice", password = "wonderland" }))
             .Content.ReadFromJsonAsync<LoginRequiresDto>())!;
-        var ok1 = await plain.PostAsJsonAsync("/auth/2fa/verify",
+        var ok1 = await plain.PostAsJsonAsync("/api/auth/2fa/verify",
             new { code, totpChallengeToken = login1.TotpChallengeToken });
         Assert.Equal(HttpStatusCode.OK, ok1.StatusCode);
         Assert.False(string.IsNullOrEmpty(
@@ -481,10 +481,10 @@ public class TotpEndpointTests
 
         // Second login with SAME code via a fresh challenge: rejected
         // with the same shape as a wrong code (401 + {"error":"invalid code"}).
-        var login2 = (await (await plain.PostAsJsonAsync("/auth/login",
+        var login2 = (await (await plain.PostAsJsonAsync("/api/auth/login",
             new { username = "alice", password = "wonderland" }))
             .Content.ReadFromJsonAsync<LoginRequiresDto>())!;
-        var bad = await plain.PostAsJsonAsync("/auth/2fa/verify",
+        var bad = await plain.PostAsJsonAsync("/api/auth/2fa/verify",
             new { code, totpChallengeToken = login2.TotpChallengeToken });
         Assert.Equal(HttpStatusCode.Unauthorized, bad.StatusCode);
         var badBody = await bad.Content.ReadFromJsonAsync<JsonElement>();
@@ -493,16 +493,16 @@ public class TotpEndpointTests
         // Lockout counter ticked: 4 more wrong attempts should trip 429.
         for (var i = 0; i < 4; i++)
         {
-            var login = (await (await plain.PostAsJsonAsync("/auth/login",
+            var login = (await (await plain.PostAsJsonAsync("/api/auth/login",
                 new { username = "alice", password = "wonderland" }))
                 .Content.ReadFromJsonAsync<LoginRequiresDto>())!;
-            await plain.PostAsJsonAsync("/auth/2fa/verify",
+            await plain.PostAsJsonAsync("/api/auth/2fa/verify",
                 new { code = "000000", totpChallengeToken = login.TotpChallengeToken });
         }
-        var lockedLogin = (await (await plain.PostAsJsonAsync("/auth/login",
+        var lockedLogin = (await (await plain.PostAsJsonAsync("/api/auth/login",
             new { username = "alice", password = "wonderland" }))
             .Content.ReadFromJsonAsync<LoginRequiresDto>())!;
-        var locked = await plain.PostAsJsonAsync("/auth/2fa/verify",
+        var locked = await plain.PostAsJsonAsync("/api/auth/2fa/verify",
             new { code = "000000", totpChallengeToken = lockedLogin.TotpChallengeToken });
         Assert.Equal(HttpStatusCode.TooManyRequests, locked.StatusCode);
     }
@@ -524,9 +524,9 @@ public class TotpEndpointTests
             ["Trading:Auth:TotpLockout:LockoutDuration"] = "00:05:00",
         });
         var http = await factory.CreateAuthedClientAsync();
-        var enroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll", new { }))
+        var enroll = (await (await http.PostAsJsonAsync("/api/auth/2fa/enroll", new { }))
             .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
-        await http.PostAsJsonAsync("/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
+        await http.PostAsJsonAsync("/api/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
         var recovery = enroll.RecoveryCodes[0];
 
         const int N = 10;
@@ -537,7 +537,7 @@ public class TotpEndpointTests
         for (var i = 0; i < N; i++)
         {
             clients[i] = factory.CreateClient();
-            var login = (await (await clients[i].PostAsJsonAsync("/auth/login",
+            var login = (await (await clients[i].PostAsJsonAsync("/api/auth/login",
                 new { username = "alice", password = "wonderland" }))
                 .Content.ReadFromJsonAsync<LoginRequiresDto>())!;
             challenges[i] = login.TotpChallengeToken;
@@ -547,7 +547,7 @@ public class TotpEndpointTests
         var responses = await Task.WhenAll(Enumerable.Range(0, N).Select(i => Task.Run(async () =>
         {
             barrier.SignalAndWait();
-            return await clients[i].PostAsJsonAsync("/auth/2fa/verify",
+            return await clients[i].PostAsJsonAsync("/api/auth/2fa/verify",
                 new { code = recovery, totpChallengeToken = challenges[i] });
         })));
 
@@ -565,17 +565,17 @@ public class TotpEndpointTests
         var plain = factory.CreateClient();
         for (var i = 0; i < 5; i++)
         {
-            var login = (await (await plain.PostAsJsonAsync("/auth/login",
+            var login = (await (await plain.PostAsJsonAsync("/api/auth/login",
                 new { username = "alice", password = "wonderland" }))
                 .Content.ReadFromJsonAsync<LoginRequiresDto>())!;
-            var wrong = await plain.PostAsJsonAsync("/auth/2fa/verify",
+            var wrong = await plain.PostAsJsonAsync("/api/auth/2fa/verify",
                 new { code = "wrong-recovery-code-xyz", totpChallengeToken = login.TotpChallengeToken });
             Assert.Equal(HttpStatusCode.Unauthorized, wrong.StatusCode);
         }
-        var sixthLogin = (await (await plain.PostAsJsonAsync("/auth/login",
+        var sixthLogin = (await (await plain.PostAsJsonAsync("/api/auth/login",
             new { username = "alice", password = "wonderland" }))
             .Content.ReadFromJsonAsync<LoginRequiresDto>())!;
-        var locked = await plain.PostAsJsonAsync("/auth/2fa/verify",
+        var locked = await plain.PostAsJsonAsync("/api/auth/2fa/verify",
             new { code = "wrong-recovery-code-xyz", totpChallengeToken = sixthLogin.TotpChallengeToken });
         Assert.Equal(HttpStatusCode.TooManyRequests, locked.StatusCode);
 
@@ -600,16 +600,16 @@ public class TotpEndpointTests
             ["Trading:Auth:TotpLockout:LockoutDuration"] = "00:05:00",
         });
         var http = await factory.CreateAuthedClientAsync();
-        var enroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll", new { }))
+        var enroll = (await (await http.PostAsJsonAsync("/api/auth/2fa/enroll", new { }))
             .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
-        await http.PostAsJsonAsync("/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
+        await http.PostAsJsonAsync("/api/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
         var recovery = enroll.RecoveryCodes[0];
 
         var plain = factory.CreateClient();
-        var login1 = (await (await plain.PostAsJsonAsync("/auth/login",
+        var login1 = (await (await plain.PostAsJsonAsync("/api/auth/login",
             new { username = "alice", password = "wonderland" }))
             .Content.ReadFromJsonAsync<LoginRequiresDto>())!;
-        var ok = await plain.PostAsJsonAsync("/auth/2fa/verify",
+        var ok = await plain.PostAsJsonAsync("/api/auth/2fa/verify",
             new { code = recovery, totpChallengeToken = login1.TotpChallengeToken });
         Assert.Equal(HttpStatusCode.OK, ok.StatusCode);
 
@@ -618,10 +618,10 @@ public class TotpEndpointTests
         // because consumed status is permanent within the user record).
         for (var i = 0; i < 6; i++)
         {
-            var loginR = (await (await plain.PostAsJsonAsync("/auth/login",
+            var loginR = (await (await plain.PostAsJsonAsync("/api/auth/login",
                 new { username = "alice", password = "wonderland" }))
                 .Content.ReadFromJsonAsync<LoginRequiresDto>())!;
-            var replay = await plain.PostAsJsonAsync("/auth/2fa/verify",
+            var replay = await plain.PostAsJsonAsync("/api/auth/2fa/verify",
                 new { code = recovery, totpChallengeToken = loginR.TotpChallengeToken });
             // Always 401 (no info leak vs wrong code), never 429 —
             // proves lockout counter never moved off 0.
@@ -645,26 +645,26 @@ public class TotpEndpointTests
             ["Trading:Auth:TotpLockout:LockoutDuration"] = "00:05:00",
         });
         var http = await factory.CreateAuthedClientAsync();
-        var enroll = (await (await http.PostAsJsonAsync("/auth/2fa/enroll", new { }))
+        var enroll = (await (await http.PostAsJsonAsync("/api/auth/2fa/enroll", new { }))
             .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
-        await http.PostAsJsonAsync("/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
+        await http.PostAsJsonAsync("/api/auth/2fa/verify", new { code = ComputeCode(enroll.Secret) });
 
         var plain = factory.CreateClient();
         // First 5 wrong → 401 (the 5th call ticks the counter to 5 and
         // engages the lock), 6th request hits the IsLocked check → 429.
         for (var i = 0; i < 5; i++)
         {
-            var login = (await (await plain.PostAsJsonAsync("/auth/login",
+            var login = (await (await plain.PostAsJsonAsync("/api/auth/login",
                 new { username = "alice", password = "wonderland" }))
                 .Content.ReadFromJsonAsync<LoginRequiresDto>())!;
-            var wrong = await plain.PostAsJsonAsync("/auth/2fa/verify",
+            var wrong = await plain.PostAsJsonAsync("/api/auth/2fa/verify",
                 new { code = $"never-issued-{i}", totpChallengeToken = login.TotpChallengeToken });
             Assert.Equal(HttpStatusCode.Unauthorized, wrong.StatusCode);
         }
-        var lastLogin = (await (await plain.PostAsJsonAsync("/auth/login",
+        var lastLogin = (await (await plain.PostAsJsonAsync("/api/auth/login",
             new { username = "alice", password = "wonderland" }))
             .Content.ReadFromJsonAsync<LoginRequiresDto>())!;
-        var locked = await plain.PostAsJsonAsync("/auth/2fa/verify",
+        var locked = await plain.PostAsJsonAsync("/api/auth/2fa/verify",
             new { code = "never-issued-final", totpChallengeToken = lastLogin.TotpChallengeToken });
         Assert.Equal(HttpStatusCode.TooManyRequests, locked.StatusCode);
 
@@ -762,21 +762,21 @@ public class TotpEndpointTests
         var aliceClient = await factory.CreateAuthedClientAsync("alice", "wonderland");
         var bobClient = await factory.CreateAuthedClientAsync("bob", "wonderland");
 
-        var aliceEnroll = (await (await aliceClient.PostAsJsonAsync("/auth/2fa/enroll", new { }))
+        var aliceEnroll = (await (await aliceClient.PostAsJsonAsync("/api/auth/2fa/enroll", new { }))
             .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
-        var bobEnroll = (await (await bobClient.PostAsJsonAsync("/auth/2fa/enroll", new { }))
+        var bobEnroll = (await (await bobClient.PostAsJsonAsync("/api/auth/2fa/enroll", new { }))
             .Content.ReadFromJsonAsync<EnrollResponseDto>())!;
         Assert.NotEqual(aliceEnroll.Secret, bobEnroll.Secret);
 
-        await aliceClient.PostAsJsonAsync("/auth/2fa/verify", new { code = ComputeCode(aliceEnroll.Secret) });
-        await bobClient.PostAsJsonAsync("/auth/2fa/verify", new { code = ComputeCode(bobEnroll.Secret) });
+        await aliceClient.PostAsJsonAsync("/api/auth/2fa/verify", new { code = ComputeCode(aliceEnroll.Secret) });
+        await bobClient.PostAsJsonAsync("/api/auth/2fa/verify", new { code = ComputeCode(bobEnroll.Secret) });
 
         // alice's challenge cannot be cleared with bob's code.
         var plain = factory.CreateClient();
-        var ch = (await (await plain.PostAsJsonAsync("/auth/login",
+        var ch = (await (await plain.PostAsJsonAsync("/api/auth/login",
             new { username = "alice", password = "wonderland" }))
             .Content.ReadFromJsonAsync<LoginRequiresDto>())!;
-        var crossed = await plain.PostAsJsonAsync("/auth/2fa/verify",
+        var crossed = await plain.PostAsJsonAsync("/api/auth/2fa/verify",
             new { code = ComputeCode(bobEnroll.Secret), totpChallengeToken = ch.TotpChallengeToken });
         Assert.Equal(HttpStatusCode.Unauthorized, crossed.StatusCode);
     }

@@ -8,7 +8,7 @@ namespace B3.Trading.Conformance.Spec_Conformance_OrderTypeTif;
 /// Q1.7 (#259). Conformance golden snapshots for the (OrderType ×
 /// TimeInForce) matrix. Each scenario submits a NewOrder with a specific
 /// (OrderType, TIF) pair, drives a deterministic ER sequence via the
-/// admin synthetic-injection seam (<c>POST /admin/simulator/er</c>), and
+/// admin synthetic-injection seam (<c>POST /api/admin/simulator/er</c>), and
 /// asserts the captured <c>executions.me</c> WS frames match a checked-in
 /// golden after the platform-wide normalisation rules in
 /// <see cref="ConformanceRunner.Normalize"/>.
@@ -21,7 +21,7 @@ namespace B3.Trading.Conformance.Spec_Conformance_OrderTypeTif;
 /// once the order is visible in the WorkingOrderBook.</para>
 ///
 /// <para>Pass-1 review fix: the golden's <c>scenario</c> block now
-/// reflects values OBSERVED via <c>GET /orders/</c> (i.e. the platform's
+/// reflects values OBSERVED via <c>GET /api/orders/</c> (i.e. the platform's
 /// persisted <see cref="OrderDto"/>) instead of the test's input
 /// dictionary. An explicit pre-ER assertion compares observed-vs-expected
 /// for type/TIF/price/stopPrice/qty/goodTillDate so a Q1.1 wiring drop
@@ -436,7 +436,7 @@ public class OrderTypeTifMatrixSpecTests
     // ------------------------------------------------------------------
 
     /// <summary>
-    /// Pass-1 review fix: poll <c>GET /orders/</c> until the just-submitted
+    /// Pass-1 review fix: poll <c>GET /api/orders/</c> until the just-submitted
     /// order is visible, then assert the platform's persisted
     /// <see cref="OrderDto"/> matches the test's expected
     /// type/TIF/price/stopPrice/qty/goodTillDate values. Returns a
@@ -461,7 +461,7 @@ public class OrderTypeTifMatrixSpecTests
             await Task.Delay(50);
         }
         if (order is null)
-            throw new TimeoutException($"Order {clOrdId} did not become visible in /orders within 5s.");
+            throw new TimeoutException($"Order {clOrdId} did not become visible in /api/orders within 5s.");
 
         var observedType = order.Value.GetProperty("type").GetString();
         var observedTif = order.Value.GetProperty("timeInForce").GetString();

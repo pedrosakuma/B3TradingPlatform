@@ -21,7 +21,7 @@ public static class AdminEndpoints
 {
     public static IEndpointRouteBuilder MapAdmin(this IEndpointRouteBuilder app)
     {
-        var group = app.MapGroup("/admin").RequireAuthorization("admin");
+        var group = app.MapGroup("/api/admin").RequireAuthorization("admin");
 
         group.MapGet("/kill", (KillSwitchService svc) => Results.Ok(new
         {
@@ -118,7 +118,7 @@ public static class AdminEndpoints
                     // (Marked/AlreadyStale/NotEligible/NotFound) is
                     // communicated by the HTTP response below; the
                     // audit envelope records the attempt.
-                    EmitAdminConfigChange(audit, ctx, "/admin/orders/mark-stale", AuditOutcomes.Success, new()
+                    EmitAdminConfigChange(audit, ctx, "/api/admin/orders/mark-stale", AuditOutcomes.Success, new()
                     {
                         ["firm"] = firmId,
                         ["cl_ord_id"] = clOrdId,
@@ -155,7 +155,7 @@ public static class AdminEndpoints
                 {
                     // Pass-1 review (#322) P1.2. Audit-first ordering —
                     // see mark-stale above.
-                    EmitAdminConfigChange(audit, ctx, "/admin/orders/clear-stale", AuditOutcomes.Success, new()
+                    EmitAdminConfigChange(audit, ctx, "/api/admin/orders/clear-stale", AuditOutcomes.Success, new()
                     {
                         ["firm"] = firmId,
                         ["cl_ord_id"] = clOrdId,
@@ -194,7 +194,7 @@ public static class AdminEndpoints
                     // the denied outcome with the precise reason and
                     // surface 409 — no business work to perform, so the
                     // single audit record carries the full picture.
-                    EmitAdminConfigChange(audit, ctx, "/admin/eod", AuditOutcomes.Denied, new()
+                    EmitAdminConfigChange(audit, ctx, "/api/admin/eod", AuditOutcomes.Denied, new()
                     {
                         ["reason"] = "persistence_disabled",
                     }, failClosed: true);
@@ -204,7 +204,7 @@ public static class AdminEndpoints
                 // trigger before the (potentially expensive)
                 // materialisation runs so a WAL-backpressured audit
                 // append refuses the run with 503.
-                EmitAdminConfigChange(audit, ctx, "/admin/eod", AuditOutcomes.Success, failClosed: true);
+                EmitAdminConfigChange(audit, ctx, "/api/admin/eod", AuditOutcomes.Success, failClosed: true);
                 var report = eod.Materialise(DateOnly.FromDateTime(DateTime.UtcNow));
                 return Results.Ok(report);
             }
@@ -273,7 +273,7 @@ public static class AdminEndpoints
         // adapter from the persistence spike) ships, it can plug in
         // an IRiskOptionsReloader and have the body trigger an
         // out-of-band reload. Returns 204 either way; the caller can
-        // immediately re-query /admin/risk/limits to verify.
+        // immediately re-query /api/admin/risk/limits to verify.
         group.MapPost("/risk/reload", (IServiceProvider sp, HttpContext ctx, IAuditLogger audit) =>
         {
             try
@@ -284,7 +284,7 @@ public static class AdminEndpoints
                 // silently un-audited (this endpoint can flip
                 // resolver behaviour platform-wide once a custom
                 // provider is wired).
-                EmitAdminConfigChange(audit, ctx, "/admin/risk/reload", AuditOutcomes.Success, new()
+                EmitAdminConfigChange(audit, ctx, "/api/admin/risk/reload", AuditOutcomes.Success, new()
                 {
                     ["reloader_present"] = sp.GetService<IRiskOptionsReloader>() is null ? "false" : "true",
                 }, failClosed: true);
@@ -302,7 +302,7 @@ public static class AdminEndpoints
             }
         });
 
-        // GET /admin/marketdata/reference-prices?symbols=ITUB4,VALE3
+        // GET /api/admin/marketdata/reference-prices?symbols=ITUB4,VALE3
         // Operator/diagnostics view of the reference-price plumbing.
         // Surfaces three independent readings per symbol so the caller
         // can disambiguate "live deslocou fallback?" without inferring
@@ -386,7 +386,7 @@ public static class AdminEndpoints
         group.MapPost("/cash", (CashLedgerRequest? req, HttpContext ctx, CashKeeper keeper, CashLedger cashLedger, EventDispatcher dispatcher, IAuditLogger audit) =>
             HandleCashLedger(req, ctx, keeper, cashLedger, dispatcher, audit));
 
-        // POST /admin/simulator/er — synthetic ER injection (formerly the
+        // POST /api/admin/simulator/er — synthetic ER injection (formerly the
         // ExchangeMode.Simulator-only route; merged into Mock+AllowErInjection
         // in #163). The route itself moved to the Infrastructure project as
         // part of the #188 layering refactor — see SimulatorEndpoint.MapSimulatorEndpoints,
@@ -458,7 +458,7 @@ public static class AdminEndpoints
             // (insufficient_funds); that downstream denial is
             // surfaced by the HTTP response and the cash counter —
             // the audit envelope records the attempt.
-            EmitAdminConfigChange(audit, ctx, "/admin/cash", AuditOutcomes.Success, new()
+            EmitAdminConfigChange(audit, ctx, "/api/admin/cash", AuditOutcomes.Success, new()
             {
                 ["endclient"] = req.Endclient!,
                 ["firmId"] = firmId,
@@ -594,7 +594,7 @@ public static class AdminEndpoints
                 killDetails["firm"] = target;
             else
                 killDetails["target"] = target;
-            EmitAdminConfigChange(audit, ctx, "/admin/kill", AuditOutcomes.Success, killDetails, failClosed: true);
+            EmitAdminConfigChange(audit, ctx, "/api/admin/kill", AuditOutcomes.Success, killDetails, failClosed: true);
             dispatcher.Dispatch(
                 new KillSwitchToggledEvent
                 {
@@ -633,7 +633,7 @@ public static class AdminEndpoints
         {
             // Pass-1 review (#322) P1.2. Audit-first ordering — see
             // ToggleKill for the rationale.
-            EmitAdminConfigChange(audit, ctx, "/admin/halts", AuditOutcomes.Success, new()
+            EmitAdminConfigChange(audit, ctx, "/api/admin/halts", AuditOutcomes.Success, new()
             {
                 ["symbol"] = symbol,
                 ["halted"] = halted ? "true" : "false",
@@ -730,7 +730,7 @@ public static class AdminEndpoints
             // operator's intent before the business dispatch so a
             // WAL-backpressured audit append refuses the phase change
             // with 503 rather than silently committing it un-audited.
-            EmitAdminConfigChange(audit, ctx, "/admin/session-phase", AuditOutcomes.Success, new()
+            EmitAdminConfigChange(audit, ctx, "/api/admin/session-phase", AuditOutcomes.Success, new()
             {
                 ["scope"] = string.IsNullOrWhiteSpace(symbol) ? "default" : "symbol",
                 ["symbol"] = symbol ?? "",
@@ -811,7 +811,7 @@ public static class AdminEndpoints
 }
 
 /// <summary>
-/// Body for <c>POST /admin/session-phase[/{symbol}|/default]</c> (#108).
+/// Body for <c>POST /api/admin/session-phase[/{symbol}|/default]</c> (#108).
 /// </summary>
 public sealed class SessionPhasePayload
 {
@@ -819,12 +819,12 @@ public sealed class SessionPhasePayload
 }
 
 /// <summary>
-/// Body for <c>POST /admin/firms/{firmId}/orders/{clOrdId}/mark-stale</c> (#132 slice 1).
+/// Body for <c>POST /api/admin/firms/{firmId}/orders/{clOrdId}/mark-stale</c> (#132 slice 1).
 /// </summary>
 public sealed record MarkStaleRequest(string? Reason);
 
 /// <summary>
-/// Body for <c>POST /admin/cash</c> (Q2.2 / #269). Operator-driven
+/// Body for <c>POST /api/admin/cash</c> (Q2.2 / #269). Operator-driven
 /// deposit or withdrawal. <see cref="Kind"/> is <c>"Deposit"</c> or
 /// <c>"Withdrawal"</c> (case-insensitive); <see cref="Amount"/> is
 /// strictly positive (sign is implied by Kind); <see cref="Currency"/>

@@ -108,7 +108,7 @@ public sealed class EntryPointExecutionReportRouter : IDisposable
         // ER is observed. The snapshot is attached to BOTH the WAL ER
         // event (so replay re-folds the same BookTouch into
         // FillProjection) and the live ExecutionEvent constructed by
-        // the processor (so /fills + fills.me + drop-copy can read it
+        // the processor (so /api/fills + fills.me + drop-copy can read it
         // without a second cache lookup). Capture happens BEFORE the
         // dispatcher lock so the cache lookup is not on the hot path.
         BookTouchSnapshot? bookTouch = null;

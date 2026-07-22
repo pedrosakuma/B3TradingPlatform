@@ -9,7 +9,7 @@ namespace B3.Trading.Application;
 ///
 /// <para>
 /// Slice 1 of issue #107 — the dogfood path. Without this seed a
-/// fresh end-client created via <c>POST /auth/signup</c> would have
+/// fresh end-client created via <c>POST /api/auth/signup</c> would have
 /// zero cash; signup integration in slice 3 will pre-fund new accounts
 /// from this same option.
 /// </para>
@@ -27,7 +27,7 @@ public sealed class CashSeedOptions
 
     /// <summary>
     /// Default opening balance applied to any end-client that signs up
-    /// via <c>POST /auth/signup</c> in slice 3. Currently informational
+    /// via <c>POST /api/auth/signup</c> in slice 3. Currently informational
     /// for slice 1 (signup wiring lands in slice 3); kept here so the
     /// config surface is settled before consumers depend on it.
     /// </summary>

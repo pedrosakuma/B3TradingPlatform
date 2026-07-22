@@ -6,7 +6,7 @@ namespace B3.Trading.Infrastructure;
 /// <summary>
 /// #679. Production safeguard for <see cref="SandboxCashOptions.AllowSelfCashDeposit"/>,
 /// mirroring <see cref="ErInjectionBootGuard"/>. Letting any authenticated
-/// end-client mint their own buying power via <c>POST /balance/deposit</c>
+/// end-client mint their own buying power via <c>POST /api/balance/deposit</c>
 /// is a real-money risk if it leaks into a production deployment, so the
 /// host refuses to boot when Production + <c>AllowSelfCashDeposit=true</c>
 /// unless the operator has explicitly opted in via
@@ -45,7 +45,7 @@ public static class SandboxCashDepositBootGuard
         var prodNote = isProduction && allowInProduction
             ? " AllowSelfCashDepositInProduction=true is currently set — opt-out is ACTIVE."
             : string.Empty;
-        return "⚠ SELF-SERVICE CASH DEPOSIT ENABLED — POST /balance/deposit lets any authenticated end-client top up their own balance. " +
+        return "⚠ SELF-SERVICE CASH DEPOSIT ENABLED — POST /api/balance/deposit lets any authenticated end-client top up their own balance. " +
             "Sandbox/demo only. NEVER USE IN PRODUCTION." + prodNote;
     }
 }

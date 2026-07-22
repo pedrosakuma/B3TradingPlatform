@@ -1,7 +1,7 @@
 # ER-injection overlay (#259, Q1.7). Layers ON TOP of the base stack +
 # conformance overlay to flip trading-host into Mock + synthetic ER
 # injection so the OrderType×TIF golden suite can drive deterministic
-# ER sequences via POST /admin/simulator/er. Kept SEPARATE from
+# ER sequences via POST /api/admin/simulator/er. Kept SEPARATE from
 # docker-compose.conformance.yml so the existing conformance jobs
 # (conformance, real-stack-conformance) — which exercise auth, admin/firms,
 # and risk-rejection-shape against a non-Mock host — are not silently
@@ -11,14 +11,14 @@
 #   * This overlay enables synthetic ER injection
 #     (Trading__Exchange__AllowErInjection=true) AND seeds a user with
 #     role=admin. To prevent the stack from accidentally standing up an
-#     internet-reachable POST /admin/simulator/er with the committed dev
+#     internet-reachable POST /api/admin/simulator/er with the committed dev
 #     defaults, this overlay:
 #       (a) DOES NOT publish trading-host or frontend to the docker host.
 #           The conformance container reaches trading-host via the b3-net
 #           bridge by service name (http://trading-host:5000). The
-#           frontend's nginx reverse-proxies /admin to trading-host so
+#           frontend's nginx reverse-proxies /api/admin to trading-host so
 #           it must also be unpublished, otherwise an attacker hitting
-#           http://<host>:8080/admin/simulator/er would still reach the
+#           http://<host>:8080/api/admin/simulator/er would still reach the
 #           ER-injection endpoint.
 #       (b) REQUIRES the operator to pass a fresh PBKDF2 hash/salt for
 #           the admin seed via B3T_CONFORMANCE_ADMIN_PASSWORD_HASH and
@@ -66,7 +66,7 @@ services:
 
       # Flip the host into Mock + ER-injection so the OrderType×TIF
       # golden suite can drive deterministic synthetic ER sequences via
-      # POST /admin/simulator/er. Base compose defaults to Mode=Real
+      # POST /api/admin/simulator/er. Base compose defaults to Mode=Real
       # which would refuse the injection endpoint at startup.
       Trading__Exchange__Mode: Mock
       Trading__Exchange__AllowErInjection: "true"
@@ -83,9 +83,9 @@ services:
       B3T_ER_INJECTION: "true"
 
   # The base stack publishes `frontend` on host port 8080, and
-  # frontend/nginx.conf proxies `~^/admin` → `trading-host:5000`. So
+  # frontend/nginx.conf proxies `~^/api/admin` → `trading-host:5000`. So
   # even with trading-host itself unpublished (above), an attacker
-  # hitting http://<host>:8080/admin/simulator/er would still reach the
+  # hitting http://<host>:8080/api/admin/simulator/er would still reach the
   # ER-injection endpoint through the nginx reverse proxy — defeating
   # the unpublish. Drop the frontend's host mapping in this overlay;
   # conformance specs talk to trading-host directly over the b3-net

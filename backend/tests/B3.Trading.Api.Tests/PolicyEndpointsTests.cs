@@ -15,7 +15,7 @@ public class PolicyEndpointsTests : IClassFixture<TestAppFactory>
     public async Task GetRiskPolicy_RequiresAuth()
     {
         var client = _factory.CreateClient();
-        var resp = await client.GetAsync("/policy/risk");
+        var resp = await client.GetAsync("/api/policy/risk");
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
     }
 
@@ -27,7 +27,7 @@ public class PolicyEndpointsTests : IClassFixture<TestAppFactory>
             ["Trading:Risk:MaxGtdHorizon"] = "7.00:00:00",
         });
         using var client = await factory.CreateAuthedClientAsync();
-        var resp = await client.GetAsync("/policy/risk");
+        var resp = await client.GetAsync("/api/policy/risk");
         resp.EnsureSuccessStatusCode();
 
         var body = await resp.Content.ReadFromJsonAsync<JsonElement>(JsonOptions);
@@ -38,7 +38,7 @@ public class PolicyEndpointsTests : IClassFixture<TestAppFactory>
     public async Task GetRiskPolicy_DefaultsTo30Days()
     {
         using var client = await _factory.CreateAuthedClientAsync();
-        var resp = await client.GetAsync("/policy/risk");
+        var resp = await client.GetAsync("/api/policy/risk");
         resp.EnsureSuccessStatusCode();
 
         var body = await resp.Content.ReadFromJsonAsync<JsonElement>(JsonOptions);

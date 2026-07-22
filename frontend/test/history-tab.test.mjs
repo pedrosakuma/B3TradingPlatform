@@ -112,7 +112,7 @@ test("getOrdersHistory threads from/to/symbol/cursor/limit into the URL", async 
   });
   assert.equal(calls.length, 1);
   const u = new URL(calls[0]);
-  assert.equal(u.pathname, "/orders/history");
+  assert.equal(u.pathname, "/api/orders/history");
   assert.equal(u.searchParams.get("from"),   "2025-01-01T00:00:00Z");
   assert.equal(u.searchParams.get("to"),     "2025-01-31T23:59:59Z");
   assert.equal(u.searchParams.get("symbol"), "PETR4");

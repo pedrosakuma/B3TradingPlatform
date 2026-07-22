@@ -9,7 +9,7 @@ namespace B3.Trading.Application;
 
 /// <summary>
 /// Sub-issue #171 (E). Centralised cancel-order pipeline shared by both
-/// <c>DELETE /orders/{clOrdId}</c> (REST) and the FIXP listener's
+/// <c>DELETE /api/orders/{clOrdId}</c> (REST) and the FIXP listener's
 /// <c>OrderCancelRequest</c> handler. Replaces the previous in-memory-only
 /// path (<c>OwnershipMap.RegisterCancelLink</c>) with a WAL-durable
 /// <see cref="OrderCancelRequestedEvent"/> append, so cancel-side state

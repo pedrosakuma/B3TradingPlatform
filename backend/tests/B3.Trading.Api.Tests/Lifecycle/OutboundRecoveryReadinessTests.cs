@@ -160,7 +160,7 @@ public sealed class OutboundRecoveryReadinessTests
             HttpStatusCode.ServiceUnavailable,
             (await client.GetAsync("/ready")).StatusCode);
 
-        var response = await client.PostAsJsonAsync("/orders/", new
+        var response = await client.PostAsJsonAsync("/api/orders/", new
         {
             Symbol = "PETR4",
             SecurityId = 12345UL,
@@ -188,7 +188,7 @@ public sealed class OutboundRecoveryReadinessTests
         var eventStore = factory.Services.GetRequiredService<IEventStore>();
         var seqBefore = eventStore.CurrentSeq;
 
-        using var submitRequest = new HttpRequestMessage(HttpMethod.Post, "/orders/")
+        using var submitRequest = new HttpRequestMessage(HttpMethod.Post, "/api/orders/")
         {
             Content = JsonContent.Create(new
             {
@@ -205,7 +205,7 @@ public sealed class OutboundRecoveryReadinessTests
             ["duplicate-a", "duplicate-b"]);
         using var submit = await client.SendAsync(submitRequest);
 
-        using var modifyRequest = new HttpRequestMessage(HttpMethod.Put, "/orders/not-a-number")
+        using var modifyRequest = new HttpRequestMessage(HttpMethod.Put, "/api/orders/not-a-number")
         {
             Content = JsonContent.Create(new
             {
@@ -221,7 +221,7 @@ public sealed class OutboundRecoveryReadinessTests
 
         using var cancelRequest = new HttpRequestMessage(
             HttpMethod.Delete,
-            "/orders/not-a-number");
+            "/api/orders/not-a-number");
         cancelRequest.Headers.TryAddWithoutValidation(
             "Idempotency-Key",
             ["duplicate-a", "duplicate-b"]);
@@ -269,7 +269,7 @@ public sealed class OutboundRecoveryReadinessTests
             DateTimeOffset.UtcNow)));
         var seqBefore = eventStore.CurrentSeq;
 
-        var createAlgo = await client.PostAsJsonAsync("/algo", new CreateAlgoRequest(
+        var createAlgo = await client.PostAsJsonAsync("/api/algo", new CreateAlgoRequest(
             "PETR4",
             4321,
             "Buy",
@@ -278,13 +278,13 @@ public sealed class OutboundRecoveryReadinessTests
             new CreateAlgoIcebergParams(10, 30m),
             Twap: null));
         var modifyAlgo = await client.PostAsJsonAsync(
-            "/algo/999/modify",
+            "/api/algo/999/modify",
             new ModifyAlgoRequest(NewQuantity: 10));
-        var cancelAlgo = await client.DeleteAsync("/algo/999");
+        var cancelAlgo = await client.DeleteAsync("/api/algo/999");
         var modifyOrder = await client.PutAsJsonAsync(
-            "/orders/999",
+            "/api/orders/999",
             new ModifyOrderRequest(Quantity: 10, Price: 30m));
-        var cancelOrder = await client.DeleteAsync("/orders/999");
+        var cancelOrder = await client.DeleteAsync("/api/orders/999");
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, createAlgo.StatusCode);
         Assert.Equal(HttpStatusCode.ServiceUnavailable, modifyAlgo.StatusCode);

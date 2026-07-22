@@ -23,7 +23,7 @@ public static class SubAccountsEndpoints
 {
     public static IEndpointRouteBuilder MapSubAccounts(this IEndpointRouteBuilder app)
     {
-        var group = app.MapGroup("/sub-accounts").RequireAuthorization();
+        var group = app.MapGroup("/api/sub-accounts").RequireAuthorization();
 
         group.MapGet("/", (HttpContext ctx, SubAccountsRegistry registry, bool? includeDeactivated) =>
         {
@@ -35,7 +35,7 @@ public static class SubAccountsEndpoints
                 r.Id, r.DisplayName, r.Active)));
         });
 
-        var admin = app.MapGroup("/sub-accounts").RequireAuthorization("admin");
+        var admin = app.MapGroup("/api/sub-accounts").RequireAuthorization("admin");
 
         admin.MapPost("/", (
             SubAccountCreateRequest? req,
@@ -70,7 +70,7 @@ public static class SubAccountsEndpoints
                     ActorFirm = firm,
                     ActorRole = ctx.User.FindFirstValue(JwtIssuer.RoleClaim),
                     SourceIp = ctx.Connection.RemoteIpAddress?.ToString(),
-                    ResourcePath = "/sub-accounts",
+                    ResourcePath = "/api/sub-accounts",
                     Details = new Dictionary<string, string>
                     {
                         ["firm"] = firm,
@@ -87,7 +87,7 @@ public static class SubAccountsEndpoints
                         ActorUserId = actor,
                     },
                     () => registry.ApplyCreated(firm, id.Value, req.DisplayName));
-                return Results.Created($"/sub-accounts/{id.Value}",
+                return Results.Created($"/api/sub-accounts/{id.Value}",
                     new SubAccountDto(id.Value, req.DisplayName, Active: true));
             }
             catch (WalBackpressureException ex)
@@ -128,7 +128,7 @@ public static class SubAccountsEndpoints
                     ActorFirm = firm,
                     ActorRole = ctx.User.FindFirstValue(JwtIssuer.RoleClaim),
                     SourceIp = ctx.Connection.RemoteIpAddress?.ToString(),
-                    ResourcePath = $"/sub-accounts/{sub.Value}",
+                    ResourcePath = $"/api/sub-accounts/{sub.Value}",
                     Details = new Dictionary<string, string>
                     {
                         ["firm"] = firm,

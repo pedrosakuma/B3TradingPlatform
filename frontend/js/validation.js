@@ -192,7 +192,7 @@ export function payloadKey(payload) {
 
 // ── Fase 2 (#398). Algos creation validation ──────────────────────
 //
-// Pure-function mirror of `AlgoEndpoints.MapAlgo` POST /algo validation
+// Pure-function mirror of `AlgoEndpoints.MapAlgo` POST /api/algo validation
 // (PT-BR messages). Returns `{ ok: true }` or `{ ok: false, error,
 // detail? }`. Callers normalise the form input into the same shape
 // the REST request expects (CreateAlgoRequest) before invoking this.

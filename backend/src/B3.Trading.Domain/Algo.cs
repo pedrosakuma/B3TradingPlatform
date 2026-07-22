@@ -171,7 +171,7 @@ public sealed record PovParameters(
 /// When <c>|currentChildPrice - target| &gt;= tickSize</c> the engine
 /// cancels the live child and places a new one at <c>target</c>. Unlike
 /// VWAP/POV there is no scheduled window — Pegged runs until filled or
-/// explicitly cancelled (DELETE /algo/{id}).
+/// explicitly cancelled (DELETE /api/algo/{id}).
 /// </para>
 ///
 /// <para><b>Ref</b>: <see cref="PegRef.Mid"/>, <see cref="PegRef.Best"/>,

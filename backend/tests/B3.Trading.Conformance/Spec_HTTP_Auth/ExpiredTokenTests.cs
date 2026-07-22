@@ -30,7 +30,7 @@ public class ExpiredTokenTests
 
         var expired = JwtMinter.MintExpired();
 
-        using var req = new HttpRequestMessage(HttpMethod.Get, "/orders");
+        using var req = new HttpRequestMessage(HttpMethod.Get, "/api/orders");
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", expired);
         var resp = await http.SendAsync(req);
 

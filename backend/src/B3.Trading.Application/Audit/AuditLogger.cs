@@ -38,7 +38,7 @@ namespace B3.Trading.Application.Audit;
 ///   exactly once at the audit site). Other unexpected exceptions
 ///   are still swallowed-and-logged to avoid bricking the endpoint
 ///   on a defect in the keeper. Use for security-sensitive
-///   <c>/admin/*</c> mutations where the audit-first ordering
+///   <c>/api/admin/*</c> mutations where the audit-first ordering
 ///   (audit append accepted by the WAL → business event
 ///   dispatched) means a successful response implies a durable
 ///   audit record exists; if audit cannot be captured we MUST

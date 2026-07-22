@@ -13,13 +13,13 @@ namespace B3.Trading.Api.Auth.Totp;
 /// <summary>
 /// TOTP (RFC 6238) endpoints for #303. Three routes:
 /// <list type="bullet">
-///   <item><c>POST /auth/2fa/enroll</c> — start enrollment (JWT or
+///   <item><c>POST /api/auth/2fa/enroll</c> — start enrollment (JWT or
 ///   ForceEnroll token). Returns the base32 secret, otpauth URI and
 ///   one-time recovery codes.</item>
-///   <item><c>POST /auth/2fa/verify</c> — dual-purpose: confirm a
+///   <item><c>POST /api/auth/2fa/verify</c> — dual-purpose: confirm a
 ///   pending enrollment (JWT mode) OR finish login (challenge-token
 ///   mode, accepts TOTP or recovery code).</item>
-///   <item><c>POST /auth/2fa/disable</c> — remove TOTP (JWT, requires
+///   <item><c>POST /api/auth/2fa/disable</c> — remove TOTP (JWT, requires
 ///   current TOTP code).</item>
 /// </list>
 /// </summary>
@@ -31,7 +31,7 @@ public static class TotpEndpoints
         if (!authOptions.IsTotpEnabled())
             return app;
 
-        app.MapGet("/auth/2fa/status", (
+        app.MapGet("/api/auth/2fa/status", (
             HttpContext http,
             IUserStore users) =>
         {
@@ -46,7 +46,7 @@ public static class TotpEndpoints
                 Enrolled: user.Totp is { EnrolledAt: not null }));
         }).RequireAuthorization();
 
-        app.MapPost("/auth/2fa/enroll", (
+        app.MapPost("/api/auth/2fa/enroll", (
             HttpContext http,
             EnrollRequest? req,
             IUserStore users,
@@ -108,7 +108,7 @@ public static class TotpEndpoints
                 ActorFirm = user.Firm,
                 ActorRole = user.Role,
                 SourceIp = http.Connection.RemoteIpAddress?.ToString(),
-                ResourcePath = "/auth/2fa/enroll",
+                ResourcePath = "/api/auth/2fa/enroll",
                 Details = enrollmentToken is null
                     ? null
                     : new Dictionary<string, string> { ["mode"] = "force_enroll_token" },
@@ -121,7 +121,7 @@ public static class TotpEndpoints
                 TotpChallengeToken: verificationToken));
         });
 
-        app.MapPost("/auth/2fa/verify", async (
+        app.MapPost("/api/auth/2fa/verify", async (
             HttpContext http,
             VerifyRequest req,
             IUserStore users,
@@ -224,7 +224,7 @@ public static class TotpEndpoints
                         ActorFirm = user.Firm,
                         ActorRole = user.Role,
                         SourceIp = http.Connection.RemoteIpAddress?.ToString(),
-                        ResourcePath = "/auth/2fa/verify",
+                        ResourcePath = "/api/auth/2fa/verify",
                         ReasonCode = recoveryAlreadyConsumed ? "recovery_code_replayed" : "2fa_wrong_code",
                     });
                     return Results.Json(new { error = "invalid code" },
@@ -264,7 +264,7 @@ public static class TotpEndpoints
                             ActorFirm = user.Firm,
                             ActorRole = user.Role,
                             SourceIp = http.Connection.RemoteIpAddress?.ToString(),
-                            ResourcePath = "/auth/2fa/verify",
+                            ResourcePath = "/api/auth/2fa/verify",
                             ReasonCode = "recovery_code_replayed",
                         });
                         return Results.Json(new { error = "invalid code" },
@@ -284,7 +284,7 @@ public static class TotpEndpoints
                         ActorUserId = user.Username,
                         ActorUsername = user.Username,
                         SourceIp = http.Connection.RemoteIpAddress?.ToString(),
-                        ResourcePath = "/auth/2fa/verify",
+                        ResourcePath = "/api/auth/2fa/verify",
                         ReasonCode = session.ErrorCode,
                     });
                     return AuthEndpoints.Error(session.StatusCode, session.ErrorCode ?? "identity_directory_unavailable");
@@ -300,7 +300,7 @@ public static class TotpEndpoints
                     ActorFirm = session.Firm,
                     ActorRole = session.Role,
                     SourceIp = http.Connection.RemoteIpAddress?.ToString(),
-                    ResourcePath = "/auth/2fa/verify",
+                    ResourcePath = "/api/auth/2fa/verify",
                 });
                 return Results.Ok(new LoginResponse(session.Token!, session.ExpiresAt!.Value));
             }
@@ -354,12 +354,12 @@ public static class TotpEndpoints
                 ActorFirm = jwtUser.Firm,
                 ActorRole = jwtUser.Role,
                 SourceIp = http.Connection.RemoteIpAddress?.ToString(),
-                ResourcePath = "/auth/2fa/verify",
+                ResourcePath = "/api/auth/2fa/verify",
             });
             return Results.Ok(new { enrolled = true });
         });
 
-        app.MapPost("/auth/2fa/disable", (
+        app.MapPost("/api/auth/2fa/disable", (
             HttpContext http,
             DisableRequest req,
             IUserStore users,
@@ -437,7 +437,7 @@ public static class TotpEndpoints
                 ActorFirm = user.Firm,
                 ActorRole = user.Role,
                 SourceIp = http.Connection.RemoteIpAddress?.ToString(),
-                ResourcePath = "/auth/2fa/disable",
+                ResourcePath = "/api/auth/2fa/disable",
             });
             return Results.Ok(new { disabled = true });
         }).RequireAuthorization();
@@ -487,7 +487,7 @@ public static class TotpEndpoints
                 ActorFirm = user.Firm,
                 ActorRole = user.Role,
                 SourceIp = http.Connection.RemoteIpAddress?.ToString(),
-                ResourcePath = "/auth/2fa/verify",
+                ResourcePath = "/api/auth/2fa/verify",
                 ReasonCode = "2fa_wrong_code",
             });
             return Results.Json(new { error = "invalid code" },
@@ -520,7 +520,7 @@ public static class TotpEndpoints
             ActorFirm = user.Firm,
             ActorRole = user.Role,
             SourceIp = http.Connection.RemoteIpAddress?.ToString(),
-            ResourcePath = "/auth/2fa/verify",
+            ResourcePath = "/api/auth/2fa/verify",
             Details = new Dictionary<string, string> { ["mode"] = "force_enroll_token" },
         });
 
@@ -534,7 +534,7 @@ public static class TotpEndpoints
                 ActorUserId = user.Username,
                 ActorUsername = user.Username,
                 SourceIp = http.Connection.RemoteIpAddress?.ToString(),
-                ResourcePath = "/auth/2fa/verify",
+                ResourcePath = "/api/auth/2fa/verify",
                 ReasonCode = session.ErrorCode,
             });
             return AuthEndpoints.Error(session.StatusCode, session.ErrorCode ?? "identity_directory_unavailable");
@@ -549,7 +549,7 @@ public static class TotpEndpoints
             ActorFirm = session.Firm,
             ActorRole = session.Role,
             SourceIp = http.Connection.RemoteIpAddress?.ToString(),
-            ResourcePath = "/auth/2fa/verify",
+            ResourcePath = "/api/auth/2fa/verify",
         });
         return Results.Ok(new LoginResponse(session.Token!, session.ExpiresAt!.Value));
     }

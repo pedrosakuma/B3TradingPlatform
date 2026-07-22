@@ -72,7 +72,7 @@ public sealed class SubAccountPositionKeeper
 
     /// <summary>
     /// Rows for every sub-account under one owner within a firm,
-    /// tagged with the sub-account id. Used by <c>GET /positions</c>
+    /// tagged with the sub-account id. Used by <c>GET /api/positions</c>
     /// when no filter is supplied and the response wants
     /// per-sub-account breakdowns.
     /// </summary>

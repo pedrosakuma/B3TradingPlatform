@@ -20,7 +20,7 @@ public static class PolicyEndpoints
 {
     public static IEndpointRouteBuilder MapPolicy(this IEndpointRouteBuilder app)
     {
-        app.MapGet("/policy/risk", [Authorize] (IOptionsMonitor<RiskOptions> opts) =>
+        app.MapGet("/api/policy/risk", [Authorize] (IOptionsMonitor<RiskOptions> opts) =>
         {
             // CurrentValue picks up live reload of Trading:Risk
             // config — the FE will see the new cap on the next boot.

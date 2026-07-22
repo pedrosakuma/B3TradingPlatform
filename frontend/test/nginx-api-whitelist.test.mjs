@@ -1,9 +1,7 @@
-// Regression coverage for #696: nginx.conf.template's `$is_api` map is an
-// explicit whitelist of path prefixes proxied to trading-host. Any REST
-// prefix called by the frontend (frontend/js/protocol.js) that is missing
-// from this whitelist silently falls through to the SPA static-file
-// handler, which only accepts GET/HEAD — producing a 405 for any other
-// verb (this is exactly how the /balance/deposit bug in #696 happened).
+// Regression coverage for #696/#698: nginx.conf.template's `$is_api` map is
+// the frontend's proxy allowlist. After the /api consolidation every REST
+// call should funnel through the single `api` prefix (with `ws` separate for
+// WebSockets and `/health`/`/ready`/`/live` staying at the root).
 //
 // This test can't spin up the real nginx container in every environment
 // (the Docker image build needs npm registry access, which is blocked in
@@ -33,7 +31,7 @@ function readIsApiWhitelist() {
   for (const line of mapMatch[1].split("\n")) {
     // Only count *active* entries mapped to `1` (ignore comments, the
     // `default 0;` line, and any future `0`-valued entries), e.g.:
-    //   ~^/balance(/|$)                      1;
+    //   ~^/api(/|$)                          1;
     const m = line.match(/^\s*~\^\/([a-zA-Z0-9_-]+)\([^)]*\)\s+1;\s*$/);
     if (m) prefixes.add(m[1]);
   }
@@ -41,7 +39,7 @@ function readIsApiWhitelist() {
 }
 
 // Extracts the first path segment out of a URL-path-shaped string literal,
-// e.g. `/statement/${dayKey}` -> "statement", `/statement` -> "statement".
+// e.g. `/api/statement/${dayKey}` -> "api", `/ws/dropcopy` -> "ws".
 function firstSegment(literal) {
   const m = literal.match(/^\/([a-zA-Z0-9_-]+)/);
   return m ? m[1] : null;
@@ -55,7 +53,7 @@ function readBackendPrefixesCalledFromProtocol() {
   const prefixes = new Set();
 
   // Case A: a literal path directly following the `${backend}` interpolation,
-  // e.g. fetch(`${backend}/orders/history`, ...).
+  // e.g. fetch(`${backend}/api/orders/history`, ...).
   for (const m of protocol.matchAll(/\$\{backend\}\/([a-zA-Z0-9_-]+)/g)) {
     prefixes.add(m[1]);
   }
@@ -72,7 +70,7 @@ function readBackendPrefixesCalledFromProtocol() {
   // Case C: `${backend}${someVar}` — the path is built in a separate
   // variable (often a ternary picking between two equivalent-prefix
   // literals), e.g.:
-  //   const path = dayKey ? `/statement/${...}` : `/statement`;
+  //   const path = dayKey ? `/api/statement/${...}` : `/api/statement`;
   //   fetch(`${backend}${path}`, ...)
   // Resolve each referenced variable back to its nearest preceding
   // declaration and pull every path-shaped literal out of it.
@@ -109,7 +107,7 @@ function readBackendPrefixesCalledFromProtocol() {
   return prefixes;
 }
 
-test("every REST prefix called from protocol.js is proxied by nginx's $is_api whitelist", () => {
+test("every backend prefix called from protocol.js is proxied by nginx's $is_api whitelist", () => {
   const whitelisted = readIsApiWhitelist();
   const called = readBackendPrefixesCalledFromProtocol();
 
@@ -118,17 +116,21 @@ test("every REST prefix called from protocol.js is proxied by nginx's $is_api wh
   assert.deepEqual(
     missing,
     [],
-    `these REST prefixes are called from protocol.js but missing from ` +
+    `these backend prefixes are called from protocol.js but missing from ` +
       `nginx.conf.template's $is_api map, so they would 405 through the real ` +
       `deployed frontend (see #696): ${missing.join(", ")}`,
   );
 });
 
-test("$is_api whitelist includes /balance and /sub-accounts (regression for #696)", () => {
+test("$is_api whitelist is collapsed to the stable api/ws + root probe prefixes", () => {
   const whitelisted = readIsApiWhitelist();
-  assert.ok(whitelisted.has("balance"), "/balance must be proxied to trading-host");
-  assert.ok(
-    whitelisted.has("sub-accounts"),
-    "/sub-accounts must be proxied to trading-host",
+  assert.deepEqual(
+    [...whitelisted].sort(),
+    ["api", "health", "live", "ready", "ws"],
   );
+});
+
+test("protocol.js only targets the consolidated /api REST prefix plus /ws", () => {
+  const called = readBackendPrefixesCalledFromProtocol();
+  assert.deepEqual([...called].sort(), ["api", "ws"]);
 });

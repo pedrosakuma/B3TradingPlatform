@@ -49,8 +49,8 @@ Source of truth: `backend/src/B3.Trading.Application/OrderModifyService.cs:167â€
 | ------------------------------------- | ------------------------------ | ----------------------------------------------------- |
 | ClOrdID burn on risk reject           | Yes                            | Yes (newClOrdId)                                      |
 | WAL rows on risk reject               | 2 (`Submitted` + synthetic `Rejected`) | 1 (`OrderReplaceRejectedEvent`)               |
-| Observable in `/executions/history`   | Yes (`Rejected`, `Synthetic`)   | Yes (via `OrderReplaceRejectedEvent`, `HistoryEndpoints.cs:455`) |
-| Observable in `/orders/history`       | Yes (terminal `Rejected`)       | N/A â€” original order keeps pre-modify state           |
+| Observable in `/api/executions/history`   | Yes (`Rejected`, `Synthetic`)   | Yes (via `OrderReplaceRejectedEvent`, `HistoryEndpoints.cs:455`) |
+| Observable in `/api/orders/history`       | Yes (terminal `Rejected`)       | N/A â€” original order keeps pre-modify state           |
 | FE rendering                           | Renders STP-local + risk reason | Renders via `ExecutionEvent { Kind=Rejected }` published in same dispatch callback (`OrderModifyService.cs:410-421`) |
 | WAL replay reconstructs the reject?   | Yes                            | Yes (replay is a no-op for book/ownership/margin; advances ClOrdId watermark â€” `StateSnapshotter.cs:1007`) |
 | Counter `OrdersRejectedByRisk`        | Bumped with `firmId` tag        | Bumped with `firmId` + `path:"modify"` tag           |
@@ -59,7 +59,7 @@ Source of truth: `backend/src/B3.Trading.Application/OrderModifyService.cs:167â€
 WAL/history/replay slice of the asymmetry: risk-rejected and margin-rejected
 modifies now dispatch `OrderReplaceRejectedEvent` to the WAL and emit a live
 `ExecutionEvent` in the same commit callback, which keeps
-`/executions/history`, FE executions rendering, and the ClOrdId replay
+`/api/executions/history`, FE executions rendering, and the ClOrdId replay
 watermark aligned. Coverage:
 `backend/tests/B3.Trading.Application.Tests/OrderReplaceRejectedEventTests.cs`.
 
@@ -118,7 +118,7 @@ They're already idempotent on the abort path
   rebuilds the same `WorkingOrderBook` + `OrderOwnershipMap` + history
   endpoints would have shown live.
 - **Single read model.** Anything that subscribes to `IExecutionEventSink` /
-  `IEventStore.ReadFromAsync` (FE WebSocket fan-out, /executions/history,
+  `IEventStore.ReadFromAsync` (FE WebSocket fan-out, /api/executions/history,
   CVM 35/505 report (#308), best-exec touch snapshot (#307), drop-copy feed
   (#306)) sees the rejection automatically. No special-case "and also fetch
   the 4xx response" path.
@@ -153,7 +153,7 @@ They're already idempotent on the abort path
 ### 2.4 What it costs
 
 - **Loses the WAL audit trail unless a new `Rejected*Event` shape is added.**
-  Today a rejected submit lives in the WAL; deleting that means /executions/history,
+  Today a rejected submit lives in the WAL; deleting that means /api/executions/history,
   CVM exports, drop-copy, and the FE executions log all stop seeing risk
   rejects.
 - **API contract shift.** If rejected modifies stay invisible (status quo)
@@ -262,9 +262,9 @@ row on both the risk-reject and the margin-reject branches (with
 `Source="risk"` / `Source="margin"`) and publishes a synthetic
 `ExecKind.Rejected` `ExecutionEvent` to the live sink for the FE blotter.
 Replay treats the event as audit-only (advances the ClOrdId watermark; no
-book/ownership/margin mutation), and `/executions/history` projects the row
+book/ownership/margin mutation), and `/api/executions/history` projects the row
 with `Kind="Rejected"`. That closes the "no WAL row / no
-`/executions/history` row / no replay watermark advance" part of the old
+`/api/executions/history` row / no replay watermark advance" part of the old
 modify-side asymmetry. It does **not** put rejected modifies on parity with
 submit for downstream consumers: drop-copy still drops the event because it
 cannot resolve the burned `newClOrdId`, and CVM reporting still ignores it

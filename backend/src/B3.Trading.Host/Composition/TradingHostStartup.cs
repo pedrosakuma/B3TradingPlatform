@@ -142,7 +142,7 @@ internal static class TradingHostStartup
             // Pass-1 review fix (#259, P1#5): when ER injection is on,
             // refuse to boot if any seeded non-user role is still using
             // the committed dev-default password material — that would
-            // make POST /admin/simulator/er trivially exploitable for
+            // make POST /api/admin/simulator/er trivially exploitable for
             // anyone with a copy of this repo.
             AdminCredentialDefaultGuard.Validate(
                 exchangeOpts.AllowErInjection,

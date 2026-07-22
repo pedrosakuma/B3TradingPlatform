@@ -10,7 +10,7 @@
   "panels": [
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "description": "Rate of child orders the engine reactor submits on behalf of algo parents, broken down by algo type (iceberg / twap). The slice-7 source-tag panel below cross-checks this against POST /orders submissions tagged source=algo — they should agree.",
+      "description": "Rate of child orders the engine reactor submits on behalf of algo parents, broken down by algo type (iceberg / twap). The slice-7 source-tag panel below cross-checks this against POST /api/orders submissions tagged source=algo — they should agree.",
       "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "ops" } },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
       "id": 1,
@@ -82,7 +82,7 @@
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "description": "Orders submitted via POST /orders broken down by source: manual (trader-typed) vs algo (engine-generated child). Cross-check: the algo series should track 'Algo children submitted' panel above. Divergence means the source tag is wrong somewhere in the submission path.",
+      "description": "Orders submitted via POST /api/orders broken down by source: manual (trader-typed) vs algo (engine-generated child). Cross-check: the algo series should track 'Algo children submitted' panel above. Divergence means the source tag is wrong somewhere in the submission path.",
       "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "ops" } },
       "gridPos": { "h": 6, "w": 8, "x": 16, "y": 8 },
       "id": 5,

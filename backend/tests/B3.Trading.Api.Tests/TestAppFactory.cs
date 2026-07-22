@@ -120,7 +120,7 @@ public class TestAppFactory : WebApplicationFactory<Program>
                 // true so production hosts get a fail-safe posture. The
                 // broad API test suite generally does NOT seed cash and
                 // intentionally relies on the permissive (NoOp) provider
-                // so /orders happy-paths don't all fail with
+                // so /api/orders happy-paths don't all fail with
                 // INSUFFICIENT_CASH. Tests that exercise the margin path
                 // opt back in via WithOverrides — see MarginCheckIntegrationTests
                 // and SignupCashSeedTests for the pattern.
@@ -136,7 +136,7 @@ public class TestAppFactory : WebApplicationFactory<Program>
                     Convert.ToBase64String(SHA256.HashData(
                         Encoding.UTF8.GetBytes("B3.Trading.Api.Tests outbound command key"))),
                 // Slice 2 of #97 ships rate limits enabled by default.
-                // The default suite hits /auth/login and /auth/signup
+                // The default suite hits /api/auth/login and /api/auth/signup
                 // hundreds of times per run; disable here so individual
                 // tests opt-in via WithOverrides when they want to
                 // exercise the limiter behavior.
@@ -149,12 +149,12 @@ public class TestAppFactory : WebApplicationFactory<Program>
                 // exercising the file-backed store opt in via WithOverrides.
                 ["Trading:Auth:UserStore:Enabled"] = "false",
                 // Slice 4 of #97: lockout disabled by default so tests
-                // hammering /auth/login with bad creds don't trip the
+                // hammering /api/auth/login with bad creds don't trip the
                 // gate. Lockout-specific tests opt in via WithOverrides.
                 ["Trading:Auth:LoginLockout:Enabled"] = "false",
                 // Q4.4 (#304). Per-user × endpoint token-bucket disabled
                 // by default in tests so the broad suite hammering
-                // /orders, /algo, /auth etc. doesn't trip the buckets.
+                // /api/orders, /api/algo, /api/auth etc. doesn't trip the buckets.
                 // Tests in TokenBucketRateLimitTests opt in explicitly
                 // via WithOverrides.
                 ["Trading:RateLimit:Enabled"] = "false",
@@ -182,7 +182,7 @@ public class TestAppFactory : WebApplicationFactory<Program>
 
     public async Task<string> LoginAsync(HttpClient client, string user = TestUser, string password = TestPassword)
     {
-        var resp = await client.PostAsJsonAsync("/auth/login", new LoginRequest(user, password));
+        var resp = await client.PostAsJsonAsync("/api/auth/login", new LoginRequest(user, password));
         resp.EnsureSuccessStatusCode();
         var body = await resp.Content.ReadFromJsonAsync<LoginResponse>();
         if (Services.GetService<IOutboundRecoveryGate>() is OutboundRecoveryState recovery)

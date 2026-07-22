@@ -16,7 +16,7 @@ namespace B3.Trading.Api.RateLimit;
 ///   </description></item>
 ///   <item><description>
 ///     Longer <c>PathPattern</c> outranks shorter (longest-prefix-wins
-///     so <c>/algo/twap</c> beats <c>/algo/</c>).
+///     so <c>/api/algo/twap</c> beats <c>/api/algo/</c>).
 ///   </description></item>
 ///   <item><description>
 ///     Method-aware rules outrank method-less ones at equal length so
@@ -44,7 +44,7 @@ public sealed class RateLimitRuleResolver
             // Explicit rules ALWAYS outrank generic fallbacks, even when
             // the fallback is method-restricted — otherwise the generic
             // POST fallback (length 1, POST-restricted) would beat the
-            // method-less /auth/login (length 11).
+            // method-less /api/auth/login (length 11).
             .OrderBy(r => r.IsGenericFallback)
             .ThenByDescending(r => r.PathPattern.Length)
             .ThenByDescending(r => r.Methods.Count > 0)
@@ -80,9 +80,9 @@ public sealed class RateLimitRuleResolver
     private static bool PathMatches(string path, string pattern)
     {
         if (pattern == "/") return true; // generic fallback
-        // Prefix match: "/orders" matches "/orders" and "/orders/123"
-        // but NOT "/orders-archive". The trailing-slash test is what
-        // keeps "/algo" from accidentally swallowing "/algorithm".
+        // Prefix match: "/api/orders" matches "/api/orders" and "/api/orders/123"
+        // but NOT "/api/orders-archive". The trailing-slash test is what
+        // keeps "/api/algo" from accidentally swallowing "/algorithm".
         if (!path.StartsWith(pattern, StringComparison.OrdinalIgnoreCase))
             return false;
         if (path.Length == pattern.Length) return true;

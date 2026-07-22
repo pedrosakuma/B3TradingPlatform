@@ -5,7 +5,7 @@ using System.Text.Json;
 namespace B3.Trading.Api.Tests;
 
 /// <summary>
-/// Coverage for <c>GET /admin/marketdata/reference-prices</c> — the
+/// Coverage for <c>GET /api/admin/marketdata/reference-prices</c> — the
 /// diagnostics surface that lets ops introspect the reference-price
 /// plumbing without deriving it from metric tags. Slice A of
 /// real-stack v2: this endpoint is the contract the v2 conformance
@@ -22,7 +22,7 @@ public class AdminMarketDataEndpointTests : IClassFixture<TestAppFactory>
     public async Task ReferencePrices_RequiresAdminRole()
     {
         using var user = await _factory.CreateAuthedClientAsync(); // role=user
-        var resp = await user.GetAsync("/admin/marketdata/reference-prices?symbols=PETR4");
+        var resp = await user.GetAsync("/api/admin/marketdata/reference-prices?symbols=PETR4");
         Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
     }
 
@@ -38,7 +38,7 @@ public class AdminMarketDataEndpointTests : IClassFixture<TestAppFactory>
         });
         using var admin = await f.CreateAuthedClientAsync("admin");
 
-        var resp = await admin.GetAsync("/admin/marketdata/reference-prices?symbols=PETR4");
+        var resp = await admin.GetAsync("/api/admin/marketdata/reference-prices?symbols=PETR4");
         resp.EnsureSuccessStatusCode();
 
         var body = await resp.Content.ReadFromJsonAsync<JsonElement>(JsonOptions);
@@ -59,7 +59,7 @@ public class AdminMarketDataEndpointTests : IClassFixture<TestAppFactory>
     {
         using var admin = await _factory.CreateAuthedClientAsync("admin");
 
-        var resp = await admin.GetAsync("/admin/marketdata/reference-prices?symbols=NEVERHEARD");
+        var resp = await admin.GetAsync("/api/admin/marketdata/reference-prices?symbols=NEVERHEARD");
         resp.EnsureSuccessStatusCode();
 
         var body = await resp.Content.ReadFromJsonAsync<JsonElement>(JsonOptions);
@@ -85,7 +85,7 @@ public class AdminMarketDataEndpointTests : IClassFixture<TestAppFactory>
         });
         using var admin = await f.CreateAuthedClientAsync("admin");
 
-        var resp = await admin.GetAsync("/admin/marketdata/reference-prices");
+        var resp = await admin.GetAsync("/api/admin/marketdata/reference-prices");
         resp.EnsureSuccessStatusCode();
 
         var body = await resp.Content.ReadFromJsonAsync<JsonElement>(JsonOptions);
@@ -106,7 +106,7 @@ public class AdminMarketDataEndpointTests : IClassFixture<TestAppFactory>
         });
         using var admin = await f.CreateAuthedClientAsync("admin");
 
-        var resp = await admin.GetAsync("/admin/marketdata/reference-prices?symbols=PETR4,PETR4,petr4");
+        var resp = await admin.GetAsync("/api/admin/marketdata/reference-prices?symbols=PETR4,PETR4,petr4");
         resp.EnsureSuccessStatusCode();
 
         var body = await resp.Content.ReadFromJsonAsync<JsonElement>(JsonOptions);
@@ -117,7 +117,7 @@ public class AdminMarketDataEndpointTests : IClassFixture<TestAppFactory>
     public async Task ReferencePrices_ReportsExchangeMode()
     {
         using var admin = await _factory.CreateAuthedClientAsync("admin");
-        var resp = await admin.GetAsync("/admin/marketdata/reference-prices?symbols=PETR4");
+        var resp = await admin.GetAsync("/api/admin/marketdata/reference-prices?symbols=PETR4");
         resp.EnsureSuccessStatusCode();
 
         var body = await resp.Content.ReadFromJsonAsync<JsonElement>(JsonOptions);

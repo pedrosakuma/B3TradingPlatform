@@ -12,7 +12,7 @@ namespace B3.Trading.Api;
 /// Q4.7 (#307). Read-only REST surface over <see cref="FillProjection"/>
 /// — exposes the best-execution book-touch evidence captured for every
 /// Fill / PartialFill ER. Single endpoint today
-/// (<c>GET /fills/{id}/touch</c>) keyed by the canonical fill id
+/// (<c>GET /api/fills/{id}/touch</c>) keyed by the canonical fill id
 /// <c>{ClOrdId}:{cumulativeQuantityAfterFill}</c>.
 ///
 /// <para><b>Firm scope.</b> A caller authenticated as <c>user</c> only
@@ -22,7 +22,7 @@ namespace B3.Trading.Api;
 /// <c>?firmId=</c> to scope to a specific firm; without the override
 /// the admin sees fills in its own firm (typically "default"). The
 /// 404-vs-403 choice matches the rest of the host's firm-scoped reads
-/// (<c>GET /orders</c>, <c>GET /positions</c>) — they silently drop
+/// (<c>GET /api/orders</c>, <c>GET /api/positions</c>) — they silently drop
 /// rows belonging to other firms instead of distinguishing
 /// "exists-elsewhere" from "does-not-exist".</para>
 /// </summary>
@@ -30,7 +30,7 @@ public static class FillsEndpoints
 {
     public static IEndpointRouteBuilder MapFills(this IEndpointRouteBuilder app)
     {
-        var group = app.MapGroup("/fills").RequireAuthorization();
+        var group = app.MapGroup("/api/fills").RequireAuthorization();
 
         group.MapGet("/{id}/touch", (string id, HttpContext ctx, FillProjection fills) =>
         {

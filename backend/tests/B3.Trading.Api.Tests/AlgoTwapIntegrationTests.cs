@@ -14,7 +14,7 @@ namespace B3.Trading.Api.Tests;
 /// §4.8). Boots the host with <c>Trading:Exchange:Mode=Mock</c> +
 /// <c>AllowErInjection=true</c> so
 /// the scheduler-driven child orders land in <c>WorkingOrderBook</c> and
-/// synthetic ERs can be driven via <c>POST /admin/simulator/er</c>.
+/// synthetic ERs can be driven via <c>POST /api/admin/simulator/er</c>.
 ///
 /// <para>
 /// These tests use real wall-clock time deliberately. Tightly-bounded
@@ -194,7 +194,7 @@ public class AlgoTwapIntegrationTests
 
     private static async Task<string> PostAlgo(HttpClient http, string token, object body)
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/algo/")
         {
             Content = JsonContent.Create(body),
         };
@@ -209,7 +209,7 @@ public class AlgoTwapIntegrationTests
         HttpClient http, string adminToken, ulong childClOrdId,
         string type, long? lastQty = null, decimal lastPx = 30m)
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/admin/simulator/er")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/admin/simulator/er")
         {
             Content = JsonContent.Create(new
             {
@@ -227,7 +227,7 @@ public class AlgoTwapIntegrationTests
 
     private static async Task<JsonElement> GetAlgo(HttpClient http, string token, string algoId)
     {
-        var req = new HttpRequestMessage(HttpMethod.Get, $"/algo/{algoId}");
+        var req = new HttpRequestMessage(HttpMethod.Get, $"/api/algo/{algoId}");
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         var resp = await http.SendAsync(req);
         resp.EnsureSuccessStatusCode();

@@ -139,7 +139,7 @@ test("renderPnl shows 'no data' placeholder when pnl is null", async () => {
 
 test("WS delta after initial REST snapshot updates state.pnl (simulated end-to-end)", async () => {
   const s = await freshState();
-  // 1) REST seed (GET /pnl/today wired in app.js via state.applyPnlSnapshot).
+  // 1) REST seed (GET /api/pnl/today wired in app.js via state.applyPnlSnapshot).
   s.applyPnlSnapshot({
     realized: [], unrealized: [], totalRealized: 0, totalUnrealized: 0,
   });
@@ -157,7 +157,7 @@ test("WS delta after initial REST snapshot updates state.pnl (simulated end-to-e
   assert.equal(p.unrealized[0].position, 100);
 });
 
-// P1 regression. The REST /pnl/today refresh issues a request and
+// P1 regression. The REST /api/pnl/today refresh issues a request and
 // awaits; if a WS delta lands on the pnl.me channel BEFORE the REST
 // promise resolves, the (older) REST payload must NOT clobber the
 // (newer) WS state. Guarded by the monotonic pnl epoch — the REST

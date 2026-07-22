@@ -156,7 +156,7 @@ login_token() {
     curl -fsS --max-time 5 \
         -H 'Content-Type: application/json' \
         -d "{\"username\":\"${TRADING_USER}\",\"password\":\"${TRADING_PASSWORD}\"}" \
-        "${TRADING_BASE_URL}/auth/login" \
+        "${TRADING_BASE_URL}/api/auth/login" \
         | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])'
 }
 
@@ -166,7 +166,7 @@ submit_order() {
         -H "Authorization: Bearer ${token}" \
         -H 'Content-Type: application/json' \
         -d "{\"symbol\":\"PETR4\",\"side\":\"${side}\",\"type\":\"Limit\",\"quantity\":100,\"price\":${price}}" \
-        "${TRADING_BASE_URL}/orders" \
+        "${TRADING_BASE_URL}/api/orders" \
         | python3 -c 'import json,sys; print(json.load(sys.stdin)["clOrdId"])'
 }
 
@@ -178,7 +178,7 @@ assert_post_recovery_trade() {
     sell="$(submit_order "$token" Sell "$price")"
     deadline=$((SECONDS + 30))
     while (( SECONDS < deadline )); do
-        orders="$(curl -fsS --max-time 5 -H "Authorization: Bearer ${token}" "${TRADING_BASE_URL}/orders")"
+        orders="$(curl -fsS --max-time 5 -H "Authorization: Bearer ${token}" "${TRADING_BASE_URL}/api/orders")"
         if BUY="$buy" SELL="$sell" python3 -c '
 import json,os,sys
 orders=json.load(sys.stdin)
@@ -391,8 +391,8 @@ scenario_network_partition() {
         return 1
     fi
     # Pass-1 review (#326) P2. End-to-end "no duplicate fills in
-    # projection" requires authenticated /orders submission against
-    # a seed user + observation of `/fills/{id}/touch` and is
+    # projection" requires authenticated /api/orders submission against
+    # a seed user + observation of `/api/fills/{id}/touch` and is
     # environment-specific (seed credentials, listed symbols).
     # Drive that flow externally and feed the pre/post snapshots via
     # CHAOS_PRE_FILL_TOUCH / CHAOS_POST_FILL_TOUCH; when both are

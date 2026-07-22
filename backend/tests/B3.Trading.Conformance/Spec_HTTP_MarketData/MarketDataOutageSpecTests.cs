@@ -176,12 +176,12 @@ public class MarketDataOutageSpecTests
 
             foreach (var openOrder in cancelableOrders)
             {
-                using var cancel = new HttpRequestMessage(HttpMethod.Delete, $"/orders/{openOrder.ClOrdId}");
+                using var cancel = new HttpRequestMessage(HttpMethod.Delete, $"/api/orders/{openOrder.ClOrdId}");
                 cancel.Headers.Authorization = auth;
                 var resp = await http.SendAsync(cancel);
                 Assert.True(
                     resp.StatusCode is HttpStatusCode.NoContent or HttpStatusCode.NotFound or HttpStatusCode.Conflict,
-                    $"DELETE /orders/{openOrder.ClOrdId} expected 204/404/409 while clearing {symbol}, got {(int)resp.StatusCode}: {await resp.Content.ReadAsStringAsync()}");
+                    $"DELETE /api/orders/{openOrder.ClOrdId} expected 204/404/409 while clearing {symbol}, got {(int)resp.StatusCode}: {await resp.Content.ReadAsStringAsync()}");
             }
 
             var deadline = DateTimeOffset.UtcNow + TradeTimeout;
@@ -244,7 +244,7 @@ public class MarketDataOutageSpecTests
         int? lastFirmCount = null;
         while (DateTimeOffset.UtcNow < deadline)
         {
-            using var req = new HttpRequestMessage(HttpMethod.Get, "/admin/firms");
+            using var req = new HttpRequestMessage(HttpMethod.Get, "/api/admin/firms");
             req.Headers.Authorization = auth;
             var resp = await http.SendAsync(req);
             if (resp.IsSuccessStatusCode)
@@ -277,7 +277,7 @@ public class MarketDataOutageSpecTests
         decimal price,
         string side)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Post, "/orders")
+        using var req = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
         {
             Headers = { Authorization = auth },
             Content = JsonContent.Create(new
@@ -293,14 +293,14 @@ public class MarketDataOutageSpecTests
         var resp = await http.SendAsync(req);
         var body = await resp.Content.ReadAsStringAsync();
         Assert.True(resp.StatusCode == HttpStatusCode.Accepted,
-            $"{side} POST /orders expected 202 Accepted, got {(int)resp.StatusCode}: {body}");
+            $"{side} POST /api/orders expected 202 Accepted, got {(int)resp.StatusCode}: {body}");
 
         var json = JsonDocument.Parse(body).RootElement;
         if (json.TryGetProperty("status", out var statusProp))
         {
             var status = statusProp.GetString();
             Assert.True(!string.Equals(status, "Rejected", StringComparison.OrdinalIgnoreCase),
-                $"{side} POST /orders was risk-rejected before reaching matching: {body}");
+                $"{side} POST /api/orders was risk-rejected before reaching matching: {body}");
         }
 
         return ulong.Parse(json.GetProperty("clOrdId").GetString()!);
@@ -334,7 +334,7 @@ public class MarketDataOutageSpecTests
         AuthenticationHeaderValue auth,
         ulong clOrdId)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Get, "/orders");
+        using var req = new HttpRequestMessage(HttpMethod.Get, "/api/orders");
         req.Headers.Authorization = auth;
         var resp = await http.SendAsync(req);
         resp.EnsureSuccessStatusCode();
@@ -364,7 +364,7 @@ public class MarketDataOutageSpecTests
         AuthenticationHeaderValue auth,
         string symbol)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Get, "/orders");
+        using var req = new HttpRequestMessage(HttpMethod.Get, "/api/orders");
         req.Headers.Authorization = auth;
         var resp = await http.SendAsync(req);
         resp.EnsureSuccessStatusCode();
@@ -399,7 +399,7 @@ public class MarketDataOutageSpecTests
         string symbol)
     {
         using var req = new HttpRequestMessage(
-            HttpMethod.Get, $"/admin/marketdata/reference-prices?symbols={Uri.EscapeDataString(symbol)}");
+            HttpMethod.Get, $"/api/admin/marketdata/reference-prices?symbols={Uri.EscapeDataString(symbol)}");
         req.Headers.Authorization = auth;
         var resp = await http.SendAsync(req);
         resp.EnsureSuccessStatusCode();
