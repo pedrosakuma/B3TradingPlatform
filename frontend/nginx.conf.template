@@ -72,6 +72,8 @@ http {
         ~^/policy(/|$)                       1;
         ~^/algo(/|$)                         1;
         ~^/admin(/|$)                        1;
+        ~^/balance(/|$)                      1;
+        ~^/sub-accounts(/|$)                 1;
         ~^/executions(/|$)                   1;
         ~^/pnl(/|$)                          1;
         ~^/statement(/|$)                    1;
