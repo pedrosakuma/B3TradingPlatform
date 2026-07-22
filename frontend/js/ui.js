@@ -2218,8 +2218,7 @@ export function renderForSlice(slice) {
   // own auto-pick-first symbol (state.js setWatchlist), which used to
   // bypass this and leave the readiness banner stuck on "Select symbol".
   if (slice === "selectedSymbol" || slice === "all") {
-    syncTicketSymbolWithSelection();
-    renderTradingReadiness();
+    syncSelectedSymbolUi();
   }
   if (slice === "watchlist" || slice === "selectedSymbol" || slice === "book" || slice === "all") renderDob();
   if (slice === "watchlist" || slice === "selectedSymbol" || slice === "chartResolution" || slice === "candles" || slice === "all") scheduleChartRender();
@@ -2700,6 +2699,13 @@ export function renderTicketPhaseCoupling() {
 // are the worst class of mistake we can prevent here. Runs on every
 // selectedSymbol change (see renderForSlice) so it stays in sync whether
 // the symbol came from a manual pick or the watchlist's auto-pick-first.
+//
+// Also exported as syncSelectedSymbolUi() and called directly from
+// app.js's handleSelectSymbol: state.setSelectedSymbol() is a no-op (no
+// "selectedSymbol" notify) when the trader re-picks the symbol that's
+// already selected (e.g. clicking the same watchlist/heatmap cell after
+// submitting an order cleared #ticket-symbol), so relying solely on the
+// slice notification would regress that same-symbol-reselect case.
 function syncTicketSymbolWithSelection() {
   const symbol = getState().selectedSymbol;
   if (!symbol) return;
@@ -2710,6 +2716,11 @@ function syncTicketSymbolWithSelection() {
     sym.value = symbol;
     _lastAutoFilledTicketSymbol = symbol;
   }
+}
+
+export function syncSelectedSymbolUi() {
+  syncTicketSymbolWithSelection();
+  renderTradingReadiness();
 }
 
 export function renderTradingReadiness() {

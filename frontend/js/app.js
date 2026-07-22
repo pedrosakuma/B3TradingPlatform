@@ -1202,11 +1202,15 @@ function handleSelectSymbol(symbol) {
   // Single global selector drives DOB, chart and tape. The DOB reads
   // the per-symbol entry from state.book that mdWorker already keeps
   // up to date via MBP — no public-channel resync is required here.
-  // Ticket-symbol auto-fill + Trading Readiness re-render live in
-  // ui.js's renderForSlice (#694) so the watchlist's own auto-pick-first
-  // path (state.js setWatchlist), which sets selectedSymbol directly
-  // without going through this handler, stays in sync too.
   state.setSelectedSymbol(symbol || null);
+  // #694: state.setSelectedSymbol() is a no-op (no "selectedSymbol"
+  // notify) when re-picking the symbol that's already selected — e.g.
+  // clicking the same watchlist/heatmap cell after submitting an order
+  // cleared #ticket-symbol. ui.js's renderForSlice covers every other
+  // path (including the watchlist's own auto-pick-first, which bypasses
+  // this handler entirely), but this same-symbol case needs an explicit
+  // call here too since no notification fires for it.
+  ui.syncSelectedSymbolUi();
 }
 
 function onMdWorkerMessage(msg) {

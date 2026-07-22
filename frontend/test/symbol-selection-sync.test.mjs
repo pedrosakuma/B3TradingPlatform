@@ -83,3 +83,20 @@ test("auto-fill never clobbers a symbol the trader is actively editing", () => {
   assert.equal(state.getState().selectedSymbol, "PETR4");
   assert.equal(ticketEl.value, "ITUB4", "manual edit must not be overwritten");
 });
+
+test("re-picking the already-selected symbol refills a cleared #ticket-symbol", () => {
+  // state.setSelectedSymbol() is a no-op (no "selectedSymbol" notify)
+  // when the symbol doesn't actually change — e.g. clicking the same
+  // watchlist/heatmap cell again right after an order submission cleared
+  // #ticket-symbol. app.js's handleSelectSymbol must not rely solely on
+  // the slice notification for this case.
+  state.setSelectedSymbol("PETR4");
+  const ticketEl = document.getElementById("ticket-symbol");
+  ticketEl.value = ""; // simulates ui.clearTicket() after a successful submit
+
+  // Exercises the exact call app.js's handleSelectSymbol makes.
+  state.setSelectedSymbol("PETR4"); // no-op: already selected, no notify
+  ui.syncSelectedSymbolUi();
+
+  assert.equal(ticketEl.value, "PETR4");
+});
