@@ -31,11 +31,20 @@ function readIsApiWhitelist() {
 
   const prefixes = new Set();
   for (const line of mapMatch[1].split("\n")) {
-    // Lines look like: `~^/balance(/|$)                      1;`
-    const m = line.match(/~\^\/([a-zA-Z0-9_-]+)/);
+    // Only count *active* entries mapped to `1` (ignore comments, the
+    // `default 0;` line, and any future `0`-valued entries), e.g.:
+    //   ~^/balance(/|$)                      1;
+    const m = line.match(/^\s*~\^\/([a-zA-Z0-9_-]+)\([^)]*\)\s+1;\s*$/);
     if (m) prefixes.add(m[1]);
   }
   return prefixes;
+}
+
+// Extracts the first path segment out of a URL-path-shaped string literal,
+// e.g. `/statement/${dayKey}` -> "statement", `/statement` -> "statement".
+function firstSegment(literal) {
+  const m = literal.match(/^\/([a-zA-Z0-9_-]+)/);
+  return m ? m[1] : null;
 }
 
 function readBackendPrefixesCalledFromProtocol() {
@@ -43,10 +52,60 @@ function readBackendPrefixesCalledFromProtocol() {
     path.join(frontendRoot, "js", "protocol.js"),
     "utf8",
   );
-  // Matches both `${backend}/foo` (template literals) and `${backend}/foo/`.
-  const matches = protocol.matchAll(/\$\{backend\}\/([a-zA-Z0-9_-]+)/g);
   const prefixes = new Set();
-  for (const m of matches) prefixes.add(m[1]);
+
+  // Case A: a literal path directly following the `${backend}` interpolation,
+  // e.g. fetch(`${backend}/orders/history`, ...).
+  for (const m of protocol.matchAll(/\$\{backend\}\/([a-zA-Z0-9_-]+)/g)) {
+    prefixes.add(m[1]);
+  }
+
+  // Case B: new URL("/some/path", backend) — the two-arg base-URL form,
+  // e.g. new URL("/ws/dropcopy", backend).
+  for (const m of protocol.matchAll(
+    /new URL\(\s*[`"']([^`"']+)[`"']\s*,\s*backend\s*\)/g,
+  )) {
+    const seg = firstSegment(m[1]);
+    if (seg) prefixes.add(seg);
+  }
+
+  // Case C: `${backend}${someVar}` — the path is built in a separate
+  // variable (often a ternary picking between two equivalent-prefix
+  // literals), e.g.:
+  //   const path = dayKey ? `/statement/${...}` : `/statement`;
+  //   fetch(`${backend}${path}`, ...)
+  // Resolve each referenced variable back to its nearest preceding
+  // declaration and pull every path-shaped literal out of it.
+  for (const m of protocol.matchAll(/\$\{backend\}\$\{([a-zA-Z_$][\w$]*)\}/g)) {
+    const varName = m[1];
+    const declRe = new RegExp(`\\b(?:const|let)\\s+${varName}\\s*=`);
+    const declMatch = declRe.exec(protocol);
+    assert.ok(
+      declMatch,
+      `expected to find a "const/let ${varName} = ..." declaration feeding ` +
+        `\${backend}\${${varName}}, so its literal(s) can be checked`,
+    );
+    const declEnd = protocol.indexOf(";", declMatch.index);
+    const declSnippet = protocol.slice(
+      declMatch.index,
+      declEnd === -1 ? protocol.length : declEnd + 1,
+    );
+    const literals = declSnippet.matchAll(/[`"']\/[a-zA-Z][a-zA-Z0-9_-]*/g);
+    let found = false;
+    for (const lit of literals) {
+      const seg = firstSegment(lit[0].slice(1));
+      if (seg) {
+        prefixes.add(seg);
+        found = true;
+      }
+    }
+    assert.ok(
+      found,
+      `expected at least one "/path" literal inside the "${varName}" ` +
+        `declaration referenced via \${backend}\${${varName}}`,
+    );
+  }
+
   return prefixes;
 }
 
