@@ -18,7 +18,7 @@ import { defaultBackend, login, signup, submitOrder, cancelOrder, modifyOrder, g
          getAdminRiskLimits, reloadAdminRisk, getReferencePrices,
          mutateCash, setOrderStale } from "./protocol.js";
 import { readPublicConfig, validateEntraConfig } from "./authConfig.js";
-import { createEntraAuth, isInteractionRequiredError } from "./api/auth.js";
+import { createEntraAuth, isInteractionRequiredError } from "./auth.js";
 import {
   readInternalSession,
   writeInternalSession,
