@@ -545,6 +545,15 @@ tr.row-stale > td.row-stale-actions { opacity: 1; }
 .view-toggle button:not(.active):hover { color: var(--text); }
 
 .admin-view { display: flex; flex-direction: column; height: 100vh; overflow: auto; padding: var(--space-6); gap: var(--space-6); }
+/* #691: `.panel` (shared with the trading grid) sets `min-height: 0` so
+ * its content can shrink/scroll inside a height-constrained grid cell.
+ * The Admin console instead stacks many `.panel.admin-panel` sections
+ * inside a scrollable flex column — with the default `flex-shrink: 1`
+ * those sections get squeezed below their own content height once the
+ * stack exceeds 100vh, and the overflowing content visually spills into
+ * the next section. Pin Admin sections to their natural height so the
+ * `.admin-view` scrollbar handles overflow instead of the flex layout. */
+.admin-view > .panel { flex-shrink: 0; }
 .admin-subbar {
   display: flex; justify-content: space-between; align-items: center;
   padding: .5rem 0; border-bottom: 1px solid var(--border);
