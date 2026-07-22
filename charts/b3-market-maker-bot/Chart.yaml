@@ -5,7 +5,9 @@ description: >-
   evolved from the simulator-bot in #134) that submits one resting bid +
   one resting ask per configured instrument against matching-platform, so
   sandbox/demo instruments always have a market to trade against. Ships a
-  single-replica Deployment with a small RWO PVC for its per-session
+  single-replica StatefulSet with a small RWO PVC (via
+  volumeClaimTemplates, so it survives helm uninstall/reinstall) for its
+  per-session
   ClOrdID watermark state; no Service/ports (it's an outbound-only FIXP +
   WebSocket client, nothing connects to it).
 type: application

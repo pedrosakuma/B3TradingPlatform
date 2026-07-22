@@ -214,7 +214,7 @@ merge to `main` — set `MARKET_MAKER_BOT_IMAGE=ghcr.io/pedrosakuma/b3-market-ma
 Kubernetes deploy of this same overlay is available as the
 [`charts/b3-market-maker-bot`](../charts/b3-market-maker-bot) Helm chart
 (published to `oci://ghcr.io/pedrosakuma/charts/b3-market-maker-bot`,
-see `charts/README.md`) — a single-replica Deployment + small RWO PVC for
+see `charts/README.md`) — a single-replica StatefulSet + small RWO PVC for
 the bot's FIXP session-state watermark, no Service/ports (outbound-only).
 
 ### Safety

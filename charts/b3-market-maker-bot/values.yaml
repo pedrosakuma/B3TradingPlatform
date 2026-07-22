@@ -15,7 +15,7 @@ image:
   digest: ""
   pullPolicy: IfNotPresent
 
-# Hardcoded to 1 in templates/deployment.yaml — the bot's FIXP session
+# Hardcoded to 1 in templates/statefulset.yaml — the bot's FIXP session
 # (sessionId/sessionVerId below) is single-writer against matching-platform,
 # same posture as b3-trading-host's WAL. This value exists only so
 # operators can't accidentally scale it via `helm upgrade --set
