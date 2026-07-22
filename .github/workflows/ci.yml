@@ -122,7 +122,8 @@ jobs:
             frontend/test/reconnect-preserves-rest.test.mjs \
             frontend/test/deep-link-subscription.test.mjs \
             frontend/test/operations-contracts.test.mjs \
-            frontend/test/operations-ui-states.test.mjs
+            frontend/test/operations-ui-states.test.mjs \
+            frontend/test/self-deposit.test.mjs
 
   frontend-a11y:
     # Fase 5 follow-up (#407). axe-core + Lighthouse CI gate against

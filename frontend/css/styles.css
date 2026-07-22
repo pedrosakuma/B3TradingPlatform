@@ -113,6 +113,25 @@ body {
   color: #d97a4a;
   border-color: rgba(217,122,74,.35);
 }
+.self-deposit {
+  display: inline-flex; align-items: center; gap: .35rem;
+  flex-wrap: wrap;
+}
+.self-deposit-form {
+  display: inline-flex; align-items: center; gap: .35rem;
+}
+.self-deposit-form input {
+  width: 8.5rem;
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: .2rem .45rem;
+  font-size: .85rem;
+  font-variant-numeric: tabular-nums;
+}
+.self-deposit-feedback {
+  flex-basis: 100%;
+  margin: 0;
+}
 .symbol-select {
   display: inline-flex; align-items: center; gap: .35rem;
   font-size: .72rem; color: var(--muted); text-transform: uppercase;

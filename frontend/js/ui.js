@@ -123,6 +123,7 @@ let onKeyboardCancel = () => {};
 let onSelectChartResolution = () => {};
 let onSelectSymbol = () => {};
 let onToggleTapeShowAll = () => {};
+let onSelfDeposit = () => {};
 
 export function setHandlers(handlers) {
   onSubmitOrder    = handlers.onSubmitOrder    ?? onSubmitOrder;
@@ -139,6 +140,7 @@ export function setHandlers(handlers) {
   onSelectChartResolution = handlers.onSelectChartResolution ?? onSelectChartResolution;
   onSelectSymbol      = handlers.onSelectSymbol      ?? onSelectSymbol;
   onToggleTapeShowAll = handlers.onToggleTapeShowAll ?? onToggleTapeShowAll;
+  onSelfDeposit       = handlers.onSelfDeposit       ?? onSelfDeposit;
 }
 
 export function showLogin() {
@@ -1313,6 +1315,18 @@ export function bindUi() {
     });
   }
 
+  const selfDepositToggle = $("self-deposit-toggle");
+  const selfDepositForm = $("self-deposit-form");
+  if (selfDepositToggle && selfDepositForm) {
+    selfDepositToggle.addEventListener("click", () => setSelfDepositExpanded(selfDepositForm.hidden));
+  }
+  if (selfDepositForm) {
+    selfDepositForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      onSelfDeposit({ amount: $("self-deposit-amount")?.value ?? "" });
+    });
+  }
+
   // Blotter filter: text + status select + working-only toggle (#342).
   // Persisted via app.js.
   const filterText = $("blotter-filter-text");
@@ -1897,12 +1911,14 @@ function renderBalance() {
     // Logged out — hide the badge entirely so the topbar collapses
     // back to the login layout.
     el.hidden = true;
+    setSelfDepositVisible(false);
     el.textContent = "";
     el.classList.remove("balance-negative");
     return;
   }
   el.hidden = false;
   const bal = st.balance;
+  setSelfDepositVisible(!!bal?.selfDepositEnabled);
   if (bal == null || !Number.isFinite(bal.available)) {
     el.textContent = "R$ —";
     el.classList.remove("balance-negative");
@@ -1912,6 +1928,51 @@ function renderBalance() {
   el.textContent = formatCurrency(bal.available);
   el.classList.toggle("balance-negative", bal.available < 0);
   el.title = `Available balance: ${formatCurrency(bal.available)}`;
+}
+
+export function setSelfDepositVisible(visible) {
+  const wrap = $("self-deposit");
+  if (!wrap) return;
+  wrap.hidden = !visible;
+  if (visible) return;
+  setSelfDepositExpanded(false);
+  setSelfDepositFeedback(null);
+  setSelfDepositSubmitting(false);
+  clearSelfDepositAmount();
+}
+
+export function setSelfDepositExpanded(expanded) {
+  const toggle = $("self-deposit-toggle");
+  const form = $("self-deposit-form");
+  if (!toggle || !form) return;
+  form.hidden = !expanded;
+  toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+  if (expanded) $("self-deposit-amount")?.focus?.({ preventScroll: true });
+}
+
+export function setSelfDepositSubmitting(submitting) {
+  const amount = $("self-deposit-amount");
+  const submit = $("self-deposit-submit");
+  const toggle = $("self-deposit-toggle");
+  if (amount) amount.disabled = !!submitting;
+  if (submit) {
+    submit.disabled = !!submitting;
+    submit.textContent = submitting ? "Depositing…" : "Deposit";
+  }
+  if (toggle) toggle.disabled = !!submitting;
+}
+
+export function clearSelfDepositAmount() {
+  const amount = $("self-deposit-amount");
+  if (amount) amount.value = "";
+}
+
+export function setSelfDepositFeedback(message, kind = "info") {
+  const el = $("self-deposit-feedback");
+  if (!el) return;
+  el.hidden = !message;
+  el.textContent = message ?? "";
+  el.className = `feedback self-deposit-feedback ${kind === "ok" ? "ok" : kind === "error" ? "error" : ""}`;
 }
 
 function applyCurrentView(view) {

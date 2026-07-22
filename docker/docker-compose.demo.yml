@@ -31,6 +31,9 @@ services:
       # health.exchange.erInjectionEnabled — no DEMO_MODE override needed.
       Trading__Exchange__Mode: Mock
       Trading__Exchange__AllowErInjection: "true"
+      Trading__Sandbox__AllowSelfCashDeposit: "true"
+      Trading__Sandbox__MaxDepositAmount: "1000000.00"
+      Trading__Sandbox__MaxBalanceAfterDeposit: "10000000.00"
 
       # User-bot 1 (default seed; submits orders).
       Trading__Auth__Users__1__Username: ${DEMO_BOT_A_USER:-bot-clientA}

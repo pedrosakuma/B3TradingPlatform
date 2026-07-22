@@ -48,12 +48,14 @@ public class SelfDepositEndpointTests
         var client = await factory.CreateAuthedClientAsync();
 
         var before = await client.GetFromJsonAsync<BalanceDto>("/balance");
+        Assert.True(before!.SelfDepositEnabled);
 
         var resp = await client.PostAsJsonAsync("/balance/deposit", new { amount = 500m });
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
         var after = await client.GetFromJsonAsync<BalanceDto>("/balance");
         Assert.Equal(before!.Available + 500m, after!.Available);
+        Assert.True(after.SelfDepositEnabled);
     }
 
     [Fact]

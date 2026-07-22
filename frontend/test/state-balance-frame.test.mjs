@@ -20,44 +20,50 @@ async function freshState() {
 
 test('applyBalanceFrame stores Available from a PascalCase wire frame', async () => {
   const s = await freshState();
-  s.applyBalanceFrame({ Available: 1234.56 });
-  assert.deepEqual(s.getState().balance, { available: 1234.56 });
+  s.applyBalanceFrame({ Available: 1234.56, SelfDepositEnabled: true });
+  assert.deepEqual(s.getState().balance, { available: 1234.56, selfDepositEnabled: true });
 });
 
 test('applyBalanceFrame accepts camelCase `available` too', async () => {
   const s = await freshState();
-  s.applyBalanceFrame({ available: 99.99 });
-  assert.deepEqual(s.getState().balance, { available: 99.99 });
+  s.applyBalanceFrame({ available: 99.99, selfDepositEnabled: true });
+  assert.deepEqual(s.getState().balance, { available: 99.99, selfDepositEnabled: true });
 });
 
 test('applyBalanceFrame supports string-encoded decimals (defensive)', async () => {
   const s = await freshState();
-  s.applyBalanceFrame({ Available: '500.25' });
-  assert.deepEqual(s.getState().balance, { available: 500.25 });
+  s.applyBalanceFrame({ Available: '500.25', SelfDepositEnabled: false });
+  assert.deepEqual(s.getState().balance, { available: 500.25, selfDepositEnabled: false });
 });
 
 test('applyBalanceFrame treats null / missing / NaN as a no-op (keeps prior value)', async () => {
   const s = await freshState();
-  s.applyBalanceFrame({ Available: 100 });
+  s.applyBalanceFrame({ Available: 100, SelfDepositEnabled: true });
   s.applyBalanceFrame(null);
   s.applyBalanceFrame({ Available: null });
   s.applyBalanceFrame({ Available: 'not-a-number' });
-  assert.deepEqual(s.getState().balance, { available: 100 });
+  assert.deepEqual(s.getState().balance, { available: 100, selfDepositEnabled: true });
 });
 
 test('applyBalanceFrame replaces wholesale on each frame (snapshot + delta share shape)', async () => {
   const s = await freshState();
-  s.applyBalanceFrame({ Available: 100 });
-  s.applyBalanceFrame({ Available: 87.66 }); // post-fee delta
+  s.applyBalanceFrame({ Available: 100, SelfDepositEnabled: true });
+  s.applyBalanceFrame({ Available: 87.66 }); // delta may omit static capability flags
   s.applyBalanceFrame({ Available: 0 });
-  assert.deepEqual(s.getState().balance, { available: 0 });
+  assert.deepEqual(s.getState().balance, { available: 0, selfDepositEnabled: true });
 });
 
 test('clearAll drops the balance slice (logout / WS reconnect boundary)', async () => {
   const s = await freshState();
-  s.applyBalanceFrame({ Available: 7500 });
+  s.applyBalanceFrame({ Available: 7500, SelfDepositEnabled: true });
   s.clearAll();
   assert.equal(s.getState().balance, null);
+});
+
+test('applyBalanceFrame defaults missing self-deposit capability to false on the first frame', async () => {
+  const s = await freshState();
+  s.applyBalanceFrame({ Available: 42 });
+  assert.deepEqual(s.getState().balance, { available: 42, selfDepositEnabled: false });
 });
 
 test('applyBalanceFrame notifies the "balance" slice', async () => {

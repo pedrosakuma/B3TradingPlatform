@@ -1,7 +1,7 @@
 // App entry point: wires login → worker → state → UI together.
 
 import { defaultBackend, login, signup, submitOrder, cancelOrder, modifyOrder, getAdminFirms,
-         validateSession, getRiskPolicy,
+         validateSession, getRiskPolicy, selfDeposit,
          getKillStatus, killFirm, reviveFirm, killEndClient, reviveEndClient,
          getHaltStatus, haltSymbol, resumeSymbol,
          runEod,
@@ -59,6 +59,7 @@ import { applyRiskPolicyFetch } from "./riskPolicy.js";
 import { readMdConnectionConfig, readMdDisplayConfig, writeMdConfig, clearMdConfig } from "./marketDataSettings.js";
 import { classifyAuthResponse, requireEnrollmentResponse } from "./authJourney.js";
 import { bindFirstOrderOnboarding, markFirstOrderAccepted } from "./onboarding.js";
+import { deriveSelfDepositFeedback, parseSelfDepositAmount } from "./selfDeposit.js";
 
 const BLOTTER_FILTER_KEY = "b3tp.blotter.filter";
 const DEFAULT_WATCHLIST = ["PETR4", "VALE3"];
@@ -180,6 +181,7 @@ async function init() {
     onSelectChartResolution: state.setChartResolution,
     onSelectSymbol: handleSelectSymbol,
     onToggleTapeShowAll: state.setTapeShowAll,
+    onSelfDeposit: handleSelfDeposit,
   });
   adminUi.setAdminHandlers({
     onToggleFirm:      handleToggleFirm,
@@ -1614,6 +1616,7 @@ function logout({ broadcast = true, redirectEntra = true, clearEntraCache = fals
   operationsUi.resetOperations();
   state.clearMarketData();
   state.setWatchlist([]);
+  ui.setSelfDepositVisible(false);
   ui.showLogin();
   showAuthEntry();
   if (broadcast) logoutChannel?.broadcast();
@@ -2030,6 +2033,45 @@ async function handleReloadRisk() {
 async function handleCashMutation(payload) {
   const result = await mutateCash(session.backend, session.token, payload);
   return `${result.kind} accepted. Available ${result.currency}: ${result.available}.`;
+}
+
+async function handleSelfDeposit({ amount }) {
+  if (!session) return;
+  const parsed = parseSelfDepositAmount(amount);
+  if (!parsed.valid) {
+    const feedback = deriveSelfDepositFeedback({ kind: "validation", message: parsed.message });
+    ui.setSelfDepositFeedback(feedback.message, feedback.tone);
+    return;
+  }
+
+  const captured = session;
+  const pending = deriveSelfDepositFeedback({ kind: "submitted" });
+  ui.setSelfDepositFeedback(pending.message, pending.tone);
+  ui.setSelfDepositSubmitting(true);
+  try {
+    const result = await selfDeposit(captured.backend, captured.token, parsed.amount);
+    if (session !== captured) return;
+    state.applyBalanceFrame({ available: result.available });
+    ui.clearSelfDepositAmount();
+    ui.setSelfDepositExpanded(false);
+    const feedback = deriveSelfDepositFeedback({
+      kind: "success",
+      amount: parsed.amount,
+      available: result.available,
+    });
+    ui.setSelfDepositFeedback(feedback.message, feedback.tone);
+  } catch (err) {
+    if (session !== captured) return;
+    if (err?.status === 401) { logout(); return; }
+    if (err?.status === 404) {
+      ui.setSelfDepositVisible(false);
+      return;
+    }
+    const feedback = deriveSelfDepositFeedback({ kind: "error", error: err });
+    ui.setSelfDepositFeedback(feedback.message, feedback.tone);
+  } finally {
+    if (session === captured) ui.setSelfDepositSubmitting(false);
+  }
 }
 
 async function handleSetOrderStale(payload) {

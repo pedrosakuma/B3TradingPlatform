@@ -35,6 +35,7 @@ public class BalanceEndpointTests : IClassFixture<TestAppFactory>
 
         Assert.NotNull(body);
         Assert.Equal(0m, body!.Available);
+        Assert.False(body.SelfDepositEnabled);
     }
 
     [Fact]
@@ -67,5 +68,21 @@ public class BalanceEndpointTests : IClassFixture<TestAppFactory>
 
         var body = await client.GetFromJsonAsync<BalanceDto>("/balance");
         Assert.Equal(12345.67m, body!.Available);
+    }
+
+    [Fact]
+    public async Task SelfDepositFlag_ReflectsSandboxOption()
+    {
+        var overrides = new Dictionary<string, string?>
+        {
+            ["Trading:Sandbox:AllowSelfCashDeposit"] = "true",
+        };
+        await using var factory = TestAppFactory.WithOverrides(overrides);
+        var client = await factory.CreateAuthedClientAsync();
+
+        var body = await client.GetFromJsonAsync<BalanceDto>("/balance");
+
+        Assert.NotNull(body);
+        Assert.True(body!.SelfDepositEnabled);
     }
 }
