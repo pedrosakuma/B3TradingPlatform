@@ -541,7 +541,7 @@ jobs:
           token="$(curl --fail --silent \
             -H 'Content-Type: application/json' \
             -d '{"username":"alice","password":"wonderland"}' \
-            http://127.0.0.1:5000/auth/login \
+            http://127.0.0.1:5000/api/auth/login \
             | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
           created="$(curl --fail --silent \
             -H "Authorization: Bearer $token" \
