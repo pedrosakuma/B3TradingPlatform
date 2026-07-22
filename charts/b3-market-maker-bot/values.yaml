@@ -1,0 +1,123 @@
+# Default values for b3-market-maker-bot.
+# Mirrors the docker-compose.market-maker.yml wiring (env prefix
+# MarketMaker__*, see MarketMakerBotOptions.cs), parameterized so a single
+# chart serves every environment. See charts/README.md and #683.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/pedrosakuma/b3-market-maker-bot
+  # Defaults to .Chart.AppVersion when empty.
+  tag: ""
+  # Optional digest pin (e.g. "sha256:05f6a7f6...").
+  # When set, the image reference becomes "repository@digest" and `tag` is ignored.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# Hardcoded to 1 in templates/deployment.yaml — the bot's FIXP session
+# (sessionId/sessionVerId below) is single-writer against matching-platform,
+# same posture as b3-trading-host's WAL. This value exists only so
+# operators can't accidentally scale it via `helm upgrade --set
+# replicaCount=N` without editing the chart.
+replicaCount: 1
+
+# The image runs as non-root uid/gid 10001 (bot). The mounted PVC roots as
+# root:root, so fsGroup is REQUIRED — without it the container crash-loops
+# trying to create/write the session-state file under
+# persistence.mountPath (same failure mode documented on b3-trading-host's
+# securityContext, #568 M6).
+securityContext:
+  fsGroup: 10001
+
+persistence:
+  # Small: this only holds the SDK's FileSessionStateStore watermark file,
+  # not a WAL. Bump if the bot's own state ever grows meaningfully.
+  storageClassName: managed-csi-premium
+  size: 256Mi
+
+# ── FIXP session against matching-platform ────────────────────────────────
+# See docker/docker-compose.market-maker.yml for the canonical docker-side
+# values (session 10102 — NOT 10101, which is trading-host's FIRM01
+# session) and matching-platform's sessions[] / firms[] config that these
+# MUST line up with.
+session:
+  endpoint: matching-platform:9876
+  sessionId: 10102
+  sessionVerId: 1
+  enteringFirm: 100
+  # Verbatim JSON credential — matching's FixpSession parses this as
+  # {auth_type, username, access_key}. Dev-shaped by default (matches
+  # docker-compose); kept as a plain value like b3-trading-host's
+  # exchange.firms[].accessKey (not Key Vault-backed today — this is a
+  # per-session wire credential, not one of the app's boot-guarded
+  # secrets). Override per-environment; do not commit a real key here
+  # (AGENTS.md: never inline secrets in values.yaml for anything that IS
+  # meant to be secret-managed — track upgrading this to a K8s Secret
+  # reference as a follow-up if a real deploy needs it).
+  accessKey: '{"auth_type":"basic","username":"10102","access_key":"dev-key-2"}'
+  senderLocation: SP
+  enteringTrader: MM
+
+# ── Market data (best-effort quote anchor) ────────────────────────────────
+# Same feed b3-trading-host subscribes to. Optional: if unset, or the feed
+# can't connect, the bot quotes off each instrument's static refPrice.
+marketData:
+  wsUrl: ws://marketdata:8080/ws
+
+# ── Behaviour ──────────────────────────────────────────────────────────────
+behaviour:
+  # Defensive safety net only — the primary re-quote path is event-driven
+  # (fills/cancels/rejects), see MarketMakerWorker.
+  reconcileInterval: "00:00:05"
+
+# ── Instruments (must match matching-platform's instruments-eqt.json) ─────
+instruments:
+  - symbol: PETR4
+    securityId: "900000000001"
+    refPrice: "30.00"
+    tickSize: "0.01"
+    lotSize: 100
+    quoteLots: 1
+    spreadTicks: 5
+  - symbol: VALE3
+    securityId: "900000000002"
+    refPrice: "70.00"
+    tickSize: "0.01"
+    lotSize: 100
+    quoteLots: 1
+    spreadTicks: 5
+  - symbol: ITUB4
+    securityId: "900000000003"
+    refPrice: "32.00"
+    tickSize: "0.01"
+    lotSize: 100
+    quoteLots: 1
+    spreadTicks: 5
+
+resources:
+  requests:
+    cpu: 25m
+    memory: 64Mi
+  limits:
+    memory: 128Mi
+
+# No probes/Service/ports: the bot is a pure outbound FIXP + WebSocket
+# client console app (no HTTP listener) — nothing connects to it, so there
+# is nothing to expose or health-check over HTTP. Kubernetes' default
+# "process alive" restart semantics (restartPolicy: Always) match
+# docker-compose's `restart: unless-stopped`.
+
+# NetworkPolicy denying all ingress — the bot never accepts inbound
+# connections (outbound-only to matching-platform:9876 and the marketdata
+# WS feed), so a default-deny-ingress rule here is pure hardening with no
+# behavioural cost. Disable if your cluster doesn't enforce NetworkPolicy
+# or you manage it out-of-band.
+networkPolicy:
+  enabled: true
+
+extraEnv: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

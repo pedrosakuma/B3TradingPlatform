@@ -1,0 +1,20 @@
+{{- if .Values.networkPolicy.enabled }}
+# market-maker-bot never accepts inbound connections — it's an
+# outbound-only FIXP client to matching-platform:9876 plus an outbound
+# WebSocket client to the marketdata feed. Deny all ingress; this chart
+# does not restrict egress today (same posture as the b3-trading-host and
+# b3-trading-frontend charts — see charts/README.md).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "b3-market-maker-bot.fullname" . }}-deny-ingress
+  labels:
+    {{- include "b3-market-maker-bot.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "b3-market-maker-bot.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress: []
+{{- end }}

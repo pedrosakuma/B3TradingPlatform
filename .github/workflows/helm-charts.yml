@@ -1,8 +1,9 @@
 name: Helm Charts
 
-# Publishes the two per-service Helm charts (b3-trading-host,
-# b3-trading-frontend) as OCI artifacts alongside the images built by
-# docker.yml, per the deploy topology RFC (#557) M3 / #568. b3deploy
+# Publishes the per-service Helm charts (b3-trading-host,
+# b3-trading-frontend, b3-market-maker-bot) as OCI artifacts alongside the
+# images built by docker.yml, per the deploy topology RFC (#557) M3 / #568
+# (extended to the market-maker bot per #683's follow-up). b3deploy
 # consumes them as `chart@version` + env values instead of hand-written
 # manifests.
 #
@@ -39,7 +40,7 @@ jobs:
     timeout-minutes: 10
     strategy:
       matrix:
-        chart: [b3-trading-host, b3-trading-frontend]
+        chart: [b3-trading-host, b3-trading-frontend, b3-market-maker-bot]
     steps:
       - uses: actions/checkout@v6
 
@@ -117,7 +118,7 @@ jobs:
     timeout-minutes: 10
     strategy:
       matrix:
-        chart: [b3-trading-host, b3-trading-frontend]
+        chart: [b3-trading-host, b3-trading-frontend, b3-market-maker-bot]
     steps:
       - uses: actions/checkout@v6
 
