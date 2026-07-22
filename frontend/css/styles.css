@@ -128,10 +128,6 @@ body {
   font-size: .85rem;
   font-variant-numeric: tabular-nums;
 }
-.self-deposit-feedback {
-  flex-basis: 100%;
-  margin: 0;
-}
 .symbol-select {
   display: inline-flex; align-items: center; gap: .35rem;
   font-size: .72rem; color: var(--muted); text-transform: uppercase;

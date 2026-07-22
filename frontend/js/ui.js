@@ -1973,12 +1973,41 @@ export function clearSelfDepositAmount() {
   if (amount) amount.value = "";
 }
 
-export function setSelfDepositFeedback(message, kind = "info") {
-  const el = $("self-deposit-feedback");
+// #696-followup. Self-deposit feedback used to be an inline <p> squeezed
+// into the crowded topbar next to the tabs/badges/logout — longer
+// messages ("Deposited R$ ... Available balance R$ ...") wrapped
+// awkwardly with almost no horizontal room. Now follows the same
+// transient-toast pattern as showWsErrorToast/showOrderToast: own slot
+// at the top of the shell (no layout shift when hidden), tone-based
+// coloring shared via the .order-toast CSS classes, auto-dismiss so a
+// stale success/error message doesn't linger indefinitely.
+const SELF_DEPOSIT_TOAST_MS = 6_000;
+let _selfDepositToastTimer = null;
+export function showSelfDepositToast(message, kind) {
+  const el = $("self-deposit-toast");
   if (!el) return;
-  el.hidden = !message;
-  el.textContent = message ?? "";
-  el.className = `feedback self-deposit-feedback ${kind === "ok" ? "ok" : kind === "error" ? "error" : ""}`;
+  if (!message) {
+    if (_selfDepositToastTimer) { clearTimeout(_selfDepositToastTimer); _selfDepositToastTimer = null; }
+    el.hidden = true;
+    el.textContent = "";
+    el.className = "order-toast";
+    return;
+  }
+  el.hidden = false;
+  el.textContent = message;
+  const cls = kind === "ok" ? "" : ["info", "warn", "error"].includes(kind) ? kind : "";
+  el.className = cls ? `order-toast ${cls}` : "order-toast";
+  if (_selfDepositToastTimer) clearTimeout(_selfDepositToastTimer);
+  _selfDepositToastTimer = setTimeout(() => {
+    _selfDepositToastTimer = null;
+    el.hidden = true;
+    el.textContent = "";
+    el.className = "order-toast";
+  }, SELF_DEPOSIT_TOAST_MS);
+}
+
+export function setSelfDepositFeedback(message, kind = "info") {
+  showSelfDepositToast(message, kind);
 }
 
 function applyCurrentView(view) {
