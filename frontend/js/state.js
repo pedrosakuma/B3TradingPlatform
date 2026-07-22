@@ -206,10 +206,13 @@ const state = {
   // the GET /balance projection (BalanceDto = { Available }) and is kept
   // fresh by the `balance.me` WS channel — snapshot on subscribe, delta
   // on every CashLedger mutation (fills, fees, opening-balance seed).
+  // #690 also carries whether self-service deposit is enabled in this
+  // environment, so the topbar can reveal/hide the control from the
+  // existing balance snapshot instead of probing POST /balance/deposit.
   // `null` until the first frame lands; the header widget renders an
   // "R$ —" placeholder in the meantime so a slow first frame doesn't
   // freeze a stale number from a prior session.
-  balance: null,            // { available: number } | null
+  balance: null,            // { available: number, selfDepositEnabled: boolean } | null
   // Q2.6 (#273). History tab slices. Cursor-based pagination: each
   // append() preserves accumulated items so "load more" feels stable.
   // `nextCursor === null` means the server has no further pages.
@@ -1220,7 +1223,9 @@ export function applyBalanceFrame(dto) {
   if (raw == null) return;
   const available = typeof raw === "number" ? raw : Number(raw);
   if (!Number.isFinite(available)) return;
-  state.balance = { available };
+  const selfDepositEnabled =
+    dto.selfDepositEnabled ?? dto.SelfDepositEnabled ?? state.balance?.selfDepositEnabled ?? false;
+  state.balance = { available, selfDepositEnabled: !!selfDepositEnabled };
   notify("balance");
 }
 

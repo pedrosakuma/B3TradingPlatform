@@ -29,6 +29,7 @@ public class BalanceWebSocketChannelTests
         Assert.Equal(Channels.BalanceMe, msg.Channel);
         var dto = Assert.IsType<BalanceDto>(msg.Data);
         Assert.Equal(1_000m, dto.Available);
+        Assert.False(dto.SelfDepositEnabled);
     }
 
     [Fact]
@@ -45,6 +46,7 @@ public class BalanceWebSocketChannelTests
         Assert.True(client.Reader.TryRead(out var msg));
         var dto = Assert.IsType<BalanceDto>(msg!.Data);
         Assert.Equal(0m, dto.Available);
+        Assert.False(dto.SelfDepositEnabled);
     }
 
     [Fact]
@@ -72,6 +74,7 @@ public class BalanceWebSocketChannelTests
         Assert.Equal(1, delta.Seq);
         var dto = Assert.IsType<BalanceDto>(delta.Data);
         Assert.Equal(7_000m, dto.Available);
+        Assert.False(dto.SelfDepositEnabled);
 
         await fan.StopAsync(CancellationToken.None);
     }
@@ -98,6 +101,7 @@ public class BalanceWebSocketChannelTests
         var delta = await ReadWithTimeoutAsync(client);
         var dto = Assert.IsType<BalanceDto>(delta!.Data);
         Assert.Equal(487.66m, dto.Available);
+        Assert.False(dto.SelfDepositEnabled);
 
         await fan.StopAsync(CancellationToken.None);
     }
@@ -130,7 +134,9 @@ public class BalanceWebSocketChannelTests
         cash.ApplyFee("FIRM01", owner, 25m);
 
         var delta = await ReadWithTimeoutAsync(client);
-        Assert.Equal(75m, ((BalanceDto)delta!.Data!).Available);
+        var dto = Assert.IsType<BalanceDto>(delta!.Data);
+        Assert.Equal(75m, dto.Available);
+        Assert.False(dto.SelfDepositEnabled);
 
         // No extra delta should arrive
         await Task.Delay(100);

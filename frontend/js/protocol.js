@@ -150,6 +150,15 @@ export async function getRiskPolicy(backend, token) {
   return jsonOrThrow(resp);
 }
 
+export async function selfDeposit(backend, token, amount) {
+  const resp = await fetch(`${backend}/balance/deposit`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ amount }),
+  });
+  return jsonOrThrow(resp);
+}
+
 export async function submitOrder(backend, token, payload) {
   const resp = await fetch(`${backend}/orders`, {
     method: "POST",

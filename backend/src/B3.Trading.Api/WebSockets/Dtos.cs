@@ -173,11 +173,15 @@ public sealed record PositionDto(
     decimal? OptionContractMultiplier = null);
 
 /// <summary>
-/// Wire shape for <c>GET /balance</c>. Slice 1 of #107 exposes only
-/// <see cref="Available"/>; reserved/total are placeholders for slice 2
-/// when the margin provider plugs into the same ledger.
+/// Wire shape for <c>GET /balance</c> and <c>balance.me</c>. Slice 1 of
+/// #107 exposed only <see cref="Available"/>; reserved/total are still
+/// placeholders for slice 2 when the margin provider plugs into the same
+/// ledger. #690 also carries <see cref="SelfDepositEnabled"/> so the
+/// trader UI can feature-detect self-service sandbox deposit from the
+/// existing balance snapshot/delta path, without burning the dedicated
+/// <c>POST /balance/deposit</c> rate-limit bucket on a probe request.
 /// </summary>
-public sealed record BalanceDto(decimal Available);
+public sealed record BalanceDto(decimal Available, bool SelfDepositEnabled = false);
 
 public sealed record ExecutionDto(
     string ClOrdId,

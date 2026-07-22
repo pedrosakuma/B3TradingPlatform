@@ -35,6 +35,7 @@ public sealed class SubscriptionManager
     private readonly Application.Risk.IReferencePrice? _refPrice;
     private readonly CashLedger? _cash;
     private readonly SymbolDirectory? _symbols;
+    private readonly bool _selfDepositEnabled;
 
     public SubscriptionManager(
         WorkingOrderBook orders,
@@ -43,7 +44,8 @@ public sealed class SubscriptionManager
         PnlKeeper? pnl = null,
         Application.Risk.IReferencePrice? refPrice = null,
         CashLedger? cash = null,
-        SymbolDirectory? symbols = null)
+        SymbolDirectory? symbols = null,
+        Microsoft.Extensions.Options.IOptions<SandboxCashOptions>? sandboxCashOptions = null)
     {
         _orders = orders;
         _positions = positions;
@@ -52,6 +54,7 @@ public sealed class SubscriptionManager
         _refPrice = refPrice;
         _cash = cash;
         _symbols = symbols;
+        _selfDepositEnabled = sandboxCashOptions?.Value.AllowSelfCashDeposit ?? false;
     }
 
     /// <summary>
@@ -114,7 +117,8 @@ public sealed class SubscriptionManager
                     ? PnlProjection.Build(client.Owner, client.FirmId, _pnl, _positions, _refPrice)
                     : null,
                 Channels.BalanceMe => new BalanceDto(
-                    _cash?.GetAvailable(client.FirmId, client.Owner) ?? 0m),
+                    _cash?.GetAvailable(client.FirmId, client.Owner) ?? 0m,
+                    _selfDepositEnabled),
                 _ => null,
             };
 

@@ -36,6 +36,7 @@ public sealed class WebSocketBalanceFanOut : IHostedService, IAsyncDisposable
     private readonly CashLedger _cash;
     private readonly SubscriptionManager _subs;
     private readonly ILogger<WebSocketBalanceFanOut>? _logger;
+    private readonly bool _selfDepositEnabled;
 
     private readonly ConcurrentDictionary<(string FirmId, EndClientId Owner), decimal> _lastSent = new();
 
@@ -50,10 +51,12 @@ public sealed class WebSocketBalanceFanOut : IHostedService, IAsyncDisposable
     public WebSocketBalanceFanOut(
         CashLedger cash,
         SubscriptionManager subs,
+        Microsoft.Extensions.Options.IOptions<SandboxCashOptions>? sandboxCashOptions = null,
         ILogger<WebSocketBalanceFanOut>? logger = null)
     {
         _cash = cash;
         _subs = subs;
+        _selfDepositEnabled = sandboxCashOptions?.Value.AllowSelfCashDeposit ?? false;
         _logger = logger;
         _cash.BalanceChanged += OnBalanceChanged;
     }
@@ -127,7 +130,7 @@ public sealed class WebSocketBalanceFanOut : IHostedService, IAsyncDisposable
             return;
         }
 
-        _subs.Publish(owner, firmId, Channels.BalanceMe, new BalanceDto(available));
+        _subs.Publish(owner, firmId, Channels.BalanceMe, new BalanceDto(available, _selfDepositEnabled));
         _lastSent[key] = available;
     }
 }

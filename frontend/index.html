@@ -153,6 +153,18 @@
            WS frames (see WebSocketBalanceFanOut / #386). -->
       <span id="user-balance" class="user-balance" role="status" aria-live="polite"
             aria-label="Available balance" title="Available balance" hidden>R$ —</span>
+      <div id="self-deposit" class="self-deposit" hidden>
+        <button id="self-deposit-toggle" class="btn btn-link" type="button"
+                aria-expanded="false" aria-controls="self-deposit-form">Deposit funds</button>
+        <form id="self-deposit-form" class="self-deposit-form" hidden>
+          <label class="visually-hidden" for="self-deposit-amount">Deposit amount in BRL</label>
+          <input id="self-deposit-amount" type="number" min="0.01" step="0.01"
+                 inputmode="decimal" placeholder="Amount (BRL)" />
+          <button id="self-deposit-submit" class="btn btn-primary" type="submit">Deposit</button>
+        </form>
+        <p id="self-deposit-feedback" class="feedback self-deposit-feedback"
+           role="status" aria-live="polite" hidden></p>
+      </div>
       <button id="logout" class="btn btn-link" type="button" aria-label="Logout">Logout</button>
     </div>
   </header>
