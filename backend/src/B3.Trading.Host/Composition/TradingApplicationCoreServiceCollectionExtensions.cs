@@ -312,7 +312,7 @@ public static class TradingApplicationCoreServiceCollectionExtensions
 
         // Lifecycle: drain flag flipped on SIGTERM /
         // IHostApplicationLifetime.ApplicationStopping. Read by /ready (503 when
-        // draining) and POST /orders (refuses new orders so in-flight can finish).
+        // draining) and POST /api/orders (refuses new orders so in-flight can finish).
         services.AddSingleton<DrainState>();
         services.AddSingleton<B3.Trading.Application.Lifecycle.IDrainGate>(
             sp => sp.GetRequiredService<DrainState>());

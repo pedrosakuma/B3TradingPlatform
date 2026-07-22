@@ -28,7 +28,7 @@ public sealed class ConformanceFactAttribute : FactAttribute
 
     /// <summary>
     /// When true, the scenario only runs against a host that opted into
-    /// synthetic ER injection (<c>POST /admin/simulator/er</c> mapped via
+    /// synthetic ER injection (<c>POST /api/admin/simulator/er</c> mapped via
     /// <c>Mode=Mock + AllowErInjection=true</c>; operator declares it via
     /// <c>B3T_ER_INJECTION=true</c>, with legacy <c>B3T_SIMULATOR_MODE=true</c>
     /// honored as a fallback). Real / Stub / plain-Mock deployments skip.

@@ -140,7 +140,7 @@ public static class MetricsRegistry
     /// <c>outcome</c> is one of <c>success|failure|denied</c>. NO
     /// per-user / per-firm / per-IP tag — those are high-cardinality
     /// dimensions that belong on the read side
-    /// (<c>/admin/audit</c>), not on a Prometheus counter.
+    /// (<c>/api/admin/audit</c>), not on a Prometheus counter.
     /// </summary>
     public static readonly Counter<long> AuditEventsTotal =
         Meter.CreateCounter<long>("trading.audit.events_total");
@@ -177,7 +177,7 @@ public static class MetricsRegistry
         Meter.CreateCounter<long>("trading.auth.exchange.requests_total");
 
     /// <summary>
-    /// #607. End-to-end /auth/exchange latency in seconds with the same
+    /// #607. End-to-end /api/auth/exchange latency in seconds with the same
     /// bounded labels as <see cref="AuthExchangeRequests"/>.
     /// </summary>
     public static readonly Histogram<double> AuthExchangeDurationSeconds =
@@ -294,7 +294,7 @@ public static class MetricsRegistry
     // mirrors the FeeKeeper synth metric: tag reconciled=true when a
     // durable RealizedPnlEvent superseded a pending synth (happy path),
     // false when FinalizeReplay had to materialise the synth (the actual
-    // ER-then-crash window). pnl.endpoint_requests counts /pnl/today
+    // ER-then-crash window). pnl.endpoint_requests counts /api/pnl/today
     // hits.
     public static readonly Counter<long> PnlRealizedAppended =
         Meter.CreateCounter<long>("trading.pnl.realized_appended");
@@ -528,7 +528,7 @@ public static class MetricsRegistry
     // Q3.5 (#285). Algo modify (cancel-replace) API. Tagged by
     // algoType so we can distinguish operator-driven Pegged repegs
     // from VWAP/POV price-nudges (when those algos retrofit). Reason
-    // is the human-readable driver — "operator" (POST /algo/{id}/modify)
+    // is the human-readable driver — "operator" (POST /api/algo/{id}/modify)
     // or "pegged_repeg" (internal Pegged price-drift retrofit).
     public static readonly Counter<long> AlgoChildModifiesTotal =
         Meter.CreateCounter<long>(
@@ -582,7 +582,7 @@ public static class MetricsRegistry
 
     /// <summary>
     /// 1 when the host booted with <c>Trading:Exchange:AllowErInjection=true</c>
-    /// (admin-gated <c>POST /admin/simulator/er</c> is mapped). Set once at
+    /// (admin-gated <c>POST /api/admin/simulator/er</c> is mapped). Set once at
     /// startup and never decremented (config is fixed at runtime). Surfaces
     /// "this host accepts synthetic ERs" to dashboards / alerts so any
     /// production drift is loud — replaces the old
@@ -900,7 +900,7 @@ public static class MetricsRegistry
     // Slice 7 — throttle/limit observability. All gauges are
     // intentionally aggregate (no per-end-client tag) to keep
     // observability cardinality bounded under tenant churn.
-    // Per-tenant detail is exposed via GET /admin/risk/throttle.
+    // Per-tenant detail is exposed via GET /api/admin/risk/throttle.
 
     /// <summary>
     /// Bumped when <see cref="Risk.Accounting.RollingNotionalAccountant"/>

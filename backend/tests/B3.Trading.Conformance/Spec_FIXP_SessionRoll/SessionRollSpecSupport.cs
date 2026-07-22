@@ -29,7 +29,7 @@ internal static class SessionRollSpecSupport
         string side = "Buy",
         long quantity = RoundTripQuantity)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Post, "/orders")
+        using var req = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
         {
             Headers = { Authorization = auth },
             Content = JsonContent.Create(new
@@ -45,7 +45,7 @@ internal static class SessionRollSpecSupport
         var resp = await http.SendAsync(req);
         var body = await resp.Content.ReadAsStringAsync();
         Assert.True(resp.StatusCode == HttpStatusCode.Accepted,
-            $"POST /orders expected 202 Accepted, got {(int)resp.StatusCode}: {body}");
+            $"POST /api/orders expected 202 Accepted, got {(int)resp.StatusCode}: {body}");
 
         var json = JsonDocument.Parse(body).RootElement;
         if (json.TryGetProperty("status", out var statusProp))
@@ -74,7 +74,7 @@ internal static class SessionRollSpecSupport
 
         var sellClOrdId = await SubmitOrderAsync(http, auth, symbol, price, side: "Sell", quantity: quantity);
 
-        // GET /orders is the full per-client history projection, not an
+        // GET /api/orders is the full per-client history projection, not an
         // "open orders only" book view. Contract-level "disappears from the
         // book" therefore means the order leaves Working and reaches a
         // terminal state; it should remain queryable here as Filled.
@@ -105,7 +105,7 @@ internal static class SessionRollSpecSupport
         decimal price,
         string side = "Buy")
     {
-        using var req = new HttpRequestMessage(HttpMethod.Post, "/orders")
+        using var req = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
         {
             Headers = { Authorization = auth },
             Content = JsonContent.Create(new
@@ -150,7 +150,7 @@ internal static class SessionRollSpecSupport
         AuthenticationHeaderValue auth,
         ulong clOrdId)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Delete, $"/orders/{clOrdId}");
+        using var req = new HttpRequestMessage(HttpMethod.Delete, $"/api/orders/{clOrdId}");
         req.Headers.Authorization = auth;
         var resp = await http.SendAsync(req);
         if (resp.StatusCode == HttpStatusCode.NotFound ||
@@ -160,7 +160,7 @@ internal static class SessionRollSpecSupport
         }
 
         Assert.True(resp.StatusCode == HttpStatusCode.NoContent,
-            $"DELETE /orders/{clOrdId} expected 204/404/409, got {(int)resp.StatusCode}: {await resp.Content.ReadAsStringAsync()}");
+            $"DELETE /api/orders/{clOrdId} expected 204/404/409, got {(int)resp.StatusCode}: {await resp.Content.ReadAsStringAsync()}");
     }
 
     internal static async Task<OrderSnapshot> WaitForOrderAsync(
@@ -201,7 +201,7 @@ internal static class SessionRollSpecSupport
         AuthenticationHeaderValue auth,
         ulong clOrdId)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Get, "/orders");
+        using var req = new HttpRequestMessage(HttpMethod.Get, "/api/orders");
         req.Headers.Authorization = auth;
         var resp = await http.SendAsync(req);
         resp.EnsureSuccessStatusCode();
@@ -270,7 +270,7 @@ internal static class SessionRollSpecSupport
         HttpClient http,
         AuthenticationHeaderValue auth)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Get, "/admin/firms");
+        using var req = new HttpRequestMessage(HttpMethod.Get, "/api/admin/firms");
         req.Headers.Authorization = auth;
         var resp = await http.SendAsync(req);
         resp.EnsureSuccessStatusCode();
@@ -290,7 +290,7 @@ internal static class SessionRollSpecSupport
             }
         }
 
-        Assert.Fail($"Firm '{FirmId}' not found in /admin/firms response.");
+        Assert.Fail($"Firm '{FirmId}' not found in /api/admin/firms response.");
         return null!;
     }
 
@@ -300,7 +300,7 @@ internal static class SessionRollSpecSupport
         string symbol)
     {
         using var req = new HttpRequestMessage(
-            HttpMethod.Get, $"/admin/marketdata/reference-prices?symbols={Uri.EscapeDataString(symbol)}");
+            HttpMethod.Get, $"/api/admin/marketdata/reference-prices?symbols={Uri.EscapeDataString(symbol)}");
         req.Headers.Authorization = auth;
         var resp = await http.SendAsync(req);
         resp.EnsureSuccessStatusCode();

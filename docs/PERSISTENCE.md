@@ -220,7 +220,7 @@ ERs remain ineligible.
 
 | Call site | Backpressure response |
 | --- | --- |
-| `POST /orders` (`OrderSubmittedEvent`) | Returns **503**; order never enters book. |
+| `POST /api/orders` (`OrderSubmittedEvent`) | Returns **503**; order never enters book. |
 | Synthetic rejection helper | Mutates state + publishes to sink (audit lost — ghost orders are worse). |
 | `EntryPointExecutionReportRouter` | Calls `processor.Apply(...)` anyway (state preserved, audit lost). |
 
@@ -346,7 +346,7 @@ would just be noise.
 
 ## EOD reconciliation
 
-`POST /admin/eod` (admin-only) validates the persisted marker generation and
+`POST /api/admin/eod` (admin-only) validates the persisted marker generation and
 complete committed segment manifest, reads each segment only through its
 recorded `EndOffset`, and writes
 `data/{firm}/eod/eod-{date}.json`:

@@ -27,7 +27,7 @@ public static class AlgoEndpoints
 {
     public static IEndpointRouteBuilder MapAlgo(this IEndpointRouteBuilder app)
     {
-        var group = app.MapGroup("/algo").RequireAuthorization();
+        var group = app.MapGroup("/api/algo").RequireAuthorization();
 
         group.MapGet("/", (HttpContext ctx, AlgoBook algos, EndClientRegistry registry) =>
         {
@@ -69,7 +69,7 @@ public static class AlgoEndpoints
             if (drain.IsDraining)
             {
                 MetricsRegistry.DrainRejections.Add(1,
-                    new KeyValuePair<string, object?>("route", "POST /algo"));
+                    new KeyValuePair<string, object?>("route", "POST /api/algo"));
                 return Results.Json(
                     new { error = "service draining" },
                     statusCode: StatusCodes.Status503ServiceUnavailable);
@@ -184,7 +184,7 @@ public static class AlgoEndpoints
 
                 case AlgoType.Vwap:
                     // Q3.1 (#281). VWAP mirrors TWAP's surface conventions
-                    // — kept on the same POST /algo endpoint so the
+                    // — kept on the same POST /api/algo endpoint so the
                     // discriminator-by-Type pattern stays consistent.
                     if (req.Vwap is null)
                         return Results.BadRequest(new { error = "vwap parameters are required for type=Vwap" });
@@ -216,7 +216,7 @@ public static class AlgoEndpoints
 
                 case AlgoType.Pov:
                     // Q3.2 (#282). POV mirrors VWAP's surface conventions
-                    // — same POST /algo endpoint, discriminator-by-Type
+                    // — same POST /api/algo endpoint, discriminator-by-Type
                     // pattern.
                     if (req.Pov is null)
                         return Results.BadRequest(new { error = "pov parameters are required for type=Pov" });
@@ -248,7 +248,7 @@ public static class AlgoEndpoints
                     break;
 
                 case AlgoType.Pegged:
-                    // Q3.3 (#283). Pegged shares the POST /algo surface
+                    // Q3.3 (#283). Pegged shares the POST /api/algo surface
                     // with the other algos via the type discriminator.
                     // #454 Fase 1: tick now resolves through
                     // ITickSizeProvider (config-backed SymbolDirectory
@@ -373,7 +373,7 @@ public static class AlgoEndpoints
                     new KeyValuePair<string, object?>("kind", "created"));
             }
 
-            return Results.Accepted($"/algo/{algoId}", new
+            return Results.Accepted($"/api/algo/{algoId}", new
             {
                 AlgoId = algoId.ToString(),
                 Status = AlgoStatus.PendingNew.ToString(),
@@ -404,7 +404,7 @@ public static class AlgoEndpoints
             if (drain.IsDraining)
             {
                 MetricsRegistry.DrainRejections.Add(1,
-                    new KeyValuePair<string, object?>("route", "POST /algo/modify"));
+                    new KeyValuePair<string, object?>("route", "POST /api/algo/modify"));
                 return Results.Json(
                     new { error = "service draining" },
                     statusCode: StatusCodes.Status503ServiceUnavailable);
@@ -462,7 +462,7 @@ public static class AlgoEndpoints
                     statusCode: StatusCodes.Status503ServiceUnavailable);
             }
 
-            return Results.Accepted($"/algo/{id}", new
+            return Results.Accepted($"/api/algo/{id}", new
             {
                 AlgoId = id.ToString(),
                 Status = algo.Status.ToString(),
@@ -487,7 +487,7 @@ public static class AlgoEndpoints
             if (drain.IsDraining)
             {
                 MetricsRegistry.DrainRejections.Add(1,
-                    new KeyValuePair<string, object?>("route", "DELETE /algo"));
+                    new KeyValuePair<string, object?>("route", "DELETE /api/algo"));
                 return Results.Json(
                     new { error = "service draining" },
                     statusCode: StatusCodes.Status503ServiceUnavailable);
@@ -543,7 +543,7 @@ public static class AlgoEndpoints
                     new KeyValuePair<string, object?>("kind", "cancel_requested"));
             }
 
-            return Results.Accepted($"/algo/{id}", new
+            return Results.Accepted($"/api/algo/{id}", new
             {
                 AlgoId = id.ToString(),
                 Status = AlgoStatus.Cancelling.ToString(),
@@ -574,7 +574,7 @@ public static class AlgoEndpoints
 }
 
 /// <summary>
-/// HTTP request body for <c>POST /algo</c>. The discriminated parameter
+/// HTTP request body for <c>POST /api/algo</c>. The discriminated parameter
 /// shape mirrors the wire <see cref="AlgoDto"/>: only the block matching
 /// <see cref="Type"/> is read; the other is ignored. Per RFC §C2 the
 /// public schema deliberately does NOT expose <c>parentAlgoId</c> /
@@ -655,7 +655,7 @@ public sealed record CreateAlgoPeggedParams(
     decimal? PriceLimit = null);
 
 /// <summary>
-/// Q3.5 (#285). Body for <c>POST /algo/{id}/modify</c>. At least one
+/// Q3.5 (#285). Body for <c>POST /api/algo/{id}/modify</c>. At least one
 /// of <see cref="NewQuantity"/> / <see cref="NewPrice"/> must be set;
 /// the engine inherits the omitted side from the live child.
 /// <see cref="ChildClOrdId"/> is optional — when null the engine

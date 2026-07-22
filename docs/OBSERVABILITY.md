@@ -47,7 +47,7 @@ Sample `/health` body:
 While draining:
 
 - `/ready` → **503** (LB stops sending new traffic).
-- `POST /orders` → **503** with `{"error":"service draining"}`. New
+- `POST /api/orders` → **503** with `{"error":"service draining"}`. New
   orders are refused; in-flight orders complete normally.
 - The ER router and WAL keep running so replies for already-submitted
   orders flush out before the host exits.

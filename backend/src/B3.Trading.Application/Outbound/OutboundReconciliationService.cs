@@ -475,7 +475,7 @@ public sealed class OutboundReconciliationService
             ActorUsername = operatorRef,
             ActorFirm = mutation.FirmId,
             ActorRole = "admin",
-            ResourcePath = $"/admin/outbound-mutations/{mutation.MutationId}/resolve",
+            ResourcePath = $"/api/admin/outbound-mutations/{mutation.MutationId}/resolve",
             ReasonCode = request.ReasonCode,
             Details = details,
             TimestampUtc = _clock.GetUtcNow(),
@@ -505,7 +505,7 @@ public sealed class OutboundReconciliationService
             ActorFirm = mutation.FirmId,
             ActorRole = "admin",
             ResourcePath =
-                $"/admin/outbound-mutations/{mutation.MutationId}/evidence",
+                $"/api/admin/outbound-mutations/{mutation.MutationId}/evidence",
             ReasonCode = "authoritative_evidence_registered",
             Details = new Dictionary<string, string>(StringComparer.Ordinal)
             {

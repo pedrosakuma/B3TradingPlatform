@@ -68,7 +68,7 @@ public class VwapAlgoEndpointTests
         using var http = f.CreateClient();
         var token = await f.LoginAsync(http);
 
-        var req = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/algo/")
         {
             Content = JsonContent.Create(new
             {
@@ -91,7 +91,7 @@ public class VwapAlgoEndpointTests
         var token = await f.LoginAsync(http);
 
         var now = DateTimeOffset.UtcNow;
-        var req = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/algo/")
         {
             Content = JsonContent.Create(VwapBody(100, now.AddMinutes(5), now.AddMinutes(1))),
         };
@@ -108,7 +108,7 @@ public class VwapAlgoEndpointTests
         var token = await f.LoginAsync(http);
 
         var now = DateTimeOffset.UtcNow;
-        var req = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/algo/")
         {
             Content = JsonContent.Create(VwapBody(100, now, now.AddMinutes(1), sliceMaxPct: 1.5m)),
         };
@@ -125,7 +125,7 @@ public class VwapAlgoEndpointTests
         var token = await f.LoginAsync(http);
 
         var now = DateTimeOffset.UtcNow;
-        var req = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/algo/")
         {
             Content = JsonContent.Create(VwapBody(100, now, now.AddMinutes(1), childPrice: null)),
         };
@@ -145,7 +145,7 @@ public class VwapAlgoEndpointTests
         var token = await f.LoginAsync(http);
 
         var now = DateTimeOffset.UtcNow;
-        var req = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/algo/")
         {
             Content = JsonContent.Create(
                 VwapBody(150, now.AddSeconds(-1), now.AddSeconds(60))),
@@ -426,7 +426,7 @@ public class VwapAlgoEndpointTests
         var inFlight = await WaitForAnyChild(book, algoId);
 
         // Operator cancel.
-        var req = new HttpRequestMessage(HttpMethod.Delete, $"/algo/{algoId}");
+        var req = new HttpRequestMessage(HttpMethod.Delete, $"/api/algo/{algoId}");
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", userToken);
         var del = await http.SendAsync(req);
         Assert.Equal(HttpStatusCode.Accepted, del.StatusCode);
@@ -443,7 +443,7 @@ public class VwapAlgoEndpointTests
 
         // Second DELETE after terminal: not Accepted, and crucially the
         // terminal timestamp must not move (no second terminal event).
-        var req2 = new HttpRequestMessage(HttpMethod.Delete, $"/algo/{algoId}");
+        var req2 = new HttpRequestMessage(HttpMethod.Delete, $"/api/algo/{algoId}");
         req2.Headers.Authorization = new AuthenticationHeaderValue("Bearer", userToken);
         var del2 = await http.SendAsync(req2);
         Assert.Equal(HttpStatusCode.Conflict, del2.StatusCode);
@@ -462,7 +462,7 @@ public class VwapAlgoEndpointTests
 
     private static async Task<string> PostAlgo(HttpClient http, string token, object body)
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/algo/")
         {
             Content = JsonContent.Create(body),
         };
@@ -477,7 +477,7 @@ public class VwapAlgoEndpointTests
         HttpClient http, string adminToken, ulong childClOrdId,
         string type, long? lastQty = null, decimal lastPx = 30m)
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/admin/simulator/er")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/admin/simulator/er")
         {
             Content = JsonContent.Create(new
             {
@@ -495,7 +495,7 @@ public class VwapAlgoEndpointTests
 
     private static async Task<JsonElement> GetAlgo(HttpClient http, string token, string algoId)
     {
-        var req = new HttpRequestMessage(HttpMethod.Get, $"/algo/{algoId}");
+        var req = new HttpRequestMessage(HttpMethod.Get, $"/api/algo/{algoId}");
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         var resp = await http.SendAsync(req);
         resp.EnsureSuccessStatusCode();

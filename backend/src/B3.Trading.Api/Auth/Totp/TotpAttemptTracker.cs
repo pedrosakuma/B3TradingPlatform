@@ -5,7 +5,7 @@ using Microsoft.Extensions.Options;
 namespace B3.Trading.Api.Auth.Totp;
 
 /// <summary>
-/// Per-user rate limit for /auth/2fa/verify (#303). Mirrors
+/// Per-user rate limit for /api/auth/2fa/verify (#303). Mirrors
 /// <see cref="ILoginAttemptTracker"/> shape but tracks a separate
 /// counter so a TOTP-brute flood does not lock the user out of
 /// password login (and vice-versa). Returns a Retry-After hint so the

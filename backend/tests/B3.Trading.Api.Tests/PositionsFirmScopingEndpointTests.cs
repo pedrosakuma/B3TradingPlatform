@@ -9,7 +9,7 @@ using Microsoft.Extensions.DependencyInjection;
 namespace B3.Trading.Api.Tests;
 
 /// <summary>
-/// PR #316 P1. GET /positions must be firm-scoped so a JWT sub registered
+/// PR #316 P1. GET /api/positions must be firm-scoped so a JWT sub registered
 /// under two firms does not leak the other firm's positions.
 /// </summary>
 public class PositionsFirmScopingEndpointTests : IClassFixture<TestAppFactory>
@@ -34,14 +34,14 @@ public class PositionsFirmScopingEndpointTests : IClassFixture<TestAppFactory>
 
         var (t1, _) = issuer.Issue(TestAppFactory.TestUser, "user", "FIRM01");
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", t1);
-        var firm1 = await client.GetFromJsonAsync<List<PositionDto>>("/positions");
+        var firm1 = await client.GetFromJsonAsync<List<PositionDto>>("/api/positions");
         Assert.NotNull(firm1);
         Assert.Single(firm1!);
         Assert.Equal("PETR4", firm1![0].Symbol);
 
         var (t2, _) = issuer.Issue(TestAppFactory.TestUser, "user", "FIRM02");
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", t2);
-        var firm2 = await client.GetFromJsonAsync<List<PositionDto>>("/positions");
+        var firm2 = await client.GetFromJsonAsync<List<PositionDto>>("/api/positions");
         Assert.NotNull(firm2);
         Assert.Single(firm2!);
         Assert.Equal("VALE3", firm2![0].Symbol);

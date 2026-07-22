@@ -11,7 +11,7 @@ namespace B3.Trading.Api.Tests;
 /// (PETR4 reference price seeded at 30.0; Risk pipeline up).
 ///
 /// <para>Submit risk rejections come back as <c>202 Accepted</c> with
-/// <c>Status="Rejected"</c> — the existing contract on <c>POST /orders</c>;
+/// <c>Status="Rejected"</c> — the existing contract on <c>POST /api/orders</c>;
 /// modify risk rejections come back as <c>422 UnprocessableEntity</c>.
 /// We assert the reason string carries the machine-readable prefix so
 /// downstream consumers (UI / FIXP bot) can branch on it.</para>
@@ -195,7 +195,7 @@ public class Q12RiskEndpointTests
 
     private static async Task<HttpResponseMessage> PostBase(HttpClient http, string token, object payload)
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/orders")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
         {
             Content = JsonContent.Create(payload),
         };
@@ -220,7 +220,7 @@ public class Q12RiskEndpointTests
     private static async Task<HttpResponseMessage> PutModify(
         HttpClient http, string token, string clOrdId, object payload)
     {
-        var req = new HttpRequestMessage(HttpMethod.Put, $"/orders/{clOrdId}")
+        var req = new HttpRequestMessage(HttpMethod.Put, $"/api/orders/{clOrdId}")
         {
             Content = JsonContent.Create(payload),
         };

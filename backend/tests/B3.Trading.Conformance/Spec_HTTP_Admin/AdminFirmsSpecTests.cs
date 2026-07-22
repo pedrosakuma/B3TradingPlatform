@@ -5,7 +5,7 @@ using B3.Trading.Conformance.Infrastructure;
 namespace B3.Trading.Conformance.Spec_HTTP_Admin;
 
 /// <summary>
-/// Spec — Admin. <c>GET /admin/firms</c> is the operator-facing
+/// Spec — Admin. <c>GET /api/admin/firms</c> is the operator-facing
 /// inventory of configured exchange firms. Its shape is part of the
 /// platform's public contract because dashboards and ops scripts depend
 /// on it; this scenario locks in <c>{ mode, firms[] }</c> with the
@@ -21,7 +21,7 @@ public class AdminFirmsSpecTests
         using var http = new HttpClient { BaseAddress = peer.BaseUrl };
         var auth = await LoginHelper.LoginAsync(http, peer.AdminUsername!, peer.AdminPassword!);
 
-        using var req = new HttpRequestMessage(HttpMethod.Get, "/admin/firms");
+        using var req = new HttpRequestMessage(HttpMethod.Get, "/api/admin/firms");
         req.Headers.Authorization = auth;
         var resp = await http.SendAsync(req);
         resp.EnsureSuccessStatusCode();

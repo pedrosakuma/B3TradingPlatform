@@ -22,7 +22,7 @@ public interface IOutboundSubmissionFaultInjector
 }
 
 /// <summary>
-/// The "submit an order" pipeline extracted from <c>POST /orders</c> so it
+/// The "submit an order" pipeline extracted from <c>POST /api/orders</c> so it
 /// can be reused by the algo engine (RFC algo-orders-v0 §4.3). Manual
 /// submissions and engine-driven child slices share the same WAL writes,
 /// risk pipeline, margin reservation, gateway dispatch, and synthetic
@@ -153,7 +153,7 @@ public sealed class OrderSubmissionService
         if (_drain.IsDraining)
         {
             MetricsRegistry.DrainRejections.Add(1,
-                new KeyValuePair<string, object?>("route", req.Source == OrderSubmissionSource.Algo ? "algo.submit" : "POST /orders"));
+                new KeyValuePair<string, object?>("route", req.Source == OrderSubmissionSource.Algo ? "algo.submit" : "POST /api/orders"));
             return OrderSubmissionResult.Drained;
         }
 
@@ -367,7 +367,7 @@ public sealed class OrderSubmissionService
         // Ordering note (RFC docs/rfcs/risk-pipeline-ordering-v0.md, #262):
         // risk evaluation runs *post-WAL* on the submit path. On reject we
         // emit a synthetic ExecutionReportReceivedEvent so the rejection is
-        // recoverable from the WAL (FE executions log, /executions/history,
+        // recoverable from the WAL (FE executions log, /api/executions/history,
         // CVM 35/505, drop-copy, best-exec touch). This is intentionally
         // asymmetric with OrderModifyService, which evaluates pre-WAL — see
         // RFC §1.3 and the open audit-gap follow-up.

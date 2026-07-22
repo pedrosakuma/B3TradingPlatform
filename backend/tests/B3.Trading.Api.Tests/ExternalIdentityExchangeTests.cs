@@ -30,10 +30,10 @@ public sealed class ExternalIdentityExchangeTests
         await using var factory = new TestAppFactory();
         using var http = factory.CreateClient();
 
-        var exchange = await http.PostAsync("/auth/exchange", null);
+        var exchange = await http.PostAsync("/api/auth/exchange", null);
         Assert.Equal(HttpStatusCode.NotFound, exchange.StatusCode);
 
-        var login = await http.PostAsJsonAsync("/auth/login", new LoginRequest("alice", "wonderland"));
+        var login = await http.PostAsJsonAsync("/api/auth/login", new LoginRequest("alice", "wonderland"));
         Assert.Equal(HttpStatusCode.OK, login.StatusCode);
         var body = await login.Content.ReadFromJsonAsync<LoginResponse>();
         Assert.NotNull(body);
@@ -69,13 +69,13 @@ public sealed class ExternalIdentityExchangeTests
         using var http = factory.CreateClient();
 
         Assert.Equal(HttpStatusCode.NotFound,
-            (await http.PostAsJsonAsync("/auth/login", new LoginRequest("alice", "wonderland"))).StatusCode);
+            (await http.PostAsJsonAsync("/api/auth/login", new LoginRequest("alice", "wonderland"))).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound,
-            (await http.PostAsJsonAsync("/auth/signup", new SignupRequest("new-user", "wonderland-1"))).StatusCode);
+            (await http.PostAsJsonAsync("/api/auth/signup", new SignupRequest("new-user", "wonderland-1"))).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound,
-            (await http.GetAsync("/auth/2fa/status")).StatusCode);
+            (await http.GetAsync("/api/auth/2fa/status")).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized,
-            (await http.PostAsync("/auth/exchange", null)).StatusCode);
+            (await http.PostAsync("/api/auth/exchange", null)).StatusCode);
     }
 
     [Fact]
@@ -108,11 +108,11 @@ public sealed class ExternalIdentityExchangeTests
         using var http = factory.CreateClient();
 
         Assert.Equal(HttpStatusCode.NotFound,
-            (await http.PostAsJsonAsync("/auth/login", new LoginRequest("alice", "wonderland"))).StatusCode);
+            (await http.PostAsJsonAsync("/api/auth/login", new LoginRequest("alice", "wonderland"))).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound,
-            (await http.GetAsync("/auth/2fa/status")).StatusCode);
+            (await http.GetAsync("/api/auth/2fa/status")).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized,
-            (await http.PostAsync("/auth/exchange", null)).StatusCode);
+            (await http.PostAsync("/api/auth/exchange", null)).StatusCode);
     }
 
     [Fact]
@@ -177,7 +177,7 @@ public sealed class ExternalIdentityExchangeTests
         await BindAliceAsync(factory);
 
         http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", keys.IssueAccessToken());
-        var orders = await http.GetAsync("/orders");
+        var orders = await http.GetAsync("/api/orders");
         Assert.Equal(HttpStatusCode.Unauthorized, orders.StatusCode);
 
         var internalToken = await factory.LoginAsync(factory.CreateClient());
@@ -219,7 +219,7 @@ public sealed class ExternalIdentityExchangeTests
         var alice = await directory.GetUserAsync("alice");
         await directory.SetFirmAndRoleAsync("alice", "FIRM77", TradingUserDirectoryConstants.RoleAdmin, alice!.RowVersion);
 
-        var resp = await http.PostAsJsonAsync("/auth/login", new LoginRequest("alice", "wonderland"));
+        var resp = await http.PostAsJsonAsync("/api/auth/login", new LoginRequest("alice", "wonderland"));
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var body = await resp.Content.ReadFromJsonAsync<LoginResponse>();
         var jwt = new JwtSecurityTokenHandler().ReadJwtToken(body!.Token);
@@ -236,7 +236,7 @@ public sealed class ExternalIdentityExchangeTests
         await using var factory = HybridFactory(keys);
         using var admin = await factory.CreateAuthedClientAsync("admin");
 
-        var list = await admin.GetAsync("/admin/identity/users");
+        var list = await admin.GetAsync("/api/admin/identity/users");
         Assert.Equal(HttpStatusCode.OK, list.StatusCode);
         var users = await list.Content.ReadFromJsonAsync<JsonElement>();
         var adminUser = users.GetProperty("users").EnumerateArray()
@@ -244,7 +244,7 @@ public sealed class ExternalIdentityExchangeTests
         var rowVersion = adminUser.GetProperty("rowVersion").GetInt64();
 
         var bind = await admin.PostAsJsonAsync(
-            "/admin/identity/users/admin/external-bindings",
+            "/api/admin/identity/users/admin/external-bindings",
             new { externalAccessToken = keys.IssueAccessToken(), expectedRowVersion = rowVersion });
         Assert.Equal(HttpStatusCode.Created, bind.StatusCode);
         var binding = await bind.Content.ReadFromJsonAsync<JsonElement>();
@@ -253,16 +253,16 @@ public sealed class ExternalIdentityExchangeTests
         var afterBind = await factory.Services.GetRequiredService<ITradingUserDirectory>().GetUserAsync("admin");
         Assert.NotNull(afterBind);
         var disable = await admin.PutAsJsonAsync(
-            "/admin/identity/users/admin/status",
+            "/api/admin/identity/users/admin/status",
             new { status = TradingUserDirectoryConstants.StatusDisabled, expectedRowVersion = afterBind!.RowVersion });
         await AssertErrorAsync(disable, HttpStatusCode.Conflict, "last_admin_conflict");
 
         var downgrade = await admin.PutAsJsonAsync(
-            "/admin/identity/users/admin/authorization",
+            "/api/admin/identity/users/admin/authorization",
             new { firmId = "default", role = TradingUserDirectoryConstants.RoleCompliance, expectedRowVersion = afterBind.RowVersion });
         await AssertErrorAsync(downgrade, HttpStatusCode.Conflict, "last_admin_conflict");
 
-        using var unlinkReq = new HttpRequestMessage(HttpMethod.Delete, $"/admin/identity/users/admin/external-bindings/{bindingId}")
+        using var unlinkReq = new HttpRequestMessage(HttpMethod.Delete, $"/api/admin/identity/users/admin/external-bindings/{bindingId}")
         {
             Content = JsonContent.Create(new { expectedRowVersion = afterBind.RowVersion }),
         };
@@ -280,23 +280,23 @@ public sealed class ExternalIdentityExchangeTests
         var alice = await directory.GetUserAsync("alice");
 
         var bind = await admin.PostAsJsonAsync(
-            "/admin/identity/users/alice/external-bindings",
+            "/api/admin/identity/users/alice/external-bindings",
             new { externalAccessToken = keys.IssueAccessToken(), expectedRowVersion = alice!.RowVersion });
         Assert.Equal(HttpStatusCode.Created, bind.StatusCode);
 
         var bob = await directory.GetUserAsync("bob");
         var conflict = await admin.PostAsJsonAsync(
-            "/admin/identity/users/bob/external-bindings",
+            "/api/admin/identity/users/bob/external-bindings",
             new { externalAccessToken = keys.IssueAccessToken(), expectedRowVersion = bob!.RowVersion });
         await AssertErrorAsync(conflict, HttpStatusCode.Conflict, "identity_binding_conflict");
 
         var stale = await admin.PutAsJsonAsync(
-            "/admin/identity/users/alice/status",
+            "/api/admin/identity/users/alice/status",
             new { status = TradingUserDirectoryConstants.StatusDisabled, expectedRowVersion = alice.RowVersion });
         await AssertErrorAsync(stale, HttpStatusCode.Conflict, "row_version_conflict");
 
         var missing = await admin.PostAsJsonAsync(
-            "/admin/identity/users/missing/external-bindings",
+            "/api/admin/identity/users/missing/external-bindings",
             new { externalAccessToken = keys.IssueAccessToken(), expectedRowVersion = 1 });
         await AssertErrorAsync(missing, HttpStatusCode.Conflict, "identity_binding_conflict");
     }
@@ -314,19 +314,19 @@ public sealed class ExternalIdentityExchangeTests
 
         var firstToken = await factory.LoginAsync(setup);
         setup.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", firstToken);
-        var enroll = await setup.PostAsJsonAsync("/auth/2fa/enroll", new { });
+        var enroll = await setup.PostAsJsonAsync("/api/auth/2fa/enroll", new { });
         Assert.Equal(HttpStatusCode.OK, enroll.StatusCode);
         var enrollBody = await enroll.Content.ReadFromJsonAsync<JsonElement>();
         var secret = enrollBody.GetProperty("secret").GetString()!;
-        var confirm = await setup.PostAsJsonAsync("/auth/2fa/verify", new { code = ComputeTotp(secret) });
+        var confirm = await setup.PostAsJsonAsync("/api/auth/2fa/verify", new { code = ComputeTotp(secret) });
         Assert.Equal(HttpStatusCode.OK, confirm.StatusCode);
 
         using var loginClient = factory.CreateClient();
-        var login = await loginClient.PostAsJsonAsync("/auth/login", new LoginRequest("alice", "wonderland"));
+        var login = await loginClient.PostAsJsonAsync("/api/auth/login", new LoginRequest("alice", "wonderland"));
         var challenge = (await login.Content.ReadFromJsonAsync<JsonElement>())
             .GetProperty("totpChallengeToken")
             .GetString();
-        var verify = await loginClient.PostAsJsonAsync("/auth/2fa/verify",
+        var verify = await loginClient.PostAsJsonAsync("/api/auth/2fa/verify",
             new { code = ComputeTotp(secret, stepOffset: 1), totpChallengeToken = challenge });
 
         Assert.Equal(HttpStatusCode.OK, verify.StatusCode);
@@ -468,7 +468,7 @@ public sealed class ExternalIdentityExchangeTests
 
     private static Task<HttpResponseMessage> ExchangeAsync(HttpClient http, string token)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Post, "/auth/exchange");
+        using var req = new HttpRequestMessage(HttpMethod.Post, "/api/auth/exchange");
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         return http.SendAsync(req);
     }

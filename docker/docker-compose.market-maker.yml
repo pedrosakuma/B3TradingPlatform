@@ -15,7 +15,7 @@
 # This is the canonical real-market sandbox recipe (#683 item 3): it
 # ALSO flips trading-host's Trading__Sandbox__AllowSelfCashDeposit to
 # true, so any logged-in end-client can self-service `POST
-# /balance/deposit` for buying power and then actually trade against
+# /api/balance/deposit` for buying power and then actually trade against
 # the bot's resting quotes. See docs/DOCKER.md "Market-maker overlay"
 # for the full walkthrough and the safety notes below.
 #
@@ -47,7 +47,7 @@ services:
     environment:
       # Self-service cash deposit (#679/#681): lets any authenticated
       # end-client top up their own CashLedger balance via `POST
-      # /balance/deposit` instead of requiring an admin round-trip —
+      # /api/balance/deposit` instead of requiring an admin round-trip —
       # the actual motivator for this whole overlay, since a market
       # maker resting quotes is only useful if end-clients have buying
       # power to trade against them. Disabled by default in the base

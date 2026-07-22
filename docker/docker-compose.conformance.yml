@@ -16,7 +16,7 @@
 # always invoked explicitly via `run --rm`.
 
 services:
-  # Add an admin-role seed user so the conformance suite can hit /admin/*.
+  # Add an admin-role seed user so the conformance suite can hit /api/admin/*.
   # Reuses alice's hash/salt (PBKDF2 is deterministic on plaintext+salt)
   # under a different username + role=admin, so no extra secret-management
   # is required. Slots Users__4 and Users__8 avoid colliding with base
@@ -93,7 +93,7 @@ services:
       # _SALT. Default `wonderland` matches the seeds committed in
       # .env.example. Override in .env when rotating.
       B3T_AUTH_PASS: ${TRADING_SEED_PASSWORD:-wonderland}
-      # Admin user for /admin/* coverage. Reuses the same PBKDF2 hash/salt
+      # Admin user for /api/admin/* coverage. Reuses the same PBKDF2 hash/salt
       # because PBKDF2 is deterministic for a given plaintext+salt — same
       # password material, different username + admin role.
       B3T_ADMIN_USER: ${TRADING_ADMIN_USER:-carol}

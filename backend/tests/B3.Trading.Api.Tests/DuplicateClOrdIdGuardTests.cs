@@ -99,7 +99,7 @@ public class DuplicateClOrdIdGuardTests
     private static async Task<HttpResponseMessage> PostOrder(
         HttpClient http, string token, int qty, decimal price)
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/orders")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
         {
             Content = JsonContent.Create(new
             {
@@ -118,7 +118,7 @@ public class DuplicateClOrdIdGuardTests
     private static async Task<HttpResponseMessage> PutModify(
         HttpClient http, string token, string clOrdId, int qty, decimal? price)
     {
-        var req = new HttpRequestMessage(HttpMethod.Put, $"/orders/{clOrdId}")
+        var req = new HttpRequestMessage(HttpMethod.Put, $"/api/orders/{clOrdId}")
         {
             Content = JsonContent.Create(new { Quantity = qty, Price = price })
         };

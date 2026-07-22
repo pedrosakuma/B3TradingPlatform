@@ -4,9 +4,9 @@
 # trading-host + frontend.
 #
 # Use cases:
-#   - Validating the fail-closed surface (POST /orders → 502 BadGateway,
+#   - Validating the fail-closed surface (POST /api/orders → 502 BadGateway,
 #     /health readyForOrders=false, blotter empty, ticket disabled).
-#   - Auth/admin-only flows (login, /admin/firms CRUD) without spinning
+#   - Auth/admin-only flows (login, /api/admin/firms CRUD) without spinning
 #     up the matching engine.
 #   - CI conformance jobs that exercise the Unavailable contract
 #     (admin/firms tests, risk-rejection-shape).

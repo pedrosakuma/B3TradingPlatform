@@ -83,7 +83,7 @@ public sealed class SubAccountsRegistry
     /// <summary>
     /// Lists every entry for <paramref name="firmId"/>, active or
     /// deactivated. The caller filters in the API surface as needed
-    /// (default <c>GET /sub-accounts</c> hides deactivated rows).
+    /// (default <c>GET /api/sub-accounts</c> hides deactivated rows).
     /// </summary>
     public IReadOnlyList<Entry> ListForFirm(string firmId)
     {

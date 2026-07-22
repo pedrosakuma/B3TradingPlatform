@@ -6,7 +6,7 @@ namespace B3.Trading.DemoDriver;
 /// <summary>
 /// Single instance. Logs in as the configured admin and periodically picks a
 /// random working order from <see cref="DemoOrderRegistry"/> to inject either
-/// a PartialFill or a Fill into via <c>POST /admin/simulator/er</c>.
+/// a PartialFill or a Fill into via <c>POST /api/admin/simulator/er</c>.
 ///
 /// Only runs in Simulator mode. In other modes the worker exits early (the
 /// bots will still submit; orders just sit working in Mock or fail gracefully

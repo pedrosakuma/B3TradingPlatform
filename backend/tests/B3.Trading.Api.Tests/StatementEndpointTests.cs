@@ -52,7 +52,7 @@ public class StatementEndpointTests : IDisposable
     {
         using var f = TestAppFactory.WithOverrides(Overrides());
         using var http = f.CreateClient();
-        var resp = await http.GetAsync("/statement");
+        var resp = await http.GetAsync("/api/statement");
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
     }
 
@@ -62,7 +62,7 @@ public class StatementEndpointTests : IDisposable
         using var f = TestAppFactory.WithOverrides(Overrides());
         using var http = f.CreateClient();
         var token = await f.LoginAsync(http);
-        var req = Bearer(HttpMethod.Get, "/statement", token);
+        var req = Bearer(HttpMethod.Get, "/api/statement", token);
         var resp = await http.SendAsync(req);
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var dto = await resp.Content.ReadFromJsonAsync<JsonElement>();
@@ -165,7 +165,7 @@ public class StatementEndpointTests : IDisposable
         await InjectFill(http, adminToken, buyId, qty: 100, price: 30m);
 
         var day = DateOnly.FromDateTime(DateTimeOffset.UtcNow.UtcDateTime).ToString("yyyy-MM-dd");
-        var req = Bearer(HttpMethod.Get, $"/statement/{day}.csv", token);
+        var req = Bearer(HttpMethod.Get, $"/api/statement/{day}.csv", token);
         var resp = await http.SendAsync(req);
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         Assert.Equal("text/csv", resp.Content.Headers.ContentType?.MediaType);
@@ -244,7 +244,7 @@ public class StatementEndpointTests : IDisposable
         using var http = f.CreateClient();
         var token = await f.LoginAsync(http);
         var future = DateOnly.FromDateTime(DateTimeOffset.UtcNow.UtcDateTime).AddDays(7).ToString("yyyy-MM-dd");
-        var req = Bearer(HttpMethod.Get, $"/statement/{future}", token);
+        var req = Bearer(HttpMethod.Get, $"/api/statement/{future}", token);
         var resp = await http.SendAsync(req);
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
     }
@@ -255,7 +255,7 @@ public class StatementEndpointTests : IDisposable
         using var f = TestAppFactory.WithOverrides(Overrides());
         using var http = f.CreateClient();
         var token = await f.LoginAsync(http);
-        var req = Bearer(HttpMethod.Get, "/statement/not-a-date", token);
+        var req = Bearer(HttpMethod.Get, "/api/statement/not-a-date", token);
         var resp = await http.SendAsync(req);
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
     }
@@ -287,7 +287,7 @@ public class StatementEndpointTests : IDisposable
         for (var i = 0; i < FillCount; i++)
             clOrdIds.Add(ulong.Parse(await SubmitBuy(http, token, qty: 1, price: 30m)));
 
-        // Reader task: hammer GET /statement and assert consistency on
+        // Reader task: hammer GET /api/statement and assert consistency on
         // every response. Runs until all fills have been injected and
         // we have observed the final consistent state at least once.
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -613,7 +613,7 @@ public class StatementEndpointTests : IDisposable
 
     private static async Task<JsonElement> GetStatement(HttpClient http, string token, string? dayKey = null)
     {
-        var url = dayKey is null ? "/statement" : $"/statement/{dayKey}";
+        var url = dayKey is null ? "/api/statement" : $"/api/statement/{dayKey}";
         var req = Bearer(HttpMethod.Get, url, token);
         var resp = await http.SendAsync(req);
         resp.EnsureSuccessStatusCode();
@@ -628,7 +628,7 @@ public class StatementEndpointTests : IDisposable
 
     private static async Task<string> SubmitOrder(HttpClient http, string token, string side, int qty, decimal price)
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/orders")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
         {
             Content = JsonContent.Create(new
             {
@@ -649,7 +649,7 @@ public class StatementEndpointTests : IDisposable
 
     private static async Task InjectFill(HttpClient http, string adminToken, ulong clOrdId, long qty, decimal price)
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/admin/simulator/er")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/admin/simulator/er")
         {
             Content = JsonContent.Create(new
             {

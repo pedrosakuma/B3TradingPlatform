@@ -7,9 +7,9 @@ namespace B3.Trading.Conformance.Spec_HTTP_Simulator;
 
 /// <summary>
 /// Spec — Simulator. Smoke scenario for the slice-4 simulator gateway:
-/// (1) submit a real order via <c>POST /orders</c>,
-/// (2) inject a synthetic Fill via <c>POST /admin/simulator/er</c>,
-/// (3) verify <c>GET /orders/</c> reflects the fill.
+/// (1) submit a real order via <c>POST /api/orders</c>,
+/// (2) inject a synthetic Fill via <c>POST /api/admin/simulator/er</c>,
+/// (3) verify <c>GET /api/orders/</c> reflects the fill.
 /// Skipped unless the operator declares the host opted into ER
 /// injection via <c>B3T_ER_INJECTION=true</c> (legacy
 /// <c>B3T_SIMULATOR_MODE=true</c> honored as fallback after #163).
@@ -26,7 +26,7 @@ public class SimulatorErInjectionSpecTests
         var userAuth = await LoginHelper.LoginAsync(http, peer.Username, peer.Password);
         var adminAuth = await LoginHelper.LoginAsync(http, peer.AdminUsername!, peer.AdminPassword!);
 
-        using var submit = new HttpRequestMessage(HttpMethod.Post, "/orders/")
+        using var submit = new HttpRequestMessage(HttpMethod.Post, "/api/orders/")
         {
             Content = JsonContent.Create(new
             {
@@ -44,7 +44,7 @@ public class SimulatorErInjectionSpecTests
         var ack = await submitResp.Content.ReadFromJsonAsync<JsonElement>();
         var clOrdId = ulong.Parse(ack.GetProperty("clOrdId").GetString()!);
 
-        using var inject = new HttpRequestMessage(HttpMethod.Post, "/admin/simulator/er")
+        using var inject = new HttpRequestMessage(HttpMethod.Post, "/api/admin/simulator/er")
         {
             Content = JsonContent.Create(new
             {
@@ -58,7 +58,7 @@ public class SimulatorErInjectionSpecTests
         var injectResp = await http.SendAsync(inject);
         Assert.Equal(HttpStatusCode.Accepted, injectResp.StatusCode);
 
-        using var list = new HttpRequestMessage(HttpMethod.Get, "/orders/");
+        using var list = new HttpRequestMessage(HttpMethod.Get, "/api/orders/");
         list.Headers.Authorization = userAuth;
         var listResp = await http.SendAsync(list);
         listResp.EnsureSuccessStatusCode();

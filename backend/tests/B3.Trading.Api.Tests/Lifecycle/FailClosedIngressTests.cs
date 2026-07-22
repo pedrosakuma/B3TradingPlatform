@@ -29,7 +29,7 @@ public class FailClosedIngressTests
             });
         using var client = await factory.CreateAuthedClientAsync();
 
-        var response = await client.PostAsJsonAsync("/orders/", new
+        var response = await client.PostAsJsonAsync("/api/orders/", new
         {
             Symbol = "PETR4",
             SecurityId = 4321UL,

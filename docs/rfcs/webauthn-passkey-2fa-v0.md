@@ -5,7 +5,7 @@
 | Status   | Proposed                                                            |
 | Tracking | [#319](https://github.com/pedrosakuma/B3TradingPlatform/issues/319) |
 | Refs     | [#303](https://github.com/pedrosakuma/B3TradingPlatform/issues/303) (Q4.3 2FA), PR #318 (TOTP baseline) |
-| Builds on | TOTP second factor (`/auth/2fa/*`, `UserTotpConfig`)               |
+| Builds on | TOTP second factor (`/api/auth/2fa/*`, `UserTotpConfig`)               |
 
 ## 1. Context
 
@@ -42,7 +42,7 @@ questions that need an answer before implementation.
 1. **WebAuthn as a co-equal second factor.** A user may register one or
    more passkeys, alongside or instead of TOTP.
 2. **Multi-factor-aware login.** When a user has *any* factor enrolled,
-   `/auth/login` returns a challenge that enumerates the available
+   `/api/auth/login` returns a challenge that enumerates the available
    factors (`totp`, `webauthn`) so the FE can route to the right prompt.
 3. **Reuse, don't reinvent.** Reuse the existing challenge-token
    handshake, `IUserStore` persistence + JSON snapshot, Data Protection
@@ -128,12 +128,12 @@ Mirror the TOTP enroll shape (`TotpEndpoints.cs:29-96`), two-step
 because WebAuthn registration is a challenge/response with the
 authenticator:
 
-- `POST /auth/webauthn/register/begin` → returns
+- `POST /api/auth/webauthn/register/begin` → returns
   `PublicKeyCredentialCreationOptions` (RP info, user handle, challenge,
   excludeCredentials of already-registered IDs, pubKeyCredParams). The
   challenge is stashed in a short-TTL store keyed by an opaque token,
   reusing the `TotpStores` pattern.
-- `POST /auth/webauthn/register/finish` → receives the attestation
+- `POST /api/auth/webauthn/register/finish` → receives the attestation
   response, verifies it via `Fido2NetLib`, and on success appends a
   `WebAuthnCredential`. Accessible both in the **JWT-authenticated**
   mode (a logged-in user adding a passkey) and the **ForceEnroll**
@@ -155,7 +155,7 @@ Extend `AuthEndpoints.cs:105-148` so the factor branch becomes
    `totpChallengeToken`. **Back-compat:** keep `requires2fa` +
    `totpChallengeToken` populated when TOTP is available so the current
    FE keeps working unchanged.
-4. New verify endpoint `POST /auth/webauthn/assert` consumes the
+4. New verify endpoint `POST /api/auth/webauthn/assert` consumes the
    challenge token + the authenticator assertion, verifies signature +
    **sign-counter monotonicity** (clone detection) via `Fido2NetLib`,
    updates `SignCount`/`LastUsedAt`, and on success mints the JWT
@@ -188,10 +188,10 @@ present, and offer a chooser when both. `protocol.js:41-88` gains
 2. **Persistence** — `WebAuthnCredential` + `UserWebAuthnConfig` on
    `UserConfig`; `IUserStore` add/list/update-sign-count/remove;
    protector reuse; JSON round-trip in both stores.
-3. **Registration endpoints** — `/auth/webauthn/register/begin|finish`
+3. **Registration endpoints** — `/api/auth/webauthn/register/begin|finish`
    (JWT + ForceEnroll modes).
-4. **Login + assertion** — factor-set-aware `/auth/login` response;
-   `/auth/webauthn/assert`; lockout integration (I7).
+4. **Login + assertion** — factor-set-aware `/api/auth/login` response;
+   `/api/auth/webauthn/assert`; lockout integration (I7).
 5. **Recovery-code sharing** — ensure passkey-only users get/keep
    recovery codes (resolve §8 O3).
 6. **`amr` claim** — optional auth-method-reference (§5.4).

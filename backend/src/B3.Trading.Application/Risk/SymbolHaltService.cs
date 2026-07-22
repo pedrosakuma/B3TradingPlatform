@@ -28,7 +28,7 @@ namespace B3.Trading.Application.Risk;
 /// <para>
 /// <b>Halt origin (#370 Stage A):</b> halts carry a
 /// <see cref="HaltOrigin"/> tag (<see cref="HaltOrigin.Operator"/>
-/// for <c>/admin/halts</c>, <see cref="HaltOrigin.Venue"/> for halts
+/// for <c>/api/admin/halts</c>, <see cref="HaltOrigin.Venue"/> for halts
 /// observed via market data). The two origins are independent flags:
 /// a symbol is halted iff at least one origin has it halted, so an
 /// operator halt is never cleared by a venue resume (operator stays
@@ -157,7 +157,7 @@ public sealed class SymbolHaltService
         _haltedSymbols.Clear();
         // Legacy path — pre-#370 snapshots only carried the symbol
         // list, no origin. Treat them as operator halts so the
-        // existing /admin/halts DELETE keeps working after recovery.
+        // existing /api/admin/halts DELETE keeps working after recovery.
         var operatorFlag = FlagOf(HaltOrigin.Operator);
         foreach (var s in haltedSymbols) _haltedSymbols[s] = operatorFlag;
     }

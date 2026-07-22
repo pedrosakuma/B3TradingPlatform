@@ -120,7 +120,7 @@ public class LoginLockoutTests
         // Three wrong-password attempts: each returns 401 invalid.
         for (var i = 0; i < 3; i++)
         {
-            var r = await http.PostAsJsonAsync("/auth/login", new { username = "alice", password = "nope" });
+            var r = await http.PostAsJsonAsync("/api/auth/login", new { username = "alice", password = "nope" });
             Assert.Equal(HttpStatusCode.Unauthorized, r.StatusCode);
         }
 
@@ -128,7 +128,7 @@ public class LoginLockoutTests
         // refused with the same 401 response shape because lockout
         // engaged on the third miss. Anti-enumeration: locked vs
         // wrong-password indistinguishable from the client's POV.
-        var blocked = await http.PostAsJsonAsync("/auth/login", new { username = "alice", password = "wonderland" });
+        var blocked = await http.PostAsJsonAsync("/api/auth/login", new { username = "alice", password = "wonderland" });
         Assert.Equal(HttpStatusCode.Unauthorized, blocked.StatusCode);
         var body = await blocked.Content.ReadFromJsonAsync<Dictionary<string, string>>();
         Assert.Equal("invalid credentials", body?["error"]);
@@ -148,14 +148,14 @@ public class LoginLockoutTests
 
         // Two misses then a success: the slate must be wiped, so the
         // user can miss two MORE times without locking out.
-        await http.PostAsJsonAsync("/auth/login", new { username = "alice", password = "nope" });
-        await http.PostAsJsonAsync("/auth/login", new { username = "alice", password = "nope" });
-        var ok = await http.PostAsJsonAsync("/auth/login", new { username = "alice", password = "wonderland" });
+        await http.PostAsJsonAsync("/api/auth/login", new { username = "alice", password = "nope" });
+        await http.PostAsJsonAsync("/api/auth/login", new { username = "alice", password = "nope" });
+        var ok = await http.PostAsJsonAsync("/api/auth/login", new { username = "alice", password = "wonderland" });
         Assert.Equal(HttpStatusCode.OK, ok.StatusCode);
 
-        await http.PostAsJsonAsync("/auth/login", new { username = "alice", password = "nope" });
-        await http.PostAsJsonAsync("/auth/login", new { username = "alice", password = "nope" });
-        var stillOk = await http.PostAsJsonAsync("/auth/login", new { username = "alice", password = "wonderland" });
+        await http.PostAsJsonAsync("/api/auth/login", new { username = "alice", password = "nope" });
+        await http.PostAsJsonAsync("/api/auth/login", new { username = "alice", password = "nope" });
+        var stillOk = await http.PostAsJsonAsync("/api/auth/login", new { username = "alice", password = "wonderland" });
         Assert.Equal(HttpStatusCode.OK, stillOk.StatusCode);
     }
 
@@ -175,9 +175,9 @@ public class LoginLockoutTests
         });
         var http = factory.CreateClient();
 
-        await http.PostAsJsonAsync("/auth/login", new { username = "ghost-user", password = "x" });
-        await http.PostAsJsonAsync("/auth/login", new { username = "ghost-user", password = "x" });
-        var third = await http.PostAsJsonAsync("/auth/login", new { username = "ghost-user", password = "x" });
+        await http.PostAsJsonAsync("/api/auth/login", new { username = "ghost-user", password = "x" });
+        await http.PostAsJsonAsync("/api/auth/login", new { username = "ghost-user", password = "x" });
+        var third = await http.PostAsJsonAsync("/api/auth/login", new { username = "ghost-user", password = "x" });
 
         // All three look identical — 401 invalid credentials. We can't
         // observe the lock externally from a single response (by design),

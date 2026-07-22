@@ -2,7 +2,7 @@ namespace B3.Trading.Application;
 
 /// <summary>
 /// #679. Config surface for the self-service cash deposit endpoint
-/// (<c>POST /balance/deposit</c>). Lets an authenticated end-client top
+/// (<c>POST /api/balance/deposit</c>). Lets an authenticated end-client top
 /// up their own <see cref="CashLedger"/> balance without operator
 /// intervention — the sandbox/demo motivator being that buying power
 /// (not just a working order) is required for a trade to actually
@@ -13,7 +13,7 @@ namespace B3.Trading.Application;
 /// Disabled by default (<see cref="AllowSelfCashDeposit"/> = <c>false</c>)
 /// so production deployments never expose it by accident; when the
 /// endpoint is disabled the route itself is not mapped (404, not 403 —
-/// mirrors the <c>POST /admin/simulator/er</c> conditional-mount pattern
+/// mirrors the <c>POST /api/admin/simulator/er</c> conditional-mount pattern
 /// gated by <c>ExchangeOptions.AllowErInjection</c>).
 /// </para>
 /// </summary>
@@ -22,7 +22,7 @@ public sealed class SandboxCashOptions
     public const string SectionName = "Trading:Sandbox";
 
     /// <summary>
-    /// Master switch. When <c>false</c> (default), <c>POST /balance/deposit</c>
+    /// Master switch. When <c>false</c> (default), <c>POST /api/balance/deposit</c>
     /// is not mapped at all.
     /// </summary>
     public bool AllowSelfCashDeposit { get; set; }
@@ -37,7 +37,7 @@ public sealed class SandboxCashOptions
     public bool AllowSelfCashDepositInProduction { get; set; }
 
     /// <summary>
-    /// Maximum amount accepted in a single <c>POST /balance/deposit</c>
+    /// Maximum amount accepted in a single <c>POST /api/balance/deposit</c>
     /// call. Rejected with 422 above this bound. Anti-abuse guardrail —
     /// exact production value still to be defined per #679.
     /// </summary>

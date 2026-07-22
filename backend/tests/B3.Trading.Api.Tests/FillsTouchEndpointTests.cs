@@ -15,7 +15,7 @@ using Microsoft.Extensions.DependencyInjection;
 namespace B3.Trading.Api.Tests;
 
 /// <summary>
-/// Q4.7 (#307). End-to-end coverage for the <c>GET /fills/{id}/touch</c>
+/// Q4.7 (#307). End-to-end coverage for the <c>GET /api/fills/{id}/touch</c>
 /// REST surface and the <c>bookTouch</c> payload on the
 /// <c>executions.me</c> WS channel. Pairs with
 /// <c>BookTouchCaptureTests</c> (capture / WAL / projection unit tests).
@@ -74,7 +74,7 @@ public class FillsTouchEndpointTests
         var (token, _) = issuer.Issue("alice", "user", Firm01);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
-        var resp = await client.GetAsync($"/fills/{id}/touch");
+        var resp = await client.GetAsync($"/api/fills/{id}/touch");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var dto = await resp.Content.ReadFromJsonAsync<BookTouchDto>(JsonOptions);
         Assert.NotNull(dto);
@@ -90,7 +90,7 @@ public class FillsTouchEndpointTests
     {
         await using var factory = TestAppFactory.WithOverrides(new Dictionary<string, string?>());
         var client = await factory.CreateAuthedClientAsync();
-        var resp = await client.GetAsync("/fills/9999:42/touch");
+        var resp = await client.GetAsync("/api/fills/9999:42/touch");
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
     }
 
@@ -105,7 +105,7 @@ public class FillsTouchEndpointTests
         var (token, _) = issuer.Issue("bob", "user", Firm02);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
-        var resp = await client.GetAsync($"/fills/{id}/touch");
+        var resp = await client.GetAsync($"/api/fills/{id}/touch");
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
     }
 
@@ -116,7 +116,7 @@ public class FillsTouchEndpointTests
         var (_, id) = SeedFill(factory, "alice", Firm01, 301UL, 75, FreshTouch());
 
         var client = await factory.CreateAuthedClientAsync("admin");
-        var resp = await client.GetAsync($"/fills/{id}/touch?firmId={Firm01}");
+        var resp = await client.GetAsync($"/api/fills/{id}/touch?firmId={Firm01}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var dto = await resp.Content.ReadFromJsonAsync<BookTouchDto>(JsonOptions);
         Assert.NotNull(dto);
@@ -134,7 +134,7 @@ public class FillsTouchEndpointTests
         var (token, _) = issuer.Issue("alice", "user", Firm01);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
-        var resp = await client.GetAsync($"/fills/{id}/touch?firmId={Firm02}");
+        var resp = await client.GetAsync($"/api/fills/{id}/touch?firmId={Firm02}");
         Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
     }
 
@@ -152,7 +152,7 @@ public class FillsTouchEndpointTests
         var (token, _) = issuer.Issue("alice", "user", Firm01);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
-        var resp = await client.GetAsync($"/fills/{id}/touch");
+        var resp = await client.GetAsync($"/api/fills/{id}/touch");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var dto = await resp.Content.ReadFromJsonAsync<BookTouchDto>(JsonOptions);
         Assert.NotNull(dto);
@@ -170,7 +170,7 @@ public class FillsTouchEndpointTests
         var (_, id) = SeedFill(factory, "alice", Firm01, 601UL, 100, FreshTouch());
 
         using var client = factory.CreateClient();
-        var resp = await client.GetAsync($"/fills/{id}/touch");
+        var resp = await client.GetAsync($"/api/fills/{id}/touch");
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
     }
 
@@ -200,7 +200,7 @@ public class FillsTouchEndpointTests
         var snap = await ReadJsonAsync(ws, cts.Token);
         Assert.Equal("snapshot", snap.GetProperty("type").GetString());
 
-        var req = new HttpRequestMessage(HttpMethod.Post, "/orders")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
         {
             Content = JsonContent.Create(new { Symbol = "PETR4", SecurityId = 4321UL, Side = "Buy", Type = "Limit", Quantity = 100, Price = 30m }),
         };
@@ -234,13 +234,13 @@ public class FillsTouchEndpointTests
     public async Task RestEndpoint_AfterLiveFillThroughRouter_ReturnsCapturedTouch()
     {
         // Full live path (no SeedFill shortcut): submit, prime cache,
-        // emit fill, GET /fills/{id}/touch and confirm what the router
+        // emit fill, GET /api/fills/{id}/touch and confirm what the router
         // captured matches what the REST surface returns.
         await using var factory = TestAppFactory.WithOverrides(new Dictionary<string, string?>());
         using var http = factory.CreateClient();
         var token = await factory.LoginAsync(http);
 
-        var req = new HttpRequestMessage(HttpMethod.Post, "/orders")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
         {
             Content = JsonContent.Create(new { Symbol = "PETR4", SecurityId = 4321UL, Side = "Buy", Type = "Limit", Quantity = 60, Price = 30m }),
         };
@@ -266,7 +266,7 @@ public class FillsTouchEndpointTests
 
         var authed = factory.CreateClient();
         authed.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
-        var resp = await authed.GetAsync($"/fills/{id}/touch");
+        var resp = await authed.GetAsync($"/api/fills/{id}/touch");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var dto = await resp.Content.ReadFromJsonAsync<BookTouchDto>(JsonOptions);
         Assert.NotNull(dto);
@@ -281,7 +281,7 @@ public class FillsTouchEndpointTests
         // Persistence-on path: enable WAL + a temp data dir, emit a
         // fill, then dispose+recreate the factory with the same dir.
         // The recovery pre-pass folds historical Fill ERs back into
-        // FillProjection so /fills/{id}/touch keeps working after cold
+        // FillProjection so /api/fills/{id}/touch keeps working after cold
         // boot.
         var dataDir = Path.Combine(
             Path.GetTempPath(),
@@ -303,7 +303,7 @@ public class FillsTouchEndpointTests
                 using var http = factory.CreateClient();
                 var token = await factory.LoginAsync(http);
 
-                var req = new HttpRequestMessage(HttpMethod.Post, "/orders")
+                var req = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
                 {
                     Content = JsonContent.Create(new { Symbol = "PETR4", SecurityId = 4321UL, Side = "Buy", Type = "Limit", Quantity = 40, Price = 30m }),
                 };
@@ -355,7 +355,7 @@ public class FillsTouchEndpointTests
                 var token = await factory2.LoginAsync(http);
                 http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
-                var resp = await http.GetAsync($"/fills/{fillId}/touch");
+                var resp = await http.GetAsync($"/api/fills/{fillId}/touch");
                 Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
                 var dto = await resp.Content.ReadFromJsonAsync<BookTouchDto>(JsonOptions);
                 Assert.NotNull(dto);

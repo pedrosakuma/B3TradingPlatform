@@ -14,7 +14,7 @@ namespace B3.Trading.Api.Tests;
 
 /// <summary>
 /// Q4.14 (#314). Regression coverage: a <c>compliance</c> principal
-/// must be able to read <c>GET /fills/{id}/touch</c> within its own
+/// must be able to read <c>GET /api/fills/{id}/touch</c> within its own
 /// firm (the endpoint is gated by plain
 /// <see cref="Microsoft.AspNetCore.Builder.AuthorizationEndpointConventionBuilderExtensions.RequireAuthorization{TBuilder}(TBuilder)"/>
 /// — any authenticated principal passes — and the firm scope is
@@ -72,7 +72,7 @@ public class FillTouchComplianceAccessTests
         var (_, id) = SeedFill(factory, "alice", Firm01, 1001UL, 100);
 
         using var client = ComplianceClient(factory, Firm01);
-        var resp = await client.GetAsync($"/fills/{id}/touch");
+        var resp = await client.GetAsync($"/api/fills/{id}/touch");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var dto = await resp.Content.ReadFromJsonAsync<BookTouchDto>(JsonOptions);
         Assert.NotNull(dto);
@@ -88,7 +88,7 @@ public class FillTouchComplianceAccessTests
         var (_, id) = SeedFill(factory, "alice", Firm01, 1002UL, 50);
 
         using var client = ComplianceClient(factory, Firm02);
-        var resp = await client.GetAsync($"/fills/{id}/touch");
+        var resp = await client.GetAsync($"/api/fills/{id}/touch");
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
     }
 
@@ -103,7 +103,7 @@ public class FillTouchComplianceAccessTests
         var (_, id) = SeedFill(factory, "alice", Firm01, 1003UL, 75);
 
         using var client = ComplianceClient(factory, Firm01);
-        var resp = await client.GetAsync($"/fills/{id}/touch?firmId={Firm02}");
+        var resp = await client.GetAsync($"/api/fills/{id}/touch?firmId={Firm02}");
         Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
     }
 }

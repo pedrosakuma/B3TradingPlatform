@@ -332,7 +332,7 @@ public sealed class Order
     /// When set, this order is a child slice produced by an
     /// <c>AlgoEngine</c> on behalf of the parent <see cref="Algo"/> with
     /// id <see cref="ParentAlgoId"/> and slice index <see cref="AlgoSliceSeq"/>.
-    /// Manual orders submitted via <c>POST /orders</c> leave both fields
+    /// Manual orders submitted via <c>POST /api/orders</c> leave both fields
     /// <c>null</c>. The pair is set together or both <c>null</c> — never
     /// one without the other (RFC §4.2).
     /// </summary>

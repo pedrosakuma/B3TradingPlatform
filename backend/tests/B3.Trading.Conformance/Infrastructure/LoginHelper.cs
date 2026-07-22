@@ -5,7 +5,7 @@ using System.Net.Http.Json;
 namespace B3.Trading.Conformance.Infrastructure;
 
 /// <summary>
-/// Small helper: <c>POST /auth/login</c> against the configured platform
+/// Small helper: <c>POST /api/auth/login</c> against the configured platform
 /// and return an authorization header ready to apply to any request. Lets
 /// individual conformance specs stay focused on the contract they're
 /// asserting instead of re-implementing the login dance.
@@ -25,7 +25,7 @@ internal static class LoginHelper
             return new AuthenticationHeaderValue("Bearer", cached.Token);
         }
 
-        var resp = await http.PostAsJsonAsync("/auth/login", new { username, password });
+        var resp = await http.PostAsJsonAsync("/api/auth/login", new { username, password });
         Assert.True(resp.IsSuccessStatusCode,
             $"login failed for '{username}': {(int)resp.StatusCode} {await resp.Content.ReadAsStringAsync()}");
         var payload = await resp.Content.ReadFromJsonAsync<LoginResponse>();

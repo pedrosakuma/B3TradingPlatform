@@ -45,7 +45,7 @@ public static class ErInjectionBootGuard
         var prodNote = isProduction && allowInProduction
             ? " AllowErInjectionInProduction=true is currently set — opt-out is ACTIVE."
             : string.Empty;
-        return "⚠ ER INJECTION ENABLED — POST /admin/simulator/er accepts synthetic execution reports for any working ClOrdId. " +
+        return "⚠ ER INJECTION ENABLED — POST /api/admin/simulator/er accepts synthetic execution reports for any working ClOrdId. " +
             "Test/dev only. NEVER USE IN PRODUCTION." + prodNote;
     }
 }

@@ -16,7 +16,7 @@ caused a single production incident. But it is **v1**: every gap we
 deferred to "after we have real customers on it" is now blocking
 something concrete:
 
-- Multi-firm support landed (#25, `/admin/firms`) but limits are still
+- Multi-firm support landed (#25, `/api/admin/firms`) but limits are still
   per-symbol/per-end-client. A firm can't be capped as a unit.
 - `IMarginProvider` exists as an interface only — no implementation,
   no cache, no metric. Any conversation about onboarding a real firm
@@ -203,10 +203,10 @@ file watcher for appsettings; this is a small, well-trodden change.
 
 Two new admin endpoints (gated by `role=admin`):
 
-- `GET /admin/risk/limits?firmId=&endClient=&symbol=` returns the
+- `GET /api/admin/risk/limits?firmId=&endClient=&symbol=` returns the
   effective `RiskLimits` after resolution. Pure read, no side effects.
   Lets ops verify what the system actually thinks the cap is.
-- `POST /admin/risk/reload` triggers a reload of the underlying
+- `POST /api/admin/risk/reload` triggers a reload of the underlying
   configuration source. No-op for the appsettings provider (which
   reloads automatically) but a useful hook for the file/DB providers
   the persistence spike may pick later.
@@ -350,7 +350,7 @@ metrics + tests included.
 
 1. RFC (this document) — no code. **shipped (#39)**
 2. `PerFirm` limits + resolver update. **shipped (#40)**
-3. `IOptionsMonitor` switch + `GET /admin/risk/limits` + reload
+3. `IOptionsMonitor` switch + `GET /api/admin/risk/limits` + reload
    endpoint. **shipped (#41)**
 4. `MarginCheck` + reserve-on-submit ledger. **shipped (#43)**
 5. `IReferencePrice` indirection + `MarketDataReferencePrice` with
@@ -372,7 +372,7 @@ metrics + tests included.
    to bound memory under tenant churn.
 8. Conformance scenarios + Grafana panel + docs touch-up. **shipped** —
    `Spec_HTTP_Risk/RiskRejectionShapeSpecTests.cs` discovers the
-   resolved `MaxQuantity` via `GET /admin/risk/limits` and asserts the
+   resolved `MaxQuantity` via `GET /api/admin/risk/limits` and asserts the
    wire contract for risk rejections (`202 Accepted` + `{ clOrdId,
    status: "Rejected", reason }`). Grafana dashboard
    `dashboards/risk.json` ("B3 Trading — Risk") surfaces rejection
@@ -400,6 +400,6 @@ contract changes.
   aggregate). Memory is bounded by the periodic sweeper; the running
   aggregate keeps `Sum`/`Count` O(entries-pruned-this-call) rather
   than O(window-size).
-- **OQ-4:** Should `/admin/risk/reload` be per-firm or global?
+- **OQ-4:** Should `/api/admin/risk/reload` be per-firm or global?
   Starting global; per-firm only if a multi-firm config-source
   provider needs it.

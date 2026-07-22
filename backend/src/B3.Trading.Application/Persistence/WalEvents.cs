@@ -102,7 +102,7 @@ public sealed record OrderSubmittedEvent : WalEvent
     /// <summary>
     /// When set, the order is a child slice of an <see cref="AlgoCreatedEvent"/>'s
     /// parent. Both algo fields are set together or both <c>null</c>; manual
-    /// orders submitted via <c>POST /orders</c> emit <c>null</c>. Added in
+    /// orders submitted via <c>POST /api/orders</c> emit <c>null</c>. Added in
     /// algo orders v0 — older WAL segments without these fields deserialise
     /// with <c>null</c> on both, which matches the manual-order semantics
     /// they actually carried.
@@ -232,7 +232,7 @@ public sealed record BotBusinessIdentityTombstonePurgedEvent : WalEvent
 
 /// <summary>
 /// Sub-issue #171 (E). Recorded the moment a cancel request reaches the
-/// platform — REST <c>DELETE /orders/{clOrdId}</c> or a FIXP
+/// platform — REST <c>DELETE /api/orders/{clOrdId}</c> or a FIXP
 /// <c>OrderCancelRequest</c>. The previous in-memory-only path
 /// (<c>OwnershipMap.RegisterCancelLink</c>) lost cancel-side state on
 /// restart; persisting it as a WAL event closes the FIXP-cancel ER
@@ -270,7 +270,7 @@ public sealed record OrderCancelPreSendFailedEvent : WalEvent
 }
 
 /// <summary>
-/// Slice 4 of #122. Recorded the moment <c>PUT /orders/{clOrdId}</c>
+/// Slice 4 of #122. Recorded the moment <c>PUT /api/orders/{clOrdId}</c>
 /// reaches the modify pipeline (post-validation, post-risk, after
 /// margin Prepare succeeded but before the gateway dispatch).
 ///
@@ -336,7 +336,7 @@ public sealed record OrderReplacePreSendFailedEvent : WalEvent
 /// coordinator, before any gateway dispatch. Closes the audit gap
 /// flagged by the risk-pipeline-ordering RFC (#262): without this
 /// event the rejected modify left zero WAL footprint — invisible to
-/// <c>/executions/history</c>, the FE blotter, the CVM 35/505 export
+/// <c>/api/executions/history</c>, the FE blotter, the CVM 35/505 export
 /// (#308), the drop-copy feed (#306) and the best-exec touch capture
 /// (#307). The companion <see cref="OrderReplaceRequestedEvent"/> is
 /// NOT emitted on the reject path (no intent registration, no
@@ -748,7 +748,7 @@ public sealed record AlgoCreatedEvent : WalEvent
 }
 
 /// <summary>
-/// Recorded when <c>DELETE /algo/{id}</c> reaches the engine, before the
+/// Recorded when <c>DELETE /api/algo/{id}</c> reaches the engine, before the
 /// child cancels are dispatched. Replay uses it to set the parent to
 /// <c>Cancelling</c>; the eventual <see cref="AlgoTerminalStateRecordedEvent"/>
 /// promotes it to <c>Cancelled</c>.
@@ -1331,7 +1331,7 @@ public sealed record RealizedPnlEvent : WalEvent
 
 /// <summary>
 /// Q4.1 (#301). Recorded when a new sub-account is registered for a
-/// firm via <c>POST /sub-accounts</c>. The
+/// firm via <c>POST /api/sub-accounts</c>. The
 /// <c>SubAccountsRegistry</c> rehydrates the in-memory set on
 /// recovery by replaying this event family (CREATE / DEACTIVATE).
 /// Sub-accounts are namespaced per-firm: <c>(FirmId, Id)</c> is the
@@ -1379,7 +1379,7 @@ public sealed record SubAccountDeactivatedEvent : WalEvent
 /// string map so the on-disk schema is stable as new capture sites
 /// land. Audit replay folds these into an in-memory ring-buffer
 /// keeper — see <c>AuditLogKeeper</c> — which is the source of
-/// truth for <c>GET /admin/audit</c>; no snapshot field is
+/// truth for <c>GET /api/admin/audit</c>; no snapshot field is
 /// reserved (the keeper rehydrates from a WAL tail on recovery,
 /// bounded by its configured retention cap).</para>
 /// </summary>
@@ -1406,7 +1406,7 @@ public sealed record AuditLogEvent : WalEvent
     /// <summary>Source IP from <c>HttpContext.Connection.RemoteIpAddress</c>, normalised to its string form. Null for non-HTTP capture sites.</summary>
     public string? SourceIp { get; init; }
 
-    /// <summary>HTTP path being exercised at the capture site (e.g. <c>/auth/login</c>, <c>/admin/cash</c>). Null for non-HTTP capture sites.</summary>
+    /// <summary>HTTP path being exercised at the capture site (e.g. <c>/api/auth/login</c>, <c>/api/admin/cash</c>). Null for non-HTTP capture sites.</summary>
     public string? ResourcePath { get; init; }
 
     /// <summary>Machine-readable reason code, especially for failure / denied outcomes (<c>unknown_user</c>, <c>bad_password</c>, <c>locked</c>, <c>2fa_wrong_code</c>, …).</summary>

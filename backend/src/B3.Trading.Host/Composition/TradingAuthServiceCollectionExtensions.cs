@@ -194,7 +194,7 @@ public static class TradingAuthServiceCollectionExtensions
         services.AddAuthorization(options =>
         {
             options.AddPolicy("admin", policy => policy.RequireRole("admin"));
-            // Q4.14 (#314). Admin OR compliance — used by /admin/audit so a
+            // Q4.14 (#314). Admin OR compliance — used by /api/admin/audit so a
             // compliance principal can read the audit log (server-side
             // firm-scoped at the endpoint, never trust query filters).
             // Distinct from the CVM policy below because the policy name

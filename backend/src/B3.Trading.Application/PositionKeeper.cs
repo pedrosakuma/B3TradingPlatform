@@ -103,7 +103,7 @@ public sealed class PositionKeeper
 
     /// <summary>
     /// PR #316 P1. Returns positions for <paramref name="owner"/> filtered
-    /// to <paramref name="firmId"/>. Used by /positions, /pnl, /statement
+    /// to <paramref name="firmId"/>. Used by /api/positions, /api/pnl, /api/statement
     /// and the WS owner-scoped snapshot path so an end-client registered
     /// under multiple firms only sees the caller's firm slice.
     /// </summary>

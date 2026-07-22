@@ -26,14 +26,14 @@ For alert rules in Prometheus / AlertManager YAML form see
 ### Hybrid rollout
 
 1. Keep `Trading:Auth:Mode=Local` until the SQLite directory imports current
-   `alice`/`bob`/admin owner IDs and `/health.identityDirectory.ready=true`.
+   `alice`/`bob`/api/admin owner IDs and `/health.identityDirectory.ready=true`.
 2. If no admin is seeded, add one temporary legacy admin through Key Vault
    `Trading:Auth:Users` password hash/salt, not signup. Start once in Local so
    import preserves the exact `tradingUserId`.
 3. Switch to `Hybrid` with signup disabled. Login with the local admin and call
-   `POST /admin/identity/users/{id}/external-bindings` with the internal admin
+   `POST /api/admin/identity/users/{id}/external-bindings` with the internal admin
    JWT in `Authorization` and the Entra access token in JSON body.
-4. Exchange with `/auth/exchange`, bind existing `alice`/`bob`, verify their
+4. Exchange with `/api/auth/exchange`, bind existing `alice`/`bob`, verify their
    orders/positions/history remain under the same owner IDs, then disable local
    login/TOTP and switch to `Entra`.
 
@@ -84,7 +84,7 @@ never created, migrated, or reset.
 
 ## 0.1 Outbound mutation reconciliation (#647)
 
-Use the firm-scoped `/admin/outbound-mutations/` timeline when `/ready` is
+Use the firm-scoped `/api/admin/outbound-mutations/` timeline when `/ready` is
 closed by outbound recovery or the reconciliation gauges show ambiguous or
 legacy-unknown work. The response deliberately contains no account, investor,
 end-client, ciphertext, or customer identifier. `encryptedFieldReferences`
@@ -94,7 +94,7 @@ identity needed to diagnose historical-key availability.
 ### Investigation and evidence
 
 1. List unresolved rows with
-   `GET /admin/outbound-mutations/?requiresReconciliation=true`, then fetch the
+   `GET /api/admin/outbound-mutations/?requiresReconciliation=true`, then fetch the
    mutation timeline by its opaque mutation UUID. Never paste customer values
    into a reason or evidence reference.
 2. Match the attempt's firm/session/version/sequence and ClOrdID against an
@@ -109,7 +109,7 @@ identity needed to diagnose historical-key availability.
      (`official_extract`, `official-extract:<sha256>`).
 3. Before using `venue_mass_action` or `official_extract`, register the
    evidence against the mutation with
-   `POST /admin/outbound-mutations/{mutationId}/evidence`. Supply the source
+   `POST /api/admin/outbound-mutations/{mutationId}/evidence`. Supply the source
    type, prefixed SHA-256 evidence reference, coverage start/end timestamps
    that include the mutation timestamp, and an
    `attestation:<sha256>` reference. Registration is firm-scoped,
@@ -134,7 +134,7 @@ customer fields to this API.
 `venue_absent` for an ambiguous New/Replace is capacity-releasing and therefore
 returns `202 pending_approval`. A different firm-scoped admin must approve the
 proposal at
-`POST /admin/outbound-mutations/{mutationId}/resolve/{proposalId}/approve`.
+`POST /api/admin/outbound-mutations/{mutationId}/resolve/{proposalId}/approve`.
 Self-approval is rejected. The audit WAL record is committed before the
 proposal/resolution record; the resolution WAL record commits before held
 capacity is released. A `503 reconciliation_unavailable` means no resolution
@@ -470,7 +470,7 @@ production posture relies on upstream LB/WAF controls for internet exposure.
 ## 3. User-bot tenant lifecycle
 
 For public bot operators. All credential APIs are per-user; admin kill /
-mass-cancel live under `/admin` (role `admin`). Secret provisioning for the
+mass-cancel live under `/api/admin` (role `admin`). Secret provisioning for the
 public overlay is in `docs/operations/fixp-listener.md` and
 `docker/docker-compose.public.yml`.
 
@@ -502,15 +502,15 @@ public overlay is in `docs/operations/fixp-listener.md` and
 ### 3.3 Incident response — rogue bot or session
 
 1. **Stop the orders:** kill-switch the tenant —
-   `POST /admin/kill/end-client/{id}` (or `/admin/kill/firm/{id}`). Working
+   `POST /api/admin/kill/end-client/{id}` (or `/api/admin/kill/firm/{id}`). Working
    orders cancel; new submits rejected until `DELETE` revives.
 2. **Cut access:** revoke the credential (§3.2). Next Negotiate fails;
    in-flight session has no working orders left after kill.
 3. **Cert-level:** add the leaf thumbprint to the deny-list (§2.4) — global,
    network-free, ~one reload interval.
-4. **Confirm:** `GET /admin/kill` shows killed end-clients/firms; reject-reason
+4. **Confirm:** `GET /api/admin/kill` shows killed end-clients/firms; reject-reason
    metrics (#533) show `reject:credentials` climb. Mark stuck venue orders
-   stale via `/admin/firms/{firmId}/orders/{clOrdId}/mark-stale` if needed.
+   stale via `/api/admin/firms/{firmId}/orders/{clOrdId}/mark-stale` if needed.
 
 ---
 

@@ -19,9 +19,9 @@ namespace B3.Trading.Api;
 /// the intraday-today path.
 ///
 /// <list type="bullet">
-///   <item><c>GET /statement/{dayKey?}</c> — JSON. Default
+///   <item><c>GET /api/statement/{dayKey?}</c> — JSON. Default
 ///   <c>dayKey</c> is today (UTC).</item>
-///   <item><c>GET /statement/{dayKey}.csv</c> — same projection as a
+///   <item><c>GET /api/statement/{dayKey}.csv</c> — same projection as a
 ///   multi-section UTF-8 BOM CSV (Excel-friendly).</item>
 /// </list>
 ///
@@ -46,7 +46,7 @@ public static class StatementEndpoints
 
     public static IEndpointRouteBuilder MapStatement(this IEndpointRouteBuilder app)
     {
-        app.MapGet("/statement/{dayKey?}", [Authorize] async (
+        app.MapGet("/api/statement/{dayKey?}", [Authorize] async (
             HttpContext ctx,
             EndClientRegistry registry,
             IEventStore store,
@@ -73,7 +73,7 @@ public static class StatementEndpoints
             return Results.Ok(dto);
         });
 
-        app.MapGet("/statement/{dayKey}.csv", [Authorize] async (
+        app.MapGet("/api/statement/{dayKey}.csv", [Authorize] async (
             HttpContext ctx,
             EndClientRegistry registry,
             IEventStore store,

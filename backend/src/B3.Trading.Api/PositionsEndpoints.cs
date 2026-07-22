@@ -13,7 +13,7 @@ public static class PositionsEndpoints
 {
     public static IEndpointRouteBuilder MapPositions(this IEndpointRouteBuilder app)
     {
-        app.MapGet("/positions", [Authorize] (
+        app.MapGet("/api/positions", [Authorize] (
             HttpContext ctx,
             EndClientRegistry registry,
             PositionKeeper positions,

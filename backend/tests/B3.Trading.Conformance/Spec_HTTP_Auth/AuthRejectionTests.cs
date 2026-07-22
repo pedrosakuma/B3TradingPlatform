@@ -20,7 +20,7 @@ public class AuthRejectionTests
         var peer = PlatformEndpoint.TryResolve()!;
         using var http = new HttpClient { BaseAddress = peer.BaseUrl };
 
-        var resp = await http.GetAsync("/orders");
+        var resp = await http.GetAsync("/api/orders");
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
     }
 
@@ -30,7 +30,7 @@ public class AuthRejectionTests
         var peer = PlatformEndpoint.TryResolve()!;
         using var http = new HttpClient { BaseAddress = peer.BaseUrl };
 
-        using var req = new HttpRequestMessage(HttpMethod.Get, "/orders");
+        using var req = new HttpRequestMessage(HttpMethod.Get, "/api/orders");
         // Looks superficially like a JWT (3 base64url segments) but the
         // signature won't validate against the platform's signing key.
         req.Headers.Authorization = new AuthenticationHeaderValue(
@@ -67,7 +67,7 @@ public class AuthRejectionTests
         using var http = new HttpClient { BaseAddress = peer.BaseUrl };
         var auth = await LoginHelper.LoginAsync(http, peer.Username, peer.Password);
 
-        using var req = new HttpRequestMessage(HttpMethod.Get, "/admin/firms");
+        using var req = new HttpRequestMessage(HttpMethod.Get, "/api/admin/firms");
         req.Headers.Authorization = auth;
         var resp = await http.SendAsync(req);
 

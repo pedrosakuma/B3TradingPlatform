@@ -66,7 +66,7 @@ test.describe("trader workspace smoke", () => {
     // the stub gateway never produces a terminal ER.
     const deleteResponses = [];
     page.on("response", (resp) => {
-      if (resp.request().method() === "DELETE" && resp.url().includes("/orders/")) {
+      if (resp.request().method() === "DELETE" && resp.url().includes("/api/orders/")) {
         deleteResponses.push(resp.status());
       }
     });
@@ -102,7 +102,7 @@ test.describe("trader workspace smoke", () => {
     // it to the backend and returned 204.
     await expect.poll(
       () => deleteResponses.length,
-      { timeout: 10_000, message: "expected at least one DELETE /orders/<id> response" },
+      { timeout: 10_000, message: "expected at least one DELETE /api/orders/<id> response" },
     ).toBeGreaterThan(0);
     expect(deleteResponses[0]).toBe(204);
   });

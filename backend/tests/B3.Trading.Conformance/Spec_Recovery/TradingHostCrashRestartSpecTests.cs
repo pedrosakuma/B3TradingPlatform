@@ -237,7 +237,7 @@ public class TradingHostCrashRestartSpecTests
         string side,
         long quantity = OrderQuantity)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Post, "/orders")
+        using var req = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
         {
             Headers = { Authorization = auth },
             Content = JsonContent.Create(new
@@ -253,7 +253,7 @@ public class TradingHostCrashRestartSpecTests
         var resp = await http.SendAsync(req);
         var body = await resp.Content.ReadAsStringAsync();
         Assert.True(resp.StatusCode == HttpStatusCode.Accepted,
-            $"POST /orders expected 202 Accepted, got {(int)resp.StatusCode}: {body}");
+            $"POST /api/orders expected 202 Accepted, got {(int)resp.StatusCode}: {body}");
 
         var json = JsonDocument.Parse(body).RootElement;
         if (json.TryGetProperty("status", out var statusProp))
@@ -291,7 +291,7 @@ public class TradingHostCrashRestartSpecTests
         AuthenticationHeaderValue auth,
         ulong clOrdId)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Get, "/orders");
+        using var req = new HttpRequestMessage(HttpMethod.Get, "/api/orders");
         req.Headers.Authorization = auth;
         var resp = await http.SendAsync(req);
         resp.EnsureSuccessStatusCode();
@@ -364,7 +364,7 @@ public class TradingHostCrashRestartSpecTests
 
     private static async Task<decimal> GetBalanceAsync(HttpClient http, AuthenticationHeaderValue auth)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Get, "/balance");
+        using var req = new HttpRequestMessage(HttpMethod.Get, "/api/balance");
         req.Headers.Authorization = auth;
         var resp = await http.SendAsync(req);
         resp.EnsureSuccessStatusCode();
@@ -374,7 +374,7 @@ public class TradingHostCrashRestartSpecTests
 
     private static async Task<IReadOnlyList<PositionSnapshot>> GetPositionsAsync(HttpClient http, AuthenticationHeaderValue auth)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Get, "/positions");
+        using var req = new HttpRequestMessage(HttpMethod.Get, "/api/positions");
         req.Headers.Authorization = auth;
         var resp = await http.SendAsync(req);
         resp.EnsureSuccessStatusCode();
@@ -391,7 +391,7 @@ public class TradingHostCrashRestartSpecTests
 
     private static async Task<PnlSnapshot> GetPnlAsync(HttpClient http, AuthenticationHeaderValue auth)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Get, "/pnl/today");
+        using var req = new HttpRequestMessage(HttpMethod.Get, "/api/pnl/today");
         req.Headers.Authorization = auth;
         var resp = await http.SendAsync(req);
         resp.EnsureSuccessStatusCode();
@@ -415,7 +415,7 @@ public class TradingHostCrashRestartSpecTests
         AuthenticationHeaderValue auth,
         string firmId)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Get, "/admin/firms");
+        using var req = new HttpRequestMessage(HttpMethod.Get, "/api/admin/firms");
         req.Headers.Authorization = auth;
         var resp = await http.SendAsync(req);
         resp.EnsureSuccessStatusCode();
@@ -434,7 +434,7 @@ public class TradingHostCrashRestartSpecTests
             }
         }
 
-        throw new InvalidOperationException($"Firm '{firmId}' not found in /admin/firms response.");
+        throw new InvalidOperationException($"Firm '{firmId}' not found in /api/admin/firms response.");
     }
 
     private static uint GetUInt32Flexible(JsonElement value) => value.ValueKind switch

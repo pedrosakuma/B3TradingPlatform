@@ -8,7 +8,7 @@
 
 ## 1. Context
 
-`B3.Trading.Host` ships an order-by-order surface: `POST /orders`
+`B3.Trading.Host` ships an order-by-order surface: `POST /api/orders`
 produces exactly one venue order, the `RiskPipeline` runs once,
 `WorkingOrderBook` tracks one row, and `ExecutionReportProcessor`
 mutates that row from ERs returned by `IExchangeGateway`. Every
@@ -23,7 +23,7 @@ on three real cases:
   the platform is just absent.
 - An algo team wanting to test a TWAP against the conformance stack
   without standing up their own scheduler around HTTP calls into
-  `/orders`.
+  `/api/orders`.
 - Post-trade analysis that needs a stable parent identity to group
   related child orders. `clOrdId` is venue-bound and per-child; there
   is no aggregation key today.
@@ -52,7 +52,7 @@ deterministically and reacts to their ERs to decide the next action.
    child back to its parent without touching internal logs.
 5. Surface algo lifecycle on its own WS topic so the trader UI (later
    PR) can render parents alongside children without re-deriving state
-   from `/orders`.
+   from `/api/orders`.
 
 ## 3. Non-goals
 
@@ -152,7 +152,7 @@ Concretely:
   that are not algo-linked simply emit `null` — backward compatible
   with the existing `orders` consumers.
 - The algo engine submits a child by calling the **same internal
-  submit pipeline** that `POST /orders` uses, with `ParentAlgoId`
+  submit pipeline** that `POST /api/orders` uses, with `ParentAlgoId`
   and `AlgoSliceSeq` set. The link is therefore baked into the
   first persisted event for the child; there is no separate "link"
   event to race against the gateway.
@@ -180,7 +180,7 @@ alongside the existing services. It owns:
 
 `AlgoSignal` instances are enqueued from two sources:
 
-- `AlgoCreated` enqueued when `POST /algo` accepts a new parent
+- `AlgoCreated` enqueued when `POST /api/algo` accepts a new parent
   (after the create event has been persisted).
 - `ChildExecutionObserved` enqueued from the existing
   `ExecutionReportProcessor` *after* it returns from the dispatcher
@@ -198,7 +198,7 @@ makes that impossible by construction.
 
 The engine itself never holds the dispatcher lock when it submits
 children: it goes through the same `OrderSubmissionService` (a small
-extraction of the body of `POST /orders`) that the HTTP endpoint
+extraction of the body of `POST /api/orders`) that the HTTP endpoint
 uses, which acquires the dispatcher lock only for the duration of
 its own append.
 
@@ -262,9 +262,9 @@ Transition rules that v0 must lock down because they bite hardest:
    filled quantity preserved.
 5. **TWAP window expired during downtime** (see §4.6).
 6. **Drain mode active.** Engine refuses to submit new children
-   (same posture as `POST /orders` today: 503 / refuse-then-drain).
+   (same posture as `POST /api/orders` today: 503 / refuse-then-drain).
    Parents stay in their current state; no auto-cancel of live
-   children. `DELETE /algo/{id}` continues to be honoured if the
+   children. `DELETE /api/algo/{id}` continues to be honoured if the
    gateway is up.
 
 ### 4.5 Persistence
@@ -274,7 +274,7 @@ Three new event types in `FileEventStore`:
 - `AlgoCreatedEvent` — captures the parent params at submit time.
   Authoritative source of truth for everything in §4.1 except the
   derived state.
-- `AlgoCancelRequestedEvent` — recorded when `DELETE /algo/{id}`
+- `AlgoCancelRequestedEvent` — recorded when `DELETE /api/algo/{id}`
   reaches the engine (before the child cancels are dispatched).
 - `AlgoTerminalStateRecordedEvent` — recorded when the parent
   reaches a terminal state (`Completed`, `Cancelled`, `Expired`,
@@ -374,7 +374,7 @@ evenly. v0 fixes the rule:
 - Slice `n-1` carries the remainder so the parent total matches
   exactly.
 - If the rounded slice quantity is `0` after lot-rounding, the
-  parameters are rejected at `POST /algo` time. The validator
+  parameters are rejected at `POST /api/algo` time. The validator
   echoes the implied per-slice quantity in the error body so the
   caller can adjust.
 
@@ -385,20 +385,20 @@ case the last child carries the remainder.
 ### 4.9 HTTP / WS surface
 
 ```
-POST   /algo             {type, symbol, securityId, side, totalQuantity,
+POST   /api/algo             {type, symbol, securityId, side, totalQuantity,
                           parameters: {…type-specific…}}
                          → 202 Accepted {algoId, status: "PendingNew"}
                          → 400 BadRequest {error} on param validation
-GET    /algo             → [{algoId, type, symbol, side, totalQuantity,
+GET    /api/algo             → [{algoId, type, symbol, side, totalQuantity,
                             filledQuantity, status, terminalReason?,
                             parameters, createdAt, updatedAt}]
-GET    /algo/{algoId}    → same shape; 404 if unknown to the caller
-DELETE /algo/{algoId}    → 202 Accepted {algoId, status: "Cancelling"}
+GET    /api/algo/{algoId}    → same shape; 404 if unknown to the caller
+DELETE /api/algo/{algoId}    → 202 Accepted {algoId, status: "Cancelling"}
                          → 409 Conflict {error} if already terminal
 ```
 
-Authorization mirrors `/orders`: end-clients see only their own
-algos; admin role sees all (for `/admin/algo` follow-up if needed).
+Authorization mirrors `/api/orders`: end-clients see only their own
+algos; admin role sees all (for `/api/admin/algo` follow-up if needed).
 
 The `algo` WS topic ships with **snapshot-on-subscribe** semantics
 matching the existing `orders.me` / `executions.me` / `positions.me`
@@ -434,7 +434,7 @@ v0 ships a small piece of test infrastructure to close that gap
 - A new gateway mode `Simulator` (alongside `Unavailable`, `Stub`,
   `Mock`) implements `IExchangeGateway` by recording submits and
   exposing an admin-gated injection endpoint:
-  `POST /admin/simulator/er` accepts a JSON ER (clOrdId, type,
+  `POST /api/admin/simulator/er` accepts a JSON ER (clOrdId, type,
   cumQty, lastQty, lastPx) and replays it through the same
   `EntryPointExecutionReportRouter` an upstream firm would.
 - The endpoint is gated to the `admin` role and refuses to register
@@ -483,12 +483,12 @@ engines from conformance.
 2. `Algo` domain + `AlgoBook` + new event types + `Order.ParentAlgoId` /
    `AlgoSliceSeq` field additions + snapshot/WAL plumbing. No engine,
    no API. Adds the persistence shape so later PRs can rely on it.
-3. HTTP + WS surface (`POST /algo`, `GET /algo`, `DELETE /algo/{id}`,
+3. HTTP + WS surface (`POST /api/algo`, `GET /api/algo`, `DELETE /api/algo/{id}`,
    topic `algo`) wired to a no-op engine that just accepts and
    refuses to submit children. Locks the wire contract.
-4. **Simulator gateway mode + `POST /admin/simulator/er`.** ✅ Implemented.
+4. **Simulator gateway mode + `POST /api/admin/simulator/er`.** ✅ Implemented.
    Adds `ExchangeMode.Simulator` (reusing the `Mock` wiring),
-   admin-gated `POST /admin/simulator/er` mapped only when active,
+   admin-gated `POST /api/admin/simulator/er` mapped only when active,
    four production safeguards (boot Warning,
    `trading.simulator.mode_active` UpDownCounter, `/health` body,
    refuse-to-boot in Production unless `Trading:Exchange:AllowSimulatorInProduction=true`),
@@ -504,7 +504,7 @@ engines from conformance.
    remainder), `AlgoScheduler` `BackgroundService` (PeriodicTimer
    100ms, no catch-up burst), TWAP-aware engine paths
    (defer/expire on create, no auto-refill on filled, window-expired
-   routing on cancelled/rejected), §4.8 validator on `POST /algo`,
+   routing on cancelled/rejected), §4.8 validator on `POST /api/algo`,
    and the scheduler observability metrics
    (`trading.algo.twap.slice_fire_jitter`,
    `trading.algo.scheduler.tick_duration`,
@@ -512,12 +512,12 @@ engines from conformance.
 7. **Conformance scenarios + Grafana panel** for algo metrics.
    ✅ Implemented. Adds three `Spec_HTTP_Algo` scenarios (iceberg
    lifecycle including cancel-ack, TWAP two-slice fills-to-completion,
-   `POST /algo` §4.8 validator echo) plus a **B3 Trading — Algo**
+   `POST /api/algo` §4.8 validator echo) plus a **B3 Trading — Algo**
    Grafana dashboard
    (`docker/observability/grafana/dashboards/algo.json`) covering
    children-submitted rate by type, signals consumed/dropped/queue
    depth, scheduler tick duration, TWAP slice fire jitter, and
-   manual-vs-algo `POST /orders` source split. Per §7 C1 there is no
+   manual-vs-algo `POST /api/orders` source split. Per §7 C1 there is no
    `parentAlgoId` metric tag.
 
 The frontend follow-up is intentionally *not* numbered here. It
@@ -636,7 +636,7 @@ cardinality is the natural fit.
 
 ### C2 — Algo-on-algo composition
 
-`POST /algo` validates that the caller is **not** an algo engine
+`POST /api/algo` validates that the caller is **not** an algo engine
 itself. v0 explicitly rejects parents that try to nest algos as
 children. The v0 schema has no field that would expose such a
 chain; this is a defensive check more than an enforced restriction.

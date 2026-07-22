@@ -71,7 +71,7 @@ public class AuditLogRecoveryTests : IDisposable
         EventType = AuditEventTypes.AdminConfigChange,
         Outcome = AuditOutcomes.Success,
         ActorUsername = "admin",
-        ResourcePath = $"/admin/test/{suffix}",
+        ResourcePath = $"/api/admin/test/{suffix}",
         Details = new Dictionary<string, string> { ["k"] = suffix },
     };
 

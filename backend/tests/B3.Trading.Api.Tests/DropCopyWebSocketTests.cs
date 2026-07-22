@@ -316,7 +316,7 @@ public class DropCopyWebSocketTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => wsClient.ConnectAsync(uri, cts.Token));
     }
 
-    // 8. Audit emission: connect event lands in /admin/audit with role + firm.
+    // 8. Audit emission: connect event lands in /api/admin/audit with role + firm.
     [Fact]
     public async Task DropCopyConnect_EmitsAuditEntry()
     {

@@ -18,7 +18,7 @@ import { defaultBackend, login, signup, submitOrder, cancelOrder, modifyOrder, g
          getAdminRiskLimits, reloadAdminRisk, getReferencePrices,
          mutateCash, setOrderStale } from "./protocol.js";
 import { readPublicConfig, validateEntraConfig } from "./authConfig.js";
-import { createEntraAuth, isInteractionRequiredError } from "./auth.js";
+import { createEntraAuth, isInteractionRequiredError } from "./api/auth.js";
 import {
   readInternalSession,
   writeInternalSession,
@@ -65,7 +65,7 @@ const BLOTTER_FILTER_KEY = "b3tp.blotter.filter";
 const DEFAULT_WATCHLIST = ["PETR4", "VALE3"];
 const FIRMS_POLL_INTERVAL_MS = 5_000;
 // /health is unauthenticated and cheap, so a tighter cadence than the
-// admin-only /admin/firms poll is fine. Drives the gateway badge that
+// admin-only /api/admin/firms poll is fine. Drives the gateway badge that
 // every logged-in user sees in the header.
 const GATEWAY_POLL_INTERVAL_MS = 5_000;
 
@@ -100,8 +100,8 @@ let expiryTimer = null;
 let warningTimer = null;
 let firmsPollTimer = null;
 let gatewayPollTimer = null;
-// #303. State for the in-flight 2FA challenge between /auth/login and
-// /auth/2fa/verify. Cleared on success / cancel / refresh.
+// #303. State for the in-flight 2FA challenge between /api/auth/login and
+// /api/auth/2fa/verify. Cleared on success / cancel / refresh.
 let pendingTotp = null; // { backend, username, remember, totpChallengeToken }
 let pendingRenewalTotp = null;
 let securityStatusRefreshSeq = 0;
@@ -486,7 +486,7 @@ async function onLogin(e) {
         return;
       }
       // Force-enroll path: open enrollment immediately. We don't have a
-      // JWT yet, so we pass the enrollment token through to /auth/2fa/enroll.
+      // JWT yet, so we pass the enrollment token through to /api/auth/2fa/enroll.
       pendingTotp = { backend, username, remember, enrollmentToken: nextStep.enrollmentToken };
       await beginForcedEnrollment();
       return;
@@ -1473,7 +1473,7 @@ async function handleCancelAll(clOrdIds) {
 }
 
 // Slice 5 of #122. Routes the blotter "Modify" intent through
-// PUT /orders/{clOrdId}. The modal already validated qty/price and
+// PUT /api/orders/{clOrdId}. The modal already validated qty/price and
 // is responsible for showing the inline error; here we only translate
 // transport failures into modal errors and toggle inflight state.
 async function handleModifyOrder(clOrdId, payload) {
@@ -1621,7 +1621,7 @@ function logout({ broadcast = true, redirectEntra = true, clearEntraCache = fals
 }
 
 // ── Admin firms poll ───────────────────────────────────────────────
-// Only admins can hit /admin/firms (backend returns 403 otherwise).
+// Only admins can hit /api/admin/firms (backend returns 403 otherwise).
 // We gate the call client-side too so the network panel stays clean.
 
 function startFirmsPoll() {
@@ -2189,7 +2189,7 @@ async function handleRevokeBotCredential({ id, label }) {
 // ── Q2.6 (#273). History / P&L / Statement orchestration ──────────
 //
 // On entering the History view we:
-//   * seed the P&L panel via GET /pnl/today (the `pnl.me` WS channel
+//   * seed the P&L panel via GET /api/pnl/today (the `pnl.me` WS channel
 //     also keeps the state slice live in the background — subscribed
 //     statically from the worker, so no per-view subscribe dance);
 //   * load the first page of orders + executions history under the

@@ -33,15 +33,15 @@ public sealed class AdminOutboundMutationEndpointTests
         using var firmA = CreateAdminClient(factory, "firm-a-admin", "F1");
         using var firmB = CreateAdminClient(factory, "firm-b-admin", "F2");
 
-        var list = await firmA.GetAsync("/admin/outbound-mutations/");
+        var list = await firmA.GetAsync("/api/admin/outbound-mutations/");
         var detail = await firmA.GetAsync(
-            $"/admin/outbound-mutations/{fixture.MutationId}");
+            $"/api/admin/outbound-mutations/{fixture.MutationId}");
         var foreignDetail = await firmB.GetAsync(
-            $"/admin/outbound-mutations/{fixture.MutationId}");
+            $"/api/admin/outbound-mutations/{fixture.MutationId}");
         var foreignList = await firmA.GetAsync(
-            "/admin/outbound-mutations/?firmId=F2");
+            "/api/admin/outbound-mutations/?firmId=F2");
         var foreignEvidence = await firmB.PostAsJsonAsync(
-            $"/admin/outbound-mutations/{fixture.MutationId}/evidence",
+            $"/api/admin/outbound-mutations/{fixture.MutationId}/evidence",
             EvidenceRegistrationBody("official_extract", '0'));
         var health = await firmA.GetAsync("/health");
 
@@ -81,7 +81,7 @@ public sealed class AdminOutboundMutationEndpointTests
         using var admin = CreateAdminClient(factory, "algo-operator", "F1");
 
         var list = await admin.GetAsync(
-            "/admin/outbound-mutations/?requiresReconciliation=true");
+            "/api/admin/outbound-mutations/?requiresReconciliation=true");
         var listPayload = await list.Content.ReadAsStringAsync();
 
         Assert.Equal(HttpStatusCode.OK, list.StatusCode);
@@ -95,7 +95,7 @@ public sealed class AdminOutboundMutationEndpointTests
             "official_extract",
             admin);
         var resolve = await admin.PostAsJsonAsync(
-            $"/admin/outbound-mutations/{fixture.MutationId}/resolve",
+            $"/api/admin/outbound-mutations/{fixture.MutationId}/resolve",
             new
             {
                 decision = "venue_absent",
@@ -133,7 +133,7 @@ public sealed class AdminOutboundMutationEndpointTests
             maker);
 
         var propose = await maker.PostAsJsonAsync(
-            $"/admin/outbound-mutations/{fixture.MutationId}/resolve",
+            $"/api/admin/outbound-mutations/{fixture.MutationId}/resolve",
             new
             {
                 decision = "venue_absent",
@@ -148,20 +148,20 @@ public sealed class AdminOutboundMutationEndpointTests
             await propose.Content.ReadAsStringAsync());
         var proposalId = proposal.RootElement.GetProperty("proposalId").GetString();
         var selfApprove = await maker.PostAsync(
-            $"/admin/outbound-mutations/{fixture.MutationId}/resolve/{proposalId}/approve",
+            $"/api/admin/outbound-mutations/{fixture.MutationId}/resolve/{proposalId}/approve",
             content: null);
         Assert.Equal(HttpStatusCode.UnprocessableEntity, selfApprove.StatusCode);
         Assert.Equal(0, margin.ReleaseCount);
 
         var approve = await checker.PostAsync(
-            $"/admin/outbound-mutations/{fixture.MutationId}/resolve/{proposalId}/approve",
+            $"/api/admin/outbound-mutations/{fixture.MutationId}/resolve/{proposalId}/approve",
             content: null);
 
         Assert.Equal(HttpStatusCode.OK, approve.StatusCode);
         Assert.Equal(1, margin.ReleaseCount);
 
         var duplicate = await maker.PostAsJsonAsync(
-            $"/admin/outbound-mutations/{fixture.MutationId}/resolve",
+            $"/api/admin/outbound-mutations/{fixture.MutationId}/resolve",
             new
             {
                 decision = "venue_absent",
@@ -201,7 +201,7 @@ public sealed class AdminOutboundMutationEndpointTests
         using var admin = CreateAdminClient(factory, "maker", "F1");
 
         var response = await admin.PostAsJsonAsync(
-            $"/admin/outbound-mutations/{fixture.MutationId}/resolve",
+            $"/api/admin/outbound-mutations/{fixture.MutationId}/resolve",
             new
             {
                 decision = "venue_absent",
@@ -234,7 +234,7 @@ public sealed class AdminOutboundMutationEndpointTests
         var reference = $"{prefix}{new string(digestCharacter, 64)}";
 
         var bare = await maker.PostAsJsonAsync(
-            $"/admin/outbound-mutations/{fixture.MutationId}/resolve",
+            $"/api/admin/outbound-mutations/{fixture.MutationId}/resolve",
             new
             {
                 decision = "venue_absent",
@@ -243,7 +243,7 @@ public sealed class AdminOutboundMutationEndpointTests
                 reason,
             });
         var nonCovering = await maker.PostAsJsonAsync(
-            $"/admin/outbound-mutations/{fixture.MutationId}/evidence",
+            $"/api/admin/outbound-mutations/{fixture.MutationId}/evidence",
             new
             {
                 sourceType = evidenceType,
@@ -254,10 +254,10 @@ public sealed class AdminOutboundMutationEndpointTests
                     $"attestation:{new string(digestCharacter, 64)}",
             });
         var registered = await maker.PostAsJsonAsync(
-            $"/admin/outbound-mutations/{fixture.MutationId}/evidence",
+            $"/api/admin/outbound-mutations/{fixture.MutationId}/evidence",
             EvidenceRegistrationBody(evidenceType, digestCharacter));
         var proposed = await maker.PostAsJsonAsync(
-            $"/admin/outbound-mutations/{fixture.MutationId}/resolve",
+            $"/api/admin/outbound-mutations/{fixture.MutationId}/resolve",
             new
             {
                 decision = "venue_absent",
@@ -280,7 +280,7 @@ public sealed class AdminOutboundMutationEndpointTests
         using var admin = CreateAdminClient(factory, "maker", "F1");
 
         var annotation = await admin.PostAsJsonAsync(
-            $"/admin/outbound-mutations/{fixture.MutationId}/resolve",
+            $"/api/admin/outbound-mutations/{fixture.MutationId}/resolve",
             new
             {
                 decision = "leave_ambiguous",
@@ -289,7 +289,7 @@ public sealed class AdminOutboundMutationEndpointTests
                 reason = "manual_comparison_recorded",
             });
         var invalidTerminal = await admin.PostAsJsonAsync(
-            $"/admin/outbound-mutations/{fixture.MutationId}/resolve",
+            $"/api/admin/outbound-mutations/{fixture.MutationId}/resolve",
             new
             {
                 decision = "venue_absent",
@@ -298,7 +298,7 @@ public sealed class AdminOutboundMutationEndpointTests
                 reason = "manual_comparison_recorded",
             });
         var sessionRoll = await admin.PostAsJsonAsync(
-            $"/admin/outbound-mutations/{fixture.MutationId}/resolve",
+            $"/api/admin/outbound-mutations/{fixture.MutationId}/resolve",
             new
             {
                 decision = "leave_ambiguous",
@@ -338,7 +338,7 @@ public sealed class AdminOutboundMutationEndpointTests
         using var admin = CreateAdminClient(factory, "maker", "F1");
 
         var response = await admin.PostAsJsonAsync(
-            $"/admin/outbound-mutations/{fixture.MutationId}/resolve",
+            $"/api/admin/outbound-mutations/{fixture.MutationId}/resolve",
             new
             {
                 decision = "venue_absent",
@@ -369,11 +369,11 @@ public sealed class AdminOutboundMutationEndpointTests
         using var maker = CreateAdminClient(factory, "maker", "F1");
         using var checker = CreateAdminClient(factory, "checker", "F1");
         var registered = await maker.PostAsJsonAsync(
-            $"/admin/outbound-mutations/{fixture.MutationId}/evidence",
+            $"/api/admin/outbound-mutations/{fixture.MutationId}/evidence",
             EvidenceRegistrationBody("official_extract", '9'));
         Assert.Equal(HttpStatusCode.OK, registered.StatusCode);
         var proposed = await maker.PostAsJsonAsync(
-            $"/admin/outbound-mutations/{fixture.MutationId}/resolve",
+            $"/api/admin/outbound-mutations/{fixture.MutationId}/resolve",
             new
             {
                 decision = "venue_absent",
@@ -387,7 +387,7 @@ public sealed class AdminOutboundMutationEndpointTests
         Assert.Equal(
             HttpStatusCode.OK,
             (await checker.PostAsync(
-                $"/admin/outbound-mutations/{fixture.MutationId}/resolve/{proposalId}/approve",
+                $"/api/admin/outbound-mutations/{fixture.MutationId}/resolve/{proposalId}/approve",
                 content: null)).StatusCode);
 
         var alertCount = 0L;
@@ -417,7 +417,7 @@ public sealed class AdminOutboundMutationEndpointTests
             SendingTime: T0.AddMinutes(5)));
 
         var detail = await checker.GetAsync(
-            $"/admin/outbound-mutations/{fixture.MutationId}");
+            $"/api/admin/outbound-mutations/{fixture.MutationId}");
         var body = await detail.Content.ReadAsStringAsync();
         Assert.Contains("\"state\":\"ambiguous\"", body, StringComparison.Ordinal);
         Assert.Contains("\"requiresReconciliation\":true", body, StringComparison.Ordinal);
@@ -437,7 +437,7 @@ public sealed class AdminOutboundMutationEndpointTests
             .GetProperty("evidenceId")
             .GetString();
         var invalidAbsent = await maker.PostAsJsonAsync(
-            $"/admin/outbound-mutations/{fixture.MutationId}/resolve",
+            $"/api/admin/outbound-mutations/{fixture.MutationId}/resolve",
             new
             {
                 decision = "venue_absent",
@@ -448,7 +448,7 @@ public sealed class AdminOutboundMutationEndpointTests
         Assert.Equal(HttpStatusCode.UnprocessableEntity, invalidAbsent.StatusCode);
         Assert.Equal(1, margin.ReleaseCount);
         var followUp = await checker.PostAsJsonAsync(
-            $"/admin/outbound-mutations/{fixture.MutationId}/resolve",
+            $"/api/admin/outbound-mutations/{fixture.MutationId}/resolve",
             new
             {
                 decision = "venue_acknowledged",
@@ -734,7 +734,7 @@ public sealed class AdminOutboundMutationEndpointTests
             ? $"venue-report:{new string('e', 64)}"
             : $"official-extract:{new string('f', 64)}";
         var response = await admin.PostAsJsonAsync(
-            $"/admin/outbound-mutations/{mutation.MutationId}/evidence",
+            $"/api/admin/outbound-mutations/{mutation.MutationId}/evidence",
             EvidenceRegistrationBody(
                 evidenceType,
                 evidenceType == "venue_mass_action" ? 'e' : 'f'));

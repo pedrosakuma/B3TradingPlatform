@@ -2107,7 +2107,7 @@ function renderFirmsHealth() {
 
 // Header gateway pill, fed by the public /health poll. Visible to every
 // logged-in user (admins also see the richer #firms-health badge from
-// /admin/firms). Hidden when the host is in a no-session mode (Mock/
+// /api/admin/firms). Hidden when the host is in a no-session mode (Mock/
 // Stub/Unavailable — /health.exchange.firms is absent), so it never
 // guesses at a state we can't observe.
 function renderGatewayPill() {
@@ -3634,7 +3634,7 @@ export function validateTicketState(formState) {
 
   // GTD requires goodTillDate in (now, now + maxGtdHorizonDays].
   // The horizon mirrors the backend `Trading:Risk:MaxGtdHorizon`
-  // surfaced via /policy/risk; falls back to 30 days when the
+  // surfaced via /api/policy/risk; falls back to 30 days when the
   // policy fetch hasn't completed (or failed) so the UI is never
   // blocked by a slow boot.
   if (!gtdHidden && isGtdTif(tif)) {

@@ -25,7 +25,7 @@ public static class AdminOutboundMutationEndpoints
     public static IEndpointRouteBuilder MapAdminOutboundMutations(
         this IEndpointRouteBuilder app)
     {
-        var group = app.MapGroup("/admin/outbound-mutations")
+        var group = app.MapGroup("/api/admin/outbound-mutations")
             .RequireAuthorization("admin");
 
         group.MapGet("/", (
@@ -129,7 +129,7 @@ public static class AdminOutboundMutationEndpoints
                     cancellationToken);
                 return result.Status == OutboundOperatorResolutionStatus.PendingApproval
                     ? Results.Accepted(
-                        $"/admin/outbound-mutations/{mutationId:D}",
+                        $"/api/admin/outbound-mutations/{mutationId:D}",
                         ProjectResolutionResult(result))
                     : Results.Ok(ProjectResolutionResult(result));
             }

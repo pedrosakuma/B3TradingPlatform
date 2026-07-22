@@ -56,7 +56,7 @@ public class AlgoModifyEndpointTests
         using var http = f.CreateClient();
         var token = await f.LoginAsync(http);
 
-        var req = new HttpRequestMessage(HttpMethod.Post, "/algo/9999999/modify")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/algo/9999999/modify")
         {
             Content = JsonContent.Create(new { NewPrice = 30.0m }),
         };
@@ -79,7 +79,7 @@ public class AlgoModifyEndpointTests
         cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
         var algoId = await PostAlgo(http, token, PeggedBody(100));
 
-        var req = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
+        var req = new HttpRequestMessage(HttpMethod.Post, $"/api/algo/{algoId}/modify")
         {
             Content = JsonContent.Create(new { Reason = "no-op" }),
         };
@@ -99,7 +99,7 @@ public class AlgoModifyEndpointTests
         cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
         var algoId = await PostAlgo(http, token, PeggedBody(100));
 
-        var req = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
+        var req = new HttpRequestMessage(HttpMethod.Post, $"/api/algo/{algoId}/modify")
         {
             Content = JsonContent.Create(new { NewQuantity = 0 }),
         };
@@ -128,7 +128,7 @@ public class AlgoModifyEndpointTests
         await InjectEr(http, adminToken, child.ClOrdId, "Fill", lastQty: 100);
         await WaitForAlgoStatus(http, token, algoId, "Completed", "Filled");
 
-        var req = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
+        var req = new HttpRequestMessage(HttpMethod.Post, $"/api/algo/{algoId}/modify")
         {
             Content = JsonContent.Create(new { NewPrice = 31.0m }),
         };
@@ -156,7 +156,7 @@ public class AlgoModifyEndpointTests
         Assert.Equal(30.0m, child1.Price);
 
         // Operator modify: bump the limit one tick up. Quantity stays.
-        var req = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
+        var req = new HttpRequestMessage(HttpMethod.Post, $"/api/algo/{algoId}/modify")
         {
             Content = JsonContent.Create(new { NewPrice = 30.5m, Reason = "OperatorModify" }),
         };
@@ -224,7 +224,7 @@ public class AlgoModifyEndpointTests
         // briefly to let the consumer loop drain).
         await Task.Delay(150);
 
-        var req = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
+        var req = new HttpRequestMessage(HttpMethod.Post, $"/api/algo/{algoId}/modify")
         {
             // newQty=100 is below cum=120 → engine rejects.
             Content = JsonContent.Create(new { NewQuantity = 100 }),
@@ -253,7 +253,7 @@ public class AlgoModifyEndpointTests
         cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
         var algoId = await PostAlgo(http, token, PeggedBody(100));
 
-        var req = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
+        var req = new HttpRequestMessage(HttpMethod.Post, $"/api/algo/{algoId}/modify")
         {
             // Pass-1 review (#299) P2-A. Reason becomes a metric tag, so
             // only the closed allowlist is accepted. An arbitrary
@@ -294,7 +294,7 @@ public class AlgoModifyEndpointTests
         // Operator modify in flight — engine writes WAL + registers
         // intent + dispatches CancelReplace, but does NOT yet move
         // rt.LiveChildClOrdId off the OLD child.
-        var modReq = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
+        var modReq = new HttpRequestMessage(HttpMethod.Post, $"/api/algo/{algoId}/modify")
         {
             Content = JsonContent.Create(new { NewPrice = 30.5m }),
         };
@@ -375,7 +375,7 @@ public class AlgoModifyEndpointTests
         var book = f.Services.GetRequiredService<WorkingOrderBook>();
         var oldChild = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
 
-        var modReq = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
+        var modReq = new HttpRequestMessage(HttpMethod.Post, $"/api/algo/{algoId}/modify")
         {
             Content = JsonContent.Create(new { NewPrice = 30.5m }),
         };
@@ -418,7 +418,7 @@ public class AlgoModifyEndpointTests
     {
         // Pass-2 review (#299) P1. Translators in
         // B3EntryPointClientGateway (OrderModified arm) and
-        // SimulatorEndpoint (/admin/simulator/er Replaced arm) default
+        // SimulatorEndpoint (/api/admin/simulator/er Replaced arm) default
         // missing CumQty to 0. If the OLD child had prior fills (e.g.
         // partial fill of 30) and the venue / simulator drives a
         // Replaced ER with erCum=0, hydrating the replacement with
@@ -450,7 +450,7 @@ public class AlgoModifyEndpointTests
         Assert.Equal(30L, algoBefore.GetProperty("filledQuantity").GetInt64());
 
         // Operator modify: keep quantity unchanged (100) but bump price.
-        var modReq = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
+        var modReq = new HttpRequestMessage(HttpMethod.Post, $"/api/algo/{algoId}/modify")
         {
             Content = JsonContent.Create(new { NewPrice = 30.5m }),
         };
@@ -565,7 +565,7 @@ public class AlgoModifyEndpointTests
         var mock = f.Services.GetRequiredService<MockEntryPointClient>();
         var preReplaces = mock.SubmittedReplaces.Count;
 
-        var modReq = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
+        var modReq = new HttpRequestMessage(HttpMethod.Post, $"/api/algo/{algoId}/modify")
         {
             Content = JsonContent.Create(new { NewPrice = 30.5m }),
         };
@@ -628,7 +628,7 @@ public class AlgoModifyEndpointTests
         var book = f.Services.GetRequiredService<WorkingOrderBook>();
         var oldChild = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
 
-        var modReq = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
+        var modReq = new HttpRequestMessage(HttpMethod.Post, $"/api/algo/{algoId}/modify")
         {
             Content = JsonContent.Create(new { NewPrice = 30.5m }),
         };
@@ -725,7 +725,7 @@ public class AlgoModifyEndpointTests
 
             var newQty = 101 + cycle; // 101, 102, ..., 109
             var preReplaceCount = mock.SubmittedReplaces.Count;
-            var modReq = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
+            var modReq = new HttpRequestMessage(HttpMethod.Post, $"/api/algo/{algoId}/modify")
             {
                 Content = JsonContent.Create(new { NewQuantity = newQty }),
             };
@@ -855,7 +855,7 @@ public class AlgoModifyEndpointTests
             TimeSpan.FromSeconds(3),
             $"expected reserved=3000m baseline, got {margin.ReservedForTesting(TestAppFactory.TestUser)}");
 
-        var modReq = new HttpRequestMessage(HttpMethod.Post, $"/algo/{algoId}/modify")
+        var modReq = new HttpRequestMessage(HttpMethod.Post, $"/api/algo/{algoId}/modify")
         {
             Content = JsonContent.Create(new { NewPrice = 30.5m }),
         };
@@ -880,14 +880,14 @@ public class AlgoModifyEndpointTests
             $"expected reserved=3050m post-ambiguous, got {margin.ReservedForTesting(TestAppFactory.TestUser)}");
 
         // A competing order trying to consume the freed delta MUST
-        // be rejected for margin. /orders accepts the request with
+        // be rejected for margin. /api/orders accepts the request with
         // 202 and validates asynchronously (mirrors the existing
         // pass-3 test's posture), so we assert on the ledger side:
         // reserved must NOT increase above 3050 after the submission
         // attempt — if margin had been freed back to 3000 by an
         // erroneous AbortReplace, the 30-notional competing order
         // would slot into the headroom and bump reserved to 3030.
-        var orderReq = new HttpRequestMessage(HttpMethod.Post, "/orders/")
+        var orderReq = new HttpRequestMessage(HttpMethod.Post, "/api/orders/")
         {
             Content = JsonContent.Create(new
             {
@@ -927,7 +927,7 @@ public class AlgoModifyEndpointTests
 
     private static async Task<JsonElement> GetAlgo(HttpClient http, string token, string algoId)
     {
-        var req = new HttpRequestMessage(HttpMethod.Get, $"/algo/{algoId}");
+        var req = new HttpRequestMessage(HttpMethod.Get, $"/api/algo/{algoId}");
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         var resp = await http.SendAsync(req);
         resp.EnsureSuccessStatusCode();
@@ -936,7 +936,7 @@ public class AlgoModifyEndpointTests
 
     private static async Task<string> PostAlgo(HttpClient http, string token, object body)
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/algo/")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/algo/")
         {
             Content = JsonContent.Create(body),
         };
@@ -951,7 +951,7 @@ public class AlgoModifyEndpointTests
         HttpClient http, string adminToken, ulong childClOrdId,
         string type, long? lastQty = null, decimal lastPx = 30m)
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/admin/simulator/er")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/admin/simulator/er")
         {
             Content = JsonContent.Create(new
             {
@@ -971,7 +971,7 @@ public class AlgoModifyEndpointTests
         HttpClient http, string adminToken, ulong newClOrdId, ulong origClOrdId, long leavesQuantity,
         long? cumQty = null)
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/admin/simulator/er")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/admin/simulator/er")
         {
             Content = JsonContent.Create(new
             {
@@ -1054,7 +1054,7 @@ public class AlgoModifyEndpointTests
         string? last = null;
         while (sw.Elapsed < TimeSpan.FromSeconds(5))
         {
-            var req = new HttpRequestMessage(HttpMethod.Get, $"/algo/{algoId}");
+            var req = new HttpRequestMessage(HttpMethod.Get, $"/api/algo/{algoId}");
             req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
             var resp = await http.SendAsync(req);
             resp.EnsureSuccessStatusCode();
@@ -1066,7 +1066,7 @@ public class AlgoModifyEndpointTests
         throw new TimeoutException($"Algo {algoId} did not reach any of [{string.Join(",", anyOf)}] within 5s; last={last}");
     }
 
-    // Polls GET /algo/{id} until the given long-valued property equals
+    // Polls GET /api/algo/{id} until the given long-valued property equals
     // the expected value, then returns the latest snapshot. Replaces
     // fixed Task.Delay sleeps that race the async ER pipeline under load
     // (#347): the ExecutionReportProcessor → AlgoEngine → projection hop

@@ -147,7 +147,7 @@ test("GTD beyond 30 days → error", () => {
 });
 
 // Q1.4 (#256). The GTD horizon mirrors the backend
-// `Trading:Risk:MaxGtdHorizon` exposed via /policy/risk. When the FE
+// `Trading:Risk:MaxGtdHorizon` exposed via /api/policy/risk. When the FE
 // stashes a different (e.g. 7-day) policy, the validator must honor it.
 test("GTD honors maxGtdHorizonDays from risk policy (7d cap)", () => {
   const okAt5 = new Date(NOW + 5 * ONE_DAY).toISOString();

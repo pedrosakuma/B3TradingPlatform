@@ -86,7 +86,7 @@ internal sealed class InMemoryPendingTotpEnrollmentStore : IPendingTotpEnrollmen
 }
 
 /// <summary>
-/// Short-lived opaque tokens minted by <c>/auth/login</c> when the
+/// Short-lived opaque tokens minted by <c>/api/auth/login</c> when the
 /// caller still has to clear the second factor. The token is bound to
 /// the username + a flag indicating whether it grants completion of
 /// 2FA verification (existing enrollment) or kicks off forced
@@ -119,7 +119,7 @@ public enum TotpChallengeKind
     /// <summary>User has TOTP enrolled; client must POST a code.</summary>
     Verify = 0,
 
-    /// <summary>User has <see cref="UserConfig.Require2FA"/> set but hasn't enrolled — client must POST /auth/2fa/enroll using this token.</summary>
+    /// <summary>User has <see cref="UserConfig.Require2FA"/> set but hasn't enrolled — client must POST /api/auth/2fa/enroll using this token.</summary>
     ForceEnroll = 1,
 
     /// <summary>User started mandatory enrollment and must confirm its pending secret before a JWT is issued.</summary>

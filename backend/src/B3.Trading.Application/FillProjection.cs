@@ -64,7 +64,7 @@ public sealed class FillProjection
 
     /// <summary>
     /// Canonical fill id used as the dictionary key and exposed on
-    /// <c>/fills/{id}/touch</c>. Stable across replays because both
+    /// <c>/api/fills/{id}/touch</c>. Stable across replays because both
     /// inputs are taken from the durable WAL ER event.
     /// </summary>
     public static string BuildId(ulong clOrdId, long cumulativeQuantityAfterFill)

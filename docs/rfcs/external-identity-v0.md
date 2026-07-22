@@ -16,7 +16,7 @@ Trading-specific authorization remains owned by this platform in a
 **SQLite directory on the existing trading-host RWO PVC**.
 
 The browser authenticates with Authorization Code + PKCE, obtains an Entra
-**access token for the trading API**, and sends it to `POST /auth/exchange`.
+**access token for the trading API**, and sends it to `POST /api/auth/exchange`.
 The trading-host validates that external token under a dedicated bearer
 scheme, resolves its exact `(issuer, subject)` binding in SQLite, and issues
 the existing internal JWT contract:
@@ -73,8 +73,8 @@ trust boundary that prevents that.
 | Directory | `IUserStore` combines credential lookup, signup and TOTP mutations. `InMemoryUserStore` and `FileBackedUserStore` use case-insensitive usernames. |
 | Persistence | Runtime users are stored in `{Persistence:DataDirectory}/users.json`; env-seeded users remain configuration-authoritative (`TradingAuthServiceCollectionExtensions.cs:46-71`). |
 | Corruption policy | The JSON store currently warns and starts with an empty runtime set (`FileBackedUserStore.cs:30-34`, `FileBackedUserStoreTests.cs:98-121`). The SQLite authorization directory will deliberately fail closed instead. |
-| Login/signup | `/auth/login` validates password/TOTP and `/auth/signup` creates a FIRM01 user, seeds positions/cash and immediately mints a JWT (`AuthEndpoints.cs`). |
-| TOTP | `/auth/2fa/enroll`, `/verify` and `/disable` use `IUserStore`; successful verification mints the same JWT (`TotpEndpoints.cs:206-224`). |
+| Login/signup | `/api/auth/login` validates password/TOTP and `/api/auth/signup` creates a FIRM01 user, seeds positions/cash and immediately mints a JWT (`AuthEndpoints.cs`). |
+| TOTP | `/api/auth/2fa/enroll`, `/verify` and `/disable` use `IUserStore`; successful verification mints the same JWT (`TotpEndpoints.cs:206-224`). |
 | JWT mint | `JwtIssuer` emits HS256 `sub`, `jti`, `role`, `firm`; default lifetime is currently 60 minutes. |
 | JWT validation | One default bearer scheme validates internal issuer, audience, lifetime and symmetric key; `NameClaimType=sub`, `RoleClaimType=role` (`TradingAuthServiceCollectionExtensions.cs:75-116`). |
 | WebSocket token | Only `/ws` paths may read the internal JWT from `?access_token=` because browsers cannot set the upgrade `Authorization` header. |
@@ -188,7 +188,7 @@ single-value assumptions.
 3. Firm, role and status are read only from `ITradingUserDirectory`.
 4. Unknown or disabled principals have no provisioning side effects.
 5. External tokens never authenticate the default REST/WS bearer scheme.
-6. Internal tokens never authenticate `POST /auth/exchange`.
+6. Internal tokens never authenticate `POST /api/auth/exchange`.
 7. Existing valid internal sessions require no SQLite read on an order path.
 8. SQLite is valid only with one active process writer and an RWO volume.
 9. Local password/TOTP is transitional and cannot remain a public Entra-mode
@@ -208,7 +208,7 @@ flowchart LR
     end
 
     subgraph Host["Trading-host trust boundary"]
-        EX["/auth/exchange\nexternal bearer scheme"]
+        EX["/api/auth/exchange\nexternal bearer scheme"]
         VAL["Issuer/audience/scope/\nazp/signature/lifetime"]
         DIR["ITradingUserDirectory"]
         MINT["Internal JwtIssuer"]
@@ -241,7 +241,7 @@ sequenceDiagram
     autonumber
     participant B as Browser SPA
     participant E as Entra External ID
-    participant X as /auth/exchange
+    participant X as /api/auth/exchange
     participant D as SQLite directory
     participant A as Existing REST/WS API
 
@@ -265,7 +265,7 @@ sequenceDiagram
 
 ## 6. External token validation contract
 
-`POST /auth/exchange` uses a named external scheme, for example
+`POST /api/auth/exchange` uses a named external scheme, for example
 `EntraExternal`. The default scheme remains the internal JWT scheme.
 
 The endpoint accepts only a signed **delegated access token** that satisfies
@@ -402,7 +402,7 @@ are not copied into the internal JWT.
 ### 8.1 Request and success response
 
 ```http
-POST /auth/exchange
+POST /api/auth/exchange
 Authorization: Bearer <Entra access token for trading API>
 ```
 
@@ -490,7 +490,7 @@ issuer. In Local mode it preserves the current `IUserStore` role/firm
 behavior. In Hybrid/Entra it accepts only a successfully authenticated
 identity, resolves `tradingUserId` in `ITradingUserDirectory`, requires active
 status/non-empty firm/exactly one role, and only then delegates to
-`JwtIssuer`. `/auth/login`, `/auth/2fa/verify` and `/auth/exchange` therefore
+`JwtIssuer`. `/api/auth/login`, `/api/auth/2fa/verify` and `/api/auth/exchange` therefore
 cannot drift into separate authorization rules.
 
 ### 9.2 Minimum schema
@@ -654,10 +654,10 @@ values, timestamps and optimistic concurrency remain portable.
 
 | Capability | Local | Hybrid | Entra |
 | --- | ---: | ---: | ---: |
-| `/auth/login` | enabled | enabled only when `LocalLoginEnabled=true` | not mapped |
-| `/auth/signup` | existing config | disabled by default; explicit dev-only opt-in | not mapped |
-| `/auth/2fa/*` | existing config | enabled only with local login | not mapped |
-| `/auth/exchange` | not mapped | enabled | enabled |
+| `/api/auth/login` | enabled | enabled only when `LocalLoginEnabled=true` | not mapped |
+| `/api/auth/signup` | existing config | disabled by default; explicit dev-only opt-in | not mapped |
+| `/api/auth/2fa/*` | existing config | enabled only with local login | not mapped |
+| `/api/auth/exchange` | not mapped | enabled | enabled |
 | SQLite directory | optional until #606 is enabled | required and authorization-authoritative | required and authorization-authoritative |
 | Linked external admin boot guard | no | warning until migration completes | required |
 
@@ -670,7 +670,7 @@ from SQLite**, not `UserConfig`. This prevents two authorization authorities.
 An imported local user missing from SQLite fails with
 `account_not_provisioned`. Specifically, successful password or TOTP
 verification calls the same directory-backed internal session issuer as
-`/auth/exchange`; `UserConfig.Role` and `UserConfig.Firm` are ignored when
+`/api/auth/exchange`; `UserConfig.Role` and `UserConfig.Firm` are ignored when
 minting in Hybrid.
 
 Production Hybrid defaults:
@@ -748,7 +748,7 @@ authorization state are audited.
 The concrete bootstrap/admin route is:
 
 ```http
-POST /admin/identity/users/{tradingUserId}/external-bindings
+POST /api/admin/identity/users/{tradingUserId}/external-bindings
 Authorization: Bearer <internal admin JWT>
 Content-Type: application/json
 
@@ -975,7 +975,7 @@ Required operational telemetry:
 ### #607 — exchange
 
 - named external bearer scheme and strict validation profile;
-- `/auth/exchange`, audit/metrics and 10-minute internal JWT;
+- `/api/auth/exchange`, audit/metrics and 10-minute internal JWT;
 - tests for issuer/audience/scope/actor/algorithm/lifetime/key rollover,
   token version/public-client proof, ID-token substitution,
   unknown/disabled users and ignored Entra roles;

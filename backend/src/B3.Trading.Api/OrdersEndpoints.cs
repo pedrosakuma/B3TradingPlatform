@@ -17,7 +17,7 @@ public static class OrdersEndpoints
 {
     public static IEndpointRouteBuilder MapOrders(this IEndpointRouteBuilder app)
     {
-        var group = app.MapGroup("/orders").RequireAuthorization();
+        var group = app.MapGroup("/api/orders").RequireAuthorization();
 
         group.MapGet("/", (HttpContext ctx, WorkingOrderBook book, EndClientRegistry registry) =>
         {
@@ -114,7 +114,7 @@ public static class OrdersEndpoints
                     firm,
                     owner.Value,
                     ResolvePrincipal(ctx),
-                    "POST /orders",
+                    "POST /api/orders",
                     idempotencyKey);
                 requestHash = CanonicalRequestHash(
                     req,
@@ -184,11 +184,11 @@ public static class OrdersEndpoints
                 ctx.Response.Headers["Idempotency-Key-Required"] = "true";
                 ctx.Response.Headers.Append(
                     "Warning",
-                    "299 B3TradingPlatform \"Idempotency-Key will become required for POST /orders\"");
+                    "299 B3TradingPlatform \"Idempotency-Key will become required for POST /api/orders\"");
                 MetricsRegistry.OrdersMissingIdempotencyKey.Add(
                     1,
                     new KeyValuePair<string, object?>("firmId", firm),
-                    new KeyValuePair<string, object?>("endpoint", "POST /orders"));
+                    new KeyValuePair<string, object?>("endpoint", "POST /api/orders"));
                 var unkeyedResult = await submitter.SubmitAsync(submission, ct);
                 return MapSubmissionResult(
                     unkeyedResult,
@@ -311,7 +311,7 @@ public static class OrdersEndpoints
                     firm,
                     owner.Value,
                     ResolvePrincipal(ctx),
-                    "PUT /orders",
+                    "PUT /api/orders",
                     idempotencyKey);
                 requestHash = CanonicalModifyRequestHash(clOrdIdU, req);
                 try
@@ -348,7 +348,7 @@ public static class OrdersEndpoints
                 FirmId: firm);
             if (identity is null)
             {
-                MarkMissingIdempotency(ctx, firm, "PUT /orders");
+                MarkMissingIdempotency(ctx, firm, "PUT /api/orders");
                 var unkeyed = await modifier.ModifyAsync(request, ct);
                 return MapModifyResult(
                     unkeyed,
@@ -421,7 +421,7 @@ public static class OrdersEndpoints
                     firm,
                     owner.Value,
                     ResolvePrincipal(ctx),
-                    "DELETE /orders",
+                    "DELETE /api/orders",
                     idempotencyKey);
                 requestHash = CanonicalCancelRequestHash(clOrdIdU);
                 try
@@ -444,7 +444,7 @@ public static class OrdersEndpoints
 
             if (identity is null)
             {
-                MarkMissingIdempotency(ctx, firm, "DELETE /orders");
+                MarkMissingIdempotency(ctx, firm, "DELETE /api/orders");
                 var unkeyed = await canceller.CancelAsync(owner, clOrdIdU, ct, firmId: firm);
                 return MapCancelResult(
                     unkeyed,
@@ -511,14 +511,14 @@ public static class OrdersEndpoints
         {
             OrderModifyResultKind.Accepted => legacyResponse
                 ? Results.Accepted(
-                    $"/orders/{result.NewClOrdId}",
+                    $"/api/orders/{result.NewClOrdId}",
                     new
                     {
                         ClOrdId = result.NewClOrdId.ToString(),
                         OriginalClOrdId = originalClOrdId.ToString(),
                     })
                 : Results.Accepted(
-                    $"/orders/mutations/{result.MutationId}",
+                    $"/api/orders/mutations/{result.MutationId}",
                     MutationResponse(
                         result.MutationId,
                         result.NewClOrdId,
@@ -573,7 +573,7 @@ public static class OrdersEndpoints
             OrderCancelResultKind.Accepted => legacyResponse
                 ? Results.NoContent()
                 : Results.Accepted(
-                    $"/orders/mutations/{result.MutationId}",
+                    $"/api/orders/mutations/{result.MutationId}",
                     MutationResponse(
                         result.MutationId,
                         result.CancelClOrdId,
@@ -659,7 +659,7 @@ public static class OrdersEndpoints
                 Results.Json(response, statusCode: StatusCodes.Status503ServiceUnavailable),
             "RecordedPendingApproval" =>
                 Results.Json(response, statusCode: StatusCodes.Status503ServiceUnavailable),
-            _ => Results.Accepted($"/orders/mutations/{binding.MutationId}", response),
+            _ => Results.Accepted($"/api/orders/mutations/{binding.MutationId}", response),
         };
     }
 
@@ -690,7 +690,7 @@ public static class OrdersEndpoints
         return result.Kind switch
         {
             OrderSubmissionResultKind.Accepted or OrderSubmissionResultKind.Rejected =>
-                Results.Accepted($"/orders/mutations/{result.MutationId}", response),
+                Results.Accepted($"/api/orders/mutations/{result.MutationId}", response),
             OrderSubmissionResultKind.GatewayFailed =>
                 Results.Json(response, statusCode: StatusCodes.Status502BadGateway),
             OrderSubmissionResultKind.WalBackpressure =>
@@ -724,7 +724,7 @@ public static class OrdersEndpoints
             state,
             lookupUrl = mutationId.Value == Guid.Empty
                 ? null
-                : $"/orders/mutations/{mutationId}",
+                : $"/api/orders/mutations/{mutationId}",
             replayed,
             status = status ?? (state is "RejectedBeforeApproval" or "RejectedBeforeSend"
                 ? "Rejected"

@@ -39,7 +39,7 @@ frontend/
                            ▼           ▼
                   ┌──────────────┐  ┌─────────────┐
                   │  Backend     │  │  worker.js  │  WebSocket holder
-                  │  /auth /ord  │  │  reconnect  │
+                  │  /api/auth /ord  │  │  reconnect  │
                   │  ers /pos    │  │  apply ER   │
                   └──────────────┘  └──────┬──────┘
                                            │  postMessage(snapshot/delta)
@@ -115,7 +115,7 @@ frontend elsewhere.
   not add a Submit gate: existing in-flight, validation, and `Reserved`-phase
   rules remain the client-side authority, with the server authoritative for
   intake and routing.
-- A successful `POST /orders` first reports **platform acceptance**. The toast
+- A successful `POST /api/orders` first reports **platform acceptance**. The toast
   advances to **live order update received** only after the corresponding
   order appears in WebSocket state; the same delta drives the fresh-row cue in
   Working Orders.
@@ -126,7 +126,7 @@ frontend elsewhere.
 
 ## Operator and account controls
 
-The authenticated ticket loads the caller's firm-scoped `/sub-accounts/` list;
+The authenticated ticket loads the caller's firm-scoped `/api/sub-accounts/` list;
 admins can create or deactivate those same firm-scoped accounts in **Admin**.
 The Admin console also exposes the existing authorized backend controls for
 session phases, stale-order marking, resolved risk limits and reload, reference
@@ -140,7 +140,7 @@ older than five minutes must be refreshed before submit.
 
 ## Auth
 
-Local mode (the default) uses `POST /auth/login`; the internal JWT + expiry
+Local mode (the default) uses `POST /api/auth/login`; the internal JWT + expiry
 land in `sessionStorage`, with the legacy remember-me option mirroring only
 local sessions into `localStorage`. The worker passes the internal token via
 `?access_token=` because browsers cannot attach `Authorization` headers on the
@@ -157,12 +157,12 @@ config is rendered from:
 | `AUTH_ISSUER`, `AUTH_TENANT_ID` | Backend exact issuer and tenant checks; required with Hybrid/Entra compose deployments. |
 | `AUTH_CLIENT_ID` | Public SPA application client id. |
 | `AUTH_API_SCOPE` | Delegated trading API scope requested by MSAL. |
-| `AUTH_API_AUDIENCE`, `AUTH_REQUIRED_SCOPE` | Backend access-token audience and exact `scp` value for `/auth/exchange`. |
+| `AUTH_API_AUDIENCE`, `AUTH_REQUIRED_SCOPE` | Backend access-token audience and exact `scp` value for `/api/auth/exchange`. |
 | `AUTH_REDIRECT_URI` / `AUTH_LOGOUT_URI` | SPA redirect and post-logout URLs. |
 | `AUTH_KNOWN_AUTHORITIES` | Comma-separated trusted authority hosts for MSAL. |
 
 No client secret is present in the SPA, image or compose examples. The Entra
-access token is used only for `POST /auth/exchange`; the existing REST and `/ws`
+access token is used only for `POST /api/auth/exchange`; the existing REST and `/ws`
 modules consume only the returned internal JWT. Entra mode removes local
 password/signup/TOTP/remember-me controls, ignores internal JWTs in
 `localStorage`, stores the internal JWT in `sessionStorage`, and renews by

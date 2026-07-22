@@ -37,7 +37,7 @@ public static class AuthEndpoints
         var authOptions = app.ServiceProvider.GetRequiredService<IOptions<AuthOptions>>().Value;
         if (authOptions.IsLocalLoginEnabled())
         {
-            app.MapPost("/auth/login", async (
+            app.MapPost("/api/auth/login", async (
             HttpContext http,
             LoginRequest req,
             IUserStore users,
@@ -56,7 +56,7 @@ public static class AuthEndpoints
                     Outcome = AuditOutcomes.Failure,
                     ActorUsername = req?.Username,
                     SourceIp = sourceIp,
-                    ResourcePath = "/auth/login",
+                    ResourcePath = "/api/auth/login",
                     ReasonCode = "missing_credentials",
                 });
                 return Results.BadRequest(new { error = "username and password required" });
@@ -76,7 +76,7 @@ public static class AuthEndpoints
                     Outcome = AuditOutcomes.Failure,
                     ActorUsername = loginUsername,
                     SourceIp = sourceIp,
-                    ResourcePath = "/auth/login",
+                    ResourcePath = "/api/auth/login",
                     ReasonCode = "locked",
                 });
                 return Results.Json(new { error = "invalid credentials" }, statusCode: StatusCodes.Status401Unauthorized);
@@ -96,7 +96,7 @@ public static class AuthEndpoints
                     Outcome = AuditOutcomes.Failure,
                     ActorUsername = loginUsername,
                     SourceIp = sourceIp,
-                    ResourcePath = "/auth/login",
+                    ResourcePath = "/api/auth/login",
                     ReasonCode = user is null ? "unknown_user" : "bad_password",
                 });
                 return Results.Json(new { error = "invalid credentials" }, statusCode: StatusCodes.Status401Unauthorized);
@@ -128,7 +128,7 @@ public static class AuthEndpoints
                     ActorFirm = user.Firm,
                     ActorRole = user.Role,
                     SourceIp = sourceIp,
-                    ResourcePath = "/auth/login",
+                    ResourcePath = "/api/auth/login",
                     ReasonCode = "2fa_required",
                 });
                 return Results.Ok(new LoginTwoFactorRequiredResponse(
@@ -142,7 +142,7 @@ public static class AuthEndpoints
 
             // 2FA branch #2: user is REQUIRED to enroll (admin-forced)
             // but hasn't yet. Mint a ForceEnroll token; the client
-            // calls /auth/2fa/enroll with that token instead of a JWT.
+            // calls /api/auth/2fa/enroll with that token instead of a JWT.
             if (user.Require2FA)
             {
                 var token = totpChallenges.Issue(user.Username, TotpChallengeKind.ForceEnroll);
@@ -155,7 +155,7 @@ public static class AuthEndpoints
                     ActorFirm = user.Firm,
                     ActorRole = user.Role,
                     SourceIp = sourceIp,
-                    ResourcePath = "/auth/login",
+                    ResourcePath = "/api/auth/login",
                     ReasonCode = "2fa_required_but_missing",
                 });
                 return Results.Ok(new LoginEnrollmentRequiredResponse(
@@ -173,7 +173,7 @@ public static class AuthEndpoints
                     ActorUserId = user.Username,
                     ActorUsername = user.Username,
                     SourceIp = sourceIp,
-                    ResourcePath = "/auth/login",
+                    ResourcePath = "/api/auth/login",
                     ReasonCode = session.ErrorCode,
                 });
                 return Error(session.StatusCode, session.ErrorCode ?? "identity_directory_unavailable");
@@ -188,7 +188,7 @@ public static class AuthEndpoints
                 ActorFirm = session.Firm,
                 ActorRole = session.Role,
                 SourceIp = sourceIp,
-                ResourcePath = "/auth/login",
+                ResourcePath = "/api/auth/login",
             });
             return Results.Ok(new LoginResponse(session.Token!, session.ExpiresAt!.Value));
         });
@@ -196,7 +196,7 @@ public static class AuthEndpoints
 
         if (authOptions.IsSignupEnabled())
         {
-            app.MapPost("/auth/signup", async (
+            app.MapPost("/api/auth/signup", async (
             SignupRequest req,
             IUserStore users,
             IOptions<AuthOptions> opts,
@@ -298,7 +298,7 @@ public static class AuthEndpoints
             if (!session.Succeeded)
                 return Error(session.StatusCode, session.ErrorCode ?? "identity_directory_unavailable");
 
-            return Results.Created($"/auth/users/{newUser.Username}", new LoginResponse(session.Token!, session.ExpiresAt!.Value));
+            return Results.Created($"/api/auth/users/{newUser.Username}", new LoginResponse(session.Token!, session.ExpiresAt!.Value));
         });
         }
 
@@ -374,7 +374,7 @@ public sealed record LoginResponse(string Token, DateTimeOffset ExpiresAt);
 public sealed record SignupRequest(string Username, string Password);
 
 /// <summary>
-/// Returned by <c>/auth/login</c> when the user has one or more active
+/// Returned by <c>/api/auth/login</c> when the user has one or more active
 /// second factors. <see cref="Factors"/> tells the client whether to route
 /// to TOTP, WebAuthn, or either endpoint.
 /// </summary>
@@ -385,9 +385,9 @@ public sealed record LoginTwoFactorRequiredResponse(
     string? TotpChallengeToken);
 
 /// <summary>
-/// Returned by <c>/auth/login</c> when the user has
+/// Returned by <c>/api/auth/login</c> when the user has
 /// <c>Require2FA=true</c> but no active enrollment. The client must
-/// POST <c>{ enrollmentToken }</c> to <c>/auth/2fa/enroll</c>, then confirm the returned
+/// POST <c>{ enrollmentToken }</c> to <c>/api/auth/2fa/enroll</c>, then confirm the returned
 /// TOTP challenge to receive a JWT. (#303)
 /// </summary>
 public sealed record LoginEnrollmentRequiredResponse(bool Requires2faEnrollment, string EnrollmentToken);

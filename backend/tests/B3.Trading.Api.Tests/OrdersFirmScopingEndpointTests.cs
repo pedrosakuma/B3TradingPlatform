@@ -9,7 +9,7 @@ using Microsoft.Extensions.DependencyInjection;
 namespace B3.Trading.Api.Tests;
 
 /// <summary>
-/// PR #316 P1. GET /orders must be firm-scoped so a JWT sub registered
+/// PR #316 P1. GET /api/orders must be firm-scoped so a JWT sub registered
 /// under two firms does not leak the other firm's orders.
 /// </summary>
 public class OrdersFirmScopingEndpointTests : IClassFixture<TestAppFactory>
@@ -34,14 +34,14 @@ public class OrdersFirmScopingEndpointTests : IClassFixture<TestAppFactory>
 
         var (t1, _) = issuer.Issue(TestAppFactory.TestUser, "user", "FIRM01");
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", t1);
-        var firm1 = await client.GetFromJsonAsync<List<OrderDto>>("/orders/");
+        var firm1 = await client.GetFromJsonAsync<List<OrderDto>>("/api/orders/");
         Assert.NotNull(firm1);
         Assert.Single(firm1!);
         Assert.Equal("101", firm1![0].ClOrdId);
 
         var (t2, _) = issuer.Issue(TestAppFactory.TestUser, "user", "FIRM02");
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", t2);
-        var firm2 = await client.GetFromJsonAsync<List<OrderDto>>("/orders/");
+        var firm2 = await client.GetFromJsonAsync<List<OrderDto>>("/api/orders/");
         Assert.NotNull(firm2);
         Assert.Single(firm2!);
         Assert.Equal("102", firm2![0].ClOrdId);
@@ -69,7 +69,7 @@ public class OrdersFirmScopingEndpointTests : IClassFixture<TestAppFactory>
 
         // FIRM02 token attacking FIRM01's order id.
         var (firm2Token, _) = issuer.Issue(TestAppFactory.TestUser, "user", "FIRM02");
-        var crossFirm = new HttpRequestMessage(HttpMethod.Put, "/orders/201")
+        var crossFirm = new HttpRequestMessage(HttpMethod.Put, "/api/orders/201")
         {
             Content = JsonContent.Create(new { Quantity = 200, Price = 30m }),
         };
@@ -80,7 +80,7 @@ public class OrdersFirmScopingEndpointTests : IClassFixture<TestAppFactory>
         // Sanity: a completely unknown id from the same FIRM02
         // session returns the same NotFound — proving cross-firm
         // is indistinguishable from non-existence.
-        var unknown = new HttpRequestMessage(HttpMethod.Put, "/orders/9999999")
+        var unknown = new HttpRequestMessage(HttpMethod.Put, "/api/orders/9999999")
         {
             Content = JsonContent.Create(new { Quantity = 200, Price = 30m }),
         };
@@ -92,7 +92,7 @@ public class OrdersFirmScopingEndpointTests : IClassFixture<TestAppFactory>
         // (the modify itself will go further, but here we just
         // assert we don't get a NotFound from the firm check).
         var (firm1Token, _) = issuer.Issue(TestAppFactory.TestUser, "user", "FIRM01");
-        var sameFirm = new HttpRequestMessage(HttpMethod.Put, "/orders/201")
+        var sameFirm = new HttpRequestMessage(HttpMethod.Put, "/api/orders/201")
         {
             Content = JsonContent.Create(new { Quantity = 200, Price = 30m }),
         };
@@ -104,7 +104,7 @@ public class OrdersFirmScopingEndpointTests : IClassFixture<TestAppFactory>
     [Fact]
     public async Task DeleteCancel_CrossFirm_SameOwner_ReturnsNotFound()
     {
-        // PR #316 P1. Mirror of the modify test for DELETE /orders.
+        // PR #316 P1. Mirror of the modify test for DELETE /api/orders.
         await using var factory = TestAppFactory.WithOverrides(new Dictionary<string, string?>());
 
         var registry = factory.Services.GetRequiredService<EndClientRegistry>();
@@ -120,19 +120,19 @@ public class OrdersFirmScopingEndpointTests : IClassFixture<TestAppFactory>
         var (firm2Token, _) = issuer.Issue(TestAppFactory.TestUser, "user", "FIRM02");
 
         // FIRM02 cancelling FIRM01's order → NotFound.
-        var crossFirm = new HttpRequestMessage(HttpMethod.Delete, "/orders/301");
+        var crossFirm = new HttpRequestMessage(HttpMethod.Delete, "/api/orders/301");
         crossFirm.Headers.Authorization = new AuthenticationHeaderValue("Bearer", firm2Token);
         Assert.Equal(System.Net.HttpStatusCode.NotFound, (await client.SendAsync(crossFirm)).StatusCode);
 
         // Same NotFound for a non-existent id — indistinguishable.
-        var unknown = new HttpRequestMessage(HttpMethod.Delete, "/orders/9999999");
+        var unknown = new HttpRequestMessage(HttpMethod.Delete, "/api/orders/9999999");
         unknown.Headers.Authorization = new AuthenticationHeaderValue("Bearer", firm2Token);
         Assert.Equal(System.Net.HttpStatusCode.NotFound, (await client.SendAsync(unknown)).StatusCode);
 
         // FIRM01 path unaffected: the cancel proceeds through the
         // service (Accepted / NoContent) for its own order.
         var (firm1Token, _) = issuer.Issue(TestAppFactory.TestUser, "user", "FIRM01");
-        var sameFirm = new HttpRequestMessage(HttpMethod.Delete, "/orders/301");
+        var sameFirm = new HttpRequestMessage(HttpMethod.Delete, "/api/orders/301");
         sameFirm.Headers.Authorization = new AuthenticationHeaderValue("Bearer", firm1Token);
         var sameResp = await client.SendAsync(sameFirm);
         Assert.NotEqual(System.Net.HttpStatusCode.NotFound, sameResp.StatusCode);

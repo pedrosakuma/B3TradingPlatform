@@ -14,7 +14,7 @@ namespace B3.Trading.Api;
 
 /// <summary>
 /// Q4.5 (#305) + Q4.14 (#314). Read-only admin/compliance surface over
-/// <see cref="AuditLogKeeper"/>. Mounted at <c>/admin/audit</c>, gated
+/// <see cref="AuditLogKeeper"/>. Mounted at <c>/api/admin/audit</c>, gated
 /// by the <c>"admin-or-compliance"</c> authorization policy
 /// (anonymous → 401, plain user → 403). The endpoint returns events
 /// newest-first with opaque base64 cursor pagination.
@@ -56,11 +56,11 @@ public static class AdminAuditEndpoints
 
     public static IEndpointRouteBuilder MapAdminAudit(this IEndpointRouteBuilder app)
     {
-        // Mounted as a standalone endpoint (NOT under the /admin
+        // Mounted as a standalone endpoint (NOT under the /api/admin
         // group) so its policy stays orthogonal to the broader admin
-        // surface: compliance must reach /admin/audit but must NOT
-        // reach /admin/kill, /admin/halts, /admin/firms, etc.
-        app.MapGet("/admin/audit", (HttpContext ctx, AuditLogKeeper keeper, IOptions<AuthOptions> authOpts) =>
+        // surface: compliance must reach /api/admin/audit but must NOT
+        // reach /api/admin/kill, /api/admin/halts, /api/admin/firms, etc.
+        app.MapGet("/api/admin/audit", (HttpContext ctx, AuditLogKeeper keeper, IOptions<AuthOptions> authOpts) =>
         {
             var q = ctx.Request.Query;
             var now = DateTimeOffset.UtcNow;

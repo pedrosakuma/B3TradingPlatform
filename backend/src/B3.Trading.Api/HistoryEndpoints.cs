@@ -15,9 +15,9 @@ namespace B3.Trading.Api;
 /// Q2.1 (#268). Trader-scoped historical queries projected on demand
 /// from the WAL:
 /// <list type="bullet">
-///   <item><c>GET /orders/history</c> — one entry per ClOrdID, materialised
+///   <item><c>GET /api/orders/history</c> — one entry per ClOrdID, materialised
 ///   from the order's submit + ER stream; includes terminals.</item>
-///   <item><c>GET /executions/history</c> — one entry per ExecutionReport
+///   <item><c>GET /api/executions/history</c> — one entry per ExecutionReport
 ///   the platform routed; covers every <see cref="ExecKind"/>.</item>
 /// </list>
 ///
@@ -57,7 +57,7 @@ public static class HistoryEndpoints
 
     public static IEndpointRouteBuilder MapHistory(this IEndpointRouteBuilder app)
     {
-        app.MapGet("/orders/history", async (
+        app.MapGet("/api/orders/history", async (
             HttpContext ctx,
             EndClientRegistry registry,
             IEventStore store,
@@ -130,7 +130,7 @@ public static class HistoryEndpoints
             return Results.Ok(new HistoryPageDto<OrderHistoryItemDto>(items, page.NextCursor));
         }).RequireAuthorization();
 
-        app.MapGet("/executions/history", async (
+        app.MapGet("/api/executions/history", async (
             HttpContext ctx,
             EndClientRegistry registry,
             IEventStore store,
@@ -600,10 +600,10 @@ public static class HistoryEndpoints
         // Items are sorted (Seq DESC, TieBreaker DESC). The cursor anchors
         // the LAST item we returned previously; the next page strictly
         // precedes it under the same composite ordering. The TieBreaker
-        // is the order's ClOrdId for /orders/history (a Replaced ER
+        // is the order's ClOrdId for /api/orders/history (a Replaced ER
         // updates both the original and the replacement with the same
         // LastSeq, so paging by Seq alone would drop the sibling at the
-        // boundary). For /executions/history each ER occupies a unique
+        // boundary). For /api/executions/history each ER occupies a unique
         // WAL Seq so the tie-breaker is unused (passed as 0).
         IEnumerable<T> windowed = sortedDesc;
         if (cursor is { } c)
@@ -785,7 +785,7 @@ public static class HistoryEndpoints
         public DateTimeOffset LastTs;
 
         // Q3.4 (#284) — native iceberg / reserve display fields, mirrored
-        // onto the projection so /orders/history is not blind to the
+        // onto the projection so /api/orders/history is not blind to the
         // distinction between iceberg and full-disclosure orders. Null on
         // legacy WAL rows that pre-date the additive fields on
         // OrderSubmittedEvent — matches the no-reserve semantics those
@@ -1181,7 +1181,7 @@ public static class HistoryEndpoints
         // keys via [JsonPropertyName] keeps the wire format compact.
         [System.Text.Json.Serialization.JsonPropertyName("seq")] public long Seq { get; init; } = Seq;
         [System.Text.Json.Serialization.JsonPropertyName("ts")] public DateTimeOffset Ts { get; init; } = Ts;
-        // Q2.1 (#268). Pagination snapshot anchor for /orders/history.
+        // Q2.1 (#268). Pagination snapshot anchor for /api/orders/history.
         // Captured on the first request (no cursor) and threaded through
         // every subsequent page so the walk reads a frozen WAL view.
         // Default 0 means "no snapshot" — old cursors (pre-fix) and the
@@ -1192,7 +1192,7 @@ public static class HistoryEndpoints
         // projection to the same LastSeq; sorting/paging by Seq alone
         // would silently drop one sibling whenever the page boundary
         // fell between them. ClOrdId is the secondary sort key for the
-        // /orders/history walk; /executions/history sets it to 0
+        // /api/orders/history walk; /api/executions/history sets it to 0
         // (each ER is one WAL row with a unique Seq). Default 0 keeps
         // pre-fix encoded cursors decodable.
         [System.Text.Json.Serialization.JsonPropertyName("cl")] public ulong ClOrdId { get; init; }
@@ -1204,7 +1204,7 @@ public static class HistoryEndpoints
 /// <summary>Q2.1 (#268). Generic cursor-paginated history page wire shape.</summary>
 public sealed record HistoryPageDto<T>(IReadOnlyList<T> Items, string? NextCursor);
 
-/// <summary>Q2.1 (#268). Wire shape for one row of <c>GET /orders/history</c>.</summary>
+/// <summary>Q2.1 (#268). Wire shape for one row of <c>GET /api/orders/history</c>.</summary>
 public sealed record OrderHistoryItemDto(
     string ClOrdId,
     string Symbol,
@@ -1236,7 +1236,7 @@ public sealed record OrderHistoryItemDto(
     /// limitation — see #298).</summary>
     string? DisplayResetPolicy = null);
 
-/// <summary>Q2.1 (#268). Wire shape for one row of <c>GET /executions/history</c>.</summary>
+/// <summary>Q2.1 (#268). Wire shape for one row of <c>GET /api/executions/history</c>.</summary>
 public sealed record ExecutionHistoryItemDto(
     string ClOrdId,
     string Symbol,

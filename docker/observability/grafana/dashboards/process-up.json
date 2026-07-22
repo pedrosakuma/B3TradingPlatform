@@ -51,7 +51,7 @@
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "description": "Cumulative count of orders accepted by /orders POST since process start. Stays at 0 in Mode=Unavailable (no submits get past UnavailableExchangeGateway, so the increment never fires).",
+      "description": "Cumulative count of orders accepted by /api/orders POST since process start. Stays at 0 in Mode=Unavailable (no submits get past UnavailableExchangeGateway, so the increment never fires).",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },

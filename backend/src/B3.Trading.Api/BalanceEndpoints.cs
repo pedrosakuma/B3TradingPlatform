@@ -16,7 +16,7 @@ public static class BalanceEndpoints
 {
     public static IEndpointRouteBuilder MapBalance(this IEndpointRouteBuilder app)
     {
-        app.MapGet("/balance", [Authorize] (
+        app.MapGet("/api/balance", [Authorize] (
             HttpContext ctx,
             EndClientRegistry registry,
             CashLedger cash,
@@ -42,7 +42,7 @@ public static class BalanceEndpoints
     /// forbidden (403) in the default/production configuration.
     /// <para>
     /// Reuses the same <see cref="CashLedgerEvent"/> + fold-into-both-
-    /// ledgers path as <c>POST /admin/cash</c> (see
+    /// ledgers path as <c>POST /api/admin/cash</c> (see
     /// <c>AdminEndpoints.HandleCashLedger</c>) — the WAL/replay code
     /// doesn't distinguish operator-driven from self-driven deposits,
     /// only <see cref="CashLedgerEvent.OperatorId"/> differs (set to
@@ -54,7 +54,7 @@ public static class BalanceEndpoints
     /// </summary>
     public static IEndpointRouteBuilder MapBalanceSelfDeposit(this IEndpointRouteBuilder app)
     {
-        app.MapPost("/balance/deposit", [Authorize] (
+        app.MapPost("/api/balance/deposit", [Authorize] (
             SelfDepositRequest? req,
             HttpContext ctx,
             EndClientRegistry registry,
@@ -78,7 +78,7 @@ public static class BalanceEndpoints
                       ?? throw new InvalidOperationException("Authenticated request missing sub claim.");
             var owner = registry.Register(sub);
             var firmId = ctx.User.FindFirstValue(JwtIssuer.FirmClaim) ?? "default";
-            var currency = "BRL"; // v0 whitelist, mirrors /admin/cash.
+            var currency = "BRL"; // v0 whitelist, mirrors /api/admin/cash.
 
             try
             {
@@ -94,7 +94,7 @@ public static class BalanceEndpoints
                     ActorFirm = firmId,
                     ActorRole = ctx.User.FindFirstValue(JwtIssuer.RoleClaim),
                     SourceIp = ctx.Connection.RemoteIpAddress?.ToString(),
-                    ResourcePath = "/balance/deposit",
+                    ResourcePath = "/api/balance/deposit",
                     Details = new()
                     {
                         ["amount"] = req.Amount.ToString(System.Globalization.CultureInfo.InvariantCulture),
@@ -104,7 +104,7 @@ public static class BalanceEndpoints
                 audit.LogOrFail(auditEvt);
 
                 // #679 review fix: the balance-cap check must run against
-                // CashLedger (the ledger the cap and GET /balance actually
+                // CashLedger (the ledger the cap and GET /api/balance actually
                 // describe — CashKeeper excludes fills/fees so it can
                 // diverge from the real spendable balance) AND must be
                 // evaluated atomically under the dispatcher's snapshot
@@ -168,7 +168,7 @@ public static class BalanceEndpoints
     }
 }
 
-/// <summary>Body for <c>POST /balance/deposit</c> (#679).</summary>
+/// <summary>Body for <c>POST /api/balance/deposit</c> (#679).</summary>
 public sealed class SelfDepositRequest
 {
     public decimal Amount { get; set; }

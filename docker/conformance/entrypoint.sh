@@ -41,7 +41,7 @@ base_url=${B3T_BASE_URL%/}
 live_url=${B3T_LIVE_URL:-$base_url/live}
 ready_url=${B3T_READY_URL:-$base_url/ready}
 health_url=$base_url/health
-login_url=$base_url/auth/login
+login_url=$base_url/api/auth/login
 
 echo "[conformance] target: $base_url"
 echo "[conformance] waiting for $live_url ..."

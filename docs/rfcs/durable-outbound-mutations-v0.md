@@ -677,7 +677,7 @@ Admin-only endpoints list redacted mutations and evidence, retrieve a single
 timeline, attach evidence, and resolve:
 
 ```text
-POST /admin/outbound-mutations/{mutationId}/resolve
+POST /api/admin/outbound-mutations/{mutationId}/resolve
 {
   "decision": "venue_acknowledged|venue_absent|leave_ambiguous",
   "evidenceType": "terminal_er|contracted_not_applied|venue_mass_action|official_extract|manual_annotation",

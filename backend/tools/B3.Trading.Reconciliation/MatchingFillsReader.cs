@@ -14,7 +14,7 @@ public static class MatchingFillsReader
 {
     /// <summary>
     /// Reads and validates the drop at
-    /// <c>{dropRootDir}/{channel}/{yyyy-MM-dd}/fills.csv</c>. The
+    /// <c>{dropRootDir}/{channel}/{yyyy-MM-dd}/api/fills.csv</c>. The
     /// <c>.done</c> sidecar must be present (it is the consumer-visible
     /// "ready" signal) and its declared SHA-256 must match the bytes of
     /// <c>fills.csv</c>.

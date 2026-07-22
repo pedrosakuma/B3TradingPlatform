@@ -11,7 +11,7 @@ namespace B3.Trading.Application;
 /// <summary>
 /// Slice 4 of #122. The "modify (cancel-replace) an order" pipeline,
 /// counterpart to <see cref="OrderSubmissionService"/>. Both manual
-/// modifies (PUT /orders/{clOrdId}) and any future engine-driven
+/// modifies (PUT /api/orders/{clOrdId}) and any future engine-driven
 /// replace flows funnel through here so risk evaluation, margin
 /// coordination, in-flight tracking, WAL durability, and gateway
 /// dispatch live in exactly one place.
@@ -187,7 +187,7 @@ public sealed class OrderModifyService
         if (_drain.IsDraining)
         {
             MetricsRegistry.DrainRejections.Add(1,
-                new KeyValuePair<string, object?>("route", "PUT /orders"));
+                new KeyValuePair<string, object?>("route", "PUT /api/orders"));
             return OrderModifyResult.Drained;
         }
 
@@ -441,7 +441,7 @@ public sealed class OrderModifyService
         // Ordering note (RFC docs/rfcs/risk-pipeline-ordering-v0.md, #262):
         // risk evaluation runs *pre-WAL* on the modify path. #337 closed
         // the audit gap below: a rejected modify dispatches an
-        // OrderReplaceRejectedEvent so /executions/history, the CVM /
+        // OrderReplaceRejectedEvent so /api/executions/history, the CVM /
         // drop-copy / touch consumers and the FE blotter all observe
         // the burned ClOrdId + reason. Replay treats the event as a
         // pure no-op for book/ownership/margin state (advances the

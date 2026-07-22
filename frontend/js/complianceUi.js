@@ -2,9 +2,9 @@
 //
 // Renders the four-panel compliance console:
 //   1. Drop-copy live feed (rolling table, last 200 messages)
-//   2. Audit-log search (form → GET /admin/audit, cursor pagination)
-//   3. Best-execution evidence drill-down (GET /fills/{id}/touch)
-//   4. CVM 35 / 505 report download (GET /reports/cvm/{model}/{date})
+//   2. Audit-log search (form → GET /api/admin/audit, cursor pagination)
+//   3. Best-execution evidence drill-down (GET /api/fills/{id}/touch)
+//   4. CVM 35 / 505 report download (GET /api/reports/cvm/{model}/{date})
 //
 // SCOPE / ROLE
 // ────────────
@@ -30,7 +30,7 @@
 // LGPD
 // ────
 // The audit-log panel surfaces actor usernames. Compliance is
-// firm-scoped server-side at /admin/audit (Q4.14 backend slice), so
+// firm-scoped server-side at /api/admin/audit (Q4.14 backend slice), so
 // the rendered rows are always within the caller's own firm — no
 // cross-firm names leak through this UI.
 

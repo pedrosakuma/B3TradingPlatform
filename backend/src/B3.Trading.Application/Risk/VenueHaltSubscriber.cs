@@ -21,7 +21,7 @@ namespace B3.Trading.Application.Risk;
 /// app-side event. This subscriber translates raw SBE
 /// <c>SecurityTradingStatus</c> codes (PAUSE / OPEN / FORBIDDEN) into
 /// halt/resume operations on the operator-independent venue origin
-/// flag. Operator halts placed via <c>/admin/halts</c> are unaffected
+/// flag. Operator halts placed via <c>/api/admin/halts</c> are unaffected
 /// by venue resumes (and vice versa) — see <see cref="HaltOrigin"/>.
 /// </para>
 ///

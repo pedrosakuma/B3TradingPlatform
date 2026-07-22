@@ -17,7 +17,7 @@ public class BalanceEndpointTests : IClassFixture<TestAppFactory>
     public async Task UnauthenticatedGet_Returns401()
     {
         var client = _factory.CreateClient();
-        var resp = await client.GetAsync("/balance");
+        var resp = await client.GetAsync("/api/balance");
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
     }
 
@@ -29,7 +29,7 @@ public class BalanceEndpointTests : IClassFixture<TestAppFactory>
         await using var factory = TestAppFactory.WithOverrides(new Dictionary<string, string?>());
         var client = await factory.CreateAuthedClientAsync();
 
-        var resp = await client.GetAsync("/balance");
+        var resp = await client.GetAsync("/api/balance");
         resp.EnsureSuccessStatusCode();
         var body = await resp.Content.ReadFromJsonAsync<BalanceDto>();
 
@@ -42,7 +42,7 @@ public class BalanceEndpointTests : IClassFixture<TestAppFactory>
     public async Task AfterFill_ReflectsLedger()
     {
         // Drive the ledger directly via the singleton CashLedger and
-        // confirm GET /balance reads the same source of truth.
+        // confirm GET /api/balance reads the same source of truth.
         await using var factory = TestAppFactory.WithOverrides(new Dictionary<string, string?>());
         var client = await factory.CreateAuthedClientAsync();
 
@@ -51,7 +51,7 @@ public class BalanceEndpointTests : IClassFixture<TestAppFactory>
         var owner = registry.Register(TestAppFactory.TestUser);
         ledger.ApplyFill(owner, OrderSide.Sell, 100, 50m); // +5000
 
-        var body = await client.GetFromJsonAsync<BalanceDto>("/balance");
+        var body = await client.GetFromJsonAsync<BalanceDto>("/api/balance");
         Assert.Equal(5000m, body!.Available);
     }
 
@@ -66,7 +66,7 @@ public class BalanceEndpointTests : IClassFixture<TestAppFactory>
         await using var factory = TestAppFactory.WithOverrides(overrides);
         var client = await factory.CreateAuthedClientAsync();
 
-        var body = await client.GetFromJsonAsync<BalanceDto>("/balance");
+        var body = await client.GetFromJsonAsync<BalanceDto>("/api/balance");
         Assert.Equal(12345.67m, body!.Available);
     }
 
@@ -80,7 +80,7 @@ public class BalanceEndpointTests : IClassFixture<TestAppFactory>
         await using var factory = TestAppFactory.WithOverrides(overrides);
         var client = await factory.CreateAuthedClientAsync();
 
-        var body = await client.GetFromJsonAsync<BalanceDto>("/balance");
+        var body = await client.GetFromJsonAsync<BalanceDto>("/api/balance");
 
         Assert.NotNull(body);
         Assert.True(body!.SelfDepositEnabled);

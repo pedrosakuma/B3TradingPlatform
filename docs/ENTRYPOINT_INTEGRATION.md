@@ -23,7 +23,7 @@ Both are MIT-licensed. Upgrade by bumping the `<PackageReference>` in
 ```
                                    ┌────────── upstream EntryPointClient (firm A) ──┐
                                    │                                                 │
-HTTP /orders ─→ OrdersEndpoints ─→ MultiFirmExchangeGateway ─→ B3EntryPointClientGateway ─→ B3 gateway
+HTTP /api/orders ─→ OrdersEndpoints ─→ MultiFirmExchangeGateway ─→ B3EntryPointClientGateway ─→ B3 gateway
                                    │   (routes by Order.FirmId)                      │
                                    └────────── upstream EntryPointClient (firm B) ──┘
                                                        │
@@ -69,7 +69,7 @@ ClOrdID as a **decimal string** (`ClOrdId.ToString()`). Internally
 ## SecurityID
 
 The upstream wire identifies an instrument by `uint64 SecurityId` —
-`Symbol` is a UI-only concept on our side. `POST /orders` accepts
+`Symbol` is a UI-only concept on our side. `POST /api/orders` accepts
 `securityId` directly; the frontend resolves Symbol→SecurityId from a
 config-fed lookup. Our `Order` carries both, but only `SecurityId` is
 forwarded.

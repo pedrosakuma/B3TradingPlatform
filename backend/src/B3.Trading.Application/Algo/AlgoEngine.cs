@@ -236,7 +236,7 @@ public sealed class AlgoEngine : BackgroundService
                     // consumer task — one stuck algo would freeze every
                     // other algo on the host. Log + continue; the affected
                     // parent stays in whatever state the failed transition
-                    // left it (operator-visible via GET /algo).
+                    // left it (operator-visible via GET /api/algo).
                     _logger.LogError(ex, "AlgoEngine reactor failed for signal {Kind} algo {AlgoId}/{Firm}.",
                         SignalKind(signal), AlgoIdOf(signal), signal.FirmId);
                 }
@@ -748,7 +748,7 @@ public sealed class AlgoEngine : BackgroundService
         {
             // Recovery edge-case: snapshot says fully filled but no terminal
             // event yet (crashed between final fill and terminal write).
-            // Promote to Completed now so /algo reflects truth.
+            // Promote to Completed now so /api/algo reflects truth.
             await RecordTerminalAsync(algo, rt, AlgoStatus.Completed, AlgoTerminalReason.None).ConfigureAwait(false);
             return;
         }

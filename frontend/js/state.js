@@ -99,9 +99,9 @@ const state = {
   // picks watchlist[0] when null and a watchlist exists.
   selectedSymbol: null,
   // UX-only slices added in the operability pass.
-  submitInflight: null,    // { startedAt: ms } | null — true while POST /orders is awaiting response
+  submitInflight: null,    // { startedAt: ms } | null — true while POST /api/orders is awaiting response
   wsReconnect: null,       // { nextAt: ms } | null — when worker has scheduled the next attempt
-  firmsHealth: null,       // { mode, firms, fetchedAt } | null — admin-only poll of /admin/firms
+  firmsHealth: null,       // { mode, firms, fetchedAt } | null — admin-only poll of /api/admin/firms
   // Public, unauthenticated mirror of /health.exchange. Polled for every
   // logged-in user (not just admin) so the gateway badge can stop lying
   // when the FIXP session goes Suspended/Disconnected mid-trading.
@@ -154,7 +154,7 @@ const state = {
   // trader gets immediate visual feedback and can't fire repeat DELETEs.
   inflightCancels: new Set(),
   // Slice 5 of #122. Per-ClOrdID set of modifies currently in flight
-  // (PUT /orders issued, no server ack yet). Drives the "Modifying…"
+  // (PUT /api/orders issued, no server ack yet). Drives the "Modifying…"
   // state on the row's Modify button so a slow server can't yield two
   // PUTs racing the venue.
   inflightModifies: new Set(),
@@ -190,12 +190,12 @@ const state = {
   // manager to decide whether to (un)subscribe `auction.${symbol}`.
   auctionPanelSymbol: null,
   // Q1.4 (#256). Effective risk-policy values fetched from
-  // `GET /policy/risk` on session start. `null` until the first
+  // `GET /api/policy/risk` on session start. `null` until the first
   // successful fetch lands; readers fall back to safe client-side
   // defaults (e.g. 30-day GTD cap) so a slow/failed fetch never
   // blocks the ticket. Shape: `{ maxGtdHorizonDays: number }`.
   riskPolicy: null,
-  // Q2.6 (#273). P&L panel slice. Mirrors the GET /pnl/today projection
+  // Q2.6 (#273). P&L panel slice. Mirrors the GET /api/pnl/today projection
   // shape (parallel realized / unrealized arrays + the two totals).
   // `pnl.me` WS frames (both snapshot and delta) carry the full DTO, so
   // applyPnlSnapshot / applyPnlDelta both replace wholesale — no diff
@@ -203,12 +203,12 @@ const state = {
   // readers render a "no data yet" placeholder in the meantime.
   pnl: null,                // PnlTodayDto | null
   // #385 / #386. Live cash balance for the logged-in end-client. Mirrors
-  // the GET /balance projection (BalanceDto = { Available }) and is kept
+  // the GET /api/balance projection (BalanceDto = { Available }) and is kept
   // fresh by the `balance.me` WS channel — snapshot on subscribe, delta
   // on every CashLedger mutation (fills, fees, opening-balance seed).
   // #690 also carries whether self-service deposit is enabled in this
   // environment, so the topbar can reveal/hide the control from the
-  // existing balance snapshot instead of probing POST /balance/deposit.
+  // existing balance snapshot instead of probing POST /api/balance/deposit.
   // `null` until the first frame lands; the header widget renders an
   // "R$ —" placeholder in the meantime so a slow first frame doesn't
   // freeze a stale number from a prior session.
@@ -228,7 +228,7 @@ const state = {
   // projection while the "view JSON" modal is open (cleared on close).
   statement: { lastDownload: null, lastJson: null, busy: false, error: null },
   // Fase 2 (#398). Algos slice — mirror of `algo.me` WS channel + REST
-  // `GET /algo/`. Map<algoId, AlgoDto>. Snapshot replaces wholesale on
+  // `GET /api/algo/`. Map<algoId, AlgoDto>. Snapshot replaces wholesale on
   // (re)subscribe; deltas upsert. Server never sends a "remove" frame —
   // terminal algos stay until clearAll() (logout / WS reconnect) or
   // until the user toggles the includeTerminal filter and we
@@ -1153,7 +1153,7 @@ export function isAuctionPhase(phase) {
 }
 
 // ── Q2.6 (#273). P&L panel slice ──────────────────────────────────
-// Both REST snapshot (GET /pnl/today) and WS `pnl.me` frames carry the
+// Both REST snapshot (GET /api/pnl/today) and WS `pnl.me` frames carry the
 // full PnlTodayDto, so snapshot+delta both replace wholesale. Reducer
 // is split into two names so call-sites read clearly, but the logic is
 // identical.
@@ -1170,7 +1170,7 @@ function _normalizePnl(dto) {
 }
 
 // Monotonic epoch bumped by every authoritative WS-driven write
-// (applyPnlDelta + clearPnl). A REST refresh (GET /pnl/today) captures
+// (applyPnlDelta + clearPnl). A REST refresh (GET /api/pnl/today) captures
 // the epoch BEFORE issuing its request and passes it as `ifEpoch` to
 // applyPnlSnapshot; if the epoch moved while in-flight, a WS delta
 // landed first with newer state and the REST result is dropped.
@@ -1184,7 +1184,7 @@ export function getPnlEpoch() { return _pnlEpoch; }
 export function bumpPnlEpoch() { _pnlEpoch += 1; }
 
 export function applyPnlSnapshot(dto, opts) {
-  // REST seed (GET /pnl/today). Gated by `ifEpoch` to avoid clobbering
+  // REST seed (GET /api/pnl/today). Gated by `ifEpoch` to avoid clobbering
   // a WS delta that arrived AFTER the request was issued but BEFORE it
   // resolved — see refreshPnl() in app.js.
   if (opts && opts.ifEpoch !== undefined && opts.ifEpoch !== _pnlEpoch) return;

@@ -1093,7 +1093,7 @@ than upstream, pick the documented action:
 
 | Origin                          | Backpressure trigger                          | Action                                                                 |
 | ------------------------------- | --------------------------------------------- | ---------------------------------------------------------------------- |
-| **REST** `POST /orders`         | `WAL channel full` (bounded `ChannelCapacity`) | HTTP `503` + `Retry-After: 1` header; metric `WalBackpressure{call_site=rest}` |
+| **REST** `POST /api/orders`         | `WAL channel full` (bounded `ChannelCapacity`) | HTTP `503` + `Retry-After: 1` header; metric `WalBackpressure{call_site=rest}` |
 | **WS** order submit             | Same                                           | Submit promise rejected with `BackpressureError`; client logic retries; metric `WalBackpressure{call_site=ws}` |
 | **FIXP** inbound `NewOrderSingle` | Same                                           | `BusinessReject` SBE message with reason `RESOURCE_BUSY`; bot retries; metric `WalBackpressure{call_site=fixp.inbound}` |
 | **EntryPoint inbound ER**       | WAL channel full                              | **Apply ER without WAL append** (existing `EntryPointExecutionReportRouter` exception, §4.2); metric `WalBackpressure{call_site=er.router}` |

@@ -11,8 +11,8 @@ namespace B3.Trading.Api.Tests;
 /// <summary>
 /// #288 — REST surface emits a stable machine-readable <c>code</c>
 /// (e.g. <c>min_tick_size</c>) alongside the human-readable
-/// <c>reason</c>/<c>error</c>, on both <c>POST /orders</c>
-/// (<c>Status="Rejected"</c>, 202) and <c>PUT /orders/{id}</c>
+/// <c>reason</c>/<c>error</c>, on both <c>POST /api/orders</c>
+/// (<c>Status="Rejected"</c>, 202) and <c>PUT /api/orders/{id}</c>
 /// (<c>422 UnprocessableEntity</c>) risk-rejection paths.
 ///
 /// <para>
@@ -81,7 +81,7 @@ public class RiskRejectionCodeSurfaceTests
         Assert.Null(origAck.Status); // Accepted (not "Rejected")
 
         // Modify to an off-tick price (0.005 increment).
-        var put = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origAck.ClOrdId}")
+        var put = new HttpRequestMessage(HttpMethod.Put, $"/api/orders/{origAck.ClOrdId}")
         {
             Content = JsonContent.Create(new
             {
@@ -125,7 +125,7 @@ public class RiskRejectionCodeSurfaceTests
 
         async Task<HttpResponseMessage> SendModify()
         {
-            var request = new HttpRequestMessage(HttpMethod.Put, $"/orders/{origAck.ClOrdId}")
+            var request = new HttpRequestMessage(HttpMethod.Put, $"/api/orders/{origAck.ClOrdId}")
             {
                 Content = JsonContent.Create(new
                 {
@@ -160,7 +160,7 @@ public class RiskRejectionCodeSurfaceTests
 
     private static async Task<HttpResponseMessage> PostOrder(HttpClient http, string token, object payload)
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/orders")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
         {
             Content = JsonContent.Create(payload),
         };

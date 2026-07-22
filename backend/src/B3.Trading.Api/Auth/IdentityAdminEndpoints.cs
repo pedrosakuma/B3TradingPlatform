@@ -15,7 +15,7 @@ public static class IdentityAdminEndpoints
 
     public static IEndpointRouteBuilder MapIdentityAdmin(this IEndpointRouteBuilder app)
     {
-        var group = app.MapGroup("/admin/identity").RequireAuthorization("admin");
+        var group = app.MapGroup("/api/admin/identity").RequireAuthorization("admin");
 
         group.MapGet("/users", async (ITradingUserDirectory directory, CancellationToken ct) =>
         {
@@ -60,7 +60,7 @@ public static class IdentityAdminEndpoints
                     audit,
                     http,
                     AuditEventTypes.IdentityBindingCreate,
-                    "/admin/identity/users/{tradingUserId}/external-bindings",
+                    "/api/admin/identity/users/{tradingUserId}/external-bindings",
                     tradingUserId,
                     before,
                     IntendedSummary(before, rowVersionDelta: 1, bindingCountDelta: 1));
@@ -74,7 +74,7 @@ public static class IdentityAdminEndpoints
                     req.ExpectedRowVersion,
                     ct);
                 return Results.Created(
-                    $"/admin/identity/users/{Uri.EscapeDataString(tradingUserId)}/external-bindings/{binding.Id}",
+                    $"/api/admin/identity/users/{Uri.EscapeDataString(tradingUserId)}/external-bindings/{binding.Id}",
                     ToDto(binding));
             }
             catch (WalBackpressureException)
@@ -106,7 +106,7 @@ public static class IdentityAdminEndpoints
                     audit,
                     http,
                     AuditEventTypes.IdentityBindingDelete,
-                    "/admin/identity/users/{tradingUserId}/external-bindings/{bindingId}",
+                    "/api/admin/identity/users/{tradingUserId}/external-bindings/{bindingId}",
                     tradingUserId,
                     before,
                     IntendedSummary(before, rowVersionDelta: 1, bindingCountDelta: -1),
@@ -142,7 +142,7 @@ public static class IdentityAdminEndpoints
                     audit,
                     http,
                     AuditEventTypes.IdentityUserStatusChange,
-                    "/admin/identity/users/{tradingUserId}/status",
+                    "/api/admin/identity/users/{tradingUserId}/status",
                     tradingUserId,
                     before,
                     IntendedSummary(before, rowVersionDelta: 1, status: req.Status));
@@ -178,7 +178,7 @@ public static class IdentityAdminEndpoints
                     audit,
                     http,
                     AuditEventTypes.IdentityUserAuthorizationChange,
-                    "/admin/identity/users/{tradingUserId}/authorization",
+                    "/api/admin/identity/users/{tradingUserId}/authorization",
                     tradingUserId,
                     before,
                     IntendedSummary(before, rowVersionDelta: 1, firmId: req.FirmId, role: req.Role));

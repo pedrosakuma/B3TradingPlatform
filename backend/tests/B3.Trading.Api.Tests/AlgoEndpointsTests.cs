@@ -57,7 +57,7 @@ public class AlgoEndpointsTests
         using var factory = NewFactory();
         using var client = await factory.CreateAuthedClientAsync();
 
-        var resp = await client.PostAsJsonAsync("/algo/", IcebergBody());
+        var resp = await client.PostAsJsonAsync("/api/algo/", IcebergBody());
         Assert.Equal(HttpStatusCode.Accepted, resp.StatusCode);
         var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
         Assert.False(string.IsNullOrEmpty(body.GetProperty("algoId").GetString()));
@@ -70,7 +70,7 @@ public class AlgoEndpointsTests
         using var factory = NewFactory();
         using var client = await factory.CreateAuthedClientAsync();
 
-        var resp = await client.PostAsJsonAsync("/algo/", TwapBody());
+        var resp = await client.PostAsJsonAsync("/api/algo/", TwapBody());
         Assert.Equal(HttpStatusCode.Accepted, resp.StatusCode);
     }
 
@@ -80,7 +80,7 @@ public class AlgoEndpointsTests
         using var factory = NewFactory();
         using var client = await factory.CreateAuthedClientAsync();
 
-        var resp = await client.PostAsJsonAsync("/algo/", IcebergBody(total: 100, display: 200));
+        var resp = await client.PostAsJsonAsync("/api/algo/", IcebergBody(total: 100, display: 200));
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
     }
 
@@ -91,7 +91,7 @@ public class AlgoEndpointsTests
         using var factory = NewFactory();
         using var client = await factory.CreateAuthedClientAsync();
 
-        var resp = await client.PostAsJsonAsync("/algo/", TwapBody(childType: "Limit", childPrice: null));
+        var resp = await client.PostAsJsonAsync("/api/algo/", TwapBody(childType: "Limit", childPrice: null));
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
         var body = await resp.Content.ReadAsStringAsync();
         Assert.Contains("childPrice", body, StringComparison.OrdinalIgnoreCase);
@@ -107,7 +107,7 @@ public class AlgoEndpointsTests
         using var factory = NewFactory();
         using var client = await factory.CreateAuthedClientAsync();
 
-        var resp = await client.PostAsJsonAsync("/algo/", TwapBody(childType: "Market", childPrice: null));
+        var resp = await client.PostAsJsonAsync("/api/algo/", TwapBody(childType: "Market", childPrice: null));
         Assert.Equal(HttpStatusCode.Accepted, resp.StatusCode);
     }
 
@@ -118,7 +118,7 @@ public class AlgoEndpointsTests
         using var client = await factory.CreateAuthedClientAsync();
         var now = DateTimeOffset.UtcNow;
 
-        var resp = await client.PostAsJsonAsync("/algo/", TwapBody(start: now.AddMinutes(10), end: now));
+        var resp = await client.PostAsJsonAsync("/api/algo/", TwapBody(start: now.AddMinutes(10), end: now));
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
     }
 
@@ -128,7 +128,7 @@ public class AlgoEndpointsTests
         using var factory = NewFactory();
         using var client = await factory.CreateAuthedClientAsync();
 
-        var resp = await client.PostAsJsonAsync("/algo/", new
+        var resp = await client.PostAsJsonAsync("/api/algo/", new
         {
             Symbol = "PETR4",
             Side = "Buy",
@@ -145,7 +145,7 @@ public class AlgoEndpointsTests
         using var factory = NewFactory();
         using var client = await factory.CreateAuthedClientAsync();
 
-        var resp = await client.PostAsJsonAsync("/algo/", new
+        var resp = await client.PostAsJsonAsync("/api/algo/", new
         {
             Symbol = "PETR4",
             Side = "Buy",
@@ -161,7 +161,7 @@ public class AlgoEndpointsTests
         using var factory = NewFactory();
         using var client = factory.CreateClient();
 
-        var resp = await client.PostAsJsonAsync("/algo/", IcebergBody());
+        var resp = await client.PostAsJsonAsync("/api/algo/", IcebergBody());
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
     }
 
@@ -171,15 +171,15 @@ public class AlgoEndpointsTests
         using var factory = NewFactory();
         using var client = await factory.CreateAuthedClientAsync();
 
-        var post = await client.PostAsJsonAsync("/algo/", IcebergBody());
+        var post = await client.PostAsJsonAsync("/api/algo/", IcebergBody());
         var posted = await post.Content.ReadFromJsonAsync<JsonElement>();
         var algoId = posted.GetProperty("algoId").GetString()!;
 
-        var list = await client.GetFromJsonAsync<JsonElement>("/algo/");
+        var list = await client.GetFromJsonAsync<JsonElement>("/api/algo/");
         Assert.Equal(JsonValueKind.Array, list.ValueKind);
         Assert.Equal(1, list.GetArrayLength());
 
-        var get = await client.GetFromJsonAsync<JsonElement>($"/algo/{algoId}");
+        var get = await client.GetFromJsonAsync<JsonElement>($"/api/algo/{algoId}");
         Assert.Equal(algoId, get.GetProperty("algoId").GetString());
         Assert.Equal("PETR4", get.GetProperty("symbol").GetString());
         // Engine may have already promoted PendingNew → Working by submitting
@@ -199,15 +199,15 @@ public class AlgoEndpointsTests
         using var aliceClient = await factory.CreateAuthedClientAsync();
         using var bobClient = await factory.CreateAuthedClientAsync(user: "bob");
 
-        var post = await aliceClient.PostAsJsonAsync("/algo/", IcebergBody());
+        var post = await aliceClient.PostAsJsonAsync("/api/algo/", IcebergBody());
         var posted = await post.Content.ReadFromJsonAsync<JsonElement>();
         var algoId = posted.GetProperty("algoId").GetString()!;
 
-        var bobView = await bobClient.GetAsync($"/algo/{algoId}");
+        var bobView = await bobClient.GetAsync($"/api/algo/{algoId}");
         Assert.Equal(HttpStatusCode.NotFound, bobView.StatusCode);
 
         // And bob's list does not see alice's algo.
-        var bobList = await bobClient.GetFromJsonAsync<JsonElement>("/algo/");
+        var bobList = await bobClient.GetFromJsonAsync<JsonElement>("/api/algo/");
         Assert.Equal(0, bobList.GetArrayLength());
     }
 
@@ -217,11 +217,11 @@ public class AlgoEndpointsTests
         using var factory = NewFactory();
         using var client = await factory.CreateAuthedClientAsync();
 
-        var post = await client.PostAsJsonAsync("/algo/", IcebergBody());
+        var post = await client.PostAsJsonAsync("/api/algo/", IcebergBody());
         var posted = await post.Content.ReadFromJsonAsync<JsonElement>();
         var algoId = posted.GetProperty("algoId").GetString()!;
 
-        var del = await client.DeleteAsync($"/algo/{algoId}");
+        var del = await client.DeleteAsync($"/api/algo/{algoId}");
         Assert.Equal(HttpStatusCode.Accepted, del.StatusCode);
         var body = await del.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("Cancelling", body.GetProperty("status").GetString());
@@ -230,7 +230,7 @@ public class AlgoEndpointsTests
         // a child cancel-ack so the engine stays in Cancelling indefinitely;
         // the only racy variant is the engine processing the cancel before a
         // live child existed (no child to cancel → Cancelled immediately).
-        var get = await client.GetFromJsonAsync<JsonElement>($"/algo/{algoId}");
+        var get = await client.GetFromJsonAsync<JsonElement>($"/api/algo/{algoId}");
         var status = get.GetProperty("status").GetString();
         Assert.Contains(status, new[] { "Cancelling", "Cancelled" });
     }
@@ -241,7 +241,7 @@ public class AlgoEndpointsTests
         using var factory = NewFactory();
         using var client = await factory.CreateAuthedClientAsync();
 
-        var del = await client.DeleteAsync("/algo/99999999");
+        var del = await client.DeleteAsync("/api/algo/99999999");
         Assert.Equal(HttpStatusCode.NotFound, del.StatusCode);
     }
 
@@ -252,11 +252,11 @@ public class AlgoEndpointsTests
         using var aliceClient = await factory.CreateAuthedClientAsync();
         using var bobClient = await factory.CreateAuthedClientAsync(user: "bob");
 
-        var post = await aliceClient.PostAsJsonAsync("/algo/", IcebergBody());
+        var post = await aliceClient.PostAsJsonAsync("/api/algo/", IcebergBody());
         var posted = await post.Content.ReadFromJsonAsync<JsonElement>();
         var algoId = posted.GetProperty("algoId").GetString()!;
 
-        var del = await bobClient.DeleteAsync($"/algo/{algoId}");
+        var del = await bobClient.DeleteAsync($"/api/algo/{algoId}");
         Assert.Equal(HttpStatusCode.NotFound, del.StatusCode);
     }
 
@@ -270,12 +270,12 @@ public class AlgoEndpointsTests
         using var factory = NewFactory();
         using var client = await factory.CreateAuthedClientAsync();
 
-        var post = await client.PostAsJsonAsync("/algo/", IcebergBody());
+        var post = await client.PostAsJsonAsync("/api/algo/", IcebergBody());
         var posted = await post.Content.ReadFromJsonAsync<JsonElement>();
         var algoId = posted.GetProperty("algoId").GetString()!;
 
-        var first = await client.DeleteAsync($"/algo/{algoId}");
-        var second = await client.DeleteAsync($"/algo/{algoId}");
+        var first = await client.DeleteAsync($"/api/algo/{algoId}");
+        var second = await client.DeleteAsync($"/api/algo/{algoId}");
         Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
         Assert.Contains(second.StatusCode, new[] { HttpStatusCode.Accepted, HttpStatusCode.Conflict });
     }
@@ -317,7 +317,7 @@ public class AlgoEndpointsTests
         using var factory = NewLotFactory();
         using var client = await factory.CreateAuthedClientAsync();
 
-        var resp = await client.PostAsJsonAsync("/algo/", LotTwapBody(total: 2, sliceCount: 5));
+        var resp = await client.PostAsJsonAsync("/api/algo/", LotTwapBody(total: 2, sliceCount: 5));
 
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
         var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
@@ -337,7 +337,7 @@ public class AlgoEndpointsTests
         using var factory = NewLotFactory();
         using var client = await factory.CreateAuthedClientAsync();
 
-        var resp = await client.PostAsJsonAsync("/algo/", LotTwapBody(total: 250, sliceCount: 2));
+        var resp = await client.PostAsJsonAsync("/api/algo/", LotTwapBody(total: 250, sliceCount: 2));
 
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
         var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
@@ -353,7 +353,7 @@ public class AlgoEndpointsTests
         using var factory = NewLotFactory();
         using var client = await factory.CreateAuthedClientAsync();
 
-        var resp = await client.PostAsJsonAsync("/algo/", LotTwapBody(total: 400, sliceCount: 4));
+        var resp = await client.PostAsJsonAsync("/api/algo/", LotTwapBody(total: 400, sliceCount: 4));
         Assert.Equal(HttpStatusCode.Accepted, resp.StatusCode);
     }
 }

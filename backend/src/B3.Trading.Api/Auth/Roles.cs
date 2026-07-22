@@ -12,7 +12,7 @@ namespace B3.Trading.Api.Auth;
 /// feed (<c>/ws/dropcopy</c>). A compliance principal sees every order /
 /// fill / cancel for its own firm regardless of the originating user; an
 /// admin principal is treated symmetrically and may additionally pass
-/// <c>?firmId=</c> to view another firm. No /admin/* surface was
+/// <c>?firmId=</c> to view another firm. No /api/admin/* surface was
 /// broadened — compliance read-paths land via #306-style endpoints, not
 /// by mixing roles into the existing admin policy.</para>
 /// </summary>

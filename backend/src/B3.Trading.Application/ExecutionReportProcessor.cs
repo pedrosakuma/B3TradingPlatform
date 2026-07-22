@@ -408,7 +408,7 @@ public sealed class ExecutionReportProcessor
                     _positions.ApplyFill(order.FirmId, owner, order.Symbol, order.Side, delta, lastPx);
                     // Q4.1 (#301). Sub-account-tagged fills are also
                     // booked into the parallel sub-account keeper so a
-                    // ?subAccount=X filter on GET /positions can read
+                    // ?subAccount=X filter on GET /api/positions can read
                     // a segregated row. The master keeper above sees
                     // every fill (sub-account-null + sub-account-tagged)
                     // so the aggregate view is naturally preserved.
@@ -659,7 +659,7 @@ public sealed class ExecutionReportProcessor
                                     // delta into the correct firm bucket — required
                                     // so the same JWT sub registered in two firms
                                     // doesn't see cross-firm realized leaking on
-                                    // GET /pnl/today or pnl.me.
+                                    // GET /api/pnl/today or pnl.me.
                                     SubAccountId = order.SubAccountId?.Value,
                                     FirmId = order.FirmId,
                                 };
@@ -829,7 +829,7 @@ public sealed class ExecutionReportProcessor
             BookTouch: kind is ExecKind.Fill or ExecKind.PartialFill ? bookTouch : null);
 
         // Q4.7 (#307). Fold the fill into the in-memory projection so
-        // GET /fills/{id}/touch can read it back. Runs on both live
+        // GET /api/fills/{id}/touch can read it back. Runs on both live
         // dispatch and WAL replay (the latter passes the BookTouch
         // hydrated from the WAL ER event) so cold restart preserves
         // every fill's touch evidence without a separate snapshot
@@ -939,7 +939,7 @@ public sealed class ExecutionReportProcessor
         // does NOT reach the WS hub (orders.me has no record of the
         // replace-side ClOrdID). But the operator who clicked Modify
         // on the *original* ClOrdID has every right to know their
-        // PUT /orders/{clOrdId} got rejected — without this second
+        // PUT /api/orders/{clOrdId} got rejected — without this second
         // event the UI silently re-enables the Modify button as if
         // nothing happened. Emit a discriminated ExecKind.ReplaceRejected
         // scoped to intent.OriginalClOrdId, carrying the original's
@@ -1066,7 +1066,7 @@ public sealed class ExecutionReportProcessor
         //
         // Pass-2 review (#299) P1. Translators default missing CumQty
         // to 0 (B3EntryPointClientGateway OrderModified arm, simulator
-        // /admin/simulator/er Replaced arm). If the venue/sim sends a
+        // /api/admin/simulator/er Replaced arm). If the venue/sim sends a
         // Replaced ER with stale or zero CumQty AFTER the original
         // accumulated fills, hydrating the replacement with that low
         // baseline causes the very next Fill ER for the new ClOrdID to
@@ -1245,7 +1245,7 @@ public enum ExecKind
     /// intercepted by the <c>PendingReplacementRegistry</c> consumer).
     /// The original order is untouched (status stays Working /
     /// PartiallyFilled) but the operator who issued the
-    /// <c>PUT /orders/{clOrdId}</c> must know the modify failed.
+    /// <c>PUT /api/orders/{clOrdId}</c> must know the modify failed.
     /// <para>
     /// Routing: the <see cref="Rejected"/> event for the *replace-side*
     /// ClOrdID continues to flow to <c>BotRouter</c> only (per #172 F:

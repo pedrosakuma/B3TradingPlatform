@@ -187,7 +187,7 @@ public sealed class WorkingOrderBook
     /// <paramref name="firmId"/> so the same JWT <c>sub</c> registered
     /// in multiple firms sees only the orders that belong to the firm
     /// it is currently authenticated under. Used by
-    /// <c>GET /orders</c> + <c>orders.me</c> snapshot.
+    /// <c>GET /api/orders</c> + <c>orders.me</c> snapshot.
     /// </summary>
     public IReadOnlyCollection<Order> ForEndClientAndFirm(string firmId, EndClientId owner)
     {

@@ -17,10 +17,10 @@ public static class InstrumentsEndpoints
 {
     public static IEndpointRouteBuilder MapInstruments(this IEndpointRouteBuilder app)
     {
-        // GET /instruments?underlying=PETR4 — returns options for that underlying
-        // GET /instruments?type=option — returns all options
-        // GET /instruments — returns all known instruments (options + equities)
-        app.MapGet("/instruments", [Authorize] (
+        // GET /api/instruments?underlying=PETR4 — returns options for that underlying
+        // GET /api/instruments?type=option — returns all options
+        // GET /api/instruments — returns all known instruments (options + equities)
+        app.MapGet("/api/instruments", [Authorize] (
             SecurityDefinitionRegistry registry,
             SymbolDirectory directory,
             string? underlying,

@@ -7,7 +7,7 @@ namespace B3.Trading.Api.Tests;
 
 /// <summary>
 /// Q4.5 (#305). End-to-end coverage of the admin audit log surface:
-/// capture sites (login, 2FA, admin mutations), the GET /admin/audit
+/// capture sites (login, 2FA, admin mutations), the GET /api/admin/audit
 /// read endpoint, pagination, filters, and cross-firm visibility.
 /// Engine-driven via HTTP — no mocks per project convention.
 /// </summary>
@@ -36,7 +36,7 @@ public class AdminAuditEndpointTests : IClassFixture<TestAppFactory>
 
     private static async Task<AuditPage> QueryAuditAsync(HttpClient admin, string queryString = "")
     {
-        var resp = await admin.GetAsync($"/admin/audit{queryString}");
+        var resp = await admin.GetAsync($"/api/admin/audit{queryString}");
         resp.EnsureSuccessStatusCode();
         return (await resp.Content.ReadFromJsonAsync<AuditPage>(Json))!;
     }
@@ -45,7 +45,7 @@ public class AdminAuditEndpointTests : IClassFixture<TestAppFactory>
     public async Task Get_AnonymousReturns401()
     {
         using var anon = _factory.CreateClient();
-        var resp = await anon.GetAsync("/admin/audit");
+        var resp = await anon.GetAsync("/api/admin/audit");
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
     }
 
@@ -53,7 +53,7 @@ public class AdminAuditEndpointTests : IClassFixture<TestAppFactory>
     public async Task Get_TraderReturns403()
     {
         using var trader = await _factory.CreateAuthedClientAsync(); // alice (user)
-        var resp = await trader.GetAsync("/admin/audit");
+        var resp = await trader.GetAsync("/api/admin/audit");
         Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
     }
 
@@ -61,7 +61,7 @@ public class AdminAuditEndpointTests : IClassFixture<TestAppFactory>
     public async Task Login_FailedAttempt_EmitsAuditEvent()
     {
         using var anon = _factory.CreateClient();
-        var bad = await anon.PostAsJsonAsync("/auth/login", new { username = "alice", password = "wrong" });
+        var bad = await anon.PostAsJsonAsync("/api/auth/login", new { username = "alice", password = "wrong" });
         Assert.Equal(HttpStatusCode.Unauthorized, bad.StatusCode);
 
         using var admin = await _factory.CreateAuthedClientAsync("admin");
@@ -93,15 +93,15 @@ public class AdminAuditEndpointTests : IClassFixture<TestAppFactory>
         using var admin = await _factory.CreateAuthedClientAsync("admin");
 
         // Toggle kill on/off for a firm so we leave the platform in a clean state.
-        var on = await admin.PostAsync("/admin/kill/firm/default", content: null);
+        var on = await admin.PostAsync("/api/admin/kill/firm/default", content: null);
         on.EnsureSuccessStatusCode();
-        var off = await admin.DeleteAsync("/admin/kill/firm/default");
+        var off = await admin.DeleteAsync("/api/admin/kill/firm/default");
         off.EnsureSuccessStatusCode();
 
         var page = await QueryAuditAsync(admin, "?type=admin.config.change&limit=100");
         Assert.Contains(page.Entries, e =>
             e.EventType == "admin.config.change" &&
-            e.ResourcePath != null && e.ResourcePath.StartsWith("/admin/kill") &&
+            e.ResourcePath != null && e.ResourcePath.StartsWith("/api/admin/kill") &&
             e.ActorRole == "admin");
     }
 
@@ -110,7 +110,7 @@ public class AdminAuditEndpointTests : IClassFixture<TestAppFactory>
     {
         using var anon = _factory.CreateClient();
         await _factory.LoginAsync(anon, "alice");
-        var bad = await anon.PostAsJsonAsync("/auth/login", new { username = "alice", password = "wrong" });
+        var bad = await anon.PostAsJsonAsync("/api/auth/login", new { username = "alice", password = "wrong" });
         Assert.Equal(HttpStatusCode.Unauthorized, bad.StatusCode);
 
         using var admin = await _factory.CreateAuthedClientAsync("admin");
@@ -123,7 +123,7 @@ public class AdminAuditEndpointTests : IClassFixture<TestAppFactory>
     public async Task OutcomeFilter_OnlyReturnsMatching()
     {
         using var anon = _factory.CreateClient();
-        var bad = await anon.PostAsJsonAsync("/auth/login", new { username = "alice", password = "wrong" });
+        var bad = await anon.PostAsJsonAsync("/api/auth/login", new { username = "alice", password = "wrong" });
         Assert.Equal(HttpStatusCode.Unauthorized, bad.StatusCode);
 
         using var admin = await _factory.CreateAuthedClientAsync("admin");
@@ -139,7 +139,7 @@ public class AdminAuditEndpointTests : IClassFixture<TestAppFactory>
         // Generate a known burst of failure events.
         for (var i = 0; i < 7; i++)
         {
-            var bad = await anon.PostAsJsonAsync("/auth/login", new { username = "alice", password = $"wrong-{i}" });
+            var bad = await anon.PostAsJsonAsync("/api/auth/login", new { username = "alice", password = $"wrong-{i}" });
             Assert.Equal(HttpStatusCode.Unauthorized, bad.StatusCode);
         }
 
@@ -158,7 +158,7 @@ public class AdminAuditEndpointTests : IClassFixture<TestAppFactory>
     public async Task InvalidCursor_Returns400()
     {
         using var admin = await _factory.CreateAuthedClientAsync("admin");
-        var resp = await admin.GetAsync("/admin/audit?cursor=%21%21not-base64%21%21");
+        var resp = await admin.GetAsync("/api/admin/audit?cursor=%21%21not-base64%21%21");
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
     }
 }

@@ -51,7 +51,7 @@ public class MultiFirmIsolationTests
         {
             var (token, _) = issuer.Issue(user, "user", firm);
             client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
-            var got = await client.GetFromJsonAsync<List<OrderDto>>("/orders/");
+            var got = await client.GetFromJsonAsync<List<OrderDto>>("/api/orders/");
             Assert.NotNull(got);
             Assert.Single(got!);
             Assert.Equal(expectedClOrdId.ToString(), got![0].ClOrdId);
@@ -84,7 +84,7 @@ public class MultiFirmIsolationTests
         {
             var (token, _) = issuer.Issue(user, "user", firm);
             client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
-            var got = await client.GetFromJsonAsync<List<PositionDto>>("/positions");
+            var got = await client.GetFromJsonAsync<List<PositionDto>>("/api/positions");
             Assert.NotNull(got);
             Assert.Single(got!);
             Assert.Equal(symbol, got![0].Symbol);
@@ -130,7 +130,7 @@ public class MultiFirmIsolationTests
         {
             var (token, _) = issuer.Issue(user, "user", firm);
             client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
-            var dto = await client.GetFromJsonAsync<PnlTodayDto>("/pnl/today");
+            var dto = await client.GetFromJsonAsync<PnlTodayDto>("/api/pnl/today");
             Assert.NotNull(dto);
             // Each firm's view must contain its own symbol — and ONLY
             // its own symbol — in the unrealized leg. The other firms'
@@ -165,13 +165,13 @@ public class MultiFirmIsolationTests
         var (t2, _) = issuer.Issue("alice", "user", Firm02);
 
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", t1);
-        var f1 = await client.GetFromJsonAsync<List<OrderDto>>("/orders/");
+        var f1 = await client.GetFromJsonAsync<List<OrderDto>>("/api/orders/");
         Assert.NotNull(f1);
         Assert.Single(f1!);
         Assert.Equal("411", f1![0].ClOrdId);
 
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", t2);
-        var f2 = await client.GetFromJsonAsync<List<OrderDto>>("/orders/");
+        var f2 = await client.GetFromJsonAsync<List<OrderDto>>("/api/orders/");
         Assert.NotNull(f2);
         Assert.Single(f2!);
         Assert.Equal("412", f2![0].ClOrdId);
@@ -274,7 +274,7 @@ public class MultiFirmIsolationTests
     public async Task ConcurrentSubmission_AcrossThreeFirms_NoCrossFirmLeak()
     {
         // Stress test: each firm submits orders in a tight loop on a
-        // dedicated thread; afterwards every firm's GET /orders must
+        // dedicated thread; afterwards every firm's GET /api/orders must
         // list ONLY its own orders. Catches accidental shared mutable
         // state on the submission hot path that would let one firm's
         // order land in another firm's book.
@@ -314,7 +314,7 @@ public class MultiFirmIsolationTests
         {
             var (token, _) = issuer.Issue(user, "user", firm);
             client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
-            var got = await client.GetFromJsonAsync<List<OrderDto>>("/orders/");
+            var got = await client.GetFromJsonAsync<List<OrderDto>>("/api/orders/");
             Assert.NotNull(got);
             Assert.Equal(perFirm, got!.Count);
             // Every ClOrdId must fall in this firm's prefix bucket —

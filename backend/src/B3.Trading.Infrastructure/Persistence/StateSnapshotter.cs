@@ -1010,7 +1010,7 @@ public sealed class EventReplayer
     /// <summary>
     /// Q4.5 (#305). Optional. When wired, replay folds every
     /// <see cref="AuditLogEvent"/> into the in-memory ring-buffer
-    /// keeper that backs <c>GET /admin/audit</c>, so post-restart
+    /// keeper that backs <c>GET /api/admin/audit</c>, so post-restart
     /// reads converge with steady state (bounded by the keeper's
     /// configured capacity).
     /// </summary>
@@ -1086,7 +1086,7 @@ public sealed class EventReplayer
         SubAccountPnlKeeper? subAccountPnl = null,
         // Q4.5 (#305). Optional. When wired, replay of
         // <see cref="AuditLogEvent"/> folds the envelope into the
-        // in-memory ring-buffer keeper that backs GET /admin/audit.
+        // in-memory ring-buffer keeper that backs GET /api/admin/audit.
         AuditLogKeeper? auditKeeper = null,
         PendingCancelRegistry? pendingCancels = null,
         OutboundMutationLedger? outboundLedger = null,
@@ -1622,7 +1622,7 @@ public sealed class EventReplayer
                     new EndClientId(cle.EndClientId),
                     cle.Amount);
                 // #679. Also fold into CashLedger — the spendable/margin
-                // balance GET /balance and the margin provider read —
+                // balance GET /api/balance and the margin provider read —
                 // so operator (and future self-service) cash movements
                 // survive cold-start recovery consistently with the
                 // live path (see AdminEndpoints.HandleCashLedger).

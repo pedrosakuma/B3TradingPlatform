@@ -28,7 +28,7 @@ namespace B3.Trading.Application;
 /// slices 0..n-2 carry <c>floor(totalLots/n) * lot</c> and the last slice
 /// carries the remainder, so every slice is a whole multiple of the
 /// instrument lot and <c>MinLotSizeCheck</c> never rejects an algo child.
-/// The caller (<c>POST /algo</c>) guarantees <c>total % lot == 0</c> and
+/// The caller (<c>POST /api/algo</c>) guarantees <c>total % lot == 0</c> and
 /// <c>total / lot &gt;= sliceCount</c>, so no slice rounds to zero.
 /// </para>
 /// </summary>
@@ -100,7 +100,7 @@ public static class TwapPlan
 
     /// <summary>
     /// Per-slice floor quantity (RFC §4.8); echoed in the
-    /// <c>POST /algo</c> error body when validation rejects the
+    /// <c>POST /api/algo</c> error body when validation rejects the
     /// parameters because the implied per-slice quantity is zero.
     ///
     /// <para>

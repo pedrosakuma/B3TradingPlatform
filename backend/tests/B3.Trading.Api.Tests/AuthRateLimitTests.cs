@@ -6,7 +6,7 @@ using B3.Trading.Api.Auth;
 namespace B3.Trading.Api.Tests;
 
 /// <summary>
-/// Slice 2 of #97 — anti-abuse rate limit on /auth/signup and /auth/login.
+/// Slice 2 of #97 — anti-abuse rate limit on /api/auth/signup and /api/auth/login.
 /// Defaults disable the limiter inside <see cref="TestAppFactory"/>; each
 /// test here opts into a specific policy via <c>WithOverrides</c> so the
 /// rest of the suite is unaffected.
@@ -36,7 +36,7 @@ public class AuthRateLimitTests
         // localhost so they share the partition).
         for (var i = 0; i < 3; i++)
         {
-            var ok = await client.PostAsJsonAsync("/auth/signup",
+            var ok = await client.PostAsJsonAsync("/api/auth/signup",
                 new SignupRequest(FreshUsername(), "wonderland-1"));
             Assert.Equal(HttpStatusCode.Created, ok.StatusCode);
         }
@@ -44,7 +44,7 @@ public class AuthRateLimitTests
         // 4th must be rejected before hitting the handler. We use a fresh
         // username to ensure the conflict path could not steal the
         // assertion if the limiter were silently disabled.
-        var rejected = await client.PostAsJsonAsync("/auth/signup",
+        var rejected = await client.PostAsJsonAsync("/api/auth/signup",
             new SignupRequest(FreshUsername(), "wonderland-1"));
         Assert.Equal(HttpStatusCode.TooManyRequests, rejected.StatusCode);
         Assert.True(rejected.Headers.Contains("Retry-After"),
@@ -72,11 +72,11 @@ public class AuthRateLimitTests
 
         for (var i = 0; i < 2; i++)
         {
-            var ok = await client.PostAsJsonAsync("/auth/signup",
+            var ok = await client.PostAsJsonAsync("/api/auth/signup",
                 new SignupRequest(FreshUsername(), "wonderland-1"));
             Assert.Equal(HttpStatusCode.Created, ok.StatusCode);
         }
-        var rejected = await client.PostAsJsonAsync("/auth/signup",
+        var rejected = await client.PostAsJsonAsync("/api/auth/signup",
             new SignupRequest(FreshUsername(), "wonderland-1"));
         Assert.Equal(HttpStatusCode.TooManyRequests, rejected.StatusCode);
     }
@@ -98,11 +98,11 @@ public class AuthRateLimitTests
         // tying up PBKDF2 hashing under flood).
         for (var i = 0; i < 3; i++)
         {
-            var ok = await client.PostAsJsonAsync("/auth/login",
+            var ok = await client.PostAsJsonAsync("/api/auth/login",
                 new LoginRequest("alice", "wonderland"));
             Assert.Equal(HttpStatusCode.OK, ok.StatusCode);
         }
-        var rejected = await client.PostAsJsonAsync("/auth/login",
+        var rejected = await client.PostAsJsonAsync("/api/auth/login",
             new LoginRequest("alice", "wonderland"));
         Assert.Equal(HttpStatusCode.TooManyRequests, rejected.StatusCode);
     }
@@ -111,7 +111,7 @@ public class AuthRateLimitTests
     public async Task Limiter_DoesNotAffect_OtherEndpoints()
     {
         // Aggressive signup limit of 1 — must NOT bleed into other paths.
-        // /positions is auth-protected so we go through login first
+        // /api/positions is auth-protected so we go through login first
         // (login limit untouched here, default disabled).
         using var factory = TestAppFactory.WithOverrides(new Dictionary<string, string?>
         {
@@ -125,10 +125,10 @@ public class AuthRateLimitTests
         http.DefaultRequestHeaders.Authorization =
             new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
 
-        // Many calls to /positions: zero rate-limit interference.
+        // Many calls to /api/positions: zero rate-limit interference.
         for (var i = 0; i < 20; i++)
         {
-            var resp = await http.GetAsync("/positions");
+            var resp = await http.GetAsync("/api/positions");
             Assert.NotEqual(HttpStatusCode.TooManyRequests, resp.StatusCode);
         }
     }
@@ -144,7 +144,7 @@ public class AuthRateLimitTests
 
         for (var i = 0; i < 10; i++)
         {
-            var resp = await client.PostAsJsonAsync("/auth/signup",
+            var resp = await client.PostAsJsonAsync("/api/auth/signup",
                 new SignupRequest(FreshUsername(), "wonderland-1"));
             Assert.Equal(HttpStatusCode.Created, resp.StatusCode);
         }

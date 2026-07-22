@@ -9,7 +9,7 @@
 //      plain user never sees admin / compliance).
 //   2. The drop-copy feed buffer caps at COMPLIANCE_FEED_CAP and
 //      drops the oldest entries first (newest-N preserved).
-//   3. Audit-form opts → /admin/audit URL building uses the
+//   3. Audit-form opts → /api/admin/audit URL building uses the
 //      documented query-parameter shape (omitted fields are not
 //      sent; ISO timestamps for since/until).
 //   4. CVM download URL builds correctly per model + date and
@@ -173,7 +173,7 @@ test("searchAuditLog only sends populated query args + ISO timestamps", async ()
   fetchResponse = null;
   assert.equal(fetchCalls.length, 1);
   const u = new URL(fetchCalls[0].url);
-  assert.equal(u.pathname, "/admin/audit");
+  assert.equal(u.pathname, "/api/admin/audit");
   assert.equal(u.searchParams.get("since"),   "2025-01-15T00:00:00.000Z");
   assert.equal(u.searchParams.get("user"),    "alice");
   assert.equal(u.searchParams.get("outcome"), "denied");
@@ -187,7 +187,7 @@ test("searchAuditLog only sends populated query args + ISO timestamps", async ()
   assert.equal(fetchCalls[0].init.headers.Authorization, "Bearer tok");
 });
 
-test("downloadCvmReport builds /reports/cvm/{model}/{date} and saves cvm_<m>_<yyyymmdd>", async () => {
+test("downloadCvmReport builds /api/reports/cvm/{model}/{date} and saves cvm_<m>_<yyyymmdd>", async () => {
   fetchCalls.length = 0;
   fetchResponse = {
     ok: true, status: 200,
@@ -200,7 +200,7 @@ test("downloadCvmReport builds /reports/cvm/{model}/{date} and saves cvm_<m>_<yy
   const { filename } = await protocol.downloadCvmReport("http://api", "tok", 35, "2025-01-15");
   fetchResponse = null;
   assert.equal(fetchCalls.length, 1);
-  assert.equal(fetchCalls[0].url, "http://api/reports/cvm/35/2025-01-15");
+  assert.equal(fetchCalls[0].url, "http://api/api/reports/cvm/35/2025-01-15");
   assert.equal(filename, "cvm_35_20250115.xml");
 
   // Model 505 uses the same URL shape.
@@ -215,7 +215,7 @@ test("downloadCvmReport builds /reports/cvm/{model}/{date} and saves cvm_<m>_<yy
   };
   const r2 = await protocol.downloadCvmReport("http://api", "tok", 505, "2025-02-03");
   fetchResponse = null;
-  assert.equal(fetchCalls[0].url, "http://api/reports/cvm/505/2025-02-03");
+  assert.equal(fetchCalls[0].url, "http://api/api/reports/cvm/505/2025-02-03");
   assert.equal(r2.filename, "cvm_505_20250203.xml");
 });
 

@@ -32,7 +32,7 @@ namespace B3.Trading.Api.RateLimit;
 /// Multi-firm note: the user key is the JWT <c>sub</c> claim only, NOT
 /// <c>(sub, firm)</c>. Therefore the same login active in two firms
 /// shares a single bucket across both firms. This is intentional — an
-/// abusive script that floods POST /orders should be throttled
+/// abusive script that floods POST /api/orders should be throttled
 /// regardless of which firm context the calls target.
 /// </para>
 /// </remarks>
@@ -78,7 +78,7 @@ public sealed class TokenBucketRateLimitOptions
         // saturate the gateway.
         new TokenBucketRule
         {
-            PathPattern = "/orders",
+            PathPattern = "/api/orders",
             Methods = new() { "POST", "PUT", "DELETE", "PATCH" },
             Burst = 5,
             RefillPerSecond = 5,
@@ -89,28 +89,28 @@ public sealed class TokenBucketRateLimitOptions
         // only accept POST anyway).
         new TokenBucketRule
         {
-            PathPattern = "/auth/login",
+            PathPattern = "/api/auth/login",
             Burst = 3,
             RefillPerSecond = 1,
         },
         new TokenBucketRule
         {
-            PathPattern = "/auth/2fa/verify",
+            PathPattern = "/api/auth/2fa/verify",
             Burst = 3,
             RefillPerSecond = 1,
         },
         new TokenBucketRule
         {
-            PathPattern = "/auth/2fa/enroll",
+            PathPattern = "/api/auth/2fa/enroll",
             Burst = 3,
             RefillPerSecond = 1,
         },
-        // Algo writes: same family as /orders but algos can legitimately
+        // Algo writes: same family as /api/orders but algos can legitimately
         // produce many child operations (slice cancel/replace) so the
         // burst is larger and the refill leaves headroom.
         new TokenBucketRule
         {
-            PathPattern = "/algo/",
+            PathPattern = "/api/algo/",
             Methods = new() { "POST", "PUT", "DELETE", "PATCH" },
             Burst = 10,
             RefillPerSecond = 5,
@@ -120,11 +120,11 @@ public sealed class TokenBucketRateLimitOptions
         // compliance/admin caller running many concurrent requests
         // could pin a worker thread + memory on year-long historical
         // scans, so cap the per-user rate well below the generic
-        // /reports default. Real-world cadence is at most one
+        // /api/reports default. Real-world cadence is at most one
         // download per report-date per day per firm.
         new TokenBucketRule
         {
-            PathPattern = "/reports/cvm/",
+            PathPattern = "/api/reports/cvm/",
             Methods = new() { "GET", "HEAD" },
             Burst = 3,
             RefillPerSecond = 1,
@@ -135,7 +135,7 @@ public sealed class TokenBucketRateLimitOptions
         // deposit spam.
         new TokenBucketRule
         {
-            PathPattern = "/balance/deposit",
+            PathPattern = "/api/balance/deposit",
             Methods = new() { "POST" },
             Burst = 5,
             RefillPerSecond = 1,

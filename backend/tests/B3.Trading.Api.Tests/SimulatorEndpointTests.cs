@@ -10,8 +10,8 @@ namespace B3.Trading.Api.Tests;
 /// Simulator gateway; merged into Mock+AllowErInjection in #163). Boots
 /// the host with <c>Trading:Exchange:Mode=Mock</c> +
 /// <c>AllowErInjection=true</c>, submits a real order via
-/// <c>POST /orders</c>, then drives synthetic ERs via
-/// <c>POST /admin/simulator/er</c> and asserts that
+/// <c>POST /api/orders</c>, then drives synthetic ERs via
+/// <c>POST /api/admin/simulator/er</c> and asserts that
 /// <c>WorkingOrderBook</c> state mutates as if a venue had emitted them.
 /// </summary>
 public class SimulatorEndpointTests
@@ -161,7 +161,7 @@ public class SimulatorEndpointTests
     {
         // Negative path: in #163 the route gates on
         // Mode==Mock && AllowErInjection==true. WithMock() supplies just
-        // Mock, so /admin/simulator/er must not be mapped.
+        // Mock, so /api/admin/simulator/er must not be mapped.
         using var f = TestAppFactory.WithOverrides(WithMock());
         using var http = f.CreateClient();
         var adminToken = await f.LoginAsync(http, "admin");
@@ -214,7 +214,7 @@ public class SimulatorEndpointTests
 
     private static async Task<HttpResponseMessage> InjectEr(HttpClient http, string token, object body)
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/admin/simulator/er")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/admin/simulator/er")
         {
             Content = JsonContent.Create(body),
         };
@@ -224,7 +224,7 @@ public class SimulatorEndpointTests
 
     private static async Task<ulong> SubmitOrder(HttpClient http, string token, int qty, decimal price)
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, "/orders")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
         {
             Content = JsonContent.Create(new
             {
@@ -245,7 +245,7 @@ public class SimulatorEndpointTests
 
     private static async Task<JsonElement[]> ListOrders(HttpClient http, string token)
     {
-        var req = new HttpRequestMessage(HttpMethod.Get, "/orders/");
+        var req = new HttpRequestMessage(HttpMethod.Get, "/api/orders/");
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         var resp = await http.SendAsync(req);
         resp.EnsureSuccessStatusCode();

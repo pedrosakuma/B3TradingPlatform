@@ -30,7 +30,7 @@ namespace B3.Trading.Application;
 /// Unrealized P&amp;L is purely derived
 /// (<c>(refPrice - avgPrice) * position</c> for longs;
 /// <c>(avgPrice - refPrice) * position</c> for shorts) and is NEVER
-/// durable — the GET /pnl/today endpoint and the WS push channel
+/// durable — the GET /api/pnl/today endpoint and the WS push channel
 /// project it on the fly from <see cref="PositionKeeper"/> +
 /// <c>IReferencePrice</c>.
 /// </para>

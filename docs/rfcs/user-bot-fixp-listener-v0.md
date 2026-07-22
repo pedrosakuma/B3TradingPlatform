@@ -10,7 +10,7 @@
 
 Trading-host today exposes two inbound order-entry surfaces:
 
-- **REST** `POST /orders` — JWT-authenticated, used by the trader UI
+- **REST** `POST /api/orders` — JWT-authenticated, used by the trader UI
   and any HTTP-aware client.
 - **WebSocket hub** `/hub` — JWT-authenticated, fan-out for ERs and
   algo lifecycle.

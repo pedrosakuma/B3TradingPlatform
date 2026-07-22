@@ -13,7 +13,7 @@ namespace B3.Trading.Api.Tests;
 
 /// <summary>
 /// Q3.4 (#284). REST surface for the native iceberg / reserve
-/// display-qty fields on <c>POST /orders</c>. Asserts both the
+/// display-qty fields on <c>POST /api/orders</c>. Asserts both the
 /// happy-path accept (display fields land on the WorkingOrderBook
 /// intact) and the validation rejections — DisplayQty &gt; Quantity
 /// and DisplayQty &lt;= 0 must come back as 4xx before the WAL
@@ -124,7 +124,7 @@ public class OrdersIcebergEndpointTests
     public async Task GET_orders_AndWsSnapshot_SurfaceDisplayFields()
     {
         // Pass-1 review (#297) P2. OrderDto.ToDto must expose the
-        // persisted DisplayQty + DisplayResetPolicy so REST GET /orders
+        // persisted DisplayQty + DisplayResetPolicy so REST GET /api/orders
         // and WS orders.me snapshots surface the iceberg state — the
         // trader's intent that is already on the WAL must also be
         // visible to operators and dashboards.
@@ -135,8 +135,8 @@ public class OrdersIcebergEndpointTests
         var submit = await PostIceberg(http, token, qty: 100, price: 30m, displayQty: 25, policy: "Always");
         Assert.Equal(HttpStatusCode.Accepted, submit.StatusCode);
 
-        // 1) REST GET /orders surfaces the fields.
-        var get = new HttpRequestMessage(HttpMethod.Get, "/orders/");
+        // 1) REST GET /api/orders surfaces the fields.
+        var get = new HttpRequestMessage(HttpMethod.Get, "/api/orders/");
         get.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         var listResp = await http.SendAsync(get);
         Assert.Equal(HttpStatusCode.OK, listResp.StatusCode);
@@ -202,7 +202,7 @@ public class OrdersIcebergEndpointTests
                 DisplayQty = displayQty,
                 DisplayResetPolicy = policy,
             };
-        var req = new HttpRequestMessage(HttpMethod.Post, "/orders")
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
         {
             Content = JsonContent.Create(payload),
         };

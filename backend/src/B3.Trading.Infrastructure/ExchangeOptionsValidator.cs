@@ -32,7 +32,7 @@ public sealed class ExchangeOptionsValidator : IValidateOptions<ExchangeOptions>
 
         var resolved = options.ResolveMode();
 
-        // ER injection (admin-gated /admin/simulator/er) is only valid
+        // ER injection (admin-gated /api/admin/simulator/er) is only valid
         // alongside the in-process Mock gateway because SimulatorEndpoint
         // depends on MockEntryPointClient — Real / Stub / Unavailable
         // don't register that type. Failing fast here avoids the worse

@@ -96,10 +96,10 @@ The host listens on the default ASP.NET Core ports (typically
 
 ```bash
 curl http://localhost:5000/health
-curl -XPOST http://localhost:5000/orders \
+curl -XPOST http://localhost:5000/api/orders \
   -H 'content-type: application/json' \
   -d '{"login":"alice","symbol":"PETR4","side":"Buy","type":"Limit","quantity":100,"price":30.50}'
-curl 'http://localhost:5000/orders?login=alice'
+curl 'http://localhost:5000/api/orders?login=alice'
 ```
 
 The `IExchangeGateway` wiring is selected at startup via
@@ -142,7 +142,7 @@ that:
 - logs in as `bot-clientA` and `bot-clientB` and submits random
   buy/sell limit orders around the configured reference prices, and
 - logs in as `demo-admin` and injects synthetic Fill / PartialFill
-  ERs against the bots' working orders via `/admin/simulator/er`.
+  ERs against the bots' working orders via `/api/admin/simulator/er`.
 
 Log in as **`bot-clientA`** (password `demopass`) or **`bot-clientB`**
 to see that bot's blotter, executions and positions panels evolve in

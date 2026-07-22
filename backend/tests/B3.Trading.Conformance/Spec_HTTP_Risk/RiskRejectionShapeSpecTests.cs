@@ -16,7 +16,7 @@ namespace B3.Trading.Conformance.Spec_HTTP_Risk;
 ///
 /// <para>
 /// The scenario discovers the configured cap via <c>GET
-/// /admin/risk/limits</c> instead of hardcoding values, so the same
+/// /api/admin/risk/limits</c> instead of hardcoding values, so the same
 /// suite runs against any deployment whose admin happens to have
 /// tuned the caps differently. Skipped if no <c>MaxQuantity</c> is
 /// configured for the test user (deployments that disable v2 risk
@@ -60,7 +60,7 @@ public class RiskRejectionShapeSpecTests
         // non-zero securityId in the payload regardless of the
         // SymbolDirectory contents. Picking a synthetic id keeps the
         // test independent of operator-provided directory data.
-        using var submit = new HttpRequestMessage(HttpMethod.Post, "/orders")
+        using var submit = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
         {
             Headers = { Authorization = userAuth },
             Content = JsonContent.Create(new
@@ -98,7 +98,7 @@ public class RiskRejectionShapeSpecTests
         // matches what a trader from `endClient` would actually hit
         // when no per-symbol override applies.
         using var req = new HttpRequestMessage(
-            HttpMethod.Get, $"/admin/risk/limits?endClient={Uri.EscapeDataString(endClient)}");
+            HttpMethod.Get, $"/api/admin/risk/limits?endClient={Uri.EscapeDataString(endClient)}");
         req.Headers.Authorization = auth;
         var resp = await http.SendAsync(req);
         resp.EnsureSuccessStatusCode();

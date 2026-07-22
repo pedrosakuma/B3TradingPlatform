@@ -9,7 +9,7 @@ using Microsoft.Extensions.DependencyInjection;
 namespace B3.Trading.Api.Tests;
 
 /// <summary>
-/// Q2.4 (#271). GET /pnl/today happy-path coverage. The endpoint is
+/// Q2.4 (#271). GET /api/pnl/today happy-path coverage. The endpoint is
 /// AuthN-gated; the projection layer is shared with the WS pnl.me
 /// channel snapshot — exercising it via HTTP is the lowest-risk surface
 /// because route mounting + JWT plumbing get covered for free.
@@ -23,7 +23,7 @@ public class PnlEndpointTests : IClassFixture<TestAppFactory>
     public async Task UnauthenticatedGet_Returns401()
     {
         var client = _factory.CreateClient();
-        var resp = await client.GetAsync("/pnl/today");
+        var resp = await client.GetAsync("/api/pnl/today");
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
     }
 
@@ -33,7 +33,7 @@ public class PnlEndpointTests : IClassFixture<TestAppFactory>
         await using var factory = TestAppFactory.WithOverrides(new Dictionary<string, string?>());
         var client = await factory.CreateAuthedClientAsync();
 
-        var body = await client.GetFromJsonAsync<PnlTodayDto>("/pnl/today");
+        var body = await client.GetFromJsonAsync<PnlTodayDto>("/api/pnl/today");
         Assert.NotNull(body);
         Assert.Equal(0m, body!.TotalRealized);
         Assert.Equal(0m, body.TotalUnrealized);
@@ -70,7 +70,7 @@ public class PnlEndpointTests : IClassFixture<TestAppFactory>
             TimestampUtc = DateTimeOffset.UtcNow,
         });
 
-        var body = await client.GetFromJsonAsync<PnlTodayDto>("/pnl/today");
+        var body = await client.GetFromJsonAsync<PnlTodayDto>("/api/pnl/today");
         Assert.NotNull(body);
         Assert.Equal(50m, body!.TotalRealized);
         var realizedRow = Assert.Single(body.Realized);
@@ -103,7 +103,7 @@ public class PnlEndpointTests : IClassFixture<TestAppFactory>
     {
         // Pass-4 (#278) P1#2 — unknown-basis legacy positions carry
         // no usable AverageEntryPrice, so the projection must NOT
-        // publish phantom unrealized for them on either /pnl/today
+        // publish phantom unrealized for them on either /api/pnl/today
         // (REST) or pnl.me (WS — both share PnlProjection.Build).
         // Symbols WITH a real basis are still surfaced; the
         // unknown-basis symbol is simply absent from the unrealized
@@ -148,7 +148,7 @@ public class PnlEndpointTests : IClassFixture<TestAppFactory>
     [Fact]
     public async Task GetPnlToday_ScopedByFirm_DoesNotLeakAcrossFirms()
     {
-        // PR #316 P1. /pnl/today must scope realized + unrealized by
+        // PR #316 P1. /api/pnl/today must scope realized + unrealized by
         // firm so a JWT sub registered under two firms never sees the
         // other firm's pnl bucket.
         await using var factory = TestAppFactory.WithOverrides(new Dictionary<string, string?>());
@@ -194,7 +194,7 @@ public class PnlEndpointTests : IClassFixture<TestAppFactory>
 
         var (t1, _) = issuer.Issue(TestAppFactory.TestUser, "user", "FIRM01");
         http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", t1);
-        var body1 = await http.GetFromJsonAsync<PnlTodayDto>("/pnl/today");
+        var body1 = await http.GetFromJsonAsync<PnlTodayDto>("/api/pnl/today");
         Assert.NotNull(body1);
         Assert.Equal(111m, body1!.TotalRealized);
         Assert.Single(body1.Realized, r => r.Symbol == "PETR4");
@@ -203,7 +203,7 @@ public class PnlEndpointTests : IClassFixture<TestAppFactory>
 
         var (t2, _) = issuer.Issue(TestAppFactory.TestUser, "user", "FIRM02");
         http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", t2);
-        var body2 = await http.GetFromJsonAsync<PnlTodayDto>("/pnl/today");
+        var body2 = await http.GetFromJsonAsync<PnlTodayDto>("/api/pnl/today");
         Assert.NotNull(body2);
         Assert.Equal(222m, body2!.TotalRealized);
         Assert.Single(body2.Realized, r => r.Symbol == "VALE3");

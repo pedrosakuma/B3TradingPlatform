@@ -123,7 +123,7 @@ public enum ExchangeMode
     /// <summary>No-op <see cref="StubExchangeGateway"/>. Submits succeed silently. CI / smoke.</summary>
     Stub,
 
-    /// <summary>In-process <c>MockEntryPointClient</c> + <c>EntryPointClientGateway</c>. No TCP. Dev loop and integration tests. When paired with <see cref="ExchangeOptions.AllowErInjection"/>=<c>true</c>, the admin-gated <c>POST /admin/simulator/er</c> endpoint is mapped (formerly the standalone <c>Simulator</c> variant; merged into Mock in #163).</summary>
+    /// <summary>In-process <c>MockEntryPointClient</c> + <c>EntryPointClientGateway</c>. No TCP. Dev loop and integration tests. When paired with <see cref="ExchangeOptions.AllowErInjection"/>=<c>true</c>, the admin-gated <c>POST /api/admin/simulator/er</c> endpoint is mapped (formerly the standalone <c>Simulator</c> variant; merged into Mock in #163).</summary>
     Mock,
 
     /// <summary>Real <c>B3.EntryPoint.Client.EntryPointClient</c> per <see cref="FirmConfig"/> behind <c>MultiFirmExchangeGateway</c>.</summary>
@@ -170,7 +170,7 @@ public sealed class ExchangeOptions
     /// <summary>
     /// When <c>true</c> AND <see cref="ResolveMode"/> is
     /// <see cref="ExchangeMode.Mock"/>, the admin-gated
-    /// <c>POST /admin/simulator/er</c> endpoint is mapped so test harnesses
+    /// <c>POST /api/admin/simulator/er</c> endpoint is mapped so test harnesses
     /// can inject synthetic execution reports for any working
     /// <c>ClOrdId</c>. Required by Iceberg / TWAP integration + conformance
     /// tests; replaces the legacy <c>ExchangeMode.Simulator</c> variant
