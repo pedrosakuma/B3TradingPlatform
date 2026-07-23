@@ -11,17 +11,24 @@ namespace B3.Trading.MarketMakerBot;
 /// truth for both. State lives in process; no persistence beyond what
 /// the SDK's session state store gives us for SessionVerId.
 ///
-/// <see cref="_activeSides"/> is the atomicity guard: the event-driven
+/// <see cref="_activeSideOwners"/> is the atomicity guard: the event-driven
 /// requote path and the defensive reconcile loop can race to replace
 /// the same (symbol, side), so reserving a side is a single
 /// check-and-set under <see cref="_sideLock"/> via
 /// <see cref="TryRegisterSubmit"/> rather than a separate "is it open"
-/// check followed by a separate submit.
+/// check followed by a separate submit. Tracking the *owning* ClOrdId
+/// (rather than a bare presence flag) additionally protects against a
+/// duplicate/racing terminal execution report for a superseded order
+/// evicting a newer order's reservation for the same side.
 /// </summary>
 public sealed class OrderTracker
 {
     private readonly ConcurrentDictionary<ulong, TrackedOrder> _orders = new();
-    private readonly HashSet<(string Symbol, bool IsBuy)> _activeSides = new();
+    // Tracks which ClOrdId currently owns each (symbol, side) reservation,
+    // so a duplicate/racing terminal ER for an order that has already been
+    // superseded by a newer reservation on the same side can't free a slot
+    // it no longer owns (see Close()).
+    private readonly Dictionary<(string Symbol, bool IsBuy), ulong> _activeSideOwners = new();
     private readonly object _sideLock = new();
     private readonly TimeProvider _clock;
 
@@ -29,6 +36,11 @@ public sealed class OrderTracker
     {
         _clock = clock ?? TimeProvider.System;
     }
+
+    /// <summary>Exposes the tracker's clock so callers (e.g. the staleness
+    /// guard) can compute ages consistently with <see cref="SubmittedAtUtc"/>,
+    /// including under test with an injected <see cref="TimeProvider"/>.</summary>
+    public DateTimeOffset UtcNow => _clock.GetUtcNow();
 
     public int InFlightCount(string symbol)
     {
@@ -41,6 +53,31 @@ public sealed class OrderTracker
         return count;
     }
 
+    /// <summary>Total number of currently-open (resting or just-submitted)
+    /// orders across all instruments — the input to the safety cap.</summary>
+    public int OpenCount()
+    {
+        var count = 0;
+        foreach (var o in _orders.Values)
+            if (o.IsOpen) count++;
+        return count;
+    }
+
+    /// <summary>Snapshot of currently-open orders whose age (relative to
+    /// <paramref name="now"/>) is at least <paramref name="maxAge"/> — the
+    /// candidates for the miss-fill/staleness cancel guard. See
+    /// <see cref="MarketMakerBotOptions.MaxOrderAge"/>.</summary>
+    public IReadOnlyList<TrackedOrder> FindStale(TimeSpan maxAge, DateTimeOffset now)
+    {
+        List<TrackedOrder>? stale = null;
+        foreach (var o in _orders.Values)
+        {
+            if (o.IsOpen && now - o.SubmittedAtUtc >= maxAge)
+                (stale ??= new List<TrackedOrder>()).Add(o);
+        }
+        return stale ?? (IReadOnlyList<TrackedOrder>)Array.Empty<TrackedOrder>();
+    }
+
     /// <summary>True when this (symbol, side) currently has a resting
     /// order or a just-submitted-but-not-yet-acknowledged one. The
     /// market maker keeps at most one resting order per side per
@@ -50,7 +87,7 @@ public sealed class OrderTracker
     {
         lock (_sideLock)
         {
-            return _activeSides.Contains((symbol, isBuy));
+            return _activeSideOwners.ContainsKey((symbol, isBuy));
         }
     }
 
@@ -65,8 +102,10 @@ public sealed class OrderTracker
     {
         lock (_sideLock)
         {
-            if (!_activeSides.Add((symbol, isBuy)))
+            var side = (symbol, isBuy);
+            if (_activeSideOwners.ContainsKey(side))
                 return false;
+            _activeSideOwners[side] = clOrdId;
         }
 
         var now = _clock.GetUtcNow();
@@ -130,13 +169,18 @@ public sealed class OrderTracker
     }
 
     /// <summary>Marks the order closed and frees its (symbol, side)
-    /// reservation so a future requote/reconcile pass may take it.</summary>
+    /// reservation — but only if this order is still the current owner
+    /// of that reservation. A duplicate/racing terminal ER for an order
+    /// that has already been superseded by a newer submit on the same
+    /// side must not evict the newer order's reservation.</summary>
     private void Close(TrackedOrder o)
     {
         o.IsOpen = false;
         lock (_sideLock)
         {
-            _activeSides.Remove((o.Symbol, o.IsBuy));
+            var side = (o.Symbol, o.IsBuy);
+            if (_activeSideOwners.TryGetValue(side, out var owner) && owner == o.ClOrdId)
+                _activeSideOwners.Remove(side);
         }
     }
 }

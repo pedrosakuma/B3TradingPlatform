@@ -36,4 +36,19 @@ public static class MarketMakerMetrics
     /// <summary>OrderCancelled events received.</summary>
     public static readonly Counter<long> Cancelled =
         Meter.CreateCounter<long>("bot.orders.cancelled");
+
+    /// <summary>RFC #703 miss-fill/staleness guard: orders explicitly
+    /// cancelled by <c>MarketMakerWorker.CancelStaleOrdersAsync</c> for
+    /// exceeding <see cref="MarketMakerBotOptions.MaxOrderAge"/>. Tagged
+    /// <c>{symbol}</c>. Should normally stay at zero — a nonzero rate
+    /// means the event-driven requote path is missing terminal events.</summary>
+    public static readonly Counter<long> StaleOrdersCancelled =
+        Meter.CreateCounter<long>("bot.orders.stale_cancelled");
+
+    /// <summary>RFC #703 client-side safety cap: incremented every time a
+    /// quote is skipped because <see cref="OrderTracker.OpenCount"/> is at
+    /// or above <see cref="MarketMakerBotOptions.MaxOpenOrders"/>. Should
+    /// normally stay at zero.</summary>
+    public static readonly Counter<long> SafetyCapHits =
+        Meter.CreateCounter<long>("bot.orders.safety_cap_hit");
 }

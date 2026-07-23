@@ -80,6 +80,17 @@ internal sealed class MarketMakerWorker : BackgroundService
             EnteringTrader = _options.EnteringTrader,
             SessionStateStore = stateStore,
             Logger = _log,
+            // RFC #703: the bot never explicitly cancels its own resting
+            // orders — it relies entirely on this session attribute to
+            // keep the venue's book from accumulating orphaned orders
+            // across an abrupt disconnect (crash, pod restart, network
+            // blip) or a graceful shutdown/terminate.
+            // CancelOnDisconnectType is marked evaluation-only (B3EP_COD)
+            // in SDK 0.17.0; deliberately opting in here as it's the only
+            // available server-enforced backstop pending stabilization.
+#pragma warning disable B3EP_COD
+            CancelOnDisconnect = CancelOnDisconnectType.CancelOnDisconnectOrTerminate,
+#pragma warning restore B3EP_COD
         };
 
         _client = new EntryPointClient(clientOpts);
@@ -210,6 +221,8 @@ internal sealed class MarketMakerWorker : BackgroundService
             try { await Task.Delay(_options.ReconcileInterval, ct); }
             catch (OperationCanceledException) { return; }
 
+            await CancelStaleOrdersAsync(client, ct);
+
             foreach (var instr in _options.Instruments)
             {
                 if (_priceTracker.IsDelisted(instr.Symbol)) continue;
@@ -221,9 +234,67 @@ internal sealed class MarketMakerWorker : BackgroundService
         }
     }
 
+    /// <summary>
+    /// RFC #703 miss-fill guard: the SDK has no order-status query, so we
+    /// can't ask the venue "is this still really open" — instead, any
+    /// order the tracker still considers open past
+    /// <see cref="MarketMakerBotOptions.MaxOrderAge"/> is explicitly
+    /// cancelled. If it genuinely was still resting, the venue's
+    /// <c>OrderCancelled</c> ER closes it and <see cref="HandleEventAsync"/>
+    /// re-quotes the side normally. If the bot had silently missed its
+    /// terminal event earlier (a "miss-fill"), the venue's reject for an
+    /// unknown/already-terminal order also reaches us as a terminal ER,
+    /// which still frees the tracker's stale reservation.
+    /// </summary>
+    private async Task CancelStaleOrdersAsync(EntryPointClient client, CancellationToken ct)
+    {
+        var stale = _tracker.FindStale(_options.MaxOrderAge, _tracker.UtcNow);
+        foreach (var o in stale)
+        {
+            var cancelClOrdId = (ulong)Interlocked.Increment(ref _nextClOrdId);
+            var req = new UpModels.CancelOrderRequest
+            {
+                ClOrdID = new UpModels.ClOrdID(cancelClOrdId),
+                OrigClOrdID = new UpModels.ClOrdID(o.ClOrdId),
+                SecurityId = FindInstrument(o.Symbol)?.SecurityId ?? 0,
+                Side = o.IsBuy ? UpModels.Side.Buy : UpModels.Side.Sell,
+            };
+            try
+            {
+                await client.CancelAsync(req, ct);
+                MarketMakerMetrics.StaleOrdersCancelled.Add(1,
+                    new KeyValuePair<string, object?>("symbol", o.Symbol));
+                _log.LogWarning(
+                    "[mm] cancelled stale order clordid={ClOrdId} symbol={Symbol} side={Side} age={Age} (miss-fill guard)",
+                    o.ClOrdId, o.Symbol, o.IsBuy ? "buy" : "sell", _tracker.UtcNow - o.SubmittedAtUtc);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "[mm] failed to cancel stale order clordid={ClOrdId} symbol={Symbol}",
+                    o.ClOrdId, o.Symbol);
+            }
+        }
+    }
+
     private async Task QuoteSideAsync(EntryPointClient client, InstrumentConfig instr, bool isBuy, CancellationToken ct)
     {
         if (_priceTracker.IsDelisted(instr.Symbol)) return;
+        // RFC #703 client-side safety cap (defense in depth against the
+        // failure mode in pedrosakuma/B3MatchingPlatform#567): stop adding
+        // NEW resting orders once the bot's own tracked open-order count
+        // hits the configured ceiling. Existing resting orders are left
+        // alone — this only throttles growth, it never panic-cancels.
+        var openCount = _tracker.OpenCount();
+        if (openCount >= _options.MaxOpenOrders)
+        {
+            MarketMakerMetrics.SafetyCapHits.Add(1,
+                new KeyValuePair<string, object?>("symbol", instr.Symbol));
+            _log.LogWarning(
+                "[mm] safety cap hit: {OpenCount} open orders >= MaxOpenOrders={MaxOpenOrders}; skipping quote for {Symbol} side={Side}",
+                openCount, _options.MaxOpenOrders, instr.Symbol, isBuy ? "buy" : "sell");
+            return;
+        }
         var refPrice = _priceTracker.TryGetReferencePrice(instr.Symbol, out var live) ? live : instr.RefPrice;
         var price = QuoteCalculator.ComputeQuotePrice(instr, isBuy, refPrice);
         var quantity = QuoteCalculator.QuoteQuantity(instr);

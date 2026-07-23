@@ -110,6 +110,67 @@ public class OrderTrackerTests
         Assert.False(t.HasOpenSide("MGLU3", isBuy: true));
     }
 
+    [Fact]
+    public void OnTerminal_DuplicateForSupersededOrder_DoesNotEvictNewerReservation()
+    {
+        // Regression test for the OrderTracker.Close() owner-check bug
+        // (RFC #703): a stale/duplicate terminal ER for an order that has
+        // already been superseded by a newer submit on the same
+        // (symbol, side) must not evict the newer order's reservation.
+        var t = new OrderTracker();
+        Assert.True(t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true));
+        t.OnTerminal(1UL); // legitimately closes clOrdId 1, frees the side.
+        Assert.True(t.TryRegisterSubmit(2UL, "PETR4", 29m, 100, isBuy: true)); // new owner of the side.
+
+        // A duplicate/racing terminal ER for the OLD order arrives late.
+        t.OnTerminal(1UL);
+
+        // The new order's reservation must still be intact.
+        Assert.True(t.HasOpenSide("PETR4", isBuy: true));
+        Assert.Equal(1, t.InFlightCount("PETR4"));
+        Assert.False(t.TryRegisterSubmit(3UL, "PETR4", 28m, 100, isBuy: true));
+    }
+
+    [Fact]
+    public void OpenCount_ReflectsOpenOrdersAcrossSymbols()
+    {
+        var t = new OrderTracker();
+        Assert.Equal(0, t.OpenCount());
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+        t.TryRegisterSubmit(2UL, "VALE3", 70m, 100, isBuy: false);
+        Assert.Equal(2, t.OpenCount());
+        t.OnTerminal(1UL);
+        Assert.Equal(1, t.OpenCount());
+    }
+
+    [Fact]
+    public void FindStale_ReturnsOnlyOrdersAtOrOverMaxAge()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var t = new OrderTracker(clock);
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+        clock.Advance(TimeSpan.FromMinutes(3));
+        t.TryRegisterSubmit(2UL, "PETR4", 31m, 100, isBuy: false);
+        clock.Advance(TimeSpan.FromMinutes(2));
+
+        // clOrdId 1 is now 5 minutes old, clOrdId 2 is 2 minutes old.
+        var stale = t.FindStale(TimeSpan.FromMinutes(5), t.UtcNow);
+        Assert.Single(stale);
+        Assert.Equal(1UL, stale[0].ClOrdId);
+    }
+
+    [Fact]
+    public void FindStale_ClosedOrders_AreExcluded()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var t = new OrderTracker(clock);
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+        t.OnTerminal(1UL);
+        clock.Advance(TimeSpan.FromMinutes(10));
+
+        Assert.Empty(t.FindStale(TimeSpan.FromMinutes(5), t.UtcNow));
+    }
+
     private sealed class FakeClock : TimeProvider
     {
         private DateTimeOffset _now;
