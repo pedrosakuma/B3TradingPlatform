@@ -206,8 +206,10 @@ public sealed class OrderTracker
 
     /// <summary>
     /// Atomic check-and-set variant of <see cref="RegisterCancelAttempt"/>:
-    /// registers the cancel attempt only if — and only if — no cancel is
-    /// already pending for <paramref name="origClOrdId"/>. RFC #703's
+    /// registers the cancel attempt only if — and only if — the order is
+    /// still open, no cancel is already pending for it, and (when
+    /// <paramref name="minIntervalSinceLastAttempt"/> is given) at least
+    /// that much time has passed since its last cancel attempt. RFC #703's
     /// book-driven reactive requote path (<c>MarketMakerWorker.ReactToBookChangeAsync</c>)
     /// runs concurrently with the pre-existing staleness guard
     /// (<c>CancelStaleOrdersAsync</c>) on a separate loop; without this
@@ -215,17 +217,32 @@ public sealed class OrderTracker
     /// for the same order and each submit a distinct CancelOrderRequest
     /// for it — two cancels racing the venue for one order, only one of
     /// which the correlation table (last write wins) could ever resolve.
-    /// Returns <c>false</c> (registering nothing) when a cancel is
-    /// already outstanding, so the caller skips submitting a second one.
+    /// The interval check is folded into the same lock (rather than left
+    /// to a separate, pre-lock read in the caller) so a concurrent
+    /// register/clear/register sequence on another thread can't leave the
+    /// caller's throttle decision stale by the time this actually commits.
+    /// The open-check additionally guards against a stale
+    /// already-terminal <see cref="TrackedOrder"/> reference (e.g. from a
+    /// <c>FindStale</c> snapshot) picking up a fresh cancel attempt after
+    /// a concurrent fill/cancel has already closed it via <see cref="Close"/>.
+    /// Returns <c>false</c> (registering nothing) when any guard fails, so
+    /// the caller skips submitting a cancel altogether.
     /// </summary>
-    public bool TryRegisterCancelAttempt(ulong cancelClOrdId, ulong origClOrdId)
+    public bool TryRegisterCancelAttempt(ulong cancelClOrdId, ulong origClOrdId,
+        TimeSpan? minIntervalSinceLastAttempt = null)
     {
         if (!_orders.TryGetValue(origClOrdId, out var order)) return false;
         lock (order)
         {
-            if (order.PendingCancelClOrdId is not null) return false;
+            if (!order.IsOpen || order.PendingCancelClOrdId is not null) return false;
+            var now = _clock.GetUtcNow();
+            if (minIntervalSinceLastAttempt is { } minInterval)
+            {
+                var lastActivity = order.LastCancelAttemptAtUtc ?? order.SubmittedAtUtc;
+                if (now - lastActivity < minInterval) return false;
+            }
             order.PendingCancelClOrdId = cancelClOrdId;
-            order.LastCancelAttemptAtUtc = _clock.GetUtcNow();
+            order.LastCancelAttemptAtUtc = now;
         }
         _cancelAttempts[cancelClOrdId] = origClOrdId;
         return true;
@@ -270,12 +287,23 @@ public sealed class OrderTracker
     /// order is actually gone (see <c>MarketMakerWorker.HandleEventAsync</c>'s
     /// OrderRejected case), so the staleness guard is free to try again
     /// on a later reconcile tick instead of considering one already
-    /// outstanding forever.
+    /// outstanding forever. Also drops the now-abandoned <see
+    /// cref="_cancelAttempts"/> correlation row for the rejected cancel
+    /// request itself (it's no longer in flight, and leaving it behind
+    /// would let it accumulate indefinitely for an order that stays open
+    /// and keeps having its cancel attempts rejected — a real risk now
+    /// that RFC #703's book-driven path can trigger far more retries than
+    /// the occasional staleness-guard cancel #705 originally accepted).
     /// </summary>
     public void ClearPendingCancel(ulong origClOrdId)
     {
         if (_orders.TryGetValue(origClOrdId, out var order))
-            lock (order) { order.PendingCancelClOrdId = null; }
+            lock (order)
+            {
+                if (order.PendingCancelClOrdId is { } pending)
+                    _cancelAttempts.TryRemove(pending, out _);
+                order.PendingCancelClOrdId = null;
+            }
     }
 
     /// <summary>
@@ -285,7 +313,8 @@ public sealed class OrderTracker
     /// SUBMIT itself fails synchronously (no ER will ever arrive to
     /// resolve it), so we don't accidentally clear a DIFFERENT, later
     /// cancel attempt that may already be outstanding for the same order
-    /// by the time the failure is handled.
+    /// by the time the failure is handled. Also drops the abandoned
+    /// correlation row for the failed cancel — see <see cref="ClearPendingCancel"/>.
     /// </summary>
     public void ClearPendingCancelIfMatches(ulong origClOrdId, ulong expectedCancelClOrdId)
     {
@@ -293,7 +322,10 @@ public sealed class OrderTracker
             lock (order)
             {
                 if (order.PendingCancelClOrdId == expectedCancelClOrdId)
+                {
                     order.PendingCancelClOrdId = null;
+                    _cancelAttempts.TryRemove(expectedCancelClOrdId, out _);
+                }
             }
     }
 

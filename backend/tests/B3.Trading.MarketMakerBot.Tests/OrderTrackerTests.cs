@@ -380,6 +380,68 @@ public class OrderTrackerTests
     }
 
     [Fact]
+    public void TryRegisterCancelAttempt_ClosedOrder_ReturnsFalse()
+    {
+        var t = new OrderTracker();
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+        t.OnTerminal(1UL);
+
+        // A stale TrackedOrder reference (e.g. from a FindStale/
+        // TryGetActiveSideOrder snapshot) must not be able to pick up a
+        // fresh cancel attempt after a concurrent fill/cancel has already
+        // closed it.
+        Assert.False(t.TryRegisterCancelAttempt(cancelClOrdId: 90UL, origClOrdId: 1UL));
+        Assert.False(t.TryResolveCancelAttempt(90UL, out _));
+    }
+
+    [Fact]
+    public void TryRegisterCancelAttempt_WithinMinInterval_ReturnsFalse()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var t = new OrderTracker(clock);
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+
+        clock.Advance(TimeSpan.FromSeconds(2)); // clear of the interval since submission too
+        Assert.True(t.TryRegisterCancelAttempt(cancelClOrdId: 90UL, origClOrdId: 1UL, TimeSpan.FromSeconds(1)));
+        t.ClearPendingCancel(1UL); // e.g. a rejected cancel — free to retry per PendingCancelClOrdId, but not yet per the interval
+
+        clock.Advance(TimeSpan.FromMilliseconds(500));
+        Assert.False(t.TryRegisterCancelAttempt(cancelClOrdId: 91UL, origClOrdId: 1UL, TimeSpan.FromSeconds(1)));
+
+        clock.Advance(TimeSpan.FromMilliseconds(600));
+        Assert.True(t.TryRegisterCancelAttempt(cancelClOrdId: 92UL, origClOrdId: 1UL, TimeSpan.FromSeconds(1)));
+    }
+
+    [Fact]
+    public void ClearPendingCancel_RemovesCancelAttemptCorrelation()
+    {
+        var t = new OrderTracker();
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+        t.TryRegisterCancelAttempt(cancelClOrdId: 90UL, origClOrdId: 1UL);
+
+        t.ClearPendingCancel(1UL);
+
+        // The order is still open (cancel was merely rejected, not
+        // proven terminal), but the abandoned correlation row for the
+        // rejected cancel request itself must not linger forever.
+        Assert.True(t.TryGet(1UL, out var order));
+        Assert.True(order.IsOpen);
+        Assert.False(t.TryResolveCancelAttempt(90UL, out _));
+    }
+
+    [Fact]
+    public void ClearPendingCancelIfMatches_RemovesCancelAttemptCorrelation()
+    {
+        var t = new OrderTracker();
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+        t.TryRegisterCancelAttempt(cancelClOrdId: 90UL, origClOrdId: 1UL);
+
+        t.ClearPendingCancelIfMatches(origClOrdId: 1UL, expectedCancelClOrdId: 90UL);
+
+        Assert.False(t.TryResolveCancelAttempt(90UL, out _));
+    }
+
+    [Fact]
     public void PruneClosed_RemovesOldClosedOrdersAndTheirCancelAttempts()
     {
         var clock = new FakeClock(DateTimeOffset.UtcNow);

@@ -427,14 +427,11 @@ internal sealed class MarketMakerWorker : BackgroundService
         {
             if (!_tracker.TryGetActiveSideOrder(symbol, isBuy, out var resting)) continue;
             if (resting.PendingCancelClOrdId is not null) continue;
-            // Throttled from the last CANCEL ATTEMPT, not from the
-            // order's own submission time: a synchronously-failed or
-            // rejected cancel frees PendingCancelClOrdId immediately (see
-            // SubmitCancelAsync / HandleEventAsync's OrderRejected case),
-            // and SubmittedAtUtc would otherwise already be far in the
-            // past for a long-resting order — letting every subsequent
-            // book delta retry the cancel with no real throttle at all,
-            // the exact venue-flooding shape RFC #703 exists to prevent.
+            // Fast-path skip only — the authoritative throttle check runs
+            // INSIDE SubmitCancelAsync's atomic registration below (see
+            // OrderTracker.TryRegisterCancelAttempt), since this snapshot
+            // read is unsynchronized and could be stale by the time we
+            // actually try to register the attempt.
             var lastActivity = resting.LastCancelAttemptAtUtc ?? resting.SubmittedAtUtc;
             if (now - lastActivity < _options.MinRequoteInterval) continue;
 
@@ -442,7 +439,8 @@ internal sealed class MarketMakerWorker : BackgroundService
             if (target <= 0m) continue;
             if (Math.Abs(resting.Price - target) <= maxDeviation) continue;
 
-            if (await SubmitCancelAsync(client, resting, instr, MarketMakerMetrics.BookDrivenRequoteSubmitFailed, ct))
+            if (await SubmitCancelAsync(client, resting, instr, MarketMakerMetrics.BookDrivenRequoteSubmitFailed, ct,
+                    _options.MinRequoteInterval))
             {
                 MarketMakerMetrics.BookDrivenRequotes.Add(1,
                     new KeyValuePair<string, object?>("symbol", symbol),
@@ -462,17 +460,25 @@ internal sealed class MarketMakerWorker : BackgroundService
     /// why atomicity matters here specifically — the staleness guard and
     /// the reactive path run on separate concurrent loops and could
     /// otherwise both target the same order), sends the request, and on
-    /// synchronous failure clears the pending-cancel marker it just set
-    /// so the order isn't permanently hidden from future guards. Returns
-    /// whether the cancel was accepted for transmission (false also when
-    /// a cancel was already outstanding for this order from the OTHER
-    /// path); callers add their own reason-specific success metric/log.
+    /// synchronous failure clears the pending-cancel marker (and its now
+    /// -abandoned correlation row) it just set so the order isn't
+    /// permanently hidden from future guards. <paramref name="minIntervalSinceLastAttempt"/>,
+    /// when given, is enforced INSIDE the same atomic registration rather
+    /// than only by a separate pre-call check in the caller, so a
+    /// concurrent register/clear on another thread can't leave the
+    /// caller's own throttle decision stale by the time this actually
+    /// commits. Returns whether the cancel was accepted for transmission
+    /// (false also when a cancel was already outstanding for this order
+    /// from the OTHER path, the order had already closed, or the interval
+    /// hadn't elapsed); callers add their own reason-specific success
+    /// metric/log.
     /// </summary>
     private async Task<bool> SubmitCancelAsync(EntryPointClient client, TrackedOrder o, InstrumentConfig instr,
-        System.Diagnostics.Metrics.Counter<long> submitFailedMetric, CancellationToken ct)
+        System.Diagnostics.Metrics.Counter<long> submitFailedMetric, CancellationToken ct,
+        TimeSpan? minIntervalSinceLastAttempt = null)
     {
         var cancelClOrdId = (ulong)Interlocked.Increment(ref _nextClOrdId);
-        if (!_tracker.TryRegisterCancelAttempt(cancelClOrdId, o.ClOrdId))
+        if (!_tracker.TryRegisterCancelAttempt(cancelClOrdId, o.ClOrdId, minIntervalSinceLastAttempt))
             return false;
         var req = new UpModels.CancelOrderRequest
         {
