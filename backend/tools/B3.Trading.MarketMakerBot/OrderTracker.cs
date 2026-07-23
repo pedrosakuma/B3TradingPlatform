@@ -195,6 +195,21 @@ public sealed class OrderTracker
             order.PendingCancelClOrdId = null;
     }
 
+    /// <summary>
+    /// Same as <see cref="ClearPendingCancel"/>, but only clears if the
+    /// currently-registered pending cancel is still
+    /// <paramref name="expectedCancelClOrdId"/> — used when a cancel
+    /// SUBMIT itself fails synchronously (no ER will ever arrive to
+    /// resolve it), so we don't accidentally clear a DIFFERENT, later
+    /// cancel attempt that may already be outstanding for the same order
+    /// by the time the failure is handled.
+    /// </summary>
+    public void ClearPendingCancelIfMatches(ulong origClOrdId, ulong expectedCancelClOrdId)
+    {
+        if (_orders.TryGetValue(origClOrdId, out var order) && order.PendingCancelClOrdId == expectedCancelClOrdId)
+            order.PendingCancelClOrdId = null;
+    }
+
     public void OnAccepted(ulong clOrdId, long leaves)
     {
         if (_orders.TryGetValue(clOrdId, out var o))

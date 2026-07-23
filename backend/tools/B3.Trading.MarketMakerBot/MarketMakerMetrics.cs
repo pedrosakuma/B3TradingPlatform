@@ -54,6 +54,13 @@ public static class MarketMakerMetrics
     public static readonly Counter<long> StaleCancelRejected =
         Meter.CreateCounter<long>("bot.orders.stale_cancel_rejected");
 
+    /// <summary>RFC #703 miss-fill/staleness guard: a stale-order cancel
+    /// request failed synchronously (transport error, terminated session,
+    /// etc) before any ER could arrive to resolve it. Tagged
+    /// <c>{symbol}</c>.</summary>
+    public static readonly Counter<long> StaleCancelSubmitFailed =
+        Meter.CreateCounter<long>("bot.orders.stale_cancel_submit_failed");
+
     /// <summary>RFC #703 client-side safety cap: incremented every time a
     /// quote is skipped because <see cref="OrderTracker.OpenCount"/> is at
     /// or above <see cref="MarketMakerBotOptions.MaxOpenOrders"/>. Should

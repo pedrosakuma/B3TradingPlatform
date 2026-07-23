@@ -262,6 +262,24 @@ public class OrderTrackerTests
         Assert.Equal(0, t.InFlightCount("PETR4"));
     }
 
+    [Fact]
+    public void ClearPendingCancelIfMatches_OnlyClearsMatchingAttempt()
+    {
+        var t = new OrderTracker();
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+        t.RegisterCancelAttempt(cancelClOrdId: 99UL, origClOrdId: 1UL);
+
+        // A stale (superseded) expected id must not clear a newer pending
+        // cancel that has since been registered for the same order.
+        t.RegisterCancelAttempt(cancelClOrdId: 100UL, origClOrdId: 1UL);
+        t.ClearPendingCancelIfMatches(origClOrdId: 1UL, expectedCancelClOrdId: 99UL);
+        Assert.Empty(t.FindStale(TimeSpan.Zero, t.UtcNow)); // still pending (100UL), so not eligible for retry yet
+
+        // Clearing with the CURRENT pending id succeeds.
+        t.ClearPendingCancelIfMatches(origClOrdId: 1UL, expectedCancelClOrdId: 100UL);
+        Assert.Single(t.FindStale(TimeSpan.Zero, t.UtcNow));
+    }
+
     private sealed class FakeClock : TimeProvider
     {
         private DateTimeOffset _now;

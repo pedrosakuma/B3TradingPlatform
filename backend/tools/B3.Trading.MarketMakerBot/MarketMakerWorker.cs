@@ -337,6 +337,17 @@ internal sealed class MarketMakerWorker : BackgroundService
             catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
+                // The request never reached (or was never acknowledged
+                // by) the venue, so no ER will ever arrive to clear
+                // PendingCancelClOrdId via ClearPendingCancel/Close().
+                // Without this, FindStale would skip this order forever
+                // (it looks like a cancel is permanently outstanding).
+                // Guarded so we don't clear a DIFFERENT, later attempt
+                // that may have already been registered for this order
+                // by the time this catch runs.
+                _tracker.ClearPendingCancelIfMatches(o.ClOrdId, cancelClOrdId);
+                MarketMakerMetrics.StaleCancelSubmitFailed.Add(1,
+                    new KeyValuePair<string, object?>("symbol", o.Symbol));
                 _log.LogWarning(ex, "[mm] failed to cancel stale order clordid={ClOrdId} symbol={Symbol}",
                     o.ClOrdId, o.Symbol);
             }
