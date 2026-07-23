@@ -48,6 +48,32 @@ public sealed class MarketMakerBotOptions
     /// </summary>
     public TimeSpan ReconcileInterval { get; set; } = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// RFC #703 miss-fill / staleness guard: the SDK exposes no mass
+    /// order-status query, so there is no way to ask the venue "what do I
+    /// actually have open right now" — this is a purely time-based
+    /// heuristic instead. Any resting order older than this is cancelled
+    /// (and, via the normal <c>OrderCancelled</c> event path, immediately
+    /// re-quoted) by <see cref="ReconcileLoopAsync"/> on every tick, so a
+    /// resting order the bot's own event stream silently dropped (a
+    /// "miss-fill") can't linger on the book indefinitely.
+    /// </summary>
+    public TimeSpan MaxOrderAge { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// RFC #703 client-side safety cap, defense in depth against the exact
+    /// failure mode that produced <c>pedrosakuma/B3MatchingPlatform#567</c>
+    /// (73k+ resting orders overflowing matching's fixed snapshot buffer):
+    /// once the bot's own tracked open-order count reaches this, it stops
+    /// submitting NEW quotes (existing resting orders are left alone —
+    /// this is not a panic-cancel) and logs loudly. There is normally at
+    /// most one resting order per (instrument, side), so this should only
+    /// ever trip if something upstream (venue or bot bug) is preventing
+    /// orders from actually terminating.
+    /// </summary>
+    [Range(1, int.MaxValue)]
+    public int MaxOpenOrders { get; set; } = 500;
+
     [Required, MinLength(1)]
     public List<InstrumentConfig> Instruments { get; set; } = new();
 

@@ -36,4 +36,35 @@ public static class MarketMakerMetrics
     /// <summary>OrderCancelled events received.</summary>
     public static readonly Counter<long> Cancelled =
         Meter.CreateCounter<long>("bot.orders.cancelled");
+
+    /// <summary>RFC #703 miss-fill/staleness guard: orders explicitly
+    /// cancelled by <c>MarketMakerWorker.CancelStaleOrdersAsync</c> for
+    /// exceeding <see cref="MarketMakerBotOptions.MaxOrderAge"/>. Tagged
+    /// <c>{symbol}</c>. Should normally stay at zero — a nonzero rate
+    /// means the event-driven requote path is missing terminal events.</summary>
+    public static readonly Counter<long> StaleOrdersCancelled =
+        Meter.CreateCounter<long>("bot.orders.stale_cancelled");
+
+    /// <summary>RFC #703 miss-fill/staleness guard: the venue rejected a
+    /// stale-order cancel request (e.g. the order was already
+    /// terminal/unknown, or a transient reject). The tracker deliberately
+    /// leaves the original order's reservation untouched in this case —
+    /// see <c>MarketMakerWorker.HandleEventAsync</c>'s OrderRejected case
+    /// for the rationale. Tagged <c>{symbol}</c>.</summary>
+    public static readonly Counter<long> StaleCancelRejected =
+        Meter.CreateCounter<long>("bot.orders.stale_cancel_rejected");
+
+    /// <summary>RFC #703 miss-fill/staleness guard: a stale-order cancel
+    /// request failed synchronously (transport error, terminated session,
+    /// etc) before any ER could arrive to resolve it. Tagged
+    /// <c>{symbol}</c>.</summary>
+    public static readonly Counter<long> StaleCancelSubmitFailed =
+        Meter.CreateCounter<long>("bot.orders.stale_cancel_submit_failed");
+
+    /// <summary>RFC #703 client-side safety cap: incremented every time a
+    /// quote is skipped because <see cref="OrderTracker.OpenCount"/> is at
+    /// or above <see cref="MarketMakerBotOptions.MaxOpenOrders"/>. Should
+    /// normally stay at zero.</summary>
+    public static readonly Counter<long> SafetyCapHits =
+        Meter.CreateCounter<long>("bot.orders.safety_cap_hit");
 }

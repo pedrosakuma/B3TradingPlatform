@@ -80,6 +80,17 @@ internal sealed class MarketMakerWorker : BackgroundService
             EnteringTrader = _options.EnteringTrader,
             SessionStateStore = stateStore,
             Logger = _log,
+            // RFC #703: the bot never explicitly cancels its own resting
+            // orders — it relies entirely on this session attribute to
+            // keep the venue's book from accumulating orphaned orders
+            // across an abrupt disconnect (crash, pod restart, network
+            // blip) or a graceful shutdown/terminate.
+            // CancelOnDisconnectType is marked evaluation-only (B3EP_COD)
+            // in SDK 0.17.0; deliberately opting in here as it's the only
+            // available server-enforced backstop pending stabilization.
+#pragma warning disable B3EP_COD
+            CancelOnDisconnect = CancelOnDisconnectType.CancelOnDisconnectOrTerminate,
+#pragma warning restore B3EP_COD
         };
 
         _client = new EntryPointClient(clientOpts);
@@ -162,13 +173,62 @@ internal sealed class MarketMakerWorker : BackgroundService
             case UpModels.OrderCancelled c:
                 {
                     MarketMakerMetrics.Cancelled.Add(1);
-                    var known = _tracker.TryGet(c.ClOrdID.Value, out var o);
-                    _tracker.OnTerminal(c.ClOrdID.Value);
+                    // OrigClOrdID is the original resting order's id; it's
+                    // only set when the cancel was in response to an
+                    // explicit CancelOrderRequest (ours or another
+                    // session's) — a venue-initiated spontaneous cancel
+                    // (e.g. Day expiry) reports ClOrdID as the order's own
+                    // id with no OrigClOrdID. Prefer OrigClOrdID, but the
+                    // upstream gateway is also known to sometimes drop it
+                    // on cancel acks entirely (see this repo's own
+                    // ExecutionReportProcessorTests.Cancel_WithMissingOrigClOrdId_ResolvesViaCancelLink
+                    // for the trading-host side of the same class of bug)
+                    // — fall back to our own cancel-attempt correlation
+                    // table before finally assuming ClOrdID IS the
+                    // original id (the spontaneous-cancel case).
+                    var targetClOrdId = c.OrigClOrdID?.Value
+                        ?? (_tracker.TryResolveCancelAttempt(c.ClOrdID.Value, out var linked) ? linked : c.ClOrdID.Value);
+                    var known = _tracker.TryGet(targetClOrdId, out var o);
+                    _tracker.OnTerminal(targetClOrdId);
                     if (known) await RequoteAsync(client, o.Symbol, o.IsBuy, ct);
                     break;
                 }
             case UpModels.OrderRejected r:
                 {
+                    // A reject of a bot-generated cancel request (see
+                    // CancelStaleOrdersAsync) has no OrigClOrdID field to
+                    // fall back on like OrderCancelled does, so it's
+                    // otherwise indistinguishable from a rejected NEW
+                    // order submit. Resolve it via the correlation table
+                    // and deliberately do NOT free the original order's
+                    // reservation: if it's still genuinely resting,
+                    // closing it here would let the next reconcile tick
+                    // submit a duplicate order alongside it — the exact
+                    // venue-flooding failure mode RFC #703 exists to
+                    // prevent. Worst case if this really was a miss-fill
+                    // (order already gone at the venue): that side stays
+                    // marked "open" — blocking further quoting on it —
+                    // until the bot restarts, at which point
+                    // cancel-on-disconnect and a fresh OrderTracker clear
+                    // the stuck state. A stuck side is an acceptable
+                    // trade-off against a duplicated resting order.
+                    if (_tracker.TryResolveCancelAttempt(r.ClOrdID.Value, out var origClOrdId))
+                    {
+                        // Clear the pending-cancel marker (NOT the order
+                        // itself — see rationale above) so the next
+                        // reconcile tick is free to retry the cancel
+                        // instead of treating one as permanently
+                        // outstanding.
+                        _tracker.ClearPendingCancel(origClOrdId);
+                        var stuckKnown = _tracker.TryGet(origClOrdId, out var stuck);
+                        var stuckSymbol = stuckKnown ? stuck.Symbol : "?";
+                        MarketMakerMetrics.StaleCancelRejected.Add(1,
+                            new KeyValuePair<string, object?>("symbol", stuckSymbol));
+                        _log.LogWarning(
+                            "[mm] stale-order cancel rejected for clordid={ClOrdId} reason={Reason}; leaving tracker state unchanged (see RFC #703)",
+                            origClOrdId, r.Reason);
+                        break;
+                    }
                     var known = _tracker.TryGet(r.ClOrdID.Value, out var o);
                     var symbol = known ? o.Symbol : "?";
                     MarketMakerMetrics.Rejects.Add(1, new KeyValuePair<string, object?>("symbol", symbol));
@@ -210,6 +270,8 @@ internal sealed class MarketMakerWorker : BackgroundService
             try { await Task.Delay(_options.ReconcileInterval, ct); }
             catch (OperationCanceledException) { return; }
 
+            await CancelStaleOrdersAsync(client, ct);
+
             foreach (var instr in _options.Instruments)
             {
                 if (_priceTracker.IsDelisted(instr.Symbol)) continue;
@@ -221,9 +283,95 @@ internal sealed class MarketMakerWorker : BackgroundService
         }
     }
 
+    /// <summary>
+    /// RFC #703 miss-fill guard: the SDK has no order-status query, so we
+    /// can't ask the venue "is this still really open" — instead, any
+    /// order the tracker still considers open past
+    /// <see cref="MarketMakerBotOptions.MaxOrderAge"/> is explicitly
+    /// cancelled. If it genuinely was still resting, the venue's
+    /// <c>OrderCancelled</c> ER closes it and <see cref="HandleEventAsync"/>
+    /// re-quotes the side normally. If the bot had silently missed its
+    /// terminal event earlier (a "miss-fill"), the venue rejects the
+    /// cancel of an unknown/already-terminal order via <c>OrderRejected</c>
+    /// keyed on the CANCEL request's own (freshly-generated) ClOrdID —
+    /// <see cref="OrderTracker.RegisterCancelAttempt"/> aliases that id to
+    /// the original tracked order so the reject still resolves and frees
+    /// the stale reservation, instead of retrying identically forever.
+    /// </summary>
+    private async Task CancelStaleOrdersAsync(EntryPointClient client, CancellationToken ct)
+    {
+        var stale = _tracker.FindStale(_options.MaxOrderAge, _tracker.UtcNow);
+        foreach (var o in stale)
+        {
+            var instr = FindInstrument(o.Symbol);
+            if (instr is null)
+            {
+                // Instrument config was removed/renamed since the order was
+                // submitted; there is no valid SecurityId to cancel with.
+                _log.LogWarning(
+                    "[mm] cannot build stale-order cancel for clordid={ClOrdId}: unknown instrument {Symbol}",
+                    o.ClOrdId, o.Symbol);
+                continue;
+            }
+            var cancelClOrdId = (ulong)Interlocked.Increment(ref _nextClOrdId);
+            // Alias BEFORE the SDK await — see TryRegisterSubmit's own
+            // comment on this pattern: a fast wire can deliver the
+            // resulting ER before this call returns.
+            _tracker.RegisterCancelAttempt(cancelClOrdId, o.ClOrdId);
+            var req = new UpModels.CancelOrderRequest
+            {
+                ClOrdID = new UpModels.ClOrdID(cancelClOrdId),
+                OrigClOrdID = new UpModels.ClOrdID(o.ClOrdId),
+                SecurityId = instr.SecurityId,
+                Side = o.IsBuy ? UpModels.Side.Buy : UpModels.Side.Sell,
+            };
+            try
+            {
+                await client.CancelAsync(req, ct);
+                MarketMakerMetrics.StaleOrdersCancelled.Add(1,
+                    new KeyValuePair<string, object?>("symbol", o.Symbol));
+                _log.LogWarning(
+                    "[mm] cancelled stale order clordid={ClOrdId} symbol={Symbol} side={Side} age={Age} (miss-fill guard)",
+                    o.ClOrdId, o.Symbol, o.IsBuy ? "buy" : "sell", _tracker.UtcNow - o.SubmittedAtUtc);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                // The request never reached (or was never acknowledged
+                // by) the venue, so no ER will ever arrive to clear
+                // PendingCancelClOrdId via ClearPendingCancel/Close().
+                // Without this, FindStale would skip this order forever
+                // (it looks like a cancel is permanently outstanding).
+                // Guarded so we don't clear a DIFFERENT, later attempt
+                // that may have already been registered for this order
+                // by the time this catch runs.
+                _tracker.ClearPendingCancelIfMatches(o.ClOrdId, cancelClOrdId);
+                MarketMakerMetrics.StaleCancelSubmitFailed.Add(1,
+                    new KeyValuePair<string, object?>("symbol", o.Symbol));
+                _log.LogWarning(ex, "[mm] failed to cancel stale order clordid={ClOrdId} symbol={Symbol}",
+                    o.ClOrdId, o.Symbol);
+            }
+        }
+    }
+
     private async Task QuoteSideAsync(EntryPointClient client, InstrumentConfig instr, bool isBuy, CancellationToken ct)
     {
         if (_priceTracker.IsDelisted(instr.Symbol)) return;
+        // RFC #703 client-side safety cap (defense in depth against the
+        // failure mode in pedrosakuma/B3MatchingPlatform#567): stop adding
+        // NEW resting orders once the bot's own tracked open-order count
+        // hits the configured ceiling. Existing resting orders are left
+        // alone — this only throttles growth, it never panic-cancels.
+        var openCount = _tracker.OpenCount();
+        if (openCount >= _options.MaxOpenOrders)
+        {
+            MarketMakerMetrics.SafetyCapHits.Add(1,
+                new KeyValuePair<string, object?>("symbol", instr.Symbol));
+            _log.LogWarning(
+                "[mm] safety cap hit: {OpenCount} open orders >= MaxOpenOrders={MaxOpenOrders}; skipping quote for {Symbol} side={Side}",
+                openCount, _options.MaxOpenOrders, instr.Symbol, isBuy ? "buy" : "sell");
+            return;
+        }
         var refPrice = _priceTracker.TryGetReferencePrice(instr.Symbol, out var live) ? live : instr.RefPrice;
         var price = QuoteCalculator.ComputeQuotePrice(instr, isBuy, refPrice);
         var quantity = QuoteCalculator.QuoteQuantity(instr);
